@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -36,6 +37,7 @@ type Config struct {
 	RuntimeDir     string
 	ExtraRoots     []string
 	LogFormat      string
+	LogLevel       slog.Level
 	ReleaseRoot    string
 	ServiceName    string
 
@@ -81,6 +83,12 @@ func Load() (*Config, error) {
 		PortMappingEnabled:  envBoolOr("HERDR_REACHABILITY_PORT_MAPPING", true),
 		RearmBootstrap:      envBoolOr("HERDR_RELAY_REARM_BOOTSTRAP", false),
 	}
+
+	logLevel, err := parseLogLevel(os.Getenv("HERDR_RELAY_LOG_LEVEL"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.LogLevel = logLevel
 
 	if origins := os.Getenv("HERDR_ALLOWED_ORIGINS"); origins != "" {
 		for _, o := range strings.Split(origins, ",") {
@@ -272,6 +280,21 @@ func parseGatewaySelection(raw string) string {
 		return GatewaySelectionLatency
 	}
 	return GatewaySelectionOrdered
+}
+
+func parseLogLevel(raw string) (slog.Level, error) {
+	switch normalized := strings.ToLower(strings.TrimSpace(raw)); normalized {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("invalid HERDR_RELAY_LOG_LEVEL %q: want debug, info, warn, or error", raw)
+	}
 }
 
 func envOr(key, fallback string) string {

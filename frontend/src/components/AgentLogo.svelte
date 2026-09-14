@@ -1,5 +1,5 @@
 <script module lang="ts">
-  export type AgentLogoKind = 'claude' | 'codex' | 'generic' | 'kimi' | 'omp' | 'opencode' | 'pi' | 'qoder';
+  export type AgentLogoKind = 'claude' | 'codex' | 'generic' | 'hermes' | 'kimi' | 'omp' | 'opencode' | 'pi' | 'qoder';
 
   export function agentLogoKind(value: string): AgentLogoKind {
     const normalized = value.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
@@ -10,6 +10,7 @@
     if (['oh my pi', 'omp'].includes(normalized)) return 'omp';
     if (['kimi', 'kimi cli', 'kimi code', 'kimi code cli'].includes(normalized)) return 'kimi';
     if (['qoder', 'qoder cli', 'qodercli'].includes(normalized)) return 'qoder';
+    if (['hermes', 'hermes agent', 'hermesagent'].includes(normalized)) return 'hermes';
     return 'generic';
   }
 
@@ -25,6 +26,7 @@
     if (value === 'omp') return 'Oh My Pi';
     if (value === 'kimi') return 'Kimi';
     if (value === 'qoder') return 'Qoder';
+    if (value === 'hermes') return 'Hermes';
     return original.trim() || 'Agent';
   }
 
@@ -58,7 +60,17 @@
 </script>
 
 <span class={`agent-logo agent-logo-${kind}`} role="img" aria-label={label} title={label}>
-  {#if kind === 'codex'}
+  {#if kind === 'hermes'}
+    <svg viewBox="0 0 28 28" aria-hidden="true">
+      <rect width="28" height="28" rx="6" fill="#fff3ec" />
+      <g transform="translate(3.5 3.5) scale(.75)" fill="#ea580c">
+        <!-- Hermes winged helmet motif -->
+        <path fill-rule="evenodd" d="M14 3.5C8.2 3.5 3.5 8.2 3.5 14c0 2.4.8 4.6 2.2 6.4L4 24.5l4.3-1.4c1.7 1 3.6 1.6 5.7 1.6 5.8 0 10.5-4.7 10.5-10.5S19.8 3.5 14 3.5zm-1 4.5h2v6.5h-2V8zm1 12.5c-.8 0-1.5-.7-1.5-1.5s.7-1.5 1.5-1.5 1.5.7 1.5 1.5-.7 1.5-1.5 1.5z" />
+        <path d="M21.5 5.5l-4 2.5 1.5 3.5 4.5-2.5z" opacity=".85" />
+        <path d="M6.5 5.5l4 2.5-1.5 3.5-4.5-2.5z" opacity=".85" />
+      </g>
+    </svg>
+  {:else if kind === 'codex'}
     <svg viewBox="0 0 28 28" aria-hidden="true">
       <rect width="28" height="28" rx="6" fill="#eef0ff" />
       <path transform="translate(4 4) scale(.8333)" fill="#4f5ff7" fill-rule="evenodd" d="M8.086.457a6.105 6.105 0 0 1 3.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 0 0 .107.029c1.408-.346 2.762-.224 4.061.366l.217.106c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 0 1-.18 1.631.167.167 0 0 0 .04.155 5.982 5.982 0 0 1 1.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 0 1-2.934 1.851.162.162 0 0 0-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 0 0-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 0 1-2.595-.622 6.058 6.058 0 0 1-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 0 1-.495-1.283 6.11 6.11 0 0 1-.017-3.064.166.166 0 0 0 .008-.074.115.115 0 0 0-.037-.064 5.958 5.958 0 0 1-1.38-2.202 5.196 5.196 0 0 1-.333-1.589 6.915 6.915 0 0 1 .188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 0 0 .087-.087A6.016 6.016 0 0 1 5.635 2.31C6.315 1.464 7.132.846 8.086.457Zm-.804 7.85a.848.848 0 0 0-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 0 0 1.46.864l1.94-3.272a.849.849 0 0 0 .007-.854l-1.94-3.393Zm5.446 6.24a.849.849 0 0 0 0 1.695h4.848a.849.849 0 0 0 0-1.696h-4.848Z" />

@@ -1,0 +1,90 @@
+Activity Resolver Table:
+  Non-Data Actions:
+      android.intent.action.MAIN:
+        1a2b3c com.android.chrome/com.google.android.apps.chrome.Main filter 4d5e6f
+          Action: "android.intent.action.MAIN"
+          Category: "android.intent.category.LAUNCHER"
+
+Receiver Resolver Table:
+  Non-Data Actions:
+      android.intent.action.MY_PACKAGE_REPLACED:
+        2b3c4d com.android.chrome/org.chromium.chrome.browser.upgrade.UpgradeReceiver
+
+Domain verification status:
+  com.android.chrome:
+    ID: 00000000-0000-0000-0000-000000000001
+    Signatures: [fixture]
+    Domain verification state:
+      www.google.com: none
+
+Registered ContentProviders:
+  com.android.chrome/org.chromium.chrome.browser.ChromeFileProvider:
+    Provider{3c4d5e com.android.chrome/org.chromium.chrome.browser.ChromeFileProvider}
+
+Packages:
+  Package [com.android.chrome] (1a2b3c):
+    userId=10123
+    pkg=Package{2b3c4d com.android.chrome}
+    codePath=/data/app/~~fixture/com.android.chrome-fixture
+    resourcePath=/data/app/~~fixture/com.android.chrome-fixture
+    legacyNativeLibraryDir=/data/app/~~fixture/com.android.chrome-fixture/lib
+    primaryCpuAbi=x86_64
+    secondaryCpuAbi=null
+    versionCode=677820038 minSdk=29 targetSdk=35
+    versionName=131.0.6778.200
+    flags=[ SYSTEM HAS_CODE ALLOW_CLEAR_USER_DATA UPDATED_SYSTEM_APP ]
+    privateFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION ]
+    forceQueryable=false
+    usesLibraries:
+      org.chromium.chrome
+    usesStaticLibraries:
+      com.google.android.trichromelibrary version:677820038
+    usesOptionalLibraries:
+      org.apache.http.legacy
+    usesLibraryFiles:
+      /data/app/~~fixture/com.google.android.trichromelibrary-fixture/base.apk
+    timeStamp=2026-01-01 00:00:00
+    lastUpdateTime=2026-01-01 00:00:00
+    installerPackageName=com.android.shell
+    initiatingPackageName=com.android.shell
+    originatingPackageName=com.android.shell
+    packageSource=1
+    signatures=PackageSignatures{3c4d5e version:3, signatures:[fixture], past signatures:[]}
+    install permissions:
+      android.permission.INTERNET: granted=true
+    User 0: ceDataInode=12345 installed=true hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=0 instant=false virtual=false
+      firstInstallTime=2026-01-01 00:00:00
+      runtime permissions:
+        android.permission.POST_NOTIFICATIONS: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED ]
+  Package [com.example.other] (4d5e6f):
+    userId=10124
+    usesStaticLibraries:
+      com.google.android.trichromelibrary version:111
+    usesOptionalLibraries:
+      org.apache.http.legacy
+
+Hidden system packages:
+  Package [com.android.chrome] (5e6f7a):
+    userId=10123
+    codePath=/product/app/Chrome
+    versionCode=661308838 minSdk=29 targetSdk=35
+    versionName=128.0.6613.88
+    usesStaticLibraries:
+      com.google.android.trichromelibrary version:661308838
+    usesOptionalLibraries:
+      org.apache.http.legacy
+    User 0: installed=true hidden=false suspended=false stopped=false enabled=0
+
+Queries:
+  system apps queryable: false
+  forceQueryable:
+    com.android.chrome
+
+Dexopt state:
+  [com.android.chrome]
+    path: /data/app/~~fixture/com.android.chrome-fixture/base.apk
+      x86_64: [status=verify] [reason=install]
+
+Compiler stats:
+  [com.android.chrome]
+    (No recorded stats)

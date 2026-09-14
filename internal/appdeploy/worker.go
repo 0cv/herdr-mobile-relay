@@ -2,7 +2,10 @@ package appdeploy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,6 +23,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
+	"github.com/andybalholm/brotli"
 )
 
 const (
@@ -620,6 +625,9 @@ func validate(job Job) error {
 	if err := verifyWebBundle(job); err != nil {
 		return err
 	}
+	if _, err := release.VerifyWebDescriptor(os.DirFS(job.WebRoot), job.Version); err != nil {
+		return fmt.Errorf("web release descriptor: %w", err)
+	}
 	return nil
 }
 
@@ -637,19 +645,84 @@ func verifyWebBundle(job Job) error {
 	return nil
 }
 
+func VerifyPublic(ctx context.Context, webRoot, origin, version, revision string) error {
+	if webRoot == "" {
+		return errors.New("verified web release root is required for public verification")
+	}
+	normalizedOrigin, err := setuphelper.NormalizeOrigin(origin, false)
+	if err != nil {
+		return fmt.Errorf("public app origin: %w", err)
+	}
+	descriptor, err := release.VerifyWebDescriptor(os.DirFS(webRoot), version)
+	if err != nil {
+		return fmt.Errorf("verify local web release descriptor: %w", err)
+	}
+	versionData, err := os.ReadFile(filepath.Join(webRoot, "version.json"))
+	if err != nil {
+		return fmt.Errorf("read local web version: %w", err)
+	}
+	if version == "" {
+		version = descriptor.Version
+	}
+	if revision == "" {
+		var identity struct {
+			Revision string `json:"revision"`
+		}
+		if err := json.Unmarshal(versionData, &identity); err != nil {
+			return fmt.Errorf("parse local web version: %w", err)
+		}
+		revision = identity.Revision
+	}
+	if err := verifyVersion(versionData, version, revision); err != nil {
+		return fmt.Errorf("local web version: %w", err)
+	}
+	return verifyPublic(ctx, Job{
+		WebRoot:  webRoot,
+		Origin:   normalizedOrigin,
+		Version:  version,
+		Revision: revision,
+	})
+}
+
 func verifyPublic(ctx context.Context, job Job) error {
 	verifyCtx, cancel := context.WithTimeout(ctx, publicVerificationTimeout)
 	defer cancel()
-	client := &http.Client{
-		Timeout: publicRequestTimeout,
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if request.URL.Scheme+"://"+request.URL.Host != job.Origin {
-				return errPublicOriginRedirect
-			}
-			return nil
-		},
-	}
+	client := &http.Client{Timeout: publicRequestTimeout}
 	return verifyPublicWith(verifyCtx, job, client, publicRetryDelay)
+}
+
+type publicResponseError struct {
+	status int
+}
+
+func (e *publicResponseError) Error() string {
+	return fmt.Sprintf("verify public app: HTTP %d", e.status)
+}
+
+func samePublicOrigin(value, expected string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	return parsed.Scheme+"://"+parsed.Host == expected
+}
+
+func publicClient(client *http.Client, origin string) *http.Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	copy := *client
+	previousRedirect := copy.CheckRedirect
+	copy.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if !samePublicOrigin(request.URL.String(), origin) {
+			return errPublicOriginRedirect
+		}
+		if previousRedirect != nil {
+			return previousRedirect(request, via)
+		}
+		return nil
+	}
+	return &copy
 }
 
 func verifyPublicWith(
@@ -658,10 +731,11 @@ func verifyPublicWith(
 	client *http.Client,
 	retryDelay func(int) time.Duration,
 ) error {
+	client = publicClient(client, job.Origin)
 	nonce := time.Now().UnixNano()
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		retryable, err := checkPublicVersion(ctx, job, client, nonce, attempt)
+		retryable, err := checkPublicBundle(ctx, job, client, nonce, attempt)
 		if err == nil {
 			return nil
 		}
@@ -683,50 +757,257 @@ func verifyPublicWith(
 	}
 }
 
-func checkPublicVersion(
+const maxPublicResourceBytes = 32 * 1024 * 1024
+
+func publicResourceURL(origin, resource, cacheBust string) (string, error) {
+	if resource == "" || strings.HasPrefix(resource, "/") || strings.ContainsAny(resource, "\\?#") ||
+		path.Clean(resource) != resource || resource == "." || resource == ".." || strings.HasPrefix(resource, "../") {
+		return "", errors.New("public app resource path is invalid")
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = "/" + resource
+	parsed.RawQuery = "herdr_deploy_check=" + url.QueryEscape(cacheBust)
+	return parsed.String(), nil
+}
+
+func fetchPublicResource(
+	ctx context.Context,
+	client *http.Client,
+	origin, resource, cacheBust, acceptEncoding string,
+) ([]byte, http.Header, error) {
+	resourceURL, err := publicResourceURL(origin, resource, cacheBust)
+	if err != nil {
+		return nil, nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	request.Header.Set("Accept", "*/*")
+	request.Header.Set("Accept-Encoding", acceptEncoding)
+	request.Header.Set("Cache-Control", "no-cache, no-store")
+	response, err := client.Do(request)
+	if err != nil {
+		if errors.Is(err, errPublicOriginRedirect) {
+			return nil, nil, err
+		}
+		return nil, nil, fmt.Errorf("fetch public app resource: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, response.Header, &publicResponseError{status: response.StatusCode}
+	}
+	if response.ContentLength > maxPublicResourceBytes {
+		return nil, response.Header, errors.New("public app resource exceeds verification limit")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxPublicResourceBytes+1))
+	if err != nil {
+		return nil, response.Header, fmt.Errorf("read public app resource: %w", err)
+	}
+	if len(body) > maxPublicResourceBytes {
+		return nil, response.Header, errors.New("public app resource exceeds verification limit")
+	}
+	return body, response.Header, nil
+}
+
+func decodePublicRepresentation(body []byte, headers http.Header) ([]byte, error) {
+	encoding := strings.ToLower(strings.TrimSpace(headers.Get("Content-Encoding")))
+	switch encoding {
+	case "", "identity":
+		return body, nil
+	case "br":
+		reader := brotli.NewReader(bytes.NewReader(body))
+		decoded, err := io.ReadAll(io.LimitReader(reader, maxPublicResourceBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("decode Brotli public app resource: %w", err)
+		}
+		if len(decoded) > maxPublicResourceBytes {
+			return nil, errors.New("decoded public app resource exceeds verification limit")
+		}
+		return decoded, nil
+	case "gzip":
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("decode gzip public app resource: %w", err)
+		}
+		defer reader.Close()
+		decoded, err := io.ReadAll(io.LimitReader(reader, maxPublicResourceBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("decode gzip public app resource: %w", err)
+		}
+		if len(decoded) > maxPublicResourceBytes {
+			return nil, errors.New("decoded public app resource exceeds verification limit")
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("unsupported public app Content-Encoding %q", encoding)
+	}
+}
+
+func publicDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func verifyPublicVersionMetadata(data []byte, job Job, descriptor release.WebDescriptor) error {
+	if err := verifyVersion(data, job.Version, job.Revision); err != nil {
+		return err
+	}
+	var identity struct {
+		Assets       int    `json:"assets"`
+		Build        string `json:"build"`
+		Entry        string `json:"entry"`
+		Script       string `json:"script"`
+		Style        string `json:"style"`
+		ScriptSHA256 string `json:"script_sha256"`
+		StyleSHA256  string `json:"style_sha256"`
+	}
+	if err := json.Unmarshal(data, &identity); err != nil {
+		return err
+	}
+	javascript := descriptor.Files["javascript"]
+	stylesheet := descriptor.Files["stylesheet"]
+	if identity.Assets != descriptor.Assets || identity.Build != descriptor.Build || identity.Entry != descriptor.Entry ||
+		identity.Script != "/"+javascript.Path || identity.Style != "/"+stylesheet.Path ||
+		identity.ScriptSHA256 != javascript.SHA256 || identity.StyleSHA256 != stylesheet.SHA256 {
+		return errors.New("public version metadata does not match the web release descriptor")
+	}
+	return nil
+}
+
+func verifiedTargetWebDescriptor(job Job) (release.WebDescriptor, error) {
+	if job.WebRoot == "" {
+		return release.WebDescriptor{}, errors.New("verified web release root is required for public verification")
+	}
+	descriptor, err := release.VerifyWebDescriptor(os.DirFS(job.WebRoot), job.Version)
+	if err != nil {
+		return release.WebDescriptor{}, fmt.Errorf("verify local web release descriptor: %w", err)
+	}
+	return descriptor, nil
+}
+
+func compareWebDescriptorIdentity(public, target release.WebDescriptor) error {
+	if public.Schema != target.Schema || public.Version != target.Version ||
+		public.Assets != target.Assets || public.Build != target.Build || public.Entry != target.Entry {
+		return errors.New("public release descriptor identity does not match the verified local target")
+	}
+	for _, name := range []string{"entry", "javascript", "stylesheet"} {
+		publicFile, publicOK := public.Files[name]
+		targetFile, targetOK := target.Files[name]
+		if !publicOK || !targetOK || publicFile != targetFile {
+			return fmt.Errorf("public %s digest does not match the verified local target", name)
+		}
+	}
+	return nil
+}
+
+func checkPublicBundle(
 	ctx context.Context,
 	job Job,
 	client *http.Client,
 	nonce int64,
 	attempt int,
 ) (bool, error) {
-	cacheBust := url.QueryEscape(fmt.Sprintf("%s-%d-%d", job.Revision, nonce, attempt))
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		job.Origin+"/version.json?herdr_deploy_check="+cacheBust,
-		nil,
-	)
+	targetDescriptor, err := verifiedTargetWebDescriptor(job)
 	if err != nil {
 		return false, err
 	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Cache-Control", "no-cache, no-store")
-	response, err := client.Do(request)
+	cacheBust := fmt.Sprintf("%s-%d-%d", job.Revision, nonce, attempt)
+	descriptorData, descriptorHeaders, err := fetchPublicResource(ctx, client, job.Origin, "release.json", cacheBust, "identity")
 	if err != nil {
-		if errors.Is(err, errPublicOriginRedirect) {
-			return false, err
+		return publicErrorRetryable(err), err
+	}
+	descriptorData, err = decodePublicRepresentation(descriptorData, descriptorHeaders)
+	if err != nil {
+		return true, err
+	}
+	var rawDescriptor release.WebDescriptor
+	if err := json.Unmarshal(descriptorData, &rawDescriptor); err != nil {
+		return true, fmt.Errorf("decode public release descriptor: %w", err)
+	}
+	if rawDescriptor.Files == nil {
+		return true, errors.New("public release descriptor has no files")
+	}
+	if err := compareWebDescriptorIdentity(rawDescriptor, targetDescriptor); err != nil {
+		return true, err
+	}
+	files := make(map[string][]byte, len(targetDescriptor.Files))
+	for _, name := range []string{"entry", "javascript", "stylesheet"} {
+		descriptorFile := targetDescriptor.Files[name]
+		identityBody, identityHeaders, fetchErr := fetchPublicResource(
+			ctx, client, job.Origin, descriptorFile.Path, cacheBust+"-"+name, "identity",
+		)
+		if fetchErr != nil {
+			return publicErrorRetryable(fetchErr), fetchErr
 		}
-		return true, fmt.Errorf("verify public app: %w", err)
+		identityBody, decodeErr := decodePublicRepresentation(identityBody, identityHeaders)
+		if decodeErr != nil {
+			return true, decodeErr
+		}
+		files[descriptorFile.Path] = identityBody
+
+		compressedBody, compressedHeaders, fetchErr := fetchPublicResource(
+			ctx, client, job.Origin, descriptorFile.Path, cacheBust+"-br-"+name, "br",
+		)
+		if fetchErr != nil {
+			return publicErrorRetryable(fetchErr), fetchErr
+		}
+		compressedBody, decodeErr = decodePublicRepresentation(compressedBody, compressedHeaders)
+		if decodeErr != nil {
+			return true, decodeErr
+		}
+		if publicDigest(compressedBody) != descriptorFile.SHA256 {
+			return true, fmt.Errorf("public representation for %s does not match its descriptor", name)
+		}
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		retryable := response.StatusCode == http.StatusNotFound ||
-			response.StatusCode == http.StatusRequestTimeout ||
-			response.StatusCode == http.StatusTooEarly ||
-			response.StatusCode == http.StatusTooManyRequests ||
-			response.StatusCode >= http.StatusInternalServerError
-		return retryable, fmt.Errorf("verify public app: HTTP %d", response.StatusCode)
+	if _, err := release.VerifyWebDescriptorData(descriptorData, files, job.Version); err != nil {
+		return true, fmt.Errorf("public web release descriptor: %w", err)
 	}
-	var identity map[string]any
-	if err := json.NewDecoder(io.LimitReader(response.Body, 64*1024)).Decode(&identity); err != nil {
-		return true, fmt.Errorf("decode public version: %w", err)
+	versionData, versionHeaders, err := fetchPublicResource(
+		ctx, client, job.Origin, "version.json", cacheBust+"-version", "identity",
+	)
+	if err != nil {
+		return publicErrorRetryable(err), err
 	}
-	data, _ := json.Marshal(identity)
-	if err := verifyVersion(data, job.Version, job.Revision); err != nil {
+	versionData, err = decodePublicRepresentation(versionData, versionHeaders)
+	if err != nil {
+		return true, err
+	}
+	if err := verifyPublicVersionMetadata(versionData, job, targetDescriptor); err != nil {
 		return true, fmt.Errorf("public web bundle identity: %w", err)
 	}
+	compressedVersionData, compressedVersionHeaders, err := fetchPublicResource(
+		ctx, client, job.Origin, "version.json", cacheBust+"-version-br", "br",
+	)
+	if err != nil {
+		return publicErrorRetryable(err), err
+	}
+	compressedVersionData, err = decodePublicRepresentation(compressedVersionData, compressedVersionHeaders)
+	if err != nil {
+		return true, err
+	}
+	if err := verifyPublicVersionMetadata(compressedVersionData, job, targetDescriptor); err != nil {
+		return true, fmt.Errorf("public compressed web bundle identity: %w", err)
+	}
 	return false, nil
+}
+
+func publicErrorRetryable(err error) bool {
+	if errors.Is(err, errPublicOriginRedirect) {
+		return false
+	}
+	var responseErr *publicResponseError
+	if errors.As(err, &responseErr) {
+		return responseErr.status == http.StatusNotFound ||
+			responseErr.status == http.StatusRequestTimeout ||
+			responseErr.status == http.StatusTooEarly ||
+			responseErr.status == http.StatusTooManyRequests ||
+			responseErr.status >= http.StatusInternalServerError
+	}
+	return true
 }
 
 func publicRetryDelay(attempt int) time.Duration {

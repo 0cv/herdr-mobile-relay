@@ -27,7 +27,18 @@
     "speech_voice_management",
     "invitation_qr"
   ],
-  "speech_languages": ["en", "fr"],
+  "herdr_status": {
+    "installed_client_version": "0.9.0",
+    "server_version": "0.9.0",
+    "server_protocol": 1,
+    "server_protocol_known": true,
+    "endpoint_protocol_generation": 1,
+    "generation": 1,
+    "features": {
+      "ordinary_json": {"state": "supported", "reason": "ping", "generation": 1},
+      "workspace.move_block": {"state": "supported", "reason": "recognized_validation_refusal", "generation": 1}
+    }
+  },
   "inventory": {"state": "ready"},
   "agent_profiles": [
     {"id": "claude", "label": "Claude"},

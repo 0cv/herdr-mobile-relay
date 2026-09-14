@@ -23,7 +23,7 @@ import { PANE_LEASE_HIDDEN_GRACE_MS, paneLeaseRenewalAllowed, quickSetupConfig }
 import { suggestedLaunchName, validAgentName } from '$lib/launch';
 import { parseNotificationTarget, relayProtocolError, relayVersionMeta, shortRevision } from '$lib/protocol';
 import { relayPushScope } from '$lib/push';
-import { stateFromLocation } from '$lib/router';
+import { stateFromLocation, viewUrl } from '$lib/router';
 import {
   createQuestionDraft,
   questionSubmitAllowed,
@@ -139,6 +139,29 @@ describe('protocol and setup parsing', () => {
       view: 'history',
       paneId: 'relay::pane-1',
     });
+    const target = {
+      relay_id: 'relay',
+      server_session_id: 'primary',
+      pane_id: 'w1:p1',
+      terminal_id: 'terminal-1',
+      generation: 1,
+      agent_session_id: 'session-1',
+    } as const;
+    const automaticHistory = {
+      view: 'history' as const,
+      paneId: 'relay::w1:p1',
+      target,
+      fallbackToTerminalOnInitialUnavailable: true as const,
+    };
+    const historyUrl = viewUrl(automaticHistory);
+    expect(historyUrl).toMatch(/^#history=r3\./u);
+    expect(historyUrl).not.toContain('fallback');
+    expect(stateFromLocation({ hash: historyUrl } as Location)).toEqual({
+      view: 'history',
+      paneId: 'relay::w1:p1',
+      target,
+    });
+    expect(viewUrl({ view: 'terminal', paneId: 'relay::w1:p1', target })).toMatch(/^#pane=r3\./u);
     expect(relayPushScope('UPPER-id-')).toBe('./push/upper-id/');
     expect(relayPushScope('---')).toBe('./push/relay/');
   });

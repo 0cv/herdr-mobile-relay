@@ -15,9 +15,10 @@ import (
 func clearAllEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
+		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME", "PRIME_AGENT_DIR",
 		"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "XDG_DATA_HOME",
 		ClaudeListEnv, QoderListEnv, CodexListEnv, PiListEnv, OMPListEnv, OMOListEnv, OpenCodeListEnv,
+		HermesListEnv, PrimeListEnv,
 	} {
 		t.Setenv(name, "")
 	}
@@ -741,9 +742,8 @@ func TestProfileCacheRefreshesDanglingSymlinkAfterExpiry(t *testing.T) {
 }
 
 func TestPrimeRootsDefaultAndOverride(t *testing.T) {
+	clearAllEnv(t)
 	home := t.TempDir()
-	t.Setenv(PrimeListEnv, "")
-	t.Setenv("PRIME_AGENT_DIR", "")
 	want := []string{filepath.Join(home, ".prime", "agent", "sessions")}
 	if got := Prime(home); !slices.Equal(got, want) {
 		t.Fatalf("Prime(%q) = %v, want %v", home, got, want)
@@ -753,5 +753,24 @@ func TestPrimeRootsDefaultAndOverride(t *testing.T) {
 	want = []string{filepath.Join(override, "sessions"), filepath.Join(home, ".prime", "agent", "sessions")}
 	if got := Prime(home); !slices.Equal(got, want) {
 		t.Fatalf("Prime(%q) with PRIME_AGENT_DIR = %v, want %v", home, got, want)
+	}
+}
+
+func TestHermesDataAndDatabases(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	t.Setenv(HermesListEnv, strings.Join([]string{"/configured/one", "/configured/two"}, string(os.PathListSeparator)))
+	t.Setenv("HERMES_HOME", "/hermes-home")
+
+	wantData := []string{"/configured/one", "/configured/two", "/hermes-home", filepath.Join(home, ".hermes")}
+	if got := HermesData(home); !slices.Equal(got, wantData) {
+		t.Fatalf("HermesData(%q) = %v, want %v", home, got, wantData)
+	}
+	wantDBs := make([]string, 0, len(wantData))
+	for _, root := range wantData {
+		wantDBs = append(wantDBs, filepath.Join(root, "state.db"))
+	}
+	if got := HermesDBs(home); !slices.Equal(got, wantDBs) {
+		t.Fatalf("HermesDBs(%q) = %v, want %v", home, got, wantDBs)
 	}
 }

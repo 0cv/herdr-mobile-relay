@@ -76,6 +76,33 @@ func TestListDirectoriesSubdir(t *testing.T) {
 	}
 }
 
+func TestListDirectoriesSelectsDottedSubdirectory(t *testing.T) {
+	home := t.TempDir()
+	parent := filepath.Join(home, "Development")
+	dotted := filepath.Join(parent, "test.com")
+	plain := filepath.Join(parent, "testcom")
+	for _, path := range []string{dotted, plain} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	listing := ListDirectories(parent, home)
+	if len(listing.Directories) != 2 ||
+		listing.Directories[0].Path != dotted ||
+		listing.Directories[1].Path != plain {
+		t.Fatalf("directories = %+v, want dotted and plain directories", listing.Directories)
+	}
+
+	selected := ListDirectories(dotted, home)
+	if selected.Current.Path != dotted {
+		t.Fatalf("current.path = %q, want %q", selected.Current.Path, dotted)
+	}
+	if selected.Directories == nil {
+		t.Fatal("directories is nil, want an empty list")
+	}
+}
+
 func TestListDirectoriesTraversalBlocked(t *testing.T) {
 	home := t.TempDir()
 	os.MkdirAll(filepath.Join(home, "safe"), 0o755)

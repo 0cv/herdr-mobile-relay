@@ -9,7 +9,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -79,6 +79,7 @@ jobs:
         with:
           name: release-bundles
           path: dist/release/
+          retention-days: 1
 
   native-smoke:
     name: Native release smoke (${{ matrix.target }})
@@ -111,9 +112,31 @@ jobs:
             dist/release/checksums.txt "$version" "$GITHUB_SHA" \
             "${target%_*}/${target#*_}"
 
+  mobile:
+    # Temporarily disabled while the installed-device harness is fixed on ci-mobile.
+    if: ${{ false }}
+    needs: build
+    uses: ./.github/workflows/mobile-ci.yml
+    with:
+      artifact_run_id: ${{ github.run_id }}
+      artifact_name: release-bundles
+      candidate_commit: ${{ github.sha }}
+      head_commit: ${{ github.sha }}
+      platform: all
+      suite: release
+      baseline_set: all
+    permissions:
+      actions: read
+      contents: read
+
   publish:
+    # Do not depend on the disabled mobile job: a skipped dependency skips
+    # publication too. Restore this dependency when mobile CI is re-enabled.
     needs: [verify, build, native-smoke]
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:

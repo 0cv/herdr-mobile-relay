@@ -1,0 +1,32 @@
+
+Packages:
+  Package [com.android.chrome] (79b540f):
+    appId=10145
+    pkg=Package{4170da8 com.android.chrome}
+    codePath=/data/app/~~3EyZwkG_dtVNz2pRMUcRFw==/com.android.chrome-UVjtQw0byhDcWUKMwl_gng==
+    resourcePath=/data/app/~~3EyZwkG_dtVNz2pRMUcRFw==/com.android.chrome-UVjtQw0byhDcWUKMwl_gng==
+    legacyNativeLibraryDir=/data/app/~~3EyZwkG_dtVNz2pRMUcRFw==/com.android.chrome-UVjtQw0byhDcWUKMwl_gng==/lib
+    extractNativeLibs=false
+    primaryCpuAbi=x86_64
+    secondaryCpuAbi=null
+    supportsScreens=[small, medium, large, xlarge, resizeable, anyDensity]
+    usesStaticLibraries:
+      com.google.android.trichromelibrary version:677820038
+    usesOptionalLibraries:
+      android.car
+      androidx.window.extensions
+      android.ext.adservices
+      androidx.window.sidecar
+    usesLibraryFiles:
+      /data/app/~~r-ncmtFUhZPO2sR5rZK8sQ==/com.google.android.trichromelibrary_677820038-p7qNCM3f0s4je3JgvA68QQ==/base.apk
+
+Hidden system packages:
+  Package [com.android.chrome] (f0f0f27):
+    appId=10145
+    pkg=Package{f3185d4 com.android.chrome}
+    codePath=/product/app/Chrome-Stub
+    resourcePath=/product/app/Chrome-Stub
+    legacyNativeLibraryDir=/product/app/Chrome-Stub/lib
+    extractNativeLibs=true
+    primaryCpuAbi=null
+    secondaryCpuAbi=null

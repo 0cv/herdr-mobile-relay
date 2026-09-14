@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
@@ -66,12 +67,9 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 		}
 		serverResult <- nil
 	}()
-
 	client := NewClient("/binary/must-not-run", socketPath)
-	if !client.SupportsRealtimePane(context.Background()) {
-		t.Fatal("socket API was not detected")
-	}
 	defer client.Close()
+
 	for index := 1; index <= 2; index++ {
 		content, readErr := client.ReadPane(context.Background(), "w1:p1", 80, "ansi")
 		if readErr != nil {
@@ -86,6 +84,63 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 	}
 	if serverErr := <-serverResult; serverErr != nil {
 		t.Fatal(serverErr)
+	}
+}
+
+func TestUnaryRequestCancellationClosesBlockedPeer(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	received := make(chan struct{})
+	release := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverErr <- acceptErr
+			return
+		}
+		defer conn.Close()
+		var request map[string]any
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			serverErr <- decodeErr
+			return
+		}
+		close(received)
+		<-release
+		serverErr <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, requestErr := newSocketAPIClient(socketPath).requestUnary(
+			ctx,
+			"workspace.list",
+			map[string]any{},
+		)
+		done <- requestErr
+	}()
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("request not received")
+	}
+	cancel()
+	select {
+	case <-done:
+		close(release)
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		<-done
+		t.Fatal("cancellation did not interrupt the in-flight unary read")
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -126,10 +181,6 @@ func TestTabMoveRetriesWhenServerClosesEachConnection(t *testing.T) {
 	}()
 
 	client := NewClient("/binary/must-not-run", socketPath)
-	defer client.Close()
-	if !client.SupportsRealtimePane(context.Background()) {
-		t.Fatal("socket API was not detected")
-	}
 	if err := client.TabMove(context.Background(), "w1:t2", 0); err != nil {
 		t.Fatalf("first move: %v", err)
 	}

@@ -103,7 +103,11 @@ if curl --help all 2>/dev/null | grep -q -- '--doh-url'; then
 fi
 
 public_curl() {
-    curl "${PUBLIC_CURL_ARGS[@]}" "$@"
+    if [ "${#PUBLIC_CURL_ARGS[@]}" -gt 0 ]; then
+        curl "${PUBLIC_CURL_ARGS[@]}" "$@"
+        return
+    fi
+    curl "$@"
 }
 
 

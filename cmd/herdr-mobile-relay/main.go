@@ -33,7 +33,7 @@ var (
 func main() {
 	exitCode, err := run(os.Args[1:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "herdr-mobile-relay: %v\n", err)
+		reportError(os.Stderr, os.Args[1:], err)
 		os.Exit(exitCode)
 	}
 }
@@ -74,6 +74,20 @@ func run(args []string) (int, error) {
 			return 3, err
 		}
 		return status(err)
+	case "verify-public":
+		verifyFlags := flag.NewFlagSet("verify-public", flag.ContinueOnError)
+		verifyFlags.SetOutput(os.Stderr)
+		webRoot := verifyFlags.String("web-root", "web", "local web release root")
+		origin := verifyFlags.String("origin", "", "public app origin")
+		version := verifyFlags.String("version", "", "expected release version (defaults to the local descriptor)")
+		revision := verifyFlags.String("revision", "", "expected release revision (defaults to local version metadata)")
+		if err := verifyFlags.Parse(args); err != nil {
+			return 2, err
+		}
+		if verifyFlags.NArg() != 0 || *origin == "" {
+			return 2, errors.New("usage: herdr-mobile-relay verify-public --origin ORIGIN [--web-root DIRECTORY] [--version VERSION] [--revision REVISION]")
+		}
+		return status(appdeploy.VerifyPublic(context.Background(), *webRoot, *origin, *version, *revision))
 	case "app-deploy-worker":
 		if len(args) != 1 {
 			return 2, errors.New("usage: herdr-mobile-relay app-deploy-worker JOB.json")
@@ -310,14 +324,7 @@ func runServe() (int, error) {
 		return 1, err
 	}
 
-	var handler slog.Handler
-	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
-	if cfg.LogFormat == "json" {
-		handler = slog.NewJSONHandler(os.Stderr, opts)
-	} else {
-		handler = slog.NewTextHandler(os.Stderr, opts)
-	}
-	logger := slog.New(handler)
+	logger := newRelayLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr))
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

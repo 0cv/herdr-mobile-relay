@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -120,31 +121,56 @@ type TopologySnapshot struct {
 }
 
 type EventClient struct {
-	path string
-	// supportsWorkspaceReordered reports whether the running Herdr build
-	// accepts a workspace.reordered subscription. Herdr 0.7.5 (the supported
-	// minimum) rejects the whole events.subscribe request when the name is
-	// unknown, degrading realtime updates to polling.
-	supportsWorkspaceReordered func() bool
+	path                          string
+	supportsWorkspaceReordered    func() bool
+	workspaceReorderedSupported   func()
+	workspaceReorderedUnsupported func()
+	workspaceReorderedReset       func()
 }
 
 func NewEventClient(path string) *EventClient {
 	return &EventClient{path: path}
 }
 
-// SetWorkspaceReorderedProbe installs the capability probe consulted on each
-// subscribe. The probe runs lazily so constructing the client stays cheap;
-// when unset, workspace.reordered is excluded.
 func (c *EventClient) SetWorkspaceReorderedProbe(probe func() bool) {
 	c.supportsWorkspaceReordered = probe
 }
 
-// Bootstrap subscribes before taking a snapshot. Events arriving while the
-// snapshot is in flight remain queued and are returned for replay afterward.
+func (c *EventClient) SetWorkspaceReorderedCapability(
+	shouldAttempt func() bool,
+	supported func(),
+	unsupported func(),
+) {
+	c.supportsWorkspaceReordered = shouldAttempt
+	c.workspaceReorderedSupported = supported
+	c.workspaceReorderedUnsupported = unsupported
+}
+
+func (c *EventClient) SetWorkspaceReorderedReset(reset func()) {
+	c.workspaceReorderedReset = reset
+}
+
+func (c *EventClient) shouldSubscribeWorkspaceReordered() bool {
+	return c != nil && c.supportsWorkspaceReordered != nil && c.supportsWorkspaceReordered()
+}
 func (c *EventClient) Bootstrap(ctx context.Context) (*EventStream, SessionSnapshot, []Event, error) {
-	stream, err := c.subscribe(ctx)
+	if c != nil && c.workspaceReorderedReset != nil {
+		c.workspaceReorderedReset()
+	}
+	includeWorkspaceReordered := c.shouldSubscribeWorkspaceReordered()
+	stream, err := c.subscribeWith(ctx, includeWorkspaceReordered)
+	if err != nil && includeWorkspaceReordered && isUnsupportedSubscription(err) {
+		if c.workspaceReorderedUnsupported != nil {
+			c.workspaceReorderedUnsupported()
+		}
+		includeWorkspaceReordered = false
+		stream, err = c.subscribeWith(ctx, false)
+	}
 	if err != nil {
 		return nil, SessionSnapshot{}, nil, err
+	}
+	if includeWorkspaceReordered && c.workspaceReorderedSupported != nil {
+		c.workspaceReorderedSupported()
 	}
 	snapshot, err := c.snapshot(ctx)
 	if err != nil {
@@ -155,6 +181,37 @@ func (c *EventClient) Bootstrap(ctx context.Context) (*EventStream, SessionSnaps
 }
 
 func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
+	return c.subscribeWith(ctx, c.shouldSubscribeWorkspaceReordered())
+}
+
+type eventSubscriptionError struct {
+	Code        string
+	Message     string
+	PreDispatch bool
+}
+
+func (e *eventSubscriptionError) Error() string {
+	if e == nil {
+		return "Herdr events subscription failed"
+	}
+	return fmt.Sprintf("Herdr events subscription %s: %s", e.Code, e.Message)
+}
+
+func isUnsupportedSubscription(err error) bool {
+	var subscriptionErr *eventSubscriptionError
+	if !errors.As(err, &subscriptionErr) || subscriptionErr == nil {
+		return false
+	}
+	switch subscriptionErr.Code {
+	case "unknown_event", "unsupported_event", "unknown_subscription", "unsupported_subscription",
+		"invalid_subscription":
+		return true
+	default:
+		return subscriptionErr.PreDispatch
+	}
+}
+
+func (c *EventClient) subscribeWith(ctx context.Context, includeWorkspaceReordered bool) (*EventStream, error) {
 	if c == nil || c.path == "" {
 		return nil, errors.New("Herdr socket path is unavailable")
 	}
@@ -174,9 +231,7 @@ func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
 		"id":     eventSubscriptionRequestID,
 		"method": "events.subscribe",
 		"params": map[string]any{
-			"subscriptions": topologySubscriptions(
-				c.supportsWorkspaceReordered != nil && c.supportsWorkspaceReordered(),
-			),
+			"subscriptions": topologySubscriptions(includeWorkspaceReordered),
 		},
 	}
 	if err := writeSocketJSON(conn, request); err != nil {
@@ -203,13 +258,27 @@ func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("decode Herdr events subscription: %w", err)
 	}
+	if response.Error != nil {
+		preDispatch := isPreDispatchSubscriptionError(
+			response.ID,
+			response.Error.Code,
+			response.Error.Message,
+			includeWorkspaceReordered,
+		)
+		if response.ID != eventSubscriptionRequestID && !preDispatch {
+			_ = conn.Close()
+			return nil, errors.New("Herdr events subscription response ID mismatch")
+		}
+		_ = conn.Close()
+		return nil, &eventSubscriptionError{
+			Code:        response.Error.Code,
+			Message:     response.Error.Message,
+			PreDispatch: preDispatch,
+		}
+	}
 	if response.ID != eventSubscriptionRequestID {
 		_ = conn.Close()
 		return nil, errors.New("Herdr events subscription response ID mismatch")
-	}
-	if response.Error != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("Herdr events subscription %s: %s", response.Error.Code, response.Error.Message)
 	}
 	if response.Result.Type != "subscription_started" {
 		_ = conn.Close()
@@ -224,6 +293,10 @@ func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
 	return stream, nil
 }
 
+func isPreDispatchSubscriptionError(id, code, message string, includeWorkspaceReordered bool) bool {
+	return includeWorkspaceReordered && isPreDispatchRequestError(id, code, message) &&
+		strings.Contains(message, "unknown variant `workspace.reordered`")
+}
 func (c *EventClient) snapshot(ctx context.Context) (SessionSnapshot, error) {
 	if c == nil || c.path == "" {
 		return SessionSnapshot{}, errors.New("Herdr socket path is unavailable")

@@ -35,15 +35,15 @@ func TestCancelledCommandDoesNotLeakGroup(t *testing.T) {
 	c := NewClient(bin, filepath.Join(dir, "sock"))
 
 	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan struct{})
 	go func() {
-		time.Sleep(300 * time.Millisecond) // let the child write its PID
-		cancel()                           // parent cancellation (not a deadline)
+		_, _ = c.run(ctx, 10*time.Second, "send-text", "--pane", "p1", "x")
+		close(result)
 	}()
 
-	// Runs the leader; returns once cancellation kills it.
-	_, _ = c.run(ctx, 10*time.Second, "send-text", "--pane", "p1", "x")
-
 	pid := readChildPID(t, pidFile)
+	cancel()
+	<-result
 	if pid == 0 {
 		t.Fatal("child never recorded its PID")
 	}

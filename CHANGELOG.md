@@ -3,7 +3,16 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
-## [0.21.4] - 2026-09-04
+## [Unreleased]
+
+### Changed
+
+- Synced with upstream [0cv/herdr-mobile-relay](https://github.com/0cv/herdr-mobile-relay)
+  through v0.21.2. Upstream numbered its own 0.21.0 to 0.21.2 releases
+  independently of this fork; the fork's 0.21.x entries below are marked
+  "(fork)" and the upstream entries follow them.
+
+## [0.21.4] - 2026-09-04 (fork)
 
 ### Added
 
@@ -21,7 +30,7 @@ project follows [Semantic Versioning](https://semver.org/).
   subdirectories, or one the relay could not read, serialized `directories` as
   `null`, and the phone reported "Relay returned an invalid directory listing".
 
-## [0.21.3] - 2026-09-04
+## [0.21.3] - 2026-09-04 (fork)
 
 ### Changed
 
@@ -31,7 +40,7 @@ project follows [Semantic Versioning](https://semver.org/).
   phone that shows the live screen instead of the stitched history can be traced
   from `relay.log` without a client-side capture.
 
-## [0.21.2] - 2026-09-04
+## [0.21.2] - 2026-09-04 (fork)
 
 ### Changed
 
@@ -44,7 +53,7 @@ project follows [Semantic Versioning](https://semver.org/).
   the history. Frames captured at phone width and at desktop width do not always
   align, so a block can appear re-wrapped or repeated after the width changes.
 
-## [0.21.1] - 2026-09-04
+## [0.21.1] - 2026-09-04 (fork)
 
 ### Fixed
 
@@ -56,7 +65,7 @@ project follows [Semantic Versioning](https://semver.org/).
   the relay observes a pane; the Conversation view remains the way to read turns
   from before that.
 
-## [0.21.0] - 2026-09-04
+## [0.21.0] - 2026-09-04 (fork)
 
 ### Added
 
@@ -72,6 +81,151 @@ project follows [Semantic Versioning](https://semver.org/).
   `~/.prime/agent/sessions/<id>.jsonl`; `HERDR_PRIME_CONFIG_DIRS` and
   `PRIME_AGENT_DIR` override the root. Prime conductors run for days, so their
   history window is 64 MiB rather than 16.
+## [0.21.2] - 2026-09-14
+
+### Fixed
+
+- Select curated natural macOS voices for English, French, German, Spanish,
+  and Chinese instead of whichever voice happens to appear first in the system
+  listing.
+
+## [0.21.1] - 2026-09-13
+
+### Fixed
+
+- Find Claude Code conversation history, session titles, and completion
+  responses when an agent runs from Herdr's `foreground_cwd` instead of the
+  pane's original `cwd`, including Git worktrees, while preserving transcript
+  root, project, cursor, and continuation isolation.
+
+## [0.21.0] - 2026-09-12
+
+### Added
+
+- Browse older file-backed conversations through bounded local snapshots with
+  authenticated cursors, progress reporting, and explicit source and storage
+  diagnostics. OpenCode and Hermes keep native pagination, while all providers
+  expose tool activity and bounded corruption and omission diagnostics.
+- Load conversation exchanges automatically across wire-page boundaries, keep a
+  bounded memory-only preview for warm reopens, and reuse verified recent-range
+  projections on the relay without persisting transcript data in the browser.
+
+- Report the installed Herdr client separately from the running server version,
+  protocol, endpoint generation, and per-feature compatibility evidence.
+- Add JSON-backed workspace and linked-worktree management, including inventory,
+  create, rename, reorder, explicit group-close confirmation, and separate
+  worktree removal.
+- Add verified Android and iOS installed-PWA device CI with exact release
+  artifacts, cache-recovery coverage, lifecycle checks, and publication gating.
+
+### Changed
+
+- Temporarily disable experimental installed-device CI for automatic checks and
+  release publication while it is repaired on `ci-mobile`. Browser checks and
+  native release-bundle verification remain required.
+- Move ordinary inventory, workspace, tab, and pane-read paths onto Herdr's
+  JSON socket surface with capability refreshes after startup and reconnects,
+  while retaining safe fallbacks where supported.
+- Treat group close as one explicit operation over the currently open group;
+  stale phone confirmations are rejected before dispatch, while concurrent
+  membership changes are handled according to Herdr's current-group semantics.
+- Restrict automatic mobile CI to successful same-repository pushes on `main`
+  and configure Android Chromedriver auto-download on the Appium server.
+
+### Fixed
+
+- Follow Claude session continuations from stale session anchors, including the
+  first continuation, older pages, and later appends, without losing messages or
+  retaining warnings after a missing continuation becomes available.
+- Preserve authenticated history snapshots during concurrent appends,
+  preparation, validation, and evidence compaction, with bounded request reads
+  and retained metadata.
+- Clear recovered inventory warnings and publish coherent agent, workspace, and
+  status updates across refreshes and reconnects.
+- Keep conversation scrolling pinned to new replies when WebKit reports a layout
+  scroll before its resize notification, without interrupting readers scrolling
+  upward through history.
+- Bind delayed workspace-close errors to their originating relay and action so
+  a response cannot open or mutate a group on a different computer.
+- Stop showing unchecked optional Herdr features as compatibility failures in
+  Settings, while retaining warnings for failed checks and unsupported features.
+  Compatibility warnings now wrap instead of being cut off on narrow screens.
+- Check terminal-read support at startup and after Herdr reconnects without
+  targeting a live pane, and record successful lightweight reads, instead of
+  leaving Settings stuck on a pending terminal compatibility check.
+- Extract the phone version from the `Phone app version` label instead of
+  accidentally reporting another version shown on the Settings page.
+- Initialize hybrid transport before capability-refresh goroutines can observe
+  it.
+- Install the Android CA through the supported Pixel Settings flow and verify
+  both the user trust store and the fixture HTTPS endpoint.
+
+## [0.20.11] - 2026-09-08
+
+### Fixed
+
+- Complete phone update progress when the new app and stylesheet have loaded
+  alongside an older cached manifest bootstrap, instead of remaining at 95%.
+
+## [0.20.10] - 2026-09-07
+
+### Fixed
+
+- Track the phone app as a separate update item and require the newly loaded
+  build identity before reporting a fleet update complete.
+- Publish build-specific web entries with content-addressed JavaScript and CSS,
+  integrity metadata, bounded public verification, and same-origin recovery for
+  existing installed apps.
+- Bound automatic phone reload recovery and preserve pending update progress when
+  a navigation or asset delivery fails.
+
+## [0.20.9] - 2026-09-07
+
+### Added
+
+- Add first-class support for Nous Hermes Agent, including native conversation
+  history, session titles, tool activity, response copy, mobile approvals, and
+  Hermes branding.
+- Add Hermes slash commands with `hermes`, `hermes-agent`, and `hermes agent`
+  aliases, 23 built-in commands, and best-effort project, profile, and personal
+  `SKILL.md` discovery.
+
+### Changed
+
+- Resolve Hermes state from `HERMES_HOME`, the default `~/.hermes` directory,
+  and `HERDR_HERMES_DATA_DIRS` for non-default data locations.
+- Keep Hermes approval controls stable while focus, status, and boxed-terminal
+  chrome repaint.
+
+### Fixed
+
+- Preserve a pending Hermes composer around response copying, including when
+  clearing succeeds but verification is canceled or temporarily fails, without
+  overwriting newer composer text.
+- Keep mobile approval controls visible for dialogs whose borders use standard
+  box-drawing corners, junctions, and tees.
+- Normalize empty directory and slash-command responses so `null` arrays from a
+  relay do not make the mobile client fail.
+
+## [0.20.8] - 2026-09-05
+
+### Fixed
+
+- Preserve Piper's relative shared-library symlinks during runtime extraction,
+  reject archive traversal, and verify a staged engine starts before publishing
+  it.
+- **Affected cached installations:** run
+  `relay/speech-voices.sh --reinstall-runtime`. It replaces only the cached
+  runtime and preserves every downloaded voice.
+
+## [0.20.7] - 2026-09-04
+
+### Fixed
+
+- Browse and launch agents from directories with dots in their names, including
+  empty directories.
+- Resolve Claude Code conversation history for paths with non-alphanumeric
+  characters while keeping similarly named projects distinct.
 
 ## [0.20.6] - 2026-09-03
 
@@ -1421,6 +1575,7 @@ project follows [Semantic Versioning](https://semver.org/).
   `/permissions` tab highlights follow arrow-key navigation.
 - Submit Qoder prompts and slash commands from **Send** without requiring a
   separate **Enter** action.
+
 - Suppress transient viewport-only snapshots while a resized terminal is still
   reflowing its scrollback.
 - Keep long URLs, hashes, and other unbroken strings within responsive terminal
@@ -1430,6 +1585,17 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...HEAD
+[0.21.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...v0.21.2
+[0.21.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.11...v0.21.0
+[0.20.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.10...v0.20.11
+[0.20.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.9...v0.20.10
+[0.20.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.8...v0.20.9
+[0.20.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.7...v0.20.8
+[0.20.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.6...v0.20.7
+
+[0.20.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.5...v0.20.6
 [0.20.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.4...v0.20.5
 [0.20.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.3...v0.20.4
 [0.20.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.2...v0.20.3

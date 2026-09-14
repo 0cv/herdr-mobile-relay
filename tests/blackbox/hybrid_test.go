@@ -99,6 +99,8 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 
 	relayPort := freePort(t)
 	env.relayHTTP = fmt.Sprintf("http://127.0.0.1:%d", relayPort)
+	socketPath := filepath.Join(tmpDir, "herdr.sock")
+	socketListener := startInventorySocket(t, socketPath, scenario)
 	relay := exec.Command(paths["herdr-mobile-relay"])
 	relay.Env = append(os.Environ(),
 		fmt.Sprintf("HERDR_RELAY_PORT=%d", relayPort),
@@ -116,15 +118,17 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 		fmt.Sprintf("FAKE_HERDR_OPERATIONS=%s", filepath.Join(tmpDir, "operations.jsonl")),
 		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(tmpDir, "config")),
 		fmt.Sprintf("XDG_CACHE_HOME=%s", filepath.Join(tmpDir, "cache")),
-		fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(tmpDir, "data")),
-		fmt.Sprintf("HERDR_SOCKET_PATH=%s", filepath.Join(tmpDir, "herdr.sock")),
+		fmt.Sprintf("HERDR_SOCKET_PATH=%s", socketPath),
 	)
 	relay.Stdout = os.Stdout
 	relay.Stderr = os.Stderr
 	if err := relay.Start(); err != nil {
 		t.Fatalf("start relay: %v", err)
 	}
-	t.Cleanup(func() { stopProcess(relay) })
+	t.Cleanup(func() {
+		stopProcess(relay)
+		_ = socketListener.Close()
+	})
 	waitForStatus(t, env.relayHTTP, "/readyz", http.StatusOK)
 	return env
 }

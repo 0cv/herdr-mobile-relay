@@ -1,0 +1,16 @@
+{
+  "nativeWebTap": false,
+  "nativeWebTapStrict": false,
+  "useJSONSource": false,
+  "webScreenshotMode": "native",
+  "shouldUseCompactResponses": true,
+  "elementResponseAttributes": "type,label",
+  "mjpegServerScreenshotQuality": 25,
+  "mjpegServerFramerate": 10,
+  "screenshotQuality": 1,
+  "mjpegScalingFactor": 100,
+  "reduceMotion": null,
+  "pageSourceExcludedAttributes": "",
+  "defaultActiveApplication": "auto",
+  "respectSystemAlerts": true
+}

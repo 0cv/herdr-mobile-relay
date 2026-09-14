@@ -17,7 +17,11 @@ cat > "$FAKE_BIN/herdr" <<'EOF'
 #!/bin/sh
 test "$*" = "plugin uninstall herdr-mobile-relay.events"
 EOF
-chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/herdr"
+cat > "$FAKE_BIN/uname" <<'EOF'
+#!/bin/sh
+printf 'Linux\n'
+EOF
+chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/herdr" "$FAKE_BIN/uname"
 export PATH="$FAKE_BIN:$PATH"
 
 TEST_HOME="$WORK_DIR/home"

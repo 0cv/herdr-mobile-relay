@@ -1,0 +1,88 @@
+{
+  "pushRun": "34447989084",
+  "sourceCommit": "00257bd12d2e496a2fa9ccc6351cb78ef984436c",
+  "contexts": [
+    {
+      "id": "NATIVE_APP"
+    },
+    {
+      "id": "WEBVIEW_20640.1",
+      "title": "🐑 herdr",
+      "url": "https://localhost:52101/#invite=[REDACTED]&invite_expires=[REDACTED]&invite_version=[REDACTED]&label=alpha&relay=wss%3A%2F%2Flocalhost%3A52102&setup=[REDACTED]",
+      "bundleId": "com.apple.mobilesafari"
+    },
+    {
+      "id": "WEBVIEW_21760.2",
+      "title": "",
+      "url": "about:blank",
+      "bundleId": "com.apple.SafariViewService"
+    }
+  ],
+  "foreground": {
+    "processArguments": {
+      "env": {},
+      "args": []
+    },
+    "name": "",
+    "pid": 22735,
+    "bundleId": "com.apple.webapp"
+  },
+  "remoteDebuggerListing": [
+    "PID:21760",
+    {
+      "2": {
+        "WIRTitleKey": "",
+        "WIRTypeKey": "WIRTypeWebPage",
+        "WIRURLKey": "about:blank",
+        "WIRPageIdentifierKey": 2,
+        "WIRHostApplicationIdentifierKey": "PID:22735",
+        "WIROverrideNameKey": ""
+      }
+    }
+  ],
+  "publishedPages": [
+    {
+      "id": 2,
+      "title": "Herdr Mobile Relay",
+      "url": "https://localhost:52101/builds/0.20.10-363-cf1b92fa5edff10a/index.html#invite=[REDACTED]&invite_expires=[REDACTED]&invite_version=[REDACTED]&label=alpha&relay=wss%3A%2F%2Flocalhost%3A52102&setup=[REDACTED]",
+      "isKey": false
+    }
+  ],
+  "prRun": "34447993534",
+  "openurlFailure": {
+    "phase": "ios-navigation",
+    "operation": "simctl openurl failed",
+    "durationMs": 35085,
+    "timeoutMs": 30000,
+    "timedOut": true,
+    "signal": "SIGTERM",
+    "detail": {
+      "attempt": 1,
+      "kind": "timeout",
+      "process": {
+        "code": "COMMAND_FAILED",
+        "durationMs": 35085,
+        "exitCode": 1,
+        "timedOut": true,
+        "signal": "SIGTERM",
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    "at": "2026-09-10T07:18:08.837Z"
+  },
+  "hierarchies": [
+    {
+      "name": "ios-before-share-hierarchy.xml",
+      "sha256": "76765fdf8163926c980949c0f4eea9fbe05985d4467dbd05f8b5ee2d9d6ec79b"
+    },
+    {
+      "name": "ios-share-0-hierarchy.xml",
+      "sha256": "0221a9a3445be3eb1e253d27e5821dab428b5e7fc4d34aa30303421f0a2a65c2"
+    },
+    {
+      "name": "ios-share-1-hierarchy.xml",
+      "sha256": "ac8b11584559d40ad58c324fa4fb700f01a4341e111a6b6fbad010808ddf53e5"
+    }
+  ]
+}

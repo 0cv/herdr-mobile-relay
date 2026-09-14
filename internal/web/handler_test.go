@@ -1,12 +1,18 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
 func setupTestWebRoot(t *testing.T) string {
@@ -36,6 +42,120 @@ func setupTestWebRoot(t *testing.T) string {
 	os.WriteFile(filepath.Join(dir, "assets", "app.js.br"), []byte("compressed"), 0o644)
 
 	return dir
+}
+
+func contentTestDigest(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
+}
+
+func contentTestIntegrity(data []byte) string {
+	digest := sha256.Sum256(data)
+	return "sha256-" + base64.StdEncoding.EncodeToString(digest[:])
+}
+
+func setupContentAddressedWebRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	javascript := []byte("console.log('content-addressed');")
+	stylesheet := []byte("body{color:blue}")
+	javascriptPath := "assets/app-" + contentTestDigest(javascript) + ".js"
+	stylesheetPath := "assets/app-" + contentTestDigest(stylesheet) + ".css"
+	entryPath := "builds/0.20.10-363-0123456789abcdef/index.html"
+	entry := []byte(`<link rel="stylesheet" href="/` + stylesheetPath + `" integrity="` + contentTestIntegrity(stylesheet) + `"><script src="/` + javascriptPath + `" integrity="` + contentTestIntegrity(javascript) + `"></script>`)
+	for filename, data := range map[string][]byte{
+		javascriptPath: javascript,
+		stylesheetPath: stylesheet,
+		entryPath:      entry,
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, filename)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, filename), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const build = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	descriptor := relayrelease.WebDescriptor{
+		Schema:  relayrelease.WebDescriptorSchema,
+		Version: "0.20.10",
+		Assets:  363,
+		Build:   build,
+		Entry:   "/" + entryPath,
+		Files: map[string]relayrelease.WebDescriptorFile{
+			"entry":      {Path: entryPath, SHA256: contentTestDigest(entry), Integrity: contentTestIntegrity(entry)},
+			"javascript": {Path: javascriptPath, SHA256: contentTestDigest(javascript), Integrity: contentTestIntegrity(javascript)},
+			"stylesheet": {Path: stylesheetPath, SHA256: contentTestDigest(stylesheet), Integrity: contentTestIntegrity(stylesheet)},
+		},
+	}
+	descriptorData, err := json.Marshal(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "release.json"), descriptorData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	versionData, err := json.Marshal(map[string]any{
+		"version": "0.20.10",
+		"assets":  363,
+		"build":   build,
+		"entry":   "/" + entryPath,
+		"script":  "/" + javascriptPath,
+		"style":   "/" + stylesheetPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "version.json"), versionData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestServesContentAddressedReleaseAndStableBootstrap(t *testing.T) {
+	root := setupContentAddressedWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	for _, requestURL := range []string{"/", "/index.html?herdr_reload=0.20.10-1"} {
+		request := httptest.NewRequest(http.MethodGet, requestURL, nil)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, request)
+		if response.Code != http.StatusTemporaryRedirect {
+			t.Fatalf("%s status = %d", requestURL, response.Code)
+		}
+		if !strings.HasPrefix(response.Header().Get("Location"), "/builds/0.20.10-363-0123456789abcdef/index.html") {
+			t.Fatalf("%s location = %q", requestURL, response.Header().Get("Location"))
+		}
+		if got := response.Header().Get("Cache-Control"); got != "no-cache, no-store" {
+			t.Fatalf("%s cache control = %q", requestURL, got)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("stable JavaScript path status = %d, want 404", response.Code)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/assets/app-"+contentTestDigest([]byte("console.log('content-addressed');"))+".js", nil)
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("content-addressed JavaScript response = %d cache=%q", response.Code, response.Header().Get("Cache-Control"))
+	}
+}
+
+func TestRejectsInvalidPresentWebDescriptor(t *testing.T) {
+	root := setupTestWebRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "release.json"), []byte(`{"schema":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewHandler(root); err == nil {
+		t.Fatal("invalid release descriptor was silently downgraded to the legacy asset scheme")
+	}
 }
 
 func TestServesAllowedAsset(t *testing.T) {

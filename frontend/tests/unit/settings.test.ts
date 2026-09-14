@@ -13,6 +13,7 @@ import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -65,6 +66,8 @@ describe('settings relay status', () => {
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: {} });
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     appUpdateStatus.set({
       state: 'current',
       currentVersion: APP_VERSION,
@@ -83,6 +86,8 @@ describe('settings relay status', () => {
     transportHijack.current = null;
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     vi.unstubAllGlobals();
     if (serviceWorkerDescriptor) Object.defineProperty(navigator, 'serviceWorker', serviceWorkerDescriptor);
     else Reflect.deleteProperty(navigator, 'serviceWorker');
@@ -102,6 +107,119 @@ describe('settings relay status', () => {
     socket.server({ type: 'push_subscribed', ok: true });
     await waitFor(() => expect(screen.getByText('Push: synced')).toBeInTheDocument());
   });
+
+  it('shows installed client and running server compatibility separately', async () => {
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 3,
+      capabilities: ['workspace_management'],
+      herdr_status: {
+        installed_client_version: '0.9.0',
+        server_version: '0.8.0',
+        server_protocol: 7,
+        server_protocol_known: true,
+        endpoint_protocol_generation: 3,
+        generation: 2,
+        features: {
+          'workspace.move_block': {
+            state: 'unsupported',
+            reason: 'method_not_supported',
+            generation: 2,
+          },
+        },
+      },
+      agent_profiles: [],
+    });
+    expect(await screen.findByText('Herdr client: 0.9.0')).toBeInTheDocument();
+    expect(screen.getByText(/Herdr server: 0\.8\.0/)).toBeInTheDocument();
+    expect(screen.getByText(/protocol 7/)).toBeInTheDocument();
+    expect(screen.getByText('Herdr 0.9.0 recommended.')).toBeInTheDocument();
+    expect(screen.getByText('Workspace group reorder: Server upgrade needed')).toBeInTheDocument();
+  });
+
+  it('does not warn for unprobed or unadvertised optional Herdr features', async () => {
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 3,
+      capabilities: [],
+      herdr_status: {
+        server_version: '0.9.0',
+        server_protocol_known: false,
+        generation: 1,
+        features: {
+          ordinary_json: { state: 'supported', reason: 'ping', generation: 1 },
+          direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 1 },
+          'pane.read': { state: 'unknown', reason: 'not_checked', generation: 1 },
+          'client_shell.endpoint': { state: 'unknown', reason: 'not_advertised', generation: 1 },
+        },
+      },
+      agent_profiles: [],
+    });
+    expect(await screen.findByText(/Herdr server: 0\.9\.0/)).toBeInTheDocument();
+    expect(screen.queryByText(/Could not check|Server upgrade needed|Server feature unavailable/)).not.toBeInTheDocument();
+
+    // A real read failure must appear without remounting Settings, and a later
+    // successful observation must remove it rather than leave a stale warning.
+    socket.server({
+      type: 'herdr_status',
+      status: {
+        server_version: '0.9.0',
+        server_protocol_known: false,
+        generation: 2,
+        features: {
+          'pane.read': { state: 'unknown', reason: 'timeout', generation: 2 },
+        },
+      },
+    });
+    expect(await screen.findByText('Terminal reads: Could not check')).toBeInTheDocument();
+    socket.server({
+      type: 'herdr_status',
+      status: {
+        server_version: '0.9.0',
+        server_protocol_known: false,
+        generation: 3,
+        features: {
+          'pane.read': { state: 'supported', reason: 'operation_succeeded', generation: 3 },
+        },
+      },
+    });
+    await waitFor(() => expect(screen.queryByText('Terminal reads: Could not check')).not.toBeInTheDocument());
+  });
+
+  it.each([
+    ['server_unavailable', 'Could not check'],
+    ['malformed_ping', 'Could not check'],
+    ['probe_failed', 'Could not check'],
+    ['reconnect_required', 'Rechecking after Herdr reconnect'],
+  ])(
+    'keeps Herdr check outcomes visible: %s',
+    async (reason, message) => {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({
+        type: 'push_config',
+        protocol: 3,
+        capabilities: [],
+        herdr_status: {
+          server_protocol_known: false,
+          generation: 1,
+          features: {
+            ordinary_json: { state: 'unknown', reason, generation: 1 },
+            direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 1 },
+          },
+        },
+        agent_profiles: [],
+      });
+      expect(await screen.findByText(`Herdr API: ${message}`)).toBeInTheDocument();
+    },
+  );
 
   it('shows every potential gateway in priority order', () => {
     relayStore.destroy();
@@ -294,6 +412,39 @@ describe('settings relay status', () => {
     await user.click(screen.getByRole('button', { name: 'Remove Fedora' }));
     await user.click(within(screen.getByRole('dialog', { name: 'Remove Fedora?' })).getByRole('button', { name: 'Remove Relay' }));
     await waitFor(() => expect(screen.queryByText('Fedora')).not.toBeInTheDocument());
+  });
+
+  it('shows and persists the global Default View choice', async () => {
+    const user = userEvent.setup();
+    const first = render(SettingsView);
+    const views = within(screen.getByRole('group', { name: 'Default View' }));
+    expect(views.getByRole('button', { name: 'Terminal' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(views.getByRole('button', { name: 'Conversation' }));
+    expect(views.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('herdr_default_agent_view')).toBe('conversation');
+    first.unmount();
+    render(SettingsView);
+    expect(within(screen.getByRole('group', { name: 'Default View' })).getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps the previous global choice when local storage rejects a save', async () => {
+    const user = userEvent.setup();
+    render(SettingsView);
+    const views = within(screen.getByRole('group', { name: 'Default View' }));
+    const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('storage full');
+    });
+    await user.click(views.getByRole('button', { name: 'Conversation' }));
+    expect(views.getByRole('button', { name: 'Terminal' })).toHaveAttribute('aria-pressed', 'true');
+    expect(views.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'false');
+    setItem.mockRestore();
+  });
+
+  it('shows the local agent choice without a connected relay', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    render(SettingsView);
+    expect(screen.getByRole('group', { name: 'Default View' })).toBeInTheDocument();
   });
 
   it('applies interface size from the accessible settings group', async () => {

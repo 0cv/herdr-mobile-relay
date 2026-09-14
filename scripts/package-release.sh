@@ -22,6 +22,11 @@ OUTPUT_DIR=${3:-"$REPO_DIR/dist/release"}
 case "$VERSION" in
     v*) VERSION=${VERSION#v} ;;
 esac
+SOURCE_VERSION=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.toml")
+[ "$VERSION" = "$SOURCE_VERSION" ] || {
+    echo "requested release version $VERSION does not match herdr-plugin.toml $SOURCE_VERSION" >&2
+    exit 1
+}
 
 command -v go >/dev/null 2>&1 || {
     echo "go is required on the release builder" >&2
@@ -59,6 +64,9 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         -o "$STAGE/herdr-mobile-relay" \
         "$REPO_DIR/cmd/herdr-mobile-relay"
     cp -R "$REPO_DIR/web" "$STAGE/web"
+    # Validate before stamping the relay revision: stamping must never turn a
+    # bundle for another product version into a candidate for this release.
+    bun "$REPO_DIR/frontend/scripts/validate-build.mjs" "$STAGE/web"
     bun "$SCRIPT_DIR/stamp-web-version.mjs" "$STAGE/web/version.json" "$VERSION" "$REVISION"
     cp "$REPO_DIR/LICENSE" "$STAGE/LICENSE"
     cp "$REPO_DIR/README.md" "$STAGE/README.md"

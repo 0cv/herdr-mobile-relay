@@ -8,6 +8,7 @@ package coordinator
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -88,6 +89,9 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 		"else\n"+
 		"  sleep 30\n"+
 		"fi\n")
+	if _, err := exec.Command(bin, "pane", "read").Output(); err != nil {
+		t.Fatal(err)
+	}
 
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 	commitApproval(d.state, "pane-1")

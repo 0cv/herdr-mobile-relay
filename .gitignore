@@ -1,6 +1,8 @@
 .build/
 bin/
 dist/
+/run-artifacts/
+/mobile-bundles/
 *.dmg
 .DS_Store
 .swiftpm/

@@ -139,6 +139,10 @@ func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 		"fi\n"+
 		"printf '{\"ok\":true}\\n'\n")
 
+	startInventorySocket(t, filepath.Join(dir, "sock"), []any{
+		map[string]any{"workspace_id": "w1", "label": "Project"},
+		map[string]any{"workspace_id": "w2", "label": "Second"},
+	})
 	dispatcher := NewDispatcher(
 		herdr.NewClient(bin, filepath.Join(dir, "sock")),
 		NewState(testLogger()),
@@ -176,7 +180,7 @@ func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 			t.Context(),
 			func() { close(admitted) },
 			func(ctx context.Context) *CommandResult {
-				return dispatcher.HandleWorkspaceClose(ctx, "close-1", "w2")
+				return dispatcher.HandleWorkspaceClose(ctx, "close-1", "w2", false, nil)
 			},
 		)
 	}()

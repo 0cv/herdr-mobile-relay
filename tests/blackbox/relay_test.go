@@ -1,9 +1,11 @@
 package blackbox
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -16,15 +18,16 @@ import (
 )
 
 type TestEnv struct {
-	relayCmd      *exec.Cmd
-	fakeBin       string
-	tmpDir        string
-	operationsLog string
-	socketPath    string
-	port          int
-	pluginPort    int
-	wsURL         string
-	httpBase      string
+	relayCmd       *exec.Cmd
+	fakeBin        string
+	tmpDir         string
+	operationsLog  string
+	socketPath     string
+	socketListener net.Listener
+	port           int
+	pluginPort     int
+	wsURL          string
+	httpBase       string
 }
 
 func setupEnv(t *testing.T) *TestEnv {
@@ -52,9 +55,10 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 	if out, err := buildRelay.CombinedOutput(); err != nil {
 		t.Fatalf("build relay: %v\n%s", err, out)
 	}
-
 	port := freePort(t)
 	pluginPort := freePort(t)
+	socketPath := filepath.Join(tmpDir, "herdr.sock")
+	socketListener := startInventorySocket(t, socketPath, scenario)
 
 	// Write scenario file
 	scenarioPath := filepath.Join(tmpDir, "scenario.json")
@@ -66,14 +70,15 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 	os.WriteFile(filepath.Join(webDir, "index.html"), []byte("<html>test</html>"), 0o644)
 
 	env := &TestEnv{
-		fakeBin:       fakeBin,
-		tmpDir:        tmpDir,
-		operationsLog: filepath.Join(tmpDir, "operations.jsonl"),
-		socketPath:    filepath.Join(tmpDir, "herdr.sock"),
-		port:          port,
-		pluginPort:    pluginPort,
-		wsURL:         fmt.Sprintf("ws://127.0.0.1:%d/ws", port),
-		httpBase:      fmt.Sprintf("http://127.0.0.1:%d", port),
+		fakeBin:        fakeBin,
+		tmpDir:         tmpDir,
+		operationsLog:  filepath.Join(tmpDir, "operations.jsonl"),
+		socketPath:     socketPath,
+		socketListener: socketListener,
+		port:           port,
+		pluginPort:     pluginPort,
+		wsURL:          fmt.Sprintf("ws://127.0.0.1:%d/ws", port),
+		httpBase:       fmt.Sprintf("http://127.0.0.1:%d", port),
 	}
 
 	env.relayCmd = exec.Command(relayBin)
@@ -109,10 +114,138 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 		case <-time.After(3 * time.Second):
 			env.relayCmd.Process.Kill()
 		}
+		_ = env.socketListener.Close()
 	})
-
 	waitForStatus(t, env.httpBase, "/readyz", http.StatusOK)
 	return env
+}
+
+func startInventorySocket(t *testing.T, socketPath, scenario string) net.Listener {
+	t.Helper()
+	var fixture struct {
+		Panes      []map[string]any  `json:"panes"`
+		Tabs       []map[string]any  `json:"tabs"`
+		Workspaces []map[string]any  `json:"workspaces"`
+		Content    map[string]string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(scenario), &fixture); err != nil {
+		t.Fatalf("decode fake Herdr scenario: %v", err)
+	}
+	if fixture.Panes == nil {
+		fixture.Panes = []map[string]any{}
+	}
+	if fixture.Tabs == nil {
+		fixture.Tabs = []map[string]any{}
+	}
+	if fixture.Workspaces == nil {
+		ids := make(map[string]struct{})
+		for _, item := range fixture.Panes {
+			if id, ok := item["workspace_id"].(string); ok && id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		for _, item := range fixture.Tabs {
+			if id, ok := item["workspace_id"].(string); ok && id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		for id := range ids {
+			fixture.Workspaces = append(fixture.Workspaces, map[string]any{
+				"workspace_id": id,
+				"number":       len(fixture.Workspaces) + 1,
+				"label":        id,
+				"pane_count":   0,
+				"tab_count":    0,
+			})
+		}
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen fake Herdr socket: %v", err)
+	}
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				var request struct {
+					ID     string `json:"id"`
+					Method string `json:"method"`
+					Params struct {
+						PaneID string `json:"pane_id"`
+					} `json:"params"`
+				}
+				if json.NewDecoder(bufio.NewReader(conn)).Decode(&request) != nil {
+					return
+				}
+				send := func(result any) {
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"id": request.ID, "result": result,
+					})
+				}
+				sendError := func(code, message string) {
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"id":    request.ID,
+						"error": map[string]any{"code": code, "message": message},
+					})
+				}
+				switch request.Method {
+				case "ping":
+					send(map[string]any{
+						"type": "pong", "version": "0.9.0", "protocol": 1,
+						"capabilities": map[string]any{"endpoint_protocol_generation": 1},
+					})
+				case "agent.list":
+					send(map[string]any{"type": "agent_list", "agents": fixture.Panes})
+				case "pane.list":
+					send(map[string]any{"type": "pane_list", "panes": fixture.Panes})
+				case "workspace.list":
+					send(map[string]any{"type": "workspace_list", "workspaces": fixture.Workspaces})
+				case "tab.list":
+					send(map[string]any{"type": "tab_list", "tabs": fixture.Tabs})
+				case "session.snapshot":
+					send(map[string]any{
+						"type": "session_snapshot",
+						"snapshot": map[string]any{
+							"version": "0.9.0", "protocol": 1,
+							"workspaces": fixture.Workspaces, "tabs": fixture.Tabs,
+							"panes": fixture.Panes, "agents": fixture.Panes,
+						},
+					})
+				case "events.subscribe":
+					send(map[string]any{"type": "subscription_started"})
+					_, _ = io.Copy(io.Discard, conn)
+				case "workspace.move_block":
+					sendError("workspace_move_block_failed", "empty selection")
+				case "workspace.move":
+					send(map[string]any{"type": "workspace_list"})
+				case "pane.read":
+					if len(fixture.Content) > 0 {
+						sendError("unknown_method", "scenario content uses the CLI fixture")
+						break
+					}
+					if request.Params.PaneID == "" {
+						sendError("pane_not_found", "pane  not found")
+						break
+					}
+					content := fixture.Content[request.Params.PaneID]
+					if content == "" {
+						content = "blackbox fixture pane"
+					}
+					send(map[string]any{
+						"type": "pane_read",
+						"read": map[string]any{"text": content, "truncated": false},
+					})
+				default:
+					sendError("unknown_method", "unknown method")
+				}
+			}(conn)
+		}
+	}()
+	return listener
 }
 
 func waitForStatus(t *testing.T, base, endpoint string, status int) {

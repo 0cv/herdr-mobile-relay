@@ -2,6 +2,7 @@ package profiles
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -20,9 +21,9 @@ func TestDefaultCandidatesFiltered(t *testing.T) {
 	}
 }
 
-func TestDefaultCandidatesIncludePiOhMyPiAndKimi(t *testing.T) {
+func TestDefaultCandidatesIncludePiOhMyPiKimiAndHermes(t *testing.T) {
 	binDir := t.TempDir()
-	for _, name := range []string{"pi", "omp", "kimi"} {
+	for _, name := range []string{"pi", "omp", "kimi", "hermes"} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -34,6 +35,7 @@ func TestDefaultCandidatesIncludePiOhMyPiAndKimi(t *testing.T) {
 		{ID: "pi", Label: "Pi", Kind: "pi"},
 		{ID: "omp", Label: "Oh My Pi", Kind: "omp"},
 		{ID: "kimi", Label: "Kimi", Kind: "kimi"},
+		{ID: "hermes", Label: "Hermes", Kind: "hermes"},
 	} {
 		var got *Profile
 		for index := range profiles {
@@ -56,6 +58,9 @@ func TestAgentVersionUsesResolvedProfileExecutable(t *testing.T) {
 	binDir := t.TempDir()
 	codex := filepath.Join(binDir, "codex")
 	if err := os.WriteFile(codex, []byte("#!/bin/sh\necho 'codex-cli 1.2.3'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Command(codex, "--version").Output(); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)

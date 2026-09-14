@@ -81,7 +81,8 @@ func TestPushConfigFixtureHasRequiredCutoverFields(t *testing.T) {
 	}
 	if fixture.Type != "push_config" || fixture.Protocol != Version ||
 		fixture.Version == "" || fixture.ReleaseVersion == "" || fixture.Revision == "" ||
-		fixture.Update == nil || fixture.AppDeploy == nil {
+		fixture.Update == nil || fixture.AppDeploy == nil ||
+		fixture.HerdrStatus.Generation == 0 || len(fixture.HerdrStatus.Features) == 0 {
 		t.Fatalf("incomplete push_config fixture: %+v", fixture)
 	}
 	fixtureCapabilities := make(map[string]bool, len(fixture.Capabilities))

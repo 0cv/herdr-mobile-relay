@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "candidate": {
+    "source": "release workflow artifact",
+    "mustBeExactArtifact": true
+  },
+  "baselines": [
+    {
+      "name": "0.20.8",
+      "version": "0.20.8",
+      "assets": 361,
+      "sourceRelease": "v0.20.8",
+      "sourceCommit": "4eb61d54d455199d58a3f7257b9464920121cefb",
+      "archive": "herdr-mobile-relay_0.20.8_linux_amd64.tar.gz",
+      "url": "https://github.com/0cv/herdr-mobile-relay/releases/download/v0.20.8/herdr-mobile-relay_0.20.8_linux_amd64.tar.gz",
+      "archiveSha256": "66e61fa8bc7b6c35ced621bcd21118b1af4f17e0b31dc9e6ac4a956fc987dff8",
+      "webHash": "82879faaaad4b68974220e4805a7bb24135d6398c310f45922c459773faf6277",
+      "revision": "4eb61d54d455199d58a3f7257b9464920121cefb",
+      "entry": "/index.html",
+      "script": "/assets/app.js",
+      "style": "/assets/app.css",
+      "build": ""
+    },
+    {
+      "name": "0.20.9",
+      "version": "0.20.9",
+      "assets": 362,
+      "sourceRelease": "v0.20.9",
+      "sourceCommit": "c6e24cc3f627ecc791db39d77b177a754c46501e",
+      "archive": "herdr-mobile-relay_0.20.9_linux_amd64.tar.gz",
+      "url": "https://github.com/0cv/herdr-mobile-relay/releases/download/v0.20.9/herdr-mobile-relay_0.20.9_linux_amd64.tar.gz",
+      "archiveSha256": "13313eb4fe52b8087a78e09c8d7a28b676996bd7fb9ab057e00c56e8ea504e24",
+      "webHash": "70dba73d85a68997d4a4b006bb06de304413895e5c775308aed0c5732759ff43",
+      "revision": "c6e24cc3f627ecc791db39d77b177a754c46501e",
+      "entry": "/index.html",
+      "script": "/assets/app.js",
+      "style": "/assets/app.css",
+      "build": ""
+    },
+    {
+      "name": "0.20.10",
+      "version": "0.20.10",
+      "assets": 363,
+      "sourceRelease": "v0.20.10",
+      "sourceCommit": "b80aacf9ecfe69ae1457ed129d652dae8e436080",
+      "archive": "herdr-mobile-relay_0.20.10_linux_amd64.tar.gz",
+      "url": "https://github.com/0cv/herdr-mobile-relay/releases/download/v0.20.10/herdr-mobile-relay_0.20.10_linux_amd64.tar.gz",
+      "archiveSha256": "8e11f6c6320a2918432c6bc3e668ab97cc939c00f68700fde832f1525f8aba63",
+      "webHash": "19865ef9037faf4be87dd9e6421b824cf07292896f690b0d0f330cf28f7f5d9a",
+      "revision": "b80aacf9ecfe69ae1457ed129d652dae8e436080",
+      "entry": "/builds/0.20.10-363-cf1b92fa5edff10a/index.html",
+      "script": "/assets/app-245cf7e0a10fc43924a457533ac694e1ac7f9055b99ef05c70231809b0a76357.js",
+      "style": "/assets/app-da7e4c463ec89f1c9b864c24e5a6605bcabd04ffc593fa44b89ce97116112752.css",
+      "build": "cf1b92fa5edff10ab372fcb8479ad789a5443a6a8260a81dc61f30c8198045ab"
+    }
+  ]
+}

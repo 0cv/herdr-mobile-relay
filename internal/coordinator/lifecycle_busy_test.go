@@ -63,8 +63,10 @@ func busyLifecycle(t *testing.T, dir, bin string) (*Lifecycle, string) {
 	}
 	writeScript(t, pathDir, "codex", "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	socketPath := filepath.Join(dir, "herdr.sock")
+	startInventorySocket(t, socketPath, nil)
 	return &Lifecycle{
-		herdr:    herdr.NewClient(bin, filepath.Join(dir, "herdr.sock")),
+		herdr:    herdr.NewClient(bin, socketPath),
 		profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),
 		home:     home,
 	}, cwd
@@ -163,7 +165,7 @@ func TestAgentStartKeepsTheTargetWhenHerdrKeepsRefusing(t *testing.T) {
 	record := filepath.Join(dir, "invocations.log")
 	lifecycle, cwd := busyLifecycle(t, dir, busyHerdr(t, dir, record, -1))
 
-	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+400*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+time.Second)
 	defer cancel()
 	result, err := lifecycle.Start(ctx, profiles.Profile{ID: "codex", Kind: "codex"}, StartRequest{
 		ProfileID: "codex",
@@ -211,7 +213,7 @@ func TestAgentStartFailureSurfacesTheKeptPane(t *testing.T) {
 
 	// The caller's deadline shortens the 40s command deadline, so the retry
 	// window closes as soon as the startup reserve is exhausted.
-	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+400*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+time.Second)
 	defer cancel()
 	result := d.handleAgentStart(ctx, time.Now(), "request-1", map[string]any{
 		"profile_id": "codex",

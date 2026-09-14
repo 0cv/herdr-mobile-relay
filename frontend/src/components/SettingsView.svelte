@@ -7,6 +7,10 @@
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import {
+    AGENT_VIEW_LABELS,
+    AGENT_VIEWS,
+    APP_ASSET_VERSION,
+    APP_BUILD_ID,
     APP_VERSION,
     canInviteFrom,
     HOME_LAYOUTS,
@@ -16,6 +20,7 @@
     TERMINAL_REFRESH_LABELS,
     TERMINAL_REFRESH_OPTIONS,
     THEMES,
+    type AgentView,
     type HomeLayout,
     type InterfaceSize,
     type TerminalHistoryLines,
@@ -33,8 +38,10 @@
     stopSpeech,
   } from '$lib/speech';
   import {
+    defaultAgentView,
     homeLayout,
     interfaceSize,
+    setDefaultAgentView,
     setHomeLayout,
     setInterfaceSize,
     setTerminalHeightLease,
@@ -86,6 +93,34 @@
   } from '$lib/updates';
   import type { AppUpdateStatus, RelayConfig, RelayConnectionView, RelaySpeechVoice } from '$lib/types';
 
+  function herdrWarnings(features: Record<string, { state: string; reason: string }> | undefined): string {
+    const labels: Record<string, string> = {
+      ordinary_json: 'Herdr API',
+      'workspace.move_block': 'Workspace group reorder',
+      'workspace.reordered': 'Workspace reorder events',
+      'pane.read': 'Terminal reads',
+      'tab.move': 'Tab reorder',
+      'client_shell.endpoint': 'Client endpoint',
+      direct_terminal: 'Direct terminal',
+    };
+    return Object.entries(features || {})
+      .filter(([, feature]) => {
+        if (feature.state === 'supported') return false;
+        // Optional features may not be probed until used, or advertised at all.
+        // Neither is evidence of a failed check or an incompatible server.
+        return feature.state !== 'unknown'
+          || !['not_checked', 'not_advertised'].includes(feature.reason);
+      })
+      .map(([name, feature]) => {
+        const label = labels[name] || name;
+        const message = feature.state === 'unsupported'
+          ? feature.reason === 'method_not_supported' ? 'Server upgrade needed' : 'Server feature unavailable'
+          : feature.reason === 'reconnect_required' ? 'Rechecking after Herdr reconnect' : 'Could not check';
+        return `${label}: ${message}`;
+      })
+      .join(' · ');
+  }
+
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
 
@@ -95,11 +130,14 @@
       relayId: string;
       targetVersion: string;
       appRelayId: string;
+      phoneAppRequired: boolean;
+      phoneTarget: { version: string; assets: number; build: string } | null;
       description: string;
     }
     | {
       kind: 'reload_app';
       targetVersion: string;
+      phoneTarget: { version: string; assets: number; build: string } | null;
       description: string;
     };
   let { readOnlyRelayIds = new Set<string>() }: { readOnlyRelayIds?: Set<string> } = $props();
@@ -112,6 +150,13 @@
   const pushPolicies = relayStore.pushPolicies;
   const pushTests = relayStore.pushTests;
   const appUpdate = appUpdateStatus;
+  function appPhoneTarget(version: string) {
+    return {
+      version,
+      assets: $appUpdate.deployedVersion === version ? $appUpdate.deployedAssets : 0,
+      build: $appUpdate.deployedVersion === version ? ($appUpdate.deployedBuild || '') : '',
+    };
+  }
   let previousAppUpdate = $state<AppUpdateStatus | null>(null);
   let checkingUpdates = $state(false);
   const appUpdateChecking = $derived(checkingUpdates || $appUpdate.state === 'checking');
@@ -197,6 +242,11 @@
       return {
         kind: 'reload_app',
         targetVersion: $appUpdate.deployedVersion,
+        phoneTarget: {
+          version: $appUpdate.deployedVersion,
+          assets: $appUpdate.deployedAssets,
+          build: $appUpdate.deployedBuild || '',
+        },
         description: `Load the verified phone app v${$appUpdate.deployedVersion}.`,
       };
     }
@@ -211,6 +261,8 @@
           relayId: owner.relay.id,
           targetVersion,
           appRelayId: owner.relay.id,
+          phoneAppRequired: true,
+          phoneTarget: appPhoneTarget(targetVersion),
           description: `Publish the phone app from ${owner.relay.label}, then continue with any remaining relay updates.`,
         };
       }
@@ -220,6 +272,8 @@
         relayId: owner.relay.id,
         targetVersion,
         appRelayId: owner.relay.id,
+        phoneAppRequired: true,
+        phoneTarget: appPhoneTarget(targetVersion),
         description: `Publish the phone app first, then update ${owner.relay.label} and continue with the remaining relays.`,
       };
     }
@@ -239,6 +293,8 @@
       relayId: selected.relay.id,
       targetVersion: selected.connection.update.available_version,
       appRelayId: '',
+      phoneAppRequired: false,
+      phoneTarget: null,
       description: `Update ${selected.relay.label} first, then continue safely with each remaining relay.`,
     };
   });
@@ -291,6 +347,12 @@
       permission: notificationsSupported() ? Notification.permission : 'unavailable',
     };
   });
+
+  function changeDefaultAgentView(value: AgentView): void {
+    if (setDefaultAgentView(value) === 'unavailable') {
+      relayStore.showToast('Could not save the default view on this device.', true);
+    }
+  }
 
   function updateActionLabel(action: SafeUpdateAction | null): string {
     if (action?.kind === 'reload_app') return 'Load Update';
@@ -450,8 +512,8 @@
     if (!action || action.kind !== 'reload_app' && isReadOnlyRelay(action.relayId)) return;
     if (action.kind === 'reload_app') {
       const relayIds = relayRows.filter(({ relay }) => !isReadOnlyRelay(relay.id)).map(({ relay }) => relay.id);
-      if (relayIds.length) queueUpdateProgressForReload(action.targetVersion, relayIds);
-      reloadApp(action.targetVersion);
+      queueUpdateProgressForReload(action.targetVersion, relayIds, action.phoneTarget);
+      reloadApp(action.targetVersion, action.phoneTarget);
       return;
     }
     const relayIds = [
@@ -460,7 +522,11 @@
         .map(({ relay }) => relay.id)
         .filter((relayId) => relayId !== action.relayId && !isReadOnlyRelay(relayId)),
     ];
-    beginUpdateProgress(action.targetVersion, relayIds, action.relayId, action.appRelayId);
+    beginUpdateProgress(action.targetVersion, relayIds, action.relayId, action.appRelayId, {
+      phoneAppRequired: action.phoneAppRequired,
+      phoneTarget: action.phoneTarget,
+      phoneState: action.phoneAppRequired ? 'publishing' : 'loaded',
+    });
     busyRelayId = action.relayId;
     try {
       if (action.kind === 'deploy_app') {
@@ -563,7 +629,12 @@
   }
 </script>
 
-<main class="page settings-page" aria-labelledby="settings-title">
+<main
+  class="page settings-page"
+  aria-labelledby="settings-title"
+  data-app-assets={APP_ASSET_VERSION}
+  data-app-build={APP_BUILD_ID}
+>
   <h2 id="settings-title">Settings</h2>
 
   <Card>
@@ -590,6 +661,8 @@
         {@const currentRelay = connection?.relay || relay}
         {@const gateways = currentRelay.gatewayUrls || []}
         {@const connectionPath = relayPathLabel(connection, currentRelay)}
+        {@const herdr = connection?.herdrStatus}
+        {@const herdrFeatureWarnings = herdrWarnings(herdr?.features)}
         <article class="relay-row">
           <span
             class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
@@ -633,6 +706,18 @@
               </small>
             {/if}
             {#if version}<small class:warning={version.tone === 'warning'} title={version.title}>{version.label}</small>{/if}
+            <small>
+              <span>Herdr client: {herdr?.installed_client_version || 'unknown'}</span>
+              <span>
+                Herdr server: {herdr?.server_version || 'unavailable/unknown'}
+                {#if herdr?.server_protocol_known} · protocol {herdr.server_protocol}{/if}
+                {#if herdr?.endpoint_protocol_generation} · endpoint generation {herdr.endpoint_protocol_generation}{/if}
+              </span>
+            </small>
+            <small>Herdr 0.9.0 recommended.</small>
+            {#if herdrFeatureWarnings}
+              <small class="warning herdr-feature-warning" role="status">{herdrFeatureWarnings}</small>
+            {/if}
             <small class:warning={update.warning} role="status">{update.label}</small>
             {#if update.detail}<small class:warning={update.warning} title={update.detail}>{update.detail}</small>{/if}
           </div>
@@ -683,6 +768,22 @@
     {/if}
   {/each}
 
+
+  <Card>
+    <h3>Agents</h3>
+    <fieldset class="choice-grid compact-grid">
+      <legend>Default View</legend>
+      {#each AGENT_VIEWS as item (item)}
+        <button
+          class:active={$defaultAgentView === item}
+          type="button"
+          aria-pressed={$defaultAgentView === item}
+          onclick={() => changeDefaultAgentView(item)}
+        >{AGENT_VIEW_LABELS[item]}</button>
+      {/each}
+    </fieldset>
+    <p class="hint">Saved on this device. Used when opening an agent unless that pane has its own setting. Conversation falls back to Terminal when a native transcript is unavailable.</p>
+  </Card>
 
   <Card>
     <h3>Appearance</h3>

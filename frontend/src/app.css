@@ -326,6 +326,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .relay-info { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .relay-info span, .relay-info small { color: var(--muted); font-size: .74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .relay-info small.error { color: var(--danger); white-space: normal; }
+.relay-info small.herdr-feature-warning { white-space: normal; overflow-wrap: anywhere; }
 .relay-info ol { font-size: .74rem; margin: .15rem 0 .35rem 1rem; overflow-wrap: anywhere; padding: 0; }
 .relay-actions { display: flex; flex: 0 0 auto; flex-direction: column; gap: .3rem; }
 .update-command { background: var(--input); border: 1px solid var(--border); border-radius: .55rem; font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; padding: .7rem; user-select: text; white-space: pre-wrap; }
@@ -401,6 +402,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-warning { color: var(--warning); flex: 0 0 auto; font-size: .7rem; margin: 0; text-align: center; }
 .conversation-warning.error { color: var(--danger); }
 .conversation-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .1rem .05rem .6rem; }
+.conversation-history-status { color: var(--muted); font-size: .68rem; line-height: 1.2; margin: 0; min-height: 1.05rem; padding: .15rem .25rem; text-align: center; }
+.conversation-history-sentinel { flex: 0 0 1px; height: 1px; min-height: 1px; pointer-events: none; }
 .conversation-input-area { flex: 0 0 auto; margin-top: auto; min-width: 0; }
 .conversation-composer { align-items: flex-end; display: flex; gap: .45rem; }
 /* Attach controls stack vertically beside the composer so two targets cost

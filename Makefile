@@ -3,13 +3,20 @@ include .env
 export
 endif
 
-WEB_PROJECT ?= herdr-mobile-relay
+WEB_PROJECT ?= herdr-0cv
+WEB_ORIGIN ?= https://$(WEB_PROJECT).pages.dev
+ifeq ($(origin WEB_PROJECT),file)
+ifeq ($(WEB_PROJECT),herdr-mobile-relay)
+$(warning WEB_PROJECT=herdr-mobile-relay is the retired default; using herdr-0cv)
+WEB_PROJECT := herdr-0cv
+endif
+endif
 WEB_BRANCH ?= main
 WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
@@ -18,7 +25,8 @@ help:
 	@echo "  make stable-setup               Provision/resume a stable tunnel, service, and verified QR"
 	@echo "  make stable-teardown            Remove only resources recorded by the stable wizard"
 	@echo "  make setup                      Prepare config and check prerequisites without installing"
-	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages (WEB_PROJECT=$(WEB_PROJECT))"
+	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages and verify the public bundle"
+	@echo "    WEB_ORIGIN=https://...        Public origin to verify after deployment"
 	@echo "  make web-release                Replace ./web with a verified frontend release build"
 	@echo "  make service-install            Install/start the relay service for this platform"
 	@echo "  make setup-link                 Print the phone setup link and QR code for a stable relay"
@@ -29,6 +37,11 @@ help:
 	@echo "  make service-logs               Tail relay service logs"
 	@echo "  make service-uninstall          Stop/remove the relay service"
 	@echo "  make speech-voices              Cache the neural voices that read responses aloud"
+	@echo "  make mobile-ci-check            Check the host-only installed-PWA harness"
+	@echo "  make mobile-cache-recovery MOBILE_ARGS=...  Check cached stylesheet recovery with a bundle set"
+	@echo "  make mobile-ci-run MOBILE_ARGS=...  Run a configured device scenario"
+	@echo "  make mobile-android MOBILE_ARGS=... Run the installed Android suite"
+	@echo "  make mobile-ios MOBILE_ARGS=...    Run the installed iOS suite"
 	@echo "  make gateway                    Build the self-hostable blind gateway binary"
 	@echo "  make check                      Run backend and frontend checks"
 
@@ -85,7 +98,7 @@ go-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './frontend/node_modules/*'))"
 	go vet ./...
 	go test ./...
-	go test -race ./...
+	go test -race -p 1 ./...
 
 backend-check: go-check shell-check production-path-audit
 
@@ -143,6 +156,7 @@ frontend-check:
 	bun build frontend/public/sw.js --outfile=/dev/null
 	bun build frontend/public/notification-icons.js --outfile=/dev/null
 	bash -n frontend/scripts/run-browser-tests.sh
+	bash -n frontend/scripts/run-attention-tests.sh
 
 frontend-browser:
 	frontend/scripts/run-browser-tests.sh dist
@@ -187,6 +201,37 @@ web-release-check: web-bundle-check
 
 web-deploy: web-bundle-check
 	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy web --project-name "$(WEB_PROJECT)" --branch "$(WEB_BRANCH)" --skip-caching
+	go run ./cmd/herdr-mobile-relay verify-public --web-root web --origin "$(WEB_ORIGIN)"
 
 web-preview:
 	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web
+
+mobile-ci-check: mobile-retention-check mobile-composite-check
+	bun install --frozen-lockfile --cwd frontend
+	bun install --frozen-lockfile --cwd tests/mobile
+	bun run --cwd tests/mobile lint
+	bun run --cwd tests/mobile check
+	bun run --cwd tests/mobile test:unit
+	go test ./tests/mobile/fixture
+	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml .github/workflows/mobile-ci.yml .github/workflows/release.yml
+
+mobile-retention-check:
+	bun tests/mobile/retention-check.ts .github
+
+mobile-composite-check:
+	bun tests/mobile/composite-check.ts .github/actions
+
+mobile-cache-recovery:
+	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
+	bun run --cwd tests/mobile test:cache-recovery -- $(MOBILE_ARGS)
+
+mobile-ci-run:
+	bun run --cwd tests/mobile run -- $(MOBILE_ARGS)
+
+mobile-android:
+	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
+	MOBILE_PLATFORM=android $(MAKE) mobile-ci-run MOBILE_ARGS="$(MOBILE_ARGS)"
+
+mobile-ios:
+	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
+	MOBILE_PLATFORM=ios $(MAKE) mobile-ci-run MOBILE_ARGS="$(MOBILE_ARGS)"

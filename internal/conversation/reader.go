@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,11 @@ const (
 	// the phone asks for the whole conversation, so the tail window is wider.
 	maxPrimeConversationBytes = 64 * 1024 * 1024
 	maxEntryBytes             = 128 * 1024
+	maxToolCount              = 128
+	maxToolIDBytes            = 256
+	maxToolNameBytes          = 160
+	maxToolInputBytes         = 1024 * 1024
+	maxToolOutputBytes        = 1024 * 1024
 	defaultPageSize           = 80
 	maxPageSize               = 200
 	locationCacheTTL          = 60 * time.Second
@@ -34,15 +40,19 @@ const (
 	maxOMOCacheEntries        = 8
 )
 
-var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var (
+	canonicalSessionID           = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	claudeProjectNonAlphanumeric = regexp.MustCompile(`[^A-Za-z0-9]`)
+)
 
 type ToolActivity struct {
-	ID        string `json:"id,omitempty"`
-	Name      string `json:"name"`
-	Input     string `json:"input,omitempty"`
-	Output    string `json:"output,omitempty"`
-	Error     bool   `json:"error,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
+	ID            string `json:"id,omitempty"`
+	Name          string `json:"name"`
+	associationID string
+	Input         string `json:"input,omitempty"`
+	Output        string `json:"output,omitempty"`
+	Error         bool   `json:"error,omitempty"`
+	Truncated     bool   `json:"truncated,omitempty"`
 }
 
 type Entry struct {
@@ -55,23 +65,33 @@ type Entry struct {
 }
 
 type Page struct {
-	Available     bool          `json:"available"`
-	ReasonCode    string        `json:"reason_code,omitempty"`
-	Reason        string        `json:"reason,omitempty"`
-	Entries       []Entry       `json:"entries"`
-	HasMore       bool          `json:"has_more"`
-	Total         int           `json:"total"`
-	FileTruncated bool          `json:"file_truncated,omitempty"`
-	SourceCorrupt bool          `json:"source_corrupt,omitempty"`
-	OMOPlan       *OMOTodoState `json:"omo_plan,omitempty"`
+	Available              bool          `json:"available"`
+	ReasonCode             string        `json:"reason_code,omitempty"`
+	Reason                 string        `json:"reason,omitempty"`
+	Entries                []Entry       `json:"entries"`
+	HasMore                bool          `json:"has_more"`
+	Total                  int           `json:"total"`
+	FileTruncated          bool          `json:"file_truncated,omitempty"`
+	SourceCorrupt          bool          `json:"source_corrupt,omitempty"`
+	ContinuationIncomplete bool          `json:"continuation_incomplete,omitempty"`
+	ContinuationReason     string        `json:"continuation_reason,omitempty"`
+	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
 }
+type locationKey struct {
+	Agent         string
+	CWD           string
+	ForegroundCWD string
+	SessionID     string
+}
+
 type Reader struct {
 	home      string
 	mu        sync.Mutex
-	locations map[string]locationCacheEntry
-	locating  map[string]chan struct{}
+	locations map[locationKey]locationCacheEntry
+	locating  map[locationKey]chan struct{}
 	omoCache  map[string]omoCacheEntry
 	openCode  *openCodeReader
+	hermes    *hermesReader
 }
 
 type locationCacheEntry struct {
@@ -83,16 +103,18 @@ type locationCacheEntry struct {
 // configured root that contains it. Session-title resolution consumes the same
 // location so it cannot read a different copy of the session.
 type Location struct {
-	Path string
-	Root string
+	Path  string
+	Root  string
+	Title string
 }
 
 // NewReader keeps a bounded tuple-to-location cache. Sharing one Reader between
+// the conversation and session packages makes their root selection identical.
 func NewReader(home string) *Reader {
 	return &Reader{
-		home: home, locations: make(map[string]locationCacheEntry),
-		locating: make(map[string]chan struct{}), omoCache: make(map[string]omoCacheEntry),
-		openCode: newOpenCodeReader(home),
+		home: home, locations: make(map[locationKey]locationCacheEntry),
+		locating: make(map[locationKey]chan struct{}), omoCache: make(map[string]omoCacheEntry),
+		openCode: newOpenCodeReader(home), hermes: newHermesReader(home),
 	}
 }
 
@@ -112,7 +134,7 @@ func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
 		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode",
-		"primeagent", "prime":
+		"hermes", "hermesagent", "primeagent", "prime":
 		return true
 	default:
 		return false
@@ -128,21 +150,34 @@ func normalizedAgent(agent string) string {
 // Read resolves a conversation without project context. It is used for
 // historical activity where the pane cwd is no longer available.
 func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
-	return r.read(agent, "", sessionID, before, limit)
+	return r.ReadWithProject(agent, ProjectContext{}, sessionID, before, limit)
 }
 
 // ReadFor resolves a pane conversation using the same cwd-aware locator as the
 // session-title resolver.
 func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.read(agent, cwd, sessionID, before, limit)
+	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
 }
 
+// read preserves the old package-local helper shape for tests and legacy
+// callers; public callers should use Read or ReadFor.
 func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
+	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
+}
+
+// ReadWithProject resolves a conversation with the pane and, for Claude Code,
+// foreground directory hints. Once the anchor is located, Claude continuation
+// descendants stay in that anchor's project and root.
+func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID, before string, limit int) (Page, error) {
+	project = NormalizeProjectContext(agent, project)
+	if isHermesAgent(agent) {
+		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
+	}
 	if normalizedAgent(agent) == "opencode" {
-		return r.readOpenCodeFor(cwd, sessionID, before, limit)
+		return r.readOpenCodeFor(project.CWD, sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
-		return r.readOMO(cwd, sessionID, before, limit)
+		return r.readOMO(project.CWD, sessionID, before, limit)
 	}
 	if !Supported(agent) {
 		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
@@ -151,9 +186,12 @@ func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, er
 	if sessionID == "" {
 		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
-	location := r.Locate(agent, cwd, sessionID)
+	location := r.LocateWithProject(agent, project, sessionID)
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+	}
+	if isClaudeProvider(agent) {
+		return r.readClaudeChain(project.CWD, sessionID, location, before, limit)
 	}
 	tailBytes := int64(maxConversationBytes)
 	if isPrime(agent) {
@@ -201,12 +239,25 @@ func unavailableCode(code, reason string) Page {
 }
 
 // Locate returns the exact contained transcript selected for agent, cwd and
-// sessionID. Root order is authoritative; within Claude/Qoder roots cwd selects
-// the project directory when it is known. Cached tuple locations are returned
+// sessionID. Root order is authoritative; within Claude roots the foreground
+// directory is tried before the pane cwd. Cached tuple locations are returned
 // before any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) Locate(agent, cwd, sessionID string) Location {
+	return r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+}
+
+// LocateWithProject returns the exact contained transcript selected for the
+// supplied project context. The effective foreground hint is part of the
+// cache and single-flight keys, so changing it cannot reuse an old hit or
+// miss.
+func (r *Reader) LocateWithProject(agent string, project ProjectContext, sessionID string) Location {
+	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
-	key := normalizedAgent(agent) + "\x00" + cwd + "\x00" + sessionID
+	agentKey := normalizedAgent(agent)
+	if isHermesAgent(agent) {
+		agentKey = "hermes"
+	}
+	key := locationKey{Agent: agentKey, CWD: project.CWD, ForegroundCWD: project.ForegroundCWD, SessionID: sessionID}
 	for {
 		now := time.Now()
 		r.mu.Lock()
@@ -224,7 +275,7 @@ func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 		break
 	}
 
-	location := r.locate(agent, cwd, sessionID)
+	location := r.locateWithProject(agent, project, sessionID)
 	ttl := locationCacheTTL
 	if location.Path == "" {
 		ttl = locationMissTTL
@@ -249,18 +300,27 @@ func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 	return location
 }
 
+// locate preserves the old package-local helper shape for tests and legacy
+// callers; public callers should use Locate or LocateWithProject.
 func (r *Reader) locate(agent, cwd, sessionID string) Location {
+	return r.locateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+}
+
+func (r *Reader) locateWithProject(agent string, project ProjectContext, sessionID string) Location {
+	project = NormalizeProjectContext(agent, project)
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.claudeRoots(), cwd, sessionID+".jsonl")
+		return findProjectSessionWithProject(r.claudeRoots(), project, sessionID+".jsonl", func(cwd string) string {
+			return claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-")
+		})
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.qoderRoots(), cwd, sessionID+".jsonl")
+		return findProjectSessionWithProject(r.qoderRoots(), project, sessionID+".jsonl", func(string) string { return "" })
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
 			return Location{}
@@ -272,6 +332,8 @@ func (r *Reader) locate(agent, cwd, sessionID string) Location {
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "primeagent", "prime":
 		return resolvePrimeSession(r.primeRoots(), sessionID)
+	case "hermes", "hermesagent":
+		return r.hermes.locate(project.CWD, sessionID)
 	default:
 		return Location{}
 	}
@@ -337,18 +399,58 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func findProjectSession(roots []string, cwd, filename string) Location {
+func findProjectSession(roots []string, cwd, filename, preferredProjectName string) Location {
+	return findProjectSessionWithProject(roots, ProjectContext{CWD: cwd}, filename, func(string) string {
+		return preferredProjectName
+	})
+}
+
+// findProjectSessionWithProject keeps roots as the outer loop. Within one root
+// the more specific foreground directory is tried before the pane cwd, and an
+// unknown-cwd scan is used only when neither known directory is available.
+func findProjectSessionWithProject(roots []string, project ProjectContext, filename string, preferredProjectName func(string) string) Location {
+	candidates := projectDirectoriesForContext(project)
 	for _, root := range roots {
-		for _, projectDir := range projectDirectories(root, cwd) {
-			if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
-				return Location{Path: path, Root: root}
+		seen := make(map[string]bool)
+		for _, cwd := range candidates {
+			preferred := ""
+			if preferredProjectName != nil {
+				preferred = preferredProjectName(cwd)
+			}
+			for _, projectDir := range projectDirectories(root, cwd, preferred) {
+				projectDir = filepath.Clean(projectDir)
+				if seen[projectDir] {
+					continue
+				}
+				seen[projectDir] = true
+				if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
+					return Location{Path: path, Root: root}
+				}
 			}
 		}
 	}
 	return Location{}
 }
 
-func projectDirectories(root, cwd string) []string {
+func projectDirectoriesForContext(project ProjectContext) []string {
+	candidates := make([]string, 0, 2)
+	if project.ForegroundCWD != "" {
+		candidates = append(candidates, project.ForegroundCWD)
+	}
+	if strings.TrimSpace(project.CWD) != "" {
+		if len(candidates) == 0 || candidates[0] != project.CWD {
+			candidates = append(candidates, project.CWD)
+		}
+	}
+	if len(candidates) == 0 {
+		// An empty cwd has historical meaning: enumerate every project in the
+		// root. It is deliberately not combined with a valid foreground hint.
+		return []string{""}
+	}
+	return candidates
+}
+
+func projectDirectories(root, cwd, preferredProjectName string) []string {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -365,18 +467,19 @@ func projectDirectories(root, cwd string) []string {
 	}
 
 	encoded := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
-	exact := map[string]bool{encoded: true, "-" + encoded: true}
-	directories := make([]string, 0, 2)
-	seen := make(map[string]bool, 2)
-	for _, entry := range entries {
-		if !exact[entry.Name()] {
+	candidates := [...]string{preferredProjectName, "-" + encoded, encoded}
+	directories := make([]string, 0, len(candidates))
+	seen := make(map[string]bool, len(candidates))
+	for _, name := range candidates {
+		if name == "" {
 			continue
 		}
-		path := filepath.Join(root, entry.Name())
-		if isDir(path) {
-			directories = append(directories, path)
-			seen[path] = true
+		path := filepath.Join(root, name)
+		if seen[path] || !isDir(path) {
+			continue
 		}
+		directories = append(directories, path)
+		seen[path] = true
 	}
 	for _, entry := range entries {
 		path := filepath.Join(root, entry.Name())
@@ -502,13 +605,23 @@ func containedRegularFile(path, root string) string {
 }
 
 func loadTail(path string, limit int64) (string, bool, error) {
-	file, err := os.Open(path)
+	file, err := openConversationSource(path)
 	if err != nil {
 		return "", false, err
 	}
 	defer file.Close()
+	return loadTailFile(file, limit)
+}
+
+func loadTailFile(file *os.File, limit int64) (string, bool, error) {
+	if file == nil {
+		return "", false, errors.New("conversation source is closed")
+	}
 	info, err := file.Stat()
-	if err != nil {
+	if err != nil || !info.Mode().IsRegular() {
+		if err == nil {
+			err = errors.New("conversation source is not a regular file")
+		}
 		return "", false, err
 	}
 	clipped := info.Size() > limit
@@ -559,7 +672,7 @@ func parseTranscript(agent, text string) []Entry {
 		}
 		calls, results := parseToolActivity(normalized, record)
 		for _, result := range results {
-			location, ok := pendingTools[result.id]
+			location, ok := pendingTools[toolAssociationKey(normalized, result.id)]
 			if !ok || location.entry >= len(entries) || location.tool >= len(entries[location.entry].Tools) {
 				continue
 			}
@@ -569,7 +682,7 @@ func parseTranscript(agent, text string) []Entry {
 			tool.Output = output
 			tool.Error = result.failed
 			tool.Truncated = tool.Truncated || truncated
-			delete(pendingTools, result.id)
+			delete(pendingTools, toolAssociationKey(normalized, result.id))
 		}
 
 		role, timestamp, body := "", stringValue(record["timestamp"]), ""
@@ -578,7 +691,7 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parseClaudeRecord(record)
 		case "codex", "openaicodex":
 			role, body = parseCodexRecord(record)
-		case "pi", "picodingagent", "omp", "ohmypi":
+		case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 			role, body = parsePiRecord(record)
 		case "primeagent", "prime":
 			role, body = parsePrimeRecord(record)
@@ -591,14 +704,14 @@ func parseTranscript(agent, text string) []Entry {
 			continue
 		}
 		body, truncated := clampText(body, maxEntryBytes)
-		id := stableRowID(line, seenIDs)
+		entry := Entry{Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
+		normalizeEntryTools(&entry)
+		entry.ID = stableRowID(line, seenIDs)
 		entryIndex := len(entries)
-		entries = append(entries, Entry{
-			ID: id, Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated,
-		})
+		entries = append(entries, entry)
 		for toolIndex := range calls {
-			if calls[toolIndex].ID != "" {
-				pendingTools[calls[toolIndex].ID] = toolLocation{entry: entryIndex, tool: toolIndex}
+			if id := toolAssociationID(calls[toolIndex]); id != "" {
+				pendingTools[toolAssociationKey(normalized, id)] = toolLocation{entry: entryIndex, tool: toolIndex}
 			}
 		}
 	}
@@ -629,19 +742,19 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 			return []ToolActivity{call}, nil
 		case "functioncalloutput", "customtoolcalloutput", "localshellcalloutput":
 			return nil, []toolResult{{
-				id:     firstString(payload, "call_id", "id"),
+				id:     strings.TrimSpace(firstString(payload, "call_id", "id")),
 				output: textValue(firstValue(payload, "output", "content")),
 				failed: payload["is_error"] == true,
 			}}
 		}
-	case "pi", "picodingagent", "omp", "ohmypi", "primeagent", "prime":
+	case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode", "primeagent", "prime":
 		if stringValue(record["type"]) != "message" {
 			return nil, nil
 		}
 		message, _ := record["message"].(map[string]any)
 		if normalizedBlockType(message["role"]) == "toolresult" {
 			return nil, []toolResult{{
-				id:     firstString(message, "toolCallId", "tool_call_id", "id"),
+				id:     strings.TrimSpace(firstString(message, "toolCallId", "tool_call_id", "id")),
 				output: textValue(message["content"]),
 				failed: message["isError"] == true || message["is_error"] == true,
 			}}
@@ -669,7 +782,7 @@ func toolsFromBlocks(blocks []any) ([]ToolActivity, []toolResult) {
 			))
 		case "toolresult":
 			results = append(results, toolResult{
-				id:     firstString(block, "tool_use_id", "toolCallId", "tool_call_id", "id"),
+				id:     strings.TrimSpace(firstString(block, "tool_use_id", "toolCallId", "tool_call_id", "id")),
 				output: textValue(block["content"]),
 				failed: block["is_error"] == true || block["isError"] == true,
 			})
@@ -684,9 +797,81 @@ func newToolActivity(id, name string, input any) ToolActivity {
 	}
 	inputText := sanitizeText(textValue(input))
 	inputText, truncated := clampText(inputText, maxEntryBytes/2)
-	return ToolActivity{
+	tool := ToolActivity{
 		ID: strings.TrimSpace(id), Name: strings.TrimSpace(name), Input: inputText, Truncated: truncated,
+		associationID: strings.TrimSpace(id),
 	}
+	normalized, _ := normalizeToolActivity(tool)
+	return normalized
+}
+
+func normalizeToolID(value string) string {
+	value, _ = clampText(strings.TrimSpace(value), maxToolIDBytes)
+	return value
+}
+
+func toolAssociationID(tool ToolActivity) string {
+	if tool.associationID != "" {
+		return tool.associationID
+	}
+	return strings.TrimSpace(tool.ID)
+}
+
+func toolAssociationKey(agent, id string) string {
+	digest := sha256.Sum256([]byte(agent + "\x00" + id))
+	return hex.EncodeToString(digest[:])
+}
+
+func normalizeToolActivity(tool ToolActivity) (ToolActivity, bool) {
+	originalID, originalName := tool.ID, tool.Name
+	originalInput, originalOutput := tool.Input, tool.Output
+	originalError, originalTruncated := tool.Error, tool.Truncated
+	associationID := toolAssociationID(tool)
+	tool.associationID = associationID
+	tool.ID = normalizeToolID(associationID)
+	tool.Name, _ = clampText(strings.TrimSpace(tool.Name), maxToolNameBytes)
+	tool.Input, _ = clampText(tool.Input, maxToolInputBytes)
+	tool.Output, _ = clampText(tool.Output, maxToolOutputBytes)
+	if tool.Name == "" {
+		tool.Name = "Tool"
+	}
+	changed := tool.ID != originalID || tool.Name != originalName || tool.Input != originalInput ||
+		tool.Output != originalOutput || tool.Error != originalError || tool.Truncated != originalTruncated
+	if changed {
+		tool.Truncated = true
+	}
+	return tool, changed
+}
+
+func normalizeEntryTools(entry *Entry) (int, int) {
+	if entry == nil || len(entry.Tools) == 0 {
+		return 0, 0
+	}
+	omittedTools, omittedPayloads := 0, 0
+	if len(entry.Tools) > maxToolCount {
+		omittedTools = len(entry.Tools) - maxToolCount
+		entry.Tools = append([]ToolActivity(nil), entry.Tools[:maxToolCount]...)
+		entry.Truncated = true
+	}
+	for index, tool := range entry.Tools {
+		normalized, changed := normalizeToolActivity(tool)
+		if changed || normalized.Truncated {
+			omittedPayloads++
+			entry.Truncated = true
+		}
+		entry.Tools[index] = normalized
+	}
+	return omittedTools, omittedPayloads
+}
+
+func normalizeEntriesForResponse(entries []Entry) BrowseDiagnostics {
+	diagnostics := BrowseDiagnostics{}
+	for index := range entries {
+		tools, payloads := normalizeEntryTools(&entries[index])
+		diagnostics.OmittedTools += tools
+		diagnostics.OmittedPayloads += payloads
+	}
+	return diagnostics
 }
 
 func normalizedBlockType(value any) string {

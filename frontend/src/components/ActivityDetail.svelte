@@ -1,14 +1,17 @@
 <script lang="ts">
+  import { get } from 'svelte/store';
   import { onMount } from 'svelte';
   import Button from '$components/ui/Button.svelte';
+  import { agentOpeningView } from '$lib/agent-view';
   import { activityTone } from '$lib/activity';
   import { clientPaneId } from '$lib/agents';
   import { navigate, replaceView } from '$lib/router';
-  import { targetRefForAgent } from '$lib/resource-id';
+  import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
   import { relayStore } from '$lib/store';
 
   const activities = relayStore.activities;
   const agents = relayStore.agents;
+  const connections = relayStore.connections;
 
   let { key }: { key: string } = $props();
 
@@ -27,9 +30,14 @@
   onMount(() => relayStore.requestActivities());
 
   function goToThread() {
-    if (!activity?.pane_id) return;
-    if (agent) void relayStore.acknowledgePane(agent);
-    navigate({ view: 'terminal', paneId, target: agent ? targetRefForAgent(agent) || undefined : undefined });
+    if (!activity?.pane_id || !agent) return;
+    void relayStore.acknowledgePane(agent);
+    navigate(agentOpeningView(
+      agent,
+      get(connections).get(agent.relay_id),
+      get(defaultAgentView),
+      get(paneAgentViewOverrides),
+    ));
   }
 
   async function copyExtract() {

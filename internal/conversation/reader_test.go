@@ -17,11 +17,13 @@ func testReader(t *testing.T) (*Reader, string) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("PI_CODING_AGENT_DIR", "")
+	t.Setenv("HERMES_HOME", "")
 	t.Setenv(agentroots.ClaudeListEnv, "")
 	t.Setenv(agentroots.QoderListEnv, "")
 	t.Setenv(agentroots.CodexListEnv, "")
 	t.Setenv(agentroots.PiListEnv, "")
 	t.Setenv(agentroots.OMPListEnv, "")
+	t.Setenv(agentroots.HermesListEnv, "")
 	home := t.TempDir()
 	return NewReader(home), home
 }
@@ -413,6 +415,33 @@ func TestClaudeConversationReadForSelectsCurrentProjectOnDuplicateID(t *testing.
 	}
 	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "current response" {
 		t.Fatalf("page = %#v, want the transcript from the current project only", page)
+	}
+}
+
+func TestClaudeConversationReadForDistinguishesDottedProjectDirectory(t *testing.T) {
+	reader, home := testReader(t)
+	projects := filepath.Join(home, ".claude", "projects")
+	writeRows(t, filepath.Join(projects, "-home-cv-Development-test-com", testSessionID+".jsonl"),
+		map[string]any{"type": "assistant", "uuid": "dotted", "message": map[string]any{"content": "dotted response"}})
+	writeRows(t, filepath.Join(projects, "-home-cv-Development-testcom", testSessionID+".jsonl"),
+		map[string]any{"type": "assistant", "uuid": "plain", "message": map[string]any{"content": "plain response"}})
+
+	for _, test := range []struct {
+		cwd  string
+		want string
+	}{
+		{cwd: "/home/cv/Development/test.com", want: "dotted response"},
+		{cwd: "/home/cv/Development/testcom", want: "plain response"},
+	} {
+		t.Run(filepath.Base(test.cwd), func(t *testing.T) {
+			page, err := reader.ReadFor("claude", test.cwd, testSessionID, "", 80)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != test.want {
+				t.Fatalf("page = %#v, want %q from the selected project directory", page, test.want)
+			}
+		})
 	}
 }
 

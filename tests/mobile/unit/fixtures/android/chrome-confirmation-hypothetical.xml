@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout class="android.widget.FrameLayout" package="com.android.chrome" bounds="[0,0][1080,2400]" enabled="true" displayed="true">
+    <android.widget.LinearLayout class="android.widget.LinearLayout" package="com.android.chrome" bounds="[40,700][1040,1500]" enabled="true" displayed="true">
+      <android.widget.TextView class="android.widget.TextView" package="com.android.chrome" text="Install app" bounds="[80,750][900,850]" enabled="true" displayed="true"/>
+      <android.widget.TextView class="android.widget.TextView" package="com.android.chrome" text="Herdr Mobile Relay" bounds="[80,900][900,1000]" enabled="true" displayed="true"/>
+      <android.widget.TextView class="android.widget.TextView" package="com.android.chrome" text="fixture.test" bounds="[80,1020][900,1100]" enabled="true" displayed="true"/>
+      <android.widget.Button class="android.widget.Button" resource-id="" package="com.android.chrome" text="Cancel" clickable="true" enabled="true" displayed="true" bounds="[100,1250][450,1400]"/>
+      <android.widget.Button class="android.widget.Button" resource-id="" package="com.android.chrome" text="Add" clickable="true" enabled="true" displayed="true" bounds="[600,1250][950,1400]"/>
+    </android.widget.LinearLayout>
+  </android.widget.FrameLayout>
+</hierarchy>

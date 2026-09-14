@@ -106,6 +106,55 @@ Full uninstall removes the service, releases, relay state, push credentials, and
 cache. It also removes the plugin registration when Herdr is reachable, and
 prints the manual command when it is not.
 
+## Relay logging
+
+The relay defaults to the `info` log level, so routine inventory diagnostics at
+`debug` are hidden. Put `HERDR_RELAY_LOG_LEVEL=debug` in the generated runtime
+environment file to diagnose a service, then restore `info` when finished.
+That file is the one named by `HERDR_RELAY_ENV` (normally managed by the
+installer); an export in a terminal does not change an already-running service.
+A custom `ExecStart=... serve` unit must set the variable through its own
+`Environment=` or `EnvironmentFile=` arrangement rather than relying on the
+plugin wrapper. For an installed unit, restart it after changing the file:
+`systemctl --user restart <your-unit>`.
+
+The installed unit is normally `herdr-mobile-relay.service`; substitute your
+own name, such as `herdr-mobile-relay-ts.service`:
+
+```bash
+journalctl --user -u <your-unit> -p warning --since '1 hour ago' --no-pager
+journalctl --user -u <your-unit> -f
+journalctl --user -u <your-unit> -o json --since '5 minutes ago' --no-pager
+```
+
+On Linux, journal-connected relay stderr receives priorities automatically when
+the unit keeps the default `SyslogLevelPrefix=yes`; terminal, file, and macOS
+logs stay unprefixed. JSON controls formatting, not verbosity or journal
+priority. The prefix sets the journal priority; slog attributes remain inside
+`MESSAGE`, not separate journal fields. `-p warning` filters records displayed
+by `journalctl`, while the log level controls records emitted and stored. `info`
+still includes warnings, so this setting does not reduce repeated outage
+warnings.
+
+Inventory polling performs its first attempt immediately and keeps the normal
+configured cadence (or the 15-second reconciliation cadence while the events
+stream is healthy). If `agent.list` or `workspace.list` fails, automatic retries
+back off exponentially from that healthy interval: each failed attempt doubles
+the next delay, up to 60 seconds (a 2-second cadence becomes 4, 8, 16, 32,
+then 60 seconds). A successful pair of required fetches resets the backoff and
+restores the normal cadence. Every failed attempt remains a
+WARN record; only the timing changes. Optional tab/pane fallback failures and a
+stale topology commit do not count as upstream outage failures.
+
+`Wake()` remains a coalesced, immediate refresh request even during backoff, so
+an explicit phone refresh, successful relay action, topology change, or UDP
+resync can cause an attempt sooner than the automatic retry. This is
+intentional; connected phones also request a refresh every 120 seconds, and
+multiple phones can interleave these automatic wakeups during an outage.
+Wakeups are not blanket-rate-limited. The separate Herdr events-stream
+reconnect loop is unchanged, so its unavailable/dropped warnings can still
+appear at their existing cadence during an outage.
+
 ## Troubleshooting
 
 - **No setup menu:** invoke the `setup` action:

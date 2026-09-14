@@ -13,7 +13,12 @@ export type ViewState =
   | { view: 'activity' }
   | { view: 'activity_detail'; key: string }
   | { view: 'terminal'; paneId: string; target?: FrontendTargetRef }
-  | { view: 'history'; paneId: string; target?: FrontendTargetRef }
+  | {
+    view: 'history';
+    paneId: string;
+    target?: FrontendTargetRef;
+    fallbackToTerminalOnInitialUnavailable?: true;
+  }
   | { view: 'notification'; target: NotificationTarget }
   | { view: 'push'; eventRef: string; deviceId: string }
   | { view: 'push_unavailable' };

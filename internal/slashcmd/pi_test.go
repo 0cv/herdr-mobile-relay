@@ -414,6 +414,32 @@ func TestPiDiscoversNestedAndFlatSkills(t *testing.T) {
 	}
 }
 
+func TestCanonicalPiPatternPreservesFilenameGlobs(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	mkdirAll(t, filepath.Join(realRoot, "skills"))
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		filepath.Join(link, "skills", "*"):      filepath.Join(canonicalRoot, "skills", "*"),
+		filepath.Join(link, "deploy*.md"):       filepath.Join(canonicalRoot, "deploy*.md"),
+		filepath.Join(link, "[dr]*.md"):         filepath.Join(canonicalRoot, "[dr]*.md"),
+		filepath.Join(link, "skills", "[a-z]*"): filepath.Join(canonicalRoot, "skills", "[a-z]*"),
+	}
+	for input, expected := range cases {
+		if actual := canonicalPiPattern(input); actual != expected {
+			t.Errorf("canonicalPiPattern(%q) = %q, want %q", input, actual, expected)
+		}
+	}
+}
+
 func TestPiInterpretsSkillIncludeExcludePatterns(t *testing.T) {
 	f := newPiFixture(t)
 	root := filepath.Join(f.home, ".pi", "agent", "configured")

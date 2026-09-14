@@ -1,0 +1,42 @@
+{
+  "sourceCommit": "f35ab6ffa9defa57ef653eb39a5f351bda4dd23c",
+  "versions": { "appium": "3.1.1", "xcuitest": "12.10.0", "wda": "16.12.1" },
+  "safariAUTFailure": {
+    "run": "34488014724",
+    "evidence": "failure-appium.json driver.commands; appium.log:2683-2708",
+    "durationMs": 106,
+    "allowanceMs": 29986,
+    "status": 400,
+    "response": {
+      "error": "invalid element state",
+      "message": "The application under test with bundle id 'com.apple.mobilesafari' is not running, possibly crashed"
+    }
+  },
+  "share": {
+    "run": "34488020101",
+    "evidence": "failure-appium.json driver.commands; appium.log:636-656",
+    "initialSourceMs": 934,
+    "sourceMs": [1008, 1807, 3255, 3429],
+    "scrollClientMs": 4763,
+    "scrollBackendMs": 4438,
+    "sourceClientTimeoutMs": 5038,
+    "sourceClientAllowanceMs": 5000,
+    "sourceBackendMs": 5764,
+    "sourceResponseBytes": 62487,
+    "limit": "The late PR XML is truncated in its Appium log, not a complete saved hierarchy. The successful replay substitutes the independently recorded push post-scroll XML, not a reconstructed PR result."
+  },
+  "confirmation": {
+    "run": "34488014724",
+    "evidence": "appium.log:804-915",
+    "lookupMs": [2362, 386],
+    "identityMs": [3329, 3774],
+    "attributeMs": { "enabled": 113, "visible": 136, "hittable": 219 },
+    "clickMs": 2438,
+    "limit": "Recorded completed lookup miss then successful confirmation timings. The XML used for confirmation is the separately labeled Plan12 hypothetical fixture."
+  },
+  "files": {
+    "ios-34488020101-before-share-hierarchy.xml": "f433870495fe825887fa381bdca1245f12b56e2f033560f595cccbd359e5a97e",
+    "ios-34488020101-share-0-hierarchy.xml": "f55445eefd1890512cf1dfb78ccc3e227152a19ad69a1dc089072ddd9fd19036",
+    "ios-34488014724-share-1-hierarchy.xml": "b9c640948bd1f3d726fadabaa62a10d482a8fef805274eb04b439abc3803a06e"
+  }
+}

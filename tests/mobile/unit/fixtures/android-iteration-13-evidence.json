@@ -1,0 +1,71 @@
+[
+  {
+    "file": "android-recorded-34488014724-trichrome.dump",
+    "classification": "recorded",
+    "source": "run 34488014724 android-environment-before-diagnostics.json",
+    "completeness": "Complete persisted stdoutPreview record; PR fragments are sanitized and are not recovered raw paths",
+    "sha256": "91349aaca6b9f531bb4eea09ab24427d2adac816d9b59200256032927647d6fa",
+    "bytes": 2842,
+    "originalStdoutSha256": "91349aaca6b9f531bb4eea09ab24427d2adac816d9b59200256032927647d6fa",
+    "originalStdoutBytes": 2842
+  },
+  {
+    "file": "android-recorded-34488014724-libraries.list",
+    "classification": "recorded",
+    "source": "run 34488014724 android-environment-before-diagnostics.json",
+    "completeness": "Complete persisted stdoutPreview record; PR fragments are sanitized and are not recovered raw paths",
+    "sha256": "3c33c6ba79b8ebc735ce1d033ca7c13404bc11a16ce331a420cf92d9e99201c0",
+    "bytes": 378,
+    "originalStdoutSha256": "3c33c6ba79b8ebc735ce1d033ca7c13404bc11a16ce331a420cf92d9e99201c0",
+    "originalStdoutBytes": 378
+  },
+  {
+    "file": "android-recorded-34488020101-trichrome.dump",
+    "classification": "recorded-sanitized",
+    "source": "run 34488020101 android-environment-before-diagnostics.json",
+    "completeness": "Complete persisted stdoutPreview record; PR fragments are sanitized and are not recovered raw paths",
+    "sha256": "109dff45d480504ec3c587f740dd2b898f1063905656b3525ac07a8638cdc7ca",
+    "bytes": 2752,
+    "originalStdoutSha256": "89e50d60e5eca4dfc7cbae75525ba26f5451af4bdbe8ff957f668b5dadc40c2b",
+    "originalStdoutBytes": 2842
+  },
+  {
+    "file": "android-recorded-34488020101-libraries.list",
+    "classification": "recorded-sanitized",
+    "source": "run 34488020101 android-environment-before-diagnostics.json",
+    "completeness": "Complete persisted stdoutPreview record; PR fragments are sanitized and are not recovered raw paths",
+    "sha256": "295a264406a69a4e07a9095c3a8a9b5ba2be4fcaeb0c8fdc93d6e43cf5dd08db",
+    "bytes": 348,
+    "originalStdoutSha256": "ba62bc6e2cece394eba2dd1daa12b30a1bc4b37371eaee3bf0b578fb94ead75a",
+    "originalStdoutBytes": 378
+  },
+  {
+    "file": "android-recorded-34455964640-googlecertificates.log",
+    "classification": "recorded",
+    "source": "run 34455964640 failure-android-logcat.log lines 784-847",
+    "sha256": "460ec16e451b8c21ba8dede0e685f755b8b5db4ff0f184d9d0ec7679cae7cd05"
+  },
+  {
+    "file": "android-recorded-34488014724-setup.log",
+    "classification": "recorded",
+    "source": "run 34488014724 android-qualification-logcat.log",
+    "lines": [
+      22,
+      70,
+      369,
+      707
+    ],
+    "sha256": "86c069e5024674f0571a601bdff9534cf52985d79c9efd432ff67d9f2e350c8d"
+  },
+  {
+    "file": "android-recorded-34488020101-setup.log",
+    "classification": "recorded",
+    "source": "run 34488020101 android-qualification-logcat.log",
+    "lines": [
+      45,
+      200,
+      295
+    ],
+    "sha256": "95233a50cff4ae2c43aeaf1d18e31025b28c299bf3b88ce01e92a0f263bd2401"
+  }
+]

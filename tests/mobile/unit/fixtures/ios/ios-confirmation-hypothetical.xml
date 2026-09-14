@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication name="Safari" bundleId="com.apple.mobilesafari" visible="true">
+    <XCUIElementTypeWindow visible="true">
+      <XCUIElementTypeToolbar visible="true">
+        <XCUIElementTypeButton name="Add" enabled="true" visible="true"/>
+      </XCUIElementTypeToolbar>
+      <XCUIElementTypeOther visible="true">
+        <XCUIElementTypeNavigationBar name="Add to Home Screen" visible="true">
+          <XCUIElementTypeButton name="Cancel" enabled="true" visible="true"/>
+          <XCUIElementTypeButton name="Add" enabled="true" visible="true"/>
+        </XCUIElementTypeNavigationBar>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeWindow>
+  </XCUIElementTypeApplication>
+</AppiumAUT>

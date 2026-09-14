@@ -101,7 +101,7 @@ func TestOMOWithoutTodoIsAvailableAndOversizedRowsAreSkipped(t *testing.T) {
 	}
 }
 
-func TestOMOInvalidOnlyTodoStateReportsCorruptSource(t *testing.T) {
+func TestOMOInvalidOnlyTodoStatePreservesHistory(t *testing.T) {
 	home := t.TempDir()
 	cwd := "/work/project"
 	sessionID := "session-invalid-todo"
@@ -112,6 +112,7 @@ func TestOMOInvalidOnlyTodoStateReportsCorruptSource(t *testing.T) {
 	path := filepath.Join(directory, "2026-09-02T12-00-00-000Z_"+sessionID+".jsonl")
 	transcript := fmt.Sprintf(
 		"{\"type\":\"session\",\"id\":%q,\"cwd\":%q}\n"+
+			"{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"keep this\"}}\n"+
 			"{\"type\":\"custom\",\"customType\":\"senpi.todo-state\",\"data\":{\"schema\":\"v2\",\"phases\":[{\"name\":\"\",\"tasks\":[]}]}}\n",
 		sessionID,
 		cwd,
@@ -124,13 +125,13 @@ func TestOMOInvalidOnlyTodoStateReportsCorruptSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Available || page.ReasonCode != "source_corrupt" {
+	if !page.Available || page.ReasonCode != "" || !page.SourceCorrupt || len(page.Entries) != 1 || page.Entries[0].Text != "keep this" {
 		t.Fatalf("invalid-only OMO page = %#v", page)
 	}
 	reader.mu.Lock()
 	cacheEntries := len(reader.omoCache)
 	reader.mu.Unlock()
-	if cacheEntries != 0 {
-		t.Fatalf("invalid OMO source cached %d entries", cacheEntries)
+	if cacheEntries != 1 {
+		t.Fatalf("readable invalid OMO source was not cached: %d entries", cacheEntries)
 	}
 }

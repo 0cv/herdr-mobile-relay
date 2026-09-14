@@ -2,7 +2,13 @@
 
 Connect one Linux or macOS computer to your phone through a temporary Cloudflare
 tunnel, or through a gateway that needs no Cloudflare account (see **Skip
-Cloudflare**). You need Herdr 0.7.5 or newer, Git, and `curl`.
+Cloudflare**). You need Herdr 0.7.5 or newer, Git, and `curl`. Herdr 0.9.0 is
+recommended for the complete live JSON inventory and workspace-management
+surface, but it is not the relay's minimum supported version.
+
+The relay shows the installed Herdr client separately from the running server
+version and protocol. If those differ, Settings reports the affected feature
+rather than treating the whole connection as unavailable.
 
 ## 1. Install
 
@@ -59,6 +65,10 @@ or with `relay/speech-voices.sh --languages fr`. Stock Apple Silicon uses
 macOS `say`; Settings does not offer neural voice downloads unless Piper is
 already installed.
 
+If a relay was updated after a failed Piper runtime extraction, reinstall only
+the cached engine with `relay/speech-voices.sh --reinstall-runtime`. The
+downloaded voices remain in place.
+
 ## Skip Cloudflare
 
 Choose **Community WebRTC Gateway** in the setup menu. It checks the project's
@@ -99,8 +109,10 @@ changes, the full action list, teardown, and uninstall.
 - **Temporary URL fails:** rerun Quick Start for a fresh hostname.
 - **Gateway registration times out:** check `HERDR_GATEWAY_URL` and outbound
   HTTPS access; `curl -s localhost:8375/healthz` reports `gateway.registered`.
-- **App stays disconnected:** reopen the full link including `#setup=...`.
+- **App still shows the previous release after the relay updates:** open Settings,
+  choose **Check for Updates**, then **Load Update**. A separately hosted app
+  must be published by its configured deployment-owner relay first.
 - **Need the stable QR again:** invoke `setup-link`.
-- **Stable setup stops:** rerun the exact command it prints; setup is resumable.
+- **Need relay log filtering:** see [Cloudflare tunnel logging](docs/cloudflare-tunnel.md#relay-logging).
 
 [README.md](README.md) indexes the rest of the documentation.

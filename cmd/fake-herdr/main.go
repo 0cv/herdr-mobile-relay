@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+type PaneAgentSession struct {
+	Value string `json:"value,omitempty"`
+	Kind  string `json:"kind,omitempty"`
+}
+
 type Pane struct {
 	ID             string `json:"pane_id"`
 	TerminalID     string `json:"terminal_id,omitempty"`
@@ -30,7 +35,8 @@ type Pane struct {
 	Scroll         struct {
 		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
 	} `json:"scroll,omitempty"`
-	ForegroundCwd string `json:"foreground_cwd,omitempty"`
+	ForegroundCwd string            `json:"foreground_cwd,omitempty"`
+	AgentSession  *PaneAgentSession `json:"agent_session,omitempty"`
 }
 
 type Workspace struct {

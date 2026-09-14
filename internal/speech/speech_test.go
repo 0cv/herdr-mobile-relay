@@ -54,7 +54,8 @@ func fakeEngine(t *testing.T, binDir, name, flag string, wav []byte) {
 	if err := os.WriteFile(source, wav, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, binDir, name, `echo "$@" > `+binDir+`/`+name+`-args
+	writeExecutable(t, binDir, name, `if [ "$1" = "--help" ]; then exit 0; fi
+echo "$@" > `+binDir+`/`+name+`-args
 while [ "$1" != "`+flag+`" ]; do shift; done
 /bin/cat `+source+` > "$2"`)
 }
@@ -234,7 +235,7 @@ func TestSynthesizeRoutesEachLanguageToItsVoice(t *testing.T) {
 	}
 }
 
-func TestParseSayVoicesKeepsTheFirstVoicePerLanguage(t *testing.T) {
+func TestParseSayVoicesSelectsKnownVoices(t *testing.T) {
 	voices := parseSayVoices(strings.Join([]string{
 		"Alva                   sv_SE    # Hej, jag heter Alva.",
 		"Amelie                 fr_CA    # Bonjour, je m’appelle Amelie.",
@@ -250,6 +251,77 @@ func TestParseSayVoicesKeepsTheFirstVoicePerLanguage(t *testing.T) {
 	}
 	if _, offered := voices["sv"]; offered {
 		t.Fatal("parseSayVoices kept a language the app never offers")
+	}
+}
+
+func TestParseSayVoicesPrefersSamantha(t *testing.T) {
+	for _, name := range []string{"Samantha", "Samantha (English (US))"} {
+		t.Run(name, func(t *testing.T) {
+			voices := parseSayVoices(strings.Join([]string{
+				"Albert              en_US    # Hello! My name is Albert.",
+				"Daniel              en_GB    # Hello! My name is Daniel.",
+				name + " en_US    # Hello! My name is Samantha.",
+				"Zarvox              en_US    # Hello! My name is Zarvox.",
+			}, "\n"))
+			if voices["en"] != name {
+				t.Fatalf("English voice = %q, want %q", voices["en"], name)
+			}
+		})
+	}
+}
+
+func TestParseSayVoicesWithoutSamantha(t *testing.T) {
+	voices := parseSayVoices("Daniel en_GB # Hello!\nKaren en_AU # Hello!")
+	if voices["en"] != "Daniel" {
+		t.Fatalf("English voice = %q, want Daniel", voices["en"])
+	}
+}
+
+func TestParseSayVoicesLocalizedNames(t *testing.T) {
+	voices := parseSayVoices("Anna (German (Germany)) de_DE # Hallo!\nAmélie (French (Canada)) fr_CA # Bonjour!")
+	if voices["de"] != "Anna (German (Germany))" || voices["fr"] != "Amélie (French (Canada))" {
+		t.Fatalf("localized voices = %v", voices)
+	}
+}
+
+func TestParseSayVoicesPreferredLanguages(t *testing.T) {
+	for _, test := range []struct {
+		language string
+		locale   string
+		primary  string
+		backup   string
+	}{
+		{"en", "en_US", "Samantha (English (US))", "Daniel"},
+		{"fr", "fr_FR", "Thomas", "Amélie (French (Canada))"},
+		{"de", "de_DE", "Anna (German (Germany))", "Markus"},
+		{"es", "es_ES", "Mónica (Spanish (Spain))", "Paulina"},
+		{"zh", "zh_CN", "Tingting", "Meijia"},
+	} {
+		t.Run(test.language, func(t *testing.T) {
+			primary := test.primary + " " + test.locale + " # Hello!"
+			backup := test.backup + " " + test.locale + " # Hello!"
+			novelty := "Eddy " + test.locale + " # Hello!"
+			for _, listing := range []string{
+				strings.Join([]string{novelty, backup, primary}, "\n"),
+				strings.Join([]string{primary, backup, novelty}, "\n"),
+			} {
+				if got := parseSayVoices(listing)[test.language]; got != test.primary {
+					t.Fatalf("voice = %q, want %q", got, test.primary)
+				}
+			}
+			if got := parseSayVoices(novelty + "\n" + backup)[test.language]; got != test.backup {
+				t.Fatalf("backup voice = %q, want %q", got, test.backup)
+			}
+			if got := parseSayVoices(novelty)[test.language]; got != "" {
+				t.Fatalf("unexpected unapproved voice %q", got)
+			}
+		})
+	}
+}
+
+func TestParseSayVoicesRejectsAlbert(t *testing.T) {
+	if voices := parseSayVoices("Albert en_US # Hello!"); len(voices) != 0 {
+		t.Fatalf("unexpected voices: %v", voices)
 	}
 }
 

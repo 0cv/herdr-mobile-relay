@@ -8,7 +8,7 @@ import ActivityView from '$components/ActivityView.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import LaunchView from '$components/LaunchView.svelte';
-import { relayStore } from '$lib/store';
+import { CommandError, relayStore } from '$lib/store';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
 import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, WorktreeListing } from '$lib/types';
@@ -534,7 +534,153 @@ describe('accessible Svelte interactions', () => {
       relayStore.relayConfigs.set([]);
     }
   });
+  it('requires separate group consent after a primary close refusal', async () => {
+    const user = userEvent.setup();
+    const workspace = (id: string, label: string, linked: boolean, panes: number): RelayWorkspace => ({
+      relay_id: 'fedora', relay_label: 'Fedora', workspace_id: id, number: linked ? 2 : 1, label,
+      focused: false, pane_count: panes, tab_count: 1, active_tab_id: '', agent_status: '',
+      cwd: `/repos/${id}`,
+      worktree: {
+        repo_key: 'repo', repo_name: 'project', repo_root: '/repos/project',
+        checkout_path: `/repos/${id}`, is_linked_worktree: linked,
+      },
+    });
+    const primary = workspace('w1', 'Project', false, 2);
+    const child = workspace('w2', 'Fix', true, 1);
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' },
+      capabilities: ['workspace_management', 'worktree_management'],
+    } as unknown as RelayConnectionView;
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    relayStore.connections.set(new Map([['fedora', connection as never]]));
+    relayStore.workspaces.set([primary, child]);
+    const close = vi.spyOn(relayStore, 'closeWorkspace')
+      .mockRejectedValueOnce(Object.assign(
+        new CommandError('Close the workspace group explicitly'),
+        { data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] } },
+      ))
+      .mockResolvedValue({ type: 'command_result', request_id: 'close-2', action: 'workspace_close', ok: true, phase: 'completed' });
+    try {
+      render(WorkspaceManager);
+      await user.click(screen.getAllByRole('button', { name: 'Close' })[0]);
+      const firstDialog = screen.getByRole('dialog', { name: 'Close Project?' });
+      await user.click(within(firstDialog).getByRole('button', { name: 'Close Workspace' }));
+      await vi.waitFor(() => expect(screen.getByRole('dialog', { name: 'Close Project group?' })).toBeInTheDocument());
+      const groupDialog = screen.getByRole('dialog', { name: 'Close Project group?' });
+      expect(groupDialog).toHaveTextContent('All running panes in the currently open group will close. Group membership can change until the command runs. Git checkouts and branches are not removed.');
+      expect(within(groupDialog).getByRole('list')).toHaveTextContent('Project');
+      expect(within(groupDialog).getByRole('list')).toHaveTextContent('Fix');
+      expect(close).toHaveBeenCalledTimes(1);
+      await user.click(within(groupDialog).getByRole('button', { name: 'Close Workspace Group' }));
+      await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(2));
+      expect(close).toHaveBeenNthCalledWith(2, primary, {
+        closeGroup: true,
+        expectedWorkspaceIds: ['w1', 'w2'],
+      });
+    } finally {
+      close.mockRestore();
+      relayStore.workspaces.set([]);
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
 
+  it('does not route a delayed workspace refusal to the selected sibling relay', async () => {
+    const user = userEvent.setup();
+    const workspace = (relayId: string, relayLabel: string, id: string, label: string, linked: boolean): RelayWorkspace => ({
+      relay_id: relayId, relay_label: relayLabel, workspace_id: id, number: linked ? 2 : 1, label,
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '',
+      cwd: `/repos/${relayId}/${id}`,
+      worktree: {
+        repo_key: 'repo', repo_name: 'project', repo_root: `/repos/${relayId}/project`,
+        checkout_path: `/repos/${relayId}/${id}`, is_linked_worktree: linked,
+      },
+    });
+    const alphaPrimary = workspace('alpha', 'Alpha', 'w1', 'Alpha Project', false);
+    const alphaChild = workspace('alpha', 'Alpha', 'w2', 'Alpha Fix', true);
+    const betaPrimary = workspace('beta', 'Beta', 'w1', 'Beta Project', false);
+    const betaChild = workspace('beta', 'Beta', 'w2', 'Beta Fix', true);
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' },
+      capabilities: ['workspace_management', 'worktree_management'],
+    } as unknown as RelayConnectionView;
+    relayStore.relayConfigs.set([
+      { id: 'alpha', label: 'Alpha', url: 'wss://alpha', token: '' },
+      { id: 'beta', label: 'Beta', url: 'wss://beta', token: '' },
+    ]);
+    relayStore.connections.set(new Map([
+      ['alpha', connection as never],
+      ['beta', connection as never],
+    ]));
+    relayStore.workspaces.set([alphaPrimary, alphaChild, betaPrimary, betaChild]);
+    let rejectClose!: (reason?: unknown) => void;
+    const pending = new Promise<CommandResult>((_resolve, reject) => { rejectClose = reject; });
+    const close = vi.spyOn(relayStore, 'closeWorkspace').mockReturnValue(pending);
+    try {
+      render(WorkspaceManager);
+      await vi.waitFor(() => expect(screen.getAllByRole('button', { name: 'Close' }).length).toBeGreaterThan(0));
+      await user.click(screen.getAllByRole('button', { name: 'Close' })[0]);
+      const dialog = screen.getByRole('dialog', { name: 'Close Alpha Project?' });
+      await user.click(within(dialog).getByRole('button', { name: 'Close Workspace' }));
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Computer' }), 'beta');
+      rejectClose(Object.assign(new CommandError('Close the workspace group explicitly'), {
+        data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] },
+      }));
+      await expect(pending).rejects.toThrow('Close the workspace group explicitly');
+      await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Close Beta Project group?' })).not.toBeInTheDocument());
+    } finally {
+      close.mockRestore();
+      relayStore.workspaces.set([]);
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('cancels group confirmation when its relay disconnects', async () => {
+    const user = userEvent.setup();
+    const workspace = (id: string, label: string, linked: boolean): RelayWorkspace => ({
+      relay_id: 'fedora', relay_label: 'Fedora', workspace_id: id, number: linked ? 2 : 1, label,
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '',
+      cwd: `/repos/${id}`,
+      worktree: {
+        repo_key: 'repo', repo_name: 'project', repo_root: '/repos/project',
+        checkout_path: `/repos/${id}`, is_linked_worktree: linked,
+      },
+    });
+    const primary = workspace('w1', 'Project', false);
+    const child = workspace('w2', 'Fix', true);
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' },
+      capabilities: ['workspace_management'],
+    } as unknown as RelayConnectionView;
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    relayStore.connections.set(new Map([['fedora', connection as never]]));
+    relayStore.workspaces.set([primary, child]);
+    const close = vi.spyOn(relayStore, 'closeWorkspace').mockRejectedValue(
+      Object.assign(new CommandError('Close the workspace group explicitly'), {
+        data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] },
+      }),
+    );
+    try {
+      render(WorkspaceManager);
+      await user.click(screen.getAllByRole('button', { name: 'Close' })[0]);
+      const firstDialog = screen.getByRole('dialog', { name: 'Close Project?' });
+      await user.click(within(firstDialog).getByRole('button', { name: 'Close Workspace' }));
+      await vi.waitFor(() => expect(screen.getByRole('dialog', { name: 'Close Project group?' })).toBeInTheDocument());
+      relayStore.connections.set(new Map());
+      await vi.waitFor(() => expect(
+        screen.queryByRole('dialog', { name: 'Close Project group?' }),
+      ).not.toBeInTheDocument());
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+      relayStore.workspaces.set([]);
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
   it('hands the launch form to a deep link relay that connects after a faster sibling', async () => {
     relayStore.relayConfigs.set([
       { id: 'fast', label: 'Fast', url: 'wss://fast', token: '' },
@@ -614,10 +760,17 @@ describe('accessible Svelte interactions', () => {
         id: 'turn-1', timestamp: '2026-09-02T12:00:00Z',
         role: 'assistant', text: 'valid turn', tools: [],
       }],
+      nextCursor: 'cursor-1',
       hasMore: true,
       total: 2,
-      fileTruncated: false,
-      sourceCorrupt: true,
+      diagnostics: {
+        oversized_records: 0,
+        corrupt_records: 1,
+        omitted_tools: 0,
+        omitted_payloads: 0,
+        plan_corrupt: false,
+        source_truncated: false,
+      },
     }).mockResolvedValue({
       available: true,
       reason: '',
@@ -627,16 +780,14 @@ describe('accessible Svelte interactions', () => {
       }],
       hasMore: false,
       total: 2,
-      fileTruncated: false,
-      sourceCorrupt: false,
     });
     try {
       const view = render(ConversationHistory, { agent });
-      expect(await screen.findByText(/Some OpenCode records could not be decoded/)).toBeInTheDocument();
-      expect(screen.queryByText(/larger than 16 MB/)).not.toBeInTheDocument();
+      expect(await screen.findByText(/Some records could not be decoded/)).toBeInTheDocument();
+      expect(screen.queryByText(/log exceeds 16 MB/)).not.toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: 'Load older turns' }));
       await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(2));
-      expect(screen.getByText(/Some OpenCode records could not be decoded/)).toBeInTheDocument();
+      expect(screen.getByText(/Some records could not be decoded/)).toBeInTheDocument();
       view.unmount();
     } finally {
       history.mockRestore();
@@ -651,7 +802,6 @@ describe('accessible Svelte interactions', () => {
     };
     vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
       available: true, reason: '', entries: [], hasMore: false, total: 0,
-      fileTruncated: false, sourceCorrupt: false,
     });
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
       type: 'command_result', request_id: 'prompt-1', ok: true,
