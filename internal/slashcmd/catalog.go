@@ -6,8 +6,11 @@ import (
 )
 
 const (
-	maxEntries      = 300
-	maxCustomFiles  = 250
+	// maxCustomFiles is the per-request discovery budget for custom command and
+	// skill files. It bounds filesystem work independently of the serialized
+	// catalog size.
+	maxCustomFiles  = 2000
+	maxEntries      = 4096
 	maxMetadataSize = 64 * 1024
 )
 
@@ -98,10 +101,13 @@ func CatalogForProfileWithSuppression(
 		commands, truncated = discoverGenericSkills(skillDirs, commandFormat)
 	}
 
+	return finalizeCatalog(commands, truncated)
+}
+
+func finalizeCatalog(commands []Command, truncated bool) Catalog {
 	if len(commands) > maxEntries {
 		commands = commands[:maxEntries]
 		truncated = true
 	}
-
 	return Catalog{Commands: commands, Truncated: truncated}
 }

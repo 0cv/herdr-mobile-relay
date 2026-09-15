@@ -709,8 +709,9 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .slash-command-name small { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slash-command-description { color: var(--muted); font-size: .66rem; grid-column: 1 / -1; grid-row: 2; line-height: 1.35; white-space: normal; }
 .slash-command-source { align-self: center; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .56rem; font-style: normal; grid-column: 2; grid-row: 1; justify-self: end; padding: .08rem .28rem; text-transform: capitalize; }
-.slash-command-status, .slash-command-limit { color: var(--muted); font-size: .68rem; line-height: 1.4; margin: 0; padding: .7rem; }
-.slash-command-limit { border-top: 1px solid var(--border); font-size: .6rem; padding: .35rem .65rem; }
+.slash-command-status, .slash-command-limit, .slash-command-display-limit { color: var(--muted); font-size: .68rem; line-height: 1.4; margin: 0; padding: .7rem; }
+.slash-command-limit, .slash-command-display-limit { border-top: 1px solid var(--border); font-size: .6rem; padding: .35rem .65rem; }
+
 /* Keep the version-41 menu safe while an already-open client loads newer CSS. */
 .composer-field > .slash-command-menu { background: var(--card); border: 1px solid var(--border); border-radius: .72rem; bottom: calc(100% + .42rem); box-shadow: 0 .8rem 2.4rem rgb(0 0 0 / .42); left: 0; max-height: min(48dvh, 22rem); overflow-y: auto; position: absolute; right: 0; z-index: 15; }
 .composer-field > .slash-command-menu .slash-command-name em { border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .56rem; font-style: normal; margin-left: auto; padding: .08rem .28rem; text-transform: capitalize; }

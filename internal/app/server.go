@@ -1004,6 +1004,7 @@ func (s *Server) Run(ctx context.Context) error {
 				)
 				break
 			}
+			catalog = fitSlashCommandCatalog(catalog, requestID, "list_slash_commands", paneID)
 			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
 		case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
 			requestID := inbound.RequestID
@@ -2939,6 +2940,39 @@ func (s *Server) sendCommandResult(
 	}
 	s.hub.Send(client, commandResultMessage(result))
 }
+
+func fitSlashCommandCatalog(catalog slashcmd.Catalog, requestID, action, paneID string) slashcmd.Catalog {
+	if slashCommandResultFits(catalog, requestID, action, paneID) {
+		return catalog
+	}
+
+	commands := catalog.Commands
+	low, high := 0, len(commands)
+	for low < high {
+		mid := low + (high-low+1)/2
+		candidate := slashcmd.Catalog{Commands: commands[:mid], Truncated: true}
+		if slashCommandResultFits(candidate, requestID, action, paneID) {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	return slashcmd.Catalog{Commands: commands[:low], Truncated: true}
+}
+
+func slashCommandResultFits(catalog slashcmd.Catalog, requestID, action, paneID string) bool {
+	message := commandResultMessage(&coordinator.CommandResult{
+		RequestID: requestID,
+		Action:    action,
+		OK:        true,
+		Phase:     "completed",
+		PaneID:    paneID,
+		Data:      catalog,
+	})
+	encoded, err := json.Marshal(message)
+	return err == nil && len(encoded) <= transport.MaxOutboundMessageBytes
+}
+
 func (s *Server) sendAuditedCommandResult(
 	client *transport.ClientConn,
 	message map[string]any,

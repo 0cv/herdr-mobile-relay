@@ -19,10 +19,11 @@ interface BootOptions {
   standalone?: boolean;
   navigatorStandalone?: boolean;
   userAgent?: string;
+  largeSlashCatalog?: boolean;
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent }) => {
+  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent, largeSlashCatalog }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
     if (navigatorStandalone !== null) {
       Object.defineProperty(navigator, 'standalone', { configurable: true, value: navigatorStandalone });
@@ -157,22 +158,35 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           return;
         }
         if (message.type === 'list_slash_commands') {
+          const commands = largeSlashCatalog
+            ? Array.from({ length: 4096 }, (_, index) => ({
+              command: `/catalog-${String(index).padStart(4, '0')}`,
+              description: 'D'.repeat(240),
+              argument_hint: 'H'.repeat(120),
+              source: 'personal',
+            }))
+            : [
+              { command: '/help', description: 'Show the full command reference and explain every available action', source: 'builtin' },
+              { command: '/copy', description: 'Copy the latest agent response', source: 'builtin' },
+              { command: '/model', description: 'Choose the active model', source: 'builtin' },
+              { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
+              ...Array.from({ length: 18 }, (_, index) => ({
+                command: `/sample-${index + 1}`,
+                description: `Example command ${index + 1}`,
+                source: 'builtin',
+              })),
+            ];
+          if (largeSlashCatalog) {
+            commands[350] = {
+              command: '/late-command',
+              description: 'Late command',
+              argument_hint: 'H'.repeat(120),
+              source: 'personal',
+            };
+          }
           queueMicrotask(() => this.server({
             type: 'command_result', request_id: message.request_id, ok: true, phase: 'completed',
-            data: {
-              commands: [
-                { command: '/help', description: 'Show the full command reference and explain every available action', source: 'builtin' },
-                { command: '/copy', description: 'Copy the latest agent response', source: 'builtin' },
-                { command: '/model', description: 'Choose the active model', source: 'builtin' },
-                { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
-                ...Array.from({ length: 18 }, (_, index) => ({
-                  command: `/sample-${index + 1}`,
-                  description: `Example command ${index + 1}`,
-                  source: 'builtin',
-                })),
-              ],
-              truncated: false,
-            },
+            data: { commands, truncated: false },
           }));
           return;
         }
@@ -435,6 +449,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     standalone: options.standalone ?? false,
     navigatorStandalone: options.navigatorStandalone ?? null,
     userAgent: options.userAgent ?? '',
+    largeSlashCatalog: options.largeSlashCatalog ?? false,
   });
   await page.goto(path);
 }
@@ -5118,6 +5133,48 @@ test('discovers slash commands per terminal and fills them before sending', asyn
   await expect(claudeComposer).toHaveValue('/help');
   expect((await commands(page)).filter((command) => command.type === 'list_slash_commands')).toHaveLength(2);
   expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(1);
+});
+
+test('keeps a large slash catalog responsive in the installed PWA', async ({ page }) => {
+  await boot(page, [fedora], '/', {
+    largeSlashCatalog: true,
+    standalone: true,
+    navigatorStandalone: true,
+  });
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Large catalog app', agent: 'codex', cwd: '/home/test/large' }],
+  });
+  await page.getByRole('button', { name: 'Open Large catalog app on Fedora' }).click();
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await composer.fill('/');
+  const popover = page.getByRole('region', { name: 'Command suggestions' });
+  await expect(popover).toBeVisible();
+  await expect(popover.getByRole('option')).toHaveCount(200);
+  await expect(popover.getByText('200+ matching', { exact: true })).toBeVisible();
+  await expect(popover.getByText('More matching commands are hidden; keep typing to narrow the list.', { exact: true })).toBeVisible();
+  await page.keyboard.press('ArrowUp');
+  await expect(composer).toHaveAttribute('aria-activedescendant', 'slash-command-option-199');
+  await page.keyboard.press('Enter');
+  await expect(composer).toHaveValue('/catalog-0199 ');
+  expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(0);
+
+  const filterStarted = await page.evaluate(() => performance.now());
+  await composer.fill('/late');
+  await expect(popover.getByRole('option', { name: /\/late-command/ })).toBeVisible();
+  await expect(popover.getByRole('option')).toHaveCount(1);
+  const filterMs = await page.evaluate((started) => performance.now() - started, filterStarted);
+  console.log(`large slash catalog filter: ${filterMs.toFixed(2)}ms`);
+  expect(filterMs).toBeLessThan(1_000);
+  await popover.getByRole('option', { name: /\/late-command/ }).click();
+  await expect(composer).toHaveValue('/late-command ');
+  expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(0);
+
+  const loadedVersion = await page.evaluate(async () => (await fetch('/version.json')).json());
+  expect(loadedVersion.assets).toBe(APP_METADATA.assets);
+  expect(loadedVersion.build).toBe(APP_METADATA.build);
 });
 
 test('scales the whole interface from accessible settings', async ({ page }) => {
