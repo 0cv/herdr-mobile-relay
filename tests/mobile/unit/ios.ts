@@ -1193,16 +1193,19 @@ test('Plan13 recorded hierarchy inputs retain their exact evidence hashes', asyn
 });
 
 const lifecycleError = recordedIteration13.safariAUTFailure.response;
+type HomeLaunchMode = 'ready' | 'duplicate-reference' | 'ambiguous' | 'missing' | 'loading' | 'timeout' | 'readiness-transition' | 'not-ready' | 'malformed-reference';
 
-async function lifecycleReplay(name: string) {
+async function lifecycleReplay(name: string, options: { foreground?: string; home?: HomeLaunchMode; page?: string } = {}) {
+  const homeMode = options.home || 'ready';
   const state = {
-    safariRunning: true, foreground: 'com.apple.mobilesafari', installed: false, pid: 16089 as unknown,
+    safariRunning: true, foreground: options.foreground ?? 'com.apple.mobilesafari', installed: false, pid: 16089 as unknown,
     overlay: '', documentOrigin: origin, standalone: true, url: `${origin}/`,
     settingsFault: '', stateFault: undefined as unknown, activeFault: undefined as unknown,
     alertFault: false, ignoreHome: false, wrongLaunch: '', systemObservationFault: '', slowInstalledObservation: false,
     systemName: 'SpringBoard', systemRootCount: 1,
   };
   let settings: Record<string, unknown> = { defaultActiveApplication: 'auto', respectSystemAlerts: false };
+  let homeObservations = 0;
   const appState = (bundle: string) => {
     if (bundle === 'com.apple.webapp' && state.stateFault !== undefined) return state.stateFault;
     if (bundle === state.foreground) return 4;
@@ -1219,7 +1222,7 @@ async function lifecycleReplay(name: string) {
     if (!state.safariRunning) return '';
     return state.overlay ? 'com.apple.springboard' : state.foreground;
   };
-  const replay = await adapter(`lifecycle-${name}`, async ({ path, body, method }) => {
+  const replay = await adapter(`lifecycle-${name}`, async ({ path, body, method, signal }) => {
     if (path.endsWith('/appium/settings')) {
       if (method === 'GET') return value(state.settingsFault === 'readback' ? { ...settings, defaultActiveApplication: 'auto' } : state.settingsFault === 'malformed-readback' ? [] : settings);
       if (state.settingsFault === 'unsupported') return Response.json({ value: { error: 'invalid argument', message: 'unsupported setting' } }, { status: 400 });
@@ -1273,13 +1276,34 @@ async function lifecycleReplay(name: string) {
     }
     if (path.endsWith('/elements')) {
       assert.equal(active(), 'com.apple.springboard');
+      if (body.value.includes('XCUIElementTypePageIndicator')) {
+        if (homeMode === 'timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+        if (homeMode === 'loading') return value([]);
+        homeObservations += 1;
+        const icons = homeMode === 'missing' ? [] : homeMode === 'ambiguous' ? [element('home-icon'), element('home-icon-2')] : [element('home-icon')];
+        const references: unknown[] = [element('home-container'), ...icons, element('home-page'), ...(homeMode === 'duplicate-reference' ? [element('home-icon')] : [])];
+        if (homeMode === 'malformed-reference') references.push({});
+        return value(references);
+      }
       if (body.value.includes('XCUIElementTypeApplication')) {
         const xml = `<AppiumAUT>${Array.from({ length: state.systemRootCount }, () => `<XCUIElementTypeApplication name="${state.systemName}"/>`).join('')}</AppiumAUT>`;
         return value(Array.from({ length: xpathCount(xml, String(body.value)) }, (_, index) => element(index ? `other-root-${index}` : 'springboard-root')));
       }
       return value([element('home-icon')]);
     }
-    if (path.endsWith('/home-icon/attribute/hittable')) return value('true');
+    if (path.includes('/home-container/attribute/')) {
+      const attribute = path.split('/attribute/')[1];
+      return value(attribute === 'type' ? 'XCUIElementTypeOther' : attribute === 'name' ? 'Home screen icons' : null);
+    }
+    if (path.includes('/home-icon/attribute/') || path.includes('/home-icon-2/attribute/')) {
+      const attribute = path.split('/attribute/')[1];
+      const ready = homeMode !== 'not-ready' && (homeMode !== 'readiness-transition' || homeObservations > 1);
+      return value(attribute === 'type' ? 'XCUIElementTypeIcon' : attribute === 'name' ? 'Herdr Mobile Relay' : attribute === 'enabled' ? ready ? 'true' : 'false' : attribute === 'visible' || attribute === 'hittable' ? 'true' : null);
+    }
+    if (path.includes('/home-page/attribute/')) {
+      const attribute = path.split('/attribute/')[1];
+      return value(attribute === 'type' ? 'XCUIElementTypePageIndicator' : attribute === 'name' ? 'Page control' : attribute === 'value' ? options.page || 'Page 1 of 1' : null);
+    }
     if (path.endsWith('/home-icon/click')) {
       state.foreground = state.wrongLaunch || 'com.apple.webapp';
       state.installed = true;
@@ -1326,6 +1350,112 @@ for (const count of [0, 2]) {
   });
 }
 
+test('current-page-first launch clicks a ready Page 2 icon without Home navigation', async () => {
+  const a = await lifecycleReplay('current-page2', { foreground: 'com.apple.springboard', page: 'Page 2 of 2' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: pressButton').length, 0);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  const homeQueries = a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator'));
+  assert.equal(homeQueries.length, 1);
+  assert.ok(homeQueries[0].body.value.includes("not(ancestor::*[@visible='false'])"));
+  assert.equal(homeQueries[0].body.value.includes('contains('), false);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.driver.snapshot().unusable, false);
+});
+
+test('non-Home foreground receives one verified Home navigation before page inspection', async () => {
+  const a = await lifecycleReplay('non-home-current-page', { foreground: 'com.apple.mobilesafari' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: pressButton').length, 1);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+});
+
+test('current-page readiness transition is polled without page navigation', async () => {
+  const a = await lifecycleReplay('current-page-readiness-transition', { home: 'readiness-transition' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 2);
+});
+
+test('malformed current foreground identity fails before Home navigation', async () => {
+  const a = await lifecycleReplay('malformed-current-foreground');
+  a.state.activeFault = { bundleId: 42, pid: 42 };
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => {
+    first = error;
+    return /IOS_CONTEXT_OWNERSHIP/u.test(String(error));
+  });
+  const stopped = a.requests.length;
+  assert.equal(a.requests.some((request) => request.body.script === 'mobile: pressButton' || request.body.script === 'mobile: swipe' || request.path.endsWith('/home-icon/click')), false);
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+test('same Home element reference in the union is deduplicated before classification', async () => {
+  const a = await lifecycleReplay('duplicate-home-reference', { home: 'duplicate-reference' });
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 1);
+});
+
+test('distinct same-label Home icons fail closed before any launch action', async () => {
+  const a = await lifecycleReplay('ambiguous-home-icons', { home: 'ambiguous' });
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => {
+    first = error;
+    return /Home screen icon is ambiguous/u.test(String(error));
+  });
+  const stopped = a.requests.length;
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 0);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+test('malformed extra Home element reference fails closed before any launch action', async () => {
+  const a = await lifecycleReplay('malformed-home-reference', { home: 'malformed-reference' });
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => {
+    first = error;
+    return /Home observation element reference .* malformed/u.test(String(error));
+  });
+  const stopped = a.requests.length;
+  assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 0);
+  assert.equal(a.requests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+for (const mode of ['missing', 'loading'] as const) {
+  test(`Home ${mode} never authorizes an arbitrary icon click`, async () => {
+    const a = await lifecycleReplay(`home-${mode}`, { home: mode });
+    await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /IOS_CONTEXT/u);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon/click')).length, 0);
+    assert.equal(a.requests.filter((request) => request.path.endsWith('/home-icon-2/click')).length, 0);
+    const swipes = a.requests.filter((request) => request.body.script === 'mobile: swipe');
+    if (mode === 'loading') {
+      assert.equal(swipes.length, 0);
+    } else {
+      assert.equal(swipes.filter((request) => request.body.args.direction === 'right').length, 8);
+      assert.equal(swipes.filter((request) => request.body.args.direction === 'left').length, 7);
+    }
+    assert.equal(a.driver.snapshot().unusable, false);
+  });
+}
+
+test('Home observation timeout quarantines the Appium session without late launch work', async () => {
+  const a = await lifecycleReplay('home-timeout', { home: 'timeout' });
+  await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /APPIUM_TIMEOUT/u);
+  const stopped = a.requests.length;
+  const first = a.driver.snapshot().firstFatal;
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.requests.length, stopped);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+});
+
 test('Plan13 lifecycle supported handoff survives obsolete Safari through background cold termination and relaunch', async () => {
   const a = await lifecycleReplay('complete');
   await a.owned(() => a.platform.launchInstalledApp());
@@ -1352,7 +1482,7 @@ test('Plan13 lifecycle supported handoff survives obsolete Safari through backgr
     const index = a.requests.indexOf(transition);
     assert.equal(a.requests[index + 1].method, 'GET');
     assert.ok(a.requests[index + 1].path.endsWith('/appium/settings'));
-    assert.ok(/pressButton|terminateApp/u.test(a.requests[index + 2].body.script || '') || a.requests[index + 2].path.endsWith('/home-icon/click'));
+    assert.ok(/activeAppInfo|pressButton|terminateApp/u.test(a.requests[index + 2].body.script || '') || a.requests[index + 2].path.endsWith('/home-icon/click'));
   }
   assert.equal(a.requests.some((r) => /activateApp|launchApp/u.test(r.body.script || '') || (r.path.endsWith('/url') && r.method === 'POST')), false);
   assert.equal(a.driver.snapshot().unusable, false);

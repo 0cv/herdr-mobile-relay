@@ -260,6 +260,60 @@ export function nativeActionListEvidence(source: string, target: string): Native
   };
 }
 
+const IOS_HOME_ICON_LABELS = ['Herdr Mobile Relay', 'Herdr Relay'] as const;
+const IOS_HOME_ICON_SCOPE_XPATH = "//XCUIElementTypeOther[@name='Home screen icons']";
+const IOS_HOME_CONTAINER_XPATH = "//XCUIElementTypeOther[@name='Home screen icons' and @visible='true' and not(ancestor::*[@visible='false'])]";
+const IOS_HOME_PAGE_INDICATOR_XPATH = "//XCUIElementTypePageIndicator[((@name='Page control') or (@label='Page control')) and @visible='true' and not(ancestor::*[@visible='false'])]";
+
+interface IOSHomePage {
+  current: number;
+  total: number;
+  raw: string;
+}
+
+interface IOSHomeObservation {
+  state: 'pending' | 'missing' | 'not-ready' | 'ready';
+  container?: string;
+  icon?: string;
+  page?: IOSHomePage;
+  attributes?: Record<string, string | null>;
+  reason: string;
+}
+
+function iosHomeIconXPath(): string {
+  const labels = IOS_HOME_ICON_LABELS.flatMap((label) => [
+    `@name=${xpathLiteral(label)}`,
+    `@label=${xpathLiteral(label)}`,
+  ]);
+  return `${IOS_HOME_ICON_SCOPE_XPATH}//XCUIElementTypeIcon[${labels.join(' or ')}]`;
+}
+
+function iosHomeObservationLocator(): Locator {
+  return {
+    using: 'xpath',
+    value: [IOS_HOME_CONTAINER_XPATH, iosHomeIconXPath(), IOS_HOME_PAGE_INDICATOR_XPATH].join(' | '),
+  };
+}
+
+function iosHomeElementKind(attributes: Record<string, string | null>): 'container' | 'icon' | 'page' | undefined {
+  if (attributes.type === 'XCUIElementTypeOther' && attributes.name === 'Home screen icons') return 'container';
+  if (attributes.type === 'XCUIElementTypeIcon'
+    && IOS_HOME_ICON_LABELS.some((label) => attributes.name === label || attributes.label === label)) return 'icon';
+  if (attributes.type === 'XCUIElementTypePageIndicator'
+    && (attributes.name === 'Page control' || attributes.label === 'Page control')) return 'page';
+  return undefined;
+}
+
+function parseIOSHomePage(value: string): IOSHomePage | undefined {
+  const match = value.trim().match(/^Page\s+(\d+)\s+of\s+(\d+)$/u);
+  if (!match) return undefined;
+  const current = Number(match[1]);
+  const total = Number(match[2]);
+  return Number.isSafeInteger(current) && Number.isSafeInteger(total) && current > 0 && total >= current
+    ? { current, total, raw: value }
+    : undefined;
+}
+
 export function iosNativeScrollDirection(target: NativeBounds, viewport: NativeBounds): 'up' | 'down' | undefined {
   if (target.y < viewport.y - 1) return 'up';
   if (target.y + target.height > viewport.y + viewport.height + 1) return 'down';
@@ -696,22 +750,39 @@ export class IOSPlatform implements MobilePlatform {
     phase.assertAvailable('launch installed provider');
     await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
     await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, phase);
-    await this.driver.mobile('pressButton', { name: 'home' }, Math.max(2, phase.remainingMs));
+    const foreground = await this.observeCurrentNativeForeground(phase);
+    if (foreground !== IOS_SPRINGBOARD_BUNDLE_ID) {
+      await this.driver.mobile('pressButton', { name: 'home' }, Math.max(2, phase.remainingMs));
+    }
     await this.ensureSpringBoardForeground(phase);
     await delay(Math.min(750, phase.remainingMs), phase);
-    for (let page = 0; page < 8; page += 1) {
-      phase.assertAvailable('show first SpringBoard page');
-      await this.driver.mobile('swipe', { direction: 'right' }, Math.max(2, phase.remainingMs));
+    let observation = await this.observeHomeIcon(phase);
+    observation = await this.waitForHomeIconReadiness(observation, phase);
+    if (observation.state === 'pending' || observation.state === 'not-ready') {
+      throw new Error(`IOS_CONTEXT: current SpringBoard page was not positively observed (${observation.reason})`);
+    }
+    const currentPageReady = observation.state === 'ready';
+    if (observation.state === 'missing') {
+      for (let page = 0; page < 8; page += 1) {
+        phase.assertAvailable('show first SpringBoard page');
+        await this.driver.mobile('swipe', { direction: 'right' }, Math.max(2, phase.remainingMs));
+      }
     }
     for (let page = 0; page < 8; page += 1) {
       phase.assertAvailable('find installed provider icon');
-      await this.ensureSpringBoardForeground(phase);
-      const icon = await this.findHittableHomeIcon(Math.min(5_000, phase.remainingMs));
-      if (icon) {
+      if (!currentPageReady || page > 0) {
+        await this.ensureSpringBoardForeground(phase);
+        observation = await this.observeHomeIcon(phase);
+        observation = await this.waitForHomeIconReadiness(observation, phase);
+      }
+      if (observation.state === 'pending' || observation.state === 'not-ready') {
+        throw new Error(`IOS_CONTEXT: current SpringBoard page was not positively observed (${observation.reason})`);
+      }
+      if (observation.state === 'ready' && observation.icon) {
         await this.setNativeObservationTarget(IOS_INSTALLED_BUNDLE_ID, phase);
         const clickTimeout = phase.remainingMs;
         if (clickTimeout <= 1) break;
-        await this.driver.click(icon, clickTimeout);
+        await this.driver.click(observation.icon, clickTimeout);
         const providerTimeout = Math.min(30_000, phase.remainingMs);
         if (providerTimeout <= 1) break;
         if (await this.waitForInstalledProvider(providerTimeout)) {
@@ -1465,43 +1536,101 @@ export class IOSPlatform implements MobilePlatform {
     throw new Error(`IOS_SHARE: ${description}: ${lastError || 'control was not usable before the deadline'}`);
   }
 
-  private async findHittableHomeIcon(timeoutMs: number): Promise<string> {
-    const locators = [
-      accessibility('Herdr Mobile Relay'),
-      textLocator('Herdr Mobile Relay'),
-      accessibility('Herdr Relay'),
-      textLocator('Herdr Relay'),
-      {
-        using: 'xpath',
-        value: "//*[@name='Home screen icons']//*[contains(@name, 'Herdr Mobile Relay') or contains(@name, 'Herdr Relay') or contains(@label, 'Herdr Mobile Relay') or contains(@label, 'Herdr Relay')]",
-      },
-    ];
-    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
-    for (const locator of locators) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
-      const elements = await this.driver.findAll(locator, remaining).catch((error: unknown) => {
-        if (isFatalDriverError(error)) throw error;
-        return [];
-      });
-      for (const element of elements) {
-        const hittableTimeout = deadline - Date.now();
-        if (hittableTimeout <= 1) return '';
-        const hittable = await this.driver.attribute(element, 'hittable', hittableTimeout).catch((error: unknown) => {
-          if (isFatalDriverError(error)) throw error;
-          return null;
-        });
-        if (hittable === 'true') return element;
-        const visibleTimeout = deadline - Date.now();
-        if (visibleTimeout <= 1) return '';
-        const visible = await this.driver.attribute(element, 'visible', visibleTimeout).catch((error: unknown) => {
-          if (isFatalDriverError(error)) throw error;
-          return null;
-        });
-        if (hittable === null && visible === 'true') return element;
-      }
+  private async readNativeHomeAttribute(element: string, name: string, phase: PhaseBudget): Promise<string | null> {
+    phase.assertAvailable(`read Home ${name}`);
+    const timeout = Math.min(IOS_NATIVE_LOOKUP_ROUND_MS, phase.remainingMs);
+    if (timeout < minimumDriverRequestMs) throw new Error(`IOS_CONTEXT: insufficient time to read Home ${name}`);
+    const value = await this.driver.attribute(element, name, timeout);
+    if (value !== null && typeof value !== 'string') {
+      this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home ${name} attribute response was malformed`);
     }
-    return '';
+    return value;
+  }
+
+  private async waitForHomeIconReadiness(observation: IOSHomeObservation, parent: PhaseBudget): Promise<IOSHomeObservation> {
+    if (observation.state !== 'not-ready') return observation;
+    const phase = parent.phaseView('ios-home-readiness', IOS_NATIVE_LIST_READINESS_MS);
+    while (observation.state === 'not-ready' && phase.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS + minimumDriverRequestMs) {
+      if (phase.remainingMs < 250 + minimumDriverRequestMs) break;
+      await delay(250, phase);
+      observation = await this.observeHomeIcon(phase);
+    }
+    return observation;
+  }
+
+  private async homeObservationElementIds(phase: PhaseBudget): Promise<string[]> {
+    phase.assertAvailable('observe current SpringBoard page');
+    const queryTimeout = Math.min(IOS_NATIVE_HIERARCHY_COMMAND_MS, phase.remainingMs);
+    if (queryTimeout < minimumDriverRequestMs) throw new Error('IOS_CONTEXT: insufficient time to observe current SpringBoard page');
+    const response = await this.driver.command<unknown>('/elements', 'POST', iosHomeObservationLocator(), queryTimeout);
+    if (!Array.isArray(response)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'Home observation element response was not an array');
+    const rawIds = response.map((candidate: unknown, index: number) => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home observation element reference ${index} was malformed`);
+      }
+      const record = candidate as Record<string, unknown>;
+      const references = ['element-6066-11e4-a52e-4f735466cecf', 'ELEMENT']
+        .filter((key) => Object.hasOwn(record, key))
+        .map((key) => record[key]);
+      if (!references.length || references.some((reference) => typeof reference !== 'string' || !reference.trim())
+        || new Set(references).size !== 1) {
+        this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home observation element reference ${index} was malformed`);
+      }
+      return references[0] as string;
+    });
+    return [...new Set(rawIds)];
+  }
+
+  private async observeHomeIcon(phase: PhaseBudget): Promise<IOSHomeObservation> {
+    const ids = await this.homeObservationElementIds(phase);
+    if (!ids.length) return { state: 'pending', reason: 'Home page elements are not published' };
+
+    const classified: Array<{ id: string; kind: 'container' | 'icon' | 'page' }> = [];
+    for (const id of ids) {
+      const attributes: Record<string, string | null> = {};
+      for (const name of ['type', 'name', 'label']) {
+        attributes[name] = await this.readNativeHomeAttribute(id, name, phase);
+      }
+      const kind = iosHomeElementKind(attributes);
+      if (!kind) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home observation returned an unclassified element ${id}`);
+      classified.push({ id, kind });
+    }
+
+    const containers = classified.filter((element) => element.kind === 'container');
+    if (containers.length > 1) {
+      this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home screen icon container is ambiguous (${containers.map((element) => element.id).join(', ')})`);
+    }
+    const pages = classified.filter((element) => element.kind === 'page');
+    if (pages.length > 1) {
+      this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home page indicator is ambiguous (${pages.map((element) => element.id).join(', ')})`);
+    }
+    if (!containers.length) return { state: 'pending', reason: 'Home screen icon container is missing' };
+    if (!pages.length) return { state: 'pending', container: containers[0].id, reason: 'Home page indicator is missing' };
+
+    const pageValue = await this.readNativeHomeAttribute(pages[0].id, 'value', phase);
+    const page = typeof pageValue === 'string' ? parseIOSHomePage(pageValue) : undefined;
+    if (!page) return { state: 'pending', container: containers[0].id, reason: 'Home page indicator value is invalid' };
+
+    const icons = classified.filter((element) => element.kind === 'icon');
+    if (icons.length > 1) {
+      this.failOwnership('IOS_CONTEXT_OWNERSHIP', `Home screen icon is ambiguous (${icons.map((element) => element.id).join(', ')})`);
+    }
+    if (!icons.length) return { state: 'missing', container: containers[0].id, page, reason: 'installed provider icon is not on the current page' };
+
+    const icon = icons[0].id;
+    const attributes: Record<string, string | null> = {};
+    for (const name of ['enabled', 'visible', 'hittable']) {
+      attributes[name] = await this.readNativeHomeAttribute(icon, name, phase);
+    }
+    const ready = attributes.enabled === 'true' && attributes.visible === 'true' && attributes.hittable === 'true';
+    return {
+      state: ready ? 'ready' : 'not-ready',
+      container: containers[0].id,
+      icon,
+      page,
+      attributes,
+      reason: ready ? 'installed provider icon is ready' : 'installed provider icon is not ready',
+    };
   }
 
   private async waitForInstalledProvider(timeoutMs: number): Promise<boolean> {
@@ -1550,6 +1679,30 @@ export class IOSPlatform implements MobilePlatform {
       }
       this.nativeObservationTarget = target;
       this.diagnostics.record({ phase: phase.phase, operation: 'native-observation-target', detail: settings });
+    } catch (error) {
+      if (!isFatalDriverError(error)) this.nativeObservationFailure ??= error;
+      throw error;
+    }
+  }
+
+  private async observeCurrentNativeForeground(phase: PhaseBudget): Promise<string> {
+    this.assertOwnershipClear();
+    try {
+      if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') {
+        await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
+      }
+      phase.assertAvailable('observe current native foreground');
+      const info = await this.driver.activeAppInfo(phase.remainingMs);
+      const activeValue = info?.bundleId ?? info?.bundleID;
+      const active = typeof activeValue === 'string' ? activeValue : '';
+      const pid = info?.pid;
+      if (!active.trim() || active !== active.trim() || (typeof pid !== 'number' && typeof pid !== 'string')
+        || !/^[1-9]\d*$/u.test(String(pid)) || !Number.isSafeInteger(Number(pid))) {
+        this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native foreground is not positively identified (${active || String(activeValue || 'unknown')}, PID ${String(pid)})`);
+      }
+      this.lastNativeActivity = String(info?.activity || info?.appActivity || '');
+      this.lastNativePid = String(pid);
+      return active;
     } catch (error) {
       if (!isFatalDriverError(error)) this.nativeObservationFailure ??= error;
       throw error;
