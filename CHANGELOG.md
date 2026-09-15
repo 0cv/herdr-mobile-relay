@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-09-15
+
 ### Fixed
 
 - Expand bounded slash-command discovery and report incomplete catalogs
@@ -1514,7 +1516,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...HEAD
+[0.21.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...v0.21.3
 [0.21.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.11...v0.21.0

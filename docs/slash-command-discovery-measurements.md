@@ -6,8 +6,8 @@ change can be compared against the same workload.
 
 ## Workload and release
 
-- Release served from `web/`: version `0.21.1`, assets `382`, build
-  `b2376bb25f4207ddb5a93dc8297494f8fd70f9172893fc38fbd16fc884a44773`.
+- Release served from `web/`: version `0.21.3`, assets `382`, build
+  `d94d3346c9244736e18853b5248911dd13649ac3b6d22e585b19a88ac211e6e5`.
 - Browser fixture returned 4,096 commands with 240-character descriptions and
   120-character argument hints, then included `/late-command` at a late index.
 - The phone filtered the retained catalog before rendering its 200-row display
