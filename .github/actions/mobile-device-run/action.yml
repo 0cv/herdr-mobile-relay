@@ -72,6 +72,8 @@ runs:
     - name: Set up Android SDK
       if: inputs.platform == 'android'
       uses: android-actions/setup-android@v3
+      with:
+        packages: 'platform-tools'
     - name: Create and boot Android emulator
       if: inputs.platform == 'android'
       run: |

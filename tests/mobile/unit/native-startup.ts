@@ -40,6 +40,76 @@ const stepBlock = (source: string, name: string): string => {
 const exportBlock = (source: string): string => stepBlock(source, 'Sanitize bounded diagnostics');
 const createIosBlock = (source: string): string => stepBlock(source, 'Create and boot iOS simulator');
 
+const androidSdkSetupSteps = (source: string): string[] => {
+  const lines = source.split('\n');
+  const starts = lines.flatMap((line, index) => line.trim() === '- name: Set up Android SDK' ? [index] : []);
+  return starts.map(start => {
+    const stepIndent = lines[start].match(/^\s*/u)?.[0].length || 0;
+    const nextStep = lines.findIndex((line, index) => index > start
+      && line.trimStart().startsWith('- ')
+      && (line.match(/^\s*/u)?.[0].length || 0) <= stepIndent);
+    return lines.slice(start, nextStep >= 0 ? nextStep : lines.length).join('\n');
+  });
+};
+
+const lineIndent = (line: string): number => line.match(/^\s*/u)?.[0].length || 0;
+
+const assertAndroidSdkSetupContract = (source: string, path: string): void => {
+  const steps = androidSdkSetupSteps(source);
+  assert.equal(steps.length, 1, `${path}: expected one Android SDK setup step`);
+  const step = steps[0];
+  assert.match(step, /^\s+uses: android-actions\/setup-android@v3\s*$/mu);
+  const lines = step.split('\n');
+  const stepIndent = lineIndent(lines[0]);
+  const withLines = lines.flatMap((line, index) => line.trim() === 'with:' && lineIndent(line) === stepIndent + 2 ? [index] : []);
+  assert.equal(withLines.length, 1, `${path}: setup packages must be mapped under with`);
+  const withLine = withLines[0];
+  const withIndent = lineIndent(lines[withLine]);
+  const packageInputs: string[] = [];
+  for (let index = withLine + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    const indent = lineIndent(line);
+    if (indent <= withIndent) break;
+    if (indent === withIndent + 2 && line.trimStart().startsWith('packages:')) {
+      packageInputs.push(line.replace(/^\s+packages:\s*/u, '').trim());
+    }
+  }
+  assert.deepEqual(packageInputs, ["'platform-tools'"], `${path}: unexpected setup packages`);
+};
+
+type AndroidSdkSetupFixture = 'omitted' | 'default' | 'misplaced' | 'tools' | 'tools-before-platform-tools' | 'tools-after-platform-tools';
+
+const androidSdkSetupFixture = (source: string, fixture: AndroidSdkSetupFixture): string => {
+  const lines = source.split('\n');
+  const start = lines.findIndex(line => line.trim() === '- name: Set up Android SDK');
+  assert.ok(start >= 0);
+  const stepIndent = lineIndent(lines[start]);
+  const nextStep = lines.findIndex((line, index) => index > start
+    && line.trimStart().startsWith('- ')
+    && lineIndent(line) <= stepIndent);
+  const end = nextStep >= 0 ? nextStep : lines.length;
+  const packageLine = lines.findIndex((line, index) => index > start && index < end && /^\s+packages:\s*/u.test(line));
+  assert.ok(packageLine >= 0);
+  const withLine = lines.findIndex((line, index) => index > start && index < end && line.trim() === 'with:');
+  assert.ok(withLine >= 0);
+  if (fixture === 'omitted') {
+    lines.splice(packageLine, 1);
+  } else if (fixture === 'default') {
+    lines.splice(withLine, packageLine - withLine + 1);
+  } else if (fixture === 'misplaced') {
+    lines[withLine] = lines[withLine].replace('with:', 'env:');
+  } else {
+    const packageValue = fixture === 'tools'
+      ? 'tools'
+      : fixture === 'tools-before-platform-tools'
+        ? 'tools platform-tools'
+        : 'platform-tools tools';
+    lines[packageLine] = lines[packageLine].replace("'platform-tools'", `'${packageValue}'`);
+  }
+  return lines.join('\n');
+};
+
 const runShellBlock = (script: string, cwd: string, env: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> => new Promise((resolve, reject) => {
   const child = spawn('bash', ['-euo', 'pipefail', '-c', script], { cwd, env, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
@@ -318,6 +388,27 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
     delete process.env.IOS_XCTEST_STATE_DIR;
     try { await assert.rejects(managedWdaCapabilities('82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40'), /missing IOS_XCTEST_STATE_DIR/u); }
     finally { if (old === undefined) delete process.env.IOS_XCTEST_STATE_DIR; else process.env.IOS_XCTEST_STATE_DIR = old; }
+  }],
+  ['Native startup Android SDK setup requests only platform-tools on both CI paths', async () => {
+    const repo = join(import.meta.dirname, '../../..');
+    const paths = ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml'];
+    for (const path of paths) {
+      const source = await readFile(join(repo, path), 'utf8');
+      assertAndroidSdkSetupContract(source, path);
+      for (const fixture of ['omitted', 'default', 'misplaced', 'tools', 'tools-before-platform-tools', 'tools-after-platform-tools'] as const) {
+        const fixtureSource = androidSdkSetupFixture(source, fixture);
+        assert.throws(
+          () => assertAndroidSdkSetupContract(fixtureSource, path),
+          `${path}: ${fixture} fixture was accepted`,
+        );
+      }
+      for (const fragment of [
+        'sdkmanager "platform-tools" "emulator" "build-tools;35.0.0" "$android_system_image"',
+        'test "$android_system_image" = "system-images;android-35;google_apis;x86_64"',
+        "jq -e '.failure == null and .bytes > 0 and .bytes <= 104857600' \"$MOBILE_OUTPUT/android-environment-collector.json\"",
+        'bun tests/mobile/android-environment.ts check',
+      ]) assert.ok(source.includes(fragment), `${path}: missing preserved Android contract: ${fragment}`);
+    }
   }],
   ['Native startup both CI paths use the shared owner and preserve pre-session ordering', async () => {
     for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
