@@ -131,6 +131,7 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 | [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
 | [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |
 | [docs/agent-directories.md](docs/agent-directories.md) | Agents that use a non-default config or profile directory |
+| [docs/slash-command-discovery.md](docs/slash-command-discovery.md) | Bounded slash-command discovery and incomplete-catalog guidance |
 | [docs/updates.md](docs/updates.md) | Verified releases, phone-driven upgrades, upgrading from 0.19.1 |
 | [docs/security.md](docs/security.md) | What is encrypted, device pairing, what an intermediary sees |
 | [docs/development.md](docs/development.md) | Building, testing, and contributing |

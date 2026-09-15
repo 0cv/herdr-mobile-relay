@@ -82,6 +82,22 @@ func commandSliceHas(commands []Command, name string) bool {
 	return false
 }
 
+func TestScanSkillDirBudgetMarksInjectedExhaustion(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"first", "second"} {
+		writeSkill(t, dir, name, "Skill")
+	}
+
+	budget := 1
+	commands, _, truncated := scanSkillDirBudget(dir, "personal", &budget)
+	if len(commands) != 1 {
+		t.Fatalf("got %d commands, want one command before exhaustion", len(commands))
+	}
+	if !truncated {
+		t.Fatal("budget exhaustion should report a conservatively incomplete catalog")
+	}
+}
+
 func TestWalkFileLimit(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < 260; i++ {

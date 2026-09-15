@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Expand bounded slash-command discovery and report incomplete catalogs
+  accurately on the phone, including catalogs clipped by an older relay.
+
 ## [0.21.2] - 2026-09-14
 
 ### Fixed

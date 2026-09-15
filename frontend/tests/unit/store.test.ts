@@ -10,6 +10,7 @@ import {
   setTerminalRefreshInterval,
 } from '$lib/preferences';
 import { paneViewPreferenceKey } from '$lib/agent-view';
+import { SLASH_COMMAND_MAX_ENTRIES } from '$lib/slash-command-limits';
 import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
@@ -2510,6 +2511,45 @@ describe('relay command store', () => {
     });
     await expect(changed).resolves.toEqual({ commands: [], truncated: false });
   });
+  it('retains the frontend cap warning and late entries after normalization', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: ['slash_commands'], agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'codex', cwd: '/home/test/project',
+      ...exactAgentFields(),
+    };
+    const rawCommands = Array.from({ length: SLASH_COMMAND_MAX_ENTRIES + 1 }, (_, index) => ({
+      command: `/bulk-${String(index).padStart(4, '0')}`,
+      description: `Bulk command ${index}`,
+      source: 'project',
+    }));
+    rawCommands[350] = { command: '/late-command', description: 'Late command', source: 'project' };
+
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({
+      type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed',
+      data: { commands: rawCommands, truncated: false },
+    });
+
+    const catalog = await pending;
+    expect(catalog.commands).toHaveLength(SLASH_COMMAND_MAX_ENTRIES);
+    expect(catalog.truncated).toBe(true);
+    expect(catalog.commands.some((entry) => entry.command === '/late-command')).toBe(true);
+    expect(catalog.commands[0].command).toBe('/bulk-0000');
+    const cached = await relayStore.loadSlashCommands(agent);
+    expect(cached.truncated).toBe(true);
+    expect(cached.commands.some((entry) => entry.command === '/late-command')).toBe(true);
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1);
+  });
+
   it('normalizes slash command results without data', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();

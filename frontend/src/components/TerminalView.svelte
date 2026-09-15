@@ -185,6 +185,7 @@
   const CELL_MEASURE_TEXT = '0000000000';
   const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
   const PANE_REALTIME_RESYNC_MS = 15_000;
+  const MAX_VISIBLE_SLASH_COMMANDS = 200;
   // One relay poll of slack over its own three-second settling window.
   const PANE_RESIZE_WAIT_MAX_MS = 4_000;
   // Herdr's key parser covers f1..f24; the pad exposes the range phones need.
@@ -257,11 +258,13 @@
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
-  const filteredSlashCommands = $derived.by(() => {
+  const matchingSlashCommands = $derived.by(() => {
     if (slashQuery === null) return [];
     if (!slashQuery) return slashCatalog.commands;
     return slashCatalog.commands.filter((entry) => entry.command.slice(1).toLocaleLowerCase().startsWith(slashQuery));
   });
+  const filteredSlashCommands = $derived(matchingSlashCommands.slice(0, MAX_VISIBLE_SLASH_COMMANDS));
+  const slashMatchesHidden = $derived(matchingSlashCommands.length > filteredSlashCommands.length);
   const effectiveSlashIndex = $derived(filteredSlashCommands.length
     ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
     : -1);
@@ -2201,7 +2204,7 @@
         <header class="slash-command-header" aria-hidden="true">
           <strong>Commands</strong>
           {#if !slashCatalogLoading && !slashCatalogUnavailable}
-            <span>{filteredSlashCommands.length} matching</span>
+            <span>{filteredSlashCommands.length}{slashMatchesHidden ? '+' : ''} matching</span>
           {:else}
             <span>Type to filter</span>
           {/if}
@@ -2209,9 +2212,9 @@
         {#if slashCatalogLoading}
           <p class="slash-command-status" role="status">Loading commands…</p>
         {:else if slashCatalogUnavailable}
-          <p class="slash-command-status">Suggestions unavailable — you can still send this command.</p>
+          <p class="slash-command-status" role="status">Suggestions unavailable — you can still send this command.</p>
         {:else if !filteredSlashCommands.length}
-          <p class="slash-command-status">No matching command — you can still send it.</p>
+          <p class="slash-command-status" role="status">No matching command — you can still send it.</p>
         {/if}
         <div
           id="slash-command-options"
@@ -2242,7 +2245,10 @@
           {/each}
         </div>
         {#if !slashCatalogLoading && slashCatalog.truncated}
-          <p class="slash-command-limit">More commands are available; keep typing to narrow the list.</p>
+          <p class="slash-command-limit" role="status">Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.</p>
+        {/if}
+        {#if !slashCatalogLoading && slashMatchesHidden}
+          <p class="slash-command-display-limit" role="status">More matching commands are hidden; keep typing to narrow the list.</p>
         {/if}
       </section>
     {/if}

@@ -8,7 +8,10 @@ import (
 )
 
 const (
-	maxWalkFiles    = 250
+	// The standalone walkers and Hermes use the same per-request custom-file
+	// budget as the other providers. maxWalkFiles remains named separately for
+	// callers that specifically reason about recursive filesystem traversal.
+	maxWalkFiles    = maxCustomFiles
 	maxGitWalkDepth = 32
 )
 

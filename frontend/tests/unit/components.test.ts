@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, within } from '@testing-library/svelte';
+import { get } from 'svelte/store';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
@@ -12,6 +13,28 @@ import { CommandError, relayStore } from '$lib/store';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
 import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, WorktreeListing } from '$lib/types';
+
+const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
+
+class SlashCommandWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+  static instances: SlashCommandWebSocket[] = [];
+  readyState = SlashCommandWebSocket.CONNECTING;
+  protocol = '';
+  sent: string[] = [];
+  onopen: (() => void) | null = null;
+  onclose: ((event?: { code: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  constructor(readonly url: string) { SlashCommandWebSocket.instances.push(this); }
+  send(payload: string) { this.sent.push(payload); }
+  close() { this.readyState = SlashCommandWebSocket.CLOSED; }
+  open() { this.readyState = SlashCommandWebSocket.OPEN; this.onopen?.(); }
+  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
+}
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
@@ -98,6 +121,7 @@ describe('accessible Svelte interactions', () => {
     expect(screen.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
     expect(screen.getByRole('option', { name: /\/plan/ })).toBeVisible();
     expect(screen.queryByRole('option', { name: /\/model/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(INCOMPLETE_CATALOG_NOTICE, { exact: true })).not.toBeInTheDocument();
     await user.keyboard('{Enter}');
     expect(composer).toHaveValue('/plan ');
     expect(send).not.toHaveBeenCalled();
@@ -108,6 +132,118 @@ describe('accessible Svelte interactions', () => {
       type: 'submit_prompt', text: '/plan Review the migration',
     });
     vi.restoreAllMocks();
+  });
+
+  it('keeps incomplete-catalog guidance for empty matches and manual submission', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p3', pane_id: 'fedora::w1:p3',
+      project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
+    };
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const load = vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
+      commands: [{ command: '/present', description: 'Present command', source: 'project' }],
+      truncated: true,
+    });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'prompt-2', ok: true,
+    });
+    render(TerminalView, {
+      agent,
+      allAgents: [agent],
+      frame: { paneId: agent.pane_id, content: 'ready', format: 'plain' },
+      responding: new Set<string>(),
+    });
+
+    const composer = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.type(composer, '/pre');
+    expect(screen.getByText(INCOMPLETE_CATALOG_NOTICE, { exact: true })).toBeVisible();
+    await user.clear(composer);
+    await user.type(composer, '/absent');
+    expect(screen.getByText(INCOMPLETE_CATALOG_NOTICE, { exact: true })).toBeVisible();
+    expect(screen.getByText('No matching command — you can still send it.')).toBeVisible();
+    expect(load).toHaveBeenCalledOnce();
+    expect(send).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+    expect(send).toHaveBeenCalledWith(agent, {
+      type: 'submit_prompt', text: '/absent',
+    });
+    vi.restoreAllMocks();
+  });
+
+  it('filters a late real-store catalog and reopens it from cache before filling', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal('WebSocket', SlashCommandWebSocket);
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    const socket = SlashCommandWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: ['slash_commands'], agent_profiles: [],
+    });
+    const relay = get(relayStore.relayConfigs)[0];
+    const agent: Agent = {
+      relay_id: relay.id, relay_label: relay.label, raw_pane_id: 'w1:late', pane_id: `${relay.id}::w1:late`,
+      project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
+      server_session_id: 'primary', terminal_id: 'terminal-w1:late', generation: 1, agent_session_id: '',
+    };
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const first = render(TerminalView, {
+      agent,
+      allAgents: [agent],
+      frame: { paneId: agent.pane_id, content: 'ready', format: 'plain' },
+      responding: new Set<string>(),
+    });
+    await waitFor(() => expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1));
+    const request = JSON.parse(socket.sent.at(-1)!);
+    const commands = Array.from({ length: 401 }, (_, index) => ({
+      command: `/catalog-${String(index).padStart(4, '0')}`,
+      description: `Catalog command ${index}`,
+      source: 'project',
+    }));
+    commands[350] = { command: '/late-command', description: 'Late command', source: 'project' };
+    socket.message({
+      type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed',
+      data: { commands, truncated: false },
+    });
+
+    const composer = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.type(composer, '/late');
+    await waitFor(() => expect(screen.getByRole('option', { name: /\/late-command/ })).toBeVisible());
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'not-sent', ok: true,
+    });
+    await user.click(screen.getByRole('option', { name: /\/late-command/ }));
+    expect(composer).toHaveValue('/late-command');
+    expect(send).not.toHaveBeenCalled();
+    expect((await relayStore.loadSlashCommands(agent)).commands).toHaveLength(401);
+    first.unmount();
+    expect((await relayStore.loadSlashCommands(agent)).commands).toHaveLength(401);
+
+    render(TerminalView, {
+      agent,
+      allAgents: [agent],
+      frame: { paneId: agent.pane_id, content: 'ready', format: 'plain' },
+      responding: new Set<string>(),
+    });
+    const reopenedComposer = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.clear(reopenedComposer);
+    await user.type(reopenedComposer, '/late');
+    await waitFor(() => expect(screen.getByRole('option', { name: /\/late-command/ })).toBeVisible());
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1);
+    await user.keyboard('{Enter}');
+    expect(reopenedComposer).toHaveValue('/late-command');
+    expect(send).not.toHaveBeenCalled();
+
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it('opens agents and submits approval buttons by role', async () => {

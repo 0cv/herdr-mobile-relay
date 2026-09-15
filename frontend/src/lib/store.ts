@@ -25,6 +25,7 @@ import {
   shouldRetainSetupFragment,
 } from './config';
 import { gatewayRendezvous } from './gateway-credentials';
+import { SLASH_COMMAND_MAX_ENTRIES } from './slash-command-limits';
 import {
   BrowserDeviceCredentialStore,
   commitDeviceEnrollment,
@@ -2865,10 +2866,11 @@ class RelayStore {
         const rawCommands = data.commands;
         const commandsList = Array.isArray(rawCommands) ? rawCommands : [];
         const sources = new Set(['builtin', 'personal', 'project']);
-        const commands = commandsList
+        const validCommands = commandsList
           .filter((entry: Record<string, unknown>) => typeof entry?.command === 'string'
-            && /^\/[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(entry.command))
-          .slice(0, 300)
+            && /^\/[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(entry.command));
+        const commands = validCommands
+          .slice(0, SLASH_COMMAND_MAX_ENTRIES)
           .map((entry: Record<string, unknown>): SlashCommand => ({
             command: String(entry.command),
             description: String(entry.description || entry.command).slice(0, 240),
@@ -2878,7 +2880,10 @@ class RelayStore {
               : 'builtin',
           }))
           .sort((left, right) => left.command.localeCompare(right.command, undefined, { sensitivity: 'base' }));
-        const catalog = { commands, truncated: Boolean(data.truncated) };
+        const catalog = {
+          commands,
+          truncated: Boolean(data.truncated) || validCommands.length > SLASH_COMMAND_MAX_ENTRIES,
+        };
         if (this.pendingSlashCommands.get(agent.pane_id)?.promise === promise) {
           this.slashCommandCache.set(agent.pane_id, { identity, catalog });
         }
