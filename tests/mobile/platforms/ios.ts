@@ -62,6 +62,13 @@ export function isIOSSafariViewServiceBundle(bundleId?: string): boolean {
   return bundleId?.toLowerCase() === 'com.apple.safariviewservice';
 }
 
+function isIOSAllowedLaunchForeground(bundleId: string): boolean {
+  return bundleId === IOS_SPRINGBOARD_BUNDLE_ID
+    || bundleId === IOS_INSTALLED_BUNDLE_ID
+    || isIOSSafariBrowserBundle(bundleId)
+    || isIOSSafariViewServiceBundle(bundleId);
+}
+
 export function isIOSStaleContextError(error: unknown): boolean {
   if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) return false;
   const message = error instanceof Error ? error.message : String(error);
@@ -767,8 +774,8 @@ export class IOSPlatform implements MobilePlatform {
     const phase = this.budget.phaseView('ios-launch', 120_000);
     phase.assertAvailable('launch installed provider');
     await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
-    await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, phase);
     const foreground = await this.observeCurrentNativeForeground(phase);
+    await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, phase);
     if (foreground !== IOS_SPRINGBOARD_BUNDLE_ID) {
       await this.driver.mobile('pressButton', { name: 'home' }, Math.max(2, phase.remainingMs));
     }
@@ -1721,6 +1728,9 @@ export class IOSPlatform implements MobilePlatform {
       if (!active.trim() || active !== active.trim() || (typeof pid !== 'number' && typeof pid !== 'string')
         || !/^[1-9]\d*$/u.test(String(pid)) || !Number.isSafeInteger(Number(pid))) {
         this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native foreground is not positively identified (${active || String(activeValue || 'unknown')}, PID ${String(pid)})`);
+      }
+      if (!isIOSAllowedLaunchForeground(active)) {
+        this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native foreground ${active} is not an allowed iOS lifecycle identity`);
       }
       this.lastNativeActivity = String(info?.activity || info?.appActivity || '');
       this.lastNativePid = String(pid);

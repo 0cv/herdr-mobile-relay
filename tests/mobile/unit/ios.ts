@@ -1406,7 +1406,7 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
   const appState = (bundle: string) => {
     if (bundle === 'com.apple.webapp' && state.stateFault !== undefined) return state.stateFault;
     if (bundle === state.foreground) return 4;
-    if (bundle === 'com.apple.springboard') return state.overlay && state.overlay !== 'app-dialog' ? 4 : 2;
+    if (bundle === 'com.apple.springboard') return state.overlay && state.overlay !== 'app-dialog' ? 4 : state.foreground === 'com.apple.webapp' ? 4 : 2;
     if (bundle === 'com.apple.webapp') return state.installed ? 2 : 1;
     return state.safariRunning ? 2 : 1;
   };
@@ -1474,6 +1474,7 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
     if (path.endsWith('/elements')) {
       assert.equal(active(), 'com.apple.springboard');
       if (body.value.includes('XCUIElementTypePageIndicator')) {
+        if (state.foreground !== 'com.apple.springboard') return value([]);
         if (homeMode === 'timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
         if (homeMode === 'loading') return value([]);
         homeObservations += 1;
@@ -1569,6 +1570,33 @@ test('non-Home foreground receives one verified Home navigation before page insp
   assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
 });
 
+test('provider UI is observed before pinning SpringBoard during retained relaunch', async () => {
+  const a = await lifecycleReplay('provider-ui-retained-target');
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.platform.evidenceSnapshot().installedBundleId, 'com.apple.webapp');
+  const beforeRelaunch = a.requests.length;
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  const relaunchRequests = a.requests.slice(beforeRelaunch);
+  const foregroundRead = relaunchRequests.findIndex((request) => request.body.script === 'mobile: activeAppInfo');
+  const springBoardTarget = relaunchRequests.findIndex((request) => request.path.endsWith('/appium/settings')
+    && request.method === 'POST' && request.body.settings.defaultActiveApplication === 'com.apple.springboard');
+  assert.ok(foregroundRead >= 0);
+  assert.ok(springBoardTarget >= 0);
+  assert.ok(foregroundRead < springBoardTarget, 'current foreground must be observed before changing the observation target');
+  assert.equal(relaunchRequests.filter((request) => request.body.script === 'mobile: pressButton').length, 1);
+  assert.equal(relaunchRequests.filter((request) => request.body.script === 'mobile: swipe').length, 0);
+  assert.equal(relaunchRequests.filter((request) => request.path.endsWith('/elements') && request.body.value.includes('XCUIElementTypePageIndicator')).length, 1);
+  assert.equal(relaunchRequests.filter((request) => request.path.endsWith('/home-icon/click')).length, 1);
+  assert.equal(relaunchRequests.some((request) => request.body.script === 'mobile: getContexts'), true);
+  assert.equal(relaunchRequests.some((request) => request.path.endsWith('/url') && !request.body.url), true);
+  assert.equal(relaunchRequests.some((request) => request.path.endsWith('/execute/sync') && request.body.script?.startsWith('return {')), true);
+  assert.equal(a.platform.evidenceSnapshot().installedBundleId, 'com.apple.webapp');
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.ok(a.platform.evidenceSnapshot().selectedInstalledContext);
+  assert.equal(a.settings().defaultActiveApplication, 'com.apple.webapp');
+});
+
 test('current-page readiness transition is polled without page navigation', async () => {
   const a = await lifecycleReplay('current-page-readiness-transition', { home: 'readiness-transition' });
   await a.owned(() => a.platform.launchInstalledApp());
@@ -1587,6 +1615,27 @@ test('malformed current foreground identity fails before Home navigation', async
   });
   const stopped = a.requests.length;
   assert.equal(a.requests.some((request) => request.body.script === 'mobile: pressButton' || request.body.script === 'mobile: swipe' || request.path.endsWith('/home-icon/click')), false);
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === first);
+  assert.equal(a.requests.length, stopped);
+});
+
+test('unexpected relaunch foreground fails closed before Home navigation', async () => {
+  const a = await lifecycleReplay('unexpected-relaunch-foreground');
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  a.state.foreground = 'com.example.other';
+  const beforeRelaunch = a.requests.length;
+  let first: unknown;
+  await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => {
+    first = error;
+    return /allowed iOS lifecycle identity/u.test(String(error));
+  });
+  const attempted = a.requests.slice(beforeRelaunch);
+  assert.equal(attempted.filter((request) => request.path.endsWith('/appium/settings') && request.method === 'POST').length, 0);
+  assert.equal(attempted.some((request) => request.body.script === 'mobile: pressButton'
+    || request.body.script === 'mobile: swipe' || request.path.endsWith('/home-icon/click')), false);
+  assert.equal(a.platform.evidenceSnapshot().installedBundleId, 'com.apple.webapp');
+  const stopped = a.requests.length;
   await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === first);
   assert.equal(a.requests.length, stopped);
 });
@@ -1679,7 +1728,8 @@ test('Plan13 lifecycle supported handoff survives obsolete Safari through backgr
     const index = a.requests.indexOf(transition);
     assert.equal(a.requests[index + 1].method, 'GET');
     assert.ok(a.requests[index + 1].path.endsWith('/appium/settings'));
-    assert.ok(/activeAppInfo|pressButton|terminateApp/u.test(a.requests[index + 2].body.script || '') || a.requests[index + 2].path.endsWith('/home-icon/click'));
+    assert.ok(/activeAppInfo|queryAppState|pressButton|terminateApp/u.test(a.requests[index + 2].body.script || '')
+      || a.requests[index + 2].path.endsWith('/context') || a.requests[index + 2].path.endsWith('/home-icon/click'));
   }
   assert.equal(a.requests.some((r) => /activateApp|launchApp/u.test(r.body.script || '') || (r.path.endsWith('/url') && r.method === 'POST')), false);
   assert.equal(a.driver.snapshot().unusable, false);
