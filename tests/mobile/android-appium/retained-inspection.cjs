@@ -414,17 +414,19 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
         validateSelectedDocument: async (_, result, first, last) => {
           check();
           const selected = result.observations.find((entry) => entry.targetId === result.selectedHandle);
-          if (!selected || JSON.stringify(selected.document) !== JSON.stringify(first.document) || JSON.stringify(selected.document) !== JSON.stringify(last.document)) throw new Error('Cross-protocol selected document mismatch');
+          const core = (document) => ({href: document.href, origin: document.origin, timeOrigin: document.timeOrigin, backendNodeId: document.backendNodeId});
+          if (!selected || JSON.stringify(selected.document) !== JSON.stringify(core(first.document)) || JSON.stringify(selected.document) !== JSON.stringify(core(last.document))) throw new Error('Cross-protocol selected document mismatch');
           check();
         },
       });
       const [before, after] = snapshots;
       if (snapshots.length !== 2) throw new Error('Missing bounded owner observations');
+      const phase = after.document.standalone ? 'installed-selected' : 'initial-browser-selected';
       if (after.document.standalone) {
         if (after.native.provider !== 'android-standalone') throw new Error('Standalone DOM is not installed native ownership');
         boundHandle = after.selectedHandle;
       }
-      return {...result, phase: boundHandle ? 'installed-selected' : 'initial-browser-selected', original: {...original, serial, sessionId: session, chromeSessionId: token}, before, after};
+      return {...result, phase, original: {...original, serial, sessionId: session, chromeSessionId: token}, before, after};
     }, true);
   };
   await run(Date.now() + 10_000, async () => {

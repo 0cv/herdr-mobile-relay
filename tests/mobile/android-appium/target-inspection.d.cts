@@ -6,13 +6,15 @@ export interface OwnerSnapshot extends AssociationSnapshot {
   handles: string[];
   selectedHandle: string;
 }
-export interface DocumentObservation {
+export interface CoreDocumentObservation {
   href: string;
   origin: string;
-  standalone: boolean;
-  provider: 'android-standalone' | 'browser';
   timeOrigin: number;
   backendNodeId: number;
+}
+export interface SelectedDocumentObservation extends CoreDocumentObservation {
+  standalone: boolean;
+  provider: 'android-standalone' | 'browser';
 }
 export interface ProcessObservation {
   pid: number;
@@ -32,9 +34,9 @@ export interface AssociationResult {
 }
 export interface InspectionResult {
   processAssociation: ProcessAssociation;
-  kind: 'bounded-nonactivating-observation';
+  kind: 'bounded-nonactivating-core-observation';
   targets: Array<{targetId: string; type: string; url: string; title: string}>;
-  observations: Array<{targetId: string; document: DocumentObservation}>;
+  observations: Array<{targetId: string; document: CoreDocumentObservation}>;
   selectedHandle: string;
 }
 export interface AssociationContract<Owner extends object, Snapshot extends AssociationSnapshot> {

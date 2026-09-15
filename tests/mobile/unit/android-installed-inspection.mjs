@@ -25,7 +25,8 @@ const {WebSocketServer} = createRequire(new URL('./commands/context/target-inspe
 const BOOT = 'A'.repeat(32);
 const APP = 'B'.repeat(32);
 const COMMAND = 'mobile: inspectRetainedChromeTargets';
-const EXPRESSION = "JSON.stringify({href:location.href,origin:location.origin,standalone:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,provider:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true ? 'android-standalone' : 'browser',timeOrigin:performance.timeOrigin})";
+const SCRIPT = "JSON.stringify({href:location.href,origin:location.origin,standalone:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,provider:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true ? 'android-standalone' : 'browser',timeOrigin:performance.timeOrigin})";
+const CORE_EXPRESSION = "JSON.stringify({href:location.href,origin:location.origin,timeOrigin:performance.timeOrigin})";
 const nativeActivity = 'org.chromium.chrome.browser.webapps.WebappActivity';
 async function fixture(run, initialMode = '') {
   const calls = [];
@@ -127,7 +128,7 @@ async function fixture(run, initialMode = '') {
     } else if (path === '/execute/sync') {
       assert.equal(req.method, 'POST');
       assert.deepEqual(payload.args, []);
-      assert.equal(payload.script, `return ${EXPRESSION}`);
+      assert.equal(payload.script, `return ${SCRIPT}`);
       value = JSON.stringify(document(state.selected));
       if (state.mode === 'wd-timeOrigin') value = JSON.stringify({...document(state.selected), timeOrigin: 999});
     } else if (path === '/url') value = document(state.selected).href;
@@ -146,6 +147,7 @@ async function fixture(run, initialMode = '') {
   wss.on('connection', (ws) => {
     const connectionId = ++connection;
     let processReads = 0;
+    let evaluationCount = 0;
     ws.on('message', (raw) => {
     const message = JSON.parse(raw);
     calls.push({...message, connectionId});
@@ -169,12 +171,35 @@ async function fixture(run, initialMode = '') {
       case 'Target.getTargets': result = {targetInfos: [target(BOOT), target(APP), ...state.extras]}; break;
       case 'Target.attachToTarget': result = {sessionId: message.params.targetId}; break;
       case 'DOM.getDocument': result = {root: root(message.sessionId)}; break;
-      case 'Runtime.evaluate':
-        assert.equal(message.params.expression, EXPRESSION);
+      case 'Runtime.evaluate': {
+        assert.equal(message.params.expression, CORE_EXPRESSION);
         assert.equal(message.params.throwOnSideEffect, true);
-        result = {result: {type: 'string', value: JSON.stringify(document(message.sessionId))}};
-        if (state.mode === 'observation-exception') {
-          result.exceptionDetails = {exception: {className: 'EvalError', description: 'EvalError: Possible side-effect in debuggee detected'}};
+        evaluationCount++;
+        const selectedDocument = document(message.sessionId);
+        result = {result: {type: 'string', value: JSON.stringify({ href: selectedDocument.href, origin: selectedDocument.origin, timeOrigin: selectedDocument.timeOrigin })}};
+        const sideEffect = 'EvalError: Possible side-effect in debug-evaluate';
+        const secretStack = `${sideEffect}\n    at read (https://attacker.invalid/session=SESSION_SECRET/pid=1234/token=CREDENTIAL_SECRET/${APP}:1:2)`;
+        const rejectInitial = evaluationCount === 1;
+        const rejectRepeat = evaluationCount === 3;
+        const exception = (className, description) => {
+          result.result = {type: 'object', subtype: 'error', className, description};
+          result.exceptionDetails = {exception: {className, description}};
+        };
+        if ((state.mode === 'observation-exception' && rejectInitial)
+          || (state.mode === 'observation-exception-stack' && rejectInitial)
+          || (state.mode === 'observation-hostile' && rejectInitial)) {
+          exception('EvalError', state.mode === 'observation-exception-stack' ? `${sideEffect}\n    at evaluate (https://fixture.test/app.js:1:2)` : state.mode === 'observation-hostile' ? secretStack : sideEffect);
+        } else if ((state.mode === 'observation-repeat-exception' && rejectRepeat)
+          || (state.mode === 'observation-repeat-exception-stack' && rejectRepeat)) {
+          exception('EvalError', state.mode === 'observation-repeat-exception-stack' ? secretStack : sideEffect);
+        } else if (state.mode === 'observation-old-message' && rejectInitial) {
+          exception('EvalError', 'EvalError: Possible side-effect in debuggee detected');
+        } else if (state.mode === 'observation-same-line-stack' && rejectInitial) {
+          exception('EvalError', `${sideEffect} at evaluate`);
+        } else if (state.mode === 'observation-wrong-class' && rejectInitial) {
+          exception('Error', sideEffect);
+        } else if (state.mode === 'observation-malformed-stack' && rejectInitial) {
+          exception('EvalError', `${sideEffect}\n    at`);
         } else if (state.mode === 'observation-nonstring') {
           result.result = {type: 'object', value: {untrusted: 'expression-result'}};
         } else if (state.mode === 'observation-both') {
@@ -183,12 +208,9 @@ async function fixture(run, initialMode = '') {
         } else if (state.mode === 'observation-malformed') {
           result.result = {type: null};
           result.exceptionDetails = {exception: {className: ['EvalError'], description: {untrusted: 'malformed'}}};
-        } else if (state.mode === 'observation-hostile') {
-          const hostile = 'https://attacker.invalid/session=SESSION_SECRET/pid=1234/token=CREDENTIAL_SECRET/' + 'x'.repeat(5000);
-          result.result = {type: hostile, value: hostile};
-          result.exceptionDetails = {exception: {className: hostile, description: hostile}, stackTrace: {callFrames: [hostile, hostile, hostile]}};
         }
         break;
+      }
       default: throw new Error(`Unexpected CDP command ${message.method}`);
     }
     ws.send(JSON.stringify({id: message.id, result, ...(message.sessionId ? {sessionId: message.sessionId} : {})}));
@@ -397,11 +419,18 @@ test('saved native disabled statuses with constructed gzip pass installed produc
 }, 'disabled'));
 
 for (const [mode, expected] of [
-  ['observation-exception', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'known-side-effect-rejection', remoteType: 'string'}],
+  ['observation-exception', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'known-side-effect-rejection', remoteType: 'object'}],
+  ['observation-exception-stack', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'known-side-effect-rejection', remoteType: 'object'}],
+  ['observation-repeat-exception', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'repeat', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'known-side-effect-rejection', remoteType: 'object'}],
+  ['observation-repeat-exception-stack', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'repeat', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'known-side-effect-rejection', remoteType: 'object'}],
+  ['observation-old-message', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'unknown', remoteType: 'object'}],
+  ['observation-same-line-stack', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'unknown', remoteType: 'object'}],
+  ['observation-wrong-class', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'Error', exceptionCause: 'unknown', remoteType: 'object'}],
+  ['observation-malformed-stack', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'unknown', remoteType: 'object'}],
   ['observation-nonstring', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: false, exceptionClass: 'unknown', exceptionCause: 'unknown', remoteType: 'object'}],
   ['observation-both', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'TypeError', exceptionCause: 'unknown', remoteType: 'object'}],
   ['observation-malformed', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'unknown', exceptionCause: 'unknown', remoteType: 'unknown'}],
-  ['observation-hostile', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'unknown', exceptionCause: 'unknown', remoteType: 'unknown'}],
+  ['observation-hostile', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'known-side-effect-rejection', remoteType: 'object'}],
 ]) test(`document observation rejection is bounded and sanitized: ${mode}`, async () => fixture(async ({inspect, state, calls, refused}) => {
   state.mode = mode;
   let firstMessage;
@@ -413,17 +442,74 @@ for (const [mode, expected] of [
     assert.ok(firstMessage.length < 1_000);
     assert.equal(firstMessage.includes('SESSION_SECRET'), false);
     assert.equal(firstMessage.includes('CREDENTIAL_SECRET'), false);
+    assert.equal(firstMessage.includes('attacker.invalid'), false);
+    assert.equal(firstMessage.includes('https://fixture.test'), false);
+    assert.equal(firstMessage.includes('at evaluate'), false);
+    assert.equal(firstMessage.includes('EvalError: Possible side-effect'), false);
+    assert.equal(firstMessage.includes(APP), false);
     return true;
   });
   const evaluation = calls.at(-1);
   assert.equal(evaluation.method, 'Runtime.evaluate');
   assert.equal(evaluation.params.throwOnSideEffect, true);
+  const count = calls.length;
   await assert.rejects(inspect(), error => {
     assert.equal(String(error), firstMessage);
     return true;
   });
+  assert.equal(calls.length, count);
   await refused();
 }));
+
+function assertExactSelectedInspectionTrace(route) {
+  assert.deepEqual(route.filter(call => call.url).map(call => [call.method, call.url]), [
+    ['GET', '/json/version'],
+    ['GET', '/session/original-token/window/handles'],
+    ['GET', '/session/original-token/window'],
+    ['POST', '/session/original-token/goog/cdp/execute'],
+    ['POST', '/session/original-token/execute/sync'],
+    ['POST', '/session/original-token/goog/cdp/execute'],
+    ['GET', '/session/original-token/window'],
+    ['GET', '/json/version'],
+    ['GET', '/json/version'],
+    ['GET', '/json/version'],
+    ['GET', '/json/version'],
+    ['GET', '/session/original-token/window/handles'],
+    ['GET', '/session/original-token/window'],
+    ['POST', '/session/original-token/goog/cdp/execute'],
+    ['POST', '/session/original-token/execute/sync'],
+    ['POST', '/session/original-token/goog/cdp/execute'],
+    ['GET', '/session/original-token/window'],
+    ['GET', '/json/version'],
+  ]);
+  assert.deepEqual(route.filter(call => call.id).map(call => [call.id, call.method, call.sessionId]), [
+    [1, 'SystemInfo.getProcessInfo', undefined],
+    [2, 'Target.getTargets', undefined],
+    [3, 'Target.attachToTarget', undefined],
+    [4, 'DOM.getDocument', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+    [5, 'Runtime.evaluate', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+    [6, 'DOM.getDocument', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+    [7, 'Target.attachToTarget', undefined],
+    [8, 'DOM.getDocument', 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'],
+    [9, 'Runtime.evaluate', 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'],
+    [10, 'DOM.getDocument', 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'],
+    [11, 'DOM.getDocument', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+    [12, 'Runtime.evaluate', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+    [13, 'DOM.getDocument', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'],
+    [14, 'DOM.getDocument', 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'],
+    [15, 'Runtime.evaluate', 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'],
+    [16, 'DOM.getDocument', 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'],
+    [17, 'Target.getTargets', undefined],
+    [18, 'SystemInfo.getProcessInfo', undefined],
+  ]);
+  for (const call of route.filter(call => call.url && call.url.endsWith('/execute/sync'))) {
+    assert.deepEqual(call.payload.args, []);
+    assert.equal(call.payload.script, `return ${SCRIPT}`);
+  }
+  for (const call of route.filter(call => call.url && call.url.endsWith('/goog/cdp/execute'))) {
+    assert.deepEqual(call.payload, {cmd: 'DOM.getDocument', params: {depth: 0, pierce: false}});
+  }
+}
 
 test('actual installed dispatcher: repeated bounded two-page reads and same-scope navigation', async () => fixture(async ({inspect, state, calls}) => {
   for (const path of ['#settings', '#pairing', '#complete']) {
@@ -434,6 +520,7 @@ test('actual installed dispatcher: repeated bounded two-page reads and same-scop
     assert.equal(route.filter(call => call.adb).length, 52);
     assert.equal(route.filter(call => call.url).length, 18);
     assert.equal(route.filter(call => call.id).length, 18);
+    assertExactSelectedInspectionTrace(route);
     assert.equal(result.phase, 'installed-selected');
     assert.equal(result.selectedHandle, APP);
     assert.equal(result.observations.length, 2);
@@ -460,12 +547,24 @@ test('initial browser selection is observational, installed selection is separat
   await refused();
 }));
 
-for (const mode of ['ambiguous', 'unknown']) test(`consumer receives ${mode} rather than sole proof`, async () => fixture(async ({inspect, state}) => {
-  state.mode = mode;
-  if (mode === 'unknown') state.extras = [{targetId: 'opaque', type: 'new_document_kind', url: 'https://app/', title: 'same', attached: false}];
+test('accepted lost coverage: an unselected standalone page is not part of mode proof', async () => fixture(async ({inspect, state}) => {
+  const baseline = await inspect();
+  assert.equal(state.mode, '');
+  state.mode = 'ambiguous';
+  const changed = await inspect();
+  assert.equal(state.mode, 'ambiguous');
+  assert.deepEqual(changed.targets, baseline.targets);
+  assert.deepEqual(changed.observations, baseline.observations);
+  assert.equal(changed.phase, 'installed-selected');
+  assert.equal(changed.selectedHandle, APP);
+  assert.ok(changed.observations.every((entry) => !Object.hasOwn(entry.document, 'standalone') && !Object.hasOwn(entry.document, 'provider')));
+}));
+
+test('unknown target kinds remain inventoried rather than becoming mode proof', async () => fixture(async ({inspect, state}) => {
+  state.mode = 'unknown';
+  state.extras = [{targetId: 'opaque', type: 'new_document_kind', url: 'https://app/', title: 'same', attached: false}];
   const result = await inspect();
-  if (mode === 'ambiguous') assert.equal(result.observations.filter((entry) => entry.document.standalone).length, 2);
-  else assert.equal(result.targets.at(-1).type, 'new_document_kind');
+  assert.equal(result.targets.at(-1).type, 'new_document_kind');
 }));
 
 for (const mode of ['handles', 'forward', 'serial-forward', 'namespace-absent', 'namespace-duplicate', 'namespace-nested', 'namespace-different', 'boot', 'process-string', 'process-wrong', 'process-missing', 'process-duplicate', 'process-cpu', 'process-protocol', 'process-final-loss', 'endpoint', 'wd-document', 'wd-timeOrigin', 'wd-large', 'cdp-wrong-id', 'pid', 'startTime', 'inode', 'native-browser', 'current-handle', 'outer-session', 'inner-session', 'owner-object', 'adb-object', 'adb-serial', 'caps-endpoint', 'proxy-endpoint', 'wrapper-adb', 'adb-executable', 'wrong-context', 'wrong-current-owner', 'wrong-dispatch', 'inspection-miss']) {

@@ -25,7 +25,10 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     'kernel-boot': r => { r.original.kernelCapability.bootId = '22222222-1111-1111-1111-111111111111'; },
     'kernel-time': r => { r.original.kernelCapability.acquiredFinishedAt = Date.now() + 10_000; },
     'kernel-snapshot': r => { r.after.native.kernelCapability.mode = 'disabled'; },
-    'kernel-cache-time': r => { r.after.native.kernelCapability.acquiredStartedAt++; },
+    'kernel-cache-time': r => {
+      r.after.native.kernelCapability.acquiredStartedAt--;
+      r.after.native.kernelCapability.acquiredFinishedAt--;
+    },
     'original-namespace': r => { Object.assign(r.original, { namespace: 'unknown' }); },
     'original-session': r => { r.original.sessionId = 'replacement'; },
     'native-pid': r => { r.after.native.pid = '124'; },
@@ -37,7 +40,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     'current-document': r => { r.after.document.backendNodeId++; },
     'current-provider': r => { r.before.document.provider = 'browser'; },
     'current-window': r => { r.selectedHandle = bootstrap; r.before.selectedHandle = bootstrap; r.after.selectedHandle = bootstrap; },
-    second: r => { r.observations[0].document.standalone = true; r.observations[0].document.provider = 'android-standalone'; },
+    second: r => { Object.assign(r.observations[0].document, { standalone: true, provider: 'android-standalone' }); },
     unknown: r => { r.targets[0].type = 'unknown'; },
     iframe: r => { r.targets[0].type = 'iframe'; },
     'background-page': r => { r.targets[0].type = 'background_page'; },
@@ -55,14 +58,19 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     'endpoint-drift': r => { r.after.endpoint.port++; },
     'forward-drift': r => { r.after.forward.inode = '43'; },
     'document-scope': r => { r.observations[1].document.href = 'https://wrong.test/'; r.observations[1].document.origin = 'https://wrong.test'; },
+    'zero-candidate': r => { r.observations[1].document.href = 'https://other.test/'; r.observations[1].document.origin = 'https://other.test'; r.targets[1].url = 'https://other.test/'; },
+    'association-final-count': r => { r.processAssociation.after.requestId++; },
   };
-  for (const scenario of [...Object.keys(changes), 'route-error', 'route-timeout', 'overlap', 'fresh-navigation', 'service-worker', 'mutation-postcheck', 'parent-admission', 'identity-document-race', 'completion-document-race', 'preference-native-race', 'agent-native-race', 'composer-native-race', 'completion-parent-admission', 'completion-parent-expiry', 'failure-parent-admission', 'failure-parent-expiry', 'composer-type-native-race']) {
-    let armed = false;
+  for (const scenario of [...Object.keys(changes), 'route-error', 'route-timeout', 'overlap', 'fresh-navigation', 'service-worker', 'mutation-postcheck', 'parent-admission', 'identity-document-race', 'completion-document-race', 'preference-native-race', 'agent-native-race', 'composer-native-race', 'completion-parent-admission', 'completion-parent-expiry', 'failure-parent-admission', 'failure-parent-expiry', 'composer-type-native-race', 'candidate-navigation-during-switch', 'confirmation-publication']) {
+    const admissionScenario = ['zero-candidate', 'candidate-navigation-during-switch', 'confirmation-publication'].includes(scenario);
+    let armed = admissionScenario;
     let calls = 0;
     let selected = bootstrap;
     let href = 'https://fixture.test/';
     let mutations = 0;
     let readCalls = 0;
+    let productCalls = 0;
+    let confirmationObserved = false;
     let elapsed = 0;
     const clock = Date.now;
     Date.now = () => clock() + elapsed;
@@ -77,15 +85,32 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       const response = (value: unknown) => Response.json({ value, sessionId: 'original' });
       if (path === '/session') return response({});
-      if (path === '/window' && init?.method === 'POST') { selected = body.handle; switches.push(selected); return response(null); }
-      if (path === '/url' && init?.method === 'GET') return response(href);
+      if (path === '/window' && init?.method === 'POST') {
+        selected = body.handle;
+        switches.push(selected);
+        if (scenario === 'candidate-navigation-during-switch' && switches.length === 1) {
+          timeOrigin++;
+          mutations++;
+        }
+        if (scenario === 'confirmation-publication' && switches.length === 1) {
+          assert.equal((platform as any).selectedInstalledWindowValid, false);
+          assert.equal((platform as any).inspectedDocument, '');
+          assert.equal((platform as any).inspectedNavigationId, '');
+          assert.equal(readCalls, 0);
+          assert.equal(productCalls, 0);
+          confirmationObserved = true;
+        }
+        return response(null);
+      }
+      if (path === '/url' && init?.method === 'GET') { productCalls++; return response(href); }
       if (path === '/url' && init?.method === 'POST') { href = body.url; timeOrigin++; mutations++; return response(null); }
-      if (path.endsWith('/click') || path.endsWith('/value')) { mutations++; return response(null); }
-      if (path === '/element') return response({ 'element-6066-11e4-a52e-4f735466cecf': 'settings' });
-      if (path === '/elements') return response([{ 'element-6066-11e4-a52e-4f735466cecf': 'settings' }]);
-      if (path.endsWith('/rect')) return response({ x: 0, y: 0, width: 100, height: 100 });
+      if (path.endsWith('/click') || path.endsWith('/value')) { productCalls++; mutations++; return response(null); }
+      if (path === '/element') { productCalls++; return response({ 'element-6066-11e4-a52e-4f735466cecf': 'settings' }); }
+      if (path === '/elements') { productCalls++; return response([{ 'element-6066-11e4-a52e-4f735466cecf': 'settings' }]); }
+      if (path.endsWith('/rect')) { productCalls++; return response({ x: 0, y: 0, width: 100, height: 100 }); }
       if (path === '/execute/sync') {
         if (body.script !== 'mobile: inspectRetainedChromeTargets') {
+          productCalls++;
           readCalls++;
           const value = { navigationId: String(timeOrigin), origin: 'https://fixture.test', standalone: true, provider: 'android-standalone', phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true, rawPlanPresent: true };
           if (armed && ['identity-document-race', 'completion-document-race'].includes(scenario)) { timeOrigin++; mutations++; }
@@ -120,8 +145,32 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://inspection.invalid', outputDir: '/tmp', certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget });
     Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
       retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([bootstrap, installed], bootstrap, installed, startedAt).original } });
+    if (admissionScenario && scenario !== 'confirmation-publication') {
+      let first: unknown;
+      await assert.rejects(() => platform.attachToInstalledView(), error => { first = error; return true; });
+      assert.deepEqual(switches, scenario === 'candidate-navigation-during-switch' ? [installed] : []);
+      assert.equal((platform as any).selectedInstalledWindowValid, false);
+      assert.equal((platform as any).inspectedDocument, '');
+      assert.equal((platform as any).inspectedNavigationId, '');
+      assert.equal(productCalls, 0);
+      const count = calls;
+      await assert.rejects(() => platform.attachToInstalledView(), error => error === first);
+      assert.equal(calls, count);
+      console.log(`PASS retained inspection ${scenario}`);
+      continue;
+    }
     await platform.attachToInstalledView();
     assert.deepEqual(switches, [installed]);
+    if (scenario === 'confirmation-publication') {
+      assert.equal(confirmationObserved, true);
+      assert.equal((platform as any).selectedInstalledWindowValid, true);
+      assert.ok((platform as any).inspectedDocument);
+      assert.ok((platform as any).inspectedNavigationId);
+      assert.equal(readCalls, 0);
+      assert.equal(productCalls, 0);
+      console.log(`PASS retained inspection ${scenario}`);
+      continue;
+    }
     armed = true;
     if (scenario === 'fresh-navigation' || scenario === 'service-worker') {
       await platform.readRunningIdentity();

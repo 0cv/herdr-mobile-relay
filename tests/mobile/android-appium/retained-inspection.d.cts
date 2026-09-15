@@ -1,7 +1,7 @@
 import type {KernelCapability, NativeNamespace} from './kernel-namespace.cjs';
 import type {AndroidDriver} from 'appium-android-driver';
 import type {Chromedriver} from 'appium-chromedriver';
-import type {DocumentObservation, InspectionResult, OwnerSnapshot} from './target-inspection.cjs';
+import type {InspectionResult, OwnerSnapshot, SelectedDocumentObservation} from './target-inspection.cjs';
 
 export interface RetainedInspectionInput {
   deadline: number;
@@ -18,7 +18,7 @@ export interface NativeObservation {
   provider: 'browser' | 'android-standalone';
 }
 export interface RetainedSnapshot extends OwnerSnapshot {
-  document: DocumentObservation;
+  document: SelectedDocumentObservation;
   native: NativeObservation;
   nativeBefore: NativeObservation;
   forward: {serial: string; port: number; socket: 'chrome_devtools_remote'; inode: string; browserVersion: string};

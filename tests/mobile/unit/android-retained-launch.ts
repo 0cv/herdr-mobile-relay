@@ -10,7 +10,7 @@ import { gzipSync } from 'node:zlib';
 import { kernelReaderFixture } from './android-kernel-reader-fixture';
 
 export async function runAndroidRetainedLaunchRegressions(scenarios?: string[]): Promise<void> {
-  for (const scenario of scenarios ?? ['boot', 'kernel-boot-acquisition', 'kernel-disabled', 'kernel-unreadable', 'kernel-missing', 'kernel-malformed', 'kernel-duplicate', 'kernel-conflicting', 'kernel-enabled-absent', 'kernel-disabled-fields', 'kernel-pid-duplicate', 'kernel-nspid-duplicate', 'kernel-nested', 'kernel-same-number-nested', 'healthy', 'pid-before', 'start-before', 'selected-window-loss', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-owner', 'replaced-session', 'missing-current', 'missing-handles', 'missing-context', 'refusal', 'timeout', 'malformed', 'wrong-id', 'wrong-component', 'wrong-scope', 'wrong-mac', 'ambiguous-shortcut', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document', 'recorded-two-page']) {
+  for (const scenario of scenarios ?? ['boot', 'kernel-boot-acquisition', 'kernel-disabled', 'kernel-unreadable', 'kernel-missing', 'kernel-malformed', 'kernel-duplicate', 'kernel-conflicting', 'kernel-enabled-absent', 'kernel-disabled-fields', 'kernel-pid-duplicate', 'kernel-nspid-duplicate', 'kernel-nested', 'kernel-same-number-nested', 'healthy', 'pid-before', 'start-before', 'selected-window-loss', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-owner', 'replaced-session', 'missing-current', 'missing-handles', 'missing-context', 'refusal', 'timeout', 'malformed', 'wrong-id', 'wrong-component', 'wrong-scope', 'wrong-mac', 'ambiguous-shortcut', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document', 'zero-candidate', 'still-browser-confirmation', 'recorded-two-page']) {
     const root = await mkdtemp(join(tmpdir(), 'android-retained-launch-'));
     const saved = { adb: process.env.ADB, ownership: process.env.MOBILE_DEVICE_OWNERSHIP_FILE };
     const file = join(root, 'state.json');
@@ -136,11 +136,32 @@ console.log(output);
             if (lostSelected) result.after.handles = [bootstrap];
             if (scenario === 'missing-context') return response({ error: 'unknown error', message: 'original context missing' }, 500);
             if (scenario === 'wrong-origin') result.observations[1].document.origin = 'https://wrong.test';
-            if (scenario === 'stale-browser' || scenario === 'late-document') result.observations[1].document.standalone = false;
-            if (scenario === 'wrong-provider') result.observations[1].document.provider = 'browser';
+            if (scenario === 'zero-candidate') {
+              result.observations[1].document.href = 'https://other.test/';
+              result.observations[1].document.origin = 'https://other.test';
+              result.targets[1].url = 'https://other.test/';
+            }
+            if (scenario === 'still-browser-confirmation') {
+              result.phase = 'initial-browser-selected';
+              for (const snapshot of [result.before, result.after]) {
+                snapshot.document.standalone = false;
+                snapshot.document.provider = 'browser';
+              }
+            }
+            if (scenario === 'stale-browser' || scenario === 'late-document') {
+              result.before.document.standalone = false;
+              result.before.document.provider = 'browser';
+              result.after.document.standalone = false;
+              result.after.document.provider = 'browser';
+            }
+            if (scenario === 'wrong-provider') result.after.document.provider = 'browser';
             if (scenario === 'ambiguous-document') {
-              result.observations[0].document.standalone = true;
-              result.observations[0].document.provider = 'android-standalone';
+              const second = 'C'.repeat(32);
+              result.targets.push({ targetId: second, type: 'page', url: 'https://fixture.test/', title: '' });
+              result.observations.push({ targetId: second, document: { href: 'https://fixture.test/', origin: 'https://fixture.test', timeOrigin: originalStartedAt - 1, backendNodeId: 3 } });
+              result.before.handles.push(second);
+              result.after.handles.push(second);
+              result.processAssociation.after.requestId = 4 + 7 * result.before.handles.length;
             }
             return response(result);
           }
@@ -237,10 +258,13 @@ console.log(output);
         assert.equal(calls.length, count);
         assert.equal(await readFile(file, 'utf8'), native);
         assert.deepEqual(client.snapshot().firstFatal, fatal);
-        const afterLaunch = ['boot', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-context', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document'].includes(scenario);
+        const afterLaunch = ['boot', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-context', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document', 'zero-candidate', 'still-browser-confirmation'].includes(scenario);
         assert.equal(JSON.parse(native).launched, afterLaunch ? 1 : 0);
         assert.equal(calls.some(call => call.method === 'DELETE'), false);
         assert.equal(calls.filter(call => call.path === '/session').length, scenario === 'replaced-session' ? 2 : 1);
+        if (scenario === 'zero-candidate' || scenario === 'still-browser-confirmation') {
+          assert.deepEqual(calls.filter(call => call.path === '/window' && call.method === 'POST').map(call => call.body.handle), scenario === 'zero-candidate' ? [] : [installed]);
+        }
       }
       assert.equal(calls.some(call => call.path === '/url' && call.method === 'POST'), false);
       assert.equal(calls.some(call => call.body.name === 'WEBVIEW_other'), false);

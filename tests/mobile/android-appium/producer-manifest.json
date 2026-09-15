@@ -75,19 +75,19 @@
     },
     "lib/commands/context/retained-inspection.cjs": {
       "source": "retained-inspection.cjs",
-      "sha256": "6043b8d4f72168373ebfec8286e0cac6bc9bb3e287fd625308999d5b6a5cb9d3"
+      "sha256": "8d22a5ad4523802d19303a7947be4f97179c1b962c087c63f95b57e08cdcda5a"
     },
     "lib/commands/context/retained-inspection.d.cts": {
       "source": "retained-inspection.d.cts",
-      "sha256": "a020a13e99f49f2b85527fbfb106d28b59841262d26685cb49ff4c0e2827dc53"
+      "sha256": "863cc166ea0304af7cf822457e083a557649d32df77f907fa257f37770e6e20c"
     },
     "lib/commands/context/target-inspection.cjs": {
       "source": "target-inspection.cjs",
-      "sha256": "58c21b69457ee8ddcdace5b1627cdf1682245aff4462464790a343e11f798c48"
+      "sha256": "9d0a98716f10d802752bcd6b3dd6855bb2087a8f0aee6d07aba06a9bc69838c1"
     },
     "lib/commands/context/target-inspection.d.cts": {
       "source": "target-inspection.d.cts",
-      "sha256": "4e947b68bb38c2f10f13796bdcc77afdb714eea318323a2d80fe1000478b13e0"
+      "sha256": "13c33343d646c50262bbc049b403425a51137a784713c953cc5fcdcc324136a1"
     },
     "build/lib/commands/context/adb-inspection.cjs": {
       "source": "adb-inspection.cjs",
@@ -99,19 +99,19 @@
     },
     "build/lib/commands/context/retained-inspection.cjs": {
       "source": "retained-inspection.cjs",
-      "sha256": "6043b8d4f72168373ebfec8286e0cac6bc9bb3e287fd625308999d5b6a5cb9d3"
+      "sha256": "8d22a5ad4523802d19303a7947be4f97179c1b962c087c63f95b57e08cdcda5a"
     },
     "build/lib/commands/context/retained-inspection.d.cts": {
       "source": "retained-inspection.d.cts",
-      "sha256": "a020a13e99f49f2b85527fbfb106d28b59841262d26685cb49ff4c0e2827dc53"
+      "sha256": "863cc166ea0304af7cf822457e083a557649d32df77f907fa257f37770e6e20c"
     },
     "build/lib/commands/context/target-inspection.cjs": {
       "source": "target-inspection.cjs",
-      "sha256": "58c21b69457ee8ddcdace5b1627cdf1682245aff4462464790a343e11f798c48"
+      "sha256": "9d0a98716f10d802752bcd6b3dd6855bb2087a8f0aee6d07aba06a9bc69838c1"
     },
     "build/lib/commands/context/target-inspection.d.cts": {
       "source": "target-inspection.d.cts",
-      "sha256": "4e947b68bb38c2f10f13796bdcc77afdb714eea318323a2d80fe1000478b13e0"
+      "sha256": "13c33343d646c50262bbc049b403425a51137a784713c953cc5fcdcc324136a1"
     },
     "lib/commands/context/kernel-namespace.cjs": {
       "source": "kernel-namespace.cjs",

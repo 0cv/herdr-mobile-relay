@@ -9,6 +9,7 @@ assert.ok(process.env.APPIUM_HOME, 'Owned installed fixture required');
 const installedRequire = createRequire(path.join(process.env.APPIUM_HOME, 'node_modules/appium-android-driver/build/lib/commands/context/target-inspection.cjs'));
 const {WebSocketServer} = installedRequire('ws');
 const {inspectTargets, associateBrowserProcess} = installedRequire('./target-inspection.cjs');
+const CORE_EXPRESSION = 'JSON.stringify({href:location.href,origin:location.origin,timeOrigin:performance.timeOrigin})';
 
 async function fixture(mode, run) {
   const calls = [];
@@ -32,6 +33,7 @@ async function fixture(mode, run) {
   });
   let inventoryCount = 0;
   let evaluations = 0;
+  let unselectedMode = 'browser';
   const target = (id) => ({targetId: id, type: 'page', url: 'https://app/', title: 'same', attached: true});
   wss.on('connection', (ws) => {
     connections++;
@@ -92,8 +94,9 @@ async function fixture(mode, run) {
         break;
       case 'Runtime.evaluate': {
         evaluations++;
-        const standalone = mode === 'ambiguous' || message.sessionId === 'installed';
-        result = {result: {type: 'string', value: JSON.stringify({href: 'https://app/', origin: 'https://app', standalone, provider: standalone ? 'android-standalone' : 'browser', timeOrigin: 100})}};
+        const timeOrigin = (message.sessionId === 'installed' ? 100 : 50) + (mode === 'repeat-drift' && evaluations > 2 ? 1 : 0);
+        result = {result: {type: 'string', value: JSON.stringify({href: 'https://app/', origin: 'https://app', timeOrigin})}};
+        if (mode === 'other-page-unreadable' && message.sessionId === 'bootstrap' && evaluations === 1) result.result = {type: 'object', value: {untrusted: 'other-page'}};
         break;
       }
       default: throw new Error(`Unexpected command ${message.method}`);
@@ -142,7 +145,11 @@ async function fixture(mode, run) {
     },
   };
   if (mode === 'expired') contract.deadline = Date.now() - 1;
-  try { await run({owner, contract, calls, connections: () => connections, failures: () => failures}); }
+  try {
+    await run({owner, contract, calls, connections: () => connections, failures: () => failures,
+      setUnselectedMode: value => { unselectedMode = value; }, unselectedMode: () => unselectedMode,
+      unselectedDocument: () => ({href: 'https://app/', origin: 'https://app', standalone: unselectedMode === 'standalone', provider: unselectedMode === 'standalone' ? 'android-standalone' : 'browser'})});
+  }
   finally {
     for (const timer of timers) clearTimeout(timer);
     for (const client of wss.clients) client.terminate();
@@ -152,22 +159,42 @@ async function fixture(mode, run) {
   }
 }
 
-for (const mode of ['healthy', 'ambiguous', 'unknown', 'pid-children', 'bare']) {
+for (const mode of ['healthy', 'unknown', 'pid-children', 'bare']) {
   test(mode, async () => fixture(mode, async ({owner, contract, calls, connections, failures}) => {
     const result = await inspectTargets(owner, contract);
     assertAssociation(result, calls, contract);
     assert.equal(connections(), 1);
-    assert.equal(result.kind, 'bounded-nonactivating-observation');
+    assert.equal(result.kind, 'bounded-nonactivating-core-observation');
     assert.equal(result.observations.length, 2);
-    assert.equal(result.observations.filter((o) => o.document.standalone).length, mode === 'ambiguous' ? 2 : 1);
+    assert.ok(result.observations.every((o) => Object.keys(o.document).sort().join(',') === 'backendNodeId,href,origin,timeOrigin'));
     assert.equal(result.targets.length, mode === 'unknown' ? 3 : 2);
     assert.equal(failures(), 0);
+    assert.equal(result.processAssociation.before.requestId, 1);
+    assert.equal(result.processAssociation.after.requestId, 18);
+    assertExactTargetTrace(calls);
     assert(calls.every((c) => ['SystemInfo.getProcessInfo', 'Target.getTargets', 'Target.attachToTarget', 'DOM.getDocument', 'Runtime.evaluate'].includes(c.method)));
     const expressions = calls.filter((c) => c.method === 'Runtime.evaluate').map((c) => c.params.expression);
-    assert.equal(new Set(expressions).size, 1);
+    assert.deepEqual(expressions, Array(4).fill(CORE_EXPRESSION));
   }));
 }
-for (const mode of ['pid-string', 'pid-fraction', 'pid-zero', 'pid-negative', 'pid-overflow', 'pid-unsafe', 'pid-missing-id', 'pid-wrong', 'pid-after-wrong', 'pid-missing', 'pid-absent', 'pid-duplicate', 'pid-duplicate-id', 'pid-child-invalid', 'pid-many', 'pid-type', 'pid-no-browser', 'pid-no-cpu', 'pid-cpu-string', 'pid-cpu-negative', 'pid-null', 'pid-child-route', 'child-root-route', 'pid-error', 'pid-stale', 'pid-repeat', 'pid-after-late', 'final-disconnect', 'final-selected-disconnect', 'duplicate', 'invalid', 'unmapped', 'changed', 'disappeared', 'replaced', 'wrong-target', 'wrong-attach-session', 'wrong-request', 'wrong-session', 'event', 'http-large', 'http-partial', 'http-malformed', 'frame-large', 'frame-partial', 'frame-malformed', 'http-stall', 'open-stall', 'read-stall', 'expired', 'owner-before', 'owner-during', 'owner-after', 'selected-refused', 'disconnect', 'late', 'foreign-endpoint', 'document-replaced']) {
+
+test('accepted loss: an unselected standalone mode change remains unobserved', async () => fixture('healthy', async ({owner, contract, calls, setUnselectedMode, unselectedMode, unselectedDocument}) => {
+  const inspect = () => inspectTargets(owner, {...contract, deadline: Date.now() + 2000});
+  const baseline = await inspect();
+  assert.equal(unselectedMode(), 'browser');
+  assert.equal(unselectedDocument().standalone, false);
+  setUnselectedMode('standalone');
+  const changed = await inspect();
+  assert.equal(unselectedMode(), 'standalone');
+  assert.deepEqual(unselectedDocument(), {href: 'https://app/', origin: 'https://app', standalone: true, provider: 'android-standalone'});
+  assert.deepEqual(changed.targets, baseline.targets);
+  assert.deepEqual(changed.observations, baseline.observations);
+  assert.ok(changed.observations.every(entry => !Object.hasOwn(entry.document, 'standalone') && !Object.hasOwn(entry.document, 'provider')));
+  assert.equal(changed.selectedHandle, baseline.selectedHandle);
+  assert.equal(calls.length, 36);
+}));
+
+for (const mode of ['pid-string', 'pid-fraction', 'pid-zero', 'pid-negative', 'pid-overflow', 'pid-unsafe', 'pid-missing-id', 'pid-wrong', 'pid-after-wrong', 'pid-missing', 'pid-absent', 'pid-duplicate', 'pid-duplicate-id', 'pid-child-invalid', 'pid-many', 'pid-type', 'pid-no-browser', 'pid-no-cpu', 'pid-cpu-string', 'pid-cpu-negative', 'pid-null', 'pid-child-route', 'child-root-route', 'pid-error', 'pid-stale', 'pid-repeat', 'pid-after-late', 'final-disconnect', 'final-selected-disconnect', 'duplicate', 'invalid', 'unmapped', 'changed', 'disappeared', 'replaced', 'wrong-target', 'wrong-attach-session', 'wrong-request', 'wrong-session', 'event', 'http-large', 'http-partial', 'http-malformed', 'frame-large', 'frame-partial', 'frame-malformed', 'http-stall', 'open-stall', 'read-stall', 'expired', 'owner-before', 'owner-during', 'owner-after', 'selected-refused', 'disconnect', 'late', 'foreign-endpoint', 'document-replaced', 'repeat-drift', 'other-page-unreadable']) {
   test(mode, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
     await assert.rejects(inspectTargets(owner, contract));
     assert.equal(failures(), 1);
@@ -191,6 +218,43 @@ test('original PID cannot rebase between entry points', async () => fixture('hea
   assert.equal(calls.length, count);
   assert.equal(connections(), 2);
 }));
+
+function assertExactTargetTrace(calls) {
+  const route = calls.map(call => [call.id, call.method, call.sessionId]);
+  assert.deepEqual(route, [
+    [1, 'SystemInfo.getProcessInfo', undefined],
+    [2, 'Target.getTargets', undefined],
+    [3, 'Target.attachToTarget', undefined],
+    [4, 'DOM.getDocument', 'bootstrap'],
+    [5, 'Runtime.evaluate', 'bootstrap'],
+    [6, 'DOM.getDocument', 'bootstrap'],
+    [7, 'Target.attachToTarget', undefined],
+    [8, 'DOM.getDocument', 'installed'],
+    [9, 'Runtime.evaluate', 'installed'],
+    [10, 'DOM.getDocument', 'installed'],
+    [11, 'DOM.getDocument', 'bootstrap'],
+    [12, 'Runtime.evaluate', 'bootstrap'],
+    [13, 'DOM.getDocument', 'bootstrap'],
+    [14, 'DOM.getDocument', 'installed'],
+    [15, 'Runtime.evaluate', 'installed'],
+    [16, 'DOM.getDocument', 'installed'],
+    [17, 'Target.getTargets', undefined],
+    [18, 'SystemInfo.getProcessInfo', undefined],
+  ]);
+  for (const call of calls) {
+    if (call.method === 'SystemInfo.getProcessInfo' || call.method === 'Target.getTargets') assert.deepEqual(call.params, {});
+    if (call.method === 'Target.attachToTarget') assert.deepEqual(call.params, {targetId: call.id === 3 ? 'bootstrap' : 'installed', flatten: true});
+    if (call.method === 'DOM.getDocument') assert.deepEqual(call.params, {depth: 0, pierce: false});
+    if (call.method === 'Runtime.evaluate') {
+      assert.deepEqual(Object.keys(call.params).sort(), ['expression', 'returnByValue', 'silent', 'throwOnSideEffect', 'timeout']);
+      assert.equal(call.params.expression, CORE_EXPRESSION);
+      assert.equal(call.params.returnByValue, true);
+      assert.equal(call.params.silent, true);
+      assert.equal(call.params.throwOnSideEffect, true);
+      assert.ok(Number.isSafeInteger(call.params.timeout) && call.params.timeout > 0);
+    }
+  }
+}
 
 function assertAssociation(result, calls, contract) {
   const association = result.processAssociation;

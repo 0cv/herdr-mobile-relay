@@ -700,20 +700,34 @@ export class AndroidPlatform implements MobilePlatform {
               bootId: native.bootId, namespace: native.namespace, kernelCapability: native.kernelCapability, activity: native.activity, provider: native.provider,
               startedAt: native.startedAt, finishedAt: native.finishedAt })) })),
         } });
-        this.lastForeground = { packageName: 'com.android.chrome', activity: after.native.activity, pid: after.native.pid };
-        this.lastUrl = after.document.href;
-        this.inspectedDocument = JSON.stringify([decoded.candidate, after.document.backendNodeId, after.document.timeOrigin]);
-        this.inspectedNavigationId = String(after.document.timeOrigin);
         return decoded;
       };
+      const bindInstalledWindow = (decoded: ReturnType<typeof decodeRetainedInspection>): void => {
+        const { after } = decoded.result;
+        this.selectedInstalledWindow = decoded.result.selectedHandle;
+        this.selectedInstalledWindowValid = true;
+        this.lastForeground = { packageName: 'com.android.chrome', activity: after.native.activity, pid: after.native.pid };
+        this.lastUrl = after.document.href;
+        this.inspectedDocument = JSON.stringify([decoded.result.selectedHandle, after.document.href, after.document.origin, after.document.backendNodeId, after.document.timeOrigin]);
+        this.inspectedNavigationId = String(after.document.timeOrigin);
+      };
       const first = await inspect(this.selectedInstalledWindowValid ? this.selectedInstalledWindow : '');
-      if (this.selectedInstalledWindowValid) return;
-      this.selectedInstalledWindow = first.candidate;
-      this.selectedInstalledWindowValid = true;
-      if (first.result.selectedHandle !== first.candidate) {
-        await this.driver.switchWindow(first.candidate, switchMs);
-        await inspect(first.candidate);
+      if (this.selectedInstalledWindowValid) {
+        bindInstalledWindow(first);
+        return;
       }
+      if (first.result.phase === 'installed-selected') {
+        bindInstalledWindow(first);
+        return;
+      }
+      const provisional = first.result.observations.find((entry) => entry.targetId === first.candidate)?.document;
+      if (!provisional) throw new Error('Missing provisional installed core observation');
+      await this.driver.switchWindow(first.candidate, switchMs);
+      const confirmed = await inspect(first.candidate);
+      const selected = confirmed.result.observations.find((entry) => entry.targetId === confirmed.result.selectedHandle)?.document;
+      if (confirmed.result.phase !== 'installed-selected' || confirmed.result.selectedHandle !== first.candidate || confirmed.candidate !== first.candidate
+        || !selected || JSON.stringify(provisional) !== JSON.stringify(selected)) throw new Error('Provisional installed document identity was not confirmed');
+      bindInstalledWindow(confirmed);
     } catch {
       this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'retained installed observation or selection failed');
     }
