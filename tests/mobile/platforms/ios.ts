@@ -47,6 +47,7 @@ const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
 const IOS_CONFIRMATION_IDENTITY_MS = 12_000;
 const IOS_CONFIRMATION_ROUND_MS = 5 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS;
+const IOS_CONFIRMATION_COMPLETION_MS = 3 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
@@ -665,20 +666,22 @@ export class IOSPlatform implements MobilePlatform {
     const addToHomeScreen = await this.findNativeScrollable([
       iosActionLabelContains('Add to Home Screen'),
     ], 'Add to Home Screen', Math.min(IOS_NATIVE_ACTION_TIMEOUT_MS, phase.remainingMs));
-    await withIOSConfirmationSettings(this.driver, phase, IOS_NATIVE_SCROLL_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS, async (confirmation) => {
-      if (confirmation.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
+    await withIOSConfirmationSettings(this.driver, phase, IOS_NATIVE_SCROLL_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS, async (operation) => {
+      if (operation.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
       await this.driver.click(addToHomeScreen, IOS_NATIVE_SCROLL_COMMAND_MS);
+      const confirmation = operation.phaseView('ios-install-confirmation', 75_000);
       const addButton = await this.waitForInstallConfirmation(confirmation);
-      if (confirmation.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+      if (confirmation.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS || operation.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) {
+        throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+      }
       await this.driver.click(addButton, IOS_NATIVE_LOOKUP_ROUND_MS);
     });
     await delay(Math.min(1_500, phase.remainingMs), phase);
   }
 
-  private async waitForInstallConfirmation(parent: PhaseBudget): Promise<string> {
-    const phase = parent.phaseView('ios-install-confirmation', 75_000);
+  private async waitForInstallConfirmation(phase: PhaseBudget): Promise<string> {
     let lastState = 'missing';
-    while (phase.remainingMs >= IOS_CONFIRMATION_ROUND_MS) {
+    while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
       try {
         if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') throw new Error('IOS_SHARE: Add: confirmation is not in the native context');
         const appInfo = await this.driver.activeAppInfo(IOS_NATIVE_LOOKUP_ROUND_MS);
@@ -686,28 +689,43 @@ export class IOSPlatform implements MobilePlatform {
         if (!isIOSSafariBrowserBundle(bundleId) && !isIOSSafariViewServiceBundle(bundleId)) {
           throw new Error(`IOS_SHARE: Add: Safari confirmation is not foreground (${bundleId || 'unknown'})`);
         }
-        if (phase.remainingMs < IOS_CONFIRMATION_ROUND_MS - IOS_NATIVE_LOOKUP_ROUND_MS) break;
+        if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
         const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_CONFIRMATION_LOOKUP_MS);
         const element = this.installConfirmationElementId(response);
-        if (phase.remainingMs < IOS_CONFIRMATION_ROUND_MS - IOS_NATIVE_LOOKUP_ROUND_MS - IOS_CONFIRMATION_LOOKUP_MS) break;
-        if (await this.installConfirmationIdentity() !== element) {
+        if (phase.remainingMs < IOS_CONFIRMATION_IDENTITY_MS) break;
+        const identity = await this.installConfirmationIdentity();
+        if (identity !== element) {
           lastState = 'confirmation identity is missing or replaced';
         } else {
-          if (phase.remainingMs < 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS) break;
-          const readiness = phase.phaseView('ios-confirmation-readiness', phase.remainingMs, IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS);
-          const state = await this.nativeControlState(element, readiness);
-          if (state === 'indeterminate' && readiness.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
-          if (state === 'ready') {
-            if (phase.remainingMs < IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
-            const currentElement = await this.installConfirmationIdentity();
-            if (!currentElement) throw new Error('IOS_SHARE: Add: confirmation identity was replaced before click');
-            if (currentElement === element) {
-              if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
-              return element;
-            }
-            lastState = 'confirmation Add control was replaced before click';
+          if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+          const enabled = await this.readNativeControlAttribute(element, 'enabled', IOS_NATIVE_LOOKUP_ROUND_MS);
+          if (enabled === 'false') {
+            lastState = 'disabled';
+          } else if (enabled !== 'true') {
+            lastState = 'indeterminate';
+          } else if (phase.remainingMs < IOS_CONFIRMATION_COMPLETION_MS) {
+            break;
           } else {
-            lastState = state;
+            if (phase.remainingMs < 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
+            const visible = await this.readNativeControlAttribute(element, 'visible', IOS_NATIVE_LOOKUP_ROUND_MS);
+            if (visible !== 'true') {
+              lastState = visible === 'false' ? 'hidden' : 'indeterminate';
+            } else {
+              if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
+              const hittable = await this.readNativeControlAttribute(element, 'hittable', IOS_NATIVE_LOOKUP_ROUND_MS);
+              if (hittable !== 'true') {
+                lastState = hittable === 'false' ? 'not-hittable' : 'indeterminate';
+              } else {
+                if (phase.remainingMs < IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
+                const currentElement = await this.installConfirmationIdentity();
+                if (!currentElement) throw new Error('IOS_SHARE: Add: confirmation identity was replaced before click');
+                if (currentElement === element) {
+                  if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+                  return element;
+                }
+                lastState = 'confirmation Add control was replaced before click';
+              }
+            }
           }
         }
       } catch (error) {
@@ -1231,16 +1249,20 @@ export class IOSPlatform implements MobilePlatform {
     return source;
   }
 
+  private async readNativeControlAttribute(element: string, name: string, timeout: number, validateResponse = true): Promise<string | null> {
+    const response = await this.driver.attribute(element, name, timeout);
+    if (validateResponse && response !== null && typeof response !== 'string') {
+      throw new Error('IOS_SHARE: Add: malformed native attribute response');
+    }
+    return response;
+  }
+
   private async nativeControlState(element: string, deadline: number | PhaseBudget): Promise<'ready' | 'hidden' | 'disabled' | 'not-hittable' | 'indeterminate'> {
     const read = async (name: string): Promise<string | null> => {
       const timeout = typeof deadline === 'number' ? deadline - Date.now()
         : deadline.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS ? IOS_NATIVE_LOOKUP_ROUND_MS : 0;
       if (timeout < minimumDriverRequestMs) return null;
-      const response = await this.driver.attribute(element, name, timeout);
-      if (deadline instanceof PhaseBudget && response !== null && typeof response !== 'string') {
-        throw new Error('IOS_SHARE: Add: malformed native attribute response');
-      }
-      return response;
+      return this.readNativeControlAttribute(element, name, timeout, deadline instanceof PhaseBudget);
     };
     const enabled = await read('enabled');
     if (enabled !== 'true') return enabled === 'false' ? 'disabled' : 'indeterminate';
