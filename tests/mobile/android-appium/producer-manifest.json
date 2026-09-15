@@ -83,7 +83,7 @@
     },
     "lib/commands/context/target-inspection.cjs": {
       "source": "target-inspection.cjs",
-      "sha256": "1aca26ea75ab1257116fbaa59f280c5dcfb4bff54242e9d5dadab12bd7bdef27"
+      "sha256": "58c21b69457ee8ddcdace5b1627cdf1682245aff4462464790a343e11f798c48"
     },
     "lib/commands/context/target-inspection.d.cts": {
       "source": "target-inspection.d.cts",
@@ -107,7 +107,7 @@
     },
     "build/lib/commands/context/target-inspection.cjs": {
       "source": "target-inspection.cjs",
-      "sha256": "1aca26ea75ab1257116fbaa59f280c5dcfb4bff54242e9d5dadab12bd7bdef27"
+      "sha256": "58c21b69457ee8ddcdace5b1627cdf1682245aff4462464790a343e11f798c48"
     },
     "build/lib/commands/context/target-inspection.d.cts": {
       "source": "target-inspection.d.cts",

@@ -6,7 +6,29 @@ const WebSocket = require('ws');
 
 const EXPRESSION = `JSON.stringify({href:location.href,origin:location.origin,standalone:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,provider:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true ? 'android-standalone' : 'browser',timeOrigin:performance.timeOrigin})`;
 const LIMIT = 65536;
+const REMOTE_TYPES = new Set(['bigint', 'boolean', 'function', 'number', 'object', 'string', 'symbol', 'undefined']);
+const EXCEPTION_CLASSES = new Set(['AggregateError', 'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError']);
+const SIDE_EFFECT_DESCRIPTION = 'EvalError: Possible side-effect in debuggee detected';
 const owners = new WeakMap();
+
+function remoteType(value) {
+  return typeof value === 'string' && REMOTE_TYPES.has(value) ? value : 'unknown';
+}
+function exceptionInfo(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !value.exception || typeof value.exception !== 'object' || Array.isArray(value.exception)) {
+    return {className: 'unknown', cause: 'unknown'};
+  }
+  const className = typeof value.exception.className === 'string' && EXCEPTION_CLASSES.has(value.exception.className) ? value.exception.className : 'unknown';
+  return {className, cause: className === 'EvalError' && value.exception.description === SIDE_EFFECT_DESCRIPTION ? 'known-side-effect-rejection' : 'unknown'};
+}
+function observationDiagnostic(reply, remote, targetOrdinal, observationPass) {
+  const exception = exceptionInfo(reply.exceptionDetails);
+  return {
+    failurePredicate: 'document-observation-unavailable', targetOrdinal, observationPass,
+    exceptionDetails: Boolean(reply.exceptionDetails), exceptionClass: exception.className, exceptionCause: exception.cause,
+    remoteType: remoteType(remote.type),
+  };
+}
 
 function record(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid protocol object');
@@ -177,26 +199,27 @@ async function inspect(owner, contract, targets) {
       if (!Array.isArray(handles) || handles.some((handle) => typeof handle !== 'string') || new Set(handles).size !== handles.length || JSON.stringify([...handles].sort()) !== JSON.stringify(pages.map((target) => target.targetId).sort()) || !handles.includes(before.selectedHandle)) throw new Error('Unmapped target or selected handle');
       const sessions = new Set();
       const observations = [];
-      const observe = async (sessionId) => {
+      const observe = async (sessionId, targetOrdinal, observationPass) => {
         const first = record((await send('DOM.getDocument', {depth: 0, pierce: false}, sessionId)).root);
         const reply = await send('Runtime.evaluate', {expression: EXPRESSION, returnByValue: true, silent: true, throwOnSideEffect: true, timeout: Math.max(1, contract.deadline - Date.now())}, sessionId);
         const remote = record(reply.result);
-        if (reply.exceptionDetails || remote.type !== 'string') throw new Error('Document observation unavailable');
+        const diagnostic = observationDiagnostic(reply, remote, targetOrdinal, observationPass);
+        if (reply.exceptionDetails || remote.type !== 'string') throw new Error(`Document observation unavailable (${JSON.stringify(diagnostic)})`);
         const observation = record(JSON.parse(text(remote.value)));
         if (typeof observation.href !== 'string' || typeof observation.origin !== 'string' || typeof observation.standalone !== 'boolean' || observation.provider !== (observation.standalone ? 'android-standalone' : 'browser') || !Number.isFinite(observation.timeOrigin)) throw new Error('Malformed observation');
         const last = record((await send('DOM.getDocument', {depth: 0, pierce: false}, sessionId)).root);
         if (!Number.isSafeInteger(first.backendNodeId) || first.backendNodeId <= 0 || first.nodeType !== 9 || first.backendNodeId !== last.backendNodeId || last.nodeType !== 9 || first.documentURL !== observation.href || last.documentURL !== observation.href) throw new Error('Document changed');
         return {...observation, backendNodeId: first.backendNodeId};
       };
-      for (const target of pages) {
+      for (const [index, target] of pages.entries()) {
         const attached = await send('Target.attachToTarget', {targetId: target.targetId, flatten: true});
         const sessionId = text(attached.sessionId);
         if (sessions.has(sessionId)) throw new Error('Duplicate target session');
         sessions.add(sessionId);
-        observations.push({targetId: target.targetId, sessionId, document: await observe(sessionId)});
+        observations.push({targetId: target.targetId, sessionId, document: await observe(sessionId, index + 1, 'initial')});
       }
-      for (const observation of observations) {
-        if (JSON.stringify(await observe(observation.sessionId)) !== JSON.stringify(observation.document)) throw new Error('Observation changed within bracket');
+      for (const [index, observation] of observations.entries()) {
+        if (JSON.stringify(await observe(observation.sessionId, index + 1, 'repeat')) !== JSON.stringify(observation.document)) throw new Error('Observation changed within bracket');
       }
       if (JSON.stringify(inventory(await send('Target.getTargets'))) !== JSON.stringify(initial)) throw new Error('Inventory changed');
       result = {kind: 'bounded-nonactivating-observation', targets: initial, observations: observations.map(({targetId, document}) => ({targetId, document})), selectedHandle: before.selectedHandle};

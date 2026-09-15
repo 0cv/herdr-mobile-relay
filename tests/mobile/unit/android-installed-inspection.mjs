@@ -173,6 +173,21 @@ async function fixture(run, initialMode = '') {
         assert.equal(message.params.expression, EXPRESSION);
         assert.equal(message.params.throwOnSideEffect, true);
         result = {result: {type: 'string', value: JSON.stringify(document(message.sessionId))}};
+        if (state.mode === 'observation-exception') {
+          result.exceptionDetails = {exception: {className: 'EvalError', description: 'EvalError: Possible side-effect in debuggee detected'}};
+        } else if (state.mode === 'observation-nonstring') {
+          result.result = {type: 'object', value: {untrusted: 'expression-result'}};
+        } else if (state.mode === 'observation-both') {
+          result.result = {type: 'object', value: {untrusted: 'expression-result'}};
+          result.exceptionDetails = {exception: {className: 'TypeError', description: 'arbitrary exception text'}};
+        } else if (state.mode === 'observation-malformed') {
+          result.result = {type: null};
+          result.exceptionDetails = {exception: {className: ['EvalError'], description: {untrusted: 'malformed'}}};
+        } else if (state.mode === 'observation-hostile') {
+          const hostile = 'https://attacker.invalid/session=SESSION_SECRET/pid=1234/token=CREDENTIAL_SECRET/' + 'x'.repeat(5000);
+          result.result = {type: hostile, value: hostile};
+          result.exceptionDetails = {exception: {className: hostile, description: hostile}, stackTrace: {callFrames: [hostile, hostile, hostile]}};
+        }
         break;
       default: throw new Error(`Unexpected CDP command ${message.method}`);
     }
@@ -380,6 +395,35 @@ test('saved native disabled statuses with constructed gzip pass installed produc
   state.mode = 'disabled';
   await refused();
 }, 'disabled'));
+
+for (const [mode, expected] of [
+  ['observation-exception', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'EvalError', exceptionCause: 'known-side-effect-rejection', remoteType: 'string'}],
+  ['observation-nonstring', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: false, exceptionClass: 'unknown', exceptionCause: 'unknown', remoteType: 'object'}],
+  ['observation-both', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'TypeError', exceptionCause: 'unknown', remoteType: 'object'}],
+  ['observation-malformed', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'unknown', exceptionCause: 'unknown', remoteType: 'unknown'}],
+  ['observation-hostile', {failurePredicate: 'document-observation-unavailable', targetOrdinal: 1, observationPass: 'initial', exceptionDetails: true, exceptionClass: 'unknown', exceptionCause: 'unknown', remoteType: 'unknown'}],
+]) test(`document observation rejection is bounded and sanitized: ${mode}`, async () => fixture(async ({inspect, state, calls, refused}) => {
+  state.mode = mode;
+  let firstMessage;
+  await assert.rejects(inspect(), error => {
+    firstMessage = String(error);
+    const match = firstMessage.match(/Document observation unavailable \((\{.*\})\)$/u);
+    assert.ok(match);
+    assert.deepEqual(JSON.parse(match[1]), expected);
+    assert.ok(firstMessage.length < 1_000);
+    assert.equal(firstMessage.includes('SESSION_SECRET'), false);
+    assert.equal(firstMessage.includes('CREDENTIAL_SECRET'), false);
+    return true;
+  });
+  const evaluation = calls.at(-1);
+  assert.equal(evaluation.method, 'Runtime.evaluate');
+  assert.equal(evaluation.params.throwOnSideEffect, true);
+  await assert.rejects(inspect(), error => {
+    assert.equal(String(error), firstMessage);
+    return true;
+  });
+  await refused();
+}));
 
 test('actual installed dispatcher: repeated bounded two-page reads and same-scope navigation', async () => fixture(async ({inspect, state, calls}) => {
   for (const path of ['#settings', '#pairing', '#complete']) {
