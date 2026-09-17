@@ -16,7 +16,7 @@ unset NODE_PATH
 mkdir -p "$RUNNER_TEMP"
 node --experimental-import-meta-resolve tests/mobile/android-appium/gate.ts configure "$APPIUM_HOME"
 (cd "$APPIUM_HOME" && APPIUM_SKIP_CHROMEDRIVER_INSTALL=1 npm ci --ignore-scripts --no-audit --no-fund --engine-strict)
-cp -R "$APPIUM_HOME/node_modules/appium-android-driver" "$MOBILE_PRISTINE_ANDROID_PACKAGE"
+cp -R "$APPIUM_HOME/node_modules/appium-uiautomator2-driver/node_modules/appium-android-driver" "$MOBILE_PRISTINE_ANDROID_PACKAGE"
 node --experimental-import-meta-resolve tests/mobile/android-appium/gate.ts patch "$APPIUM_HOME"
 node --experimental-import-meta-resolve tests/mobile/android-appium/gate.ts verify "$APPIUM_HOME"
 node --test tests/mobile/unit/android-adb-inspection.cjs

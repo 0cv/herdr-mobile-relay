@@ -66,7 +66,15 @@ async function fixture(run, initialMode = '') {
   await new Promise(resolve => adbServer.listen(0, "127.0.0.1", resolve));
   const sockets = new Set();
   let driver;
-  const state = {selected: APP, pid: String(initialPid), startTime: '123456', serial: 'fixture', inode: '4321', activity: nativeActivity, mode: initialMode, count: 0, pageURL: 'https://app/#settings', extras: [], onRead: undefined};
+  let directSocket;
+  const state = {selected: APP, pid: String(initialPid), startTime: '123456', serial: 'fixture', inode: '4321', activity: nativeActivity, mode: initialMode, count: 0, pageURL: 'https://app/#settings', extras: [], onRead: undefined, eventSent: false};
+  const diagnosticEvent = (sessionId = APP) => JSON.stringify({
+    method: state.mode === 'unknown-event' ? 'DOM.secretNotification' : 'DOM.childNodeCountUpdated',
+    ...(sessionId ? {sessionId} : {}),
+    params: state.mode === 'late-event-secrets'
+      ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
+      : {nodeId: 7, childNodeCount: 2},
+  });
   const nativeCalls = [];
   const nativeSockets = new Set();
   const nativeServer = createServer((req, res) => {
@@ -109,7 +117,7 @@ async function fixture(run, initialMode = '') {
     let value;
     const path = req.url.replace('/session/original-token', '');
     if (path === '/json/version') {
-      res.end(JSON.stringify({Browser: 'Chrome/131.0.6778.200', webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser${state.mode === 'endpoint' ? '/foreign' : ''}`}));
+      res.end(JSON.stringify({Browser: 'Chrome/131.0.6778.200', webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser${state.mode === 'endpoint' ? '/foreign' : ''}`}));
       return;
     }
     if ((path === '/element' && state.mode === 'lookup-miss') || (path === '/window/handles' && state.mode === 'inspection-miss')) {
@@ -145,6 +153,7 @@ async function fixture(run, initialMode = '') {
   });
   let connection = 0;
   wss.on('connection', (ws) => {
+    directSocket = ws;
     const connectionId = ++connection;
     let processReads = 0;
     let evaluationCount = 0;
@@ -153,6 +162,32 @@ async function fixture(run, initialMode = '') {
     calls.push({...message, connectionId});
     let result;
     if (state.mode === 'cdp-wrong-id') { ws.send(JSON.stringify({id: message.id + 1, result: {}})); return; }
+    if (state.mode === 'frame-partial') { ws._socket.write(Buffer.from([0x81, 126, 0, 100, 123])); return; }
+    if (state.mode === 'frame-large') { ws.send('x'.repeat(70000)); return; }
+    if (state.mode === 'frame-malformed') { ws.send('{'); return; }
+    if (state.mode === 'frame-binary') {
+      ws.send(Buffer.from([0x7b]));
+      ws.send(JSON.stringify({method: 'Target.secretNotification', params: {secret: 'CREDENTIAL_SECRET'}}));
+      return;
+    }
+    if (state.mode === 'frame-flood') {
+      ws.send(JSON.stringify({method: 'Target.targetCreated', params: {}}));
+      for (let index = 0; index < 401; index++) ws.send(JSON.stringify({method: 'Target.secretNotification', params: {secret: 'CREDENTIAL_SECRET'}}));
+      return;
+    }
+    if (state.mode === 'unknown-event' && message.id === 1) {
+      ws.send(JSON.stringify({method: 'Target.secretNotification', params: {secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}}));
+      return;
+    }
+    if (state.mode === 'id-event' && message.id === 1) {
+      ws.send(JSON.stringify({id: message.id, method: 'DOM.childNodeCountUpdated', params: {nodeId: 7, childNodeCount: 2}}));
+      return;
+    }
+    if ((state.mode === 'event-error' || state.mode === 'event-result') && message.id === 1) {
+      ws.send(JSON.stringify({method: 'DOM.childNodeCountUpdated', params: {nodeId: 7, childNodeCount: 2}, ...(state.mode === 'event-error' ? {error: {code: -32000, message: 'not a reply'}} : {result: {ignored: true}})}));
+      return;
+    }
+    if (state.mode === 'pending-event' && message.id === 4) ws.send(diagnosticEvent());
     switch (message.method) {
       case 'SystemInfo.getProcessInfo':
         processReads++;
@@ -213,7 +248,15 @@ async function fixture(run, initialMode = '') {
       }
       default: throw new Error(`Unexpected CDP command ${message.method}`);
     }
-    ws.send(JSON.stringify({id: message.id, result, ...(message.sessionId ? {sessionId: message.sessionId} : {})}));
+    const response = {id: message.id, result, ...(message.sessionId ? {sessionId: message.sessionId} : {})};
+    if (state.mode === 'result-malformed') response.result = [];
+    if (state.mode === 'between-passes' && message.id === 10) {
+      ws._socket.cork();
+      try { ws.send(JSON.stringify(response)); ws.send(diagnosticEvent(BOOT)); }
+      finally { ws._socket.uncork(); }
+      return;
+    }
+    ws.send(JSON.stringify(response));
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -310,6 +353,14 @@ async function fixture(run, initialMode = '') {
     assert.ok(driver.chromedriver instanceof Chromedriver);
     assert.ok(driver.chromedriver.jwproxy instanceof JWProxy);
     assert.ok(driver.getProxyAvoidList().some(([method, pattern]) => method === 'POST' && pattern.test('/session/outer-token/execute/sync')), 'Real CHROMIUM dispatcher must not proxy the mobile route');
+    state.onRead = async () => {
+      if (['late-event', 'late-event-secrets'].includes(state.mode)
+        && !state.eventSent && calls.filter(call => call.connectionId === connection && call.id).at(-1)?.id === 18) {
+        state.eventSent = true;
+        directSocket.send(diagnosticEvent());
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
     const inspect = async () => {
       const result = await driver.executeCommand('execute', COMMAND, [{deadline: Date.now() + 8000}]);
       validateResult(result);
@@ -461,6 +512,70 @@ for (const [mode, expected] of [
   await refused();
 }));
 
+function readUncorrelatedDiagnostic(error) {
+  const match = String(error).match(/Uncorrelated CDP reply or event \((\{.*\})\)/u);
+  assert.ok(match, String(error));
+  return JSON.parse(match[1]);
+}
+
+test('installed producer exposes the bounded late-event discriminator without changing quarantine', async () => fixture(async ({inspect, state, refused, calls}) => {
+  state.mode = 'late-event';
+  let original;
+  await assert.rejects(inspect(), error => {
+    original = error;
+    assert.deepEqual(readUncorrelatedDiagnostic(error), {
+      failurePredicate: 'uncorrelated-cdp-message', classification: 'event', method: 'DOM.childNodeCountUpdated',
+      idPresence: 'absent', idType: 'absent', idValue: 'none',
+      sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
+      lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
+      phase: 'final-snapshot', messageCount: 19, params: {nodeId: 7, childNodeCount: 2},
+    });
+    assert.ok(String(error).length < 1_000);
+    return true;
+  });
+  const count = calls.length;
+  await refused();
+  assert.equal(calls.length, count);
+  await assert.rejects(inspect(), error => error === original);
+}));
+
+test('installed producer redacts untrusted late-event params', async () => fixture(async ({inspect, state}) => {
+  state.mode = 'late-event-secrets';
+  await assert.rejects(inspect(), error => {
+    const text = String(error);
+    assert.deepEqual(readUncorrelatedDiagnostic(error).params, {nodeId: 'nonmatching', childNodeCount: 2});
+    assert.equal(text.includes('SESSION_SECRET'), false);
+    assert.equal(text.includes('CREDENTIAL_SECRET'), false);
+    assert.equal(text.includes('attacker.invalid'), false);
+    return true;
+  });
+}));
+
+for (const [mode, expected] of [
+  ['pending-event', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'unknown', sessionOrdinal: 'unknown', targetOrdinal: 'unknown', lastSequence: 4, pendingId: 4, pendingMethod: 'DOM.getDocument', pendingSessionOrdinal: 1, phase: 'initial', messageCount: 4}],
+  ['between-passes', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'known-local-ordinal', sessionOrdinal: 1, targetOrdinal: 1, lastSequence: 10, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none', phase: 'initial', messageCount: 11}],
+  ['event-error', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1, params: {nodeId: 7, childNodeCount: 2}}],
+  ['event-result', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1, params: {nodeId: 7, childNodeCount: 2}}],
+  ['frame-flood', {classification: 'event', method: 'Target.targetCreated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1}],
+  ['unknown-event', {classification: 'event', method: 'unknown', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1}],
+  ['id-event', {classification: 'other', method: 'DOM.childNodeCountUpdated', idPresence: 'present', idType: 'number', idValue: 1, sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1}],
+]) test(`installed producer keeps ${mode} fatal`, async () => fixture(async ({inspect, state, refused, calls}) => {
+  state.mode = mode;
+  let original;
+  await assert.rejects(inspect(), error => {
+    original = error;
+    const diagnostic = readUncorrelatedDiagnostic(error);
+    assert.equal(diagnostic.failurePredicate, 'uncorrelated-cdp-message');
+    for (const [field, value] of Object.entries(expected)) assert.deepEqual(diagnostic[field], value);
+    return true;
+  });
+  const count = calls.length;
+  await refused();
+  assert.equal(calls.length, count);
+  await assert.rejects(inspect(), error => error === original);
+  assert.equal(calls.length, count);
+}));
+
 function assertExactSelectedInspectionTrace(route) {
   assert.deepEqual(route.filter(call => call.url).map(call => [call.method, call.url]), [
     ['GET', '/json/version'],
@@ -567,8 +682,8 @@ test('unknown target kinds remain inventoried rather than becoming mode proof', 
   assert.equal(result.targets.at(-1).type, 'new_document_kind');
 }));
 
-for (const mode of ['handles', 'forward', 'serial-forward', 'namespace-absent', 'namespace-duplicate', 'namespace-nested', 'namespace-different', 'boot', 'process-string', 'process-wrong', 'process-missing', 'process-duplicate', 'process-cpu', 'process-protocol', 'process-final-loss', 'endpoint', 'wd-document', 'wd-timeOrigin', 'wd-large', 'cdp-wrong-id', 'pid', 'startTime', 'inode', 'native-browser', 'current-handle', 'outer-session', 'inner-session', 'owner-object', 'adb-object', 'adb-serial', 'caps-endpoint', 'proxy-endpoint', 'wrapper-adb', 'adb-executable', 'wrong-context', 'wrong-current-owner', 'wrong-dispatch', 'inspection-miss']) {
-  test(`installed rejection is sticky: ${mode}`, async () => fixture(async ({driver, inspect, state, refused}) => {
+for (const mode of ['handles', 'forward', 'serial-forward', 'namespace-absent', 'namespace-duplicate', 'namespace-nested', 'namespace-different', 'boot', 'process-string', 'process-wrong', 'process-missing', 'process-duplicate', 'process-cpu', 'process-protocol', 'process-final-loss', 'endpoint', 'wd-document', 'wd-timeOrigin', 'wd-large', 'cdp-wrong-id', 'result-malformed', 'frame-binary', 'frame-large', 'frame-partial', 'frame-malformed', 'pid', 'startTime', 'inode', 'native-browser', 'current-handle', 'outer-session', 'inner-session', 'owner-object', 'adb-object', 'adb-serial', 'caps-endpoint', 'proxy-endpoint', 'wrapper-adb', 'adb-executable', 'wrong-context', 'wrong-current-owner', 'wrong-dispatch', 'inspection-miss']) {
+  test(`installed rejection is sticky: ${mode}`, async () => fixture(async ({driver, inspect, state, refused, calls}) => {
     await inspect();
     if (mode === 'pid') state.pid = '5302';
     else if (mode === 'startTime') state.startTime = '123457';
@@ -588,8 +703,13 @@ for (const mode of ['handles', 'forward', 'serial-forward', 'namespace-absent', 
     else if (mode === 'wrong-current-owner') driver.chromedriver = Object.create(driver.chromedriver);
     else if (mode === 'wrong-dispatch') driver.chromedriver.jwproxy.command = async () => { throw new Error('Replaced command must never run'); };
     else state.mode = mode;
-    await assert.rejects(inspect());
+    let original;
+    await assert.rejects(inspect(), error => { original = error; return true; });
+    const count = calls.length;
     await refused();
+    assert.equal(calls.length, count);
+    await assert.rejects(inspect(), error => error === original);
+    assert.equal(calls.length, count);
   }));
 }
 

@@ -64,6 +64,20 @@ const append = bytes => Buffer.concat([bytes, Buffer.from('\n')]);
 run('verify', true, 'healthy complete installed contract');
 startup(true, 'both actual CI verify/start fragments');
 run('patch', false, 'already patched producer refuses');
+const shadowAxios = path.join(home, runtime.base.root, 'build/lib/jsonwp-proxy/node_modules/axios');
+const shadowAxiosMarker = path.join(output, 'shadow-axios-executed');
+fs.mkdirSync(shadowAxios, {recursive: true});
+fs.writeFileSync(path.join(shadowAxios, 'package.json'), JSON.stringify({name: 'axios', version: '0.0.0', main: 'index.js'}));
+fs.writeFileSync(path.join(shadowAxios, 'index.js'), `require('node:fs').writeFileSync(${JSON.stringify(shadowAxiosMarker)}, 'executed'); module.exports = {shadow: true};\n`);
+try {
+  run('verify', false, 'shadow Axios under effective proxy importer is rejected');
+  assert.equal(fs.existsSync(shadowAxiosMarker), false, 'Unverified shadow Axios must not execute during verify');
+  startup(false, 'shadow Axios under effective proxy importer is rejected');
+  assert.equal(fs.existsSync(shadowAxiosMarker), false, 'Unverified shadow Axios must not execute during startup');
+} finally {
+  fs.rmSync(path.join(home, runtime.base.root, 'build/lib/jsonwp-proxy/node_modules'), {recursive: true, force: true});
+  fs.rmSync(shadowAxiosMarker, {force: true});
+}
 for (const file of Object.keys(manifest.files)) {
   mutation(path.join(root, file), append, () => { run('verify', false, `transformed mutation ${file}`); startup(false, `transformed mutation ${file}`); });
   if (file.endsWith('.map')) missing(path.join(root, file), () => { run('verify', false, `missing required map ${file}`); startup(false, `missing required map ${file}`); });
@@ -79,7 +93,7 @@ missing(entry, () => {
 const metadata = path.join(home, 'node_modules/.cache/appium/extensions.yaml');
 for (const [name, before, after] of [
   ['class', 'mainClass: AndroidUiautomator2Driver', 'mainClass: WrongDriver'],
-  ['version', 'version: 8.2.2', 'version: 0.0.0'],
+  ['version', 'version: 8.7.0', 'version: 0.0.0'],
   ['selected-driver', 'pkgName: appium-uiautomator2-driver', 'pkgName: wrong-driver'],
   ['path', 'installPath: ', 'installPath: /wrong/'],
 ]) mutation(metadata, bytes => bytes.toString().replace(before, after), () => run('verify', false, `selected driver metadata ${name}`));

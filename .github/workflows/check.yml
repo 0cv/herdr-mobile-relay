@@ -11,29 +11,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - name: Format
         run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
       - run: go vet ./...
-      - run: go test ./...
+      # Serialize package test binaries: lifecycle subprocess tests use bounded
+      # one-second contexts and must not compete with unrelated packages.
+      - run: go test -p 1 ./...
 
   journal:
     name: Linux journald logging acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - name: Run opt-in user-journal integration test
         env:
@@ -48,43 +50,51 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
-      - run: go test -race ./...
+      - run: go test -race -p 1 ./...
 
   shell:
     name: Shell and production paths
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - run: make shell-check production-path-audit
 
   frontend:
-    name: Frontend and mobile browsers (Bun 1.4)
+    name: Frontend and mobile browsers (Bun 1.4.2)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
-      - uses: actions/setup-go@v7
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          go-version: 1.27.0
+          bun-version: 1.4.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.1
           cache: true
       - run: bun install --frozen-lockfile --cwd frontend
       # Native browsers instead of the multi-GB Playwright container image:
@@ -92,13 +102,13 @@ jobs:
       # assertion in the suite depends on the image's font set. Ubuntu is a
       # supported install-deps target; Fedora is not, which is why the
       # container path in run-browser-tests.sh stays for local Fedora runs.
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
       - run: cd frontend && bun x playwright install --with-deps chromium webkit
-      - run: make frontend-check
-      - run: make web-release-check
+      - run: make PATH="$PATH" frontend-check
+      - run: make PATH="$PATH" web-release-check
 
   # Bundles are one of the things this workflow checks, not something it
   # publishes, so they no longer wait behind the test jobs: a red run fails on
@@ -108,16 +118,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          go-version: 1.27.0
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.1
           cache: true
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
       - name: Build, manifest, checksum, and offline-verify four targets
         run: |
           make cross-build
@@ -126,7 +144,7 @@ jobs:
           scripts/check-installed-release.sh \
             "dist/release/herdr-mobile-relay_${version}_linux_amd64.tar.gz" \
             dist/release/checksums.txt "$version" "$GITHUB_SHA" linux/amd64
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-bundles
           path: dist/release/
@@ -149,8 +167,8 @@ jobs:
             target: darwin_arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-bundles
           path: dist/release
@@ -168,60 +186,89 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
-      - uses: actions/setup-go@v7
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          go-version: 1.27.0
+          bun-version: 1.4.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.1
           cache: true
-      - run: make mobile-ci-common-check
+      - run: make PATH="$PATH" mobile-ci-common-check
 
   mobile-unit-check-am:
     name: Mobile unit checks (A-M and non-letters)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
       - name: Install required XML test tools
         run: |
           sudo apt-get update
           sudo apt-get install -y libxml2-utils
-      - run: make mobile-unit-check MOBILE_UNIT_FILTER='^(?:[A-Ma-m]|[^A-Za-z]|$)'
+      - run: make PATH="$PATH" mobile-unit-check MOBILE_UNIT_FILTER='^(?:[A-Ma-m]|[^A-Za-z]|$)'
 
   mobile-unit-check-nz:
     name: Mobile unit checks (N-Z)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
       - name: Install required XML test tools
         run: |
           sudo apt-get update
           sudo apt-get install -y libxml2-utils
-      - run: make mobile-unit-check MOBILE_UNIT_FILTER='^[N-Zn-z]'
+      - run: make PATH="$PATH" mobile-unit-check MOBILE_UNIT_FILTER='^[N-Zn-z]'
 
   mobile-inspection-check:
     name: Android installed inspection controls
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24.12.0
-      - uses: oven-sh/setup-bun@v2
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
       - run: bun install --frozen-lockfile --cwd tests/mobile
       - run: bun run --cwd tests/mobile test:android-inspection
 

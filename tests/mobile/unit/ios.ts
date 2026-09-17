@@ -1383,7 +1383,20 @@ test('an insufficient navigation budget records prerequisite skips without admit
   assert.ok(events.length > 0 && events.every((event) => event.detail.outcome === 'skipped'));
 });
 
-test('Plan13 recorded hierarchy inputs retain their exact evidence hashes', async () => {
+test('Plan13 recorded provenance retains its historical tool tuple and run identities', async () => {
+  assert.deepEqual({
+    sourceCommit: recordedIteration13.sourceCommit,
+    versions: recordedIteration13.versions,
+    runs: {
+      safariAUTFailure: recordedIteration13.safariAUTFailure.run,
+      share: recordedIteration13.share.run,
+      confirmation: recordedIteration13.confirmation.run,
+    },
+  }, {
+    sourceCommit: 'f35ab6ffa9defa57ef653eb39a5f351bda4dd23c',
+    versions: { appium: '3.1.1', xcuitest: '12.10.0', wda: '16.12.1' },
+    runs: { safariAUTFailure: '34488014724', share: '34488020101', confirmation: '34488014724' },
+  });
   for (const [file, expected] of Object.entries(recordedIteration13.files)) {
     assert.equal(createHash('sha256').update(await readFile(join(fixtureDir, file))).digest('hex'), expected);
   }
@@ -1733,7 +1746,7 @@ test('Plan13 lifecycle supported handoff survives obsolete Safari through backgr
   }
   assert.equal(a.requests.some((r) => /activateApp|launchApp/u.test(r.body.script || '') || (r.path.endsWith('/url') && r.method === 'POST')), false);
   assert.equal(a.driver.snapshot().unusable, false);
-  await writeSanitizedJson(join(a.outputDir, 'ios-lifecycle-result.json'), { proofKind: 'Source-derived WDA 16.12.1 branch model with hypothetical lifecycle and system-state replies; actual adapter/client, no native execution.', requests: a.requests, evidence: a.platform.evidenceSnapshot() });
+  await writeSanitizedJson(join(a.outputDir, 'ios-lifecycle-result.json'), { proofKind: 'Source-derived WDA 16.12.8 branch model with hypothetical lifecycle and system-state replies; actual adapter/client, no native execution.', requests: a.requests, evidence: a.platform.evidenceSnapshot() });
 });
 
 test('Plan13 lifecycle complete native proof is not cut off by the former five-second provider phase', async () => {

@@ -5,17 +5,16 @@
   "type": "module",
   "engines": { "node": "^20.19.0 || ^22.12.0 || >=24.0.0", "npm": ">=10" },
   "dependencies": {
-    "appium": "3.1.1",
-    "appium-uiautomator2-driver": "8.2.2",
-    "@appium/logger": "2.0.4"
+    "appium": "3.7.0",
+    "appium-uiautomator2-driver": "8.7.0",
+    "@appium/logger": "2.0.11"
   },
   "overrides": {
     "appium-uiautomator2-driver": {
       "appium-android-driver": {
-        ".": "14.0.4",
+        ".": "14.2.0",
         "appium-chromedriver": {
-          ".": "9.0.1",
-          "@appium/base-driver": "10.0.0"
+          ".": "9.0.18"
         }
       }
     }

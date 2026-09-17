@@ -123,7 +123,25 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
       }
     }
   }
-  evidence.inspectionResolvers = {context, helper, transport, ws: entries.ws, absent: ['bufferutil', 'utf-8-validate']};
+  const axiosImporter = new URL('./jsonwp-proxy/proxy-request.js', entries.base).href;
+  assert.equal(fileURLToPath(axiosImporter), join(root, packages.base.root, 'build/lib/jsonwp-proxy/proxy-request.js'), 'Unexpected effective Axios importer path');
+  assert.equal(await realpath(fileURLToPath(axiosImporter)), fileURLToPath(axiosImporter), 'Symlinked Axios importer');
+  const axiosPackage = JSON.parse(await readFile(join(root, packages.axios.root, 'package.json'), 'utf8'));
+  assert.equal(axiosPackage.name, packages.axios.name);
+  assert.equal(axiosPackage.version, packages.axios.version);
+  const resolvedAxios = pathToFileURL(createRequire(axiosImporter).resolve('axios')).href;
+  assert.equal(resolvedAxios, entries.axios, 'Unexpected effective Axios importer route');
+  evidence.inspectionResolvers = {context, helper, transport, ws: entries.ws, axiosImporter, axios: resolvedAxios, axiosVersion: axiosPackage.version, absent: ['bufferutil', 'utf-8-validate']};
+  for (const [parent, specifier, target, condition] of [
+    [new URL('./driver.js', entries.uiautomator2).href, 'appium-android-driver', entries.android, 'import'],
+    [new URL('./commands/context/helpers.js', entries.android).href, 'appium-chromedriver', entries.wrapper, 'import'],
+    [new URL('./commands/context/exports.js', entries.android).href, 'appium-chromedriver', entries.wrapper, 'import'],
+    [new URL('./chromedriver.js', entries.wrapper).href, '@appium/base-driver', entries.base, 'import'],
+    [axiosImporter, 'axios', entries.axios, 'require'],
+  ]) {
+    const resolved = condition === 'require' ? pathToFileURL(createRequire(parent).resolve(specifier)).href : import.meta.resolve(specifier, parent);
+    assert.equal(resolved, target, `Unexpected effective import route from ${parent}`);
+  }
   const main = join(root, packages.appium.root, 'build/lib/main.js');
   assert.ok(packages.appium.files['build/lib/main.js'], 'Appium executable must be attested');
   const selected = JSON.parse(execFileSync(process.execPath, [main, 'driver', 'list', '--installed', '--json'], {
@@ -137,16 +155,6 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
   assert.equal(selected.uiautomator2.installType, 'npm');
   assert.equal(await realpath(selected.uiautomator2.installPath), join(root, packages.uiautomator2.root));
   evidence.selected = selected;
-  for (const [parent, specifier, target, condition] of [
-    [new URL('./driver.js', entries.uiautomator2).href, 'appium-android-driver', entries.android, 'import'],
-    [new URL('./commands/context/helpers.js', entries.android).href, 'appium-chromedriver', entries.wrapper, 'import'],
-    [new URL('./commands/context/exports.js', entries.android).href, 'appium-chromedriver', entries.wrapper, 'import'],
-    [new URL('./chromedriver.js', entries.wrapper).href, '@appium/base-driver', entries.base, 'import'],
-    [new URL('./build/lib/jsonwp-proxy/proxy.js', entries.base).href, 'axios', entries.axios, 'require'],
-  ]) {
-    const resolved = condition === 'require' ? pathToFileURL(createRequire(parent).resolve(specifier)).href : import.meta.resolve(specifier, parent);
-    assert.equal(resolved, target, `Unexpected effective import route from ${parent}`);
-  }
   return evidence;
 }
 

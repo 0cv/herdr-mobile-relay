@@ -5,8 +5,8 @@ const {test} = require('node:test');
 const net = require('node:net');
 const path = require('node:path');
 assert.ok(process.env.APPIUM_HOME, 'Explicit installed fixture required');
-const {createAdbInspection} = require(path.join(process.env.APPIUM_HOME, 'node_modules/appium-android-driver/build/lib/commands/context/adb-inspection.cjs'));
-const {acquireKernelCapability} = require(path.join(process.env.APPIUM_HOME, 'node_modules/appium-android-driver/build/lib/commands/context/kernel-namespace.cjs'));
+const {createAdbInspection} = require(path.join(process.env.APPIUM_HOME, 'node_modules/appium-uiautomator2-driver/node_modules/appium-android-driver/build/lib/commands/context/adb-inspection.cjs'));
+const {acquireKernelCapability} = require(path.join(process.env.APPIUM_HOME, 'node_modules/appium-uiautomator2-driver/node_modules/appium-android-driver/build/lib/commands/context/kernel-namespace.cjs'));
 const {gzipSync} = require('node:zlib');
 const frame = (id, value) => {
   const header = Buffer.alloc(5); header[0] = id; header.writeUInt32LE(value.length, 1);

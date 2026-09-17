@@ -58,7 +58,7 @@ const assertAndroidSdkSetupContract = (source: string, path: string): void => {
   const steps = androidSdkSetupSteps(source);
   assert.equal(steps.length, 1, `${path}: expected one Android SDK setup step`);
   const step = steps[0];
-  assert.match(step, /^\s+uses: android-actions\/setup-android@v3\s*$/mu);
+  assert.match(step, /^\s+uses: android-actions\/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4\.0\.1\s*$/mu);
   const lines = step.split('\n');
   const stepIndent = lineIndent(lines[0]);
   const withLines = lines.flatMap((line, index) => line.trim() === 'with:' && lineIndent(line) === stepIndent + 2 ? [index] : []);
@@ -380,7 +380,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
     assert.ok(finalized);
   }],
   ['Native startup WDA status identity and absent managed evidence refuse fallback', async () => {
-    const status = { value: { ready: true, state: 'success', build: { version: '16.12.1', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '18.6' } } };
+    const status = { value: { ready: true, state: 'success', build: { version: '16.12.8', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '18.6' } } };
     assert.ok(validWdaStatus(status, '18.6'));
     for (const invalid of [{}, { value: { ready: true } }, { value: { ...status.value, ready: false } }, { value: { ...status.value, build: { ...status.value.build, version: 'wrong' } } }]) assert.equal(validWdaStatus(invalid, '18.6'), false);
     assert.equal(validWdaStatus(status, '18.5'), false);

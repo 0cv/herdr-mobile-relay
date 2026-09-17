@@ -101,11 +101,11 @@ if [[ "$*" == *"main.js --address"* ]]; then exit 42; fi
     const integrity = join(env.APPIUM_HOME, 'retained-owner-integrity.json');
     const artifact = join(output, 'android-appium-integrity.json');
     await mkdir(env.APPIUM_HOME, { recursive: true });
-    const proof = JSON.stringify({ appium: { version: '3.1.1', files: { 'build/lib/main.js': 'reviewed-hash' } } });
+    const proof = JSON.stringify({ appium: { version: '3.7.0', files: { 'build/lib/main.js': 'reviewed-hash' } } });
     await writeFile(integrity, proof);
     assertExit(runBash(['-c', capture], { ...env, MOBILE_OUTPUT: output }), 0, `${filename}: Android integrity export`);
     assert.equal(await readFile(artifact, 'utf8'), proof);
-    assert.ok(text.indexOf('- name: Sanitize bounded diagnostics') < text.indexOf('uses: actions/upload-artifact@v4', text.indexOf('- name: Sanitize bounded diagnostics')));
+    assert.ok(text.indexOf('- name: Sanitize bounded diagnostics') < text.indexOf('uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', text.indexOf('- name: Sanitize bounded diagnostics')));
     assert.ok(text.indexOf('- name: Upload mobile evidence') < text.indexOf('- name: Stop owned mobile processes and devices'));
     assert.match(text.slice(text.indexOf('- name: Upload mobile evidence')), /path: \$\{\{ runner.temp \}\}\/herdr-mobile-output/u);
     await rm(artifact);

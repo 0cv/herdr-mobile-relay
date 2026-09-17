@@ -8,7 +8,7 @@ import { redactText, sanitizeValue } from './diagnostics';
 
 const runnerId = 'com.facebook.WebDriverAgentRunner.xctrunner';
 const productId = 'com.facebook.WebDriverAgentRunner';
-const version = '16.12.1';
+const version = '16.12.8';
 const maxStartupMs = 300_000;
 const maxStartupLogBytes = 100 * 1024 * 1024;
 const startupOutputMarker = '[startup output suppressed]\n';
@@ -30,6 +30,7 @@ const diagnosticSource = 'tests/mobile/support/ios-xctest.ts';
 const privateOwnerKeyPattern = /(?:password|passwd|secret|token|credential|private|api[_-]?key)/iu;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const yieldToChildExit = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 
 function monotonicMilliseconds(): number {
   return Number(process.hrtime.bigint()) / 1_000_000;
@@ -346,10 +347,10 @@ function portValue(key: string, fallback: number): number {
   return value;
 }
 
-function listeners(port: number, timeout = maxProcessCommandMs, observed?: (status: number | null) => void, context?: DiagnosticContext): string[] {
+function listeners(port: number, timeout = maxProcessCommandMs, observed?: (status: number | null, stderrBytes: number) => void, context?: DiagnosticContext): string[] {
   if (!Number.isInteger(port) || port < 1 || port > 65535 || timeout <= 0) throw new Error('XCTEST: startup deadline');
   const result = executeSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], timeout, 65_536, context ? {...context, port} : undefined);
-  observed?.(result.status);
+  observed?.(result.status, Buffer.byteLength(result.stderr || ''));
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new Error('XCTEST: startup deadline');
   if (result.error || (result.status !== 0 && result.status !== 1)) throw new Error('XCTEST: cannot inspect endpoint ownership');
   const values = [...new Set(result.stdout.trim().split(/\s+/u).filter(Boolean))];
@@ -606,6 +607,7 @@ type ListenerEvidence = Partial<ProcessEvidence> & Pick<ProcessEvidence, 'pid' |
 interface ListenerCommandStatus {
   port: number;
   status: number | null;
+  stderr?: 'present';
 }
 
 interface CleanupListenerSnapshot {
@@ -1000,8 +1002,9 @@ function listenerValidation(
   errorCategory: string,
   cachedProductExecutableHash?: string,
   cachedProductExecutableHashAt?: string,
+  observedRunnerPid?: string,
 ): ListenerValidation {
-  const runnerPid = snapshot.wda.status === 'evaluated' ? snapshot.wda.pids?.[0] : undefined;
+  const runnerPid = observedRunnerPid ?? (snapshot.wda.status === 'evaluated' ? snapshot.wda.pids?.[0] : undefined);
   return {
     checkedAt: new Date().toISOString(),
     endpoints: {wda: endpointDiagnostic(snapshot.wda), mjpeg: endpointDiagnostic(snapshot.mjpeg)},
@@ -1093,8 +1096,13 @@ async function supervise(): Promise<void> {
   let productBinaryHash = '';
   let child: ChildProcess | undefined;
   let exited: Promise<void> | undefined;
+  let childExitObserved: Promise<void> | undefined;
   let childEnded = false;
+  let childExited = false;
+  let childErrorObserved = false;
   let frozenRunner: RunnerIdentity | undefined;
+  let pendingRunner: RunnerIdentity | undefined;
+  let pendingInitialSnapshot: ListenerSnapshot | undefined;
   let initialCandidateSnapshot: ListenerSnapshot | undefined;
   let cleanupListenerSnapshot: CleanupListenerSnapshot | undefined;
   const commandContext = (phase: string, operation: string, extra: Partial<Pick<DiagnosticContext, 'endpoint' | 'port' | 'pid' | 'frozenOwner'>> = {}): DiagnosticContext => ({
@@ -1119,7 +1127,7 @@ async function supervise(): Promise<void> {
     if (stage === 'registration-receipt') return 'XCTEST: registration receipt validation failed';
     if (stage === 'status-evidence-write') return 'XCTEST: WDA status evidence write failed';
     if (stage.startsWith('managed-')) return 'XCTEST: managed WDA listener changed';
-    if (['wda-pid-count', 'wda-runner-evidence', 'wda-executable-evidence'].includes(stage)) return 'XCTEST: unknown WDA listener';
+    if (stage.startsWith('pending-') || ['wda-pid-count', 'wda-runner-evidence', 'wda-executable-evidence'].includes(stage)) return 'XCTEST: unknown WDA listener';
     return `XCTEST: ${category}`;
   };
   const rememberFailure = (failure: {
@@ -1170,6 +1178,15 @@ async function supervise(): Promise<void> {
   const snapshotCommandIds = (snapshot: ListenerSnapshot): number[] => snapshot.commandStart === undefined
     ? snapshot.commandIds || []
     : diagnostics.commandIdsFrom(snapshot.commandStart);
+  const saveFailure = (): void => {
+    owner.ready = false;
+    try {
+      writeFileSync(join(root, 'owner-private.json'), ownerContent(owner, false), { mode: 0o600 });
+      writeFileSync(join(root, 'owner.json'), ownerContent(owner, true), { mode: 0o600 });
+    } catch {
+      return;
+    }
+  };
   const save = (): boolean => {
     try {
       writeOwner(root, owner);
@@ -1177,6 +1194,7 @@ async function supervise(): Promise<void> {
     } catch {
       rememberFailure({message: 'XCTEST: owner evidence write failed', phase: 'supervisor', stage: 'owner-evidence-write', category: 'owner-evidence-write'});
       stop = true;
+      saveFailure();
       return false;
     }
   };
@@ -1184,6 +1202,33 @@ async function supervise(): Promise<void> {
     const value = deadline - Date.now();
     if (value <= 0) throw new Error('XCTEST: startup deadline');
     return value;
+  };
+  const ensureChildRunning = async (phase: string): Promise<void> => {
+    if (!child || childExited || childEnded) throw new Error(`XCTEST: runner exited during ${phase}`);
+    let alive = child.exitCode === null && child.signalCode === null;
+    if (alive) {
+      try {
+        process.kill(child.pid!, 0);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') alive = false;
+        else if (code !== 'EPERM') throw error;
+      }
+    }
+    if (alive) {
+      const state = executeSync('ps', ['-p', String(child.pid), '-o', 'stat='], Math.min(maxProcessCommandMs, remaining()), 4_096,
+        commandContext('startup', 'inspect-child-state', {pid: String(child.pid), frozenOwner: Boolean(frozenRunner)}));
+      if ((state.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new Error('XCTEST: startup deadline');
+      if (state.error) throw new Error('XCTEST: cannot inspect child state');
+      alive = state.status === 0 && !/^Z/u.test(state.stdout.trim());
+      await yieldToChildExit();
+      if (childExited || childEnded || child.exitCode !== null || child.signalCode !== null) alive = false;
+    }
+    if (!alive) {
+      if (childExitObserved) await Promise.race([childExitObserved, sleep(Math.min(1_000, remaining()))]);
+      if (!childExited && !childEnded) throw new Error(`XCTEST: child exit was not observed during ${phase}`);
+      throw new Error(`XCTEST: runner exited during ${phase}`);
+    }
   };
   const onSignal = (): void => {
     diagnostics.lifecycle('stop-requested', {phase: 'supervise'});
@@ -1395,12 +1440,14 @@ async function supervise(): Promise<void> {
   };
   const persistListenerCommandFailure = (snapshot: ListenerSnapshot, failureStage: string, error: unknown, phase: string): void => {
     const category = listenerCommandErrorCategory(error);
-    const diagnosticCategory = category === 'timeout' ? 'listener-command-timeout'
+    const deadline = category === 'timeout';
+    const diagnosticStage = deadline ? 'startup-deadline' : failureStage;
+    const diagnosticCategory = deadline ? 'startup-deadline'
       : category === 'invalid-process-id' ? 'listener-invalid-process-id' : 'listener-command-error';
-    const validation = listenerValidation(snapshot, snapshot.commands, 'not-evaluated', 'not-evaluated', {}, failureStage,
+    const validation = listenerValidation(snapshot, snapshot.commands, 'not-evaluated', 'not-evaluated', {}, diagnosticStage,
       diagnosticCategory, owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt);
     owner.listenerValidation = validation;
-    rememberFailure({error, phase, stage: failureStage, category: diagnosticCategory, predicate: validation,
+    rememberFailure({error, phase, stage: diagnosticStage, category: diagnosticCategory, predicate: validation,
       frozenOwner: Boolean(frozenRunner), commandIds: snapshotCommandIds(snapshot), inspectionId: snapshot.inspectionId});
     save();
   };
@@ -1422,7 +1469,7 @@ async function supervise(): Promise<void> {
     });
     try {
       try {
-        wdaEndpoint = {status: 'evaluated', pids: listeners(port, deadlineTimeout(inspectionDeadline), status => commands.push({port, status}), commandContext(phase, 'inspect-listener', {
+        wdaEndpoint = {status: 'evaluated', pids: listeners(port, deadlineTimeout(inspectionDeadline), (status, stderrBytes) => commands.push({port, status, ...(stderrBytes ? {stderr: 'present'} : {})}), commandContext(phase, 'inspect-listener', {
           endpoint: 'wda', port, frozenOwner: Boolean(frozenRunner),
         }))};
       } catch (error) {
@@ -1432,7 +1479,7 @@ async function supervise(): Promise<void> {
         throw error;
       }
       try {
-        mjpegEndpoint = {status: 'evaluated', pids: listeners(mjpeg, deadlineTimeout(inspectionDeadline), status => commands.push({port: mjpeg, status}), commandContext(phase, 'inspect-listener', {
+        mjpegEndpoint = {status: 'evaluated', pids: listeners(mjpeg, deadlineTimeout(inspectionDeadline), (status, stderrBytes) => commands.push({port: mjpeg, status, ...(stderrBytes ? {stderr: 'present'} : {})}), commandContext(phase, 'inspect-listener', {
           endpoint: 'mjpeg', port: mjpeg, frozenOwner: Boolean(frozenRunner),
         }))};
       } catch (error) {
@@ -1462,6 +1509,7 @@ async function supervise(): Promise<void> {
           save();
           if (error instanceof Error && error.message === 'XCTEST: startup deadline') {
             const current = snapshot();
+            if (phase === 'initial' && !initialCandidateSnapshot) initialCandidateSnapshot = current;
             const validation = listenerValidation(current, commands, 'not-evaluated', 'not-evaluated', {}, 'listener-process-evidence', 'listener-process-timeout', owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt);
             owner.listenerValidation = validation;
             rememberFailure({error, phase, stage: 'listener-process-evidence', category: 'listener-process-timeout', predicate: validation,
@@ -1614,6 +1662,107 @@ async function supervise(): Promise<void> {
     if (mjpegAssociation === 'not-evaluated') mjpegAssociation = 'match';
     persist(runnerAssociation, mjpegAssociation, 'validated', 'none');
     return { pid: admittedRunner!.pid, executable: admittedRunner!.executable, birth: admittedRunner!.birth! };
+  };
+  const validatePendingSnapshot = (snapshot: ListenerSnapshot, expected: RunnerIdentity | undefined, inspectionDeadline: number, phase = 'initial', allowHttp = false): RunnerIdentity => {
+    const wdaPids = snapshot.wda.status === 'evaluated' ? snapshot.wda.pids || [] : [];
+    const mjpegPids = snapshot.mjpeg.status === 'evaluated' ? snapshot.mjpeg.pids || [] : [];
+    const candidatePid = expected?.pid || (mjpegPids.length === 1 ? mjpegPids[0] : undefined);
+    const observed = candidatePid ? snapshot.evidence.find(entry => entry.pid === candidatePid) : undefined;
+    const evaluation: RunnerMatchEvidence = {};
+    const causalCommandIds = (): number[] => snapshotCommandIds(snapshot);
+    let runnerAssociation: ListenerValidation['runnerAssociation'] = 'not-evaluated';
+    let mjpegAssociation: ListenerValidation['mjpegAssociation'] = 'not-evaluated';
+    const persist = (failureStage: string, errorCategory: string): void => {
+      owner.listenerValidation = listenerValidation(snapshot, snapshot.commands, runnerAssociation, mjpegAssociation, evaluation,
+        failureStage, errorCategory, owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt, candidatePid);
+      if (!save()) throw new Error('XCTEST: owner evidence write failed');
+    };
+    const record = (failureStage: string, errorCategory: string): never => {
+      const validation = listenerValidation(snapshot, snapshot.commands, runnerAssociation, mjpegAssociation, evaluation,
+        failureStage, errorCategory, owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt, candidatePid);
+      owner.listenerValidation = validation;
+      const message = 'XCTEST: unknown WDA listener';
+      rememberFailure({message, phase, stage: failureStage, category: errorCategory, predicate: validation,
+        frozenOwner: false, commandIds: causalCommandIds(), inspectionId: snapshot.inspectionId});
+      save();
+      throw new Error(message);
+    };
+    const recordDeadline = (error: unknown): never => {
+      const validation = listenerValidation(snapshot, snapshot.commands, runnerAssociation, mjpegAssociation, evaluation,
+        'startup-deadline', 'startup-deadline', owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt, candidatePid);
+      owner.listenerValidation = validation;
+      rememberFailure({error, phase, stage: 'startup-deadline', category: 'startup-deadline', predicate: validation,
+        frozenOwner: false, commandIds: causalCommandIds(), inspectionId: snapshot.inspectionId});
+      save();
+      throw error;
+    };
+    if (childExited || owner.firstFailure || stop || existsSync(join(root, 'stop'))) {
+      if (childExited) record('pending-child-exit', 'child-exit');
+      throw new Error('XCTEST: startup stopped before WDA listener admission');
+    }
+    if (snapshot.commands.find(command => command.port === port)?.stderr) record('wda-pid-count', 'listener-command-error');
+    if (snapshot.commands.find(command => command.port === mjpeg)?.stderr) record('mjpeg-pid-count', 'listener-command-error');
+    if (snapshot.wda.status !== 'evaluated' || wdaPids.length !== (allowHttp ? 1 : 0)) record('pending-wda-pid-count', 'listener-endpoint-cardinality');
+    if (snapshot.mjpeg.status !== 'evaluated' || mjpegPids.length > 1 || (!allowHttp && mjpegPids.length !== 1)) record('pending-mjpeg-pid-count', 'listener-endpoint-cardinality');
+    if (allowHttp && expected && mjpegPids.some(pid => pid !== expected.pid)) record('pending-mjpeg-pid', 'managed-listener-identity-mismatch');
+    if (allowHttp && expected && wdaPids[0] !== expected.pid) record('pending-runner-pid', 'managed-listener-identity-mismatch');
+    if (!candidatePid || !observed) record('pending-mjpeg-runner-evidence', 'listener-process-evidence');
+    if (!observed?.executable || observed.executable === '[unavailable]') record('pending-mjpeg-executable-evidence', 'listener-process-evidence');
+    if (!observed?.birth) record('pending-mjpeg-birth-evidence', 'listener-process-evidence');
+    if (expected) {
+      if (observed!.pid !== expected.pid) record('pending-runner-pid', 'managed-listener-identity-mismatch');
+      if (observed!.executable !== expected.executable) record('pending-runner-executable', 'managed-listener-identity-mismatch');
+      if (observed!.birth !== expected.birth) record('pending-runner-birth', 'managed-listener-identity-mismatch');
+    }
+    runnerAssociation = allowHttp ? 'match' : 'not-evaluated';
+    mjpegAssociation = 'match';
+    let executableMatch = false;
+    try {
+      executableMatch = runnerExecutableMatches(observed!.executable, product, udid, inspectionDeadline, productBinaryHash, evaluation,
+        commandContext(phase, 'validate-pending-runner-identity', {
+          endpoint: allowHttp ? 'wda' : 'mjpeg', port: allowHttp ? port : mjpeg, pid: observed!.pid, frozenOwner: false,
+        }), true);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'XCTEST: startup deadline') recordDeadline(error);
+      record(evaluation.failureStage || 'pending-runner-executable-observation', evaluation.errorCategory || 'runner-command-error');
+    }
+    if (!executableMatch) record(evaluation.failureStage ? `pending-${evaluation.failureStage}` : 'pending-runner-identity', evaluation.errorCategory || 'runner-identity-mismatch');
+    try {
+      ownership(udid);
+    } catch {
+      record('pending-simulator-ownership', 'simulator-ownership-mismatch');
+    }
+    if (!owner.xctestrun || !owner.xctestrunHash) record('pending-xctestrun-evidence', 'xctestrun-identity-mismatch');
+    try {
+      if (realpathSync(owner.xctestrun!) !== owner.xctestrun) record('pending-xctestrun-path', 'xctestrun-identity-mismatch');
+    } catch {
+      record('pending-xctestrun-path', 'xctestrun-identity-error');
+    }
+    let currentXctestrunHash: string;
+    try {
+      currentXctestrunHash = boundedBinaryHash(owner.xctestrun!, inspectionDeadline,
+        commandContext(phase, 'validate-pending-xctestrun', {endpoint: 'simulator', frozenOwner: false}));
+    } catch (error) {
+      if (error instanceof Error && error.message === 'XCTEST: startup deadline') recordDeadline(error);
+      record('pending-xctestrun-hash', 'xctestrun-identity-error');
+    }
+    if (currentXctestrunHash! !== owner.xctestrunHash) record('pending-xctestrun-hash', 'xctestrun-identity-mismatch');
+    let currentProductHash: string;
+    try {
+      currentProductHash = boundedBinaryHash(join(product, 'WebDriverAgentRunner-Runner'), inspectionDeadline,
+        commandContext(phase, 'validate-pending-product', {endpoint: 'simulator', frozenOwner: false}));
+    } catch (error) {
+      if (error instanceof Error && error.message === 'XCTEST: startup deadline') recordDeadline(error);
+      record('pending-product-hash', 'product-identity-error');
+    }
+    if (currentProductHash! !== productBinaryHash) record('pending-product-hash', 'product-identity-mismatch');
+    try {
+      if (realpathSync(productInput) !== product) record('pending-product-path', 'product-identity-mismatch');
+    } catch {
+      record('pending-product-path', 'product-identity-error');
+    }
+    persist('pending', 'none');
+    return {pid: observed!.pid, executable: observed!.executable, birth: observed!.birth!};
   };
   const recordInitialCandidateDiagnostic = (snapshot: ListenerSnapshot, cleanupSnapshot?: CleanupListenerSnapshot): void => {
     if (owner.initialCandidateDiagnostic || frozenRunner || snapshot.wda.status !== 'evaluated' || snapshot.mjpeg.status !== 'evaluated') return;
@@ -1806,8 +1955,13 @@ async function supervise(): Promise<void> {
     save();
   };
   const stopChild = async (): Promise<void> => {
-    if (!child || childEnded) {
-      diagnostics.lifecycle('child-stop-skipped', {phase: 'cleanup', childPresent: Boolean(child), childEnded});
+    if (!child || childEnded || childExited) {
+      diagnostics.lifecycle('child-stop-skipped', {phase: 'cleanup', childPresent: Boolean(child), childEnded, childExited, childErrorObserved});
+      if (childExited && !childEnded) {
+        await Promise.race([exited || Promise.resolve(), sleep(10_000)]);
+        if (!childEnded) rememberFailure({message: 'XCTEST: child cleanup did not settle', phase: 'cleanup', stage: 'child-cleanup', category: 'child-cleanup-timeout', frozenOwner: Boolean(frozenRunner)});
+        diagnostics.lifecycle('child-stop-finished', {phase: 'cleanup', pid: child?.pid, childEnded});
+      }
       return;
     }
     const requestSignal = (signal: NodeJS.Signals): void => {
@@ -1896,16 +2050,27 @@ async function supervise(): Promise<void> {
     diagnostics.lifecycle('child-spawned', {phase: 'startup', pid: child.pid, frozenOwner: false});
     child.stdout?.on('data', chunk => retain(Buffer.from(chunk), 'stdout'));
     child.stderr?.on('data', chunk => retain(Buffer.from(chunk), 'stderr'));
+    let resolveChildExit: () => void = () => {};
+    childExitObserved = new Promise(resolve => { resolveChildExit = resolve; });
     exited = new Promise(resolve => {
       child!.on('error', error => {
-        diagnostics.lifecycle('child-error', {phase: 'startup', pid: child?.pid, category: 'child-process-error', code: (error as NodeJS.ErrnoException).code});
-        rememberFailure({message: 'XCTEST: child process error', phase: 'startup', stage: 'child-process', category: 'child-process-error'});
+        childErrorObserved = true;
+        const stopping = stop || existsSync(join(root, 'stop'));
+        if (!stopping) stop = true;
+        diagnostics.lifecycle('child-error', {phase: 'startup', pid: child?.pid, category: 'child-process-error', code: (error as NodeJS.ErrnoException).code, childExited});
+        if (!stopping) rememberFailure({message: 'XCTEST: child process error', phase: 'startup', stage: 'child-process', category: 'child-process-error'});
         save();
       });
       child!.on('exit', (code, signal) => {
+        childExited = true;
+        const stopping = stop || existsSync(join(root, 'stop'));
+        if (!stopping) stop = true;
         diagnostics.lifecycle('child-exit', {phase: 'startup', pid: child?.pid, exitCode: code, signal, frozenOwner: Boolean(frozenRunner)});
+        resolveChildExit();
+        if (!stopping) rememberFailure({message: 'XCTEST: child process exited', phase: 'startup', stage: 'child-exit', category: 'child-exit', frozenOwner: Boolean(frozenRunner)});
       });
       child!.on('close', (code, signal) => {
+        childExited = true;
         childEnded = true;
         finishOutput();
         owner.exitCode = code;
@@ -1922,7 +2087,7 @@ async function supervise(): Promise<void> {
       rememberFailure({error, phase: 'startup', stage: 'child-pid-birth', category: 'child-pid-birth'});
     }
     save();
-    while (!stop && !childEnded && !existsSync(join(root, 'stop'))) {
+    while (!stop && !childEnded && !childExited && !owner.firstFailure && !existsSync(join(root, 'stop'))) {
       remaining();
       try {
         const initial = inspectListeners(deadline, 'initial');
@@ -1938,20 +2103,63 @@ async function supervise(): Promise<void> {
             save();
             throw new Error('XCTEST: managed WDA listener changed');
           }
+          if (pendingRunner) {
+            try {
+              validatePendingSnapshot(initial, pendingRunner, deadline, 'initial');
+            } catch (error) {
+              initialCandidateSnapshot ||= pendingInitialSnapshot || initial;
+              throw error;
+            }
+          }
+          await sleep(Math.min(250, remaining()));
+          continue;
+        }
+        if (!initialWdaPids.length && !frozenRunner) {
+          try {
+            const candidate = validatePendingSnapshot(initial, pendingRunner, deadline, 'initial');
+            if (!pendingRunner) {
+              pendingRunner = candidate;
+              pendingInitialSnapshot = initial;
+              diagnostics.lifecycle('runner-candidate-pinned', {
+                phase: 'initial',
+                pid: candidate.pid,
+                birth: safeProcessBirth(candidate.birth, true),
+                executable: redactedBounded(candidate.executable, 1_024),
+                frozenOwner: false,
+              });
+              save();
+            } else {
+              diagnostics.lifecycle('runner-candidate-revalidated', {
+                phase: 'initial',
+                pid: candidate.pid,
+                birth: safeProcessBirth(candidate.birth, true),
+                executable: redactedBounded(candidate.executable, 1_024),
+                frozenOwner: false,
+              });
+              save();
+            }
+          } catch (error) {
+            initialCandidateSnapshot ||= pendingInitialSnapshot || initial;
+            throw error;
+          }
           await sleep(Math.min(250, remaining()));
           continue;
         }
         let candidate: RunnerIdentity;
         try {
-          candidate = validateListenerSnapshot(initial, frozenRunner, deadline, 'initial');
+          if (pendingRunner) validatePendingSnapshot(initial, pendingRunner, deadline, 'initial', true);
+          candidate = validateListenerSnapshot(initial, frozenRunner || pendingRunner, deadline, 'initial');
         } catch (error) {
-          initialCandidateSnapshot = initial;
+          initialCandidateSnapshot ||= pendingInitialSnapshot || initial;
           throw error;
         }
+        await yieldToChildExit();
+        if (owner.firstFailure || childExited || stop || existsSync(join(root, 'stop'))) throw new Error('XCTEST: startup stopped before WDA admission');
         if (!frozenRunner) {
           try {
             owner.receipt = receipt('after-initial');
           } catch (error) {
+            if (pendingInitialSnapshot) initialCandidateSnapshot ||= pendingInitialSnapshot;
             owner.receiptError = receiptErrorCategory(error);
             const message = 'XCTEST: registration receipt validation failed';
             rememberFailure({message, phase: 'after-initial', stage: 'registration-receipt', category: 'registration-receipt-validation', predicate: owner.listenerValidation,
@@ -1960,8 +2168,18 @@ async function supervise(): Promise<void> {
             throw new ReceiptValidationError(message);
           }
           const afterReceipt = inspectListeners(deadline, 'after-receipt');
-          candidate = validateListenerSnapshot(afterReceipt, candidate, deadline, 'after-receipt', false);
+          try {
+            candidate = validateListenerSnapshot(afterReceipt, candidate, deadline, 'after-receipt', false);
+          } catch (error) {
+            if (pendingInitialSnapshot) initialCandidateSnapshot ||= pendingInitialSnapshot;
+            throw error;
+          }
+          await yieldToChildExit();
+          await ensureChildRunning('WDA freeze');
+          if (owner.firstFailure || childExited || stop || existsSync(join(root, 'stop'))) throw new Error('XCTEST: startup stopped before WDA freeze');
           frozenRunner = candidate;
+          pendingRunner = undefined;
+          pendingInitialSnapshot = undefined;
           owner.runnerPid = candidate.pid;
           owner.runnerExecutable = candidate.executable;
           owner.runnerBirth = candidate.birth;
@@ -2015,6 +2233,8 @@ async function supervise(): Promise<void> {
         } finally {
           const afterStatus = inspectListeners(deadline, 'after-status');
           validateListenerSnapshot(afterStatus, frozenRunner, deadline, 'after-status', true);
+          await yieldToChildExit();
+          await ensureChildRunning('readiness');
         }
         const statusReady = Boolean(status && status.statusCode === 200 && !status.truncated && validWdaStatus(status.body, required('IOS_PLATFORM_VERSION')));
         diagnostics.lifecycle('readiness-predicate', {
@@ -2026,14 +2246,16 @@ async function supervise(): Promise<void> {
         });
         if (statusReady) {
           remaining();
-          if (childEnded) throw new Error('XCTEST: runner exited during readiness');
+          if (childEnded || childExited) throw new Error('XCTEST: runner exited during readiness');
+          if (stop || owner.firstFailure || existsSync(join(root, 'stop'))) throw new Error('XCTEST: startup stopped before readiness');
           owner.ready = true;
+          if (!save()) throw new Error('XCTEST: owner evidence write failed');
           diagnostics.lifecycle('ready-admitted', {phase: 'readiness', endpoint: 'wda', port, frozenOwner: true});
-          save();
           break;
         }
       } catch (error) {
-        if (error instanceof ReceiptValidationError || (error instanceof Error && error.message.startsWith('XCTEST:'))) throw error;
+        if (owner.firstFailure || childExited || stop || existsSync(join(root, 'stop'))
+          || error instanceof ReceiptValidationError || (error instanceof Error && error.message.startsWith('XCTEST:'))) throw error;
       }
       await sleep(Math.min(250, remaining()));
     }

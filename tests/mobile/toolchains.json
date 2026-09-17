@@ -1,14 +1,15 @@
 {
   "schema": 1,
   "verified": false,
-  "verificationNote": "The repository host cannot prove macOS simulator feasibility or Android module stability. The first hosted run must record the selected image, browser, package, and module identities before this file is marked verified.",
-  "node": "24.12.0",
-  "bun": "1.4.0",
-  "appium": "3.1.1",
-  "appiumLogger": "2.0.4",
+  "verificationNote": "The repository host cannot prove macOS simulator feasibility, Android device/module qualification, or local ARM64 browser alignment. The first hosted run must record the selected image, browser, package, and module identities before this file is marked verified.",
+  "node": "24.21.0",
+  "bun": "1.4.2",
+  "appium": "3.7.0",
+  "appiumLogger": "2.0.11",
+  "wda": "16.12.8",
   "drivers": {
-    "uiautomator2": "8.2.2",
-    "xcuitest": "12.10.0"
+    "uiautomator2": "8.7.0",
+    "xcuitest": "12.12.4"
   },
   "android": {
     "runner": "ubuntu-24.04",

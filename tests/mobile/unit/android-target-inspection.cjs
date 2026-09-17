@@ -2,11 +2,12 @@
 
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
+const {readFileSync} = require('node:fs');
 const http = require('node:http');
 const {createRequire} = require('node:module');
 const path = require('node:path');
 assert.ok(process.env.APPIUM_HOME, 'Owned installed fixture required');
-const installedRequire = createRequire(path.join(process.env.APPIUM_HOME, 'node_modules/appium-android-driver/build/lib/commands/context/target-inspection.cjs'));
+const installedRequire = createRequire(path.join(process.env.APPIUM_HOME, 'node_modules/appium-uiautomator2-driver/node_modules/appium-android-driver/build/lib/commands/context/target-inspection.cjs'));
 const {WebSocketServer} = installedRequire('ws');
 const {inspectTargets, associateBrowserProcess} = installedRequire('./target-inspection.cjs');
 const CORE_EXPRESSION = 'JSON.stringify({href:location.href,origin:location.origin,timeOrigin:performance.timeOrigin})';
@@ -17,13 +18,15 @@ async function fixture(mode, run) {
   const timers = new Set();
   let connections = 0;
   let pidReads = 0;
+  let directSocket;
   const browserPath = mode === 'bare' ? '/devtools/browser' : '/devtools/browser/owned';
+  let serverPort;
   const server = http.createServer((req, res) => {
     if (mode === 'http-stall') return;
     if (mode === 'http-partial') { res.writeHead(200, {'Content-Length': 900}); res.write('{'); res.destroy(); return; }
     if (mode === 'http-large') { res.end('x'.repeat(70000)); return; }
     if (mode === 'http-malformed') { res.end('{'); return; }
-    res.end(JSON.stringify({Browser: 'Chrome/131', webSocketDebuggerUrl: mode === 'foreign-endpoint' ? 'ws://127.0.0.1:1/devtools/browser/foreign' : `ws://127.0.0.1:${server.address().port}${browserPath}`}));
+    res.end(JSON.stringify({Browser: 'Chrome/131', webSocketDebuggerUrl: mode === 'foreign-endpoint' ? 'ws://127.0.0.1:1/devtools/browser/foreign' : `ws://127.0.0.1:${serverPort}${browserPath}`}));
   });
   server.on('connection', (peer) => { peers.add(peer); peer.on('close', () => peers.delete(peer)); });
   const wss = new WebSocketServer({noServer: true});
@@ -35,8 +38,16 @@ async function fixture(mode, run) {
   let evaluations = 0;
   let unselectedMode = 'browser';
   const target = (id) => ({targetId: id, type: 'page', url: 'https://app/', title: 'same', attached: true});
+  const diagnosticEvent = (sessionId = 'installed') => JSON.stringify({
+    method: mode === 'unknown-event' ? 'DOM.secretNotification' : 'DOM.childNodeCountUpdated',
+    ...(sessionId ? {sessionId} : {}),
+    params: mode === 'late-event-secrets'
+      ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
+      : {nodeId: 7, childNodeCount: 2},
+  });
   wss.on('connection', (ws) => {
     connections++;
+    directSocket = ws;
     ws.on('message', (raw) => {
     const message = JSON.parse(raw);
     calls.push(message);
@@ -45,7 +56,27 @@ async function fixture(mode, run) {
     if (mode === 'frame-partial') { ws._socket.write(Buffer.from([0x81, 126, 0, 100, 123])); return; }
     if (mode === 'frame-large') { ws.send('x'.repeat(70000)); return; }
     if (mode === 'frame-malformed') { ws.send('{'); return; }
-    if (mode === 'event') { ws.send(JSON.stringify({method: 'Target.targetCreated', params: {}})); return; }
+    if (mode === 'frame-binary') {
+      ws.send(Buffer.from([0x7b]));
+      ws.send(JSON.stringify({method: 'Target.secretNotification', params: {secret: 'CREDENTIAL_SECRET'}}));
+      return;
+    }
+    if (mode === 'frame-flood') {
+      ws.send(JSON.stringify({method: 'Target.targetCreated', params: {}}));
+      for (let index = 0; index < 401; index++) ws.send(JSON.stringify({method: 'Target.secretNotification', params: {secret: 'CREDENTIAL_SECRET'}}));
+      return;
+    }
+    if (mode === 'event' || mode === 'unknown-event' || mode === 'id-event' || mode === 'event-error' || mode === 'event-result') {
+      const event = mode === 'event'
+        ? {method: 'Target.targetCreated', params: {}}
+        : mode === 'unknown-event'
+          ? {method: 'Target.secretNotification', params: {secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}}
+          : mode === 'id-event'
+            ? {id: message.id, method: 'DOM.childNodeCountUpdated', params: {nodeId: 7, childNodeCount: 2}}
+            : {method: 'DOM.childNodeCountUpdated', params: {nodeId: 7, childNodeCount: 2}, ...(mode === 'event-error' ? {error: {code: -32000, message: 'not a reply'}} : {result: {ignored: true}})};
+      ws.send(JSON.stringify(event));
+      return;
+    }
     let result;
     switch (message.method) {
       case 'SystemInfo.getProcessInfo': {
@@ -102,6 +133,7 @@ async function fixture(mode, run) {
       default: throw new Error(`Unexpected command ${message.method}`);
     }
     const response = {id: mode === 'wrong-request' ? message.id + 1 : message.id, result, ...(message.sessionId ? {sessionId: mode === 'wrong-session' ? 'foreign' : message.sessionId} : {})};
+    if (mode === 'result-malformed') response.result = [];
     if (mode === 'pid-child-route') response.sessionId = 'installed';
     if (mode === 'child-root-route' && message.sessionId) delete response.sessionId;
     if (mode === 'pid-error') response.error = {code: -32601, message: 'Unsupported'};
@@ -114,15 +146,25 @@ async function fixture(mode, run) {
       ws._socket.cork();
       try { ws.send(JSON.stringify(response)); ws.send(JSON.stringify(response)); }
       finally { ws._socket.uncork(); }
-    } else ws.send(JSON.stringify(response));
+    } else {
+      if (mode === 'pending-event' && message.id === 4) ws.send(diagnosticEvent());
+      if (mode === 'between-passes' && message.id === 10) {
+        ws._socket.cork();
+        try { ws.send(JSON.stringify(response)); ws.send(diagnosticEvent('bootstrap')); }
+        finally { ws._socket.uncork(); }
+        return;
+      }
+      ws.send(JSON.stringify(response));
+    }
     if (mode === 'final-disconnect' && pidReads === 2) ws.close();
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  serverPort = server.address().port;
   const owner = {};
   let failures = 0;
   let snapshots = 0;
-  const snapshot = {endpoint: {host: '127.0.0.1', port: server.address().port, browserPath}, browserVersion: 'Chrome/131', handles: ['bootstrap', 'installed'], selectedHandle: 'installed'};
+  const snapshot = {endpoint: {host: '127.0.0.1', port: serverPort, browserPath}, browserVersion: 'Chrome/131', handles: ['bootstrap', 'installed'], selectedHandle: 'installed'};
   const contract = {
     expectedBrowserPid: 123,
     deadline: Date.now() + (['late', 'pid-after-late', 'http-stall', 'open-stall', 'read-stall', 'frame-partial'].includes(mode) ? 100 : 2000),
@@ -131,6 +173,10 @@ async function fixture(mode, run) {
     snapshot: async () => {
       snapshots++;
       if (mode === 'final-disconnect' && snapshots > 1) await new Promise((resolve) => setTimeout(resolve, 30));
+      if (['late-event', 'late-event-secrets'].includes(mode) && snapshots > 1) {
+        directSocket.send(diagnosticEvent());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
       return structuredClone(snapshot);
     },
     validateSnapshot: async (_owner, before, after) => { assert.deepEqual(before, after); if (mode === 'owner-after' && snapshots > 1) throw new Error('Native owner lost'); },
@@ -178,6 +224,76 @@ for (const mode of ['healthy', 'unknown', 'pid-children', 'bare']) {
   }));
 }
 
+function readUncorrelatedDiagnostic(error) {
+  const match = String(error).match(/Uncorrelated CDP reply or event \((\{.*\})\)$/u);
+  assert.ok(match, String(error));
+  return JSON.parse(match[1]);
+}
+
+test('frame limits run before message classification', () => {
+  const source = readFileSync(installedRequire.resolve('./target-inspection.cjs'), 'utf8');
+  const frameGuard = source.indexOf('if (++messages > 400 || binary || data.length > LIMIT)');
+  const messageParse = source.indexOf("const message = record(JSON.parse(data.toString('utf8')))");
+  assert.ok(frameGuard >= 0 && messageParse > frameGuard);
+});
+
+test('late event diagnosis preserves the final refusal and quarantine', async () => fixture('late-event', async ({owner, contract, calls, failures}) => {
+  let original;
+  await assert.rejects(inspectTargets(owner, contract), error => {
+    original = error;
+    assert.deepEqual(readUncorrelatedDiagnostic(error), {
+      failurePredicate: 'uncorrelated-cdp-message', classification: 'event', method: 'DOM.childNodeCountUpdated',
+      idPresence: 'absent', idType: 'absent', idValue: 'none',
+      sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
+      lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
+      phase: 'final-snapshot', messageCount: 21, params: {nodeId: 7, childNodeCount: 2},
+    });
+    assert.ok(String(error).length < 1_000);
+    return true;
+  });
+  assert.equal(failures(), 1);
+  const count = calls.length;
+  await assert.rejects(inspectTargets(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
+  await assert.rejects(associateBrowserProcess(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
+  assert.equal(calls.length, count);
+}));
+
+test('diagnostic event params are schema bounded and redacted', async () => fixture('late-event-secrets', async ({owner, contract}) => {
+  await assert.rejects(inspectTargets(owner, contract), error => {
+    const text = String(error);
+    const diagnostic = readUncorrelatedDiagnostic(error);
+    assert.deepEqual(diagnostic.params, {nodeId: 'nonmatching', childNodeCount: 2});
+    assert.equal(text.includes('SESSION_SECRET'), false);
+    assert.equal(text.includes('CREDENTIAL_SECRET'), false);
+    assert.equal(text.includes('attacker.invalid'), false);
+    return true;
+  });
+}));
+
+for (const [mode, expected] of [
+  ['pending-event', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'unknown', sessionOrdinal: 'unknown', targetOrdinal: 'unknown', lastSequence: 4, pendingId: 4, pendingMethod: 'DOM.getDocument', pendingSessionOrdinal: 1, phase: 'initial', messageCount: 5}],
+  ['between-passes', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'known-local-ordinal', sessionOrdinal: 1, targetOrdinal: 1, lastSequence: 10, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none', phase: 'initial', messageCount: 13}],
+  ['event-error', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1, params: {nodeId: 7, childNodeCount: 2}}],
+  ['event-result', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1, params: {nodeId: 7, childNodeCount: 2}}],
+  ['frame-flood', {classification: 'event', method: 'Target.targetCreated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1}],
+  ['unknown-event', {classification: 'event', method: 'unknown', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1}],
+  ['id-event', {classification: 'other', method: 'DOM.childNodeCountUpdated', idPresence: 'present', idType: 'number', idValue: 1, sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none', lastSequence: 1, pendingId: 1, pendingMethod: 'SystemInfo.getProcessInfo', pendingSessionOrdinal: 'root', phase: 'initial', messageCount: 1}],
+]) test(`uncorrelated message diagnostic preserves ${mode} refusal`, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
+  let original;
+  await assert.rejects(inspectTargets(owner, contract), error => {
+    original = error;
+    const diagnostic = readUncorrelatedDiagnostic(error);
+    assert.equal(diagnostic.failurePredicate, 'uncorrelated-cdp-message');
+    for (const [field, value] of Object.entries(expected)) assert.deepEqual(diagnostic[field], value);
+    assert.equal(failures(), 1);
+    return true;
+  });
+  const count = calls.length;
+  await assert.rejects(inspectTargets(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
+  await assert.rejects(associateBrowserProcess(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
+  assert.equal(calls.length, count);
+}));
+
 test('accepted loss: an unselected standalone mode change remains unobserved', async () => fixture('healthy', async ({owner, contract, calls, setUnselectedMode, unselectedMode, unselectedDocument}) => {
   const inspect = () => inspectTargets(owner, {...contract, deadline: Date.now() + 2000});
   const baseline = await inspect();
@@ -194,13 +310,14 @@ test('accepted loss: an unselected standalone mode change remains unobserved', a
   assert.equal(calls.length, 36);
 }));
 
-for (const mode of ['pid-string', 'pid-fraction', 'pid-zero', 'pid-negative', 'pid-overflow', 'pid-unsafe', 'pid-missing-id', 'pid-wrong', 'pid-after-wrong', 'pid-missing', 'pid-absent', 'pid-duplicate', 'pid-duplicate-id', 'pid-child-invalid', 'pid-many', 'pid-type', 'pid-no-browser', 'pid-no-cpu', 'pid-cpu-string', 'pid-cpu-negative', 'pid-null', 'pid-child-route', 'child-root-route', 'pid-error', 'pid-stale', 'pid-repeat', 'pid-after-late', 'final-disconnect', 'final-selected-disconnect', 'duplicate', 'invalid', 'unmapped', 'changed', 'disappeared', 'replaced', 'wrong-target', 'wrong-attach-session', 'wrong-request', 'wrong-session', 'event', 'http-large', 'http-partial', 'http-malformed', 'frame-large', 'frame-partial', 'frame-malformed', 'http-stall', 'open-stall', 'read-stall', 'expired', 'owner-before', 'owner-during', 'owner-after', 'selected-refused', 'disconnect', 'late', 'foreign-endpoint', 'document-replaced', 'repeat-drift', 'other-page-unreadable']) {
+for (const mode of ['pid-string', 'pid-fraction', 'pid-zero', 'pid-negative', 'pid-overflow', 'pid-unsafe', 'pid-missing-id', 'pid-wrong', 'pid-after-wrong', 'pid-missing', 'pid-absent', 'pid-duplicate', 'pid-duplicate-id', 'pid-child-invalid', 'pid-many', 'pid-type', 'pid-no-browser', 'pid-no-cpu', 'pid-cpu-string', 'pid-cpu-negative', 'pid-null', 'pid-child-route', 'child-root-route', 'pid-error', 'pid-stale', 'pid-repeat', 'pid-after-late', 'final-disconnect', 'final-selected-disconnect', 'duplicate', 'invalid', 'unmapped', 'changed', 'disappeared', 'replaced', 'wrong-target', 'wrong-attach-session', 'wrong-request', 'wrong-session', 'event', 'http-large', 'http-partial', 'http-malformed', 'frame-binary', 'frame-large', 'frame-partial', 'frame-malformed', 'http-stall', 'open-stall', 'read-stall', 'expired', 'owner-before', 'owner-during', 'owner-after', 'selected-refused', 'disconnect', 'late', 'foreign-endpoint', 'document-replaced', 'repeat-drift', 'other-page-unreadable']) {
   test(mode, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
-    await assert.rejects(inspectTargets(owner, contract));
+    let original;
+    await assert.rejects(inspectTargets(owner, contract), error => { original = error; return true; });
     assert.equal(failures(), 1);
     const count = calls.length;
-    await assert.rejects(inspectTargets(owner, {...contract, deadline: Date.now() + 1000}));
-    await assert.rejects(associateBrowserProcess(owner, {...contract, deadline: Date.now() + 1000}));
+    await assert.rejects(inspectTargets(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
+    await assert.rejects(associateBrowserProcess(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
     assert.equal(failures(), 1);
     await new Promise((resolve) => setTimeout(resolve, mode.includes('late') ? 170 : 5));
     assert.equal(calls.length, count);

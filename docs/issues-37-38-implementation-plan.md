@@ -722,8 +722,9 @@ unreachable.
 
 ## 5. Verification instructions
 
-All commands are run from the repository root. Required toolchains are Go
-1.27.0 and Bun 1.4, as documented in `docs/development.md` and project manifests.
+All commands are run from the repository root. Required toolchains are Node.js
+24.21.0, Go 1.27.1, and Bun 1.4.2, as documented in `docs/development.md` and
+project manifests.
 Use disposable fake upstreams; never stop the user's live Herdr to simulate an
 outage. The Makefile loads `.env`; do not print it or run deployment targets.
 

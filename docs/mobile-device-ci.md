@@ -53,16 +53,19 @@ export MOBILE_PLATFORM=android
 export ANDROID_SERIAL=emulator-5554
 export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/android-owned"
 printf 'android:%s\n' "$ANDROID_SERIAL" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
-npm install --global appium@3.1.1
-appium driver install uiautomator2@8.2.2
+npm install --global appium@3.7.0
+appium driver install uiautomator2@8.7.0
 appium --address 127.0.0.1 --port 4723 &
 export MOBILE_FIXTURE_BINARY="$PWD/run-artifacts/herdr-mobile-fixture"
 ```
 
 Hosted Android installs the pinned Chrome/Trichrome pair declared in
 `tests/mobile/toolchains.json` before Appium starts. The current reproducible
-candidate is Chrome `131.0.6778.200` / version code `677820038` for x86+x86_64,
-with the matching `com.google.android.trichromelibrary` library. CI verifies
+CI-only pin is Chrome `131.0.6778.200` / version code `677820038` for
+x86+x86_64, with the matching `com.google.android.trichromelibrary` library.
+It is not a local ARM64-aligned browser release; keep `verified` false until a
+matching signed ARM64 and x86_64 Chrome/Trichrome pair has binary manifests,
+hashes, certificates, and hosted qualification. CI verifies
 both SHA-256 archives and the Google signing certificates, unpacks the Chrome
 APKM, installs the library first, and then installs all Chrome splits. The
 hosted emulator uses the declared Google APIs image without the Play Store and
@@ -132,12 +135,44 @@ printf 'ios:%s\n' "$IOS_SIMULATOR_UDID" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
 xcrun simctl boot "$IOS_SIMULATOR_UDID"
 xcrun simctl bootstatus "$IOS_SIMULATOR_UDID" -b
 open -Fn /Applications/Xcode_16.4.app/Contents/Developer/Applications/Simulator.app
-npm install --global appium@3.1.1
-appium driver install xcuitest@12.10.0
+npm install --global appium@3.7.0
+appium driver install xcuitest@12.12.4
 appium --address 127.0.0.1 --port 4723 &
 export MOBILE_PLATFORM=ios
 export MOBILE_FIXTURE_BINARY="$PWD/run-artifacts/herdr-mobile-fixture"
 ```
+
+### iOS 27 operator prerequisite
+
+The current CI contract intentionally remains macOS-15/Xcode 16.4/iOS 18.6;
+this checkout does not claim iOS 27 qualification. Stable Xcode 27 requires
+macOS Tahoe 26.6 or newer. The current host is macOS 26.1, and the available
+`xcode-27` hosted image is a preview beta, so neither is an acceptable source
+for changing `tests/mobile/toolchains.json`.
+
+After the protected iOS49 qualification has finished, and before an iOS 27
+qualification, an operator must use the Apple release
+information at [Apple's iOS 27 support page](https://support.apple.com/en-us/100100),
+the [Xcode support matrix](https://developer.apple.com/support/xcode/), and the
+[Apple developer downloads](https://developer.apple.com/download/all/) to:
+
+1. confirm supported Mac hardware and record measured free disk space with
+   `df -h /` (reserve enough for macOS, Xcode, the iOS 27 simulator runtime, and
+   WDA derived data; this project does not invent a fixed disk-size threshold);
+2. upgrade macOS to at least 26.6 during an approved maintenance window;
+3. install the stable Xcode 27 release and the exact iOS 27 simulator runtime,
+   accept the license, and complete first-launch components with operator
+   credentials; and
+4. use an isolated developer directory and owned simulator while recording
+   `DEVELOPER_DIR=/Applications/Xcode_27.app/Contents/Developer xcodebuild -version`
+   and `DEVELOPER_DIR=/Applications/Xcode_27.app/Contents/Developer xcrun simctl list runtimes`.
+
+After those identities are recorded, rebuild WDA from the pinned XCUITest
+12.12.4/WDA 16.12.8 tree, run the managed XCTest/Appium qualification on an
+owned iOS 27 simulator, and retain the runtime/build provenance. Do not replace
+the current iOS 18.6 pin with a beta, a `macos-latest` label, or an unmeasured
+runtime. Do not change the global Xcode selector for this qualification; pass
+`DEVELOPER_DIR` explicitly to each `xcodebuild`/`xcrun` command.
 
 Run one baseline at a time:
 
@@ -158,7 +193,7 @@ A manual workflow dispatch requires `artifact_run_id`, the completed successful 
 
 Each device matrix entry selects one of 0.20.8, 0.20.9, or 0.20.10 as the installed baseline. `baseline_set: latest` prepares only 0.20.10; smoke runs omit the unused synthetic bundle artifact. The controlled smoke and release suites inject one bounded corrupt candidate-script response for historical upgrades and a missing-stylesheet response for the synthetic current-code pair, prove each request was consumed and phone completion was not acknowledged, then use the shipped Try again control without reinstalling or re-pairing. It also builds two coherent temporary current-code bundles through the real frontend pipeline and runs the same fault/completion assertions against that pair. The historical 0.20.8/0.20.9 progress-format gap is reported as `HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:<version>` rather than treated as a successful acknowledgement or a failed upgrade. After recording completion evidence, the runner closes the non-dismissible update dialog, returns from Settings to the fixture's alpha agent, and only then runs the native keyboard check. Evidence artifacts contain the mobile result, screenshots, bounded fixture/Appium logs, driver versions, and platform version records. Secrets, setup fragments, relay credentials, and control headers are redacted or deleted before upload.
 
-On hosted iOS, both CI entrypoints prebuild pinned WDA 16.12.1 and use
+On hosted iOS, both CI entrypoints prebuild pinned WDA 16.12.8 and use
 `tests/mobile/support/ios-xctest.ts` to supervise one managed
 `xcodebuild test-without-building` invocation. The helper selects exactly one
 expected xctestrun and runner for the owned simulator. It records the child PID,

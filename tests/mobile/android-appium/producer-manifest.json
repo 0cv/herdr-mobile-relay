@@ -83,7 +83,7 @@
     },
     "lib/commands/context/target-inspection.cjs": {
       "source": "target-inspection.cjs",
-      "sha256": "9d0a98716f10d802752bcd6b3dd6855bb2087a8f0aee6d07aba06a9bc69838c1"
+      "sha256": "4e4fdaccc67abe3aa999235348181c58ec7fc74f7f6d6f138f38e689b1b41e0e"
     },
     "lib/commands/context/target-inspection.d.cts": {
       "source": "target-inspection.d.cts",
@@ -107,7 +107,7 @@
     },
     "build/lib/commands/context/target-inspection.cjs": {
       "source": "target-inspection.cjs",
-      "sha256": "9d0a98716f10d802752bcd6b3dd6855bb2087a8f0aee6d07aba06a9bc69838c1"
+      "sha256": "4e4fdaccc67abe3aa999235348181c58ec7fc74f7f6d6f138f38e689b1b41e0e"
     },
     "build/lib/commands/context/target-inspection.d.cts": {
       "source": "target-inspection.d.cts",
@@ -131,10 +131,10 @@
     }
   },
   "inputs": {
-    "appium-runtime-manifest.json": "feee347156aeaf404a50609e505b5e96d9c1e257a1435f0573484b3d68633425",
+    "appium-runtime-manifest.json": "1d14bd9592fb1bf076abdd520f3e96c0f9007361cda17cf1e2cc5fe99e5e4063",
     "declaration-map.ts": "a69a5e8d10082bee60f98c84c14d8e51073fa546f530833f43e361dafea9519c",
-    "gate.ts": "d934727cf2b4821faaf6ca9051cad2558b7655fe78a69ddafd0388f1acb4b05f",
+    "gate.ts": "7dab383e84fc32490e7a82be4969f370ba1bf7f819835360fa920305e458a7bb",
     "producer-transform.json": "7f8166dc99ec6d9487104299904357e1732a087bfa5e33eba5e1d666ade003de",
-    "runtime-manifest.json": "fcc558732a7f646adfc2530225263b8d6cc17553c6968223a0bacf35bdac5d0c"
+    "runtime-manifest.json": "d8418ab84297f350737b4318b43b01b4e406918329cc569c2d0ab780fdda2dce"
   }
 }

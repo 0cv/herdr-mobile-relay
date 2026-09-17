@@ -102,12 +102,20 @@ jobs:
       head_sha: ${{ steps.validate.outputs.head_sha }}
       artifact_run_id: ${{ steps.validate.outputs.artifact_run_id }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
       - name: Validate source run and artifact
         id: validate
         env:
@@ -230,27 +238,36 @@ jobs:
       synthetic_baseline_identity: ${{ steps.artifact_identity.outputs.synthetic_baseline_identity }}
     steps:
       - name: Check out the verified source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
-      - uses: actions/setup-go@v5
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          go-version: '1.27.0'
+          bun-version: 1.4.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
           cache: true
       - name: Verify mobile toolchain declarations
         run: |
           jq -e '
             .schema == 1 and
-            .node == "24.12.0" and
-            .bun == "1.4.0" and
-            .appium == "3.1.1" and
-            .appiumLogger == "2.0.4" and
-            .drivers.uiautomator2 == "8.2.2" and
-            .drivers.xcuitest == "12.10.0" and
+            .node == "24.21.0" and
+            .bun == "1.4.2" and
+            .appium == "3.7.0" and
+            .appiumLogger == "2.0.11" and
+            .wda == "16.12.8" and
+            .drivers.uiautomator2 == "8.7.0" and
+            .drivers.xcuitest == "12.12.4" and
             .android.systemImage == "system-images;android-35;google_apis;x86_64" and
             .android.systemImagePolicy == "owned-google-apis-emulator" and
             .android.vendingPolicy == "absent-or-disabled-user-0" and
@@ -271,7 +288,7 @@ jobs:
             .android.trichromeLibraryCertificateSha1 == "9524aa4a04aceeab425451e593ac639c942fb3cd" and
             (.android.trichromeLibraryCertificateSha1 | length == 40 and test("^[0-9a-f]{40}$"))
           ' tests/mobile/toolchains.json >/dev/null
-          test "$(bun --version)" = 1.4.0
+          test "$(bun --version)" = 1.4.2
       - name: Select requested device matrix
         id: matrix
         env:
@@ -316,7 +333,7 @@ jobs:
         run: bun install --frozen-lockfile --cwd tests/mobile
       - name: Install frontend build dependencies
         run: bun install --frozen-lockfile --cwd frontend
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: mobile-playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
@@ -334,7 +351,7 @@ jobs:
           bun run --cwd tests/mobile test:cache-recovery -- \
             --bundle-set "$GITHUB_WORKSPACE/dist/mobile-current/bundle-set.json"
       - name: Download exact release artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.artifact_name || 'release-bundles' }}
           path: dist/release
@@ -403,19 +420,19 @@ jobs:
           echo "baseline_identities=$baseline_identities" >> "$GITHUB_OUTPUT"
           echo "synthetic_baseline_identity=$synthetic_baseline_identity" >> "$GITHUB_OUTPUT"
       - name: Publish verified bundle sets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-bundles-android
           path: dist/mobile-android
           if-no-files-found: error
           retention-days: 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-bundles-ios
           path: dist/mobile-ios
           if-no-files-found: error
           retention-days: 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ (inputs.suite || 'release') == 'release' }}
         with:
           name: mobile-bundles-current
@@ -434,7 +451,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out the verified source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
@@ -465,15 +482,23 @@ jobs:
           test "$PROVENANCE_RESULT" = success
           test "$PREPARE_RESULT" = success
           test "$SMOKE_RESULT" = success
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
       - name: Download current-attempt smoke evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: mobile-evidence-smoke-*-${{ github.run_attempt }}
           path: smoke-evidence
@@ -508,7 +533,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Check out the verified source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
@@ -539,15 +564,23 @@ jobs:
           test "$PROVENANCE_RESULT" = success
           test "$PREPARE_RESULT" = success
           test "$RELEASE_SMOKE_RESULT" = success
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          bun-version: 1.4.0
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
       - name: Download current-attempt release evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: mobile-evidence-release-smoke-*-${{ github.run_attempt }}
           path: release-evidence
@@ -585,7 +618,7 @@ jobs:
       APPIUM_URL: http://127.0.0.1:4723
     steps:
       - name: Check out the verified source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
@@ -610,26 +643,31 @@ jobs:
           printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
           printf 'IOS_WDA_PREBUILT_PATH=%s/Build/Products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
           printf 'IOS_WDA_AGENT_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
-      - uses: actions/setup-node@v4
+          bun-version: 1.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24.12.0
-      - uses: actions/setup-go@v5
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.1'
           cache: true
       - name: Install mobile harness dependencies
         run: bun install --frozen-lockfile --cwd tests/mobile
       - name: Download verified bundle set
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: mobile-bundles-${{ matrix.platform }}
           path: mobile-bundles
       - name: Download current-code bundle pair
         if: matrix.scenario == 'synthetic'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: mobile-bundles-current
           path: mobile-bundles-current
@@ -637,7 +675,7 @@ jobs:
         run: go build -trimpath -o "$MOBILE_FIXTURE_BINARY" ./tests/mobile/fixture
       - name: Set up Android SDK
         if: matrix.platform == 'android'
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
           packages: 'platform-tools'
       - name: Create and boot Android emulator
@@ -824,10 +862,10 @@ jobs:
           if [ "$MOBILE_PLATFORM" = android ]; then
             bash tests/mobile/android-appium/ci.sh install
           else
-            npm install --global appium@3.1.1
-            appium driver install xcuitest@12.10.0
-            npm install --prefix "$APPIUM_HOME/node_modules/appium-xcuitest-driver" --no-save --package-lock=false appium-webdriveragent@16.12.1
-            npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
+            npm install --global appium@3.7.0
+            appium driver install xcuitest@12.12.4
+            npm install --prefix "$APPIUM_HOME/node_modules/appium-xcuitest-driver" --no-save --package-lock=false appium-webdriveragent@16.12.8
+            npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.11
             appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
           fi
       - name: Prebuild WebDriverAgent
@@ -956,7 +994,7 @@ jobs:
           fi
       - name: Upload mobile evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-evidence-full-${{ matrix.platform }}-${{ matrix.baseline }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/herdr-mobile-output
@@ -986,22 +1024,33 @@ jobs:
     steps:
       - name: Check out the verified source for final evidence validation
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
       - name: Download current-attempt device evidence artifacts
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: mobile-evidence-full-*-${{ github.run_attempt }}
           path: evidence
           merge-multiple: false
+      - name: Install Node for final evidence validation
+        if: needs.provenance.result == 'success' && needs.device.result == 'success'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        if: needs.provenance.result == 'success' && needs.device.result == 'success'
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
       - name: Install Bun for final evidence validation
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
       - name: Reject skipped evidence stages
         env:
           PROVENANCE_RESULT: ${{ needs.provenance.result }}

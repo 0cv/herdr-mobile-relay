@@ -42,27 +42,33 @@ runs:
         printf 'IOS_WDA_PREBUILT_PATH=%s/Build/Products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
         printf 'IOS_WDA_AGENT_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
       shell: bash
-    - uses: oven-sh/setup-bun@v2
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
-        bun-version: 1.4.0
-    - uses: actions/setup-node@v4
+        bun-version: 1.4.2
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
-        node-version: 24.12.0
-    - uses: actions/setup-go@v5
+        node-version: 24.21.0
+    - name: Assert shell Node runtime
+      run: |
+        set -euo pipefail
+        test "$(node --version)" = v24.21.0
+        test "$(command -v node)" = "$(node -p 'process.execPath')"
+      shell: bash
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27.0'
+        go-version: '1.27.1'
         cache: true
     - name: Install mobile harness dependencies
       run: bun install --frozen-lockfile --cwd tests/mobile
       shell: bash
     - name: Download verified bundle set
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: mobile-bundles-${{ inputs.platform }}
         path: mobile-bundles
     - name: Download current-code bundle pair
       if: inputs.scenario == 'synthetic'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: mobile-bundles-current
         path: mobile-bundles-current
@@ -71,7 +77,7 @@ runs:
       shell: bash
     - name: Set up Android SDK
       if: inputs.platform == 'android'
-      uses: android-actions/setup-android@v3
+      uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
       with:
         packages: 'platform-tools'
     - name: Create and boot Android emulator
@@ -252,10 +258,10 @@ runs:
         if [ "$MOBILE_PLATFORM" = android ]; then
           bash tests/mobile/android-appium/ci.sh install
         else
-          npm install --global appium@3.1.1
-          appium driver install xcuitest@12.10.0
-          npm install --prefix "$APPIUM_HOME/node_modules/appium-xcuitest-driver" --no-save --package-lock=false appium-webdriveragent@16.12.1
-          npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
+          npm install --global appium@3.7.0
+          appium driver install xcuitest@12.12.4
+          npm install --prefix "$APPIUM_HOME/node_modules/appium-xcuitest-driver" --no-save --package-lock=false appium-webdriveragent@16.12.8
+          npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.11
           appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
         fi
       shell: bash
@@ -392,7 +398,7 @@ runs:
       shell: bash
     - name: Upload mobile evidence
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ inputs.evidence_prefix }}-${{ inputs.platform }}-${{ inputs.baseline }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/herdr-mobile-output

@@ -10,6 +10,14 @@ const REMOTE_TYPES = new Set(['bigint', 'boolean', 'function', 'number', 'object
 const EXCEPTION_CLASSES = new Set(['AggregateError', 'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError']);
 const SIDE_EFFECT_DESCRIPTION = 'EvalError: Possible side-effect in debug-evaluate';
 const SIDE_EFFECT_STACK = /^(?:\n\x20{4}at [^\r\n]{1,512}){1,64}$/u;
+const KNOWN_METHODS = new Set([
+  'SystemInfo.getProcessInfo', 'Target.getTargets', 'Target.attachToTarget', 'Target.attachedToTarget',
+  'Target.targetCreated', 'Target.targetInfoChanged', 'Target.targetDestroyed', 'Target.detachedFromTarget',
+  'DOM.getDocument', 'DOM.documentUpdated', 'DOM.childNodeCountUpdated', 'DOM.scrollableFlagUpdated',
+  'DOM.topLayerElementsUpdated', 'Runtime.evaluate',
+]);
+const DIAGNOSTIC_INTEGER_MAX = 2147483647;
+const DIAGNOSTIC_REQUEST_MAX = 400;
 const owners = new WeakMap();
 
 function remoteType(value) {
@@ -33,6 +41,59 @@ function observationDiagnostic(reply, remote, targetOrdinal, observationPass) {
     failurePredicate: 'document-observation-unavailable', targetOrdinal, observationPass,
     exceptionDetails: Boolean(reply.exceptionDetails), exceptionClass: exception.className, exceptionCause: exception.cause,
     remoteType: remoteType(remote.type),
+  };
+}
+function knownMethod(value) {
+  return typeof value === 'string' && KNOWN_METHODS.has(value) ? value : 'unknown';
+}
+function diagnosticId(message) {
+  if (!Object.hasOwn(message, 'id')) return {idPresence: 'absent', idType: 'absent', idValue: 'none'};
+  const value = message.id;
+  if (typeof value === 'number') {
+    return {idPresence: 'present', idType: 'number', idValue: Number.isSafeInteger(value) && value >= 1 && value <= DIAGNOSTIC_REQUEST_MAX ? value : 'nonmatching'};
+  }
+  const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  return {idPresence: 'present', idType: ['boolean', 'object', 'string'].includes(type) ? type : 'other', idValue: 'nonmatching'};
+}
+function diagnosticInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= DIAGNOSTIC_INTEGER_MAX ? value : 'nonmatching';
+}
+function diagnosticEventParams(method, params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return undefined;
+  if (method === 'DOM.childNodeCountUpdated') return {nodeId: diagnosticInteger(params.nodeId), childNodeCount: diagnosticInteger(params.childNodeCount)};
+  if (method === 'DOM.scrollableFlagUpdated') return {nodeId: diagnosticInteger(params.nodeId), isScrollable: typeof params.isScrollable === 'boolean' ? params.isScrollable : 'nonmatching'};
+  return undefined;
+}
+function messageClassification(message) {
+  const hasId = Object.hasOwn(message, 'id');
+  const hasMethod = Object.hasOwn(message, 'method');
+  if (hasMethod && !hasId && typeof message.method === 'string') return 'event';
+  if (!hasMethod && hasId) return 'reply';
+  return 'other';
+}
+function diagnosticSession(message, sessionTargets) {
+  if (!Object.hasOwn(message, 'sessionId')) return {sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none'};
+  const association = typeof message.sessionId === 'string' ? sessionTargets.get(message.sessionId) : undefined;
+  if (!association) return {sessionRelation: 'unknown', sessionOrdinal: 'unknown', targetOrdinal: 'unknown'};
+  return {sessionRelation: 'known-local-ordinal', sessionOrdinal: association.sessionOrdinal, targetOrdinal: association.targetOrdinal};
+}
+function pendingSessionOrdinal(value, sessionTargets) {
+  if (value.sessionId === undefined) return 'root';
+  return sessionTargets.get(value.sessionId)?.sessionOrdinal ?? 'unknown';
+}
+function uncorrelatedDiagnostic(message, pending, sessionTargets, sequence, phase, messages) {
+  const classification = messageClassification(message);
+  const method = knownMethod(message.method);
+  const params = classification === 'event' ? diagnosticEventParams(method, message.params) : undefined;
+  return {
+    failurePredicate: 'uncorrelated-cdp-message', classification, method,
+    ...diagnosticId(message), ...diagnosticSession(message, sessionTargets),
+    lastSequence: sequence,
+    pendingId: pending ? pending.id : 'none',
+    pendingMethod: pending ? knownMethod(pending.method) : 'none',
+    pendingSessionOrdinal: pending ? pendingSessionOrdinal(pending, sessionTargets) : 'none',
+    phase, messageCount: messages,
+    ...(params ? {params} : {}),
   };
 }
 
@@ -101,6 +162,8 @@ async function inspect(owner, contract, targets) {
   let sequence = 0;
   let messages = 0;
   let connected = false;
+  let phase = 'initial';
+  const sessionTargets = new Map();
   const connectionId = randomUUID();
   const failure = new Promise((_, reject) => { rejectFailure = reject; });
   failure.catch(() => {});
@@ -171,7 +234,7 @@ async function inspect(owner, contract, targets) {
       socket.on('message', (data, binary) => {
         try {
           check();
-          if (binary || data.length > LIMIT || ++messages > 400) throw new Error('Message limit or binary frame');
+          if (++messages > 400 || binary || data.length > LIMIT) throw new Error('Message limit or binary frame');
           const message = record(JSON.parse(data.toString('utf8')));
           if (message.method === 'Target.attachedToTarget' && pending?.method === 'Target.attachToTarget' && !pending.attached && message.id === undefined && message.sessionId === undefined) {
             const event = record(message.params);
@@ -179,7 +242,9 @@ async function inspect(owner, contract, targets) {
             pending.attached = text(event.sessionId);
             return;
           }
-          if (!pending || message.id !== pending.id || message.sessionId !== pending.sessionId || message.method !== undefined || message.error !== undefined) throw new Error('Uncorrelated CDP reply or event');
+          if (!pending || message.id !== pending.id || message.sessionId !== pending.sessionId || message.method !== undefined || message.error !== undefined) {
+            throw new Error(`Uncorrelated CDP reply or event (${JSON.stringify(uncorrelatedDiagnostic(message, pending, sessionTargets, sequence, phase, messages))})`);
+          }
           const result = record(message.result);
           if (pending.attached && pending.attached !== result.sessionId) throw new Error('Wrong attached session');
           const resolveReply = pending.resolve;
@@ -203,7 +268,6 @@ async function inspect(owner, contract, targets) {
       const handles = before.handles;
       const pages = initial.filter((target) => target.type === 'page');
       if (!Array.isArray(handles) || handles.some((handle) => typeof handle !== 'string') || new Set(handles).size !== handles.length || JSON.stringify([...handles].sort()) !== JSON.stringify(pages.map((target) => target.targetId).sort()) || !handles.includes(before.selectedHandle)) throw new Error('Unmapped target or selected handle');
-      const sessions = new Set();
       const observations = [];
       const observe = async (sessionId, targetOrdinal, observationPass) => {
         const first = record((await send('DOM.getDocument', {depth: 0, pierce: false}, sessionId)).root);
@@ -221,16 +285,19 @@ async function inspect(owner, contract, targets) {
       for (const [index, target] of pages.entries()) {
         const attached = await send('Target.attachToTarget', {targetId: target.targetId, flatten: true});
         const sessionId = text(attached.sessionId);
-        if (sessions.has(sessionId)) throw new Error('Duplicate target session');
-        sessions.add(sessionId);
+        if (sessionTargets.has(sessionId)) throw new Error('Duplicate target session');
+        sessionTargets.set(sessionId, {sessionOrdinal: index + 1, targetOrdinal: index + 1});
         observations.push({targetId: target.targetId, sessionId, document: await observe(sessionId, index + 1, 'initial')});
       }
+      phase = 'repeat';
       for (const [index, observation] of observations.entries()) {
         if (JSON.stringify(await observe(observation.sessionId, index + 1, 'repeat')) !== JSON.stringify(observation.document)) throw new Error('Observation changed within bracket');
       }
+      phase = 'final-snapshot';
       if (JSON.stringify(inventory(await send('Target.getTargets'))) !== JSON.stringify(initial)) throw new Error('Inventory changed');
       result = {kind: 'bounded-nonactivating-core-observation', targets: initial, observations: observations.map(({targetId, document}) => ({targetId, document})), selectedHandle: before.selectedHandle};
     }
+    phase = 'final-snapshot';
     const pidAfter = await observePid();
     const processAssociation = {kind: 'bounded-sequential-service-to-process', before: pidBefore, after: pidAfter};
     result = targets ? {...result, processAssociation} : {kind: 'bounded-browser-process-association', processAssociation};
