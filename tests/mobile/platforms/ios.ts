@@ -42,6 +42,8 @@ const IOS_NAVIGATION_PHASE_MS = 86_000;
 const IOS_SAFARI_DISCOVERY_RESERVE_MS = 6_000;
 const IOS_SAFARI_ATTACH_COMMAND_MS = 15_000;
 const IOS_SAFARI_OBSERVATION_MS = IOS_SAFARI_ATTACH_COMMAND_MS + 2_000;
+const IOS_SAFARI_DIAGNOSTIC_CONTEXT_LIMIT = 64;
+const IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT = 2_048;
 const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
@@ -53,6 +55,48 @@ const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
 const IOS_NATIVE_LIST_READINESS_MS = 15_000;
 const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_SCROLL_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
+
+type SafariDiscoveryResult = 'no-context' | 'native-only' | 'safari-context' | 'expected-origin-context' | 'unrelated-context' | 'inspection-truncated';
+type SafariNavigationFailureKind = 'discovery' | 'observation' | 'reserve';
+type SafariObservationResult = 'expected-origin' | 'origin-mismatch' | 'missing-url';
+
+interface SafariDiscoveryEvidence {
+  result: SafariDiscoveryResult;
+  cause: string;
+  contextCount: number;
+  inspectedContextCount: number;
+  safariContextCount: number;
+  expectedOriginContextCount: number;
+  contextInspectionTruncated: boolean;
+  stringInspectionTruncated: boolean;
+  observedAt: string;
+  elapsedMs: number;
+  remainingMs: number;
+}
+
+interface SafariObservationEvidence {
+  result: SafariObservationResult;
+  cause: string;
+  observedAt: string;
+  elapsedMs: number;
+  remainingMs: number;
+}
+
+interface SafariReserveEvidence {
+  reason: 'discovery-observation' | 'safari-observation';
+  requiredMs: number;
+  observedAt: string;
+  elapsedMs: number;
+  remainingMs: number;
+}
+
+interface SafariNavigationFailureEvidence {
+  kind: SafariNavigationFailureKind;
+  cause: string;
+  observedAt: string;
+  elapsedMs: number;
+  remainingMs: number;
+}
 
 export function isIOSSafariBrowserBundle(bundleId?: string): boolean {
   return bundleId?.toLowerCase() === 'com.apple.mobilesafari';
@@ -389,6 +433,10 @@ export class IOSPlatform implements MobilePlatform {
   private nativeObservationFailure?: unknown;
   private nativeObservationTarget = 'auto';
   private springBoardRoot = '';
+  private safariLastDiscovery?: SafariDiscoveryEvidence;
+  private safariLastObservation?: SafariObservationEvidence;
+  private safariReserveExhaustion?: SafariReserveEvidence;
+  private safariFirstFailure?: SafariNavigationFailureEvidence;
   private navigationCommand = command;
 
   constructor(private readonly options: PlatformOptions) {
@@ -575,32 +623,158 @@ export class IOSPlatform implements MobilePlatform {
     });
   }
 
+  private safariTiming(phase: PhaseBudget, timeoutMs: number): Pick<SafariDiscoveryEvidence, 'observedAt' | 'elapsedMs' | 'remainingMs'> {
+    const remainingMs = Math.max(0, Math.floor(phase.remainingMs));
+    return {
+      observedAt: new Date().toISOString(),
+      elapsedMs: Math.max(0, Math.floor(timeoutMs - remainingMs)),
+      remainingMs,
+    };
+  }
+
+  private safariDiscoveryEvidence(metadata: ContextMetadata[], phase: PhaseBudget, timeoutMs: number): SafariDiscoveryEvidence {
+    const inspectedContextCount = Math.min(metadata.length, IOS_SAFARI_DIAGNOSTIC_CONTEXT_LIMIT);
+    const contextInspectionTruncated = metadata.length > inspectedContextCount;
+    let safariContextCount = 0;
+    let expectedOriginContextCount = 0;
+    let nativeOnly = metadata.length > 0;
+    let stringInspectionTruncated = false;
+    for (let index = 0; index < inspectedContextCount; index += 1) {
+      const candidate = metadata[index];
+      if (candidate.id !== 'NATIVE_APP') nativeOnly = false;
+      if (candidate.bundleId !== undefined) {
+        if (candidate.bundleId.length > IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT) stringInspectionTruncated = true;
+        else if (isIOSSafariBrowserBundle(candidate.bundleId)) safariContextCount += 1;
+      }
+      if (candidate.url !== undefined) {
+        if (candidate.url.length > IOS_SAFARI_DIAGNOSTIC_STRING_LIMIT) stringInspectionTruncated = true;
+        else if (this.isExpectedOrigin(candidate.url)) expectedOriginContextCount += 1;
+      }
+    }
+    let result: SafariDiscoveryResult;
+    let cause: string;
+    if (contextInspectionTruncated || stringInspectionTruncated) {
+      result = 'inspection-truncated';
+      cause = contextInspectionTruncated
+        ? 'WebKit context inspection was truncated'
+        : 'WebKit context string inspection was truncated';
+    } else if (metadata.length === 0) {
+      result = 'no-context';
+      cause = 'WebKit returned no contexts';
+    } else if (nativeOnly) {
+      result = 'native-only';
+      cause = 'Safari did not publish a web context';
+    } else if (safariContextCount > 0) {
+      result = 'safari-context';
+      cause = 'Safari web context was published';
+    } else if (expectedOriginContextCount > 0) {
+      result = 'expected-origin-context';
+      cause = 'fixture origin context was published';
+    } else {
+      result = 'unrelated-context';
+      cause = 'no Safari or fixture origin context was published';
+    }
+    return {
+      result,
+      cause,
+      contextCount: inspectedContextCount,
+      inspectedContextCount,
+      safariContextCount,
+      expectedOriginContextCount,
+      contextInspectionTruncated,
+      stringInspectionTruncated,
+      ...this.safariTiming(phase, timeoutMs),
+    };
+  }
+
+  private safariObservationEvidence(
+    result: SafariObservationResult,
+    cause: string,
+    phase: PhaseBudget,
+    timeoutMs: number,
+  ): SafariObservationEvidence {
+    return { result, cause, ...this.safariTiming(phase, timeoutMs) };
+  }
+
+  private safariFailureEvidence(
+    phase: PhaseBudget,
+    timeoutMs: number,
+    kind: SafariNavigationFailureKind,
+    cause: string,
+  ): SafariNavigationFailureEvidence {
+    return { kind, cause, ...this.safariTiming(phase, timeoutMs) };
+  }
+
+  private retainSafariReserve(
+    phase: PhaseBudget,
+    timeoutMs: number,
+    reason: SafariReserveEvidence['reason'],
+    requiredMs: number,
+  ): void {
+    if (this.safariReserveExhaustion) return;
+    this.safariReserveExhaustion = { reason, requiredMs, ...this.safariTiming(phase, timeoutMs) };
+  }
+
+  private retainSafariFirstFailure(receipt: SafariNavigationFailureEvidence): void {
+    if (this.safariFirstFailure) return;
+    this.safariFirstFailure = receipt;
+    this.diagnostics.record({
+      phase: 'ios-navigation',
+      operation: 'safari-navigation-first-failure',
+      detail: {
+        failure: receipt,
+        lastDiscovery: this.safariLastDiscovery,
+        lastObservation: this.safariLastObservation,
+        reserveExhaustion: this.safariReserveExhaustion,
+      },
+    });
+  }
+
   private async waitForSafariFixturePage(url: string, timeoutMs: number, parent: PhaseBudget): Promise<void> {
     const phase = parent.phaseView('ios-safari-readiness', timeoutMs);
     let fallbackAttempted = false;
     let lastError = '';
+    let firstFailure: SafariNavigationFailureEvidence | undefined;
     while (!phase.exhausted) {
       try {
         if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_DISCOVERY_RESERVE_MS) {
+          this.retainSafariReserve(phase, timeoutMs, 'discovery-observation', IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_DISCOVERY_RESERVE_MS);
           lastError = `not enough time for WebKit discovery and Safari observation (${phase.remainingMs}ms remains)`;
+          firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'reserve', 'WebKit discovery and Safari observation reserve was unavailable');
           break;
         }
         const metadata = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
+        this.safariLastDiscovery = this.safariDiscoveryEvidence(metadata, phase, timeoutMs);
         const context = metadata.find((candidate) => isIOSSafariBrowserBundle(candidate.bundleId)
           || (candidate.url !== undefined && this.isExpectedOrigin(candidate.url)));
         if (!context) {
           lastError = 'Safari did not publish a web context';
+          firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'discovery', this.safariLastDiscovery.cause);
         } else {
-          if (phase.remainingMs < IOS_SAFARI_OBSERVATION_MS) break;
+          if (phase.remainingMs < IOS_SAFARI_OBSERVATION_MS) {
+            this.retainSafariReserve(phase, timeoutMs, 'safari-observation', IOS_SAFARI_OBSERVATION_MS);
+            lastError = `not enough time for Safari observation (${phase.remainingMs}ms remains)`;
+            firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'reserve', 'Safari observation reserve was unavailable');
+            break;
+          }
           await this.driver.switchContext(context.id, IOS_SAFARI_ATTACH_COMMAND_MS);
           if (phase.remainingMs < 2_000) break;
           const currentUrl = await this.driver.currentUrl(1_000);
           if (this.isExpectedOrigin(currentUrl)) {
+            this.safariLastObservation = this.safariObservationEvidence('expected-origin', 'Safari page reported the fixture origin', phase, timeoutMs);
             this.lastUrl = currentUrl;
             if (phase.remainingMs < 1_000) break;
             await this.driver.switchContext('NATIVE_APP', 1_000);
             return;
           }
+          const observation = this.safariObservationEvidence(
+            currentUrl ? 'origin-mismatch' : 'missing-url',
+            currentUrl ? 'Safari page did not report the fixture origin' : 'Safari page did not report a URL',
+            phase,
+            timeoutMs,
+          );
+          this.safariLastObservation = observation;
+          firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'observation', observation.cause);
           if (!fallbackAttempted) {
             fallbackAttempted = true;
             const navigateTimeout = phase.remainingMs;
@@ -608,11 +782,14 @@ export class IOSPlatform implements MobilePlatform {
             await this.driver.navigate(url, navigateTimeout);
             continue;
           }
-          lastError = `Safari page is ${currentUrl || 'not navigated to the fixture origin'}`;
+          lastError = currentUrl ? 'Safari page is not at the fixture origin' : 'Safari page is not navigated to the fixture origin';
         }
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
+        lastError = isCommandAdmissionError(error)
+          ? 'Safari discovery command was not admitted'
+          : error instanceof WebDriverError ? `${error.code}: Safari discovery failed` : 'Safari discovery failed';
+        firstFailure ||= this.safariFailureEvidence(phase, timeoutMs, 'discovery', lastError.split(':', 1)[0]);
         if (isCommandAdmissionError(error) || phase.exhausted) break;
       }
       if (phase.exhausted) break;
@@ -625,7 +802,15 @@ export class IOSPlatform implements MobilePlatform {
         throw error;
       }
     }
-    throw new Error(`IOS_NAVIGATION: Safari fixture page was not ready (${lastError || 'no page observed'})`);
+    const failure = firstFailure || this.safariFailureEvidence(phase, timeoutMs, 'reserve', 'Safari fixture page was not observed');
+    this.retainSafariFirstFailure(failure);
+    const details = [
+      lastError || 'no page observed',
+      this.safariLastDiscovery ? `last discovery ${this.safariLastDiscovery.result}: ${this.safariLastDiscovery.cause}` : '',
+      this.safariLastObservation ? `last observation ${this.safariLastObservation.result}: ${this.safariLastObservation.cause}` : '',
+      this.safariReserveExhaustion ? `reserve ${this.safariReserveExhaustion.reason} (${this.safariReserveExhaustion.remainingMs}ms remains)` : '',
+    ].filter(Boolean).join('; ');
+    throw new Error(`IOS_NAVIGATION: Safari fixture page was not ready (${details})`);
   }
 
   async openSetupURLInInstalledApp(url: string): Promise<void> {
@@ -1229,6 +1414,12 @@ export class IOSPlatform implements MobilePlatform {
       nativeActivity: this.lastNativeActivity,
       nativePid: this.lastNativePid,
       simulatorReadyAt: this.simulatorReadyAt,
+      safariNavigation: {
+        lastDiscovery: this.safariLastDiscovery,
+        lastObservation: this.safariLastObservation,
+        reserveExhaustion: this.safariReserveExhaustion,
+        firstFailure: this.safariFirstFailure,
+      },
       driver: this.driver.snapshot(),
       events: this.diagnostics.snapshot(),
     };

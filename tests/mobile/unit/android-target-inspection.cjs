@@ -39,11 +39,13 @@ async function fixture(mode, run) {
   let unselectedMode = 'browser';
   const target = (id) => ({targetId: id, type: 'page', url: 'https://app/', title: 'same', attached: true});
   const diagnosticEvent = (sessionId = 'installed') => JSON.stringify({
-    method: mode === 'unknown-event' ? 'DOM.secretNotification' : 'DOM.childNodeCountUpdated',
+    method: mode === 'unknown-event' ? 'DOM.secretNotification' : mode === 'late-top-layer-event' ? 'DOM.topLayerElementsUpdated' : 'DOM.childNodeCountUpdated',
     ...(sessionId ? {sessionId} : {}),
-    params: mode === 'late-event-secrets'
-      ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
-      : {nodeId: 7, childNodeCount: 2},
+    params: mode === 'late-top-layer-event'
+      ? {topLayerElements: [7]}
+      : mode === 'late-event-secrets'
+        ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
+        : {nodeId: 7, childNodeCount: 2},
   });
   wss.on('connection', (ws) => {
     connections++;
@@ -173,7 +175,7 @@ async function fixture(mode, run) {
     snapshot: async () => {
       snapshots++;
       if (mode === 'final-disconnect' && snapshots > 1) await new Promise((resolve) => setTimeout(resolve, 30));
-      if (['late-event', 'late-event-secrets'].includes(mode) && snapshots > 1) {
+      if (['late-event', 'late-event-secrets', 'late-top-layer-event'].includes(mode) && snapshots > 1) {
         directSocket.send(diagnosticEvent());
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
@@ -268,6 +270,28 @@ test('diagnostic event params are schema bounded and redacted', async () => fixt
     assert.equal(text.includes('attacker.invalid'), false);
     return true;
   });
+}));
+
+test('late top-layer event preserves the exact refusal and quarantine', async () => fixture('late-top-layer-event', async ({owner, contract, calls, failures}) => {
+  let original;
+  await assert.rejects(inspectTargets(owner, contract), error => {
+    original = error;
+    assert.deepEqual(readUncorrelatedDiagnostic(error), {
+      failurePredicate: 'uncorrelated-cdp-message', classification: 'event', method: 'DOM.topLayerElementsUpdated',
+      idPresence: 'absent', idType: 'absent', idValue: 'none',
+      sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
+      lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
+      phase: 'final-snapshot', messageCount: 21,
+    });
+    assert.equal(Object.hasOwn(readUncorrelatedDiagnostic(error), 'params'), false, 'top-layer params are not retained');
+    assert.ok(String(error).length < 1_000);
+    return true;
+  });
+  assert.equal(failures(), 1);
+  const count = calls.length;
+  await assert.rejects(inspectTargets(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
+  await assert.rejects(associateBrowserProcess(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
+  assert.equal(calls.length, count);
 }));
 
 for (const [mode, expected] of [

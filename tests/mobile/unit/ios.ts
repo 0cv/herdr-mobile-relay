@@ -321,6 +321,150 @@ for (const late of [[{ id: 'NATIVE_APP' }], [{ id: 'WEBVIEW_18099.1', bundleId: 
   });
 }
 
+test('Safari native-only discovery retains the first cause and reserve boundary after late publication', async () => {
+  let now = 0;
+  let published = false;
+  let discoveries = 0;
+  let availableContexts = [{ id: 'NATIVE_APP' }];
+  const lateContexts = [{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }];
+  let releasePublication!: () => void;
+  const publication = new Promise<void>((resolve) => {
+    releasePublication = () => {
+      published = true;
+      availableContexts = lateContexts;
+      resolve();
+    };
+  });
+  const { platform, driver, requests, budget } = await adapter('safari-boundary-publication', ({ body }) => {
+    if (body.script === 'mobile: getContexts') {
+      assert.equal(published, false, 'late page publication must not trigger another discovery');
+      discoveries += 1;
+      now = discoveries === 1 ? 20_000 : 20_001;
+      return value(availableContexts);
+    }
+    throw new Error(`unexpected late-publication operation ${JSON.stringify(body)}`);
+  }, () => now);
+
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
+  let failure = '';
+  try {
+    await assert.rejects(
+      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget),
+      (error) => {
+        failure = String(error);
+        return /not enough time for WebKit discovery and Safari observation \(25999ms remains\)/u.test(failure);
+      },
+    );
+  } finally {
+    (globalThis as any).setTimeout = originalSetTimeout;
+  }
+  const beforeLatePublication = structuredClone(platform.evidenceSnapshot().safariNavigation);
+  const eventsBeforeLatePublication = (platform.evidenceSnapshot().events as any[])
+    .filter((event) => event.operation === 'safari-navigation-first-failure');
+  assert.equal(eventsBeforeLatePublication.length, 1);
+  assert.equal((beforeLatePublication as any).lastDiscovery.result, 'native-only');
+  assert.equal((beforeLatePublication as any).lastDiscovery.cause, 'Safari did not publish a web context');
+  assert.equal(discoveries, 2);
+  assert.equal((beforeLatePublication as any).lastDiscovery.remainingMs, 25_999);
+  assert.equal((beforeLatePublication as any).reserveExhaustion.reason, 'discovery-observation');
+  assert.equal((beforeLatePublication as any).reserveExhaustion.remainingMs, 25_999);
+  assert.equal((beforeLatePublication as any).firstFailure.kind, 'discovery');
+  assert.equal((beforeLatePublication as any).firstFailure.cause, 'Safari did not publish a web context');
+  assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, 2);
+  assert.equal(requests.some((request) => request.path.endsWith('/context')
+    || request.path.endsWith('/url')
+    || request.body.script === 'mobile: activeAppInfo'
+    || request.body.script?.startsWith('return {')), false);
+  assert.equal((platform.evidenceSnapshot() as any).installedBundleId, 'com.apple.webapp');
+  assert.equal((platform.evidenceSnapshot() as any).installedBindingState, 'unselected');
+  assert.equal((platform.evidenceSnapshot() as any).lastIdentity, undefined);
+  assert.match(failure, /Safari did not publish a web context/u);
+
+  releasePublication();
+  await publication;
+  assert.deepEqual(availableContexts, lateContexts);
+  const afterLatePublication = platform.evidenceSnapshot();
+  assert.deepEqual(afterLatePublication.safariNavigation, beforeLatePublication);
+  assert.equal(afterLatePublication.installedBindingState, 'unselected');
+  assert.equal(afterLatePublication.lastIdentity, undefined);
+  assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, 2);
+  assert.equal((afterLatePublication.events as any[])
+    .filter((event) => event.operation === 'safari-navigation-first-failure').length, 1);
+  assert.equal(driver.snapshot().unusable, false);
+});
+
+test('Safari diagnostic inspection caps oversized metadata without changing selection work', async () => {
+  let now = 0;
+  let discoveries = 0;
+  const hugeUrl = 'x'.repeat(100_000);
+  const oversizedMetadata = [
+    { id: 'WEBVIEW-oversized', bundleId: 'not-safari', url: hugeUrl },
+    ...Array.from({ length: 4_096 }, () => ({ id: 'NATIVE_APP' })),
+  ];
+  const { platform, driver, requests, budget } = await adapter('safari-oversized-diagnostics', ({ body }) => {
+    if (body.script === 'mobile: getContexts') {
+      discoveries += 1;
+      now = 20_001;
+      return value(oversizedMetadata);
+    }
+    throw new Error(`unexpected oversized-diagnostics operation ${JSON.stringify(body)}`);
+  }, () => now);
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = (callback: (...args: any[]) => void, _delay: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args);
+  try {
+    await assert.rejects(
+      () => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget),
+      /not enough time for WebKit discovery and Safari observation \(25999ms remains\)/u,
+    );
+  } finally {
+    (globalThis as any).setTimeout = originalSetTimeout;
+  }
+  const navigation = platform.evidenceSnapshot().safariNavigation as any;
+  assert.equal(discoveries, 1);
+  assert.equal(navigation.lastDiscovery.result, 'inspection-truncated');
+  assert.equal(navigation.lastDiscovery.contextCount, 64);
+  assert.equal(navigation.lastDiscovery.inspectedContextCount, 64);
+  assert.equal(navigation.lastDiscovery.contextInspectionTruncated, true);
+  assert.equal(navigation.lastDiscovery.stringInspectionTruncated, true);
+  assert.equal(JSON.stringify(navigation).includes(hugeUrl), false);
+  assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, 1);
+  assert.equal(requests.some((request) => request.path.endsWith('/context') || request.path.endsWith('/url')), false);
+  assert.equal(driver.snapshot().unusable, false);
+});
+
+test('Safari discovery and observation evidence remain separate at reserve exhaustion', async () => {
+  let now = 0;
+  const { platform, requests, budget } = await adapter('safari-observation-reserve', ({ path, body }) => {
+    if (body.script === 'mobile: getContexts') return value([{ id: 'WEBVIEW-18099.1', bundleId: 'com.apple.mobilesafari' }]);
+    if (path.endsWith('/context')) return value(null);
+    if (path.endsWith('/url') && !body.url) {
+      now = 30_001;
+      return value('https://other.invalid/');
+    }
+    if (path.endsWith('/url') && body.url) return value(null);
+    throw new Error(`unexpected observation-reserve operation ${path} ${JSON.stringify(body)}`);
+  }, () => now);
+
+  await assert.rejects(
+    () => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget),
+    /IOS_NAVIGATION: Safari fixture page was not ready/u,
+  );
+  const navigation = platform.evidenceSnapshot().safariNavigation as any;
+  assert.equal(navigation.lastDiscovery.result, 'safari-context');
+  assert.equal(navigation.lastDiscovery.cause, 'Safari web context was published');
+  assert.equal(navigation.lastDiscovery.elapsedMs, 0);
+  assert.equal(navigation.lastDiscovery.remainingMs, 46_000);
+  assert.equal(navigation.lastObservation.result, 'origin-mismatch');
+  assert.equal(navigation.lastObservation.cause, 'Safari page did not report the fixture origin');
+  assert.equal(navigation.lastObservation.remainingMs, 15_999);
+  assert.equal(navigation.reserveExhaustion.reason, 'discovery-observation');
+  assert.equal(navigation.firstFailure.kind, 'observation');
+  assert.equal(navigation.firstFailure.cause, 'Safari page did not report the fixture origin');
+  assert.equal(requests.filter((request) => request.path.endsWith('/context')).length, 1);
+  assert.equal(requests.filter((request) => request.path.endsWith('/url')).length, 2);
+});
+
 for (const budgetSource of ['attachment', 'parent'] as const) {
   test(`insufficient ${budgetSource} budget does not dispatch initial publication discovery`, async () => {
     let now = 0;

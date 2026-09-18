@@ -69,11 +69,13 @@ async function fixture(run, initialMode = '') {
   let directSocket;
   const state = {selected: APP, pid: String(initialPid), startTime: '123456', serial: 'fixture', inode: '4321', activity: nativeActivity, mode: initialMode, count: 0, pageURL: 'https://app/#settings', extras: [], onRead: undefined, eventSent: false};
   const diagnosticEvent = (sessionId = APP) => JSON.stringify({
-    method: state.mode === 'unknown-event' ? 'DOM.secretNotification' : 'DOM.childNodeCountUpdated',
+    method: state.mode === 'unknown-event' ? 'DOM.secretNotification' : state.mode === 'late-top-layer-event' ? 'DOM.topLayerElementsUpdated' : 'DOM.childNodeCountUpdated',
     ...(sessionId ? {sessionId} : {}),
-    params: state.mode === 'late-event-secrets'
-      ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
-      : {nodeId: 7, childNodeCount: 2},
+    params: state.mode === 'late-top-layer-event'
+      ? {topLayerElements: [7]}
+      : state.mode === 'late-event-secrets'
+        ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
+        : {nodeId: 7, childNodeCount: 2},
   });
   const nativeCalls = [];
   const nativeSockets = new Set();
@@ -204,7 +206,15 @@ async function fixture(run, initialMode = '') {
         if (state.mode === 'process-protocol') { ws.send(JSON.stringify({id: message.id, error: {code: -32601, message: 'unsupported'}})); return; }
         break;
       case 'Target.getTargets': result = {targetInfos: [target(BOOT), target(APP), ...state.extras]}; break;
-      case 'Target.attachToTarget': result = {sessionId: message.params.targetId}; break;
+      case 'Target.attachToTarget':
+        result = {sessionId: message.params.targetId};
+        if (state.mode === 'late-top-layer-event') {
+          ws.send(JSON.stringify({
+            method: 'Target.attachedToTarget',
+            params: {sessionId: message.params.targetId, targetInfo: target(message.params.targetId), waitingForDebugger: false},
+          }));
+        }
+        break;
       case 'DOM.getDocument': result = {root: root(message.sessionId)}; break;
       case 'Runtime.evaluate': {
         assert.equal(message.params.expression, CORE_EXPRESSION);
@@ -354,7 +364,7 @@ async function fixture(run, initialMode = '') {
     assert.ok(driver.chromedriver.jwproxy instanceof JWProxy);
     assert.ok(driver.getProxyAvoidList().some(([method, pattern]) => method === 'POST' && pattern.test('/session/outer-token/execute/sync')), 'Real CHROMIUM dispatcher must not proxy the mobile route');
     state.onRead = async () => {
-      if (['late-event', 'late-event-secrets'].includes(state.mode)
+      if (['late-event', 'late-event-secrets', 'late-top-layer-event'].includes(state.mode)
         && !state.eventSent && calls.filter(call => call.connectionId === connection && call.id).at(-1)?.id === 18) {
         state.eventSent = true;
         directSocket.send(diagnosticEvent());
@@ -549,6 +559,29 @@ test('installed producer redacts untrusted late-event params', async () => fixtu
     assert.equal(text.includes('attacker.invalid'), false);
     return true;
   });
+}));
+
+test('installed consumer preserves the exact late top-layer refusal and quarantine', async () => fixture(async ({inspect, state, refused, calls}) => {
+  state.mode = 'late-top-layer-event';
+  let original;
+  await assert.rejects(inspect(), error => {
+    original = error;
+    const diagnostic = readUncorrelatedDiagnostic(error);
+    assert.deepEqual(diagnostic, {
+      failurePredicate: 'uncorrelated-cdp-message', classification: 'event', method: 'DOM.topLayerElementsUpdated',
+      idPresence: 'absent', idType: 'absent', idValue: 'none',
+      sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
+      lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
+      phase: 'final-snapshot', messageCount: 21,
+    });
+    assert.equal(Object.hasOwn(diagnostic, 'params'), false, 'top-layer params are not retained');
+    return true;
+  });
+  const count = calls.length;
+  await refused();
+  assert.equal(calls.length, count, 'quarantine must stop later sends');
+  await assert.rejects(inspect(), error => error === original);
+  assert.equal(calls.length, count, 'the first failure remains immutable');
 }));
 
 for (const [mode, expected] of [
