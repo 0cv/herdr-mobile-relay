@@ -27,6 +27,7 @@ import {
   textLocator,
   type ContextMetadata,
   type Locator,
+  type WebDriverRequestTiming,
   WebDriverError,
 } from '../support/webdriver';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
@@ -437,6 +438,7 @@ export class IOSPlatform implements MobilePlatform {
   private safariLastObservation?: SafariObservationEvidence;
   private safariReserveExhaustion?: SafariReserveEvidence;
   private safariFirstFailure?: SafariNavigationFailureEvidence;
+  private attachmentFirstRefusal?: Readonly<WebDriverRequestTiming>;
   private navigationCommand = command;
 
   constructor(private readonly options: PlatformOptions) {
@@ -1030,104 +1032,122 @@ export class IOSPlatform implements MobilePlatform {
   async attachToInstalledView(timeoutMs = 30_000): Promise<void> {
     this.assertOwnershipClear();
     const phase = this.budget.phaseView('ios-attachment', timeoutMs);
-    let lastError = '';
-    while (!phase.exhausted) {
-      phase.assertAvailable('discover installed page');
-      if (this.selectedInstalledContext) {
-        try {
-          phase.assertAvailable('validate cached installed page');
-          await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
-          await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
-          await this.driver.switchContext(this.selectedInstalledContext, Math.max(1, phase.remainingMs));
-          const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
-          this.lastUrl = url;
-          if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `cached document origin ${url} is not ${this.origin}`);
-          await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
-          return;
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          this.diagnostics.record({ phase: 'ios-attachment', operation: 'cached-context', detail });
-          if (!isIOSStaleContextError(error)) throw error;
-          this.selectedInstalledContext = '';
-          lastError = `cached context: ${detail}`;
-        }
-      }
-      phase.assertAvailable('discover installed page metadata');
-      if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) {
-        lastError ||= `not enough time for WebKit discovery and foreground observation (${phase.remainingMs}ms remains)`;
-        break;
-      }
-      const contexts = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
-      phase.assertAvailable('validate installed discovery foreground');
-      if (phase.remainingMs < IOS_INSTALLED_FOREGROUND_MS) break;
-      await this.requireInstalledProviderForeground(IOS_INSTALLED_FOREGROUND_MS);
-      let candidateError: unknown;
-      if (!contexts.length) {
-        lastError = 'installed page metadata is unavailable';
-      } else {
-        for (const context of contexts) {
-          phase.assertAvailable('select installed page');
-          const rejection = iosInstalledContextRejection(context, this.origin);
-          this.diagnostics.record({
-            phase: 'ios-attachment',
-            operation: 'context-candidate',
-            context: context.id,
-            detail: { bundleId: context.bundleId, url: context.url, title: context.title, raw: context.raw, rejection: rejection || undefined },
-          });
-          if (context.id === 'NATIVE_APP' || isIOSSafariBrowserBundle(context.bundleId)) continue;
-          if (!isIOSSafariViewServiceBundle(context.bundleId) && context.bundleId !== this.installedBundleId) {
-            this.failOwnership('IOS_CONTEXT_OWNERSHIP', `page provider ${context.bundleId || 'unknown'} is not an installed provider`);
-          }
-          if (rejection) {
-            if (this.installedBindingState === 'unselected' && !this.selectedInstalledContext
-              && isIOSSafariViewServiceBundle(context.bundleId)
-              && /^WEBVIEW_\d+\.\d+$/u.test(context.id)
-              && context.url === 'about:blank' && context.title === '') {
-              lastError = `${context.id}: initial page publication is pending`;
-              this.diagnostics.record({
-                phase: 'ios-attachment', operation: 'initial-publication-pending', context: context.id,
-                nativeProvider: this.installedBundleId, detail: { nativePid: this.lastNativePid, bundleId: context.bundleId },
-              });
-              continue;
-            }
-            this.failOwnership('IOS_CONTEXT_OWNERSHIP', rejection);
-          }
+    // Observe this original attachment deadline; never install it as a new
+    // driver budget or change either native ownership bracket's allowance.
+    const restoreTimingScope = this.driver.setRequestTimingScope('ios-attachment-discovery', phase);
+    try {
+      let lastError = '';
+      while (!phase.exhausted) {
+        phase.assertAvailable('discover installed page');
+        if (this.selectedInstalledContext) {
           try {
-            phase.assertAvailable('validate installed page provider');
+            phase.assertAvailable('validate cached installed page');
+            this.driver.setRequestTimingScope('ios-attachment-pre-attachment-native', phase);
             await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
             await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
-            await this.driver.switchContext(context.id, Math.max(1, phase.remainingMs));
-            if (this.installedBindingState !== 'bound') this.installedBindingState = 'inspecting';
+            this.driver.setRequestTimingScope('ios-attachment-validation', phase);
+            await this.driver.switchContext(this.selectedInstalledContext, Math.max(1, phase.remainingMs));
             const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
             this.lastUrl = url;
-            if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
+            if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `cached document origin ${url} is not ${this.origin}`);
             await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
-            this.selectedInstalledContext = context.id;
-            this.installedBindingState = 'bound';
             return;
           } catch (error) {
-            if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+            if (isCommandAdmissionError(error)) this.attachmentFirstRefusal ??= this.driver.snapshot().lastCommand?.timing;
             const detail = error instanceof Error ? error.message : String(error);
-            this.diagnostics.record({ phase: 'ios-attachment', operation: 'context-rejected', context: context.id, detail });
-            lastError = `${context.id}: ${detail}`;
-            if (!isIOSStaleContextError(error) && !isIOSContextNotReadyError(error)) candidateError ||= error;
+            this.diagnostics.record({ phase: 'ios-attachment', operation: 'cached-context', detail });
+            if (!isIOSStaleContextError(error)) throw error;
+            this.selectedInstalledContext = '';
+            lastError = `cached context: ${detail}`;
           }
         }
-        if (!lastError) lastError = `no installed page for ${this.origin}`;
-      }
-      if (candidateError) throw candidateError;
-      try {
-        await delay(250, phase);
-      } catch (error) {
-        if (phase.exhausted) {
-          this.budget.assertAvailable('discover installed page');
+        phase.assertAvailable('discover installed page metadata');
+        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) {
+          lastError ||= `not enough time for WebKit discovery and foreground observation (${phase.remainingMs}ms remains)`;
           break;
         }
-        throw error;
+        this.driver.setRequestTimingScope('ios-attachment-discovery', phase);
+        const contexts = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
+        phase.assertAvailable('validate installed discovery foreground');
+        if (phase.remainingMs < IOS_INSTALLED_FOREGROUND_MS) break;
+        this.driver.setRequestTimingScope('ios-attachment-discovery-native', phase);
+        await this.requireInstalledProviderForeground(IOS_INSTALLED_FOREGROUND_MS);
+        let candidateError: unknown;
+        if (!contexts.length) {
+          lastError = 'installed page metadata is unavailable';
+        } else {
+          for (const context of contexts) {
+            phase.assertAvailable('select installed page');
+            const rejection = iosInstalledContextRejection(context, this.origin);
+            this.diagnostics.record({
+              phase: 'ios-attachment',
+              operation: 'context-candidate',
+              context: context.id,
+              detail: { bundleId: context.bundleId, url: context.url, title: context.title, raw: context.raw, rejection: rejection || undefined },
+            });
+            if (context.id === 'NATIVE_APP' || isIOSSafariBrowserBundle(context.bundleId)) continue;
+            if (!isIOSSafariViewServiceBundle(context.bundleId) && context.bundleId !== this.installedBundleId) {
+              this.failOwnership('IOS_CONTEXT_OWNERSHIP', `page provider ${context.bundleId || 'unknown'} is not an installed provider`);
+            }
+            if (rejection) {
+              if (this.installedBindingState === 'unselected' && !this.selectedInstalledContext
+                && isIOSSafariViewServiceBundle(context.bundleId)
+                && /^WEBVIEW_\d+\.\d+$/u.test(context.id)
+                && context.url === 'about:blank' && context.title === '') {
+                lastError = `${context.id}: initial page publication is pending`;
+                this.diagnostics.record({
+                  phase: 'ios-attachment', operation: 'initial-publication-pending', context: context.id,
+                  nativeProvider: this.installedBundleId, detail: { nativePid: this.lastNativePid, bundleId: context.bundleId },
+                });
+                continue;
+              }
+              this.failOwnership('IOS_CONTEXT_OWNERSHIP', rejection);
+            }
+            try {
+              phase.assertAvailable('validate installed page provider');
+              this.driver.setRequestTimingScope('ios-attachment-pre-attachment-native', phase);
+              await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
+              await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
+              this.driver.setRequestTimingScope('ios-attachment-validation', phase);
+              await this.driver.switchContext(context.id, Math.max(1, phase.remainingMs));
+              if (this.installedBindingState !== 'bound') this.installedBindingState = 'inspecting';
+              const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
+              this.lastUrl = url;
+              if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
+              await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
+              this.selectedInstalledContext = context.id;
+              this.installedBindingState = 'bound';
+              return;
+            } catch (error) {
+              if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+              if (isCommandAdmissionError(error)) this.attachmentFirstRefusal ??= this.driver.snapshot().lastCommand?.timing;
+              const detail = error instanceof Error ? error.message : String(error);
+              this.diagnostics.record({ phase: 'ios-attachment', operation: 'context-rejected', context: context.id, detail });
+              lastError = `${context.id}: ${detail}`;
+              if (!isIOSStaleContextError(error) && !isIOSContextNotReadyError(error)) candidateError ||= error;
+            }
+          }
+          if (!lastError) lastError = `no installed page for ${this.origin}`;
+        }
+        if (candidateError) throw candidateError;
+        try {
+          await delay(250, phase);
+        } catch (error) {
+          if (phase.exhausted) {
+            this.budget.assertAvailable('discover installed page');
+            break;
+          }
+          throw error;
+        }
       }
+      this.budget.assertAvailable('discover installed page');
+      throw new Error(`IOS_CONTEXT: no installed Home Screen web context for ${this.origin}: ${lastError}`);
+    } catch (error) {
+      if (isCommandAdmissionError(error)) this.attachmentFirstRefusal ??= this.driver.snapshot().lastCommand?.timing;
+      throw error;
+    } finally {
+      restoreTimingScope();
     }
-    this.budget.assertAvailable('discover installed page');
-    throw new Error(`IOS_CONTEXT: no installed Home Screen web context for ${this.origin}: ${lastError}`);
   }
 
   async readRunningIdentity(): Promise<RuntimeIdentity> {
@@ -1414,6 +1434,7 @@ export class IOSPlatform implements MobilePlatform {
       nativeActivity: this.lastNativeActivity,
       nativePid: this.lastNativePid,
       simulatorReadyAt: this.simulatorReadyAt,
+      attachmentFirstRefusal: this.attachmentFirstRefusal,
       safariNavigation: {
         lastDiscovery: this.safariLastDiscovery,
         lastObservation: this.safariLastObservation,

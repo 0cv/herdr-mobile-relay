@@ -95,6 +95,142 @@ async function assertPermanentFailure(platform: IOSPlatform, requests: Request[]
   assert.equal(requests.length, count, 'latched ownership failure must not admit another command');
 }
 
+for (const mode of ['1ms', '249ms', '250ms', 'timeout', 'interrupted'] as const) {
+  test(`iOS attachment timing second native bracket ${mode} preserves original admission and late-settlement fences`, async () => {
+    let now = 0;
+    let activeObservations = 0;
+    let alerts = 0;
+    let roots = 0;
+    let appStates = 0;
+    let discoveries = 0;
+    let publications = [published];
+    let releaseBody!: (body: string) => void;
+    const lateBody = new Promise<string>(resolve => { releaseBody = resolve; });
+    const { platform, driver, requests, budget } = await adapter(`attachment-timing-${mode}`, ({ path, body, method }) => {
+      if (body.script === 'mobile: getContexts') {
+        discoveries++;
+        now += 2_000;
+        return value(publications);
+      }
+      if (body.script === 'mobile: queryAppState') {
+        assert.equal(body.args.bundleId, 'com.apple.webapp');
+        now += ++appStates === 1 ? 1_000 : 3_000;
+        return value(4);
+      }
+      if (path.endsWith('/element/springboard-root/elements')) {
+        assert.equal(body.using, 'xpath');
+        assert.match(body.value, /XCUIElementTypeAlert/u);
+        now += ++roots === 1 ? 1_000 : 4_000;
+        return value([element('springboard-root')]);
+      }
+      if (path.endsWith('/alert/text')) {
+        assert.equal(method, 'GET');
+        now += ++alerts === 1 ? 1_000 : 13_000;
+        return Response.json({ value: { error: 'no such alert', message: 'No alert is open' } }, { status: 404 });
+      }
+      if (body.script === 'mobile: activeAppInfo') {
+        activeObservations++;
+        if (activeObservations === 1) {
+          now += 1_000;
+          return value({ bundleId: 'com.apple.webapp', pid: 29073 });
+        }
+        assert.equal(now, 28_000, 'last native observation is admitted with 2000ms, not an already-expired budget');
+        if (mode === 'timeout' || mode === 'interrupted') {
+          const response = new Response(null);
+          response.text = () => mode === 'timeout' ? lateBody : Promise.reject(new TypeError('native body interrupted'));
+          return response;
+        }
+        now = 30_000 - Number.parseInt(mode, 10);
+        return value({ bundleId: 'com.apple.webapp', pid: 29073 });
+      }
+      if (path.endsWith('/context')) {
+        if (body.name === 'NATIVE_APP') now += 2_000;
+        else {
+          assert.equal(mode, '250ms', 'sub-250ms switch must never reach transport');
+          assert.equal(body.name, published.id);
+          assert.equal(method, 'POST');
+        }
+        return value(null);
+      }
+      if (path.endsWith('/url')) {
+        assert.equal(mode, '250ms');
+        return value(`${origin}/`);
+      }
+      throw new Error(`unexpected attachment timing operation ${path}`);
+    }, () => now, false); // No default handler may silently satisfy a native fence.
+    const fatal = mode === 'timeout' || mode === 'interrupted';
+    await assert.rejects(() => platform.attachToInstalledView(), fatal
+      ? mode === 'timeout' ? /APPIUM_TIMEOUT/u : /APPIUM_INTERRUPTED/u
+      : /APPIUM_COMMAND_NOT_ADMITTED/u);
+    assert.equal(discoveries, 1);
+    assert.equal(appStates, 2);
+    assert.equal(roots, 2);
+    assert.equal(alerts, 2);
+    assert.equal(activeObservations, 2);
+    assert.equal(budget.recoveryCount, 0);
+    assert.equal((driver as any).budget, budget, 'diagnostic scope must not replace the enforcement budget');
+    assert.equal((driver as any).timingScope, undefined, 'scope restored on every failure path');
+    const native = driver.snapshot().commands.filter(command => command.timing?.scope.endsWith('-native'));
+    assert.deepEqual(native.map(command => [command.timing!.scope, command.timing!.operation]), [
+      ...['app-state', 'native-elements', 'alert', 'active-app'].map(operation => ['ios-attachment-discovery-native', operation]),
+      ...['context', 'app-state', 'native-elements', 'alert', 'active-app'].map(operation => ['ios-attachment-pre-attachment-native', operation]),
+    ]);
+    assert.ok(native.every(command => command.timing!.admitted && command.timing!.sent));
+    assert.ok(native.every(command => command.timing!.phaseRemainingAtDispatchMs! >= (command.timing!.operation === 'alert' || command.timing!.operation === 'context' ? 250 : 1_000)));
+    assert.equal(native.at(-1)!.timing!.phaseRemainingAtEntryMs, 2_000);
+    assert.equal(native.filter(command => command.timing!.operation === 'alert').every(command => command.timing!.status === 404 && command.timing!.completed), true);
+    const snapshot = platform.evidenceSnapshot();
+    assert.equal(snapshot.selectedInstalledContext, '');
+    assert.equal(snapshot.installedDocumentBound, false);
+    assert.equal(snapshot.installedBindingState, mode === '250ms' ? 'inspecting' : 'unselected');
+    assert.equal(snapshot.lastIdentity, undefined);
+    assert.equal(snapshot.lastCompletion, undefined);
+    assert.equal(snapshot.ownershipFailure, undefined);
+    assert.equal(requests.some(request => request.body.script?.startsWith('return {')), false, 'no document/runtime acceptance');
+    assert.equal(requests.filter(request => request.path.endsWith('/context') && request.body.name !== 'NATIVE_APP').length, mode === '250ms' ? 1 : 0);
+    assert.equal(requests.filter(request => request.path.endsWith('/url')).length, mode === '250ms' ? 1 : 0);
+    assert.equal(driver.snapshot().selectedContext, mode === '250ms' ? published.id : 'NATIVE_APP');
+    assert.equal(driver.snapshot().unusable, fatal);
+    assert.equal(driver.snapshot().firstFatal?.code, fatal ? mode === 'timeout' ? 'APPIUM_TIMEOUT' : 'APPIUM_INTERRUPTED' : undefined);
+    if (!fatal) {
+      const refusal = snapshot.attachmentFirstRefusal as any;
+      assert.equal(Object.isFrozen(refusal), true);
+      assert.equal(refusal.outcome, 'not-admitted');
+      assert.equal(refusal.scope, 'ios-attachment-validation');
+      assert.equal(refusal.phaseRemainingAtEntryMs, Number.parseInt(mode, 10));
+      assert.equal(refusal.phaseRemainingAtSettlementMs, Number.parseInt(mode, 10));
+      assert.equal(refusal.dispatchMs, undefined);
+      assert.equal(refusal.dispatchedOrdinal, undefined);
+      assert.equal(refusal.sent, false);
+      if (mode === '250ms') {
+        const switchReceipt = driver.snapshot().commands.find(command => command.timing?.scope === 'ios-attachment-validation' && command.timing.operation === 'context')!;
+        assert.equal(switchReceipt.timing!.sent, true);
+        assert.equal(switchReceipt.timeoutMs, 250);
+      } else {
+        assert.equal(refusal.operation, 'context');
+        assert.equal(native.at(-1)!.timing!.phaseRemainingAtSettlementMs, Number.parseInt(mode, 10));
+      }
+    } else assert.equal(snapshot.attachmentFirstRefusal, undefined);
+    const saved = structuredClone(snapshot);
+    const count = requests.length;
+    publications = [{ ...published, title: 'late publication' }];
+    now = 30_001;
+    releaseBody(JSON.stringify({ value: { bundleId: 'com.apple.webapp', pid: 29073 } }));
+    await lateBody;
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(requests.length, count, 'late publication/body must not implicitly issue another command');
+    assert.deepEqual(platform.evidenceSnapshot(), saved, 'first refusal/fatal, binding and history remain immutable');
+    // An admission refusal is only this attempt's refusal, not a permanent
+    // attachment latch. Only fatal body failures prohibit a new invocation.
+    if (fatal) {
+      await assert.rejects(() => platform.attachToInstalledView(), /APPIUM_SESSION_UNUSABLE/u);
+      assert.equal(requests.length, count);
+      assert.deepEqual(driver.snapshot().firstFatal, (saved.driver as any).firstFatal);
+    }
+  });
+}
+
 test('recorded initial publication waits passively for the same page before actual document binding', async () => {
   assert.equal(recorded.remoteDebuggerListing[0], `PID:${installed.id.split('_')[1].split('.')[0]}`);
   assert.equal((recorded.remoteDebuggerListing[1] as any)['2'].WIRHostApplicationIdentifierKey, `PID:${recorded.foreground.pid}`);

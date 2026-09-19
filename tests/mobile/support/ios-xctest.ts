@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -769,6 +769,7 @@ interface Owner {
   listenerEvidence?: ListenerEvidence[];
   listenerValidation?: ListenerValidation;
   firstFailure?: FirstFailure;
+  exitRevocation?: { primaryWriteFailed?: true; callbackFailed?: true; persistencePrerequisite?: 'failed' };
   diagnostics?: WdaDiagnostics;
   cachedProductExecutableHash?: string;
   cachedProductExecutableHashAt?: string;
@@ -1196,6 +1197,53 @@ async function supervise(): Promise<void> {
       stop = true;
       saveFailure();
       return false;
+    }
+  };
+  // Exit callbacks cannot rely on save(): its diagnostic catch-body may throw.
+  const rememberExitFailure = (stage: 'child-exit' | 'child-exit-callback' | 'owner-evidence-write'): void => {
+    try {
+      rememberFailure({phase: 'startup', stage, category: stage, frozenOwner: Boolean(frozenRunner)});
+    } catch {
+      // Keep an already selected causal record intact, even if diagnostics fail.
+      try {
+        owner.error ||= `XCTEST: ${stage}`;
+        owner.firstFailure ||= {
+          at: new Date().toISOString(), monotonicMs: Number(diagnostics.now().toFixed(3)),
+          phase: 'startup', source: diagnosticSource, stage, category: stage,
+          message: `XCTEST: ${stage}`, frozenOwner: Boolean(frozenRunner),
+          predicate: {status: 'not-evaluated'}, commandIds: [], causalCommands: [],
+        };
+      } catch { /* The callback still must revoke and resolve. */ }
+    }
+  };
+  const saveExitRevocation = (): void => {
+    owner.ready = false;
+    try {
+      writeOwner(root, owner);
+      return;
+    } catch {
+      owner.exitRevocation = {...owner.exitRevocation, primaryWriteFailed: true};
+      rememberExitFailure('owner-evidence-write');
+    }
+    // Two atomic replacements, not a transaction. A private fault must not
+    // bypass public revocation. Alternate owned paths avoid obstructed .nexts.
+    for (const sanitized of [false, true]) {
+      const target = join(root, sanitized ? 'owner.json' : 'owner-private.json');
+      const next = join(root, sanitized ? 'owner-exit.next.json' : 'owner-private-exit.next.json');
+      try {
+        writeFileSync(next, ownerContent(owner, sanitized), {mode: 0o600});
+        renameSync(next, target);
+      } catch {
+        try {
+          unlinkSync(target);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          // Unwritable AND non-invalidatable disk is a failed prerequisite,
+          // never a promise that stale disk readiness was revoked.
+          owner.exitRevocation.persistencePrerequisite = 'failed';
+          process.exitCode ||= 1;
+        }
+      }
     }
   };
   const remaining = (): number => {
@@ -2062,12 +2110,31 @@ async function supervise(): Promise<void> {
         save();
       });
       child!.on('exit', (code, signal) => {
-        childExited = true;
-        const stopping = stop || existsSync(join(root, 'stop'));
-        if (!stopping) stop = true;
-        diagnostics.lifecycle('child-exit', {phase: 'startup', pid: child?.pid, exitCode: code, signal, frozenOwner: Boolean(frozenRunner)});
-        resolveChildExit();
-        if (!stopping) rememberFailure({message: 'XCTEST: child process exited', phase: 'startup', stage: 'child-exit', category: 'child-exit', frozenOwner: Boolean(frozenRunner)});
+        try {
+          childExited = true;
+          owner.ready = false;
+          owner.exitCode = code;
+          owner.signal = signal;
+          const stopping = stop || existsSync(join(root, 'stop'));
+          stop = true;
+          if (!stopping) rememberExitFailure('child-exit');
+          diagnostics.lifecycle('child-exit', {phase: 'startup', pid: child?.pid, exitCode: code, signal, frozenOwner: Boolean(frozenRunner)});
+        } catch {
+          stop = true;
+          owner.exitRevocation = {...owner.exitRevocation, callbackFailed: true};
+          rememberExitFailure('child-exit-callback');
+        } finally {
+          try {
+            saveExitRevocation();
+          } catch {
+            // Guard even the publication failure path at the event boundary.
+            owner.exitRevocation = {...owner.exitRevocation, persistencePrerequisite: 'failed'};
+            process.exitCode ||= 1;
+            rememberExitFailure('owner-evidence-write');
+          } finally {
+            try { resolveChildExit(); } catch { /* Never throw from this event. */ }
+          }
+        }
       });
       child!.on('close', (code, signal) => {
         childExited = true;

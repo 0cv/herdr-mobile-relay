@@ -179,6 +179,157 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
     assert.equal(requests.includes('disable-user --user 0 com.google.android.gms'), false);
   });
+  test('smoke53 stable package versions and paths do not excuse normalized GMS component drift', async () => {
+    // Normalized delta from run 35296215928, environment-delta.json (not a
+    // device dump). Unchanged members are synthetic padding to the observed
+    // 186 -> 245 enabled / 80 -> 77 disabled counts; added/removed names are observed.
+    const enabledAdded = [
+      'com.google.android.gms.family.v2.create.FamilyCreationActivity',
+      'com.google.android.gms.family.v2.invites.SendInvitationsActivity',
+      'com.google.android.gms.family.v2.manage.DeleteMemberActivity',
+      'com.google.android.gms.family.v2.manage.FamilyManagementActivity',
+      'com.google.android.gms.family.v2.tos.TosActivity',
+      'com.google.android.gms.family.webview.FamilyWebViewActivity',
+      'com.google.android.gms.findmydevice.spot.locationreporting.taptoid.TapToIdHalfSheetActivity',
+      'com.google.android.gms.fonts.provider.FontsProvider',
+      'com.google.android.gms.fonts.update.UpdateSchedulerService',
+      'com.google.android.gms.googlehelp.GcmBroadcastReceiver',
+      'com.google.android.gms.googlehelp.gcm.InvalidateGcmTokenGcmTaskService',
+      'com.google.android.gms.googlehelp.helpactivities.OpenHelpRtcActivity',
+      'com.google.android.gms.googlehelp.webview.GoogleHelpRenderingApiWebViewActivity',
+      'com.google.android.gms.googlehelp.webview.GoogleHelpSupportWebViewActivity',
+      'com.google.android.gms.growth.featuredrops.activity.FeatureDropsActivity',
+      'com.google.android.gms.growth.featuredrops.activity.FeatureDropsProofingActivity',
+      'com.google.android.gms.growth.notifications.GcmBroadcastReceiver',
+      'com.google.android.gms.growth.notifications.NotificationActionActivity',
+      'com.google.android.gms.growth.surveys.activity.GmsSurveyActivity',
+      'com.google.android.gms.growth.ui.GrowthDebugActivity',
+      'com.google.android.gms.growth.ui.webview.GrowthWebViewActivity',
+      'com.google.android.gms.ipa.base.IpaGcmTaskService',
+      'com.google.android.gms.languageprofile.GcmReceiverService',
+      'com.google.android.gms.languageprofile.GcmTaskService',
+      'com.google.android.gms.lockbox.service.LockboxBrokerService',
+      'com.google.android.gms.octarine.ui.OctarineWebviewActivity',
+      'com.google.android.gms.pay.deeplink.AliasSavePkPassActivity',
+      'com.google.android.gms.pay.deeplink.AliasSaveSmartHealthCardActivity',
+      'com.google.android.gms.people.sync.coreui.ContactsSyncCoreActivity',
+      'com.google.android.gms.recaptcha.RecaptchaActivity',
+      'com.google.android.gms.romanesco.settings.ContactsRestoreContactsActivity',
+      'com.google.android.gms.romanesco.settings.ContactsRestoreDialogActivity',
+      'com.google.android.gms.romanesco.settings.ContactsRestoreSettingsActivity',
+      'com.google.android.gms.security.provider.SecurityProvider',
+      'com.google.android.gms.security.recaptcha.RecaptchaActivity',
+      'com.google.android.gms.security.settings.VerifyAppsSettingsActivity',
+      'com.google.android.gms.semanticlocationhistory.service.OnDeviceSettingsInjectorService',
+      'com.google.android.gms.semanticlocationhistory.settings.OnDeviceSettingsActivity',
+      'com.google.android.gms.setupservices.GoogleServicesActivity',
+      'com.google.android.gms.smartdevice.d2d.ui.ForwardingActivity',
+      'com.google.android.gms.smartdevice.d2d.ui.TargetDirectTransferActivity',
+      'com.google.android.gms.smartdevice.magicwand.MagicWandActivity',
+      'com.google.android.gms.smartdevice.setup.ui.AccountChallengeActivity',
+      'com.google.android.gms.trustlet.place.ui.TrustedPlacesSettingsActivity',
+      'com.google.android.gms.udc.gcm.GcmBroadcastReceiver',
+      'com.google.android.gms.udc.service.UdcContextInitService',
+      'com.google.android.gms.udc.ui.AuthenticatingWebViewActivity',
+      'com.google.android.gms.udc.ui.UdcSettingsListActivity',
+      'com.google.android.gms.update.OtaSuggestionSummaryProvider',
+      'com.google.android.gms.update.SystemUpdateActivity',
+      'com.google.android.gms.update.SystemUpdateV2Activity',
+      'com.google.android.gms.update.UpdateFromSdCardActivity',
+      'com.google.android.gms.vision.DependencyBroadcastReceiverProxy',
+      'com.google.android.gms.wallet.ocr.CardRecognitionShimProxyActivity',
+      'com.google.android.personalsafety.settings.BleTagPlatformSettingsActivity',
+      'com.google.android.personalsafety.settings.BleTagSettingsActivity',
+      'com.google.firebase.auth.api.gms.service.FirebaseAuthService',
+      'com.google.firebase.auth.api.gms.ui.BrowserSignInResponseHandlerActivity',
+      'com.google.firebase.auth.api.gms.ui.BrowserSignInStarterActivity',
+    ];
+    const disabledRemoved = [
+      'com.google.android.gms.pay.deeplink.AliasSaveSmartHealthCardActivity',
+      'com.google.android.gms.semanticlocationhistory.service.OnDeviceSettingsInjectorService',
+      'com.google.android.gms.semanticlocationhistory.settings.OnDeviceSettingsActivity',
+      'com.google.android.personalsafety.settings.BleTagPlatformSettingsActivity',
+    ];
+    const disabledAdded = ['com.google.android.gms.findmydevice.spot.suw.SetupWizardActivity'];
+    const enabled = Array.from({ length: 186 }, (_, index) => `fixture.gms.Enabled${index}`);
+    const disabled = Array.from({ length: 76 }, (_, index) => `fixture.gms.Disabled${index}`);
+    const fixture = await harness.createFixture();
+    const path = join(fixture.fixtureDirectory, 'valid-gms.dump');
+    const original = await readFile(path, 'utf8');
+    const dump = (enabled: string[], disabled: string[]) => original.replace('Queries:',
+      `      enabledComponents:\n${enabled.map(name => `        ${name}\n`).join('')}      disabledComponents:\n${disabled.map(name => `        ${name}\n`).join('')}Queries:`);
+    await writeFile(path, dump(enabled, [...disabled, ...disabledRemoved]));
+    const { before, after } = await snapshots(fixture);
+    const identity = async (path: string) => (JSON.parse(await readFile(path, 'utf8')) as AndroidEnvironmentSnapshot).packages['com.google.android.gms'];
+    const first = await identity(before);
+    assert.equal(first.dependencyConfig.enabledComponents.length, 186);
+    assert.equal(first.dependencyConfig.disabledComponents.length, 80);
+    // Reorder sections' members and change an object ID: dump hash changes,
+    // normalized component identity must not. No new baseline is taken.
+    await writeFile(path, dump([...enabled].reverse(), [...disabled, ...disabledRemoved].reverse()).replace('(fixture)', '(noise)'));
+    assert.equal((await harness.snapshot(fixture, 'valid', after, join(fixture.root, 'noise-diagnostics.json'))).passed, true);
+    const noise = await identity(after);
+    assert.notEqual(noise.dumpSha256, first.dumpSha256);
+    assert.equal(noise.identitySha256, first.identitySha256);
+    assert.equal(noise.dependencyConfigSha256, first.dependencyConfigSha256);
+    assert.equal((await harness.check(fixture, before, after)).passed, true);
+    await writeFile(path, dump([...enabled, ...enabledAdded].reverse(), [...disabled, ...disabledAdded].reverse()));
+    assert.equal((await harness.snapshot(fixture, 'valid', after, join(fixture.root, 'drift-diagnostics.json'))).passed, true);
+    const last = await identity(after);
+    assert.equal(last.dependencyConfig.enabledComponents.length, 245);
+    assert.equal(last.dependencyConfig.disabledComponents.length, 77);
+    assert.deepEqual(last.dependencyConfig.enabledComponents.filter(name => !first.dependencyConfig.enabledComponents.includes(name)), [...enabledAdded].sort());
+    assert.deepEqual(first.dependencyConfig.disabledComponents.filter(name => !last.dependencyConfig.disabledComponents.includes(name)), [...disabledRemoved].sort());
+    assert.deepEqual(last.dependencyConfig.disabledComponents.filter(name => !first.dependencyConfig.disabledComponents.includes(name)), disabledAdded);
+    for (const key of Object.keys(first) as Array<keyof typeof first>) {
+      if (['dependencyConfig', 'dependencyConfigSha256', 'identitySha256', 'dumpSha256'].includes(key)) continue;
+      assert.deepEqual(last[key], first[key], `stable package field ${key}`);
+    }
+    assert.notEqual(last.dependencyConfigSha256, first.dependencyConfigSha256);
+    assert.notEqual(last.identitySha256, first.identitySha256);
+    const checked = await harness.check(fixture, before, after);
+    assert.equal(checked.passed, false);
+    assert.deepEqual(checked.issues, [
+      'com.google.android.gms dependencyConfigSha256 changed',
+      'com.google.android.gms identitySha256 changed',
+      'com.google.android.gms dependency configuration changed',
+    ]);
+  });
+  for (const violation of ['earlier SIGKILL', 'unknown close force-stop', 'both'] as const) {
+    test(`smoke53 successful scenario and session close cannot qualify ${violation}`, async () => {
+      const fixture = await harness.createFixture();
+      const child = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
+      await state(fixture, { absent: true, children: { '5759': child } });
+      const { before, after } = await snapshots(fixture);
+      let deletes = 0;
+      const driver = new AppiumClient('http://fixture.test', 1_000, async (input, init) => {
+        if (init?.method === 'DELETE') deletes++;
+        return Response.json({ value: new URL(String(input)).pathname === '/session' ? { sessionId: 'scenario' } : true });
+      });
+      await driver.create({ capabilities: {} });
+      assert.equal(await driver.execute('return true'), true, 'synthetic scenario assertion completes');
+      await driver.close();
+      assert.equal(deletes, 1);
+      assert.equal(driver.snapshot().sessionId, '');
+      assert.equal(driver.snapshot().unusable, false);
+      // Source-derived event shapes with fixture times/PIDs. The observed
+      // initiator 9970 stays UNKNOWN; DELETE is not an am force-stop receipt.
+      const early = `09-10 08:45:09.265 546 1761 I ActivityManager: Killing 5759:${child}/u0a146i-9000 (adj 0): isolated not needed\n`
+        + '09-10 08:45:09.401 5759 5759 I Process: Sending signal. PID: 5759 SIG: 9\n';
+      const close = marker('20.000', 'CLOSE_BEGIN bootstrap')
+        + '09-10 08:45:21.180 546 1761 I ActivityManager: Force stopping com.android.chrome appid=10146 user=0: from pid 9970\n'
+        + '09-10 08:45:21.181 546 1761 I ActivityManager: Killing 6538:com.android.chrome/u0a146 (adj 0): stop com.android.chrome due to from pid 9970\n'
+        + marker('22.000', 'CLOSE_END bootstrap');
+      const checked = await harness.check(fixture, before, after, (violation !== 'unknown close force-stop' ? early : '') + (violation !== 'earlier SIGKILL' ? close : ''));
+      assert.equal(checked.passed, false);
+      assert.ok(checked.issues.includes('native process death, dependency configuration change or package replacement was observed'));
+      const report = JSON.parse(await readFile(join(fixture.root, 'check.json'), 'utf8'));
+      if (violation !== 'unknown close force-stop') assert.ok(report.forcedRestartEvents.some((line: string) => line.includes('5759 SIG: 9')));
+      if (violation !== 'earlier SIGKILL') assert.ok(report.forcedRestartEvents.some((line: string) => line.includes('from pid 9970')));
+      assert.deepEqual(JSON.parse(await readFile(join(fixture.root, 'operations.json'), 'utf8')), [], 'never fabricate device initiator ownership from a host session close');
+      assert.equal(report.normalRetirements.length, 0);
+    });
+  }
   test('headless version acquisition avoids the GUI runtime and preserves measured identity', async () => {
     const fixture = await harness.createFixture();
     assert.throws(() => execFileSync('emulator', ['-version'], { env: fixture.environment, stdio: 'pipe' }), /libpulse.so.0/u);
