@@ -334,6 +334,10 @@ wait_for_fixture_file() {
 }
 wait_for_fixture_pid() {
   fixture_path=$1
+  if [ -n "\${2:-}" ]; then
+    fixture_pid=$("$STARTUP_TEST_EXECUTABLE" "$root/bin/pending-invalid-pid-wait.ts" "$2") || return 2
+    return 0
+  fi
   fixture_deadline=$(cat "$root/state/deadline" 2>/dev/null || printf '')
   while :; do
     if [ -s "$fixture_path" ]; then
@@ -818,6 +822,17 @@ lsof)
         touch "$root/pending-deadline-command"
       fi
       if [ "$mode" = "listener-pending-invalid-pid" ] && [ "$pending_wda_count" -eq 2 ]; then
+        touch "$root/pending-invalid-boundary" || exit 2
+        pending_child_pid=$(grep '^  "pid":' "$root/state/owner.json" | cut -d : -f 2 | tr -d ' ,')
+        case "$pending_child_pid" in
+          ''|0*|*[!0-9]*) pending_child_pid= ;;
+        esac
+        if [ -z "$pending_child_pid" ] || [ "\${#pending_child_pid}" -gt 10 ] || [ "$pending_child_pid" -gt 2147483647 ] || ! wait_for_fixture_pid "$root/xcode.pid" "$pending_child_pid"; then
+          printf '%s\\n' PREREQUISITE > "$root/pending-invalid-prerequisite"
+          printf '%s\\n' 'pending invalid PID launch prerequisite failed' >&2
+          exit 2
+        fi
+        printf '%s\\n' "$fixture_pid" > "$root/pending-invalid-acknowledged" || exit 2
         printf '%s/%s\\n' "$pending_wda_count" invalid >> "$root/pending-observations"
         printf '%s\\n' 2147483648
         exit 0
@@ -1065,6 +1080,64 @@ xcodebuild)
 esac
 exit 0
 `;
+const pendingInvalidPidWait = String.raw`import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const startedNs = process.hrtime.bigint();
+const root = process.env.STARTUP_TEST_ROOT;
+let result = 'READ_ERROR';
+const fail = reason => { result = reason; throw new Error('pending invalid PID prerequisite'); };
+const read = (name, limit) => {
+  const path = join(root, name);
+  if (statSync(path).size > limit) fail('MALFORMED');
+  const text = readFileSync(path, 'utf8');
+  if (Buffer.byteLength(text) > limit) fail('MALFORMED');
+  return text;
+};
+const publish = (name, text) => {
+  const path = join(root, name);
+  writeFileSync(path + '.next', text);
+  renameSync(path + '.next', path);
+};
+try {
+  const expected = process.argv[2];
+  if (!/^[1-9]\d{0,9}$/.test(expected) || Number(expected) > 2147483647) fail('IDENTITY');
+  const deadlineText = read('state/deadline', 16);
+  if (!/^\d{13}$/.test(deadlineText)) fail('BUDGET');
+  const startupDeadline = Number(deadlineText);
+  const budgetMs = Math.min(2000, startupDeadline - Date.now());
+  if (budgetMs <= 0) fail('BUDGET');
+  const endNs = startedNs + BigInt(budgetMs) * 1000000n;
+  const check = () => {
+    if (process.hrtime.bigint() >= endNs || Date.now() >= startupDeadline) fail('BUDGET');
+    if (['stop', 'state/stop', 'pending-invalid-abort'].some(name => existsSync(join(root, name)))) fail('CANCELLED');
+    const owner = JSON.parse(read('state/owner.json', 1048576));
+    if (owner.firstFailure || owner.diagnostics?.lifecycle?.some(event => ['child-error', 'child-exit', 'child-close'].includes(event.event))) fail('CHILD_FAILURE');
+    if (String(owner.pid) !== expected) fail('IDENTITY');
+    if (process.hrtime.bigint() >= endNs || Date.now() >= startupDeadline) fail('BUDGET');
+    if (existsSync(join(root, 'pending-invalid-withheld'))) fail('WITHHELD');
+  };
+  check();
+  publish('pending-invalid-budget', JSON.stringify({startedNs: String(startedNs), endNs: String(endNs), startupDeadline, budgetMs}));
+  while (true) {
+    check();
+    if (existsSync(join(root, 'xcode.pid'))) {
+      if (read('xcode.pid', 11) !== expected + '\n') fail('MALFORMED');
+      check();
+      publish('pending-invalid-result', JSON.stringify({result: 'ACKNOWLEDGED', observedNs: String(process.hrtime.bigint())}));
+      check();
+      process.stdout.write(expected + '\n');
+      break;
+    }
+    if (!existsSync(join(root, 'pending-invalid-waiting'))) publish('pending-invalid-waiting', expected + '\n');
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+} catch {
+  process.exitCode = 2;
+  try { publish('pending-invalid-result', JSON.stringify({result, observedNs: String(process.hrtime.bigint())})); }
+  catch { result = 'RECEIPT_UNAVAILABLE'; }
+  process.stderr.write('pending invalid PID prerequisite ' + result + '\n');
+}
+`;
 const wdaServer = `import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -1094,6 +1167,21 @@ const publishPid = path => {
   renameSync(nextPath, path);
 };
 const remove = path => { try { unlinkSync(path); } catch {} };
+if (mode === 'listener-pending-invalid-pid' && process.env.STARTUP_TEST_INVALID_PID_CONTROL) {
+  const abortStart = () => { remove(runnerPid); remove(xcodePid); process.exit(48); };
+  process.on('SIGTERM', abortStart);
+  process.on('SIGINT', abortStart);
+  publishPid(join(root, 'pending-invalid-held'));
+  const startDeadline = Number(readFileSync(join(root, 'state/deadline'), 'utf8'));
+  while (!existsSync(join(root, 'pending-invalid-release'))) {
+    if (!Number.isSafeInteger(startDeadline) || Date.now() >= startDeadline
+      || existsSync(join(root, 'pending-invalid-abort')) || existsSync(join(root, 'state/stop'))) abortStart();
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  if (existsSync(join(root, 'pending-invalid-abort')) || existsSync(join(root, 'pending-invalid-withheld'))) abortStart();
+  process.off('SIGTERM', abortStart);
+  process.off('SIGINT', abortStart);
+}
 if (role !== 'endpoint') appendFileSync(join(root, 'launches'), JSON.stringify(args) + '\\n');
 if (mode === 'early') process.exit(43);
 if (mode === 'exit-before-close') {
@@ -2285,8 +2373,74 @@ xctestOwnerTests.push(['Native startup XCTest exit witness classification', asyn
     assert.equal(getterCalled, false);
   }
 }]);
-for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-ready-owner-evidence-write', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-uncoordinated-negative', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity', 'listener-http-only', ...pendingModes]) {
-  xctestOwnerTests.push([`Native startup actual XCTest supervisor ${mode}`, async () => {
+function pendingInvalidSnapshot(root: string, mode: string, child: ChildProcess, closed: boolean): string {
+  const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
+  const number = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
+  const pick = (value: unknown, allowed: string[]) => typeof value === 'string' && allowed.includes(value) ? value : 'unavailable';
+  const read = (name: string, limit: number) => {
+    if (statSync(join(root, name)).size > limit) throw new Error('snapshot size limit');
+    const text = readFileSync(join(root, name), 'utf8');
+    if (Buffer.byteLength(text) > limit) throw new Error('snapshot size limit');
+    return text;
+  };
+  let owner: Record<string, unknown> = {};
+  let ownerRead = 'unavailable';
+  try { owner = record(JSON.parse(read('state/owner.json', 1_048_576))); ownerRead = 'read'; } catch { ownerRead = 'read-error'; }
+  let launchRead: Record<string, unknown> = {presence: existsSync(join(root, 'launches')), result: 'unavailable'};
+  try {
+    const text = read('launches', 8192);
+    launchRead = {...launchRead, result: 'read', bytes: Buffer.byteLength(text), lines: text.trim().split(/\r?\n/u).length};
+  } catch (error) { launchRead.result = pick(record(error).code, ['ENOENT', 'EACCES', 'EIO']); }
+  let observations: string[] | string;
+  let receiptQueryCount: number | string = 'unavailable';
+  try { observations = read('pending-observations', 4096).trim().split(/\r?\n/u).slice(0, 8).map(value => /^\d{1,3}\/(?:0|1|2|invalid)$/u.test(value) ? value : 'unavailable'); } catch { observations = 'read-error'; }
+  try { const text = read('receipt-queries', 16); if (/^\d{1,6}$/u.test(text)) receiptQueryCount = Number(text); } catch { receiptQueryCount = 'read-error'; }
+  const failure = record(owner.firstFailure);
+  const diagnostics = record(owner.diagnostics);
+  const lifecycle = list(diagnostics.lifecycle).map(record);
+  const events = ['child-spawned', 'child-error', 'child-exit', 'child-close', 'child-signal-requested', 'child-stop-finished', 'cleanup-enter', 'owner-ended'];
+  const phases = ['preflight', 'startup', 'initial', 'after-initial', 'readiness', 'status', 'scenario', 'supervisor', 'cleanup'];
+  const stages = ['mjpeg-listener-command', 'wda-listener-command', 'child-spawn', 'child-process', 'child-pid-birth', 'child-exit', 'child-exit-callback', 'owner-evidence-write', 'startup-deadline', 'startup-log-write', 'startup-log-limit', 'supervisor-error'];
+  const categories = [...stages, 'listener-invalid-process-id', 'listener-command-error', 'child-spawn-error', 'child-process-error', 'output-limit'];
+  const flag = (event: string) => ownerRead === 'read' && Array.isArray(diagnostics.lifecycle) ? lifecycle.some(entry => entry.event === event) : 'unavailable';
+  const snapshot = {
+    mode, ownerRead, launchRead, observations, receiptQueryCount,
+    supervisor: {closed, exit: child.exitCode, signal: child.signalCode},
+    firstFailure: {
+      source: pick(failure.source, ['tests/mobile/support/ios-xctest.ts']), phase: pick(failure.phase, phases),
+      stage: pick(failure.stage, stages), category: pick(failure.category, categories),
+      commandIds: Array.isArray(failure.commandIds) ? failure.commandIds.slice(0, 8).map(number) : 'unavailable',
+    },
+    lifecycle: Array.isArray(diagnostics.lifecycle) ? lifecycle.filter(entry => events.includes(String(entry.event))).slice(0, 12).map(entry => ({id: number(entry.id), event: pick(entry.event, events)})) : 'unavailable',
+    ready: typeof owner.ready === 'boolean' ? owner.ready : 'unavailable',
+    pinned: flag('runner-candidate-pinned'), frozen: flag('runner-frozen'), readyAdmitted: flag('ready-admitted'),
+    causalCommands: Array.isArray(failure.causalCommands) ? failure.causalCommands.slice(0, 4).map(value => {
+      const command = record(value);
+      return {
+        id: number(command.id), phase: pick(command.phase, phases),
+        operation: pick(command.operation, ['inspect-listener', 'inspect-process-command', 'inspect-process-birth', 'inspect-process-executable', 'inspect-child-state', 'read-install-receipt', 'select-xctestrun', 'validate-product-bundle-id']),
+        endpoint: pick(command.endpoint, ['wda', 'mjpeg', 'simulator']),
+        status: command.status === null ? null : number(command.status),
+        signal: command.signal === null ? null : pick(command.signal, ['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGSEGV']),
+        errorCategory: pick(record(command.error).category, ['timeout', 'spawn-error', 'nonzero-exit', 'output-limit']),
+        stdoutBytes: number(record(command.stdout).bytes), stderrBytes: number(record(command.stderr).bytes),
+      };
+    }) : 'unavailable',
+  };
+  const text = JSON.stringify(snapshot);
+  if (Buffer.byteLength(text) > 8192) throw new Error('snapshot size limit');
+  return text;
+}
+
+const pendingInvalidControls = [
+  ['Native startup actual XCTest supervisor listener-pending-invalid-pid held-start ordering', 'held-start'],
+  ['Native startup actual XCTest supervisor listener-pending-invalid-pid withheld-start prerequisite', 'withheld-start'],
+] as const;
+for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revocationModes, 'ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-ready-owner-evidence-write', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-uncoordinated-negative', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity', 'listener-http-only', ...pendingModes]) {
+  const invalidPidControl = pendingInvalidControls.find(([name]) => name === testMode)?.[1];
+  const mode = invalidPidControl ? 'listener-pending-invalid-pid' : testMode;
+  xctestOwnerTests.push([invalidPidControl ? testMode : `Native startup actual XCTest supervisor ${mode}`, async () => {
     const witnessBuild = mode === 'listener-concurrent-exit-before-close' ? await terminalBuild() : undefined;
     const witnessNonce = witnessBuild ? randomBytes(16).toString('hex') : undefined;
     const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-test-'));
@@ -2367,6 +2521,7 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
     for (const cmd of ['plutil', 'lsof', 'ps', 'xcrun', 'xcodebuild']) await symlink(dispatcher, join(bin, cmd));
     const wdaServerFile = join(bin, 'xctest-wda-server.ts');
     await writeFile(wdaServerFile, witnessBuild ? terminalServer : wdaServer, { mode: 0o700 });
+    if (mode === 'listener-pending-invalid-pid') await writeFile(join(bin, 'pending-invalid-pid-wait.ts'), pendingInvalidPidWait, {mode: 0o600});
     if (witnessBuild) terminalWrite(root, 'source-binding.json', {dispatcher: terminalHash(await readFile(dispatcher)), server: terminalHash(await readFile(wdaServerFile)), binary: witnessBuild.binaryHash, sources: witnessBuild.sources, buildRoot: witnessBuild.root});
     const reserve = createNetServer();
     await new Promise<void>((resolve, reject) => {
@@ -2380,6 +2535,7 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
       IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.6', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
       IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
       MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned'),
+      STARTUP_TEST_INVALID_PID_CONTROL: invalidPidControl || '',
       ...(mode === 'stream-finalization-failure' ? { STARTUP_TEST_LOG_FINALIZATION_TARGET: join(root, 'blocked-log-target') } : {}),
       ...(mode === 'listener-pending-deadline' || mode === 'listener-pending-command-error' || mode === 'listener-pending-child-error' || mode === 'listener-pending-owner-evidence-write' || mode === 'listener-initial-race-receipt' || mode === 'listener-initial-race-receipt-command-error' || mode === 'listener-initial-race-receipt-hash-error' || mode === 'listener-ready-owner-evidence-write' ? { XCTEST_COMMAND_TRACE: join(root, 'command-trace') } : {}) };
     const initialProductHash = createHash('sha256').update(await readFile(join(product, 'WebDriverAgentRunner-Runner'))).digest('hex');
@@ -2475,13 +2631,41 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
     let revocationFirstFailure: unknown;
     let revocationPrivateFirstFailure: unknown;
     let revocationError: unknown;
+    let pendingInvalidFailure: {error: unknown; diagnostic: string} | undefined;
+    let cleanupFailure: {error: unknown} | undefined;
+    let pendingInvalidFirstFailure: unknown;
+    const assertInvalidFailure = (owner: {firstFailure?: {stage?: string; category?: string; phase?: string}}) => {
+      assert.equal(owner.firstFailure?.stage, 'mjpeg-listener-command', 'fixture prerequisite: unexpected pending invalid PID failure stage');
+      assert.equal(owner.firstFailure?.category, 'listener-invalid-process-id', 'fixture prerequisite: unexpected pending invalid PID failure category');
+      assert.equal(owner.firstFailure?.phase, 'initial', 'fixture prerequisite: unexpected pending invalid PID failure phase');
+    };
+    const readInvalidPidBudget = () => {
+      const path = join(root, 'pending-invalid-budget');
+      assert.ok(statSync(path).size <= 512, 'fixture prerequisite: budget receipt size');
+      const budget = JSON.parse(readFileSync(path, 'utf8'));
+      assert.match(budget.startedNs, /^\d{1,24}$/u);
+      assert.match(budget.endNs, /^\d{1,24}$/u);
+      assert.equal(budget.startupDeadline, deadline);
+      assert.ok(Number.isSafeInteger(budget.budgetMs) && budget.budgetMs > 0 && budget.budgetMs <= 2000);
+      assert.equal(BigInt(budget.endNs) - BigInt(budget.startedNs), BigInt(budget.budgetMs) * 1_000_000n);
+      return budget as {startedNs: string; endNs: string; startupDeadline: number; budgetMs: number};
+    };
+    const assertInvalidPidResult = (expected: 'WITHHELD' | 'ACKNOWLEDGED') => {
+      const budget = readInvalidPidBudget();
+      const path = join(root, 'pending-invalid-result');
+      assert.ok(statSync(path).size <= 512, 'fixture prerequisite: result receipt size');
+      const result = JSON.parse(readFileSync(path, 'utf8'));
+      assert.equal(result.result, expected, 'fixture prerequisite: unexpected acknowledgment result');
+      assert.match(result.observedNs, /^\d{1,24}$/u);
+      assert.ok(BigInt(result.observedNs) >= BigInt(budget.startedNs) && BigInt(result.observedNs) < BigInt(budget.endNs), 'fixture prerequisite: acknowledgment decision exceeded local budget');
+    };
     const exited = new Promise<void>(resolve => child.on('close', () => { done = true; resolve(); }));
     let witness: TerminalSession | undefined;
     let witnessFailure: unknown;
     if (witnessBuild) {
       child.once('exit', () => { if (!existsSync(join(root, 'child-exit-observed'))) terminalFailure(root); });
     }
-    try {
+    const runAssertions = async () => {
       if (witnessBuild && witnessNonce) {
         witness = await terminalStart(root, witnessNonce, terminalPid(child.pid), deadline, witnessBuild);
         await terminalArm(witness);
@@ -2706,6 +2890,43 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
       }
       if (pendingModes.includes(mode)) {
         const pendingDeadline = Date.now() + 15_000;
+        if (invalidPidControl) {
+          while (!done && Date.now() < deadline && !existsSync(join(root, 'pending-invalid-boundary'))) await pause();
+          const controlEndNs = process.hrtime.bigint() + 2_000_000_000n;
+          const checkControlBudget = () => {
+            if (existsSync(join(root, 'pending-invalid-budget'))) readInvalidPidBudget();
+            assert.ok(process.hrtime.bigint() < controlEndNs && Date.now() < deadline, 'fixture prerequisite: held start acknowledgment budget exhausted');
+          };
+          while (!done && !(existsSync(join(root, 'pending-invalid-held')) && existsSync(join(root, 'pending-invalid-waiting')) && existsSync(join(root, 'pending-invalid-budget')))) {
+            checkControlBudget();
+            if (existsSync(join(root, 'pending-observations'))) {
+              assert.equal((await readFile(join(root, 'pending-observations'), 'utf8')).includes('invalid'), false, 'invalid response preceded actual launch publication');
+            }
+            await pause();
+          }
+          checkControlBudget();
+          assert.equal(done, false, 'fixture prerequisite: supervisor closed during held start');
+          assert.equal(existsSync(join(root, 'pending-invalid-boundary')), true, 'fixture prerequisite: invalid injection boundary missing');
+          assert.equal(existsSync(join(root, 'pending-invalid-held')), true, 'fixture prerequisite: actual mock did not reach held start');
+          assert.equal(existsSync(join(root, 'pending-invalid-waiting')), true, 'fixture prerequisite: launch acknowledgment wait missing');
+          const heldOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
+          const heldPid = (await readFile(join(root, 'pending-invalid-held'), 'utf8')).trim();
+          assert.match(heldPid, /^[1-9]\d{0,9}$/u);
+          assert.ok(Number(heldPid) <= 2147483647);
+          assert.equal(heldPid, String(heldOwner.pid));
+          assert.equal(heldOwner.diagnostics.lifecycle.find((event: {event: string}) => event.event === 'child-spawned').detail.pid, Number(heldPid));
+          assert.equal((await readFile(join(root, 'pending-invalid-waiting'), 'utf8')).trim(), heldPid);
+          assert.equal(heldOwner.firstFailure, undefined, 'fixture prerequisite: supervisor failed during held start');
+          assert.equal(heldOwner.ready, false);
+          assert.equal(heldOwner.diagnostics.lifecycle.some((event: {event: string}) => ['runner-candidate-pinned', 'runner-frozen', 'ready-admitted'].includes(event.event)), false);
+          assert.equal(existsSync(join(root, 'status-queries')), false);
+          assert.equal(existsSync(join(root, 'launches')), false);
+          assert.equal(existsSync(join(root, 'xcode.pid')), false);
+          assert.equal(existsSync(join(root, 'pending-invalid-acknowledged')), false);
+          assert.deepEqual((await readFile(join(root, 'pending-observations'), 'utf8')).trim().split(/\r?\n/u), ['1/0']);
+          checkControlBudget();
+          writeFileSync(join(root, invalidPidControl === 'held-start' ? 'pending-invalid-release' : 'pending-invalid-withheld'), 'test decision');
+        }
         while (!done && Date.now() < pendingDeadline) {
           if (witness) terminalCheck(root, deadline);
           if (existsSync(join(state, 'owner.json'))) {
@@ -2716,6 +2937,54 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
           await pause();
         }
         const pendingOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
+        if (mode === 'listener-pending-invalid-pid') {
+          await writeFile(join(root, 'pending-candidate-continue'), 'invalid response observation complete');
+          if (invalidPidControl === 'withheld-start') {
+            assert.throws(() => assertInvalidFailure(pendingOwner), /fixture prerequisite/u);
+            assert.equal(await readFile(join(root, 'pending-invalid-prerequisite'), 'utf8'), 'PREREQUISITE\n');
+            assertInvalidPidResult('WITHHELD');
+            assert.equal(pendingOwner.firstFailure.stage, 'mjpeg-listener-command');
+            assert.equal(pendingOwner.firstFailure.category, 'listener-command-error');
+            assert.equal(pendingOwner.firstFailure.phase, 'initial');
+            const failedCommand = pendingOwner.firstFailure.causalCommands.find((command: {endpoint?: string}) => command.endpoint === 'mjpeg');
+            assert.equal(failedCommand.status, 2);
+            assert.equal(failedCommand.signal, null);
+            assert.equal(failedCommand.error, undefined);
+            assert.equal(failedCommand.stdout.bytes, 0);
+            assert.ok(failedCommand.stderr.bytes > 0);
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('fixture prerequisite: withheld start cleanup deadline')), 15_000); })]);
+            } finally { clearTimeout(timer); }
+            const settled = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
+            assert.deepEqual(settled.firstFailure, pendingOwner.firstFailure);
+            assert.ok(settled.endedAt);
+            assert.equal(settled.ready, false);
+            assert.equal(settled.runnerPid, undefined);
+            assert.equal(settled.runnerBirth, undefined);
+            assert.equal(settled.runnerExecutable, undefined);
+            assert.equal(settled.diagnostics.lifecycle.some((event: {event: string}) => ['runner-candidate-pinned', 'runner-frozen', 'ready-admitted', 'owned-listener-termination-requested'].includes(event.event)), false);
+            for (const event of ['child-spawned', 'child-exit', 'child-close', 'child-stop-finished', 'owner-ended']) {
+              assert.equal(settled.diagnostics.lifecycle.some((entry: {event: string}) => entry.event === event), true);
+            }
+            for (const name of ['launches', 'xcode.pid', 'runner.pid', 'pending-invalid-acknowledged', 'status-queries', 'state/wda-status.json']) assert.equal(existsSync(join(root, name)), false);
+            const withheldObservations = (await readFile(join(root, 'pending-observations'), 'utf8')).trim().split(/\r?\n/u);
+            assert.equal(withheldObservations[0], '1/0');
+            assert.equal(withheldObservations.some(value => value.includes('invalid')), false);
+            assert.equal(await readFile(join(root, 'receipt-queries'), 'utf8'), '1');
+            assertionsPassed = true;
+            return;
+          }
+          assertInvalidFailure(pendingOwner);
+          assertInvalidPidResult('ACKNOWLEDGED');
+          pendingInvalidFirstFailure = pendingOwner.firstFailure;
+          assert.equal((await readFile(join(root, 'pending-invalid-acknowledged'), 'utf8')).trim(), String(pendingOwner.pid));
+          const invalidCommand = pendingOwner.firstFailure.causalCommands.find((command: {endpoint?: string}) => command.endpoint === 'mjpeg');
+          assert.equal(invalidCommand.status, 0);
+          assert.equal(invalidCommand.signal, null);
+          assert.equal(invalidCommand.stdout.bytes, 11);
+          assert.equal(invalidCommand.stderr.bytes, 0);
+        }
         const pendingLifecycle = pendingOwner.diagnostics?.lifecycle || [];
         const pinned = pendingLifecycle.find((event: {event: string}) => event.event === 'runner-candidate-pinned');
         if (mode === 'listener-pending-ambiguous' || mode === 'listener-pending-command-error' || mode === 'listener-pending-invalid-pid') {
@@ -3286,10 +3555,21 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
         await writeFile(join(root, 'listener-candidate-evidence.json'), `${JSON.stringify(candidateEvidence, null, 2)}\n`);
         assert.deepEqual(JSON.parse(await readFile(join(root, 'listener-candidate-evidence.json'), 'utf8')), candidateEvidence);
       }
+      if (mode === 'listener-pending-invalid-pid') {
+        assertInvalidFailure(owner);
+        assert.deepEqual(owner.firstFailure, pendingInvalidFirstFailure);
+      }
       if (['occupied', 'ownership', 'ambiguous', 'product'].includes(mode)) assert.equal(existsSync(join(root, 'launches')), false);
       else {
         const commands = (await readFile(join(root, 'launches'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
         assert.deepEqual(commands, [['test-without-building', '-xctestrun', owner.xctestrun, '-destination', `id=${udid}`]]);
+      }
+      if (mode === 'listener-pending-invalid-pid') {
+        assert.equal(owner.diagnostics.lifecycle.some((event: {event: string}) => event.event === 'runner-candidate-pinned' || event.event === 'owned-listener-termination-requested'), false);
+        for (const event of ['child-spawned', 'child-exit', 'child-close', 'child-stop-finished', 'owner-ended']) {
+          assert.equal(owner.diagnostics.lifecycle.some((entry: {event: string}) => entry.event === event), true);
+        }
+        assert.equal(existsSync(join(root, 'xcode.pid')), false);
       }
       if (mode === 'early') assert.equal(owner.exitCode, 43);
       if (mode === 'invalid' || mode === 'oversized' || mode === 'delayed') {
@@ -3749,10 +4029,34 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
       if (mode !== 'ownership' && mode !== 'listener-pending-ownership') assert.match(await readFile(join(state, 'ios-wda-system.log'), 'utf8'), /output":"suppressed"/u);
       assert.equal(existsSync(join(root, 'runner.pid')), false);
       assertionsPassed = true;
+    };
+    try {
+      await runAssertions();
     } catch (error) {
-      if (witnessBuild) { witnessFailure = error; terminalFailure(root); }
-      throw error;
+      if (mode === 'listener-pending-invalid-pid') {
+        pendingInvalidFailure = {error, diagnostic: 'unavailable'};
+      } else {
+        if (witnessBuild) { witnessFailure = error; terminalFailure(root); }
+        throw error;
+      }
     } finally {
+      if (mode === 'listener-pending-invalid-pid') {
+        for (const name of ['pending-invalid-abort', 'pending-invalid-release', 'pending-candidate-continue', 'state/stop']) {
+          try { await writeFile(join(root, name), 'fixture finalization'); } catch (error) { cleanupFailure ??= {error}; }
+        }
+        if (!done) {
+          try {
+            if (!child.kill('SIGTERM') && child.exitCode === null && child.signalCode === null) {
+              cleanupFailure ??= {error: new Error('pending invalid fixture supervisor signal not accepted')};
+            }
+          } catch (error) { cleanupFailure ??= {error}; }
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('pending invalid fixture cleanup deadline')), 15_000); })]);
+          } catch (error) { cleanupFailure ??= {error}; }
+          finally { clearTimeout(timer); }
+        }
+      }
       if (witnessBuild) {
         try { await terminalTeardown(root, witness, witnessSettlement!, !assertionsPassed); }
         catch (error) { if (!witnessFailure) witnessFailure = error; }
@@ -3769,7 +4073,7 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
           await rm(join(state, name), {recursive: true, force: true});
         }
       }
-      if (!done && !witnessBuild) {
+      if (!done && !witnessBuild && mode !== 'listener-pending-invalid-pid') {
         if (mode === 'listener-ready-owner-evidence-write') await writeFile(join(root, 'ready-failure-fallback-continue'), 'failed test cleanup');
         await writeFile(join(state, 'stop'), 'failed test cleanup');
         child.kill('SIGTERM');
@@ -3783,13 +4087,37 @@ for (const mode of [...revocationModes, 'ready', 'ready-then-oversized', 'early'
           if (existsSync(join(root, name))) await writeFile(join(diagnosticRoot, name), await readFile(join(root, name)));
         }
       }
-      if (diagnosticRootBase && !witnessBuild && !revocationModes.includes(mode) && (!assertionsPassed || listenerEvidenceModes.includes(mode) || mode === 'listener-concurrent-exit-before-close')) {
+      if (diagnosticRootBase && !witnessBuild && !revocationModes.includes(mode) && mode !== 'listener-pending-invalid-pid' && (!assertionsPassed || listenerEvidenceModes.includes(mode) || mode === 'listener-concurrent-exit-before-close')) {
         const diagnosticRoot = listenerEvidenceModes.includes(mode) ? join(diagnosticRootBase, mode) : diagnosticRootBase;
         await rm(diagnosticRoot, { recursive: true, force: true });
         await cp(root, diagnosticRoot, { recursive: true, force: true });
       }
-      if (!witnessBuild) await rm(root, { recursive: true, force: true });
+      if (mode === 'listener-pending-invalid-pid' && (pendingInvalidFailure || cleanupFailure)) {
+        pendingInvalidFailure ??= {error: cleanupFailure!.error, diagnostic: 'unavailable'};
+        try { pendingInvalidFailure.diagnostic = pendingInvalidSnapshot(root, testMode, child, done); }
+        catch { pendingInvalidFailure.diagnostic = '{"collection":"unavailable"}'; }
+      }
+      if (!witnessBuild) {
+        try { await rm(root, { recursive: true, force: true }); }
+        catch (error) { cleanupFailure ??= {error}; }
+      }
     }
+    if (mode === 'listener-pending-invalid-pid') {
+      if (!pendingInvalidFailure && cleanupFailure) pendingInvalidFailure = {error: cleanupFailure.error, diagnostic: '{"collection":"unavailable","cleanup":"root-removal-failed"}'};
+      if (pendingInvalidFailure) {
+        const {error, diagnostic} = pendingInvalidFailure;
+        try {
+          if (error instanceof Error) {
+            const snapshot = `\npending-invalid-fixture ${diagnostic}`;
+            const stack = error.stack;
+            error.message += snapshot;
+            if (stack) error.stack = stack + snapshot;
+          }
+        } catch { pendingInvalidFailure.diagnostic = '{"attachment":"unavailable"}'; }
+        throw error;
+      }
+    }
+    if (cleanupFailure) throw cleanupFailure.error;
     if (assertionsPassed && witnessFailure) throw witnessFailure;
   }]);
 }
