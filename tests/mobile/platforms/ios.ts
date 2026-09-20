@@ -29,6 +29,7 @@ import {
   type ContextMetadata,
   type Locator,
   type WebDriverRequestTiming,
+  type WebDriverRequestPolicy,
   WebDriverError,
 } from '../support/webdriver';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
@@ -50,8 +51,9 @@ const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
 const IOS_CONFIRMATION_IDENTITY_MS = 12_000;
-const IOS_CONFIRMATION_ROUND_MS = 5 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS;
-const IOS_CONFIRMATION_COMPLETION_MS = 3 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS;
+const IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS = 12_000;
+const IOS_CONFIRMATION_ROUND_MS = 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
+const IOS_CONFIRMATION_COMPLETION_MS = 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
@@ -449,6 +451,8 @@ export class IOSPlatform implements MobilePlatform {
   private failureCapture?: Promise<void>;
   private launchReceipt?: IOSLaunchReceipt;
   private nativeDiagnosticsBlocked = false;
+  private installationAddRequested = false;
+  private installationAddFailure?: unknown;
   private omitLaunchLogs = false;
   private readonly launchPersistence = {
     directory: iosReceiptWriteStatus('directory'), events: iosReceiptWriteStatus('events'), receipt: iosReceiptWriteStatus('receipt'),
@@ -836,6 +840,7 @@ export class IOSPlatform implements MobilePlatform {
 
   async installFromBrowser(): Promise<void> {
     this.assertOwnershipClear();
+    if (this.installationAddRequested) throw new Error('IOS_SHARE: final Add was already requested');
     const phase = this.budget.phaseView('ios-install', 120_000);
     phase.assertAvailable('start iOS installation');
     await this.driver.switchContext('NATIVE_APP', Math.max(minimumDriverRequestMs, phase.remainingMs));
@@ -873,39 +878,56 @@ export class IOSPlatform implements MobilePlatform {
     const addToHomeScreen = await this.findNativeScrollable([
       iosActionLabelContains('Add to Home Screen'),
     ], 'Add to Home Screen', Math.min(IOS_NATIVE_ACTION_TIMEOUT_MS, phase.remainingMs));
-    await withIOSConfirmationSettings(this.driver, phase, IOS_NATIVE_SCROLL_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS, async (operation) => {
-      if (operation.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
-      await this.driver.click(addToHomeScreen, IOS_NATIVE_SCROLL_COMMAND_MS);
-      const confirmation = operation.phaseView('ios-install-confirmation', 75_000);
-      const addButton = await this.waitForInstallConfirmation(confirmation);
-      if (confirmation.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS || operation.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) {
-        throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
-      }
-      await this.driver.click(addButton, IOS_NATIVE_LOOKUP_ROUND_MS);
-    });
+    const transaction = phase.phaseView('ios-confirmation-transaction', phase.remainingMs, 1_500);
+    const policy = this.driver.nativeRequestPolicy(transaction);
+    try {
+      await withIOSConfirmationSettings(this.driver, transaction, IOS_NATIVE_SCROLL_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS, async (operation) => {
+        const operationPolicy = Object.freeze({ ...policy, budget: operation });
+        if (operation.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
+        await this.driver.click(addToHomeScreen, IOS_NATIVE_SCROLL_COMMAND_MS, operationPolicy);
+        const confirmation = operation.phaseView('ios-install-confirmation', 75_000);
+        const confirmationPolicy = Object.freeze({ ...operationPolicy, budget: confirmation });
+        const addButton = await this.waitForInstallConfirmation(confirmation, confirmationPolicy);
+        if (confirmation.remainingMs < IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS || operation.remainingMs < IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS) {
+          throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+        }
+        if (this.installationAddRequested) throw new Error('IOS_SHARE: final Add was already requested');
+        this.installationAddRequested = true;
+        try {
+          await this.driver.click(addButton, IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS, Object.freeze({ ...confirmationPolicy, finalAction: true }));
+        } catch (error) {
+          this.installationAddFailure ??= error;
+          this.nativeDiagnosticsBlocked = true;
+          throw error;
+        }
+      }, policy);
+    } catch (error) {
+      if (this.driver.snapshot().unusable || this.driver.snapshot().firstFatal) this.nativeDiagnosticsBlocked = true;
+      throw error;
+    }
     await delay(Math.min(1_500, phase.remainingMs), phase);
   }
 
-  private async waitForInstallConfirmation(phase: PhaseBudget): Promise<string> {
+  private async waitForInstallConfirmation(phase: PhaseBudget, policy: WebDriverRequestPolicy): Promise<string> {
     let lastState = 'missing';
     while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
       try {
         if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') throw new Error('IOS_SHARE: Add: confirmation is not in the native context');
-        const appInfo = await this.driver.activeAppInfo(IOS_NATIVE_LOOKUP_ROUND_MS);
+        const appInfo = await this.driver.activeAppInfo(IOS_NATIVE_LOOKUP_ROUND_MS, policy);
         const bundleId = String(appInfo?.bundleId || appInfo?.bundleID || '');
         if (!isIOSSafariBrowserBundle(bundleId) && !isIOSSafariViewServiceBundle(bundleId)) {
           throw new Error(`IOS_SHARE: Add: Safari confirmation is not foreground (${bundleId || 'unknown'})`);
         }
         if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
-        const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_CONFIRMATION_LOOKUP_MS);
+        const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_CONFIRMATION_LOOKUP_MS, policy);
         const element = this.installConfirmationElementId(response);
         if (phase.remainingMs < IOS_CONFIRMATION_IDENTITY_MS) break;
-        const identity = await this.installConfirmationIdentity();
+        const identity = await this.installConfirmationIdentity(policy);
         if (identity !== element) {
           lastState = 'confirmation identity is missing or replaced';
         } else {
           if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
-          const enabled = await this.readNativeControlAttribute(element, 'enabled', IOS_NATIVE_LOOKUP_ROUND_MS);
+          const enabled = await this.readNativeControlAttribute(element, 'enabled', IOS_NATIVE_LOOKUP_ROUND_MS, true, policy);
           if (enabled === 'false') {
             lastState = 'disabled';
           } else if (enabled !== 'true') {
@@ -913,21 +935,20 @@ export class IOSPlatform implements MobilePlatform {
           } else if (phase.remainingMs < IOS_CONFIRMATION_COMPLETION_MS) {
             break;
           } else {
-            if (phase.remainingMs < 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
-            const visible = await this.readNativeControlAttribute(element, 'visible', IOS_NATIVE_LOOKUP_ROUND_MS);
+            const visible = await this.readNativeControlAttribute(element, 'visible', IOS_NATIVE_LOOKUP_ROUND_MS, true, policy);
             if (visible !== 'true') {
               lastState = visible === 'false' ? 'hidden' : 'indeterminate';
             } else {
-              if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
-              const hittable = await this.readNativeControlAttribute(element, 'hittable', IOS_NATIVE_LOOKUP_ROUND_MS);
+              if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS) break;
+              const hittable = await this.readNativeControlAttribute(element, 'hittable', IOS_NATIVE_LOOKUP_ROUND_MS, true, policy);
               if (hittable !== 'true') {
                 lastState = hittable === 'false' ? 'not-hittable' : 'indeterminate';
               } else {
-                if (phase.remainingMs < IOS_CONFIRMATION_IDENTITY_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
-                const currentElement = await this.installConfirmationIdentity();
+                if (phase.remainingMs < IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS) break;
+                const currentElement = await this.installConfirmationIdentity(policy);
                 if (!currentElement) throw new Error('IOS_SHARE: Add: confirmation identity was replaced before click');
                 if (currentElement === element) {
-                  if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+                  if (phase.remainingMs < IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
                   return element;
                 }
                 lastState = 'confirmation Add control was replaced before click';
@@ -957,17 +978,18 @@ export class IOSPlatform implements MobilePlatform {
     return id;
   }
 
-  private async installConfirmationIdentity(): Promise<string | undefined> {
+  private async installConfirmationIdentity(policy: WebDriverRequestPolicy): Promise<string | undefined> {
     const response = await this.driver.command<unknown>('/elements', 'POST', {
       using: 'xpath',
       value: "//XCUIElementTypeNavigationBar[@name='Add to Home Screen' and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add']",
-    }, IOS_CONFIRMATION_IDENTITY_MS);
+    }, IOS_CONFIRMATION_IDENTITY_MS, policy);
     if (!Array.isArray(response)) throw new Error('IOS_SHARE: Add: malformed confirmation identity response');
     const matches = response.map((candidate: unknown) => this.installConfirmationElementId(candidate));
     return matches.length === 1 ? matches[0] : undefined;
   }
 
   async launchInstalledApp(): Promise<void> {
+    if (this.installationAddFailure !== undefined) throw this.installationAddFailure;
     this.launchObservation.begin();
     try {
       await this.launchInstalledAppObserved();
@@ -1542,8 +1564,8 @@ export class IOSPlatform implements MobilePlatform {
     return source;
   }
 
-  private async readNativeControlAttribute(element: string, name: string, timeout: number, validateResponse = true): Promise<string | null> {
-    const response = await this.driver.attribute(element, name, timeout);
+  private async readNativeControlAttribute(element: string, name: string, timeout: number, validateResponse = true, policy?: WebDriverRequestPolicy): Promise<string | null> {
+    const response = await this.driver.attribute(element, name, timeout, policy);
     if (validateResponse && response !== null && typeof response !== 'string') {
       throw new Error('IOS_SHARE: Add: malformed native attribute response');
     }
@@ -2152,6 +2174,7 @@ export class IOSPlatform implements MobilePlatform {
   private assertOwnershipClear(): void {
     if (this.ownershipFailure) throw this.ownershipFailure;
     if (this.nativeObservationFailure !== undefined) throw this.nativeObservationFailure;
+    if (this.installationAddFailure !== undefined) throw this.installationAddFailure;
   }
 
   private failOwnership(code: string, detail: string): never {

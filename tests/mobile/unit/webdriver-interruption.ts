@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
-import type { WebDriverError, WebDriverRequestTiming } from '../support/webdriver';
+import { AppiumClient as PolicyClient, WebDriverError as PolicyError, type RequestEnforcementClock, type WebDriverError, type WebDriverRequestTiming } from '../support/webdriver';
 import { PhaseBudget } from '../support/budget';
 
 type Test = [string, () => Promise<void>];
@@ -27,7 +27,419 @@ function assertTimingOrder(timing: Readonly<WebDriverRequestTiming>) {
   assert.equal(Object.isFrozen(timing), true);
 }
 
+async function policyClient(handler: (init?: RequestInit) => Promise<Response>) {
+  let now = 0;
+  let sent = 0;
+  let signal: AbortSignal | null | undefined;
+  let onNow: (() => void) | undefined;
+  let timerMode: 'normal' | 'inline' | 'throw' | 'inline-throw' = 'normal';
+  const wire: { url: string; method?: string }[] = [];
+  const timers = new Map<ReturnType<typeof setTimeout>, () => void>();
+  let ordinal = 0;
+  const clock: RequestEnforcementClock = {
+    now: () => { onNow?.(); return now; },
+    timer: (callback) => {
+      if (timerMode === 'throw') throw new Error('injected timer setup failure');
+      if (timerMode === 'inline' || timerMode === 'inline-throw') callback();
+      if (timerMode === 'inline-throw') throw new Error('injected failure after inline timeout');
+      const id = ++ordinal as unknown as ReturnType<typeof setTimeout>;
+      timers.set(id, callback);
+      return id;
+    },
+    clear: id => { timers.delete(id); },
+  };
+  const client = new PolicyClient('http://policy.invalid', 30_000, async (input, init) => {
+    wire.push({ url: String(input), method: init?.method });
+    if (String(input).endsWith('/session')) return Response.json({ value: {}, sessionId: 'policy' });
+    sent++;
+    signal = init?.signal;
+    assert.equal(init?.body, undefined);
+    return handler(init);
+  }, undefined, clock);
+  await client.create({ capabilities: {} });
+  const root = new PhaseBudget('policy-root', { timeoutMs: 120_000, now: clock.now });
+  client.setBudget(root);
+  const phase = root.phaseView('policy-confirmation', 75_000);
+  const policy = Object.freeze({ ...client.nativeRequestPolicy(phase), finalAction: true });
+  return { client, root, phase, policy, clock, timers, wire, sent: () => sent, signal: () => signal,
+    observeNow: (callback: () => void) => { onNow = callback; },
+    timerMode: (mode: 'normal' | 'inline' | 'throw' | 'inline-throw') => { timerMode = mode; },
+    advance: (ms: number) => { now += ms; },
+    expire: (ms: number) => { now += ms; for (const callback of [...timers.values()]) callback(); },
+  };
+}
+
 export const webdriverInterruptionTests: Test[] = [];
+
+webdriverInterruptionTests.push(['Appium request timing SM57 original5000 timeout retains first fatal after late200', async () => {
+  const headers = deferred<Response>();
+  const a = await policyClient(() => headers.promise);
+  const action = a.client.click('add', 5_000, a.policy);
+  let original: unknown;
+  const rejected = assert.rejects(action, error => { original = error; return error instanceof PolicyError && error.code === 'APPIUM_TIMEOUT'; });
+  a.expire(5_000);
+  await rejected;
+  const fatal = a.client.snapshot().firstFatal;
+  assert.ok(fatal);
+  assert.ok(original instanceof PolicyError);
+  assert.equal(fatal.code, original.code);
+  assert.equal(fatal.path, original.path);
+  assert.equal(fatal.detail, original.message);
+  assert.equal(a.signal()!.reason, original.cause);
+  const saved = structuredClone(a.client.snapshot());
+  const receipt = a.client.snapshot().lastCommand!.timing!;
+  const settlement = (a.client as any).previousSettlementMs;
+  assert.equal(Object.isFrozen(receipt), true);
+  assert.equal(receipt.sent, true);
+  assert.equal(receipt.outcome, 'timeout');
+  assert.equal(a.client.snapshot().lastCommand!.timeoutMs, 5_000);
+  headers.resolve(Response.json({ value: null }));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(a.client.snapshot(), saved);
+  assert.equal(a.sent(), 1);
+  assert.equal((a.client as any).previousSettlementMs, settlement);
+  assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing?.outcome === 'success').length, 0);
+  await assert.rejects(() => a.client.click('add', 12_000, a.policy), /APPIUM_SESSION_UNUSABLE/u);
+  assert.deepEqual(a.client.snapshot(), saved);
+  assert.equal(a.client.snapshot().firstFatal, fatal);
+  assert.equal(original.timedOut, true);
+  assert.equal(a.timers.size, 0);
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing SM57 scoped final Add rejects late headers before delayed timer', async () => {
+  for (const stage of ['headers', 'body', 'parse'] as const) {
+    for (const elapsed of [11_999, 12_000]) {
+      const headers = deferred<Response>();
+      const a = await policyClient(() => headers.promise);
+      const text = '{"value":null}';
+      const parse = JSON.parse;
+      let replacementCalls = 0;
+      JSON.parse = ((input: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+        if (stage === 'parse' && input === text) a.advance(elapsed);
+        return parse(input, reviver);
+      }) as typeof JSON.parse;
+      try {
+        const action = a.client.click('add', 12_000, a.policy);
+        const settled = elapsed < 12_000 ? action : assert.rejects(action, /APPIUM_TIMEOUT/u);
+        assert.equal(a.timers.size, 1);
+        a.clock.now = () => { replacementCalls++; return 0; };
+        a.clock.clear = () => { replacementCalls++; };
+        a.clock.timer = () => { replacementCalls++; throw new Error('replacement timer must not run'); };
+        if (stage === 'headers') a.advance(elapsed);
+        const response = new Response(null);
+        response.text = async () => {
+          if (stage === 'body') a.advance(elapsed);
+          return text;
+        };
+        headers.resolve(response);
+        await settled;
+        assert.equal(replacementCalls, 0);
+        assert.equal(a.sent(), 1);
+        assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, elapsed < 12_000 ? 1 : 0);
+        assert.equal(a.client.snapshot().lastCommand!.timeoutMs, 12_000);
+        assert.equal(a.client.snapshot().unusable, elapsed >= 12_000);
+        assert.equal(a.signal()!.aborted, elapsed >= 12_000);
+        assert.equal(a.timers.size, 0);
+        assert.equal(a.root.remainingMs, 120_000 - elapsed);
+        assert.equal(a.phase.remainingMs, 75_000 - elapsed);
+      } finally { JSON.parse = parse; }
+    }
+  }
+  for (const elapsed of [11_999, 12_000, 12_001]) {
+    const a = await policyClient(async () => { a.advance(elapsed); return Response.json({ value: null }); });
+    const action = a.client.click('add', 12_000, a.policy);
+    if (elapsed < 12_000) await action;
+    else await assert.rejects(action, /APPIUM_TIMEOUT/u);
+    assert.equal(a.sent(), 1);
+    assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, elapsed < 12_000 ? 1 : 0);
+    assert.equal(a.client.snapshot().lastCommand!.timing!.outcome, elapsed < 12_000 ? 'success' : 'timeout');
+    assert.equal(a.client.snapshot().unusable, elapsed >= 12_000);
+    assert.equal(a.signal()?.aborted, elapsed >= 12_000);
+    assert.equal(a.timers.size, 0);
+  }
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing SM57 scoped final Add rejects late body before delayed timer', async () => {
+  for (const malformed of [false, true]) {
+    const a = await policyClient(async () => {
+      const response = new Response(null, { status: malformed ? 500 : 200 });
+      response.text = async () => { a.advance(12_000); return malformed ? 'invalid JSON' : '{"value":null}'; };
+      return response;
+    });
+    await assert.rejects(() => a.client.click('add', 12_000, a.policy), /APPIUM_TIMEOUT/u);
+    const saved = structuredClone(a.client.snapshot());
+    assert.equal(saved.firstFatal?.code, 'APPIUM_TIMEOUT');
+    assert.equal(saved.lastCommand!.timing!.completed, false);
+    assert.equal(saved.lastCommand!.timing!.parseStartMs, undefined);
+    await assert.rejects(() => a.client.settings(), /APPIUM_SESSION_UNUSABLE/u);
+    assert.deepEqual(a.client.snapshot(), saved);
+    assert.equal(a.sent(), 1);
+  }
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing SM57 scoped final Add rejects late parse and invalid acknowledgement', async () => {
+  for (const text of ['{"value":null}', '{"value":{}}', '{}', 'null', 'bad JSON', '{"value":{"error":"stale element reference"}}']) {
+    for (const late of [false, true]) {
+      const a = await policyClient(async () => new Response(text));
+      const parse = JSON.parse;
+      JSON.parse = ((input: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+        if (input === text && late) a.advance(12_000);
+        return parse(input, reviver);
+      }) as typeof JSON.parse;
+      try {
+        const action = a.client.click('add', 12_000, a.policy);
+        if (!late && text === '{"value":null}') await action;
+        else await assert.rejects(action, late ? /APPIUM_TIMEOUT/u : /APPIUM_HTTP|APPIUM_COMMAND/u);
+      } finally { JSON.parse = parse; }
+      assert.equal(a.sent(), 1);
+      assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, !late && text === '{"value":null}' ? 1 : 0);
+      assert.equal(a.client.snapshot().unusable, late || text !== '{"value":null}');
+      assert.equal(Object.isFrozen(a.client.snapshot().lastCommand!.timing), true);
+      assert.equal(a.timers.size, 0);
+    }
+  }
+  const closeBody = deferred<string>();
+  const closeStarted = deferred<void>();
+  const addHeaders = deferred<Response>();
+  const a = await policyClient(async init => {
+    if (init?.method !== 'DELETE') return addHeaders.promise;
+    const response = new Response(null);
+    response.text = () => { closeStarted.resolve(); return closeBody.promise; };
+    return response;
+  });
+  const cause = new TypeError('original close body interruption');
+  let original: unknown;
+  const closing = a.client.close();
+  const rejectedClose = assert.rejects(closing, error => { original = error; return error instanceof PolicyError && error.cause === cause; });
+  await closeStarted.promise;
+  const action = a.client.click('add', 12_000, a.policy);
+  const rejectedAdd = assert.rejects(action, /APPIUM_TIMEOUT/u);
+  closeBody.reject(cause);
+  await rejectedClose;
+  assert.ok(original instanceof PolicyError);
+  assert.equal(original.code, 'APPIUM_INTERRUPTED');
+  const fatal = a.client.snapshot().firstFatal;
+  assert.ok(fatal);
+  assert.equal(fatal.code, original.code);
+  assert.equal(fatal.method, 'DELETE');
+  assert.equal(fatal.path, original.path);
+  assert.equal(fatal.detail, original.message);
+  const savedFatal = structuredClone(fatal);
+  a.advance(12_000);
+  addHeaders.resolve(new Response('malformed'));
+  await rejectedAdd;
+  assert.equal(a.client.snapshot().firstFatal, fatal);
+  assert.deepEqual(fatal, savedFatal);
+  assert.equal(original.cause, cause);
+  assert.equal(a.wire.filter(request => request.url.endsWith('/click')).length, 1);
+  assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, 0);
+  assert.equal(a.timers.size, 0);
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing SM57 dispatch gap preserves full allocation or remains unsent', async () => {
+  for (const provider of ['enforcement', 'budget'] as const) {
+    for (const mutation of ['create', 'context'] as const) {
+      const a = await policyClient(async () => Response.json({ value: null }));
+      let armed = false;
+      let attempts = 0;
+      const followups: Promise<void>[] = [];
+      const attempt = () => {
+        if (!armed) return;
+        armed = false;
+        attempts++;
+        followups.push(assert.rejects(mutation === 'create'
+          ? a.client.create({ capabilities: {} }) : a.client.switchContext('WEBVIEW-overlap'), /APPIUM_COMMAND_NOT_ADMITTED/u));
+      };
+      const budget = new PhaseBudget('same-clock-origin', {
+        timeoutMs: 75_000,
+        now: () => { if (provider === 'budget') attempt(); return a.clock.now(); },
+      });
+      if (provider === 'enforcement') a.observeNow(attempt);
+      const retained = a.client.nativeRequestPolicy(budget);
+      const policy = { ...retained, finalAction: true, beforeDispatch: () => { retained.beforeDispatch(); armed = true; } };
+      await assert.rejects(() => a.client.click('add', 12_000, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
+      await Promise.all(followups);
+      assert.equal(attempts, 1);
+      assert.equal(followups.length, 1);
+      assert.equal(a.wire.length, 1);
+      assert.equal(a.wire[0].method, 'POST');
+      assert.equal(a.sent(), 0);
+      assert.equal(a.client.snapshot().lastCommand!.timing!.sent, false);
+      assert.equal(a.client.snapshot().lastCommand!.timing!.outcome, 'not-admitted');
+      assert.equal(Object.isFrozen(a.client.snapshot().lastCommand!.timing), true);
+      assert.equal(a.client.snapshot().lastCommand!.timing!.sessionGeneration, 1);
+      assert.equal(a.client.snapshot().selectedContext, 'NATIVE_APP');
+      assert.equal(a.client.snapshot().unusable, false);
+      assert.equal(a.client.snapshot().firstFatal, undefined);
+      assert.equal(a.timers.size, 0);
+      await a.client.settings(2_000);
+      assert.equal(a.client.snapshot().lastCommand!.timing!.sessionGeneration, 1);
+      assert.equal(a.client.snapshot().lastCommand!.path, '/session/policy/appium/settings');
+      assert.equal(a.wire.filter(request => request.url.endsWith('/click')).length, 0);
+      assert.equal(a.wire.length, 2);
+    }
+  }
+  {
+    let reads = 0;
+    const a = await policyClient(async () => ++reads === 1
+      ? Response.json({ value: { error: 'stale element reference' } }, { status: 404 })
+      : Response.json({ value: null }));
+    await assert.rejects(() => a.client.command('/elements', 'GET', undefined, 5_000, a.client.nativeRequestPolicy(a.phase)), error => {
+      assert.ok(error instanceof PolicyError);
+      assert.equal(error.code, 'APPIUM_COMMAND');
+      assert.equal(error.status, 404);
+      return true;
+    });
+    assert.equal(a.client.snapshot().unusable, false);
+    assert.equal(a.client.snapshot().firstFatal, undefined);
+    await a.client.click('add', 12_000, a.policy);
+    assert.equal(a.sent(), 2);
+    assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, 1);
+  }
+  for (const limiting of ['root', 'operation', 'confirmation'] as const) {
+    for (const remaining of [12_000, 11_999]) {
+      const a = await policyClient(async () => Response.json({ value: null }));
+      const root = new PhaseBudget('root', { timeoutMs: limiting === 'root' ? remaining : 120_000, now: a.clock.now });
+      const operation = root.phaseView('operation', limiting === 'operation' ? remaining : 80_000);
+      const confirmation = operation.phaseView('confirmation', limiting === 'confirmation' ? remaining : 75_000);
+      a.client.setBudget(root);
+      const policy = Object.freeze({ ...a.client.nativeRequestPolicy(confirmation), finalAction: true });
+      if (remaining === 12_000) await a.client.click('add', 12_000, policy);
+      else await assert.rejects(() => a.client.click('add', 12_000, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
+      assert.equal(a.sent(), remaining === 12_000 ? 1 : 0);
+      assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, remaining === 12_000 ? 1 : 0);
+      assert.equal(a.client.snapshot().lastCommand!.timeoutMs, 12_000);
+    }
+  }
+  const a = await policyClient(async () => Response.json({ value: null }));
+  const policy = Object.freeze({ ...a.policy, budget: a.root.phaseView('exact', 12_000), beforeDispatch: () => { a.policy.beforeDispatch(); a.advance(1); } });
+  await assert.rejects(() => a.client.click('add', 12_000, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
+  assert.equal(a.sent(), 0);
+  assert.equal(a.client.snapshot().lastCommand!.timing!.sent, false);
+  assert.equal(a.timers.size, 0);
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing SM57 remote work surviving abort stays unknown and quarantined', async () => {
+  for (const expiration of ['timer', 'late-headers'] as const) {
+    const headers = deferred<Response>();
+    const followups: Promise<void>[] = [];
+    let aborts = 0;
+    let fatalAtAbort: ReturnType<PolicyClient['snapshot']>['firstFatal'];
+    const a = await policyClient(init => {
+      init!.signal!.addEventListener('abort', () => {
+        aborts++;
+        fatalAtAbort = a.client.snapshot().firstFatal;
+        assert.ok(fatalAtAbort);
+        assert.equal(a.client.snapshot().unusable, true);
+        followups.push(assert.rejects(a.client.updateSettings({ waitForIdleTimeout: 0 }), /APPIUM_SESSION_UNUSABLE/u));
+        followups.push(assert.rejects(a.client.click('add', 12_000, a.policy), /APPIUM_SESSION_UNUSABLE/u));
+      }, { once: true });
+      return headers.promise;
+    });
+    const action = a.client.click('add', 12_000, a.policy);
+    let original: unknown;
+    const rejected = assert.rejects(action, error => { original = error; return error instanceof PolicyError && error.code === 'APPIUM_TIMEOUT'; });
+    if (expiration === 'timer') a.expire(12_000);
+    else { a.advance(12_000); headers.resolve(Response.json({ value: null })); }
+    await rejected;
+    await Promise.all(followups);
+    assert.equal(aborts, 1);
+    assert.equal(followups.length, 2);
+    assert.ok(original instanceof PolicyError);
+    assert.ok(fatalAtAbort);
+    assert.equal(a.client.snapshot().firstFatal, fatalAtAbort);
+    assert.equal(fatalAtAbort.code, original.code);
+    assert.equal(fatalAtAbort.path, original.path);
+    assert.equal(fatalAtAbort.detail, original.message);
+    assert.equal(a.signal()!.reason, original.cause);
+    const saved = structuredClone(a.client.snapshot());
+    const receipt = a.client.snapshot().lastCommand!.timing!;
+    const settlement = (a.client as any).previousSettlementMs;
+    assert.equal(Object.isFrozen(receipt), true);
+    headers.resolve(Response.json({ value: null }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await assert.rejects(action, error => error === original);
+    assert.deepEqual(a.client.snapshot(), saved);
+    assert.equal(a.client.snapshot().lastCommand!.timing, receipt);
+    assert.equal((a.client as any).previousSettlementMs, settlement);
+    assert.equal(a.sent(), 1);
+    assert.equal(a.wire.length, 2);
+    assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, 0);
+    assert.equal(a.timers.size, 0);
+  }
+  for (const mode of ['inline', 'throw', 'inline-throw'] as const) {
+    const headers = deferred<Response>();
+    const a = await policyClient(() => headers.promise);
+    a.timerMode(mode);
+    let original: unknown;
+    await assert.rejects(a.client.click('add', 12_000, a.policy), error => {
+      original = error;
+      assert.ok(error instanceof PolicyError);
+      assert.equal(error.code, mode === 'throw' ? 'APPIUM_HTTP' : 'APPIUM_TIMEOUT');
+      return true;
+    });
+    assert.ok(original instanceof PolicyError);
+    const fatal = a.client.snapshot().firstFatal;
+    assert.ok(fatal);
+    assert.equal(fatal.code, original.code);
+    assert.equal(fatal.detail, original.message);
+    const saved = structuredClone(a.client.snapshot());
+    headers.reject(new TypeError('losing transport rejection'));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(a.client.snapshot(), saved);
+    assert.equal(a.client.snapshot().firstFatal, fatal);
+    assert.equal(a.sent(), 1);
+    assert.equal(a.client.snapshot().commands.filter(command => command.path.endsWith('/click') && command.timing!.outcome === 'success').length, 0);
+    assert.equal(a.signal()!.aborted, true);
+    assert.equal(a.timers.size, 0);
+  }
+  const native = deferred<Response>();
+  let nativeCompleted = false;
+  const nativeSettlement = native.promise.then(() => { nativeCompleted = true; });
+  const a = await policyClient(() => native.promise);
+  const action = a.client.click('add', 12_000, a.policy);
+  const rejected = assert.rejects(action, /APPIUM_TIMEOUT/u);
+  a.expire(12_000);
+  await rejected;
+  assert.equal(a.signal()?.aborted, true);
+  assert.equal(nativeCompleted, false);
+  const snapshot = structuredClone(a.client.snapshot());
+  native.resolve(Response.json({ value: null }));
+  await nativeSettlement;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(nativeCompleted, true);
+  assert.deepEqual(a.client.snapshot(), snapshot);
+  for (const followup of [() => a.client.settings(), () => a.client.activeAppInfo(), () => a.client.click('add'), () => a.client.create({ capabilities: {} })]) {
+    await assert.rejects(followup, /APPIUM_SESSION_UNUSABLE/u);
+  }
+  assert.equal(a.sent(), 1);
+  assert.deepEqual(a.client.snapshot(), snapshot);
+  await a.client.close();
+  assert.equal(a.sent(), 2);
+  assert.equal(a.client.snapshot().unusable, true);
+  assert.deepEqual(a.client.snapshot().firstFatal, snapshot.firstFatal);
+  await assert.rejects(() => a.client.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.sent(), 2);
+}]);
+
+webdriverInterruptionTests.push(['Appium request timing SM57 unscoped defaults and diagnostic annotations stay observational', async () => {
+  const a = await policyClient(async () => { a.advance(13_000); return Response.json({ value: null }); });
+  const diagnostic = a.root.phaseView('diagnostic', 8_000);
+  const restore = a.client.setRequestTimingScope('ios-attachment-pre-attachment-native', diagnostic);
+  await a.client.command('/alert/text', 'GET', undefined, 5_000);
+  restore();
+  assert.equal(a.client.snapshot().lastCommand!.timeoutMs, 5_000);
+  assert.equal(a.client.snapshot().lastCommand!.timing!.phaseRemainingAtSettlementMs, 0);
+  assert.equal(a.client.snapshot().lastCommand!.timing!.outcome, 'success');
+  await a.client.command('/unscoped', 'GET');
+  assert.equal(a.client.snapshot().lastCommand!.timeoutMs, 30_000);
+  assert.equal(a.client.snapshot().firstFatal, undefined);
+  assert.equal((a.client as any).budget, a.root);
+}]);
 
 for (const reply of ['success', 'no-alert', 'malformed'] as const) {
   webdriverInterruptionTests.push([`Appium request timing separates response, body and local settlement for ${reply}`, async () => {

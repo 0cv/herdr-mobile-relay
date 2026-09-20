@@ -1,5 +1,5 @@
 import { PhaseBudget } from './budget';
-import { AppiumClient, isFatalDriverError } from './webdriver';
+import { AppiumClient, isFatalDriverError, type WebDriverRequestPolicy } from './webdriver';
 
 export const IOS_INITIAL_SETTINGS_COMMAND_MS = 5_000;
 export const CONFIRMATION_SETTINGS_COMMAND_MS = 2_000;
@@ -40,10 +40,11 @@ export async function withIOSConfirmationSettings<T>(
   parent: PhaseBudget,
   operationMs: number,
   operation: (phase: PhaseBudget) => Promise<T>,
+  policy?: WebDriverRequestPolicy,
 ): Promise<T> {
   const overhead = 3 * CONFIRMATION_SETTINGS_COMMAND_MS + CONFIRMATION_RESTORE_MS;
   if (parent.remainingMs < operationMs + overhead) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient whole transaction allowance');
-  const saved = touchedSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS));
+  const saved = touchedSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS, policy));
   let attempted = false;
   let failed = false;
   let originalError: unknown;
@@ -51,9 +52,9 @@ export async function withIOSConfirmationSettings<T>(
   try {
     if (parent.remainingMs < operationMs + 2 * CONFIRMATION_SETTINGS_COMMAND_MS + CONFIRMATION_RESTORE_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient apply and operation allowance');
     attempted = true;
-    await driver.updateSettings(IOS_CONFIRMATION_SETTINGS, CONFIRMATION_SETTINGS_COMMAND_MS);
+    await driver.updateSettings(IOS_CONFIRMATION_SETTINGS, CONFIRMATION_SETTINGS_COMMAND_MS, policy);
     if (parent.remainingMs < operationMs + CONFIRMATION_SETTINGS_COMMAND_MS + CONFIRMATION_RESTORE_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient readback and operation allowance');
-    assertSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS), IOS_CONFIRMATION_SETTINGS);
+    assertSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS, policy), IOS_CONFIRMATION_SETTINGS);
     if (parent.remainingMs < operationMs + CONFIRMATION_RESTORE_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient operation and restoration allowance');
     result = await operation(parent.phaseView('ios-confirmation-operation', parent.remainingMs, CONFIRMATION_RESTORE_MS));
   } catch (error) {
@@ -63,9 +64,9 @@ export async function withIOSConfirmationSettings<T>(
   if (attempted && !isFatalDriverError(originalError) && !driver.snapshot().unusable && !driver.snapshot().firstFatal) {
     try {
       if (parent.remainingMs < CONFIRMATION_RESTORE_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient restoration allowance');
-      await driver.updateSettings(saved, CONFIRMATION_SETTINGS_COMMAND_MS);
+      await driver.updateSettings(saved, CONFIRMATION_SETTINGS_COMMAND_MS, policy);
       if (parent.remainingMs < CONFIRMATION_SETTINGS_COMMAND_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient restoration readback allowance');
-      assertSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS), saved);
+      assertSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS, policy), saved);
     } catch (error) {
       if (!failed) throw error;
     }

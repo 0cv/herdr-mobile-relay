@@ -58,7 +58,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
     } finally {
       inFlight -= 1;
     }
-  });
+  }, undefined, now ? { now, timer: (callback, ms) => setTimeout(callback, ms), clear: timer => clearTimeout(timer) } : undefined);
   await driver.create({ capabilities: {} });
   driver.setBudget(budget);
   (platform as any).driver = driver;
@@ -812,7 +812,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       assert.equal(scrolls, 1);
       assert.equal(confirmationLookups, (confirmationProfiles[mode]?.length ?? 0) + 1);
     } else if (mode.startsWith('add-')) {
-      await assert.rejects(() => platform.installFromBrowser(), mode === 'add-hung' ? /APPIUM_TIMEOUT/u : /confirmation control was not ready/u);
+      await assert.rejects(() => platform.installFromBrowser(), /APPIUM_TIMEOUT|confirmation control was not ready/u);
       assert.deepEqual(clicks, ['share', 'target-1']);
       if (mode === 'add-budget') assert.equal(confirmationLookups, 0, 'do not dispatch a partial confirmation lookup');
       if (mode === 'add-hung') {
@@ -828,7 +828,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
     const commands = driver.snapshot().commands;
     const lookups = commands.filter((_entry, index) => requests[requests.length - commands.length + index]?.body.value === 'Add');
     assert.ok(lookups.every((entry) => entry.timeoutMs === 8_000), 'confirmation probes must receive a complete native transaction, never optional-loop leftovers');
-    assert.equal(driver.snapshot().unusable, mode === 'add-hung');
+    assert.equal(driver.snapshot().unusable, ['add-hung', 'add-budget', 'add-disabled', 'add-hidden', 'add-not-hittable'].includes(mode));
   });
 }
 
@@ -845,6 +845,8 @@ async function confirmationReplay(name: string, options: {
   replaceReadyIdentity?: 'once' | 'always';
   replaceFirstIdentity?: boolean;
   oldIdentityPolicy?: boolean;
+  oldFinalAddPolicy?: boolean;
+  finalActionDuration?: number;
   foreground?: string;
   fault?: ConfirmationFault;
   faultAt?: ConfirmationBoundary;
@@ -874,11 +876,14 @@ async function confirmationReplay(name: string, options: {
   const states = options.states || ['ready'];
   const state = () => states[Math.min(lookups - 1, states.length - 1)];
   const stale = () => Response.json({ value: (fixture || recordedConfirmation[0]).response.value }, { status: 404 });
+  const pendingAdvances: Array<() => void> = [];
   const advance = (boundary: string) => {
-    now += options.after?.(boundary, lookups) || 0;
-    const remaining = options.remainingAt?.(boundary, lookups, identityReads);
-    if (remaining !== undefined) now = confirmationStart + 75_000 - remaining;
-    observations.push({ boundary, lookup: lookups, now });
+    pendingAdvances.push(() => {
+      now += options.after?.(boundary, lookups) || 0;
+      const remaining = options.remainingAt?.(boundary, lookups, identityReads);
+      if (remaining !== undefined) now = confirmationStart + 75_000 - remaining;
+      observations.push({ boundary, lookup: lookups, now });
+    });
   };
   const { platform, driver, requests, budget, outputDir } = await adapter(`confirmation-${name}`, async ({ path, body, signal }) => {
     const responseBody = (kind: 'hung' | 'interrupted' | 'late') => new Response(new ReadableStream({
@@ -996,6 +1001,7 @@ async function confirmationReplay(name: string, options: {
         confirming = true;
       }
       if (id.startsWith('add-')) {
+        now += options.finalActionDuration || 0;
         advance('click');
         if (options.faultAt === 'click') return fault();
       }
@@ -1003,15 +1009,21 @@ async function confirmationReplay(name: string, options: {
     }
     throw new Error(`unexpected confirmation request ${path} ${JSON.stringify(body)}`);
   }, fixture || options.latency ? undefined : () => now);
-  if (options.oldIdentityPolicy) {
-    const original = driver.command.bind(driver);
-    driver.command = (path, method, body, timeoutMs) => original(path, method, body, path === '/elements' && confirming ? 8_000 : timeoutMs);
-  }
+  const originalCommand = driver.command.bind(driver);
+  driver.command = async (path, method, body, timeoutMs, policy) => {
+    try {
+      const cap = options.oldIdentityPolicy && path === '/elements' && confirming ? 8_000
+        : options.oldFinalAddPolicy && /\/element\/add-[^/]+\/click$/u.test(path) ? 5_000 : timeoutMs;
+      return await originalCommand(path, method, body, cap, policy) as any;
+    } finally {
+      for (const advance of pendingAdvances.splice(0)) advance();
+    }
+  };
   if (options.initialConfirmationRemaining !== undefined || options.afterConfirmationValidation !== undefined) {
     const original = (platform as any).waitForInstallConfirmation.bind(platform);
-    (platform as any).waitForInstallConfirmation = async (phase: PhaseBudget) => {
+    (platform as any).waitForInstallConfirmation = async (phase: PhaseBudget, policy: unknown) => {
       if (options.initialConfirmationRemaining !== undefined) now = confirmationStart + 75_000 - options.initialConfirmationRemaining;
-      const result = await original(phase);
+      const result = await original(phase, policy);
       now += options.afterConfirmationValidation || 0;
       return result;
     };
@@ -1044,6 +1056,142 @@ async function confirmationReplay(name: string, options: {
   }
   return { platform, driver, requests, error, lookups, attributes, clicks, observations, now };
 }
+
+test('confirmation SM57 final Add12000 is isolated from all other caps', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('SM57-caps');
+  assert.equal(a.error, undefined);
+  const history = a.driver.snapshot().commands;
+  const commands = history.slice(history.findIndex(command => command.path.endsWith('/element/target-1/click')));
+  assert.equal(commands.find(command => command.path.endsWith('/element/add-1/click'))?.timeoutMs, 12_000);
+  assert.equal(commands.find(command => command.path.endsWith('/element/target-1/click'))?.timeoutMs, 5_000);
+  assert.ok(commands.filter(command => command.path.endsWith('/elements')).every(command => command.timeoutMs === 12_000));
+  assert.equal(commands.find(command => command.path.endsWith('/element') && command.timeoutMs === 8_000)?.timeoutMs, 8_000);
+  assert.ok(commands.filter(command => command.path.includes('/add-1/attribute/')).every(command => command.timeoutMs === 5_000));
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+  assert.equal(a.requests.filter(request => request.body.script === 'mobile: queryAppState').length, 1);
+  assert.equal(a.platform.evidenceSnapshot().launchReceipt, undefined);
+});
+
+test('confirmation SM57 final Add full allocation or no SEND at every parent boundary', async () => {
+  for (const limiting of ['root', 'operation', 'confirmation'] as const) {
+    for (const remaining of [12_000, 11_999]) {
+      let now = 0;
+      let sends = 0;
+      const root = new PhaseBudget('root', { timeoutMs: limiting === 'root' ? remaining : 120_000, now: () => now });
+      const operation = root.phaseView('operation', limiting === 'operation' ? remaining : 80_000);
+      const confirmation = operation.phaseView('confirmation', limiting === 'confirmation' ? remaining : 75_000);
+      const driver = new AppiumClient('http://policy.invalid', 30_000, async (input, init) => {
+        if (String(input).endsWith('/session')) return Response.json({ value: {}, sessionId: 'policy' });
+        sends++;
+        assert.equal(init?.body, undefined);
+        now += 11_999;
+        return value(null);
+      }, undefined, { now: () => now, timer: () => 0 as unknown as ReturnType<typeof setTimeout>, clear: () => undefined });
+      await driver.create({ capabilities: {} });
+      driver.setBudget(root);
+      const policy = { ...driver.nativeRequestPolicy(confirmation), finalAction: true };
+      if (remaining === 12_000) await driver.click('typed-add', 12_000, policy);
+      else await assert.rejects(() => driver.click('typed-add', 12_000, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
+      assert.equal(sends, remaining === 12_000 ? 1 : 0);
+      assert.equal(driver.snapshot().lastCommand!.timing!.sent, remaining === 12_000);
+    }
+  }
+});
+
+test('confirmation SM57 final identity to dispatch gap refuses without SEND', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('SM57-gap', {
+    remainingAt: (boundary, _lookup, identityRead) => boundary === 'identity' && identityRead === 2 ? 12_000 : undefined,
+    afterConfirmationValidation: 1,
+  });
+  assert.match(String(a.error), /insufficient time to complete confirmation click/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+  for (const changed of ['context', 'generation']) {
+    let sends = 0;
+    const driver = new AppiumClient('http://policy.invalid', 30_000, async () => { sends++; return Response.json({ value: null, sessionId: 'same-id' }); });
+    await driver.create({ capabilities: {} });
+    const policy = { ...driver.nativeRequestPolicy(new PhaseBudget('confirmation', { timeoutMs: 75_000 })), finalAction: true };
+    if (changed === 'context') await driver.switchContext('WEBVIEW-other');
+    else { await driver.close(); await driver.create({ capabilities: {} }); }
+    const before = sends;
+    await assert.rejects(() => driver.click('typed-add', 12_000, policy), /original.*(?:context|owner)/u);
+    assert.equal(sends, before);
+  }
+});
+
+test('confirmation SM57 fresh triplet and final identity survive pre-SEND replacement only', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('SM57-replacement', { replaceReadyIdentity: 'once', after: () => 500 });
+  assert.equal(a.error, undefined);
+  assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable', 'add-2:enabled', 'add-2:visible', 'add-2:hittable']);
+  assert.deepEqual(a.clicks, ['share', 'target-1', 'add-2']);
+  for (const options of [
+    { foreground: 'com.example.wrong' }, { fault: 'malformed-value' as const, faultAt: 'lookup' as const },
+    { dialog: 'hidden' as const, persistent: true }, { dialog: 'ambiguous' as const, persistent: true },
+  ]) {
+    const refused = await confirmationReplay('SM57-identity-refused', options);
+    assert.ok(refused.error);
+    assert.equal(refused.clicks.length, 2);
+  }
+});
+
+test('confirmation SM57 sent stale Add cannot retry or recover installation', async () => {
+  requireXmlLint();
+  const old = await confirmationReplay('SM57-original5000-late200', { oldFinalAddPolicy: true, finalActionDuration: 5_000 });
+  assert.match(String(old.error), /APPIUM_TIMEOUT/u);
+  const oldAdd = old.driver.snapshot().commands.filter(command => /\/element\/add-[^/]+\/click$/u.test(command.path));
+  assert.equal(oldAdd.length, 1);
+  assert.equal(oldAdd[0].timeoutMs, 5_000);
+  assert.equal(oldAdd[0].timing!.sent, true);
+  assert.equal(oldAdd[0].timing!.outcome, 'timeout');
+  assert.equal(oldAdd[0].timing!.completed, false);
+  const count = old.requests.length;
+  await assert.rejects(() => old.platform.installFromBrowser(), error => error === old.error);
+  await assert.rejects(() => old.platform.launchInstalledApp(), error => error === old.error);
+  await old.platform.captureSanitizedEvidence('failure');
+  assert.equal(old.requests.length, count);
+  assert.equal(old.platform.evidenceSnapshot().launchReceipt, undefined);
+  assert.equal(old.requests.some(request => /activateApp|pressButton/u.test(request.body.script || '')), false);
+  for (const fault of ['stale', 'transport', 'malformed-value', 'malformed'] as const) {
+    const a = await confirmationReplay(`SM57-sent-${fault}`, { fault, faultAt: 'click' });
+    assert.ok(a.error);
+    assert.equal(a.driver.snapshot().unusable, true);
+    assert.equal(a.lookups, 1);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
+    const count = a.requests.length;
+    const first = a.driver.snapshot().firstFatal;
+    for (const action of [() => a.platform.installFromBrowser(), () => a.platform.launchInstalledApp(), () => a.platform.attachToInstalledView()]) {
+      await assert.rejects(action, error => error === a.error);
+    }
+    await assert.rejects(() => a.driver.settings(), /APPIUM_SESSION_UNUSABLE/u);
+    await assert.rejects(() => a.driver.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/u);
+    await a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.requests.length, count);
+    assert.equal(a.driver.snapshot().firstFatal, first);
+    assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+    assert.equal(a.platform.evidenceSnapshot().launchReceipt, undefined);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+  }
+});
+
+test('confirmation SM57 independent absolute phases and restoration tail never renew', async () => {
+  requireXmlLint();
+  for (const remaining of [80_500, 80_499]) {
+    const a = await confirmationReplay(`SM57-entry-${remaining}`, { parentRemaining: remaining });
+    if (remaining === 80_500) assert.equal(a.error, undefined);
+    else assert.match(String(a.error), /insufficient whole transaction allowance/u);
+    const settings = a.requests.filter(request => request.path.endsWith('/appium/settings') && 'waitForIdleTimeout' in (request.body.settings || {}));
+    assert.equal(settings.length, remaining === 80_500 ? 2 : 0);
+    assert.equal(a.lookups, remaining === 80_500 ? 1 : 0);
+  }
+  const a = await confirmationReplay('SM57-no-renewal', { parentRemaining: 81_000, replaceReadyIdentity: 'always', after: boundary => boundary === 'identity' ? 1_000 : 0 });
+  assert.match(String(a.error), /confirmation control was not ready/u);
+  assert.ok(a.lookups > 1);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.ok(a.now < 120_000 - 5_500);
+});
 
 test('confirmation cycle13 old 8s policy rejects recorded 8650ms aggregate plus synthetic 50ms overhead', async () => {
   const skip = requireXmlLint();
@@ -1130,14 +1278,14 @@ test('confirmation child starts after activity click and keeps its full completi
   const skip = requireXmlLint();
   if (skip) return skip;
   const replay = await confirmationReplay('activity-click-duration', {
-    states: [...Array.from({ length: 15 }, () => 'disabled' as const), 'ready'],
+    states: [...Array.from({ length: 12 }, () => 'disabled' as const), 'ready'],
     activityDuration: 4_000,
     after: (boundary) => boundary === 'lookup' ? 3_000 : 0,
   });
   assert.equal(replay.error, undefined);
-  assert.equal(replay.lookups, 16);
-  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-16']);
-  assert.ok(replay.observations.some((entry) => entry.lookup === 16 && entry.boundary === 'enabled' && entry.now === 52_000));
+  assert.equal(replay.lookups, 13);
+  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-13']);
+  assert.ok(replay.observations.some((entry) => entry.lookup === 13 && entry.boundary === 'enabled' && entry.now === 43_000));
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
@@ -1222,12 +1370,12 @@ for (const suffix of ['enabled', 'visible', 'hittable', 'identity', 'click'] as 
       if (skip) return skip;
       const replay = await confirmationReplay(`completion-${suffix}-${exact ? 'exact' : 'minus-one'}`, {
         initialConfirmationRemaining: 40_000,
-        afterConfirmationValidation: suffix === 'click' && !exact ? 41_000 : undefined,
+        afterConfirmationValidation: suffix === 'click' && !exact ? 1 : undefined,
         remainingAt: (boundary, _lookup, identityRead) => {
-          if (boundary === 'enabled') return suffix === 'enabled' ? exact ? 27_000 : 26_999 : 27_000;
-          if (boundary === 'visible') return suffix === 'visible' ? exact ? 22_000 : 21_999 : 22_000;
-          if (boundary === 'hittable') return suffix === 'hittable' ? exact ? 17_000 : 16_999 : 17_000;
-          if (boundary === 'identity' && identityRead === 2) return suffix === 'identity' ? exact ? 5_000 : 4_999 : 5_000;
+          if (boundary === 'enabled') return suffix === 'enabled' ? exact ? 34_000 : 33_999 : 34_000;
+          if (boundary === 'visible') return suffix === 'visible' ? exact ? 29_000 : 28_999 : 29_000;
+          if (boundary === 'hittable') return suffix === 'hittable' ? exact ? 24_000 : 23_999 : 24_000;
+          if (boundary === 'identity' && identityRead === 2) return suffix === 'identity' ? exact ? 12_000 : 11_999 : 12_000;
           return undefined;
         },
       });
@@ -1252,7 +1400,8 @@ for (const suffix of ['enabled', 'visible', 'hittable', 'identity', 'click'] as 
       assert.ok(confirmation.every((entry) => !entry.error && !entry.timedOut));
       assert.ok(confirmation.every((entry) => entry.path.endsWith('/element') ? entry.timeoutMs === 8_000
         : entry.path.endsWith('/elements') ? entry.timeoutMs === 12_000
-        : entry.path.includes('/attribute/') || entry.path.endsWith('/click') || entry.path.endsWith('/execute/sync') ? entry.timeoutMs === 5_000
+        : entry.path.endsWith('/click') ? entry.timeoutMs === 12_000
+        : entry.path.includes('/attribute/') || entry.path.endsWith('/execute/sync') ? entry.timeoutMs === 5_000
         : true));
     });
   }
@@ -1287,7 +1436,7 @@ test('confirmation hypothetical same-dialog Add replacement reacquires a complet
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
-for (const remaining of [74_000, 76_000]) {
+for (const remaining of [81_000, 83_000]) {
   test(`confirmation hypothetical repeated same-dialog Add replacements do not renew the ${remaining}ms child deadline`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -1418,7 +1567,7 @@ test('confirmation final click requires its complete parent allowance after all 
   if (skip) return skip;
   let identityReads = 0;
   const replay = await confirmationReplay('click-admission', {
-    parentRemaining: 74_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 65_001 : 0,
+    parentRemaining: 81_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 63_501 : 0,
   });
   assert.match(String(replay.error), /insufficient time to complete confirmation click/u);
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
@@ -1440,7 +1589,7 @@ for (const boundary of ['lookup', 'identity', 'enabled', 'click'] as const) {
       assert.equal(first?.code, 'APPIUM_TIMEOUT');
       const count = replay.requests.length;
       await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
-      await assert.rejects(() => replay.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
+      await assert.rejects(() => replay.platform.installFromBrowser(), boundary === 'click' ? error => error === replay.error : /APPIUM_SESSION_UNUSABLE/u);
       assert.equal(replay.requests.length, count);
       assert.deepEqual(replay.driver.snapshot().firstFatal, first);
     });
@@ -2235,7 +2384,7 @@ async function hierarchyReplay(mode: string) {
   return { ...a, error, clicks, reads, sheetReads, scrolls, swipes, lookups };
 }
 
-for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'slow-search', 'slow-fallback', 'near-gesture', 'fallback-success']) {
+for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'slow-search', 'slow-fallback', 'fallback-success']) {
   test(`Plan13 hierarchy full install ${mode} completes with full source allowances and one final Add`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -2249,14 +2398,14 @@ for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publi
   });
 }
 
-for (const mode of ['parent-initial', 'publication-tail', 'search-tail', 'parent-gesture', 'child-gesture', 'fallback-tail', 'fallback-reserve', 'fallback-source-admission', 'post-source-admission', 'malformed-source']) {
+for (const mode of ['parent-initial', 'publication-tail', 'search-tail', 'parent-gesture', 'child-gesture', 'fallback-tail', 'fallback-reserve', 'fallback-source-admission', 'post-source-admission', 'malformed-source', 'near-gesture']) {
   test(`Plan13 hierarchy full install ${mode} never dispatches a short source or an unverifiable gesture`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
     const a = await hierarchyReplay(mode);
     assert.ok(a.error);
     assert.ok(a.clicks.length <= 1);
-    assert.equal(a.scrolls, /fallback|post-source|malformed/u.test(mode) ? 1 : 0);
+    assert.equal(a.scrolls, /fallback|post-source|malformed|near-gesture/u.test(mode) ? 1 : 0);
     assert.equal(a.swipes, 0);
     if (mode === 'parent-initial') assert.equal(a.reads, 0);
     if (mode === 'publication-tail' || mode === 'search-tail') assert.equal(a.sheetReads, 1);
