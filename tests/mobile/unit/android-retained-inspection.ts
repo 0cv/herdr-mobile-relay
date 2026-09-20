@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import {mkdtemp, writeFile, rm} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {waitForPhoneCompletion, assertCandidateFailureObserved} from '../run';
 import {QualificationFailureLatch} from '../support/oracle';
 import type {BundleSet} from '../support/artifacts';
@@ -185,7 +187,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
         assert.ok(results.every(r => r.status === 'rejected'));
         first = (results[0] as PromiseRejectedResult).reason;
       } else {
-        const fixture = await mkdtemp('/tmp/herdr-adapter-qualification.');
+        const fixture = await mkdtemp(join(tmpdir(), 'herdr-adapter-qualification.'));
         const previousMarker = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
         process.env.MOBILE_DEVICE_OWNERSHIP_FILE = `${fixture}/owned`;
         await writeFile(process.env.MOBILE_DEVICE_OWNERSHIP_FILE, 'android:emulator-5554');

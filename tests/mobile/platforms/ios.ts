@@ -11,6 +11,7 @@ import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../sup
 import { PhaseBudget } from '../support/budget';
 import { initializeIOSConfirmationSettings, withIOSConfirmationSettings } from '../support/confirmation-settings';
 import { CommandError, command, commandOutput } from '../support/process';
+import { collectIOSLaunchReceipt, IOSLaunchObservation, iosReceiptWriteStatus, observeIOSReceiptWrite, type IOSLaunchReceipt } from '../support/ios-launch-receipt';
 import { requireOwnedDevice } from '../support/device';
 import {
   accessibility,
@@ -440,6 +441,18 @@ export class IOSPlatform implements MobilePlatform {
   private safariFirstFailure?: SafariNavigationFailureEvidence;
   private attachmentFirstRefusal?: Readonly<WebDriverRequestTiming>;
   private navigationCommand = command;
+  private launchObservation = new IOSLaunchObservation();
+  private launchCollector = collectIOSLaunchReceipt;
+  private launchWrite = writeFile;
+  private launchMkdir = mkdir;
+  private diagnosticCommand = commandOutput;
+  private failureCapture?: Promise<void>;
+  private launchReceipt?: IOSLaunchReceipt;
+  private nativeDiagnosticsBlocked = false;
+  private omitLaunchLogs = false;
+  private readonly launchPersistence = {
+    directory: iosReceiptWriteStatus('directory'), events: iosReceiptWriteStatus('events'), receipt: iosReceiptWriteStatus('receipt'),
+  };
 
   constructor(private readonly options: PlatformOptions) {
     this.udid = options.deviceId || process.env.IOS_SIMULATOR_UDID || '';
@@ -955,6 +968,16 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async launchInstalledApp(): Promise<void> {
+    this.launchObservation.begin();
+    try {
+      await this.launchInstalledAppObserved();
+    } catch (error) {
+      this.launchObservation.freeze(error, this.driver.snapshot());
+      throw error;
+    }
+  }
+
+  private async launchInstalledAppObserved(): Promise<void> {
     this.assertOwnershipClear();
     await requireOwnedDevice('ios', this.udid);
     this.selectedInstalledContext = '';
@@ -994,17 +1017,24 @@ export class IOSPlatform implements MobilePlatform {
         await this.setNativeObservationTarget(IOS_INSTALLED_BUNDLE_ID, phase);
         const clickTimeout = phase.remainingMs;
         if (clickTimeout <= 1) break;
+        this.launchObservation.arm(this.driver.snapshot(), observation.page?.current ?? 0, clickTimeout);
         await this.driver.click(observation.icon, clickTimeout);
+        this.launchObservation.acknowledge(this.driver.snapshot(), observation.icon);
+        this.launchObservation.enter('provider');
         const providerTimeout = Math.min(30_000, phase.remainingMs);
         if (providerTimeout <= 1) break;
         if (await this.waitForInstalledProvider(providerTimeout)) {
           const foregroundTimeout = phase.remainingMs;
           if (foregroundTimeout <= 1) break;
+          this.launchObservation.enter('foreground');
           await this.requireInstalledProviderForeground(foregroundTimeout);
+          this.launchObservation.enter('attachment');
           await delay(Math.min(750, phase.remainingMs), phase);
           await this.attachToInstalledView(Math.min(30_000, phase.remainingMs));
+          this.launchObservation.enter('complete');
           return;
         }
+        this.launchObservation.enter('other');
         if (this.installedBindingState === 'bound') this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider did not return after the planned launch');
         await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, phase);
         const homeTimeout = phase.remainingMs;
@@ -1393,13 +1423,47 @@ export class IOSPlatform implements MobilePlatform {
     return this.driver.execute<string>("return localStorage.getItem('herdr_home_workspace_layout') || ''");
   }
 
-  async captureSanitizedEvidence(name: string): Promise<void> {
-    await mkdir(this.outputDir, { recursive: true });
+  captureSanitizedEvidence(name: string): Promise<void> {
+    if (this.failureCapture) return this.failureCapture;
+    if (name !== 'failure') return this.captureEvidence(name);
+    this.omitLaunchLogs = this.launchObservation.failure !== undefined;
+    this.failureCapture = Promise.resolve().then(() => this.captureEvidence(name));
+    return this.failureCapture;
+  }
+
+  private async captureLaunchReceipt(): Promise<boolean> {
+    const failure = this.launchObservation.failure;
+    if (!failure) return true;
+    this.omitLaunchLogs = true;
     try {
-      const screenshot = Buffer.from(await this.driver.screenshot(), 'base64');
-      if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
-    } catch (error) {
-      this.diagnostics.record({ phase: 'evidence', operation: 'screenshot', detail: error instanceof Error ? error.message : String(error) });
+      this.launchReceipt = await this.launchCollector(this.udid, failure, this.origin, {
+        clock: this.launchObservation.clock, queryEligible: this.launchObservation.queryEligible,
+      });
+    } catch {
+      this.nativeDiagnosticsBlocked = true;
+      this.diagnostics.record({ phase: 'evidence', operation: 'ios-launch-receipt', detail: 'collector-unavailable-withheld' });
+      return false;
+    }
+    this.nativeDiagnosticsBlocked ||= this.launchReceipt.blockNativeDiagnostics;
+    const clock = this.launchObservation.clock;
+    if (!await observeIOSReceiptWrite(this.launchPersistence.directory, clock, 0, () => this.launchMkdir(this.outputDir, { recursive: true }))) return false;
+    const { eventsText, receiptText } = this.launchReceipt;
+    if (!await observeIOSReceiptWrite(this.launchPersistence.events, clock, Buffer.byteLength(eventsText),
+      () => this.launchWrite(join(this.outputDir, 'ios-launch-owner-events.jsonl'), eventsText, { flag: 'wx', mode: 0o600 }))) return false;
+    return observeIOSReceiptWrite(this.launchPersistence.receipt, clock, Buffer.byteLength(receiptText),
+      () => this.launchWrite(join(this.outputDir, 'ios-launch-receipt.json'), receiptText, { flag: 'wx', mode: 0o600 }));
+  }
+
+  private async captureEvidence(name: string): Promise<void> {
+    if (name === 'failure' && !await this.captureLaunchReceipt()) return;
+    await mkdir(this.outputDir, { recursive: true });
+    if (!this.nativeDiagnosticsBlocked) {
+      try {
+        const screenshot = Buffer.from(await this.driver.screenshot(), 'base64');
+        if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
+      } catch (error) {
+        this.diagnostics.record({ phase: 'evidence', operation: 'screenshot', detail: error instanceof Error ? error.message : String(error) });
+      }
     }
     await writeSanitizedJson(join(this.outputDir, `${name}-appium.json`), this.evidenceSnapshot());
     await this.diagnostics.write(join(this.outputDir, `${name}-events.json`));
@@ -1410,12 +1474,18 @@ export class IOSPlatform implements MobilePlatform {
       ['wda', ['simctl', 'spawn', this.udid, 'launchctl', 'print', 'system']],
     ];
     for (const [suffix, args] of captures) {
-      const output = await commandOutput('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
+      if (this.nativeDiagnosticsBlocked) break;
+      if (this.omitLaunchLogs && (suffix === 'simulator-log' || suffix === 'webkit-safari')) continue;
+      const output = await this.diagnosticCommand('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
       await writeBoundedText(join(this.outputDir, `${name}-ios-${suffix}.log`), output);
     }
   }
 
   evidenceSnapshot(): Record<string, unknown> {
+    const persistenceTerminal = Object.values(this.launchPersistence).find(status => status.state === 'rejected')
+      ?? (this.launchPersistence.receipt.state === 'fulfilled' ? this.launchPersistence.receipt : undefined);
+    const captureElapsedMs = persistenceTerminal?.settled && this.launchReceipt
+      ? persistenceTerminal.settled.monoMs - this.launchReceipt.receipt.collection.started.monoMs : null;
     return {
       platform: this.name,
       device: this.udid,
@@ -1435,6 +1505,10 @@ export class IOSPlatform implements MobilePlatform {
       nativePid: this.lastNativePid,
       simulatorReadyAt: this.simulatorReadyAt,
       attachmentFirstRefusal: this.attachmentFirstRefusal,
+      launchReceipt: this.launchReceipt?.receipt,
+      launchPersistence: structuredClone(this.launchPersistence),
+      launchCollectionAndPersistenceElapsedMs: captureElapsedMs,
+      nativeDiagnosticsBlocked: this.nativeDiagnosticsBlocked,
       safariNavigation: {
         lastDiscovery: this.safariLastDiscovery,
         lastObservation: this.safariLastObservation,

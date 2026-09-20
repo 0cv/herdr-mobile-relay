@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { readFile, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -7,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as wait } from 'node:timers/promises';
 import { IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
-import { AppiumClient, isRetryableElementLookupError } from '../support/webdriver';
+import { AppiumClient, isRetryableElementLookupError, type WebDriverSnapshot } from '../support/webdriver';
+import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
 import { PhaseBudget } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
 import { CommandError, command } from '../support/process';
@@ -2276,6 +2278,897 @@ for (const mode of ['hung-source', 'late-source', 'late-body', 'interrupted-body
     assert.equal(a.driver.snapshot().firstFatal?.code, /interrupted-(?:reset|abort)/u.test(mode) ? 'APPIUM_INTERRUPTED' : 'APPIUM_TIMEOUT');
   });
 }
+
+class ReceiptClock implements IOSReceiptClock {
+  elapsed = 0;
+  readonly epoch = Date.UTC(2026, 8, 20, 23, 59, 59, 250);
+  private next = 0;
+  readonly timers = new Map<number, { at: number; callback: () => void }>();
+  wall = () => this.epoch + this.elapsed;
+  mono = () => this.elapsed;
+  timer = (callback: () => void, ms: number) => {
+    const id = ++this.next;
+    this.timers.set(id, { at: this.elapsed + ms, callback });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  };
+  clear = (id: ReturnType<typeof setTimeout>) => { this.timers.delete(id as unknown as number); };
+  advance(ms: number): void {
+    const end = this.elapsed + ms;
+    for (;;) {
+      const next = [...this.timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      this.elapsed = Math.max(this.elapsed, next[1].at);
+      this.timers.delete(next[0]);
+      next[1].callback();
+    }
+    this.elapsed = end;
+  }
+}
+
+class ReceiptPipe extends EventEmitter {
+  destroyed = false;
+  destroy(): this { this.destroyed = true; return this; }
+}
+class ReceiptChild extends EventEmitter {
+  pid: number | undefined = 42;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  readonly stdout = new ReceiptPipe();
+  readonly stderr = new ReceiptPipe();
+  readonly signals: string[] = [];
+  acceptsSignal = true;
+  kill(signal: string): boolean { this.signals.push(signal); return this.acceptsSignal; }
+  exit(code: number | null, signal: string | null = null): void {
+    this.exitCode = code; this.signalCode = signal as NodeJS.Signals | null; this.emit('exit', code, signal);
+  }
+  close(code: number | null = 0, signal: string | null = null): void {
+    this.stdout.emit('end'); this.stderr.emit('end');
+    this.stdout.emit('close'); this.stderr.emit('close');
+    this.exit(code, signal); this.emit('close', code, signal);
+  }
+}
+const receiptUdid = '12345678-1234-1234-1234-123456789ABC';
+const receiptClip = 'ADD6F23D30D34C62A8E065D19753E4AF';
+const receiptSession = '12345678-ABCD-1234-ABCD-123456789ABC';
+const receiptLine = (message: string, subsystem = 'com.apple.mobilesafari', category = 'WebApp', producer = 'SafariViewService') =>
+  `2026-09-21 00:00:01.000 Df ${producer}[42:abcd] [${subsystem}:${category}] ${message}\n`;
+const receiptLoad = (clip = receiptClip) => receiptLine(`Loading UIWebClip with identifier '${clip}'; version: 1`);
+function receiptFailure(clock: ReceiptClock): IOSLaunchFailure {
+  return { eligible: true, reason: 'single-acknowledged-tap', stage: 'provider', invocation: 1, taps: 1,
+    bundle: 'com.apple.webapp', readiness: 'ready', page: 1, remainingMs: 120_000,
+    tap: { wallMs: clock.wall(), monoMs: clock.mono() }, settled: { wallMs: clock.wall(), monoMs: clock.mono() },
+    before: null, click: null, fatal: { wallMs: clock.wall() + 30_000, monoMs: clock.mono() + 30_000 } };
+}
+function receiptRun(clock = new ReceiptClock(), failure = receiptFailure(clock), signal?: AbortSignal) {
+  const child = new ReceiptChild();
+  const commands: Array<{ binary: string; argv: string[] }> = [];
+  const result = collectIOSLaunchReceipt(receiptUdid, failure, origin, { clock, signal, spawn: (binary, argv) => {
+    commands.push({ binary, argv }); return child as unknown as ChildProcess;
+  } });
+  child.emit('spawn');
+  return { clock, child, commands, result };
+}
+async function receiptSettled<T>(result: Promise<T>, clock: ReceiptClock): Promise<T> {
+  let settled = false;
+  void result.then(() => { settled = true; }, () => { settled = true; });
+  for (let turn = 0; turn < 100 && !settled; turn++) await Promise.resolve();
+  if (!settled) clock.advance(20_000);
+  for (let turn = 0; turn < 100 && !settled; turn++) await Promise.resolve();
+  assert.equal(settled, true, 'collector must settle within the bounded fake clock control');
+  assert.equal(clock.timers.size, 0);
+  return result;
+}
+function receiptSnapshot(attemptId = 1, path = '/session/mock/element/icon/click'): WebDriverSnapshot {
+  return { sessionId: '[active]', selectedContext: 'NATIVE_APP', selectedWindow: '', unusable: false, commands: [], lookups: [],
+    lastCommand: { command: 'POST', method: 'POST', path, durationMs: 1, timeoutMs: 1_000, timedOut: false, selectedContext: 'NATIVE_APP', selectedWindow: '',
+      timing: { attemptId, dispatchedOrdinal: attemptId, sessionGeneration: 1, operation: 'other', scope: 'unscoped', entryMs: attemptId,
+        dispatchMs: attemptId, settlementMs: attemptId + 1, phaseRemainingAtEntryMs: 1_000, phaseRemainingAtDispatchMs: 1_000,
+        phaseRemainingAtSettlementMs: 999, admitted: true, sent: true, completed: true, outcome: 'success' } } };
+}
+
+test('SM55 receipt query literal UTC window and refusals', async () => {
+  const clock = new ReceiptClock();
+  const failure = receiptFailure(clock);
+  const expected = ['simctl', 'spawn', receiptUdid, 'log', 'show', '--style', 'compact', '--start', '2026-09-20 23:59:54+0000', '--end', '2026-09-21 00:00:30+0000', '--predicate', IOS_LAUNCH_PREDICATE];
+  assert.equal(IOS_LAUNCH_PREDICATE, '((process == "SpringBoard" OR process == "Web" OR process == "runningboardd" OR process == "frontboardd" OR process == "launchd" OR process == "lsd") AND (eventMessage CONTAINS[c] "com.apple.webapp" OR eventMessage CONTAINS[c] "WebClip" OR eventMessage CONTAINS[c] "com.apple.WebKit.PushBundle." OR eventMessage CONTAINS[c] "com.apple.SafariViewService")) OR (process == "Web" AND (subsystem == "com.apple.UIKit" OR subsystem == "com.apple.runningboard" OR subsystem == "com.apple.FrontBoard")) OR (process == "SafariViewService" AND ((subsystem == "com.apple.UIKit" AND (category == "ViewServiceSessionManager" OR category == "ViewServices" OR category == "AppLifecycle")) OR (subsystem == "com.apple.mobilesafari" AND (category == "WebApp" OR category == "WebPush")) OR (subsystem == "com.apple.runningboard" AND category == "monitor")))');
+  assert.deepEqual(iosLaunchQuery(receiptUdid, failure)?.argv, expected);
+  const valid = receiptRun(clock, failure);
+  valid.child.close();
+  assert.deepEqual(valid.commands, [{ binary: 'xcrun', argv: expected }]);
+  assert.deepEqual((await valid.result).receipt.query?.argv, expected);
+  assert.equal(expected.filter(arg => arg === IOS_LAUNCH_PREDICATE).length, 1);
+  assert.equal(IOS_LAUNCH_PREDICATE.includes('TRUEPREDICATE'), false);
+  for (const fatal of [
+    { wallMs: NaN, monoMs: 1 }, { wallMs: failure.tap!.wallMs - 1, monoMs: 1 },
+    { wallMs: failure.tap!.wallMs + 1_001, monoMs: 0 },
+    { wallMs: failure.tap!.wallMs + 121_001, monoMs: 121_001 },
+  ]) assert.equal(iosLaunchQuery(receiptUdid, { ...failure, fatal }), null);
+  for (const udid of ['', 'protocol-only', `${receiptUdid}; log show`, `${receiptUdid}\n`]) assert.equal(iosLaunchQuery(udid, failure), null);
+  const exact = { ...failure, tap: { wallMs: Date.UTC(2026, 0, 1), monoMs: 0 }, fatal: { wallMs: Date.UTC(2026, 0, 1) + 120_000, monoMs: 120_000 } };
+  assert.equal(iosLaunchQuery(receiptUdid, exact)?.endMs, exact.fatal.wallMs);
+  const a = receiptRun(clock, { ...failure, eligible: false });
+  assert.equal((await a.result).receipt.outcome, 'not-eligible');
+  assert.equal(a.commands.length, 0);
+  assert.equal(clock.timers.size, 0);
+});
+
+test('SM55 receipt eligibility command boundaries and ring eviction', async () => {
+  for (const mode of ['eligible', 'no-tap', 'unsent', 'unacknowledged', 'multiple', 'path', 'method', 'generation', 'earlier', 'later', 'unresolved', 'ring-eviction']) {
+    const clock = new ReceiptClock();
+    const observation = new IOSLaunchObservation(clock);
+    observation.begin();
+    if (mode === 'earlier') observation.begin();
+    if (mode !== 'no-tap') observation.arm(receiptSnapshot(), 1, 120_000);
+    const after = receiptSnapshot(2);
+    if (mode === 'unsent') after.lastCommand!.timing = { ...after.lastCommand!.timing!, sent: false, admitted: false, dispatchedOrdinal: undefined };
+    if (mode === 'unacknowledged') after.lastCommand!.timing = { ...after.lastCommand!.timing!, completed: false, outcome: 'timeout' };
+    if (mode === 'path') after.lastCommand!.path = '/session/mock/element/other/click';
+    if (mode === 'method') after.lastCommand!.method = 'GET';
+    if (mode === 'generation') after.lastCommand!.timing = { ...after.lastCommand!.timing!, sessionGeneration: 2 };
+    observation.acknowledge(after, 'icon');
+    if (mode === 'multiple') observation.arm(after, 2, 60_000);
+    observation.enter('provider');
+    if (mode === 'ring-eviction') {
+      for (let index = 0; index < 1_100; index++) after.commands.push(receiptSnapshot(index + 3).lastCommand!);
+      after.commands = after.commands.slice(-50);
+      after.lastCommand = after.commands.at(-1);
+    }
+    if (mode === 'unresolved') after.lastCommand!.timing = { ...after.lastCommand!.timing!, completed: false };
+    if (mode === 'later') observation.enter('attachment');
+    const fatal = new Error('synthetic-first-fatal');
+    observation.freeze(fatal, after);
+    const frozen = observation.failure;
+    observation.freeze(new Error('synthetic-later-fatal'), after);
+    assert.equal(observation.failure, frozen);
+    assert.equal(frozen?.eligible === true, mode === 'eligible' || mode === 'ring-eviction');
+    if (mode === 'earlier' || mode === 'later') assert.equal(frozen, undefined);
+    else assert.equal((observation as any).originalFatal, fatal);
+    if (frozen) assert.ok(Buffer.byteLength(JSON.stringify(frozen)) < IOS_LAUNCH_LIMITS.armBytes);
+  }
+});
+
+test('SM55 receipt process exit signal errno and callback permutations', async () => {
+  for (const mode of ['zero', 'nonzero-empty', 'signal', 'spawn-error', 'stream-error', 'error-exit-close', 'exit-before-kill', 'rejected-signal', 'missing-pid', 'lingering-pipe']) {
+    const a = receiptRun();
+    if (mode === 'zero') a.child.close();
+    if (mode === 'nonzero-empty') a.child.close(64);
+    if (mode === 'signal') a.child.close(null, 'SIGKILL');
+    if (mode === 'spawn-error' || mode === 'error-exit-close') {
+      a.child.emit('error', Object.assign(new Error('synthetic-private-message'), { code: 'ENOENT', path: 'synthetic-private-path', cause: new Error('secret') }));
+      if (mode === 'error-exit-close') a.child.close(64);
+      else a.clock.advance(2_000);
+    }
+    if (mode === 'stream-error') { a.child.stdout.emit('error', { code: 'EIO', message: 'secret' }); a.child.close(); }
+    if (mode === 'exit-before-kill') { a.clock.advance(17_000); a.child.exit(0); a.clock.advance(2_000); }
+    if (mode === 'rejected-signal') { a.child.acceptsSignal = false; a.clock.advance(19_000); }
+    if (mode === 'missing-pid') { a.child.pid = undefined; a.child.emit('spawn'); a.clock.advance(2_000); }
+    if (mode === 'lingering-pipe') { a.child.exit(0); a.clock.advance(2_000); }
+    const result = await receiptSettled(a.result, a.clock);
+    assert.equal(a.commands.length, 1);
+    assert.equal(a.clock.timers.size, 0);
+    assert.equal(a.child.listenerCount('exit'), 0);
+    assert.equal(a.child.listenerCount('close'), 0);
+    assert.equal(a.child.stdout.listenerCount('data'), 0);
+    assert.equal(a.child.listenerCount('error'), 1, 'only a stateless late error consumer remains');
+    assert.equal(result.receipt.process.simulatorWorker, 'unknown');
+    assert.equal(result.receipt.process.hostDescendants, 'unknown');
+    assert.equal(result.receipt.stderr.received, 0);
+    assert.equal(result.receiptText.includes('secret') || result.receiptText.includes('synthetic-private'), false);
+    if (mode === 'nonzero-empty') assert.equal(result.receipt.process.exitCode, 64);
+    if (mode === 'signal') { assert.equal(result.receipt.process.exitCode, null); assert.equal(result.receipt.flags.deadline, false); assert.equal(result.receipt.process.signal, 'SIGKILL'); assert.equal(result.receipt.process.signalState, 'recognized'); }
+    if (mode === 'spawn-error') { assert.equal(result.receipt.process.exitCode, null); assert.equal(result.receipt.process.error, 'ENOENT'); }
+    if (mode === 'exit-before-kill' || mode === 'rejected-signal') assert.deepEqual(a.child.signals, ['SIGTERM']);
+    if (mode === 'lingering-pipe' || mode === 'missing-pid' || mode === 'spawn-error') assert.deepEqual(a.child.signals, []);
+    if (['lingering-pipe', 'exit-before-kill', 'rejected-signal'].includes(mode)) assert.equal(result.blockNativeDiagnostics, true);
+    const frozen = result.receiptText;
+    a.child.emit('error', new Error('late-secret'));
+    a.child.close();
+    a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    a.clock.advance(30_000);
+    assert.equal(result.receiptText, frozen);
+  }
+  const clock = new ReceiptClock();
+  const failed = await collectIOSLaunchReceipt(receiptUdid, receiptFailure(clock), origin, { clock, spawn: () => { throw { code: 'EACCES', message: 'secret' }; } });
+  assert.equal(failed.receipt.process.spawned, false);
+  assert.equal(failed.receipt.process.exitCode, null);
+  assert.equal(failed.receipt.process.error, 'EACCES');
+  assert.equal(iosReceiptError(new Proxy({}, { getOwnPropertyDescriptor() { throw new Error('secret'); } })), 'unknown-withheld');
+});
+
+test('SM55 receipt spawn failure close-only and conflicting status stay distinct', async () => {
+  for (const mode of ['before-spawn', 'close-only', 'conflicting-exit', 'bad-chunk', 'pipe-error', 'delayed-kill', 'SIGEMT', 'unknown-signal', 'close-unknown', 'duplicate-unknown']) {
+    const clock = new ReceiptClock();
+    const child = new ReceiptChild();
+    const resultPromise = collectIOSLaunchReceipt(receiptUdid, receiptFailure(clock), origin, { clock, spawn: () => child as unknown as ChildProcess });
+    if (mode === 'before-spawn') child.emit('error', { code: 'ENOENT', message: 'synthetic-secret' });
+    else child.emit('spawn');
+    if (mode === 'SIGEMT' || mode === 'unknown-signal') child.close(null, mode === 'SIGEMT' ? 'SIGEMT' : 'synthetic-private-signal');
+    else if (mode === 'close-unknown') { child.exit(0); child.emit('close', 0, 'synthetic-private-signal'); }
+    else if (mode === 'duplicate-unknown') { child.exit(0); child.exit(0, 'synthetic-private-signal'); child.emit('close', 0, null); }
+    else if (mode === 'close-only') child.emit('close', 64, null);
+    else if (mode === 'conflicting-exit') { child.exit(64); child.exit(0); child.emit('close', 64, null); }
+    else if (mode === 'bad-chunk') { child.stdout.emit('data', { message: 'synthetic-secret' }); child.close(); }
+    else if (mode === 'pipe-error') { child.stderr.emit('error', new Error('synthetic-secret')); child.close(); }
+    else if (mode === 'delayed-kill') {
+      clock.advance(17_000);
+      clock.elapsed = 19_500;
+      clock.advance(0);
+    } else clock.advance(2_000);
+    const result = await receiptSettled(resultPromise, clock);
+    assert.equal(result.receipt.outcome, 'incomplete');
+    if (['SIGEMT', 'unknown-signal', 'close-unknown', 'duplicate-unknown'].includes(mode)) {
+      assert.equal(result.receipt.process.unknownSignalObserved, true);
+      assert.equal(result.receipt.process.signal, null);
+      assert.equal(result.receipt.flags.deadline, false);
+      assert.equal(result.receipt.process.exitCode, mode === 'close-unknown' || mode === 'duplicate-unknown' ? 0 : null);
+      assert.equal(result.receipt.process.statusConflict, true);
+      assert.equal(result.receipt.process.signalState, mode === 'close-unknown' || mode === 'duplicate-unknown' ? 'absent' : 'unknown-withheld');
+      assert.equal(result.receiptText.includes('SIGEMT') || result.receiptText.includes('synthetic-private-signal'), false);
+    }
+    assert.equal(result.receiptText.includes('synthetic-secret'), false);
+    if (mode === 'before-spawn') { assert.equal(result.receipt.process.spawnError, 'ENOENT'); assert.equal(result.receipt.process.spawned, false); }
+    if (mode === 'close-only') { assert.equal(result.receipt.process.exitCode, null); assert.equal(result.receipt.process.closeCode, 64); }
+    if (mode === 'conflicting-exit') { assert.equal(result.receipt.process.exitCode, 64); assert.equal(result.receipt.process.statusConflict, true); }
+    if (mode === 'delayed-kill') assert.deepEqual(child.signals, ['SIGTERM']);
+    assert.equal(clock.timers.size, 0);
+    child.emit('error', new Error('late-secret'));
+    child.stderr.emit('error', new Error('late-secret'));
+  }
+});
+
+test('SM55 receipt absolute deadline cancellation caps and scheduling overrun', async () => {
+  for (const at of [16_999, 17_000, 17_500, 20_001]) {
+    const a = receiptRun();
+    a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    a.clock.elapsed = at;
+    a.child.exit(0);
+    a.child.emit('close', 0, null);
+    const result = await receiptSettled(a.result, a.clock);
+    assert.equal(result.receipt.flags.deadline, at >= 17_000);
+    assert.equal(result.receipt.flags.overrun, at > 20_000);
+    assert.equal(result.receipt.process.exitCode, 0);
+    assert.equal(result.receipt.process.signal, null);
+    if (at < 19_000) assert.equal(result.receipt.process.closeCode, 0);
+    assert.equal(result.receipt.outcome, at < 17_000 ? 'public-projection-unreviewed' : 'incomplete');
+    assert.deepEqual(a.child.signals, []);
+  }
+  for (const at of [999, 1_000, 1_500, 2_000, 2_001]) {
+    const a = receiptRun();
+    a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    a.child.exit(0);
+    a.clock.elapsed = at;
+    a.child.emit('close', 0, null);
+    const result = await receiptSettled(a.result, a.clock);
+    assert.equal(result.receipt.flags.deadline, at >= 1_000);
+    assert.equal(result.receipt.process.exitCode, 0);
+    assert.equal(result.receipt.process.closeCode, 0);
+    assert.equal(result.receipt.process.localStop, 'confirmed');
+    assert.deepEqual(a.child.signals, []);
+  }
+  for (const setup of ['abort-inside-spawn', 'abort-without-spawn-event', 'abort-overrun', 'abort-then-throw', 'setup-error', 'setup-error-after-spawn']) {
+    const clock = new ReceiptClock();
+    const child = new ReceiptChild();
+    const controller = new AbortController();
+    if (setup.startsWith('setup-error')) {
+      const onOutput = child.stdout.on.bind(child.stdout);
+      child.stdout.on = function (event, listener) {
+        if (event === 'data') throw { code: 'EIO', message: 'synthetic-setup-secret' };
+        return onOutput(event, listener);
+      };
+      if (setup === 'setup-error-after-spawn') {
+        const on = child.on.bind(child);
+        child.on = function (event, listener) {
+          on(event, listener);
+          if (event === 'spawn') child.emit('spawn');
+          return child;
+        };
+      }
+    }
+    const promise = collectIOSLaunchReceipt(receiptUdid, receiptFailure(clock), origin, { clock, signal: controller.signal, spawn: () => {
+      if (setup === 'abort-overrun') clock.elapsed = 20_001;
+      if (setup.startsWith('abort')) controller.abort(new Error('synthetic-setup-secret'));
+      if (setup === 'abort-then-throw') throw { code: 'ENOENT', message: 'synthetic-setup-secret' };
+      return child as unknown as ChildProcess;
+    } });
+    if (setup === 'abort-inside-spawn') child.emit('spawn');
+    clock.advance(2_000);
+    const result = await receiptSettled(promise, clock);
+    assert.equal(result.receipt.outcome, 'incomplete');
+    assert.equal(result.blockNativeDiagnostics, true);
+    assert.equal(result.receipt.process.exitCode, null);
+    assert.equal(result.receipt.process.localStop, 'unconfirmed');
+    assert.deepEqual(child.signals, setup === 'abort-inside-spawn' || setup === 'abort-without-spawn-event' ? ['SIGTERM', 'SIGKILL'] : []);
+    if (setup !== 'abort-then-throw') {
+      assert.equal(child.stdout.destroyed, true);
+      assert.equal(child.stderr.destroyed, true);
+    }
+    assert.equal(child.listenerCount('exit'), 0);
+    assert.equal(child.listenerCount('close'), 0);
+    assert.equal(child.stdout.listenerCount('data'), 0);
+    assert.equal(result.receiptText.includes('synthetic-setup-secret'), false);
+    assert.equal(result.receipt.process.spawnError, setup === 'abort-then-throw' ? 'ENOENT' : setup === 'setup-error' ? 'EIO' : null);
+    assert.equal(clock.timers.size, 0);
+  }
+  for (const mode of ['deadline', 'before-cancel', 'after-cancel', 'cap-deadline', 'overrun', 'overrun-after-term']) {
+    const clock = new ReceiptClock();
+    const controller = new AbortController();
+    if (mode === 'before-cancel') controller.abort(new Error('synthetic-private-cancel'));
+    const a = receiptRun(clock, receiptFailure(clock), controller.signal);
+    if (mode === 'after-cancel') controller.abort(new Error('synthetic-private-cancel'));
+    if (mode === 'cap-deadline') {
+      clock.elapsed = 17_000;
+      a.child.stdout.emit('data', Buffer.alloc(IOS_LAUNCH_LIMITS.stdoutBytes + 7, 120));
+    }
+    if (mode === 'overrun' || mode === 'overrun-after-term') {
+      if (mode === 'overrun-after-term') clock.advance(17_000);
+      clock.elapsed = 20_001;
+      a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+    }
+    clock.advance(20_000);
+    const result = await receiptSettled(a.result, clock);
+    assert.equal(result.receipt.outcome, 'incomplete');
+    assert.equal(result.receiptText.includes('synthetic-private'), false);
+    assert.equal(clock.timers.size, 0);
+    if (mode === 'before-cancel') assert.equal(a.commands.length, 0);
+    if (mode === 'cap-deadline') { assert.equal(result.receipt.flags.receiveCap, true); assert.equal(result.receipt.flags.deadline, true); assert.equal(result.receipt.stdout.overshoot, 7); }
+    if (mode === 'overrun' || mode === 'overrun-after-term') {
+      assert.equal(result.receipt.flags.overrun, true);
+      assert.ok(result.receipt.collection.overrunMs > 0);
+      assert.deepEqual(a.child.signals, mode === 'overrun' ? [] : ['SIGTERM']);
+    }
+  }
+});
+
+test('SM55 receipt byte UTF8 grammar and hostile secret withholding', async () => {
+  const a = receiptRun();
+  const secret = 'SYNTHETIC_SECRET';
+  const text = Buffer.from(`unknown € https://user:${secret}@${secret}.invalid/path?key=${secret}#${secret}\n`);
+  for (const byte of text) a.child.stdout.emit('data', Buffer.from([byte]));
+  a.child.stdout.emit('data', Buffer.from([0xc3, 0x28, 10]));
+  a.child.stdout.emit('data', Buffer.from('x'.repeat(8_193) + '\n'));
+  a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`Loading UIWebClip with identifier '${receiptClip}'; version: 1 ${secret}`)));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`Loading UIWebClip with identifier '<private>'; version: 1`)));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`Loading UIWebClip with identifier '${receiptClip}'; version: 1`, 'com.apple.UIKit', 'unknown')));
+  a.child.stderr.emit('data', Buffer.from(`log: Permission denied\nlog: Invalid predicate\nlog: Invalid start date\nsimctl: No such file or directory\n${secret}\n`));
+  a.child.stdout.emit('data', Buffer.from('incomplete-' + secret));
+  a.child.close();
+  const result = await a.result;
+  assert.equal(result.receipt.outcome, 'incomplete');
+  assert.equal(result.receipt.stdout.invalidUTF8, 1);
+  assert.equal(result.receipt.stdout.overlong, 1);
+  assert.equal(result.receipt.stdout.incompleteTail, 1);
+  assert.equal(result.receipt.eventCount, 1);
+  assert.deepEqual(result.receipt.stderrClasses, ['permission-denied', 'unsupported-predicate', 'unsupported-date', 'missing-executable']);
+  assert.equal((result.receiptText + result.eventsText).includes(secret), false);
+  assert.equal(result.eventsText.includes(receiptClip), true);
+  assert.equal(result.receipt.stdout.received, result.receipt.stdout.retained + result.receipt.stdout.discarded);
+  const b = receiptRun();
+  const invalid = Buffer.from(receiptLoad() + receiptInvalidOrigin() + 'SYNTHETIC_FAULT_SECRET\n');
+  b.child.stdout.emit('data', invalid);
+  b.child.close();
+  const withheld = await receiptSettled(b.result, b.clock);
+  assert.equal(withheld.receipt.stdout.received, invalid.byteLength);
+  assert.equal(withheld.receipt.stdout.retained, invalid.byteLength);
+  assert.equal(withheld.receipt.stdout.discarded, 0);
+  assert.equal(withheld.receipt.stdout.withheld, 2);
+  assert.equal(withheld.receipt.eventCount, 1);
+  assert.equal(withheld.receipt.flags.handlerFault, false);
+  assert.equal((withheld.receiptText + withheld.eventsText).includes('SYNTHETIC_FAULT_SECRET'), false);
+  const c = receiptRun();
+  let expected!: ReturnType<typeof receiptFaultChunk>;
+  queueMicrotask(() => { expected = receiptFaultChunk(c.child); c.clock.advance(2_000); });
+  const faulted = await receiptSettled(c.result, c.clock);
+  for (const key of ['received', 'retained', 'discarded'] as const) assert.equal(faulted.receipt.stdout[key], expected[key]);
+  assert.equal(faulted.receipt.stdout.withheld, 2);
+  assert.equal(faulted.receipt.eventCount, 1);
+  assert.equal(faulted.receipt.flags.handlerFault, true);
+  assert.equal(faulted.receipt.outcome, 'incomplete');
+  assert.deepEqual(c.child.signals, []);
+  assert.equal((faulted.receiptText + faulted.eventsText).includes('SYNTHETIC_FAULT_SECRET'), false);
+});
+
+test('SM55 receipt receive line record and public byte cap boundaries', async () => {
+  for (const kind of ['stdout', 'stderr'] as const) {
+    const cap = kind === 'stdout' ? IOS_LAUNCH_LIMITS.stdoutBytes : IOS_LAUNCH_LIMITS.stderrBytes;
+    for (const delta of [-1, 0, 1]) {
+      const a = receiptRun();
+      a.child[kind].emit('data', Buffer.alloc(cap + delta, 120));
+      a.child.close();
+      const result = await a.result;
+      assert.equal(result.receipt[kind].received, cap + delta);
+      assert.equal(result.receipt.flags.receiveCap, delta >= 0);
+      assert.equal(result.receipt[kind].overshoot, Math.max(0, delta));
+      if (delta >= 0) { assert.equal(result.receipt[kind].retained, 0); assert.equal(result.receipt[kind].discarded, cap + delta); }
+    }
+  }
+  for (const length of [8_191, 8_192, 8_193]) {
+    const a = receiptRun();
+    a.child.stdout.emit('data', Buffer.from('x'.repeat(length) + '\n'));
+    a.child.close();
+    assert.equal((await a.result).receipt.stdout.overlong, length > 8_192 ? 1 : 0);
+  }
+  const a = receiptRun();
+  for (let index = 0; index < 4_097; index++) a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+  a.child.close();
+  const result = await a.result;
+  assert.equal(result.receipt.flags.outputCap || result.receipt.flags.recordCap, true);
+  assert.ok(result.receipt.eventCount <= 4_096);
+  assert.ok(Buffer.byteLength(result.eventsText) <= 524_288);
+  assert.ok(Buffer.byteLength(result.receiptText) <= 32_768);
+  assert.ok(Buffer.byteLength(result.receipt.stderrClasses.join('\n')) <= 8_192);
+});
+
+test('SM55 receipt conflicting native identities retain only explicit relations', async () => {
+  const a = receiptRun();
+  for (const clip of [receiptClip, 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB']) a.child.stdout.emit('data', Buffer.from(receiptLoad(clip)));
+  for (const host of [101, 202]) a.child.stdout.emit('data', Buffer.from(receiptLine(`Configuring connection on service com.apple.uikit.viewservice.com.apple.SafariViewService to host pid ${host} for session ${receiptSession}`, 'com.apple.UIKit', 'ViewServiceSessionManager')));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`sceneOfRecord: sceneID: sceneID:com.apple.SafariViewService-default  persistentID: ${receiptSession}`, 'com.apple.UIKit', 'AppLifecycle')));
+  for (const host of ['localhost', 'synthetic-secret.invalid']) a.child.stdout.emit('data', Buffer.from(receiptLine(`Web Clip with identifier '${receiptClip}', script from origin <WKSecurityOrigin: 0x1234; protocol = https; host = ${host}; port = 52101> updated app badge count to 0`, 'com.apple.mobilesafari', 'WebPush')));
+  a.child.stdout.emit('data', Buffer.from(receiptLine('Received state update for 101 (app<com.apple.webapp((null))>, running-Foreground', 'com.apple.runningboard', 'monitor', 'Web')));
+  a.child.stdout.emit('data', Buffer.from(receiptLine(`request=${receiptSession} token=${receiptClip} https://synthetic-secret.invalid/`, 'com.apple.FrontBoard', 'unknown', 'SpringBoard')));
+  a.child.stdout.emit('data', Buffer.from(receiptLoad().replace('2026-09-21', '2020-01-01')));
+  a.child.close();
+  const result = await a.result;
+  const records = result.eventsText.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(result.receipt.outcome, 'public-projection-unreviewed');
+  assert.deepEqual(records.filter(record => record.hostPid).map(record => record.hostPid), [101, 202]);
+  assert.deepEqual(records.filter(record => record.origin).map(record => record.origin), ['fixture-origin', 'other-origin']);
+  assert.ok(records.every(record => record.clockMapping === 'unknown' && record.temporalRelationToFatal === 'unavailable'));
+  assert.equal(result.receipt.coverage.tapToRequest, 'unproved');
+  assert.equal(result.receipt.coverage.clipToHost, 'unproved');
+  assert.equal(result.eventsText.includes('synthetic-secret'), false);
+  assert.equal(records.length, 9);
+  assert.equal(records.at(-1).temporalRelationToFatal, 'unavailable', 'no host/native clock mapping is invented for an outlying native timestamp');
+});
+
+async function receiptCaptureAdapter(name: string, clock = new ReceiptClock()) {
+  const a = await adapter(`receipt-${name}`, ({ path }) => {
+    if (path.endsWith('/screenshot')) return value('');
+    throw new Error('unexpected receipt gameplay command');
+  }, clock.mono);
+  const internal = a.platform as any;
+  internal.udid = receiptUdid;
+  internal.launchObservation = new IOSLaunchObservation(clock);
+  internal.launchObservation.failure = Object.freeze(receiptFailure(clock));
+  const native: string[][] = [];
+  internal.diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  const writes: Array<{ path: string; text: string; options: unknown }> = [];
+  internal.launchMkdir = async () => undefined;
+  internal.launchWrite = async (path: string, text: string, options: unknown) => { writes.push({ path, text, options }); };
+  const child = new ReceiptChild();
+  let queries = 0;
+  internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => collectIOSLaunchReceipt(udid, failure, fixture, {
+    ...hooks, clock, spawn: () => {
+      queries += 1;
+      queueMicrotask(() => { child.emit('spawn'); child.stdout.emit('data', Buffer.from(receiptLoad())); child.close(); });
+      return child as unknown as ChildProcess;
+    },
+  });
+  return { ...a, internal, clock, native, writes, child, queries: () => queries };
+}
+
+type ReceiptLaunchMode = 'failure' | 'success' | 'unrelated' | '99' | 'driver-fatal';
+async function receiptLaunchAdapter(name: string, initialMode: ReceiptLaunchMode = 'failure') {
+  const clock = new ReceiptClock();
+  const trace: string[] = [];
+  let mode = initialMode;
+  let tapped = false;
+  let rounds = 0;
+  let contexts = 0;
+  const a = await adapter(`receipt-launch-${name}`, ({ path, body }) => {
+    if (path.endsWith('/screenshot')) { trace.push('screenshot'); return value(''); }
+    if (path.endsWith('/context')) {
+      if (tapped && mode === '99') { contexts += 1; clock.elapsed += 11; }
+      return value(null);
+    }
+    if (path.endsWith('/click')) { tapped = true; trace.push('click'); return value(null); }
+    if (body.script === 'mobile: queryAppState') {
+      if (mode === '99') {
+        const web = body.args.bundleId === 'com.apple.webapp';
+        trace.push(web ? '1' : '4');
+        if (!web) rounds += 1;
+        return value(web ? 1 : 4);
+      }
+      if (mode === 'failure') return Response.json({ value: { error: 'unknown error', message: 'synthetic provider refusal' } }, { status: 500 });
+      if (mode === 'driver-fatal') {
+        const response = new Response(null);
+        response.text = async () => { throw new TypeError('synthetic body interrupted'); };
+        return response;
+      }
+      return value(4);
+    }
+    if (path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert', message: 'No alert' } }, { status: 404 });
+    if (path.endsWith('/element/springboard-root/elements')) return value([element('springboard-root')]);
+    if (body.script === 'mobile: activeAppInfo') { trace.push('foreground'); return value({ bundleId: 'com.apple.webapp', pid: 42 }); }
+    if (body.script === 'mobile: getContexts') {
+      assert.equal((a.platform as any).launchObservation.queryEligible, false);
+      trace.push('attachment');
+      return value([published]);
+    }
+    if (path.endsWith('/url')) return value(`${origin}/`);
+    if (body.script?.startsWith('return {')) return value({ origin, standalone: true, applicationInitialized: true });
+    throw new Error('unexpected receipt launch command');
+  }, clock.mono, false);
+  const internal = a.platform as any;
+  internal.udid = receiptUdid;
+  internal.launchObservation = new IOSLaunchObservation(clock);
+  internal.observeCurrentNativeForeground = async () => 'com.apple.springboard';
+  internal.setNativeObservationTarget = async () => undefined;
+  internal.ensureSpringBoardForeground = async () => undefined;
+  internal.observeHomeIcon = async () => {
+    if (mode === 'unrelated') throw new Error('synthetic unrelated preparation failure');
+    return { state: 'ready', icon: 'icon', page: { current: 1, total: 1, raw: 'Page 1 of 1' } };
+  };
+  internal.waitForHomeIconReadiness = async (observation: unknown) => observation;
+  const native: string[][] = [];
+  internal.diagnosticCommand = async (_binary: string, argv: string[]) => { trace.push('native'); native.push(argv); return ''; };
+  const writes: Array<{ path: string; text: string; options: unknown }> = [];
+  internal.launchMkdir = async () => { trace.push('mkdir'); };
+  internal.launchWrite = async (path: string, text: string, options: unknown) => { trace.push('write'); writes.push({ path, text, options }); };
+  const child = new ReceiptChild();
+  let queries = 0;
+  let collect: () => void = () => { child.stdout.emit('data', Buffer.from(receiptLoad())); child.close(); };
+  internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => {
+    trace.push('collector');
+    return receiptSettled(collectIOSLaunchReceipt(udid, failure, fixture, { ...hooks, clock, spawn: () => {
+      queries += 1;
+      queueMicrotask(() => { child.emit('spawn'); collect(); });
+      return child as unknown as ChildProcess;
+    } }), clock);
+  };
+  const marker = join(a.outputDir, 'synthetic-receipt-ownership');
+  await writeFile(marker, `ios:${receiptUdid}\n`);
+  const launch = async () => {
+    const previousMarker = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    const previousWait = PhaseBudget.prototype.wait;
+    process.env.MOBILE_DEVICE_OWNERSHIP_FILE = marker;
+    PhaseBudget.prototype.wait = async function (ms: number) {
+      if (mode !== '99') return;
+      if (!tapped) return;
+      clock.elapsed += ms;
+      if (rounds === 99) clock.elapsed = 29_247;
+    };
+    try { await a.platform.launchInstalledApp(); }
+    finally {
+      PhaseBudget.prototype.wait = previousWait;
+      if (previousMarker === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+      else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousMarker;
+    }
+  };
+  return { ...a, internal, clock, trace, native, writes, child, launch, queries: () => queries, rounds: () => rounds, contexts: () => contexts,
+    setMode: (next: ReceiptLaunchMode) => { mode = next; tapped = false; }, collect: (callback: () => void) => { collect = callback; } };
+}
+
+const receiptInvalidOrigin = () => receiptLine(`Web Clip with identifier '${receiptClip}', script from origin <WKSecurityOrigin: 0x1234; protocol = https; host = 999.999.999.999; port = 0> updated app badge count to 0`, 'com.apple.mobilesafari', 'WebPush');
+function receiptFaultChunk(child: ReceiptChild) {
+  const prefix = receiptLoad() + receiptInvalidOrigin();
+  const fault = receiptLoad('CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC');
+  const tail = 'https://synthetic:SYNTHETIC_FAULT_SECRET@secret.invalid/private?key=SYNTHETIC_FAULT_SECRET\n';
+  const chunk = Buffer.from(prefix + fault + tail);
+  const stringify = JSON.stringify;
+  JSON.stringify = ((record: any) => {
+    if (record?.webClip === 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC') throw Object.assign(new Error('SYNTHETIC_FAULT_SECRET'), { path: tail, cause: new Error(tail) });
+    return stringify(record);
+  }) as typeof JSON.stringify;
+  try { child.stdout.emit('data', chunk); }
+  finally { JSON.stringify = stringify; }
+  return { received: chunk.byteLength, retained: Buffer.byteLength(prefix + fault), discarded: Buffer.byteLength(tail) };
+}
+
+test('SM55 receipt ordinary delayed writes stay owned and frozen on reentry', async () => {
+  const a = await receiptCaptureAdapter('delayed');
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const writing = new Promise<void>(resolve => { started = resolve; });
+  a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+    a.writes.push({ path, text, options });
+    if (a.writes.length === 1) { started(); await pending; }
+  };
+  const first = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('failure'), first);
+  await writing;
+  const frozen = a.internal.launchReceipt;
+  const payload = frozen.receiptText;
+  assert.ok(Object.isFrozen(frozen.receipt.flags));
+  let settled = false;
+  void first.then(() => { settled = true; }, () => { settled = true; });
+  assert.equal(a.platform.captureSanitizedEvidence('candidate'), first);
+  a.clock.advance(25_000);
+  a.child.stdout.emit('data', Buffer.from(receiptLoad('CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC')));
+  a.child.emit('error', { code: 'ENOENT', message: 'late-secret' });
+  a.child.close();
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(a.internal.launchPersistence.events.state, 'pending');
+  assert.equal(a.internal.launchReceipt, frozen);
+  assert.equal(frozen.receiptText, payload);
+  assert.equal(a.requests.some(request => request.path.endsWith('/screenshot')), false);
+  release();
+  await first;
+  assert.equal(a.queries(), 1);
+  assert.equal(a.writes.length, 2);
+  assert.equal(a.internal.launchPersistence.events.elapsedMs, 25_000);
+  assert.equal(a.internal.launchPersistence.receipt.state, 'fulfilled');
+  assert.equal(JSON.parse(a.writes[1].text).persistenceCompletion, 'unavailable-pre-write');
+  assert.deepEqual(a.writes.map(write => write.path.split('/').at(-1)), ['ios-launch-owner-events.jsonl', 'ios-launch-receipt.json']);
+  assert.ok(a.writes.every(write => JSON.stringify(write.options) === JSON.stringify({ flag: 'wx', mode: 0o600 })));
+  assert.equal(a.native.some(argv => argv.includes('log')), false);
+  assert.equal(a.native.length, 2);
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.writes.length, 2);
+});
+
+test('SM55 receipt rejected partial writes preserve first fatal without retry', async () => {
+  for (const rejected of [1, 2]) {
+    const a = await receiptLaunchAdapter(`reject-${rejected}`);
+    let fatal: unknown;
+    await assert.rejects(a.launch, error => { fatal = error; return true; });
+    const failure = a.internal.launchObservation.failure;
+    const driverFatal = a.driver.snapshot().firstFatal;
+    assert.equal(failure.eligible, true);
+    a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+      a.writes.push({ path, text, options });
+      if (a.writes.length === rejected) { a.clock.advance(25_000); throw Object.assign(new Error('synthetic-private-path'), { code: 'ENOSPC', cause: new Error('secret') }); }
+    };
+    await Promise.all([a.platform.captureSanitizedEvidence('failure'), a.platform.captureSanitizedEvidence('failure')]);
+    assert.equal(a.queries(), 1);
+    assert.equal(a.writes.length, rejected);
+    assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    assert.equal(a.internal.launchObservation.failure, failure);
+    assert.equal(a.driver.snapshot().firstFatal, driverFatal);
+    assert.equal(a.clock.timers.size, 0);
+    const status = a.platform.evidenceSnapshot().launchPersistence as any;
+    assert.equal(status[rejected === 1 ? 'events' : 'receipt'].error, 'ENOSPC');
+    assert.equal(JSON.stringify(status).includes('synthetic-private'), false);
+    assert.equal(a.native.length, 0);
+    await a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.writes.length, rejected);
+  }
+});
+
+test('SM55 receipt pending rejection and directory refusal are owned once', async () => {
+  const a = await receiptCaptureAdapter('pending-rejection');
+  let reject!: (error: unknown) => void;
+  let started!: () => void;
+  const pending = new Promise<void>((_resolve, rejectWrite) => { reject = rejectWrite; });
+  const writing = new Promise<void>(resolve => { started = resolve; });
+  a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+    a.writes.push({ path, text, options }); started(); await pending;
+  };
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  await writing;
+  const frozen = a.internal.launchReceipt.receiptText;
+  a.clock.advance(30_000);
+  assert.equal(a.platform.captureSanitizedEvidence('paired'), capture);
+  assert.equal(a.internal.launchPersistence.events.state, 'pending');
+  reject(Object.assign(new Error('synthetic-secret-path'), { code: 'EIO', cause: new Error('secret') }));
+  await capture;
+  assert.equal(a.internal.launchPersistence.events.state, 'rejected');
+  assert.equal(a.internal.launchPersistence.events.elapsedMs, 30_000);
+  assert.equal(a.platform.evidenceSnapshot().launchCollectionAndPersistenceElapsedMs, 30_000);
+  assert.equal(a.internal.launchReceipt.receiptText, frozen);
+  assert.equal(a.writes.length, 1);
+  assert.equal(a.queries(), 1);
+  assert.equal(a.native.length, 0);
+  assert.equal(JSON.stringify(a.platform.evidenceSnapshot().launchPersistence).includes('synthetic-secret'), false);
+  const b = await receiptCaptureAdapter('directory-refusal');
+  b.internal.launchMkdir = async () => { throw { code: 'EEXIST', path: 'synthetic-secret' }; };
+  await b.platform.captureSanitizedEvidence('failure');
+  await b.platform.captureSanitizedEvidence('failure');
+  assert.equal(b.queries(), 1);
+  assert.equal(b.writes.length, 0);
+  assert.equal(b.internal.launchPersistence.directory.error, 'EEXIST');
+  const c = await receiptCaptureAdapter('collector-refusal');
+  let attempts = 0;
+  c.internal.launchCollector = async () => { attempts += 1; throw new Error('synthetic-private-callback'); };
+  await c.platform.captureSanitizedEvidence('failure');
+  await c.platform.captureSanitizedEvidence('failure');
+  assert.equal(attempts, 1);
+  assert.equal(c.writes.length, 0);
+  assert.equal(c.native.length, 0);
+  assert.equal(c.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  assert.equal(JSON.stringify(c.platform.evidenceSnapshot()).includes('synthetic-private-callback'), false);
+});
+
+test('SM55 receipt unconfirmed stop fences all native diagnostics before persistence', async () => {
+  for (const mode of ['deadline', 'callback-error', 'abort-inside-spawn']) {
+    const a = await receiptLaunchAdapter(`unconfirmed-${mode}`);
+    let fatal: unknown;
+    await assert.rejects(a.launch, error => { fatal = error; return true; });
+    const count = a.requests.length;
+    a.collect(() => {
+      if (mode === 'callback-error') a.child.emit('error', { code: 'EIO', message: 'synthetic-private-error' });
+      a.clock.advance(mode === 'deadline' ? 19_000 : 2_000);
+    });
+    if (mode === 'abort-inside-spawn') {
+      const controller = new AbortController();
+      a.internal.launchCollector = (udid: string, failure: IOSLaunchFailure, fixture: string, hooks: IOSReceiptHooks) => receiptSettled(collectIOSLaunchReceipt(udid, failure, fixture, {
+        ...hooks, signal: controller.signal, spawn: () => {
+          controller.abort();
+          queueMicrotask(() => a.clock.advance(2_000));
+          return a.child as unknown as ChildProcess;
+        },
+      }), a.clock);
+    }
+    let release!: () => void;
+    let writing = false;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    a.internal.launchWrite = async (path: string, text: string, options: unknown) => {
+      a.writes.push({ path, text, options });
+      if (a.writes.length === 1) { writing = true; await pending; }
+    };
+    const first = a.platform.captureSanitizedEvidence('failure');
+    try {
+      for (let turn = 0; turn < 100 && !writing; turn++) await Promise.resolve();
+      assert.equal(writing, true, 'bounded collector must reach the held ordinary write');
+      assert.equal(a.internal.launchPersistence.events.state, 'pending');
+      assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+      assert.equal(a.platform.captureSanitizedEvidence('candidate'), first);
+      assert.equal(a.platform.captureSanitizedEvidence('failure'), first);
+      const frozen = a.internal.launchReceipt.receiptText;
+      a.clock.advance(25_000);
+      a.child.emit('spawn');
+      a.child.close();
+      a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+      assert.equal(a.internal.launchReceipt.receiptText, frozen);
+      assert.equal(a.native.length, 0);
+      assert.equal(a.requests.length, count);
+      assert.equal(a.writes.length, 1);
+      assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    } finally { release(); await first; }
+    assert.equal(a.native.length, 0);
+    assert.equal(a.requests.length, count);
+    assert.equal(a.writes.length, 2);
+    assert.equal(a.clock.timers.size, 0);
+    assert.deepEqual(a.child.signals, mode === 'callback-error' ? [] : ['SIGTERM', 'SIGKILL']);
+  }
+});
+
+test('SM55 receipt ineligible failure omits broad fallback and success adds no query', async () => {
+  const a = await receiptCaptureAdapter('ineligible');
+  a.internal.launchObservation.failure = { ...receiptFailure(a.clock), eligible: false };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.queries(), 0);
+  assert.equal(a.internal.launchReceipt.receipt.outcome, 'not-eligible');
+  assert.equal(a.native.some(argv => argv.includes('log')), false);
+  const b = await receiptLaunchAdapter('success', 'success');
+  await b.launch();
+  assert.equal(b.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(b.internal.launchObservation.queryEligible, false);
+  assert.equal(b.internal.launchObservation.failure, undefined);
+  await b.platform.captureSanitizedEvidence('paired');
+  await b.platform.captureSanitizedEvidence('candidate');
+  assert.equal(b.queries(), 0);
+  assert.equal(b.writes.length, 0);
+  assert.equal(b.trace.includes('collector'), false);
+  assert.equal(b.native.length, 8, 'existing checkpoint commands only');
+  b.setMode('unrelated');
+  await assert.rejects(b.launch);
+  await b.platform.captureSanitizedEvidence('failure');
+  assert.equal(b.queries(), 0);
+  assert.equal(b.trace.includes('collector'), false);
+  assert.equal(b.internal.launchObservation.failure, undefined);
+  for (const later of ['failure', 'success', 'success-unrelated']) {
+    const c = await receiptLaunchAdapter(`revoked-${later}`);
+    let fatal: unknown;
+    await assert.rejects(c.launch, error => { fatal = error; return true; });
+    const failure = c.internal.launchObservation.failure;
+    const facts = JSON.stringify(failure);
+    assert.equal(failure.eligible, true);
+    assert.equal(c.internal.launchObservation.queryEligible, true);
+    c.setMode(later === 'failure' ? 'failure' : 'success');
+    if (later === 'failure') await assert.rejects(c.launch, error => error !== fatal);
+    else await c.launch();
+    assert.equal(c.internal.launchObservation.queryEligible, false);
+    if (later === 'success-unrelated') {
+      c.setMode('unrelated');
+      await assert.rejects(c.launch, error => error !== fatal);
+    }
+    const first = c.platform.captureSanitizedEvidence('failure');
+    assert.equal(c.platform.captureSanitizedEvidence('candidate'), first);
+    await first;
+    assert.equal(c.queries(), 0);
+    assert.equal(c.internal.launchReceipt.receipt.outcome, 'not-eligible');
+    assert.equal(c.internal.launchReceipt.receipt.query, null);
+    assert.equal(c.internal.launchObservation.failure, failure);
+    assert.equal(JSON.stringify(failure), facts);
+    assert.equal(c.internal.launchObservation.originalFatal, fatal);
+    assert.equal(c.native.some(argv => argv.includes('log')), false);
+    assert.equal(c.native.length, 2);
+    assert.equal(c.trace.filter(event => event === 'collector').length, 1);
+    assert.equal(c.clock.timers.size, 0);
+  }
+  const d = await receiptLaunchAdapter('driver-fatal', 'driver-fatal');
+  let fatal: unknown;
+  await assert.rejects(d.launch, error => { fatal = error; return /APPIUM_INTERRUPTED/u.test(String(error)); });
+  const driverFatal = d.driver.snapshot().firstFatal;
+  assert.equal(driverFatal?.code, 'APPIUM_INTERRUPTED');
+  await d.platform.captureSanitizedEvidence('failure');
+  assert.equal(d.queries(), 0);
+  assert.equal(d.internal.launchObservation.originalFatal, fatal);
+  assert.equal(d.driver.snapshot().firstFatal, driverFatal);
+  assert.equal(d.driver.snapshot().unusable, true);
+  assert.equal(d.native.some(argv => argv.includes('log')), false);
+  assert.equal(d.clock.timers.size, 0);
+});
+
+test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering', async () => {
+  for (const outcome of ['zero', 'nonzero', 'timeout', 'cap', 'late', 'projection-fault']) {
+    const a = await receiptLaunchAdapter(`provider-${outcome}`, '99');
+    let fatal: unknown;
+    await assert.rejects(a.launch, error => { fatal = error; return /APPIUM_COMMAND_NOT_ADMITTED/u.test(String(error)); });
+    assert.equal(a.rounds(), 99);
+    assert.equal(a.contexts(), 100);
+    const launchTrace = ['click', ...Array.from({ length: 99 }, () => ['1', '4']).flat()];
+    assert.deepEqual(a.trace, launchTrace);
+    const commands = a.driver.snapshot().commands;
+    assert.equal(commands.at(-2)!.timeoutMs, 753);
+    assert.equal(commands.at(-1)!.timeoutMs, 742);
+    assert.equal(commands.at(-1)!.timing!.sent, false);
+    const failure = a.internal.launchObservation.failure;
+    const driverFatal = a.driver.snapshot().firstFatal;
+    const facts = JSON.stringify(failure);
+    const count = a.requests.length;
+    assert.equal(failure.eligible, true);
+    assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+    assert.equal(a.requests.filter(request => request.path.endsWith('/click')).length, 1);
+    assert.equal(a.budget.recoveryCount, 0);
+    assert.equal(a.requests.some(request => request.path.endsWith('/appium/settings')), false);
+    let faultCounts: ReturnType<typeof receiptFaultChunk> | undefined;
+    a.collect(() => {
+      if (outcome === 'projection-fault') {
+        faultCounts = receiptFaultChunk(a.child);
+        a.clock.advance(2_000);
+        return;
+      }
+      if (outcome === 'timeout') { a.clock.advance(19_000); return; }
+      if (outcome === 'cap') a.child.stdout.emit('data', Buffer.alloc(IOS_LAUNCH_LIMITS.stdoutBytes + 1));
+      else a.child.stdout.emit('data', Buffer.from(receiptLoad()));
+      a.child.close(outcome === 'nonzero' ? 64 : 0);
+    });
+    const capture = a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.platform.captureSanitizedEvidence('candidate'), capture);
+    await capture;
+    const result = a.internal.launchReceipt;
+    const frozen = result.receiptText;
+    if (outcome === 'late') {
+      a.child.stdout.emit('data', Buffer.from(receiptLoad('BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB')));
+      a.child.close();
+      a.clock.advance(25_000);
+    }
+    assert.equal(a.queries(), 1);
+    assert.equal(a.writes.length, 2);
+    assert.equal(result.receipt.failure, failure);
+    assert.equal(result.receiptText, frozen);
+    assert.equal(JSON.stringify(failure), facts);
+    assert.equal(a.internal.launchObservation.originalFatal, fatal);
+    assert.equal(a.driver.snapshot().firstFatal, driverFatal);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+    assert.equal(a.budget.recoveryCount, 0);
+    assert.equal(a.requests.slice(count).every(request => request.path.endsWith('/screenshot')), true);
+    assert.equal(a.native.some(argv => argv.includes('log')), false);
+    const blocked = outcome === 'timeout' || outcome === 'projection-fault';
+    assert.deepEqual(a.trace.slice(launchTrace.length), blocked
+      ? ['collector', 'mkdir', 'write', 'write']
+      : ['collector', 'mkdir', 'write', 'write', 'screenshot', 'native', 'native']);
+    assert.equal(a.requests.length, count + (blocked ? 0 : 1));
+    assert.equal(result.receipt.outcome, outcome === 'zero' || outcome === 'late' ? 'public-projection-unreviewed' : 'incomplete');
+    if (faultCounts) {
+      for (const key of ['received', 'retained', 'discarded'] as const) assert.equal(result.receipt.stdout[key], faultCounts[key]);
+      assert.equal(result.receipt.stdout.received, result.receipt.stdout.retained + result.receipt.stdout.discarded);
+      assert.equal(result.receipt.stdout.withheld, 2);
+      assert.equal(result.receipt.eventCount, 1);
+      assert.equal(result.receipt.flags.handlerFault, true);
+      assert.equal((result.receiptText + result.eventsText).includes('SYNTHETIC_FAULT_SECRET'), false);
+    }
+    await a.platform.captureSanitizedEvidence('failure');
+    assert.equal(a.writes.length, 2);
+    assert.equal(a.clock.timers.size, 0);
+  }
+});
 
 export async function runIOSRegressions(): Promise<void> {
   let failures = 0;
