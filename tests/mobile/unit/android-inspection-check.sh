@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-fixture="$(mktemp -d /tmp/herdr-inspection-check.XXXXXXXX)"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/herdr-inspection-check.XXXXXXXX")"
 trap 'rm -rf "$fixture"' EXIT
 printf '%s\n' 'herdr-owned-inspection-fixture' > "$fixture/.owned"
 mkdir -p "$fixture/source/tests/mobile" "$fixture/source/.github"

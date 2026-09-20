@@ -8,12 +8,21 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.
 const source = path.join(repo, 'tests/mobile/android-appium');
 const home = process.env.APPIUM_HOME;
 const output = process.env.MOBILE_INSPECTION_TEST_OUTPUT;
-assert.ok(home?.startsWith('/tmp/') && output?.startsWith('/tmp/') && process.env.HERDR_OWNED_INSTALLER_FIXTURE === '1', 'Explicit disposable fixture authority required');
-const fixture = path.dirname(repo);
-assert.equal(fs.readFileSync(path.join(fixture, '.owned'), 'utf8'), 'herdr-owned-inspection-fixture\n');
-assert.equal(fs.realpathSync(home), path.join(fixture, 'install'));
-assert.equal(fs.realpathSync(output), path.join(fixture, 'output'));
-assert.equal(fs.realpathSync(repo), path.join(fixture, 'source'));
+const pristine = process.env.MOBILE_PRISTINE_ANDROID_PACKAGE;
+const temporaryParent = process.env.TMPDIR || '/tmp';
+assert.ok(process.env.HERDR_OWNED_INSTALLER_FIXTURE === '1' && [home, output, pristine, temporaryParent].every(value => typeof value === 'string' && value.length > 0 && path.isAbsolute(value)), 'Explicit disposable fixture authority required');
+assert.equal(path.relative(repo, fileURLToPath(import.meta.url)), 'tests/mobile/unit/android-inspection-integrity.mjs');
+assert.ok(fs.lstatSync(path.dirname(repo)).isDirectory(), 'Disposable fixture must be a directory, not a symlink');
+const fixture = fs.realpathSync(path.dirname(repo));
+assert.equal(path.dirname(fixture), fs.realpathSync(temporaryParent), 'Disposable fixture must be a direct child of configured TMPDIR');
+assert.match(path.basename(fixture), /^herdr-inspection-check\.[A-Za-z0-9]{8}(?![\s\S])/, 'Fresh inspection fixture name required');
+for (const [directory, name] of [[repo, 'source'], [home, 'install'], [output, 'output'], [pristine, 'pristine']]) {
+  assert.ok(fs.lstatSync(directory).isDirectory(), `Owned ${name} directory required`);
+  assert.equal(fs.realpathSync(directory), path.join(fixture, name), `Owned ${name} must match fixture layout`);
+}
+const ownershipMarker = path.join(fixture, '.owned');
+assert.ok(fs.lstatSync(ownershipMarker).isFile(), 'Regular non-symlink fixture marker required');
+assert.equal(fs.readFileSync(ownershipMarker, 'utf8'), 'herdr-owned-inspection-fixture\n');
 const gate = path.join(output, 'gate-fixture');
 fs.mkdirSync(output, {recursive: true});
 fs.cpSync(source, gate, {recursive: true});
@@ -121,8 +130,6 @@ for (const resolverDirectory of ['node_modules', 'lib/node_modules']) for (const
 }
 const producerSnapshot = Object.fromEntries(Object.keys(manifest.files).map(file => [file, fs.readFileSync(path.join(root, file))]));
 const authoredSnapshot = Object.fromEntries(Object.keys(manifest.authored).map(file => [file, fs.readFileSync(path.join(root, file))]));
-const pristine = process.env.MOBILE_PRISTINE_ANDROID_PACKAGE;
-assert.ok(pristine?.startsWith('/tmp/'), 'Verified owned pristine package required for patch-input negatives');
 try {
   for (const file of Object.keys(producerSnapshot)) fs.copyFileSync(path.join(pristine, file), path.join(root, file));
   for (const file of Object.keys(authoredSnapshot)) fs.unlinkSync(path.join(root, file));

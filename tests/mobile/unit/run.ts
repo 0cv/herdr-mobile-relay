@@ -961,47 +961,8 @@ test('Android launch failures are classified without hiding command diagnostics'
 });
 
 test('Android initial launch retains bootstrap and verifies readiness after signed launch', async () => {
-  const platform = new AndroidPlatform({
-    origin: 'https://fixture.test',
-    appiumUrl: 'http://fake.test',
-    outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '',
-    setupUrl: '',
-    deviceId: 'emulator-5554',
-    budget: new PhaseBudget('android-launch-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
-  });
-  const shortcut = {
-    id: 'shortcut-id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
-    url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac',
-  };
-  const events: string[] = [];
-  const driver = platform.driver as any;
-  (platform as any).assertRetainedOwner = async () => { events.push('owner'); };
-  (platform as any).assertRetainedSession = () => undefined;
-  driver.switchContext = async (context: string) => { events.push(context); };
-  driver.currentWindow = async () => 'original';
-  driver.windowHandles = async () => ['original'];
-  driver.currentUrl = async () => 'https://fixture.test/';
-  (platform as any).recordLaunchForeground = async () => undefined;
-  (platform as any).waitForChromeShortcut = async () => { events.push('shortcut'); return shortcut; };
-  driver.close = async () => { events.push('close'); };
-  (platform as any).launchChromeShortcut = async () => { events.push('launch'); };
-  (platform as any).waitForInstalledTarget = async () => { events.push('target'); };
-  (platform as any).waitForChromeDevTools = async () => { events.push('devtools'); };
-  (platform as any).createChromeSession = async () => { events.push('create'); };
-  (platform as any).attachToInstalledView = async () => { events.push('attach'); };
-  const ownershipRoot = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-ownership-'));
-  const ownershipFile = join(ownershipRoot, 'owned');
-  await writeFile(ownershipFile, 'android:emulator-5554\n');
-  const previousOwnershipFile = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
-  process.env.MOBILE_DEVICE_OWNERSHIP_FILE = ownershipFile;
-  try {
-    await platform.launchInstalledApp();
-  } finally {
-    if (previousOwnershipFile === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
-    else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousOwnershipFile;
-  }
-  assert.deepEqual(events, ['owner', 'NATIVE_APP', 'CHROMIUM', 'shortcut', 'owner', 'NATIVE_APP', 'owner', 'launch', 'target', 'devtools', 'owner', 'attach']);
+  const { runAndroidRetainedLaunchRegressions } = await import('./android-retained-launch');
+  await runAndroidRetainedLaunchRegressions(['recorded-two-page']);
 });
 
 test('Android Chrome DevTools readiness recognizes the published socket', async () => {

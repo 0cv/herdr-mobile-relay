@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { repositoryPath, repositoryRoot } from '../support/paths';
 import { fileSha256 } from '../support/artifacts';
 import type { AndroidEnvironmentSnapshot, AndroidPreparation } from '../android-environment';
 import { AndroidEnvironmentMeasurement } from '../android-measurement';
-import { AndroidPlatform } from '../platforms/android';
+import { androidLifecycleCases, runAndroidLifecycleCase, withAndroidRetainedLifecycleFixture } from './android-retained-launch';
 import { AppiumClient } from '../support/webdriver';
 import { androidEventDetails, androidLogEvents } from '../android-events';
 
@@ -93,52 +93,123 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  test('retained initial launch emits no fabricated bootstrap close evidence and explicit relaunch closes', async () => {
-    const fixture = await harness.createFixture();
-    const saved = { ...process.env };
-    Object.assign(process.env, fixture.environment);
-    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
-    try {
-      await measurement.begin();
-      let deletes = 0;
-      const driver = new AppiumClient('http://fixture.test', 1_000, async (input, init) => {
-        if (init?.method === 'DELETE') deletes++;
-        return Response.json({ value: new URL(String(input)).pathname === '/session' ? { sessionId: 'launch-fixture' } : null });
+  test('retained initial and warm relaunch emit no fabricated close evidence or planned operations', async () => {
+    let completed = 0;
+    for (const group of Object.keys(androidLifecycleCases) as Array<keyof typeof androidLifecycleCases>) {
+      for (const name of androidLifecycleCases[group]) {
+        const fixture = await harness.createFixture();
+        await runAndroidLifecycleCase(fixture, group, name);
+        assert.equal(existsSync(join(fixture.root, 'android-environment-bootstrap-close.json')), false);
+        assert.doesNotMatch(await readFile(fixture.log, 'utf8'), /CLOSE_(?:BEGIN|END)/u);
+        completed++;
+        console.log(`PASS SM56 lifecycle ${group}/${name}`);
+      }
+    }
+    assert.equal(completed, 54);
+  });
+  test('SM56 warm lifecycle keeps independent and combined signal, stop and component drift fatal', async () => {
+    for (const name of ['healthy-warm', 'early-isolated-signal9-only', 'unknown-stop-only', 'stable-binary-gms-components-only', 'signal9-stop-components-combined', 'package-identity-replacement-only']) {
+      const fixture = await harness.createFixture();
+      await withAndroidRetainedLifecycleFixture(fixture, async ({ platform, client, measurement, calls, operations }) => {
+        const owner = client.retainSessionOwner();
+        const window = platform.evidenceSnapshot().selectedInstalledWindow;
+        const before = JSON.parse(await readFile(join(fixture.root, 'android-environment-before.json'), 'utf8')) as AndroidEnvironmentSnapshot;
+        const combined = name === 'signal9-stop-components-combined';
+        const signal = combined || name === 'early-isolated-signal9-only';
+        const stop = combined || name === 'unknown-stop-only';
+        const components = combined || name === 'stable-binary-gms-components-only';
+        const replacement = name === 'package-identity-replacement-only';
+        const expectedEvents: string[] = [];
+        const native = (tag: string, message: string, fatal = false) => {
+          const line = `${(Date.now() / 1000).toFixed(3)} 546 1761 I ${tag}: ${message}\n`;
+          if (fatal) expectedEvents.push(line.trimEnd());
+          return line;
+        };
+        let events = '';
+        if (signal) {
+          const child = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:8';
+          events += native('ActivityManager', `Start proc 5835:${child}/u0a146i-9000 for service {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:8}`);
+          events += native('ActivityManager', `Killing 5835:${child}/u0a146i-9000 (adj 0): isolated not needed`, true);
+          events += native('Process', 'Sending signal. PID: 5835 SIG: 9', true);
+        }
+        if (stop) {
+          assert.equal(before.measurement?.processes['6538'], 'com.android.chrome');
+          events += native('ActivityManager', 'Force stopping com.android.chrome appid=10123 user=0: from pid 9864');
+          events += native('ActivityManager', 'Killing 6538:com.android.chrome/u0a123 (adj 0): stop com.android.chrome due to from pid 9864', true);
+        }
+        if (replacement) events += native('PackageManager', 'Replacing package com.android.chrome', true);
+        if (events) await appendFile(join(fixture.fixtureDirectory, 'native.log'), events);
+        if (components) {
+          const file = join(fixture.fixtureDirectory, 'valid-gms.dump');
+          const dump = await readFile(file, 'utf8');
+          assert.ok(dump.includes('Queries:'));
+          await writeFile(file, dump.replace('Queries:', '      enabledComponents:\n        com.google.android.gms.fixture.ComponentChanged\nQueries:'));
+        }
+        if (replacement) {
+          const file = join(fixture.fixtureDirectory, 'valid-chrome.dump');
+          const dump = await readFile(file, 'utf8');
+          await writeFile(file, dump.replace(/lastUpdateTime=[^\n]+/u, 'lastUpdateTime=2026-09-20 12:00:00'));
+        }
+        await platform.relaunchInstalledApp();
+        await platform.backgroundApp();
+        await platform.relaunchInstalledApp();
+        const candidate = await platform.readRunningIdentity();
+        assert.equal(candidate.version, '0.21.0');
+        assert.equal(candidate.assets, 380);
+        assert.equal(candidate.buildFromApplication, true);
+        owner();
+        assert.equal(platform.evidenceSnapshot().selectedInstalledWindow, window);
+        assert.equal(calls.filter(call => call.path === '/session').length, 1);
+        assert.equal(calls.filter(call => call.method === 'DELETE').length, 0);
+        assert.deepEqual(await operations(), []);
+        if (name === 'healthy-warm') await measurement.finish();
+        else await assert.rejects(() => measurement.finish(), /measurement failed/u);
+        const result = JSON.parse(await readFile(join(fixture.root, 'android-environment-check.json'), 'utf8'));
+        assert.equal(result.passed, name === 'healthy-warm');
+        assert.deepEqual(result.normalRetirements, []);
+        assert.deepEqual(result.boundaryDiscordances, []);
+        assert.ok((await readFile(join(fixture.root, 'android-qualification-logcat.log'), 'utf8')).includes(events));
+        assert.deepEqual(result.forcedRestartEvents, expectedEvents);
+        assert.deepEqual(result.nativeEvents.map((event: { line: string }) => event.line), expectedEvents);
+        assert.deepEqual(result.eventCounts, {
+          rawEvents: expectedEvents.length,
+          distinctDeathPids: Number(signal) + Number(stop),
+          fatalEvents: expectedEvents.length,
+          normalRetirementPids: 0,
+        });
+        assert.deepEqual(result.issues, [
+          ...(components ? [
+            'com.google.android.gms dependencyConfigSha256 changed',
+            'com.google.android.gms identitySha256 changed',
+            'com.google.android.gms dependency configuration changed',
+          ] : []),
+          ...(replacement ? ['com.android.chrome lastUpdateTime changed', 'com.android.chrome identitySha256 changed'] : []),
+          ...(expectedEvents.length ? ['native process death, dependency configuration change or package replacement was observed'] : []),
+        ]);
+        if (signal) assert.ok(result.forcedRestartEvents.some((line: string) => line.includes('5835 SIG: 9')));
+        if (stop) assert.ok(result.forcedRestartEvents.some((line: string) => line.includes('from pid 9864')));
+        if (stop) {
+          const stopped = result.nativeEvents.find((event: { initiatorPid?: string }) => event.initiatorPid === '9864');
+          assert.ok(stopped);
+          assert.equal(stopped.kind, 'process-death');
+          assert.equal(stopped.pid, '6538');
+          assert.equal(stopped.processName, 'com.android.chrome');
+          assert.equal(stopped.uid, 'u0a123');
+          assert.equal(stopped.reason, 'stop com.android.chrome due to from pid 9864');
+        }
+        if (components) {
+          assert.ok(result.issues.includes('com.google.android.gms dependency configuration changed'));
+          const after = JSON.parse(await readFile(join(fixture.root, 'android-environment-after.json'), 'utf8')) as AndroidEnvironmentSnapshot;
+          for (const key of ['versionCode', 'versionName', 'codePath', 'apkPaths', 'lastUpdateTime'] as const) {
+            assert.deepEqual(after.packages['com.google.android.gms'][key], before.packages['com.google.android.gms'][key]);
+          }
+        }
+        if (replacement) assert.ok(result.issues.some((issue: string) => /com.android.chrome.*changed/u.test(issue)));
+        assert.deepEqual(await operations(), []);
+        assert.equal(existsSync(join(fixture.root, 'android-environment-bootstrap-close.json')), false);
+        assert.doesNotMatch(await readFile(fixture.log, 'utf8'), /force-stop|disable-user|CLOSE_(?:BEGIN|END)/u);
       });
-      await driver.create({ capabilities: {} });
-      const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://fixture.test', outputDir: fixture.root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
-      const internals = platform as any;
-      internals.driver = driver;
-      internals.assertRetainedOwner = async () => undefined;
-      internals.assertRetainedSession = driver.retainSessionOwner();
-      driver.currentWindow = async () => 'original';
-      driver.currentUrl = async () => 'https://fixture.test/';
-      driver.windowHandles = async () => ['original'];
-      internals.waitForChromeShortcut = async () => ({});
-      internals.shortcutEvidence = () => ({});
-      internals.recordLaunchForeground = async () => undefined;
-      internals.launchChromeShortcut = async () => undefined;
-      internals.waitForInstalledTarget = async () => undefined;
-      internals.waitForChromeDevTools = async () => undefined;
-      internals.createChromeSession = async () => driver.create({ capabilities: {} });
-      internals.attachToInstalledView = async () => undefined;
-      platform.environmentMeasurement = measurement;
-      await platform.launchInstalledApp();
-      assert.equal(deletes, 0);
-      const path = join(fixture.root, 'android-environment-bootstrap-close.json');
-      await assert.rejects(() => readFile(path, 'utf8'), /ENOENT/u);
-      const observations = async () => (await readFile(fixture.log, 'utf8')).split('\n').filter(line => line.includes('shell ps -A -o PID,NAME') || /CLOSE_(?:BEGIN|END)/u.test(line));
-      const initialCommands = await observations();
-      assert.equal(initialCommands.filter(line => /CLOSE_(?:BEGIN|END)/u.test(line)).length, 0);
-      await platform.relaunchInstalledApp();
-      assert.equal(deletes, 1);
-      await assert.rejects(() => readFile(path, 'utf8'), /ENOENT/u);
-      assert.deepEqual(await observations(), initialCommands);
-      assert.deepEqual(JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8')), []);
-    } finally {
-      await measurement.finish().catch(() => undefined);
-      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-      Object.assign(process.env, saved);
+      console.log(`PASS SM56 environment ${name}`);
     }
   });
   const prepare = (fixture: Fixture) => cli(fixture, ['prepare', '--serial', 'emulator-5554', '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'), '--output', join(fixture.root, 'preparation.json'), '--adb-timeout-ms', '1000']);
@@ -975,16 +1046,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(baseline.measurement.processes['6700'], undefined);
       await state(fixture, { ...initial, children: { '6700': childName } });
       await assert.rejects(measurement.terminate(packageName, '7777'), /PID changed/u);
-      const driver = new AppiumClient('http://android-protocol.test', 30_000, async (input) => new Response(JSON.stringify({
-        value: new URL(String(input)).pathname === '/session' ? { sessionId: 'android-measurement' } : null,
-      }), { status: 200 }));
-      await driver.create({ capabilities: {} });
-      const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://android-protocol.test', outputDir: fixture.root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
-      (platform as any).driver = driver;
-      (platform as any).installedPackage = packageName;
-      platform.environmentMeasurement = measurement;
-      await platform.terminateInstalledApp();
-      await driver.close();
+      await measurement.terminate(packageName, packageName === 'com.android.chrome' ? '6538' : '6600');
       await measurement.finish();
       const check = JSON.parse(await readFile(join(fixture.root, 'android-environment-check.json'), 'utf8'));
       assert.equal(check.passed, true, JSON.stringify(check));

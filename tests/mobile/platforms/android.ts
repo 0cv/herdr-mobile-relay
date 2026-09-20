@@ -194,6 +194,7 @@ export class AndroidPlatform implements MobilePlatform {
   private readonly budget: PhaseBudget;
   private readonly diagnostics: DiagnosticRecorder;
   private startupLog?: AndroidStartupLog;
+  private setupAttempted = false;
   private installedPackage = '';
   private initialLaunchAttempted = false;
   private retainedOwner?: RetainedNativeIdentity & { driver: AppiumClient; assertSession: () => void };
@@ -205,6 +206,19 @@ export class AndroidPlatform implements MobilePlatform {
   private inspectedDocument = '';
   private inspectedNavigationId = '';
   private ownershipFailure?: QualificationFatalError;
+  private lifecycleFailure?: Error;
+  private lifecycleActive = false;
+  private lifecycleSettled?: Promise<void>;
+  private settleLifecycle?: () => void;
+  private ownedSessionClose?: Promise<void>;
+  private ownedResourcesStop?: Promise<void>;
+  private lifecycleBinding?: () => void;
+  private coldHandoff?: {
+    owner: NonNullable<AndroidPlatform['retainedOwner']>;
+    target: NonNullable<AndroidPlatform['installedTarget']>;
+    measurement: AndroidEnvironmentMeasurement;
+    measurementId: string;
+  };
   private lastIdentity?: RuntimeIdentity;
   private lastUrl = '';
   private keyboardDraft = '';
@@ -224,22 +238,48 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async startFreshDevice(): Promise<void> {
+    this.assertOwnershipClear();
+    if (this.setupAttempted || this.startupLog || this.retainedOwner || this.driver.snapshot().sessionId) {
+      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'fresh setup requires an unused platform');
+    }
+    this.beginLifecycle();
+    this.setupAttempted = true;
+    this.guardRetainedCommands();
+    try {
+      await this.prepareFreshDevice();
+      this.assertDriverClear();
+    } catch (error) {
+      this.failLifecycle(error);
+    } finally {
+      this.endLifecycle();
+    }
+  }
+
+  private async prepareFreshDevice(): Promise<void> {
     if (!/^emulator-\d+$/.test(this.serial)) throw new Error('ANDROID_TARGET: refusing a non-emulator or ambiguous device');
     await requireOwnedDevice('android', this.serial);
+    this.assertDriverClear();
     if (this.startupLog) throw new Error('ANDROID_TARGET: startup diagnostic already owned');
     this.startupLog = new AndroidStartupLog(this.outputDir);
     this.startupLog.start(this.serial);
     await this.startupLog.waitForHandshake();
+    this.assertDriverClear();
     const devices = await commandOutput(process.env.ADB || 'adb', ['devices']);
+    this.assertDriverClear();
     const matching = devices.split(/\r?\n/).filter((line) => line.startsWith(`${this.serial}\t`));
     if (matching.length !== 1 || !matching[0].endsWith('\tdevice')) throw new Error(`ANDROID_TARGET: ${this.serial} is not the only ready emulator`);
     const adb = process.env.ADB || 'adb';
     await command(adb, ['-s', this.serial, 'wait-for-device'], 60_000);
+    this.assertDriverClear();
     await command(adb, ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
+    this.assertDriverClear();
     await command(adb, ['-s', this.serial, 'shell', 'pm', 'clear', 'com.android.chrome']).catch(() => undefined);
+    this.assertDriverClear();
     const installedPackages = await commandOutput(adb, ['-s', this.serial, 'shell', 'pm', 'list', 'packages']);
+    this.assertDriverClear();
     for (const packageName of installedPackages.split(/\r?\n/u).map((line) => line.replace(/^package:/u, '').trim()).filter((value) => /webapk|herdr/iu.test(value))) {
       await command(adb, ['-s', this.serial, 'uninstall', packageName]).catch(() => undefined);
+      this.assertDriverClear();
     }
     // Install the user CA before starting Chrome. Chromium caches its platform
     // trust configuration during process startup, so installing it after a
@@ -260,9 +300,11 @@ export class AndroidPlatform implements MobilePlatform {
       },
       requestTimeoutMs: 60_000,
     });
+    this.assertDriverClear();
     await this.configureNativeSettings();
     await this.installCertificate();
-    await this.driver.close();
+    this.assertDriverClear();
+    await this.closeOwnedSession();
     await this.createChromeSession(false);
     await this.verifyFixtureEndpoint();
   }
@@ -325,6 +367,7 @@ export class AndroidPlatform implements MobilePlatform {
   async launchInstalledApp(): Promise<void> {
     this.assertOwnershipClear();
     if (this.initialLaunchAttempted) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'initial signed launch was already attempted');
+    this.beginLifecycle();
     this.initialLaunchAttempted = true;
     this.guardRetainedCommands();
     try {
@@ -338,44 +381,106 @@ export class AndroidPlatform implements MobilePlatform {
       if (!current || !handles.includes(current)) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'original current window is unavailable');
       const url = await this.driver.currentUrl();
       if (!url) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'original current document is unavailable');
-      await this.launchInstalledTarget(false);
+      await this.launchInstalledTarget('initial');
     } catch (error) {
-      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', error instanceof Error ? error.message : String(error));
+      this.failLifecycle(error);
+    } finally {
+      this.endLifecycle();
     }
   }
 
-  private async launchInstalledTarget(recreate: boolean): Promise<void> {
-    this.assertOwnershipClear();
+  private async launchInstalledTarget(mode: 'initial' | 'warm' | 'cold'): Promise<void> {
+    const selectionTail = mode === 'warm' ? 13_000 : 26_000;
+    const attachmentTail = (mode === 'cold' ? 70_000 + 20_000 : 0) + 5_000 + selectionTail;
+    const contextTail = mode === 'initial' ? 2_000 : 0;
+    const intentTail = 5_000 + 10_000 + 10_000 + attachmentTail;
+    this.requireLifecycleAllowance(30_000 + contextTail + 5_000 + 5_000 + 30_000 + intentTail);
     await requireOwnedDevice('android', this.serial);
-    this.selectedInstalledWindow = '';
-    this.selectedInstalledWindowValid = false;
-    const shortcut = await this.waitForChromeShortcut(30_000);
-    this.installedTarget = {
-      packageName: 'com.android.chrome',
-      activity: CHROME_WEBAPP_COMPONENT.split('/')[1],
-      shortcut,
-    };
+    this.requireLifecycleAllowance(30_000 + contextTail + 5_000 + 5_000 + 30_000 + intentTail);
+    const shortcut = await this.waitForChromeShortcut(30_000, contextTail + 5_000 + 5_000 + 30_000 + intentTail,
+      mode === 'initial' ? undefined : this.installedTarget?.shortcut);
+    this.requireLifecycleAllowance(5_000 + 5_000 + 30_000 + intentTail);
+    if (mode === 'initial') {
+      this.installedTarget = Object.freeze({
+        packageName: 'com.android.chrome',
+        activity: CHROME_WEBAPP_COMPONENT.split('/')[1],
+        shortcut: Object.freeze(shortcut),
+      });
+    }
     this.lastLaunch = { shortcut: this.shortcutEvidence(shortcut), transitions: [] };
     this.diagnostics.record({ phase: 'android-launch', operation: 'shortcut-observed', detail: this.lastLaunch.shortcut });
-    if (recreate) await this.driver.close();
-    else {
-      await this.assertRetainedOwner();
-      await this.driver.switchContext('NATIVE_APP');
+    if (mode === 'initial') {
+      this.requireLifecycleAllowance(2_000 + 5_000 + 5_000 + 30_000 + intentTail);
+      await this.driver.switchContext('NATIVE_APP', 2_000);
     }
     await this.recordLaunchForeground('before-command');
-    if (!recreate) await this.assertRetainedOwner();
+    this.requireLifecycleAllowance(5_000 + 30_000 + intentTail);
+    if (mode === 'cold') await this.assertChromeStopped();
+    else await this.assertRetainedOwner();
+    this.requireLifecycleAllowance(30_000 + intentTail);
+    await this.launchChromeShortcut(shortcut, intentTail);
+    this.requireLifecycleAllowance(intentTail);
+    await this.recordLaunchForeground('after-command');
+    this.requireLifecycleAllowance(10_000 + 10_000 + attachmentTail);
+    await this.waitForInstalledTarget(30_000, undefined, 10_000 + attachmentTail);
+    this.requireLifecycleAllowance(10_000 + attachmentTail);
+    await this.waitForChromeDevTools(30_000, attachmentTail);
+    this.requireLifecycleAllowance(attachmentTail);
+    if (mode === 'cold') await this.createChromeSession(true, 26_000);
+    else await this.assertRetainedOwner();
+    this.requireLifecycleAllowance(selectionTail);
+    await this.inspectInstalledView();
+    this.requireLifecycleAllowance(0);
+  }
+
+  private beginLifecycle(allowHandoff = false): void {
+    this.assertOwnershipClear();
+    if (this.lifecycleActive || (!allowHandoff && this.coldHandoff)) {
+      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'overlapping or incompatible installed lifecycle');
+    }
+    this.assertDriverClear();
+    this.lifecycleActive = true;
+    this.lifecycleSettled = new Promise(resolve => { this.settleLifecycle = resolve; });
+  }
+
+  private endLifecycle(): void {
+    this.lifecycleBinding = undefined;
+    this.lifecycleActive = false;
+    this.settleLifecycle?.();
+    this.settleLifecycle = undefined;
+    this.lifecycleSettled = undefined;
+  }
+
+  private assertDriverClear(): void {
+    this.assertOwnershipClear();
+    const snapshot = this.driver.snapshot();
+    if (snapshot.firstFatal || snapshot.unusable) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'driver has a terminal lifecycle failure');
+  }
+
+  private requireLifecycleAllowance(milliseconds: number): void {
+    this.assertDriverClear();
+    if (this.budget.exhausted || this.budget.remainingMs < milliseconds) {
+      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient installed lifecycle tail allowance');
+    }
+  }
+
+  private failLifecycle(error: unknown): never {
+    this.coldHandoff = undefined;
+    this.lifecycleFailure ||= this.ownershipFailure || (error instanceof Error ? error : new Error(String(error)));
+    throw this.lifecycleFailure;
+  }
+
+  private async assertChromeStopped(): Promise<void> {
+    this.requireLifecycleAllowance(5_000);
     try {
-      await this.launchChromeShortcut(shortcut);
+      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'pidof', 'com.android.chrome'], 5_000, { budget: this.budget });
     } catch (error) {
-      await this.recordLaunchForeground('after-command-failure');
+      this.assertDriverClear();
+      if (error instanceof CommandError && error.exitCode === 1 && !error.timedOut && !error.signal
+        && !error.stdout.trim() && !error.stderr.trim()) return;
       throw error;
     }
-    await this.recordLaunchForeground('after-command');
-    await this.waitForInstalledTarget(30_000);
-    await this.waitForChromeDevTools(30_000);
-    if (recreate) await this.createChromeSession(true);
-    else await this.assertRetainedOwner();
-    await this.attachToInstalledView();
+    this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'Chrome reappeared before the owned cold launch');
   }
 
   async assertStandalone(origin: string): Promise<RuntimeIdentity> {
@@ -430,6 +535,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private nativeTransactionAvailable(deadline: number, timeoutMs = ANDROID_NATIVE_LOOKUP_COMMAND_MS): boolean {
+    this.assertOwnershipClear();
     return Math.min(deadline - Date.now(), this.budget.remainingMs) >= timeoutMs;
   }
 
@@ -486,12 +592,16 @@ export class AndroidPlatform implements MobilePlatform {
     return false;
   }
 
-  private async launchChromeShortcut(shortcut?: AndroidChromeShortcut): Promise<CommandResult> {
-    const launchShortcut = shortcut || await this.waitForChromeShortcut(30_000);
+  private async launchChromeShortcut(shortcut?: AndroidChromeShortcut, reserveMs = 0): Promise<CommandResult> {
+    const launchShortcut = shortcut || await this.waitForChromeShortcut(30_000, reserveMs);
+    const phase = this.budget.phaseView('android-signed-intent', 30_000, reserveMs);
+    this.requireLifecycleAllowance(30_000 + reserveMs);
     const args = androidChromeShortcutArgs(this.serial, launchShortcut);
     try {
-      const result = await command(process.env.ADB || 'adb', args, 30_000);
-      if (!/^\s*Status:\s*ok\s*$/mu.test(result.stdout) || /(?:^|\n)\s*Error:/u.test(result.stdout)) {
+      const result = await command(process.env.ADB || 'adb', args, 30_000, { budget: phase });
+      phase.assertAvailable('signed intent settlement');
+      this.requireLifecycleAllowance(reserveMs);
+      if (result.stderr.trim() || !/^\s*Status:\s*ok\s*$/mu.test(result.stdout) || /(?:^|\n)\s*Error:/u.test(result.stdout)) {
         throw new Error('ANDROID_LAUNCH: signed launch did not report a successful status');
       }
       this.recordLaunchCommand('succeeded', result, launchShortcut);
@@ -558,7 +668,9 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async recordLaunchForeground(label: string): Promise<void> {
     try {
-      const evidence = await this.foregroundEvidence(5_000);
+      const evidence = await this.foregroundEvidence(5_000, this.budget);
+      this.assertOwnershipClear();
+      this.budget.assertAvailable('foreground settlement');
       const detail = {
         state: label,
         packageName: evidence.packageName,
@@ -578,16 +690,19 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  private async waitForChromeShortcut(timeoutMs: number): Promise<AndroidChromeShortcut> {
+  private async waitForChromeShortcut(timeoutMs: number, reserveMs = 0, expected?: AndroidChromeShortcut): Promise<AndroidChromeShortcut> {
     const adb = process.env.ADB || 'adb';
-    const deadline = Date.now() + timeoutMs;
+    const phase = this.budget.phaseView('android-shortcut', timeoutMs, reserveMs);
+    const deadline = Date.now() + phase.remainingMs;
     let lastError = 'Chrome did not publish a matching Herdr Relay ShortcutInfo';
     while (Date.now() < deadline) {
       try {
         const output = await commandOutput(adb, [
           '-s', this.serial, 'shell', 'cmd', 'shortcut', 'get-shortcuts',
           '--user', '0', '--flags', '15', 'com.android.chrome',
-        ], 30_000);
+        ], Math.min(30_000, phase.remainingMs), { budget: phase });
+        phase.assertAvailable('shortcut settlement');
+        this.assertOwnershipClear();
         const expectedOrigin = new URL(this.origin).origin;
         const shortcuts = parseAndroidChromeShortcuts(output).filter((candidate) => {
           const labels = [candidate.shortLabel, candidate.name];
@@ -613,13 +728,16 @@ export class AndroidPlatform implements MobilePlatform {
             || [shortcut.source, shortcut.displayMode, shortcut.orientation].some(value => value !== undefined && !/^-?\d+$/u.test(value))) {
             this.failOwnership('ANDROID_SHORTCUT', 'signed installed shortcut fields are invalid');
           }
+          if (expected && JSON.stringify(shortcut) !== JSON.stringify(expected)) this.failOwnership('ANDROID_SHORTCUT', 'signed installed shortcut identity changed');
           return shortcut;
         }
+        if (expected) this.failOwnership('ANDROID_SHORTCUT', 'retained signed installed shortcut is missing');
       } catch (error) {
-        if (isQualificationFatal(error)) throw error;
+        this.assertOwnershipClear();
+        if (expected || isQualificationFatal(error) || phase.exhausted) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      await delay(250, phase);
     }
     throw new Error(`ANDROID_SHORTCUT: ${lastError}`);
   }
@@ -663,6 +781,17 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async attachToInstalledView(timeoutMs = 30_000): Promise<void> {
+    this.beginLifecycle();
+    try {
+      await this.inspectInstalledView(timeoutMs);
+    } catch (error) {
+      this.failLifecycle(error);
+    } finally {
+      this.endLifecycle();
+    }
+  }
+
+  private async inspectInstalledView(timeoutMs = 30_000): Promise<void> {
     this.assertOwnershipClear();
     this.guardRetainedCommands();
     try {
@@ -703,6 +832,8 @@ export class AndroidPlatform implements MobilePlatform {
         return decoded;
       };
       const bindInstalledWindow = (decoded: ReturnType<typeof decodeRetainedInspection>): void => {
+        this.assertDriverClear();
+        phase.assertAvailable('retained selection settlement');
         const { after } = decoded.result;
         this.selectedInstalledWindow = decoded.result.selectedHandle;
         this.selectedInstalledWindowValid = true;
@@ -734,22 +865,36 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async readInstalledDocument<T>(script: string, deadline = Date.now() + 52_000): Promise<T> {
+    this.beginLifecycle();
+    try {
+      return await this.readInstalledDocumentWithinLifecycle<T>(script, deadline);
+    } catch (error) {
+      this.failLifecycle(error);
+    } finally {
+      this.endLifecycle();
+    }
+  }
+
+  private async readInstalledDocumentWithinLifecycle<T>(script: string, deadline: number): Promise<T> {
     const remaining = () => Math.min(deadline - Date.now(), this.budget.remainingMs);
     const initialInspection = this.selectedInstalledWindowValid ? 11_000 : 24_000;
     const context = this.driver.snapshot().selectedContext === 'CHROMIUM' ? 0 : 2_000;
     if (remaining() < initialInspection + context + 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient read and retained bounds allowance');
-    await this.attachToInstalledView(remaining() - 13_000);
+    await this.inspectInstalledView(remaining() - 13_000);
     const document = this.inspectedDocument;
     const commandMs = Math.min(30_000, remaining() - 11_000);
     if (commandMs < 2_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient read and retained postcheck allowance');
     const value = await this.driver.execute<T>(script, [], commandMs);
-    await this.attachToInstalledView(remaining());
+    this.assertDriverClear();
+    if (remaining() < 11_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient retained read postcheck allowance');
+    await this.inspectInstalledView(remaining());
     if (remaining() <= 0 || document !== this.inspectedDocument) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'read document changed or parent deadline expired');
     return value;
   }
 
   async readRunningIdentity(deadline?: number): Promise<RuntimeIdentity> {
     const identity = await this.readInstalledDocument<RuntimeIdentity>(runtimeScript(), deadline);
+    this.assertOwnershipClear();
     if (!identity || typeof identity !== 'object' || Array.isArray(identity) || identity.navigationId !== this.inspectedNavigationId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'runtime identity is missing or malformed');
     this.lastIdentity = {
       ...identity,
@@ -761,7 +906,9 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async readUpdateCompletion(deadline?: number): Promise<UpdateCompletionEvidence> {
-    this.lastCompletion = await this.readInstalledDocument<UpdateCompletionEvidence>(updateCompletionScript(true), deadline);
+    const completion = await this.readInstalledDocument<UpdateCompletionEvidence>(updateCompletionScript(true), deadline);
+    this.assertOwnershipClear();
+    this.lastCompletion = completion;
     if (!this.lastCompletion || typeof this.lastCompletion !== 'object' || Array.isArray(this.lastCompletion) || this.lastCompletion.navigationId !== this.inspectedNavigationId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'completion evidence is missing or malformed');
     return this.lastCompletion;
   }
@@ -799,41 +946,109 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async backgroundApp(): Promise<void> {
-    this.assertOwnershipClear();
-    await requireOwnedDevice('android', this.serial);
-    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-    });
-    await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
-    await delay(500);
+    this.beginLifecycle();
+    try {
+      this.requireLifecycleAllowance(5_000 + 2_000 + 30_000 + 500);
+      await requireOwnedDevice('android', this.serial);
+      await this.assertRetainedOwner();
+      this.requireLifecycleAllowance(2_000 + 30_000 + 500);
+      await this.driver.switchContext('NATIVE_APP', 2_000);
+      this.requireLifecycleAllowance(30_000 + 500);
+      await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], 30_000, { budget: this.budget });
+      this.requireLifecycleAllowance(500);
+      await delay(500, this.budget);
+      this.requireLifecycleAllowance(0);
+    } catch (error) {
+      this.failLifecycle(error);
+    } finally {
+      this.endLifecycle();
+    }
   }
 
   async relaunchInstalledApp(): Promise<void> {
-    this.assertOwnershipClear();
-    if (!this.selectedInstalledWindow && !this.installedTarget) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'explicit relaunch requires an installed lifecycle');
-    this.retainedOwner = undefined;
-    this.kernelReader = undefined;
-    this.kernelCapability = undefined;
+    this.beginLifecycle(true);
+    const handoff = this.coldHandoff;
+    this.coldHandoff = undefined;
     try {
-      await this.launchInstalledTarget(true);
+      if (!this.selectedInstalledWindow || !this.selectedInstalledWindowValid || !this.installedTarget) {
+        this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'explicit relaunch requires a selected installed lifecycle');
+      }
+      if (!handoff) {
+        await this.assertRetainedOwner();
+        await this.assertRetainedSelection();
+        await this.launchInstalledTarget('warm');
+        return;
+      }
+      if (handoff.owner !== this.retainedOwner || handoff.target !== this.installedTarget
+        || handoff.measurement !== this.environmentMeasurement || handoff.measurementId !== this.environmentMeasurement?.id) {
+        this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'owned cold handoff identity changed');
+      }
+      this.lifecycleBinding = () => {
+        if (handoff.target !== this.installedTarget || handoff.measurement !== this.environmentMeasurement
+          || handoff.measurementId !== handoff.measurement.id) {
+          this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'consumed cold handoff binding changed');
+        }
+      };
+      this.assertRetainedSession();
+      this.requireLifecycleAllowance(5_000 + 30_000 + 30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      await this.assertChromeStopped();
+      this.assertRetainedSession();
+      this.requireLifecycleAllowance(30_000 + 30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      await this.closeOwnedSession();
+      this.requireLifecycleAllowance(30_000 + 5_000 + 5_000 + 30_000 + 146_000);
+      if (this.retainedOwner !== handoff.owner) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'retired cold owner changed');
+      this.retainedOwner = undefined;
+      this.kernelReader = undefined;
+      this.kernelCapability = undefined;
+      this.selectedInstalledWindow = '';
+      this.selectedInstalledWindowValid = false;
+      await this.launchInstalledTarget('cold');
     } catch (error) {
-      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', error instanceof Error ? error.message : String(error));
+      this.failLifecycle(error);
+    } finally {
+      this.endLifecycle();
     }
   }
 
   async terminateInstalledApp(): Promise<void> {
-    this.assertOwnershipClear();
-    await requireOwnedDevice('android', this.serial);
-    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-    });
-    const foreground = await this.foregroundEvidence();
-    if (!this.environmentMeasurement || foreground.packageName !== this.installedPackage || !isAndroidTerminationPackage(foreground.packageName)
-      || !isAndroidPersistentWebAppActivity(foreground.activity) || !foreground.pid) {
-      throw new Error('ANDROID_TERMINATE: measured installed PWA process is not independently identified');
+    this.beginLifecycle();
+    try {
+      this.requireLifecycleAllowance(175_000);
+      await requireOwnedDevice('android', this.serial);
+      await this.assertRetainedOwner();
+      await this.inspectInstalledView();
+      this.requireLifecycleAllowance(157_000);
+      await this.driver.switchContext('NATIVE_APP', 2_000);
+      this.requireLifecycleAllowance(155_000);
+      const foreground = await this.foregroundEvidence(5_000, this.budget);
+      this.requireLifecycleAllowance(150_000);
+      const owner = this.retainedOwner!;
+      const target = this.installedTarget!;
+      const measurement = this.environmentMeasurement;
+      if (!measurement || foreground.packageName !== this.installedPackage || !isAndroidTerminationPackage(foreground.packageName)
+        || !isAndroidPersistentWebAppActivity(foreground.activity) || foreground.pid !== owner.pid) {
+        throw new Error('ANDROID_TERMINATE: measured installed PWA process is not independently identified');
+      }
+      const measurementId = measurement.id;
+      this.lifecycleBinding = () => {
+        if (owner !== this.retainedOwner || target !== this.installedTarget || measurement !== this.environmentMeasurement || measurementId !== measurement.id) {
+          this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'termination owner or measurement changed');
+        }
+      };
+      this.assertRetainedSession();
+      await measurement.terminate(foreground.packageName, foreground.pid);
+      this.requireLifecycleAllowance(30_000);
+      this.assertRetainedSession();
+      const home = await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME'], 30_000, { budget: this.budget });
+      this.requireLifecycleAllowance(0);
+      if (home.stdout.trim() || home.stderr.trim()) throw new Error('ANDROID_TERMINATE: HOME returned unexpected output');
+      this.assertRetainedSession();
+      this.coldHandoff = Object.freeze({ owner, target, measurement, measurementId });
+    } catch (error) {
+      this.failLifecycle(error);
+    } finally {
+      this.endLifecycle();
     }
-    await this.environmentMeasurement.terminate(foreground.packageName, foreground.pid);
-    await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
   }
 
   private async mutateInstalledDocument(operation: () => Promise<unknown>, deadline: number): Promise<void> {
@@ -1037,10 +1252,26 @@ export class AndroidPlatform implements MobilePlatform {
     };
   }
 
-  async stopOwnedResources(): Promise<void> {
+  stopOwnedResources(): Promise<void> {
+    if (this.ownedResourcesStop) return this.ownedResourcesStop;
+    this.coldHandoff = undefined;
+    this.selectedInstalledWindowValid = false;
+    this.lifecycleFailure ||= this.ownershipFailure || qualificationFatal('ANDROID_CONTEXT_OWNERSHIP', 'installed lifecycle stopped', 'ownership');
+    this.ownedResourcesStop = this.finishOwnedResources();
+    return this.ownedResourcesStop;
+  }
+
+  private closeOwnedSession(): Promise<void> {
+    if (!this.ownedSessionClose && !this.driver.snapshot().sessionId) return this.driver.close();
+    this.ownedSessionClose ||= this.driver.close();
+    return this.ownedSessionClose;
+  }
+
+  private async finishOwnedResources(): Promise<void> {
+    await this.lifecycleSettled;
     let closeError: unknown;
     try {
-      await this.driver.close();
+      await this.closeOwnedSession();
     } catch (error) { closeError = error; }
     try {
       await this.startupLog?.finish();
@@ -1051,17 +1282,27 @@ export class AndroidPlatform implements MobilePlatform {
     if (closeError) throw closeError;
   }
 
-  private async createChromeSession(attachToRunningApp: boolean): Promise<void> {
+  private async createChromeSession(attachToRunningApp: boolean, reserveMs = 0): Promise<void> {
+    this.assertDriverClear();
+    if (reserveMs) this.requireLifecycleAllowance(70_000 + 20_000 + 5_000 + reserveMs);
     if (this.budget.remainingMs < 70_000) throw new Error('ANDROID_SESSION: insufficient parent allowance including retained producer startup');
+    if (this.driver.snapshot().sessionId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'previous session was not retired before creation');
+    this.ownedSessionClose = undefined;
     await this.driver.create({
       capabilities: androidChromeCapabilities(this.serial, attachToRunningApp),
       requestTimeoutMs: 70_000,
       budget: this.budget,
     });
-    await this.configureNativeSettings();
+    this.assertDriverClear();
+    if (reserveMs) this.requireLifecycleAllowance(20_000 + 5_000 + reserveMs);
+    await this.configureNativeSettings(reserveMs + (reserveMs ? 5_000 : 0));
+    this.assertDriverClear();
+    if (reserveMs) this.requireLifecycleAllowance(5_000 + reserveMs);
     const assertSession = this.driver.retainSessionOwner();
     try {
       const process = await this.readChromeProcess();
+      this.assertDriverClear();
+      if (reserveMs) this.requireLifecycleAllowance(reserveMs);
       assertSession();
       this.retainedOwner = { driver: this.driver, assertSession, ...process };
     } catch (error) { this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', String(error)); }
@@ -1071,7 +1312,11 @@ export class AndroidPlatform implements MobilePlatform {
     this.assertOwnershipClear();
     const observationStartedAt = new Date().toISOString();
     const deadline = Date.now() + Math.min(5_000, budget.remainingMs);
-    const check = () => { this.assertOwnershipClear(); budget.assertAvailable('native process observation'); };
+    const check = () => {
+      this.assertOwnershipClear();
+      budget.assertAvailable('native process observation');
+      if (Date.now() >= deadline) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'native process observation expired');
+    };
     this.kernelReader ||= createAdbInspection({curDeviceId: this.serial, executable: {defaultArgs: ['-P', '5037', '-s', this.serial]}}, () => this.assertOwnershipClear(), error => {
       this.ownershipFailure ||= qualificationFatal('ANDROID_CONTEXT_OWNERSHIP', error.message, 'ownership');
       return this.ownershipFailure;
@@ -1122,6 +1367,21 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
+  private async assertRetainedSelection(): Promise<void> {
+    this.requireLifecycleAllowance(6_000);
+    this.assertRetainedSession();
+    if (this.driver.snapshot().selectedContext !== 'CHROMIUM') await this.driver.switchContext('CHROMIUM', 2_000);
+    this.requireLifecycleAllowance(4_000);
+    const current = await this.driver.currentWindow(2_000);
+    this.requireLifecycleAllowance(2_000);
+    const handles = await this.driver.windowHandles(2_000);
+    this.requireLifecycleAllowance(0);
+    this.assertRetainedSession();
+    if (!this.selectedInstalledWindowValid || current !== this.selectedInstalledWindow || !handles.includes(current)) {
+      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'original installed selection is unavailable');
+    }
+  }
+
   private async assertRetainedOwner(budget = this.budget): Promise<void> {
     this.assertOwnershipClear();
     const owner = this.retainedOwner;
@@ -1138,7 +1398,8 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  private async configureNativeSettings(): Promise<void> {
+  private async configureNativeSettings(reserveMs = 0): Promise<void> {
+    if (reserveMs) this.requireLifecycleAllowance(20_000 + reserveMs);
     const timeoutMs = Math.min(10_000, this.budget.remainingMs);
     if (timeoutMs < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to configure native settings');
     const requested = {
@@ -1146,9 +1407,12 @@ export class AndroidPlatform implements MobilePlatform {
       waitForSelectorTimeout: ANDROID_NATIVE_SELECTOR_TIMEOUT_MS,
     };
     await this.driver.updateSettings(requested, timeoutMs);
+    if (reserveMs) this.requireLifecycleAllowance(10_000 + reserveMs);
     const readbackTimeout = Math.min(timeoutMs, this.budget.remainingMs);
     if (readbackTimeout < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to read back native settings');
     const response = await this.driver.settings(readbackTimeout);
+    this.assertOwnershipClear();
+    if (reserveMs) this.requireLifecycleAllowance(reserveMs);
     const observed = response.settings && typeof response.settings === 'object'
       ? response.settings as Record<string, unknown>
       : response;
@@ -1162,8 +1426,8 @@ export class AndroidPlatform implements MobilePlatform {
     };
   }
 
-  private async waitForChromeDevTools(timeoutMs: number): Promise<void> {
-    const phase = this.budget.phaseView('android-devtools', timeoutMs);
+  private async waitForChromeDevTools(timeoutMs: number, reserveMs = 0): Promise<void> {
+    const phase = this.budget.phaseView('android-devtools', timeoutMs, reserveMs);
     const adb = process.env.ADB || 'adb';
     let last = '';
     while (!phase.exhausted) {
@@ -1174,9 +1438,13 @@ export class AndroidPlatform implements MobilePlatform {
           budget: phase,
           label: 'discover Chrome DevTools socket',
         });
+        phase.assertAvailable('DevTools settlement');
+        this.assertDriverClear();
         if (hasAndroidChromeDevToolsSocket(sockets)) return;
         last = 'chrome_devtools_remote socket is not published';
       } catch (error) {
+        this.assertOwnershipClear();
+        if (phase.exhausted || isFatalDriverError(error)) throw error;
         if (this.retainedOwner) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', String(error));
         last = error instanceof Error ? error.message : String(error);
       }
@@ -1185,28 +1453,44 @@ export class AndroidPlatform implements MobilePlatform {
     throw new Error(`ANDROID_CONTEXT: Chrome DevTools was not ready (${last})`);
   }
 
+  private async certificateCommand(args: string[]): Promise<CommandResult> {
+    this.assertDriverClear();
+    try {
+      const result = await command(process.env.ADB || 'adb', args, 30_000);
+      this.assertDriverClear();
+      return result;
+    } catch (error) {
+      this.assertDriverClear();
+      throw error;
+    }
+  }
+
   private async installCertificate(): Promise<void> {
-    const adb = process.env.ADB || 'adb';
+    this.assertDriverClear();
     const remote = '/sdcard/Download/herdr-mobile-ci-ca.crt';
     const remoteName = basename(remote);
     const commonName = await this.certificateCommonName();
 
-    await command(adb, ['-s', this.serial, 'push', this.options.certificate, remote], 30_000);
+    this.assertDriverClear();
+    await this.certificateCommand(['-s', this.serial, 'push', this.options.certificate, remote]);
     // adb push does not update MediaProvider, so DocumentsUI may omit the
     // freshly copied file from Downloads until the exact path is scanned.
-    await command(adb, [
+    await this.certificateCommand([
       '-s', this.serial, 'shell', 'content', 'call', '--uri', 'content://media',
       '--method', 'scan_file', '--arg', remote,
-    ], 30_000).catch(async () => {
-      await command(adb, [
+    ]).catch(async () => {
+      this.assertDriverClear();
+      await this.certificateCommand([
         '-s', this.serial, 'shell', 'am', 'broadcast', '--receiver-include-background',
         '-a', 'android.intent.action.MEDIA_SCANNER_SCAN_FILE', '-d', `file://${remote}`,
-      ], 30_000).catch(() => undefined);
+      ]).catch(() => { this.assertDriverClear(); });
     });
+    this.assertDriverClear();
     await delay(500);
-    await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.google.android.documentsui']).catch(() => undefined);
-    await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.android.settings']);
-    await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.MORE_SECURITY_PRIVACY_SETTINGS'], 30_000);
+    this.assertDriverClear();
+    await this.certificateCommand(['-s', this.serial, 'shell', 'am', 'force-stop', 'com.google.android.documentsui']).catch(() => { this.assertDriverClear(); });
+    await this.certificateCommand(['-s', this.serial, 'shell', 'am', 'force-stop', 'com.android.settings']);
+    await this.certificateCommand(['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.MORE_SECURITY_PRIVACY_SETTINGS']);
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
@@ -1247,9 +1531,11 @@ export class AndroidPlatform implements MobilePlatform {
       accessibility(remoteName),
       androidTextLocator(remoteName),
     ], remoteName);
+    this.assertDriverClear();
     await delay(1_000);
+    this.assertDriverClear();
     await this.verifyCertificate(remoteName, commonName);
-    await command(adb, ['-s', this.serial, 'shell', 'rm', '-f', remote], 30_000);
+    await this.certificateCommand(['-s', this.serial, 'shell', 'rm', '-f', remote]);
   }
 
   private async openCertificatePicker(timeoutMs = 30_000): Promise<void> {
@@ -1309,6 +1595,7 @@ export class AndroidPlatform implements MobilePlatform {
         if (/More security|Security & privacy/iu.test(source)) return;
         last = 'Settings activity hierarchy did not expose its landing page';
       } catch (error) {
+        this.assertOwnershipClear();
         if (isFatalDriverError(error)) throw error;
         last = error instanceof Error ? error.message : String(error);
       }
@@ -1325,6 +1612,7 @@ export class AndroidPlatform implements MobilePlatform {
       try {
         await action();
       } catch (error) {
+        this.assertOwnershipClear();
         if (isFatalDriverError(error)) {
           await this.captureNativeSettingsAdbEvidence(name);
           throw error;
@@ -1355,10 +1643,13 @@ export class AndroidPlatform implements MobilePlatform {
         ['window-adb', ['-s', this.serial, 'shell', 'dumpsys', 'window', 'windows']],
       ];
       for (const [suffix, args] of captures) {
+        this.assertOwnershipClear();
         const output = await commandOutput(adb, args, 10_000).catch((error) => error instanceof Error ? error.message : String(error));
+        this.assertOwnershipClear();
         await writeBoundedText(join(this.outputDir, `${name}-${suffix}.log`), output);
       }
     } catch (error) {
+      this.assertOwnershipClear();
       this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-adb-evidence', detail: error instanceof Error ? error.message : String(error) });
     }
   }
@@ -1476,20 +1767,25 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async certificateCommonName(): Promise<string> {
-    const certificate = new X509Certificate(await readFile(this.options.certificate));
+    this.assertDriverClear();
+    const bytes = await readFile(this.options.certificate);
+    this.assertDriverClear();
+    const certificate = new X509Certificate(bytes);
     const commonName = certificate.subject.match(/CN\s*=\s*([^,\n/]+)/u)?.[1]?.trim();
     if (!commonName) throw new Error('ANDROID_CERTIFICATE: supplied certificate has no common name');
     return commonName;
   }
 
   private async verifyCertificate(certificateName: string, commonName: string): Promise<void> {
-    const adb = process.env.ADB || 'adb';
-    await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.TRUSTED_CREDENTIALS_USER'], 30_000);
+    this.assertDriverClear();
+    await this.certificateCommand(['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.TRUSTED_CREDENTIALS_USER']);
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
     await this.waitForForegroundPackage('com.android.settings');
+    this.assertDriverClear();
     await delay(500);
+    this.assertDriverClear();
     const nameWithoutExtension = certificateName.replace(/\.[^.]+$/u, '');
     await this.driver.findAny([
       accessibility(commonName),
@@ -1561,10 +1857,12 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async foregroundEvidence(timeoutMs = 10_000, budget?: PhaseBudget): Promise<{ packageName: string; activity: string; focusedPackage: string; focusedActivity: string; pid: string; raw: string }> {
+    this.assertOwnershipClear();
     const output = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities'], timeoutMs, {
       budget,
       label: 'read Android foreground activity',
     });
+    this.assertOwnershipClear();
     const component = output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)/u);
     const packageName = component?.[1] || '';
     const processLine = packageName
@@ -1581,14 +1879,16 @@ export class AndroidPlatform implements MobilePlatform {
     };
   }
 
-  private async waitForInstalledTarget(timeoutMs: number, launchError?: unknown): Promise<void> {
-    const phase = this.budget.phaseView('android-launch-proof', timeoutMs);
+  private async waitForInstalledTarget(timeoutMs: number, launchError?: unknown, reserveMs = 0): Promise<void> {
+    const phase = this.budget.phaseView('android-launch-proof', timeoutMs, reserveMs);
     let last = launchError instanceof Error ? launchError.message : '';
     while (!phase.exhausted) {
       phase.assertAvailable('verify installed launch');
       try {
         if (this.retainedOwner) await this.assertRetainedOwner(phase);
         const evidence = await this.foregroundEvidence(Math.min(5_000, phase.remainingMs), phase);
+        phase.assertAvailable('installed foreground settlement');
+        this.assertDriverClear();
         this.lastForeground = evidence;
         last = `${evidence.packageName}/${evidence.activity} pid=${evidence.pid}`;
         this.diagnostics.record({ phase: 'android-launch-proof', operation: 'foreground-observation', detail: { packageName: evidence.packageName, activity: evidence.activity, pid: evidence.pid } });
@@ -1634,10 +1934,14 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private assertOwnershipClear(): void {
+    if (this.lifecycleFailure) throw this.lifecycleFailure;
     if (this.ownershipFailure) throw this.ownershipFailure;
+    this.lifecycleBinding?.();
   }
 
   private failOwnership(code: string, detail: string): never {
+    this.coldHandoff = undefined;
+    if (this.lifecycleFailure) throw this.lifecycleFailure;
     this.ownershipFailure ||= qualificationFatal(code, detail, 'ownership');
     throw this.ownershipFailure;
   }
