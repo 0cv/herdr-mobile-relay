@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -155,6 +156,138 @@ func scanCursorSkillDirBudget(dir, source string, budget *int) ([]Command, bool)
 	return commands, truncated
 }
 
+// projectAncestors returns the ancestor directories Cursor searches for
+// workspace-scoped config, from the repository root down to cwd, or from the
+// filesystem root when cwd is not in a repository. Cursor passes every
+// workspace folder to its loader, so a nested cwd sees outer workspace roots
+// as well.
+func projectAncestors(cwd string) []string {
+	if cwd == "" {
+		return nil
+	}
+	stop := findGitRoot(cwd)
+	if stop == "" {
+		stop = filepath.VolumeName(cwd) + string(filepath.Separator)
+	}
+	var reversed []string
+	dir := cwd
+	for range maxGitWalkDepth {
+		reversed = append(reversed, dir)
+		if dir == stop {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	ancestors := make([]string, 0, len(reversed))
+	for i := len(reversed) - 1; i >= 0; i-- {
+		ancestors = append(ancestors, reversed[i])
+	}
+	return ancestors
+}
+
+// uniqueCommandName mirrors Cursor's getSkillIdForPath collision handling: the
+// first use of a name keeps it, and each later duplicate gains a -2, -3 ...
+// suffix. Cursor lists both skills rather than letting one replace the other,
+// so the palette does the same.
+func uniqueCommandName(name string, taken map[string]bool) string {
+	if !taken[name] {
+		taken[name] = true
+		return name
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("%s-%d", name, suffix)
+		if !taken[candidate] {
+			taken[candidate] = true
+			return candidate
+		}
+	}
+}
+
+// projectCommandRoots returns every ancestor's flat command directories in the
+// order Cursor reads them for a workspace: outer scopes first, so the nearest
+// workspace wins a name collision the same way a later root does.
+func projectCommandRoots(cwd string) []string {
+	var roots []string
+	for _, ancestor := range projectAncestors(cwd) {
+		roots = append(roots, cursorCommandRoots(ancestor)...)
+	}
+	return roots
+}
+
+// cursorCommandRoots reports the flat *.md command directories Cursor reads for
+// one scope. Unlike skills these are not nested a directory per command: the
+// id is the filename without its .md suffix, and Cursor does not recurse.
+//
+// Both trees are read at each scope. Cursor registers them in this order
+// within a scope and loadCommandsFromDirectory assigns each id unconditionally,
+// so the later .cursor tree wins a name collision. The .claude tree is in
+// Cursor's own read path, not something HeRDR adds.
+func cursorCommandRoots(dir string) []string {
+	return []string{
+		filepath.Join(dir, ".claude", "commands"),
+		filepath.Join(dir, ".cursor", "commands"),
+	}
+}
+
+// scanCursorCommandDirBudget scans dir for flat *.md command files and names
+// each command after the file. It walks the top level only, matching Cursor,
+// and skips anything that is not a regular file: a FIFO or socket named *.md
+// would block fileFrontmatter forever.
+func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, bool) {
+	if dir == "" || *budget <= 0 {
+		return nil, *budget <= 0
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, false
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		left, right := strings.ToLower(entries[i].Name()), strings.ToLower(entries[j].Name())
+		if left == right {
+			return entries[i].Name() < entries[j].Name()
+		}
+		return left < right
+	})
+	var commands []Command
+	seen := make(map[string]bool, len(entries))
+	truncated := false
+	for _, entry := range entries {
+		if *budget <= 0 {
+			truncated = true
+			break
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		cmdName := strings.TrimSuffix(name, ".md")
+		if !commandNamePattern.MatchString(cmdName) || seen[cmdName] {
+			continue
+		}
+		seen[cmdName] = true
+		*budget--
+		path := filepath.Join(dir, name)
+		fm := fileFrontmatter(path)
+		if isHidden(fm) || !userInvocable(fm) {
+			continue
+		}
+		commands = append(commands, Command{
+			Command:      "/" + cmdName,
+			Description:  descriptionFrom(fm, path),
+			Source:       source,
+			ArgumentHint: compact(fm["argument-hint"], 120),
+		})
+	}
+	return commands, truncated
+}
+
 func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(cursorBuiltins))
@@ -164,44 +297,76 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	budget := maxCustomFiles
 	truncated := false
-	active := make(map[string]Command, len(cursorBuiltins))
 	order := make([]string, 0, len(cursorBuiltins))
-	apply := func(commands []Command) {
-		for _, command := range commands {
-			if _, exists := active[command.Command]; !exists {
-				order = append(order, command.Command)
-			}
-			active[command.Command] = command
+	active := make(map[string]Command, len(cursorBuiltins))
+	add := func(command Command) {
+		if _, exists := active[command.Command]; !exists {
+			order = append(order, command.Command)
 		}
+		active[command.Command] = command
 	}
 
-	// Precedence follows the Claude provider: a personal skill wins over a
-	// project skill of the same name, because personal roots are applied last.
-	// Cursor's loader sets each skill by id as it walks its roots, so the last
-	// root to define a name is what its palette resolves; this repo's Claude
-	// provider documents the same personal-over-project rule, and matching it
-	// keeps one mental model for both. Builtins are applied first so any skill
-	// of the same name overrides them.
-	apply(cursorBuiltins)
-
-	if ctx.Cwd != "" {
-		for _, dir := range findProjectDirs(ctx.Cwd, []string{".cursor", ".agents"}) {
-			skillsDir := filepath.Join(dir, "skills")
-			cmds, trunc := scanCursorSkillDirBudget(skillsDir, "project", &budget)
-			apply(cmds)
-			truncated = truncated || trunc
-		}
+	// Cursor resolves its builtins from a reserved registry rather than the
+	// markdown command map, so a file reusing a builtin name would otherwise
+	// publish a command the pane does not run. Reserve those names: a colliding
+	// file is suffixed beside the builtin.
+	reserved := make(map[string]bool, len(cursorBuiltins))
+	for _, builtin := range cursorBuiltins {
+		reserved[builtin.Command] = true
+		add(builtin)
 	}
 
-	for _, root := range cursorSkillRoots(ctx.Home) {
-		cmds, trunc := scanCursorSkillDirBudget(root, "personal", &budget)
-		apply(cmds)
+	// Cursor's command map assigns ids unconditionally
+	// (loadCommandsFromDirectory calls commands.set for every file), so a later
+	// root replaces an earlier one of the same name. The user roots load last,
+	// so a personal command file wins over a workspace file of the same name.
+	scanCommands := func(root, source string) {
+		cmds, trunc := scanCursorCommandDirBudget(root, source, &budget)
 		truncated = truncated || trunc
+		for _, command := range cmds {
+			if reserved[command.Command] {
+				command.Command = uniqueCommandName(command.Command, reserved)
+			}
+			add(command)
+		}
+	}
+	for _, root := range projectCommandRoots(ctx.Cwd) {
+		scanCommands(root, "project")
+	}
+	for _, root := range cursorCommandRoots(ctx.Home) {
+		scanCommands(root, "personal")
 	}
 
-	// Additional configured skill dirs from agent-profiles.ini. Cursor has no
-	// project command tree of its own, so this stays the documented escape
-	// hatch for pointing the palette at a directory outside the roots above.
+	// Skills collide differently. getSkillIdForPath keeps a set of ids already
+	// handed out and appends -2, -3 ... to a later duplicate, so one folder name
+	// under two roots lists both entries instead of one replacing the other.
+	// Personal roots load first, matching Cursor's loadSkillRoots order, so the
+	// personal entry keeps the bare name.
+	taken := make(map[string]bool, len(active))
+	for name := range active {
+		taken[name] = true
+	}
+	scanSkills := func(root, source string) {
+		cmds, trunc := scanCursorSkillDirBudget(root, source, &budget)
+		truncated = truncated || trunc
+		for _, command := range cmds {
+			command.Command = uniqueCommandName(command.Command, taken)
+			add(command)
+		}
+	}
+	for _, root := range cursorSkillRoots(ctx.Home) {
+		scanSkills(root, "personal")
+	}
+	for _, ancestor := range projectAncestors(ctx.Cwd) {
+		for _, stem := range []string{".cursor", ".agents"} {
+			scanSkills(filepath.Join(ancestor, stem, "skills"), "project")
+		}
+	}
+
+	// Additional configured skill dirs from agent-profiles.ini. Cursor's own
+	// command tree has no configured analogue, so this stays the documented
+	// escape hatch for pointing the palette at a directory outside the roots
+	// above.
 	if len(ctx.SkillDirs) > 0 {
 		format := ctx.CommandFormat
 		if format == "" {

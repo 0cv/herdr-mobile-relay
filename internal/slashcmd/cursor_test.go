@@ -3,7 +3,9 @@ package slashcmd
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // cursorSkill writes <dir>/<folder>/SKILL.md. The frontmatter name is
@@ -73,9 +75,12 @@ func TestCursorIgnoresReservedInternalRoots(t *testing.T) {
 	}
 }
 
-// A personal skill wins over a project skill of the same folder name, matching
-// the Claude provider's documented precedence.
-func TestCursorPersonalSkillOverridesProject(t *testing.T) {
+// Cursor's loadSkillRoots receives the personal root before the workspace
+// roots, and skills.set assigns ids unconditionally, so a project skill of the
+// same folder name would replace a personal one. getSkillIdForPath instead
+// hands each duplicate a -2 suffix, so Cursor lists both. The palette matches:
+// both are published and the personal entry keeps the bare name.
+func TestCursorSkillNameCollisionListsBoth(t *testing.T) {
 	home := t.TempDir()
 	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "review", "review", "Personal review")
 
@@ -84,9 +89,17 @@ func TestCursorPersonalSkillOverridesProject(t *testing.T) {
 	cursorSkill(t, filepath.Join(repo, ".cursor", "skills"), "review", "review", "Project review")
 
 	catalog := cursorCatalog(t, repo, home)
-	got := commandSource(catalog, "/review")
-	if got != "personal" {
-		t.Errorf("/review source = %q, want personal", got)
+	if !containsCommand(catalog, "/review") {
+		t.Errorf("personal skill missing; catalog=%v", commandNames(catalog))
+	}
+	if !containsCommand(catalog, "/review-2") {
+		t.Errorf("project duplicate should be suffixed, not dropped; catalog=%v", commandNames(catalog))
+	}
+	if got := commandSource(catalog, "/review"); got != "personal" {
+		t.Errorf("/review source = %q, want personal (personal roots load first)", got)
+	}
+	if got := commandSource(catalog, "/review-2"); got != "project" {
+		t.Errorf("/review-2 source = %q, want project", got)
 	}
 }
 
@@ -102,18 +115,76 @@ func TestCursorDiscoversProjectSkill(t *testing.T) {
 	}
 }
 
-// A builtin must survive even when a personal skill shares its name, and must
-// come first because builtins are applied before the skill roots.
-func TestCursorBuiltinsSurviveSkillCollision(t *testing.T) {
+// A user command file wins over a workspace file of the same name: Cursor
+// loads the workspace roots first and the user roots last, and
+// loadCommandsFromDirectory assigns each id unconditionally.
+func TestCursorUserCommandBeatsWorkspaceCommand(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
+	writeFile(t, filepath.Join(repo, ".cursor", "commands", "deploy.md"), "# Repo deploy\n")
+	writeFile(t, filepath.Join(home, ".cursor", "commands", "deploy.md"), "# Personal deploy\n")
+
+	catalog := cursorCatalog(t, repo, home)
+	if got := commandSource(catalog, "/deploy"); got != "personal" {
+		t.Errorf("/deploy source = %q, want personal to win the collision", got)
+	}
+	if containsCommand(catalog, "/project-deploy") {
+		t.Error("command files are not prefixed by scope")
+	}
+}
+
+// Commands live as flat *.md files named after the command, in both the .cursor
+// and .claude trees Cursor reads, at workspace and user scope.
+func TestCursorReadsCommandFiles(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
+	writeFile(t, filepath.Join(repo, ".cursor", "commands", "ship.md"), "# Ship it\n")
+	writeFile(t, filepath.Join(repo, ".claude", "commands", "audit.md"), "# Audit it\n")
+	writeFile(t, filepath.Join(home, ".cursor", "commands", "personal.md"), "# Personal\n")
+	writeFile(t, filepath.Join(home, ".claude", "commands", "claudeuser.md"), "# Claude user\n")
+
+	catalog := cursorCatalog(t, repo, home)
+	for _, name := range []string{"/ship", "/audit", "/personal", "/claudeuser"} {
+		if !containsCommand(catalog, name) {
+			t.Errorf("%s missing; catalog=%v", name, commandNames(catalog))
+		}
+	}
+}
+
+// A builtin keeps its reserved name and a colliding user file is suffixed beside
+// it: Cursor resolves builtins from its own registry, so publishing the file
+// under that name would offer the phone a command the pane does not run.
+func TestCursorUserFileCannotTakeBuiltinName(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".cursor", "commands", "clear.md"), "# My clear\n")
+
+	catalog := cursorCatalog(t, t.TempDir(), home)
+	if !containsCommand(catalog, "/clear") {
+		t.Errorf("/clear missing; catalog=%v", commandNames(catalog))
+	}
+	if got := commandSource(catalog, "/clear"); got != "builtin" {
+		t.Errorf("/clear source = %q, want the builtin to keep its reserved name", got)
+	}
+	if !containsCommand(catalog, "/clear-2") {
+		t.Errorf("colliding file should be suffixed; catalog=%v", commandNames(catalog))
+	}
+}
+
+// A skill named after a builtin is published beside it rather than replacing it:
+// Cursor suffixes the later duplicate, and builtins register last here so the
+// reserved command keeps its name.
+func TestCursorBuiltinSurvivesSkillCollision(t *testing.T) {
 	home := t.TempDir()
 	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "help", "help", "A skill named help")
 
 	catalog := cursorCatalog(t, t.TempDir(), home)
-	if got := commandSource(catalog, "/help"); got != "personal" {
-		t.Errorf("/help source = %q, want the personal skill to win", got)
+	if got := commandSource(catalog, "/help"); got != "builtin" {
+		t.Errorf("/help source = %q, want the builtin to keep the name", got)
 	}
-	if len(catalog.Commands) == 0 || catalog.Commands[0].Command != "/add-dir" {
-		t.Errorf("builtins should still lead the catalog, got %v", commandNames(catalog)[:1])
+	if !containsCommand(catalog, "/help-2") {
+		t.Errorf("skill should be suffixed beside the builtin; catalog=%v", commandNames(catalog))
 	}
 }
 
@@ -192,6 +263,32 @@ func TestCursorHonorsConfiguredSkillDirs(t *testing.T) {
 	)
 	if !containsCommand(catalog, "/custom-command") {
 		t.Errorf("configured skill dir ignored; catalog=%v", commandNames(catalog))
+	}
+}
+
+// A non-regular *.md entry is skipped rather than read: fileFrontmatter would
+// block forever on a FIFO with no writer, in a service that polls.
+func TestCursorSkipsNonRegularCommandFile(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".cursor", "commands")
+	mkdirAll(t, dir)
+	writeFile(t, filepath.Join(dir, "real.md"), "# Real\n")
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe.md"), 0o600); err != nil {
+		t.Skipf("fifo unavailable: %v", err)
+	}
+
+	done := make(chan Catalog, 1)
+	go func() { done <- cursorCatalog(t, t.TempDir(), home) }()
+	select {
+	case catalog := <-done:
+		if !containsCommand(catalog, "/real") {
+			t.Errorf("real command missing; catalog=%v", commandNames(catalog))
+		}
+		if containsCommand(catalog, "/pipe") {
+			t.Error("a fifo must not become a command")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("discovery hung on a fifo; non-regular files must be skipped")
 	}
 }
 
