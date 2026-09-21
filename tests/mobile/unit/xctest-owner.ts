@@ -3,7 +3,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { cp, mkdtemp, mkdir, readFile, writeFile, rm, realpath, symlink } from 'node:fs/promises';
-import { existsSync, readFileSync, writeFileSync, renameSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, isAbsolute } from 'node:path';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
@@ -1138,15 +1138,116 @@ try {
   process.stderr.write('pending invalid PID prerequisite ' + result + '\n');
 }
 `;
+function listenerFailureFields(value: unknown, mode: string, producerPid: number, parentPid: number, live: boolean) {
+  const record = (input: unknown): Record<string, unknown> => input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const owner = record(value);
+  const lifecycle = record(owner.diagnostics).lifecycle;
+  if (!Array.isArray(lifecycle) || !Number.isSafeInteger(producerPid) || producerPid <= 0 || !Number.isSafeInteger(parentPid) || parentPid <= 0) throw new Error('IDENTITY');
+  const events = lifecycle.map(record);
+  const spawned = events.filter(event => event.event === 'child-spawned');
+  const started = events.filter(event => event.event === 'supervisor-start');
+  if (spawned.length !== 1 || started.length !== 1 || owner.pid !== producerPid
+    || record(spawned[0].detail).pid !== producerPid || record(spawned[0].detail).phase !== 'startup'
+    || record(started[0].detail).pid !== parentPid || record(started[0].detail).phase !== 'startup'
+    || !Number.isSafeInteger(spawned[0].id) || Number(spawned[0].id) <= 0) throw new Error('IDENTITY');
+  const first = events.filter(event => event.event === 'failure-observed' && record(event.detail).first === true);
+  const failure = record(owner.firstFailure);
+  const stage = mode === 'listener-first-failure' ? 'wda-listener-command' : 'mjpeg-listener-command';
+  if (!['listener-first-failure', 'listener-second-failure', 'listener-uncoordinated-negative'].includes(mode)
+    || owner.ready !== false || (live && Object.hasOwn(owner, 'endedAt')) || first.length !== 1
+    || failure.phase !== 'initial' || failure.stage !== stage || failure.category !== 'listener-command-error'
+    || failure.source !== 'tests/mobile/support/ios-xctest.ts' || failure.message !== 'XCTEST: listener-command-error'
+    || failure.frozenOwner !== false || record(first[0].detail).first !== true
+    || record(first[0].detail).stage !== stage || record(first[0].detail).category !== failure.category
+    || record(first[0].detail).phase !== failure.phase || record(first[0].detail).frozenOwner !== false) throw new Error('MALFORMED');
+  const positiveId = (id: unknown) => Number.isSafeInteger(id) && Number(id) > 0;
+  const ids = failure.commandIds, commands = failure.causalCommands;
+  if (!positiveId(first[0].id) || Number(first[0].id) <= Number(spawned[0].id) || !positiveId(failure.inspectionId)
+    || typeof failure.monotonicMs !== 'number' || !Number.isFinite(failure.monotonicMs) || failure.monotonicMs < 0
+    || !Array.isArray(ids) || ids.length < 1 || ids.length > 16 || !ids.every(positiveId)
+    || !Array.isArray(commands) || commands.length !== (mode === 'listener-first-failure' ? 1 : 2)
+    || commands.length !== ids.length || record(failure.predicate).status !== 'evaluated'
+    || JSON.stringify(record(failure.predicate).listenerValidation) !== JSON.stringify(owner.listenerValidation)) throw new Error('MALFORMED');
+  for (const input of commands) {
+    const command = record(input), stdout = record(command.stdout), stderr = record(command.stderr);
+    if (!ids.includes(command.id) || command.phase !== 'initial' || command.operation !== 'inspect-listener'
+      || command.source !== failure.source || command.signal !== null || command.error !== undefined
+      || !Number.isSafeInteger(command.port) || Number(command.port) < 1 || Number(command.port) > 65535
+      || JSON.stringify(command.command) !== JSON.stringify(['lsof', '-nP', `-iTCP:${command.port}`, '-sTCP:LISTEN', '-t'])
+      || ![0, 1, 2].includes(Number(command.status)) || typeof command.status !== 'number'
+      || !Number.isSafeInteger(stdout.bytes) || Number(stdout.bytes) < 0 || !Number.isSafeInteger(stderr.bytes) || Number(stderr.bytes) < 0
+      || stdout.content !== (stdout.bytes ? '[listener command output suppressed]\n' : '')
+      || stderr.content !== (stderr.bytes ? '[listener command output suppressed]\n' : '')) throw new Error('MALFORMED');
+  }
+  const keys = ['at', 'monotonicMs', 'phase', 'source', 'stage', 'category', 'message', 'frozenOwner', 'predicate', 'status', 'listenerValidation', 'commandIds', 'causalCommands', 'inspectionId',
+    'checkedAt', 'endpoints', 'wda', 'mjpeg', 'count', 'pids', 'errorCategory', 'commandStatus', 'port', 'stderrBytes', 'runnerEvidencePresent', 'runnerAssociation', 'mjpegAssociation', 'bundleId', 'executableHash', 'cachedProductExecutableHash', 'cachedProductExecutableHashAt', 'failureStage',
+    'id', 'operation', 'command', 'timeoutMs', 'startedAt', 'endedAt', 'monotonicStartMs', 'monotonicEndMs', 'durationMs', 'signal', 'endpoint', 'stdout', 'stderr', 'content', 'bytes', 'truncated', 'suppressed', 'classification', 'event', 'detail', 'first'];
+  const strings = ['initial', 'tests/mobile/support/ios-xctest.ts', stage, 'listener-command-error', 'XCTEST: listener-command-error', 'evaluated', 'not-evaluated', 'error', 'command-error', 'inspect-listener', 'wda', 'mjpeg', 'empty', 'empty-or-no-listener', 'present', '', '[listener command output suppressed]\n', 'failure-observed'];
+  const copy = (input: unknown, key = '', depth = 0): unknown => {
+    if (depth > 9) throw new Error('MALFORMED');
+    if (input === null || typeof input === 'boolean') return input;
+    if (typeof input === 'number' && Number.isFinite(input) && input >= 0 && input <= Number.MAX_SAFE_INTEGER) return input;
+    if (typeof input === 'string') {
+      if (['at', 'checkedAt', 'cachedProductExecutableHashAt', 'startedAt', 'endedAt'].includes(key)
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(input) && Number.isFinite(Date.parse(input))) return input;
+      if (key === 'cachedProductExecutableHash' && /^[0-9a-f]{64}$/u.test(input)) return input;
+      if (key === 'pids' && input === String(producerPid)) return input;
+      if (key === 'command' && (['lsof', '-nP', '-sTCP:LISTEN', '-t'].includes(input) || /^-iTCP:[1-9]\d{0,4}$/u.test(input))) return input;
+      if (strings.includes(input)) return input;
+      throw new Error('MALFORMED');
+    }
+    if (Array.isArray(input)) {
+      if (input.length > 16) throw new Error('MALFORMED');
+      return input.map(entry => copy(entry, key, depth + 1));
+    }
+    if (!input || typeof input !== 'object') throw new Error('MALFORMED');
+    return Object.fromEntries(Object.entries(input).map(([name, entry]) => {
+      if (!keys.includes(name)) throw new Error('MALFORMED');
+      return [name, copy(entry, name, depth + 1)];
+    }));
+  };
+  return {
+    spawnEventId: Number(spawned[0].id),
+    firstFailure: copy(failure) as Record<string, unknown>,
+    listenerValidation: copy(owner.listenerValidation) as Record<string, unknown>,
+    failureEvent: copy(first[0]) as {id: number; detail: {first: boolean; frozenOwner: boolean}},
+  };
+}
+
+function readListenerText(root: string, name: string, limit: number): string {
+  const path = join(root, name);
+  const advertised = statSync(path);
+  if (!advertised.isFile() || advertised.size > limit) throw new Error('READ_ERROR');
+  const fd = openSync(path, 'r');
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > limit) throw new Error('READ_ERROR');
+    const bytes = Buffer.alloc(before.size);
+    const length = readSync(fd, bytes, 0, bytes.length, 0);
+    const after = fstatSync(fd);
+    if (after.size > limit || length !== bytes.length || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('READ_ERROR');
+    return bytes.toString('utf8');
+  } finally { closeSync(fd); }
+}
+
+function readListenerRecord(root: string, name: string, limit: number): unknown {
+  return JSON.parse(readListenerText(root, name, limit));
+}
+
 const wdaServer = `import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 const encodeXctestExitProbe = ${encodeXctestExitProbe.toString()};
+const listenerFailureFields = ${listenerFailureFields.toString()};
+const readListenerText = ${readListenerText.toString()};
+const readListenerRecord = ${readListenerRecord.toString()};
 const root = process.env.STARTUP_TEST_ROOT;
 const mode = process.env.STARTUP_TEST_MODE;
 const role = process.env.STARTUP_TEST_WDA_SERVER_ROLE || 'owner';
+const listenerWitnessMode = ['listener-first-failure', 'listener-second-failure', 'listener-uncoordinated-negative'].includes(mode);
+const captureControl = process.env.STARTUP_TEST_LISTENER_CAPTURE_CONTROL || '';
 const holdsDescendant = mode === 'listener-concurrent-exit-before-close' || mode.startsWith('listener-exit-after-ready');
 const args = process.argv.slice(3);
 const runnerPid = join(root, 'runner.pid');
@@ -1192,7 +1293,7 @@ if (mode === 'receipt-product-changed' || mode === 'listener-initial-race-produc
   writeFileSync(join(process.env.STARTUP_TEST_PRODUCT, 'WebDriverAgentRunner-Runner'), 'changed');
   writeFileSync(join(root, 'product-changed-at'), String(Date.now()));
 }
-if (role !== 'endpoint' || !existsSync(xcodePid)) publishPid(xcodePid);
+if (!listenerWitnessMode && (role !== 'endpoint' || !existsSync(xcodePid))) publishPid(xcodePid);
 if (mode === 'credential' || mode === 'credential-binary' || mode === 'credential-binary-failure') {
   process.stdout.write('PASSWORD=bare-password-sentinel API_PASSWORD=plain-password PRIVATE_URL=https://private.example/internal/path?ref=private-reference\\n');
   process.stderr.write('{"PASSWORD":"bare-password-sentinel","api_token":"plain-password","private_url":"https://private.example/internal/path"}\\n');
@@ -1318,9 +1419,84 @@ const stop = () => {
   server.close(() => process.exit(0));
 };
 if (!holdsDescendant || role === 'endpoint') {
-  process.on('SIGTERM', stop);
+  let captureStarted = false;
+  const publishCaptureRecord = (name, record, limit) => {
+    const text = JSON.stringify(record);
+    const path = join(root, name);
+    if (Buffer.byteLength(text) > limit || existsSync(path)) throw new Error('WRITE_ERROR');
+    writeFileSync(path + '.next', text, {flag: 'wx', mode: 0o600});
+    renameSync(path + '.next', path);
+  };
+  const captureError = reason => {
+    try { publishCaptureRecord('listener-capture-error.json', {schema: 1, reason}, 512); } catch {}
+  };
+  const capture = () => {
+    let owner;
+    try { owner = readListenerRecord(root, 'state/owner.json', 1048576); }
+    catch { captureError('READ_ERROR'); return; }
+    let fields;
+    try { fields = listenerFailureFields(owner, mode, process.pid, process.ppid, true); }
+    catch (error) { captureError(error.message === 'IDENTITY' ? 'IDENTITY' : 'MALFORMED'); return; }
+    const receipt = {schema: 1, mode, trigger: 'SIGTERM', producerPid: process.pid, producerParentPid: process.ppid,
+      spawnEventId: fields.spawnEventId, capturedAt: new Date().toISOString(), capturedBeforeOwnerEnded: true,
+      firstFailure: fields.firstFailure, listenerValidation: fields.listenerValidation, failureEvent: fields.failureEvent};
+    try { publishCaptureRecord('first-failure-observation.json', receipt, 65536); }
+    catch { captureError('WRITE_ERROR'); }
+  };
+  const controlledCapture = async () => {
+    const startedNs = process.hrtime.bigint();
+    let startupDeadline;
+    try { startupDeadline = readListenerRecord(root, 'state/deadline', 32); }
+    catch { captureError('READ_ERROR'); return; }
+    const budgetMs = Math.min(2000, startupDeadline - Date.now());
+    if (!Number.isSafeInteger(startupDeadline) || !Number.isSafeInteger(budgetMs) || budgetMs <= 0) { captureError('BUDGET'); return; }
+    const endNs = startedNs + BigInt(budgetMs) * 1000000n;
+    let owner;
+    try { owner = readListenerRecord(root, 'state/owner.json', 1048576); }
+    catch { captureError('READ_ERROR'); return; }
+    let fields;
+    try { fields = listenerFailureFields(owner, mode, process.pid, process.ppid, true); }
+    catch (error) { captureError(error.message === 'IDENTITY' ? 'IDENTITY' : 'MALFORMED'); return; }
+    try {
+      publishCaptureRecord('listener-capture-held.json', {schema: 1, mode, control: captureControl, producerPid: process.pid,
+        producerParentPid: process.ppid, spawnEventId: fields.spawnEventId, startupDeadline, budgetMs, startedNs: String(startedNs), endNs: String(endNs)}, 512);
+    } catch { captureError('WRITE_ERROR'); return; }
+    while (true) {
+      if (existsSync(join(root, 'listener-capture-abort')) || existsSync(join(root, 'state/stop'))) { captureError('CANCELLED'); return; }
+      if (process.hrtime.bigint() >= endNs || Date.now() >= startupDeadline) { captureError('BUDGET'); return; }
+      if (existsSync(join(root, 'listener-capture-decision.json'))) {
+        let decision;
+        try { decision = readListenerRecord(root, 'listener-capture-decision.json', 512); }
+        catch { captureError('READ_ERROR'); return; }
+        if (decision?.schema !== 1 || Object.keys(decision).sort().join(',') !== 'decision,schema' || !['CAPTURE', 'WITHHELD'].includes(decision?.decision)
+          || decision.decision !== (captureControl === 'held-capture' ? 'CAPTURE' : 'WITHHELD')) { captureError('MALFORMED'); return; }
+        const observedNs = process.hrtime.bigint();
+        if (observedNs >= endNs || Date.now() >= startupDeadline) { captureError('BUDGET'); return; }
+        try { publishCaptureRecord('listener-capture-result.json', {schema: 1, decision: decision.decision, observedNs: String(observedNs)}, 512); }
+        catch { captureError('WRITE_ERROR'); return; }
+        if (process.hrtime.bigint() >= endNs || Date.now() >= startupDeadline) { captureError('BUDGET'); return; }
+        if (decision.decision === 'WITHHELD') captureError('WITHHELD');
+        else capture();
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+  };
+  process.on('SIGTERM', () => {
+    if (!listenerWitnessMode) { stop(); return; }
+    if (captureStarted || stopping) return;
+    captureStarted = true;
+    if (role !== 'owner') { captureError('IDENTITY'); stop(); return; }
+    if (captureControl) {
+      if (mode !== 'listener-first-failure' || !['held-capture', 'withheld-capture'].includes(captureControl)) { captureError('MALFORMED'); stop(); return; }
+      void controlledCapture().catch(() => captureError('MALFORMED')).finally(stop);
+      return;
+    }
+    try { capture(); } finally { stop(); }
+  });
   process.on('SIGINT', stop);
   process.on('exit', () => { remove(runnerPid); remove(xcodePid); });
+  if (listenerWitnessMode) publishPid(xcodePid);
   if (mode === 'listener-concurrent-exit-before-close' && role === 'endpoint') {
     const managedChildPid = readFileSync(xcodePid, 'utf8').trim();
     const observerParentPid = process.ppid;
@@ -2373,6 +2549,121 @@ xctestOwnerTests.push(['Native startup XCTest exit witness classification', asyn
     assert.equal(getterCalled, false);
   }
 }]);
+function listenerOwnerProjection(value: unknown, supervisorPid: number | undefined) {
+  const record = (input: unknown): Record<string, unknown> => input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const list = (input: unknown): unknown[] => Array.isArray(input) ? input : [];
+  const number = (input: unknown) => typeof input === 'number' && Number.isFinite(input) && input >= 0 && input <= Number.MAX_SAFE_INTEGER ? input : null;
+  const pick = (input: unknown, allowed: string[]) => typeof input === 'string' && allowed.includes(input) ? input : 'other';
+  const boolean = (input: unknown) => typeof input === 'boolean' ? input : null;
+  const phases = ['startup', 'preflight', 'initial', 'after-initial', 'readiness', 'status', 'scenario', 'supervisor', 'cleanup'];
+  const stages = ['wda-listener-command', 'mjpeg-listener-command', 'child-spawn', 'child-process', 'child-pid-birth', 'child-exit', 'child-exit-callback', 'owner-evidence-write', 'startup-deadline', 'startup-log-write', 'startup-log-limit', 'supervisor-error'];
+  const categories = [...stages, 'listener-command-error', 'listener-invalid-process-id', 'child-spawn-error', 'child-process-error', 'output-limit'];
+  const events = ['supervisor-start', 'child-spawn-requested', 'child-spawned', 'child-birth-observed', 'failure-observed', 'cleanup-enter', 'owner-ready-cleared', 'child-signal-requested', 'child-exit', 'child-close', 'child-stop-skipped', 'child-stop-finished', 'system-log-collected', 'owner-ended'];
+  const owner = record(value), failure = record(owner.firstFailure), validation = record(owner.listenerValidation);
+  const lifecycle = list(record(owner.diagnostics).lifecycle).map(record);
+  const spawned = lifecycle.filter(event => event.event === 'child-spawned');
+  const started = lifecycle.filter(event => event.event === 'supervisor-start');
+  const owned = Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0 && spawned.length === 1 && owner.pid === record(spawned[0].detail).pid;
+  const endpoint = (input: unknown) => {
+    const entry = record(input);
+    return {status: pick(entry.status, ['evaluated', 'not-evaluated', 'error']), count: number(entry.count), errorCategory: pick(entry.errorCategory, ['command-error', 'invalid-process-id', 'timeout'])};
+  };
+  const selected = lifecycle.filter(event => events.includes(String(event.event)));
+  const causal = list(failure.causalCommands);
+  return {
+    ownerRead: value ? 'read' : 'unavailable', clock: 'supervisor-process-relative',
+    identity: {ownedChildMatchesSpawn: owned, parentMatchesSupervisor: started.length === 1 && Number.isSafeInteger(supervisorPid) && record(started[0].detail).pid === supervisorPid},
+    ready: boolean(owner.ready), ended: Object.hasOwn(owner, 'endedAt'), firstFailurePresent: Boolean(owner.firstFailure),
+    pinned: lifecycle.some(event => event.event === 'runner-candidate-pinned'), frozen: lifecycle.some(event => event.event === 'runner-frozen'),
+    readyAdmitted: lifecycle.some(event => event.event === 'ready-admitted'), statusPublished: Boolean(owner.status),
+    firstFailure: {source: pick(failure.source, ['tests/mobile/support/ios-xctest.ts']), phase: pick(failure.phase, phases), stage: pick(failure.stage, stages), category: pick(failure.category, categories),
+      frozenOwner: boolean(failure.frozenOwner), commandIds: list(failure.commandIds).slice(0, 16).map(number), inspectionId: number(failure.inspectionId), monotonicMs: number(failure.monotonicMs)},
+    listener: {failureStage: pick(validation.failureStage, stages), errorCategory: pick(validation.errorCategory, categories),
+      wda: endpoint(record(validation.endpoints).wda), mjpeg: endpoint(record(validation.endpoints).mjpeg),
+      runnerEvidencePresent: pick(validation.runnerEvidencePresent, ['not-evaluated', 'present', 'absent']),
+      runnerAssociation: pick(validation.runnerAssociation, ['not-evaluated', 'match', 'mismatch']), mjpegAssociation: pick(validation.mjpegAssociation, ['not-evaluated', 'match', 'mismatch'])},
+    lifecycle: selected.slice(0, 16).map(event => {
+      const detail = record(event.detail);
+      return {id: number(event.id), event: pick(event.event, events), phase: pick(detail.phase, phases), monotonicMs: number(event.monotonicMs),
+        ...(Object.hasOwn(detail, 'first') ? {first: boolean(detail.first)} : {}),
+        ...(Object.hasOwn(detail, 'frozenOwner') ? {frozenOwner: boolean(detail.frozenOwner)} : {}),
+        ...(Object.hasOwn(detail, 'signal') ? {signal: detail.signal === null ? null : pick(detail.signal, ['SIGTERM', 'SIGINT', 'SIGKILL'])} : {}),
+        ...(Object.hasOwn(detail, 'accepted') ? {accepted: boolean(detail.accepted)} : {}),
+        ...(Object.hasOwn(detail, 'exitCode') ? {exitCode: number(detail.exitCode)} : {}),
+        ...(Object.hasOwn(detail, 'childEnded') ? {childEnded: boolean(detail.childEnded)} : {})};
+    }),
+    causalCommands: causal.slice(0, 4).map(input => {
+      const command = record(input), error = record(command.error);
+      return {id: number(command.id), phase: pick(command.phase, phases), operation: pick(command.operation, ['inspect-listener', 'inspect-process-command', 'inspect-process-birth', 'inspect-process-executable', 'inspect-child-state', 'read-install-receipt', 'select-xctestrun', 'validate-product-bundle-id']),
+        endpoint: pick(command.endpoint, ['wda', 'mjpeg', 'simulator']), status: number(command.status), signal: command.signal === null ? null : pick(command.signal, ['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGSEGV']),
+        errorCategory: pick(error.category, ['timeout', 'spawn-error', 'nonzero-exit', 'output-limit']), errorCode: pick(error.code, ['ENOENT', 'EIO', 'EPERM', 'EACCES', 'ETIMEDOUT', 'ENOBUFS']),
+        stdoutBytes: number(record(command.stdout).bytes), stderrBytes: number(record(command.stderr).bytes), timeoutMs: number(command.timeoutMs), durationMs: number(command.durationMs), monotonicStartMs: number(command.monotonicStartMs), monotonicEndMs: number(command.monotonicEndMs)};
+    }),
+    truncated: selected.length > 16 || causal.length > 4,
+  };
+}
+
+function listenerFailureAttachment(root: string, mode: string, control: string | undefined, child: ChildProcess, closed: boolean, outcome: string, views: Record<string, unknown>, primary: unknown, cleanup: unknown): string {
+  const readText = (name: string, limit: number) => readListenerText(root, name, limit);
+  const markers = ['xcode.pid', 'runner.pid', 'listener-pair', 'listener-pair-count', 'listener-publication-release', 'listener-publication-ack', 'endpoint-ready', 'uncoordinated-wda-observed', 'uncoordinated-mjpeg-observed', 'first-failure-observation.json', 'listener-capture-held.json', 'listener-capture-decision.json', 'listener-capture-result.json', 'listener-capture-error.json', 'listener-capture-abort'];
+  const captureReasons = ['WITHHELD', 'CANCELLED', 'BUDGET', 'MALFORMED', 'IDENTITY', 'READ_ERROR', 'WRITE_ERROR'];
+  let capture = 'unavailable';
+  try {
+    const result = readListenerRecord(root, 'listener-capture-error.json', 512) as {reason?: string};
+    capture = captureReasons.includes(result.reason || '') ? result.reason! : 'other';
+  } catch { /* Collection is secondary to the original assertion. */ }
+  let ownedPid: number | undefined;
+  try {
+    const owner = readListenerRecord(root, 'state/owner.json', 1_048_576) as {pid?: number};
+    const proof = listenerFailureFields(owner, mode, owner.pid!, child.pid!, false);
+    if (proof.spawnEventId > 0) ownedPid = owner.pid;
+  } catch { /* Unknown identity must not render an arbitrary PID. */ }
+  const traces = ['listener-pair-trace', 'listener-publication-trace'].map(name => {
+    try {
+      const lines = readText(name, 4096).trim().split(/\r?\n/u);
+      return {name, truncated: lines.length > 24, entries: lines.slice(0, 24).map(line => {
+        if (['runner-pid-written', 'publication-ack', 'endpoint-ready', 'uncoordinated-wda-empty'].includes(line)) return {event: line};
+        const pair = /^(http|mjpeg|mjpeg-entry|mjpeg-ack) ([1-9]\d{0,2})(?: (EMPTY|[1-9]\d{0,9}))?$/u.exec(line);
+        if (pair) return {event: pair[1], ordinal: Number(pair[2]), empty: pair[3] === 'EMPTY', matchesOwnedChild: ownedPid !== undefined && pair[3] === String(ownedPid)};
+        const negative = /^(uncoordinated-publication|uncoordinated-mjpeg) ([1-9]\d{0,9})$/u.exec(line);
+        if (negative) return {event: negative[1], matchesOwnedChild: ownedPid !== undefined && negative[2] === String(ownedPid)};
+        return {event: 'other'};
+      })};
+    } catch { return {name, unavailable: true}; }
+  });
+  let launches: unknown, receiptQueries: unknown = 'unavailable';
+  try { launches = {present: true, lines: readText('launches', 4096).trim().split(/\r?\n/u).length}; } catch { launches = {present: existsSync(join(root, 'launches')), unavailable: true}; }
+  try { const text = readText('receipt-queries', 16); if (/^\d{1,6}$/u.test(text)) receiptQueries = Number(text); } catch { receiptQueries = 'unavailable'; }
+  const boundedViews: Record<string, unknown> = {};
+  for (const name of ['firstLive', 'producerReceipt', 'lastPoll', 'preFinalizer', 'settledFinal']) {
+    const view = views[name];
+    boundedViews[name] = view || {unavailable: true};
+    if (Buffer.byteLength(JSON.stringify(boundedViews[name])) > 1150 && view && typeof view === 'object') {
+      const projection = view as ReturnType<typeof listenerOwnerProjection>;
+      boundedViews[name] = {truncated: true, ownerRead: projection.ownerRead, clock: projection.clock, identity: projection.identity, ready: projection.ready, ended: projection.ended,
+        firstFailurePresent: projection.firstFailurePresent, firstFailure: projection.firstFailure, pinned: projection.pinned, frozen: projection.frozen, readyAdmitted: projection.readyAdmitted,
+        firstEventId: projection.lifecycle?.find(event => event.first === true)?.id};
+    }
+  }
+  const detailed = (views.settledFinal || views.preFinalizer || views.lastPoll) as Partial<ReturnType<typeof listenerOwnerProjection>> | undefined;
+  const attachment = {schema: 1, mode: listenerEvidenceModes.includes(mode) ? mode : 'other', control: control === 'held-capture' || control === 'withheld-capture' ? control : 'none',
+    observation: ['validated', 'unavailable', ...captureReasons].includes(outcome) ? outcome : 'other', capture,
+    originalCode: primary instanceof assert.AssertionError ? 'ERR_ASSERTION' : 'other', primaryReason: primary instanceof assert.AssertionError && primary.message === `${mode} did not retain a pre-cleanup first-failure observation` ? 'missing-observation' : 'other',
+    cleanup: cleanup ? 'failed' : 'none', supervisor: {closed, exitCode: child.exitCode, signal: child.signalCode === null ? null : ['SIGTERM', 'SIGINT', 'SIGKILL'].includes(child.signalCode) ? child.signalCode : 'other'},
+    clocks: {owner: 'supervisor-process-relative', controlDecision: 'child-local', controlRelease: 'coordinator-local'}, views: boundedViews,
+    markers: Object.fromEntries(markers.map(name => [name, existsSync(join(root, name))])), traces, launches, receiptQueries,
+    settledDetail: {clock: 'supervisor-process-relative', listener: detailed?.listener, lifecycle: detailed?.lifecycle, causalCommands: detailed?.causalCommands, truncated: detailed?.truncated ?? false}};
+  const text = JSON.stringify(attachment);
+  if (Buffer.byteLength(text) <= 8000) return text;
+  const reduced = {...attachment, truncated: true, traces: {truncated: true}, settledDetail: {truncated: true, listener: detailed?.listener, lifecycle: detailed?.lifecycle?.slice(0, 8), causalCommands: detailed?.causalCommands?.slice(0, 2)}};
+  const reducedText = JSON.stringify(reduced);
+  if (Buffer.byteLength(reducedText) <= 8000) return reducedText;
+  const truncatedText = JSON.stringify({...reduced, settledDetail: {truncated: true, unavailable: true}});
+  if (Buffer.byteLength(truncatedText) <= 8000) return truncatedText;
+  return JSON.stringify({schema: 1, mode: attachment.mode, control: attachment.control, originalCode: attachment.originalCode, primaryReason: attachment.primaryReason,
+    capture, cleanup: attachment.cleanup, truncated: true, views: Object.fromEntries(Object.keys(boundedViews).map(name => [name, {truncated: true, unavailable: true}]))});
+}
+
 function pendingInvalidSnapshot(root: string, mode: string, child: ChildProcess, closed: boolean): string {
   const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {};
   const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
@@ -2433,14 +2724,19 @@ function pendingInvalidSnapshot(root: string, mode: string, child: ChildProcess,
   return text;
 }
 
+const listenerCaptureControls = [
+  ['Native startup actual XCTest supervisor listener-first-failure held-capture ordering', 'held-capture'],
+  ['Native startup actual XCTest supervisor listener-first-failure withheld-capture prerequisite', 'withheld-capture'],
+] as const;
 const pendingInvalidControls = [
   ['Native startup actual XCTest supervisor listener-pending-invalid-pid held-start ordering', 'held-start'],
   ['Native startup actual XCTest supervisor listener-pending-invalid-pid withheld-start prerequisite', 'withheld-start'],
 ] as const;
-for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revocationModes, 'ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-ready-owner-evidence-write', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-uncoordinated-negative', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity', 'listener-http-only', ...pendingModes]) {
+for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pendingInvalidControls.map(([name]) => name), ...revocationModes, 'ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-ready-owner-evidence-write', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-uncoordinated-negative', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity', 'listener-http-only', ...pendingModes]) {
   const invalidPidControl = pendingInvalidControls.find(([name]) => name === testMode)?.[1];
-  const mode = invalidPidControl ? 'listener-pending-invalid-pid' : testMode;
-  xctestOwnerTests.push([invalidPidControl ? testMode : `Native startup actual XCTest supervisor ${mode}`, async () => {
+  const captureControl = listenerCaptureControls.find(([name]) => name === testMode)?.[1];
+  const mode = invalidPidControl ? 'listener-pending-invalid-pid' : captureControl ? 'listener-first-failure' : testMode;
+  xctestOwnerTests.push([invalidPidControl || captureControl ? testMode : `Native startup actual XCTest supervisor ${mode}`, async () => {
     const witnessBuild = mode === 'listener-concurrent-exit-before-close' ? await terminalBuild() : undefined;
     const witnessNonce = witnessBuild ? randomBytes(16).toString('hex') : undefined;
     const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-test-'));
@@ -2536,6 +2832,7 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
       IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
       MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned'),
       STARTUP_TEST_INVALID_PID_CONTROL: invalidPidControl || '',
+      STARTUP_TEST_LISTENER_CAPTURE_CONTROL: captureControl || '',
       ...(mode === 'stream-finalization-failure' ? { STARTUP_TEST_LOG_FINALIZATION_TARGET: join(root, 'blocked-log-target') } : {}),
       ...(mode === 'listener-pending-deadline' || mode === 'listener-pending-command-error' || mode === 'listener-pending-child-error' || mode === 'listener-pending-owner-evidence-write' || mode === 'listener-initial-race-receipt' || mode === 'listener-initial-race-receipt-command-error' || mode === 'listener-initial-race-receipt-hash-error' || mode === 'listener-ready-owner-evidence-write' ? { XCTEST_COMMAND_TRACE: join(root, 'command-trace') } : {}) };
     const initialProductHash = createHash('sha256').update(await readFile(join(product, 'WebDriverAgentRunner-Runner'))).digest('hex');
@@ -2628,6 +2925,18 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
     let assertionsPassed = false;
     let initialRaceFirstFailure: unknown;
     let firstFailureObservation: Record<string, unknown> | undefined;
+    let heldFirstFailure: ReturnType<typeof listenerFailureFields> | undefined;
+    let withheldObservationFailure: unknown;
+    let listenerFailure: {error: unknown} | undefined;
+    let listenerDiagnostic = '{"collection":"unavailable"}';
+    let observationOutcome = 'unavailable';
+    const listenerViews: Record<string, unknown> = {};
+    let lastListenerOwner: unknown;
+    const readListenerOwner = () => {
+      lastListenerOwner = readListenerRecord(root, 'state/owner.json', 1_048_576);
+      listenerViews.lastPoll = listenerOwnerProjection(lastListenerOwner, child.pid);
+      return lastListenerOwner as Record<string, unknown>;
+    };
     let revocationFirstFailure: unknown;
     let revocationPrivateFirstFailure: unknown;
     let revocationError: unknown;
@@ -2754,29 +3063,104 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
       const outputBoundaryMode = ['output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding'].includes(mode);
       if (listenerEvidenceModes.includes(mode)) {
         const observationDeadline = Date.now() + 15_000;
-        while (Date.now() < observationDeadline && !firstFailureObservation) {
-          if (existsSync(join(state, 'owner.json'))) {
-            const current = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8')) as {
-              firstFailure?: unknown;
-              endedAt?: string;
-              listenerValidation?: unknown;
-              diagnostics?: {lifecycle?: Array<{event?: string; detail?: {first?: boolean}}>};
-            };
-            const firstFailureEvent = current.diagnostics?.lifecycle?.find((event: {event?: string; detail?: {first?: boolean}}) => event.event === 'failure-observed' && event.detail?.first === true);
-            if (current.firstFailure && firstFailureEvent && !current.endedAt) {
-              firstFailureObservation = {
-                capturedBeforeOwnerEnded: true,
-                capturedAt: new Date().toISOString(),
-                firstFailure: JSON.parse(JSON.stringify(current.firstFailure)),
-                listenerValidation: current.listenerValidation ? JSON.parse(JSON.stringify(current.listenerValidation)) : undefined,
-                failureEvent: JSON.parse(JSON.stringify(firstFailureEvent)),
-              };
-              await writeFile(join(root, 'first-failure-observation.json'), `${JSON.stringify(firstFailureObservation, null, 2)}\n`);
-            }
-          }
-          if (!firstFailureObservation) await pause();
+        if (captureControl) {
+          while (!done && Date.now() < Math.min(deadline, observationDeadline) && !existsSync(join(root, 'listener-capture-held.json'))) await pause();
+          const coordinatorBudgetMs = Math.min(2000, deadline - Date.now());
+          assert.ok(coordinatorBudgetMs > 0, 'listener capture coordinator budget');
+          const coordinatorEnd = process.hrtime.bigint() + BigInt(coordinatorBudgetMs) * 1_000_000n;
+          const held = readListenerRecord(root, 'listener-capture-held.json', 512) as Record<string, unknown>;
+          assert.deepEqual(Object.keys(held).sort(), ['schema', 'mode', 'control', 'producerPid', 'producerParentPid', 'spawnEventId', 'startupDeadline', 'budgetMs', 'startedNs', 'endNs'].sort());
+          assert.equal(held.schema, 1);
+          assert.equal(held.mode, mode);
+          assert.equal(held.control, captureControl);
+          assert.equal(held.startupDeadline, deadline);
+          assert.ok(Number.isSafeInteger(held.budgetMs) && Number(held.budgetMs) > 0 && Number(held.budgetMs) <= 2000);
+          assert.match(String(held.startedNs), /^\d{1,24}$/u);
+          assert.match(String(held.endNs), /^\d{1,24}$/u);
+          assert.equal(BigInt(String(held.endNs)) - BigInt(String(held.startedNs)), BigInt(Number(held.budgetMs)) * 1_000_000n);
+          const liveOwner = readListenerOwner();
+          assert.equal(held.producerPid, liveOwner.pid);
+          heldFirstFailure = listenerFailureFields(liveOwner, mode, Number(held.producerPid), child.pid!, true);
+          assert.equal(held.producerParentPid, child.pid);
+          assert.equal(held.spawnEventId, heldFirstFailure.spawnEventId);
+          listenerViews.firstLive ??= listenerOwnerProjection(liveOwner, child.pid);
+          const events = (liveOwner.diagnostics as {lifecycle: Array<{event: string}>}).lifecycle;
+          assert.equal(events.some(event => ['child-exit', 'child-close', 'owner-ended'].includes(event.event)), false);
+          assert.equal(done, false);
+          assert.equal(existsSync(join(root, 'first-failure-observation.json')), false);
+          assert.equal(existsSync(join(root, 'listener-capture-error.json')), false);
+          assert.ok(process.hrtime.bigint() < coordinatorEnd && Date.now() < Math.min(deadline, observationDeadline), 'listener capture coordinator decision budget');
+          writeFileSync(join(root, 'listener-capture-decision.json.next'), JSON.stringify({schema: 1, decision: captureControl === 'held-capture' ? 'CAPTURE' : 'WITHHELD'}), {flag: 'wx', mode: 0o600});
+          assert.ok(process.hrtime.bigint() < coordinatorEnd && Date.now() < Math.min(deadline, observationDeadline), 'listener capture coordinator publication budget');
+          renameSync(join(root, 'listener-capture-decision.json.next'), join(root, 'listener-capture-decision.json'));
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('listener capture supervisor deadline')), Math.max(0, observationDeadline - Date.now())); })]);
+          } finally { clearTimeout(timer); }
+          assert.equal(done, true);
+          const result = readListenerRecord(root, 'listener-capture-result.json', 512) as Record<string, unknown>;
+          assert.deepEqual(Object.keys(result).sort(), ['schema', 'decision', 'observedNs'].sort());
+          assert.equal(result.schema, 1);
+          assert.equal(result.decision, captureControl === 'held-capture' ? 'CAPTURE' : 'WITHHELD');
+          assert.match(String(result.observedNs), /^\d{1,24}$/u);
+          assert.ok(BigInt(String(result.observedNs)) >= BigInt(String(held.startedNs)) && BigInt(String(result.observedNs)) < BigInt(String(held.endNs)), 'listener capture child-local decision budget');
+          if (captureControl === 'withheld-capture') {
+            assert.deepEqual(readListenerRecord(root, 'listener-capture-error.json', 512), {schema: 1, reason: 'WITHHELD'});
+            assert.equal(existsSync(join(root, 'first-failure-observation.json')), false);
+          } else assert.equal(existsSync(join(root, 'listener-capture-error.json')), false);
         }
-        assert.ok(firstFailureObservation, `${mode} did not retain a pre-cleanup first-failure observation`);
+        const observe = async () => {
+          while (Date.now() < observationDeadline && !firstFailureObservation) {
+            try {
+              if (existsSync(join(state, 'owner.json'))) {
+                const current = readListenerOwner();
+                try {
+                  listenerFailureFields(current, mode, Number(current.pid), child.pid!, true);
+                  listenerViews.firstLive ??= listenerOwnerProjection(current, child.pid);
+                } catch { /* A finalized owner is diagnostic only, never a witness. */ }
+              }
+            } catch { listenerViews.lastPoll = {unavailable: true, reason: 'READ_ERROR'}; }
+            try {
+              if (existsSync(join(root, 'first-failure-observation.json'))) {
+                const receipt = readListenerRecord(root, 'first-failure-observation.json', 65_536) as Record<string, unknown>;
+                const current = readListenerOwner();
+                assert.equal(receipt.producerPid, current.pid);
+                const fields = listenerFailureFields(current, mode, Number(receipt.producerPid), child.pid!, false);
+                assert.deepEqual(Object.keys(receipt).sort(), ['schema', 'mode', 'trigger', 'producerPid', 'producerParentPid', 'spawnEventId', 'capturedAt', 'capturedBeforeOwnerEnded', 'firstFailure', 'listenerValidation', 'failureEvent'].sort());
+                assert.equal(receipt.schema, 1);
+                assert.equal(receipt.mode, mode);
+                assert.equal(receipt.trigger, 'SIGTERM');
+                assert.equal(receipt.producerParentPid, child.pid);
+                assert.equal(receipt.spawnEventId, fields.spawnEventId);
+                assert.equal(receipt.capturedBeforeOwnerEnded, true);
+                assert.match(String(receipt.capturedAt), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
+                assert.deepEqual(receipt.firstFailure, fields.firstFailure);
+                assert.deepEqual(receipt.listenerValidation, fields.listenerValidation);
+                assert.deepEqual(receipt.failureEvent, fields.failureEvent);
+                assert.equal(existsSync(join(root, 'listener-capture-error.json')), false);
+                firstFailureObservation = receipt;
+                observationOutcome = 'validated';
+                listenerViews.producerReceipt = {schema: 1, trigger: 'SIGTERM', producerPid: receipt.producerPid,
+                  parentMatchesSupervisor: receipt.producerParentPid === child.pid, spawnMatchesOwner: true,
+                  capturedBeforeOwnerEnded: true, spawnEventId: fields.spawnEventId, firstFailureEventId: fields.failureEvent.id};
+              }
+            } catch (error) {
+              observationOutcome = error instanceof Error && error.message === 'IDENTITY' ? 'IDENTITY' : error instanceof Error && error.message === 'READ_ERROR' ? 'READ_ERROR' : 'MALFORMED';
+              break;
+            }
+            if (!firstFailureObservation) await pause();
+          }
+          assert.ok(firstFailureObservation, `${mode} did not retain a pre-cleanup first-failure observation`);
+        };
+        if (captureControl === 'withheld-capture') {
+          await assert.rejects(observe, error => {
+            withheldObservationFailure = error;
+            return error instanceof assert.AssertionError && error.code === 'ERR_ASSERTION'
+              && error.message === `${mode} did not retain a pre-cleanup first-failure observation`
+              && observationOutcome === 'unavailable';
+          });
+          assert.equal(existsSync(join(root, 'first-failure-observation.json')), false);
+        } else await observe();
       }
       if (credentialMode) {
         while (!done && Date.now() < deadline && !existsSync(join(state, 'wda-preflight-private.log'))) await pause();
@@ -3133,7 +3517,7 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
       assert.ok(owner.endedAt);
       assert.equal(owner.ready, false);
       assert.ok(Buffer.byteLength(await readFile(join(state, 'owner.json'), 'utf8')) <= 1048576);
-      assert.ok(Buffer.byteLength(await readFile(join(state, 'owner-private.json'), 'utf8')) <= 1048576);
+      if (!listenerEvidenceModes.includes(mode)) assert.ok(Buffer.byteLength(await readFile(join(state, 'owner-private.json'), 'utf8')) <= 1048576);
       if (mode === 'ready' || mode === 'status-first-failure' || mode === 'listener-http-only') {
         const privateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
         const standaloneStatus = JSON.parse(await readFile(join(state, 'wda-status.json'), 'utf8'));
@@ -3172,7 +3556,21 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
       const cleanupEntry = lifecycle.find((event: { event: string }) => event.event === 'cleanup-enter');
       const endedEntry = lifecycle.find((event: { event: string }) => event.event === 'owner-ended');
       assert.ok(cleanupEntry && endedEntry && cleanupEntry.id < endedEntry.id);
-      if (mode === 'listener-first-failure' || mode === 'listener-second-failure') {
+      if (listenerEvidenceModes.includes(mode)) {
+        assert.equal(owner.runnerPid, undefined);
+        assert.equal(owner.runnerBirth, undefined);
+        assert.equal(owner.runnerExecutable, undefined);
+        assert.equal(owner.status, undefined);
+        assert.equal(existsSync(join(state, 'wda-status.json')), false);
+        assert.equal(existsSync(join(root, 'status-queries')), false);
+        assert.equal(lifecycle.some((event: {event: string}) => ['runner-candidate-pinned', 'runner-frozen', 'ready-admitted'].includes(event.event)), false);
+        assert.equal(done, true);
+        assert.equal(child.exitCode, 0);
+        assert.equal(child.signalCode, null);
+        assert.equal(owner.exitCode, 0);
+        assert.equal(owner.signal, null);
+        const signals = lifecycle.filter((event: {event: string}) => event.event === 'child-signal-requested');
+        assert.equal(signals.length, 1);
         const childSignal = lifecycle.find((event: {event: string; detail?: {signal?: string; accepted?: boolean}}) => event.event === 'child-signal-requested');
         const childExit = lifecycle.find((event: {event: string}) => event.event === 'child-exit');
         const childClose = lifecycle.find((event: {event: string}) => event.event === 'child-close');
@@ -3180,13 +3578,19 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
         assert.ok(childSignal && childExit && childClose && childStopFinished);
         assert.equal(childSignal.detail?.signal, 'SIGTERM');
         assert.equal(childSignal.detail?.accepted, true);
-        assert.ok(childSignal.id < childExit.id && childExit.id < childClose.id && childClose.id < childStopFinished.id);
+        assert.ok(childSignal.id < childExit.id && childExit.id < childClose.id && childClose.id < childStopFinished.id && childStopFinished.id < endedEntry.id);
+        assert.equal(childStopFinished.detail?.childEnded, true);
+        for (const event of [childSignal, childExit, childClose, childStopFinished]) assert.equal(event.detail?.pid, owner.pid);
+        assert.equal(childExit.detail?.exitCode, 0);
+        assert.equal(childExit.detail?.signal, null);
+        assert.equal(childClose.detail?.exitCode, 0);
+        assert.equal(childClose.detail?.signal, null);
         assert.equal(lifecycle.some((event: {event: string}) => event.event === 'owned-listener-termination-requested'), false);
       }
       if (!['ready', 'ready-then-oversized', 'status-first-failure', 'listener-http-only', 'listener-pending-ready', 'listener-pending-http-only', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'output-below', 'output-equal', 'output-shrinking', 'output-expanding'].includes(mode)) assert.ok(owner.firstFailure);
       if (owner.firstFailure) assert.ok(Array.isArray(owner.firstFailure.causalCommands));
-      if (listenerEvidenceModes.includes(mode)) {
-        const retainedObservation = JSON.parse(await readFile(join(root, 'first-failure-observation.json'), 'utf8')) as {
+      if (listenerEvidenceModes.includes(mode) && captureControl !== 'withheld-capture') {
+        const retainedObservation = readListenerRecord(root, 'first-failure-observation.json', 65_536) as {
           capturedBeforeOwnerEnded: boolean;
           firstFailure: Record<string, unknown>;
           listenerValidation?: Record<string, unknown>;
@@ -3199,6 +3603,7 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
         assert.equal(firstFailureEvents.length, 1);
         assert.ok(failureEvents.every((event: { detail?: { first?: boolean; frozenOwner?: boolean } }) => event.detail?.first === true || event.detail?.first === false));
         assert.equal(firstFailureEvents[0].detail?.frozenOwner, false);
+        assert.deepEqual(firstFailureEvents[0], retainedObservation.failureEvent);
         assert.equal(retainedObservation.failureEvent.detail?.first, true);
         assert.equal(retainedObservation.failureEvent.detail?.frozenOwner, false);
         assert.equal(firstFailureSnapshot.frozenOwner, false);
@@ -3213,7 +3618,21 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
         assert.equal(existsSync(join(root, 'runner.pid')), false);
         assert.equal(existsSync(join(root, 'xcode.pid')), false);
       }
+      if (captureControl) {
+        assert.ok(heldFirstFailure);
+        assert.deepEqual(owner.firstFailure, heldFirstFailure.firstFailure);
+        assert.deepEqual(owner.listenerValidation, heldFirstFailure.listenerValidation);
+        assert.deepEqual(lifecycle.filter((event: {event: string; detail?: {first?: boolean}}) => event.event === 'failure-observed' && event.detail?.first === true), [heldFirstFailure.failureEvent]);
+        assert.equal(existsSync(join(root, 'runner.pid')), false);
+        assert.equal(existsSync(join(root, 'xcode.pid')), false);
+        if (captureControl === 'withheld-capture') {
+          assert.ok(withheldObservationFailure instanceof assert.AssertionError);
+          assert.equal(existsSync(join(root, 'first-failure-observation.json')), false);
+          assert.deepEqual(readListenerRecord(root, 'listener-capture-error.json', 512), {schema: 1, reason: 'WITHHELD'});
+        }
+      }
       if (mode === 'listener-uncoordinated-negative') {
+        for (const marker of ['listener-publication-release', 'listener-publication-ack', 'endpoint-ready']) assert.equal(existsSync(join(root, marker)), false);
         assert.equal(owner.firstFailure.stage, 'mjpeg-listener-command');
         assert.equal(owner.firstFailure.category, 'listener-command-error');
         assert.equal(owner.firstFailure.frozenOwner, false);
@@ -3484,7 +3903,7 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
         assert.equal(owner.diagnostics.lifecycle.some((event: {event: string}) => event.event === 'runner-frozen'), false);
         assert.equal(owner.diagnostics.lifecycle.some((event: {event: string}) => event.event === 'ready-admitted'), false);
       }
-      if (listenerEvidenceModes.includes(mode)) {
+      if (listenerEvidenceModes.includes(mode) && captureControl !== 'withheld-capture') {
         const pairTrace = (await readFile(join(root, 'listener-pair-trace'), 'utf8')).trim().split(/\r?\n/u);
         const runnerPid = String(owner.pid);
         if (mode === 'listener-uncoordinated-negative') {
@@ -3508,7 +3927,7 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
           assert.equal(existsSync(join(root, 'listener-publication-ack')), true);
           assert.equal(existsSync(join(root, 'endpoint-ready')), true);
         }
-        const preCleanupObservation = JSON.parse(await readFile(join(root, 'first-failure-observation.json'), 'utf8')) as {
+        const preCleanupObservation = readListenerRecord(root, 'first-failure-observation.json', 65_536) as {
           capturedBeforeOwnerEnded: boolean;
           failureEvent: Record<string, unknown>;
           firstFailure: Record<string, unknown>;
@@ -4033,13 +4452,39 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
     try {
       await runAssertions();
     } catch (error) {
-      if (mode === 'listener-pending-invalid-pid') {
+      if (listenerEvidenceModes.includes(mode)) {
+        listenerFailure = {error};
+      } else if (mode === 'listener-pending-invalid-pid') {
         pendingInvalidFailure = {error, diagnostic: 'unavailable'};
       } else {
         if (witnessBuild) { witnessFailure = error; terminalFailure(root); }
         throw error;
       }
     } finally {
+      if (listenerEvidenceModes.includes(mode)) {
+        try { listenerViews.preFinalizer = listenerOwnerProjection(readListenerRecord(root, 'state/owner.json', 1_048_576), child.pid); }
+        catch { listenerViews.preFinalizer = {unavailable: true}; }
+        if (captureControl) {
+          for (const name of ['listener-capture-abort', 'listener-capture-decision.json']) {
+            try {
+              if (!existsSync(join(root, name))) writeFileSync(join(root, name), JSON.stringify({schema: 1, decision: 'CANCELLED'}), {flag: 'wx', mode: 0o600});
+            } catch (error) { cleanupFailure ??= {error}; }
+          }
+        }
+        if (!done) {
+          try { await writeFile(join(state, 'stop'), 'failed test cleanup'); } catch (error) { cleanupFailure ??= {error}; }
+          try {
+            if (!child.kill('SIGTERM') && child.exitCode === null && child.signalCode === null) cleanupFailure ??= {error: new Error('listener fixture supervisor signal not accepted')};
+          } catch (error) { cleanupFailure ??= {error}; }
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('listener fixture cleanup deadline')), 15_000); })]);
+          } catch (error) { cleanupFailure ??= {error}; }
+          finally { clearTimeout(timer); }
+        }
+        try { listenerViews.settledFinal = done ? listenerOwnerProjection(readListenerRecord(root, 'state/owner.json', 1_048_576), child.pid) : {unavailable: true, closed: false}; }
+        catch { listenerViews.settledFinal = {unavailable: true, closed: done}; }
+      }
       if (mode === 'listener-pending-invalid-pid') {
         for (const name of ['pending-invalid-abort', 'pending-invalid-release', 'pending-candidate-continue', 'state/stop']) {
           try { await writeFile(join(root, name), 'fixture finalization'); } catch (error) { cleanupFailure ??= {error}; }
@@ -4073,7 +4518,7 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
           await rm(join(state, name), {recursive: true, force: true});
         }
       }
-      if (!done && !witnessBuild && mode !== 'listener-pending-invalid-pid') {
+      if (!done && !witnessBuild && mode !== 'listener-pending-invalid-pid' && !listenerEvidenceModes.includes(mode)) {
         if (mode === 'listener-ready-owner-evidence-write') await writeFile(join(root, 'ready-failure-fallback-continue'), 'failed test cleanup');
         await writeFile(join(state, 'stop'), 'failed test cleanup');
         child.kill('SIGTERM');
@@ -4087,8 +4532,8 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
           if (existsSync(join(root, name))) await writeFile(join(diagnosticRoot, name), await readFile(join(root, name)));
         }
       }
-      if (diagnosticRootBase && !witnessBuild && !revocationModes.includes(mode) && mode !== 'listener-pending-invalid-pid' && (!assertionsPassed || listenerEvidenceModes.includes(mode) || mode === 'listener-concurrent-exit-before-close')) {
-        const diagnosticRoot = listenerEvidenceModes.includes(mode) ? join(diagnosticRootBase, mode) : diagnosticRootBase;
+      if (diagnosticRootBase && !witnessBuild && !revocationModes.includes(mode) && mode !== 'listener-pending-invalid-pid' && !listenerEvidenceModes.includes(mode) && (!assertionsPassed || mode === 'listener-concurrent-exit-before-close')) {
+        const diagnosticRoot = diagnosticRootBase;
         await rm(diagnosticRoot, { recursive: true, force: true });
         await cp(root, diagnosticRoot, { recursive: true, force: true });
       }
@@ -4097,11 +4542,38 @@ for (const testMode of [...pendingInvalidControls.map(([name]) => name), ...revo
         try { pendingInvalidFailure.diagnostic = pendingInvalidSnapshot(root, testMode, child, done); }
         catch { pendingInvalidFailure.diagnostic = '{"collection":"unavailable"}'; }
       }
-      if (!witnessBuild) {
+      if (listenerEvidenceModes.includes(mode)) {
+        if (!listenerFailure && cleanupFailure) listenerFailure = {error: cleanupFailure.error};
+        try { listenerDiagnostic = listenerFailureAttachment(root, mode, captureControl, child, done, observationOutcome, listenerViews, listenerFailure?.error, cleanupFailure); }
+        catch { listenerDiagnostic = '{"collection":"unavailable","secondary":"READ_ERROR"}'; }
+        try {
+          const error = listenerFailure?.error;
+          if (error instanceof Error) {
+            const suffix = `\nlistener-fixture ${listenerDiagnostic}`;
+            const stack = error.stack;
+            error.message += suffix;
+            if (stack) error.stack = stack + suffix;
+          }
+        } catch { listenerViews.attachment = {unavailable: true}; }
+      }
+      if (!witnessBuild && (!listenerEvidenceModes.includes(mode) || done)) {
         try { await rm(root, { recursive: true, force: true }); }
-        catch (error) { cleanupFailure ??= {error}; }
+        catch (error) {
+          cleanupFailure ??= {error};
+          const firstCleanupFailure = listenerEvidenceModes.includes(mode) && !listenerFailure;
+          if (firstCleanupFailure) listenerFailure = {error};
+          if (listenerFailure?.error instanceof Error) {
+            try {
+              const suffix = (firstCleanupFailure ? `\nlistener-fixture ${listenerDiagnostic}` : '') + '\nlistener-fixture-cleanup {"rootRemoval":"failed"}';
+              const stack = listenerFailure.error.stack;
+              listenerFailure.error.message += suffix;
+              if (stack) listenerFailure.error.stack = stack + suffix;
+            } catch { listenerViews.attachment = {unavailable: true}; }
+          }
+        }
       }
     }
+    if (listenerFailure) throw listenerFailure.error;
     if (mode === 'listener-pending-invalid-pid') {
       if (!pendingInvalidFailure && cleanupFailure) pendingInvalidFailure = {error: cleanupFailure.error, diagnostic: '{"collection":"unavailable","cleanup":"root-removal-failed"}'};
       if (pendingInvalidFailure) {
