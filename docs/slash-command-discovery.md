@@ -15,6 +15,31 @@ while its final catalog and wire-size limits still apply. This preserves Hermes'
 provider precedence and configured-folder behavior; it is not a promise of an
 unbounded catalog.
 
+## Cursor
+
+Cursor needs its own provider rather than the generic skill path, for two
+reasons. It names a skill's slash command after the **directory** holding
+`SKILL.md`, not the frontmatter `name` field — a skill in
+`~/.cursor/skills/pdf-forms` is `/pdf-forms` even when its frontmatter says
+`name: pdf form toolkit`. And it has a built-in command table the generic path
+cannot supply: without a provider, a cursor pane falls through to the generic
+path and gets an empty palette, not even builtins.
+
+The provider publishes the commands Cursor registers unconditionally and scans
+personal skills from `~/.cursor/skills` and the shared `~/.agents/skills`. It
+deliberately excludes `~/.cursor/skills-cursor` (reserved for Cursor's own
+built-in skills and managed automatically — Cursor's own documentation tells
+users never to create skills there), `~/.cursor/cloud-skills`,
+`~/.cursor/plugins`, and the `~/.claude`, `~/.codex` and `~/.grok` trees, since
+those either duplicate another agent's catalog in a cursor pane or expose
+internal state that is not a user-authored skill.
+
+Cursor gates several commands behind its debug flag, and documents the
+`/dev:*` entries as developer-only. Both groups are omitted: publishing them
+would offer the phone commands the pane does not have. Configured
+`agent-profiles.ini` skill folders remain available as the escape hatch for
+pointing the palette somewhere outside the roots above.
+
 A catalog can be incomplete when a discovery pass, the final entry cap, or
 the serialized response-size guard is reached. One outbound relay message is
 limited to 4 MiB; the relay clips a large serialized `command_result` before
