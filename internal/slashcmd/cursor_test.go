@@ -75,12 +75,12 @@ func TestCursorIgnoresReservedInternalRoots(t *testing.T) {
 	}
 }
 
-// Cursor's loadSkillRoots receives the personal root before the workspace
-// roots, and skills.set assigns ids unconditionally, so a project skill of the
-// same folder name would replace a personal one. getSkillIdForPath instead
-// hands each duplicate a -2 suffix, so Cursor lists both. The palette matches:
-// both are published and the personal entry keeps the bare name.
-func TestCursorSkillNameCollisionListsBoth(t *testing.T) {
+// Cursor builds a fresh id set inside each loadSkillsFromDirectory call, so a
+// duplicate folder name across two roots is NOT suffixed: the later root simply
+// overwrites the earlier id in the skills map. loadSkillRoots passes the
+// personal roots first, so a project skill of the same folder name replaces the
+// personal one and only a single /review exists.
+func TestCursorSkillNameCollisionAcrossRootsReplaces(t *testing.T) {
 	home := t.TempDir()
 	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "review", "review", "Personal review")
 
@@ -90,16 +90,48 @@ func TestCursorSkillNameCollisionListsBoth(t *testing.T) {
 
 	catalog := cursorCatalog(t, repo, home)
 	if !containsCommand(catalog, "/review") {
-		t.Errorf("personal skill missing; catalog=%v", commandNames(catalog))
+		t.Errorf("collision dropped the skill entirely; catalog=%v", commandNames(catalog))
 	}
-	if !containsCommand(catalog, "/review-2") {
-		t.Errorf("project duplicate should be suffixed, not dropped; catalog=%v", commandNames(catalog))
+	if containsCommand(catalog, "/review-2") {
+		t.Errorf("cross-root duplicates must not be suffixed; catalog=%v", commandNames(catalog))
 	}
-	if got := commandSource(catalog, "/review"); got != "personal" {
-		t.Errorf("/review source = %q, want personal (personal roots load first)", got)
+	if got := commandSource(catalog, "/review"); got != "project" {
+		t.Errorf("/review source = %q, want project (personal roots load first and are overwritten)", got)
 	}
-	if got := commandSource(catalog, "/review-2"); got != "project" {
-		t.Errorf("/review-2 source = %q, want project", got)
+}
+
+// A folder name repeated WITHIN one root is what makes Cursor switch to a
+// root-relative id: getRelativeSkillId joins the path below the root with "-",
+// so skills/tools/review/SKILL.md and skills/other/review/SKILL.md resolve as
+// /tools-review and /other-review rather than colliding on /review.
+func TestCursorDuplicateFolderNamesWithinRootUseRelativeIDs(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".cursor", "skills")
+	cursorSkill(t, filepath.Join(root, "tools"), "review", "review", "Tools review")
+	cursorSkill(t, filepath.Join(root, "other"), "review", "review", "Other review")
+
+	catalog := cursorCatalog(t, t.TempDir(), home)
+	for _, name := range []string{"/tools-review", "/other-review"} {
+		if !containsCommand(catalog, name) {
+			t.Errorf("%s missing; catalog=%v", name, commandNames(catalog))
+		}
+	}
+	if containsCommand(catalog, "/review") {
+		t.Errorf("duplicated folder name should not keep a bare id; catalog=%v", commandNames(catalog))
+	}
+}
+
+// Cursor's findSkillMarkdownFiles recurses, so a skill nested below the root is
+// discovered under its own folder name. A scanner that only reads
+// <root>/<entry>/SKILL.md silently drops it.
+func TestCursorDiscoversNestedSkill(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".cursor", "skills")
+	cursorSkill(t, filepath.Join(root, "tools"), "deep-tool", "deep-tool", "Nested skill")
+
+	catalog := cursorCatalog(t, t.TempDir(), home)
+	if !containsCommand(catalog, "/deep-tool") {
+		t.Errorf("nested skill omitted; catalog=%v", commandNames(catalog))
 	}
 }
 
@@ -153,9 +185,11 @@ func TestCursorReadsCommandFiles(t *testing.T) {
 	}
 }
 
-// A builtin keeps its reserved name and a colliding user file is suffixed beside
-// it: Cursor resolves builtins from its own registry, so publishing the file
-// under that name would offer the phone a command the pane does not run.
+// A builtin keeps its reserved name and a colliding user file is dropped rather
+// than suffixed. Cursor resolves builtins from its own registry and registers
+// markdown commands under their unchanged filename stem, so nothing resolves a
+// fabricated /clear-2 - publishing it would offer the phone a command that
+// cannot invoke the file.
 func TestCursorUserFileCannotTakeBuiltinName(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, ".cursor", "commands", "clear.md"), "# My clear\n")
@@ -167,14 +201,12 @@ func TestCursorUserFileCannotTakeBuiltinName(t *testing.T) {
 	if got := commandSource(catalog, "/clear"); got != "builtin" {
 		t.Errorf("/clear source = %q, want the builtin to keep its reserved name", got)
 	}
-	if !containsCommand(catalog, "/clear-2") {
-		t.Errorf("colliding file should be suffixed; catalog=%v", commandNames(catalog))
+	if containsCommand(catalog, "/clear-2") {
+		t.Errorf("a suffixed alias is not resolvable in Cursor and must not be published; catalog=%v", commandNames(catalog))
 	}
 }
 
-// A skill named after a builtin is published beside it rather than replacing it:
-// Cursor suffixes the later duplicate, and builtins register last here so the
-// reserved command keeps its name.
+// A skill named after a builtin is likewise dropped, leaving the builtin alone.
 func TestCursorBuiltinSurvivesSkillCollision(t *testing.T) {
 	home := t.TempDir()
 	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "help", "help", "A skill named help")
@@ -183,8 +215,8 @@ func TestCursorBuiltinSurvivesSkillCollision(t *testing.T) {
 	if got := commandSource(catalog, "/help"); got != "builtin" {
 		t.Errorf("/help source = %q, want the builtin to keep the name", got)
 	}
-	if !containsCommand(catalog, "/help-2") {
-		t.Errorf("skill should be suffixed beside the builtin; catalog=%v", commandNames(catalog))
+	if containsCommand(catalog, "/help-2") {
+		t.Errorf("skill alias must not be invented; catalog=%v", commandNames(catalog))
 	}
 }
 

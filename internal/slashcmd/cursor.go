@@ -95,65 +95,162 @@ func cursorSkillRoots(home string) []string {
 	}
 }
 
-// scanCursorSkillDirBudget scans dir for <entry>/SKILL.md and names each
-// command after the entry directory. It follows symlinked skill directories
-// through entryIsDir, matching scanSkillDirBudget: a personal root may link a
-// skill to a checkout elsewhere, and Cursor itself resolves those links.
-func scanCursorSkillDirBudget(dir, source string, budget *int) ([]Command, bool) {
-	if dir == "" || *budget <= 0 {
-		return nil, *budget <= 0
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+// cursorSkillWalk returns the skill directories under root that Cursor would
+// load, in Cursor's own order.
+//
+// Cursor's findSkillMarkdownFiles recurses to depth 10 and reads a SKILL.md
+// wherever it sits, so a skill may be nested any number of levels below a root:
+// .cursor/skills/tools/review/SKILL.md is a valid skill named after its folder.
+// A scanner that only checks <root>/<entry>/SKILL.md silently drops those.
+//
+// Symlinked directories are followed, matching entryIsDir elsewhere: a personal
+// root frequently links a skill to a checkout elsewhere on disk. Both the
+// directories walked and the SKILL.md files accepted are deduplicated by
+// realpath, so a link and its target are read once and a link that points back
+// up the tree cannot loop.
+func cursorSkillWalk(root string, budget *int) ([]string, bool) {
+	const maxDepth = 10
+	if root == "" {
 		return nil, false
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		left, right := strings.ToLower(entries[i].Name()), strings.ToLower(entries[j].Name())
-		if left == right {
-			return entries[i].Name() < entries[j].Name()
-		}
-		return left < right
-	})
-	var commands []Command
-	seen := make(map[string]bool, len(entries))
+
+	var dirs []string
+	seenFiles := make(map[string]bool)
+	seenDirs := make(map[string]bool)
+	visited := 0
 	truncated := false
-	for _, entry := range entries {
+
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if depth > maxDepth {
+			return
+		}
 		if *budget <= 0 {
 			truncated = true
-			break
+			return
 		}
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			if seenDirs[resolved] {
+				return
+			}
+			seenDirs[resolved] = true
 		}
-		child := filepath.Join(dir, entry.Name())
-		if !entryIsDir(entry, child) {
-			continue
+		visited++
+		if visited > maxEntries {
+			truncated = true
+			return
 		}
-		metadata, resolved, ok := scopedSkillMetadata(dir, entry.Name(), source, "")
-		if !ok || seen[resolved] {
-			continue
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
 		}
-		seen[resolved] = true
-		*budget--
-		if !userInvocable(metadata) {
-			continue
-		}
-		name := entry.Name()
-		if !commandNamePattern.MatchString(name) {
-			continue
-		}
-		description := metadata["description"]
-		if description == "" {
-			description = strings.ToUpper(name[:1]) + name[1:] + " skill"
-		}
-		commands = append(commands, Command{
-			Command:      "/" + name,
-			Description:  compact(description, 240),
-			Source:       source,
-			ArgumentHint: compact(metadata["argument-hint"], 120),
+		sort.Slice(entries, func(i, j int) bool {
+			left, right := strings.ToLower(entries[i].Name()), strings.ToLower(entries[j].Name())
+			if left == right {
+				return entries[i].Name() < entries[j].Name()
+			}
+			return left < right
 		})
+
+		for _, entry := range entries {
+			if *budget <= 0 {
+				truncated = true
+				return
+			}
+			if strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			child := filepath.Join(dir, entry.Name())
+			if !entryIsDir(entry, child) {
+				continue
+			}
+			// A directory holding SKILL.md is a skill. Cursor still descends
+			// into it, so a skill that also nests skills yields both.
+			if skillFile := filepath.Join(child, "SKILL.md"); regularFile(skillFile) {
+				resolved := skillFile
+				if link, err := filepath.EvalSymlinks(skillFile); err == nil {
+					resolved = link
+				}
+				if !seenFiles[resolved] {
+					seenFiles[resolved] = true
+					*budget--
+					dirs = append(dirs, child)
+				}
+			}
+			walk(child, depth+1)
+		}
 	}
-	return commands, truncated
+	walk(root, 0)
+
+	// Cursor orders its collected SKILL.md paths before assigning ids, so the
+	// id numbering does not depend on directory read order.
+	sort.Strings(dirs)
+	return dirs, truncated
+}
+
+func regularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// duplicateSkillFolderNames reports the folder names that appear more than once
+// within one root. Cursor computes this per root, before assigning any id, and
+// uses it to decide which skills get a relative-path id.
+func duplicateSkillFolderNames(dirs []string) map[string]bool {
+	counts := make(map[string]int, len(dirs))
+	for _, dir := range dirs {
+		counts[filepath.Base(dir)]++
+	}
+	duplicates := make(map[string]bool)
+	for name, count := range counts {
+		if count > 1 {
+			duplicates[name] = true
+		}
+	}
+	return duplicates
+}
+
+// relativeSkillID mirrors getRelativeSkillId: a skill folder's path relative to
+// the root, with the separators joined by "-". It reports false when the path
+// does not sit below the root, where Cursor falls back to the bare name.
+func relativeSkillID(root, skillDir string) (string, bool) {
+	relative, err := filepath.Rel(root, skillDir)
+	if err != nil || relative == "" || relative == "." || filepath.IsAbs(relative) {
+		return "", false
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" && part != "." {
+			kept = append(kept, part)
+		}
+	}
+	if len(kept) == 0 {
+		return "", false
+	}
+	return strings.Join(kept, "-"), true
+}
+
+// cursorSkillID mirrors getSkillIdForPath: the id is the skill folder's name,
+// except that a folder name duplicated within the same root instead uses the
+// root-relative path, and any id already handed out for this root gains a -2,
+// -3 ... suffix.
+//
+// taken is deliberately scoped to ONE root. Cursor builds a fresh id set inside
+// each loadSkillsFromDirectory call, so duplicates across roots do not suffix
+// - the later root simply overwrites the earlier id in the skills map.
+func cursorSkillID(root, skillDir string, duplicates, taken map[string]bool) string {
+	id := filepath.Base(skillDir)
+	if duplicates[id] {
+		if relative, ok := relativeSkillID(root, skillDir); ok {
+			id = relative
+		}
+	}
+	return uniqueCommandName(id, taken)
 }
 
 // projectAncestors returns the ancestor directories Cursor searches for
@@ -306,10 +403,12 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		active[command.Command] = command
 	}
 
-	// Cursor resolves its builtins from a reserved registry rather than the
-	// markdown command map, so a file reusing a builtin name would otherwise
-	// publish a command the pane does not run. Reserve those names: a colliding
-	// file is suffixed beside the builtin.
+	// Cursor resolves its builtins from a separate registry, not the markdown
+	// command map or the skills map. A file or skill reusing a builtin name is
+	// therefore not separately invocable - typing that name runs the builtin -
+	// and the pane does not register any alias for it. Publishing a fabricated
+	// suffix like /clear-2 would offer the phone a command nothing resolves, so
+	// a colliding entry is dropped and the builtin keeps its name.
 	reserved := make(map[string]bool, len(cursorBuiltins))
 	for _, builtin := range cursorBuiltins {
 		reserved[builtin.Command] = true
@@ -325,7 +424,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		truncated = truncated || trunc
 		for _, command := range cmds {
 			if reserved[command.Command] {
-				command.Command = uniqueCommandName(command.Command, reserved)
+				continue
 			}
 			add(command)
 		}
@@ -337,29 +436,62 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scanCommands(root, "personal")
 	}
 
-	// Skills collide differently. getSkillIdForPath keeps a set of ids already
-	// handed out and appends -2, -3 ... to a later duplicate, so one folder name
-	// under two roots lists both entries instead of one replacing the other.
-	// Personal roots load first, matching Cursor's loadSkillRoots order, so the
-	// personal entry keeps the bare name.
-	taken := make(map[string]bool, len(active))
-	for name := range active {
-		taken[name] = true
-	}
-	scanSkills := func(root, source string) {
-		cmds, trunc := scanCursorSkillDirBudget(root, source, &budget)
+	// Skills follow getSkillIdForPath instead: the id is the skill folder's
+	// name, or the root-relative path when that folder name repeats within the
+	// same root, and any repeat within the root gains a -2, -3 ... suffix.
+	//
+	// The id set is built fresh per root. Cursor's loadSkillsFromDirectory
+	// creates its own set inside each call, so a duplicate across roots is not
+	// suffixed - the later root overwrites the earlier id in the skills map.
+	// That makes root order decide collisions, and Cursor's loadSkillRoots
+	// passes the personal roots first, so a project skill replaces a personal
+	// one of the same folder name.
+	scanSkills := func(root, source string, project bool) {
+		dirs, trunc := cursorSkillWalk(root, &budget)
 		truncated = truncated || trunc
-		for _, command := range cmds {
-			command.Command = uniqueCommandName(command.Command, taken)
-			add(command)
+		if len(dirs) == 0 {
+			return
+		}
+		duplicates := duplicateSkillFolderNames(dirs)
+		taken := make(map[string]bool, len(dirs))
+		for _, skillDir := range dirs {
+			name := cursorSkillID(root, skillDir, duplicates, taken)
+			if !commandNamePattern.MatchString(name) {
+				continue
+			}
+			skillFile := filepath.Join(skillDir, "SKILL.md")
+			var metadata map[string]string
+			var ok bool
+			if project {
+				metadata, _, ok = scopedSkillMetadata(root, filepath.Base(skillDir), source, "")
+			} else {
+				metadata, ok = readSkillMetadata(skillFile)
+			}
+			if !ok || !userInvocable(metadata) {
+				continue
+			}
+			command := "/" + name
+			if reserved[command] {
+				continue
+			}
+			description := metadata["description"]
+			if description == "" {
+				description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+			}
+			add(Command{
+				Command:      command,
+				Description:  compact(description, 240),
+				Source:       source,
+				ArgumentHint: compact(metadata["argument-hint"], 120),
+			})
 		}
 	}
 	for _, root := range cursorSkillRoots(ctx.Home) {
-		scanSkills(root, "personal")
+		scanSkills(root, "personal", false)
 	}
 	for _, ancestor := range projectAncestors(ctx.Cwd) {
 		for _, stem := range []string{".cursor", ".agents"} {
-			scanSkills(filepath.Join(ancestor, stem, "skills"), "project")
+			scanSkills(filepath.Join(ancestor, stem, "skills"), "project", true)
 		}
 	}
 
