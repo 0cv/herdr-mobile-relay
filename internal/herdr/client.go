@@ -73,6 +73,7 @@ func (e *CLIError) Error() string {
 var refusalCodes = map[string]struct{}{
 	"server_not_running":                     {},
 	"agent_pane_busy":                        {},
+	"agent_not_ready":                        {},
 	"protocol_mismatch":                      {},
 	"invalid_request":                        {},
 	"workspace_not_found":                    {},
@@ -129,6 +130,8 @@ func RefusalMessage(code string) string {
 		return "Herdr server is not running"
 	case "agent_pane_busy":
 		return "Agent pane is still starting"
+	case "agent_not_ready":
+		return "Agent pane has no name; Herdr requires a named agent to receive prompts"
 	case "protocol_mismatch":
 		return "Herdr server protocol is incompatible with this relay"
 	case "workspace_group_close_required":
@@ -721,9 +724,32 @@ func (c *Client) SendText(ctx context.Context, paneID, text string) error {
 	return err
 }
 
+// Prompt submits text to an agent pane.
+//
+// `herdr agent prompt` is the preferred path: it honors the pane's live
+// bracketed-paste mode and submits the text and Enter atomically. It requires
+// the pane to host a NAMED agent, though — Herdr answers `agent_not_ready`
+// when the agent has no name, which is the common case for a pane opened by
+// hand or reopened after Herdr itself was updated (names are opt-in and are
+// dropped when the pane's occupant is replaced). Instead of leaving the prompt
+// undelivered, fall back to the pane surface, which accepts any pane.
 func (c *Client) Prompt(ctx context.Context, paneID, text string) error {
-	_, err := c.runCommand(ctx, "agent", "prompt", paneID, text)
-	return err
+	if _, err := c.runCommand(ctx, "agent", "prompt", paneID, text); err != nil {
+		if !isAgentNotReady(err) {
+			return err
+		}
+		if _, fallbackErr := c.runCommand(ctx, "pane", "run", paneID, text); fallbackErr != nil {
+			return fmt.Errorf("herdr agent prompt: %w (pane fallback: %v)", err, fallbackErr)
+		}
+	}
+	return nil
+}
+
+// isAgentNotReady reports whether Herdr refused the call because the pane's
+// agent has no name (`agent prompt` only accepts named agents).
+func isAgentNotReady(err error) bool {
+	var cliErr *CLIError
+	return errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == "agent_not_ready"
 }
 
 func (c *Client) StopPane(ctx context.Context, paneID string) error {
