@@ -40,11 +40,13 @@ const ACTION_LABEL: Record<string, string> = {
   back: 'Back',
   cancel: 'Cancel',
   choose: 'Choose',
+  clear: 'Clear',
   close: 'Close',
   confirm: 'Confirm',
   continue: 'Continue',
   deny: 'Deny',
   down: 'Down',
+  edit: 'Edit',
   move: 'Move',
   navigate: 'Navigate',
   next: 'Next',
@@ -95,7 +97,14 @@ function cleanTitle(value: string): string {
 
 export function terminalTextInputActive(value: string): boolean {
   const tail = value.replace(/\r\n?/g, '\n').split('\n').slice(-8).join('\n');
-  return /\benter(?:\s+or\s+ctrl\+q)?\s+submit\b/iu.test(tail);
+  // Two known footer shapes signal "the TUI wants typed input":
+  //  - Hermes-style approval footers: "enter (or ctrl+q) to submit".
+  //  - Cursor-style pickers and menus: "Type to filter • Enter to select •
+  //    Tab to edit". The bullet separator is U+2022. The cursor bundle also
+  //    emits the same words with a middle dot or spaced pipe on other
+  //    surfaces, so match words, not punctuation.
+  return /\benter(?:\s+or\s+ctrl\+q)?\s+submit\b/iu.test(tail)
+    || /\btype\s+to\s+filter\b/iu.test(tail);
 }
 
 export function detectTerminalMenu(value: string): TerminalMenu | null {
