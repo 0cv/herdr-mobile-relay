@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Full uninstall: remove the relay binary, releases, config, cache, and service.
 set -euo pipefail
 

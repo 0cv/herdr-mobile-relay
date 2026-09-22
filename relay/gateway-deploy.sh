@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Deploys a gateway of your own: a docker compose stack with Caddy terminating
 # TLS in front of the blind WSS gateway, driven from this menu over SSH.
 #

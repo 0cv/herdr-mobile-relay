@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -979,7 +979,7 @@ mkdir -p "$STABLE_SWITCH_DIR"
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-install-service.sh" \
     "$STABLE_SWITCH_DIR/"
 cat > "$STABLE_SWITCH_DIR/stable-setup.sh" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$HERDR_RELAY_ENV" ||
     [ -n "${HERDR_GATEWAY_URL:-}" ]; then
     echo "stable setup still inherited the gateway" >&2

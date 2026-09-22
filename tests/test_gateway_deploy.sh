@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Covers relay/gateway-deploy.sh: the bundle it writes and the SSH deployment it
 # drives. Every remote step runs against stub ssh/curl binaries, so the test
 # never touches a network or a real server.
@@ -14,7 +14,7 @@ mkdir -p "$STUB_DIR"
 SSH_LOG="$WORK_DIR/ssh.log"
 export SSH_LOG
 cat > "$STUB_DIR/ssh" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 # Records the remote command and answers the handful of probes the deployment
 # makes. The tar step must drain stdin or the local tar reports a broken pipe.
 set -uo pipefail
