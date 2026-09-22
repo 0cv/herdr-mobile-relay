@@ -51,7 +51,7 @@
     terminalResizeLayoutEngaged,
     terminalScreenColumns,
   } from '$lib/terminal';
-  import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
+  import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type {
     Agent,
@@ -276,7 +276,7 @@
     stripAnsi(displayed)
       .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
-  const terminalTextMode = $derived(inspectionMode && terminalTextInputActive(terminalPlainText));
+  const terminalTextMode = $derived(inspectionMode ? terminalTextInputMode(terminalPlainText) : null);
   const composerLocked = $derived(readOnly || responsePending || (inspectionMode && !terminalTextMode));
   // The relay recognizes the prompt; that recognition is what opens the masked
   // input, even while the generic composer stays locked for inspection.
@@ -1198,13 +1198,13 @@
         await relayStore.sendToAgent(agent, {
           type: 'send_input',
           text,
-          keys: ['Enter'],
-          activity_label: 'Submitted terminal text',
+          ...(terminalText === 'submit' ? { keys: ['Enter'] } : {}),
+          activity_label: terminalText === 'filter' ? 'Sent filter text' : 'Submitted terminal text',
         });
       } else {
         await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       }
-      relayStore.showToast(terminalText ? 'Terminal text submitted.' : 'Prompt sent.');
+      relayStore.showToast(terminalText === 'filter' ? 'Filter text sent. Select separately using terminal controls.' : terminalText ? 'Terminal text submitted.' : 'Prompt sent.');
     } catch (error) {
       const dispatchedUnknown = typeof error === 'object'
         && error !== null
@@ -1216,7 +1216,7 @@
       if (!composer && !dispatchedUnknown) composer = submittedDraft;
       const detail = error instanceof Error
         ? error.message
-        : terminalText ? 'Terminal text could not be submitted.' : 'Prompt could not be sent.';
+        : terminalText === 'filter' ? 'Filter text could not be sent.' : terminalText ? 'Terminal text could not be submitted.' : 'Prompt could not be sent.';
       relayStore.showToast(dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail, true);
     } finally {
       sendingPrompt = false;
@@ -2312,7 +2312,7 @@
             ? 'Approval pending — use buttons'
             : inspectionMode
               ? terminalTextMode
-                ? 'Type terminal input…'
+                ? terminalTextMode === 'filter' ? 'Type filter text…' : 'Type terminal input…'
                 : 'Needs inspection — use terminal controls'
               : 'Type a reply…'}
           role="combobox"
@@ -2333,7 +2333,7 @@
         ></textarea>
         {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
-      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt || uploadingAttachment} aria-label={sendingPrompt ? 'Submitting input' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
+      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt || uploadingAttachment} aria-label={sendingPrompt ? 'Submitting input' : terminalTextMode === 'filter' ? 'Send filter text' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
       <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
       <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>

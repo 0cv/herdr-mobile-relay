@@ -1,32 +1,34 @@
 import { describe, expect, it } from 'vitest';
 
-import { detectTerminalMenu, terminalTextInputActive } from '../../src/lib/terminal-menu';
+import { detectTerminalMenu, terminalTextInputMode } from '../../src/lib/terminal-menu';
 
-describe('terminalTextInputActive', () => {
+describe('terminalTextInputMode', () => {
   it('keeps matching the Hermes approval footer it was built for', () => {
     // Real Hermes question footer, as captured in this repo's own fixtures
     // (tests/browser/mobile-journeys.spec.ts, tests/unit/components.test.ts).
-    expect(terminalTextInputActive('Custom answer: Which weekend?\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor')).toBe(true);
-    expect(terminalTextInputActive('press enter submit')).toBe(true);
+    expect(terminalTextInputMode('Custom answer: Which weekend?\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor')).toBe('submit');
+    expect(terminalTextInputMode('press enter submit')).toBe('submit');
   });
 
   it('matches the Cursor model picker footer', () => {
     // Captured from a live cursor pane running /model (agent bundle
     // v2026.09.18): the picker renders its hints as one bullet-separated line.
     const footer = 'Type to filter • Enter to select • Tab to edit';
-    expect(terminalTextInputActive(footer)).toBe(true);
+    expect(terminalTextInputMode(footer)).toBe('filter');
+    expect(terminalTextInputMode(footer.replaceAll('•', '|'))).toBe('filter');
+    expect(terminalTextInputMode(`${footer}\n${'old output\n'.repeat(8)}`)).toBeNull();
   });
 
   it('matches the picker footer with the filter box focused', () => {
     // The same footer once the user focuses the filter input; the hints do
     // not change, but the footer sits above a longer scrollback tail.
     const scrollback = 'Available models\n\n Filter: opus\n\n    Claude Opus 5            300K High\n\n 1-2 of 38\n\n Type to filter • Enter to select • Tab to edit';
-    expect(terminalTextInputActive(scrollback)).toBe(true);
+    expect(terminalTextInputMode(scrollback)).toBe('filter');
   });
 
   it('does not match an idle pane or a model list without the footer', () => {
-    expect(terminalTextInputActive('Manual Reboot DR [Grok 4.6 Medium]\nctx 24% used')).toBe(false);
-    expect(terminalTextInputActive('Available models\n Filter:\n    Auto\n    Grok 4.7')).toBe(false);
+    expect(terminalTextInputMode('Manual Reboot DR [Grok 4.6 Medium]\nctx 24% used')).toBeNull();
+    expect(terminalTextInputMode('Available models\n Filter:\n    Auto\n    Grok 4.7')).toBeNull();
   });
 });
 

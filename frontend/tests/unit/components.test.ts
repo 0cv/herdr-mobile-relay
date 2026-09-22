@@ -260,6 +260,61 @@ describe('accessible Svelte interactions', () => {
     respond.mockRestore();
   });
 
+  it('sends Cursor filter text without selecting a model', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'filter-1', ok: true,
+    });
+    const agent: Agent = { ...blockedAgent, attention_kind: 'unknown', options: undefined };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: { paneId: agent.pane_id, content: 'Available models\nType to filter • Enter to select • Tab to edit', format: 'plain' },
+    });
+    const input = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.type(input, 'grok');
+    expect(send).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Send filter text' }));
+    expect(send).toHaveBeenCalledExactlyOnceWith(agent, {
+      type: 'send_input', text: 'grok', activity_label: 'Sent filter text',
+    });
+    expect(input).toHaveValue('');
+    expect(screen.getByPlaceholderText('Type filter text…')).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Arrow keys' }));
+    await user.click(screen.getByRole('button', { name: 'Down' }));
+    await user.click(screen.getByRole('button', { name: 'Enter' }));
+    expect(send.mock.calls.slice(1).map(([, command]) => command)).toEqual([
+      expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
+      expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
+    ]);
+    for (const modifier of ['Control', 'Meta']) {
+      send.mockClear();
+      await user.type(input, 'opus');
+      await user.keyboard(`{${modifier}>}{Enter}{/${modifier}}`);
+      expect(send).toHaveBeenCalledExactlyOnceWith(agent, {
+        type: 'send_input', text: 'opus', activity_label: 'Sent filter text',
+      });
+    }
+    send.mockRejectedValueOnce(new Error('Delivery failed'));
+    await user.type(input, 'retry');
+    await user.click(screen.getByRole('button', { name: 'Send filter text' }));
+    expect(input).toHaveValue('retry');
+    send.mockRejectedValueOnce({ data: { dispatched_unknown: true } });
+    await user.click(screen.getByRole('button', { name: 'Send filter text' }));
+    expect(input).toHaveValue('');
+    await view.rerender({ readOnly: true });
+    expect(input).toBeDisabled();
+    for (const attention_kind of ['approval', 'question'] as const) {
+      await view.rerender({ readOnly: false, agent: { ...agent, attention_kind } });
+      expect(input).toBeDisabled();
+    }
+    await view.rerender({ agent, frame: { paneId: agent.pane_id, content: 'Available models', format: 'plain' } });
+    expect(input).toBeDisabled();
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+
   it('enables blocked terminal text only while its editor is active', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);

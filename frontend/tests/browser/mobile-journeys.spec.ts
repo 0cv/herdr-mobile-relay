@@ -1213,6 +1213,45 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
   await expect.poll(() => socketCount(page)).toBe(2);
 });
 
+test('filters a Cursor picker before explicitly navigating and selecting', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
+  });
+  await page.getByRole('button', { name: 'Open Cursor picker on Fedora' }).click();
+  const footer = 'Type to filter • Enter to select • Tab to edit • Esc to clear';
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: `Available models\n${footer}`,
+  });
+  const input = page.getByPlaceholder('Type filter text…');
+  const mutations = async () => (await commands(page)).filter((command) =>
+    ['send_input', 'send_text', 'send_keys', 'submit_prompt'].includes(String(command.type)));
+  await input.fill('grok');
+  expect(await mutations()).toEqual([]);
+  await page.getByRole('button', { name: 'Send filter text' }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_input', text: 'grok' }),
+  ]);
+  expect((await mutations())[0]).not.toHaveProperty('keys');
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
+    content: `Filter: grok\nGrok Fast\nGrok Medium\n${footer}`,
+  });
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue('');
+  await page.getByRole('button', { name: 'Arrow keys' }).click();
+  await page.getByRole('button', { name: 'Down', exact: true }).click();
+  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_input', text: 'grok' }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
+  ]);
+});
+
 test('centers plan keys and enables text only for the terminal editor', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
