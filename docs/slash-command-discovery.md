@@ -40,6 +40,12 @@ would offer the phone commands the pane does not have. Configured
 `agent-profiles.ini` skill folders remain available as the escape hatch for
 pointing the palette somewhere outside the roots above.
 
+Native skill discovery skips `node_modules`, `__pycache__`, `dist`, and `build`,
+while deduplicating linked skill files across roots. Project skill links must
+remain inside their skill root. Skills whose nonempty `metadata.surfaces` excludes
+`cli` are omitted. Command files may be symlinks to regular files; pipes and sockets
+are never read.
+
 A catalog can be incomplete when a discovery pass, the final entry cap, or
 the serialized response-size guard is reached. One outbound relay message is
 limited to 4 MiB; the relay clips a large serialized `command_result` before

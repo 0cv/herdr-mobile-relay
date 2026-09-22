@@ -108,14 +108,13 @@ func cursorSkillRoots(home string) []string {
 // directories walked and the SKILL.md files accepted are deduplicated by
 // realpath, so a link and its target are read once and a link that points back
 // up the tree cannot loop.
-func cursorSkillWalk(root string, budget *int) ([]string, bool) {
+func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[string]bool) ([]string, bool) {
 	const maxDepth = 10
 	if root == "" {
 		return nil, false
 	}
 
 	var dirs []string
-	seenFiles := make(map[string]bool)
 	seenDirs := make(map[string]bool)
 	visited := 0
 	truncated := false
@@ -158,11 +157,11 @@ func cursorSkillWalk(root string, budget *int) ([]string, bool) {
 				truncated = true
 				return
 			}
-			if strings.HasPrefix(entry.Name(), ".") {
+			if cursorSkillDirIgnored(entry.Name()) {
 				continue
 			}
 			child := filepath.Join(dir, entry.Name())
-			if !entryIsDir(entry, child) {
+			if !entryIsDir(entry, child) || project && !pathWithin(child, root) {
 				continue
 			}
 			// A directory holding SKILL.md is a skill. Cursor still descends
@@ -172,7 +171,7 @@ func cursorSkillWalk(root string, budget *int) ([]string, bool) {
 				if link, err := filepath.EvalSymlinks(skillFile); err == nil {
 					resolved = link
 				}
-				if !seenFiles[resolved] {
+				if !seenFiles[resolved] && (!project || pathWithin(resolved, root)) {
 					seenFiles[resolved] = true
 					*budget--
 					dirs = append(dirs, child)
@@ -187,6 +186,15 @@ func cursorSkillWalk(root string, budget *int) ([]string, bool) {
 	// id numbering does not depend on directory read order.
 	sort.Strings(dirs)
 	return dirs, truncated
+}
+
+func cursorSkillDirIgnored(name string) bool {
+	switch name {
+	case "node_modules", "__pycache__", "dist", "build":
+		return true
+	default:
+		return strings.HasPrefix(name, ".")
+	}
 }
 
 func regularFile(path string) bool {
@@ -361,7 +369,8 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
 		}
-		if !entry.Type().IsRegular() {
+		path := filepath.Join(dir, name)
+		if !regularFile(path) {
 			continue
 		}
 		cmdName := strings.TrimSuffix(name, ".md")
@@ -370,7 +379,6 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 		}
 		seen[cmdName] = true
 		*budget--
-		path := filepath.Join(dir, name)
 		fm := fileFrontmatter(path)
 		if isHidden(fm) || !userInvocable(fm) {
 			continue
@@ -446,8 +454,9 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// That makes root order decide collisions, and Cursor's loadSkillRoots
 	// passes workspace roots before personal roots, so a personal skill replaces
 	// a project one with the same id.
+	seenSkillFiles := make(map[string]bool)
 	scanSkills := func(root, source string, project bool) {
-		dirs, trunc := cursorSkillWalk(root, &budget)
+		dirs, trunc := cursorSkillWalk(root, project, &budget, seenSkillFiles)
 		truncated = truncated || trunc
 		if len(dirs) == 0 {
 			return
@@ -459,18 +468,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			if !commandNamePattern.MatchString(name) {
 				continue
 			}
-			skillFile := filepath.Join(skillDir, "SKILL.md")
-			var metadata map[string]string
-			var ok bool
-			if project {
-				relative, err := filepath.Rel(root, skillDir)
-				if err != nil {
-					continue
-				}
-				metadata, _, ok = scopedSkillMetadata(root, relative, source, "")
-			} else {
-				metadata, ok = readSkillMetadata(skillFile)
-			}
+			metadata, ok := readCursorSkillMetadata(root, skillDir, project)
 			if !ok || !userInvocable(metadata) {
 				continue
 			}

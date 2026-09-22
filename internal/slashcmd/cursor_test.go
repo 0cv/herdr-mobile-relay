@@ -312,8 +312,12 @@ func TestCursorSkipsNonRegularCommandFile(t *testing.T) {
 	dir := filepath.Join(home, ".cursor", "commands")
 	mkdirAll(t, dir)
 	writeFile(t, filepath.Join(dir, "real.md"), "# Real\n")
-	if err := syscall.Mkfifo(filepath.Join(dir, "pipe.md"), 0o600); err != nil {
+	pipe := filepath.Join(dir, "pipe.md")
+	if err := syscall.Mkfifo(pipe, 0o600); err != nil {
 		t.Skipf("fifo unavailable: %v", err)
+	}
+	if err := os.Symlink(pipe, filepath.Join(dir, "linked-pipe.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 
 	done := make(chan Catalog, 1)
@@ -323,8 +327,10 @@ func TestCursorSkipsNonRegularCommandFile(t *testing.T) {
 		if !containsCommand(catalog, "/real") {
 			t.Errorf("real command missing; catalog=%v", commandNames(catalog))
 		}
-		if containsCommand(catalog, "/pipe") {
-			t.Error("a fifo must not become a command")
+		for _, command := range []string{"/pipe", "/linked-pipe"} {
+			if containsCommand(catalog, command) {
+				t.Errorf("a fifo must not become a command: %s", command)
+			}
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("discovery hung on a fifo; non-regular files must be skipped")
@@ -395,21 +401,19 @@ func TestCursorNestedProjectSkillMetadata(t *testing.T) {
 
 func TestCursorNestedProjectSkillSymlinkBoundary(t *testing.T) {
 	for _, linkFile := range []bool{false, true} {
-		for _, outside := range []bool{false, true} {
-			name := "directory"
+		for _, location := range []string{"skill-root", "repository", "outside"} {
+			name := "directory-" + location
 			if linkFile {
-				name = "file"
-			}
-			if outside {
-				name += "-outside"
-			} else {
-				name += "-inside"
+				name = "file-" + location
 			}
 			t.Run(name, func(t *testing.T) {
 				repo := t.TempDir()
 				writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
-				targetRoot := repo
-				if outside {
+				targetRoot := filepath.Join(repo, ".cursor", "skills", "z-targets")
+				switch location {
+				case "repository":
+					targetRoot = repo
+				case "outside":
 					targetRoot = t.TempDir()
 				}
 				cursorSkill(t, targetRoot, "shared", "ignored", "Linked metadata")
@@ -428,8 +432,8 @@ func TestCursorNestedProjectSkillSymlinkBoundary(t *testing.T) {
 					t.Skipf("symlinks unavailable: %v", err)
 				}
 				catalog := cursorCatalog(t, repo, t.TempDir())
-				if got := containsCommand(catalog, "/linked"); got != !outside {
-					t.Errorf("/linked present = %v, want %v", got, !outside)
+				if got, want := containsCommand(catalog, "/linked"), location == "skill-root"; got != want {
+					t.Errorf("/linked present = %v, want %v", got, want)
 				}
 				for _, command := range catalog.Commands {
 					if command.Command == "/linked" && (command.Description != "Linked metadata" || command.Source != "project") {
@@ -438,6 +442,191 @@ func TestCursorNestedProjectSkillSymlinkBoundary(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCursorSkipsDependencyAndBuildDirectories(t *testing.T) {
+	for _, ignored := range []string{"node_modules", "__pycache__", "dist", "build"} {
+		t.Run(ignored, func(t *testing.T) {
+			home := t.TempDir()
+			root := filepath.Join(home, ".cursor", "skills")
+			cursorSkill(t, filepath.Join(root, "tools"), "review", "review", "Real review")
+			cursorSkill(t, filepath.Join(root, ignored), "review", "review", "Ignored review")
+			cursorSkill(t, root, ignored, ignored, "Ignored skill")
+
+			catalog := cursorCatalog(t, t.TempDir(), home)
+			if !containsCommand(catalog, "/review") {
+				t.Errorf("ignored directory changed skill ID; catalog=%v", commandNames(catalog))
+			}
+			for _, command := range catalog.Commands {
+				if command.Source != "builtin" && command != (Command{"/review", "Real review", "personal", ""}) {
+					t.Errorf("unexpected command: %+v", command)
+				}
+			}
+		})
+	}
+}
+
+func TestCursorDeduplicatesSkillRealpathsAcrossRoots(t *testing.T) {
+	for _, duplicateName := range []bool{false, true} {
+		name := "alias"
+		if duplicateName {
+			name = "alias-with-distinct-sibling"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			cursorRoot := filepath.Join(home, ".cursor", "skills")
+			agentsRoot := filepath.Join(home, ".agents", "skills")
+			cursorSkill(t, cursorRoot, "original", "ignored", "Original skill")
+			link := filepath.Join(agentsRoot, "tools", "alias")
+			mkdirAll(t, filepath.Dir(link))
+			if err := os.Symlink(filepath.Join(cursorRoot, "original"), link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			if duplicateName {
+				cursorSkill(t, filepath.Join(agentsRoot, "other"), "alias", "ignored", "Distinct skill")
+			}
+
+			catalog := cursorCatalog(t, t.TempDir(), home)
+			if !containsCommand(catalog, "/original") {
+				t.Error("original skill missing")
+			}
+			if got := containsCommand(catalog, "/alias"); got != duplicateName {
+				t.Errorf("/alias present = %v, want %v", got, duplicateName)
+			}
+			for _, command := range catalog.Commands {
+				if command.Source == "builtin" || command.Command == "/original" {
+					continue
+				}
+				if !duplicateName || command != (Command{"/alias", "Distinct skill", "personal", ""}) {
+					t.Errorf("unexpected command: %+v", command)
+				}
+			}
+		})
+	}
+}
+
+func TestCursorFollowsRegularCommandSymlink(t *testing.T) {
+	for _, stem := range []string{".cursor", ".claude"} {
+		t.Run(stem, func(t *testing.T) {
+			home := t.TempDir()
+			target := filepath.Join(home, "dotfiles", "review.md")
+			writeFile(t, target, "---\ndescription: Linked review\n---\nReview the code\n")
+			link := filepath.Join(home, stem, "commands", "linked-review.md")
+			mkdirAll(t, filepath.Dir(link))
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			if err := os.Symlink(filepath.Join(home, "missing"), filepath.Join(filepath.Dir(link), "broken.md")); err != nil {
+				t.Fatal(err)
+			}
+
+			catalog := cursorCatalog(t, t.TempDir(), home)
+			if !containsCommand(catalog, "/linked-review") {
+				t.Error("symlinked command missing")
+			}
+			if containsCommand(catalog, "/broken") {
+				t.Error("broken symlink became a command")
+			}
+		})
+	}
+}
+
+func TestCursorSkillSurfaces(t *testing.T) {
+	cases := []struct {
+		name, metadata string
+		visible        bool
+	}{
+		{"unset", "", true},
+		{"ide-list", "metadata:\n  surfaces: [ide]\n", false},
+		{"cli-list", "metadata:\n  surfaces: [ide, cli]\n", true},
+		{"ide-block-list", "metadata:\n  surfaces:\n    - ide\n    - cloud\n", false},
+		{"cli-block-list", "metadata:\n  surfaces:\n    - ide\n    - cli\n", true},
+		{"indentless-list", "metadata:\n  surfaces:\n  - ide\n", false},
+		{"ide-scalar", "metadata:\n  surfaces: ide, cloud\n", false},
+		{"cli-scalar", "metadata:\n  surfaces: 'ide, cli'\n", true},
+		{"folded-scalar", "metadata:\n  surfaces: >-\n    ide,\n    cloud\n", false},
+		{"inline-map", "metadata: {surfaces: [ide]}\n", false},
+		{"inline-map-cli", "metadata: {surfaces: [cli]}\n", true},
+		{"case-sensitive", "metadata: {surfaces: [CLI]}\n", false},
+		{"list-preserves-whitespace", "metadata: {surfaces: [' cli ']}\n", false},
+		{"alias", "shared: &surfaces [ide]\nmetadata: {surfaces: *surfaces}\n", false},
+		{"metadata-null", "metadata: null\n", true},
+		{"metadata-scalar", "metadata: unrelated\n", true},
+		{"empty-list", "metadata:\n  surfaces: []\n", true},
+		{"empty-scalar", "metadata:\n  surfaces: ''\n", true},
+		{"null", "metadata:\n  surfaces: null\n", true},
+		{"nonstring-list", "metadata:\n  surfaces: [42, false]\n", true},
+		{"mixed-list", "metadata:\n  surfaces: [42, ide]\n", false},
+		{"unrelated-root-key", "surfaces: [ide]\n", true},
+		{"unrelated-nested-key", "metadata:\n  other:\n    surfaces: [ide]\n", true},
+	}
+	for _, tc := range cases {
+		for _, project := range []bool{false, true} {
+			scope := "personal"
+			if project {
+				scope = "project"
+			}
+			t.Run(tc.name+"-"+scope, func(t *testing.T) {
+				home, repo := t.TempDir(), t.TempDir()
+				writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
+				root := home
+				if project {
+					root = repo
+				}
+				root = filepath.Join(root, ".cursor", "skills")
+				writeFile(t, filepath.Join(root, "surface-test", "SKILL.md"),
+					"---\nname: ignored\ndescription: Surface test\n"+tc.metadata+"---\nBody\n")
+				cursorSkill(t, root, "sibling", "sibling", "Sibling skill")
+				catalog := cursorCatalog(t, repo, home)
+				if got := containsCommand(catalog, "/surface-test"); got != tc.visible {
+					t.Errorf("skill present = %v, want %v", got, tc.visible)
+				}
+				if !containsCommand(catalog, "/sibling") {
+					t.Error("surface filtering removed sibling")
+				}
+			})
+		}
+	}
+}
+
+func TestCursorProjectOutsideLinkDoesNotChangeSkillID(t *testing.T) {
+	for _, linkFile := range []bool{false, true} {
+		name := "directory"
+		if linkFile {
+			name = "file"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo := t.TempDir()
+			writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
+			root := filepath.Join(repo, ".cursor", "skills")
+			cursorSkill(t, filepath.Join(root, "tools"), "review", "review", "Real review")
+			cursorSkill(t, repo, "review", "review", "Outside review")
+			target := filepath.Join(repo, "review")
+			link := filepath.Join(root, "other", "review")
+			if linkFile {
+				target = filepath.Join(target, "SKILL.md")
+				link = filepath.Join(link, "SKILL.md")
+			}
+			mkdirAll(t, filepath.Dir(link))
+			relativeTarget, err := filepath.Rel(filepath.Dir(link), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(relativeTarget, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+
+			catalog := cursorCatalog(t, repo, t.TempDir())
+			if !containsCommand(catalog, "/review") {
+				t.Error("outside link changed the valid skill ID")
+			}
+			for _, command := range catalog.Commands {
+				if command.Source != "builtin" && command != (Command{"/review", "Real review", "project", ""}) {
+					t.Errorf("unexpected command: %+v", command)
+				}
+			}
+		})
 	}
 }
 
