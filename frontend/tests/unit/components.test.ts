@@ -312,6 +312,14 @@ describe('accessible Svelte interactions', () => {
     }
     await view.rerender({ agent, frame: { paneId: agent.pane_id, content: 'Available models', format: 'plain' } });
     expect(input).toBeDisabled();
+    await view.rerender({
+      agent,
+      frame: {
+        paneId: agent.pane_id, format: 'plain',
+        content: 'Type to filter • Enter to select • Tab to edit\nNeeds inspection\n>',
+      },
+    });
+    expect(input).toBeDisabled();
     view.unmount();
     vi.restoreAllMocks();
   });
@@ -320,7 +328,7 @@ describe('accessible Svelte interactions', () => {
     ['done', 'done'],
     ['blocked', 'done'],
     ['blocked', 'working'],
-  ])('keeps Cursor filters text-only across %s to %s status updates', async (status, nextStatus) => {
+  ])('keeps Cursor filters text-only across %s to %s updates and restores prompts after closing', async (status, nextStatus) => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
@@ -359,10 +367,17 @@ describe('accessible Svelte interactions', () => {
     expect(screen.getByRole('button', { name: 'Send filter text' })).toBeDisabled();
     await view.rerender({
       readOnly: false,
-      frame: { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' },
+      frame: {
+        paneId: agent.pane_id, format: 'plain',
+        content: 'Type to filter • Enter to select • Tab to edit\nSelected model: Grok Fast\n>',
+      },
     });
     expect(screen.getByPlaceholderText('Type a reply…')).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Attach photos' })).toBeEnabled();
+    await user.type(input, '/mo');
+    expect(screen.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
+    await user.clear(input);
     send.mockClear();
     await user.type(input, 'Continue');
     await user.click(screen.getByRole('button', { name: 'Send prompt' }));

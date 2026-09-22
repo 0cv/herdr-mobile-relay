@@ -66,7 +66,7 @@ const SINGLE_HINT = new RegExp(`(${KEY_TOKEN})\\s*(?:to|:|=|-)?\\s*(${VERB_TOKEN
 const PAIRED_ARROWS = /([↑↓←→])\s*[/|]\s*([↑↓←→])\s*(?:to|:|=|-)?\s*(navigate|move|select|choose|previous|next)?/giu;
 const YES_NO = /\b(?:press\s+)?([yn])\s*[/|]\s*([yn])\b/iu;
 const EXPLICIT_LETTER = /\b([yn])\s*(?:to|:|=|-)+\s*(yes|no|accept|deny|confirm|cancel)\b/giu;
-const FILTER_FOOTER = /^\s*type\s+to\s+filter[\s•·|]+enter\s+to\s+select(?:[\s•·|]+(?:tab\s+to\s+edit|esc\s+to\s+(?:clear|close)))*\s*$/imu;
+const FILTER_FOOTER = /(?:^|\n)\s*type\s+to\s+filter[\s•·|]+enter\s+to\s+select(?:[\s•·|]+(?:tab\s+to\s+edit|esc\s+to\s+(?:clear|close)))*\s*$/iu;
 
 function normalizeKey(value: string): string {
   const lower = value.toLocaleLowerCase();

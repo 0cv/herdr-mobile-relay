@@ -23,6 +23,7 @@ describe('terminalTextInputMode', () => {
     const footer = `  Type to\nfilter ${separator} Enter to select\n${separator} Tab to edit ${separator} Esc to close  `;
     expect(terminalTextInputMode(footer)).toBe('filter');
     expect(terminalTextInputMode(footer.replaceAll('\n', '\r\n'))).toBe('filter');
+    expect(terminalTextInputMode(`Available models\n${footer}\n \t\n`)).toBe('filter');
     expect(terminalTextInputMode('Type to filter\nEnter to select')).toBe('filter');
   });
 
@@ -34,6 +35,21 @@ describe('terminalTextInputMode', () => {
     'Type to filter\nUnrelated output\nEnter to select',
   ])('does not treat ordinary output as a picker: %s', (output) => {
     expect(terminalTextInputMode(output)).toBeNull();
+  });
+
+  it.each(['>', 'Selected model: Grok Fast\n>', 'Ready for a prompt\n\n'])(
+    'ignores a picker footer followed by newer output: %s',
+    (output) => {
+      const footer = 'Type to filter • Enter to select • Tab to edit • Esc to clear';
+      expect(terminalTextInputMode(`${footer}\n${output}`)).toBeNull();
+      expect(terminalTextInputMode(`Type to filter\nEnter to select\n${output}`)).toBeNull();
+      expect(terminalTextInputMode(`${footer}\n${output}\n${footer}`)).toBe('filter');
+    },
+  );
+
+  it('uses a newer editor footer instead of a stale picker footer', () => {
+    const content = 'Type to filter • Enter to select • Tab to edit\nCustom answer:\n>\nenter or ctrl+q submit  esc cancel';
+    expect(terminalTextInputMode(content)).toBe('submit');
   });
 
   it('keeps editor submission active when earlier output mentions filtering', () => {
