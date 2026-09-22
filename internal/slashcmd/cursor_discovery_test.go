@@ -192,8 +192,7 @@ func TestCursorSkillWalkRootAndDepth(t *testing.T) {
 			writeFile(t, filepath.Join(deep, "too-deep", "SKILL.md"), "Depth 11\n")
 			budget := maxCustomFiles
 			dirs, truncated := cursorSkillWalk(root, project, &budget, make(map[string]bool))
-			want := []string{root, filepath.Join(root, "parent"), deep}
-			slices.Sort(want)
+			want := []string{deep, filepath.Join(root, "parent"), root}
 			if !slices.Equal(dirs, want) {
 				t.Errorf("skill directories = %v, want %v", dirs, want)
 			}

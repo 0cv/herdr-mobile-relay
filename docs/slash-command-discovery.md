@@ -41,8 +41,11 @@ would offer the phone commands the pane does not have. Configured
 pointing the palette somewhere outside the roots above.
 
 Project commands and skills are scanned at the pane's working directory, not
-inferred from its ancestors. Markdown commands take precedence over skills with
-the same command name, regardless of their scope.
+inferred from its ancestors. Builtins take precedence over Markdown commands,
+which take precedence over skills, with command names compared without regard
+to case. Markdown command files are not filtered by `hidden` or `user-invocable`
+frontmatter; `user-invocable` filtering applies only to skills. Empty command and
+skill files are skipped.
 
 Native skill discovery reads `SKILL.md` at the root and through ten directory
 levels, skipping `node_modules`, `__pycache__`, `dist`, and `build`, while

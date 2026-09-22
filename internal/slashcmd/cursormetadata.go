@@ -10,7 +10,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-func readCursorSkillMetadata(root, skillDir string, project bool) (map[string]string, bool) {
+func readCursorSkillFile(root, skillDir string, project bool) ([]byte, bool) {
 	skillFile := filepath.Join(skillDir, "SKILL.md")
 	var file *os.File
 	var err error
@@ -43,10 +43,10 @@ func readCursorSkillMetadata(root, skillDir string, project bool) (map[string]st
 		return nil, false
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxMetadataSize+1))
-	if err != nil || len(data) > maxMetadataSize {
+	if err != nil || len(data) == 0 || len(data) > maxMetadataSize {
 		return nil, false
 	}
-	return parseCursorSkillMetadata(data)
+	return data, true
 }
 
 func parseCursorSkillMetadata(data []byte) (map[string]string, bool) {

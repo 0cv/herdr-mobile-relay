@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
 )
 
 type cursorProvider struct{}
@@ -105,7 +108,9 @@ func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[strin
 		return nil, false
 	}
 
-	var dirs []string
+	var files []string
+	fileIndices := make(map[string]int)
+	pathOrder := collate.New(language.Und)
 	seenDirs := make(map[string]bool)
 	visited := 0
 	truncated := false
@@ -134,14 +139,6 @@ func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[strin
 		if err != nil {
 			return
 		}
-		sort.Slice(entries, func(i, j int) bool {
-			left, right := strings.ToLower(entries[i].Name()), strings.ToLower(entries[j].Name())
-			if left == right {
-				return entries[i].Name() < entries[j].Name()
-			}
-			return left < right
-		})
-
 		for _, entry := range entries {
 			if *budget <= 0 {
 				truncated = true
@@ -166,16 +163,29 @@ func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[strin
 			if (!linkedPersonalDir || isSymlink) && !pathWithin(resolved, realRoot) {
 				continue
 			}
-			seenFiles[resolved] = true
+			if index, exists := fileIndices[resolved]; exists {
+				if pathOrder.CompareString(child, files[index]) < 0 {
+					files[index] = child
+				}
+				continue
+			}
+			fileIndices[resolved] = len(files)
+			files = append(files, child)
 			*budget--
-			dirs = append(dirs, dir)
 		}
 	}
 	walk(root, 0, false)
 
-	// Cursor orders its collected SKILL.md paths before assigning ids, so the
-	// id numbering does not depend on directory read order.
-	sort.Strings(dirs)
+	sort.SliceStable(files, func(i, j int) bool {
+		return pathOrder.CompareString(files[i], files[j]) < 0
+	})
+	for resolved := range fileIndices {
+		seenFiles[resolved] = true
+	}
+	dirs := make([]string, 0, len(files))
+	for _, file := range files {
+		dirs = append(dirs, filepath.Dir(file))
+	}
 	return dirs, truncated
 }
 
@@ -297,13 +307,6 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 	if err != nil {
 		return nil, false
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		left, right := strings.ToLower(entries[i].Name()), strings.ToLower(entries[j].Name())
-		if left == right {
-			return entries[i].Name() < entries[j].Name()
-		}
-		return left < right
-	})
 	var commands []Command
 	seen := make(map[string]bool, len(entries))
 	truncated := false
@@ -317,7 +320,8 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 			continue
 		}
 		path := filepath.Join(dir, name)
-		if !regularFile(path) {
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 			continue
 		}
 		cmdName := strings.TrimSuffix(name, ".md")
@@ -327,9 +331,6 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 		seen[cmdName] = true
 		*budget--
 		fm := fileFrontmatter(path)
-		if isHidden(fm) || !userInvocable(fm) {
-			continue
-		}
 		commands = append(commands, Command{
 			Command:      "/" + cmdName,
 			Description:  descriptionFrom(fm, path),
@@ -366,7 +367,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// a colliding entry is dropped and the builtin keeps its name.
 	reserved := make(map[string]bool, len(cursorBuiltins))
 	for _, builtin := range cursorBuiltins {
-		reserved[builtin.Command] = true
+		reserved[strings.ToLower(builtin.Command)] = true
 		add(builtin)
 	}
 
@@ -378,7 +379,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		cmds, trunc := scanCursorCommandDirBudget(root, source, &budget)
 		truncated = truncated || trunc
 		for _, command := range cmds {
-			if reserved[command.Command] {
+			if reserved[strings.ToLower(command.Command)] {
 				continue
 			}
 			add(command)
@@ -393,7 +394,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scanCommands(root, "personal")
 	}
 	for name := range active {
-		reserved[name] = true
+		reserved[strings.ToLower(name)] = true
 	}
 
 	// Skills follow getSkillIdForPath instead: the id is the skill folder's
@@ -416,16 +417,20 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		duplicates := duplicateSkillFolderNames(dirs)
 		taken := make(map[string]bool, len(dirs))
 		for _, skillDir := range dirs {
+			data, ok := readCursorSkillFile(root, skillDir, project)
+			if !ok {
+				continue
+			}
 			name := cursorSkillID(root, skillDir, duplicates, taken)
 			if !commandNamePattern.MatchString(name) {
 				continue
 			}
-			metadata, ok := readCursorSkillMetadata(root, skillDir, project)
+			metadata, ok := parseCursorSkillMetadata(data)
 			if !ok || !userInvocable(metadata) {
 				continue
 			}
 			command := "/" + name
-			if reserved[command] {
+			if reserved[strings.ToLower(command)] {
 				continue
 			}
 			description := metadata["description"]
@@ -460,7 +465,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		}
 		custom, trunc := discoverGenericSkills(ctx.SkillDirs, format)
 		for _, command := range custom {
-			if reserved[command.Command] {
+			if reserved[strings.ToLower(command.Command)] {
 				continue
 			}
 			add(command)
@@ -469,10 +474,14 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	commands := make([]Command, 0, len(order))
+	seen := make(map[string]bool, len(order))
 	for _, name := range order {
-		if command, exists := active[name]; exists {
-			commands = append(commands, command)
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
 		}
+		seen[key] = true
+		commands = append(commands, active[name])
 	}
 	if budget <= 0 {
 		truncated = true

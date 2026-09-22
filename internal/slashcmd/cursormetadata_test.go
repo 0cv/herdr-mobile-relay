@@ -52,12 +52,12 @@ func TestCursorSkillMetadataWithoutFrontmatter(t *testing.T) {
 	}
 }
 
-func TestCursorSkillMetadataReadLimit(t *testing.T) {
+func TestCursorSkillFileReadLimit(t *testing.T) {
 	for _, project := range []bool{false, true} {
 		root := t.TempDir()
 		skillDir := filepath.Join(root, "review")
 		writeFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: review\n---\n"+strings.Repeat("x", maxMetadataSize))
-		if _, ok := readCursorSkillMetadata(root, skillDir, project); ok {
+		if _, ok := readCursorSkillFile(root, skillDir, project); ok {
 			t.Errorf("oversized skill accepted: project=%v", project)
 		}
 	}
