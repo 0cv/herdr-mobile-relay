@@ -15,17 +15,11 @@ type cursorProvider struct{}
 
 func (p *cursorProvider) ID() string { return "cursor" }
 
-// cursorBuiltins mirrors the commands Cursor's terminal UI registers for
-// itself. Cursor builds this table at runtime and gates a few entries behind
-// its debug flag, so those are omitted here: /debug-test, /throw, /pq and
-// /static-indicator exist only when debug logging is enabled, and the
-// /dev:* entries are documented by Cursor as developer-only (they classify
-// conversations and score commits for its own telemetry) with their own
-// separate visibility gate. Publishing either group would offer the phone
-// commands the pane does not have. Everything else is unconditional.
 var cursorBuiltins = []Command{
+	{"/about", "About", "builtin", ""},
 	{"/add-dir", "Add directory", "builtin", "<path>"},
 	{"/ask", "Ask Mode", "builtin", ""},
+	{"/auto-review", "Auto-review", "builtin", ""},
 	{"/bedrock", "Bedrock", "builtin", "<subcommand> <options>"},
 	{"/btw", "Side question", "builtin", "<question>"},
 	{"/changes", "View changes", "builtin", ""},
@@ -37,6 +31,7 @@ var cursorBuiltins = []Command{
 	{"/copy", "Copy message", "builtin", ""},
 	{"/copy-conversation-id", "Copy Conversation ID", "builtin", ""},
 	{"/copy-request-id", "Copy Request ID", "builtin", ""},
+	{"/cursor", "Open in Cursor", "builtin", ""},
 	{"/debug", "Debug Mode", "builtin", "[<prompt>]"},
 	{"/detach", "Detach", "builtin", ""},
 	{"/exit", "Exit", "builtin", ""},
@@ -54,7 +49,7 @@ var cursorBuiltins = []Command{
 	{"/max-mode", "Max Mode", "builtin", ""},
 	{"/mcp", "MCP", "builtin", "[list|list-tools] [<identifier>]"},
 	{"/model", "Model", "builtin", "<filter>"},
-	{"/open-in-prompt-quality", "Open in Prompt Quality", "builtin", ""},
+	{"/open", "Open in Cursor", "builtin", ""},
 	{"/plan", "Plan Mode", "builtin", "[<prompt>]"},
 	{"/plugin", "Plugin", "builtin", "[list|marketplace list|marketplace add <git-url>]"},
 	{"/quit", "Quit", "builtin", ""},
@@ -62,15 +57,39 @@ var cursorBuiltins = []Command{
 	{"/resume", "Resume Chat", "builtin", ""},
 	{"/rewind", "Rewind", "builtin", ""},
 	{"/rule", "Rules", "builtin", ""},
+	{"/run-everything", "Run Everything", "builtin", ""},
+	{"/sandbox", "Sandbox", "builtin", ""},
 	{"/save-workspace", "Save workspace", "builtin", "<name>"},
+	{"/shell", "Shell Mode", "builtin", "[<command>]"},
 	{"/show-thinking", "Show Thinking", "builtin", ""},
 	{"/skills", "Skills", "builtin", ""},
 	{"/status-indicators", "Status Indicators", "builtin", ""},
 	{"/summarize", "Summarize", "builtin", ""},
 	{"/sync-theme", "Sync Theme", "builtin", ""},
+	{"/update", "Update", "builtin", ""},
 	{"/usage", "Usage", "builtin", ""},
 	{"/vim", "Vim Mode", "builtin", ""},
 	{"/zen-mode", "Zen Mode", "builtin", ""},
+}
+
+var cursorBuiltinAliases = map[string][]string{
+	"/about":          {"/whoami", "/account"},
+	"/auto-review":    {"/smart-auto"},
+	"/clear":          {"/new", "/new-chat", "/newchat"},
+	"/command":        {"/commands"},
+	"/config":         {"/settings", "/preferences", "/cli-config"},
+	"/copy":           {"/clipboard", "/paste"},
+	"/fork":           {"/duplicate", "/clone", "/branch"},
+	"/line-numbers":   {"/lines", "/numbers"},
+	"/open":           {"/cursor"},
+	"/rename":         {"/name", "/title"},
+	"/resume":         {"/continue", "/recent", "/history"},
+	"/rewind":         {"/restore", "/undo"},
+	"/run-everything": {"/auto-run"},
+	"/shell":          {"/sh", "/run"},
+	"/show-thinking":  {"/thoughts", "/thinking", "/thinking-blocks"},
+	"/summarize":      {"/compress", "/compact"},
+	"/zen-mode":       {"/zen"},
 }
 
 // cursorSkillRoots reports the directories Cursor scans for personal skills.
@@ -298,7 +317,7 @@ func cursorCommandRoots(dir string) []string {
 // scanCursorCommandDirBudget scans dir for flat *.md command files and names
 // each command after the file. It walks the top level only, matching Cursor,
 // and skips anything that is not a regular file: a FIFO or socket named *.md
-// would block fileFrontmatter forever.
+// would block discovery forever.
 func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, bool) {
 	if dir == "" || *budget <= 0 {
 		return nil, *budget <= 0
@@ -321,7 +340,7 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 		}
 		path := filepath.Join(dir, name)
 		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxCursorCommandSize {
 			continue
 		}
 		cmdName := strings.TrimSuffix(name, ".md")
@@ -330,10 +349,18 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 		}
 		seen[cmdName] = true
 		*budget--
-		fm := fileFrontmatter(path)
+		data, ok := readCursorCommandFile(path)
+		if !ok {
+			continue
+		}
+		fm, _ := parseFrontmatterBytes(data)
+		description := fm["description"]
+		if description == "" {
+			description = extractFirstLineBytes(data)
+		}
 		commands = append(commands, Command{
 			Command:      "/" + cmdName,
-			Description:  descriptionFrom(fm, path),
+			Description:  compact(description, 120),
 			Source:       source,
 			ArgumentHint: compact(fm["argument-hint"], 120),
 		})
@@ -368,6 +395,9 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	reserved := make(map[string]bool, len(cursorBuiltins))
 	for _, builtin := range cursorBuiltins {
 		reserved[strings.ToLower(builtin.Command)] = true
+		for _, alias := range cursorBuiltinAliases[builtin.Command] {
+			reserved[strings.ToLower(alias)] = true
+		}
 		add(builtin)
 	}
 

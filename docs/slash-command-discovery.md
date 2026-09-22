@@ -34,18 +34,21 @@ users never to create skills there), `~/.cursor/cloud-skills`,
 those either duplicate another agent's catalog in a cursor pane or expose
 internal state that is not a user-authored skill.
 
-Cursor gates several commands behind its debug flag, and documents the
-`/dev:*` entries as developer-only. Both groups are omitted: publishing them
-would offer the phone commands the pane does not have. Configured
+Cursor gates several commands behind its debug flag; `/open-in-prompt-quality`
+and the `/dev:*` entries are development-only. Both groups are omitted:
+publishing them would offer the phone commands the pane does not have. Configured
 `agent-profiles.ini` skill folders remain available as the escape hatch for
 pointing the palette somewhere outside the roots above.
 
 Project commands and skills are scanned at the pane's working directory, not
-inferred from its ancestors. Builtins take precedence over Markdown commands,
-which take precedence over skills, with command names compared without regard
-to case. Markdown command files are not filtered by `hidden` or `user-invocable`
-frontmatter; `user-invocable` filtering applies only to skills. Empty command and
-skill files are skipped.
+inferred from its ancestors. Builtin names and aliases (such as `/new` for
+`/clear`) take precedence over Markdown commands, which take precedence over
+skills, with command names compared without regard to case. Markdown command
+files are not filtered by `hidden` or `user-invocable` frontmatter;
+`user-invocable` filtering applies only to skills. Empty command and skill files
+are skipped. Command files larger than Cursor's 1 MiB limit are
+skipped before reading; reads are also bounded in case a file grows during
+discovery.
 
 Native skill discovery reads `SKILL.md` at the root and through ten directory
 levels, skipping `node_modules`, `__pycache__`, `dist`, and `build`, while
