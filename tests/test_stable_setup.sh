@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,7 +65,7 @@ printf 'systemctl %s\n' "$*" >> "$STUB_LOG"
 exit 0
 EOF
     cat > "$BIN/cloudflared" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 printf 'cloudflared %s\n' "$*" >> "$STUB_LOG"
 args=" $* "
@@ -152,7 +152,7 @@ echo "unexpected cloudflared invocation: $*" >&2
 exit 2
 EOF
     cat > "$BIN/curl" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 url="${!#}"
 printf 'curl %s\n' "$url" >> "$STUB_LOG"
 case "$url" in
