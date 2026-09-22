@@ -15,6 +15,58 @@ while its final catalog and wire-size limits still apply. This preserves Hermes'
 provider precedence and configured-folder behavior; it is not a promise of an
 unbounded catalog.
 
+## Cursor
+
+Cursor needs its own provider rather than the generic skill path, for two
+reasons. It names a skill's slash command after the **directory** holding
+`SKILL.md`, not the frontmatter `name` field — a skill in
+`~/.cursor/skills/pdf-forms` is `/pdf-forms` even when its frontmatter says
+`name: pdf form toolkit`. And it has a built-in command table the generic path
+cannot supply: without a provider, a cursor pane falls through to the generic
+path and gets an empty palette, not even builtins.
+
+The provider publishes the commands Cursor registers unconditionally and scans
+personal skills from `~/.cursor/skills` and the shared `~/.agents/skills`. It
+deliberately excludes `~/.cursor/skills-cursor` (reserved for Cursor's own
+built-in skills and managed automatically — Cursor's own documentation tells
+users never to create skills there), `~/.cursor/cloud-skills`,
+`~/.cursor/plugins`, and the `~/.claude`, `~/.codex` and `~/.grok` trees, since
+those either duplicate another agent's catalog in a cursor pane or expose
+internal state that is not a user-authored skill.
+
+Cursor gates several commands behind its debug flag; `/open-in-prompt-quality`
+and the `/dev:*` entries are development-only. These are omitted, as are
+`/detach`, `/goal`, `/max-mode`, `/usage`, and `/zen-mode`: their availability
+depends on the pane's persistent session, feature flags, model catalog, or
+runtime capabilities, which discovery cannot determine. Their names and aliases
+are not reserved, so user-authored commands with those names remain discoverable.
+Configured `agent-profiles.ini` skill folders remain available as the escape
+hatch for pointing the palette somewhere outside the roots above.
+
+Project commands and skills are scanned at the pane's working directory, not
+inferred from its ancestors. Builtin names and aliases (such as `/new` for
+`/clear`) take precedence over Markdown commands, which take precedence over
+skills, with command names compared without regard to case. Markdown command
+files are not filtered by `hidden` or `user-invocable` frontmatter;
+`user-invocable` filtering applies only to skills: Cursor excludes boolean
+`false` and trimmed, case-insensitive `"false"`, not `no`, `off`, or `0`.
+Skill frontmatter accepts a leading UTF-8 BOM and explicit YAML language markers
+such as `---yaml` and `--- yml`. Empty command and skill files are skipped.
+Native command and skill files larger than Cursor's 1 MiB limit are skipped
+before reading; reads are also bounded in case a file grows during discovery.
+
+Native skill discovery reads `SKILL.md` at the root and through ten directory
+levels, skipping `node_modules`, `__pycache__`, `dist`, and `build`, while
+deduplicating linked skill files across roots. Project skill links must remain
+inside their skill root. Personal directory links may point outside the root,
+but only that directory's own skill is read, not its descendants. Individual
+`SKILL.md` links must remain inside the skill root in both scopes. Skills whose
+nonempty `metadata.surfaces` excludes `cli` are omitted. Command files may be
+symlinks to regular files; pipes and sockets are never read. If a file or
+directory budget interrupts a skill root's discovery, that root's skills are
+omitted and the catalog is marked incomplete: assigning their command IDs
+requires finding all duplicate folder names within the root.
+
 A catalog can be incomplete when a discovery pass, the final entry cap, or
 the serialized response-size guard is reached. One outbound relay message is
 limited to 4 MiB; the relay clips a large serialized `command_result` before

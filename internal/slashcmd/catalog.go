@@ -39,6 +39,8 @@ func profileIDForAgentName(agent string) string {
 		return "claude"
 	case "codex":
 		return "codex"
+	case "cursor", "cursor-agent", "cursor agent":
+		return "cursor"
 	case "qoder", "qodercli":
 		return "qoder"
 	case "pi", "pi-coding-agent":
