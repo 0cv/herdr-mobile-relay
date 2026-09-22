@@ -340,7 +340,7 @@ func scanCursorCommandDirBudget(dir, source string, budget *int) ([]Command, boo
 		}
 		path := filepath.Join(dir, name)
 		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxCursorCommandSize {
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxCursorFileSize {
 			continue
 		}
 		cmdName := strings.TrimSuffix(name, ".md")
@@ -441,7 +441,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	scanSkills := func(root, source string, project bool) {
 		dirs, trunc := cursorSkillWalk(root, project, &budget, seenSkillFiles)
 		truncated = truncated || trunc
-		if len(dirs) == 0 {
+		if trunc || len(dirs) == 0 {
 			return
 		}
 		duplicates := duplicateSkillFolderNames(dirs)

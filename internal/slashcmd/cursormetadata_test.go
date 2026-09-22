@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,11 +55,17 @@ func TestCursorSkillMetadataWithoutFrontmatter(t *testing.T) {
 
 func TestCursorSkillFileReadLimit(t *testing.T) {
 	for _, project := range []bool{false, true} {
-		root := t.TempDir()
-		skillDir := filepath.Join(root, "review")
-		writeFile(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: review\n---\n"+strings.Repeat("x", maxMetadataSize))
-		if _, ok := readCursorSkillFile(root, skillDir, project); ok {
-			t.Errorf("oversized skill accepted: project=%v", project)
+		for _, size := range []int{0, 1, 64*1024 + 1, 1 << 20, 1<<20 + 1} {
+			t.Run(fmt.Sprintf("project=%v/size=%d", project, size), func(t *testing.T) {
+				root := t.TempDir()
+				skillDir := filepath.Join(root, "review")
+				writeFile(t, filepath.Join(skillDir, "SKILL.md"), strings.Repeat("x", size))
+				eligible := size > 0 && size <= 1<<20
+				data, ok := readCursorSkillFile(root, skillDir, project)
+				if ok != eligible || ok && len(data) != size {
+					t.Errorf("read returned %d bytes, ok=%v; want size=%d, ok=%v", len(data), ok, size, eligible)
+				}
+			})
 		}
 	}
 }

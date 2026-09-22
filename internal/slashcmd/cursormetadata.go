@@ -10,7 +10,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const maxCursorCommandSize = 1 << 20
+const maxCursorFileSize = 1 << 20
 
 func readCursorCommandFile(path string) ([]byte, bool) {
 	file, err := os.Open(path)
@@ -18,7 +18,7 @@ func readCursorCommandFile(path string) ([]byte, bool) {
 		return nil, false
 	}
 	defer file.Close()
-	return readCursorFile(file, maxCursorCommandSize)
+	return readCursorFile(file, maxCursorFileSize)
 }
 
 func readCursorSkillFile(root, skillDir string, project bool) ([]byte, bool) {
@@ -49,7 +49,7 @@ func readCursorSkillFile(root, skillDir string, project bool) ([]byte, bool) {
 		}
 	}
 	defer file.Close()
-	return readCursorFile(file, maxMetadataSize)
+	return readCursorFile(file, maxCursorFileSize)
 }
 
 func readCursorFile(file *os.File, maxSize int64) ([]byte, bool) {

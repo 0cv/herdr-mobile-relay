@@ -46,8 +46,8 @@ inferred from its ancestors. Builtin names and aliases (such as `/new` for
 skills, with command names compared without regard to case. Markdown command
 files are not filtered by `hidden` or `user-invocable` frontmatter;
 `user-invocable` filtering applies only to skills. Empty command and skill files
-are skipped. Command files larger than Cursor's 1 MiB limit are
-skipped before reading; reads are also bounded in case a file grows during
+are skipped. Native command and skill files larger than Cursor's 1 MiB limit
+are skipped before reading; reads are also bounded in case a file grows during
 discovery.
 
 Native skill discovery reads `SKILL.md` at the root and through ten directory
@@ -57,7 +57,10 @@ inside their skill root. Personal directory links may point outside the root,
 but only that directory's own skill is read, not its descendants. Individual
 `SKILL.md` links must remain inside the skill root in both scopes. Skills whose
 nonempty `metadata.surfaces` excludes `cli` are omitted. Command files may be
-symlinks to regular files; pipes and sockets are never read.
+symlinks to regular files; pipes and sockets are never read. If a file or
+directory budget interrupts a skill root's discovery, that root's skills are
+omitted and the catalog is marked incomplete: assigning their command IDs
+requires finding all duplicate folder names within the root.
 
 A catalog can be incomplete when a discovery pass, the final entry cap, or
 the serialized response-size guard is reached. One outbound relay message is
