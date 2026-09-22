@@ -169,7 +169,10 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 	for {
 		info, err := l.herdr.AgentGet(ctx, paneID)
 		if err == nil && (info.Running || info.Status != "") {
-			return l.herdr.RenameAgent(ctx, paneID, name)
+			if err := l.herdr.RenameAgent(ctx, paneID, name); err != nil {
+				return partiallyApplied("custom agent was already started", err)
+			}
+			return nil
 		}
 		select {
 		case <-ctx.Done():
