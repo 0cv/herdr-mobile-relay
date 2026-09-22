@@ -19,8 +19,10 @@ require_supported_platform
 case "${1:-}" in
     "") ;;
     --install-missing) INSTALL_MISSING=1 ;;
+    --pi-install) exec bash "$SCRIPT_DIR/pi-commands.sh" install "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
+    --pi-remove) exec bash "$SCRIPT_DIR/pi-commands.sh" remove "${2:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}" ;;
     *)
-        echo "Usage: $0 [--install-missing]"
+        echo "Usage: $0 [--install-missing | --pi-install [agent-dir] | --pi-remove [agent-dir]]"
         exit 2
         ;;
 esac

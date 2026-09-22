@@ -179,6 +179,12 @@
   let slashCatalog = $state<SlashCommandCatalog>({ commands: [], truncated: false });
   let slashCatalogLoading = $state(true);
   let slashCatalogUnavailable = $state(false);
+  let slashCatalogRequest = 0;
+  let slashCatalogTarget = '';
+  const slashCatalogIdentity = $derived(JSON.stringify([
+    agent.relay_id, agent.server_session_id, agent.raw_pane_id,
+    agent.terminal_id, agent.generation, agent.agent_session_id, agent.agent, agent.cwd,
+  ]));
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
   let dismissedMenuSignature = $state('');
@@ -598,19 +604,48 @@
     });
   });
 
+  async function refreshSlashCommands() {
+    const request = ++slashCatalogRequest;
+    const identity = slashCatalogIdentity;
+    const target = { ...agent };
+    slashCatalogLoading = true;
+    slashCatalogUnavailable = false;
+    try {
+      const catalog = await relayStore.loadSlashCommands(target, true);
+      if (request !== slashCatalogRequest || identity !== slashCatalogIdentity) return;
+      slashCatalog = catalog;
+    } catch {
+      if (request !== slashCatalogRequest || identity !== slashCatalogIdentity) return;
+      slashCatalogUnavailable = true;
+    } finally {
+      if (request === slashCatalogRequest && identity === slashCatalogIdentity) slashCatalogLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const identity = slashCatalogIdentity;
+    const status = $connections.get(agent.relay_id)?.status;
+    const open = slashMenuOpen;
+    untrack(() => {
+      ++slashCatalogRequest;
+      if (slashCatalogTarget !== identity) {
+        slashCatalog = { commands: [], truncated: false };
+        slashCatalogTarget = identity;
+      }
+      if (!open) return;
+      if (status && status !== 'connected') {
+        slashCatalogLoading = false;
+        slashCatalogUnavailable = true;
+        return;
+      }
+      void refreshSlashCommands();
+    });
+    return () => { ++slashCatalogRequest; };
+  });
+
   onMount(() => {
-    let mounted = true;
     componentMounted = true;
     const stopWakeLock = mountTerminalWakeLock();
-    void relayStore.loadSlashCommands(agent).then((catalog) => {
-      if (!mounted) return;
-      slashCatalog = catalog;
-      slashCatalogUnavailable = false;
-    }).catch(() => {
-      if (mounted) slashCatalogUnavailable = true;
-    }).finally(() => {
-      if (mounted) slashCatalogLoading = false;
-    });
     const measurePane = () => requestPaneSizeLease(false);
     const realtimeDeltaEnabled = () => Boolean(
       $connections.get(agent.relay_id)?.capabilities.includes('pane_realtime_delta'),
@@ -666,7 +701,6 @@
     );
     void tick().then(measurePane);
     return () => {
-      mounted = false;
       componentMounted = false;
       window.removeEventListener('resize', measurePane);
       window.visualViewport?.removeEventListener('resize', measurePane);
@@ -2201,7 +2235,7 @@
   <div class="terminal-bottom" onfocusin={focusComposer} onfocusout={blurComposer}>
     {#if slashMenuOpen}
       <section class="slash-command-popover" aria-label="Command suggestions">
-        <header class="slash-command-header" aria-hidden="true">
+        <header class="slash-command-header">
           <strong>Commands</strong>
           {#if !slashCatalogLoading && !slashCatalogUnavailable}
             <span>{filteredSlashCommands.length}{slashMatchesHidden ? '+' : ''} matching</span>
@@ -2209,8 +2243,18 @@
             <span>Type to filter</span>
           {/if}
         </header>
+        {#if slashCatalog.status === 'partial'}
+          <p class="slash-command-status" role="status">Runtime command discovery is incomplete. Loaded extensions and prompts may be missing; you can still send a command manually.</p>
+        {:else if slashCatalog.status === 'loading'}
+          <p class="slash-command-status" role="status">Pi is loading command resources. Refresh when loading finishes.</p>
+        {:else if slashCatalog.status === 'unavailable'}
+          <p class="slash-command-status" role="status">Runtime command discovery is unavailable. You can still send a command manually.</p>
+        {/if}
+        <button type="button" onclick={() => void refreshSlashCommands()} disabled={slashCatalogLoading}>
+          Refresh commands
+        </button>
         {#if slashCatalogLoading}
-          <p class="slash-command-status" role="status">Loading commands…</p>
+          <p class="slash-command-status" role="status">{slashCatalog.commands.length ? 'Refreshing commands…' : 'Loading commands…'}</p>
         {:else if slashCatalogUnavailable}
           <p class="slash-command-status" role="status">Suggestions unavailable — you can still send this command.</p>
         {:else if !filteredSlashCommands.length}

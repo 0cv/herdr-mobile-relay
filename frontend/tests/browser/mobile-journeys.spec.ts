@@ -2821,8 +2821,8 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
   const copyButton = page.getByRole('button', { name: 'Copy', exact: true });
   const responseTranscript = page.getByRole('textbox', { name: 'Latest final response' });
   await expect(responseTranscript).toHaveValue('Parsed terminal response.');
-  await expect.poll(async () => (await commandsForSocket(page, 0))
-    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(1);
+  expect((await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(0);
   await setAutoCommands(page, false);
 
   await copyButton.click();
@@ -2920,8 +2920,9 @@ test('speak reports the relay copy failure when no parser can read the pane', as
     format: 'plain',
     content: ' Completed omp response.\n\n────────────────────\n\n────────────────────',
   });
-  await expect.poll(async () => (await commandsForSocket(page, 0))
-    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(1);
+  await expect(page.getByRole('button', { name: 'Read latest response aloud' })).toBeVisible();
+  expect((await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(0);
   await setAutoCommands(page, false);
 
   await page.getByRole('button', { name: 'Read latest response aloud' }).click();

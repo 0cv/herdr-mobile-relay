@@ -87,6 +87,9 @@ for WRAPPER in \
     printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER"
 done
 
+cp "$REPO_DIR/relay/pi-commands.sh" "$RELEASE_DIR/relay/pi-commands.sh"
+cp -R "$REPO_DIR/relay/pi-command-bridge" "$RELEASE_DIR/relay/pi-command-bridge"
+
 "$RELEASE_DIR/herdr-mobile-relay" release-manifest \
     "$RELEASE_DIR" "$MANIFEST_VERSION" "$REVISION" "$HOST_TARGET" >/dev/null
 ARCHIVE="$WORK_DIR/herdr-mobile-relay_${MANIFEST_VERSION}_${HOST_OS}_${HOST_ARCH}.tar.gz"

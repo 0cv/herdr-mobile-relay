@@ -979,7 +979,6 @@ func (s *Server) Run(ctx context.Context) error {
 				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent pane not found", paneID, nil)
 				break
 			}
-			generation := s.state.Generation(paneID)
 			agent, cwd := activeAgent.Agent, activeAgent.Cwd
 			project := projectContextForAgent(activeAgent)
 			home, _ := os.UserHomeDir()
@@ -991,7 +990,18 @@ func (s *Server) Run(ctx context.Context) error {
 			catalog := slashcmd.CatalogForProfileWithSuppression(
 				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
 			)
-			if s.state.Generation(paneID) != generation {
+			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
+				catalog.Status = "partial"
+				if runtime, err := runtimePiCatalog(client.Context(), s.herdrC, s.cfg.SocketPath, paneID, activeAgent.SessionID); err == nil {
+					if runtime.Status == "available" || runtime.Status == "partial" {
+						catalog = runtime
+					} else {
+						catalog.Status = runtime.Status
+					}
+				}
+			}
+			currentAgent, currentExists := s.state.Agent(paneID)
+			if !currentExists || !sameSlashTarget(activeAgent, currentAgent) {
 				s.sendCommandResult(
 					client,
 					requestID,
@@ -1004,7 +1014,7 @@ func (s *Server) Run(ctx context.Context) error {
 				)
 				break
 			}
-			catalog = fitSlashCommandCatalog(catalog, requestID, "list_slash_commands", paneID)
+			catalog = fitSlashCommandCatalog(slashcmd.Revise(catalog), requestID, "list_slash_commands", paneID)
 			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
 		case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
 			requestID := inbound.RequestID
@@ -2950,14 +2960,27 @@ func fitSlashCommandCatalog(catalog slashcmd.Catalog, requestID, action, paneID 
 	low, high := 0, len(commands)
 	for low < high {
 		mid := low + (high-low+1)/2
-		candidate := slashcmd.Catalog{Commands: commands[:mid], Truncated: true}
+		candidate := trimSlashCatalog(catalog, mid)
 		if slashCommandResultFits(candidate, requestID, action, paneID) {
 			low = mid
 		} else {
 			high = mid - 1
 		}
 	}
-	return slashcmd.Catalog{Commands: commands[:low], Truncated: true}
+	return trimSlashCatalog(catalog, low)
+}
+
+func trimSlashCatalog(catalog slashcmd.Catalog, count int) slashcmd.Catalog {
+	catalog.Commands = catalog.Commands[:count]
+	catalog.Truncated = true
+	metadata := make(map[string]slashcmd.Metadata)
+	for _, command := range catalog.Commands {
+		if value, ok := catalog.Metadata[command.Command]; ok {
+			metadata[command.Command] = value
+		}
+	}
+	catalog.Metadata = metadata
+	return slashcmd.Revise(catalog)
 }
 
 func slashCommandResultFits(catalog slashcmd.Catalog, requestID, action, paneID string) bool {

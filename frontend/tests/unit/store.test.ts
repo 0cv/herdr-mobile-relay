@@ -1,4 +1,5 @@
 import { get } from 'svelte/store';
+import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
 import { BrowserDeviceCredentialStore } from '$lib/device-auth';
@@ -2511,6 +2512,82 @@ describe('relay command store', () => {
     });
     await expect(changed).resolves.toEqual({ commands: [], truncated: false });
   });
+  it.each([
+    { server_session_id: 'replacement-server' },
+    { terminal_id: 'replacement-terminal' },
+    { generation: 99 },
+    { agent_session_id: 'replacement-agent-session' },
+  ])('invalidates slash commands when target identity changes: %j', async (replacement) => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
+    };
+    const older = relayStore.loadSlashCommands(agent);
+    const olderRequest = JSON.parse(socket.sent.at(-1)!);
+    const currentAgent = { ...agent, ...replacement };
+    const current = relayStore.loadSlashCommands(currentAgent);
+    const currentRequest = JSON.parse(socket.sent.at(-1)!);
+    expect(currentRequest.request_id).not.toBe(olderRequest.request_id);
+    socket.message({
+      type: 'command_result', request_id: currentRequest.request_id, ok: true,
+      data: { commands: [{ command: '/current', source: 'builtin' }], truncated: false },
+    });
+    await current;
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true,
+      data: { commands: [{ command: '/old', source: 'builtin' }], truncated: false },
+    });
+    await older;
+    await expect(relayStore.loadSlashCommands(currentAgent)).resolves.toMatchObject({
+      commands: [{ command: '/current' }],
+    });
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(2);
+  });
+
+  it('refreshes slash commands and prevents superseded requests from repopulating the cache', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
+    };
+    const initial = relayStore.loadSlashCommands(agent);
+    const initialRequest = JSON.parse(socket.sent.at(-1)!);
+    socket.message({
+      type: 'command_result', request_id: initialRequest.request_id, ok: true,
+      data: { commands: [{ command: '/initial', source: 'builtin' }], truncated: false },
+    });
+    await initial;
+    const older = relayStore.loadSlashCommands(agent, true);
+    const olderRequest = JSON.parse(socket.sent.at(-1)!);
+    const current = relayStore.loadSlashCommands(agent, true);
+    const currentRequest = JSON.parse(socket.sent.at(-1)!);
+    const duplicate = relayStore.loadSlashCommands(agent);
+    socket.message({
+      type: 'command_result', request_id: currentRequest.request_id, ok: true,
+      data: { commands: [{ command: '/reloaded', source: 'builtin' }], truncated: false },
+    });
+    await expect(current).resolves.toMatchObject({ commands: [{ command: '/reloaded' }] });
+    await expect(duplicate).resolves.toMatchObject({ commands: [{ command: '/reloaded' }] });
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true,
+      data: { commands: [{ command: '/stale', source: 'builtin' }], truncated: false },
+    });
+    await older;
+    await expect(relayStore.loadSlashCommands(agent)).resolves.toMatchObject({
+      commands: [{ command: '/reloaded' }],
+    });
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(3);
+  });
+
   it('retains the frontend cap warning and late entries after normalization', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -2548,6 +2625,28 @@ describe('relay command store', () => {
     expect(cached.commands.some((entry) => entry.command === '/late-command')).toBe(true);
     expect(socket.sent.map((payload) => JSON.parse(payload))
       .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1);
+  });
+
+  it('preserves runtime catalog status, revision, kind, and canonical provenance', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/fixture/project', ...exactAgentFields(),
+    };
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: request.request_id, ok: true, data: piCatalogFixture });
+    const catalog = await pending;
+    expect(catalog.status).toBe('available');
+    expect(catalog.revision).toBe(piCatalogFixture.revision);
+    expect(catalog.commands.find(command => command.command === '/review:2')).toMatchObject({
+      source: 'temporary', kind: 'extension', provenance: { source: 'cli', scope: 'temporary', origin: 'top-level' },
+    });
+    expect(catalog.commands.find(command => command.command === '/summary')?.kind).toBe('prompt');
+    expect(catalog.truncated).toBe(false);
   });
 
   it('normalizes slash command results without data', async () => {
