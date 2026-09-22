@@ -95,22 +95,13 @@ func cursorSkillRoots(home string) []string {
 	}
 }
 
-// cursorSkillWalk returns the skill directories under root that Cursor would
-// load, in Cursor's own order.
-//
-// Cursor's findSkillMarkdownFiles recurses to depth 10 and reads a SKILL.md
-// wherever it sits, so a skill may be nested any number of levels below a root:
-// .cursor/skills/tools/review/SKILL.md is a valid skill named after its folder.
-// A scanner that only checks <root>/<entry>/SKILL.md silently drops those.
-//
-// Symlinked directories are followed, matching entryIsDir elsewhere: a personal
-// root frequently links a skill to a checkout elsewhere on disk. Both the
-// directories walked and the SKILL.md files accepted are deduplicated by
-// realpath, so a link and its target are read once and a link that points back
-// up the tree cannot loop.
 func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[string]bool) ([]string, bool) {
 	const maxDepth = 10
 	if root == "" {
+		return nil, false
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
 		return nil, false
 	}
 
@@ -119,8 +110,8 @@ func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[strin
 	visited := 0
 	truncated := false
 
-	var walk func(dir string, depth int)
-	walk = func(dir string, depth int) {
+	var walk func(dir string, depth int, linkedPersonalDir bool)
+	walk = func(dir string, depth int, linkedPersonalDir bool) {
 		if depth > maxDepth {
 			return
 		}
@@ -128,12 +119,11 @@ func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[strin
 			truncated = true
 			return
 		}
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			if seenDirs[resolved] {
-				return
-			}
-			seenDirs[resolved] = true
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil || seenDirs[resolved] || !linkedPersonalDir && !pathWithin(resolved, realRoot) {
+			return
 		}
+		seenDirs[resolved] = true
 		visited++
 		if visited > maxEntries {
 			truncated = true
@@ -157,30 +147,31 @@ func cursorSkillWalk(root string, project bool, budget *int, seenFiles map[strin
 				truncated = true
 				return
 			}
-			if cursorSkillDirIgnored(entry.Name()) {
-				continue
-			}
 			child := filepath.Join(dir, entry.Name())
-			if !entryIsDir(entry, child) || project && !pathWithin(child, root) {
+			isSymlink := entry.Type()&os.ModeSymlink != 0
+			if entryIsDir(entry, child) {
+				if linkedPersonalDir || cursorSkillDirIgnored(entry.Name()) {
+					continue
+				}
+				walk(child, depth+1, !project && isSymlink)
 				continue
 			}
-			// A directory holding SKILL.md is a skill. Cursor still descends
-			// into it, so a skill that also nests skills yields both.
-			if skillFile := filepath.Join(child, "SKILL.md"); regularFile(skillFile) {
-				resolved := skillFile
-				if link, err := filepath.EvalSymlinks(skillFile); err == nil {
-					resolved = link
-				}
-				if !seenFiles[resolved] && (!project || pathWithin(resolved, root)) {
-					seenFiles[resolved] = true
-					*budget--
-					dirs = append(dirs, child)
-				}
+			if entry.Name() != "SKILL.md" || !regularFile(child) {
+				continue
 			}
-			walk(child, depth+1)
+			resolved, err := filepath.EvalSymlinks(child)
+			if err != nil || seenFiles[resolved] {
+				continue
+			}
+			if (!linkedPersonalDir || isSymlink) && !pathWithin(resolved, realRoot) {
+				continue
+			}
+			seenFiles[resolved] = true
+			*budget--
+			dirs = append(dirs, dir)
 		}
 	}
-	walk(root, 0)
+	walk(root, 0, false)
 
 	// Cursor orders its collected SKILL.md paths before assigning ids, so the
 	// id numbering does not depend on directory read order.
@@ -261,39 +252,6 @@ func cursorSkillID(root, skillDir string, duplicates, taken map[string]bool) str
 	return uniqueCommandName(id, taken)
 }
 
-// projectAncestors returns the ancestor directories Cursor searches for
-// workspace-scoped config, from the repository root down to cwd, or from the
-// filesystem root when cwd is not in a repository. Cursor passes every
-// workspace folder to its loader, so a nested cwd sees outer workspace roots
-// as well.
-func projectAncestors(cwd string) []string {
-	if cwd == "" {
-		return nil
-	}
-	stop := findGitRoot(cwd)
-	if stop == "" {
-		stop = filepath.VolumeName(cwd) + string(filepath.Separator)
-	}
-	var reversed []string
-	dir := cwd
-	for range maxGitWalkDepth {
-		reversed = append(reversed, dir)
-		if dir == stop {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	ancestors := make([]string, 0, len(reversed))
-	for i := len(reversed) - 1; i >= 0; i-- {
-		ancestors = append(ancestors, reversed[i])
-	}
-	return ancestors
-}
-
 // uniqueCommandName mirrors Cursor's getSkillIdForPath collision handling: the
 // first use of a name keeps it, and each later duplicate gains a -2, -3 ...
 // suffix. Cursor lists both skills rather than letting one replace the other,
@@ -310,17 +268,6 @@ func uniqueCommandName(name string, taken map[string]bool) string {
 			return candidate
 		}
 	}
-}
-
-// projectCommandRoots returns every ancestor's flat command directories in the
-// order Cursor reads them for a workspace: outer scopes first, so the nearest
-// workspace wins a name collision the same way a later root does.
-func projectCommandRoots(cwd string) []string {
-	var roots []string
-	for _, ancestor := range projectAncestors(cwd) {
-		roots = append(roots, cursorCommandRoots(ancestor)...)
-	}
-	return roots
 }
 
 // cursorCommandRoots reports the flat *.md command directories Cursor reads for
@@ -437,11 +384,16 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			add(command)
 		}
 	}
-	for _, root := range projectCommandRoots(ctx.Cwd) {
-		scanCommands(root, "project")
+	if ctx.Cwd != "" {
+		for _, root := range cursorCommandRoots(ctx.Cwd) {
+			scanCommands(root, "project")
+		}
 	}
 	for _, root := range cursorCommandRoots(ctx.Home) {
 		scanCommands(root, "personal")
+	}
+	for name := range active {
+		reserved[name] = true
 	}
 
 	// Skills follow getSkillIdForPath instead: the id is the skill folder's
@@ -488,9 +440,9 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			})
 		}
 	}
-	for _, ancestor := range projectAncestors(ctx.Cwd) {
-		for _, stem := range []string{".cursor", ".agents"} {
-			scanSkills(filepath.Join(ancestor, stem, "skills"), "project", true)
+	if ctx.Cwd != "" {
+		for _, root := range cursorSkillRoots(ctx.Cwd) {
+			scanSkills(root, "project", true)
 		}
 	}
 	for _, root := range cursorSkillRoots(ctx.Home) {
@@ -508,10 +460,10 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		}
 		custom, trunc := discoverGenericSkills(ctx.SkillDirs, format)
 		for _, command := range custom {
-			if _, exists := active[command.Command]; !exists {
-				order = append(order, command.Command)
+			if reserved[command.Command] {
+				continue
 			}
-			active[command.Command] = command
+			add(command)
 		}
 		truncated = truncated || trunc
 	}
