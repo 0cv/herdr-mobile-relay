@@ -78,15 +78,17 @@ func TestCursorIgnoresReservedInternalRoots(t *testing.T) {
 // Cursor builds a fresh id set inside each loadSkillsFromDirectory call, so a
 // duplicate folder name across two roots is NOT suffixed: the later root simply
 // overwrites the earlier id in the skills map. loadSkillRoots passes the
-// personal roots first, so a project skill of the same folder name replaces the
-// personal one and only a single /review exists.
+// workspace roots first, so a personal skill of the same folder name replaces
+// the project one and only a single /review exists.
 func TestCursorSkillNameCollisionAcrossRootsReplaces(t *testing.T) {
 	home := t.TempDir()
-	cursorSkill(t, filepath.Join(home, ".cursor", "skills"), "review", "review", "Personal review")
+	writeFile(t, filepath.Join(home, ".cursor", "skills", "review", "SKILL.md"),
+		"---\nname: review\ndescription: Personal review\nargument-hint: <personal>\n---\n")
 
 	repo := t.TempDir()
 	writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
-	cursorSkill(t, filepath.Join(repo, ".cursor", "skills"), "review", "review", "Project review")
+	writeFile(t, filepath.Join(repo, ".cursor", "skills", "review", "SKILL.md"),
+		"---\nname: review\ndescription: Project review\nargument-hint: <project>\n---\n")
 
 	catalog := cursorCatalog(t, repo, home)
 	if !containsCommand(catalog, "/review") {
@@ -95,8 +97,13 @@ func TestCursorSkillNameCollisionAcrossRootsReplaces(t *testing.T) {
 	if containsCommand(catalog, "/review-2") {
 		t.Errorf("cross-root duplicates must not be suffixed; catalog=%v", commandNames(catalog))
 	}
-	if got := commandSource(catalog, "/review"); got != "project" {
-		t.Errorf("/review source = %q, want project (personal roots load first and are overwritten)", got)
+	for _, command := range catalog.Commands {
+		if command.Command == "/review" {
+			want := Command{"/review", "Personal review", "personal", "<personal>"}
+			if command != want {
+				t.Errorf("/review = %+v, want %+v", command, want)
+			}
+		}
 	}
 }
 
@@ -347,6 +354,89 @@ func TestCursorAgentNameAliases(t *testing.T) {
 	for _, name := range []string{"cursor", "Cursor", "cursor-agent", "cursor agent"} {
 		if got := profileIDForAgentName(name); got != "cursor" {
 			t.Errorf("profileIDForAgentName(%q) = %q, want cursor", name, got)
+		}
+	}
+}
+
+func TestCursorNestedProjectSkillMetadata(t *testing.T) {
+	for _, stem := range []string{".cursor", ".agents"} {
+		t.Run(stem, func(t *testing.T) {
+			repo := t.TempDir()
+			writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
+			root := filepath.Join(repo, stem, "skills")
+			for _, skill := range []struct {
+				path, description, hint string
+			}{
+				{"review", "Top-level review", "<top>"},
+				{"tools/review", "Nested review", "<nested>"},
+				{"tools/unique", "Unique nested skill", "<unique>"},
+			} {
+				writeFile(t, filepath.Join(root, skill.path, "SKILL.md"),
+					"---\nname: ignored\ndescription: "+skill.description+"\nargument-hint: "+skill.hint+"\n---\n")
+			}
+			catalog := cursorCatalog(t, repo, t.TempDir())
+			for _, want := range []Command{
+				{"/review", "Top-level review", "project", "<top>"},
+				{"/tools-review", "Nested review", "project", "<nested>"},
+				{"/unique", "Unique nested skill", "project", "<unique>"},
+			} {
+				if !containsCommand(catalog, want.Command) {
+					t.Errorf("missing %s", want.Command)
+				}
+				for _, got := range catalog.Commands {
+					if got.Command == want.Command && got != want {
+						t.Errorf("got %+v, want %+v", got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCursorNestedProjectSkillSymlinkBoundary(t *testing.T) {
+	for _, linkFile := range []bool{false, true} {
+		for _, outside := range []bool{false, true} {
+			name := "directory"
+			if linkFile {
+				name = "file"
+			}
+			if outside {
+				name += "-outside"
+			} else {
+				name += "-inside"
+			}
+			t.Run(name, func(t *testing.T) {
+				repo := t.TempDir()
+				writeFile(t, filepath.Join(repo, ".git"), "gitdir: elsewhere")
+				targetRoot := repo
+				if outside {
+					targetRoot = t.TempDir()
+				}
+				cursorSkill(t, targetRoot, "shared", "ignored", "Linked metadata")
+				target := filepath.Join(targetRoot, "shared")
+				link := filepath.Join(repo, ".cursor", "skills", "tools", "linked")
+				if linkFile {
+					target = filepath.Join(target, "SKILL.md")
+					link = filepath.Join(link, "SKILL.md")
+				}
+				mkdirAll(t, filepath.Dir(link))
+				relativeTarget, err := filepath.Rel(filepath.Dir(link), target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(relativeTarget, link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				catalog := cursorCatalog(t, repo, t.TempDir())
+				if got := containsCommand(catalog, "/linked"); got != !outside {
+					t.Errorf("/linked present = %v, want %v", got, !outside)
+				}
+				for _, command := range catalog.Commands {
+					if command.Command == "/linked" && (command.Description != "Linked metadata" || command.Source != "project") {
+						t.Errorf("unexpected linked metadata: %+v", command)
+					}
+				}
+			})
 		}
 	}
 }

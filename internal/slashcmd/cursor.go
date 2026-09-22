@@ -444,8 +444,8 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// creates its own set inside each call, so a duplicate across roots is not
 	// suffixed - the later root overwrites the earlier id in the skills map.
 	// That makes root order decide collisions, and Cursor's loadSkillRoots
-	// passes the personal roots first, so a project skill replaces a personal
-	// one of the same folder name.
+	// passes workspace roots before personal roots, so a personal skill replaces
+	// a project one with the same id.
 	scanSkills := func(root, source string, project bool) {
 		dirs, trunc := cursorSkillWalk(root, &budget)
 		truncated = truncated || trunc
@@ -463,7 +463,11 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			var metadata map[string]string
 			var ok bool
 			if project {
-				metadata, _, ok = scopedSkillMetadata(root, filepath.Base(skillDir), source, "")
+				relative, err := filepath.Rel(root, skillDir)
+				if err != nil {
+					continue
+				}
+				metadata, _, ok = scopedSkillMetadata(root, relative, source, "")
 			} else {
 				metadata, ok = readSkillMetadata(skillFile)
 			}
@@ -486,13 +490,13 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			})
 		}
 	}
-	for _, root := range cursorSkillRoots(ctx.Home) {
-		scanSkills(root, "personal", false)
-	}
 	for _, ancestor := range projectAncestors(ctx.Cwd) {
 		for _, stem := range []string{".cursor", ".agents"} {
 			scanSkills(filepath.Join(ancestor, stem, "skills"), "project", true)
 		}
+	}
+	for _, root := range cursorSkillRoots(ctx.Home) {
+		scanSkills(root, "personal", false)
 	}
 
 	// Additional configured skill dirs from agent-profiles.ini. Cursor's own
