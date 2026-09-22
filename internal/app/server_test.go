@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,6 +63,7 @@ func publishInventoryForTest(t *testing.T, server *Server) {
 }
 func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 	mutation := protocol.ActionMetadata{Operation: "send_input", Class: protocol.ActionMutating}
+	filter := protocol.ActionMetadata{Operation: "send_filter_text", Class: protocol.ActionMutating}
 	read := protocol.ActionMetadata{Operation: "read_pane", Class: protocol.ActionReadOnly}
 
 	for _, test := range []struct {
@@ -74,6 +76,8 @@ func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 	}{
 		{name: "reader mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: mutation, wantDenied: true},
 		{name: "reader read", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: read},
+		{name: "reader filter denied", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: filter, wantDenied: true},
+		{name: "controller filter allowed", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleController)}, authenticated: true, action: filter},
 		{name: "reader self revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-current"},
 		{name: "reader other revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-other", wantDenied: true},
 		{name: "controller mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleController)}, authenticated: true, action: mutation},
@@ -1311,6 +1315,13 @@ func TestCommittedInventoryPublicationRepairsZeroListenerRefreshAndReconnect(t *
 	reconnected.CloseNow()
 }
 
+// Cancelling the server drops in-flight socket connections, so the fixture sees
+// ordinary teardown errors that say nothing about the behaviour under test.
+func fixtureConnectionTornDown(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
 func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
@@ -1631,7 +1642,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 }
@@ -1858,7 +1869,7 @@ func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 }

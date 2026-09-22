@@ -70,6 +70,25 @@ setup and want to know what every screen and control is for.
 | --- | --- |
 | <img src="../images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="392"> | <img src="../images/speech.jpeg" alt="Speech settings with the language choice and the relay's cached voices" width="392"> |
 
+### Cursor picker filters
+
+**Send filter text** appends to an open Cursor model picker without pressing
+Enter or selecting a model. It supports up to 32 ASCII letters, digits, spaces,
+and `.-_/+:()[]`. Trailing spaces, multiline text, and other characters are
+rejected without trimming. Other picker layouts may be refused.
+
+The relay sends separate characters at least 150 ms apart and checks the live
+filter after visible characters. Interior spaces are verified with the next
+visible character. Terminal readback hides trailing spaces already in the
+picker: if the first visible character reveals an unexpected prefix, delivery
+stops and is reported as uncertain. Inspect the picker before sending more;
+the full draft is not restored after uncertain or partial delivery.
+
+Terminal controls are locked while sending. Select separately afterward, or
+press Escape to close the model picker. Relay commands are serialized per pane,
+but desktop typing is not locked: avoid typing there during delivery. Fresh
+reads detect observed interference, not an atomic guarantee against it.
+
 ## Paired devices
 
 A controller opens **Settings → Devices → Invite Device** to create a ten-minute,

@@ -1213,6 +1213,68 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
   await expect.poll(() => socketCount(page)).toBe(2);
 });
 
+test('keeps Cursor filtering text-only across status updates and restores prompts after selecting', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
+  });
+  await page.getByRole('button', { name: 'Open Cursor picker on Fedora' }).click();
+  const footer = 'Type to filter • Enter to select • Tab to edit';
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: `Available models\n${footer}`,
+  });
+  const input = page.getByPlaceholder('Type filter text…');
+  const mutations = async () => (await commands(page)).filter((command) =>
+    ['send_filter_text', 'send_input', 'send_text', 'send_keys', 'submit_prompt'].includes(String(command.type)));
+  await input.fill('grok');
+  expect(await mutations()).toEqual([]);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'done', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
+  });
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue('grok');
+  await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Send filter text' }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
+  ]);
+  expect((await mutations())[0]).not.toHaveProperty('keys');
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue('');
+  await page.getByRole('button', { name: 'Arrow keys' }).click();
+  await page.getByRole('button', { name: 'Down', exact: true }).click();
+  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
+  ]);
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
+    content: `${footer}\nSelected model: Grok Fast\n>`,
+  });
+  await expect(page.getByPlaceholder('Needs inspection — use terminal controls')).toBeDisabled();
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'done', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
+  });
+  const prompt = page.getByPlaceholder('Type a reply…');
+  await expect(prompt).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+  await prompt.fill('Continue');
+  await page.getByRole('button', { name: 'Send prompt', exact: true }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
+    expect.objectContaining({ type: 'submit_prompt', text: 'Continue' }),
+  ]);
+});
+
 test('centers plan keys and enables text only for the terminal editor', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
