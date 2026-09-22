@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 relay_release_root() {
     printf '%s\n' "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}"

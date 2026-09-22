@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Marketplace build hook: install the exact pre-built release named by the
 # plugin manifest. End-user hosts never compile Go or install Python/uv.
 set -eu

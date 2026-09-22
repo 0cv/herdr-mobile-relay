@@ -54,9 +54,14 @@ Playwright's official container via podman (Chromium runs natively — its dnf
 dependencies are nspr nss dbus-libs atk at-spi2-atk cups-libs at-spi2-core
 libXcomposite libXdamage libXext libXfixes libXrandr mesa-libgbm cairo pango
 alsa-lib, per passportxyz/passport's fedora-install-playwright-deps.sh).
+The Pi bridge subprocess regression in `make backend-check` also requires
+Node.js 22 or newer on PATH. It uses Node's strict unhandled-rejection behavior
+to verify that malformed metadata requests cannot terminate the agent runtime.
+No additional npm dependencies are needed for this check.
+
 Publishing the hosted web app (`make web-deploy`,
 `make web-preview`) shells out to `npx wrangler`, which requires Node.js 22 or
-newer on that computer only; CI and the relay's deploy action are exercised on
+newer on the publishing computer; CI and the relay's deploy action are exercised on
 Node.js 26. `make web-deploy` then runs the public bundle verifier against
 `WEB_ORIGIN` (the Pages domain by default; override it for a custom domain).
 Packaged users need no toolchain at all.

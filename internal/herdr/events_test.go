@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
@@ -97,11 +99,12 @@ func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
 	if snapshot.Protocol != 19 || len(snapshot.Agents) != 1 {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
-	if len(buffered) != 1 || buffered[0].Event != "pane.closed" {
-		t.Fatalf("buffered events = %#v", buffered)
+	events := collectBootstrapTestEvents(t, stream, buffered)
+	if len(events) != 1 || events[0].Event != "pane.closed" {
+		t.Fatalf("events = %#v", events)
 	}
 	cache := NewSessionCache(snapshot)
-	changed, err := cache.Apply(buffered[0])
+	changed, err := cache.Apply(events[0])
 	if err != nil || !changed {
 		t.Fatalf("Apply() changed=%v err=%v", changed, err)
 	}
@@ -208,8 +211,9 @@ func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T
 		t.Fatalf("Bootstrap() error = %v", err)
 	}
 	defer stream.Close()
-	if snapshot.Protocol != 1 || len(buffered) != 1 || buffered[0].Event != "pane.closed" {
-		t.Fatalf("snapshot=%+v buffered=%+v", snapshot, buffered)
+	events := collectBootstrapTestEvents(t, stream, buffered)
+	if snapshot.Protocol != 1 || len(events) != 1 || events[0].Event != "pane.closed" {
+		t.Fatalf("snapshot=%+v events=%+v", snapshot, events)
 	}
 	if supported != 0 || unsupported != 1 {
 		t.Fatalf("capability callbacks supported=%d unsupported=%d", supported, unsupported)
@@ -224,6 +228,23 @@ func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T
 	}
 	if serverErr := <-serverErr; serverErr != nil {
 		t.Fatal(serverErr)
+	}
+}
+
+func collectBootstrapTestEvents(t *testing.T, stream *EventStream, buffered []Event) []Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events := append([]Event(nil), buffered...)
+	for {
+		event, err := stream.Next(ctx)
+		if err == io.EOF {
+			return events
+		}
+		if err != nil {
+			t.Fatalf("Next() error = %v", err)
+		}
+		events = append(events, event)
 	}
 }
 

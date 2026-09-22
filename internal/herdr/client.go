@@ -53,8 +53,9 @@ func (e *OutcomeError) Error() string {
 
 // CLIError is a machine-readable failure returned by the Herdr CLI.
 type CLIError struct {
-	Code    string
-	Message string
+	Code               string
+	Message            string
+	refusedBeforeInput bool
 }
 
 func (e *CLIError) Error() string {
@@ -101,7 +102,7 @@ func refusalCode(err error) (string, bool) {
 		return "", false
 	}
 	_, refused := refusalCodes[cliErr.Code]
-	return cliErr.Code, refused
+	return cliErr.Code, refused || cliErr.refusedBeforeInput
 }
 
 func IsRefused(err error) bool {
@@ -129,6 +130,8 @@ func RefusalMessage(code string) string {
 		return "Herdr server is not running"
 	case "agent_pane_busy":
 		return "Agent pane is still starting"
+	case "agent_not_ready":
+		return "Agent is not ready to receive prompts; review the pane before retrying"
 	case "protocol_mismatch":
 		return "Herdr server protocol is incompatible with this relay"
 	case "workspace_group_close_required":
@@ -723,6 +726,10 @@ func (c *Client) SendText(ctx context.Context, paneID, text string) error {
 
 func (c *Client) Prompt(ctx context.Context, paneID, text string) error {
 	_, err := c.runCommand(ctx, "agent", "prompt", paneID, text)
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == "agent_not_ready" {
+		cliErr.refusedBeforeInput = true
+	}
 	return err
 }
 

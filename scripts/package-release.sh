@@ -70,12 +70,14 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     bun "$SCRIPT_DIR/stamp-web-version.mjs" "$STAGE/web/version.json" "$VERSION" "$REVISION"
     cp "$REPO_DIR/LICENSE" "$STAGE/LICENSE"
     cp "$REPO_DIR/README.md" "$STAGE/README.md"
+    cp -R "$REPO_DIR/relay/pi-command-bridge" "$STAGE/relay/pi-command-bridge"
     for WRAPPER in \
         common.sh \
         herdr-mobile-relay-service.sh \
         install-service.sh \
         install-systemd-user-service.sh \
         plugin-on-event.sh \
+        pi-commands.sh \
         service.sh \
         setup-link.sh \
         setup.sh \

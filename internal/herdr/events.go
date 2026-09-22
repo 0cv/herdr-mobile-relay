@@ -391,14 +391,19 @@ func topologySubscriptions(includeWorkspaceReordered bool) []map[string]string {
 // must run before the request context is cancelled.
 func closeOnContextDone(ctx context.Context, conn net.Conn) func() {
 	done := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
 		case <-done:
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		<-stopped
+	}
 }
 
 func setSocketDeadline(conn net.Conn, ctx context.Context) error {

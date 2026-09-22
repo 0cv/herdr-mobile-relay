@@ -13,7 +13,7 @@ import { CommandError, relayStore } from '$lib/store';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
-import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, WorktreeListing } from '$lib/types';
+import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
 
@@ -163,7 +163,7 @@ describe('accessible Svelte interactions', () => {
     await user.type(composer, '/absent');
     expect(screen.getByText(INCOMPLETE_CATALOG_NOTICE, { exact: true })).toBeVisible();
     expect(screen.getByText('No matching command — you can still send it.')).toBeVisible();
-    expect(load).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledTimes(2);
     expect(send).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Send prompt' }));
@@ -173,7 +173,7 @@ describe('accessible Svelte interactions', () => {
     vi.restoreAllMocks();
   });
 
-  it('filters a late real-store catalog and reopens it from cache before filling', async () => {
+  it('filters the full real-store catalog and revalidates each palette opening', async () => {
     const user = userEvent.setup();
     vi.stubGlobal('WebSocket', SlashCommandWebSocket);
     relayStore.destroy();
@@ -198,6 +198,8 @@ describe('accessible Svelte interactions', () => {
       frame: { paneId: agent.pane_id, content: 'ready', format: 'plain' },
       responding: new Set<string>(),
     });
+    const composer = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.type(composer, '/late');
     await waitFor(() => expect(socket.sent.map((payload) => JSON.parse(payload))
       .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1));
     const request = JSON.parse(socket.sent.at(-1)!);
@@ -212,8 +214,6 @@ describe('accessible Svelte interactions', () => {
       data: { commands, truncated: false },
     });
 
-    const composer = screen.getByRole('combobox', { name: 'Prompt' });
-    await user.type(composer, '/late');
     await waitFor(() => expect(screen.getByRole('option', { name: /\/late-command/ })).toBeVisible());
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
       type: 'command_result', request_id: 'not-sent', ok: true,
@@ -222,8 +222,10 @@ describe('accessible Svelte interactions', () => {
     expect(composer).toHaveValue('/late-command');
     expect(send).not.toHaveBeenCalled();
     expect((await relayStore.loadSlashCommands(agent)).commands).toHaveLength(401);
+    await user.clear(composer);
     first.unmount();
     expect((await relayStore.loadSlashCommands(agent)).commands).toHaveLength(401);
+    send.mockRestore();
 
     render(TerminalView, {
       agent,
@@ -234,17 +236,121 @@ describe('accessible Svelte interactions', () => {
     const reopenedComposer = screen.getByRole('combobox', { name: 'Prompt' });
     await user.clear(reopenedComposer);
     await user.type(reopenedComposer, '/late');
+    const reopenedRequests = socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands');
+    expect(reopenedRequests).toHaveLength(2);
+    socket.message({
+      type: 'command_result', request_id: reopenedRequests[1].request_id, ok: true, phase: 'completed',
+      data: { commands, truncated: false },
+    });
     await waitFor(() => expect(screen.getByRole('option', { name: /\/late-command/ })).toBeVisible());
-    expect(socket.sent.map((payload) => JSON.parse(payload))
-      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1);
+    const reopenedSend = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'not-sent', ok: true,
+    });
     await user.keyboard('{Enter}');
     expect(reopenedComposer).toHaveValue('/late-command');
-    expect(send).not.toHaveBeenCalled();
+    expect(reopenedSend).not.toHaveBeenCalled();
 
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each(['success', 'failure'] as const)('ignores superseded catalog %s without clearing newer loading state', async (outcome) => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'freshness', relay_label: 'Freshness', raw_pane_id: 'pane', pane_id: 'freshness::pane',
+      agent: 'pi', cwd: '/tmp/project', agent_session_id: 'first',
+    };
+    const requests: { resolve: (catalog: SlashCommandCatalog) => void; reject: (error: Error) => void }[] = [];
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const load = vi.spyOn(relayStore, 'loadSlashCommands').mockImplementation(() => new Promise((resolve, reject) => {
+      requests.push({ resolve, reject });
+    }));
+    const props = { agent, allAgents: [agent], responding: new Set<string>() };
+    const view = render(TerminalView, props);
+    const composer = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.type(composer, '/orches');
+    expect(load).toHaveBeenCalledTimes(1);
+    const replacement = { ...agent, agent_session_id: 'second' };
+    await view.rerender({ ...props, agent: replacement, allAgents: [replacement] });
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(load).toHaveBeenLastCalledWith(replacement, true);
+    if (outcome === 'success') {
+      requests[0].resolve({ commands: [{ command: '/orchestrate-old', description: 'Old session', source: 'project' }], truncated: false });
+    } else {
+      requests[0].reject(new Error('Old request failed'));
+    }
+    await waitFor(() => expect(screen.getByText('Loading commands…')).toBeVisible());
+    expect(screen.queryByRole('option', { name: /orchestrate-old/ })).not.toBeInTheDocument();
+    requests[1].resolve({ commands: [{ command: '/orchestrate', description: 'Current session', source: 'project' }], truncated: false });
+    await waitFor(() => expect(screen.getByRole('option', { name: /orchestrate/ })).toBeVisible());
+    await user.click(screen.getByRole('button', { name: 'Refresh commands' }));
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('Refreshing commands…')).toBeVisible();
+    requests[2].resolve({ commands: [], truncated: false });
+    await waitFor(() => expect(screen.queryByRole('option')).not.toBeInTheDocument());
+    await user.clear(composer);
+    await user.type(composer, '/orches');
+    expect(load).toHaveBeenCalledTimes(4);
+    view.unmount();
+    requests[3].resolve({ commands: [{ command: '/orchestrate', description: 'After unmount', source: 'project' }], truncated: false });
+    await Promise.resolve();
+    expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
+    clearPromptDraft(agent);
+    vi.restoreAllMocks();
+  });
+
+  it('revalidates an open palette on reconnect without fetching for each keystroke', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'reconnect', relay_label: 'Reconnect', raw_pane_id: 'pane', pane_id: 'reconnect::pane',
+      agent: 'pi', cwd: '/tmp/project',
+    };
+    const connected = { status: 'connected', capabilities: ['slash_commands'] };
+    relayStore.connections.set(new Map([['reconnect', connected as never]]));
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const load = vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
+      commands: [{ command: '/orchestrate', description: 'Orchestrate', source: 'project' }], truncated: false,
+    });
+    const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
+    const composer = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.type(composer, '/orches');
+    expect(load).toHaveBeenCalledTimes(1);
+    relayStore.connections.set(new Map([['reconnect', { ...connected, status: 'disconnected' } as never]]));
+    await waitFor(() => expect(screen.getByText('Suggestions unavailable — you can still send this command.')).toBeVisible());
+    expect(load).toHaveBeenCalledTimes(1);
+    relayStore.connections.set(new Map([['reconnect', connected as never]]));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    await user.type(composer, 'trate');
+    expect(load).toHaveBeenCalledTimes(2);
+    await user.keyboard('{Escape}');
+    await user.type(composer, '-');
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+    view.unmount();
+    clearPromptDraft(agent);
+    relayStore.connections.set(new Map());
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['partial', 'Runtime command discovery is incomplete.'],
+    ['loading', 'Pi is loading command resources.'],
+    ['unavailable', 'Runtime command discovery is unavailable.'],
+  ] as const)('distinguishes runtime %s from size truncation', async (status, message) => {
+    const user = userEvent.setup();
+    const agent: Agent = { relay_id: 'status', relay_label: 'Status', raw_pane_id: 'pane', pane_id: 'status::pane', agent: 'pi' };
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false, status });
+    const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
+    await user.type(screen.getByRole('combobox', { name: 'Prompt' }), '/orches');
+    expect(screen.getByText(text => text.startsWith(message))).toBeVisible();
+    expect(screen.queryByText(INCOMPLETE_CATALOG_NOTICE, { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh commands' })).toBeEnabled();
+    view.unmount();
+    clearPromptDraft(agent);
+    vi.restoreAllMocks();
   });
 
   it('opens agents and submits approval buttons by role', async () => {

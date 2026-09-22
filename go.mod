@@ -10,7 +10,9 @@ require (
 	github.com/pion/webrtc/v4 v4.2.18
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.etcd.io/bbolt v1.3.11
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sys v0.47.0
+	golang.org/x/text v0.41.0
 )
 
 require (

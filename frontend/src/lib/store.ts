@@ -2851,23 +2851,44 @@ class RelayStore {
     return data;
   }
 
-  async loadSlashCommands(agent: Agent): Promise<SlashCommandCatalog> {
+  async loadSlashCommands(agent: Agent, refresh = false): Promise<SlashCommandCatalog> {
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('slash_commands')) {
       throw new CommandError('This relay does not provide slash-command suggestions.');
     }
-    const identity = `${String(agent.agent || '')}\u0000${String(agent.cwd || '')}`;
-    const cached = this.slashCommandCache.get(agent.pane_id);
-    if (cached?.identity === identity) return cached.catalog;
+    const identity = JSON.stringify([
+      agent.relay_id, agent.server_session_id, agent.raw_pane_id,
+      agent.terminal_id, agent.generation, agent.agent_session_id,
+      agent.agent, agent.cwd,
+    ]);
     const pending = this.pendingSlashCommands.get(agent.pane_id);
-    if (pending?.identity === identity) return pending.promise;
+    if (!refresh && pending?.identity === identity) return pending.promise;
+    const cached = this.slashCommandCache.get(agent.pane_id);
+    if (!refresh && cached?.identity === identity) return cached.catalog;
+    this.slashCommandCache.delete(agent.pane_id);
 
     const promise = this.sendToAgent(agent, { type: 'list_slash_commands' }, 10_000)
       .then((result) => {
         const data = result.data && typeof result.data === 'object' ? result.data : {};
         const rawCommands = data.commands;
         const commandsList = Array.isArray(rawCommands) ? rawCommands : [];
-        const sources = new Set(['builtin', 'personal', 'project']);
+        const sources = new Set(['builtin', 'personal', 'project', 'temporary']);
+        const metadata = data.metadata && typeof data.metadata === 'object'
+          ? data.metadata as Record<string, Record<string, unknown>> : {};
+        const commandMetadata = (name: string): Pick<SlashCommand, 'kind' | 'provenance'> => {
+          const value = metadata[name];
+          if (!value || !['builtin', 'extension', 'prompt', 'skill'].includes(String(value.kind))) return {};
+          const kind = value.kind as SlashCommand['kind'];
+          const p = value.provenance as Record<string, unknown> | undefined;
+          if (!p || !['user', 'project', 'temporary'].includes(String(p.scope))
+            || !['package', 'top-level'].includes(String(p.origin))) return { kind };
+          return { kind, provenance: {
+            path: String(p.path || '').slice(0, 1024), source: String(p.source || '').slice(0, 256),
+            scope: p.scope as NonNullable<SlashCommand['provenance']>['scope'],
+            origin: p.origin as NonNullable<SlashCommand['provenance']>['origin'],
+            ...(p.base_dir ? { base_dir: String(p.base_dir).slice(0, 1024) } : {}),
+          } };
+        };
         const validCommands = commandsList
           .filter((entry: Record<string, unknown>) => typeof entry?.command === 'string'
             && /^\/[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(entry.command));
@@ -2879,12 +2900,17 @@ class RelayStore {
             ...(entry.argument_hint ? { argument_hint: String(entry.argument_hint).slice(0, 120) } : {}),
             source: sources.has(String(entry.source))
               ? entry.source as SlashCommand['source']
-              : 'builtin',
+              : 'temporary',
+            ...commandMetadata(String(entry.command)),
           }))
           .sort((left, right) => left.command.localeCompare(right.command, undefined, { sensitivity: 'base' }));
-        const catalog = {
+        const catalog: SlashCommandCatalog = {
           commands,
           truncated: Boolean(data.truncated) || validCommands.length > SLASH_COMMAND_MAX_ENTRIES,
+          ...(['loading', 'available', 'unavailable', 'partial'].includes(String(data.status))
+            ? { status: data.status as SlashCommandCatalog['status'] } : {}),
+          ...(typeof data.revision === 'string' && /^[a-f0-9]{64}$/.test(data.revision)
+            ? { revision: data.revision } : {}),
         };
         if (this.pendingSlashCommands.get(agent.pane_id)?.promise === promise) {
           this.slashCommandCache.set(agent.pane_id, { identity, catalog });

@@ -110,6 +110,12 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     --revision "$EXPECTED_REVISION" \
     "$RELEASE_DIR" >/dev/null
 
+bash "$RELEASE_DIR/relay/pi-commands.sh" install "$WORK_DIR/pi-agent" >/dev/null
+cmp "$RELEASE_DIR/relay/pi-command-bridge/bridge.mjs" \
+    "$WORK_DIR/pi-agent/extensions/herdr-mobile-relay-commands/bridge.mjs"
+bash "$RELEASE_DIR/relay/pi-commands.sh" remove "$WORK_DIR/pi-agent" >/dev/null
+[ ! -e "$WORK_DIR/pi-agent/extensions/herdr-mobile-relay-commands" ]
+
 PORT=$((40000 + ($$ % 20000)))
 PLUGIN_PORT=$((PORT + 1))
 XDG_CONFIG_HOME="$CONFIG_HOME" \

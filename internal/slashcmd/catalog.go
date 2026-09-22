@@ -1,6 +1,9 @@
 package slashcmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -23,9 +26,69 @@ type Command struct {
 	ArgumentHint string `json:"argument_hint,omitempty"`
 }
 
+type Provenance struct {
+	Path    string `json:"path"`
+	Source  string `json:"source"`
+	Scope   string `json:"scope"`
+	Origin  string `json:"origin"`
+	BaseDir string `json:"base_dir,omitempty"`
+}
+
+type Metadata struct {
+	Kind       string      `json:"kind"`
+	Provenance *Provenance `json:"provenance,omitempty"`
+}
+
+type RuntimeCommand struct {
+	Command
+	Metadata
+}
+
 type Catalog struct {
-	Commands  []Command `json:"commands"`
-	Truncated bool      `json:"truncated"`
+	Commands  []Command           `json:"commands"`
+	Truncated bool                `json:"truncated"`
+	Status    string              `json:"status,omitempty"`
+	Revision  string              `json:"revision,omitempty"`
+	Metadata  map[string]Metadata `json:"metadata,omitempty"`
+}
+
+func Revise(catalog Catalog) Catalog {
+	catalog.Revision = ""
+	data, _ := json.Marshal(catalog)
+	hash := sha256.Sum256(data)
+	catalog.Revision = hex.EncodeToString(hash[:])
+	return catalog
+}
+
+func IsPi(profile, agent string) bool {
+	provider := resolveProvider(profile)
+	if provider == nil {
+		provider = resolveProvider(profileIDForAgentName(agent))
+	}
+	return provider != nil && provider.ID() == "pi"
+}
+
+func MergePiRuntime(entries []RuntimeCommand, status string, truncated bool) Catalog {
+	commands := append([]Command(nil), piBuiltins...)
+	metadata := make(map[string]Metadata)
+	seen := make(map[string]bool)
+	for _, command := range commands {
+		seen[command.Command] = true
+		metadata[command.Command] = Metadata{Kind: "builtin"}
+	}
+	for _, entry := range entries {
+		if seen[entry.Command.Command] {
+			continue
+		}
+		seen[entry.Command.Command] = true
+		if len(commands) == maxEntries {
+			truncated = true
+			continue
+		}
+		commands = append(commands, entry.Command)
+		metadata[entry.Command.Command] = entry.Metadata
+	}
+	return Revise(Catalog{Commands: commands, Metadata: metadata, Status: status, Truncated: truncated})
 }
 
 // profileIDForAgentName maps an agent name as herdr reports it onto a provider
@@ -39,6 +102,8 @@ func profileIDForAgentName(agent string) string {
 		return "claude"
 	case "codex":
 		return "codex"
+	case "cursor", "cursor-agent", "cursor agent":
+		return "cursor"
 	case "qoder", "qodercli":
 		return "qoder"
 	case "pi", "pi-coding-agent":
@@ -109,5 +174,5 @@ func finalizeCatalog(commands []Command, truncated bool) Catalog {
 		commands = commands[:maxEntries]
 		truncated = true
 	}
-	return Catalog{Commands: commands, Truncated: truncated}
+	return Revise(Catalog{Commands: commands, Truncated: truncated, Status: "available"})
 }

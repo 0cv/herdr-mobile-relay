@@ -380,7 +380,14 @@ func TestListDirectories(t *testing.T) {
 }
 
 func TestListSlashCommands(t *testing.T) {
-	env := setupEnv(t)
+	for _, agent := range []string{"claude", "pi"} {
+		t.Run(agent, func(t *testing.T) { testListSlashCommands(t, agent) })
+	}
+}
+
+func testListSlashCommands(t *testing.T, agent string) {
+	scenario := fmt.Sprintf(`{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":%q,"name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`, agent)
+	env := setupEnvWithScenario(t, scenario)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -434,6 +441,16 @@ func TestListSlashCommands(t *testing.T) {
 	first := commands[0].(map[string]any)
 	if first["command"] == "" {
 		t.Error("first command has empty name")
+	}
+	wantStatus := "available"
+	if agent == "pi" {
+		wantStatus = "partial"
+	}
+	if resultData["status"] != wantStatus || resultData["truncated"] != false {
+		t.Fatalf("incorrect availability or truncation: %v", resultData)
+	}
+	if revision, ok := resultData["revision"].(string); !ok || len(revision) != 64 {
+		t.Fatal("missing catalog revision")
 	}
 }
 

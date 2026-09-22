@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,7 +22,7 @@ export STUB_EXIT=0
 mkdir -p "$HERDR_RELEASE_ROOT/current"
 STUB="$HERDR_RELEASE_ROOT/current/herdr-mobile-relay"
 cat > "$STUB" <<'STUB'
-#!/bin/bash
+#!/usr/bin/env bash
 printf '%s\n' "$@" > "$ARGV_FILE"
 exit "${STUB_EXIT:-0}"
 STUB
