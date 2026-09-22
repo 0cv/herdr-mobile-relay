@@ -24,7 +24,6 @@ func TestCursorBuiltinAliasesCannotBecomeCustomCommands(t *testing.T) {
 		"/shell":          {"/sh", "/run"},
 		"/show-thinking":  {"/thoughts", "/thinking", "/thinking-blocks"},
 		"/summarize":      {"/compress", "/compact"},
-		"/zen-mode":       {"/zen"},
 	}
 	for _, scope := range []string{"project", "personal", "configured"} {
 		for _, kind := range []string{"command", "skill"} {

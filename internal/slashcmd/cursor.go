@@ -33,20 +33,17 @@ var cursorBuiltins = []Command{
 	{"/copy-request-id", "Copy Request ID", "builtin", ""},
 	{"/cursor", "Open in Cursor", "builtin", ""},
 	{"/debug", "Debug Mode", "builtin", "[<prompt>]"},
-	{"/detach", "Detach", "builtin", ""},
 	{"/exit", "Exit", "builtin", ""},
 	{"/fast", "Fast Mode", "builtin", ""},
 	{"/feedback", "Feedback", "builtin", "[message]"},
 	{"/fork", "Fork Chat", "builtin", ""},
 	{"/full-conversation", "Full Conversation", "builtin", ""},
-	{"/goal", "Goal", "builtin", "<objective>"},
 	{"/help", "Help", "builtin", "<command>"},
 	{"/jobs", "Tasks", "builtin", ""},
 	{"/line-numbers", "Line Numbers", "builtin", ""},
 	{"/load-workspace", "Load workspace", "builtin", "<name>"},
 	{"/logout", "Logout", "builtin", ""},
 	{"/logs", "Logs", "builtin", ""},
-	{"/max-mode", "Max Mode", "builtin", ""},
 	{"/mcp", "MCP", "builtin", "[list|list-tools] [<identifier>]"},
 	{"/model", "Model", "builtin", "<filter>"},
 	{"/open", "Open in Cursor", "builtin", ""},
@@ -67,9 +64,7 @@ var cursorBuiltins = []Command{
 	{"/summarize", "Summarize", "builtin", ""},
 	{"/sync-theme", "Sync Theme", "builtin", ""},
 	{"/update", "Update", "builtin", ""},
-	{"/usage", "Usage", "builtin", ""},
 	{"/vim", "Vim Mode", "builtin", ""},
-	{"/zen-mode", "Zen Mode", "builtin", ""},
 }
 
 var cursorBuiltinAliases = map[string][]string{
@@ -89,7 +84,6 @@ var cursorBuiltinAliases = map[string][]string{
 	"/shell":          {"/sh", "/run"},
 	"/show-thinking":  {"/thoughts", "/thinking", "/thinking-blocks"},
 	"/summarize":      {"/compress", "/compact"},
-	"/zen-mode":       {"/zen"},
 }
 
 // cursorSkillRoots reports the directories Cursor scans for personal skills.
@@ -456,7 +450,7 @@ func (p *cursorProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				continue
 			}
 			metadata, ok := parseCursorSkillMetadata(data)
-			if !ok || !userInvocable(metadata) {
+			if !ok || strings.EqualFold(strings.TrimSpace(metadata["user-invocable"]), "false") {
 				continue
 			}
 			command := "/" + name

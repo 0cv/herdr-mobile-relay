@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -66,19 +67,43 @@ func readCursorFile(file *os.File, maxSize int64) ([]byte, bool) {
 
 func parseCursorSkillMetadata(data []byte) (map[string]string, bool) {
 	metadata := make(map[string]string)
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+	content := strings.TrimPrefix(string(data), "\ufeff")
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	language, ok := strings.CutPrefix(lines[0], "---")
+	if !ok || strings.HasPrefix(language, "-") {
 		return metadata, true
 	}
 	end := len(lines)
+	empty := true
 	for i := 1; i < len(lines); i++ {
-		if lines[i] == "---" {
+		if strings.HasPrefix(lines[i], "---") {
 			end = i
 			break
 		}
+		line := strings.TrimSpace(lines[i])
+		if line != "" && !strings.HasPrefix(line, "#") {
+			empty = false
+		}
 	}
+	if empty {
+		return metadata, true
+	}
+	frontmatter := []byte(strings.Join(lines[1:end], "\n"))
+	language = strings.TrimSpace(language)
 	var fields map[string]any
-	if err := yaml.Unmarshal([]byte(strings.Join(lines[1:end], "\n")), &fields); err != nil {
+	var err error
+	switch strings.ToLower(language) {
+	case "", "yaml", "yml":
+		err = yaml.Unmarshal(frontmatter, &fields)
+	case "js", "javascript":
+		return metadata, true
+	default:
+		if language != "json" {
+			return nil, false
+		}
+		err = json.Unmarshal(frontmatter, &fields)
+	}
+	if err != nil {
 		return nil, false
 	}
 	if !cursorSkillAllowsCLI(fields) {

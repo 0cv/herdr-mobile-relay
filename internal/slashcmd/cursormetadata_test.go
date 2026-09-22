@@ -53,6 +53,41 @@ func TestCursorSkillMetadataWithoutFrontmatter(t *testing.T) {
 	}
 }
 
+func TestCursorSkillFrontmatterBoundariesAndLanguages(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, description, invocable string
+		accepted                           bool
+	}{
+		{"leading-space", " ---\nuser-invocable: false\n---\nBody\n", "", "", true},
+		{"leading-newline", "\n---\nuser-invocable: false\n---\nBody\n", "", "", true},
+		{"horizontal-rule", "----\nuser-invocable: false\n---\nBody\n", "", "", true},
+		{"closing-suffix", "---\ndescription: Before\n--- trailing content\ndescription: After\n", "Before", "", true},
+		{"unclosed", "---yaml\ndescription: Unclosed\n", "Unclosed", "", true},
+		{"empty", "---\n---\nBody\n", "", "", true},
+		{"unknown-empty", "---toml\n# Comment\n---\nBody\n", "", "", true},
+		{"unknown-content", "---toml\nuser-invocable = false\n---\nBody\n", "", "", false},
+		{"javascript", "---javascript\nuser-invocable: false\n---\nBody\n", "", "", true},
+		{"js", "---JS\nthrow new Error('must not execute')\n---\nBody\n", "", "", true},
+		{"json", "---json\n{\"description\": \"JSON skill\", \"user-invocable\": false}\n---\nBody\n", "JSON skill", "false", true},
+		{"json-ide-only", "---json\n{\"metadata\": {\"surfaces\": [\"ide\"]}}\n---\nBody\n", "", "", false},
+		{"json-invalid", "---json\nuser-invocable: false\n---\nBody\n", "", "", false},
+		{"json-uppercase", "---JSON\n{\"description\": \"JSON skill\"}\n---\nBody\n", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata, ok := parseCursorSkillMetadata([]byte(tc.body))
+			if ok != tc.accepted {
+				t.Fatalf("accepted = %v, want %v", ok, tc.accepted)
+			}
+			if !ok {
+				return
+			}
+			if metadata["description"] != tc.description || metadata["user-invocable"] != tc.invocable {
+				t.Errorf("metadata = %v, want description %q, invocable %q", metadata, tc.description, tc.invocable)
+			}
+		})
+	}
+}
+
 func TestCursorSkillFileReadLimit(t *testing.T) {
 	for _, project := range []bool{false, true} {
 		for _, size := range []int{0, 1, 64*1024 + 1, 1 << 20, 1<<20 + 1} {
