@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1314,6 +1315,13 @@ func TestCommittedInventoryPublicationRepairsZeroListenerRefreshAndReconnect(t *
 	reconnected.CloseNow()
 }
 
+// Cancelling the server drops in-flight socket connections, so the fixture sees
+// ordinary teardown errors that say nothing about the behaviour under test.
+func fixtureConnectionTornDown(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
 func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
@@ -1634,7 +1642,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 }
@@ -1861,7 +1869,7 @@ func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 }
