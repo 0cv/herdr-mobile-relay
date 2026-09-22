@@ -62,8 +62,9 @@ type Dispatcher struct {
 
 	// testGates is a deterministic pre-admission hook retained for the existing
 	// package tests. Production never creates an entry and never takes a lock.
-	testGatesMu sync.Mutex
-	testGates   map[string]chan struct{}
+	testGatesMu    sync.Mutex
+	testGates      map[string]chan struct{}
+	testFilterWait func(context.Context, time.Duration) error
 }
 
 type receiptContextKey struct{}
@@ -266,6 +267,8 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleKeys(ctx, receivedAt, requestID, paneID, message)
 	case "send_text":
 		return d.handleText(ctx, receivedAt, requestID, paneID, message)
+	case "send_filter_text":
+		return d.handleFilterText(ctx, receivedAt, requestID, paneID, message)
 	case "send_input":
 		return d.handleInput(ctx, receivedAt, requestID, paneID, message)
 	case "send_secret":

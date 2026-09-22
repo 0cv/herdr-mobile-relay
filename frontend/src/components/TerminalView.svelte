@@ -39,7 +39,7 @@
   } from '$lib/speech';
   import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
-  import { targetRefForAgent } from '$lib/resource-id';
+  import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
   import {
@@ -165,7 +165,9 @@
   let altArmed = $state(false);
   let keyFeedback = $state('');
   let keyFeedbackError = $state(false);
-  let keySending = $state(false);
+  let keyRequestSending = $state(false);
+  let sendingFilter = $state(false);
+  const keySending = $derived(keyRequestSending || sendingFilter);
   let uploadStatus = $state('');
   let uploadError = $state(false);
   let uploadingAttachment = $state(false);
@@ -1191,22 +1193,33 @@
 
   async function sendPrompt() {
     const submittedDraft = composer;
-    const text = submittedDraft.replace(/[\r\n]+$/g, '');
-    if (!text || composerLocked || sendingPrompt) return;
     const terminalText = terminalTextMode;
+    const text = terminalText === 'filter' ? submittedDraft : submittedDraft.replace(/[\r\n]+$/g, '');
+    if (!text || composerLocked || sendingPrompt) return;
+    if (terminalText === 'filter') {
+      if (keySending || keyQueue.length) return;
+      if (!/^[a-zA-Z0-9 ._/:+()[\]-]{1,32}$/.test(text) || text.endsWith(' ')) {
+        relayStore.showToast('Use 1–32 letters, digits, spaces or .-_/+:()[]; no trailing space.', true);
+        return;
+      }
+    }
+    const target = agent;
+    const targetIdentity = targetRefForAgent(target);
+    sendingFilter = terminalText === 'filter';
     sendingPrompt = true;
     composer = '';
-    clearPromptDraft(agent);
+    clearPromptDraft(target);
     try {
-      if (terminalText) {
-        await relayStore.sendToAgent(agent, {
-          type: 'send_input',
-          text,
-          ...(terminalText === 'submit' ? { keys: ['Enter'] } : {}),
-          activity_label: terminalText === 'filter' ? 'Sent filter text' : 'Submitted terminal text',
+      if (terminalText === 'filter') {
+        await relayStore.sendToAgent(target, {
+          type: 'send_filter_text', text, activity_label: 'Sent filter text',
+        }, 15_000);
+      } else if (terminalText === 'submit') {
+        await relayStore.sendToAgent(target, {
+          type: 'send_input', text, keys: ['Enter'], activity_label: 'Submitted terminal text',
         });
       } else {
-        await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
+        await relayStore.sendToAgent(target, { type: 'submit_prompt', text });
       }
       relayStore.showToast(terminalText === 'filter' ? 'Filter text sent. Select separately using terminal controls.' : terminalText ? 'Terminal text submitted.' : 'Prompt sent.');
     } catch (error) {
@@ -1217,14 +1230,19 @@
         && error.data !== null
         && 'dispatched_unknown' in error.data
         && error.data.dispatched_unknown === true;
-      if (!composer && !dispatchedUnknown) composer = submittedDraft;
+      const notStarted = typeof error === 'object' && error !== null && 'data' in error
+        && typeof error.data === 'object' && error.data !== null
+        && 'not_started' in error.data && error.data.not_started === true;
+      if (targetIdentity && targetRefMatchesAgent(targetIdentity, agent)
+        && !composer && !dispatchedUnknown && (terminalText !== 'filter' || notStarted)) composer = submittedDraft;
       const detail = error instanceof Error
         ? error.message
         : terminalText === 'filter' ? 'Filter text could not be sent.' : terminalText ? 'Terminal text could not be submitted.' : 'Prompt could not be sent.';
       relayStore.showToast(dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail, true);
     } finally {
       sendingPrompt = false;
-      setTimeout(() => relayStore.readPane(agent), 500);
+      sendingFilter = false;
+      setTimeout(() => relayStore.readPane(target), 500);
     }
   }
 
@@ -1314,7 +1332,7 @@
   }
 
   function sendKeys(keys: string[], activityLabel = ''): Promise<boolean> {
-    if (readOnly) return Promise.resolve(false);
+    if (readOnly || sendingFilter) return Promise.resolve(false);
     return new Promise((resolve) => {
       keyQueue.push({ keys, label: activityLabel || keys.join(', '), resolve });
       void drainKeyQueue();
@@ -1323,7 +1341,7 @@
 
   async function drainKeyQueue() {
     if (keySending) return;
-    keySending = true;
+    keyRequestSending = true;
     while (keyQueue.length) {
       const command = keyQueue.shift()!;
       showKeyFeedback(`Sending ${command.label}…`);
@@ -1347,7 +1365,7 @@
         for (const queued of keyQueue.splice(0)) queued.resolve(false);
       }
     }
-    keySending = false;
+    keyRequestSending = false;
   }
 
   function showKeyFeedback(message: string, error = false) {
@@ -2396,7 +2414,7 @@
           id="modifier-key-input"
           class="modifier-key-input"
           bind:this={modifierInputElement}
-          disabled={readOnly}
+          disabled={readOnly || sendingFilter}
           aria-label="Modifier shortcut character"
           autocomplete="off"
           autocapitalize="none"

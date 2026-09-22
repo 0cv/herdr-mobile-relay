@@ -170,6 +170,7 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   send_keys: true,
   send_text: true,
   send_input: true,
+  send_filter_text: true,
   send_secret: true,
   agent_start: true,
   agent_rename: true,
@@ -2276,6 +2277,7 @@ class RelayStore {
     const error = new CommandError(detail || receipt.error?.code || 'Command failed');
     error.data = {
       phase: receipt.phase,
+      ...(receipt.phase === 'failed_before_dispatch' ? { not_started: true } : {}),
       ...(receipt.error ? { api_error: receipt.error } : {}),
       ...(receipt.phase === 'dispatched_unknown' ? { dispatched_unknown: true } : {}),
     };
@@ -2319,7 +2321,7 @@ class RelayStore {
     if (result.ok) pending.resolve(result);
     else {
       const error = new CommandError(result.error || 'Command failed');
-      error.data = result.data;
+      error.data = { ...(result.data || {}), ...(result.phase === 'not_started' ? { not_started: true } : {}) };
       if (result.phase === 'dispatched_unknown') {
         error.data = { ...(result.data || {}), dispatched_unknown: true };
       }

@@ -1222,13 +1222,13 @@ test('keeps Cursor filtering text-only across status updates and restores prompt
     agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
   });
   await page.getByRole('button', { name: 'Open Cursor picker on Fedora' }).click();
-  const footer = 'Type to filter • Enter to select • Tab to edit • Esc to clear';
+  const footer = 'Type to filter • Enter to select • Tab to edit';
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: `Available models\n${footer}`,
   });
   const input = page.getByPlaceholder('Type filter text…');
   const mutations = async () => (await commands(page)).filter((command) =>
-    ['send_input', 'send_text', 'send_keys', 'submit_prompt'].includes(String(command.type)));
+    ['send_filter_text', 'send_input', 'send_text', 'send_keys', 'submit_prompt'].includes(String(command.type)));
   await input.fill('grok');
   expect(await mutations()).toEqual([]);
   await server(page, 0, {
@@ -1240,20 +1240,16 @@ test('keeps Cursor filtering text-only across status updates and restores prompt
   await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
   await page.getByRole('button', { name: 'Send filter text' }).click();
   await expect.poll(mutations).toEqual([
-    expect.objectContaining({ type: 'send_input', text: 'grok' }),
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
   ]);
   expect((await mutations())[0]).not.toHaveProperty('keys');
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
-    content: `Filter: grok\nGrok Fast\nGrok Medium\n${footer}`,
-  });
   await expect(input).toBeEnabled();
   await expect(input).toHaveValue('');
   await page.getByRole('button', { name: 'Arrow keys' }).click();
   await page.getByRole('button', { name: 'Down', exact: true }).click();
   await page.getByRole('button', { name: 'Enter', exact: true }).click();
   await expect.poll(mutations).toEqual([
-    expect.objectContaining({ type: 'send_input', text: 'grok' }),
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
     expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
     expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
   ]);
@@ -1272,7 +1268,7 @@ test('keeps Cursor filtering text-only across status updates and restores prompt
   await prompt.fill('Continue');
   await page.getByRole('button', { name: 'Send prompt', exact: true }).click();
   await expect.poll(mutations).toEqual([
-    expect.objectContaining({ type: 'send_input', text: 'grok' }),
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
     expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
     expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
     expect.objectContaining({ type: 'submit_prompt', text: 'Continue' }),

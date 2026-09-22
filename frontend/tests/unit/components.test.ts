@@ -261,6 +261,81 @@ describe('accessible Svelte interactions', () => {
     respond.mockRestore();
   });
 
+  it.each(['filter', 'prompt', 'editor'] as const)('restores a refused %s draft after a same-target agent update, but not replacement or navigation', async (route) => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let rejectSend!: (error: unknown) => void;
+    vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((_, reject) => { rejectSend = reject; }));
+    const initial: Agent = {
+      ...blockedAgent, agent: 'cursor', attention_kind: 'unknown', options: undefined,
+      server_session_id: 'server-1', terminal_id: 'terminal-1', generation: 1, agent_session_id: 'agent-1',
+      status: route === 'prompt' ? 'done' : 'blocked',
+    };
+    const content = route === 'filter' ? 'Available models\nType to filter • Enter to select • Tab to edit'
+      : route === 'editor' ? 'Custom answer: Which weekend?\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor' : 'Ready';
+    for (const update of [
+      {},
+      { generation: 2 },
+      { server_session_id: 'server-2' },
+      { terminal_id: 'terminal-2' },
+      { agent_session_id: 'agent-2' },
+      { relay_id: 'other-relay' },
+      { pane_id: 'fedora::w1:p2', raw_pane_id: 'w1:p2' },
+    ]) {
+      const view = render(TerminalView, {
+        agent: initial, allAgents: [initial], responding: new Set<string>(),
+        frame: { paneId: initial.pane_id, content, format: 'plain' },
+      });
+      const input = screen.getByRole('combobox', { name: 'Prompt' });
+      await user.type(input, 'draft');
+      await user.keyboard('{Control>}{Enter}{/Control}');
+      expect(input).toHaveValue('');
+      const updated = { ...initial, project: 'Inventory updated', ...update };
+      await view.rerender({ agent: updated });
+      rejectSend({ data: { not_started: true } });
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Submitting input' })).not.toBeInTheDocument());
+      expect(input).toHaveValue(Object.keys(update).length === 0 ? 'draft' : '');
+      view.unmount();
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('validates filter drafts and locks keys until delivery is settled', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let settle!: () => void;
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((resolve) => {
+      settle = () => resolve({ type: 'command_result', request_id: 'filter-busy', ok: true });
+    }));
+    const agent: Agent = { ...blockedAgent, agent: 'cursor', attention_kind: 'unknown', options: undefined };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: { paneId: agent.pane_id, content: 'Available models\nType to filter • Enter to select • Tab to edit', format: 'plain' },
+    });
+    const input = screen.getByRole('combobox', { name: 'Prompt' });
+    for (const draft of ['g ', 'g😀', 'g'.repeat(33)]) {
+      await user.clear(input);
+      await user.type(input, draft);
+      await user.keyboard('{Control>}{Enter}{/Control}');
+      expect(send).not.toHaveBeenCalled();
+      expect(input).toHaveValue(draft);
+    }
+    await user.clear(input);
+    await user.type(input, 'grok');
+    await user.click(screen.getByRole('button', { name: 'Send filter text' }));
+    for (const name of ['Esc', 'Tab', 'Enter', 'Shift', 'Ctrl']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+    await user.keyboard('{Control>}{Enter}{/Control}');
+    expect(send).toHaveBeenCalledOnce();
+    settle();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled());
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+
   it('sends Cursor filter text without selecting a model', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
@@ -268,7 +343,10 @@ describe('accessible Svelte interactions', () => {
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
       type: 'command_result', request_id: 'filter-1', ok: true,
     });
-    const agent: Agent = { ...blockedAgent, attention_kind: 'unknown', options: undefined };
+    const agent: Agent = {
+      ...blockedAgent, attention_kind: 'unknown', options: undefined,
+      server_session_id: 'server-1', terminal_id: 'terminal-1', generation: 1, agent_session_id: 'agent-1',
+    };
     const view = render(TerminalView, {
       agent, allAgents: [agent], responding: new Set<string>(),
       frame: { paneId: agent.pane_id, content: 'Available models\nType to filter • Enter to select • Tab to edit', format: 'plain' },
@@ -278,8 +356,8 @@ describe('accessible Svelte interactions', () => {
     expect(send).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: 'Send filter text' }));
     expect(send).toHaveBeenCalledExactlyOnceWith(agent, {
-      type: 'send_input', text: 'grok', activity_label: 'Sent filter text',
-    });
+      type: 'send_filter_text', text: 'grok', activity_label: 'Sent filter text',
+    }, 15_000);
     expect(input).toHaveValue('');
     expect(screen.getByPlaceholderText('Type filter text…')).toBeEnabled();
     await user.click(screen.getByRole('button', { name: 'Arrow keys' }));
@@ -294,10 +372,10 @@ describe('accessible Svelte interactions', () => {
       await user.type(input, 'opus');
       await user.keyboard(`{${modifier}>}{Enter}{/${modifier}}`);
       expect(send).toHaveBeenCalledExactlyOnceWith(agent, {
-        type: 'send_input', text: 'opus', activity_label: 'Sent filter text',
-      });
+        type: 'send_filter_text', text: 'opus', activity_label: 'Sent filter text',
+      }, 15_000);
     }
-    send.mockRejectedValueOnce(new Error('Delivery failed'));
+    send.mockRejectedValueOnce({ data: { not_started: true } });
     await user.type(input, 'retry');
     await user.click(screen.getByRole('button', { name: 'Send filter text' }));
     expect(input).toHaveValue('retry');
@@ -353,15 +431,15 @@ describe('accessible Svelte interactions', () => {
     expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Send filter text' }));
     expect(send).toHaveBeenCalledExactlyOnceWith(updatedAgent, {
-      type: 'send_input', text: 'grok', activity_label: 'Sent filter text',
-    });
+      type: 'send_filter_text', text: 'grok', activity_label: 'Sent filter text',
+    }, 15_000);
     send.mockClear();
     await user.type(input, '/mo');
     expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
     await user.keyboard('{Control>}{Enter}{/Control}');
     expect(send).toHaveBeenCalledExactlyOnceWith(updatedAgent, {
-      type: 'send_input', text: '/mo', activity_label: 'Sent filter text',
-    });
+      type: 'send_filter_text', text: '/mo', activity_label: 'Sent filter text',
+    }, 15_000);
     await view.rerender({ readOnly: true });
     expect(input).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send filter text' })).toBeDisabled();
