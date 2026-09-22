@@ -88,6 +88,39 @@ func TestCursorSkillFrontmatterMarkers(t *testing.T) {
 	}
 }
 
+func TestCursorSkillYAMLVisibility(t *testing.T) {
+	for _, scope := range []string{"project", "personal"} {
+		for _, tc := range []struct {
+			name, fields string
+			visible      bool
+		}{
+			{"mixed-keys-ide", "metadata: {surfaces: [ide], 1: example}", false},
+			{"mixed-keys-ide-string", "metadata: {surfaces: ide, true: example}", false},
+			{"mixed-keys-cli", "metadata: {surfaces: [ide, cli], 1: example}", true},
+			{"mixed-keys-cli-string", "metadata: {surfaces: 'ide, cli', true: example}", true},
+			{"mixed-keys-unrestricted", "metadata: {1: example}", true},
+			{"unknown-tag", "extra: !text Example", false},
+		} {
+			t.Run(scope+"/"+tc.name, func(t *testing.T) {
+				home, cwd := t.TempDir(), t.TempDir()
+				root := home
+				if scope == "project" {
+					root = cwd
+				}
+				root = filepath.Join(root, ".cursor", "skills")
+				writeFile(t, filepath.Join(root, "example", "SKILL.md"),
+					"---\ndescription: Example\n"+tc.fields+"\n---\nBody\n")
+				cursorSkill(t, root, "sibling", "ignored", "Sibling")
+				want := []Command{{"/sibling", "Sibling", scope, ""}}
+				if tc.visible {
+					want = append(want, Command{"/example", "Example", scope, ""})
+				}
+				assertCursorCustomCommands(t, cursorCatalog(t, cwd, home), want...)
+			})
+		}
+	}
+}
+
 func TestCursorSkillUserInvocableValues(t *testing.T) {
 	for _, scope := range []string{"project", "personal"} {
 		for _, tc := range []struct {

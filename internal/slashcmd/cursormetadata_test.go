@@ -88,6 +88,41 @@ func TestCursorSkillFrontmatterBoundariesAndLanguages(t *testing.T) {
 	}
 }
 
+func TestCursorSkillYAMLTags(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		accepted     bool
+	}{
+		{"unknown-scalar", "description: !text Example", false},
+		{"unknown-mapping", "metadata: !metadata {surfaces: [cli]}", false},
+		{"unknown-sequence", "metadata: {surfaces: !surfaces [cli]}", false},
+		{"unknown-key", "!key description: Example", false},
+		{"unknown-unused-field", "extra: {nested: !text Example}", false},
+		{"unknown-uri", "description: !<tag:example.com,2026:text> Example", false},
+		{"string", "description: !!str Example", true},
+		{"string-uri", "description: !<tag:yaml.org,2002:str> Example", true},
+		{"non-specific", "description: ! Example", true},
+		{"mapping-sequence", "metadata: !!map {surfaces: !!seq [cli]}", true},
+		{"boolean", "user-invocable: !!bool true", true},
+		{"null", "extra: !!null null", true},
+		{"integer", "extra: !!int 42", true},
+		{"float", "extra: !!float 1.5", true},
+		{"timestamp", "extra: !!timestamp 2026-09-22", true},
+		{"binary", "extra: !!binary RXhhbXBsZQ==", true},
+		{"ordered-map", "extra: !!omap [{a: 1}, {b: 2}]", true},
+		{"pairs", "extra: !!pairs [{a: 1}, {b: 2}]", true},
+		{"set", "extra: !!set {a: null, b: null}", true},
+		{"merge-alias", "defaults: &defaults {surfaces: [cli]}\nmetadata: {<<: *defaults}", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ok := parseCursorSkillMetadata([]byte("---\n" + tc.fields + "\n---\nBody\n"))
+			if ok != tc.accepted {
+				t.Errorf("accepted = %v, want %v", ok, tc.accepted)
+			}
+		})
+	}
+}
+
 func TestCursorSkillFileReadLimit(t *testing.T) {
 	for _, project := range []bool{false, true} {
 		for _, size := range []int{0, 1, 64*1024 + 1, 1 << 20, 1<<20 + 1} {

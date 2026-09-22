@@ -94,7 +94,11 @@ func parseCursorSkillMetadata(data []byte) (map[string]string, bool) {
 	var err error
 	switch strings.ToLower(language) {
 	case "", "yaml", "yml":
-		err = yaml.Unmarshal(frontmatter, &fields)
+		var document yaml.Node
+		if err := yaml.Unmarshal(frontmatter, &document); err != nil || !cursorYAMLTagsSupported(&document) {
+			return nil, false
+		}
+		err = document.Decode(&fields)
 	case "js", "javascript":
 		return metadata, true
 	default:
@@ -120,10 +124,33 @@ func parseCursorSkillMetadata(data []byte) (map[string]string, bool) {
 	return metadata, true
 }
 
+func cursorYAMLTagsSupported(node *yaml.Node) bool {
+	switch node.Kind {
+	case yaml.ScalarNode, yaml.SequenceNode, yaml.MappingNode:
+		switch node.ShortTag() {
+		case "!!str", "!!bool", "!!int", "!!float", "!!null", "!!timestamp", "!!binary", "!!map", "!!seq", "!!omap", "!!pairs", "!!set", "!!merge":
+		default:
+			return false
+		}
+	}
+	for _, child := range node.Content {
+		if !cursorYAMLTagsSupported(child) {
+			return false
+		}
+	}
+	return true
+}
+
 func cursorSkillAllowsCLI(fields map[string]any) bool {
-	metadata, _ := fields["metadata"].(map[string]any)
+	var rawSurfaces any
+	switch metadata := fields["metadata"].(type) {
+	case map[string]any:
+		rawSurfaces = metadata["surfaces"]
+	case map[any]any:
+		rawSurfaces = metadata["surfaces"]
+	}
 	var surfaces []string
-	switch value := metadata["surfaces"].(type) {
+	switch value := rawSurfaces.(type) {
 	case string:
 		for _, surface := range strings.Split(value, ",") {
 			if surface = strings.TrimSpace(surface); surface != "" {
