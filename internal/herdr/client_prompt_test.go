@@ -95,6 +95,99 @@ func TestPromptFallbackFailureIsNotRefused(t *testing.T) {
 	}
 }
 
+func TestPromptFallbackCannotStart(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "herdr")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"agent\" ] && [ \"$2\" = \"prompt\" ]; then\n" +
+		"  rm \"$0\" || exit 1\n" +
+		"  printf '%s' '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent pane-1 is not an active named agent\"}}' >&2\n" +
+		"  exit 1\n" +
+		"fi\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake Herdr: %v", err)
+	}
+
+	client := NewClient(bin, filepath.Join(dir, "herdr.sock"))
+	err := client.Prompt(context.Background(), "pane-1", "hola")
+	if !errors.Is(err, ErrNotStarted) {
+		t.Fatalf("err = %v, want ErrNotStarted", err)
+	}
+	if errors.Is(err, ErrDispatchedUnknown) {
+		t.Fatalf("err = %v, want not ErrDispatchedUnknown", err)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("err = %v, want os.ErrNotExist", err)
+	}
+	if IsRefused(err) {
+		t.Fatalf("IsRefused() = true for %v; fallback could not start", err)
+	}
+	if code := RefusalCode(err); code != "" {
+		t.Fatalf("RefusalCode() = %q, want empty", code)
+	}
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) {
+		t.Fatalf("err = %v exposes original refusal: %v", err, cliErr)
+	}
+	if message := err.Error(); !strings.Contains(message, "agent_not_ready") ||
+		!strings.Contains(message, "pane fallback: start:") {
+		t.Fatalf("error = %q, want both the original refusal and the fallback failure", message)
+	}
+}
+
+func TestPromptFallbackExplicitRefusal(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	bin := filepath.Join(dir, "herdr")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" >> \"$HERDR_TEST_ARGS\"\n" +
+		"if [ \"$1\" = \"agent\" ] && [ \"$2\" = \"prompt\" ]; then\n" +
+		"  printf '%s' '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent pane-1 is not an active named agent\"}}' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"printf '%s' '{\"error\":{\"code\":\"server_not_running\",\"message\":\"no server\"}}' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake Herdr: %v", err)
+	}
+	t.Setenv("HERDR_TEST_ARGS", argsPath)
+
+	client := NewClient(bin, filepath.Join(dir, "herdr.sock"))
+	err := client.Prompt(context.Background(), "pane-1", "hola")
+	if !IsRefused(err) || !IsTransientRefused(err) {
+		t.Fatalf("err = %v, want transient refusal", err)
+	}
+	if code := RefusalCode(err); code != "server_not_running" {
+		t.Fatalf("RefusalCode() = %q, want server_not_running", code)
+	}
+	var cliErr *CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != "server_not_running" {
+		t.Fatalf("err = %v, want fallback CLIError, got %v", err, cliErr)
+	}
+	if isAgentNotReady(err) {
+		t.Fatalf("err = %v exposes original refusal", err)
+	}
+	if !errors.Is(err, ErrDispatchedUnknown) {
+		t.Fatalf("err = %v, want ErrDispatchedUnknown for started fallback", err)
+	}
+	if errors.Is(err, ErrNotStarted) {
+		t.Fatalf("err = %v, want not ErrNotStarted for started fallback", err)
+	}
+	if message := err.Error(); !strings.Contains(message, "agent_not_ready") ||
+		!strings.Contains(message, "server_not_running") {
+		t.Fatalf("error = %q, want both the original refusal and the fallback failure", message)
+	}
+	data, readErr := os.ReadFile(argsPath)
+	if readErr != nil {
+		t.Fatalf("read fake Herdr arguments: %v", readErr)
+	}
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := []string{"agent", "prompt", "pane-1", "hola", "pane", "run", "pane-1", "hola"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Herdr arguments = %#v, want %#v", got, want)
+	}
+}
+
 // Un fallo distinto de `agent_not_ready` NO se reintenta por la superficie del
 // pane: se devuelve tal cual (no queremos enviar prompts duplicados).
 func TestPromptDoesNotFallBackForOtherErrors(t *testing.T) {
