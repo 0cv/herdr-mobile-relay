@@ -739,7 +739,14 @@ func (c *Client) Prompt(ctx context.Context, paneID, text string) error {
 			return err
 		}
 		if _, fallbackErr := c.runCommand(ctx, "pane", "run", paneID, text); fallbackErr != nil {
-			return fmt.Errorf("herdr agent prompt: %w (pane fallback: %v)", err, fallbackErr)
+			// The pane surface can deliver the text and still fail afterwards
+			// (deadline, dropped connection), so the original refusal no longer
+			// describes the outcome: keeping it refused would report
+			// not_started and let a retry duplicate the prompt. Mark the
+			// dispatch unknown instead. Both failures are kept as text only —
+			// wrapping or joining them would carry agent_not_ready back into
+			// IsRefused() through errors.As.
+			return fmt.Errorf("%w: herdr agent prompt: %v (pane fallback: %v)", ErrDispatchedUnknown, err, fallbackErr)
 		}
 	}
 	return nil
