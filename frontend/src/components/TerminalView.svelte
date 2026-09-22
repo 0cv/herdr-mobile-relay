@@ -234,7 +234,6 @@
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
   const inspectionMode = $derived(agentNeedsInspection(agent));
-  const inputLocked = $derived(readOnly || responsePending || inspectionMode);
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(!readOnly && responsePending && attentionKind(agent) === 'question' && interaction));
   const resizeSessionActive = $derived(
@@ -268,16 +267,21 @@
   const effectiveSlashIndex = $derived(filteredSlashCommands.length
     ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
     : -1);
-  const slashMenuOpen = $derived(!inputLocked
-    && !questionMode
-    && slashQuery !== null
-    && dismissedSlashQuery !== composer);
   const terminalPlainText = $derived(
     stripAnsi(displayed)
       .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
-  const terminalTextMode = $derived(inspectionMode ? terminalTextInputMode(terminalPlainText) : null);
+  const terminalTextMode = $derived.by(() => {
+    const mode = terminalTextInputMode(terminalPlainText);
+    if (mode === 'filter' || inspectionMode) return mode;
+    return null;
+  });
+  const inputLocked = $derived(readOnly || responsePending || inspectionMode || terminalTextMode === 'filter');
   const composerLocked = $derived(readOnly || responsePending || (inspectionMode && !terminalTextMode));
+  const slashMenuOpen = $derived(!inputLocked
+    && !questionMode
+    && slashQuery !== null
+    && dismissedSlashQuery !== composer);
   // The relay recognizes the prompt; that recognition is what opens the masked
   // input, even while the generic composer stays locked for inspection.
   const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
@@ -2310,11 +2314,11 @@
           disabled={composerLocked}
           placeholder={approvalMode
             ? 'Approval pending — use buttons'
-            : inspectionMode
-              ? terminalTextMode
-                ? terminalTextMode === 'filter' ? 'Type filter text…' : 'Type terminal input…'
-                : 'Needs inspection — use terminal controls'
-              : 'Type a reply…'}
+            : terminalTextMode
+              ? terminalTextMode === 'filter' ? 'Type filter text…' : 'Type terminal input…'
+              : inspectionMode
+                ? 'Needs inspection — use terminal controls'
+                : 'Type a reply…'}
           role="combobox"
           aria-label="Prompt"
           aria-autocomplete="list"

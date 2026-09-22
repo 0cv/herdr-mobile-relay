@@ -315,6 +315,63 @@ describe('accessible Svelte interactions', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    ['done', 'done'],
+    ['blocked', 'done'],
+    ['blocked', 'working'],
+  ])('keeps Cursor filters text-only across %s to %s status updates', async (status, nextStatus) => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
+      commands: [{ command: '/model', description: 'Choose the active model', source: 'builtin' }],
+      truncated: false,
+    });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'filter-status-1', ok: true,
+    });
+    const agent: Agent = { ...blockedAgent, agent: 'cursor', status, attention_kind: 'unknown', options: undefined };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: { paneId: agent.pane_id, content: 'Available models\nType to filter • Enter to select • Tab to edit', format: 'plain' },
+    });
+    const input = screen.getByPlaceholderText('Type filter text…');
+    await user.type(input, 'grok');
+    const updatedAgent = { ...agent, status: nextStatus };
+    await view.rerender({ agent: updatedAgent });
+    expect(screen.getByPlaceholderText('Type filter text…')).toBeEnabled();
+    expect(input).toHaveValue('grok');
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Send filter text' }));
+    expect(send).toHaveBeenCalledExactlyOnceWith(updatedAgent, {
+      type: 'send_input', text: 'grok', activity_label: 'Sent filter text',
+    });
+    send.mockClear();
+    await user.type(input, '/mo');
+    expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
+    await user.keyboard('{Control>}{Enter}{/Control}');
+    expect(send).toHaveBeenCalledExactlyOnceWith(updatedAgent, {
+      type: 'send_input', text: '/mo', activity_label: 'Sent filter text',
+    });
+    await view.rerender({ readOnly: true });
+    expect(input).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send filter text' })).toBeDisabled();
+    await view.rerender({
+      readOnly: false,
+      frame: { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' },
+    });
+    expect(screen.getByPlaceholderText('Type a reply…')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+    send.mockClear();
+    await user.type(input, 'Continue');
+    await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+    expect(send).toHaveBeenCalledExactlyOnceWith(updatedAgent, {
+      type: 'submit_prompt', text: 'Continue',
+    });
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+
   it('enables blocked terminal text only while its editor is active', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
