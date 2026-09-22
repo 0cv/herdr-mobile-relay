@@ -10,6 +10,7 @@ import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import LaunchView from '$components/LaunchView.svelte';
 import { CommandError, relayStore } from '$lib/store';
+import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
 import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, WorktreeListing } from '$lib/types';
@@ -370,6 +371,106 @@ describe('accessible Svelte interactions', () => {
     });
     view.unmount();
     vi.restoreAllMocks();
+  });
+
+  it.each(['cursor', 'codex'])('submits normal prompts when %s output mentions filtering', async (agentName) => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
+      commands: [{ command: '/model', description: 'Choose the active model', source: 'builtin' }],
+      truncated: false,
+    });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'normal-prompt', ok: true,
+    });
+    const agent: Agent = { ...blockedAgent, agent: agentName, status: 'done', attention_kind: undefined, options: undefined };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: {
+        paneId: agent.pane_id,
+        content: 'Implemented the search field with placeholder "Type to filter".\nReady for the next request.',
+        format: 'plain',
+      },
+    });
+    try {
+      const input = screen.getByPlaceholderText('Type a reply…');
+      expect(input).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+      await user.type(input, '/mo');
+      expect(screen.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
+      await user.clear(input);
+      await user.type(input, 'Continue');
+      await user.keyboard('{Control>}{Enter}{/Control}');
+      expect(send).toHaveBeenCalledExactlyOnceWith(agent, { type: 'submit_prompt', text: 'Continue' });
+    } finally {
+      view.unmount();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each(['done', 'blocked'])('blocks attachment paste, selection, and restart in a %s Cursor picker', async (status) => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    const begin = vi.fn().mockRejectedValue(new Error('Offline'));
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session', pane_id: 'w1:p1', terminal_id: 'terminal', generation: 1,
+    }, {
+      begin,
+      chunk: async () => { throw new Error('Unexpected chunk'); },
+      finish: async () => { throw new Error('Unexpected finish'); },
+      cancel: async () => undefined,
+    }, { maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 1024 });
+    const createUpload = vi.spyOn(relayStore, 'attachmentController').mockReturnValue(controller);
+    const agent: Agent = { ...blockedAgent, agent: 'cursor', status, attention_kind: 'unknown', options: undefined };
+    const picker = {
+      paneId: agent.pane_id, content: 'Available models\nType to filter • Enter to select • Tab to edit', format: 'plain',
+    };
+    const ready = { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(), frame: picker,
+    });
+    try {
+      const input = screen.getByPlaceholderText('Type filter text…');
+      const image = new File(['image'], 'screenshot.png', { type: 'image/png' });
+      const pasteImage = () => fireEvent.paste(input, {
+        clipboardData: { items: [{ kind: 'file', type: image.type, getAsFile: () => image }] },
+      });
+      await user.type(input, 'grok');
+      expect(screen.getByRole('button', { name: 'Attach photos' })).toBeDisabled();
+      await pasteImage();
+      for (const fileInput of view.container.querySelectorAll('input[type="file"]')) {
+        await fireEvent.change(fileInput, { target: { files: [image] } });
+      }
+      expect(createUpload).not.toHaveBeenCalled();
+      expect(begin).not.toHaveBeenCalled();
+      expect(input).toHaveValue('grok');
+      await user.paste(' fast');
+      expect(input).toHaveValue('grok fast');
+
+      await view.rerender({ agent: { ...agent, status: 'done' }, frame: ready });
+      expect(screen.getByRole('button', { name: 'Attach photos' })).toBeEnabled();
+      await pasteImage();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Restart interrupted files' })).toBeEnabled());
+      expect(createUpload).toHaveBeenCalledOnce();
+      expect(begin).toHaveBeenCalledOnce();
+
+      await view.rerender({ frame: picker });
+      const restart = screen.getByRole('button', { name: 'Restart interrupted files' });
+      expect(restart).toBeDisabled();
+      await user.click(restart);
+      expect(begin).toHaveBeenCalledOnce();
+      expect(input).toHaveValue('grok fast');
+
+      await view.rerender({ frame: ready });
+      expect(restart).toBeEnabled();
+      await user.click(restart);
+      await waitFor(() => expect(begin).toHaveBeenCalledTimes(2));
+    } finally {
+      view.unmount();
+      clearPromptDraft(agent);
+      vi.restoreAllMocks();
+    }
   });
 
   it('enables blocked terminal text only while its editor is active', async () => {

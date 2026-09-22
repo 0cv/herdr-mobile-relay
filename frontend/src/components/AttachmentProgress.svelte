@@ -6,10 +6,12 @@
     snapshot,
     oncancel,
     onrestart,
+    restartDisabled = false,
   }: {
     snapshot: AttachmentBatchSnapshot;
     oncancel: () => void | Promise<void>;
     onrestart: () => void | Promise<void>;
+    restartDisabled?: boolean;
   } = $props();
 
   function stateLabel(state: string): string {
@@ -38,7 +40,7 @@
     <Button variant="secondary" size="sm" onclick={() => void oncancel()}>Cancel upload</Button>
   {:else if snapshot.items.some((item) => item.state === 'interrupted')}
     <div class="attachment-actions">
-      <Button size="sm" onclick={() => void onrestart()}>Restart interrupted files</Button>
+      <Button size="sm" disabled={restartDisabled} onclick={() => void onrestart()}>Restart interrupted files</Button>
       <Button variant="secondary" size="sm" onclick={() => void oncancel()}>Discard upload</Button>
     </div>
   {/if}

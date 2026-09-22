@@ -19,6 +19,27 @@ describe('terminalTextInputMode', () => {
     expect(terminalTextInputMode(`${footer}\n${'old output\n'.repeat(8)}`)).toBeNull();
   });
 
+  it.each(['•', '·', '|', ''])('matches wrapped picker hints separated by "%s"', (separator) => {
+    const footer = `  Type to\nfilter ${separator} Enter to select\n${separator} Tab to edit ${separator} Esc to close  `;
+    expect(terminalTextInputMode(footer)).toBe('filter');
+    expect(terminalTextInputMode(footer.replaceAll('\n', '\r\n'))).toBe('filter');
+    expect(terminalTextInputMode('Type to filter\nEnter to select')).toBe('filter');
+  });
+
+  it.each([
+    'Implemented the search field with placeholder "Type to filter".\nReady for the next request.',
+    'Type to filter',
+    'Type to filter the list, then press Enter to select an item.',
+    'The picker says "Type to filter • Enter to select • Tab to edit".',
+    'Type to filter\nUnrelated output\nEnter to select',
+  ])('does not treat ordinary output as a picker: %s', (output) => {
+    expect(terminalTextInputMode(output)).toBeNull();
+  });
+
+  it('keeps editor submission active when earlier output mentions filtering', () => {
+    expect(terminalTextInputMode('Implemented "Type to filter".\nCustom answer:\n>\nenter or ctrl+q submit  esc cancel')).toBe('submit');
+  });
+
   it('matches the picker footer with the filter box focused', () => {
     // The same footer once the user focuses the filter input; the hints do
     // not change, but the footer sits above a longer scrollback tail.

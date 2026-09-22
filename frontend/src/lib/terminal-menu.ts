@@ -66,6 +66,7 @@ const SINGLE_HINT = new RegExp(`(${KEY_TOKEN})\\s*(?:to|:|=|-)?\\s*(${VERB_TOKEN
 const PAIRED_ARROWS = /([↑↓←→])\s*[/|]\s*([↑↓←→])\s*(?:to|:|=|-)?\s*(navigate|move|select|choose|previous|next)?/giu;
 const YES_NO = /\b(?:press\s+)?([yn])\s*[/|]\s*([yn])\b/iu;
 const EXPLICIT_LETTER = /\b([yn])\s*(?:to|:|=|-)+\s*(yes|no|accept|deny|confirm|cancel)\b/giu;
+const FILTER_FOOTER = /^\s*type\s+to\s+filter[\s•·|]+enter\s+to\s+select(?:[\s•·|]+(?:tab\s+to\s+edit|esc\s+to\s+(?:clear|close)))*\s*$/imu;
 
 function normalizeKey(value: string): string {
   const lower = value.toLocaleLowerCase();
@@ -97,7 +98,7 @@ function cleanTitle(value: string): string {
 
 export function terminalTextInputMode(value: string): 'submit' | 'filter' | null {
   const tail = value.replace(/\r\n?/g, '\n').split('\n').slice(-8).join('\n');
-  if (/\btype\s+to\s+filter\b/iu.test(tail)) return 'filter';
+  if (FILTER_FOOTER.test(tail)) return 'filter';
   if (/\benter(?:\s+or\s+ctrl\+q)?\s+submit\b/iu.test(tail)) return 'submit';
   return null;
 }

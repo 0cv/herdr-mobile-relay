@@ -1866,7 +1866,7 @@
 
   async function filesSelected(files: FileList | File[]) {
     const selected = [...files];
-    if (readOnly || !selected.length || uploadingAttachment) return;
+    if (inputLocked || !selected.length || uploadingAttachment) return;
     uploadingAttachment = true;
     uploadStatus = `Uploading ${selected.length} attachment${selected.length === 1 ? '' : 's'}…`;
     uploadError = false;
@@ -1904,7 +1904,7 @@
   }
   async function restartAttachmentUpload(): Promise<void> {
     const controller = attachmentController;
-    if (!controller || uploadingAttachment) return;
+    if (inputLocked || !controller || uploadingAttachment) return;
     uploadingAttachment = true;
     uploadStatus = 'Restarting interrupted files from the beginning…';
     uploadError = false;
@@ -2342,7 +2342,7 @@
       <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
     {#if attachmentSnapshot?.items.length}
-      <AttachmentProgress snapshot={attachmentSnapshot} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
+      <AttachmentProgress snapshot={attachmentSnapshot} restartDisabled={inputLocked} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
     {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
