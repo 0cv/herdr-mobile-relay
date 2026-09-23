@@ -5,6 +5,9 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-native-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 export NATIVE_HELPER="$WORK_DIR/helper"
 go build -o "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay"
+# plutil ships only with macOS. Elsewhere the launchd cases get a stand-in
+# that still rejects a missing or empty staged plist.
+HOST_PLUTIL="$(command -v plutil || true)"
 
 for platform in systemd launchd; do
   for initial in active inactive fresh; do
@@ -87,7 +90,7 @@ kickstart)
 esac
 if [ "$FAILURE" = rollback ] && [ "$1" = bootstrap ] && [ -f "$CASE/failed" ]; then exit 1; fi
 EOF
-                # The fake relay answers with whatever instance identity the env file
+        # The fake relay answers with whatever instance identity the env file
         # currently records, so a generated identity is matched like a
         # preconfigured one.
         cat > "$BIN/curl" <<'EOF'
@@ -107,6 +110,9 @@ fi
 exec /bin/cp "$@"
 EOF
         for command in cloudflared sleep systemd-analyze; do printf '#!/bin/sh\nexit 0\n' > "$BIN/$command"; done
+        if [ -z "$HOST_PLUTIL" ]; then
+            printf '#!/bin/sh\n[ "$1" = -lint ] && [ -s "$2" ]\n' > "$BIN/plutil"
+        fi
         cat > "$BIN/id" <<'EOF'
 #!/bin/sh
 if [ "$1" = -u ]; then printf '501\n'; else /usr/bin/id "$@"; fi
