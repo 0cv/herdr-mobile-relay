@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const (
@@ -756,13 +758,13 @@ func (c *Client) StartAgent(ctx context.Context, name, kind, paneID string, time
 		"--pane", paneID,
 		"--timeout", strconv.Itoa(timeoutMs),
 	); err != nil {
-		return "", fmt.Errorf("herdr agent start: %w", err)
+		return "", fmt.Errorf("herdr agent start: %w", dispatchedAfterSuccess(err))
 	}
 	if result.PaneID == "" {
 		result.PaneID = paneID
 	}
 	if result.PaneID == "" {
-		return "", errors.New("herdr agent start: response has no pane_id")
+		return "", dispatchedAfterSuccess(errors.New("herdr agent start: response has no pane_id"))
 	}
 	return result.PaneID, nil
 }
@@ -799,6 +801,27 @@ func (c *Client) run(parent context.Context, timeout time.Duration, args ...stri
 	return c.runCommand(ctx, args...)
 }
 
+type dispatchCheckKey struct{}
+
+func WithDispatchCheck(ctx context.Context, check func() error) context.Context {
+	prior, _ := ctx.Value(dispatchCheckKey{}).(func() error)
+	return context.WithValue(ctx, dispatchCheckKey{}, func() error {
+		if prior != nil {
+			if err := prior(); err != nil {
+				return err
+			}
+		}
+		return check()
+	})
+}
+
+func CheckDispatch(ctx context.Context) error {
+	if check, ok := ctx.Value(dispatchCheckKey{}).(func() error); ok {
+		return check()
+	}
+	return nil
+}
+
 func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, error) {
 	ctx := parent
 	cancel := func() {}
@@ -818,8 +841,22 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 		return nil, &OutcomeError{Started: false, Err: ctx.Err()}
 	}
 
-	cmd := exec.Command(c.bin, args...)
-	cmd.Env = append(cmd.Environ(), "HERDR_SOCKET_PATH="+c.socketPath)
+	if err := ctx.Err(); err != nil {
+		return nil, &OutcomeError{Started: false, Err: err}
+	}
+	if err := CheckDispatch(ctx); err != nil {
+		return nil, &OutcomeError{Started: false, Err: err}
+	}
+
+	cmd := childenv.Command(c.bin, args...)
+	environment := cmd.Env[:0]
+	for _, variable := range cmd.Env {
+		key, _, _ := strings.Cut(variable, "=")
+		if key != "HERDR_SOCKET_PATH" {
+			environment = append(environment, variable)
+		}
+	}
+	cmd.Env = append(environment, "HERDR_SOCKET_PATH="+c.socketPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Process-group termination owns cancellation. WaitDelay is the final
 	// backstop for inherited stdout/stderr descriptors held by a descendant

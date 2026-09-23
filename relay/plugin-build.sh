@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Marketplace build hook: install the exact pre-built release named by the
 # plugin manifest. End-user hosts never compile Go or install Python/uv.
+set +x
 set -eu
+INSTALL_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+export -n INSTALL_TOKEN
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
 SCRIPT_DIR=${0%/*}
 if [ "$SCRIPT_DIR" = "$0" ]; then
@@ -106,9 +110,8 @@ validate_migration_source() {
 
     case "$PLATFORM" in
         Linux)
-            grep -F "Environment=HERDR_RELAY_ENV=$source_env" "$SERVICE_FILE" >/dev/null &&
-                grep -E '^ExecStart=.*herdr-(mobile-relay|remote)-service\.sh([[:space:]]|$)' \
-                    "$SERVICE_FILE" >/dev/null || {
+            [ "$(systemd_field "$SERVICE_FILE" Environment)" = "$source_env" ] &&
+                [[ "$(systemd_field "$SERVICE_FILE" ExecStart)" =~ /herdr-(mobile-relay|remote)-service\.sh$ ]] || {
                     echo "herdr-mobile-relay: refusing to migrate an unrecognized systemd service" >&2
                     return 1
                 }
@@ -127,9 +130,8 @@ validate_migration_source() {
 recognized_service_definition() {
     case "$PLATFORM" in
         Linux)
-            grep -E '^Environment=HERDR_RELAY_ENV=/.+' "$SERVICE_FILE" >/dev/null &&
-                grep -E '^ExecStart=.*herdr-(mobile-relay|remote)-service\.sh([[:space:]]|$)' \
-                    "$SERVICE_FILE" >/dev/null
+            [[ "$(systemd_field "$SERVICE_FILE" Environment)" = /* ]] &&
+                [[ "$(systemd_field "$SERVICE_FILE" ExecStart)" =~ /herdr-(mobile-relay|remote)-service\.sh$ ]]
             ;;
         Darwin)
             grep -F '<string>com.herdr-mobile-relay.service</string>' "$SERVICE_FILE" >/dev/null &&
@@ -162,13 +164,18 @@ rewrite_service_release_paths() {
     [ -f "$service_file" ] && [ -x "$service_wrapper" ] || return 1
     case "$PLATFORM" in
         Linux)
-            local temp
+            local temp line
             temp="$(mktemp "${service_file}.XXXXXX")" || return 1
-            if ! sed \
-                -e "s|^ExecStart=.*|ExecStart=$service_wrapper|" \
-                -e "s|^WorkingDirectory=.*|WorkingDirectory=$work_dir|" \
-                -e "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$env_file|" \
-                "$service_file" > "$temp"; then
+            if ! {
+                while IFS= read -r line || [ -n "$line" ]; do
+                    case "$line" in
+                        ExecStart=*) line="ExecStart=$(systemd_quoted "$service_wrapper" exec)" ;;
+                        WorkingDirectory=*) line="WorkingDirectory=$(systemd_quoted "$work_dir")" ;;
+                        Environment=HERDR_RELAY_ENV=*|Environment=\"HERDR_RELAY_ENV=*) line="Environment=$(systemd_quoted "HERDR_RELAY_ENV=$env_file")" ;;
+                    esac
+                    printf '%s\n' "$line"
+                done < "$service_file"
+            } > "$temp"; then
                 rm -f "$temp"
                 return 1
             fi
@@ -177,9 +184,9 @@ rewrite_service_release_paths() {
                 rm -f "$temp"
                 return 1
             fi
-            grep -Fx "ExecStart=$service_wrapper" "$service_file" >/dev/null &&
-                grep -Fx "WorkingDirectory=$work_dir" "$service_file" >/dev/null &&
-                grep -Fx "Environment=HERDR_RELAY_ENV=$env_file" "$service_file" >/dev/null
+            [ "$(systemd_field "$service_file" ExecStart)" = "$service_wrapper" ] &&
+                [ "$(systemd_field "$service_file" WorkingDirectory)" = "$work_dir" ] &&
+                [ "$(systemd_field "$service_file" Environment)" = "$env_file" ]
             ;;
         Darwin)
             update_launchd_release_paths \
@@ -212,10 +219,32 @@ restore_target_config() {
         echo "herdr-mobile-relay: refusing to restore through a symlinked config root" >&2
         return 1
     fi
-    rm -rf "$TARGET_CONFIG_ROOT"
+    local recovery
+    recovery=$(mktemp -d "$(dirname "$TARGET_CONFIG_ROOT")/.herdr-config-recovery.XXXXXX") || return 1
     if [ "$target_config_existed" = true ]; then
-        mkdir -p "$TARGET_CONFIG_ROOT"
-        cp -pR "$CONFIG_BACKUP/." "$TARGET_CONFIG_ROOT/"
+        mkdir "$recovery/restored" &&
+            cp -pR "$CONFIG_BACKUP/." "$recovery/restored/" || return 1
+    fi
+    if [ -e "$TARGET_CONFIG_ROOT" ]; then
+        mv "$TARGET_CONFIG_ROOT" "$recovery/failed" || return 1
+    fi
+    if [ "$target_config_existed" = true ] && ! mv "$recovery/restored" "$TARGET_CONFIG_ROOT"; then
+        if [ -d "$recovery/failed" ]; then
+            mv "$recovery/failed" "$TARGET_CONFIG_ROOT" || true
+        fi
+        echo "herdr-mobile-relay: config restore failed; recovery material retained at $recovery" >&2
+        return 1
+    fi
+    echo "herdr-mobile-relay: displaced config retained at $recovery" >&2
+}
+
+validate_migration_entry() {
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    local unsafe
+    unsafe=$(find "$1" ! -type f ! -type d -print -quit) || return 1
+    if [ -L "$1" ] || [ -n "$unsafe" ]; then
+        echo "herdr-mobile-relay: refusing unsafe migration source: $1" >&2
+        return 1
     fi
 }
 
@@ -224,11 +253,8 @@ copy_migration_entry() {
     local target_name="$2"
     local target_path="$TARGET_CONFIG_ROOT/$target_name"
 
+    validate_migration_entry "$source_path" || return 1
     [ -e "$source_path" ] || return 0
-    [ ! -L "$source_path" ] || {
-        echo "herdr-mobile-relay: refusing symlinked migration source: $source_path" >&2
-        return 1
-    }
     rm -rf "$target_path"
     cp -pR "$source_path" "$target_path"
 }
@@ -259,6 +285,11 @@ migrate_source_config() {
     if [ "$(canonical_file_path "$source_env")" = "$(canonical_file_path "$TARGET_ENV")" ]; then
         return
     fi
+    validate_migration_entry "$source_env" || return 1
+    local entry
+    for entry in device-auth push phone-app-origin phone-app-origin-configured stable-setup.json cloudflared update-state.json app-deploy-state.json; do
+        validate_migration_entry "$source_root/$entry" || return 1
+    done
     echo "herdr-mobile-relay: migrating service state into persistent plugin config..." >&2
     mkdir -p "$TARGET_CONFIG_ROOT"
     chmod 700 "$TARGET_CONFIG_ROOT"
@@ -397,10 +428,10 @@ rollback_plugin_migration() {
     if [ -n "$PREVIOUS_VERSION" ] && [ -n "$PREVIOUS_REVISION" ] && [ -n "$PREVIOUS_WEB_HASH" ]; then
         wait_for_relay_release_health \
             "$rollback_port" 30 1 \
-            "$PREVIOUS_VERSION" "$PREVIOUS_REVISION" "$PREVIOUS_WEB_HASH" \
+            "$PREVIOUS_VERSION" "$PREVIOUS_REVISION" "$PREVIOUS_WEB_HASH" "$(env_file_value "$rollback_env" HERDR_RELAY_INSTANCE_ID)" \
             >/dev/null || return 1
     else
-        wait_for_relay_health "$rollback_port" 30 1 >/dev/null || return 1
+        wait_for_relay_health "$rollback_port" 30 1 "$(env_file_value "$rollback_env" HERDR_RELAY_INSTANCE_ID)" >/dev/null || return 1
     fi
     case "$PLATFORM" in
         Linux) systemctl --user is-active --quiet herdr-mobile-relay.service || return 1 ;;
@@ -417,7 +448,8 @@ cleanup_plugin_build() {
     trap - EXIT
     if [ "$status" -ne 0 ] && [ "$rollback_armed" = true ]; then
         if ! rollback_plugin_migration; then
-            echo "herdr-mobile-relay: ERROR: automatic rollback also failed" >&2
+            echo "herdr-mobile-relay: ERROR: automatic rollback also failed; recovery material retained: $CONFIG_BACKUP $SERVICE_BACKUP" >&2
+            exit "$status"
         fi
     fi
     if [ -n "$SERVICE_BACKUP" ]; then
@@ -468,8 +500,6 @@ explain_missing_release_auth() {
 }
 
 
-
-INSTALL_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
 if [ -z "$INSTALL_TOKEN" ]; then
     for TOKEN_ENV in "$TARGET_ENV" "${SOURCE_ENV:-}"; do
         [ -n "$TOKEN_ENV" ] && [ -f "$TOKEN_ENV" ] || continue
@@ -526,7 +556,7 @@ WEB_HASH=$(sed -n 's/^[[:space:]]*"web_hash":[[:space:]]*"\([^"]*\)".*/\1/p' "$M
 # Store the repository credential separately; the service receives only its
 # path, so the relay, cloudflared, and agent subprocesses never inherit it.
 if [ -n "$INSTALL_TOKEN" ]; then
-    GH_TOKEN="$INSTALL_TOKEN" ensure_relay_env "$TARGET_ENV"
+    ensure_relay_env "$TARGET_ENV" "" "$INSTALL_TOKEN"
 fi
 unset INSTALL_TOKEN
 
@@ -585,11 +615,12 @@ if [ "$service_restarted" = true ]; then
     PORT="$(env_file_value "$TARGET_ENV" HERDR_RELAY_PORT)"
     PORT="${PORT:-8375}"
     echo "herdr-mobile-relay: verifying replacement service identity..." >&2
-    if ! wait_for_relay_release_health \
-        "$PORT" 30 1 "$VERSION" "$REVISION" "$WEB_HASH" >/dev/null; then
+    if ! HEALTH="$(wait_for_relay_release_health \
+        "$PORT" 30 1 "$VERSION" "$REVISION" "$WEB_HASH" "$(env_file_value "$TARGET_ENV" HERDR_RELAY_INSTANCE_ID)")"; then
         echo "herdr-mobile-relay: replacement service did not report the expected release identity" >&2
         exit 1
     fi
+    verify_public_readiness "$TARGET_ENV" "$HEALTH" || exit 1
     case "$PLATFORM" in
         Linux)
             systemctl --user is-active --quiet herdr-mobile-relay.service || {

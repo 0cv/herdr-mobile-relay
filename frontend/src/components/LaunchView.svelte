@@ -126,7 +126,7 @@
         cwd: launchCwd,
         prompt,
         workspace_id: targetWorkspace?.workspace_id || '',
-      }, 45_000);
+      });
       const warning = String(result.data?.warning || '');
       status = warning || 'Agent started.';
       error = Boolean(warning);

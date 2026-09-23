@@ -109,9 +109,13 @@ shell-check:
 	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done
 	sh tests/test_install.sh
+	sh tests/test_download_credentials.sh
+	bash tests/test_service_credentials.sh
 	bash tests/test_common.sh
 	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
+	sh tests/test_plugin_recovery.sh
+	bash tests/test_native_install.sh
 	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
 	bash tests/test_speech_voices.sh

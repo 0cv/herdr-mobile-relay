@@ -117,6 +117,7 @@ import type {
   WorktreeListing,
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
+const AGENT_START_TIMEOUT_MS = 60_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
 const BACKGROUND_HEALTH_TIMEOUT_MS = 10_000;
@@ -1752,7 +1753,7 @@ class RelayStore {
   sendCommand(
     relayId: string,
     payload: Record<string, any>,
-    timeoutMs = COMMAND_TIMEOUT_MS,
+    timeoutMs = payload.type === 'agent_start' ? AGENT_START_TIMEOUT_MS : COMMAND_TIMEOUT_MS,
     allowProtocolMismatch = false,
     signal?: AbortSignal,
   ): Promise<CommandResult> {

@@ -7,7 +7,7 @@ if [ "$SCRIPT_DIR" = "$0" ]; then
 fi
 REPO_DIR=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/herdr-release-script-test.XXXXXX")
-trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT INT TERM
 
 case $(uname -s) in
     Linux) HOST_OS=linux; WRONG_OS=darwin ;;

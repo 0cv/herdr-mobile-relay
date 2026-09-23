@@ -172,6 +172,11 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		hostname = hostname[:idx]
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
+	if cfg.RuntimeDir != "" {
+		if err := profResolver.SetOwnershipPath(filepath.Join(cfg.RuntimeDir, "profile-ownership.json")); err != nil {
+			logger.Warn("profile ownership requires recovery; relaunch is disabled", "error", err)
+		}
+	}
 	conversationReader := conversation.NewReader(home)
 	var conversationBrowser *conversation.Browser
 	cacheRoot := ""
@@ -694,7 +699,15 @@ func (s *Server) Run(ctx context.Context) error {
 			admitted()
 		}
 
-		commandCtx := ctx
+		commandCtx := herdr.WithDispatchCheck(ctx, func() error {
+			if s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID) != nil {
+				return errors.New("device is no longer authorized")
+			}
+			if validateExactPaneTarget(s.state, inbound, authenticated) != nil {
+				return coordinator.ErrPaneReplaced
+			}
+			return nil
+		})
 		switch action {
 		case "check_update":
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
@@ -2303,23 +2316,33 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ready := s.ready
 	s.mu.RUnlock()
 
-	inventoryOK := s.state.InventoryReady()
+	inventory := s.state.InventoryStatus()
+	delete(inventory, "message")
 
 	status := "unavailable"
 	code := http.StatusServiceUnavailable
-	if ready && inventoryOK {
+	if ready && inventory["state"] == "ready" {
 		status = "ready"
 		code = http.StatusOK
 	}
 
-	inventory := s.state.InventoryStatus()
-	delete(inventory, "message")
-
 	resp := map[string]any{
-		"status":    status,
-		"inventory": inventory,
+		"status":          status,
+		"inventory":       inventory,
+		"instance":        s.cfg.InstanceID,
+		"version":         s.version,
+		"release_version": s.version,
+		"revision":        s.revision,
+		"protocol":        protocol.Version,
+	}
+	if s.webH != nil {
+		resp["bundle_hash"] = s.webH.BundleHash()
+		resp["bundle_version"] = s.webH.BundleVersion()
+		resp["bundle_revision"] = s.webH.BundleRevision()
+		resp["bundle_build"] = s.webH.BundleBuild()
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(resp)

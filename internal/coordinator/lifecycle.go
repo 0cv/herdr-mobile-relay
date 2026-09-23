@@ -45,16 +45,19 @@ type StartRequest struct {
 }
 
 type StartResult struct {
-	PaneID      string `json:"pane_id"`
-	Name        string `json:"name"`
-	Cwd         string `json:"cwd"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
+	Identity    LaunchIdentity `json:"-"`
+	PaneID      string         `json:"pane_id"`
+	Name        string         `json:"name"`
+	Cwd         string         `json:"cwd"`
+	WorkspaceID string         `json:"workspace_id,omitempty"`
 }
 
 type Lifecycle struct {
-	herdr    *herdr.Client
-	profiles *profiles.Resolver
-	home     string
+	state        *State
+	herdr        *herdr.Client
+	profiles     *profiles.Resolver
+	home         string
+	waitForRetry func(context.Context, time.Duration) bool
 }
 
 func NewLifecycle(client *herdr.Client, resolver *profiles.Resolver) *Lifecycle {
@@ -81,10 +84,25 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 	return profile, request, nil
 }
 
-func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request StartRequest) (StartResult, error) {
-	if existing := l.reconcileExisting(ctx, profile.ID, request); existing != "" {
-		l.profiles.Remember(existing, profile.ID)
-		return StartResult{PaneID: existing, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
+func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request StartRequest) (result StartResult, resultErr error) {
+	expectedTerminal := ""
+	if l.state != nil {
+		snapshot := l.state.beginLaunch()
+		defer func() {
+			if resultErr == nil && result.PaneID != "" {
+				result.Identity = l.state.finishLaunch(snapshot, result.PaneID)
+				if expectedTerminal != "" {
+					if result.Identity.TerminalID != "" && result.Identity.TerminalID != expectedTerminal {
+						result.Identity.Valid = false
+					}
+					result.Identity.TerminalID = expectedTerminal
+				}
+			}
+		}()
+	}
+	if existing := l.reconcileExisting(ctx, profile.ID, request); existing.PaneID != "" {
+		expectedTerminal = existing.TerminalID
+		return StartResult{PaneID: existing.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -119,6 +137,24 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		return StartResult{}, err
 	}
 
+	var ownership profiles.PaneIdentity
+	if observed, observeErr := l.herdr.GetInventory(startupCtx); observeErr == nil {
+		for _, pane := range observed.Panes {
+			if pane.ID == target.PaneID {
+				ownership = profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
+				break
+			}
+		}
+	}
+	expectedTerminal = ownership.TerminalID
+	if ownership.TerminalID == "" && profile.Kind == "" {
+		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, errors.New("cannot verify the new terminal for this custom profile; leave the pane open and retry")
+	}
+	if ownership.TerminalID != "" {
+		if err := l.profiles.BeginLaunchOwnership(ownership, profile.ID); err != nil {
+			return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, err
+		}
+	}
 	startErr := l.startInTarget(startupCtx, profile, request.Name, target.PaneID)
 	if startErr != nil {
 		// The target stays open. Herdr created it, so closing it would destroy
@@ -128,8 +164,13 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, startErr
 	}
 
-	l.profiles.Remember(target.PaneID, profile.ID)
-	return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, nil
+	result = StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}
+	if ownership.TerminalID != "" {
+		if err := l.profiles.RememberVerified(ownership, profile.ID); err != nil {
+			return result, partiallyApplied("agent started but profile ownership could not be saved", err)
+		}
+	}
+	return result, nil
 }
 
 func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd string) (*herdr.CreateResult, error) {
@@ -169,7 +210,10 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 	for {
 		info, err := l.herdr.AgentGet(ctx, paneID)
 		if err == nil && (info.Running || info.Status != "") {
-			return l.herdr.RenameAgent(ctx, paneID, name)
+			if err := l.herdr.RenameAgent(ctx, paneID, name); err != nil {
+				return partiallyApplied("custom agent was already started", err)
+			}
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -187,22 +231,38 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 // timeout the relay passes cannot cover it. The refusal proves nothing ran,
 // which makes the retry safe.
 func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID string) error {
+	wait := l.waitForRetry
+	if wait == nil {
+		wait = waitForAgentRetry
+	}
+	return retryAgentStart(ctx, func() error {
+		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx))
+		return err
+	}, wait)
+}
+
+func retryAgentStart(ctx context.Context, start func() error, wait func(context.Context, time.Duration) bool) error {
 	delay := agentStartRetryInitial
 	for {
-		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx))
+		err := start()
 		if err == nil || !herdr.IsTransientRefused(err) {
 			return err
 		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			// The refusal, not the context error: it is the actual cause and
-			// it keeps the safe-to-retry classification the phone acts on.
+		if !wait(ctx, delay) {
 			return err
-		case <-timer.C:
 		}
 		delay = min(delay*2, agentStartRetryMax)
+	}
+}
+
+func waitForAgentRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -221,10 +281,10 @@ func remainingTimeoutMS(ctx context.Context) int {
 	return int(min(remaining, agentStartProcessTimeoutMS))
 }
 
-func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, request StartRequest) string {
+func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, request StartRequest) profiles.PaneIdentity {
 	inventory, err := l.herdr.GetInventory(ctx)
 	if err != nil {
-		return ""
+		return profiles.PaneIdentity{}
 	}
 	for _, pane := range inventory.Panes {
 		if pane.Name != request.Name {
@@ -237,11 +297,12 @@ func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, req
 		if request.WorkspaceID != "" && pane.WorkspaceID != request.WorkspaceID {
 			continue
 		}
-		if l.profiles.ResolvePane(pane.ID, pane.Agent) == profileID {
-			return pane.ID
+		target := profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
+		if l.profiles.OwnsTarget(target, profileID) {
+			return target
 		}
 	}
-	return ""
+	return profiles.PaneIdentity{}
 }
 
 func workspaceExists(workspaces []herdr.Workspace, workspaceID string) bool {

@@ -2574,7 +2574,6 @@ func TestCopyAgentResponseValidatesPaneState(t *testing.T) {
 			paneID: "pane-1",
 			setup: func(s *Server) {
 				s.state.CommitInventory([]*coordinator.AgentState{{PaneID: "pane-1", Agent: "unknown", Status: "idle"}}, s.state.RevisionCounter())
-				s.profiles.Remember("pane-1", "unknown")
 				s.clipboardRead = func(context.Context) ([]byte, error) { return nil, nil }
 				s.clipboardWrite = func(context.Context, []byte) error { return nil }
 			},
@@ -2611,7 +2610,6 @@ func TestCopyAgentResponseRejectsReplacedPane(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{
 		{PaneID: paneID, Agent: "claude", Status: "idle", PaneRevision: 4},
 	}, s.state.RevisionCounter())
-	s.profiles.Remember(paneID, "claude")
 	s.clipboardRead = func(context.Context) ([]byte, error) { return []byte("before"), nil }
 	s.clipboardWrite = func(context.Context, []byte) error { return nil }
 	s.copyRunner = func(
@@ -2639,7 +2637,6 @@ func TestCopyAgentResponseReturnsCopiedData(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{
 		{PaneID: paneID, Agent: "claude", Status: "idle", PaneRevision: 4},
 	}, s.state.RevisionCounter())
-	s.profiles.Remember(paneID, "claude")
 	s.clipboardRead = func(context.Context) ([]byte, error) { return []byte("before"), nil }
 	s.clipboardWrite = func(context.Context, []byte) error { return nil }
 	s.copyRunner = func(
@@ -2701,6 +2698,24 @@ func TestHealthz(t *testing.T) {
 	}
 	if resp["gateway_available_version"] != "0.9.0" {
 		t.Errorf("gateway_available_version = %v, want 0.9.0", resp["gateway_available_version"])
+	}
+}
+
+func TestReadyzIncludesReleaseIdentityForEmptyInventory(t *testing.T) {
+	s := testServer()
+	s.ready = true
+	s.state.CommitInventory(nil, 0)
+	w := httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest("GET", "/readyz", nil))
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || response["status"] != "ready" || response["instance"] != "test-instance" || response["release_version"] != "0.9.0" || response["revision"] != "abc123" {
+		t.Fatalf("readiness response: %d %+v", w.Code, response)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("readiness may be cached")
 	}
 }
 

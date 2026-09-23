@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
+set +x
 set -euo pipefail
+QUICKSTART_RELEASE_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-}
+export -n QUICKSTART_RELEASE_TOKEN RELAY_UPDATER_TOKEN_FILE
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 echo "🐑 Herdr Mobile Relay quick start"
 echo ""
 
@@ -33,8 +38,11 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 
 require_supported_platform
-ensure_relay_env "$ENV_FILE"
+ensure_relay_env "$ENV_FILE" "" "$QUICKSTART_RELEASE_TOKEN"
+unset QUICKSTART_RELEASE_TOKEN
 load_relay_env "$ENV_FILE"
+RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-$RELAY_UPDATER_TOKEN_FILE}
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
 wait_for_exit() {
     local pid="$1"
@@ -90,7 +98,7 @@ fi
 
 # 1. Start the verified packaged relay.
 echo "▸ Starting relay on $HOST:$PORT..."
-"$RELAY_BIN" serve &
+HERDR_GITHUB_TOKEN_FILE="$RELAY_UPDATER_TOKEN_FILE" "$RELAY_BIN" serve &
 RELAY_PID=$!
 sleep 2
 
@@ -141,7 +149,7 @@ if [ -n "$GATEWAY_URL" ]; then
 elif command -v cloudflared >/dev/null 2>&1; then
     echo "▸ Starting Cloudflare tunnel..."
     LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/herdr-cloudflared.XXXXXX")"
-    cloudflared tunnel --config /dev/null --url "http://$TUNNEL_TARGET_HOST:$PORT" >"$LOG_FILE" 2>&1 &
+    (unset HERDR_GITHUB_TOKEN_FILE; exec cloudflared tunnel --config /dev/null --url "http://$TUNNEL_TARGET_HOST:$PORT") >"$LOG_FILE" 2>&1 &
     TUNNEL_PID=$!
 
     URL=""

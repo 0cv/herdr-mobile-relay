@@ -107,6 +107,18 @@ func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal
 func (d *Dispatcher) SetProfiles(resolver *profiles.Resolver) {
 	d.profiles = resolver
 	d.lifecycle = NewLifecycle(d.herdr, resolver)
+	d.lifecycle.state = d.state
+	d.state.mu.Lock()
+	d.state.onInventory = func(agents []*AgentState) {
+		targets := make([]profiles.PaneIdentity, 0, len(agents))
+		for _, agent := range agents {
+			targets = append(targets, profiles.PaneIdentity{PaneID: agent.PaneID, TerminalID: agent.TerminalID, TabID: agent.TabID, WorkspaceID: agent.WorkspaceID})
+		}
+		if err := resolver.ReconcileOwnership(targets); err != nil {
+			d.logger.Warn("profile ownership reconciliation failed", "error", err)
+		}
+	}
+	d.state.mu.Unlock()
 }
 
 func (d *Dispatcher) CancelInflight() {
@@ -365,24 +377,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandPrompt, paneID, commandDeadline, text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
-			return EffectResult{Result: stale}
-		}
-		if !requiresEnter {
-			if err := d.herdr.Prompt(effectCtx, paneID, text); err != nil {
-				return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
-			}
-			return EffectResult{Result: completed(requestID, action, paneID, nil)}
-		}
-		if err := d.herdr.SendText(effectCtx, paneID, text); err != nil {
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
-		}
-		if err := d.paneSessionError(token); err != nil {
-			err = partiallyApplied("prompt text was already delivered", err)
-			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
-		}
-		if err := d.herdr.SendKeys(effectCtx, paneID, []string{"Enter"}); err != nil {
-			err = partiallyApplied("prompt text was already delivered", err)
+		if err := d.deliverPrompt(effectCtx, token, text, requiresEnter); err != nil {
 			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, action, paneID, nil)}
@@ -392,6 +387,29 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 		d.wake()
 	}
 	return result
+}
+
+func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text string, requiresEnter bool) error {
+	ctx = herdr.WithDispatchCheck(ctx, func() error { return d.paneSessionError(token) })
+	if err := d.paneSessionError(token); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(herdr.ErrNotStarted, err)
+	}
+	if !requiresEnter {
+		return d.herdr.Prompt(ctx, token.PaneID, text)
+	}
+	if err := d.herdr.SendText(ctx, token.PaneID, text); err != nil {
+		return err
+	}
+	if err := d.paneSessionError(token); err != nil {
+		return partiallyApplied("prompt text was already delivered", err)
+	}
+	if err := d.herdr.SendKeys(ctx, token.PaneID, []string{"Enter"}); err != nil {
+		return partiallyApplied("prompt text was already delivered", err)
+	}
+	return nil
 }
 
 func (d *Dispatcher) handleKeys(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
@@ -650,6 +668,9 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		return d.fail(requestID, "agent_start", "", "Profile, name, and working directory are required")
 	}
 
+	if len([]rune(request.Prompt)) > promptMaxChars {
+		return d.fail(requestID, "agent_start", "", "Prompt is longer than 100,000 characters")
+	}
 	ledgerKey := "start\x00" + requestID
 	payloadHash := hashPayload(request)
 	var profile profiles.Profile
@@ -661,23 +682,30 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		}
 	}
 
+	budget := agentStartDeadline
+	if request.Prompt != "" {
+		budget += commandDeadline
+	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command:     d.command(ctx, receivedAt, requestID, CommandStart, "", agentStartDeadline, request),
+		Command:     d.command(ctx, receivedAt, requestID, CommandStart, "", budget, request),
 		RelayLevel:  true,
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+		startupCtx, cancel := context.WithDeadline(effectCtx, receivedAt.Add(agentStartDeadline))
+		defer cancel()
 		var started StartResult
 		var err error
 		if d.lifecycle != nil {
-			started, err = d.lifecycle.Start(effectCtx, profile, request)
+			started, err = d.lifecycle.Start(startupCtx, profile, request)
 		} else {
 			// Compatibility for direct unit construction. The production server
 			// always installs a profile resolver and uses the full workflow.
+			snapshot := d.state.beginLaunch()
 			paneID := "pane-" + request.Name
 			var returned string
-			returned, err = d.herdr.StartAgent(effectCtx, request.Name, request.ProfileID, paneID, agentStartProcessTimeoutMS)
-			started = StartResult{PaneID: returned, Name: request.Name, Cwd: request.Cwd}
+			returned, err = d.herdr.StartAgent(startupCtx, request.Name, request.ProfileID, paneID, agentStartProcessTimeoutMS)
+			started = StartResult{PaneID: returned, Name: request.Name, Cwd: request.Cwd, Identity: d.state.finishLaunch(snapshot, returned)}
 		}
 		if err != nil {
 			// started.PaneID is set when Herdr created the target before the
@@ -685,7 +713,50 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 			// failure: the phone shows it instead of losing the workspace.
 			return EffectResult{Result: d.failErr(requestID, "agent_start", started.PaneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, "agent_start", started.PaneID, started)}
+		launchResult := completed(requestID, "agent_start", started.PaneID, started)
+		if request.Prompt == "" || started.PaneID == "" {
+			return EffectResult{Result: launchResult}
+		}
+		requiresEnter := isQoderAgent(profile.Kind) || isQoderAgent(request.ProfileID)
+		if agent, ok := d.state.Agent(started.PaneID); ok {
+			requiresEnter = requiresEnter || isQoderAgent(agent.Agent)
+		}
+		return EffectResult{Continuation: &EffectContinuation{
+			PaneID:      started.PaneID,
+			Generation:  started.Identity.Generation,
+			AllowAbsent: true,
+			Deadline:    time.Now().Add(commandDeadline),
+			Runner: EffectFunc(func(promptCtx context.Context, token WorkerToken) EffectResult {
+				if !started.Identity.Valid {
+					return EffectResult{Result: d.failErr(requestID, "submit_prompt", started.PaneID, ErrPaneReplaced)}
+				}
+				promptCtx = herdr.WithDispatchCheck(promptCtx, func() error {
+					if err := d.state.launchIdentityCurrent(started.PaneID, started.Identity); err != nil {
+						return err
+					}
+					return herdr.CheckDispatch(ctx)
+				})
+				if err := d.deliverPrompt(promptCtx, token, request.Prompt, requiresEnter); err != nil {
+					return EffectResult{Result: d.failErr(requestID, "submit_prompt", started.PaneID, err)}
+				}
+				if err := d.paneSessionError(token); err != nil {
+					return EffectResult{Result: d.failErr(requestID, "submit_prompt", started.PaneID, partiallyApplied("initial prompt was already delivered", err))}
+				}
+				d.recordActivityWithExtract("submit_prompt", "sent", "Prompt sent", request.Prompt, started.PaneID, requestID+"-initial")
+				d.wake()
+				return EffectResult{Result: completed(requestID, "submit_prompt", started.PaneID, nil)}
+			}),
+			Finalize: func(promptResult *CommandResult, err error) *CommandResult {
+				if err != nil || promptResult == nil || !promptResult.OK {
+					launchResult.Phase = "completed_with_warning"
+					launchResult.Data = map[string]any{
+						"pane_id": started.PaneID, "name": request.Name, "cwd": request.Cwd,
+						"warning": "Agent started, but the initial prompt was not confirmed",
+					}
+				}
+				return launchResult
+			},
+		}}
 	}))
 	if !result.OK {
 		if result.PaneID != "" {
@@ -704,24 +775,6 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 	if data.PaneID == "" {
 		if values, ok := result.Data.(map[string]any); ok {
 			data.PaneID, _ = values["pane_id"].(string)
-		}
-	}
-	if request.Prompt != "" && data.PaneID != "" {
-		generation, active := d.state.PaneSession(data.PaneID)
-		initialPromptCtx := context.WithValue(ctx, paneSessionContextKey{}, paneSessionAdmission{
-			generation:  uint64(generation),
-			active:      active,
-			allowAbsent: true,
-		})
-		promptResult := d.handlePrompt(initialPromptCtx, receivedAt, requestID+"-initial", data.PaneID, map[string]any{"text": request.Prompt})
-		if !promptResult.OK {
-			result.Phase = "completed_with_warning"
-			result.Data = map[string]any{
-				"pane_id": data.PaneID,
-				"name":    request.Name,
-				"cwd":     request.Cwd,
-				"warning": "Agent started, but the initial prompt was not confirmed",
-			}
 		}
 	}
 	d.recordActivity("agent_start", "started", "Started "+request.Name, data.PaneID, requestID)
@@ -753,10 +806,10 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 		}))
 	}
 
-	profileID := d.profiles.ResolvePane(paneID, agent.Agent)
+	profileID := d.profiles.ResolveOwnedPane(paneID)
 	profile, exists := d.profiles.Profile(profileID)
 	if !exists {
-		return d.fail(requestID, "agent_clear", paneID, "This agent does not match an available launch profile")
+		return d.fail(requestID, "agent_clear", paneID, "Launch profile ownership is unknown; start a new agent explicitly before stopping this one")
 	}
 	name := "clear-" + fmt.Sprintf("%x", receivedAt.UnixNano())[:8]
 	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd}
@@ -791,7 +844,9 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	if result.OK && !result.replayed {
 		d.state.BumpGeneration(paneID)
 		d.state.MarkTopologyChanged()
-		d.profiles.Forget(paneID)
+		if result.Phase != "completed_with_warning" {
+			d.profiles.Forget(paneID)
+		}
 		d.recordActivity("agent_clear", "cleared", "Cleared agent", paneID, requestID)
 		d.wake()
 	}
@@ -831,7 +886,14 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 		options.AllowAbsent = admission.allowAbsent
 	}
 	admitted, _ := ctx.Value(admissionContextKey{}).(func())
-	result, err := d.scheduler.ExecuteAdmitted(ctx, options, runner, admitted)
+	checkedRunner := EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		effectCtx = herdr.WithDispatchCheck(effectCtx, func() error { return herdr.CheckDispatch(ctx) })
+		if !options.RelayLevel {
+			effectCtx = herdr.WithDispatchCheck(effectCtx, func() error { return d.paneSessionError(token) })
+		}
+		return runner.Run(effectCtx, token)
+	})
+	result, err := d.scheduler.ExecuteAdmitted(ctx, options, checkedRunner, admitted)
 	switch {
 	case err == nil && result != nil:
 		return result

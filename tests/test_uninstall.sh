@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-uninstall-test.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 SCRIPT_DIR="$WORK_DIR/relay"
 mkdir -p "$SCRIPT_DIR"
 cp "$REPO_DIR/relay/uninstall.sh" "$REPO_DIR/relay/common.sh" "$SCRIPT_DIR/"
@@ -35,6 +35,7 @@ touch "$CONFIG_HOME/herdr-mobile-relay/relay.env"
 for target in "$RELEASE_ROOT" "$CONFIG_HOME/herdr-mobile-relay" "$CACHE_HOME/herdr-mobile-relay"; do
     canonical="$(cd "$target" && pwd -P)"
     printf 'product=herdr-mobile-relay\nroot=%s\n' "$canonical" > "$target/.herdr-mobile-relay-installation"
+    chmod 600 "$target/.herdr-mobile-relay-installation"
 done
 mkdir -p "$RELEASE_ROOT/releases/sealed/web"
 printf 'sealed release\n' > "$RELEASE_ROOT/releases/sealed/web/index.html"

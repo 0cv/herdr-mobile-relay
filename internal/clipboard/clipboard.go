@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 var ErrUnavailable = errors.New("clipboard tooling is unavailable")
@@ -43,7 +45,7 @@ func Reader() (name string, read func(context.Context) ([]byte, error), ok bool)
 	args := append([]string(nil), readerCommand[1:]...)
 	binary := readerCommand[0]
 	return name, func(ctx context.Context) ([]byte, error) {
-		out, err := exec.CommandContext(ctx, binary, args...).Output()
+		out, err := childenv.CommandContext(ctx, binary, args...).Output()
 		if err != nil {
 			return nil, fmt.Errorf("read clipboard with %s: %w", name, err)
 		}
@@ -59,7 +61,7 @@ func Write(ctx context.Context, data []byte) error {
 	if len(command) == 0 {
 		return ErrUnavailable
 	}
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd := childenv.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Stdin = bytes.NewReader(data)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("write clipboard with %s: %w", command[0], err)

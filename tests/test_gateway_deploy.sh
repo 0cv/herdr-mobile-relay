@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-gateway-deploy-test.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
 STUB_DIR="$WORK_DIR/bin"
 mkdir -p "$STUB_DIR"

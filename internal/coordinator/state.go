@@ -74,6 +74,7 @@ type State struct {
 	finishedNotif      map[string]bool
 	completionRev      map[string]int64
 	generation         map[string]int64
+	sessionDiscoveries map[string]sessionDiscovery
 	triage             map[string]triageRecord
 	triagePath         string
 	inventoryReady     bool
@@ -83,6 +84,9 @@ type State struct {
 	lastSuccessAt      time.Time
 	logger             *slog.Logger
 	onTransition       TransitionCallback
+	onInventory        func([]*AgentState)
+	notifyMu           sync.Mutex
+	pendingInventory   []*AgentState
 	pendingEvents      map[string]pendingEvent
 	topologyRetries    uint64
 	blockedEventSeq    uint64
@@ -113,20 +117,21 @@ type InventorySnapshot struct {
 
 func NewState(logger *slog.Logger) *State {
 	return &State{
-		agents:        make(map[string]*AgentState),
-		revision:      make(map[string]int64),
-		contentRev:    make(map[string]int64),
-		attentionRev:  make(map[string]int64),
-		prevStatus:    make(map[string]string),
-		unseenDone:    make(map[string]bool),
-		ackDone:       make(map[string]bool),
-		finishedNotif: make(map[string]bool),
-		completionRev: make(map[string]int64),
-		generation:    make(map[string]int64),
-		pendingEvents: make(map[string]pendingEvent),
-		logger:        logger,
-		triage:        make(map[string]triageRecord),
-		customAnswers: make(map[string]map[string]string),
+		agents:             make(map[string]*AgentState),
+		revision:           make(map[string]int64),
+		contentRev:         make(map[string]int64),
+		attentionRev:       make(map[string]int64),
+		prevStatus:         make(map[string]string),
+		unseenDone:         make(map[string]bool),
+		ackDone:            make(map[string]bool),
+		finishedNotif:      make(map[string]bool),
+		completionRev:      make(map[string]int64),
+		generation:         make(map[string]int64),
+		sessionDiscoveries: make(map[string]sessionDiscovery),
+		pendingEvents:      make(map[string]pendingEvent),
+		logger:             logger,
+		triage:             make(map[string]triageRecord),
+		customAnswers:      make(map[string]map[string]string),
 	}
 }
 
@@ -287,6 +292,16 @@ func (s *State) Generation(paneID string) int64 {
 	return s.generation[paneID]
 }
 
+func (s *State) PaneGenerations() map[string]uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	generations := make(map[string]uint64, len(s.generation))
+	for paneID, generation := range s.generation {
+		generations[paneID] = uint64(generation)
+	}
+	return generations
+}
+
 func (s *State) PaneSession(paneID string) (int64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -364,8 +379,27 @@ func (s *State) MarkTopologyChanged() {
 // revision, so the fresh poll wins cleanly.
 func (s *State) CommitInventory(agents []*AgentState, baseRev int64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.commitInventoryLocked(agents, baseRev)
+	s.mu.Unlock()
+	s.notifyInventory()
+}
+
+// notifyInventory runs the inventory observer after State.mu is released. The
+// observer writes the profile ownership file, and no reader of the published
+// state may wait for that disk write. notifyMu keeps deliveries serialized and
+// ordered: each delivery takes the newest staged snapshot, so a slow observer
+// can never publish an older snapshot after a newer one.
+func (s *State) notifyInventory() {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	s.mu.Lock()
+	pending := s.pendingInventory
+	s.pendingInventory = nil
+	observer := s.onInventory
+	s.mu.Unlock()
+	if observer != nil && pending != nil {
+		observer(pending)
+	}
 }
 
 // CommitTopology applies an event topology snapshot without allowing its
@@ -378,12 +412,13 @@ func (s *State) CommitTopology(
 	baseRev int64,
 ) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	workspaceChanged := s.commitWorkspacesLocked(workspaces)
 	if workspaceChanged {
 		s.topologyGen++
 	}
 	s.commitTopologyLocked(agents, baseRev)
+	s.mu.Unlock()
+	s.notifyInventory()
 	return workspaceChanged
 }
 
@@ -417,13 +452,15 @@ func (s *State) CommitPoll(
 	token PollToken,
 ) (workspaceChanged, committed bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.topologyGen != token.TopologyGeneration {
 		s.topologyRetries++
+		s.mu.Unlock()
 		return false, false
 	}
 	workspaceChanged = s.commitWorkspacesLocked(workspaces)
 	s.commitInventoryLocked(agents, token.BaseRevision)
+	s.mu.Unlock()
+	s.notifyInventory()
 	return workspaceChanged, true
 }
 
@@ -457,7 +494,19 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		cp := *incoming
 		existing, exists := s.agents[incoming.PaneID]
 		replaced := exists && paneSessionReplaced(existing, incoming)
+		if exists && !replaced && existing.SessionID != incoming.SessionID {
+			delete(s.sessionDiscoveries, incoming.PaneID)
+			if existing.SessionID == "" && incoming.SessionID != "" && existing.TerminalID != "" && existing.TerminalID == incoming.TerminalID {
+				s.sessionDiscoveries[incoming.PaneID] = sessionDiscovery{
+					generation: uint64(s.generation[incoming.PaneID]),
+					terminalID: incoming.TerminalID,
+					sessionID:  incoming.SessionID,
+				}
+			}
+			s.generation[incoming.PaneID]++
+		}
 		if replaced {
+			delete(s.sessionDiscoveries, incoming.PaneID)
 			topologyChanged = true
 			s.generation[incoming.PaneID]++
 			delete(s.prevStatus, incoming.PaneID)
@@ -565,6 +614,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 
 	for id := range s.agents {
 		if !seen[id] {
+			delete(s.sessionDiscoveries, id)
 			s.generation[id]++
 			delete(s.agents, id)
 			delete(s.revision, id)
@@ -586,6 +636,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 	}
 	if triageDirty {
 		s.persistTriageLocked()
+	}
+	if s.onInventory != nil {
+		s.pendingInventory = s.snapshotLocked()
 	}
 }
 

@@ -131,6 +131,23 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it.each(['completed', 'completed_with_warning'])('retains a launch until delayed %s', async (phase) => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'claude', name: 'project', cwd: '/tmp' });
+    const command = JSON.parse(socket.sent.at(-1)!);
+    const settled = vi.fn();
+    void pending.then(settled, settled);
+    await vi.advanceTimersByTimeAsync(52_000);
+    expect(settled).not.toHaveBeenCalled();
+    const data = phase === 'completed_with_warning' ? { warning: 'Initial prompt was not confirmed' } : {};
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase, data });
+    await expect(pending).resolves.toMatchObject({ ok: true, phase, data });
+  });
+
   it('bounds conversation history payloads and requires a usable preparation cursor', async () => {
     const agent = preferenceAgent('fedora', 'w1:p1', 'terminal-w1:p1');
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
