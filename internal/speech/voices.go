@@ -12,12 +12,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 // ErrUsage marks a command line the caller got wrong, which the relay reports
@@ -118,7 +119,7 @@ func forgetRuntimeProbe(path string) {
 func startRuntime(ctx context.Context, binary string) error {
 	startupContext, cancel := context.WithTimeout(ctx, runtimeStartTimeout)
 	defer cancel()
-	output, err := exec.CommandContext(startupContext, binary, "--help").CombinedOutput()
+	output, err := childenv.CommandContext(startupContext, binary, "--help").CombinedOutput()
 	if err == nil {
 		return nil
 	}

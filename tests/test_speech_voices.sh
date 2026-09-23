@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-speech-test.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT INT TERM
 
 SCRIPT_DIR="$WORK_DIR/relay"
 mkdir -p "$SCRIPT_DIR"

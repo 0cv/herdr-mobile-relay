@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const (
@@ -204,7 +205,7 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := exec.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
+	command := childenv.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
 	stdout := &boundedBuffer{remaining: maxHermesOutput}
 	var stderr boundedBuffer
 	stderr.remaining = 4096
@@ -311,7 +312,7 @@ func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessi
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := exec.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
+	command := childenv.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
 	stdout := &boundedBuffer{remaining: maxHermesOutput}
 	var stderr boundedBuffer
 	stderr.remaining = 4096

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -19,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
@@ -33,6 +33,7 @@ var appDeployEnvironmentKeys = [...]string{
 	"HERDR_APP_DEPLOY_NODE_DIR",
 	"HERDR_RELAY_ENV",
 	"HERDR_PLUGIN_CONFIG_DIR",
+	"HERDR_GITHUB_TOKEN_FILE",
 }
 
 var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -531,7 +532,7 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 	}
 	label := fmt.Sprintf("herdr-mobile-relay-update-%d", time.Now().Unix())
 	launch := updateWorkerLaunch(runtime.GOOS, label, executable, jobPath, os.LookupEnv)
-	command := exec.CommandContext(ctx, launch.application, launch.args...)
+	command := childenv.CommandContext(ctx, launch.application, launch.args...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schedule update worker: %s: %s", err, compact(string(output), 300))

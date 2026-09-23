@@ -27,6 +27,56 @@ make relay-plugin      # link this checkout as a Herdr plugin
 make stable-setup      # run the stable tunnel wizard with the installed relay
 ```
 
+## Launch deadlines
+
+Agent startup has a 40-second backend budget, followed by at most 12 seconds
+for initial prompt delivery. The phone keeps launch requests pending for 60
+seconds, allowing eight seconds for the final response. Both success and
+initial-prompt warnings finalize the original request; duplicate requests with
+the same request ID replay that result.
+
+## Profile ownership and installation recovery
+
+Relaunching an agent requires a verified association between its profile and
+terminal, pane, tab and workspace identities. Native conversation discovery or
+rollover does not establish ownership. Verified records are stored privately in
+`profile-ownership.json` under the relay runtime directory, and are usable after
+restart only once an accepted inventory confirms the same target. Pending
+launches, incomplete observations and removed profiles do not authorize relaunch.
+Confirmed disappearance or terminal replacement invalidates the association.
+Read-only access and explicitly requested stop operations remain available when
+ownership is unknown; create a new agent with an explicit profile instead of
+assuming a default executable for an existing pane.
+
+A corrupt ownership store disables profile-derived relaunch. Preserve it for
+inspection and restore a trusted backup while the relay is stopped. If no backup
+exists, an operator can explicitly archive the damaged file and restart with an
+empty store; only new, verified launches establish ownership again. Do not copy
+records to a replacement terminal or edit a pending launch into a verified one.
+
+Native installers stage definitions and preserve previous files, activation and
+available readiness identity before changing a service. They require both local
+`/readyz` identity/inventory and, for named tunnels, public readiness before
+retiring the previous definition. A temporary public failure fails this install
+attempt; it does not create a permanent runtime network-health requirement.
+Gateway mode does not require a Cloudflare URL.
+
+If rollback cannot be confirmed, its private recovery directory remains under
+`$XDG_STATE_HOME/herdr-mobile-relay/recovery` (default
+`~/.local/state/herdr-mobile-relay/recovery`). The `state` file identifies the
+original paths and activation settings; `0`, `1`, and `2` contain any previous
+current definition, legacy definition and environment file. A
+`previous-ready.json` file, when present, records the previous verified runtime
+identity. Inspect the native manager and these files before attempting another
+installation; a retained directory means restoration is uncertain, not healthy.
+
+Release credentials are excluded from ordinary child processes, including
+profile probes, conversation readers, Git, clipboard and speech tools. The
+updater alone deliberately receives the private credential-file pointer. The
+plugin hook passes raw download credentials only to its installer, with tracing
+disabled before token handling. Preserve unrelated PATH, proxy and agent config
+variables when changing these boundaries.
+
 ## Testing a release candidate
 
 Candidates are published as prereleases, which ordinary relays never install:

@@ -10,6 +10,8 @@ TEST_RELAY_BIN="$TEST_BIN_DIR/herdr-mobile-relay"
 GOMODCACHE="${GOMODCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-mod}" \
     GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/herdr-mobile-relay-go-cache}" \
     go build -o "$TEST_RELAY_BIN" "$ROOT/cmd/herdr-mobile-relay"
+mkdir -p "$TEST_BIN_DIR/web"
+printf '{"bundle_hash":"test-web"}\n' > "$TEST_BIN_DIR/web/release.json"
 
 cleanup() {
     # shellcheck disable=SC2086
@@ -154,6 +156,7 @@ EOF
     cat > "$BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${!#}"
+if [ -f "${HERDR_RELAY_ENV:-}" ]; then . "$HERDR_RELAY_ENV"; fi
 printf 'curl %s\n' "$url" >> "$STUB_LOG"
 case "$url" in
     http://127.0.0.1:*/healthz)
@@ -165,7 +168,7 @@ case "$url" in
         ;;
     http://127.0.0.1:*/readyz)
         if [ "${STUB_READY_MODE:-success}" = success ]; then
-            echo '{"status": "ready", "inventory": {"state": "ready"}}'
+            printf '{"status":"ready","inventory":{"state":"ready"},"instance":"%s","release_version":"dev","revision":"unknown","bundle_hash":"test-web","protocol":3}\n' "${HERDR_RELAY_INSTANCE_ID:-instance-a}"
         else
             exit 22
         fi
@@ -201,6 +204,14 @@ case "$url" in
             exit 22
         fi
         ;;
+    https://*/readyz)
+        instance="${HERDR_RELAY_INSTANCE_ID:-instance-a}"
+        case "${STUB_HTTP_MODE:-success}" in
+            mismatch) instance=other-instance ;;
+            fail) exit 22 ;;
+        esac
+        printf '{"status":"ready","inventory":{"state":"ready"},"instance":"%s","release_version":"dev","revision":"unknown","bundle_hash":"test-web","protocol":3}\n' "$instance"
+        ;;
     https://*/healthz)
         case "${STUB_HTTP_MODE:-success}" in
             success) echo '{"status": "ok", "instance": "instance-a", "version": "abc1234", "protocol": 1}' ;;
@@ -214,6 +225,7 @@ case "$url" in
         ;;
 esac
 EOF
+    printf '#!/bin/sh\nexit 0\n' > "$BIN/systemd-analyze"
     chmod 700 "$BIN"/*
 }
 
@@ -241,6 +253,7 @@ new_case() {
     write_stubs
 
     export HOME BIN STUB_LOG
+    export XDG_STATE_HOME="$HOME/state"
     export PATH="$BIN:/usr/bin:/bin"
     export HERDR_RELAY_ENV="$HOME/relay.env"
     export HERDR_RELAY_BIN="$TEST_RELAY_BIN"
@@ -589,8 +602,8 @@ test_separate_readiness_timeouts() {
     export STUB_HTTP_MODE=fail
     run_setup
     [ "$STATUS" -ne 0 ] || fail "HTTP timeout should fail"
-    assert_contains "$OUTPUT" 'Waiting up to 0 seconds for public DNS'
-    assert_contains "$OUTPUT" 'Timed out after 0 seconds waiting for https://'
+    assert_contains "$OUTPUT" 'public endpoint is unavailable'
+    assert_contains "$OUTPUT" 'previous files and activation were restored'
     assert_not_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
     pass "DNS and HTTPS readiness use independent waits and both suppress QR on timeout"
 }

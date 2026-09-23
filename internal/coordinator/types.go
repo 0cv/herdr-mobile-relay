@@ -89,6 +89,16 @@ func (f EffectFunc) Run(ctx context.Context, token WorkerToken) EffectResult {
 type EffectResult struct {
 	Result         *CommandResult
 	BumpGeneration bool
+	Continuation   *EffectContinuation
+}
+
+type EffectContinuation struct {
+	PaneID      string
+	Generation  uint64
+	AllowAbsent bool
+	Deadline    time.Time
+	Runner      EffectRunner
+	Finalize    func(*CommandResult, error) *CommandResult
 }
 
 var (

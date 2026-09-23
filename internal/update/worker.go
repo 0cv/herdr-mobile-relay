@@ -281,7 +281,7 @@ func environmentWith(key, value string) []string {
 	environment := os.Environ()
 	result := make([]string, 0, len(environment)+1)
 	for _, item := range environment {
-		if strings.HasPrefix(item, prefix) {
+		if strings.HasPrefix(item, prefix) || strings.HasPrefix(item, "GH_TOKEN=") || strings.HasPrefix(item, "GITHUB_TOKEN=") {
 			continue
 		}
 		result = append(result, item)

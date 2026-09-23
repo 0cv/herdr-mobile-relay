@@ -494,7 +494,7 @@ wait_for_agent_readiness() {
 
     printf '▸ Waiting up to %s seconds for Herdr agent inventory' "$timeout"
     while true; do
-        if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/readyz" > "$ready_file" 2>/dev/null; then
+        if wait_for_relay_health "$PORT" 1 0 "$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)" > "$ready_file" 2>/dev/null; then
             echo " ✓"
             return
         fi
@@ -527,9 +527,13 @@ wait_for_public_health() {
 
     printf '▸ Waiting up to %s seconds for HTTPS relay health' "$timeout"
     while true; do
-        if curl -fsS --max-time 5 "https://$RELAY_HOSTNAME/healthz" > "$public_file" 2>/dev/null; then
+        if curl -fsS --max-time 5 "https://$RELAY_HOSTNAME/readyz" > "$public_file" 2>/dev/null; then
             received=true
-            if state_command health-match "$LOCAL_HEALTH_FILE" "$public_file" 2> "$mismatch_file"; then
+            if verify_relay_release_health "$(cat "$public_file")" \
+                "$(json_string_field "$(cat "$LOCAL_HEALTH_FILE")" release_version)" \
+                "$(json_string_field "$(cat "$LOCAL_HEALTH_FILE")" revision)" \
+                "$(json_string_field "$(cat "$LOCAL_HEALTH_FILE")" bundle_hash)" \
+                "$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)" 2> "$mismatch_file"; then
                 echo " ✓"
                 return
             fi
@@ -540,7 +544,7 @@ wait_for_public_health() {
                 echo "✗ Public health identity did not match the local relay:" >&2
                 cat "$mismatch_file" >&2
             else
-                echo "✗ Timed out after $timeout seconds waiting for https://$RELAY_HOSTNAME/healthz." >&2
+                echo "✗ Timed out after $timeout seconds waiting for https://$RELAY_HOSTNAME/readyz." >&2
             fi
             return 1
         fi
@@ -878,13 +882,8 @@ if ! install_service; then
 fi
 
 LOCAL_HEALTH_FILE="$WORK_DIR/local-health.json"
-if ! curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" > "$LOCAL_HEALTH_FILE" 2>/dev/null; then
+if ! wait_for_relay_health "$PORT" 1 0 "$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)" > "$LOCAL_HEALTH_FILE"; then
     echo "✗ The installed service is not reachable on 127.0.0.1:$PORT." >&2
-    fail_resumable
-    exit 1
-fi
-if ! state_command health-valid "$LOCAL_HEALTH_FILE"; then
-    echo "✗ The local relay health response is incomplete." >&2
     fail_resumable
     exit 1
 fi

@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-common-test.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
@@ -409,17 +409,23 @@ esac
 
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
-GH_TOKEN="test-private-token"
-export GH_TOKEN
+EXPECTED_TOKEN="test-private-token"
+GH_TOKEN="$EXPECTED_TOKEN"
+GITHUB_TOKEN="$EXPECTED_TOKEN"
+export GH_TOKEN GITHUB_TOKEN
 ensure_relay_env "$ENV_FILE"
 
+if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+    echo "ensure_relay_env left the raw release token in the caller's environment" >&2
+    exit 1
+fi
 if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
     echo "relay.env exposed GH_TOKEN" >&2
     exit 1
 fi
 TOKEN_FILE="$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)"
 test "$TOKEN_FILE" = "$WORK_DIR/config/github-token"
-test "$(cat "$TOKEN_FILE")" = "$GH_TOKEN"
+test "$(cat "$TOKEN_FILE")" = "$EXPECTED_TOKEN"
 if stat -c '%a' "$TOKEN_FILE" >/dev/null 2>&1; then
     mode="$(stat -c '%a' "$TOKEN_FILE")"
 else
@@ -528,12 +534,31 @@ sed -n '8p' "$LAUNCHCTL_LOG" |
     grep -Fx "kickstart -k $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
 test "$(wc -l < "$LAUNCHCTL_LOG" | tr -d ' ')" = "8"
 
-HEALTH='{"status":"ok","release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
+go build -o "$WORK_DIR/readiness-helper" "$REPO_DIR/cmd/herdr-mobile-relay"
+export HERDR_RELAY_BIN="$WORK_DIR/readiness-helper"
+export HERDR_RELAY_INSTANCE_ID=test
+HEALTH='{"status":"ready","inventory":{"state":"ready"},"instance":"test","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
 if verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
     echo "release health accepted the wrong revision" >&2
     exit 1
 fi
+
+for invalid_health in \
+    '{"status":"ready","inventory":{"state":"ready"},"instance":"wrong-instance","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}' \
+    '{"status":"ready","inventory":{"state":"error"},"instance":"test","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'; do
+    (
+        curl() { printf '%s\n' "$invalid_health"; }
+        if wait_for_relay_health 8375 1 0 test 0.9.0 abc123 web456; then
+            echo 'generic readiness accepted unusable or foreign inventory' >&2
+            exit 1
+        fi
+        if wait_for_relay_release_health 8375 1 0 0.9.0 abc123 web456 test; then
+            echo 'release readiness accepted unusable or foreign inventory' >&2
+            exit 1
+        fi
+    )
+done
 
 HEALTH_ATTEMPTS="$WORK_DIR/health-attempts"
 cat > "$FAKE_LAUNCHCTL_DIR/curl" <<'EOF'
@@ -547,7 +572,7 @@ printf '%s\n' "$attempt" > "$HEALTH_ATTEMPTS"
 if [ "$attempt" -eq 1 ]; then
     printf '%s\n' '{"status":"ok","instance":"test","version":"0.8.6","protocol":2,"release_version":"0.8.6","revision":"old","bundle_hash":"old-web"}'
 else
-    printf '%s\n' '{"status":"ok","instance":"test","version":"0.9.0","protocol":2,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
+    printf '%s\n' '{"status":"ready","inventory":{"state":"ready"},"instance":"test","version":"0.9.0","protocol":3,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 fi
 EOF
 chmod 700 "$FAKE_LAUNCHCTL_DIR/curl"
@@ -558,6 +583,7 @@ EXACT_HEALTH="$(
 )"
 test "$(json_string_field "$EXACT_HEALTH" release_version)" = "0.9.0"
 test "$(cat "$HEALTH_ATTEMPTS")" = "2"
+unset HERDR_RELAY_BIN HERDR_RELAY_INSTANCE_ID
 
 GATEWAY_HEALTH='{"status":"ok","gateway":{"enabled":true,"registered":true,"relay_id":"AAAA","clients":1}}'
 test "$(gateway_registration_state "$GATEWAY_HEALTH")" = "true"
@@ -942,14 +968,21 @@ esac
 EOF
 cat > "$START_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
-printf '%s\n' '{"status":"ok","instance":"start-instance","version":"9.9.9","protocol":2}'
+printf '%s\n' '{"status":"ready","inventory":{"state":"ready"},"instance":"start-instance","version":"9.9.9","release_version":"9.9.9","revision":"test-revision","bundle_hash":"test-web","protocol":3}'
 EOF
 cat > "$START_BIN_DIR/herdr" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+mkdir -p "$START_BIN_DIR/web"
+printf '%s\n' '{"bundle_hash":"test-web"}' > "$START_BIN_DIR/web/release.json"
+export HERDR_TEST_READINESS_BIN="$WORK_DIR/readiness-helper"
 cat > "$START_BIN_DIR/relay-bin" <<'EOF'
 #!/bin/sh
+case "$1" in
+    version) printf '%s\n' '{"version":"9.9.9","revision":"test-revision"}'; exit 0 ;;
+    verify-readiness) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
+esac
 printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1
 EOF

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
@@ -65,7 +65,7 @@ type commandRunner interface {
 type execCommandRunner struct{}
 
 func (execCommandRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	return childenv.CommandContext(ctx, name, args...).Output()
 }
 
 type Lease struct {

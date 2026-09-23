@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const (
@@ -224,7 +225,7 @@ func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, 
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	command := exec.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
+	command := childenv.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
 	stdout := &boundedBuffer{remaining: maxOpenCodeOutput}
 	var stderr boundedBuffer
 	stderr.remaining = 4096

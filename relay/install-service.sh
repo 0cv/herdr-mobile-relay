@@ -10,12 +10,14 @@ LOG_DIR="$HOME/Library/Logs/herdr-mobile-relay"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+. "$SCRIPT_DIR/native-install-transaction.sh"
 
 require_user_service_context
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
 
 if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
@@ -24,6 +26,7 @@ if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
     exit 1
 fi
 
+native_install_begin launchd "$PLIST" "$LEGACY_PLIST" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
 ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 chmod +x "$SCRIPT_DIR/herdr-mobile-relay-service.sh"
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
@@ -38,7 +41,8 @@ if [ ! -d "$WORK_DIR" ]; then
     WORK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
 
-cat > "$PLIST" <<EOF
+STAGED_PLIST="$native_recovery/new.plist"
+cat > "$STAGED_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -47,7 +51,7 @@ cat > "$PLIST" <<EOF
     <string>$LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$SERVICE_WRAPPER</string>
+        <string>$(plist_text "$SERVICE_WRAPPER")</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -61,22 +65,30 @@ cat > "$PLIST" <<EOF
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>WorkingDirectory</key>
-    <string>$WORK_DIR</string>
+    <string>$(plist_text "$WORK_DIR")</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HERDR_RELAY_ENV</key>
-        <string>$ENV_FILE</string>
+        <string>$(plist_text "$ENV_FILE")</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>$LOG_DIR/service.log</string>
+    <string>$(plist_text "$LOG_DIR/service.log")</string>
     <key>StandardErrorPath</key>
-    <string>$LOG_DIR/service.err</string>
+    <string>$(plist_text "$LOG_DIR/service.err")</string>
 </dict>
 </plist>
 EOF
 
-launchctl bootout "gui/$UID" "$LEGACY_PLIST" >/dev/null 2>&1 || true
-rm -f "$LEGACY_PLIST"
+chmod 600 "$STAGED_PLIST"
+plutil -lint "$STAGED_PLIST"
+native_changed=true
+native_stage="$(mktemp "$(dirname "$PLIST")/.herdr-service.XXXXXX")"
+cp "$STAGED_PLIST" "$native_stage"
+chmod 600 "$native_stage"
+mv -f "$native_stage" "$PLIST"
+if [ "$native_legacy_active" = true ]; then
+    launchctl bootout "gui/$UID" "$LEGACY_PLIST"
+fi
 reload_launchd_service_definition "$PLIST" "$LABEL"
 
 echo "Installed and started $LABEL"
@@ -84,13 +96,20 @@ echo "Plist: $PLIST"
 echo "Env:   $ENV_FILE"
 echo "Logs:  $LOG_DIR/service.log and $LOG_DIR/service.err"
 
-PORT="${HERDR_RELAY_PORT:-8375}"
+# ensure_relay_env generates the token and instance identity into the file
+# only, so read both back before the readiness gate compares identities.
+PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
+PORT="${PORT:-${HERDR_RELAY_PORT:-8375}}"
+INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
 echo "Waiting for relay health on 127.0.0.1:$PORT..."
-if ! HEALTH="$(wait_for_relay_health "$PORT")"; then
-    echo "Relay service was installed, but it did not become healthy."
+if ! HEALTH="$(wait_for_relay_health "$PORT" 15 1 "$INSTANCE")"; then
+    report_inventory_failure "$PORT"
+    echo "Replacement service did not become ready; restoring the previous installation."
     echo "Inspect it with:"
     echo "  launchctl print gui/$(id -u)/$LABEL"
     echo "  tail -n 80 '$LOG_DIR/service.log' '$LOG_DIR/service.err'"
     exit 1
 fi
-echo "Relay health: $HEALTH"
+verify_public_readiness "$ENV_FILE" "$HEALTH"
+native_install_commit
+echo "Relay readiness: $HEALTH"

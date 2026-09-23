@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
+set +x
 set -euo pipefail
+RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-}
+export -n RELAY_UPDATER_TOKEN_FILE
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -14,6 +18,8 @@ if [ -f "$ENV_FILE" ]; then
     . "$ENV_FILE"
     set +a
 fi
+RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-$RELAY_UPDATER_TOKEN_FILE}
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 # Agents often install their CLI into a per-tool bin directory that the service
@@ -76,11 +82,11 @@ stop_child() {
 }
 
 echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
-"$RELAY_BIN" serve &
+HERDR_GITHUB_TOKEN_FILE="$RELAY_UPDATER_TOKEN_FILE" "$RELAY_BIN" serve &
 RELAY_PID=$!
 
 echo "Starting cloudflared with $CLOUDFLARED_CONFIG"
-"$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run &
+(unset HERDR_GITHUB_TOKEN_FILE; exec "$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run) &
 TUNNEL_PID=$!
 
 while true; do
