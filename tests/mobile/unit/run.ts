@@ -51,7 +51,7 @@ import {
 
 import { androidTransitionTests } from './android-transitions';
 import { androidEventTests } from './android-events';
-import { androidEnvironmentTests } from './android-environment';
+import { androidEnvironmentTests, validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnosticEvent, type FakeAdbDiagnosticStage, type FakeAdbExitCategory, type FakeAdbFixturePathCategory } from './android-environment';
 import { androidTransportTests } from './android-transport';
 import { nativeStartupTests } from './native-startup';
 import { xctestOwnerTests } from './xctest-owner';
@@ -59,6 +59,8 @@ import { runIOSRegressions } from './ios';
 import { confirmationSettingsTests } from './confirmation-settings';
 import { initialSettingsTests } from './initial-settings';
 import { scenarioRunnerTests } from './scenario-runner';
+import { androidProductEnvironmentTests, checkCLI, measurementIdentity, persistAndroidProof, resultContract, driverFixture } from './android-product-environment';
+import { mobileWorkflowTests } from './mobile-workflow';
 import { webdriverInterruptionTests } from './webdriver-interruption';
 
 type TestOutcome = void | string;
@@ -214,11 +216,13 @@ test('evidence validation enforces matrix identity and platform-specific native 
     script: '/assets/old.js', style: '/assets/old.css', webHash: 'd'.repeat(64),
   };
   const expectedCandidateIdentity = {
-    version: '0.21.0', assets: 364, build: 'new-build', entry: '/new/index.html',
+    version: '0.21.0', assets: 364, build: 'd'.repeat(64), entry: '/new/index.html',
     script: '/assets/new.js', style: '/assets/new.css', webHash,
   };
   const result = {
-    schema: 1, result: 'passed', suite: 'release', platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
+    ...resultContract(measurementIdentity({ platform: 'ios', suite: 'release', measurementId: 'ios-not-applicable' })),
+    evidence: { driver: driverFixture(), teardown: { driver: driverFixture(true) } },
+    suite: 'release', platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
     origin: 'https://fixture.test', source_commit: sourceCommit, source_run_head_sha: headSha, candidate_web_hash: webHash,
     initial_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
@@ -248,6 +252,7 @@ test('evidence validation enforces matrix identity and platform-specific native 
   assert.equal(serialized.credential_evidence.relays.alpha.invitationAuthCount, 1);
   assert.equal(serialized.credential_evidence.relays.beta.credentialAuthCount, 2);
   const options = {
+    contract: 'product' as const, runId: result.identity.runId, attempt: result.identity.attempt,
     directory: root,
     matrix: [{ platform: 'ios', baseline: '0.20.10', scenario: 'historical' }],
     suite: 'release', candidateCommit: sourceCommit, sourceRunHeadSha: headSha, candidateWebHash: webHash,
@@ -295,6 +300,7 @@ test('evidence validation enforces matrix identity and platform-specific native 
   const historicalResult = {
     ...result,
     baseline: '0.20.8',
+    identity: { ...result.identity, baseline: '0.20.8' },
     initial_identity: { ...result.initial_identity, ...historicalBaselineIdentity },
     oracle_controls: ['HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:0.20.8'],
     phone_completion: { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false },
@@ -318,10 +324,11 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await assert.rejects(validateMobileEvidence({ ...options, candidateWebHash: 'd'.repeat(64) }), /wrong candidate web hash/);
   await mkdir(join(root, 'duplicate'), { recursive: true });
   await writeFile(join(root, 'duplicate', 'mobile-result.json'), JSON.stringify(result));
-  await assert.rejects(validateMobileEvidence(options), /expected 1 result files, found 2/);
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, platform: 'android' }));
+  await assert.rejects(validateMobileEvidence(options), /missing or duplicated/);
+  const androidIdentity = measurementIdentity();
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, ...resultContract(androidIdentity), ...await persistAndroidProof(root, androidIdentity), platform: 'android', suite: 'smoke' }));
   await rm(join(root, 'duplicate'), { recursive: true, force: true });
-  await assert.rejects(validateMobileEvidence({ ...options, matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /invalid android provider|nativeActivity/);
+  await assert.rejects(validateMobileEvidence({ ...options, suite: 'smoke', matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /invalid android provider|nativeActivity/);
 });
 
 test('final evidence checkout precedes artifact download', async () => {
@@ -518,6 +525,29 @@ test('Android emulator-console parser handles names, terminators, and errors', a
   assert.equal(parseAndroidAvdName('OK\n'), undefined);
   assert.equal(parseAndroidAvdName('KO: unknown command\n'), undefined);
   assert.equal(parseAndroidAvdName('\r\n'), undefined);
+  const event = (stage: FakeAdbDiagnosticStage, logExists: boolean, fixturePathCategory: FakeAdbFixturePathCategory = 'expected-owned-path', childExitCategory?: FakeAdbExitCategory): FakeAdbDiagnosticEvent => ({
+    stage, logExists, fixturePathCategory, ...(childExitCategory ? { childExitCategory } : {}),
+  });
+  const valid: FakeAdbDiagnostic = {
+    schema: 1,
+    fixtureCreate: event('fixture-create', false),
+    children: [{ events: [
+      event('fake-child-launch', false),
+      event('log-producer-append', true),
+      event('fake-child-exit', true, 'expected-owned-path', 'success'),
+    ] }],
+  };
+  assert.doesNotThrow(() => validateFakeAdbDiagnostic(valid));
+  const invalid = [
+    { ...valid, children: [] },
+    { ...valid, children: [{ events: [event('fake-child-launch', false), event('fake-child-exit', true, 'expected-owned-path', 'success')] }] },
+    { ...valid, children: [{ events: [
+      event('fake-child-launch', false, 'mismatched'),
+      event('log-producer-append', true, 'mismatched'),
+      event('fake-child-exit', true, 'mismatched', 'success'),
+    ] }] },
+  ];
+  for (const diagnostic of invalid) assert.throws(() => validateFakeAdbDiagnostic(diagnostic), /FAKE_ADB_DIAGNOSTIC/u);
 });
 
 test('Android environment events require authoritative package or process evidence', async () => {
@@ -530,6 +560,7 @@ interface AndroidEnvironmentFixture {
   root: string;
   fixtureDirectory: string;
   log: string;
+  diagnostic: string;
   environment: NodeJS.ProcessEnv;
 }
 
@@ -649,8 +680,81 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
   const gms = await readFile(join(fixtureDirectory, 'module-change-gms.dump'), 'utf8');
   await writeFile(join(fixtureDirectory, 'module-change-gms.dump'), gms.replace('    flags=', '    usesLibraryFiles:\n      /data/app/module-changed/base.apk\n    flags='));
   const log = join(root, 'adb.log');
+  const diagnostic = join(root, 'fake-adb-diagnostic.json');
+  const initialDiagnostic: FakeAdbDiagnostic = {
+    schema: 1,
+    fixtureCreate: { stage: 'fixture-create', logExists: existsSync(log), fixturePathCategory: 'expected-owned-path' },
+    children: [],
+  };
+  await writeFile(diagnostic, JSON.stringify(initialDiagnostic));
   const adb = join(binDirectory, 'adb');
-  await writeFile(adb, `#!${process.execPath}\nimport ${JSON.stringify(repositoryPath('tests/mobile/unit/android-fake-adb.ts'))};\n`, { mode: 0o700 });
+  await writeFile(adb, `#!${process.execPath}
+import { basename, dirname } from 'node:path';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+const diagnosticFile = ${JSON.stringify(diagnostic)};
+const observedLog = () => process.env.FAKE_ANDROID_LOG || '';
+const logExists = () => {
+  const path = observedLog();
+  return path ? existsSync(path) : false;
+};
+const logSize = () => {
+  const path = observedLog();
+  if (!path) return -1;
+  try { return statSync(path).size; } catch { return -1; }
+};
+const fixturePathCategory = () => {
+  const path = observedLog();
+  if (!path) return 'absent';
+  const fixtureDirectory = process.env.FAKE_ANDROID_FIXTURE_DIR || '';
+  if (!fixtureDirectory) return 'mismatched';
+  const name = basename(path);
+  return dirname(path) === dirname(fixtureDirectory) && (name === 'adb.log' || name === 'requests.log')
+    ? 'expected-owned-path' : 'mismatched';
+};
+const diagnosticEvent = (stage, childExitCategory) => {
+  const event = { stage, logExists: logExists(), fixturePathCategory: fixturePathCategory() };
+  if (childExitCategory) event.childExitCategory = childExitCategory;
+  return event;
+};
+const readDiagnostic = () => JSON.parse(readFileSync(diagnosticFile, 'utf8'));
+const writeDiagnostic = value => writeFileSync(diagnosticFile, JSON.stringify(value));
+let childIndex = -1;
+try {
+  const value = readDiagnostic();
+  value.children.push({ events: [diagnosticEvent('fake-child-launch')] });
+  childIndex = value.children.length - 1;
+  writeDiagnostic(value);
+} catch {}
+const initialLogSize = logSize();
+const record = (stage, childExitCategory) => {
+  if (childIndex < 0) return;
+  try {
+    const value = readDiagnostic();
+    const child = value.children[childIndex];
+    if (!child) return;
+    child.events.push(diagnosticEvent(stage, childExitCategory));
+    writeDiagnostic(value);
+  } catch {}
+};
+let signaled = false;
+const signalCodes = new Map([['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]);
+for (const [signal, exitCode] of signalCodes) process.once(signal, () => {
+  signaled = true;
+  process.exit(exitCode);
+});
+let importFailed = false;
+process.once('exit', code => {
+  const currentLogSize = logSize();
+  if (currentLogSize >= 0 && (initialLogSize < 0 || currentLogSize > initialLogSize)) record('log-producer-append');
+  record('fake-child-exit', signaled ? 'signal' : importFailed ? 'launch-error' : code === 0 ? 'success' : 'nonzero');
+});
+try {
+  await import(${JSON.stringify(repositoryPath('tests/mobile/unit/android-fake-adb.ts'))});
+} catch {
+  importFailed = true;
+  process.exitCode = 1;
+}
+`, { mode: 0o700 });
   await writeFile(join(root, 'ownership'), 'android:emulator-5554\n');
   await mkdir(join(root, 'avd', 'herdr-mobile-ci-fixture.avd'), { recursive: true });
   await mkdir(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64'), { recursive: true });
@@ -677,6 +781,7 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
     root,
     fixtureDirectory,
     log,
+    diagnostic,
     environment: {
       ...process.env,
       PATH: `${binDirectory}:${process.env.PATH || ''}`,
@@ -735,18 +840,7 @@ async function runAndroidEnvironmentFixtureCheck(
   const output = join(fixture.root, 'check.json');
   await writeFile(logFile, `09-10 08:45:00.000 2000 2000 I HerdrMeasure: android-test START\n${log}09-10 08:46:00.000 2000 2000 I HerdrMeasure: android-test END\n`);
   await writeFile(join(fixture.root, 'operations.json'), '[]');
-  let passed = true;
-  try {
-    execFileSync('bun', [
-      process.env.ANDROID_ENVIRONMENT_SOURCE || 'tests/mobile/android-environment.ts', 'check', '--before', before, '--after', after, '--log', logFile, '--output', output,
-      '--operations', join(fixture.root, 'operations.json'),
-    ], { cwd: repositoryRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch {
-    passed = false;
-  }
-  const result = JSON.parse(await readFile(output, 'utf8')) as { passed: boolean; issues: string[] };
-  assert.equal(result.passed, passed);
-  return result;
+  return checkCLI(fixture, { before, after, log: logFile, operations: join(fixture.root, 'operations.json'), output });
 }
 
 test('Android recorded package evidence remains complete and separate from source-derived listings', async () => {
@@ -1304,7 +1398,9 @@ test('runtime script observations satisfy baseline and candidate validation cont
     const directory = await mkdtemp(join(tmpdir(), 'herdr-mobile-runtime-contract-'));
     const sourceCommit = 'a'.repeat(40);
     const result = {
-      schema: 1, result: 'passed', suite: 'smoke', platform: 'android', baseline: expected.version,
+      ...resultContract(measurementIdentity({ baseline: expected.version, sourceRunHeadSha: sourceCommit, candidateWebHash: candidate.webHash, candidateBuild: candidate.build })),
+      ...await persistAndroidProof(directory, measurementIdentity({ baseline: expected.version, sourceRunHeadSha: sourceCommit, candidateWebHash: candidate.webHash, candidateBuild: candidate.build })),
+      suite: 'smoke', platform: 'android', baseline: expected.version,
       candidate: 'candidate-proof', origin, source_commit: sourceCommit, source_run_head_sha: sourceCommit,
       candidate_web_hash: candidate.webHash,
       initial_identity: initial,
@@ -1333,6 +1429,7 @@ test('runtime script observations satisfy baseline and candidate validation cont
     };
     await writeFile(join(directory, 'mobile-result.json'), JSON.stringify(result));
     await validateMobileEvidence({
+      contract: 'product', runId: result.identity.runId, attempt: result.identity.attempt,
       directory,
       matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
       suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
@@ -1346,6 +1443,7 @@ test('runtime script observations satisfy baseline and candidate validation cont
         final_identity: { ...result.final_identity, buildFromApplication: false },
       }));
       await assert.rejects(validateMobileEvidence({
+        contract: 'product', runId: result.identity.runId, attempt: result.identity.attempt,
         directory,
         matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
         suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
@@ -2245,6 +2343,8 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
 
 for (const [name, body] of [...androidTransitionTests, ...androidEventTests]) test(name, body);
 for (const [name, body] of scenarioRunnerTests) test(name, body);
+for (const [name, body] of androidProductEnvironmentTests) test(name, body);
+for (const [name, body] of mobileWorkflowTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
 for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests]) test(name, body);

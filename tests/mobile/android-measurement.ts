@@ -1,15 +1,34 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { validateMeasurementIdentity, type MeasurementIdentity } from './support/mobile-result';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ANDROID_LOG_LIMIT, androidMeasurementMarker, parseAndroidProcesses, type AndroidPlannedTermination } from './android-environment';
+import { ANDROID_LOG_LIMIT, androidMeasurementMarker, parseAndroidProcesses, assessAndroidEnvironment, readEnvironmentInputs, type AndroidEnvironmentCheck, type AndroidPlannedTermination } from './android-environment';
 import { command, stopProcess } from './support/process';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 import { requireOwnedDevice } from './support/device';
 import { isAndroidPackageProcess, isAndroidTerminationPackage } from './android-events';
 import type { AppiumClient } from './support/webdriver';
 import { AndroidTransportObservation } from './support/android-transport';
+
+export interface AndroidMeasurementOutcome {
+  assessment?: AndroidEnvironmentCheck;
+  assessmentSha256?: string;
+  errors: unknown[];
+}
+
+export interface AndroidMeasurementIO {
+  command: typeof command;
+  requireOwnedDevice: typeof requireOwnedDevice;
+  mkdir: typeof mkdir;
+  writeFile: typeof writeFile;
+  readFile: typeof readFile;
+  writeJson: typeof writeSanitizedJson;
+  stopProcess: typeof stopProcess;
+  spawnCollector: () => ChildProcess;
+  transport: Pick<AndroidTransportObservation, 'observe' | 'finish' | 'failure'>;
+}
 
 export class AndroidEnvironmentMeasurement {
   readonly id = randomUUID();
@@ -20,12 +39,33 @@ export class AndroidEnvironmentMeasurement {
   private active = false;
   private started = false;
   private readonly operations: AndroidPlannedTermination[] = [];
+  private identity?: MeasurementIdentity;
+  private finished = false;
+  private readonly errors: unknown[] = [];
 
-  private readonly transport: AndroidTransportObservation;
-
-  constructor(private readonly serial: string, private readonly outputDir: string, private readonly toolchains: string) {
-    this.transport = new AndroidTransportObservation(serial, outputDir);
+  bind(identity: MeasurementIdentity): void {
+    if (this.identity || this.started || identity.measurementId !== this.id) throw new Error('ANDROID_ENVIRONMENT: identity binding must occur once before begin');
+    validateMeasurementIdentity(identity);
+    this.identity = structuredClone(identity);
   }
+
+  plannedOperations(): AndroidPlannedTermination[] { return structuredClone(this.operations); }
+
+  private async attempt(operation: () => Promise<unknown>): Promise<void> {
+    try { await operation(); } catch (error) { if (!this.errors.includes(error)) this.errors.push(error); }
+  }
+
+  private readonly transport: AndroidMeasurementIO['transport'];
+  private readonly io: AndroidMeasurementIO;
+
+  constructor(private readonly serial: string, private readonly outputDir: string, private readonly toolchains: string, io: Partial<AndroidMeasurementIO> = {}) {
+    this.io = { command, requireOwnedDevice, mkdir, writeFile, readFile, writeJson: writeSanitizedJson, stopProcess,
+      spawnCollector: () => spawn('adb', ['-s', serial, 'logcat', '-b', 'main', '-b', 'system', '-v', 'epoch', '-T', '1'], { stdio: ['ignore', 'pipe', 'pipe'] }),
+      transport: new AndroidTransportObservation(serial, outputDir), ...io };
+    this.transport = this.io.transport;
+  }
+
+  failureOutcome(): AndroidMeasurementOutcome { return { errors: [...this.errors] }; }
 
   private path(name: string): string {
     return join(this.outputDir, `android-environment-${name}.json`);
@@ -33,7 +73,7 @@ export class AndroidEnvironmentMeasurement {
 
   private async snapshot(boundary: 'start' | 'end'): Promise<void> {
     const name = boundary === 'start' ? 'before' : 'after';
-    await command(process.execPath, [fileURLToPath(new URL('./android-environment.ts', import.meta.url)), 'snapshot',
+    await this.io.command(process.execPath, [fileURLToPath(new URL('./android-environment.ts', import.meta.url)), 'snapshot',
       '--serial', this.serial, '--toolchains', this.toolchains, '--output', this.path(name),
       '--boundary', boundary, '--measurement', this.id], 180_000);
   }
@@ -41,32 +81,34 @@ export class AndroidEnvironmentMeasurement {
   async begin(): Promise<void> {
     if (this.started) throw new Error('ANDROID_ENVIRONMENT: rebaseline is forbidden');
     this.started = true;
-    await requireOwnedDevice('android', this.serial);
-    await mkdir(this.outputDir, { recursive: true });
-    await writeFile(this.path('session'), `${JSON.stringify({ id: this.id })}\n`, { flag: 'wx', mode: 0o600 });
-    await writeSanitizedJson(this.path('operations'), this.operations);
-    this.collector = spawn('adb', ['-s', this.serial, 'logcat', '-b', 'main', '-b', 'system', '-v', 'epoch', '-T', '1'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    this.collector.on('error', (error) => { this.collectorFailure ||= error; });
-    this.collector.on('exit', () => {
-      if (this.active) this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: log collector exited inside measurement');
-    });
-    this.collector.stderr!.on('data', () => { this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: log collector reported stderr'); });
-    this.collector.stdout!.on('data', (chunk: Buffer) => {
-      this.transport.observe(chunk);
-      this.bytes += chunk.length;
-      if (this.bytes > ANDROID_LOG_LIMIT) {
-        this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: measured log exceeds bound');
-        this.collector?.kill('SIGTERM');
-        return;
-      }
-      this.chunks.push(chunk);
-    });
-    this.active = true;
     try {
+      await this.io.requireOwnedDevice('android', this.serial);
+      await this.io.mkdir(this.outputDir, { recursive: true });
+      await this.io.writeFile(this.path('session'), `${JSON.stringify({ id: this.id })}\n`, { flag: 'wx', mode: 0o600 });
+      await this.io.writeJson(this.path('operations'), this.operations);
+      this.collector = this.io.spawnCollector();
+      this.collector.on('error', (error) => { this.collectorFailure ||= error; });
+      this.collector.on('exit', () => {
+        if (this.active) this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: log collector exited inside measurement');
+      });
+      this.collector.stderr!.on('data', () => { this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: log collector reported stderr'); });
+      this.collector.stdout!.on('data', (chunk: Buffer) => {
+        try { this.transport.observe(chunk); } catch (error) { this.collectorFailure ||= error instanceof Error ? error : new Error('ANDROID_ENVIRONMENT: transport observation failed'); }
+        this.bytes += chunk.length;
+        if (this.bytes > ANDROID_LOG_LIMIT) {
+          this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: measured log exceeds bound');
+          this.collector?.kill('SIGTERM');
+          return;
+        }
+        this.chunks.push(chunk);
+      });
+      this.active = true;
       await this.snapshot('start');
       await this.waitForMarker('START');
     } catch (error) {
+      this.errors.push(error);
       await this.closeCollector();
+      await this.attempt(() => this.io.writeJson(this.path('completion'), { passed: false, errors: this.errors.map(error => error instanceof Error ? error.message : String(error)) }));
       throw error;
     }
   }
@@ -154,36 +196,50 @@ export class AndroidEnvironmentMeasurement {
 
   private async closeCollector(): Promise<void> {
     this.active = false;
-    if (this.collector) await stopProcess(this.collector);
-    await this.transport.finish();
-    const log = redactText(Buffer.concat(this.chunks).toString('utf8'));
-    await writeFile(join(this.outputDir, 'android-qualification-logcat.log'), log, { mode: 0o600 });
-    await writeSanitizedJson(this.path('collector'), { bytes: this.bytes, failure: this.collectorFailure?.message, transportObservationFailure: this.transport.failure });
+    if (this.collector) await this.attempt(() => this.io.stopProcess(this.collector!));
+    await this.attempt(() => this.transport.finish());
+    let persistedBytes = 0;
+    await this.attempt(async () => {
+      const raw = Buffer.concat(this.chunks);
+      const text = raw.toString('utf8');
+      if (!Buffer.from(text, 'utf8').equals(raw)) throw new Error('ANDROID_ENVIRONMENT: invalid collector UTF-8');
+      const persisted = Buffer.from(redactText(text), 'utf8');
+      await this.io.writeFile(join(this.outputDir, 'android-qualification-logcat.log'), persisted, { mode: 0o600 });
+      persistedBytes = persisted.length;
+    });
+    await this.attempt(() => this.io.writeJson(this.path('collector'), {
+      bytes: persistedBytes, acquiredBytes: this.bytes, failure: this.collectorFailure?.message || (this.errors.length ? 'COLLECTION_FAILED' : undefined), transportObservationFailure: this.transport.failure,
+    }));
     this.chunks = [];
   }
 
-  async finish(): Promise<void> {
-    if (!this.active) throw new Error('ANDROID_ENVIRONMENT: no active measurement to finish');
-    const errors: unknown[] = [];
-    try {
-      await this.snapshot('end');
-      await this.waitForMarker('END');
-    } catch (error) {
-      errors.push(error);
-    } finally {
-      await this.closeCollector();
-    }
-    if (this.collectorFailure) errors.push(this.collectorFailure);
-    try {
-      await command(process.execPath, [fileURLToPath(new URL('./android-environment.ts', import.meta.url)), 'check',
-        '--before', this.path('before'), '--after', this.path('after'),
-        '--log', join(this.outputDir, 'android-qualification-logcat.log'), '--operations', this.path('operations'),
-        '--output', this.path('check')], 30_000);
-    } catch (error) {
-      errors.push(error);
-    }
-    const messages = errors.map((error) => error instanceof Error ? error.message : String(error));
-    await writeSanitizedJson(this.path('completion'), { passed: errors.length === 0, errors: messages });
-    if (errors.length) throw new AggregateError(errors, `ANDROID_ENVIRONMENT: measurement failed: ${messages.join('; ')}`);
+  async finish(): Promise<AndroidMeasurementOutcome> {
+    if (this.finished) throw new Error('ANDROID_ENVIRONMENT: measurement already finalized');
+    this.finished = true;
+    if (this.active) {
+      await this.attempt(() => this.snapshot('end'));
+      await this.attempt(() => this.waitForMarker('END'));
+    } else this.errors.push(new Error('ANDROID_ENVIRONMENT: no active measurement to finish'));
+    await this.closeCollector();
+    if (this.collectorFailure && !this.errors.includes(this.collectorFailure)) this.errors.push(this.collectorFailure);
+    let assessment: AndroidEnvironmentCheck | undefined;
+    let assessmentSha256: string | undefined;
+    await this.attempt(async () => {
+      if (!this.identity) throw new Error('ANDROID_ENVIRONMENT: measurement identity missing');
+      await this.io.writeJson(this.path('identity'), this.identity);
+    });
+    await this.attempt(async () => {
+      if (!this.identity) throw new Error('ANDROID_ENVIRONMENT: measurement identity missing');
+      assessment = assessAndroidEnvironment(await readEnvironmentInputs(this.outputDir), this.identity);
+      await this.io.writeJson(this.path('check'), assessment);
+      const bytes = await this.io.readFile(this.path('check'));
+      assessmentSha256 = createHash('sha256').update(bytes).digest('hex');
+      assessment = JSON.parse(bytes.toString('utf8')) as AndroidEnvironmentCheck;
+      if (assessment.collection.status !== 'PASS') throw new Error('ANDROID_ENVIRONMENT: collection guarantee failed');
+    });
+    await this.attempt(() => this.io.writeJson(this.path('completion'), {
+      passed: this.errors.length === 0, errors: this.errors.map(error => error instanceof Error ? error.message : String(error)), assessmentSha256,
+    }));
+    return { assessment: assessment ? structuredClone(assessment) : undefined, assessmentSha256, errors: [...this.errors] };
   }
 }

@@ -6,7 +6,15 @@ import { join } from 'node:path';
 import { repositoryPath, repositoryRoot } from '../support/paths';
 import { fileSha256 } from '../support/artifacts';
 import type { AndroidEnvironmentSnapshot, AndroidPreparation } from '../android-environment';
-import { AndroidEnvironmentMeasurement } from '../android-measurement';
+import { AndroidEnvironmentMeasurement as Measurement } from '../android-measurement';
+import { checkCLI, measurementIdentity, rehashPackage } from './android-product-environment';
+
+class AndroidEnvironmentMeasurement extends Measurement {
+  constructor(serial: string, output: string, toolchains: string) {
+    super(serial, output, toolchains);
+    this.bind(measurementIdentity({ measurementId: this.id }));
+  }
+}
 import { androidLifecycleCases, runAndroidLifecycleCase, withAndroidRetainedLifecycleFixture } from './android-retained-launch';
 import { AppiumClient } from '../support/webdriver';
 import { androidEventDetails, androidLogEvents } from '../android-events';
@@ -15,7 +23,108 @@ interface Fixture {
   root: string;
   fixtureDirectory: string;
   log: string;
+  diagnostic: string;
   environment: NodeJS.ProcessEnv;
+}
+
+export type FakeAdbDiagnosticStage = 'fixture-create' | 'fake-child-launch' | 'fake-child-exit' | 'log-producer-append';
+export type FakeAdbExitCategory = 'success' | 'nonzero' | 'signal' | 'launch-error';
+export type FakeAdbFixturePathCategory = 'expected-owned-path' | 'absent' | 'mismatched';
+export interface FakeAdbDiagnosticEvent {
+  stage: FakeAdbDiagnosticStage;
+  logExists: boolean;
+  fixturePathCategory: FakeAdbFixturePathCategory;
+  childExitCategory?: FakeAdbExitCategory;
+}
+export interface FakeAdbDiagnostic {
+  schema: 1;
+  fixtureCreate: FakeAdbDiagnosticEvent;
+  children: Array<{ events: FakeAdbDiagnosticEvent[] }>;
+}
+
+const fakeAdbDiagnosticEventKeys = new Set(['stage', 'logExists', 'fixturePathCategory', 'childExitCategory']);
+const fakeAdbDiagnosticStages: FakeAdbDiagnosticStage[] = ['fake-child-launch', 'log-producer-append', 'fake-child-exit'];
+const fakeAdbDiagnosticOrder = new Map(fakeAdbDiagnosticStages.map((stage, index) => [stage, index]));
+
+function invalidFakeAdbDiagnostic(): never {
+  throw new Error('FAKE_ADB_DIAGNOSTIC: required fixture, child, append, and exit witnesses missing');
+}
+
+function isFakeAdbDiagnosticStage(value: unknown): value is FakeAdbDiagnosticStage {
+  return value === 'fixture-create' || value === 'fake-child-launch' || value === 'fake-child-exit' || value === 'log-producer-append';
+}
+
+function isFakeAdbExitCategory(value: unknown): value is FakeAdbExitCategory {
+  return value === 'success' || value === 'nonzero' || value === 'signal' || value === 'launch-error';
+}
+
+function isFakeAdbFixturePathCategory(value: unknown): value is FakeAdbFixturePathCategory {
+  return value === 'expected-owned-path' || value === 'absent' || value === 'mismatched';
+}
+
+function validateFakeAdbDiagnosticEvent(value: unknown, stage?: FakeAdbDiagnosticStage): FakeAdbDiagnosticEvent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalidFakeAdbDiagnostic();
+  const event = value as Record<string, unknown>;
+  if ([...Object.keys(event)].some(key => !fakeAdbDiagnosticEventKeys.has(key))) return invalidFakeAdbDiagnostic();
+  if (!isFakeAdbDiagnosticStage(event.stage)) return invalidFakeAdbDiagnostic();
+  if (stage !== undefined && event.stage !== stage) return invalidFakeAdbDiagnostic();
+  if (typeof event.logExists !== 'boolean' || !isFakeAdbFixturePathCategory(event.fixturePathCategory)) return invalidFakeAdbDiagnostic();
+  const childExitCategory = event.childExitCategory;
+  if (childExitCategory !== undefined && !isFakeAdbExitCategory(childExitCategory)) return invalidFakeAdbDiagnostic();
+  if (event.stage !== 'fake-child-exit' && childExitCategory !== undefined) return invalidFakeAdbDiagnostic();
+  if (event.stage === 'fake-child-exit' && childExitCategory === undefined) return invalidFakeAdbDiagnostic();
+  if (event.stage === 'log-producer-append' && event.logExists !== true) return invalidFakeAdbDiagnostic();
+  const result: FakeAdbDiagnosticEvent = {
+    stage: event.stage,
+    logExists: event.logExists,
+    fixturePathCategory: event.fixturePathCategory,
+  };
+  if (Object.hasOwn(event, 'childExitCategory')) result.childExitCategory = childExitCategory;
+  return result;
+}
+
+export function validateFakeAdbDiagnostic(value: unknown): asserts value is FakeAdbDiagnostic {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalidFakeAdbDiagnostic();
+  const diagnostic = value as Record<string, unknown>;
+  if (Object.keys(diagnostic).length !== 3 || diagnostic.schema !== 1 || !Array.isArray(diagnostic.children)) return invalidFakeAdbDiagnostic();
+  const fixtureCreate = validateFakeAdbDiagnosticEvent(diagnostic.fixtureCreate, 'fixture-create');
+  if (fixtureCreate.logExists || fixtureCreate.fixturePathCategory !== 'expected-owned-path') return invalidFakeAdbDiagnostic();
+  let firstLaunched = false;
+  let firstLaunchComplete = false;
+  for (const child of diagnostic.children) {
+    if (!child || typeof child !== 'object' || Array.isArray(child)) return invalidFakeAdbDiagnostic();
+    const childRecord = child as Record<string, unknown>;
+    if (Object.keys(childRecord).length !== 1 || !Array.isArray(childRecord.events)) return invalidFakeAdbDiagnostic();
+    let previousOrder = -1;
+    let launch: FakeAdbDiagnosticEvent | undefined;
+    let append: FakeAdbDiagnosticEvent | undefined;
+    let exit: FakeAdbDiagnosticEvent | undefined;
+    for (const value of childRecord.events) {
+      const event = validateFakeAdbDiagnosticEvent(value);
+      if (event.stage === 'fake-child-exit' && exit) return invalidFakeAdbDiagnostic();
+      if (event.stage === 'fake-child-launch' && launch) return invalidFakeAdbDiagnostic();
+      if (event.stage === 'log-producer-append' && append) return invalidFakeAdbDiagnostic();
+      const order = fakeAdbDiagnosticOrder.get(event.stage as Exclude<FakeAdbDiagnosticStage, 'fixture-create'>);
+      if (order === undefined || order <= previousOrder) return invalidFakeAdbDiagnostic();
+      previousOrder = order;
+      if (event.stage === 'fake-child-launch') launch = event;
+      if (event.stage === 'log-producer-append') append = event;
+      if (event.stage === 'fake-child-exit') exit = event;
+    }
+    if (!launch) {
+      if (childRecord.events.length !== 1 || exit?.childExitCategory !== 'launch-error') return invalidFakeAdbDiagnostic();
+      continue;
+    }
+    if (!firstLaunched) {
+      firstLaunched = true;
+      firstLaunchComplete = append?.logExists === true
+        && append.fixturePathCategory === 'expected-owned-path'
+        && exit?.logExists === true
+        && exit.fixturePathCategory === 'expected-owned-path'
+        && exit.childExitCategory === 'success';
+    }
+  }
+  if (!firstLaunched || !firstLaunchComplete) return invalidFakeAdbDiagnostic();
 }
 interface Harness {
   createFixture(): Promise<Fixture>;
@@ -162,8 +271,10 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         assert.equal(calls.filter(call => call.path === '/session').length, 1);
         assert.equal(calls.filter(call => call.method === 'DELETE').length, 0);
         assert.deepEqual(await operations(), []);
-        if (name === 'healthy-warm') await measurement.finish();
-        else await assert.rejects(() => measurement.finish(), /measurement failed/u);
+        (measurement as any).identity = measurementIdentity({ measurementId: measurement.id });
+        const outcome = await measurement.finish();
+        assert.deepEqual(outcome.errors, []);
+        assert.equal(outcome.assessment?.status, name === 'healthy-warm' ? 'PASS' : 'FAIL');
         const result = JSON.parse(await readFile(join(fixture.root, 'android-environment-check.json'), 'utf8'));
         assert.equal(result.passed, name === 'healthy-warm');
         assert.deepEqual(result.normalRetirements, []);
@@ -442,11 +553,11 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     await state(fixture, { enabled: 0, propertyResponses: { 'ro.build.id': value } });
     const preparation = prepare(fixture);
     assert.equal(preparation.passed, false, name);
-    assert.match(preparation.stderr, /required system property ro.build.id/u);
+    assert.equal(preparation.stderr, 'ANDROID_ENVIRONMENT_INVALID: required environment evidence or operation failed\n');
     assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
     const snapshot = await harness.snapshot(fixture, 'valid', join(fixture.root, 'before.json'), join(fixture.root, 'diagnostics.json'));
     assert.equal(snapshot.passed, false, name);
-    assert.match(snapshot.stderr, /required system property ro.build.id/u);
+    assert.equal(snapshot.stderr, 'ANDROID_ENVIRONMENT_INVALID: required environment evidence or operation failed\n');
     assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
   });
   for (const [name, value] of [['ro.build.version.sdk', '34\n'], ['ro.kernel.qemu', '0\n']]) {
@@ -486,7 +597,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     await state(fixture, { enabled: 0, propertyChangeOnDisable: { 'ro.build.id': 'CHANGED\n' } });
     const result = prepare(fixture);
     assert.equal(result.passed, false);
-    assert.match(result.stderr, /preparation provenance changed/u);
+    assert.equal(result.stderr, 'ANDROID_ENVIRONMENT_INVALID: required environment evidence or operation failed\n');
     assert.equal((await readFile(fixture.log, 'utf8')).split('\n').filter((line) => line.includes('disable-user')).length, 1);
   });
   test('rejects changed named system identity after measurement', async () => {
@@ -502,7 +613,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     await state(fixture, value);
     const result = prepare(fixture);
     assert.equal(result.passed, false, result.stderr);
-    assert.match(result.stderr, /Shell cannot change component state/u);
+    assert.equal(result.stderr, 'ANDROID_ENVIRONMENT_INVALID: required environment evidence or operation failed\n');
     assert.deepEqual(JSON.parse(await readFile(join(fixture.fixtureDirectory, 'valid-vending.json'), 'utf8')), value);
     const preparation = JSON.parse(await readFile(join(fixture.root, 'preparation.json'), 'utf8')) as AndroidPreparation;
     assert.equal(preparation.before.identity?.enabled, String(enabled));
@@ -530,7 +641,13 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const result = prepare(fixture);
     assert.equal(result.passed, false, name);
     const allowed = name.includes('disable');
-    assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), allowed, result.stderr);
+    const requests = await readFile(fixture.log, 'utf8');
+    assert.equal(requests.includes('disable-user'), allowed, result.stderr);
+    if (name === 'wrong AVD') {
+      assert.equal(requests, '-s emulator-5554 emu avd name\n');
+      const diagnostic = JSON.parse(await readFile(fixture.diagnostic, 'utf8')) as FakeAdbDiagnostic;
+      assert.doesNotThrow(() => validateFakeAdbDiagnostic(diagnostic));
+    }
   });
   test('refuses missing ownership, wrong SDK and ambiguous AVD config before mutation', async () => {
     for (const change of ['ownership', 'sdk', 'avd']) {
@@ -653,7 +770,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     await writeFile(operations, '[]');
     const check = async (log: string) => {
       await writeFile(logFile, log);
-      const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operations, '--output', output]);
+      const result = checkCLI(fixture, { before, after, log: logFile, operations, output });
       return { ...result, report: JSON.parse(await readFile(output, 'utf8')) };
     };
     const log = marker('08.000', 'START') + body + marker('10.000', 'END');
@@ -746,6 +863,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal(mixed.report.forcedRestartEvents.length, 1);
     const last = JSON.parse(await readFile(after, 'utf8')) as AndroidEnvironmentSnapshot;
     last.packages['com.google.android.gms'].dependencyConfig.enabledComponents = ['synthetic.config.change'];
+    rehashPackage(last.packages['com.google.android.gms']);
     await writeFile(after, JSON.stringify(last));
     const drift = await check(log);
     assert.equal(drift.passed, false);
@@ -768,7 +886,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     await writeFile(operations, '[]');
     const check = async (log: string) => {
       await writeFile(logFile, log);
-      const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operations, '--output', output]);
+      const result = checkCLI(fixture, { before, after, log: logFile, operations, output });
       return { ...result, report: JSON.parse(await readFile(output, 'utf8')) };
     };
     const recordedDex = '         1789081242.806  5192  5192 I artd    : Dex parent of /product/priv-app/PrebuiltGmsCore/PrebuiltGmsCore.apk is not writable: Read-only file system\n';
@@ -797,6 +915,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     ]) assert.equal((await check(log)).passed, false, JSON.stringify(log));
     const snapshot = JSON.parse(await readFile(after, 'utf8')) as AndroidEnvironmentSnapshot;
     snapshot.packages['com.google.android.gms'].dependencyConfig.enabledComponents = ['com.google.android.gms.fonts.provider.FontsProvider'];
+    rehashPackage(snapshot.packages['com.google.android.gms']);
     await writeFile(after, JSON.stringify(snapshot));
     const persistent = await check(recordedStart + recordedEnd);
     assert.equal(persistent.passed, false);
@@ -811,7 +930,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const log = join(fixture.root, `${run}.log`);
       const setup = await readFile(repositoryPath(`tests/mobile/unit/fixtures/android-recorded-${run}-setup.log`), 'utf8');
       await writeFile(log, `${setup}09-10 14:25:00.000 2000 2000 I HerdrMeasure: android-test START\n09-10 14:26:00.000 2000 2000 I HerdrMeasure: android-test END\n`);
-      const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', log, '--operations', operations, '--output', join(fixture.root, 'check.json')]);
+      const result = checkCLI(fixture, { before, after, log, operations, output: join(fixture.root, 'check.json') });
       assert.equal(result.passed, true, result.stderr);
     }
   });
@@ -847,7 +966,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const { before, after } = await snapshots(fixture);
     const operations = join(fixture.root, 'operations.json');
     await writeFile(operations, '[]');
-    const check = (log: string) => cli(fixture, ['check', '--before', before, '--after', after, '--log', log, '--operations', operations, '--output', join(fixture.root, 'check.json')]);
+    const check = (log: string) => checkCLI(fixture, { before, after, log, operations, output: join(fixture.root, 'check.json') });
     for (const path of [join(fixture.root, 'missing.log'), fixture.root]) assert.equal(check(path).passed, false);
     const logFile = join(fixture.root, 'interval.log');
     for (const log of ['', benign, marker('00.000', 'START') + marker('00.100', 'START') + marker('30.000', 'END')]) {
@@ -898,7 +1017,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const output = join(fixture.root, 'check.json');
       await writeFile(logFile, entry.log);
       await writeFile(operations, JSON.stringify(entry.operations));
-      const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operations, '--output', output]);
+      const result = checkCLI(fixture, { before, after, log: logFile, operations, output });
       const report = JSON.parse(await readFile(output, 'utf8'));
       assert.equal(result.passed, entry.fatal === 0, entry.name);
       assert.equal(report.forcedRestartEvents.length, entry.fatal, entry.name);
@@ -915,7 +1034,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const termination = marker('08.000', 'OP_BEGIN cold com.android.chrome 6538')
       + '09-10 08:45:09.000 546 1761 I ActivityManager: Killing 6538:com.android.chrome/u0a146 (adj 0): stop com.android.chrome due to from pid 2000\n'
       + chromeDeath + marker('10.000', 'OP_END cold com.android.chrome 6538');
-    const check = () => cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operationsFile, '--output', join(fixture.root, 'check.json')]);
+    const check = () => checkCLI(fixture, { before, after, log: logFile, operations: operationsFile, output: join(fixture.root, 'check.json') });
     for (const [operations, log, passed] of [
       [[operation], termination, true], [[], termination, false], [[{ ...operation, succeeded: false }], termination, false],
       [[{ ...operation, pid: '7777' }], termination, false], [[{ ...operation, packageName: 'com.example.other' }], termination, false],
@@ -973,7 +1092,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         const operationsFile = join(fixture.root, 'operations.json');
         await writeFile(logFile, log);
         await writeFile(operationsFile, JSON.stringify(operations));
-        const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operationsFile, '--output', join(fixture.root, 'check.json')]);
+        const result = checkCLI(fixture, { before, after, log: logFile, operations: operationsFile, output: join(fixture.root, 'check.json') });
         const check = JSON.parse(await readFile(join(fixture.root, 'check.json'), 'utf8'));
         assert.equal(result.passed, variant === 'planned', JSON.stringify(check));
         if (variant === 'planned') assert.deepEqual(check.forcedRestartEvents, []);
@@ -1017,7 +1136,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       else {
         assert.equal(result.passed, false);
         assert.ok(dump.includes('[REDACTED]'));
-        assert.match(result.stderr, /sanitized|source path does not match/u);
+        assert.equal(result.stderr, 'ANDROID_ENVIRONMENT_INVALID: required environment evidence or operation failed\n');
         assert.ok(entries.filter((entry) => entry.file.includes(run) && /trichrome|libraries/u.test(entry.file)).every((entry) => entry.classification === 'recorded-sanitized'));
         const alias = '/data/app/hypothetical-pr-library';
         for (const suffix of ['dump', 'list']) {
@@ -1093,7 +1212,8 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         await state(fixture, { absent: true, children, ...changes });
         if (variant === 'missing child Killing' || variant === 'unobserved child') {
           await measurement.terminate('com.android.chrome', '6538');
-          await assert.rejects(measurement.finish(), /measurement failed/u);
+          const outcome = await measurement.finish();
+          assert.equal(outcome.assessment?.status, 'FAIL');
           const check = JSON.parse(await readFile(join(fixture.root, 'android-environment-check.json'), 'utf8'));
           assert.equal(check.passed, false);
           assert.ok(check.forcedRestartEvents.some((line: string) => line.includes(variant === 'unobserved child' ? '6701' : '6700')));
@@ -1125,7 +1245,8 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
     try {
       await assert.rejects(measurement.begin(), /collector/u);
-      await assert.rejects(measurement.finish(), /no active measurement/u);
+      const outcome = await measurement.finish();
+      assert.ok(outcome.errors.some(error => /no active measurement/u.test(String(error))));
       const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
       assert.ok(collector.failure);
     } finally {
@@ -1148,7 +1269,35 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
     const check = await harness.check(fixture, before, after);
     assert.equal(check.passed, false);
-    assert.match(check.issues.join(';'), /evidence unavailable/u);
+    assert.match(check.issues.join(';'), /input unavailable|snapshot invalid/u);
+  });
+  test('SM59 report and qualification preserve the immutable assessment and current row binding', async () => {
+    const fixture = await harness.createFixture();
+    const { before, after } = await snapshots(fixture);
+    const snapshot = JSON.parse(await readFile(after, 'utf8')) as AndroidEnvironmentSnapshot;
+    snapshot.packages['com.google.android.gms'].dependencyConfig.enabledComponents = ['com.google.android.gms.fixture.ComponentChanged'];
+    rehashPackage(snapshot.packages['com.google.android.gms']);
+    await writeFile(after, JSON.stringify(snapshot));
+    const log = join(fixture.root, 'report.log'), operations = join(fixture.root, 'report-operations.json'), output = join(fixture.root, 'report-check.json');
+    await writeFile(log, marker('00.000', 'START') + marker('30.000', 'END')); await writeFile(operations, '[]');
+    const report = checkCLI(fixture, { before, after, log, operations, output }, 'report');
+    assert.equal(report.passed, true, report.stderr);
+    const strict = checkCLI(fixture, { before, after, log, operations, output }, 'qualification');
+    assert.equal(strict.passed, false);
+    const checkPath = join(report.directory, 'android-environment-check.json');
+    const original = await readFile(checkPath, 'utf8');
+    const alteredArgs = [...report.args]; alteredArgs[alteredArgs.indexOf('--attempt') + 1] = '1';
+    assert.equal(cli(fixture, alteredArgs).passed, false);
+    assert.equal(await readFile(checkPath, 'utf8'), original);
+    for (const field of ['status', 'schema', 'counts']) {
+      const changed = JSON.parse(original);
+      if (field === 'status') changed.status = 'PASS';
+      if (field === 'schema') changed.schema = 2;
+      if (field === 'counts') changed.eventCounts.rawEvents++;
+      const bytes = JSON.stringify(changed); await writeFile(checkPath, bytes);
+      assert.equal(cli(fixture, report.args).passed, false, field);
+      assert.equal(await readFile(checkPath, 'utf8'), bytes);
+    }
   });
   test('Android-only declarations and both setup paths preserve policy, pinning and read-only postchecks', async () => {
     const policy = JSON.parse(await readFile(repositoryPath('tests/mobile/toolchains.json'), 'utf8')).android;
@@ -1161,11 +1310,23 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const source = await readFile(repositoryPath(path), 'utf8');
       assert.match(source, /android-environment\.ts prepare/u);
       assert.doesNotMatch(source, /android-environment\.ts snapshot|logcat -c|google-apis-without-play-store/u);
-      assert.match(source, /--operations "\$MOBILE_OUTPUT\/android-environment-operations\.json"/u);
+      const assertPostcheck = (text: string) => {
+        const start = text.indexOf('name: Validate immutable Android environment report');
+        const end = text.indexOf('name: Sanitize bounded diagnostics');
+        assert.ok(start >= 0 && end > start);
+        const post = text.slice(start, end);
+        assert.match(post, /android-environment\.ts check --contract report/u);
+        assert.match(post, /--directory "\$MOBILE_OUTPUT"/u);
+        assert.match(post, /--identity "\$MOBILE_OUTPUT\/android-environment-identity\.json"/u);
+        assert.doesNotMatch(post, /--output|--operations|disable-user|adb |prepare|>.*android-environment-check/u);
+      };
+      assertPostcheck(source);
+      for (const binding of ['--directory "$MOBILE_OUTPUT"', '--identity "$MOBILE_OUTPUT/android-environment-identity.json"']) assert.throws(() => assertPostcheck(source.replace(binding, '--removed binding')));
+      assert.throws(() => assertPostcheck(source.replace('check --contract report', 'check --contract report --output overwrite.json')));
+      assert.throws(() => assertPostcheck(source.replace('name: Validate immutable Android environment report', 'name: Removed')));
       assert.match(source, /apksigner verify --verbose --print-certs/u);
       assert.match(source, /sha256sum --check --status/u);
-      const post = source.slice(source.indexOf('name: Verify Android environment stability'), source.indexOf('name: Sanitize bounded diagnostics'));
-      assert.doesNotMatch(post, /disable-user|adb |prepare/u);
+
     }
   });
   return tests;

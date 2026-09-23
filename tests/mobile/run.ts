@@ -30,7 +30,9 @@ import {
 } from './support/oracle';
 import { delay, isFatalDriverError } from './support/webdriver';
 import { AndroidPlatform } from './platforms/android';
-import { AndroidEnvironmentMeasurement } from './android-measurement';
+import { AndroidEnvironmentMeasurement, type AndroidMeasurementOutcome } from './android-measurement';
+import { FailureLedger, productStatus, validateMeasurementIdentity, type EnvironmentQualification, type MeasurementIdentity, type ResultFailure } from './support/mobile-result';
+import { androidProductImpact, validateProductObservations, type ProductObservations } from './support/android-product';
 import { IOSPlatform } from './platforms/ios';
 import type { MobilePlatform, PlatformOptions, UpdateCompletionEvidence } from './platforms/types';
 import { repositoryPath, repositoryRoot } from './support/paths';
@@ -76,8 +78,13 @@ interface FixtureState {
 }
 
 interface RunResult {
-  schema: 1;
-  result: 'passed' | 'product failure' | 'infrastructure failure' | 'blocked';
+  schema: 2;
+  product: { status: 'PASS' | 'FAIL' | 'INDETERMINATE'; categories: string[] };
+  identity?: MeasurementIdentity;
+  environment_qualification?: EnvironmentQualification;
+  finalization?: { status: 'PASS' | 'FAIL'; failures: ResultFailure[] };
+  primary_failure?: ResultFailure;
+  additional_failures?: ResultFailure[];
   platform: string;
   suite: string;
   baseline: string;
@@ -396,21 +403,19 @@ function platformFor(options: PlatformOptions): MobilePlatform {
   throw new Error('PLATFORM: MOBILE_PLATFORM must be android or ios');
 }
 
-async function reversePorts(info: FixtureInfo, serial: string): Promise<string[]> {
+async function reversePorts(info: FixtureInfo, serial: string, reversed: string[]): Promise<void> {
   if (!serial) throw new Error('ANDROID_TARGET: ANDROID_SERIAL is required');
   const ports = [new URL(info.app_url).port, ...info.relay_urls.map((value) => new URL(value.replace(/^wss:/, 'https:')).port)];
-  const reversed: string[] = [];
-  for (const port of ports) {
+  for (const port of [...new Set(ports)]) {
     if (!port) throw new Error('ANDROID_TARGET: fixture URL has no port');
     await command(process.env.ADB || 'adb', ['-s', serial, 'reverse', `tcp:${port}`, `tcp:${port}`]);
     reversed.push(port);
   }
-  return reversed;
 }
 
-async function removeReverses(serial: string, ports: string[]): Promise<void> {
+async function removeReverses(serial: string, ports: string[], attempt: (stage: string, operation: () => Promise<unknown>) => Promise<void>): Promise<void> {
   for (const port of ports) {
-    await command(process.env.ADB || 'adb', ['-s', serial, 'reverse', '--remove', `tcp:${port}`]).catch(() => undefined);
+    await attempt('reverse-removal', () => command(process.env.ADB || 'adb', ['-s', serial, 'reverse', '--remove', `tcp:${port}`]));
   }
 }
 
@@ -460,6 +465,7 @@ async function runUpgradeScenario(
   const beforeAuth = authEvidence(pairedState);
   qualification.observe({ ownership: beforeAuth });
   assertRelayOwnership(beforeAuth);
+  if (platform instanceof AndroidPlatform) platform.productCheckpoint('paired');
   await platform.captureSanitizedEvidence('paired');
   setStage('upgrade');
   await platform.clickWebText('Settings');
@@ -518,12 +524,13 @@ async function runUpgradeScenario(
   qualification.observe({ ownership: afterUpgradeAuth });
   assertRelayOwnership(afterUpgradeAuth);
   assertCredentialPreserved(beforeAuth, afterUpgradeAuth);
+  if (platform instanceof AndroidPlatform) platform.productCheckpoint('candidate');
   await platform.captureSanitizedEvidence('candidate');
   const finalBeforeAuth = authEvidence(await fixtureState(info));
   qualification.observe({ ownership: finalBeforeAuth });
   assertRelayOwnership(finalBeforeAuth);
   await platform.relaunchInstalledApp();
-  const finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  let finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
   let finalAuth = await reconnectAllRelays(info, finalBeforeAuth, budget);
   qualification.observe({ ownership: finalAuth });
   assertRelayOwnership(finalAuth);
@@ -568,7 +575,7 @@ async function runUpgradeScenario(
     assertRelayOwnership(beforeColdAuth);
     await platform.terminateInstalledApp();
     await platform.relaunchInstalledApp();
-    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+    finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
     const coldAuth = await reconnectAllRelays(info, beforeColdAuth, budget);
     qualification.observe({ ownership: coldAuth });
     assertRelayOwnership(coldAuth);
@@ -582,12 +589,13 @@ async function runUpgradeScenario(
       assertNoRelayDeploy(relay.deploy_app_update_count);
     }
   }
+  if (platform instanceof AndroidPlatform && suite === 'release') platform.productCheckpoint('lifecycle-complete');
   const reloadCount = Math.max(0, upgradeNavigationCount - 1);
   const lifecycleLaunchCount = Math.max(0, navigationIds.size - upgradeNavigationCount);
   assertBoundedReloads(reloadCount);
   if (lifecycleLaunchCount > 2) throw new Error(`RELOAD_BOUND_EXCEEDED: ${lifecycleLaunchCount} lifecycle launches exceed 2`);
   return {
-    schema: 1, result: 'passed', platform: platform.name, suite,
+    schema: 2, product: { status: 'PASS', categories: [] }, platform: platform.name, suite,
     baseline: baseline.name, candidate: bundleSet.candidate.name, origin: info.app_url,
     source_commit: bundleSet.candidate.provenance.sourceCommit,
     source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
@@ -636,6 +644,13 @@ function failureSnapshot(error: unknown, stage: string): QualificationFailureSna
   return { code, stage, message: message.startsWith(prefix) ? message.slice(prefix.length).trim() : message };
 }
 
+function freezeEvidence(platform: MobilePlatform): Record<string, unknown> {
+  const snapshot = structuredClone(platform.evidenceSnapshot());
+  const driver = snapshot.driver as Record<string, unknown> | undefined;
+  if (driver) snapshot.driver = { ...driver, firstFatal: driver.firstFatal ?? null };
+  return snapshot;
+}
+
 async function main(): Promise<void> {
   const bundleSetFile = repositoryPath(required('--bundle-set'));
   const bundleSetDirectory = resolve(bundleSetFile, '..');
@@ -667,16 +682,31 @@ async function main(): Promise<void> {
   const fixtureProcess = startFixture(bundleSet, privateDir, infoFile);
   let fixtureInfo: FixtureInfo | undefined;
   let platform: MobilePlatform | undefined;
-  let reverse: string[] = [];
-  let result: RunResult;
-  let cleanupFailure: unknown;
+  const reverse: string[] = [];
+  let result!: RunResult;
+  const failures = new FailureLedger();
+  const finalizationFailures: ResultFailure[] = [];
+  const attempt = async (stage: string, operation: () => Promise<unknown>) => {
+    try { await operation(); } catch (error) {
+      failures.retain(error, stage, 'FINALIZATION');
+      finalizationFailures.push({ stage, category: 'FINALIZATION', message: error instanceof Error ? error.message : String(error) });
+    }
+  };
   let measurement: AndroidEnvironmentMeasurement | undefined;
   let measurementStarted = false;
-  let androidEnvironmentFailure: string | undefined;
+  let measured: AndroidMeasurementOutcome | undefined;
+  let identity: MeasurementIdentity = {
+    runId: process.env.GITHUB_RUN_ID || '', attempt: process.env.GITHUB_RUN_ATTEMPT || '', suite: suite as MeasurementIdentity['suite'],
+    platform: process.env.MOBILE_PLATFORM as MeasurementIdentity['platform'], baseline: baseline.name,
+    scenario: bundleSet.candidate.name === 'current-code-target' ? 'synthetic' : 'historical',
+    sourceCommit: bundleSet.candidate.provenance.sourceCommit, sourceRunHeadSha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || '',
+    candidateWebHash: bundleSet.candidate.identity.webHash, candidateBuild: bundleSet.candidate.identity.build, measurementId: 'ios-not-applicable',
+  };
   let stage: string = 'fixture';
   try {
+    validateMeasurementIdentity(identity);
     fixtureInfo = await waitForInfo(infoFile, 180_000, budget);
-    if (process.env.MOBILE_PLATFORM === 'android') reverse = await reversePorts(fixtureInfo, process.env.ANDROID_SERIAL || '');
+    if (process.env.MOBILE_PLATFORM === 'android') await reversePorts(fixtureInfo, process.env.ANDROID_SERIAL || '', reverse);
     const platformOptions: PlatformOptions = {
       origin: fixtureInfo.app_url,
       appiumUrl: process.env.APPIUM_URL || 'http://127.0.0.1:4723',
@@ -689,24 +719,33 @@ async function main(): Promise<void> {
     };
     platform = platformFor(platformOptions);
     const android = platform instanceof AndroidPlatform ? platform : undefined;
-    if (android) measurement = new AndroidEnvironmentMeasurement(platformOptions.deviceId || '', outputDir, repositoryPath('tests/mobile/toolchains.json'));
+    if (android) {
+      measurement = new AndroidEnvironmentMeasurement(platformOptions.deviceId || '', outputDir, repositoryPath('tests/mobile/toolchains.json'));
+      identity = { ...identity, measurementId: measurement.id };
+      measurement.bind(identity);
+    }
     result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; }, budget, async () => {
       if (!android || !measurement) return;
       await measurement.begin();
       measurementStarted = true;
       android.environmentMeasurement = measurement;
+      android.activateProductRecorder(identity);
     });
-    result.evidence = platform.evidenceSnapshot();
+    android?.productCheckpoint('scenario-complete');
+    result.evidence = freezeEvidence(platform);
     result.budget = budget.snapshot();
   } catch (error) {
+    if (measurement && !measurementStarted) measured = measurement.failureOutcome();
+    const primaryError = measured?.errors[0] ?? error;
+    failures.retain(primaryError, stage, measured?.errors.length ? 'COLLECTION' : 'PRODUCT');
+    if (measured) for (const additional of measured.errors) failures.retain(additional, 'measurement-begin', 'COLLECTION');
     diagnostics.record({ phase: stage, operation: 'scenario-failure', detail: error instanceof Error ? error.message : String(error) });
-    await platform?.captureSanitizedEvidence('failure').catch(() => undefined);
+    await attempt('failure-capture', async () => platform?.captureSanitizedEvidence('failure'));
     const message = error instanceof Error ? error.message : String(error);
     const partialState = fixtureInfo ? await fixtureState(fixtureInfo).catch(() => undefined) : undefined;
     const failure = failureSnapshot(error, stage);
-    const product = /(RUNTIME_|PREMATURE_|PHONE_COMPLETION_|PHONE_PLAN_|CREDENTIAL_|PREFERENCE_|INVITATION_|RELOAD_|UNEXPECTED_|STANDALONE_|ORIGIN_|APP_NOT_INITIALIZED|REQUIRED_ASSET|BASELINE_)/u.test(message);
     result = {
-      schema: 1, result: product ? 'product failure' : 'infrastructure failure',
+      schema: 2, product: { status: 'FAIL', categories: ['REQUIRED_SCENARIO_FAILURE'] },
       platform: process.env.MOBILE_PLATFORM || 'unknown', suite,
       baseline: bundleSet.baselines[0]?.name || '', candidate: bundleSet.candidate.name,
       source_commit: bundleSet.candidate.provenance.sourceCommit,
@@ -716,57 +755,64 @@ async function main(): Promise<void> {
       failure_stage: failure?.stage || stage,
       failure: message,
       qualification_failure: failure,
-      evidence: platform?.evidenceSnapshot(),
+      evidence: platform ? freezeEvidence(platform) : undefined,
       fixture_state: partialState ? { active_release: partialState.active_release, requests: partialState.requests } : undefined,
       budget: budget.snapshot(),
     };
   } finally {
-    if (measurementStarted) {
-      try {
-        await measurement!.finish();
-      } catch (error) {
-        androidEnvironmentFailure = error instanceof Error ? error.message : String(error);
-        diagnostics.record({ phase: 'android-environment', operation: 'postcheck', detail: androidEnvironmentFailure });
+    if (measurementStarted) await attempt('android-measurement', async () => {
+      measured = await measurement!.finish();
+      for (const error of measured.errors) {
+        failures.retain(error, 'android-measurement', 'COLLECTION');
+        finalizationFailures.push({ stage: 'android-measurement', category: 'COLLECTION', message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+    await attempt('measurement-proof-freeze', async () => {
+      if (platform && result) result.evidence = freezeEvidence(platform);
+    });
+    await attempt('session-teardown', async () => platform?.stopOwnedResources());
+    if (fixtureInfo) await attempt('fixture-shutdown', () => control(fixtureInfo!, '/shutdown', 'POST'));
+    await attempt('fixture-stop', () => stopProcess(fixtureProcess.process));
+    await removeReverses(process.env.ANDROID_SERIAL || '', reverse, attempt);
+    await attempt('fixture-log', () => writeFile(resolve(outputDir, 'fixture.log'), redactText(fixtureProcess.output.join('')).slice(0, 100 * 1024 * 1024), { mode: 0o600 }));
+    await attempt('fixture-info-removal', () => rm(infoFile, { force: true }));
+    await attempt('private-removal', () => rm(privateDir, { recursive: true, force: true }));
+  }
+  result.identity = identity;
+  const measuredDriver = result.evidence?.driver as { firstFatal?: unknown; unusable?: boolean } | undefined;
+  if (measuredDriver?.firstFatal || measuredDriver?.unusable || result.evidence?.ownershipFailure || (result.product.status === 'PASS' && !measuredDriver)) {
+    result.product = { status: 'FAIL', categories: [...result.product.categories, 'STICKY_OBSERVATION_FAILURE'] };
+  }
+  if (identity.platform === 'android') {
+    result.environment_qualification = { platform: 'android', status: measured?.assessment?.status || 'UNKNOWN', collection: measured?.assessment?.collection.status || 'UNKNOWN',
+      assessmentSha256: measured?.assessmentSha256 || '', measurementId: identity.measurementId };
+    const observations = result.evidence?.productObservations as ProductObservations | undefined;
+    if (measured?.assessment) {
+      const impact = androidProductImpact(measured.assessment, observations);
+      result.evidence = { ...result.evidence, productEventRelations: impact.relations };
+      result.product = { status: productStatus([result.product.status, impact.status]), categories: [...result.product.categories, ...impact.categories] };
+    } else result.product = { status: 'FAIL', categories: [...result.product.categories, 'ENVIRONMENT_EVIDENCE_MISSING'] };
+    if (result.product.status === 'PASS') {
+      try { validateProductObservations(observations!, identity, measured?.assessment?.plannedOperations); } catch (error) {
+        failures.retain(error, 'observation-validation', 'OBSERVATION');
+        result.product = { status: 'FAIL', categories: ['OBSERVATION_INVALID'] };
       }
     }
-    try {
-      await platform?.stopOwnedResources();
-    } catch (error) {
-      cleanupFailure = error;
-      diagnostics.record({ phase: 'cleanup', operation: 'session-teardown', detail: error instanceof Error ? error.message : String(error) });
-    }
-    if (fixtureInfo) await control(fixtureInfo, '/shutdown', 'POST').catch(() => undefined);
-    await stopProcess(fixtureProcess.process);
-    await removeReverses(process.env.ANDROID_SERIAL || '', reverse);
-    const fixtureLog = redactText(fixtureProcess.output.join('')).slice(0, 100 * 1024 * 1024);
-    await writeFile(resolve(outputDir, 'fixture.log'), fixtureLog, { mode: 0o600 });
-    await rm(infoFile, { force: true });
-    await rm(privateDir, { recursive: true, force: true });
-  }
-  if (androidEnvironmentFailure !== undefined) {
-    result.android_environment_failure = androidEnvironmentFailure;
-    if (result.result === 'passed') {
-      result = { ...result, result: 'infrastructure failure', failure_stage: 'android-environment', failure: androidEnvironmentFailure };
-    }
-  }
-  if (cleanupFailure) {
-    result.evidence = platform?.evidenceSnapshot();
-    if (result.result === 'passed') {
-      const message = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
-      result = {
-        ...result,
-        result: 'infrastructure failure',
-        failure_stage: 'cleanup',
-        failure: message,
-      };
-    }
-  }
-  await diagnostics.write(resolve(outputDir, 'scenario-events.json'));
-  await writeSanitizedJson(resolve(outputDir, 'mobile-result.json'), result);
-  if (result.result !== 'passed') process.exitCode = 1;
+  } else result.environment_qualification = { platform: 'ios', applicability: 'NOT_APPLICABLE' };
+  await attempt('final-driver-snapshot', async () => {
+    const teardown = platform ? freezeEvidence(platform) : undefined;
+    result.evidence = { ...result.evidence, teardown };
+    const driver = teardown?.driver as { firstFatal?: unknown; unusable?: boolean } | undefined;
+    if (driver?.unusable || (!measuredDriver?.firstFatal && driver?.firstFatal)) throw new Error('MOBILE_FINALIZATION: sticky teardown driver failure');
+  });
+  await attempt('scenario-events-write', () => diagnostics.write(resolve(outputDir, 'scenario-events.json')));
+  result.finalization = { status: finalizationFailures.length ? 'FAIL' : 'PASS', failures: [...finalizationFailures] };
+  Object.assign(result, failures.snapshot());
+  await attempt('result-write', () => writeSanitizedJson(resolve(outputDir, 'mobile-result.json'), result));
+  if (result.product.status !== 'PASS' || finalizationFailures.length) process.exitCode = 1;
 }
 
-if (import.meta.main) main().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+if (import.meta.main) main().catch(() => {
+  process.stderr.write('MOBILE_RUN_FAILED: required scenario or evidence operation failed\n');
   process.exitCode = 1;
 });

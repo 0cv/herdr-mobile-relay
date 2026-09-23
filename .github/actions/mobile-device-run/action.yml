@@ -334,17 +334,21 @@ runs:
           --output "$MOBILE_OUTPUT" \
           --private-output "$MOBILE_PRIVATE"
       shell: bash
-    - name: Verify Android environment stability
+    - name: Validate immutable Android environment report
       if: always() && inputs.platform == 'android'
+      env:
+        EXPECTED_BASELINE: ${{ inputs.baseline }}
+        EXPECTED_SCENARIO: ${{ inputs.scenario }}
       run: |
         set -euo pipefail
         jq -e '.failure == null and .bytes > 0 and .bytes <= 104857600' "$MOBILE_OUTPUT/android-environment-collector.json"
-        bun tests/mobile/android-environment.ts check \
-          --before "$MOBILE_OUTPUT/android-environment-before.json" \
-          --after "$MOBILE_OUTPUT/android-environment-after.json" \
-          --log "$MOBILE_OUTPUT/android-qualification-logcat.log" \
-          --operations "$MOBILE_OUTPUT/android-environment-operations.json" \
-          --output "$MOBILE_OUTPUT/android-environment-check.json"
+        bundle_set="$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json"
+        if [ "$EXPECTED_SCENARIO" = synthetic ]; then bundle_set="$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json"; fi
+        bun tests/mobile/android-environment.ts check --contract report \
+          --directory "$MOBILE_OUTPUT" --identity "$MOBILE_OUTPUT/android-environment-identity.json" \
+          --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+          --suite "$MOBILE_SUITE" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+          --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
       shell: bash
     - name: Finalize owned XCTest diagnostics
       if: always() && inputs.platform == 'ios'
@@ -392,9 +396,20 @@ runs:
         done
         if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
         if [ -f "$RUNNER_TEMP/android-chrome-version.txt" ]; then cp "$RUNNER_TEMP/android-chrome-version.txt" "$MOBILE_OUTPUT/android-chrome-version.txt"; fi
-        if [ -f "$MOBILE_OUTPUT/mobile-result.json" ]; then
-          cat "$MOBILE_OUTPUT/mobile-result.json"
-        fi
+      shell: bash
+    - name: Publish bounded mobile summary
+      if: always()
+      env:
+        EXPECTED_BASELINE: ${{ inputs.baseline }}
+        EXPECTED_SCENARIO: ${{ inputs.scenario }}
+      run: |
+        set -euo pipefail
+        bundle_set="$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json"
+        if [ "$EXPECTED_SCENARIO" = synthetic ]; then bundle_set="$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json"; fi
+        bun tests/mobile/validate-environment.ts --result "$MOBILE_OUTPUT/mobile-result.json" --output "$MOBILE_OUTPUT/public-summary.json" \
+          --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+          --suite "$MOBILE_SUITE" --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+          --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
       shell: bash
     - name: Upload mobile evidence
       if: always()
@@ -402,7 +417,7 @@ runs:
       with:
         name: ${{ inputs.evidence_prefix }}-${{ inputs.platform }}-${{ inputs.baseline }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/herdr-mobile-output
-        if-no-files-found: warn
+        if-no-files-found: error
         retention-days: 1
     - name: Stop owned mobile processes and devices
       if: always()

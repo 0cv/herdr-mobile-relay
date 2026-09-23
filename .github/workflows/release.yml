@@ -140,6 +140,12 @@ jobs:
       actions: read
       contents: write
     steps:
+      - name: Require this release's strict mobile qualification
+        env:
+          QUALIFICATION_STATUS: ${{ needs.mobile.outputs.qualification_status }}
+        run: |
+          set -euo pipefail
+          test "$QUALIFICATION_STATUS" = PASS
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0

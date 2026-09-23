@@ -2,6 +2,13 @@ name: mobile-device-ci
 
 on:
   workflow_call:
+    outputs:
+      product_status:
+        value: ${{ jobs.smoke_environment_report.outputs.product_status }}
+      environment_status:
+        value: ${{ jobs.smoke_environment_report.outputs.environment_status }}
+      qualification_status:
+        value: ${{ jobs.gate.outputs.qualification_status }}
     inputs:
       artifact_run_id:
         description: Calling workflow run containing the exact release artifact
@@ -466,7 +473,7 @@ jobs:
           evidence_prefix: mobile-evidence-smoke
 
   smoke_evidence:
-    name: Validate controlled smoke evidence
+    name: Product smoke evidence
     needs: [provenance, prepare, smoke]
     if: always()
     runs-on: ubuntu-24.04
@@ -512,7 +519,7 @@ jobs:
           CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
           BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
         run: |
-          bun tests/mobile/validate-evidence.ts \
+          bun tests/mobile/validate-evidence.ts --contract product --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
             --directory smoke-evidence \
             --matrix "$SMOKE_MATRIX" \
             --suite smoke \
@@ -522,10 +529,105 @@ jobs:
             --candidate-identity "$CANDIDATE_IDENTITY" \
             --baseline-identities "$BASELINE_IDENTITIES"
 
+  smoke_environment_report:
+    name: Environment report publication (not qualification)
+    needs: [provenance, prepare, smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      product_status: ${{ steps.report.outputs.product_status }}
+      environment_status: ${{ steps.report.outputs.environment_status }}
+    steps:
+      - name: Require source and prepared matrix
+        env:
+          PROVENANCE_RESULT: ${{ needs.provenance.result }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+        run: |
+          set -euo pipefail
+          test "$PROVENANCE_RESULT" = success
+          test "$PREPARE_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.provenance.outputs.source_sha }}
+          fetch-depth: 1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: mobile-evidence-smoke-*-${{ github.run_attempt }}
+          path: smoke-evidence
+          merge-multiple: false
+      - name: Publish bounded complete-row environment report
+        id: report
+        env:
+          SMOKE_MATRIX: ${{ needs.prepare.outputs.smoke_matrix }}
+          CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
+          SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
+          CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
+          BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
+        run: |
+          bun tests/mobile/validate-environment.ts --contract product --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --directory smoke-evidence --matrix "$SMOKE_MATRIX" --suite smoke \
+            --candidate-commit "$CANDIDATE_COMMIT" --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
+            --candidate-web-hash "$CANDIDATE_WEB_HASH" --candidate-identity "$CANDIDATE_IDENTITY" \
+            --baseline-identities "$BASELINE_IDENTITIES" --output environment-summary.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: mobile-environment-summary-${{ github.run_attempt }}
+          path: environment-summary.json
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke_qualification:
+    name: Strict environment qualification
+    needs: [provenance, prepare, smoke_evidence, smoke_environment_report]
+    if: always() && (inputs.suite || 'release') == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require product and report delivery
+        env:
+          PRODUCT_RESULT: ${{ needs.smoke_evidence.result }}
+          REPORT_RESULT: ${{ needs.smoke_environment_report.result }}
+        run: |
+          set -euo pipefail
+          test "$PRODUCT_RESULT" = success
+          test "$REPORT_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.provenance.outputs.source_sha }}
+          fetch-depth: 1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: mobile-evidence-smoke-*-${{ github.run_attempt }}
+          path: smoke-evidence
+          merge-multiple: false
+      - name: Require complete strict qualification
+        env:
+          SMOKE_MATRIX: ${{ needs.prepare.outputs.smoke_matrix }}
+          CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
+          SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
+          CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
+          BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
+        run: |
+          bun tests/mobile/validate-environment.ts --require-pass --contract qualified --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --directory smoke-evidence --matrix "$SMOKE_MATRIX" --suite smoke \
+            --candidate-commit "$CANDIDATE_COMMIT" --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
+            --candidate-web-hash "$CANDIDATE_WEB_HASH" --candidate-identity "$CANDIDATE_IDENTITY" \
+            --baseline-identities "$BASELINE_IDENTITIES"
+
   release_smoke:
     name: Controlled release scenario (${{ matrix.platform }})
-    needs: [provenance, prepare, smoke, smoke_evidence]
-    if: needs.smoke_evidence.result == 'success' && (inputs.suite || 'release') == 'release'
+    needs: [provenance, prepare, smoke, smoke_evidence, smoke_qualification]
+    if: needs.smoke_evidence.result == 'success' && needs.smoke_qualification.result == 'success' && (inputs.suite || 'release') == 'release'
     strategy:
       fail-fast: true
       matrix: ${{ fromJSON(needs.prepare.outputs.smoke_matrix) }}
@@ -594,7 +696,7 @@ jobs:
           CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
           BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
         run: |
-          bun tests/mobile/validate-evidence.ts \
+          bun tests/mobile/validate-evidence.ts --contract qualified --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
             --directory release-evidence \
             --matrix "$SMOKE_MATRIX" \
             --suite release \
@@ -605,8 +707,8 @@ jobs:
             --baseline-identities "$BASELINE_IDENTITIES"
 
   device:
-    needs: [provenance, prepare, smoke, smoke_evidence, release_smoke, release_evidence]
-    if: always() && needs.prepare.result == 'success' && needs.provenance.result == 'success' && needs.smoke.result == 'success' && needs.smoke_evidence.result == 'success' && (needs.release_smoke.result == 'success' || (inputs.suite || 'release') != 'release') && (needs.release_evidence.result == 'success' || (inputs.suite || 'release') != 'release') && (inputs.suite || 'release') == 'release'
+    needs: [provenance, prepare, smoke, smoke_evidence, smoke_qualification, release_smoke, release_evidence]
+    if: always() && needs.prepare.result == 'success' && needs.provenance.result == 'success' && needs.smoke.result == 'success' && needs.smoke_evidence.result == 'success' && needs.smoke_qualification.result == 'success' && needs.release_smoke.result == 'success' && needs.release_evidence.result == 'success' && (inputs.suite || 'release') == 'release'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.device_matrix) }}
@@ -932,17 +1034,21 @@ jobs:
             --suite "$MOBILE_SUITE" \
             --output "$MOBILE_OUTPUT" \
             --private-output "$MOBILE_PRIVATE"
-      - name: Verify Android environment stability
+      - name: Validate immutable Android environment report
         if: always() && matrix.platform == 'android'
+        env:
+          EXPECTED_BASELINE: ${{ matrix.baseline }}
+          EXPECTED_SCENARIO: ${{ matrix.scenario }}
         run: |
           set -euo pipefail
           jq -e '.failure == null and .bytes > 0 and .bytes <= 104857600' "$MOBILE_OUTPUT/android-environment-collector.json"
-          bun tests/mobile/android-environment.ts check \
-            --before "$MOBILE_OUTPUT/android-environment-before.json" \
-            --after "$MOBILE_OUTPUT/android-environment-after.json" \
-            --log "$MOBILE_OUTPUT/android-qualification-logcat.log" \
-            --operations "$MOBILE_OUTPUT/android-environment-operations.json" \
-            --output "$MOBILE_OUTPUT/android-environment-check.json"
+          bundle_set="$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json"
+          if [ "$EXPECTED_SCENARIO" = synthetic ]; then bundle_set="$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json"; fi
+          bun tests/mobile/android-environment.ts check --contract report \
+            --directory "$MOBILE_OUTPUT" --identity "$MOBILE_OUTPUT/android-environment-identity.json" \
+            --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --suite "$MOBILE_SUITE" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+            --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
         shell: bash
       - name: Finalize owned XCTest diagnostics
         if: always() && matrix.platform == 'ios'
@@ -989,16 +1095,26 @@ jobs:
           done
           if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
           if [ -f "$RUNNER_TEMP/android-chrome-version.txt" ]; then cp "$RUNNER_TEMP/android-chrome-version.txt" "$MOBILE_OUTPUT/android-chrome-version.txt"; fi
-          if [ -f "$MOBILE_OUTPUT/mobile-result.json" ]; then
-            cat "$MOBILE_OUTPUT/mobile-result.json"
-          fi
+      - name: Publish bounded mobile summary
+        if: always()
+        env:
+          EXPECTED_BASELINE: ${{ matrix.baseline }}
+          EXPECTED_SCENARIO: ${{ matrix.scenario }}
+        run: |
+          set -euo pipefail
+          bundle_set="$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json"
+          if [ "$EXPECTED_SCENARIO" = synthetic ]; then bundle_set="$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json"; fi
+          bun tests/mobile/validate-environment.ts --result "$MOBILE_OUTPUT/mobile-result.json" --output "$MOBILE_OUTPUT/public-summary.json" \
+            --bundle-set "$bundle_set" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --suite "$MOBILE_SUITE" --platform "$MOBILE_PLATFORM" --baseline "$EXPECTED_BASELINE" --scenario "$EXPECTED_SCENARIO" \
+            --source-run-head-sha "$MOBILE_SOURCE_RUN_HEAD_SHA"
       - name: Upload mobile evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-evidence-full-${{ matrix.platform }}-${{ matrix.baseline }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/herdr-mobile-output
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 1
       - name: Stop owned mobile processes and devices
         if: always()
@@ -1017,10 +1133,12 @@ jobs:
           rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}" || true
 
   gate:
-    needs: [provenance, prepare, smoke, smoke_evidence, release_smoke, release_evidence, device]
+    needs: [provenance, prepare, smoke, smoke_evidence, smoke_environment_report, smoke_qualification, release_smoke, release_evidence, device]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      qualification_status: ${{ steps.qualification.outputs.qualification_status }}
     steps:
       - name: Check out the verified source for final evidence validation
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
@@ -1057,6 +1175,8 @@ jobs:
           PREPARE_RESULT: ${{ needs.prepare.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
           SMOKE_EVIDENCE_RESULT: ${{ needs.smoke_evidence.result }}
+          REPORT_RESULT: ${{ needs.smoke_environment_report.result }}
+          QUALIFICATION_RESULT: ${{ needs.smoke_qualification.result }}
           RELEASE_SMOKE_RESULT: ${{ needs.release_smoke.result }}
           RELEASE_EVIDENCE_RESULT: ${{ needs.release_evidence.result }}
           DEVICE_RESULT: ${{ needs.device.result }}
@@ -1067,11 +1187,14 @@ jobs:
           test "$PREPARE_RESULT" = success
           test "$SMOKE_RESULT" = success
           test "$SMOKE_EVIDENCE_RESULT" = success
+          test "$REPORT_RESULT" = success
           if [ "$EXPECTED_SUITE" = release ]; then
+            test "$QUALIFICATION_RESULT" = success
             test "$RELEASE_SMOKE_RESULT" = success
             test "$RELEASE_EVIDENCE_RESULT" = success
             test "$DEVICE_RESULT" = success
           else
+            test "$QUALIFICATION_RESULT" = skipped
             test "$RELEASE_SMOKE_RESULT" = skipped
             test "$RELEASE_EVIDENCE_RESULT" = skipped
             test "$DEVICE_RESULT" = skipped
@@ -1090,7 +1213,7 @@ jobs:
           SYNTHETIC_BASELINE_IDENTITY: ${{ needs.prepare.outputs.synthetic_baseline_identity }}
           EXPECTED_SUITE: ${{ inputs.suite || 'release' }}
         run: |
-          bun tests/mobile/validate-evidence.ts \
+          bun tests/mobile/validate-evidence.ts --contract qualified --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
             --directory evidence \
             --matrix "$DEVICE_MATRIX" \
             --suite "$EXPECTED_SUITE" \
@@ -1102,3 +1225,14 @@ jobs:
             --synthetic-candidate-identity "$SYNTHETIC_CANDIDATE_IDENTITY" \
             --baseline-identities "$BASELINE_IDENTITIES" \
             --synthetic-baseline-identity "$SYNTHETIC_BASELINE_IDENTITY"
+      - name: Publish qualified workflow outcome
+        id: qualification
+        env:
+          EXPECTED_SUITE: ${{ inputs.suite || 'release' }}
+        run: |
+          set -euo pipefail
+          if [ "$EXPECTED_SUITE" = release ]; then
+            echo 'qualification_status=PASS' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualification_status=NOT_REQUESTED' >> "$GITHUB_OUTPUT"
+          fi

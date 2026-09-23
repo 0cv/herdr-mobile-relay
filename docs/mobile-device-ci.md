@@ -4,6 +4,83 @@
 
 The check workflow passes its exact `release-bundles` artifact to `.github/workflows/mobile-ci.yml` after the bundle job completes. Every device qualification first runs one controlled Android and iOS smoke against the latest historical baseline (`0.20.10`); a release request then runs one complete release scenario per platform before the requested full matrix. A push to `dev` stops after the controlled latest-baseline smoke, while `main` and pull requests targeting `main` continue through the full Android and iOS release suite across all historical baselines. The release device matrix adds the current-code synthetic pair once per platform, instead of repeating it for every historical baseline. Smoke matrices remain historical-only. Each matrix entry provisions its own disposable device and Appium session. The release workflow invokes the same reusable workflow for release tags and waits for the full suite against the exact release artifact before publication. These CI paths use GitHub-hosted runners with read-only permissions and no secrets.
 
+## Product result and environment qualification
+
+The schema-2 mobile result separates `product.status` (PASS, FAIL or
+INDETERMINATE), `environment_qualification`, and `finalization.status`. Android
+qualification is PASS, FAIL or UNKNOWN; iOS explicitly reports NOT_APPLICABLE.
+The runner exits successfully only for product PASS with successful required
+collection, cleanup and evidence emission. Cleanup failures cannot erase the
+original scenario/driver failure. Measurement END and collection finish before
+native teardown; the result retains a by-value pre-teardown observation receipt
+and a separate teardown snapshot.
+
+Ordinary smoke can pass with environment FAIL only for completely validated GMS
+user-0 enabled/disabled-component drift with stable remaining package, dependency,
+image and provenance fields. Component comparisons use complete arrays and
+recomputed canonical hashes, not public projections or counts. Chrome/Trichrome
+drift, changed dependency identity, firstFatal, ownership/session/target loss,
+invalid inspection or collection still blocks product smoke. Unknown child
+relation is INDETERMINATE, also blocking: different browser and child PIDs, later
+HTTP success, `isolated not needed`, or an unknown initiator do not prove a death
+unrelated. Existing complete normal-retirement and exact planned-cold policies
+remain unchanged; no general signal/exit-zero exemption is introduced.
+
+The recorder is activated by the runner, not by ordinary driver admission. It
+retains actual owner-object ordinals, native birth/kernel capability, bounded
+inspection brackets, read/mutation receipts and the exact measured cold operation.
+Each phase requires the reads and transitions performed by that scenario, with
+consecutive operation counters and fresh inspection references. Initial install,
+pairing navigation, asynchronous upgrade activation and warm/cold launch are
+explicit transitions; document changes inside a read remain failures. The final
+release checkpoint may reuse the immediately preceding lifecycle checkpoint
+because no driver operation runs between them. Both driver snapshots require
+explicit state fields, including the absence or presence of a first fatal error.
+Owned-loss relation uses the retained owner segment plus measured log boundaries,
+process inventories and, for a new cold owner, an unambiguous process-start record.
+Clock-domain ambiguity, missing bounds or PID reuse cannot establish ownership.
+These are bounded relations, not exact kernel-birth timestamps or child causality.
+It is limited to 1,000 combined records and 8 MiB; overflow fails rather than
+truncating. Coverage is bounded operations, not continuous renderer attribution.
+The historical child5820 case remains product INDETERMINATE / environment FAIL;
+its target relation is unproved and no historical result is rewritten.
+
+`android-environment.ts check` requires `--contract report|qualification` and
+explicit current-run, attempt, suite, baseline, scenario, prepared bundle and head
+arguments. It recomputes and compares the immutable schema-3 runner assessment;
+neither outer postcheck overwrites it. Input hashes bind sanitized persisted
+bytes; invalid UTF-8 is rejected before decoding can change their identity.
+Collector `bytes` counts persisted sanitized log bytes; `acquiredBytes` records
+the separate raw acquisition count. Report mode permits a complete negative
+assessment, never missing or invalid collection. Qualification mode additionally requires PASS.
+`validate-evidence.ts --contract product|qualified` validates the complete expected
+matrix and exact source/build/candidate/run/attempt identities. Both contracts
+retain the installed-provider, runtime, fault, credential and preference checks.
+The offline Android validator checks public installed-producer manifest/hash and
+resolver parity; it does not open private APPIUM_HOME state or run the installer.
+
+The reusable workflow exposes **Product smoke evidence**, **Environment report
+publication (not qualification)** and release-only **Strict environment
+qualification**. Report publication is independent of product success, validates
+every expected row (including iOS), and visibly reports negative qualification.
+FAIL dominates UNKNOWN while incomplete subchecks remain reported. A successful
+report job means report delivery, not qualification. Missing completion,
+observation or driver proof is INCOMPLETE with a bounded EVIDENCE_INVALID reason
+and a nonzero report exit; it is not reclassified as an observed product failure.
+A recorded product FAIL with complete evidence can still be reported. Missing
+rows/artifacts or outputs never default to PASS. Console, step-summary and summary artifacts use
+bounded allowlisted projections; omitted component names retain total and
+withheld counts. Restricted diagnostics are not public summaries.
+
+Release smoke, full-device evidence and the final release gate require qualified
+results. Only that complete gate emits `qualification_status=PASS`; ordinary
+smoke emits NOT_REQUESTED. The first release publication step asserts PASS before
+any publication action. `product_status` and `environment_status` are derived
+from validated current-attempt rows, not matrix last-writer outputs. Native
+product errors are not suppressed with continue-on-error. Existing check.yml
+scheduling, including main/ci-mobile release/all, is unchanged. GitHub protection
+rule/check-name mapping is a separate operator decision, not changed here.
+
 ## Host-only checks
 
 ```sh
@@ -70,10 +147,10 @@ both SHA-256 archives and the Google signing certificates, unpacks the Chrome
 APKM, installs the library first, and then installs all Chrome splits. The
 hosted emulator uses the declared Google APIs image without the Play Store and
 records GMS, module, Chrome, and Trichrome identities before and after each
-Android scenario; package replacement or a forced restart fails the run as an
-environment failure. The owner-approved normal-retirement exception admits only
+Android scenario; package replacement or a forced restart fails qualification
+and is independently assessed for product impact. The owner-approved normal-retirement exception admits only
 isolated Chrome sandbox helpers with a complete in-interval fork/start identity,
-orderly Chromium child exit, and matching Zygote exit status zero. The schema-2
+orderly Chromium child exit, and matching Zygote exit status zero. The schema-3
 check retains raw observations and numbered proof lines, reporting normal helper
 lifetimes separately from fatal events and distinguishing event counts from PID
 counts. Ordinary helper observations require both timestamp and capture-order
@@ -100,8 +177,9 @@ Missing, ambiguous, reused or contradictory identities and incomplete log
 coverage fail closed; force-stop, signals, nonzero exits, crashes and replacement
 evidence override clean-exit evidence. An `isolated not needed` reason alone is
 never sufficient. Main/privileged Chrome processes and GMS are not covered, and
-snapshot/configuration, native/document ownership and bootstrap teardown gates
-are unchanged. Android 15's package manager stores a static-library record
+native/document ownership and required teardown guarantees remain blocking.
+Only the component-only product policy described above differs from strict
+configuration qualification. Android 15's package manager stores a static-library record
 as `<library-name>_<version-code>`; the snapshot reads Chrome's declared dependency,
 queries that exact record, and records its resolved package path instead of passing a
 version selector to `pm path`. The binary URLs are an APK.now mirror fallback because
@@ -174,7 +252,9 @@ the current iOS 18.6 pin with a beta, a `macos-latest` label, or an unmeasured
 runtime. Do not change the global Xcode selector for this qualification; pass
 `DEVELOPER_DIR` explicitly to each `xcodebuild`/`xcrun` command.
 
-Run one baseline at a time:
+Run one baseline at a time. Supply explicit positive `GITHUB_RUN_ID` and
+`GITHUB_RUN_ATTEMPT` identifiers plus the exact `MOBILE_SOURCE_RUN_HEAD_SHA`; local
+receipts do not substitute for CI provenance or grant native execution authority:
 
 ```sh
 bun run --cwd tests/mobile run -- \
@@ -185,7 +265,7 @@ bun run --cwd tests/mobile run -- \
   --private-output "$PWD/run-artifacts/private-device"
 ```
 
-The runner keeps fixture info, TLS keys, and relay stores under `--private-output`, separate from the evidence directory. It removes private state in `finally`; workflow cleanup also removes it after failures. Only screenshots, `mobile-result.json`, and bounded redacted diagnostics belong in uploaded evidence. Do not copy `fixture-info.json` or relay state outside the private run directory.
+The runner keeps fixture info, TLS keys, and relay stores under `--private-output`, separate from the evidence directory. It attempts every acquired-resource cleanup in `finally`, retaining individual failures; workflow cleanup also attempts removal after failures. Persistence or cleanup failures produce nonzero execution, not a guarantee that an artifact can be recovered. Only screenshots, `mobile-result.json`, and bounded redacted diagnostics belong in uploaded evidence. Do not copy `fixture-info.json` or relay state outside the private run directory.
 
 ## CI inputs and evidence
 

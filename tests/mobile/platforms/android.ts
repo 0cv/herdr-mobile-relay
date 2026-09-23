@@ -1,5 +1,7 @@
 import { X509Certificate } from 'node:crypto';
 import { AndroidStartupLog } from '../support/android-startup-log';
+import { AndroidProductRecorder } from '../support/android-product';
+import type { MeasurementIdentity } from '../support/mobile-result';
 import { decodeRetainedInspection, type RetainedNativeIdentity } from '../support/android-retained-decoder';
 import { createAdbInspection } from '../android-appium/adb-inspection.cjs';
 import { acquireKernelCapability, namespaceForCapability, validateNamespaceStatus, sameKernelCapability, type KernelCapability } from '../android-appium/kernel-namespace.cjs';
@@ -187,6 +189,19 @@ export function androidChromeShortcutArgs(serial: string, shortcut: AndroidChrom
 export class AndroidPlatform implements MobilePlatform {
   readonly name = 'android' as const;
   environmentMeasurement?: AndroidEnvironmentMeasurement;
+  private readonly productRecorder = new AndroidProductRecorder();
+  private lastProductInspection = 0;
+  private coldProductHandoff = false;
+
+  activateProductRecorder(identity: MeasurementIdentity): void {
+    this.assertRetainedSession();
+    this.productRecorder.activate(identity, this.retainedOwner!, this.retainedOwner!);
+  }
+
+  productCheckpoint(name: string): void {
+    this.assertRetainedSession();
+    this.productRecorder.checkpoint(name, this.retainedOwner!);
+  }
   readonly driver: AppiumClient;
   private readonly serial: string;
   private readonly origin: string;
@@ -324,8 +339,11 @@ export class AndroidPlatform implements MobilePlatform {
   async openSetupURLInInstalledApp(url: string): Promise<void> {
     await this.attachToInstalledView();
     if (this.budget.remainingMs < 41_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient navigation and retained postcheck allowance');
+    this.productRecorder.transition('pairing-navigation', this.retainedOwner!);
+    const operation = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
     await this.driver.navigate(url, 30_000);
     await this.attachToInstalledView();
+    this.productRecorder.end('mutation', this.retainedOwner!, operation, this.lastProductInspection);
     await delay(1_000);
   }
 
@@ -381,6 +399,7 @@ export class AndroidPlatform implements MobilePlatform {
       if (!current || !handles.includes(current)) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'original current window is unavailable');
       const url = await this.driver.currentUrl();
       if (!url) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'original current document is unavailable');
+      this.productRecorder.transition('initial-install', this.retainedOwner!);
       await this.launchInstalledTarget('initial');
     } catch (error) {
       this.failLifecycle(error);
@@ -817,6 +836,7 @@ export class AndroidPlatform implements MobilePlatform {
           startedAt, deadline, finishedAt: Date.now(), serial: this.serial, scope: this.installedTarget!.shortcut.scope,
           selectedHandle, assertSession: session => this.driver.assertSessionIdentity(session),
         });
+        this.lastProductInspection = this.productRecorder.inspection(this.retainedOwner!, decoded.result, startedAt, Date.now(), deadline);
         const { original, before, after, processAssociation } = decoded.result;
         this.diagnostics.record({ phase: 'android-attachment', operation: 'bounded-retained-inspection', detail: {
           pid: original.pid, startTime: original.startTime, bootId: original.bootId, namespace: original.namespace, kernelCapability: original.kernelCapability,
@@ -864,10 +884,10 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  private async readInstalledDocument<T>(script: string, deadline = Date.now() + 52_000): Promise<T> {
+  private async readInstalledDocument<T>(script: string, detail: 'identity' | 'completion' | 'preference' | 'keyboard', deadline = Date.now() + 52_000): Promise<T> {
     this.beginLifecycle();
     try {
-      return await this.readInstalledDocumentWithinLifecycle<T>(script, deadline);
+      return await this.readInstalledDocumentWithinLifecycle<T>(script, detail, deadline);
     } catch (error) {
       this.failLifecycle(error);
     } finally {
@@ -875,7 +895,7 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  private async readInstalledDocumentWithinLifecycle<T>(script: string, deadline: number): Promise<T> {
+  private async readInstalledDocumentWithinLifecycle<T>(script: string, detail: 'identity' | 'completion' | 'preference' | 'keyboard', deadline: number): Promise<T> {
     const remaining = () => Math.min(deadline - Date.now(), this.budget.remainingMs);
     const initialInspection = this.selectedInstalledWindowValid ? 11_000 : 24_000;
     const context = this.driver.snapshot().selectedContext === 'CHROMIUM' ? 0 : 2_000;
@@ -884,16 +904,18 @@ export class AndroidPlatform implements MobilePlatform {
     const document = this.inspectedDocument;
     const commandMs = Math.min(30_000, remaining() - 11_000);
     if (commandMs < 2_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient read and retained postcheck allowance');
+    const operation = this.productRecorder.begin('read', this.retainedOwner!, this.lastProductInspection, detail);
     const value = await this.driver.execute<T>(script, [], commandMs);
     this.assertDriverClear();
     if (remaining() < 11_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient retained read postcheck allowance');
     await this.inspectInstalledView(remaining());
     if (remaining() <= 0 || document !== this.inspectedDocument) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'read document changed or parent deadline expired');
+    this.productRecorder.end('read', this.retainedOwner!, operation, this.lastProductInspection);
     return value;
   }
 
   async readRunningIdentity(deadline?: number): Promise<RuntimeIdentity> {
-    const identity = await this.readInstalledDocument<RuntimeIdentity>(runtimeScript(), deadline);
+    const identity = await this.readInstalledDocument<RuntimeIdentity>(runtimeScript(), 'identity', deadline);
     this.assertOwnershipClear();
     if (!identity || typeof identity !== 'object' || Array.isArray(identity) || identity.navigationId !== this.inspectedNavigationId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'runtime identity is missing or malformed');
     this.lastIdentity = {
@@ -906,7 +928,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async readUpdateCompletion(deadline?: number): Promise<UpdateCompletionEvidence> {
-    const completion = await this.readInstalledDocument<UpdateCompletionEvidence>(updateCompletionScript(true), deadline);
+    const completion = await this.readInstalledDocument<UpdateCompletionEvidence>(updateCompletionScript(true), 'completion', deadline);
     this.assertOwnershipClear();
     this.lastCompletion = completion;
     if (!this.lastCompletion || typeof this.lastCompletion !== 'object' || Array.isArray(this.lastCompletion) || this.lastCompletion.navigationId !== this.inspectedNavigationId) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'completion evidence is missing or malformed');
@@ -976,6 +998,7 @@ export class AndroidPlatform implements MobilePlatform {
       if (!handoff) {
         await this.assertRetainedOwner();
         await this.assertRetainedSelection();
+        this.productRecorder.transition('warm-launch', this.retainedOwner!);
         await this.launchInstalledTarget('warm');
         return;
       }
@@ -998,6 +1021,7 @@ export class AndroidPlatform implements MobilePlatform {
       this.requireLifecycleAllowance(30_000 + 5_000 + 5_000 + 30_000 + 146_000);
       if (this.retainedOwner !== handoff.owner) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'retired cold owner changed');
       this.retainedOwner = undefined;
+      this.coldProductHandoff = true;
       this.kernelReader = undefined;
       this.kernelCapability = undefined;
       this.selectedInstalledWindow = '';
@@ -1054,9 +1078,11 @@ export class AndroidPlatform implements MobilePlatform {
   private async mutateInstalledDocument(operation: () => Promise<unknown>, deadline: number): Promise<void> {
     if (Math.min(deadline - Date.now(), this.budget.remainingMs) < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient mutation and postcheck allowance');
     try {
+      const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
       await operation();
       await this.attachToInstalledView(deadline - Date.now());
       if (Date.now() >= deadline) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'mutation parent deadline expired');
+      this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
     } catch {
       this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'mutation or retained postcheck failed');
     }
@@ -1088,7 +1114,7 @@ export class AndroidPlatform implements MobilePlatform {
     await this.waitForKeyboard(false);
     await this.attachToInstalledView();
     if (this.keyboardDraft) {
-      const value = await this.readInstalledDocument<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''");
+      const value = await this.readInstalledDocument<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''", 'keyboard');
       if (value !== this.keyboardDraft) throw new Error('ANDROID_KEYBOARD: draft was not preserved after dismissal');
     }
   }
@@ -1115,8 +1141,10 @@ export class AndroidPlatform implements MobilePlatform {
               const clickTimeout = deadline - Date.now();
               if (clickTimeout < minimumDriverRequestMs) break;
               if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient click and retained postcheck allowance');
+              const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
               await this.driver.click(element, 2_000);
               await this.attachToInstalledView(deadline - Date.now());
+              this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
               return;
             }
             lastError = `${text} is disabled, hidden, or empty`;
@@ -1178,8 +1206,11 @@ export class AndroidPlatform implements MobilePlatform {
             const clickTimeout = deadline - Date.now();
             if (clickTimeout < minimumDriverRequestMs) break;
             if (clickTimeout < 13_000) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'insufficient dialog click and retained postcheck allowance');
+            if (dialogId === 'update-herdr-dialog' && text === 'Load Update') this.productRecorder.transition('update-activation', this.retainedOwner!);
+            const receipt = this.productRecorder.begin('mutation', this.retainedOwner!, this.lastProductInspection);
             await this.driver.click(button, 2_000);
             await this.attachToInstalledView(deadline - Date.now());
+            this.productRecorder.end('mutation', this.retainedOwner!, receipt, this.lastProductInspection);
             return;
           }
         }
@@ -1200,7 +1231,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async preferenceValue(): Promise<string> {
-    return this.readInstalledDocument<string>("return localStorage.getItem('herdr_home_workspace_layout') || ''");
+    return this.readInstalledDocument<string>("return localStorage.getItem('herdr_home_workspace_layout') || ''", 'preference');
   }
 
   async captureSanitizedEvidence(name: string): Promise<void> {
@@ -1241,6 +1272,7 @@ export class AndroidPlatform implements MobilePlatform {
       selectedInstalledWindow: this.selectedInstalledWindow,
       selectedInstalledWindowValid: this.selectedInstalledWindowValid,
       ownershipFailure: this.ownershipFailure?.snapshot(),
+      productObservations: this.productRecorder.snapshot(),
       lastUrl: this.lastUrl,
       lastIdentity: this.lastIdentity,
       lastCompletion: this.lastCompletion,
@@ -1305,6 +1337,11 @@ export class AndroidPlatform implements MobilePlatform {
       if (reserveMs) this.requireLifecycleAllowance(reserveMs);
       assertSession();
       this.retainedOwner = { driver: this.driver, assertSession, ...process };
+      this.productRecorder.owner(this.retainedOwner);
+      if (this.coldProductHandoff) {
+        this.productRecorder.handoff(this.retainedOwner, () => this.environmentMeasurement!.plannedOperations());
+        this.coldProductHandoff = false;
+      }
     } catch (error) { this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', String(error)); }
   }
 
@@ -1940,6 +1977,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private failOwnership(code: string, detail: string): never {
+    this.productRecorder.fail('OWNERSHIP_LOSS');
     this.coldHandoff = undefined;
     if (this.lifecycleFailure) throw this.lifecycleFailure;
     this.ownershipFailure ||= qualificationFatal(code, detail, 'ownership');
