@@ -42,6 +42,7 @@
   import {
     closeCurrentView,
     currentView,
+    followInitialAgentSession,
     initializeRouter,
     navigate,
     replaceView,
@@ -411,6 +412,7 @@
     const stopUpdates = initializeAppUpdates();
     const stopSecurity = initializeDeviceSecurity();
     const stopRouter = initializeRouter();
+    const stopAgentRoute = followInitialAgentSession(agents);
     const setupLinkNavigation = () => {
       relayStore.importSetupLink(location, !$securityState.locked);
     };
@@ -426,6 +428,7 @@
     window.addEventListener('hashchange', setupLinkNavigation);
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
     return () => {
+      stopAgentRoute();
       stopRouter();
       releaseSpeech();
       stopSecurity();

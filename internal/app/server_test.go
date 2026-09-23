@@ -1347,6 +1347,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	pollReady := make(chan struct{})
 	pollFailed := make(chan struct{})
 	var inventoryCalls atomic.Int32
+	var failNextInventory atomic.Bool
 	serverDone := make(chan error, 1)
 	go func() {
 		var serveErr error
@@ -1373,8 +1374,8 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 				encoder := json.NewEncoder(conn)
 				switch request.Method {
 				case "agent.list":
-					call := inventoryCalls.Add(1)
-					if call == 2 {
+					inventoryCalls.Add(1)
+					if failNextInventory.CompareAndSwap(true, false) {
 						close(pollFailed)
 						serveErr = encoder.Encode(map[string]any{
 							"id":    request.ID,
@@ -1550,6 +1551,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	// The event operation has started and is paused before its commit. A real
 	// poll failure now races that in-flight event recovery through the installed
 	// production publisher; the later ready commit must not be lost.
+	failNextInventory.Store(true)
 	server.poller.Wake()
 	select {
 	case <-pollFailed:

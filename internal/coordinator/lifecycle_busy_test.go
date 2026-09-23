@@ -64,7 +64,7 @@ func busyLifecycle(t *testing.T, dir, bin string) (*Lifecycle, string) {
 	writeScript(t, pathDir, "codex", "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	socketPath := filepath.Join(dir, "herdr.sock")
-	startInventorySocket(t, socketPath, nil)
+	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
 	return &Lifecycle{
 		herdr:    herdr.NewClient(bin, socketPath),
 		profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),

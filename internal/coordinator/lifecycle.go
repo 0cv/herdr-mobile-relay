@@ -137,23 +137,24 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		return StartResult{}, err
 	}
 
+	result = StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}
+	panes, err := l.herdr.PaneList(startupCtx)
+	if err != nil {
+		return result, fmt.Errorf("verify new terminal: %w", err)
+	}
 	var ownership profiles.PaneIdentity
-	if observed, observeErr := l.herdr.GetInventory(startupCtx); observeErr == nil {
-		for _, pane := range observed.Panes {
-			if pane.ID == target.PaneID {
-				ownership = profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
-				break
-			}
+	for _, pane := range panes {
+		if pane.ID == target.PaneID {
+			ownership = profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
+			break
 		}
 	}
 	expectedTerminal = ownership.TerminalID
-	if ownership.TerminalID == "" && profile.Kind == "" {
-		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, errors.New("cannot verify the new terminal for this custom profile; leave the pane open and retry")
+	if ownership.TerminalID == "" {
+		return result, errors.New("cannot verify the new terminal; agent was not started")
 	}
-	if ownership.TerminalID != "" {
-		if err := l.profiles.BeginLaunchOwnership(ownership, profile.ID); err != nil {
-			return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, err
-		}
+	if err := l.profiles.BeginLaunchOwnership(ownership, profile.ID); err != nil {
+		return result, err
 	}
 	startErr := l.startInTarget(startupCtx, profile, request.Name, target.PaneID)
 	if startErr != nil {
@@ -161,14 +162,11 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		// the workspace the user asked for and leave nothing to retry into. An
 		// uncertain dispatch may also have left an agent running in it, and
 		// the phone is told to review that agent before retrying.
-		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, startErr
+		return result, startErr
 	}
 
-	result = StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}
-	if ownership.TerminalID != "" {
-		if err := l.profiles.RememberVerified(ownership, profile.ID); err != nil {
-			return result, partiallyApplied("agent started but profile ownership could not be saved", err)
-		}
+	if err := l.profiles.RememberVerified(ownership, profile.ID); err != nil {
+		return result, partiallyApplied("agent started but profile ownership could not be saved", err)
 	}
 	return result, nil
 }

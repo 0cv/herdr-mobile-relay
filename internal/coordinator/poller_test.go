@@ -117,7 +117,12 @@ func TestAgentsFromTopologyPreservesForegroundCwd(t *testing.T) {
 func TestPollerEventCommitPublishesRecoveryAfterPausedEnrichment(t *testing.T) {
 	state := testState()
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
-	poller := NewPoller(nil, state, time.Second, testLogger())
+	socket := startPollerTestSocket(t, func(string) (any, string) {
+		return map[string]any{"type": "agent_list", "agents": []herdr.Pane{{ID: "pane-1", Agent: "codex", Status: "idle"}}}, ""
+	})
+	client := herdr.NewClient("unused", socket)
+	t.Cleanup(func() { _ = client.Close() })
+	poller := NewPoller(client, state, time.Second, testLogger())
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	poller.SetEnrich(func(context.Context, []*AgentState) {
@@ -257,7 +262,7 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 		defer listener.Close()
 		subscriptions := 0
 		snapshots := 0
-		for range 4 {
+		for range 7 {
 			conn, acceptErr := listener.Accept()
 			if acceptErr != nil {
 				serverDone <- acceptErr
@@ -287,6 +292,10 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 							},
 						})
 					}
+				case "agent.list":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"id": request.ID, "result": pollerSuccessResult(request.Method),
+					})
 				case "session.snapshot":
 					snapshots++
 					workspaces := []any{
@@ -313,7 +322,9 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 	}()
 
 	state := testState()
-	poller := NewPoller(herdr.NewClient("missing-herdr", socketPath), state, time.Second, testLogger())
+	client := herdr.NewClient("missing-herdr", socketPath)
+	t.Cleanup(func() { _ = client.Close() })
+	poller := NewPoller(client, state, time.Second, testLogger())
 	reconnects := 0
 	poller.eventReconnectWait = func(context.Context) bool {
 		reconnects++

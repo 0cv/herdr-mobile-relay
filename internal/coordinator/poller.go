@@ -336,7 +336,21 @@ func (p *Poller) applyTopologyEvent(ctx context.Context, cache *herdr.SessionCac
 }
 
 func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.TopologySnapshot, baseRevision int64) {
-	agents := p.agentsFromTopology(topology.Panes, topology.Tabs)
+	if ctx.Err() != nil {
+		return
+	}
+	inventory, err := p.client.GetInventory(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		p.state.MarkInventoryFailure(err)
+		p.notifyInventoryChange()
+		p.logger.Warn("event agent inventory refresh failed", "error", err)
+		p.Wake()
+		return
+	}
+	agents := p.agentsFromTopology(inventory.Panes, topology.Tabs)
 	if p.enrich != nil {
 		p.enrich(ctx, agents)
 	}

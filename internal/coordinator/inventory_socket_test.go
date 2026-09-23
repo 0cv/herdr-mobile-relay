@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"net"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
-func startInventorySocket(t *testing.T, socketPath string, workspaces []any) {
+func startInventorySocket(t *testing.T, socketPath string, workspaces []any, panes ...herdr.Pane) {
 	t.Helper()
 	if workspaces == nil {
 		workspaces = []any{}
+	}
+	if panes == nil {
+		panes = []herdr.Pane{}
 	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -37,7 +42,7 @@ func startInventorySocket(t *testing.T, socketPath string, workspaces []any) {
 				case "workspace.list":
 					result = map[string]any{"type": "workspace_list", "workspaces": workspaces}
 				case "pane.list":
-					result = map[string]any{"type": "pane_list", "panes": []any{}}
+					result = map[string]any{"type": "pane_list", "panes": panes}
 				case "workspace.close":
 					result = map[string]any{"type": "ok"}
 				case "agent.list":

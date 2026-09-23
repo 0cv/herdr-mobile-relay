@@ -6337,6 +6337,38 @@ test('waits for a dotted directory selection before launching', async ({ page })
   });
 });
 
+test('keeps a newly launched agent open when its native session is discovered', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { agent_profiles: [{ id: 'pi', label: 'Pi' }] });
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'list_directories')).toBe(true);
+  const listing = (await commands(page)).find((command) => command.type === 'list_directories')!;
+  await server(page, 0, {
+    type: 'command_result', request_id: listing.request_id, ok: true, phase: 'completed',
+    data: { current: { path: '/home/test/project', label: '~/project' }, parent: '/home/test', directories: [] },
+  });
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Start Agent', exact: true }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_start')).toBe(true);
+  const launch = (await commands(page)).find((command) => command.type === 'agent_start')!;
+  const launched = {
+    pane_id: 'w1:p2', terminal_id: 'terminal-new', generation: 1, agent_session_id: '',
+    status: 'idle', project: 'project', cwd: '/home/test/project', name: 'project-pi', agent: 'pi',
+  };
+  await server(page, 0, { type: 'agents', agents: [launched] });
+  await server(page, 0, {
+    type: 'command_result', request_id: launch.request_id, ok: true, phase: 'completed',
+    data: { pane_id: launched.pane_id, name: launched.name, cwd: launched.cwd },
+  });
+  await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
+  await server(page, 0, { type: 'agents', agents: [{ ...launched, generation: 2, agent_session_id: 'native-session' }] });
+  await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
+  await expect.poll(async () => (await commands(page)).findLast((command) => command.type === 'read_pane')?.target)
+    .toMatchObject({ terminal_id: 'terminal-new', generation: 2, agent_session_id: 'native-session' });
+  await expect(page.getByText('This agent is not available yet.')).toBeHidden();
+});
+
 test('launches and manages agent lifecycle commands', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
