@@ -1,3 +1,4 @@
+import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
@@ -317,6 +318,11 @@ describe('accessible Svelte interactions', () => {
     const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
     const composer = screen.getByRole('combobox', { name: 'Prompt' });
     await user.type(composer, '/orches');
+    expect(load).toHaveBeenCalledTimes(1);
+    for (let update = 0; update < 3; update++) {
+      relayStore.connections.set(new Map([['reconnect', { ...connected } as never]]));
+      await tick();
+    }
     expect(load).toHaveBeenCalledTimes(1);
     relayStore.connections.set(new Map([['reconnect', { ...connected, status: 'disconnected' } as never]]));
     await waitFor(() => expect(screen.getByText('Suggestions unavailable — you can still send this command.')).toBeVisible());

@@ -187,6 +187,7 @@
     agent.relay_id, agent.server_session_id, agent.raw_pane_id,
     agent.terminal_id, agent.generation, agent.agent_session_id, agent.agent, agent.cwd,
   ]));
+  const slashConnectionStatus = $derived($connections.get(agent.relay_id)?.status);
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
   let dismissedMenuSignature = $state('');
@@ -630,7 +631,7 @@
 
   $effect(() => {
     const identity = slashCatalogIdentity;
-    const status = $connections.get(agent.relay_id)?.status;
+    const status = slashConnectionStatus;
     const open = slashMenuOpen;
     untrack(() => {
       ++slashCatalogRequest;

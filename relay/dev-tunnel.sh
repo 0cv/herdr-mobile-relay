@@ -38,4 +38,5 @@ fi
 
 bun run --cwd "$REPO_DIR/frontend" build
 "$SCRIPT_DIR/setup.sh" --install-missing
+"$SCRIPT_DIR/dev-pi-commands.sh"
 exec "$SCRIPT_DIR/start.sh"

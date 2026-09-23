@@ -223,7 +223,7 @@ export default function commandBridge(pi) {
     if (ctx.mode !== 'tui' || !process.stdin.isTTY || globalThis[ownerKey]) return;
     const pane = process.env.HERDR_PANE_ID;
     const socketPath = process.env.HERDR_SOCKET_PATH;
-    const session = ctx.sessionManager.getSessionId();
+    const session = ctx.sessionManager.getSessionFile();
     if (!pane || pane.length > 160 || !socketPath || !session) return;
     owner = {};
     globalThis[ownerKey] = owner;

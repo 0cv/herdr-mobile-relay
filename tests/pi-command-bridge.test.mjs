@@ -214,27 +214,32 @@ test('session lifecycle waits for post-discovery autocomplete, isolates nested r
   let registered = [entry('loaded')];
   let factory;
   const provider = { getSuggestions: async () => ({ items: [{ value: '/skill:active' }] }) };
-  const context = { mode: 'tui', sessionManager: { getSessionId: () => 'session' }, ui: { addAutocompleteProvider: fn => { factory = fn; fn(provider); } } };
+  const sessionFile = join(fixture, '2026-09-23T12-00-00-000Z_01a0c7af-665a-76ea-94ee-5e4c09cce1a7.jsonl');
+  const context = { mode: 'tui', sessionManager: { getSessionId: () => 'session-uuid', getSessionFile: () => sessionFile }, ui: { addAutocompleteProvider: fn => { factory = fn; fn(provider); } } };
   const makeAPI = () => {
     const handlers = {};
     bridge({ on: (event, handler) => { handlers[event] = handler; }, getCommands: () => registered });
     return handlers;
   };
   let handlers = makeAPI();
-  const target = { ...identity, instance };
+  const target = { ...identity, instance, session: sessionFile };
   const path = join(directory, `${process.pid}.sock`);
   try {
     await handlers.session_start({}, context);
     expect((await query(path, target)).status).toBe('loading');
+    await expect(query(path, { ...target, session: 'session-uuid' })).rejects.toThrow();
     handlers.resources_discover();
     registered.push(entry('skill:active', 'skill'), entry('skill:hidden', 'skill'));
     factory(provider);
     expect((await query(path, target)).commands.map(c => c.command)).toEqual(['/loaded', '/skill:active']);
     const child = makeAPI();
-    await child.session_start({}, { ...context, sessionManager: { getSessionId: () => 'child' } });
+    await child.session_start({}, { ...context, sessionManager: { getSessionId: () => 'child', getSessionFile: () => join(fixture, 'child.jsonl') } });
     await child.session_shutdown();
     expect((await query(path, target)).status).toBe('available');
     await handlers.session_shutdown();
+    await expect(query(path, target)).rejects.toThrow();
+    const missingFile = makeAPI();
+    await missingFile.session_start({}, { ...context, sessionManager: { getSessionId: () => 'session-uuid', getSessionFile: () => undefined } });
     await expect(query(path, target)).rejects.toThrow();
     handlers = makeAPI();
     await handlers.session_start({}, context);

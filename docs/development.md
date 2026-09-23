@@ -14,7 +14,12 @@ make dev-tunnel
 
 `make dev-tunnel` builds the current Go source and frontend, uses isolated ports
 and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
-installed production relay.
+installed production relay. If a Pi agent directory exists, it installs or
+updates the live-command integration there, including in noninteractive runs.
+This changes the shared Pi profile, not the isolated relay state; the integration
+remains after the tunnel stops. Run `/reload` in affected Pi panes after the
+tunnel starts. Set `HERDR_DEV_PI_COMMANDS_INSTALL=0` to skip profile changes.
+Other Pi profiles require their own installation via `relay/setup.sh --pi-install`.
 
 ## Common targets
 

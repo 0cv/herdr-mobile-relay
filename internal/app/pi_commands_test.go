@@ -105,7 +105,8 @@ func TestRuntimePiCatalogAcrossBunSocket(t *testing.T) {
 	defer os.RemoveAll(directory)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bun, "../../tests/fixtures/pi-bridge-server.mjs", instance, "pane", "session", directory)
+	sessionFile := filepath.Join(dir, "2026-09-23T12-00-00-000Z_01a0c7af-665a-76ea-94ee-5e4c09cce1a7.jsonl")
+	cmd := exec.CommandContext(ctx, bun, "../../tests/fixtures/pi-bridge-server.mjs", instance, "pane", sessionFile, directory)
 	output, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -120,21 +121,21 @@ func TestRuntimePiCatalogAcrossBunSocket(t *testing.T) {
 		t.Fatal("bridge did not start")
 	}
 	processes := &fixtureProcesses{pid: cmd.Process.Pid}
-	catalog, err := runtimePiCatalog(ctx, processes, socket, "pane", "session")
+	catalog, err := runtimePiCatalog(ctx, processes, socket, "pane", sessionFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if catalog.Status != "available" || catalog.Metadata["/orchestrate"].Kind != "extension" || catalog.Metadata["/model"].Kind != "builtin" {
 		t.Fatalf("bad merged catalog: %+v", catalog)
 	}
-	for _, target := range [][2]string{{"other", "session"}, {"pane", "child"}, {"pane", ""}} {
+	for _, target := range [][2]string{{"other", sessionFile}, {"pane", "01a0c7af-665a-76ea-94ee-5e4c09cce1a7"}, {"pane", ""}} {
 		if _, err := runtimePiCatalog(ctx, processes, socket, target[0], target[1]); err == nil {
 			t.Fatal("accepted wrong identity")
 		}
 	}
 	processes.calls = 0
 	processes.replace = true
-	if _, err := runtimePiCatalog(ctx, processes, socket, "pane", "session"); err == nil {
+	if _, err := runtimePiCatalog(ctx, processes, socket, "pane", sessionFile); err == nil {
 		t.Fatal("accepted replaced process")
 	}
 }

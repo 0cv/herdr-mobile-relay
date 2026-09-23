@@ -102,10 +102,23 @@ bash relay/setup.sh --pi-install /absolute/path/to/profile/agent
 ```
 
 With no directory argument, setup uses `PI_CODING_AGENT_DIR`, then
-`~/.pi/agent`. Run `/reload` in each affected Pi pane or restart Pi. Install the
-integration into every profile whose commands you want to discover. After
-updating the relay bundle, rerun the install command to copy its matching bridge
-version into each selected profile, then reload Pi. It lives
+`~/.pi/agent`. Normal plugin installation does not install the optional Pi
+integration. For an installed release that includes this feature, use the
+installed release's `relay/setup.sh` rather than an unrelated checkout; the
+published 0.21.3 relay cannot discover live Pi extension commands. For a
+newer installed release, the default installation path is:
+
+```bash
+bash "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}/current/relay/setup.sh" \
+  --pi-install "$HOME/.pi/agent"
+```
+
+`make dev-tunnel` installs or updates the integration automatically when the
+selected Pi profile exists; set `HERDR_DEV_PI_COMMANDS_INSTALL=0` to skip it.
+Run `/reload` in each affected Pi pane after installation or restart Pi.
+Install the integration into every profile whose commands you want to discover.
+After updating the relay bundle, rerun the install command to copy its matching
+bridge version into each selected profile, then reload Pi. It lives
 alongside Herdr's integration and does not edit settings, trust decisions, or
 other extension files. To remove only its owned files:
 
@@ -135,10 +148,9 @@ precedence over runtime discovery.
 
 The bridge starts only in an interactive TUI session inside Herdr, with
 `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` present. Endpoint identity includes the
-Herdr socket's canonical path and inode, pane, exact Pi session, PID, and process
-incarnation. The relay independently checks Herdr's foreground process-group
-leader and Unix peer credentials, and rechecks the process and session after
-discovery. Nested sessions cannot replace the root registration. Missing or
+Herdr socket's canonical path and inode, pane, native Pi session file path,
+PID, and process incarnation. The relay independently checks Herdr's foreground process-group leader and
+Unix peer credentials, and rechecks the process and session after discovery. Nested sessions cannot replace the root registration. Missing or
 ambiguous identity is not guessed from a working directory.
 
 Sockets are mode 0600 inside user-owned mode 0700 directories under
