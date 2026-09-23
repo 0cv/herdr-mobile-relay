@@ -52,9 +52,160 @@ confirmationSettingsTests.push(['iOS synthetic scoped settings SM5780500 admissi
     else await assert.rejects(action, /insufficient whole transaction allowance/u);
     assert.equal(operations, remaining === 80_500 ? 1 : 0);
     assert.equal(a.requests(), remaining === 80_500 ? 5 : 0);
-    assert.ok(a.durations.every(duration => duration === 2_000));
+    assert.deepEqual(a.durations, remaining === 80_500 ? [2_000, 2_000, 2_000, 4_000, 4_000] : []);
     assert.deepEqual(a.settings(), IOS_SESSION_SETTINGS);
   }
+}]);
+
+confirmationSettingsTests.push(['iOS scoped restoration retains the original 4000ms minimum tail', async () => {
+  const a = await policySettings(20_000);
+  await assert.rejects(
+    () => withIOSConfirmationSettings(a.driver, a.transaction, 1_000, async operation => {
+      a.advance(operation.remainingMs + 1);
+    }, a.policy),
+    /insufficient restoration allowance/u,
+  );
+  assert.equal(a.requests(), 3);
+  assert.deepEqual(a.durations, [2_000, 2_000, 2_000]);
+  assert.equal(a.driver.snapshot().firstFatal, undefined);
+}]);
+
+confirmationSettingsTests.push(['iOS scoped restoration captures the 8000ms allowance once for both commands', async () => {
+  for (const slack of [7_999, 8_000]) {
+    const a = await policySettings(20_000, (ordinal, advance) => {
+      if (ordinal === 4) advance(2_865);
+      return undefined;
+    });
+    const action = withIOSConfirmationSettings(a.driver, a.transaction, 1_000, async () => {
+      a.advance(a.transaction.remainingMs - slack);
+    }, a.policy);
+    if (slack === 8_000) await action;
+    else await assert.rejects(action, /APPIUM_TIMEOUT/u);
+    assert.deepEqual(a.durations, slack === 8_000
+      ? [2_000, 2_000, 2_000, 4_000, 4_000]
+      : [2_000, 2_000, 2_000, 2_000]);
+    assert.equal(a.requests(), slack === 8_000 ? 5 : 4);
+    if (slack === 8_000) {
+      assert.deepEqual(a.settings(), IOS_SESSION_SETTINGS);
+      assert.equal(a.driver.snapshot().firstFatal, undefined);
+    } else {
+      assert.equal(a.driver.snapshot().firstFatal?.code, 'APPIUM_TIMEOUT');
+      assert.equal(a.driver.snapshot().unusable, true);
+    }
+  }
+}]);
+
+confirmationSettingsTests.push(['iOS scoped restoration times out at the full captured cap before readback', async () => {
+  for (const stage of ['transport', 'body'] as const) {
+    const a = await policySettings(20_000, (ordinal, advance) => {
+      if (ordinal !== 4) return undefined;
+      if (stage === 'transport') {
+        advance(4_000);
+        return undefined;
+      }
+      const response = Response.json({ value: null });
+      const text = response.text.bind(response);
+      response.text = async () => {
+        const body = await text();
+        advance(4_000);
+        return body;
+      };
+      return response;
+    });
+    await assert.rejects(
+      () => withIOSConfirmationSettings(a.driver, a.transaction, 1_000, async () => undefined, a.policy),
+      /APPIUM_TIMEOUT/u,
+    );
+    assert.equal(a.requests(), 4);
+    assert.deepEqual(a.durations, [2_000, 2_000, 2_000, 4_000]);
+    const firstFatal = a.driver.snapshot().firstFatal;
+    assert.equal(firstFatal?.code, 'APPIUM_TIMEOUT');
+    assert.equal(a.driver.snapshot().unusable, true);
+    await assert.rejects(() => a.driver.settings(), /APPIUM_SESSION_UNUSABLE/u);
+    assert.equal(a.requests(), 4);
+    assert.equal(a.driver.snapshot().firstFatal, firstFatal);
+  }
+}]);
+
+confirmationSettingsTests.push(['iOS scoped restoration refuses a readback without shortening the captured allowance', async () => {
+  const a = await policySettings(20_000);
+  const updateSettings = a.driver.updateSettings.bind(a.driver);
+  let updates = 0;
+  a.driver.updateSettings = async (...args: Parameters<AppiumClient['updateSettings']>) => {
+    const acknowledgement = await updateSettings(...args);
+    if (++updates === 2) a.advance(4_001);
+    return acknowledgement;
+  };
+  await assert.rejects(
+    () => withIOSConfirmationSettings(a.driver, a.transaction, 1_000, async () => {
+      a.advance(a.transaction.remainingMs - 8_000);
+    }, a.policy),
+    /insufficient restoration readback allowance/u,
+  );
+  assert.equal(a.requests(), 4);
+  assert.deepEqual(a.durations, [2_000, 2_000, 2_000, 4_000]);
+  assert.equal(a.driver.snapshot().firstFatal, undefined);
+  assert.equal(a.driver.snapshot().unusable, false);
+}]);
+
+confirmationSettingsTests.push(['iOS scoped restoration keeps root admission for the captured readback allowance', async () => {
+  let now = 0;
+  let requests = 0;
+  let settings: Record<string, unknown> = { ...IOS_SESSION_SETTINGS };
+  const driver = new AppiumClient('http://settings.invalid', 30_000, async (input, init) => {
+    if (String(input).endsWith('/session')) return Response.json({ value: {}, sessionId: 'root-settings' });
+    requests++;
+    if (init?.method === 'POST') {
+      settings = { ...settings, ...JSON.parse(String(init.body)).settings };
+      return Response.json({ value: null });
+    }
+    return Response.json({ value: settings });
+  }, undefined, { now: () => now, timer: () => 0 as unknown as ReturnType<typeof setTimeout>, clear: () => undefined });
+  await driver.create({ capabilities: {} });
+  const root = new PhaseBudget('root-settings', { timeoutMs: 10_000, now: () => now });
+  const transaction = new PhaseBudget('independent-transaction', { timeoutMs: 20_000, now: () => now });
+  driver.setBudget(root);
+  const policy = driver.nativeRequestPolicy(transaction);
+  const updateSettings = driver.updateSettings.bind(driver);
+  let updates = 0;
+  driver.updateSettings = async (...args: Parameters<AppiumClient['updateSettings']>) => {
+    const acknowledgement = await updateSettings(...args);
+    if (++updates === 2) now += 1_001;
+    return acknowledgement;
+  };
+  await assert.rejects(() => withIOSConfirmationSettings(driver, transaction, 1_000, async () => { now += 5_000; }, policy), /APPIUM_COMMAND_NOT_ADMITTED/u);
+  assert.equal(requests, 4);
+  assert.equal(driver.snapshot().lastCommand?.timeoutMs, 4_000);
+  assert.equal(driver.snapshot().lastCommand?.timing?.sent, false);
+  assert.equal(driver.snapshot().firstFatal, undefined);
+  assert.equal(driver.snapshot().unusable, false);
+}]);
+
+confirmationSettingsTests.push(['iOS scoped restoration requires a null acknowledgement and exact readback', async () => {
+  for (const [kind, response] of [
+    ['non-null', Response.json({ value: {} })],
+    ['missing-value', Response.json({})],
+    ['invalid-json', new Response('invalid JSON')],
+  ] as const) {
+    const a = await policySettings(20_000, ordinal => ordinal === 4 ? response : undefined);
+    await assert.rejects(
+      () => withIOSConfirmationSettings(a.driver, a.transaction, 1_000, async () => undefined, a.policy),
+      error => kind === 'invalid-json'
+        ? error instanceof WebDriverError && error.code === 'APPIUM_HTTP'
+        : error instanceof Error && /malformed restoration acknowledgement/u.test(error.message),
+    );
+    assert.equal(a.requests(), 4);
+    assert.deepEqual(a.durations, [2_000, 2_000, 2_000, 4_000]);
+  }
+  const mismatch = await policySettings(20_000, ordinal => ordinal === 5
+    ? Response.json({ value: { ...IOS_SESSION_SETTINGS, waitForIdleTimeout: 9 } })
+    : undefined);
+  await assert.rejects(
+    () => withIOSConfirmationSettings(mismatch.driver, mismatch.transaction, 1_000, async () => undefined, mismatch.policy),
+    /settings readback mismatch/u,
+  );
+  assert.equal(mismatch.requests(), 5);
+  assert.deepEqual(mismatch.settings(), IOS_SESSION_SETTINGS);
 }]);
 
 confirmationSettingsTests.push(['iOS synthetic scoped settings SM57 restoration has4000 and post-tail1500 without renewal', async () => {
@@ -84,7 +235,7 @@ confirmationSettingsTests.push(['iOS synthetic scoped settings SM57 restoration 
 confirmationSettingsTests.push(['iOS synthetic scoped settings SM57 late request or final-action failure prevents normal restoration', async () => {
   for (const boundary of [1, 2, 3, 4, 5]) {
     const a = await policySettings(80_500, (ordinal, advance) => {
-      if (ordinal === boundary) advance(2_000);
+      if (ordinal === boundary) advance(boundary >= 4 ? 4_000 : 2_000);
       return undefined;
     });
     await assert.rejects(() => withIOSConfirmationSettings(a.driver, a.transaction, 69_000, async () => undefined, a.policy), /APPIUM_TIMEOUT/u);
@@ -201,7 +352,10 @@ for (const boundary of [1, 2, 3, 4, 5]) {
         response.text = async () => { throw new Error('synthetic interrupted settings response'); };
         return response;
       }
-      if (init?.method === 'POST') settings = JSON.parse(String(init.body)).settings;
+      if (init?.method === 'POST') {
+        settings = JSON.parse(String(init.body)).settings;
+        return Response.json({ value: null });
+      }
       return Response.json({ value: settings });
     });
     await driver.create({ capabilities: {} });
@@ -224,7 +378,10 @@ for (const operationMs of [49_000, 57_000]) confirmationSettingsTests.push([`iOS
   const driver = new AppiumClient('http://settings.invalid', 30_000, async (input, init) => {
     if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'settings' });
     now += CONFIRMATION_SETTINGS_COMMAND_MS;
-    if (init?.method === 'POST') settings = JSON.parse(String(init.body)).settings;
+    if (init?.method === 'POST') {
+      settings = JSON.parse(String(init.body)).settings;
+      return Response.json({ value: null });
+    }
     return Response.json({ value: settings });
   });
   await driver.create({ capabilities: {} });

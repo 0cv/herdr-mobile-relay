@@ -62,11 +62,15 @@ export async function withIOSConfirmationSettings<T>(
     originalError = error;
   }
   if (attempted && !isFatalDriverError(originalError) && !driver.snapshot().unusable && !driver.snapshot().firstFatal) {
+    const restoreCommandMs = parent.remainingMs >= 2 * CONFIRMATION_RESTORE_MS
+      ? CONFIRMATION_RESTORE_MS
+      : CONFIRMATION_SETTINGS_COMMAND_MS;
     try {
       if (parent.remainingMs < CONFIRMATION_RESTORE_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient restoration allowance');
-      await driver.updateSettings(saved, CONFIRMATION_SETTINGS_COMMAND_MS, policy);
-      if (parent.remainingMs < CONFIRMATION_SETTINGS_COMMAND_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient restoration readback allowance');
-      assertSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS, policy), saved);
+      const acknowledgement = await driver.updateSettings(saved, restoreCommandMs, policy);
+      if (acknowledgement !== null) throw new Error('IOS_CONFIRMATION_SETTINGS: malformed restoration acknowledgement');
+      if (parent.remainingMs < restoreCommandMs) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient restoration readback allowance');
+      assertSettings(await driver.settings(restoreCommandMs, policy), saved);
     } catch (error) {
       if (!failed) throw error;
     }

@@ -1450,7 +1450,13 @@ for (const remaining of [81_000, 83_000]) {
     assert.ok(replay.now - (120_000 - remaining) < 75_000);
     const commands = replay.driver.snapshot().commands;
     const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
-    assert.ok(commands.slice(targetClick + 1).every((entry) => entry.timeoutMs === (entry.path.endsWith('/appium/settings') ? 2_000 : entry.path.endsWith('/elements') ? 12_000 : entry.path.endsWith('/element') ? 8_000 : 5_000) && !entry.error && !entry.timedOut));
+    const afterClick = commands.slice(targetClick + 1);
+    const restoreSettings = afterClick.filter((entry) => entry.path.endsWith('/appium/settings'));
+    const restoreTimeoutMs = restoreSettings[0]?.timeoutMs;
+    assert.ok(restoreTimeoutMs === 2_000 || restoreTimeoutMs === 4_000);
+    assert.equal(restoreSettings.length, 2);
+    assert.ok(restoreSettings.every((entry) => entry.timeoutMs === restoreTimeoutMs));
+    assert.ok(afterClick.every((entry) => entry.timeoutMs === (entry.path.endsWith('/appium/settings') ? restoreTimeoutMs : entry.path.endsWith('/elements') ? 12_000 : entry.path.endsWith('/element') ? 8_000 : 5_000) && !entry.error && !entry.timedOut));
     assert.equal(replay.driver.snapshot().unusable, false);
   });
 }
