@@ -208,7 +208,11 @@ grep -Fx "Environment=HERDR_RELAY_ENV=$SOURCE_ENV" "$UNIT_FILE" >/dev/null
 test "$(cat "$CONFIG_RECORD")" = "$TARGET_CONFIG"
 test "$(cat "$TOKEN_RECORD")" = "persisted-private-token"
 diff -qr "$WORK_DIR/target-before" "$TARGET_CONFIG" >/dev/null
-grep -F "previous service recovered successfully" "$WORK_DIR/output" >/dev/null
+grep -F "previous service recovered successfully" "$WORK_DIR/output" >/dev/null || {
+    echo "previous service did not recover after replacement identity refusal" >&2
+    cat "$WORK_DIR/output" >&2
+    exit 1
+}
 
 rm -f "$RESTART_LOG"
 if ! HOME="$TEST_HOME" \

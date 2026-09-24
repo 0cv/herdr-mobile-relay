@@ -579,16 +579,32 @@ func waitCommand(t *testing.T, cmd *exec.Cmd, timeout time.Duration) error {
 
 func waitPIDFile(t *testing.T, path string) int {
 	t.Helper()
-	waitForFile(t, path)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	deadline := time.Now().Add(5 * time.Second)
+	var data []byte
+	var parseErr error
+	for time.Now().Before(deadline) {
+		var err error
+		data, err = os.ReadFile(path)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err == nil && pid > 0 {
+				return pid
+			}
+			if err != nil {
+				parseErr = err
+			} else {
+				parseErr = errors.New("PID must be positive")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid < 1 {
-		t.Fatalf("invalid fixture PID in %s: %q (%v)", path, data, err)
+	if parseErr == nil {
+		parseErr = errors.New("PID file was not created")
 	}
-	return pid
+	t.Fatalf("invalid fixture PID in %s: %q (%v)", path, data, parseErr)
+	return 0
 }
 
 func waitForFile(t *testing.T, path string) {

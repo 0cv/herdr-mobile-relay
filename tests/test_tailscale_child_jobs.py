@@ -81,6 +81,7 @@ pid=""
 job=""
 kill_called={kill_called}
 go_directory={go_directory}
+record_file="$go_directory/record"
 cleanup() {{ if [ -n "$pid" ]; then : > "$go_file"; wait "$job" 2>/dev/null || true; fi; }}
 trap cleanup EXIT
 kill() {{ printf '%s\\n' "$*" >> "$kill_called"; return 97; }}
@@ -94,15 +95,19 @@ for ((repeat=1; repeat<=25; repeat++)); do
     observed=""
     record_status=0
     for ((probe=0; probe<500; probe++)); do
-        observed="$(LC_ALL=C jobs -l "$job" 2>/dev/null || true)"
+        LC_ALL=C jobs -l "$job" > "$record_file" 2>/dev/null || true
+        observed=""
+        IFS= read -r observed < "$record_file" || true
         record_status=0
         _child_job_record_state "$pid" "${{job#%}}" "$observed" || record_status=$?
         [ "$record_status" -eq 2 ] && break
         sleep 0.01
     done
-    [ "$record_status" -eq 2 ] || exit 3
+    [ "$record_status" -eq 2 ] || {{ printf 'terminal record timeout: pid=%s job=%s observed=%s status=%s\\n' "$pid" "$job" "$observed" "$record_status" >&2; exit 3; }}
     [ "$CHILD_JOB_STATE" = Done ] || exit 4
-    mapping="$( (LC_ALL=C jobs -p "$job" 2>/dev/null) || true )"
+    LC_ALL=C jobs -p "$job" > "$record_file" 2>/dev/null || true
+    mapping=""
+    IFS= read -r mapping < "$record_file" || true
     [ -z "$mapping" ] || exit 5
     stop_child_job "$job" "$pid" INT 1 || exit 6
     pid=""
@@ -118,6 +123,7 @@ printf 'terminal jobs reaped without kill across 25 transitions\\n'
         with tempfile.TemporaryDirectory(prefix="s9b3-terminal-order-") as directory:
             go_file = shlex.quote(str(Path(directory) / "go"))
             calls = shlex.quote(str(Path(directory) / "calls"))
+            record_file = shlex.quote(str(Path(directory) / "record"))
             child_code = (
                 "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); "
                 "deadline=time.monotonic()+5; "
@@ -129,6 +135,7 @@ set -u
 pid=""
 job=""
 go_file={go_file}
+record_file={record_file}
 calls={calls}
 cleanup() {{ if [ -n "$pid" ]; then : > "$go_file"; wait "$job" 2>/dev/null || true; fi; }}
 trap cleanup EXIT
@@ -139,11 +146,13 @@ job_number="${{job#%}}"
 : > "$go_file"
 observed=""
 for ((probe=0; probe<500; probe++)); do
-    observed="$(LC_ALL=C jobs -l "$job" 2>/dev/null || true)"
+    LC_ALL=C jobs -l "$job" > "$record_file" 2>/dev/null || true
+    observed=""
+    IFS= read -r observed < "$record_file" || true
     case "$observed" in *Done*) break ;; esac
     sleep 0.01
 done
-case "$observed" in *Done*) ;; *) exit 3 ;; esac
+case "$observed" in *Done*) ;; *) printf 'terminal-order timeout: pid=%s job=%s observed=%s\\n' "$pid" "$job" "$observed" >&2; exit 3 ;; esac
 jobs() {{
     printf '%s\\n' "${{1:-}}" >> "$calls"
     if [ "${{1:-}}" = -l ]; then
@@ -167,6 +176,7 @@ printf 'terminal record classified before any PID mapping probe\\n'
             go_file = shlex.quote(str(Path(directory) / "go"))
             armed = shlex.quote(str(Path(directory) / "armed"))
             calls = shlex.quote(str(Path(directory) / "calls"))
+            reclassified = shlex.quote(str(Path(directory) / "reclassified"))
             child_code = (
                 "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); "
                 "deadline=time.monotonic()+5; "
@@ -178,6 +188,7 @@ set -u
 pid=""
 job=""
 go_file={go_file}
+reclassified={reclassified}
 armed={armed}
 calls={calls}
 cleanup() {{ if [ -n "$pid" ]; then : > "$go_file"; wait "$job" 2>/dev/null || true; fi; }}
@@ -188,21 +199,28 @@ job="$(capture_child_job "$pid")" || exit 2
 : > "$armed"
 jobs() {{
     printf '%s %s\\n' "${{1:-}}" "${{2:-}}" >> "$calls"
+    if [ "${{1:-}}" = -l ] && [ -e "$reclassified" ]; then
+        printf '[%s]+ %s Done fixture\\n' "${{job#%}}" "$pid"
+        return 0
+    fi
     if [ "${{1:-}}" = -p ] && [ -e "$armed" ]; then
         rm -f "$armed"
         : > "$go_file"
-        local mapped
-        for ((probe=0; probe<500; probe++)); do
-            mapped="$(builtin jobs -p "$2" 2>/dev/null || true)"
-            [ -z "$mapped" ] && return 1
-            sleep 0.01
-        done
+        : > "$reclassified"
         return 1
     fi
     builtin jobs "$@"
 }}
 kill() {{ return 97; }}
-stop_child_job "$job" "$pid" INT 1 || exit 3
+if stop_child_job "$job" "$pid" INT 1; then
+    :
+else
+    status=$?
+    LC_ALL=C jobs -l "$job" >&2 || true
+    printf 'transition fixture stop failed: status=%s pid=%s job=%s reclassified=%s calls=%s\\n' \
+        "$status" "$pid" "$job" "$([ -e "$reclassified" ] && echo yes || echo no)" "$(cat "$calls")" >&2
+    exit 3
+fi
 [ "$(wc -l < "$calls" | tr -d ' ')" = 3 ] || exit 4
 [ "$(sed -n '1p' "$calls")" = "-l $job" ] || exit 5
 [ "$(sed -n '2p' "$calls")" = "-p $job" ] || exit 6
@@ -216,6 +234,7 @@ printf 'active-to-terminal reclassified with one fresh long probe\\n'
     def test_pruned_terminal_jobspec_remains_a_refusal(self):
         with tempfile.TemporaryDirectory(prefix="s9b3-pruned-") as directory:
             go_file = shlex.quote(str(Path(directory) / "go"))
+            record_file = shlex.quote(str(Path(directory) / "record"))
             child_code = (
                 "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); "
                 "deadline=time.monotonic()+5; "
@@ -227,6 +246,7 @@ set -u
 pid=""
 job=""
 go_file={go_file}
+record_file={record_file}
 cleanup() {{ if [ -n "$pid" ]; then : > "$go_file"; wait "$pid" 2>/dev/null || true; fi; }}
 trap cleanup EXIT
 python3 -c {shlex.quote(child_code)} "$go_file" &
@@ -235,11 +255,13 @@ job="$(capture_child_job "$pid")" || exit 2
 : > "$go_file"
 observed=""
 for ((probe=0; probe<500; probe++)); do
-    observed="$(LC_ALL=C jobs -l "$job" 2>/dev/null || true)"
+    LC_ALL=C jobs -l "$job" > "$record_file" 2>/dev/null || true
+    observed=""
+    IFS= read -r observed < "$record_file" || true
     case "$observed" in *Done*|*Exit*|*Terminated*|*Killed*|*Aborted*|*Hangup*|*Segmentation*|*Floating*) break ;; esac
     sleep 0.01
 done
-case "$observed" in *Done*|*Exit*|*Terminated*|*Killed*|*Aborted*|*Hangup*|*Segmentation*|*Floating*) ;; *) exit 3 ;; esac
+case "$observed" in *Done*|*Exit*|*Terminated*|*Killed*|*Aborted*|*Hangup*|*Segmentation*|*Floating*) ;; *) printf 'pruned-record timeout: pid=%s job=%s observed=%s\\n' "$pid" "$job" "$observed" >&2; exit 3 ;; esac
 LC_ALL=C jobs -l "$job" >/dev/null 2>&1 || exit 4
 LC_ALL=C jobs -p "$job" >/dev/null 2>&1 || true
 jobs() {{ return 1; }}
@@ -454,6 +476,7 @@ printf 'stopped job continued and received INT\\n'
         with tempfile.TemporaryDirectory(prefix="s9b2-owned-") as directory:
             ready = shlex.quote(str(Path(directory) / "ready"))
             marker = shlex.quote(str(Path(directory) / "int-received"))
+            record = shlex.quote(str(Path(directory) / "record"))
             child_code = (
                 "import pathlib,signal,sys,time; "
                 "ready,marker=sys.argv[1:3]; "
@@ -467,6 +490,7 @@ set -u
 . {COMMON}
 pid=""
 job=""
+record={record}
 cleanup() {{ if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; }}
 trap cleanup EXIT
 python3 -c {shlex.quote(child_code)} {ready} {marker} &
@@ -474,7 +498,18 @@ pid=$!
 job="$(capture_child_job "$pid")" || exit 2
 for ((i=0; i<200; i++)); do [ -f {ready} ] && break; sleep 0.01; done
 [ -f {ready} ] || exit 3
-stop_child_job "$job" "$pid" INT 1 || exit 4
+if stop_child_job "$job" "$pid" INT 1; then
+    :
+else
+    status=$?
+    LC_ALL=C jobs -l "$job" > "$record" 2>/dev/null || true
+    observed=""
+    IFS= read -r observed < "$record" || true
+    printf 'owned-child stop failed: status=%s pid=%s job=%s marker=%s record=%s\\n' \
+        "$status" "$pid" "$job" "$([ -f {marker} ] && echo yes || echo no)" "$observed" >&2
+    ps -o pid,ppid,pgid,sid,stat -p "$pid" >&2 || true
+    exit 4
+fi
 [ -f {marker} ] || exit 5
 if child_job_active "$job" "$pid"; then exit 6; fi
 pid=""

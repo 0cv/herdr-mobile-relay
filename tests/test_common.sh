@@ -912,7 +912,22 @@ CHOOSER_BIN_DIR="$WORK_DIR/chooser-bin"
 CHOOSER_SCRIPT_DIR="$WORK_DIR/chooser-scripts"
 CHOOSER_ENV="$WORK_DIR/config/chooser.env"
 CHOOSER_START_MARKER="$WORK_DIR/chooser-started"
+CHOOSER_SERVICE_LOG="$WORK_DIR/chooser-service-manager.log"
 mkdir -p "$CHOOSER_BIN_DIR" "$CHOOSER_SCRIPT_DIR"
+cat > "$CHOOSER_BIN_DIR/systemctl" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CHOOSER_SERVICE_LOG"
+[ "$*" = '--user is-active --quiet herdr-mobile-relay.service' ] || exit 99
+exit 3
+EOF
+cat > "$CHOOSER_BIN_DIR/launchctl" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CHOOSER_SERVICE_LOG"
+[ "${1:-}" = print ] || exit 99
+exit 1
+EOF
+chmod 700 "$CHOOSER_BIN_DIR/systemctl" "$CHOOSER_BIN_DIR/launchctl"
+export CHOOSER_SERVICE_LOG
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-choose-transport.sh" \
     "$CHOOSER_SCRIPT_DIR/"
 cat > "$CHOOSER_BIN_DIR/curl" <<'EOF'
@@ -1021,6 +1036,11 @@ fi
 case "$TEMPORARY_OUTPUT" in
     *"Temporary Cloudflare tunnel selected."*) ;;
     *) echo "temporary tunnel selection was not reported" >&2; exit 1 ;;
+esac
+case "$(uname -s)" in
+    Linux) test "$(cat "$CHOOSER_SERVICE_LOG")" = '--user is-active --quiet herdr-mobile-relay.service' ;;
+    Darwin) test "$(cat "$CHOOSER_SERVICE_LOG")" = "print gui/$(id -u)/com.herdr-mobile-relay.service" ;;
+    *) echo "unsupported platform in chooser service-manager fixture" >&2; exit 1 ;;
 esac
 
 # Quick Start must never race an installed background service for the relay
