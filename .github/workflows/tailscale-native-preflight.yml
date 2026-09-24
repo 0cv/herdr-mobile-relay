@@ -513,10 +513,13 @@ jobs:
           set -euo pipefail
           host_pid_ns="$(readlink /proc/self/ns/pid)"
           host_net_ns="$(readlink /proc/self/ns/net)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
           sandbox=(
-            --unshare-user --unshare-pid --unshare-net --die-with-parent --new-session
+            --unshare-pid --unshare-net --die-with-parent --new-session
+            --uid "$runner_uid" --gid "$runner_gid"
             --ro-bind / /
-            --tmpfs /tmp
+            --tmpfs /tmp --chmod 1777 /tmp
             --dir /tmp/workspace
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace
             --dir /tmp/runner
@@ -530,7 +533,7 @@ jobs:
             --setenv HERDR_S9B3_HOST_PID_NS "$host_pid_ns"
             --setenv HERDR_S9B3_HOST_NET_NS "$host_net_ns"
           )
-          bwrap "${sandbox[@]}" -- /usr/bin/python3 -c '
+          sudo bwrap "${sandbox[@]}" -- /usr/bin/python3 -c '
           import os
           pid = os.readlink("/proc/self/ns/pid")
           net = os.readlink("/proc/self/ns/net")
@@ -550,10 +553,13 @@ jobs:
           set -euo pipefail
           host_pid_ns="$(readlink /proc/self/ns/pid)"
           host_net_ns="$(readlink /proc/self/ns/net)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
           sandbox=(
-            --unshare-user --unshare-pid --unshare-net --die-with-parent --new-session
+            --unshare-pid --unshare-net --die-with-parent --new-session
+            --uid "$runner_uid" --gid "$runner_gid"
             --ro-bind / /
-            --tmpfs /tmp
+            --tmpfs /tmp --chmod 1777 /tmp
             --dir /tmp/workspace
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace
             --dir /tmp/runner
@@ -568,12 +574,12 @@ jobs:
             --setenv HERDR_S9B3_HOST_NET_NS "$host_net_ns"
           )
           {
-            bwrap "${sandbox[@]}" \
+            sudo bwrap "${sandbox[@]}" \
               --setenv HERDR_S9B3_SANDBOX 1 \
               --setenv HERDR_S9B3_SOURCE /tmp/workspace \
               --setenv HERDR_S9B3_SUPERVISOR /tmp/runner/herdr-mobile-relay-supervisor \
               -- /usr/bin/python3 /tmp/workspace/tests/test_tailscale_process_groups.py -v &&
-            bwrap "${sandbox[@]}" \
+            sudo bwrap "${sandbox[@]}" \
               --setenv HERDR_S9B2_SANDBOX 1 \
               --setenv HERDR_S9B2_SOURCE /tmp/workspace \
               -- /usr/bin/python3 /tmp/workspace/tests/test_tailscale_child_jobs.py -v

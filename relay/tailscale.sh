@@ -451,6 +451,43 @@ RELAY_URL="wss://${ORIGIN#https://}"
 HOST_LABEL="$(host_label)"
 SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
 PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+
+# The URL is a credential. Recheck both owned jobs, the current route, and
+# managed pairing readiness immediately before publishing it.
+if ! child_job_active "$RELAY_JOB" "$RELAY_PID"; then
+    echo "✗ The foreground relay stopped before its private setup link was ready." >&2
+    exit 1
+fi
+if ! child_job_active "$SERVE_JOB" "$SERVE_PID"; then
+    echo "✗ Tailscale Serve stopped before the private setup link was ready." >&2
+    exit 1
+fi
+PAIRING_STATUS="$(tailscale_control_request "$CONTROL_SOCKET" status "$RUN_ID" "$HERDR_RELAY_INSTANCE_ID" 2>/dev/null)" || {
+    echo "✗ Managed relay pairing control stopped before the private setup link was ready." >&2
+    exit 1
+}
+if [ "$(json_bool_field "$PAIRING_STATUS" ready)" != true ]; then
+    echo "✗ Managed relay pairing was no longer ready; no private setup link was printed." >&2
+    exit 1
+fi
+CURRENT_INSPECTION="$(
+    "$RELAY_BIN" tailscale inspect --binary "$TS_BIN" --https-port "$HTTPS_PORT" 2>/dev/null
+)" || {
+    echo "✗ Tailscale Serve inspection failed before the private setup link was ready." >&2
+    exit 1
+}
+if [ "$(json_bool_field "$CURRENT_INSPECTION" serve_inspected)" != true ] ||
+    [ "$(json_bool_field "$CURRENT_INSPECTION" exposure_complete)" != true ] ||
+    [ "$(json_bool_field "$CURRENT_INSPECTION" serve_configured)" != true ] ||
+    [ "$(json_bool_field "$CURRENT_INSPECTION" funnel_configured)" != false ] ||
+    [ "$(json_number_field "$CURRENT_INSPECTION" serve_route_count)" != 1 ] ||
+    [ "$(json_bool_field "$CURRENT_INSPECTION" serve_route_owned)" != true ]; then
+    echo "✗ The owned Tailscale Serve route changed before the private setup link was ready." >&2
+    exit 1
+fi
+# All persistent state and live ownership are now verified; cleanup from this
+# point must preserve the committed transport rather than roll it back.
+COMMITTED=true
 print_phone_setup "$PHONE_URL"
 
 echo ""
@@ -458,7 +495,6 @@ echo "✓ Tailscale relay ready at $ORIGIN"
 echo "  Backend:  http://127.0.0.1:$PORT"
 echo "  This pane owns the relay and Serve session; press Ctrl-C to stop both."
 echo "  The setup link is private and pairs one device within 10 minutes."
-COMMITTED=true
 
 while child_job_active "$RELAY_JOB" "$RELAY_PID" && child_job_active "$SERVE_JOB" "$SERVE_PID"; do
     CURRENT_INSPECTION="$("$RELAY_BIN" tailscale inspect --binary "$TS_BIN" --https-port "$HTTPS_PORT" 2>/dev/null || true)"

@@ -30,7 +30,7 @@ func s2Enroll(t *testing.T, s *Store, selector transport.E2EEAuthSelector) trans
 
 func s2Seed(t *testing.T) (*Store, []transport.E2EEAuthResult) {
 	t.Helper()
-	s, err := Open(t.TempDir())
+	s, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -114,8 +114,8 @@ jobs:
             "${target%_*}/${target#*_}"
 
   mobile:
-    # Temporarily disabled while the installed-device harness is fixed on ci-mobile.
-    if: ${{ false }}
+    # The sentinel ref is not in the current push/PR/tag triggers; mobile remains disabled.
+    if: ${{ github.ref == 'refs/heads/__mobile-ci-disabled__' }}
     needs: build
     uses: ./.github/workflows/mobile-ci.yml
     with:

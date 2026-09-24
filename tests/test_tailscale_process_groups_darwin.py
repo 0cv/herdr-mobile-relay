@@ -67,9 +67,13 @@ def descendant(role):
 
 def tree(kind, exit_first=False):
     role = kind + "-leader"
-    connection = hold(role)
 
     def retire(_signum, _frame):
+        if kind == "relay":
+            try:
+                (state / "relay-ready").unlink()
+            except FileNotFoundError:
+                pass
         if kind == "tailscale" and scenario != "cleanup-failure":
             try:
                 (state / "serve-configured").unlink()
@@ -79,6 +83,7 @@ def tree(kind, exit_first=False):
 
     signal.signal(signal.SIGINT, retire)
     signal.signal(signal.SIGTERM, retire)
+    connection = hold(role)
     child_role = kind + "-descendant"
     child = subprocess.Popen(
         [sys.executable, __file__, "--descendant", child_role],
@@ -94,9 +99,11 @@ def tree(kind, exit_first=False):
         raise SystemExit("descendant fixture did not complete its socket handshake")
     if kind == "tailscale" and not exit_first:
         (state / "serve-configured").write_text("fixture route")
-    if exit_first:
-        raise SystemExit(27)
+    if kind == "relay" and not exit_first:
+        (state / "relay-ready").write_text(nonce)
     try:
+        if exit_first:
+            raise SystemExit(27)
         while True:
             time.sleep(1)
     finally:
@@ -171,6 +178,8 @@ def main(args):
         run_id = os.environ.get("HERDR_RELAY_RUN_ID", "fixture-run")
         instance = os.environ["HERDR_RELAY_INSTANCE_ID"]
         if operation == "status":
+            if not (state / "relay-ready").is_file():
+                raise SystemExit(94)
             print('{"ready":true}')
         elif operation == "arm_bootstrap":
             print(json.dumps({
@@ -418,7 +427,15 @@ class DarwinLifecycle(unittest.TestCase):
         self.accept_roles(expected)
 
         if signal_launcher:
-            self.assertIsNone(self.launcher.poll(), "launcher exited before all role handshakes")
+            deadline = time.monotonic() + 20
+            link_banner = b"Open this private setup link"
+            while time.monotonic() < deadline:
+                self.assertIsNone(self.launcher.poll(), "launcher exited before publishing the private link")
+                if link_banner in (self.root / "launcher.log").read_bytes():
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("launcher never committed and published its private setup link")
             # The only launcher signal uses the handle returned by this direct
             # Popen; no recorded or observed numeric PID is consulted.
             self.launcher.send_signal(signal.SIGTERM)

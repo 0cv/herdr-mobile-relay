@@ -5,11 +5,17 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
+
+func testDeviceStoreDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "device-auth")
+}
 
 func testCredential(deviceID, credentialID string, role Role) credentialRecord {
 	return credentialRecord{
@@ -22,7 +28,7 @@ func testCredential(deviceID, credentialID string, role Role) credentialRecord {
 }
 
 func TestRevokeCredentialPreservesLastController(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +47,7 @@ func TestRevokeCredentialPreservesLastController(t *testing.T) {
 }
 
 func TestArmBootstrapInvitationKeepsEnrolledDevices(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +96,7 @@ func TestArmBootstrapInvitationKeepsEnrolledDevices(t *testing.T) {
 }
 
 func TestInvitationRedemptionRetriesUntilCredentialAuthentication(t *testing.T) {
-	dir := t.TempDir()
+	dir := testDeviceStoreDir(t)
 	store, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +151,7 @@ func TestInvitationRedemptionRetriesUntilCredentialAuthentication(t *testing.T) 
 }
 
 func TestRevokingPendingCredentialConsumesInvitation(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +178,7 @@ func TestRevokingPendingCredentialConsumesInvitation(t *testing.T) {
 }
 
 func TestResetWithBootstrapAtomicallyReplacesCredentials(t *testing.T) {
-	dir := t.TempDir()
+	dir := testDeviceStoreDir(t)
 	store, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +214,7 @@ func TestResetWithBootstrapAtomicallyReplacesCredentials(t *testing.T) {
 }
 
 func TestBootstrapInvitationRefreshesWhenFirstUsedAfterExpiry(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +241,7 @@ func TestBootstrapInvitationRefreshesWhenFirstUsedAfterExpiry(t *testing.T) {
 }
 
 func TestBootstrapInvitationDoesNotCountFailedProofs(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +267,7 @@ func TestBootstrapInvitationDoesNotCountFailedProofs(t *testing.T) {
 }
 
 func TestAuthorizeCredentialRejectsRevokedAndReplacedVersions(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +287,7 @@ func TestAuthorizeCredentialRejectsRevokedAndReplacedVersions(t *testing.T) {
 }
 
 func TestAuthenticatedLocaleIsNormalizedAndPersisted(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +311,7 @@ func TestAuthenticatedLocaleIsNormalizedAndPersisted(t *testing.T) {
 }
 
 func TestBootstrapStaysConsumedForStableInstalls(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(testDeviceStoreDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +326,7 @@ func TestBootstrapStaysConsumedForStableInstalls(t *testing.T) {
 }
 
 func TestRearmedBootstrapEnrollsAReplacementDeviceEachLaunch(t *testing.T) {
-	dir := t.TempDir()
+	dir := testDeviceStoreDir(t)
 	store, err := Open(dir, WithBootstrapReenrollment())
 	if err != nil {
 		t.Fatal(err)
@@ -352,7 +358,7 @@ func TestRearmedBootstrapEnrollsAReplacementDeviceEachLaunch(t *testing.T) {
 }
 
 func TestRearmedBootstrapRefreshesExpiryWithEnrolledDevices(t *testing.T) {
-	store, err := Open(t.TempDir(), WithBootstrapReenrollment())
+	store, err := Open(testDeviceStoreDir(t), WithBootstrapReenrollment())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -103,7 +103,20 @@ jobs:
         with:
           go-version: 1.27.1
           cache: true
-      - run: make shell-check production-path-audit
+      # Makefile's PATH assignment is an ordinary makefile variable and can
+      # otherwise reintroduce host tools/adapters after a clean step env.
+      - name: Run shell checks with a closed tool environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .env
+          env -i \
+            HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH=/usr/bin:/bin \
+            BASH_ENV=/dev/null ENV=/dev/null \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+            /usr/bin/make PATH=/usr/bin:/bin \
+              --eval='assert-shell-tools: ; @test "$$(command -v bash)" = /usr/bin/bash && test "$$(command -v sed)" = /usr/bin/sed' \
+              assert-shell-tools shell-check production-path-audit
 
   frontend:
     needs: provenance
@@ -206,8 +219,8 @@ jobs:
   mobile-host-check:
     needs: provenance
     name: Mobile harness checks
-    # Temporarily disabled while mobile CI is isolated on ci-mobile.
-    if: ${{ false }}
+    # The sentinel ref is not in the current push/PR triggers; mobile remains disabled.
+    if: ${{ github.ref == 'refs/heads/__mobile-ci-disabled__' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -230,8 +243,8 @@ jobs:
 
   mobile:
     name: Mobile device CI
-    # Temporarily disabled alongside mobile-host-check and the release caller.
-    if: ${{ false }}
+    # The sentinel ref is not in the current push/PR triggers; mobile remains disabled.
+    if: ${{ github.ref == 'refs/heads/__mobile-ci-disabled__' }}
     needs: [release, mobile-host-check, provenance]
     uses: ./.github/workflows/mobile-ci.yml
     with:

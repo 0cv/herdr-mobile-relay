@@ -1044,10 +1044,11 @@ cat > "$START_BIN_DIR/systemctl" <<'EOF'
 #!/bin/sh
 case "$*" in
     "--user is-active --quiet herdr-mobile-relay.service")
+        printf 'active\n' >> "$START_SERVICE_LOG"
         exit 0
         ;;
     "--user restart herdr-mobile-relay.service")
-        printf 'restarted\n' > "$START_SERVICE_LOG"
+        printf 'restarted\n' >> "$START_SERVICE_LOG"
         ;;
     *)
         exit 1
@@ -1057,8 +1058,8 @@ EOF
 cat > "$START_BIN_DIR/launchctl" <<'EOF'
 #!/bin/sh
 case "$1" in
-    print) exit 0 ;;
-    kickstart) printf 'restarted\n' > "$START_SERVICE_LOG" ;;
+    print) printf 'active\n' >> "$START_SERVICE_LOG"; exit 0 ;;
+    kickstart) printf 'restarted\n' >> "$START_SERVICE_LOG" ;;
     *) exit 1 ;;
 esac
 EOF
@@ -1080,12 +1081,14 @@ chmod 700 "$START_SCRIPT_DIR/setup-link.sh" "$START_BIN_DIR/systemctl" \
 export START_SERVICE_LOG START_RELAY_LOG
 START_OUTPUT="$(
     HOME="$START_HOME" \
-        PATH="$START_BIN_DIR:$PATH" \
+        PATH="$START_BIN_DIR:/usr/bin:/bin" \
+        BASH_ENV=/dev/null ENV=/dev/null HERDR_DEV_TUNNEL= \
         HERDR_RELAY_BIN="$START_BIN_DIR/relay-bin" \
         HERDR_RELAY_ENV="$START_ENV" \
         bash "$START_SCRIPT_DIR/start.sh"
 )"
-test -f "$START_SERVICE_LOG"
+grep -qx 'active' "$START_SERVICE_LOG"
+grep -qx 'restarted' "$START_SERVICE_LOG"
 test ! -e "$START_RELAY_LOG"
 case "$START_OUTPUT" in
     *"Restarting the installed background relay"*"Background relay ready"*"setup QR printed"*) ;;

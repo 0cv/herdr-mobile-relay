@@ -382,7 +382,7 @@ func TestReleaseRouterFaultExpiryInvalidatesFixture(t *testing.T) {
 }
 
 func TestDeviceCredentialPersistsAcrossResolverRestart(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "device-auth")
 	store, err := deviceauth.Open(dir)
 	if err != nil {
 		t.Fatal(err)
