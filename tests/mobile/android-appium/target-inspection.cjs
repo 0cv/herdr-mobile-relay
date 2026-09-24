@@ -71,6 +71,20 @@ function messageClassification(message) {
   if (!hasMethod && hasId) return 'reply';
   return 'other';
 }
+function selectedTopLayerNotification(message, phase, pending, sessionTargets, selectedHandle) {
+  if (phase !== 'post-cdp-completion' || pending || message.method !== 'DOM.topLayerElementsUpdated'
+    || Object.hasOwn(message, 'id') || Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error')) return false;
+  const fields = Object.keys(message);
+  const validFields = Object.hasOwn(message, 'params')
+    ? fields.length === 3 && ['method', 'params', 'sessionId'].every((field) => fields.includes(field))
+    : fields.length === 2 && ['method', 'sessionId'].every((field) => fields.includes(field));
+  if (!validFields) return false;
+  const association = typeof message.sessionId === 'string' ? sessionTargets.get(message.sessionId) : undefined;
+  if (!association || association.targetId !== selectedHandle) return false;
+  if (!Object.hasOwn(message, 'params')) return true;
+  const params = message.params;
+  return Boolean(params && typeof params === 'object' && !Array.isArray(params) && Object.keys(params).length === 0);
+}
 function diagnosticSession(message, sessionTargets) {
   if (!Object.hasOwn(message, 'sessionId')) return {sessionRelation: 'root', sessionOrdinal: 'none', targetOrdinal: 'none'};
   const association = typeof message.sessionId === 'string' ? sessionTargets.get(message.sessionId) : undefined;
@@ -164,6 +178,7 @@ async function inspect(owner, contract, targets) {
   let connected = false;
   let phase = 'initial';
   const sessionTargets = new Map();
+  let selectedHandle;
   const connectionId = randomUUID();
   const failure = new Promise((_, reject) => { rejectFailure = reject; });
   failure.catch(() => {});
@@ -203,6 +218,7 @@ async function inspect(owner, contract, targets) {
     state.expectedBrowserPid = expectedBrowserPid;
     timer = setTimeout(() => fail(new Error('Inspection deadline')), Math.min(contract.deadline - Date.now(), 2147483647));
     const before = await snapshot();
+    selectedHandle = before.selectedHandle;
     await bounded(() => contract.validateSnapshot(owner, before, before));
     const endpoint = record(before.endpoint);
     if (endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 || !/^\/devtools\/browser(?:\/[A-Za-z0-9-]+)?$/.test(endpoint.browserPath)) throw new Error('Invalid owner endpoint');
@@ -236,6 +252,7 @@ async function inspect(owner, contract, targets) {
           check();
           if (++messages > 400 || binary || data.length > LIMIT) throw new Error('Message limit or binary frame');
           const message = record(JSON.parse(data.toString('utf8')));
+          if (selectedTopLayerNotification(message, phase, pending, sessionTargets, selectedHandle)) return;
           if (message.method === 'Target.attachedToTarget' && pending?.method === 'Target.attachToTarget' && !pending.attached && message.id === undefined && message.sessionId === undefined) {
             const event = record(message.params);
             if (record(event.targetInfo).targetId !== pending.params.targetId || event.waitingForDebugger !== false) throw new Error('Wrong attached target');
@@ -286,7 +303,7 @@ async function inspect(owner, contract, targets) {
         const attached = await send('Target.attachToTarget', {targetId: target.targetId, flatten: true});
         const sessionId = text(attached.sessionId);
         if (sessionTargets.has(sessionId)) throw new Error('Duplicate target session');
-        sessionTargets.set(sessionId, {sessionOrdinal: index + 1, targetOrdinal: index + 1});
+        sessionTargets.set(sessionId, {sessionOrdinal: index + 1, targetOrdinal: index + 1, targetId: target.targetId});
         observations.push({targetId: target.targetId, sessionId, document: await observe(sessionId, index + 1, 'initial')});
       }
       phase = 'repeat';
@@ -299,6 +316,7 @@ async function inspect(owner, contract, targets) {
     }
     phase = 'final-snapshot';
     const pidAfter = await observePid();
+    if (targets) phase = 'post-cdp-completion';
     const processAssociation = {kind: 'bounded-sequential-service-to-process', before: pidBefore, after: pidAfter};
     result = targets ? {...result, processAssociation} : {kind: 'bounded-browser-process-association', processAssociation};
     const after = await snapshot();

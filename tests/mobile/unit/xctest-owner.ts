@@ -3374,6 +3374,12 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         if (mode === 'listener-pending-ambiguous' || mode === 'listener-pending-command-error' || mode === 'listener-pending-invalid-pid') {
           assert.equal(pinned, undefined);
         } else {
+          if (!pinned && mode === 'listener-pending-stop') {
+            let diagnostic: string;
+            try { diagnostic = pendingInvalidSnapshot(root, testMode, child, done); }
+            catch { diagnostic = '{"collection":"unavailable"}'; }
+            assert.fail(`listener-pending-stop pin not observed: ${diagnostic}`);
+          }
           assert.ok(pinned);
           assert.match(String(pinned.detail?.pid), /^[1-9]\d{0,9}$/u);
           if (!pendingOwner.firstFailure) assert.equal(pendingOwner.listenerEvidence.some((entry: {pid: string}) => entry.pid === pinned.detail.pid), true);

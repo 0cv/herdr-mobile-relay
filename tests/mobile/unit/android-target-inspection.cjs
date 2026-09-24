@@ -38,15 +38,25 @@ async function fixture(mode, run) {
   let evaluations = 0;
   let unselectedMode = 'browser';
   const target = (id) => ({targetId: id, type: 'page', url: 'https://app/', title: 'same', attached: true});
-  const diagnosticEvent = (sessionId = 'installed') => JSON.stringify({
-    method: mode === 'unknown-event' ? 'DOM.secretNotification' : mode === 'late-top-layer-event' ? 'DOM.topLayerElementsUpdated' : 'DOM.childNodeCountUpdated',
-    ...(sessionId ? {sessionId} : {}),
-    params: mode === 'late-top-layer-event'
-      ? {topLayerElements: [7]}
-      : mode === 'late-event-secrets'
-        ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
-        : {nodeId: 7, childNodeCount: 2},
-  });
+  const diagnosticEvent = (sessionId = 'installed') => {
+    const topLayer = mode.startsWith('late-top-layer-');
+    const event = {
+      method: mode === 'unknown-event' ? 'DOM.secretNotification' : topLayer ? 'DOM.topLayerElementsUpdated' : 'DOM.childNodeCountUpdated',
+      ...(sessionId ? {sessionId} : {}),
+    };
+    if (!mode.endsWith('-missing-params')) {
+      event.params = topLayer
+        ? mode.endsWith('-malformed') ? {unexpected: true} : {}
+        : mode === 'late-event-secrets'
+          ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
+          : {nodeId: 7, childNodeCount: 2};
+    }
+    if (mode.endsWith('-id')) event.id = 19;
+    if (mode.endsWith('-result')) event.result = {};
+    if (mode.endsWith('-error')) event.error = {code: -32000};
+    if (mode.endsWith('-extra-field')) event.unexpected = true;
+    return JSON.stringify(event);
+  };
   wss.on('connection', (ws) => {
     connections++;
     directSocket = ws;
@@ -149,8 +159,8 @@ async function fixture(mode, run) {
       try { ws.send(JSON.stringify(response)); ws.send(JSON.stringify(response)); }
       finally { ws._socket.uncork(); }
     } else {
-      if (mode === 'pending-event' && message.id === 4) ws.send(diagnosticEvent());
-      if (mode === 'between-passes' && message.id === 10) {
+      if ((mode === 'pending-event' && message.id === 4) || (mode === 'late-top-layer-pending' && message.id === 18)) ws.send(diagnosticEvent());
+      if ((mode === 'between-passes' || mode === 'late-top-layer-between-passes') && message.id === 10) {
         ws._socket.cork();
         try { ws.send(JSON.stringify(response)); ws.send(diagnosticEvent('bootstrap')); }
         finally { ws._socket.uncork(); }
@@ -169,23 +179,33 @@ async function fixture(mode, run) {
   const snapshot = {endpoint: {host: '127.0.0.1', port: serverPort, browserPath}, browserVersion: 'Chrome/131', handles: ['bootstrap', 'installed'], selectedHandle: 'installed'};
   const contract = {
     expectedBrowserPid: 123,
-    deadline: Date.now() + (['late', 'pid-after-late', 'http-stall', 'open-stall', 'read-stall', 'frame-partial'].includes(mode) ? 100 : 2000),
+    deadline: Date.now() + (['late', 'pid-after-late', 'http-stall', 'open-stall', 'read-stall', 'frame-partial', 'late-top-layer-deadline'].includes(mode) ? 100 : 2000),
     assertOwner: () => { if (mode === 'owner-before' || (mode === 'owner-during' && calls.length >= 3)) throw new Error('Owner changed'); },
     failure: () => { failures++; },
     snapshot: async () => {
       snapshots++;
       if (mode === 'final-disconnect' && snapshots > 1) await new Promise((resolve) => setTimeout(resolve, 30));
-      if (['late-event', 'late-event-secrets', 'late-top-layer-event'].includes(mode) && snapshots > 1) {
+      if (['late-event', 'late-event-secrets'].includes(mode) && snapshots > 1) {
         directSocket.send(diagnosticEvent());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      if (mode.startsWith('late-top-layer-') && !['late-top-layer-pending', 'late-top-layer-between-passes'].includes(mode) && snapshots > 1) {
+        if (mode === 'late-top-layer-deadline') await new Promise((resolve) => setTimeout(resolve, 150));
+        if (directSocket.readyState === 1) {
+          const count = mode === 'late-top-layer-flood' ? 401 : 1;
+          for (let index = 0; index < count; index++) directSocket.send(diagnosticEvent(mode === 'late-top-layer-root' ? null : mode === 'late-top-layer-unselected' ? 'bootstrap' : mode === 'late-top-layer-unknown' ? 'unowned' : 'installed'));
+          if (mode === 'late-top-layer-target-created') directSocket.send(JSON.stringify({method: 'Target.targetCreated', params: {targetInfo: target('new-target')}}));
+          if (mode === 'late-top-layer-document-updated') directSocket.send(JSON.stringify({method: 'DOM.documentUpdated', sessionId: 'installed', params: {}}));
+        }
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       return structuredClone(snapshot);
     },
-    validateSnapshot: async (_owner, before, after) => { assert.deepEqual(before, after); if (mode === 'owner-after' && snapshots > 1) throw new Error('Native owner lost'); },
+    validateSnapshot: async (_owner, before, after) => { assert.deepEqual(before, after); if (mode === 'owner-after' || (mode === 'late-top-layer-owner-after' && snapshots > 1)) throw new Error('Native owner lost'); },
     validateSelectedDocument: async (_owner, result) => {
       assert.equal(result.selectedHandle, 'installed');
       assert.equal(result.observations.find((o) => o.targetId === 'installed').document.backendNodeId, 2);
-      if (mode === 'selected-refused') throw new Error('Selected association refused');
+      if (mode === 'selected-refused' || mode === 'late-top-layer-selected-refused') throw new Error('Selected association refused');
       if (mode === 'final-selected-disconnect') {
         for (const client of wss.clients) client.close();
         await new Promise((resolve) => setTimeout(resolve, 30));
@@ -248,7 +268,7 @@ test('late event diagnosis preserves the final refusal and quarantine', async ()
       idPresence: 'absent', idType: 'absent', idValue: 'none',
       sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
       lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
-      phase: 'final-snapshot', messageCount: 21, params: {nodeId: 7, childNodeCount: 2},
+      phase: 'post-cdp-completion', messageCount: 21, params: {nodeId: 7, childNodeCount: 2},
     });
     assert.ok(String(error).length < 1_000);
     return true;
@@ -272,18 +292,38 @@ test('diagnostic event params are schema bounded and redacted', async () => fixt
   });
 }));
 
-test('late top-layer event preserves the exact refusal and quarantine', async () => fixture('late-top-layer-event', async ({owner, contract, calls, failures}) => {
+for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params']) {
+  test(`protocol-valid top-layer notification is admitted after CDP completion: ${mode}`, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
+    const result = await inspectTargets(owner, contract);
+    assert.equal(result.processAssociation.after.requestId, 18);
+    assert.equal(result.selectedHandle, 'installed');
+    assert.equal(calls.length, 18);
+    assert.equal(failures(), 0);
+  }));
+}
+
+for (const [mode, sessionRelation, phase] of [
+  ['late-top-layer-root', 'root', 'post-cdp-completion'],
+  ['late-top-layer-unselected', 'known-local-ordinal', 'post-cdp-completion'],
+  ['late-top-layer-unknown', 'unknown', 'post-cdp-completion'],
+  ['late-top-layer-malformed', 'known-local-ordinal', 'post-cdp-completion'],
+  ['late-top-layer-id', 'known-local-ordinal', 'post-cdp-completion'],
+  ['late-top-layer-result', 'known-local-ordinal', 'post-cdp-completion'],
+  ['late-top-layer-error', 'known-local-ordinal', 'post-cdp-completion'],
+  ['late-top-layer-extra-field', 'known-local-ordinal', 'post-cdp-completion'],
+  ['late-top-layer-pending', 'known-local-ordinal', 'final-snapshot'],
+  ['late-top-layer-between-passes', 'known-local-ordinal', 'initial'],
+]) test(`top-layer event refuses ${mode}`, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
   let original;
   await assert.rejects(inspectTargets(owner, contract), error => {
     original = error;
-    assert.deepEqual(readUncorrelatedDiagnostic(error), {
-      failurePredicate: 'uncorrelated-cdp-message', classification: 'event', method: 'DOM.topLayerElementsUpdated',
-      idPresence: 'absent', idType: 'absent', idValue: 'none',
-      sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
-      lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
-      phase: 'final-snapshot', messageCount: 21,
-    });
-    assert.equal(Object.hasOwn(readUncorrelatedDiagnostic(error), 'params'), false, 'top-layer params are not retained');
+    const diagnostic = readUncorrelatedDiagnostic(error);
+    assert.equal(diagnostic.method, 'DOM.topLayerElementsUpdated');
+    assert.equal(diagnostic.sessionRelation, sessionRelation);
+    assert.equal(diagnostic.phase, phase);
+    if (mode.endsWith('-id')) assert.equal(diagnostic.classification, 'other');
+    else assert.equal(diagnostic.classification, 'event');
+    assert.equal(Object.hasOwn(diagnostic, 'params'), false);
     assert.ok(String(error).length < 1_000);
     return true;
   });
@@ -293,6 +333,28 @@ test('late top-layer event preserves the exact refusal and quarantine', async ()
   await assert.rejects(associateBrowserProcess(owner, {...contract, deadline: Date.now() + 1000}), error => error === original);
   assert.equal(calls.length, count);
 }));
+
+test('accepted top-layer event does not hide later document or target inventory events', async () => {
+  for (const mode of ['late-top-layer-document-updated', 'late-top-layer-target-created']) {
+    await fixture(mode, async ({owner, contract}) => {
+      await assert.rejects(inspectTargets(owner, contract), error => {
+        const diagnostic = readUncorrelatedDiagnostic(error);
+        assert.equal(diagnostic.method, mode.endsWith('target-created') ? 'Target.targetCreated' : 'DOM.documentUpdated');
+        assert.equal(diagnostic.phase, 'post-cdp-completion');
+        return true;
+      });
+    });
+  }
+});
+
+test('accepted top-layer event still runs final owner and selected-document validation', async () => {
+  await fixture('late-top-layer-owner-after', async ({owner, contract}) => {
+    await assert.rejects(inspectTargets(owner, contract), /Native owner lost/u);
+  });
+  await fixture('late-top-layer-selected-refused', async ({owner, contract}) => {
+    await assert.rejects(inspectTargets(owner, contract), /Selected association refused/u);
+  });
+});
 
 for (const [mode, expected] of [
   ['pending-event', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'unknown', sessionOrdinal: 'unknown', targetOrdinal: 'unknown', lastSequence: 4, pendingId: 4, pendingMethod: 'DOM.getDocument', pendingSessionOrdinal: 1, phase: 'initial', messageCount: 5}],
@@ -334,7 +396,7 @@ test('accepted loss: an unselected standalone mode change remains unobserved', a
   assert.equal(calls.length, 36);
 }));
 
-for (const mode of ['pid-string', 'pid-fraction', 'pid-zero', 'pid-negative', 'pid-overflow', 'pid-unsafe', 'pid-missing-id', 'pid-wrong', 'pid-after-wrong', 'pid-missing', 'pid-absent', 'pid-duplicate', 'pid-duplicate-id', 'pid-child-invalid', 'pid-many', 'pid-type', 'pid-no-browser', 'pid-no-cpu', 'pid-cpu-string', 'pid-cpu-negative', 'pid-null', 'pid-child-route', 'child-root-route', 'pid-error', 'pid-stale', 'pid-repeat', 'pid-after-late', 'final-disconnect', 'final-selected-disconnect', 'duplicate', 'invalid', 'unmapped', 'changed', 'disappeared', 'replaced', 'wrong-target', 'wrong-attach-session', 'wrong-request', 'wrong-session', 'event', 'http-large', 'http-partial', 'http-malformed', 'frame-binary', 'frame-large', 'frame-partial', 'frame-malformed', 'http-stall', 'open-stall', 'read-stall', 'expired', 'owner-before', 'owner-during', 'owner-after', 'selected-refused', 'disconnect', 'late', 'foreign-endpoint', 'document-replaced', 'repeat-drift', 'other-page-unreadable']) {
+for (const mode of ['pid-string', 'pid-fraction', 'pid-zero', 'pid-negative', 'pid-overflow', 'pid-unsafe', 'pid-missing-id', 'pid-wrong', 'pid-after-wrong', 'pid-missing', 'pid-absent', 'pid-duplicate', 'pid-duplicate-id', 'pid-child-invalid', 'pid-many', 'pid-type', 'pid-no-browser', 'pid-no-cpu', 'pid-cpu-string', 'pid-cpu-negative', 'pid-null', 'pid-child-route', 'child-root-route', 'pid-error', 'pid-stale', 'pid-repeat', 'pid-after-late', 'final-disconnect', 'final-selected-disconnect', 'duplicate', 'invalid', 'unmapped', 'changed', 'disappeared', 'replaced', 'wrong-target', 'wrong-attach-session', 'wrong-request', 'wrong-session', 'event', 'http-large', 'http-partial', 'http-malformed', 'frame-binary', 'frame-large', 'frame-partial', 'frame-malformed', 'http-stall', 'open-stall', 'read-stall', 'expired', 'owner-before', 'owner-during', 'owner-after', 'selected-refused', 'disconnect', 'late', 'foreign-endpoint', 'document-replaced', 'repeat-drift', 'other-page-unreadable', 'late-top-layer-flood', 'late-top-layer-deadline', 'late-top-layer-owner-after', 'late-top-layer-selected-refused']) {
   test(mode, async () => fixture(mode, async ({owner, contract, calls, failures}) => {
     let original;
     await assert.rejects(inspectTargets(owner, contract), error => { original = error; return true; });

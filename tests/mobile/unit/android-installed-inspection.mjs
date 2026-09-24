@@ -68,15 +68,25 @@ async function fixture(run, initialMode = '') {
   let driver;
   let directSocket;
   const state = {selected: APP, pid: String(initialPid), startTime: '123456', serial: 'fixture', inode: '4321', activity: nativeActivity, mode: initialMode, count: 0, pageURL: 'https://app/#settings', extras: [], onRead: undefined, eventSent: false};
-  const diagnosticEvent = (sessionId = APP) => JSON.stringify({
-    method: state.mode === 'unknown-event' ? 'DOM.secretNotification' : state.mode === 'late-top-layer-event' ? 'DOM.topLayerElementsUpdated' : 'DOM.childNodeCountUpdated',
-    ...(sessionId ? {sessionId} : {}),
-    params: state.mode === 'late-top-layer-event'
-      ? {topLayerElements: [7]}
-      : state.mode === 'late-event-secrets'
-        ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
-        : {nodeId: 7, childNodeCount: 2},
-  });
+  const diagnosticEvent = (sessionId = APP) => {
+    const topLayer = state.mode.startsWith('late-top-layer-');
+    const event = {
+      method: state.mode === 'unknown-event' ? 'DOM.secretNotification' : topLayer ? 'DOM.topLayerElementsUpdated' : 'DOM.childNodeCountUpdated',
+      ...(sessionId ? {sessionId} : {}),
+    };
+    if (!state.mode.endsWith('-missing-params')) {
+      event.params = topLayer
+        ? state.mode.endsWith('-malformed') ? {unexpected: true} : {}
+        : state.mode === 'late-event-secrets'
+          ? {nodeId: 'SESSION_SECRET', childNodeCount: 2, secret: 'CREDENTIAL_SECRET', url: 'https://attacker.invalid/'}
+          : {nodeId: 7, childNodeCount: 2};
+    }
+    if (state.mode.endsWith('-id')) event.id = 19;
+    if (state.mode.endsWith('-result')) event.result = {};
+    if (state.mode.endsWith('-error')) event.error = {code: -32000};
+    if (state.mode.endsWith('-extra-field')) event.unexpected = true;
+    return JSON.stringify(event);
+  };
   const nativeCalls = [];
   const nativeSockets = new Set();
   const nativeServer = createServer((req, res) => {
@@ -189,7 +199,7 @@ async function fixture(run, initialMode = '') {
       ws.send(JSON.stringify({method: 'DOM.childNodeCountUpdated', params: {nodeId: 7, childNodeCount: 2}, ...(state.mode === 'event-error' ? {error: {code: -32000, message: 'not a reply'}} : {result: {ignored: true}})}));
       return;
     }
-    if (state.mode === 'pending-event' && message.id === 4) ws.send(diagnosticEvent());
+    if ((state.mode === 'pending-event' && message.id === 4) || (state.mode === 'late-top-layer-pending' && message.id === 18)) ws.send(diagnosticEvent());
     switch (message.method) {
       case 'SystemInfo.getProcessInfo':
         processReads++;
@@ -260,7 +270,7 @@ async function fixture(run, initialMode = '') {
     }
     const response = {id: message.id, result, ...(message.sessionId ? {sessionId: message.sessionId} : {})};
     if (state.mode === 'result-malformed') response.result = [];
-    if (state.mode === 'between-passes' && message.id === 10) {
+    if ((state.mode === 'between-passes' || state.mode === 'late-top-layer-between-passes') && message.id === 10) {
       ws._socket.cork();
       try { ws.send(JSON.stringify(response)); ws.send(diagnosticEvent(BOOT)); }
       finally { ws._socket.uncork(); }
@@ -364,11 +374,23 @@ async function fixture(run, initialMode = '') {
     assert.ok(driver.chromedriver.jwproxy instanceof JWProxy);
     assert.ok(driver.getProxyAvoidList().some(([method, pattern]) => method === 'POST' && pattern.test('/session/outer-token/execute/sync')), 'Real CHROMIUM dispatcher must not proxy the mobile route');
     state.onRead = async () => {
-      if (['late-event', 'late-event-secrets', 'late-top-layer-event'].includes(state.mode)
+      if ((['late-event', 'late-event-secrets'].includes(state.mode) || (state.mode.startsWith('late-top-layer-') && !['late-top-layer-pending', 'late-top-layer-between-passes'].includes(state.mode)))
         && !state.eventSent && calls.filter(call => call.connectionId === connection && call.id).at(-1)?.id === 18) {
         state.eventSent = true;
-        directSocket.send(diagnosticEvent());
-        await new Promise(resolve => setTimeout(resolve, 20));
+        const sessionId = state.mode === 'late-top-layer-root' ? null : state.mode === 'late-top-layer-unselected' ? BOOT : state.mode === 'late-top-layer-unknown' ? 'unowned' : APP;
+        const count = state.mode === 'late-top-layer-flood' ? 401 : 1;
+        for (let index = 0; index < count; index++) directSocket.send(diagnosticEvent(sessionId));
+        if (state.mode === 'late-top-layer-target-created') {
+          state.extras = [target('new-target')];
+          directSocket.send(JSON.stringify({method: 'Target.targetCreated', params: {targetInfo: target('new-target')}}));
+        }
+        if (state.mode === 'late-top-layer-document-updated') {
+          state.pageURL = 'https://changed.invalid/';
+          directSocket.send(JSON.stringify({method: 'DOM.documentUpdated', sessionId: APP, params: {}}));
+        }
+        if (state.mode === 'late-top-layer-document-change') state.pageURL = 'https://changed.invalid/';
+        if (state.mode === 'late-top-layer-owner-after') state.pid = String(initialPid + 1);
+        await new Promise(resolve => setTimeout(resolve, state.mode === 'late-top-layer-deadline' ? 8100 : 20));
       }
     };
     const inspect = async () => {
@@ -538,7 +560,7 @@ test('installed producer exposes the bounded late-event discriminator without ch
       idPresence: 'absent', idType: 'absent', idValue: 'none',
       sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
       lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
-      phase: 'final-snapshot', messageCount: 19, params: {nodeId: 7, childNodeCount: 2},
+      phase: 'post-cdp-completion', messageCount: 19, params: {nodeId: 7, childNodeCount: 2},
     });
     assert.ok(String(error).length < 1_000);
     return true;
@@ -561,28 +583,72 @@ test('installed producer redacts untrusted late-event params', async () => fixtu
   });
 }));
 
-test('installed consumer preserves the exact late top-layer refusal and quarantine', async () => fixture(async ({inspect, state, refused, calls}) => {
-  state.mode = 'late-top-layer-event';
-  let original;
-  await assert.rejects(inspect(), error => {
-    original = error;
-    const diagnostic = readUncorrelatedDiagnostic(error);
-    assert.deepEqual(diagnostic, {
-      failurePredicate: 'uncorrelated-cdp-message', classification: 'event', method: 'DOM.topLayerElementsUpdated',
-      idPresence: 'absent', idType: 'absent', idValue: 'none',
-      sessionRelation: 'known-local-ordinal', sessionOrdinal: 2, targetOrdinal: 2,
-      lastSequence: 18, pendingId: 'none', pendingMethod: 'none', pendingSessionOrdinal: 'none',
-      phase: 'final-snapshot', messageCount: 21,
+for (const mode of ['late-top-layer-event', 'late-top-layer-missing-params']) {
+  test(`installed consumer admits the protocol-valid late top-layer notification: ${mode}`, async () => fixture(async ({inspect, state, calls}) => {
+    state.mode = mode;
+    const result = await inspect();
+    assert.equal(state.eventSent, true);
+    assert.equal(result.processAssociation.after.pid, 5301);
+    assert.equal(calls.filter(call => call.id).at(-1).method, 'SystemInfo.getProcessInfo');
+    assert.equal(calls.filter(call => call.id).length, 18);
+  }));
+}
+
+for (const mode of ['late-top-layer-root', 'late-top-layer-unselected', 'late-top-layer-unknown', 'late-top-layer-malformed', 'late-top-layer-id', 'late-top-layer-result', 'late-top-layer-error', 'late-top-layer-extra-field', 'late-top-layer-pending', 'late-top-layer-between-passes']) {
+  test(`installed consumer quarantines ${mode}`, async () => fixture(async ({inspect, state, refused}) => {
+    state.mode = mode;
+    let original;
+    await assert.rejects(inspect(), error => {
+      original = error;
+      const diagnostic = readUncorrelatedDiagnostic(error);
+      assert.equal(diagnostic.method, 'DOM.topLayerElementsUpdated');
+      assert.equal(diagnostic.phase, mode === 'late-top-layer-pending' ? 'final-snapshot' : mode === 'late-top-layer-between-passes' ? 'initial' : 'post-cdp-completion');
+      assert.equal(Object.hasOwn(diagnostic, 'params'), false);
+      if (mode.endsWith('-id')) assert.equal(diagnostic.classification, 'other');
+      else assert.equal(diagnostic.classification, 'event');
+      return true;
     });
-    assert.equal(Object.hasOwn(diagnostic, 'params'), false, 'top-layer params are not retained');
-    return true;
-  });
-  const count = calls.length;
-  await refused();
-  assert.equal(calls.length, count, 'quarantine must stop later sends');
-  await assert.rejects(inspect(), error => error === original);
-  assert.equal(calls.length, count, 'the first failure remains immutable');
+    await refused();
+    await assert.rejects(inspect(), error => error === original);
+  }));
+}
+
+test('installed consumer rejects target and document changes after an admitted notification', async () => {
+  for (const [mode, method] of [['late-top-layer-target-created', 'Target.targetCreated'], ['late-top-layer-document-updated', 'DOM.documentUpdated']]) {
+    await fixture(async ({inspect, state}) => {
+      state.mode = mode;
+      await assert.rejects(inspect(), error => {
+        const diagnostic = readUncorrelatedDiagnostic(error);
+        assert.equal(diagnostic.method, method);
+        assert.equal(diagnostic.phase, 'post-cdp-completion');
+        return true;
+      });
+    });
+  }
+});
+
+test('installed consumer revalidates cross-protocol document identity after an admitted notification', async () => fixture(async ({inspect, state}) => {
+  state.mode = 'late-top-layer-document-change';
+  await assert.rejects(inspect());
+  assert.equal(state.eventSent, true);
 }));
+
+test('installed consumer validates final native ownership after an admitted notification', async () => fixture(async ({inspect, state}) => {
+  state.mode = 'late-top-layer-owner-after';
+  await assert.rejects(inspect());
+  assert.equal(state.eventSent, true);
+}));
+
+test('installed consumer enforces frame and deadline bounds after an admitted notification', async () => {
+  for (const mode of ['late-top-layer-flood', 'late-top-layer-deadline']) {
+    await fixture(async ({inspect, state}) => {
+      state.mode = mode;
+      let failure;
+      await assert.rejects(inspect(), error => { failure = String(error); return true; });
+      assert.equal(state.eventSent, true, `${mode}: ${failure}`);
+    });
+  }
+});
 
 for (const [mode, expected] of [
   ['pending-event', {classification: 'event', method: 'DOM.childNodeCountUpdated', idPresence: 'absent', idType: 'absent', idValue: 'none', sessionRelation: 'unknown', sessionOrdinal: 'unknown', targetOrdinal: 'unknown', lastSequence: 4, pendingId: 4, pendingMethod: 'DOM.getDocument', pendingSessionOrdinal: 1, phase: 'initial', messageCount: 4}],
