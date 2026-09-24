@@ -24,10 +24,21 @@ fi
 # wrapper—not only the chooser—must remove a previously selected gateway before
 # stable-setup and setup-link decide which transport to configure and encode.
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
-if [ -n "$(gateway_urls "$ENV_FILE")" ]; then
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
+    echo "✗ Cloudflare service installation is unavailable while a foreground Tailscale Serve session is active." >&2
+    echo "  Stop the pane before changing transports." >&2
+    exit 1
+fi
+CURRENT_TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
+if [ "$CURRENT_TRANSPORT" != cloudflare ]; then
     set_gateway_url "$ENV_FILE" ""
     unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
-    echo "Switching this relay from the WebRTC gateway to Cloudflare."
+    unset HERDR_TAILSCALE_ORIGIN HERDR_RELAY_PAIRING_SOCKET HERDR_RELAY_RUN_ID
+    if [ "$CURRENT_TRANSPORT" = gateway ]; then
+        echo "Switching this relay from the WebRTC gateway to Cloudflare."
+    else
+        echo "Switching this relay from $CURRENT_TRANSPORT to Cloudflare."
+    fi
     echo ""
 fi
 

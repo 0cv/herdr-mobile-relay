@@ -31,6 +31,7 @@ const (
 var ErrConcurrent = errors.New("another update is already running")
 
 type Job struct {
+	Transport         string `json:"transport"`
 	ReleaseRoot       string `json:"release_root"`
 	HerdrBin          string `json:"herdr_bin"`
 	TargetVersion     string `json:"target_version"`
@@ -83,6 +84,11 @@ func Run(ctx context.Context, jobPath string) error {
 func (w Worker) Run(ctx context.Context, jobPath string) error {
 	job, err := loadJob(jobPath)
 	if err != nil {
+		return err
+	}
+	// Missing detached environment is a refusal, not a legacy default. This must
+	// precede even validation-error persistence and preserve rejected jobs.
+	if err := transportAdmission(job.Transport, os.Getenv("HERDR_RELAY_TRANSPORT"), true); err != nil {
 		return err
 	}
 	started := time.Now().UTC().Format(time.RFC3339)

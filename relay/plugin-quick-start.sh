@@ -15,5 +15,7 @@ echo "whichever connection method the chooser configured: the community"
 echo "gateway, your own gateway, or a Cloudflare tunnel."
 echo ""
 
+# Tailscale Serve is the one foreground path that does not install or invoke
+# cloudflared; start.sh dispatches it after prerequisites are checked.
 "$SCRIPT_DIR/setup.sh" --install-missing
 exec "$SCRIPT_DIR/start.sh"

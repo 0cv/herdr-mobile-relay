@@ -1,24 +1,56 @@
 # How your phone reaches your computer
 
-Three transports can carry traffic between your phone and a relay: a Cloudflare
-tunnel, the community gateway, or a gateway you run yourself. All three are
-end-to-end encrypted. Only the two gateway choices then try to leave the
-transport behind: phone and computer negotiate a direct peer-to-peer connection
-and the gateway is left carrying the fallback. Cloudflare tunnel traffic always
-goes through Cloudflare.
+Four transports can carry traffic between your phone and a relay: a Cloudflare
+tunnel, the community gateway, a gateway you run yourself, or foreground
+Tailscale Serve. All four are end-to-end encrypted. Only the two gateway choices
+then try to leave the transport behind: phone and computer negotiate a direct
+peer-to-peer connection and the gateway is left carrying the fallback. Cloudflare
+and Tailscale traffic use their respective trusted HTTPS paths.
 
-## The three choices
+## The four choices
 
 | Choice | What it needs from you | Who carries the traffic | When to pick it |
 | --- | --- | --- | --- |
 | **Cloudflare tunnel** | Nothing for Quick Start's temporary URL; a Cloudflare account with a domain for a permanent hostname and background service. | Cloudflare's edge | The default. See [cloudflare-tunnel.md](cloudflare-tunnel.md) for the permanent hostname. |
 | **Community gateway** | No account and no domain, but the phone app must already be hosted somewhere — a gateway serves no app. | A gateway operated by the project, until the direct path forms | Free, shared, best-effort; not for heavy transfers. Pick it to avoid Cloudflare setup entirely. |
 | **Your own gateway** | A small VPS with Docker and a public hostname. | Your own gateway, until the direct path forms | Dedicated bandwidth, and the transport logs stay on your machine. See [gateway-self-hosting.md](gateway-self-hosting.md). |
+| **Tailscale Serve (foreground)** | A preinstalled, running, authenticated Tailscale node. | Your tailnet's Tailscale HTTPS path | Private tailnet access without Cloudflare or a public gateway; the setup pane must stay open. |
 
 Pick **Temporary Cloudflare Tunnel**, **Community WebRTC Gateway**, **Deploy or
-Upgrade Your Own WebRTC Gateway**, or **Stable Tunnel** directly from the setup
-menu. A completed choice is recorded, starts or restarts the relay, and prints
-the phone QR; there is no second Quick Start step.
+Upgrade Your Own WebRTC Gateway**, **Tailscale Serve (foreground)**, or **Stable
+Tunnel** directly from the setup menu. A completed choice is recorded, starts or
+restarts the relay, and prints the phone QR; there is no second Quick Start step.
+
+## Tailscale Serve
+
+Choose **Tailscale Serve (foreground)**, or press `t` in the setup menu, when this
+computer already has Tailscale installed, running, and authenticated. The relay
+still binds only to `127.0.0.1`; the launcher verifies the node's authenticated
+`*.ts.net` identity and configures a temporary HTTPS Serve route to that loopback
+port. It never runs `tailscale login`, enables Funnel, resets devices, or replaces
+an existing Serve route. Existing Serve or Funnel configuration is treated as a
+conflict and is left untouched.
+
+This mode is deliberately foreground-only. The setup pane owns the relay, the
+Serve process, and the pairing-control socket; keep it open while using the
+phone. Ctrl-C removes only the verified route created by that run. Background
+service installation and phone-managed relay updates are refused while Tailscale
+Serve is selected, so stop the pane and remove the foreground selection before
+using the Cloudflare service/update path. A stopped Tailscale selection can be
+started again with the normal Quick Start action.
+
+The printed link uses the verified Tailscale HTTPS origin and its packaged
+Herdr phone frontend by default. If this relay already has a shared app origin,
+the setup flow keeps it; choose the Tailscale origin or another installed Herdr
+app to switch explicitly. `HERDR_TAILSCALE_HTTPS_PORT` can select a free HTTPS
+Serve port (the default is `443`); `HERDR_TAILSCALE_BIN` can point at a
+non-default CLI. For isolated development certificate testing only,
+`HERDR_TAILSCALE_CA_FILE` supplies a CA file to the launcher's health check; it
+is never an insecure TLS bypass.
+
+Tailscale Serve therefore needs no separately hosted app for a new configuration.
+Tailscale must be installed and authenticated manually; the relay does not
+mutate Tailscale account state.
 
 ## The gateway path
 

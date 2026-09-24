@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -106,6 +108,25 @@ func TestVerifyReleaseIdentity(t *testing.T) {
 	crossTarget.Target = "other/target"
 	if err := verifyReleaseIdentity(crossTarget, "", "", "other/target", true); err != nil {
 		t.Fatalf("cross-target build-host verification rejected: %v", err)
+	}
+}
+
+func TestCheckPortSupportsUDP(t *testing.T) {
+	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := strconv.Itoa(listener.LocalAddr().(*net.UDPAddr).Port)
+	code, err := run([]string{"check-port", "--host", "127.0.0.1", "--port", port, "--protocol", "udp"})
+	if code == 0 || err == nil {
+		t.Fatalf("occupied UDP port accepted: code=%d err=%v", code, err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	code, err = run([]string{"check-port", "--host", "127.0.0.1", "--port", port, "--protocol", "udp"})
+	if code != 0 || err != nil {
+		t.Fatalf("free UDP port rejected: code=%d err=%v", code, err)
 	}
 }
 

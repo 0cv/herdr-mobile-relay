@@ -70,6 +70,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     bun "$SCRIPT_DIR/stamp-web-version.mjs" "$STAGE/web/version.json" "$VERSION" "$REVISION"
     cp "$REPO_DIR/LICENSE" "$STAGE/LICENSE"
     cp "$REPO_DIR/README.md" "$STAGE/README.md"
+    cp "$REPO_DIR/.env.example" "$STAGE/.env.example"
     for WRAPPER in \
         common.sh \
         herdr-mobile-relay-service.sh \
@@ -79,9 +80,11 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         service.sh \
         setup-link.sh \
         setup.sh \
+        speech-voices.sh \
         stable-setup.sh \
         stable-teardown.sh \
         start.sh \
+        tailscale.sh \
         uninstall.sh \
         uninstall-service.sh \
         uninstall-systemd-user-service.sh; do

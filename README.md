@@ -49,6 +49,13 @@ Cloudflare account, domain, `cloudflared`, or tunnel configuration. If prompted,
 choose the installed Herdr app that should host the phone UI. The relay starts
 and prints a QR code.
 
+If the computer is already on your tailnet, **Tailscale Serve (foreground)** is
+also available. It requires a manually installed and authenticated Tailscale
+node, keeps the relay on loopback, and owns the HTTPS Serve session only while
+the setup pane remains open. It never enables Funnel or changes an existing Serve
+route; see [Transports](docs/transports.md#tailscale-serve) for the lifecycle and
+update restrictions.
+
 **Temporary Cloudflare Tunnel** is the fastest getting-started option for a
 one-computer trial. It installs any missing user-level tools with confirmation,
 starts the relay and bundled app, and prints a QR code.
@@ -104,10 +111,11 @@ The setup menu exposes each complete connection path directly:
 | Community gateway | no account, domain, or tunnel configuration; an installed app origin | the recommended stable, no-configuration relay path |
 | Cloudflare tunnel | nothing for a temporary URL; a Cloudflare account and domain for a permanent hostname | the fastest one-computer trial or a permanent background service |
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
+| Tailscale Serve (foreground) | an authenticated Tailscale node | private tailnet access without a public gateway |
 
-All three are end-to-end encrypted. On either gateway the phone and the computer
+All four are end-to-end encrypted. On either gateway the phone and the computer
 then negotiate a direct peer-to-peer connection, leaving the gateway with the
-fallback; Cloudflare tunnel traffic stays on Cloudflare.
+fallback; Cloudflare and Tailscale traffic stay on their trusted HTTPS paths.
 
 - **[Transports explained →](docs/transports.md)**
 - **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**

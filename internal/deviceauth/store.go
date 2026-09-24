@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -69,6 +70,15 @@ type Invitation struct {
 	Name         string    `json:"name"`
 	Role         Role      `json:"role"`
 	Locale       string    `json:"locale"`
+}
+
+// BootstrapStatus is the non-secret readiness information exposed to the
+// managed foreground pairing socket. It intentionally contains no invitation
+// or device secret.
+type BootstrapStatus struct {
+	Armed     bool
+	Pending   bool
+	ExpiresAt time.Time
 }
 
 type credentialRecord struct {
@@ -243,6 +253,24 @@ func (s *Store) armBootstrapLocked(secret []byte, name, locale string, now time.
 	return nil
 }
 
+// BootstrapStatus reports whether the current bootstrap invitation is
+// persisted and usable. A pending invitation has already created a device
+// credential but has not completed the authenticated handshake yet.
+func (s *Store) BootstrapStatus() BootstrapStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.state.Invitation
+	if record == nil || record.InvitationID != bootstrapInvitationID {
+		return BootstrapStatus{}
+	}
+	now := s.now().UTC()
+	return BootstrapStatus{
+		Armed:     now.Before(record.ExpiresAt) && record.FailedAttempts < maxInviteAttempts,
+		Pending:   record.PendingCredentialID != "",
+		ExpiresAt: record.ExpiresAt,
+	}
+}
+
 func (s *Store) ListCredentials(currentCredentialID string) []Credential {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -384,11 +412,20 @@ func (s *Store) load() error {
 	if err != nil {
 		return fmt.Errorf("inspect device store: %w", err)
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("device store is a symlink")
+	}
 	if !info.Mode().IsRegular() {
 		return errors.New("device store is not a regular file")
 	}
-	if err := os.Chmod(s.path, 0o600); err != nil {
-		return fmt.Errorf("protect device store: %w", err)
+	if fileNlink(info) > 1 {
+		return errors.New("device store is hard linked")
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("device store mode %04o is not 0600", info.Mode().Perm())
+	}
+	if uid, ok := fileOwner(info); !ok || uid != uint32(os.Getuid()) {
+		return errors.New("device store is not owned by the current user")
 	}
 	file, err := os.Open(s.path)
 	if err != nil {
@@ -454,20 +491,48 @@ func (s *Store) persistLocked() error {
 }
 
 func protectDirectory(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create device store directory: %w", err)
-	}
 	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create device store directory: %w", err)
+		}
+		info, err = os.Lstat(dir)
+	}
 	if err != nil {
 		return fmt.Errorf("inspect device store directory: %w", err)
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("device store directory is a symlink")
+	}
+	if !info.IsDir() {
 		return errors.New("device store path is not a directory")
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("protect device store directory: %w", err)
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("device store directory mode %04o is not 0700", info.Mode().Perm())
+	}
+	if uid, ok := fileOwner(info); !ok || uid != uint32(os.Getuid()) {
+		return errors.New("device store directory is not owned by the current user")
 	}
 	return nil
+}
+
+// fileOwner reports the numeric owner uid recorded for info when the platform
+// exposes it.
+func fileOwner(info os.FileInfo) (uint32, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
+}
+
+// fileNlink reports the hard-link count recorded for info.
+func fileNlink(info os.FileInfo) uint64 {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0
+	}
+	return uint64(stat.Nlink)
 }
 
 func syncDirectory(dir string) error {

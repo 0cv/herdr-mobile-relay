@@ -23,6 +23,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common.sh"
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
+    echo "✗ Gateway deployment is unavailable while a foreground Tailscale Serve session is active." >&2
+    echo "  Stop the pane before changing transports or deploying a gateway." >&2
+    exit 1
+fi
 # Answers from the last run, kept beside the relay environment like the recorded
 # phone app origin. Rerunning to redeploy should not re-type a hostname, an SSH
 # address, and a directory that have not changed. Precedence everywhere below is

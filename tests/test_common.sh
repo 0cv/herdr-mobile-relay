@@ -683,6 +683,88 @@ EOF
 chmod 700 "$NORMALIZE_BIN"
 export HERDR_RELAY_BIN="$NORMALIZE_BIN"
 
+# Tailscale app-origin selection is hermetic: a new run uses the verified relay
+# origin, a saved shared origin wins until explicitly changed, and this path
+# must not discover Cloudflare or probe a network-hosted app.
+TAILSCALE_CHOOSER_FAIL_BIN="$WORK_DIR/tailscale-chooser-fail-bin"
+TAILSCALE_CHOOSER_DISCOVERY_SENTINEL="$WORK_DIR/tailscale-cloudflare-discovery-called"
+TAILSCALE_CHOOSER_NETWORK_SENTINEL="$WORK_DIR/tailscale-network-called"
+mkdir -p "$TAILSCALE_CHOOSER_FAIL_BIN"
+cat > "$TAILSCALE_CHOOSER_FAIL_BIN/curl" <<'EOF'
+#!/bin/sh
+: > "$TAILSCALE_CHOOSER_NETWORK_SENTINEL"
+exit 99
+EOF
+chmod 700 "$TAILSCALE_CHOOSER_FAIL_BIN/curl"
+export TAILSCALE_CHOOSER_DISCOVERY_SENTINEL TAILSCALE_CHOOSER_NETWORK_SENTINEL
+run_tailscale_chooser() (
+    local mode="$1"
+    local env_file="$2"
+    local relay_origin="$3"
+
+    if [ "$mode" = interactive ]; then
+        stdin_is_terminal() { return 0; }
+    else
+        stdin_is_terminal() { return 1; }
+    fi
+    if [ "$mode" = explicit ]; then
+        HERDR_PHONE_APP_URL=relay
+        export HERDR_PHONE_APP_URL
+        unset HERDR_APP_DEPLOY_ORIGIN
+    else
+        unset HERDR_PHONE_APP_URL HERDR_APP_DEPLOY_ORIGIN
+    fi
+    unset TUNNEL_ORIGIN_CERT
+    discover_cloudflare_phone_app_origin() {
+        : > "$TAILSCALE_CHOOSER_DISCOVERY_SENTINEL"
+        return 1
+    }
+    HERDR_RELAY_BIN="$NORMALIZE_BIN"
+    PATH="$TAILSCALE_CHOOSER_FAIL_BIN:$PATH"
+    export HERDR_RELAY_BIN PATH
+    choose_phone_app_base_url "$relay_origin" "$env_file" tailscale
+)
+
+TAILSCALE_FRESH_ENV="$WORK_DIR/config/tailscale-fresh.env"
+: > "$TAILSCALE_FRESH_ENV"
+rm -f "$TAILSCALE_CHOOSER_DISCOVERY_SENTINEL" "$TAILSCALE_CHOOSER_NETWORK_SENTINEL"
+test "$(run_tailscale_chooser noninteractive "$TAILSCALE_FRESH_ENV" \
+    https://relay.ts.example.test)" = "https://relay.ts.example.test"
+test ! -e "$TAILSCALE_CHOOSER_DISCOVERY_SENTINEL"
+test ! -e "$TAILSCALE_CHOOSER_NETWORK_SENTINEL"
+
+TAILSCALE_SHARED_ENV="$WORK_DIR/config/tailscale-shared.env"
+: > "$TAILSCALE_SHARED_ENV"
+printf '%s\n' 'https://shared.example.test' \
+    > "$(dirname "$TAILSCALE_SHARED_ENV")/phone-app-origin-configured"
+printf '%s\n' 'https://stale-observed.example.test' \
+    > "$(dirname "$TAILSCALE_SHARED_ENV")/phone-app-origin"
+test "$(run_tailscale_chooser noninteractive "$TAILSCALE_SHARED_ENV" \
+    https://relay.ts.example.test)" = "https://shared.example.test"
+
+# An explicit menu choice switches the existing shared origin to this verified
+# relay, while an explicit HERDR_PHONE_APP_URL=relay does the same unattended.
+test "$(printf '2\n' | run_tailscale_chooser interactive "$TAILSCALE_SHARED_ENV" \
+    https://relay.ts.example.test)" = "https://relay.ts.example.test"
+test "$(run_tailscale_chooser explicit "$TAILSCALE_SHARED_ENV" \
+    https://relay.ts.example.test)" = "https://relay.ts.example.test"
+
+TAILSCALE_CANCEL_STATUS=0
+TAILSCALE_CANCEL_OUTPUT="$(
+    printf 'q\n' |
+        run_tailscale_chooser interactive "$TAILSCALE_SHARED_ENV" \
+            https://relay.ts.example.test 2>&1
+)" || TAILSCALE_CANCEL_STATUS=$?
+test "$TAILSCALE_CANCEL_STATUS" -ne 0
+case "$TAILSCALE_CANCEL_OUTPUT" in
+    *"Setup cancelled."*) ;;
+    *) echo "Tailscale app-origin chooser did not cancel" >&2; exit 1 ;;
+esac
+test ! -e "$TAILSCALE_CHOOSER_DISCOVERY_SENTINEL"
+test ! -e "$TAILSCALE_CHOOSER_NETWORK_SENTINEL"
+
+# The gateway URL normalizer delegates to the compiled origin normalizer, so it
+# is stubbed the same way the fragment helper is above.
 test "$(normalize_gateway_url gw.example.com)" = "wss://gw.example.com"
 test "$(normalize_gateway_url https://gw.example.com)" = "wss://gw.example.com"
 test "$(normalize_gateway_url wss://gw.example.com)" = "wss://gw.example.com"
@@ -1242,7 +1324,7 @@ YAML
 }
 # setup-link and service.sh are the two things this action hands off to; both
 # are stubbed so the test observes the move itself.
-cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
+cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"; REPO_RELAY_DIR="$REPO_DIR/relay"; HOSTNAME_MOVE_DIR="$WORK_DIR/hostname-move"; MOVE_SERVICE_LOG="$WORK_DIR/hostname-move-service.log"; mkdir -p "$HOSTNAME_MOVE_DIR"; cp "$REPO_RELAY_DIR/common.sh" "$REPO_RELAY_DIR/change-hostname.sh" "$HOSTNAME_MOVE_DIR/"; printf '%s\n' '#!/bin/sh' "printf \"%s %s\\n\" \"\$0\" \"\$*\" >> \"\$MOVE_SERVICE_LOG\"" 'exit 0' > "$HOSTNAME_MOVE_DIR/service.sh"; chmod 700 "$HOSTNAME_MOVE_DIR/service.sh"; export MOVE_SERVICE_LOG  # change-hostname.sh resolves service.sh as an absolute sibling, so run it from this copied tree whose service.sh is a recording stub.
 
 MOVE_OUTPUT="$(
     printf 'relay-fedora.new.test\n' |
@@ -1251,7 +1333,7 @@ MOVE_OUTPUT="$(
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
         HERDR_RELAY_ENV="$MOVE_ENV" \
         HERDR_STABLE_STATE_FILE="$MOVE_STATE" \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$HOSTNAME_MOVE_DIR/change-hostname.sh" 2>&1 || true
 )"
 grep -Fq 'tunnel route dns herdr-mobile-relay-fedora relay-fedora.new.test' "$MOVE_ROUTE_LOG" ||
     { echo "the new hostname was never routed to the existing tunnel" >&2
@@ -1272,7 +1354,7 @@ test "$(cat "$MOVE_STATE_RECORD" 2>/dev/null)" = "relay-fedora.new.test" ||
 printf "HERDR_RELAY_TOKEN='move-token'\n" > "$MOVE_ENV"
 MOVE_OUTPUT="$(
     HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
-        HERDR_RELAY_ENV="$MOVE_ENV" bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        HERDR_RELAY_ENV="$MOVE_ENV" bash "$HOSTNAME_MOVE_DIR/change-hostname.sh" 2>&1 || true
 )"
 case "$MOVE_OUTPUT" in
     *"does not run a Cloudflare tunnel"*) ;;
@@ -1297,7 +1379,7 @@ MOVE_OUTPUT="$(
     printf 'relay-fedora.new.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$HOSTNAME_MOVE_DIR/change-hostname.sh" 2>&1 || true
 )"
 case "$MOVE_OUTPUT" in
     *"created relay-fedora.new.test.old.test, not relay-fedora.new.test"*) ;;
@@ -1327,7 +1409,7 @@ MOVE_OUTPUT="$(
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
         HERDR_STABLE_DNS_TIMEOUT=0 \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$HOSTNAME_MOVE_DIR/change-hostname.sh" 2>&1 || true
 )"
 case "$MOVE_OUTPUT" in
     *"does not resolve to Cloudflare yet"*) ;;
@@ -1370,7 +1452,7 @@ MOVE_OUTPUT="$(
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
         HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
         TUNNEL_ORIGIN_CERT="$MOVE_CERT" HERDR_CHANGE_HOSTNAME_RELOGIN=false \
-        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+        bash "$HOSTNAME_MOVE_DIR/change-hostname.sh" 2>&1 || true
 )"
 case "$MOVE_OUTPUT" in
     *"certificate covers old.test"*"cloudflared tunnel login"*) ;;
@@ -1384,6 +1466,14 @@ esac
     { echo "a record was created before the zone was checked" >&2; exit 1; }
 grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
     { echo "the refused move still touched the ingress" >&2; exit 1; }
+
+grep -Fq "service.sh install" "$MOVE_SERVICE_LOG" ||
+    { echo "the hostname move never reached the copied service stub" >&2; exit 1; }
+if grep -Fv "$HOSTNAME_MOVE_DIR/service.sh" "$MOVE_SERVICE_LOG" | grep -q .; then
+    echo "a hostname move handed off to a service script outside the copied tree" >&2
+    exit 1
+fi
+echo "hostname service stub reached: $HOSTNAME_MOVE_DIR/service.sh"
 
 # Printing a setup link re-arms the running relay through relay.pid and SIGUSR1,
 # and says plainly when no relay is running here.

@@ -38,6 +38,7 @@ var appDeployEnvironmentKeys = [...]string{
 var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 type Manager struct {
+	transport   string // resolved before recovery; environment is only a veto
 	releaseRoot string
 	runtimeDir  string
 	herdrBin    string
@@ -85,8 +86,9 @@ type gitObject struct {
 	} `json:"object,omitempty"`
 }
 
-func NewManager(releaseRoot, runtimeDir, herdrBin, version, revision, healthURL string) *Manager {
+func NewManager(transport, releaseRoot, runtimeDir, herdrBin, version, revision, healthURL string) *Manager {
 	manager := &Manager{
+		transport:   strings.ToLower(strings.TrimSpace(transport)),
 		releaseRoot: releaseRoot,
 		runtimeDir:  runtimeDir,
 		herdrBin:    herdrBin,
@@ -103,6 +105,10 @@ func NewManager(releaseRoot, runtimeDir, herdrBin, version, revision, healthURL 
 		manager.tokenFile = filepath.Clean(tokenFile)
 	}
 	manager.launch = manager.launchWorker
+	if manager.policyError() != nil {
+		manager.state = manager.readOnlyState()
+		return manager
+	}
 	manager.state = manager.loadState()
 	manager.recoverOrphan(true)
 	manager.state = manager.loadState()
@@ -112,6 +118,9 @@ func NewManager(releaseRoot, runtimeDir, herdrBin, version, revision, healthURL 
 func (m *Manager) State() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.policyError() != nil {
+		return m.publicState(m.readOnlyState())
+	}
 	m.recoverOrphan(false)
 	state := m.loadState()
 	if state.State != "" {
@@ -122,6 +131,11 @@ func (m *Manager) State() State {
 
 func (m *Manager) Check(ctx context.Context) State {
 	m.mu.Lock()
+	if m.policyError() != nil {
+		state := m.publicState(m.readOnlyState())
+		m.mu.Unlock()
+		return state
+	}
 	m.recoverOrphan(false)
 	current := m.loadState()
 	if transientUpdateState(current.State) {
@@ -136,6 +150,7 @@ func (m *Manager) Check(ctx context.Context) State {
 	m.state.TargetVersion = ""
 	m.state.TargetRevision = ""
 	m.state.State = "checking"
+	m.state.CanInstall = false
 	m.state.Error = ""
 	m.state.CurrentVersion = m.version
 	m.state.CurrentRevision = m.revision
@@ -145,6 +160,9 @@ func (m *Manager) Check(ctx context.Context) State {
 	metadata, err := m.fetchRelease(ctx)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.policyError() != nil {
+		return m.publicState(m.readOnlyState())
+	}
 	m.recoverOrphan(false)
 	current = m.loadState()
 	if transientUpdateState(current.State) {
@@ -200,6 +218,9 @@ func (m *Manager) Schedule(
 ) (string, State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if eligible, _, reason := m.eligibility(); !eligible {
+		return "", m.publicState(m.readOnlyState()), errors.New(reason)
+	}
 	current := m.loadState()
 	if current.State != "" {
 		m.state = current
@@ -216,16 +237,23 @@ func (m *Manager) Schedule(
 	}
 	if m.metadata.Version != expectedVersion || m.metadata.Revision != expectedRevision {
 		metadata, err := m.fetchRelease(ctx)
+		if eligible, _, reason := m.eligibility(); !eligible {
+			return "", m.publicState(m.readOnlyState()), errors.New(reason)
+		}
 		if err != nil || metadata.Version != expectedVersion || metadata.Revision != expectedRevision {
 			return "", m.publicState(m.state), errors.New("The advertised update changed; check again before installing")
 		}
 		m.metadata = metadata
+	}
+	if eligible, _, reason := m.eligibility(); !eligible {
+		return "", m.publicState(m.readOnlyState()), errors.New(reason)
 	}
 	if err := os.MkdirAll(m.runtimeDir, 0o700); err != nil {
 		return "", m.publicState(m.state), err
 	}
 	jobPath := filepath.Join(m.runtimeDir, fmt.Sprintf("update-job-%d.json", time.Now().UnixNano()))
 	job := Job{
+		Transport:         m.transport,
 		ReleaseRoot:       m.releaseRoot,
 		HerdrBin:          m.herdrBin,
 		TargetVersion:     m.metadata.Version,
@@ -475,6 +503,9 @@ func (m *Manager) token() string {
 }
 
 func (m *Manager) eligibility() (bool, string, string) {
+	if err := m.policyError(); err != nil {
+		return false, "foreground", err.Error()
+	}
 	if !semverPattern.MatchString(m.version) || !validRevision(m.revision) {
 		return false, "unsupported", "Managed updates require a released relay build"
 	}
@@ -494,10 +525,10 @@ type workerLaunch struct {
 }
 
 func updateWorkerLaunch(
-	goos, label, executable, jobPath string,
+	goos, label, executable, jobPath, transport string,
 	lookupEnv func(string) (string, bool),
 ) workerLaunch {
-	assignments := make([]string, 0, len(appDeployEnvironmentKeys))
+	assignments := []string{"HERDR_RELAY_TRANSPORT=" + transport}
 	for _, key := range appDeployEnvironmentKeys {
 		value, present := lookupEnv(key)
 		if present && strings.TrimSpace(value) != "" {
@@ -530,7 +561,7 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 		return err
 	}
 	label := fmt.Sprintf("herdr-mobile-relay-update-%d", time.Now().Unix())
-	launch := updateWorkerLaunch(runtime.GOOS, label, executable, jobPath, os.LookupEnv)
+	launch := updateWorkerLaunch(runtime.GOOS, label, executable, jobPath, m.transport, os.LookupEnv)
 	command := exec.CommandContext(ctx, launch.application, launch.args...)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -657,6 +688,16 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 }
 
 func (m *Manager) publicState(state State) State {
+	eligible, mode, reason := m.eligibility()
+	state.Eligible = eligible
+	state.Mode = mode
+	if !eligible {
+		state.CanInstall = false
+		state.Reason = reason
+		if !transientUpdateState(state.State) {
+			state.State = "blocked"
+		}
+	}
 	state.CurrentVersion = m.version
 	state.CurrentRevision = m.revision
 	state.Error = compact(state.Error, 500)

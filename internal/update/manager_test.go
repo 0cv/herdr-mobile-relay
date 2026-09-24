@@ -43,6 +43,7 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 		return value, found
 	}
 	assignments := []string{
+		"HERDR_RELAY_TRANSPORT=cloudflare",
 		"HERDR_APP_DEPLOY_ORIGIN=https://app.example.test",
 		"HERDR_CLOUDFLARE_PAGES_PROJECT=relay-app",
 		"HERDR_CLOUDFLARE_PAGES_BRANCH=main",
@@ -52,7 +53,7 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 		"HERDR_PLUGIN_CONFIG_DIR=/home/cv/.config/herdr-mobile-relay",
 	}
 
-	linux := updateWorkerLaunch("linux", "relay-update", "/opt/relay", "/tmp/job.json", lookup)
+	linux := updateWorkerLaunch("linux", "relay-update", "/opt/relay", "/tmp/job.json", "cloudflare", lookup)
 	linuxArgs := []string{"--user", "--collect", "--unit=relay-update"}
 	for _, assignment := range assignments {
 		linuxArgs = append(linuxArgs, "--setenv="+assignment)
@@ -62,7 +63,7 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 		t.Fatalf("linux launch = %#v, want application systemd-run args %#v", linux, linuxArgs)
 	}
 
-	darwin := updateWorkerLaunch("darwin", "relay-update", "/opt/relay", "/tmp/job.json", lookup)
+	darwin := updateWorkerLaunch("darwin", "relay-update", "/opt/relay", "/tmp/job.json", "cloudflare", lookup)
 	darwinArgs := []string{"submit", "-l", "relay-update", "--", "/usr/bin/env"}
 	darwinArgs = append(darwinArgs, assignments...)
 	darwinArgs = append(darwinArgs, "/opt/relay", "update-worker", "/tmp/job.json")
@@ -85,6 +86,7 @@ func TestManagerCheckPreservesActiveUpdateState(t *testing.T) {
 	}
 
 	manager := NewManager(
+		"cloudflare",
 		releaseRoot,
 		runtimeDir,
 		testHerdrBinary(t),
@@ -110,6 +112,7 @@ func TestManagerCheckRecoversStaleWorkerState(t *testing.T) {
 	releaseRoot := filepath.Join(root, "installed")
 	runtimeDir := filepath.Join(root, "runtime")
 	manager := NewManager(
+		"cloudflare",
 		releaseRoot,
 		runtimeDir,
 		testHerdrBinary(t),
@@ -164,6 +167,7 @@ func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
 	}
 
 	manager := NewManager(
+		"cloudflare",
 		filepath.Join(root, "installed"),
 		runtimeDir,
 		testHerdrBinary(t),
@@ -191,9 +195,10 @@ func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
 func TestManagerEligibilityRequiresReleasedBuildAndHerdr(t *testing.T) {
 	herdrBin := testHerdrBinary(t)
 	manager := &Manager{
-		herdrBin: herdrBin,
-		version:  "1.2.3",
-		revision: currentTestRevision,
+		transport: "cloudflare",
+		herdrBin:  herdrBin,
+		version:   "1.2.3",
+		revision:  currentTestRevision,
 	}
 	if eligible, mode, reason := manager.eligibility(); !eligible || mode != "plugin" || reason != "" {
 		t.Fatalf("eligible build rejected: eligible=%v mode=%q reason=%q", eligible, mode, reason)
@@ -227,6 +232,7 @@ func TestFetchReleaseRequiresExactTagCommit(t *testing.T) {
 		})
 	})
 	manager := NewManager(
+		"cloudflare",
 		t.TempDir(),
 		t.TempDir(),
 		testHerdrBinary(t),
@@ -325,6 +331,7 @@ func TestFetchReleaseFallsBackToLatestReleaseRedirectAfterAPIFailure(t *testing.
 			mux.HandleFunc("/commits/v2.0.0.atom", commitFeed(currentTestRevision))
 
 			manager := NewManager(
+				"cloudflare",
 				t.TempDir(),
 				t.TempDir(),
 				testHerdrBinary(t),
@@ -362,6 +369,7 @@ func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
 	runtimeDir := filepath.Join(root, "runtime")
 	herdrBin := testHerdrBinary(t)
 	manager := NewManager(
+		"cloudflare",
 		releaseRoot,
 		runtimeDir,
 		herdrBin,
@@ -433,6 +441,7 @@ func TestManagerRecoversOrphanedPluginUpdateState(t *testing.T) {
 			}
 
 			manager := NewManager(
+				"cloudflare",
 				releaseRoot,
 				runtimeDir,
 				testHerdrBinary(t),
@@ -472,6 +481,7 @@ func TestManagerPreservesUpdateStateOwnedByWorker(t *testing.T) {
 	}
 
 	manager := NewManager(
+		"cloudflare",
 		releaseRoot,
 		runtimeDir,
 		testHerdrBinary(t),
@@ -498,6 +508,7 @@ func TestManagerAllowsScheduledUpdateStartupGrace(t *testing.T) {
 	}
 
 	manager := NewManager(
+		"cloudflare",
 		releaseRoot,
 		runtimeDir,
 		testHerdrBinary(t),
@@ -523,6 +534,7 @@ func TestManagerReconcilesCompletedPluginUpdateAfterRestart(t *testing.T) {
 	}
 
 	manager := NewManager(
+		"cloudflare",
 		filepath.Join(root, "installed"),
 		runtimeDir,
 		testHerdrBinary(t),
@@ -553,6 +565,7 @@ func TestManagerReconcilesFailedInstalledPluginUpdate(t *testing.T) {
 	}
 
 	manager := NewManager(
+		"cloudflare",
 		filepath.Join(root, "installed"),
 		runtimeDir,
 		testHerdrBinary(t),
@@ -585,6 +598,7 @@ func TestManagerPreservesFailedPluginUpdateError(t *testing.T) {
 	}
 
 	manager := NewManager(
+		"cloudflare",
 		filepath.Join(root, "installed"),
 		runtimeDir,
 		testHerdrBinary(t),
@@ -611,6 +625,7 @@ func (b blockingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 
 func TestManagerStateDoesNotBlockOnReleaseCheckNetwork(t *testing.T) {
 	manager := NewManager(
+		"cloudflare",
 		t.TempDir(),
 		t.TempDir(),
 		testHerdrBinary(t),

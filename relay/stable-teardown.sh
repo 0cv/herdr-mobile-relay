@@ -9,6 +9,13 @@ export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin:/home/linux
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
+load_relay_env "$ENV_FILE"
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
+    echo "✗ Stable Cloudflare teardown is unavailable while Tailscale Serve is selected." >&2
+    echo "  Switch transports explicitly before invoking cloudflared." >&2
+    exit 1
+fi
 STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}"
 
 state_command() {

@@ -11,10 +11,17 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 )
 
-// Accepted HERDR_GATEWAY_SELECTION values.
+// Accepted relay transport values.
 const (
+	TransportCloudflare = "cloudflare"
+	TransportGateway    = "gateway"
+	TransportTailscale  = "tailscale"
+
+	// Accepted HERDR_GATEWAY_SELECTION values.
 	// GatewaySelectionOrdered registers with the first healthy entry in
 	// configured order: an explicit list is a priority, not a preference.
 	GatewaySelectionOrdered = "ordered"
@@ -24,21 +31,25 @@ const (
 )
 
 type Config struct {
-	Host           string
-	Port           int
-	PluginPort     int
-	Token          string
-	InstanceID     string
-	AllowedOrigins []string
-	WebRoot        string
-	HerdrBin       string
-	SocketPath     string
-	PollInterval   float64
-	RuntimeDir     string
-	LogFormat      string
-	LogLevel       slog.Level
-	ReleaseRoot    string
-	ServiceName    string
+	Host              string
+	Port              int
+	PluginPort        int
+	Token             string
+	InstanceID        string
+	AllowedOrigins    []string
+	WebRoot           string
+	HerdrBin          string
+	SocketPath        string
+	PollInterval      float64
+	RuntimeDir        string
+	LogFormat         string
+	LogLevel          slog.Level
+	ReleaseRoot       string
+	ServiceName       string
+	Transport         string
+	TailscaleOrigin   string
+	PairingSocketPath string
+	ManagedRunID      string
 
 	// GatewayURL is the configured tie-break leader, kept equal to
 	// GatewayURLs[0] so readers that only know one gateway keep working. The
@@ -64,18 +75,26 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	transport, err := resolveTransport(os.Getenv("HERDR_RELAY_TRANSPORT"), os.Getenv("HERDR_GATEWAY_URL"))
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{
-		Host:         envOr("HERDR_RELAY_HOST", "127.0.0.1"),
-		Port:         envIntOr("HERDR_RELAY_PORT", 8375),
-		PluginPort:   envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
-		Token:        os.Getenv("HERDR_RELAY_TOKEN"),
-		InstanceID:   os.Getenv("HERDR_RELAY_INSTANCE_ID"),
-		WebRoot:      os.Getenv("HERDR_WEB_ROOT"),
-		HerdrBin:     os.Getenv("HERDR_BIN"),
-		SocketPath:   os.Getenv("HERDR_SOCKET_PATH"),
-		PollInterval: envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
-		LogFormat:    envOr("HERDR_RELAY_LOG_FORMAT", "text"),
-		ServiceName:  envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		Host:              envOr("HERDR_RELAY_HOST", "127.0.0.1"),
+		Port:              envIntOr("HERDR_RELAY_PORT", 8375),
+		PluginPort:        envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
+		Token:             os.Getenv("HERDR_RELAY_TOKEN"),
+		InstanceID:        os.Getenv("HERDR_RELAY_INSTANCE_ID"),
+		WebRoot:           os.Getenv("HERDR_WEB_ROOT"),
+		HerdrBin:          os.Getenv("HERDR_BIN"),
+		SocketPath:        os.Getenv("HERDR_SOCKET_PATH"),
+		PollInterval:      envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
+		LogFormat:         envOr("HERDR_RELAY_LOG_FORMAT", "text"),
+		ServiceName:       envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		Transport:         transport,
+		TailscaleOrigin:   os.Getenv("HERDR_TAILSCALE_ORIGIN"),
+		PairingSocketPath: os.Getenv("HERDR_RELAY_PAIRING_SOCKET"),
+		ManagedRunID:      os.Getenv("HERDR_RELAY_RUN_ID"),
 
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
@@ -144,6 +163,12 @@ func (c *Config) Addr() string {
 }
 
 func (c *Config) validate() error {
+	if c.Transport == "" {
+		c.Transport = inferredTransport(c.GatewayURLs)
+	}
+	if c.Transport != TransportCloudflare && c.Transport != TransportGateway && c.Transport != TransportTailscale {
+		return fmt.Errorf("invalid HERDR_RELAY_TRANSPORT %q", c.Transport)
+	}
 	if c.Token == "" && c.Host != "127.0.0.1" && c.Host != "::1" && c.Host != "localhost" {
 		return fmt.Errorf("refusing to bind tokenless relay to non-loopback address %s", c.Host)
 	}
@@ -151,7 +176,16 @@ func (c *Config) validate() error {
 		return errors.New("relay key must be exactly 32 bytes")
 	}
 	if c.Port < 1 || c.Port > 65535 {
-		return fmt.Errorf("invalid port %d", c.Port)
+		return fmt.Errorf("invalid relay port %d", c.Port)
+	}
+	if c.PluginPort < 1 || c.PluginPort > 65535 {
+		return fmt.Errorf("invalid plugin port %d", c.PluginPort)
+	}
+	if c.Transport == TransportGateway && len(c.GatewayURLs) == 0 {
+		return errors.New("gateway transport requires HERDR_GATEWAY_URL")
+	}
+	if c.Transport != TransportGateway && len(c.GatewayURLs) > 0 {
+		return fmt.Errorf("HERDR_GATEWAY_URL conflicts with %s transport", c.Transport)
 	}
 	for _, gateway := range c.GatewayURLs {
 		parsed, err := url.Parse(gateway)
@@ -162,7 +196,98 @@ func (c *Config) validate() error {
 	if len(c.GatewayURLs) > 0 && c.Token == "" {
 		return fmt.Errorf("gateway url requires a relay key: the gateway path derives its credentials from it")
 	}
+	if c.Transport != TransportTailscale {
+		return nil
+	}
+	if c.Token == "" {
+		return errors.New("tailscale transport requires a relay key of exactly 32 bytes")
+	}
+	if c.Host != "127.0.0.1" {
+		return fmt.Errorf("tailscale transport requires HERDR_RELAY_HOST=127.0.0.1, got %q", c.Host)
+	}
+	if strings.TrimSpace(os.Getenv("HERDR_GATEWAY_SELECTION")) != "" {
+		return errors.New("HERDR_GATEWAY_SELECTION conflicts with tailscale transport")
+	}
+	if c.RearmBootstrap {
+		return errors.New("tailscale transport refuses HERDR_RELAY_REARM_BOOTSTRAP; it would reset device credentials")
+	}
+	if c.TailscaleOrigin == "" {
+		return errors.New("tailscale transport requires a verified HERDR_TAILSCALE_ORIGIN")
+	}
+	origin, err := setuphelper.NormalizeOrigin(c.TailscaleOrigin, false)
+	if err != nil || !strings.HasPrefix(origin, "https://") {
+		return errors.New("HERDR_TAILSCALE_ORIGIN must be an HTTPS origin without a path")
+	}
+	c.TailscaleOrigin = origin
+	if c.InstanceID == "" || !safeRunID(c.InstanceID) {
+		return errors.New("tailscale transport requires a valid relay instance ID")
+	}
+	if c.PairingSocketPath == "" || c.ManagedRunID == "" {
+		return errors.New("managed tailscale startup requires both pairing socket and run id")
+	}
+	if !filepath.IsAbs(c.PairingSocketPath) {
+		return errors.New("HERDR_RELAY_PAIRING_SOCKET must be an absolute path")
+	}
+	if !safeRunID(c.ManagedRunID) {
+		return errors.New("HERDR_RELAY_RUN_ID is invalid")
+	}
 	return nil
+}
+
+func resolveTransport(raw, gatewayRaw string) (string, error) {
+	transport := strings.ToLower(strings.TrimSpace(raw))
+	gatewayConfigured := len(parseGatewayURLs(gatewayRaw)) > 0
+	if transport == "" {
+		if gatewayConfigured {
+			return TransportGateway, nil
+		}
+		return TransportCloudflare, nil
+	}
+	switch transport {
+	case TransportCloudflare:
+		if gatewayConfigured {
+			return "", errors.New("HERDR_RELAY_TRANSPORT=cloudflare conflicts with HERDR_GATEWAY_URL")
+		}
+	case TransportGateway:
+		if !gatewayConfigured {
+			return "", errors.New("HERDR_RELAY_TRANSPORT=gateway requires HERDR_GATEWAY_URL")
+		}
+	case TransportTailscale:
+		if gatewayConfigured {
+			return "", errors.New("HERDR_RELAY_TRANSPORT=tailscale conflicts with HERDR_GATEWAY_URL")
+		}
+	default:
+		return "", fmt.Errorf("invalid HERDR_RELAY_TRANSPORT %q", raw)
+	}
+	return transport, nil
+}
+
+func inferredTransport(gateways []string) string {
+	if len(gateways) > 0 {
+		return TransportGateway
+	}
+	return TransportCloudflare
+}
+
+func truthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeRunID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x21 || character > 0x7e || character == '/' || character == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func resolveRuntimeDir(configHome string) string {

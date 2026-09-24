@@ -282,6 +282,7 @@ func TestWorkerLeavesRelayUntouchedWhenAppDeploymentFails(t *testing.T) {
 }
 
 func TestWorkerStartupFailureDoesNotLeaveUpdateScheduled(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TRANSPORT", "cloudflare")
 	root := t.TempDir()
 	releaseRoot := filepath.Join(root, "installed")
 	if err := os.WriteFile(releaseRoot, []byte("not a directory"), 0o600); err != nil {
@@ -289,6 +290,7 @@ func TestWorkerStartupFailureDoesNotLeaveUpdateScheduled(t *testing.T) {
 	}
 	statePath := filepath.Join(root, "runtime", "update-state.json")
 	job := Job{
+		Transport:      "cloudflare",
 		ReleaseRoot:    releaseRoot,
 		HerdrBin:       testHerdrBinary(t),
 		TargetVersion:  "1.2.4",
@@ -409,8 +411,10 @@ func TestPruneOldReleasesKeepsCurrentAndRollbackOnly(t *testing.T) {
 
 func writeWorkerTestJob(t *testing.T) (string, Job) {
 	t.Helper()
+	t.Setenv("HERDR_RELAY_TRANSPORT", "cloudflare")
 	root := t.TempDir()
 	job := Job{
+		Transport:      "cloudflare",
 		ReleaseRoot:    filepath.Join(root, "installed"),
 		HerdrBin:       testHerdrBinary(t),
 		TargetVersion:  "1.2.4",

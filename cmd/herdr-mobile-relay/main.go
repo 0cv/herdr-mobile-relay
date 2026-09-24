@@ -7,21 +7,26 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/app"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/eventhook"
+	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
+	"github.com/0cv/herdr-mobile-relay/internal/processsupervisor"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/stablestate"
 	"github.com/0cv/herdr-mobile-relay/internal/support"
+	"github.com/0cv/herdr-mobile-relay/internal/tailscale"
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
 )
 
@@ -34,8 +39,11 @@ func main() {
 	exitCode, err := run(os.Args[1:])
 	if err != nil {
 		reportError(os.Stderr, os.Args[1:], err)
-		os.Exit(exitCode)
 	}
+	// Always propagate the code the subcommand chose. Some subcommands (for
+	// example managed-state) return a meaningful non-zero code with a nil error,
+	// so returning normally here would silently turn every refusal into success.
+	os.Exit(exitCode)
 }
 
 func run(args []string) (int, error) {
@@ -44,6 +52,13 @@ func run(args []string) (int, error) {
 		command, args = args[0], args[1:]
 	}
 	switch command {
+	case "supervise":
+		return runSupervise(args, os.Stdin, os.Stdout, os.Stderr)
+	case "__private-process-anchor":
+		if len(args) != 0 {
+			return 2, errors.New("private process anchor accepts no arguments")
+		}
+		return processsupervisor.RunAnchor()
 	case "serve":
 		if len(args) != 0 {
 			return 2, errors.New("serve does not accept arguments")
@@ -245,6 +260,89 @@ func run(args []string) (int, error) {
 			return 2, errors.New("usage: herdr-mobile-relay prune-releases RELEASE_ROOT CURRENT_RELEASE [PREVIOUS_RELEASE]")
 		}
 		return status(relayupdate.PruneOldReleases(args[0], args[1:]...))
+	case "tailscale", "tailscale-inspect":
+		if command == "tailscale" {
+			if len(args) == 0 || args[0] != "inspect" {
+				return 2, errors.New("usage: herdr-mobile-relay tailscale inspect [--binary PATH] [--https-port PORT]")
+			}
+			args = args[1:]
+		}
+		inspectFlags := flag.NewFlagSet("tailscale-inspect", flag.ContinueOnError)
+		inspectFlags.SetOutput(os.Stderr)
+		binary := inspectFlags.String("binary", "tailscale", "Tailscale CLI path")
+		httpsPort := inspectFlags.Int("https-port", tailscale.DefaultHTTPSPort, "Tailscale HTTPS Serve port")
+		if err := inspectFlags.Parse(args); err != nil {
+			return 2, err
+		}
+		if inspectFlags.NArg() != 0 {
+			return 2, errors.New("usage: herdr-mobile-relay tailscale inspect [--binary PATH] [--https-port PORT]")
+		}
+		inspection, err := tailscale.Inspect(context.Background(), *binary, *httpsPort)
+		if err != nil {
+			return 1, err
+		}
+		encoded, err := json.Marshal(inspection)
+		if err != nil {
+			return 1, err
+		}
+		fmt.Println(string(encoded))
+		return 0, nil
+	case "pairing-control":
+		controlFlags := flag.NewFlagSet("pairing-control", flag.ContinueOnError)
+		controlFlags.SetOutput(os.Stderr)
+		socket := controlFlags.String("socket", "", "managed pairing control socket")
+		op := controlFlags.String("operation", "status", "status or arm_bootstrap")
+		runID := controlFlags.String("run-id", "", "managed foreground run identifier")
+		instance := controlFlags.String("instance", "", "relay instance identifier")
+		if err := controlFlags.Parse(args); err != nil {
+			return 2, err
+		}
+		if controlFlags.NArg() != 0 || *socket == "" || *runID == "" || *instance == "" {
+			return 2, errors.New("usage: herdr-mobile-relay pairing-control --socket PATH --operation status|arm_bootstrap --run-id ID --instance ID")
+		}
+		response, err := localcontrol.Request(context.Background(), *socket, *op, *runID, *instance)
+		if err != nil {
+			return 1, err
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return 1, err
+		}
+		fmt.Println(string(encoded))
+		return 0, nil
+	case "check-port":
+		portFlags := flag.NewFlagSet("check-port", flag.ContinueOnError)
+		portFlags.SetOutput(os.Stderr)
+		host := portFlags.String("host", "127.0.0.1", "address to check")
+		port := portFlags.Int("port", 0, "port to check")
+		protocol := portFlags.String("protocol", "tcp", "tcp or udp")
+		if err := portFlags.Parse(args); err != nil {
+			return 2, err
+		}
+		if portFlags.NArg() != 0 || *port < 1 || *port > 65535 || (*protocol != "tcp" && *protocol != "udp") {
+			return 2, errors.New("usage: herdr-mobile-relay check-port --host HOST --port PORT [--protocol tcp|udp]")
+		}
+		address := net.JoinHostPort(*host, fmt.Sprint(*port))
+		var closeListener func() error
+		var err error
+		if *protocol == "udp" {
+			var listener net.PacketConn
+			listener, err = net.ListenPacket("udp", address)
+			if listener != nil {
+				closeListener = listener.Close
+			}
+		} else {
+			var listener net.Listener
+			listener, err = net.Listen("tcp", address)
+			if listener != nil {
+				closeListener = listener.Close
+			}
+		}
+		if err != nil {
+			return 1, fmt.Errorf("port %s:%d is occupied: %w", *host, *port, err)
+		}
+		_ = closeListener()
+		return 0, nil
 	case "setup-fragment":
 		if len(args) < 2 || len(args) > 3 {
 			return 2, errors.New("usage: herdr-mobile-relay setup-fragment TOKEN LABEL [RELAY]")
@@ -271,6 +369,14 @@ func run(args []string) (int, error) {
 		}
 		fmt.Println(origin)
 		return 0, nil
+	case "managed-state":
+		if len(args) > 0 && args[0] == "reprint" {
+			return runManagedReprint(args[1:], os.Stdout, os.Stderr), nil
+		}
+		if len(args) > 0 && args[0] == "recover" {
+			return runManagedRecover(args[1:], os.Stdout, os.Stderr), nil
+		}
+		return runManagedState(args, os.Stdout, os.Stderr, managedStateSignals(), os.Getppid, 200*time.Millisecond), nil
 	case "qr":
 		qrFlags := flag.NewFlagSet("qr", flag.ContinueOnError)
 		qrFlags.SetOutput(os.Stderr)
@@ -327,10 +433,32 @@ func runServe() (int, error) {
 	logger := newRelayLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr))
 	slog.SetDefault(logger)
 
+	// The serve process is the long-lived foreground owner. In managed mode it
+	// takes the ownership lock O before opening the device store or control
+	// socket and retires it cleanly on normal exit. A SIGKILL leaves the lock as
+	// fail-closed evidence; there is no automatic recovery or takeover.
+	var owner *app.ManagedOwner
+	if cfg.ManagedRunID != "" {
+		acquired, acquireErr := app.AcquireManagedOwner(cfg.RuntimeDir)
+		if acquireErr != nil {
+			return 1, fmt.Errorf("acquire managed ownership of %s: %w", cfg.RuntimeDir, acquireErr)
+		}
+		owner = acquired
+		defer func() {
+			if retireErr := app.RetireManagedOwner(owner, logger); retireErr != nil {
+				logger.Error("managed ownership retirement was refused; retained lock evidence must be inspected",
+					"runtime_dir", cfg.RuntimeDir, "error", retireErr)
+			}
+		}()
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := app.New(cfg, version, revision, logger)
+	srv, err := app.NewOwned(cfg, version, revision, logger, owner)
+	if err != nil {
+		return 1, err
+	}
 
 	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
 		return 1, err
@@ -343,4 +471,13 @@ func status(err error) (int, error) {
 		return 1, err
 	}
 	return 0, nil
+}
+
+// managedStateSignals builds the SIGTERM/SIGINT channel for `managed-state
+// hold`. It lives here rather than in managed_state.go so the frozen S9A
+// mutant overlay (which replaces that file) still links this package.
+func managedStateSignals() <-chan os.Signal {
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	return signals
 }

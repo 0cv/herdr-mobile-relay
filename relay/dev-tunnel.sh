@@ -4,6 +4,55 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEV_DIR="${HERDR_DEV_CONFIG_DIR:-$SCRIPT_DIR/.dev}"
+
+# Canonicalize a directory without requiring it to exist. Existing parents are
+# resolved physically; missing components are kept textually (portable on
+# macOS/Linux, no realpath -m).
+canonical_dir() {
+    local path="$1"
+    local directory
+    local name
+
+    directory="$(dirname "$path")"
+    name="$(basename "$path")"
+    if [ -d "$directory" ]; then
+        directory="$(cd "$directory" && pwd -P)"
+    fi
+    printf '%s/%s\n' "${directory%/}" "$name"
+}
+
+# The development directory must never be the production relay configuration
+# root or a directory inside it: the production root holds relay.env, push and
+# device-auth state, and this script mkdirs/chmods its target before setup.
+production_config_roots=()
+if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+    production_config_roots+=("$HERDR_PLUGIN_CONFIG_DIR")
+else
+    production_config_roots+=("${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay")
+fi
+if [ -n "${HERDR_RELAY_ENV:-}" ]; then
+    production_config_roots+=("$(dirname "$HERDR_RELAY_ENV")")
+fi
+
+canonical_dev_dir="$(canonical_dir "$DEV_DIR")"
+for production_root in "${production_config_roots[@]}"; do
+    canonical_production_root="$(canonical_dir "$production_root")"
+    if [ "$canonical_dev_dir" = "$canonical_production_root" ]; then
+        refuse=1
+    else
+        case "$canonical_dev_dir" in
+            "$canonical_production_root"/*) refuse=1 ;;
+            *) refuse=0 ;;
+        esac
+    fi
+    if [ "$refuse" = 1 ]; then
+        printf '✗ Refusing HERDR_DEV_CONFIG_DIR=%s: it is the production relay configuration root or inside it.\n' "$DEV_DIR" >&2
+        printf '  Choose a private development directory such as relay/.dev.\n' >&2
+        exit 1
+    fi
+done
+unset canonical_dev_dir canonical_production_root refuse
+
 DEV_BIN_DIR="$DEV_DIR/bin"
 
 mkdir -p "$DEV_DIR" "$DEV_BIN_DIR"

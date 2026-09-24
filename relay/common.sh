@@ -1,5 +1,349 @@
 #!/bin/bash
 
+# Keep only terminal generations already validated by jobs -l and passed to
+# wait; a later stop may accept their completion after Bash prunes its record.
+CHILD_JOB_REAPED_SPECS=()
+CHILD_JOB_REAPED_PIDS=()
+CHILD_JOB_RECORD_PRESENT=false
+
+# A numeric PID can be reused as soon as its process exits. Bash job specs are
+# tied to this shell's job table, so managed foreground children keep both the
+# jobspec generation and the original PID for identity checks and wait only.
+# Capture jobs output through a file because command substitution runs the
+# builtin in a subshell whose copied job table can omit terminal records.
+_child_job_long_record() {
+    local job_spec="$1"
+    local output_file
+    local line
+    local line_count=0
+
+    CHILD_JOB_OUTPUT=""
+    CHILD_JOB_RECORD_PRESENT=false
+    output_file="$(mktemp "${TMPDIR:-/tmp}/herdr-child-job.XXXXXX")" || return 1
+    if ! LC_ALL=C jobs -l "$job_spec" > "$output_file" 2>/dev/null; then
+        rm -f "$output_file"
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line_count=$((line_count + 1))
+        if [ "$line_count" -eq 1 ]; then
+            CHILD_JOB_OUTPUT="$line"
+        fi
+    done < "$output_file"
+    rm -f "$output_file" || return 1
+    [ "$line_count" -eq 0 ] || CHILD_JOB_RECORD_PRESENT=true
+    [ "$line_count" -eq 1 ] && [ -n "$CHILD_JOB_OUTPUT" ]
+}
+
+_child_job_record_state() {
+    local expected_pid="$1"
+    local job_number="$2"
+    local job_output="$3"
+    local job_token
+    local listed_pid
+    local state
+
+    [ -n "$job_output" ] || return 1
+    case "$job_output" in
+        *$'\n'*) return 1 ;;
+    esac
+    IFS=$' \t' read -r job_token listed_pid state _ <<< "$job_output"
+    case "$job_token" in
+        "[$job_number]"|"[$job_number]+"|"[$job_number]-") ;;
+        *) return 1 ;;
+    esac
+    [ "$listed_pid" = "$expected_pid" ] || return 1
+
+    case "$state" in
+        Running|Stopped)
+            CHILD_JOB_STATE="$state"
+            return 0
+            ;;
+        Done|Exit|Terminated|Killed|Aborted|Hangup|Segmentation|Floating)
+            CHILD_JOB_STATE="$state"
+            return 2
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# This cache is never a signal authority. A live or mismatched current record
+# still fails identity checks; absence is accepted only for this exact pair
+# after a validated terminal record was already waited in this shell.
+_child_job_mark_reaped() {
+    local job_spec="$1"
+    local expected_pid="$2"
+    local index
+
+    for ((index = 0; index < ${#CHILD_JOB_REAPED_SPECS[@]}; index++)); do
+        if [ "${CHILD_JOB_REAPED_SPECS[index]}" = "$job_spec" ]; then
+            CHILD_JOB_REAPED_PIDS[index]="$expected_pid"
+            return 0
+        fi
+    done
+    CHILD_JOB_REAPED_SPECS+=("$job_spec")
+    CHILD_JOB_REAPED_PIDS+=("$expected_pid")
+}
+
+_child_job_was_reaped() {
+    local job_spec="$1"
+    local expected_pid="$2"
+    local index
+
+    for ((index = 0; index < ${#CHILD_JOB_REAPED_SPECS[@]}; index++)); do
+        if [ "${CHILD_JOB_REAPED_SPECS[index]}" = "$job_spec" ] &&
+            [ "${CHILD_JOB_REAPED_PIDS[index]}" = "$expected_pid" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_child_job_details() {
+    local job_spec="$1"
+    local expected_pid="$2"
+    local job_number
+    local mapped_pid
+    local job_output
+    local record_status
+    local CHILD_JOB_OUTPUT=""
+
+    case "$job_spec" in
+        %[0-9]*) job_number="${job_spec#%}" ;;
+        *) return 1 ;;
+    esac
+    case "$job_number" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$expected_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    _child_job_long_record "$job_spec" || return 1
+    job_output="$CHILD_JOB_OUTPUT"
+    if _child_job_record_state "$expected_pid" "$job_number" "$job_output"; then
+        record_status=0
+    else
+        record_status=$?
+    fi
+    [ "$record_status" -eq 2 ] && return 2
+    [ "$record_status" -eq 0 ] || return 1
+
+    case "$CHILD_JOB_STATE" in
+        Running|Stopped) ;;
+        *) return 1 ;;
+    esac
+    if mapped_pid="$(LC_ALL=C jobs -p "$job_spec" 2>/dev/null)"; then
+        [ "$mapped_pid" = "$expected_pid" ] && return 0
+        [ -z "$mapped_pid" ] || return 1
+    else
+        [ -z "$mapped_pid" ] || return 1
+    fi
+
+    # A child may finish after the long-form record was read but before Bash
+    # resolves the live PID mapping. Reclassify once, from the fresh job record;
+    # missing or still-active records remain an unknown-identity refusal.
+    _child_job_long_record "$job_spec" || return 1
+    job_output="$CHILD_JOB_OUTPUT"
+    if _child_job_record_state "$expected_pid" "$job_number" "$job_output"; then
+        return 1
+    else
+        record_status=$?
+    fi
+    [ "$record_status" -eq 2 ] && return 2
+    return 1
+}
+
+capture_child_job() {
+    local expected_pid="$1"
+    local job_output
+    local job_token
+    local listed_pid
+    local state
+    local job_number
+    local job_spec
+    local mapped_pid
+
+    case "$expected_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    job_output="$(LC_ALL=C jobs -l %+ 2>/dev/null)" || return 1
+    IFS=' ' read -r job_token listed_pid state _ <<< "$job_output"
+    case "$job_token" in
+        \[*\]+|\[*\]) job_number="${job_token#\[}"; job_number="${job_number%%\]*}" ;;
+        *) return 1 ;;
+    esac
+    case "$job_number" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$listed_pid" = "$expected_pid" ] || return 1
+    case "$state" in
+        Running|Stopped) ;;
+        *) return 1 ;;
+    esac
+
+    job_spec="%$job_number"
+    mapped_pid="$(LC_ALL=C jobs -p "$job_spec" 2>/dev/null)" || return 1
+    [ "$mapped_pid" = "$expected_pid" ] || return 1
+    CHILD_JOB_STATE=""
+    _child_job_details "$job_spec" "$expected_pid" || return 1
+    printf '%s\n' "$job_spec"
+}
+
+child_job_active() {
+    local CHILD_JOB_STATE=""
+    local details_status
+
+    if _child_job_details "$1" "$2"; then
+        return 0
+    else
+        details_status=$?
+    fi
+    if [ "$details_status" -eq 2 ]; then
+        # Reap only after the exact jobspec/PID terminal record was validated.
+        # Bash may prune that record before the launcher's EXIT cleanup runs.
+        wait "$1" 2>/dev/null || true
+        _child_job_mark_reaped "$1" "$2"
+    fi
+    return 1
+}
+
+_child_job_reap_forced_kill() {
+    local job_spec="$1"
+    local expected_pid="$2"
+    local observation_limit=5
+    local attempt
+    local details_status
+    local wait_status
+    local CHILD_JOB_STATE=""
+
+    # Five fresh observations with at most four 100ms sleeps bound this proof
+    # to 400ms after KILL; no further signal is sent from this loop.
+    for ((attempt = 1; attempt <= observation_limit; attempt++)); do
+        if _child_job_details "$job_spec" "$expected_pid"; then
+            details_status=0
+        else
+            details_status=$?
+        fi
+        if [ "$details_status" -eq 2 ]; then
+            [ "$CHILD_JOB_STATE" = Killed ] || return 1
+            if wait "$expected_pid" 2>/dev/null; then
+                wait_status=0
+            else
+                wait_status=$?
+            fi
+            [ "$wait_status" -eq 137 ] || return 1
+            _child_job_mark_reaped "$job_spec" "$expected_pid"
+            return 0
+        fi
+        [ "$details_status" -eq 0 ] || return 1
+        case "$CHILD_JOB_STATE" in
+            Running|Stopped) ;;
+            *) return 1 ;;
+        esac
+        if [ "$attempt" -lt "$observation_limit" ]; then
+            sleep 0.1
+        fi
+    done
+    return 1
+}
+
+stop_child_job() {
+    local job_spec="$1"
+    local expected_pid="$2"
+    local signal="$3"
+    local attempts="${4:-5}"
+    local attempt
+    local details_status
+    local CHILD_JOB_STATE=""
+
+    case "$signal" in
+        ''|*[!A-Za-z0-9]*) return 1 ;;
+    esac
+    case "$attempts" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+
+    if _child_job_details "$job_spec" "$expected_pid"; then
+        details_status=0
+    else
+        details_status=$?
+    fi
+    if [ "$details_status" -eq 2 ]; then
+        wait "$job_spec" 2>/dev/null || true
+        _child_job_mark_reaped "$job_spec" "$expected_pid"
+        return 0
+    fi
+    if [ "$details_status" -ne 0 ]; then
+        if [ "$CHILD_JOB_RECORD_PRESENT" != true ] &&
+            _child_job_was_reaped "$job_spec" "$expected_pid"; then
+            return 0
+        fi
+        return 1
+    fi
+
+    if [ "$CHILD_JOB_STATE" = Stopped ]; then
+        if _child_job_details "$job_spec" "$expected_pid"; then
+            details_status=0
+        else
+            details_status=$?
+        fi
+        if [ "$details_status" -eq 2 ]; then
+            wait "$job_spec" 2>/dev/null || true
+            _child_job_mark_reaped "$job_spec" "$expected_pid"
+            return 0
+        fi
+        [ "$details_status" -eq 0 ] || return 1
+        [ "$CHILD_JOB_STATE" = Stopped ] || return 1
+        kill -CONT "$job_spec" 2>/dev/null || return 1
+    fi
+
+    if _child_job_details "$job_spec" "$expected_pid"; then
+        details_status=0
+    else
+        details_status=$?
+    fi
+    if [ "$details_status" -eq 2 ]; then
+        wait "$job_spec" 2>/dev/null || true
+        _child_job_mark_reaped "$job_spec" "$expected_pid"
+        return 0
+    fi
+    [ "$details_status" -eq 0 ] || return 1
+    [ "$CHILD_JOB_STATE" = Running ] || return 1
+    kill "-$signal" "$job_spec" 2>/dev/null || return 1
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        sleep 1
+        if _child_job_details "$job_spec" "$expected_pid"; then
+            continue
+        else
+            details_status=$?
+        fi
+        if [ "$details_status" -eq 2 ]; then
+            wait "$job_spec" 2>/dev/null || true
+            _child_job_mark_reaped "$job_spec" "$expected_pid"
+            return 0
+        fi
+        return 1
+    done
+
+    if _child_job_details "$job_spec" "$expected_pid"; then
+        details_status=0
+    else
+        details_status=$?
+    fi
+    if [ "$details_status" -eq 2 ]; then
+        wait "$job_spec" 2>/dev/null || true
+        _child_job_mark_reaped "$job_spec" "$expected_pid"
+        return 0
+    fi
+    [ "$details_status" -eq 0 ] || return 1
+    kill -KILL "$job_spec" 2>/dev/null || return 1
+    _child_job_reap_forced_kill "$job_spec" "$expected_pid"
+}
+
 relay_release_root() {
     printf '%s\n' "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}"
 }
@@ -69,6 +413,20 @@ ssh_key_path() {
     candidate="$HOME/.ssh/$entered"
     [ -r "$candidate" ] && [ ! -d "$candidate" ] || return 1
     printf '%s\n' "$candidate"
+}
+
+# Resolve the intended path without creating, chmodding or migrating anything.
+# Pre-consent readers must not use the mutating setup resolver below.
+relay_env_file_read_only() {
+    local script_dir="$1"
+
+    if [ -n "${HERDR_RELAY_ENV:-}" ]; then
+        printf '%s\n' "$HERDR_RELAY_ENV"
+    elif [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+        printf '%s/relay.env\n' "$HERDR_PLUGIN_CONFIG_DIR"
+    else
+        printf '%s/.env\n' "$script_dir"
+    fi
 }
 
 relay_env_file() {
@@ -619,12 +977,170 @@ env_file_value() {
         return
     fi
     (
+        unset "$key"
         set -a
         # shellcheck source=/dev/null
         . "$env_file"
         set +a
         printenv "$key" 2>/dev/null || true
     )
+}
+
+# Transport selection is intentionally centralized. An unset mode preserves the
+# historical inference (gateway when HERDR_GATEWAY_URL is present, otherwise
+# Cloudflare); an explicit mode is validated instead of silently combining two
+# transports.
+relay_transport_mode() {
+    local env_file="${1:-${HERDR_RELAY_ENV:-}}"
+    local mode=""
+    local persisted_mode=""
+    local persisted_gateway=""
+    local gateways
+
+    if [ "${HERDR_TAILSCALE_REQUEST:-}" = 1 ]; then
+        mode=tailscale
+    elif [ -n "$env_file" ]; then
+        persisted_mode="$(env_file_value "$env_file" HERDR_RELAY_TRANSPORT)"
+        persisted_gateway="$(env_file_value "$env_file" HERDR_GATEWAY_URL)"
+        if [ -n "$persisted_mode" ]; then
+            mode="$persisted_mode"
+        elif [ -n "$persisted_gateway" ]; then
+            mode=gateway
+        fi
+    fi
+    if [ -z "$mode" ] && [ -n "${HERDR_RELAY_TRANSPORT+x}" ]; then
+        mode="$HERDR_RELAY_TRANSPORT"
+    fi
+    mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [ -z "$mode" ]; then
+        gateways="$(gateway_urls "$env_file")"
+        if [ -n "$gateways" ]; then
+            mode=gateway
+        else
+            mode=cloudflare
+        fi
+    fi
+    case "$mode" in
+        cloudflare|gateway|tailscale) printf '%s\n' "$mode" ;;
+        *)
+            echo "✗ Invalid HERDR_RELAY_TRANSPORT: $mode" >&2
+            return 1
+            ;;
+    esac
+}
+
+clear_tailscale_selection() {
+    local env_file="$1"
+
+    remove_env_value_atomic "$env_file" HERDR_TAILSCALE_ORIGIN
+    remove_env_value_atomic "$env_file" HERDR_RELAY_PAIRING_SOCKET
+    remove_env_value_atomic "$env_file" HERDR_RELAY_RUN_ID
+    remove_env_value_atomic "$env_file" HERDR_TAILSCALE_HTTPS_PORT
+    unset HERDR_TAILSCALE_ORIGIN HERDR_RELAY_PAIRING_SOCKET HERDR_RELAY_RUN_ID
+    unset HERDR_TAILSCALE_HTTPS_PORT
+}
+
+set_relay_transport() {
+    local env_file="$1"
+    local mode="$2"
+
+    case "$mode" in
+        cloudflare|gateway|tailscale) ;;
+        *) echo "✗ Invalid relay transport: $mode" >&2; return 1 ;;
+    esac
+    if [ "$mode" != tailscale ] && [ -e "$(tailscale_session_file "$env_file")" ]; then
+        echo "✗ Cannot change transport while a foreground Tailscale session is recorded." >&2
+        echo "  Stop that pane and verify its route before changing transport." >&2
+        return 1
+    fi
+    if [ "$mode" != tailscale ]; then
+        clear_tailscale_selection "$env_file"
+    fi
+    if [ "$mode" = cloudflare ]; then
+        # Tailscale selection deliberately leaves gateway settings intact so an
+        # explicit later gateway choice can reuse the user's existing transport.
+        remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
+        remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
+        unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
+    fi
+    set_env_value_atomic "$env_file" HERDR_RELAY_TRANSPORT "$mode"
+    export HERDR_RELAY_TRANSPORT="$mode"
+}
+
+installed_relay_service_definition_present() {
+    case "$(uname -s)" in
+        Linux) [ -f "$HOME/.config/systemd/user/herdr-mobile-relay.service" ] ;;
+        Darwin) [ -f "$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+json_bool_field() {
+    local json="$1"
+    local key="$2"
+    printf '%s\n' "$json" |
+        tr -d ' \t\n' |
+        sed -n "s/.*\"$key\":\(true\|false\).*/\1/p" |
+        head -1
+}
+
+json_number_field() {
+    local json="$1"
+    local key="$2"
+    printf '%s\n' "$json" |
+        tr -d ' \t\n' |
+        sed -n "s/.*\"$key\":\([0-9][0-9]*\).*/\1/p" |
+        head -1
+}
+
+# Session records are generated by this checkout and are read as constrained
+# key/value data, never sourced. This keeps a stale or tampered marker from
+# becoming shell code.
+tailscale_session_file() {
+    local env_file="$1"
+    printf '%s/tailscale-session.env\n' "$(dirname "$env_file")"
+}
+
+tailscale_session_value() {
+    local session_file="$1"
+    local key="$2"
+
+    [ -r "$session_file" ] || return 1
+    sed -n "s/^${key}=//p" "$session_file" | head -1
+}
+
+tailscale_control_request() {
+    local socket="$1"
+    local operation="$2"
+    local run_id="$3"
+    local instance="$4"
+
+    [ -n "$socket" ] && [ -n "$run_id" ] && [ -n "$instance" ] || return 1
+    "$(relay_binary)" pairing-control \
+        --socket "$socket" --operation "$operation" \
+        --run-id "$run_id" --instance "$instance"
+}
+
+arm_tailscale_setup_link() {
+    local env_file="$1"
+    local session_file
+    local socket
+    local run_id
+    local instance
+    local response
+
+    session_file="$(tailscale_session_file "$env_file")"
+    socket="$(tailscale_session_value "$session_file" HERDR_RELAY_PAIRING_SOCKET || true)"
+    run_id="$(tailscale_session_value "$session_file" HERDR_RELAY_RUN_ID || true)"
+    instance="$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)"
+    [ -n "$socket" ] && [ -n "$run_id" ] && [ -n "$instance" ] || return 1
+    response="$(tailscale_control_request "$socket" arm_bootstrap "$run_id" "$instance" 2>/dev/null)" || return 1
+    [ "$(json_bool_field "$response" ok)" = true ] || return 1
+    [ "$(json_string_field "$response" run_id)" = "$run_id" ] || return 1
+    [ "$(json_string_field "$response" instance)" = "$instance" ] || return 1
+    [ "$(json_bool_field "$response" invitation_armed)" = true ] || return 1
+    [ -n "$(json_string_field "$response" invitation_expires_at)" ] || return 1
+    printf '%s\n' "$response"
 }
 
 set_env_value_atomic() {
@@ -807,6 +1323,88 @@ json_string_field() {
         head -1
 }
 
+# Proves the served release and packaged web bundle belong to the running
+# binary before any invitation is armed or QR printed. The binary pins its own
+# version and revision; the served health must report the same values and a
+# usable bundle, and an installed release manifest (when present) must agree
+# with both. A mutable `current` release or a stale bundle is refused rather
+# than paired.
+require_release_identity() {
+    local health="$1"
+    local binary="$2"
+    local identity
+    local binary_version
+    local binary_revision
+    local health_version
+    local health_revision
+    local bundle_hash
+    local bundle_version
+    local bundle_revision
+    local manifest
+    local manifest_version
+    local manifest_revision
+    local manifest_web_hash
+
+    [ -n "$binary" ] && [ -x "$binary" ] || {
+        echo "✗ Release identity could not be verified: no usable relay binary was found." >&2
+        return 1
+    }
+    identity="$("$binary" version --json 2>/dev/null)" || {
+        echo "✗ Release identity could not be verified: the relay binary did not report its version." >&2
+        return 1
+    }
+    binary_version="$(json_string_field "$identity" version)"
+    binary_revision="$(json_string_field "$identity" revision)"
+    [ -n "$binary_version" ] && [ -n "$binary_revision" ] || {
+        echo "✗ Release identity could not be verified: the relay binary reported no version or revision." >&2
+        return 1
+    }
+    health_version="$(json_string_field "$health" version)"
+    health_revision="$(json_string_field "$health" revision)"
+    [ "$health_version" = "$binary_version" ] || {
+        echo "✗ Served release version '$health_version' does not match the running binary version '$binary_version'." >&2
+        return 1
+    }
+    [ "$health_revision" = "$binary_revision" ] || {
+        echo "✗ Served release revision '$health_revision' does not match the running binary revision '$binary_revision'." >&2
+        return 1
+    }
+    bundle_hash="$(json_string_field "$health" bundle_hash)"
+    [ -n "$bundle_hash" ] || {
+        echo "✗ Served release has no managed web bundle; refusing to pair a stale release." >&2
+        return 1
+    }
+    bundle_version="$(json_string_field "$health" bundle_version)"
+    bundle_revision="$(json_string_field "$health" bundle_revision)"
+    [ "$bundle_version" = "$binary_version" ] || {
+        echo "✗ Served web bundle version '$bundle_version' does not match the running binary version '$binary_version'." >&2
+        return 1
+    }
+    [ "$bundle_revision" = "$binary_revision" ] || {
+        echo "✗ Served web bundle revision '$bundle_revision' does not match the running binary revision '$binary_revision'." >&2
+        return 1
+    }
+    manifest="$(dirname "$binary")/release-manifest.json"
+    if [ -f "$manifest" ]; then
+        manifest_version="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
+        manifest_revision="$(sed -n 's/^[[:space:]]*"revision":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
+        manifest_web_hash="$(sed -n 's/^[[:space:]]*"web_hash":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1)"
+        [ "$manifest_version" = "$binary_version" ] || {
+            echo "✗ Release manifest version '$manifest_version' does not match the running binary version '$binary_version'." >&2
+            return 1
+        }
+        [ "$manifest_revision" = "$binary_revision" ] || {
+            echo "✗ Release manifest revision '$manifest_revision' does not match the running binary revision '$binary_revision'." >&2
+            return 1
+        }
+        [ "$manifest_web_hash" = "$bundle_hash" ] || {
+            echo "✗ Release manifest web hash does not match the served bundle web hash." >&2
+            return 1
+        }
+    fi
+    return 0
+}
+
 # Reads the relay's own /healthz gateway object, which reports
 # {"enabled":bool,"registered":bool,"relay_id":"...","clients":int}. Only the
 # registered flag is echoed; the relay id stays out of terminal output.
@@ -907,6 +1505,21 @@ wait_for_relay_release_health() {
 
 host_label() {
     hostname -s 2>/dev/null || hostname 2>/dev/null || echo relay
+}
+
+tailscale_https_port() {
+    local port="${HERDR_TAILSCALE_HTTPS_PORT:-443}"
+    case "$port" in
+        ''|*[!0-9]*)
+            echo "✗ HERDR_TAILSCALE_HTTPS_PORT must be a positive TCP port." >&2
+            return 1
+            ;;
+    esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || {
+        echo "✗ HERDR_TAILSCALE_HTTPS_PORT must be between 1 and 65535." >&2
+        return 1
+    }
+    printf '%s\n' "$port"
 }
 
 # The token passes through argv only for the short-lived compiled helper.
@@ -1191,11 +1804,19 @@ set_gateway_url() {
     local env_file="$1"
     local url="$2"
 
+    if [ -e "$(tailscale_session_file "$env_file")" ]; then
+        echo "✗ Cannot change gateway selection while a foreground Tailscale session is recorded." >&2
+        echo "  Stop that pane and verify its route before changing transport." >&2
+        return 1
+    fi
     if [ -z "$url" ]; then
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
+        unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
+        set_relay_transport "$env_file" cloudflare
         return 0
     fi
+    set_relay_transport "$env_file" gateway
     set_env_value_atomic "$env_file" HERDR_GATEWAY_URL "$url"
 }
 
@@ -1413,6 +2034,112 @@ phone_app_choice_action() {
     esac
 }
 
+choose_tailscale_phone_app_base_url() {
+    local relay_fallback="$1"
+    local env_file="$2"
+    local action
+    local choice
+    local current_origin=""
+    local configured_origin
+    local observed_origin
+
+    configured_origin="$(dirname "$env_file")/phone-app-origin-configured"
+    observed_origin="$(dirname "$env_file")/phone-app-origin"
+
+    # An explicit environment value is an operator request, so it wins over a
+    # saved origin and is still normalized by the compiled URL/TLS contract.
+    if [ -n "${HERDR_PHONE_APP_URL:-}" ]; then
+        phone_app_base_url "$relay_fallback" "$env_file"
+        return
+    fi
+    if [ -n "${HERDR_APP_DEPLOY_ORIGIN:-}" ]; then
+        HERDR_PHONE_APP_URL="$HERDR_APP_DEPLOY_ORIGIN" \
+            phone_app_base_url "$relay_fallback" "$env_file"
+        return
+    fi
+
+    # A prior choice is shared app state, not a reason to discover a new
+    # Cloudflare origin. Keep it unless the operator explicitly switches it.
+    if [ -s "$configured_origin" ] || [ -s "$observed_origin" ]; then
+        if ! current_origin="$(phone_app_base_url "$relay_fallback" "$env_file")"; then
+            if ! stdin_is_terminal; then
+                echo "✗ The saved phone app address is invalid." >&2
+                return 1
+            fi
+            echo "  The saved phone app address is invalid; choose a replacement." >&2
+            echo "" >&2
+        fi
+    fi
+
+    # The Tailscale caller has already verified the HTTPS identity and relay
+    # run. Its packaged frontend is the safe default for a new configuration.
+    if ! stdin_is_terminal; then
+        if [ -n "$current_origin" ]; then
+            printf '%s\n' "$current_origin"
+        else
+            phone_app_base_url "$relay_fallback" "$env_file"
+        fi
+        return
+    fi
+
+    echo "Where should the phone setup link open?" >&2
+    echo "" >&2
+    if [ -n "$current_origin" ]; then
+        echo "  Current phone app: $current_origin" >&2
+        echo "" >&2
+        menu_item 1 "Keep current phone app (recommended)" >&2
+        echo "     Reuse this shared app origin for the Tailscale relay." >&2
+        echo "" >&2
+        menu_item 2 "Use this Tailscale relay instead" >&2
+        echo "     Use its verified HTTPS origin and packaged Herdr app." >&2
+        echo "" >&2
+        menu_item 3 "Use another installed Herdr app" >&2
+    else
+        menu_item 1 "This Tailscale relay (recommended)" >&2
+        echo "     Use its verified HTTPS origin and packaged Herdr app." >&2
+        echo "" >&2
+        menu_item 2 "An existing installed Herdr app" >&2
+    fi
+    echo "     The shared app origin can be changed explicitly later." >&2
+    echo "" >&2
+    menu_item q "Cancel, change nothing" >&2
+    echo "" >&2
+    while true; do
+        read -r -p "Choice [1]: " choice || choice="cancel"
+        if [ "$choice" = "cancel" ]; then
+            echo "" >&2
+            echo "Setup cancelled." >&2
+            return 1
+        fi
+        action="$(phone_app_choice_action "$current_origin" "$choice")"
+        case "$action" in
+            keep)
+                printf '%s\n' "$current_origin"
+                return
+                ;;
+            relay)
+                HERDR_PHONE_APP_URL=relay phone_app_base_url "$relay_fallback" "$env_file"
+                return
+                ;;
+            existing)
+                prompt_phone_app_base_url "$relay_fallback" "$env_file"
+                return
+                ;;
+            cancel)
+                echo "Setup cancelled." >&2
+                return 1
+                ;;
+            invalid)
+                if [ -n "$current_origin" ]; then
+                    echo "✗ Choose 1, 2, 3, or q." >&2
+                else
+                    echo "✗ Choose 1, 2, or q." >&2
+                fi
+                ;;
+        esac
+    done
+}
+
 choose_phone_app_base_url() {
     local relay_fallback="$1"
     local env_file="$2"
@@ -1426,6 +2153,10 @@ choose_phone_app_base_url() {
 
     configured_origin="$(dirname "$env_file")/phone-app-origin-configured"
     observed_origin="$(dirname "$env_file")/phone-app-origin"
+    if [ "$setup_kind" = tailscale ]; then
+        choose_tailscale_phone_app_base_url "$relay_fallback" "$env_file"
+        return
+    fi
     if [ -z "${HERDR_PHONE_APP_URL:-}" ] && [ ! -s "$configured_origin" ]; then
         if [ -n "${HERDR_APP_DEPLOY_ORIGIN:-}" ]; then
             discovered_origin="$(
@@ -1555,6 +2286,10 @@ stdout_is_terminal() {
     [ -t 1 ]
 }
 
+stdin_is_terminal() {
+    [ -t 0 ]
+}
+
 terminal_hyperlinks_enabled() {
     stdout_is_terminal &&
         [ -z "${NO_COLOR+x}" ] &&
@@ -1673,4 +2408,52 @@ require_supported_platform() {
             exit 1
             ;;
     esac
+}
+
+# Acquire the canonical root's owner (O) for this script's lifetime. On success
+# HOLDER_PID holds the managed-state holder and the owner lock is held. On any
+# refusal the function returns non-zero with a message on stderr and leaves the
+# filesystem untouched.
+managed_owner_acquire() {
+    local dir="$1"
+    local attempt
+    HOLDER_LOG="$(mktemp "${TMPDIR:-/tmp}/herdr-managed-owner.XXXXXX")"
+    "$(relay_binary)" managed-state hold --dir "$dir" --operation owner >"$HOLDER_LOG" 2>&1 &
+    HOLDER_PID=$!
+    for ((attempt = 1; attempt <= 50; attempt++)); do
+        if grep -q '"ok":true' "$HOLDER_LOG" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+            wait "$HOLDER_PID" 2>/dev/null || true
+            echo "✗ The relay configuration is in use by another operation: $dir" >&2
+            sed -n '1,10p' "$HOLDER_LOG" >&2
+            HOLDER_PID=""
+            rm -f "$HOLDER_LOG"
+            HOLDER_LOG=""
+            return 1
+        fi
+        sleep 0.1
+    done
+    kill -TERM "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+    echo "✗ Timed out acquiring the relay configuration lock: $dir" >&2
+    HOLDER_PID=""
+    rm -f "$HOLDER_LOG"
+    HOLDER_LOG=""
+    return 1
+}
+
+# Release the holder cleanly. Safe to call when no holder is active and from an
+# EXIT trap; the holder retires the owner lock itself.
+managed_owner_release() {
+    [ -n "${HOLDER_PID:-}" ] || return 0
+    kill -TERM "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
+    if [ -n "${HOLDER_LOG:-}" ]; then
+        rm -f "$HOLDER_LOG"
+        HOLDER_LOG=""
+    fi
+    return 0
 }

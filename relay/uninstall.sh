@@ -34,6 +34,12 @@ resolve_cache_dir() {
 
 CONFIG_DIR="$(resolve_config_dir)"
 CACHE_DIR="$(resolve_cache_dir)"
+TAILSCALE_SESSION_FILE="$CONFIG_DIR/tailscale-session.env"
+if [ -e "$TAILSCALE_SESSION_FILE" ]; then
+    echo "✗ A foreground Tailscale Serve session is recorded at $TAILSCALE_SESSION_FILE." >&2
+    echo "  Stop that pane and verify its Serve route is gone before uninstalling." >&2
+    exit 1
+fi
 
 # Canonicalize a path, resolving symlinks. Returns empty if path does not exist.
 canonicalize() {

@@ -110,6 +110,7 @@ shell-check:
 	bash tests/test_common.sh
 	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
+	bash tests/test_tailscale.sh
 	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
 	bash tests/test_speech_voices.sh

@@ -13,10 +13,11 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
-ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
 export HERDR_RELAY_ENV="$ENV_FILE"
 
 cleanup() {
+    managed_owner_release
     if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
         kill "$TUNNEL_PID" 2>/dev/null || true
         wait_for_exit "$TUNNEL_PID" 5
@@ -33,8 +34,27 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 
 require_supported_platform
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
+    echo "✗ A foreground Tailscale Serve session is already recorded; start owns that pane." >&2
+    echo "  Stop the existing pane before starting another transport." >&2
+    exit 1
+fi
+TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
+if [ "$TRANSPORT" = tailscale ]; then
+    exec "$SCRIPT_DIR/tailscale.sh"
+fi
+CONFIG_ROOT="$(dirname "$ENV_FILE")"
+if [ ! -d "$CONFIG_ROOT" ]; then
+    umask 077
+    mkdir -p "$CONFIG_ROOT"
+    chmod 700 "$CONFIG_ROOT"
+fi
+HOLDER_PID=""
+HOLDER_LOG=""
+managed_owner_acquire "$CONFIG_ROOT" || exit 1
 ensure_relay_env "$ENV_FILE"
 load_relay_env "$ENV_FILE"
+TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
 
 wait_for_exit() {
     local pid="$1"
@@ -85,6 +105,7 @@ if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then
     fi
     echo "✓ Background relay ready: $HEALTH"
     echo ""
+    managed_owner_release
     exec "$SCRIPT_DIR/setup-link.sh"
 fi
 

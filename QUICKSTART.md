@@ -88,6 +88,26 @@ cut it out of the path with a direct WebRTC connection.
 [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) covers running your
 own gateway.
 
+## Use Tailscale Serve
+
+If Tailscale is already installed, running, and authenticated on the computer,
+choose **Tailscale Serve (foreground)** in the setup menu (or press `t`). The
+relay stays on `127.0.0.1`, and the launcher verifies the authenticated node
+before exposing it through a temporary tailnet HTTPS Serve route. It does not
+run `tailscale login`, enable Funnel, or overwrite an existing Serve route.
+
+Keep this pane open: it owns the relay, Serve session, and pairing socket. Ctrl-C
+stops the relay and removes only the route verified as belonging to this run.
+Background service installation and phone-managed updates are intentionally
+unavailable while this transport is selected. The verified Tailscale HTTPS
+origin serves the packaged Herdr phone frontend by default. If this relay
+already has a shared app origin, setup keeps it until you explicitly choose
+the Tailscale origin or another installed app. Tailscale must be installed and
+authenticated manually.
+
+See [Tailscale Serve in the transport guide](docs/transports.md#tailscale-serve)
+for custom HTTPS ports and the trusted certificate check.
+
 ## Make It Permanent
 
 Add a domain to Cloudflare, then run:

@@ -54,6 +54,25 @@ HERDR_PLUGIN_CONFIG_DIR="$TARGET_CONFIG_ROOT"
 HERDR_RELAY_ENV="$TARGET_ENV"
 export INSTALL_ROOT BIN_DIR HERDR_PLUGIN_CONFIG_DIR HERDR_RELAY_ENV
 
+TARGET_TRANSPORT="$(env_file_value "$TARGET_ENV" HERDR_RELAY_TRANSPORT || true)"
+SOURCE_TRANSPORT=""
+[ -z "$SOURCE_ENV" ] || SOURCE_TRANSPORT="$(env_file_value "$SOURCE_ENV" HERDR_RELAY_TRANSPORT || true)"
+TARGET_SESSION="$(dirname "$TARGET_ENV")/tailscale-session.env"
+SOURCE_SESSION=""
+[ -z "$SOURCE_ENV" ] || SOURCE_SESSION="$(dirname "$SOURCE_ENV")/tailscale-session.env"
+if [ -e "$TARGET_SESSION" ] || { [ -n "$SOURCE_SESSION" ] && [ -e "$SOURCE_SESSION" ]; }; then
+    echo "herdr-mobile-relay: foreground Tailscale Serve must be stopped before updating" >&2
+    echo "herdr-mobile-relay: remove only a verified stale session record after its route is gone" >&2
+    exit 1
+fi
+if [ "$TARGET_TRANSPORT" = tailscale ] || [ "$SOURCE_TRANSPORT" = tailscale ]; then
+    if installed_relay_service_definition_present || installed_relay_service_active; then
+        echo "herdr-mobile-relay: foreground Tailscale Serve cannot be updated through a running service" >&2
+        echo "herdr-mobile-relay: stop the pane and remove the service definition before retrying" >&2
+        exit 1
+    fi
+fi
+
 PLATFORM=$(uname -s)
 SERVICE_FILE=
 SERVICE_BACKUP=

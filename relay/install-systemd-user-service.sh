@@ -17,6 +17,12 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/usr
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
+    echo "✗ Background service installation is unsupported for foreground Tailscale Serve." >&2
+    echo "  Stop the Tailscale pane and use the manual stopped-update path instead." >&2
+    exit 1
+fi
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
 
 if ! command -v systemctl >/dev/null 2>&1; then

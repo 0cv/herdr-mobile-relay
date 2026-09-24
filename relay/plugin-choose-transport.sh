@@ -1,8 +1,8 @@
 #!/bin/bash
 # Guided chooser for how the phone reaches this computer. Every option ends by
-# writing (or clearing) the HERDR_GATEWAY_URL candidate list in the relay
-# environment, which is the single switch the rest of the tooling reads, plus
-# the HERDR_GATEWAY_SELECTION policy that decides how that list is read.
+# writing (or clearing) the transport selection in the relay environment. The
+# gateway candidate list and selection policy remain separate from the foreground
+# Tailscale Serve lifecycle.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,14 +12,27 @@ cd "$SCRIPT_DIR"
 
 MODE="${1:-}"
 case "$MODE" in
-    temporary | stable | community | own) ;;
+    temporary | stable | community | own | tailscale) ;;
     *)
-        echo "Usage: $0 {temporary|stable|community|own}" >&2
+        echo "Usage: $0 {temporary|stable|community|own|tailscale}" >&2
         exit 2
         ;;
 esac
 
+# Selection is not exposure consent. The installed plugin has already prepared
+# credentials; the foreground launcher checks prerequisites without setup/install
+# or config migration. Forward only arguments supplied by this caller.
+if [ "$MODE" = tailscale ]; then
+    shift
+    HERDR_TAILSCALE_REQUEST=1 HERDR_RELAY_TRANSPORT=tailscale exec "$SCRIPT_DIR/tailscale.sh" "$@"
+fi
+
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
+    echo "✗ Transport changes are unavailable while a foreground Tailscale Serve session is active." >&2
+    echo "  Stop the pane before selecting another transport." >&2
+    exit 1
+fi
 CURRENT="$(gateway_urls "$ENV_FILE")"
 COMMUNITY="$(community_gateway_url)"
 

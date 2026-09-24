@@ -80,23 +80,39 @@ install_tool() {
             sh "$REPO_DIR/install.sh" "$version"
             ;;
         cloudflared) install_cloudflared ;;
+        tailscale)
+            echo "Tailscale must be installed and authenticated manually; automatic login is not supported." >&2
+            return 1
+            ;;
     esac
 }
 
-GATEWAY_URL="$(gateway_url "$ENV_FILE")"
+TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
+    echo "✗ Setup changes are unavailable while a foreground Tailscale Serve session is active." >&2
+    echo "  Stop the pane before changing relay prerequisites or credentials." >&2
+    exit 1
+fi
+GATEWAY_URL=""
+[ "$TRANSPORT" = gateway ] && GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 
 missing_tools=()
 find_missing_tools() {
     missing_tools=()
     local command
     local required=(herdr)
-    # A gateway-configured relay dials the gateway itself, so cloudflared is
-    # neither installed nor required on that path.
-    if [ -z "$GATEWAY_URL" ]; then
+    # A gateway-configured relay dials the gateway itself, and Tailscale owns
+    # Serve in the foreground. Neither path needs cloudflared.
+    if [ "$TRANSPORT" = cloudflare ]; then
         required+=(cloudflared)
+    elif [ "$TRANSPORT" = tailscale ]; then
+        required+=(tailscale)
     fi
     for command in "${required[@]}"; do
         if [ "$command" = "herdr" ] && [ -x "${HERDR_BIN:-}" ]; then
+            continue
+        fi
+        if [ "$command" = "tailscale" ] && [ -x "${HERDR_TAILSCALE_BIN:-}" ]; then
             continue
         fi
         if ! command -v "$command" >/dev/null 2>&1; then
@@ -108,9 +124,12 @@ find_missing_tools() {
     fi
 }
 
-if [ -n "$GATEWAY_URL" ]; then
+if [ "$TRANSPORT" = gateway ]; then
     echo "Gateway transport configured: $GATEWAY_URL"
     echo "Skipping the cloudflared prerequisite; no Cloudflare account is needed."
+    echo ""
+elif [ "$TRANSPORT" = tailscale ]; then
+    echo "Tailscale transport selected: Serve will be configured only after explicit consent."
     echo ""
 fi
 
@@ -156,8 +175,10 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
     fi
     echo "  Herdr:       https://herdr.dev"
     echo "  Relay:       rerun the exact version installer from this plugin"
-    if [ -z "$GATEWAY_URL" ]; then
+    if [ "$TRANSPORT" = cloudflare ]; then
         echo "  cloudflared: https://developers.cloudflare.com/tunnel/downloads/"
+    elif [ "$TRANSPORT" = tailscale ]; then
+        echo "  Tailscale:   install and authenticate it manually, then retry setup"
     fi
     exit 1
 fi
@@ -189,6 +210,13 @@ if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
     install -m 0600 "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
     echo "Created $WEB_ENV_FILE"
 fi
+if [ "$TRANSPORT" = tailscale ] &&
+    [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_TRANSPORT)" = tailscale ] &&
+    [ -z "$(env_file_value "$ENV_FILE" HERDR_RELAY_TOKEN)" ]; then
+    echo "✗ Existing Tailscale configuration has no relay token; refusing to generate a new device identity." >&2
+    echo "  Restore the recorded relay.env or choose another transport explicitly." >&2
+    exit 1
+fi
 ensure_relay_env "$ENV_FILE"
 
 if ! command -v npx >/dev/null 2>&1; then
@@ -198,8 +226,10 @@ fi
 echo ""
 echo "Prerequisites and local configuration are ready."
 echo "  Relay config: $ENV_FILE"
-if [ -n "$GATEWAY_URL" ]; then
+if [ "$TRANSPORT" = gateway ]; then
     echo "  Gateway:      $GATEWAY_URL"
+elif [ "$TRANSPORT" = tailscale ]; then
+    echo "  Transport:    Tailscale Serve (foreground; no Funnel or cloudflared)"
 fi
 if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
     echo "  Web config:   $WEB_ENV_FILE"

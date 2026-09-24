@@ -1,0 +1,194 @@
+name: Tailscale native preflight
+
+on:
+  push:
+    branches:
+      - ci/tailscale-native-preflight-ef9f843
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-arm64:
+    name: Darwin arm64 process lifecycle preflight
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare private runner log directory
+        shell: bash
+        run: mkdir -m 700 -p "$RUNNER_TEMP/tailscale-native-preflight"
+
+      - name: Verify commit and candidate source provenance
+        id: provenance
+        shell: bash
+        env:
+          EXPECTED_SOURCE_TREE_SHA256: ff8ff3deb6722cc29d95fce660e66d4af92491509a1cf483e84ab7231fcf072b
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse --show-toplevel)" = "$GITHUB_WORKSPACE"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          actual="$(python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import stat
+
+          root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          excluded_workflow = ".github/workflows/tailscale-native-preflight.yml"
+          records = []
+
+          def add(path):
+              rel = path.relative_to(root).as_posix()
+              if rel == excluded_workflow:
+                  return
+              info = path.lstat()
+              mode = stat.S_IMODE(info.st_mode)
+              if stat.S_ISREG(info.st_mode):
+                  kind = "file"
+                  payload = path.read_bytes()
+              elif stat.S_ISLNK(info.st_mode):
+                  kind = "symlink"
+                  target = os.readlink(path)
+                  resolved = (path.parent / target).resolve(strict=True)
+                  if resolved != root and root not in resolved.parents:
+                      raise SystemExit("source symlink escapes the checkout")
+                  payload = os.fsencode(target)
+              else:
+                  raise SystemExit("unexpected source file kind: " + rel)
+              digest = hashlib.sha256(payload).hexdigest()
+              records.append((rel, f"{digest}\t{mode:04o}\t{kind}\t{rel}\n"))
+
+          for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+              current = Path(base)
+              for directory in list(dirs):
+                  path = current / directory
+                  if current == root and directory == ".git":
+                      dirs.remove(directory)
+                  elif path.is_symlink():
+                      dirs.remove(directory)
+                      add(path)
+              for name in files:
+                  add(current / name)
+
+          canonical = "".join(line for _rel, line in sorted(records, key=lambda item: item[0].encode("utf-8")))
+          print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+          PY
+          )"
+          test "$actual" = "$EXPECTED_SOURCE_TREE_SHA256"
+          printf 'Verified checkout: %s\nSource tree SHA-256 (workflow excluded): %s\n' "$GITHUB_SHA" "$actual" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Go 1.27.0
+        id: setup_go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.0
+          cache: true
+
+      - name: Run native Go tests
+        id: go_test
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+
+      - name: Run Go vet
+        id: go_vet
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          go vet ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/go-vet.log"
+
+      - name: Build the exact relay supervisor
+        id: supervisor_build
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -o "$RUNNER_TEMP/herdr-mobile-relay-supervisor" ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/go-build.log"
+
+      - name: Run gated inert-fixture Darwin lifecycle tests
+        id: darwin_lifecycle
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' && steps.supervisor_build.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/darwin-lifecycle.log"
+          import os
+          import signal
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          supervisor = Path(os.environ["RUNNER_TEMP"]) / "herdr-mobile-relay-supervisor"
+          env = os.environ.copy()
+          env.update({
+              "HERDR_S9B3_DISPOSABLE_DARWIN": "1",
+              "HERDR_S9B3_SOURCE": str(root),
+              "HERDR_S9B3_SUPERVISOR": str(supervisor),
+          })
+          command = [sys.executable, str(root / "tests/test_tailscale_process_groups_darwin.py"), "-v"]
+          child = subprocess.Popen(command, cwd=root, env=env, start_new_session=True)
+          try:
+              result = child.wait(timeout=600)
+          except subprocess.TimeoutExpired:
+              # Signal only the direct test-runner process group. The GitHub-hosted
+              # macOS job is disposable; never scan or signal unrelated processes.
+              try:
+                  os.killpg(child.pid, signal.SIGTERM)
+              except ProcessLookupError:
+                  pass
+              try:
+                  child.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  try:
+                      os.killpg(child.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  child.wait()
+              print("Darwin lifecycle test exceeded its 600-second bound", file=sys.stderr)
+              raise SystemExit(124)
+          raise SystemExit(result)
+          PY
+
+      - name: Upload preflight logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: tailscale-native-preflight-logs
+          path: ${{ runner.temp }}/tailscale-native-preflight/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Require all preflight checks to pass
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PROVENANCE_OUTCOME: ${{ steps.provenance.outcome }}
+          SETUP_GO_OUTCOME: ${{ steps.setup_go.outcome }}
+          GO_TEST_OUTCOME: ${{ steps.go_test.outcome }}
+          GO_VET_OUTCOME: ${{ steps.go_vet.outcome }}
+          BUILD_OUTCOME: ${{ steps.supervisor_build.outcome }}
+          DARWIN_TEST_OUTCOME: ${{ steps.darwin_lifecycle.outcome }}
+        run: |
+          set -euo pipefail
+          for result in "$PROVENANCE_OUTCOME" "$SETUP_GO_OUTCOME" "$GO_TEST_OUTCOME" "$GO_VET_OUTCOME" "$BUILD_OUTCOME" "$DARWIN_TEST_OUTCOME"; do
+            test "$result" = success || { printf 'Required preflight step outcome: %s\n' "$result" >&2; exit 1; }
+          done

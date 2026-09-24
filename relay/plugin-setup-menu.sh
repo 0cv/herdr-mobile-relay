@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
-ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
 load_relay_env "$ENV_FILE"
 
 # The menu opens after every install, so it has to answer "what do I have" before
@@ -84,6 +84,22 @@ transport_summary() {
     local active
     local current
     local count
+    local origin
+
+    if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
+        origin="$(json_string_field "$health" tailscale_origin)"
+        [ -n "$origin" ] || origin="$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_ORIGIN)"
+        if [ -n "$origin" ]; then
+            if [ -n "$(json_string_field "$health" managed_run_id)" ]; then
+                printf 'Tailscale Serve %s (foreground session active)\n' "$origin"
+            else
+                printf 'Tailscale Serve %s (foreground session stopped)\n' "$origin"
+            fi
+        else
+            printf 'Tailscale Serve selected; origin not verified\n'
+        fi
+        return 0
+    fi
 
     gateways="$(gateway_urls "$ENV_FILE")"
     if [ -n "$gateways" ]; then
@@ -179,6 +195,10 @@ render_menu() {
     echo "     Check the project's shared gateways, save the healthy candidates,"
     echo "     then start or restart the relay and print its QR."
     echo ""
+    menu_item t "Tailscale Serve (foreground)"
+    echo "     Use a preinstalled, authenticated Tailscale node over trusted HTTPS."
+    echo "     The relay stays on loopback and this pane owns the Serve session."
+    echo ""
     menu_item 3 "Deploy or Upgrade Your Own WebRTC Gateway"
     echo "     Copy the gateway shipped by this plugin to your server over SSH,"
     echo "     then start or restart the relay and print its QR."
@@ -227,7 +247,8 @@ run_action() {
         cd "$SCRIPT_DIR"
         HERDR_SETUP_MENU=1 "$action" "$@"
     ) || true
-    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
+    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION HERDR_RELAY_TRANSPORT
+    unset HERDR_TAILSCALE_ORIGIN HERDR_RELAY_PAIRING_SOCKET HERDR_RELAY_RUN_ID
     load_relay_env "$ENV_FILE"
     trap - INT
     if [ -t 0 ]; then
@@ -247,6 +268,7 @@ while true; do
             1) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" temporary; break ;;
             2) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" community; break ;;
             3) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" own; break ;;
+            t | T) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" tailscale; break ;;
             4) run_action "$SCRIPT_DIR/plugin-install-service.sh"; break ;;
             5) run_action "$SCRIPT_DIR/plugin-change-hostname.sh"; break ;;
             6) run_action "$SCRIPT_DIR/plugin-stable-teardown.sh"; break ;;
@@ -254,7 +276,7 @@ while true; do
             8) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
             9) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
             q | Q) exit 0 ;;
-            *) echo "Enter 1, 2, 3, 4, 5, 6, 7, 8, 9, or q." ;;
+            *) echo "Enter 1, 2, 3, t, 4, 5, 6, 7, 8, or 9, or q." ;;
         esac
     done
 done

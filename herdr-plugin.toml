@@ -21,14 +21,15 @@ version = "0.21.3"
 
 # Herdr 0.7.5 introduced the live-agent facade used for atomic starts and prompts.
 min_herdr_version = "0.7.5"
-description = "Remote mobile control for Herdr: approve and monitor agents from your smartphone (Android/iOS) with an installable web app, push notifications, QR pairing, and a blind gateway plus direct WebRTC transport (Cloudflare tunnels remain supported)"
+description = "Remote mobile control for Herdr: approve and monitor agents from your smartphone (Android/iOS) with an installable web app, push notifications, QR pairing, blind gateway plus direct WebRTC transport, Cloudflare tunnels, and optional foreground Tailscale Serve"
 platforms = ["macos", "linux"]
 
 # Install the exact versioned, checksum- and manifest-verified release bundle.
 # This never compiles Go and has no Python, uv, Node, Git, or toolchain
 # dependency. With HERDR_GATEWAY_URL set, Quick Start needs no Cloudflare
 # account at all; otherwise cloudflared remains an interactive Quick Start
-# decision because it opens a public tunnel.
+# decision because it opens a public tunnel. Tailscale Serve is a separate
+# foreground option and requires a manually installed, authenticated node.
 [[build]]
 command = ["bash", "relay/plugin-build.sh"]
 

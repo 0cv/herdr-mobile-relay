@@ -11,7 +11,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
-ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
 load_relay_env "$ENV_FILE"
 
 echo "🐑 Herdr Mobile Relay status"

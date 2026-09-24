@@ -9,7 +9,9 @@ this before exposing a relay beyond your own machine.
 The relay binds to `127.0.0.1:8375` by default (`HERDR_RELAY_HOST`,
 `HERDR_RELAY_PORT`); its event hook uses loopback UDP 8376
 (`HERDR_RELAY_PLUGIN_PORT`). A Cloudflare tunnel supplies HTTPS/WSS without
-opening an inbound port. On the gateway transport, an outbound connection to the
+opening an inbound port; foreground Tailscale Serve supplies a tailnet HTTPS/WSS
+origin while keeping the relay bound to loopback. On the gateway transport, an
+outbound connection to the
 gateway replaces the tunnel, and the direct WebRTC path adds one UDP socket,
 guarded by ICE credentials and a pinned DTLS fingerprint exchanged only inside
 the encrypted channel; see [transports.md](transports.md). Tokens use
@@ -23,8 +25,8 @@ development connections.
 
 Runtime data stays in the relay's private config and cache roots. The phone
 stores its relay list locally. Relays never connect to one another, and no
-central service is required: a tunnel reaches the relay directly, and gateway
-mode uses the gateways you selected.
+central service is required: a tunnel or Tailscale Serve reaches the relay
+through its selected origin, and gateway mode uses the gateways you selected.
 
 ## Audit log
 
@@ -49,8 +51,9 @@ with HKDF-SHA-256, and encrypts every subsequent WebSocket message with
 AES-256-GCM. The phone sends encrypted key confirmation before the relay
 registers the connection. Invitation and credential secrets stay in the QR or
 setup URL fragment and phone storage; they are never placed in the WebSocket
-URL or an HTTP header. Cloudflare — or, on the gateway transport, the gateway —
-can still observe connection metadata such as endpoints, timing, and encrypted
+URL or an HTTP header. Cloudflare or Tailscale Serve — or, on the gateway
+transport, the gateway — can still observe connection metadata such as endpoints,
+timing, and encrypted
 frame sizes, but not relay commands, terminal output, uploads, or
 push-subscription details. Once the direct WebRTC path takes over, application
 frames and their metadata leave the gateway entirely; it still saw the
@@ -73,7 +76,8 @@ than a human-chosen value.
 The relay key bootstraps a first controller credential. That controller can
 create a one-use invitation for another browser, then name, revoke, or reset
 paired devices. An invitation link carries the invitation secret and the
-computer's address: its WSS URL on a direct relay, or, on a gateway relay, the
+computer's address: its WSS URL on a direct relay or Tailscale Serve origin,
+or, on a gateway relay, the
 gateway list plus the relay id and rendezvous key that answer the gateway's
 challenge. Both are derived one-way from the relay key, so an invited device
 can reach the computer through the gateway - as any holder of a direct URL can
@@ -90,18 +94,21 @@ The bootstrap invitation is one-use on stable installs. Its ten-minute window
 is measured from each presentation while no device has enrolled yet — a relay
 with no paired phone would otherwise be unpairable ten minutes after start,
 with no way in — so the first successful enrolment, not the clock, is what
-consumes it. Printing the setup link again arms one more: the setup scripts
-signal the running relay (`SIGUSR1`, found through `relay.pid` beside
+consumes it. Printing the setup link again arms one more: ordinary foreground
+relay starts signal the running relay (`SIGUSR1`, found through `relay.pid` beside
 `relay.env`) before drawing the QR, and the relay mints a fresh ten-minute
-bootstrap invitation without touching the devices already enrolled. Only a
-local process can send that signal, which is the same trust the printed key
-already carries. The quick tunnel is the exception: it serves the app from a
-hostname that changes on every launch, so a phone's enrolled credential is
-stranded under the previous origin and can never be presented again. Each
-tunnel launch therefore starts with an empty device list and one fresh one-use
-bootstrap invitation, still bound to the relay key; that invitation keeps
-refreshing its ten-minute window on every attempt for as long as re-arming is
-enabled. A gateway keeps a stable identity, so its pairings survive restarts.
+bootstrap invitation without touching the devices already enrolled. Foreground
+Tailscale Serve instead uses its private local-control socket and verifies the
+active run before arming; it never resets enrolled devices or runs as a
+background service. Only a local process can send either request, which is the
+same trust the printed key already carries. The quick tunnel is the exception:
+it serves the app from a hostname that changes on every launch, so a phone's
+enrolled credential is stranded under the previous origin and can never be
+presented again. Each tunnel launch therefore starts with an empty device list
+and one fresh one-use bootstrap invitation, still bound to the relay key; that
+invitation keeps refreshing its ten-minute window on every attempt for as long
+as re-arming is enabled. A gateway keeps a stable identity, so its pairings
+survive restarts.
 
 Attachment uploads are staged privately, validated by content and container
 format, and represented to the phone by opaque references. A live upload is

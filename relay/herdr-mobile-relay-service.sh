@@ -14,6 +14,11 @@ if [ -f "$ENV_FILE" ]; then
     . "$ENV_FILE"
     set +a
 fi
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
+    echo "foreground Tailscale Serve cannot run under the background service wrapper" >&2
+    exit 78
+fi
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 # Agents often install their CLI into a per-tool bin directory that the service

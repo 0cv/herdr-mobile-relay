@@ -35,6 +35,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
+	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
@@ -118,6 +119,7 @@ type Server struct {
 	hybrid           *hybridTransport
 	uploadM          *upload.Manager
 	deviceAuth       *deviceauth.Store
+	pairingControl   *localcontrol.Server
 	initErr          error
 
 	mu        sync.RWMutex
@@ -157,6 +159,70 @@ type Server struct {
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
+	return newServer(cfg, version, revision, logger)
+}
+
+// NewOwned constructs a server for a managed run only after the supplied
+// ownership generation has been validated against the configured managed
+// resources. Every admission check is read-only, so a refusal happens before
+// newServer can create the device store, listeners, control socket or cache
+// directories. Legacy (non-managed) configurations must not supply an owner.
+func NewOwned(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner) (*Server, error) {
+	if cfg.ManagedRunID != "" {
+		if err := validateManagedAdmission(cfg, owner); err != nil {
+			return nil, err
+		}
+		return newServer(cfg, version, revision, logger), nil
+	}
+	if owner != nil {
+		return nil, errors.New("managed owner supplied for a legacy (non-managed) run")
+	}
+	return newServer(cfg, version, revision, logger), nil
+}
+
+// validateManagedAdmission proves the owner holds the same canonical directory
+// as the configured runtime directory and control socket before any managed
+// resource is opened. The helpers live here, not in managed_owner.go, so the
+// S6B2 permissive-owner mutant can replace the owner implementation wholesale.
+func validateManagedAdmission(cfg *config.Config, owner *ManagedOwner) error {
+	if owner == nil {
+		return errors.New("managed run requires an acquired managed owner")
+	}
+	if err := owner.Validate(); err != nil {
+		return fmt.Errorf("managed owner is not valid: %w", err)
+	}
+	admitted := owner.Directory()
+	cfgDir, err := canonicalDirectory(cfg.RuntimeDir)
+	if err != nil {
+		return fmt.Errorf("resolve managed runtime directory: %w", err)
+	}
+	if cfgDir != admitted {
+		return fmt.Errorf("managed runtime directory %q is not the admitted owner directory %q", cfgDir, admitted)
+	}
+	if cfg.PairingSocketPath != "" {
+		socketDir, err := canonicalDirectory(filepath.Dir(cfg.PairingSocketPath))
+		if err != nil {
+			return fmt.Errorf("resolve managed control socket directory: %w", err)
+		}
+		if socketDir != admitted {
+			return fmt.Errorf("managed control socket directory %q is not the admitted owner directory %q", socketDir, admitted)
+		}
+	}
+	return nil
+}
+
+func canonicalDirectory(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("empty managed directory path")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func newServer(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
 	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
@@ -246,7 +312,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		historyM:            histManager,
 		conversationM:       conversationReader,
 		conversationB:       conversationBrowser,
-		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
+		updateM:             newUpdateManager(cfg, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		uploadM:             uploadManager,
 		deviceAuth:          deviceStore,
@@ -262,6 +328,11 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		historyActive:       make(map[string]bool),
 		pushTestLast:        make(map[string]time.Time),
 	}
+}
+
+// Pass resolved policy before the manager can reconcile persisted update state.
+func newUpdateManager(cfg *config.Config, version, revision, healthURL string) *relayupdate.Manager {
+	return relayupdate.NewManager(cfg.Transport, cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL)
 }
 
 // armBootstrap prepares the relay's one-use pairing invitation. A re-armed
@@ -1224,37 +1295,8 @@ func (s *Server) Run(ctx context.Context) error {
 		s.webH = webHandler
 	}
 
-	udpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(s.cfg.PluginPort))
-	udpListener, err := coordinator.NewUDPListener(udpAddr, s.state, s.cfg.SocketPath, s.logger)
-	if err != nil {
-		s.recordSafeError("UDP event listener unavailable", err)
-		s.logger.Warn("udp listener unavailable", "error", err)
-	} else {
-		s.udp = udpListener
-		s.udp.SetOnDirty(func() { s.poller.Wake() })
-		s.udp.SetOnChange(func(agent *coordinator.AgentState) {
-			s.broadcastCommitted(map[string]any{
-				"type":           "agent_update",
-				"pane_id":        agent.PaneID,
-				"raw_pane_id":    agent.RawPaneID,
-				"status":         agent.Status,
-				"agent":          agent.Agent,
-				"tab_id":         agent.TabID,
-				"tab_label":      agent.TabLabel,
-				"tab_number":     agent.TabNumber,
-				"workspace_id":   agent.WorkspaceID,
-				"cwd":            agent.Cwd,
-				"project":        agent.Project,
-				"host":           agent.Host,
-				"session":        agent.Session,
-				"session_name":   agent.SessionName,
-				"updated_at":     agent.UpdatedAt,
-				"event_id":       agent.BlockedEventID,
-				"attention_kind": agent.AttentionKind,
-				"pane_revision":  agent.StateRevision,
-			})
-			s.poller.Wake()
-		})
+	if err := s.startUDPListener(); err != nil {
+		return err
 	}
 
 	s.setInventoryPublisher(ctx)
@@ -1311,6 +1353,26 @@ func (s *Server) Run(ctx context.Context) error {
 	s.ready = true
 	s.mu.Unlock()
 
+	if s.cfg.PairingSocketPath != "" {
+		control, controlErr := localcontrol.New(
+			s.cfg.PairingSocketPath,
+			s.cfg.ManagedRunID,
+			s.cfg.InstanceID,
+			s.pairingControlStatus,
+			s.armBootstrapForControl,
+		)
+		if controlErr != nil {
+			_ = ln.Close()
+			return fmt.Errorf("initialize pairing control: %w", controlErr)
+		}
+		s.pairingControl = control
+		defer func() {
+			if err := control.Close(); err != nil {
+				s.logger.Warn("pairing control cleanup failed", "error", err)
+			}
+		}()
+	}
+
 	s.logger.Info("relay listening",
 		"addr", s.cfg.Addr(),
 		"version", s.version,
@@ -1347,15 +1409,24 @@ func (s *Server) Run(ctx context.Context) error {
 	signal.Notify(profileSignals, syscall.SIGHUP)
 	defer signal.Stop(profileSignals)
 	startBackground(func() { s.reloadProfilesLoop(ctx, profileSignals) })
-	bootstrapSignals := make(chan os.Signal, 1)
-	signal.Notify(bootstrapSignals, syscall.SIGUSR1)
-	defer signal.Stop(bootstrapSignals)
-	startBackground(func() { s.armBootstrapLoop(ctx, bootstrapSignals) })
+	if s.pairingControl == nil {
+		bootstrapSignals := make(chan os.Signal, 1)
+		signal.Notify(bootstrapSignals, syscall.SIGUSR1)
+		defer signal.Stop(bootstrapSignals)
+		startBackground(func() { s.armBootstrapLoop(ctx, bootstrapSignals) })
+	}
 	if s.udp != nil {
 		startBackground(func() { s.udp.Run(ctx) })
 	}
 	startBackground(func() { s.pruneUploads(ctx) })
 	startBackground(func() { s.writeSupportLoop(ctx) })
+	if s.pairingControl != nil {
+		startBackground(func() {
+			if err := s.pairingControl.Run(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Error("pairing control stopped", "error", err)
+			}
+		})
+	}
 	startBackground(func() { s.watchJobStates(ctx) })
 	startBackground(func() { s.updateCheckLoop(ctx) })
 	if s.hybrid != nil {
@@ -2263,12 +2334,19 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"status":          "ok",
 		"readiness":       readiness,
+		"transport":       s.cfg.Transport,
 		"inventory":       inventory,
 		"instance":        s.cfg.InstanceID,
 		"version":         s.version,
 		"release_version": s.version,
 		"revision":        s.revision,
 		"protocol":        protocol.Version,
+	}
+	if s.cfg.ManagedRunID != "" {
+		resp["managed_run_id"] = s.cfg.ManagedRunID
+	}
+	if s.cfg.TailscaleOrigin != "" {
+		resp["tailscale_origin"] = s.cfg.TailscaleOrigin
 	}
 	gateway := s.hybrid.status()
 	resp["gateway"] = gateway
@@ -2745,14 +2823,51 @@ func (s *Server) armBootstrapLoop(ctx context.Context, signals <-chan os.Signal)
 }
 
 func (s *Server) armBootstrapInvitation() string {
-	if s.deviceAuth == nil {
-		return "no relay key configured"
-	}
-	if err := s.deviceAuth.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en"); err != nil {
-		s.recordSafeError("bootstrap invitation re-arm failed", err)
+	if _, err := s.armBootstrapForControl(); err != nil {
 		return err.Error()
 	}
 	return "armed for one more device"
+}
+
+func (s *Server) pairingControlStatus() localcontrol.Status {
+	s.mu.RLock()
+	ready := s.ready
+	s.mu.RUnlock()
+	status := localcontrol.Status{
+		Ready:     ready,
+		RunID:     s.cfg.ManagedRunID,
+		Instance:  s.cfg.InstanceID,
+		Transport: s.cfg.Transport,
+		Version:   s.version,
+		Revision:  s.revision,
+	}
+	if s.webH != nil {
+		status.BundleHash = s.webH.BundleHash()
+	}
+	if s.deviceAuth != nil {
+		invitation := s.deviceAuth.BootstrapStatus()
+		status.InvitationArmed = invitation.Armed
+		status.InvitationPending = invitation.Pending
+		if !invitation.ExpiresAt.IsZero() {
+			status.InvitationExpiresAt = invitation.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+	}
+	return status
+}
+
+func (s *Server) armBootstrapForControl() (localcontrol.Status, error) {
+	if s.deviceAuth == nil {
+		return localcontrol.Status{}, errors.New("no relay key configured")
+	}
+	if err := s.deviceAuth.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en"); err != nil {
+		s.recordSafeError("bootstrap invitation re-arm failed", err)
+		return localcontrol.Status{}, err
+	}
+	status := s.pairingControlStatus()
+	if !status.InvitationArmed || status.InvitationExpiresAt == "" {
+		return localcontrol.Status{}, errors.New("bootstrap invitation persistence was not acknowledged")
+	}
+	return status, nil
 }
 
 func (s *Server) pidFilePath() string {
