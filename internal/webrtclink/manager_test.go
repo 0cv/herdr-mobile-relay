@@ -806,33 +806,39 @@ func TestSessionReportCarriesTypesOnly(t *testing.T) {
 // direct session, and a session that closes without one is the cohort that
 // would justify symmetric-NAT port prediction.
 func TestOutcomeCountersClassifyEachSessionOnce(t *testing.T) {
-	h := newHarness(t, 0, nil)
-	if got := h.manager.Outcomes(); got.Direct != 0 || got.Relayed != 0 {
+	// Classify synthetic sessions directly: completing a loopback ICE exchange
+	// can nominate a pair asynchronously and make this assertion timing-sensitive.
+	manager := &Manager{
+		logger:   quietLogger(),
+		sessions: make(map[SessionKey]*session),
+	}
+	if got := manager.Outcomes(); got.Direct != 0 || got.Relayed != 0 {
 		t.Fatalf("fresh manager outcomes = %+v, want zeroes", got)
 	}
 
 	relayed := SessionKey{ClientID: "client-relayed", RequestID: "req-1"}
-	h.negotiate(t, relayed, dataChannelLabel)
-	h.manager.CloseSession(relayed, "test")
+	relayedSession := &session{manager: manager, key: relayed, cancel: func() {}}
+	manager.sessions[relayed] = relayedSession
+	relayedSession.close("test")
 	// Closing twice must not double count; close is guarded by closeOnce.
-	h.manager.CloseSession(relayed, "test again")
+	relayedSession.close("test again")
 
-	if got := h.manager.Outcomes(); got.Direct != 0 || got.Relayed != 1 {
+	if got := manager.Outcomes(); got.Direct != 0 || got.Relayed != 1 {
 		t.Fatalf("after an unnominated session outcomes = %+v, want 0 direct / 1 relayed", got)
 	}
 
 	direct := SessionKey{ClientID: "client-direct", RequestID: "req-2"}
-	h.negotiate(t, direct, dataChannelLabel)
-	session := h.manager.lookup(direct)
-	if session == nil {
-		t.Fatal("expected a live session to mark as nominated")
+	directSession := &session{
+		manager:        manager,
+		key:            direct,
+		cancel:         func() {},
+		selectedLocal:  "host",
+		selectedRemote: "srflx",
 	}
-	session.mu.Lock()
-	session.selectedLocal, session.selectedRemote = "host", "srflx"
-	session.mu.Unlock()
-	h.manager.CloseSession(direct, "test")
+	manager.sessions[direct] = directSession
+	directSession.close("test")
 
-	if got := h.manager.Outcomes(); got.Direct != 1 || got.Relayed != 1 {
+	if got := manager.Outcomes(); got.Direct != 1 || got.Relayed != 1 {
 		t.Fatalf("after a nominated session outcomes = %+v, want 1 direct / 1 relayed", got)
 	}
 }
