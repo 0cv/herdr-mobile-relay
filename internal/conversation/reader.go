@@ -125,11 +125,13 @@ func (r *Reader) piRoots() []string { return agentroots.Pi(r.home) }
 
 func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 
+func (r *Reader) grokRoots() []string { return agentroots.Grok(r.home) }
+
 func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
 		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode",
-		"hermes", "hermesagent":
+		"hermes", "hermesagent", "grok":
 		return true
 	default:
 		return false
@@ -323,6 +325,11 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
 		return r.hermes.locate(project.CWD, sessionID)
+	case "grok":
+		if !safeSessionID(sessionID) {
+			return Location{}
+		}
+		return findGrokSession(r.grokRoots(), project, sessionID)
 	default:
 		return Location{}
 	}
@@ -647,6 +654,8 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parseCodexRecord(record)
 		case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 			role, body = parsePiRecord(record)
+		case "grok":
+			role, body = parseGrokRecord(record)
 		}
 		body = sanitizeText(body)
 		if role == "" && len(calls) > 0 {
@@ -713,6 +722,8 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 		}
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
+	case "grok":
+		return grokToolActivity(record)
 	}
 	return nil, nil
 }

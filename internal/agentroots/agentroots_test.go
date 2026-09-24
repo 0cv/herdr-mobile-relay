@@ -18,7 +18,7 @@ func clearAllEnv(t *testing.T) {
 		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME",
 		"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "XDG_DATA_HOME",
 		ClaudeListEnv, QoderListEnv, CodexListEnv, PiListEnv, OMPListEnv, OMOListEnv, OpenCodeListEnv,
-		HermesListEnv,
+		HermesListEnv, "GROK_HOME", GrokListEnv,
 	} {
 		t.Setenv(name, "")
 	}
@@ -138,6 +138,33 @@ func TestQoderRoots(t *testing.T) {
 		}
 		if got := Qoder(home); !slices.Equal(got, want) {
 			t.Fatalf("Qoder(%q) = %v, want %v", home, got, want)
+		}
+	})
+}
+
+func TestGrokRoots(t *testing.T) {
+	t.Run("home default only", func(t *testing.T) {
+		clearAllEnv(t)
+		home := t.TempDir()
+		want := []string{filepath.Join(home, ".grok", "sessions")}
+		if got := Grok(home); !slices.Equal(got, want) {
+			t.Fatalf("Grok(%q) = %v, want %v", home, got, want)
+		}
+	})
+
+	t.Run("list env then GROK_HOME then home default", func(t *testing.T) {
+		clearAllEnv(t)
+		home := t.TempDir()
+		t.Setenv(GrokListEnv, "/g1:/g2")
+		t.Setenv("GROK_HOME", "/grok-home")
+		want := []string{
+			filepath.Join("/g1", "sessions"),
+			filepath.Join("/g2", "sessions"),
+			filepath.Join("/grok-home", "sessions"),
+			filepath.Join(home, ".grok", "sessions"),
+		}
+		if got := Grok(home); !slices.Equal(got, want) {
+			t.Fatalf("Grok(%q) = %v, want %v", home, got, want)
 		}
 	})
 }
