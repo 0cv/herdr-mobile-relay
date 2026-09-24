@@ -176,7 +176,7 @@ runs:
         unzip -q "$browser_dir/chrome.apkm" -d "$browser_dir/chrome"
         mapfile -t chrome_apks < <(find "$browser_dir/chrome" -maxdepth 1 -type f -name '*.apk' -print | sort)
         test "${#chrome_apks[@]}" -gt 0
-        apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -print -quit)"
+        apksigner="$ANDROID_HOME/build-tools/35.0.0/apksigner"
         test -x "$apksigner"
         for chrome_apk in "${chrome_apks[@]}"; do
           chrome_signing="$($apksigner verify --verbose --print-certs "$chrome_apk")"
