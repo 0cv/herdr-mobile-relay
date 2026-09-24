@@ -168,6 +168,246 @@ jobs:
           raise SystemExit(result)
           PY
 
+      - name: Write bounded sanitized startup diagnostics
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import fnmatch
+          import os
+          import stat
+          from pathlib import Path
+
+          UID = os.getuid()
+          MAX_FIXTURES = 8
+          MAX_TMP_ENTRIES = 4096
+          MAX_CHILD_LOGS = 2
+          MAX_FILE_BYTES = 32768
+          MAX_TOTAL_BYTES = 512 * 1024
+          MAX_SUMMARY_BYTES = 8192
+          NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+          MARKERS = (
+              ("relay_credentials_not_configured", b"Relay credentials are not configured"),
+              ("transport_selection_invalid", b"Tailscale startup was requested without tailscale transport selection"),
+              ("bootstrap_rearm_refused", b"Refusing Tailscale startup because HERDR_RELAY_REARM_BOOTSTRAP is enabled"),
+              ("configuration_directory_missing", b"Relay configuration directory is missing"),
+              ("service_definition_present", b"A Herdr Mobile Relay service definition is installed"),
+              ("tailscale_cli_unavailable", b"Tailscale CLI is unavailable"),
+              ("invalid_relay_ports", b"Relay and plugin ports must"),
+              ("loopback_backend_required", b"Tailscale Serve requires the relay backend to remain on 127.0.0.1"),
+              ("previous_session_record_present", b"A previous Tailscale foreground session record exists"),
+              ("pairing_control_socket_present", b"Tailscale pairing control socket already exists"),
+              ("relay_port_occupied", b"Relay or Herdr event port is occupied"),
+              ("tailscale_inspection_failed", b"Tailscale status/Serve inspection failed"),
+              ("exposure_inspection_incomplete", b"Tailscale exposure inspection is incomplete"),
+              ("tailscale_not_authenticated", b"Tailscale is not running with an authenticated node"),
+              ("existing_funnel_configuration", b"Existing Tailscale Funnel configuration was found"),
+              ("existing_serve_configuration", b"Existing Tailscale Serve configuration was found"),
+              ("tailscale_identity_missing", b"authenticated Tailscale node has no usable DNS identity"),
+              ("saved_origin_mismatch", b"Saved Tailscale origin does not match"),
+              ("serve_consent_missing", b"Explicit Tailscale Serve consent is required"),
+              ("tailscale_changed_before_start", b"Tailscale changed before setup could start"),
+              ("exposure_conflict_during_confirmation", b"Tailscale Serve/Funnel configuration appeared during confirmation"),
+              ("session_record_refresh_failed", b"Could not refresh the diagnostic session record"),
+              ("relay_bind_failure", b"Relay failed to bind"),
+              ("relay_health_failure", b"Relay did not become healthy"),
+              ("relay_control_not_ready", b"Managed relay pairing control did not become ready"),
+              ("relay_endpoint_not_acknowledged", b"Managed relay did not acknowledge a bound HTTP endpoint"),
+              ("relay_owner_capture_failure", b"Could not capture the relay's active Bash job generation"),
+              ("serve_owner_capture_failure", b"Could not capture Tailscale Serve's active Bash job generation"),
+              ("serve_exit_before_route", b"Tailscale Serve exited before its route became ready"),
+              ("serve_route_not_observed", b"Tailscale Serve did not report the owned route"),
+              ("trusted_https_identity_failure", b"Trusted HTTPS identity verification failed"),
+              ("https_instance_mismatch", b"HTTPS health belongs to a different relay instance"),
+              ("https_run_mismatch", b"HTTPS health belongs to a different foreground run"),
+              ("https_origin_mismatch", b"HTTPS health did not identify the verified Tailscale origin"),
+              ("invitation_not_armed", b"relay did not acknowledge persistent invitation arming"),
+              ("serve_route_no_longer_active", b"The owned Tailscale Serve route is no longer active"),
+              ("serve_cleanup_unverified", b"Could not verify Tailscale Serve/Funnel state during cleanup"),
+              ("child_cleanup_unverified", b"Child cleanup could not verify a managed generation"),
+          )
+
+          def real_directory(path):
+              try:
+                  info = os.lstat(path)
+              except OSError:
+                  return False
+              return stat.S_ISDIR(info.st_mode)
+
+          def owned_directory(path):
+              try:
+                  info = os.lstat(path)
+              except OSError:
+                  return False
+              return stat.S_ISDIR(info.st_mode) and info.st_uid == UID
+
+          def read_log(path, budget):
+              try:
+                  before = os.lstat(path)
+              except FileNotFoundError:
+                  return "absent", 0, b"", 0
+              except OSError:
+                  return "unavailable", 0, b"", 0
+              if not stat.S_ISREG(before.st_mode) or before.st_uid != UID:
+                  return "unavailable", 0, b"", 0
+              try:
+                  fd = os.open(path, os.O_RDONLY | NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+              except OSError:
+                  return "unavailable", 0, b"", 0
+              try:
+                  current = os.fstat(fd)
+                  if not stat.S_ISREG(current.st_mode) or current.st_uid != UID:
+                      return "unavailable", 0, b"", 0
+                  shown_size = min(current.st_size, MAX_FILE_BYTES)
+                  limit = min(MAX_FILE_BYTES, max(0, budget))
+                  data = os.read(fd, limit) if limit else b""
+                  return "present", shown_size, data, int(current.st_size > MAX_FILE_BYTES or len(data) < current.st_size)
+              except OSError:
+                  return "unavailable", 0, b"", 0
+              finally:
+                  os.close(fd)
+
+          def main():
+              runner_temp = Path(os.environ["RUNNER_TEMP"])
+              output_dir = runner_temp / "tailscale-native-preflight"
+              if not runner_temp.is_absolute() or not owned_directory(runner_temp) or not owned_directory(output_dir):
+                  raise RuntimeError("private output directory unavailable")
+              os.chmod(output_dir, 0o700)
+              output_info = os.lstat(output_dir)
+              if not stat.S_ISDIR(output_info.st_mode) or output_info.st_uid != UID or stat.S_IMODE(output_info.st_mode) != 0o700:
+                  raise RuntimeError("private output directory unavailable")
+
+              lines = [
+                  "Sanitized Tailscale fixture startup summary",
+                  "Marker labels indicate matching text only; they do not establish a root cause.",
+              ]
+              observed = set()
+              total_read = 0
+              limited_scan = False
+              more_fixtures = False
+              roots = []
+              try:
+                  temp_root = Path("/tmp").resolve(strict=True)
+                  if not real_directory(temp_root):
+                      raise OSError
+                  with os.scandir(temp_root) as entries:
+                      scanned = 0
+                      for entry in entries:
+                          scanned += 1
+                          if scanned > MAX_TMP_ENTRIES:
+                              limited_scan = True
+                              break
+                          if not entry.name.startswith("s9d-"):
+                              continue
+                          try:
+                              info = entry.stat(follow_symlinks=False)
+                          except OSError:
+                              continue
+                          if not stat.S_ISDIR(info.st_mode) or info.st_uid != UID:
+                              continue
+                          if len(roots) == MAX_FIXTURES:
+                              more_fixtures = True
+                              break
+                          roots.append(entry.name)
+              except OSError:
+                  lines.append("fixture_scan=unavailable")
+              roots.sort()
+              lines.append(f"fixtures={len(roots)} extra_fixtures={'yes' if more_fixtures else 'no'} scan_limited={'yes' if limited_scan else 'no'}")
+
+              for index, name in enumerate(roots, 1):
+                  root = temp_root / name
+                  if not owned_directory(root):
+                      continue
+                  launcher_state, launcher_size, launcher_data, launcher_truncated = read_log(root / "launcher.log", MAX_TOTAL_BYTES - total_read)
+                  total_read += len(launcher_data)
+                  for label, marker in MARKERS:
+                      if marker in launcher_data:
+                          observed.add(label)
+
+                  config = root / "config"
+                  child_files = []
+                  child_more = False
+                  if owned_directory(config):
+                      try:
+                          with os.scandir(config) as entries:
+                              scanned_children = 0
+                              for entry in entries:
+                                  scanned_children += 1
+                                  if scanned_children > 128:
+                                      child_more = True
+                                      break
+                                  if not fnmatch.fnmatchcase(entry.name, ".tailscale-*-log.*"):
+                                      continue
+                                  try:
+                                      info = entry.stat(follow_symlinks=False)
+                                  except OSError:
+                                      continue
+                                  if not stat.S_ISREG(info.st_mode) or info.st_uid != UID:
+                                      continue
+                                  if len(child_files) == MAX_CHILD_LOGS:
+                                      child_more = True
+                                      break
+                                  child_files.append(entry.name)
+                      except OSError:
+                          child_more = True
+
+                  child_bytes = 0
+                  child_file_bytes = 0
+                  child_read = 0
+                  child_truncated = False
+                  for child_name in sorted(child_files):
+                      state, size, data, truncated = read_log(config / child_name, MAX_TOTAL_BYTES - total_read)
+                      if state != "present":
+                          continue
+                      child_read += 1
+                      child_bytes += len(data)
+                      child_file_bytes += size
+                      child_truncated = child_truncated or bool(truncated)
+                      total_read += len(data)
+                      for label, marker in MARKERS:
+                          if marker in data:
+                              observed.add(label)
+
+                  lines.append(
+                      f"fixture={index} launcher={launcher_state} launcher_bytes={launcher_size} "
+                      f"launcher_truncated={'yes' if launcher_truncated else 'no'} "
+                      f"child_logs={len(child_files)} child_logs_read={child_read} child_file_bytes={child_file_bytes} child_bytes={child_bytes} "
+                      f"child_logs_more={'yes' if child_more else 'no'} child_truncated={'yes' if child_truncated else 'no'}"
+                  )
+
+              lines.append(f"log_bytes_read={total_read} byte_limit={MAX_TOTAL_BYTES}")
+              if observed:
+                  lines.append("classification=whitelisted_markers_observed")
+                  for label, _marker in MARKERS:
+                      if label in observed:
+                          lines.append(f"marker={label}")
+              else:
+                  lines.append("classification=unclassified_no_whitelisted_marker")
+
+              payload = ("\n".join(lines) + "\n").encode("ascii")
+              if len(payload) > MAX_SUMMARY_BYTES:
+                  raise RuntimeError("summary size limit exceeded")
+              summary = output_dir / "startup-summary.log"
+              fd = os.open(summary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600)
+              try:
+                  info = os.fstat(fd)
+                  if not stat.S_ISREG(info.st_mode) or info.st_uid != UID:
+                      raise RuntimeError("private summary file unavailable")
+                  os.fchmod(fd, 0o600)
+                  with os.fdopen(fd, "wb", closefd=False) as output:
+                      output.write(payload)
+                      output.flush()
+              finally:
+                  os.close(fd)
+
+          try:
+              main()
+          except Exception:
+              print("Sanitized startup summary could not be safely written.", file=__import__("sys").stderr)
+              raise SystemExit(1)
+          PY
+
       - name: Upload preflight logs
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
