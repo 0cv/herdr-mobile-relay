@@ -128,6 +128,8 @@ func visibleRecord(agent string, record map[string]any) (string, string, string)
 		role, body = parseCodexRecord(record)
 	case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 		role, body = parsePiRecord(record)
+	case "grok":
+		role, body = parseGrokRecord(record)
 	}
 	return role, timestamp, body
 }

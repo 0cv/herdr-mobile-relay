@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Read Grok CLI conversation history from
+  `~/.grok/sessions/<project>/<session>/chat_history.jsonl`, with user prompts,
+  assistant replies, and tool activity. `GROK_HOME` and
+  `HERDR_GROK_CONFIG_DIRS` select additional session roots.
+
 ### Changed
 
 - Read Hermes and OpenCode conversation history through an in-process SQLite
