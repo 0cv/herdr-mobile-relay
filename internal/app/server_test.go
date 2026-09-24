@@ -1336,10 +1336,17 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	pollReady := make(chan struct{})
 	pollFailed := make(chan struct{})
 	var inventoryCalls atomic.Int32
+	// The poller may close a request while this fake server is replying during teardown.
+	var shuttingDown atomic.Bool
 	serverDone := make(chan error, 1)
 	go func() {
 		var serveErr error
 		defer func() { serverDone <- serveErr }()
+		writeResponse := func(encoder *json.Encoder, response any) {
+			if err := encoder.Encode(response); err != nil && !shuttingDown.Load() {
+				serveErr = err
+			}
+		}
 		for {
 			conn, acceptErr := listener.Accept()
 			if acceptErr != nil {
@@ -1356,7 +1363,9 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 					Method string `json:"method"`
 				}
 				if decodeErr := json.NewDecoder(bufio.NewReader(conn)).Decode(&request); decodeErr != nil {
-					serveErr = decodeErr
+					if !shuttingDown.Load() {
+						serveErr = decodeErr
+					}
 					return
 				}
 				encoder := json.NewEncoder(conn)
@@ -1365,20 +1374,20 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 					call := inventoryCalls.Add(1)
 					if call == 2 {
 						close(pollFailed)
-						serveErr = encoder.Encode(map[string]any{
+						writeResponse(encoder, map[string]any{
 							"id":    request.ID,
 							"error": map[string]any{"code": "server_not_running", "message": "Herdr stopped"},
 						})
 						return
 					}
-					serveErr = encoder.Encode(map[string]any{
+					writeResponse(encoder, map[string]any{
 						"id": request.ID,
 						"result": map[string]any{
 							"type": "agent_list", "agents": []any{pane},
 						},
 					})
 				case "workspace.list":
-					serveErr = encoder.Encode(map[string]any{
+					writeResponse(encoder, map[string]any{
 						"id": request.ID,
 						"result": map[string]any{
 							"type": "workspace_list", "workspaces": []any{workspace},
@@ -1388,17 +1397,17 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 						close(pollReady)
 					}
 				case "tab.list", "pane.list":
-					serveErr = encoder.Encode(map[string]any{
+					writeResponse(encoder, map[string]any{
 						"id":    request.ID,
 						"error": map[string]any{"code": "unsupported", "message": "fixture omits topology detail"},
 					})
 				case "events.subscribe":
-					serveErr = encoder.Encode(map[string]any{
+					writeResponse(encoder, map[string]any{
 						"id":     request.ID,
 						"result": map[string]any{"type": "subscription_started"},
 					})
 				case "session.snapshot":
-					serveErr = encoder.Encode(map[string]any{
+					writeResponse(encoder, map[string]any{
 						"id":     request.ID,
 						"result": map[string]any{"type": "session_snapshot", "snapshot": snapshot},
 					})
@@ -1622,6 +1631,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 		}
 	}
 	latest.CloseNow()
+	shuttingDown.Store(true)
 	cancel()
 	select {
 	case <-pollDone:
