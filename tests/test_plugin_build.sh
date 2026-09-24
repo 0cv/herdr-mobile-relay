@@ -60,7 +60,13 @@ printf '{\n  "version": "%s",\n  "revision": "new-revision",\n  "web_hash": "new
 
 cat > "$NEW_RELEASE/herdr-mobile-relay" <<'EOF'
 #!/bin/sh
+# Fixture adapter for the exact flat health fields used by this test.
 case "$1" in
+    json-field)
+        [ "${2:-}" = string ] || exit 1
+        case "${3:-}" in status|release_version|revision|bundle_hash) ;; *) exit 1 ;; esac
+        sed -n "s/.*\"${3}\":\"\\([^\"]*\\)\".*/\\1/p"
+        ;;
     verify-release) exit 0 ;;
     activate-release)
         root=$2

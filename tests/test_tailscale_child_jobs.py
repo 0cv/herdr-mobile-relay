@@ -275,6 +275,7 @@ jobs() {{
     fi
     return 1
 }}
+LC_ALL=C jobs -l "$job" >/dev/null || exit 4
 if child_job_active "$job" "$pid"; then exit 5; fi
 if stop_child_job "$job" "$pid" INT 1; then exit 6; fi
 wait "$pid" 2>/dev/null || true
