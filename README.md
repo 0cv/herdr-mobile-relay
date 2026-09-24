@@ -6,8 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.21.3`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.21.3) · [Changelog](CHANGELOG.md)
-
+**Current version:** [`0.22.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.22.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -56,7 +55,8 @@ starts the relay and bundled app, and prints a QR code.
 Scan the QR with your phone. Keep the pane open; Ctrl-C stops the relay.
 
 Neither quick-start path needs `sudo` or a Python, Node.js, or Go toolchain.
-Treat the QR and its setup link as secrets: they carry the relay key.
+Treat the QR and its setup link as secrets: they contain a one-use device
+invitation.
 
 [QUICKSTART.md](QUICKSTART.md) has pairing detail and troubleshooting for both
 paths.
@@ -71,8 +71,10 @@ paths.
   Herdr workspace, with agents that need input pinned on top.
 - Answer approvals and structured plan questions from Codex, Claude Code,
   Hermes, Qoder, OpenCode, Oh My Pi, and Pi.
-- Send prompts, terminal keys, and slash commands; attach screenshots, photos,
-  and documents in cancellable batches.
+- Send prompts, terminal keys, and slash commands, including discovered Cursor
+  commands and skills; attach screenshots, photos, and documents in cancellable
+  batches. Optionally discover live Pi extension commands, skills, and templates
+  after [installing the Pi integration](docs/slash-command-discovery.md#pi-runtime-commands).
 - Read and search each agent's native conversation, including Hermes, OpenCode
   and Oh My OpenCode plans; inspect workspace files, images, and Git diffs
   read-only.
@@ -81,10 +83,9 @@ paths.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.
 
-**New in 0.20.0:** named controller and reader devices with QR pairing,
-relay-synthesized speech in five languages, per-device notification categories
-with settle delay, cooldown, and snooze, multi-file attachments, and OpenCode /
-Oh My OpenCode conversations.
+**New in 0.22.0:** Cursor slash-command and skill suggestions, optional live Pi
+command discovery, verified text entry in Cursor model pickers, and safer agent
+launches and background-service upgrades.
 
 **[Full feature tour →](docs/mobile-app.md)**
 

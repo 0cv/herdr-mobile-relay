@@ -5,6 +5,49 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-24
+
+### Added
+
+- Discover Cursor's built-in commands, Markdown commands, and project and
+  personal skills in the phone's slash-command palette, respecting Cursor's
+  naming, precedence, visibility, and discovery limits.
+- Discover live Pi extension commands, skills, and prompt templates from the
+  running session when the optional Pi integration is installed. Show partial
+  or unavailable discovery clearly while keeping manual command entry usable;
+  redact credentials from displayed command provenance.
+- Send filter text to an open Cursor model picker without selecting a model,
+  with paced keystrokes, live verification, and explicit partial-delivery
+  warnings when the picker cannot be confirmed.
+
+### Changed
+
+- Keep verified agent-profile ownership tied to the terminal across relay
+  restarts; refuse an unsafe relaunch if the profile or terminal cannot be
+  verified instead of guessing an executable from the pane.
+- Stage and verify native background-service upgrades before replacing the
+  previous service, and retain recovery state when rollback cannot be
+  confirmed.
+
+### Fixed
+
+- Deliver prompts to unnamed agents through the pane when Herdr refuses the
+  named-agent prompt, without retrying ambiguous or already-dispatched writes.
+- Keep launch results and initial prompts bound to the created terminal and
+  request ID, including across session discovery and refreshes; report
+  uncertain starts and initial-prompt failures without offering unsafe retries.
+- Recheck authorization and target identity immediately before Herdr writes,
+  so a replaced pane or revoked device cannot receive a stale action.
+- Keep release-download credentials out of process arguments, shell traces,
+  and unrelated child processes, including version probes and app deployment.
+- Use portable shell entrypoints and preserve the inherited PATH for systems
+  such as NixOS and Guix.
+- Follow symlinked skill directories in generic slash-command discovery,
+  and keep Cursor picker controls available through pane status changes while
+  rejecting stale picker footers and unsafe attachment uploads.
+- Preserve the newly launched agent's identity on the phone when its native
+  session appears, instead of dropping the terminal or conversation view.
+
 ## [0.21.3] - 2026-09-15
 
 ### Fixed
@@ -1516,7 +1559,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...v0.22.0
 [0.21.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...v0.21.3
 [0.21.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...v0.21.1
