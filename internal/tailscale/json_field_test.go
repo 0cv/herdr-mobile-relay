@@ -50,6 +50,7 @@ func TestExtractJSONFieldRejectsAmbiguousOrInvalidDocuments(t *testing.T) {
 		{"negative number", `{"count":-1}`, "count", "number"},
 		{"fractional number", `{"count":1.5}`, "count", "number"},
 		{"string control character", `{"run_id":"line\nbreak"}`, "run_id", "string"},
+		{"C1 string control character", `{"run_id":"\u009b[31m"}`, "run_id", "string"},
 		{"unsupported kind", `{"ready":true}`, "ready", "float"},
 		{"empty key", `{"ready":true}`, "", "bool"},
 		{"oversized key", `{"ready":true}`, strings.Repeat("k", 257), "bool"},

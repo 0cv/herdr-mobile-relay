@@ -64,6 +64,24 @@ test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_string_field '{"origin":"https://
 test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_number_field '{"count":2}' count)" = 2
 test "$(wc -l < "$JSON_FIELD_CALL_LOG" | tr -d ' ')" = 5
 
+OLD_JSON_FIELD_BIN="$WORK_DIR/old-relay"
+cat > "$OLD_JSON_FIELD_BIN" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = json-field ] || exit 2
+exit 2
+EOF
+chmod 700 "$OLD_JSON_FIELD_BIN"
+OLD_JSON_FIELD_ERROR="$(HERDR_RELAY_BIN="$OLD_JSON_FIELD_BIN" json_string_field '{"version":"old"}' version 2>&1)"
+case "$OLD_JSON_FIELD_ERROR" in
+    *"does not support strict JSON field extraction"*) ;;
+    *) echo "outdated relay binary did not produce an actionable JSON helper error" >&2; exit 1 ;;
+esac
+MISSING_JSON_FIELD_ERROR="$(HERDR_RELAY_BIN="$WORK_DIR/missing-relay" json_string_field '{}' version 2>&1)"
+case "$MISSING_JSON_FIELD_ERROR" in
+    *"Verified relay release is unavailable"*) ;;
+    *) echo "missing relay binary did not retain its diagnostic" >&2; exit 1 ;;
+esac
+
 PACKAGED_RELEASE="$WORK_DIR/releases/0.0.0-test"
 mkdir -p "$PACKAGED_RELEASE/relay"
 cp "$REPO_DIR/relay/common.sh" "$PACKAGED_RELEASE/relay/common.sh"

@@ -93,6 +93,20 @@ class CheckoutProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "not clean"):
             PROVENANCE.verify(self.fixture.root, self.fixture.git("rev-parse", "HEAD"))
 
+    def test_assume_unchanged_cannot_hide_modified_bytes(self):
+        self.fixture.git("update-index", "--assume-unchanged", "data.txt")
+        (self.fixture.root / "data.txt").write_text("changed source\n", encoding="utf-8")
+        self.assertEqual(self.fixture.git("status", "--porcelain"), "")
+        with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "tracked source bytes differ"):
+            PROVENANCE.verify(self.fixture.root, self.fixture.git("rev-parse", "HEAD"))
+
+    def test_assume_unchanged_cannot_hide_mode_change(self):
+        self.fixture.git("update-index", "--assume-unchanged", "data.txt")
+        (self.fixture.root / "data.txt").chmod(0o755)
+        self.assertEqual(self.fixture.git("status", "--porcelain"), "")
+        with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "tracked source file mode differs"):
+            PROVENANCE.verify(self.fixture.root, self.fixture.git("rev-parse", "HEAD"))
+
     def test_untracked_source_is_refused(self):
         (self.fixture.root / "new-source.txt").write_text("undeclared\n", encoding="utf-8")
         with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "not clean"):

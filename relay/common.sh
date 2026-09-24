@@ -1084,12 +1084,22 @@ relay_json_field() {
     local json="$2"
     local key="$3"
     local binary="${4:-}"
+    local status
 
     if [ -z "$binary" ]; then
-        binary="$(relay_binary 2>/dev/null)" || return 1
+        binary="$(relay_binary)" || return 1
     fi
     [ -x "$binary" ] || return 1
-    printf '%s' "$json" | "$binary" json-field "$kind" "$key" 2>/dev/null
+    if printf '%s' "$json" | "$binary" json-field "$kind" "$key" 2>/dev/null; then
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 2 ]; then
+        echo "✗ The selected relay binary does not support strict JSON field extraction." >&2
+        echo "  Reinstall a verified relay release matching these shell helpers." >&2
+    fi
+    return "$status"
 }
 
 json_bool_field() {

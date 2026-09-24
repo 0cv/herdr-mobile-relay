@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -133,7 +134,7 @@ func ExtractJSONField(data []byte, key, kind string) (string, error) {
 		if err := scalar(fields, key, &value, true); err != nil {
 			return "", err
 		}
-		if strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		if strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return "", ErrNotJSON
 		}
 		return value, nil
