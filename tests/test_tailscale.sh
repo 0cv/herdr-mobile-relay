@@ -657,8 +657,34 @@ cat > "$TOOLS_DIR/relay" <<'EOF'
 #!/bin/bash
 set -u
 
-printf '%s\n' "$*" >> "$FAKE_RELAY_LOG"
 command_name="${1:-}"
+if [ "$command_name" = json-field ]; then
+    kind="${2:-}"
+    key="${3:-}"
+    value="$(cat)"
+    case "$kind" in
+        bool)
+            case "$value" in
+                *"\"$key\":true"*) printf 'true\n' ;;
+                *"\"$key\":false"*) printf 'false\n' ;;
+                *) exit 1 ;;
+            esac
+            ;;
+        string)
+            field="$(printf '%s\n' "$value" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -1)"
+            [ -n "$field" ] || exit 1
+            printf '%s\n' "$field"
+            ;;
+        number)
+            field="$(printf '%s\n' "$value" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" | head -1)"
+            [ -n "$field" ] || exit 1
+            printf '%s\n' "$field"
+            ;;
+        *) exit 2 ;;
+    esac
+    exit 0
+fi
+printf '%s\n' "$*" >> "$FAKE_RELAY_LOG"
 case "$command_name" in
     supervise)
         shift

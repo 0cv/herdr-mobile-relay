@@ -27,6 +27,43 @@ printf '#!/bin/sh\nexit 0\n' > "$DEV_RELAY_BIN"
 chmod 700 "$DEV_RELAY_BIN"
 test "$(HERDR_RELAY_BIN="$DEV_RELAY_BIN" relay_binary)" = "$DEV_RELAY_BIN"
 
+# The common scalar accessors dispatch to the packaged relay command. This
+# isolated adapter exercises the shell contract; Go tests cover strict parsing.
+JSON_FIELD_BIN="$WORK_DIR/json-field/herdr-mobile-relay"
+JSON_FIELD_CALL_LOG="$WORK_DIR/json-field-calls.log"
+mkdir -p "$(dirname "$JSON_FIELD_BIN")"
+cat > "$JSON_FIELD_BIN" <<'EOF'
+#!/bin/bash
+[ "${1:-}" = json-field ] && [ "$#" -eq 3 ] || exit 2
+kind="$2"
+key="$3"
+value="$(cat)"
+printf '%s\n' "$kind $key" >> "$JSON_FIELD_CALL_LOG"
+case "$kind:$key:$value" in
+    bool:ready:'{"ready":true}') printf 'true\n' ;;
+    bool:ready:'{"ready":false}') printf 'false\n' ;;
+    bool:ready:*) exit 1 ;;
+    string:*:*)
+        printf '%s\n' "$value" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -1
+        ;;
+    number:*:*)
+        printf '%s\n' "$value" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" | head -1
+        ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod 700 "$JSON_FIELD_BIN"
+export JSON_FIELD_CALL_LOG JSON_FIELD_BIN
+test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_bool_field '{"ready":true}' ready)" = true
+test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_bool_field '{"ready":false}' ready)" = false
+if HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_bool_field '{"message":{"ready":true}}' ready >/dev/null; then
+    echo "boolean field adapter accepted a nested shadow" >&2
+    exit 1
+fi
+test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_string_field '{"origin":"https://relay.example.test"}' origin)" = https://relay.example.test
+test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_number_field '{"count":2}' count)" = 2
+test "$(wc -l < "$JSON_FIELD_CALL_LOG" | tr -d ' ')" = 5
+
 PACKAGED_RELEASE="$WORK_DIR/releases/0.0.0-test"
 mkdir -p "$PACKAGED_RELEASE/relay"
 cp "$REPO_DIR/relay/common.sh" "$PACKAGED_RELEASE/relay/common.sh"
@@ -529,8 +566,8 @@ sed -n '8p' "$LAUNCHCTL_LOG" |
 test "$(wc -l < "$LAUNCHCTL_LOG" | tr -d ' ')" = "8"
 
 HEALTH='{"status":"ok","release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
-verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
-if verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
+HERDR_RELAY_BIN="$JSON_FIELD_BIN" verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
+if HERDR_RELAY_BIN="$JSON_FIELD_BIN" verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
     echo "release health accepted the wrong revision" >&2
     exit 1
 fi
@@ -553,10 +590,10 @@ EOF
 chmod 700 "$FAKE_LAUNCHCTL_DIR/curl"
 export HEALTH_ATTEMPTS
 EXACT_HEALTH="$(
-    PATH="$FAKE_LAUNCHCTL_DIR:$PATH" \
+    PATH="$FAKE_LAUNCHCTL_DIR:$PATH" HERDR_RELAY_BIN="$JSON_FIELD_BIN" \
         wait_for_relay_release_health 8375 3 1 "0.9.0" "abc123" "web456"
 )"
-test "$(json_string_field "$EXACT_HEALTH" release_version)" = "0.9.0"
+test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_string_field "$EXACT_HEALTH" release_version)" = "0.9.0"
 test "$(cat "$HEALTH_ATTEMPTS")" = "2"
 
 GATEWAY_HEALTH='{"status":"ok","gateway":{"enabled":true,"registered":true,"relay_id":"AAAA","clients":1}}'
@@ -652,6 +689,9 @@ NORMALIZE_BIN="$WORK_DIR/normalize/herdr-mobile-relay"
 mkdir -p "$(dirname "$NORMALIZE_BIN")"
 cat > "$NORMALIZE_BIN" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = json-field ]; then
+    exec "$JSON_FIELD_BIN" "$@"
+fi
 # Stands in for `herdr-mobile-relay normalize-origin --allow-loopback-http URL`:
 # a bare host defaults to HTTPS, plain HTTP is loopback-only, and credentials,
 # paths, queries, and fragments are rejected.

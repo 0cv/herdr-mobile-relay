@@ -73,6 +73,10 @@ def write_stub(path, text):
 RELAY_STUB = """#!/bin/bash
 cmd="${1:-}"
 case "$cmd" in
+    json-field)
+        shift
+        /usr/bin/python3 -c 'import json,sys; kind,key=sys.argv[1:]; value=json.load(sys.stdin).get(key); valid=((kind=="bool" and type(value) is bool) or (kind=="string" and isinstance(value,str)) or (kind=="number" and type(value) is int and value>=0)); sys.exit(1) if not valid else print(str(value).lower() if type(value) is bool else value)' "$@"
+        ;;
     tailscale)
         printf '%s\\n' '{"origin":"https://node.example.invalid:8443","backend_state":"Running","logged_in":true,"serve_configured":true,"funnel_configured":false,"serve_route_count":1,"serve_route_owned":true,"serve_inspected":true,"exposure_complete":true}'
         exit 0

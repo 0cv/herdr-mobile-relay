@@ -45,7 +45,7 @@ passes first.
 
 ## Toolchains
 
-Backend development uses Go 1.27.0; frontend development uses Bun 1.4 (`bun
+Backend development uses Go 1.27.1; frontend development uses Bun 1.4 (`bun
 install --cwd frontend`, then the `make` targets above). Playwright runs on
 Bun. CI installs both browsers natively (`bun x playwright install
 --with-deps chromium webkit`); on Fedora, `install-deps` is unsupported and

@@ -88,6 +88,9 @@ permissions:
   contents: read
   actions: read
 
+env:
+  GOTOOLCHAIN: local
+
 concurrency:
   group: mobile-device-ci-${{ github.ref }}-${{ inputs.suite || 'release' }}-${{ inputs.baseline_set || 'all' }}
   cancel-in-progress: false
@@ -239,7 +242,7 @@ jobs:
           bun-version: 1.4.0
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.1'
           cache: true
       - name: Verify mobile toolchain declarations
         run: |
@@ -617,7 +620,7 @@ jobs:
           node-version: 24.12.0
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.1'
           cache: true
       - name: Install mobile harness dependencies
         run: bun install --frozen-lockfile --cwd tests/mobile

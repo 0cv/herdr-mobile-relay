@@ -9,6 +9,9 @@ permissions:
   actions: read
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   verify:
     name: Require successful check workflow
@@ -57,7 +60,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - uses: oven-sh/setup-bun@v2
         with:

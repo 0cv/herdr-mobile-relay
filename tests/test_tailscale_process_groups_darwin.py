@@ -195,6 +195,9 @@ main(sys.argv[1:])
 
 RELAY_ADAPTER = r'''#!/bin/bash
 set -euo pipefail
+if [ "${1:-}" = json-field ]; then
+    exec "$HERDR_S9B3_SUPERVISOR" "$@"
+fi
 if [ "${1:-}" = supervise ]; then
     shift
     exec "$HERDR_S9B3_SUPERVISOR" supervise "$@"

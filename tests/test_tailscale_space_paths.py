@@ -72,6 +72,9 @@ set -u
 command="${1:-}"
 shift || true
 case "$command" in
+    json-field)
+        /usr/bin/python3 -c 'import json,sys; kind,key=sys.argv[1:]; value=json.load(sys.stdin).get(key); valid=((kind=="bool" and type(value) is bool) or (kind=="string" and isinstance(value,str)) or (kind=="number" and type(value) is int and value>=0)); sys.exit(1) if not valid else print(str(value).lower() if type(value) is bool else value)' "$@"
+        ;;
     supervise)
         if [ "${1:-}" = --grace ]; then shift 2; fi
         [ "${1:-}" = -- ] || exit 96

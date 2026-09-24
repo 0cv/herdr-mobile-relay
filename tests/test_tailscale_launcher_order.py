@@ -74,6 +74,9 @@ with open(out, "w", encoding="utf-8") as f:
 RELAY_STUB = """#!/bin/bash
 set -u
 command="$1"; shift || true
+if [ "$command" = json-field ]; then
+    exec /usr/bin/python3 -c 'import json,sys; kind,key=sys.argv[1:]; value=json.load(sys.stdin).get(key); valid=((kind=="bool" and type(value) is bool) or (kind=="string" and isinstance(value,str)) or (kind=="number" and type(value) is int and value>=0)); sys.exit(1) if not valid else print(str(value).lower() if type(value) is bool else value)' "$@"
+fi
 printf 'relay\\t%s\\n' "$command $*" >> "$HERDR_B3B_CALLS"
 case "$command" in
     supervise)

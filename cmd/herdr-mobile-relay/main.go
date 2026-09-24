@@ -260,6 +260,8 @@ func run(args []string) (int, error) {
 			return 2, errors.New("usage: herdr-mobile-relay prune-releases RELEASE_ROOT CURRENT_RELEASE [PREVIOUS_RELEASE]")
 		}
 		return status(relayupdate.PruneOldReleases(args[0], args[1:]...))
+	case "json-field":
+		return runJSONField(args, os.Stdin, os.Stdout)
 	case "tailscale", "tailscale-inspect":
 		if command == "tailscale" {
 			if len(args) == 0 || args[0] != "inspect" {

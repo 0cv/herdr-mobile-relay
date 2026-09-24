@@ -2,11 +2,32 @@ name: check
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, ci/tailscale-native-preflight-ef9f843]
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
 jobs:
+  provenance:
+    name: Exact checkout provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - name: Exercise provenance refusal cases in disposable Git fixtures
+        run: python3 tests/test_checkout_provenance.py
+
   go:
+    needs: provenance
     name: Go quality
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -14,16 +35,24 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - name: Format
         run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
+      - name: Lint GitHub workflows with pinned actionlint
+        run: >-
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          -shellcheck= -pyflakes= .github/workflows/check.yml
+          .github/workflows/mobile-ci.yml .github/workflows/release.yml
+          .github/workflows/tailscale-native-preflight.yml
       - run: go vet ./...
       - run: go test ./...
 
   journal:
+    needs: provenance
     name: Linux journald logging acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -31,9 +60,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - name: Run opt-in user-journal integration test
         env:
@@ -44,6 +74,7 @@ jobs:
   # unrelated to it. Both used to sit behind `go test` in one serial job and
   # decided when every later job could start.
   race:
+    needs: provenance
     name: Go race detector
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -51,13 +82,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - run: go test -race ./...
 
   shell:
+    needs: provenance
     name: Shell and production paths
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -65,13 +98,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - run: make shell-check production-path-audit
 
   frontend:
+    needs: provenance
     name: Frontend and mobile browsers (Bun 1.4)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -79,12 +114,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - run: bun install --frozen-lockfile --cwd frontend
       # Native browsers instead of the multi-GB Playwright container image:
@@ -104,6 +140,7 @@ jobs:
   # publishes, so they no longer wait behind the test jobs: a red run fails on
   # its own job and a green run stops paying for the serial hop.
   release:
+    needs: provenance
     name: Complete release bundles
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -111,9 +148,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - uses: oven-sh/setup-bun@v2
         with:
@@ -134,7 +172,7 @@ jobs:
 
   release-native-smoke:
     name: Native release smoke (${{ matrix.target }})
-    needs: release
+    needs: [release, provenance]
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +188,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           name: release-bundles
@@ -164,6 +204,7 @@ jobs:
             "${target%_*}/${target#*_}"
 
   mobile-host-check:
+    needs: provenance
     name: Mobile harness checks
     # Temporarily disabled while mobile CI is isolated on ci-mobile.
     if: ${{ false }}
@@ -173,12 +214,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
       - name: Install required XML test tools
         run: |
@@ -190,7 +232,7 @@ jobs:
     name: Mobile device CI
     # Temporarily disabled alongside mobile-host-check and the release caller.
     if: ${{ false }}
-    needs: [release, mobile-host-check]
+    needs: [release, mobile-host-check, provenance]
     uses: ./.github/workflows/mobile-ci.yml
     with:
       artifact_run_id: ${{ github.run_id }}

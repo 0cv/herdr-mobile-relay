@@ -47,6 +47,21 @@ if name == "systemctl" and args in (["--user", "is-active", "--quiet", "herdr-mo
 if name == "curl" and args in (["-fsS", "--max-time", "2", "http://127.0.0.1:8375/healthz"], ["-fsS", "--max-time", "3", "https://app.example.invalid/version.json"]):
     record("probe")
     sys.exit(22)
+if name == "fake-relay" and len(args) == 3 and args[0] == "json-field":
+    kind, key = args[1:]
+    try:
+        value = json.load(sys.stdin).get(key)
+    except (ValueError, AttributeError):
+        sys.exit(1)
+    if kind == "bool" and type(value) is bool:
+        print(str(value).lower())
+    elif kind == "string" and isinstance(value, str):
+        print(value)
+    elif kind == "number" and type(value) is int and value >= 0:
+        print(value)
+    else:
+        sys.exit(1)
+    sys.exit(0)
 if name != "fake-relay":
     deny()
 if args == ["normalize-origin", "--allow-loopback-http", "https://app.example.invalid"] or args == ["normalize-origin", "--allow-loopback-http", ""]:

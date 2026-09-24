@@ -27,72 +27,38 @@ jobs:
         shell: bash
         run: mkdir -m 700 -p "$RUNNER_TEMP/tailscale-native-preflight"
 
-      - name: Verify commit and candidate source provenance
+      - name: Verify exact candidate checkout provenance
         id: provenance
         shell: bash
-        env:
-          EXPECTED_SOURCE_TREE_SHA256: ff8ff3deb6722cc29d95fce660e66d4af92491509a1cf483e84ab7231fcf072b
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse --show-toplevel)" = "$GITHUB_WORKSPACE"
           test "$(uname -s)" = Darwin
           test "$(uname -m)" = arm64
-          actual="$(python3 - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-          import stat
+          python3 scripts/verify-checkout-provenance.py \
+            --root "$GITHUB_WORKSPACE" --expected-sha "$GITHUB_SHA" | \
+            tee "$RUNNER_TEMP/tailscale-native-preflight/checkout-provenance.log"
+          python3 tests/test_checkout_provenance.py
 
-          root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-          excluded_workflow = ".github/workflows/tailscale-native-preflight.yml"
-          records = []
+      - name: Record native tool paths and platform
+        id: tool_paths
+        if: ${{ success() && steps.provenance.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            uname -a
+            printf 'bash_path=%s\n' /bin/bash
+            /bin/bash --version
+            printf 'python3_path=%s\n' "$(command -v python3)"
+            python3 --version
+            printf 'sed_path=%s\n' "$(command -v sed)"
+          } | tee "$RUNNER_TEMP/tailscale-native-preflight/tool-paths.log"
 
-          def add(path):
-              rel = path.relative_to(root).as_posix()
-              if rel == excluded_workflow:
-                  return
-              info = path.lstat()
-              mode = stat.S_IMODE(info.st_mode)
-              if stat.S_ISREG(info.st_mode):
-                  kind = "file"
-                  payload = path.read_bytes()
-              elif stat.S_ISLNK(info.st_mode):
-                  kind = "symlink"
-                  target = os.readlink(path)
-                  resolved = (path.parent / target).resolve(strict=True)
-                  if resolved != root and root not in resolved.parents:
-                      raise SystemExit("source symlink escapes the checkout")
-                  payload = os.fsencode(target)
-              else:
-                  raise SystemExit("unexpected source file kind: " + rel)
-              digest = hashlib.sha256(payload).hexdigest()
-              records.append((rel, f"{digest}\t{mode:04o}\t{kind}\t{rel}\n"))
-
-          for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
-              current = Path(base)
-              for directory in list(dirs):
-                  path = current / directory
-                  if current == root and directory == ".git":
-                      dirs.remove(directory)
-                  elif path.is_symlink():
-                      dirs.remove(directory)
-                      add(path)
-              for name in files:
-                  add(current / name)
-
-          canonical = "".join(line for _rel, line in sorted(records, key=lambda item: item[0].encode("utf-8")))
-          print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
-          PY
-          )"
-          test "$actual" = "$EXPECTED_SOURCE_TREE_SHA256"
-          printf 'Verified checkout: %s\nSource tree SHA-256 (workflow excluded): %s\n' "$GITHUB_SHA" "$actual" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Set up Go 1.27.0
+      - name: Set up Go 1.27.1
         id: setup_go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.27.0
+          go-version: 1.27.1
           cache: true
 
       - name: Run native Go tests
@@ -102,7 +68,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -count=1 ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          printf 'go_path=%s\n' "$(command -v go)" | tee "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          go version | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          go test -count=1 ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
 
       - name: Run Go vet
         id: go_vet
@@ -412,7 +380,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: tailscale-native-preflight-logs
+          name: tailscale-native-preflight-logs-${{ github.sha }}
           path: ${{ runner.temp }}/tailscale-native-preflight/*.log
           if-no-files-found: warn
           retention-days: 7
@@ -422,6 +390,7 @@ jobs:
         shell: bash
         env:
           PROVENANCE_OUTCOME: ${{ steps.provenance.outcome }}
+          TOOL_PATHS_OUTCOME: ${{ steps.tool_paths.outcome }}
           SETUP_GO_OUTCOME: ${{ steps.setup_go.outcome }}
           GO_TEST_OUTCOME: ${{ steps.go_test.outcome }}
           GO_VET_OUTCOME: ${{ steps.go_vet.outcome }}
@@ -429,6 +398,211 @@ jobs:
           DARWIN_TEST_OUTCOME: ${{ steps.darwin_lifecycle.outcome }}
         run: |
           set -euo pipefail
-          for result in "$PROVENANCE_OUTCOME" "$SETUP_GO_OUTCOME" "$GO_TEST_OUTCOME" "$GO_VET_OUTCOME" "$BUILD_OUTCOME" "$DARWIN_TEST_OUTCOME"; do
+          for result in "$PROVENANCE_OUTCOME" "$TOOL_PATHS_OUTCOME" "$SETUP_GO_OUTCOME" "$GO_TEST_OUTCOME" "$GO_VET_OUTCOME" "$BUILD_OUTCOME" "$DARWIN_TEST_OUTCOME"; do
             test "$result" = success || { printf 'Required preflight step outcome: %s\n' "$result" >&2; exit 1; }
+          done
+
+  linux-amd64:
+    name: Linux amd64 namespace-isolated process lifecycle preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare private runner paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$RUNNER_TEMP/tailscale-linux-preflight"
+          mkdir -m 700 -p "$private/tmp" "$private/gocache" "$private/gomodcache"
+          printf 'TMPDIR=%s/tmp\n' "$private" >> "$GITHUB_ENV"
+          printf 'GOCACHE=%s/gocache\n' "$private" >> "$GITHUB_ENV"
+          printf 'GOMODCACHE=%s/gomodcache\n' "$private" >> "$GITHUB_ENV"
+
+      - name: Verify exact candidate checkout provenance
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          python3 scripts/verify-checkout-provenance.py \
+            --root "$GITHUB_WORKSPACE" --expected-sha "$GITHUB_SHA" | \
+            tee "$RUNNER_TEMP/tailscale-linux-preflight/checkout-provenance.log"
+          python3 tests/test_checkout_provenance.py
+
+      - name: Record native tool paths and platform
+        id: tool_paths
+        if: ${{ success() && steps.provenance.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            uname -a
+            printf 'bash_path=%s\n' /bin/bash
+            /bin/bash --version
+            printf 'python3_path=%s\n' "$(command -v python3)"
+            python3 --version
+            printf 'sed_path=%s\n' "$(command -v sed)"
+          } | tee "$RUNNER_TEMP/tailscale-linux-preflight/tool-paths.log"
+
+      - name: Set up Go 1.27.1
+        id: setup_go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: true
+
+      - name: Run native Linux Go tests
+        id: go_test
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'go_path=%s\n' "$(command -v go)" | tee "$RUNNER_TEMP/tailscale-linux-preflight/go-test.log"
+          go version | tee -a "$RUNNER_TEMP/tailscale-linux-preflight/go-test.log"
+          go test -count=1 ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee -a "$RUNNER_TEMP/tailscale-linux-preflight/go-test.log"
+
+      - name: Run Go vet
+        id: go_vet
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          go vet ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-linux-preflight/go-vet.log"
+
+      - name: Build the exact relay supervisor
+        id: supervisor_build
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -o "$RUNNER_TEMP/tailscale-linux-preflight/herdr-mobile-relay-supervisor" ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-linux-preflight/go-build.log"
+
+      - name: Install bubblewrap on the disposable runner if needed
+        id: bwrap_install
+        if: ${{ success() && steps.provenance.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v bwrap >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
+          printf 'bwrap_path=%s\n' "$(command -v bwrap)" | tee "$RUNNER_TEMP/tailscale-linux-preflight/bwrap.log"
+          bwrap --version | tee -a "$RUNNER_TEMP/tailscale-linux-preflight/bwrap.log"
+
+      - name: Prove private Linux PID and network namespaces
+        id: namespace_probe
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.bwrap_install.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          host_pid_ns="$(readlink /proc/self/ns/pid)"
+          host_net_ns="$(readlink /proc/self/ns/net)"
+          sandbox=(
+            --unshare-user --unshare-pid --unshare-net --die-with-parent --new-session
+            --ro-bind / /
+            --tmpfs /tmp
+            --dir /tmp/workspace
+            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace
+            --dir /tmp/runner
+            --ro-bind "$RUNNER_TEMP/tailscale-linux-preflight" /tmp/runner
+            --tmpfs /home --tmpfs /root --tmpfs /run
+            --proc /proc --dev /dev --chdir /tmp/workspace
+            --clearenv
+            --setenv PATH /usr/bin:/bin:/usr/sbin:/sbin
+            --setenv HOME /tmp --setenv TMPDIR /tmp
+            --setenv LANG C --setenv LC_ALL C
+            --setenv HERDR_S9B3_HOST_PID_NS "$host_pid_ns"
+            --setenv HERDR_S9B3_HOST_NET_NS "$host_net_ns"
+          )
+          bwrap "${sandbox[@]}" -- /usr/bin/python3 -c '
+          import os
+          pid = os.readlink("/proc/self/ns/pid")
+          net = os.readlink("/proc/self/ns/net")
+          if pid == os.environ["HERDR_S9B3_HOST_PID_NS"]:
+              raise SystemExit("PID namespace was not isolated")
+          if net == os.environ["HERDR_S9B3_HOST_NET_NS"]:
+              raise SystemExit("network namespace was not isolated")
+          print(f"namespace probe passed: pid={pid} net={net}")
+          ' 2>&1 | tee "$RUNNER_TEMP/tailscale-linux-preflight/namespace-probe.log"
+
+      - name: Run gated Linux process lifecycle and child-job fixtures
+        id: linux_lifecycle
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' && steps.supervisor_build.outcome == 'success' && steps.bwrap_install.outcome == 'success' && steps.namespace_probe.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          host_pid_ns="$(readlink /proc/self/ns/pid)"
+          host_net_ns="$(readlink /proc/self/ns/net)"
+          sandbox=(
+            --unshare-user --unshare-pid --unshare-net --die-with-parent --new-session
+            --ro-bind / /
+            --tmpfs /tmp
+            --dir /tmp/workspace
+            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace
+            --dir /tmp/runner
+            --ro-bind "$RUNNER_TEMP/tailscale-linux-preflight" /tmp/runner
+            --tmpfs /home --tmpfs /root --tmpfs /run
+            --proc /proc --dev /dev --chdir /tmp/workspace
+            --clearenv
+            --setenv PATH /usr/bin:/bin:/usr/sbin:/sbin
+            --setenv HOME /tmp --setenv TMPDIR /tmp
+            --setenv LANG C --setenv LC_ALL C
+            --setenv HERDR_S9B3_HOST_PID_NS "$host_pid_ns"
+            --setenv HERDR_S9B3_HOST_NET_NS "$host_net_ns"
+          )
+          {
+            bwrap "${sandbox[@]}" \
+              --setenv HERDR_S9B3_SANDBOX 1 \
+              --setenv HERDR_S9B3_SOURCE /tmp/workspace \
+              --setenv HERDR_S9B3_SUPERVISOR /tmp/runner/herdr-mobile-relay-supervisor \
+              -- /usr/bin/python3 /tmp/workspace/tests/test_tailscale_process_groups.py -v &&
+            bwrap "${sandbox[@]}" \
+              --setenv HERDR_S9B2_SANDBOX 1 \
+              --setenv HERDR_S9B2_SOURCE /tmp/workspace \
+              -- /usr/bin/python3 /tmp/workspace/tests/test_tailscale_child_jobs.py -v
+          } 2>&1 | tee "$RUNNER_TEMP/tailscale-linux-preflight/linux-lifecycle.log"
+
+      - name: Upload Linux preflight logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: tailscale-native-preflight-linux-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/tailscale-linux-preflight/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Require all Linux preflight checks to pass
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PROVENANCE_OUTCOME: ${{ steps.provenance.outcome }}
+          TOOL_PATHS_OUTCOME: ${{ steps.tool_paths.outcome }}
+          SETUP_GO_OUTCOME: ${{ steps.setup_go.outcome }}
+          GO_TEST_OUTCOME: ${{ steps.go_test.outcome }}
+          GO_VET_OUTCOME: ${{ steps.go_vet.outcome }}
+          BUILD_OUTCOME: ${{ steps.supervisor_build.outcome }}
+          BWRAP_OUTCOME: ${{ steps.bwrap_install.outcome }}
+          NAMESPACE_OUTCOME: ${{ steps.namespace_probe.outcome }}
+          LINUX_TEST_OUTCOME: ${{ steps.linux_lifecycle.outcome }}
+        run: |
+          set -euo pipefail
+          for result in "$PROVENANCE_OUTCOME" "$TOOL_PATHS_OUTCOME" "$SETUP_GO_OUTCOME" "$GO_TEST_OUTCOME" "$GO_VET_OUTCOME" "$BUILD_OUTCOME" "$BWRAP_OUTCOME" "$NAMESPACE_OUTCOME" "$LINUX_TEST_OUTCOME"; do
+            test "$result" = success || { printf 'Required Linux preflight step outcome: %s\n' "$result" >&2; exit 1; }
           done

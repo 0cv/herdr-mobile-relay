@@ -105,6 +105,54 @@ func object(data []byte) (map[string]json.RawMessage, error) {
 	}
 	return m, nil
 }
+
+// ExtractJSONField returns one exact, top-level scalar after validating the
+// complete bounded JSON document. It is used by the packaged CLI for shell
+// callers; it never searches nested objects or quoted text.
+func ExtractJSONField(data []byte, key, kind string) (string, error) {
+	if key == "" || len(key) > 256 {
+		return "", ErrNotJSON
+	}
+	fields, err := object(data)
+	if err != nil {
+		return "", err
+	}
+	raw, ok := fields[key]
+	if !ok {
+		return "", ErrNotJSON
+	}
+	switch kind {
+	case "bool":
+		var value bool
+		if err := scalar(fields, key, &value, true); err != nil {
+			return "", err
+		}
+		return strconv.FormatBool(value), nil
+	case "string":
+		var value string
+		if err := scalar(fields, key, &value, true); err != nil {
+			return "", err
+		}
+		if strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			return "", ErrNotJSON
+		}
+		return value, nil
+	case "number":
+		raw = bytes.TrimSpace(raw)
+		if len(raw) == 0 || (len(raw) > 1 && raw[0] == '0') {
+			return "", ErrNotJSON
+		}
+		for _, digit := range raw {
+			if digit < '0' || digit > '9' {
+				return "", ErrNotJSON
+			}
+		}
+		return string(raw), nil
+	default:
+		return "", ErrNotJSON
+	}
+}
+
 func keys(m map[string]json.RawMessage, allowed ...string) error {
 	for k := range m {
 		found := false
