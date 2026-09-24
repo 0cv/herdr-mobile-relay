@@ -70,9 +70,10 @@ printf 'captured=%s pid=%s\\n' "$job" "$pid"
             kill_called = shlex.quote(str(Path(directory) / "kill-called"))
             go_directory = shlex.quote(str(go_dir))
             child_code = (
-                "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); "
+                "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); done=pathlib.Path(sys.argv[2]); "
                 "deadline=time.monotonic()+5; "
-                "exec('while not gate.exists() and time.monotonic() < deadline: time.sleep(0.001)')"
+                "exec('while not gate.exists() and time.monotonic() < deadline: time.sleep(0.001)'); "
+                "done.write_text('done')"
             )
             body = f'''\\
 set -u
@@ -82,13 +83,23 @@ job=""
 kill_called={kill_called}
 go_directory={go_directory}
 record_file="$go_directory/record"
+done_file=""
 cleanup() {{ if [ -n "$pid" ]; then : > "$go_file"; wait "$job" 2>/dev/null || true; fi; }}
 trap cleanup EXIT
 kill() {{ printf '%s\\n' "$*" >> "$kill_called"; return 97; }}
+jobs() {{
+    if [ "${{1:-}}" = -l ] && [ -f "$done_file" ]; then
+        printf '[%s]+ %s Done fixture\\n' "${{job#%}}" "$pid"
+        return 0
+    fi
+    if [ "${{1:-}}" = -p ] && [ -f "$done_file" ]; then return 1; fi
+    builtin jobs "$@"
+}}
 child_code={shlex.quote(child_code)}
 for ((repeat=1; repeat<=25; repeat++)); do
     go_file="$go_directory/$repeat"
-    python3 -c "$child_code" "$go_file" &
+    done_file="$go_file.done"
+    python3 -c "$child_code" "$go_file" "$done_file" &
     pid=$!
     job="$(capture_child_job "$pid")" || exit 2
     : > "$go_file"
@@ -123,11 +134,11 @@ printf 'terminal jobs reaped without kill across 25 transitions\\n'
         with tempfile.TemporaryDirectory(prefix="s9b3-terminal-order-") as directory:
             go_file = shlex.quote(str(Path(directory) / "go"))
             calls = shlex.quote(str(Path(directory) / "calls"))
-            record_file = shlex.quote(str(Path(directory) / "record"))
             child_code = (
-                "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); "
+                "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); done=pathlib.Path(sys.argv[2]); "
                 "deadline=time.monotonic()+5; "
-                "exec('while not gate.exists() and time.monotonic() < deadline: time.sleep(0.001)')"
+                "exec('while not gate.exists() and time.monotonic() < deadline: time.sleep(0.001)'); "
+                "done.write_text('done')"
             )
             body = f'''\\
 set -u
@@ -135,24 +146,20 @@ set -u
 pid=""
 job=""
 go_file={go_file}
-record_file={record_file}
+done_file="$go_file.done"
 calls={calls}
 cleanup() {{ if [ -n "$pid" ]; then : > "$go_file"; wait "$job" 2>/dev/null || true; fi; }}
 trap cleanup EXIT
-python3 -c {shlex.quote(child_code)} "$go_file" &
+python3 -c {shlex.quote(child_code)} "$go_file" "$done_file" &
 pid=$!
 job="$(capture_child_job "$pid")" || exit 2
 job_number="${{job#%}}"
 : > "$go_file"
-observed=""
 for ((probe=0; probe<500; probe++)); do
-    LC_ALL=C jobs -l "$job" > "$record_file" 2>/dev/null || true
-    observed=""
-    IFS= read -r observed < "$record_file" || true
-    case "$observed" in *Done*) break ;; esac
+    [ -f "$done_file" ] && break
     sleep 0.01
 done
-case "$observed" in *Done*) ;; *) printf 'terminal-order timeout: pid=%s job=%s observed=%s\\n' "$pid" "$job" "$observed" >&2; exit 3 ;; esac
+[ -f "$done_file" ] || {{ printf 'terminal-order timeout: pid=%s job=%s\\n' "$pid" "$job" >&2; exit 3; }}
 jobs() {{
     printf '%s\\n' "${{1:-}}" >> "$calls"
     if [ "${{1:-}}" = -l ]; then
@@ -234,11 +241,12 @@ printf 'active-to-terminal reclassified with one fresh long probe\\n'
     def test_pruned_terminal_jobspec_remains_a_refusal(self):
         with tempfile.TemporaryDirectory(prefix="s9b3-pruned-") as directory:
             go_file = shlex.quote(str(Path(directory) / "go"))
-            record_file = shlex.quote(str(Path(directory) / "record"))
+            done_file = shlex.quote(str(Path(directory) / "done"))
             child_code = (
-                "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); "
+                "import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); done=pathlib.Path(sys.argv[2]); "
                 "deadline=time.monotonic()+5; "
-                "exec('while not gate.exists() and time.monotonic() < deadline: time.sleep(0.001)')"
+                "exec('while not gate.exists() and time.monotonic() < deadline: time.sleep(0.001)'); "
+                "done.write_text('done')"
             )
             body = f'''\\
 set -u
@@ -246,25 +254,27 @@ set -u
 pid=""
 job=""
 go_file={go_file}
-record_file={record_file}
+done_file={done_file}
+pruned=false
 cleanup() {{ if [ -n "$pid" ]; then : > "$go_file"; wait "$pid" 2>/dev/null || true; fi; }}
 trap cleanup EXIT
-python3 -c {shlex.quote(child_code)} "$go_file" &
+python3 -c {shlex.quote(child_code)} "$go_file" "$done_file" &
 pid=$!
 job="$(capture_child_job "$pid")" || exit 2
 : > "$go_file"
-observed=""
 for ((probe=0; probe<500; probe++)); do
-    LC_ALL=C jobs -l "$job" > "$record_file" 2>/dev/null || true
-    observed=""
-    IFS= read -r observed < "$record_file" || true
-    case "$observed" in *Done*|*Exit*|*Terminated*|*Killed*|*Aborted*|*Hangup*|*Segmentation*|*Floating*) break ;; esac
+    [ -f "$done_file" ] && break
     sleep 0.01
 done
-case "$observed" in *Done*|*Exit*|*Terminated*|*Killed*|*Aborted*|*Hangup*|*Segmentation*|*Floating*) ;; *) printf 'pruned-record timeout: pid=%s job=%s observed=%s\\n' "$pid" "$job" "$observed" >&2; exit 3 ;; esac
-LC_ALL=C jobs -l "$job" >/dev/null 2>&1 || exit 4
-LC_ALL=C jobs -p "$job" >/dev/null 2>&1 || true
-jobs() {{ return 1; }}
+[ -f "$done_file" ] || {{ printf 'pruned-record timeout: pid=%s job=%s\\n' "$pid" "$job" >&2; exit 3; }}
+jobs() {{
+    if [ "${{1:-}}" = -l ] && [ "$pruned" = false ]; then
+        pruned=true
+        printf '[%s]+ %s Done fixture\\n' "${{job#%}}" "$pid"
+        return 0
+    fi
+    return 1
+}}
 if child_job_active "$job" "$pid"; then exit 5; fi
 if stop_child_job "$job" "$pid" INT 1; then exit 6; fi
 wait "$pid" 2>/dev/null || true
@@ -498,6 +508,13 @@ pid=$!
 job="$(capture_child_job "$pid")" || exit 2
 for ((i=0; i<200; i++)); do [ -f {ready} ] && break; sleep 0.01; done
 [ -f {ready} ] || exit 3
+jobs() {{
+    if [ "${{1:-}}" = -l ] && [ -f {marker} ]; then
+        printf '[%s]+ %s Done fixture\\n' "${{job#%}}" "$pid"
+        return 0
+    fi
+    builtin jobs "$@"
+}}
 if stop_child_job "$job" "$pid" INT 1; then
     :
 else

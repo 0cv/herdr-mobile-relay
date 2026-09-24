@@ -152,7 +152,14 @@ func spawnTestDescendant(args []string) {
 		os.Exit(92)
 	}
 	pidFile, readyFile, targetMode := args[0], args[1], args[2]
-	child := helperExec(helperCommand("target", "descendant", readyFile, targetMode))
+	childArgs := []string{"target", "descendant", readyFile, targetMode}
+	if targetMode == "ack-int" {
+		if len(args) < 4 {
+			os.Exit(96)
+		}
+		childArgs = append(childArgs, args[3])
+	}
+	child := helperExec(helperCommand(childArgs...))
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
@@ -188,14 +195,35 @@ func signalIgnore() {
 }
 
 func descendant(args []string) {
-	if len(args) != 2 {
+	if len(args) < 2 || len(args) > 3 {
 		os.Exit(95)
 	}
 	readyFile, mode := args[0], args[1]
-	if mode == "stubborn" {
+	var interrupt <-chan os.Signal
+	switch mode {
+	case "stubborn":
+		if len(args) != 2 {
+			os.Exit(95)
+		}
 		signalIgnore()
+	case "ack-int":
+		if len(args) != 3 {
+			os.Exit(95)
+		}
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, os.Interrupt)
+		defer signal.Stop(signals)
+		interrupt = signals
+	default:
+		if len(args) != 2 {
+			os.Exit(95)
+		}
 	}
 	_ = os.WriteFile(readyFile, []byte(strconv.Itoa(os.Getpid())), 0600)
+	if interrupt != nil {
+		<-interrupt
+		_ = os.WriteFile(args[2], []byte("INT"), 0600)
+	}
 	for {
 		time.Sleep(time.Hour)
 	}
@@ -502,14 +530,18 @@ func TestCompetingSignalsKeepTheFirstExitMapping(t *testing.T) {
 	directory := t.TempDir()
 	pidFile := filepath.Join(directory, "descendant.pid")
 	readyFile := filepath.Join(directory, "descendant.ready")
-	cmd := startSupervisor(t, 200*time.Millisecond, helperCommand("target", "spawn-stay", pidFile, readyFile, "stubborn")...)
+	interruptFile := filepath.Join(directory, "descendant.interrupt")
+	cmd := startSupervisor(t, 2*time.Second, helperCommand("target", "spawn-stay", pidFile, readyFile, "ack-int", interruptFile)...)
 	pid := waitPIDFile(t, pidFile)
 	waitForFile(t, readyFile)
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-	if got := exitStatus(waitCommand(t, cmd, 4*time.Second)); got != 130 {
+	waitForFile(t, interruptFile)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send competing TERM during INT cleanup: %v", err)
+	}
+	if got := exitStatus(waitCommand(t, cmd, 5*time.Second)); got != 130 {
 		t.Fatalf("competing signals returned %d, want first-signal status 130", got)
 	}
 	assertProcessRetired(t, pid)

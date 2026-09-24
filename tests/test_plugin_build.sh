@@ -211,6 +211,12 @@ diff -qr "$WORK_DIR/target-before" "$TARGET_CONFIG" >/dev/null
 grep -F "previous service recovered successfully" "$WORK_DIR/output" >/dev/null || {
     echo "previous service did not recover after replacement identity refusal" >&2
     cat "$WORK_DIR/output" >&2
+    echo "fake service restarts:" >&2
+    if [ -f "$RESTART_LOG" ]; then cat "$RESTART_LOG" >&2; else echo "<none>" >&2; fi
+    echo "fake health response:" >&2
+    if [ -f "$HEALTH_FILE" ]; then cat "$HEALTH_FILE" >&2; else echo "<none>" >&2; fi
+    echo "restored unit:" >&2
+    if [ -f "$UNIT_FILE" ]; then cat "$UNIT_FILE" >&2; else echo "<none>" >&2; fi
     exit 1
 }
 
