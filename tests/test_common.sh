@@ -1063,6 +1063,12 @@ case "$1" in
     *) exit 1 ;;
 esac
 EOF
+START_BASH_ENV="$START_HOME/bash-env"
+cat > "$START_BASH_ENV" <<'EOF'
+systemctl() { "$START_BIN_DIR/systemctl" "$@"; }
+launchctl() { "$START_BIN_DIR/launchctl" "$@"; }
+export -f systemctl launchctl
+EOF
 cat > "$START_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 printf '%s\n' '{"status":"ok","instance":"start-instance","version":"9.9.9","protocol":2}'
@@ -1073,16 +1079,22 @@ exit 0
 EOF
 cat > "$START_BIN_DIR/relay-bin" <<'EOF'
 #!/bin/sh
+if [ "$1" = managed-state ] && [ "$2" = hold ] && [ "$3" = --dir ] &&
+    [ "$5" = --operation ] && [ "$6" = owner ]; then
+    printf '{"ok":true}\n'
+    trap 'exit 0' TERM INT
+    while :; do sleep 1; done
+fi
 printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1
 EOF
 chmod 700 "$START_SCRIPT_DIR/setup-link.sh" "$START_BIN_DIR/systemctl" \
     "$START_BIN_DIR/launchctl" "$START_BIN_DIR/curl" "$START_BIN_DIR/herdr" "$START_BIN_DIR/relay-bin"
-export START_SERVICE_LOG START_RELAY_LOG
+export START_SERVICE_LOG START_RELAY_LOG START_BIN_DIR
 START_OUTPUT="$(
     HOME="$START_HOME" \
         PATH="$START_BIN_DIR:/usr/bin:/bin" \
-        BASH_ENV=/dev/null ENV=/dev/null HERDR_DEV_TUNNEL= \
+        BASH_ENV="$START_BASH_ENV" ENV=/dev/null HERDR_DEV_TUNNEL= \
         HERDR_RELAY_BIN="$START_BIN_DIR/relay-bin" \
         HERDR_RELAY_ENV="$START_ENV" \
         bash "$START_SCRIPT_DIR/start.sh"
@@ -1367,7 +1379,18 @@ YAML
 }
 # setup-link and service.sh are the two things this action hands off to; both
 # are stubbed so the test observes the move itself.
-cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"; REPO_RELAY_DIR="$REPO_DIR/relay"; HOSTNAME_MOVE_DIR="$WORK_DIR/hostname-move"; MOVE_SERVICE_LOG="$WORK_DIR/hostname-move-service.log"; mkdir -p "$HOSTNAME_MOVE_DIR"; cp "$REPO_RELAY_DIR/common.sh" "$REPO_RELAY_DIR/change-hostname.sh" "$HOSTNAME_MOVE_DIR/"; printf '%s\n' '#!/bin/sh' "printf \"%s %s\\n\" \"\$0\" \"\$*\" >> \"\$MOVE_SERVICE_LOG\"" 'exit 0' > "$HOSTNAME_MOVE_DIR/service.sh"; chmod 700 "$HOSTNAME_MOVE_DIR/service.sh"; export MOVE_SERVICE_LOG  # change-hostname.sh resolves service.sh as an absolute sibling, so run it from this copied tree whose service.sh is a recording stub.
+cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
+REPO_RELAY_DIR="$REPO_DIR/relay"
+HOSTNAME_MOVE_DIR="$WORK_DIR/hostname-move"
+MOVE_SERVICE_LOG="$WORK_DIR/hostname-move-service.log"
+mkdir -p "$HOSTNAME_MOVE_DIR"
+HOSTNAME_MOVE_DIR="$(cd "$HOSTNAME_MOVE_DIR" && pwd -P)"
+cp "$REPO_RELAY_DIR/common.sh" "$REPO_RELAY_DIR/change-hostname.sh" "$HOSTNAME_MOVE_DIR/"
+printf '%s\n' '#!/bin/sh' \
+    "printf \"%s %s\\n\" \"\$0\" \"\$*\" >> \"\$MOVE_SERVICE_LOG\"" \
+    'exit 0' > "$HOSTNAME_MOVE_DIR/service.sh"
+chmod 700 "$HOSTNAME_MOVE_DIR/service.sh"
+export MOVE_SERVICE_LOG  # change-hostname.sh resolves service.sh as an absolute sibling, so run it from this copied tree whose service.sh is a recording stub.
 
 MOVE_OUTPUT="$(
     printf 'relay-fedora.new.test\n' |

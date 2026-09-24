@@ -178,7 +178,15 @@ def main(args):
         run_id = os.environ.get("HERDR_RELAY_RUN_ID", "fixture-run")
         instance = os.environ["HERDR_RELAY_INSTANCE_ID"]
         if operation == "status":
-            if not (state / "relay-ready").is_file():
+            ready = state / "relay-ready"
+            deadline = time.monotonic() + 5
+            while (
+                not ready.is_file()
+                and scenario != "relay-exit"
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            if not ready.is_file():
                 raise SystemExit(94)
             print('{"ready":true}')
         elif operation == "arm_bootstrap":

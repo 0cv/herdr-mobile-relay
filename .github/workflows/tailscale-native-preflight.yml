@@ -503,6 +503,8 @@ jobs:
           fi
           printf 'bwrap_path=%s\n' "$(command -v bwrap)" | tee "$RUNNER_TEMP/tailscale-linux-preflight/bwrap.log"
           bwrap --version | tee -a "$RUNNER_TEMP/tailscale-linux-preflight/bwrap.log"
+          test "$(command -v setpriv)" = /usr/bin/setpriv
+          printf 'setpriv_path=%s\n' "$(command -v setpriv)" | tee -a "$RUNNER_TEMP/tailscale-linux-preflight/bwrap.log"
 
       - name: Prove private Linux PID and network namespaces
         id: namespace_probe
@@ -517,7 +519,6 @@ jobs:
           runner_gid="$(id -g)"
           sandbox=(
             --unshare-pid --unshare-net --die-with-parent --new-session
-            --uid "$runner_uid" --gid "$runner_gid"
             --ro-bind / /
             --tmpfs /tmp --chmod 1777 /tmp
             --dir /tmp/workspace
@@ -533,7 +534,9 @@ jobs:
             --setenv HERDR_S9B3_HOST_PID_NS "$host_pid_ns"
             --setenv HERDR_S9B3_HOST_NET_NS "$host_net_ns"
           )
-          sudo bwrap "${sandbox[@]}" -- /usr/bin/python3 -c '
+          sudo bwrap "${sandbox[@]}" -- /usr/bin/setpriv \
+            --reuid "$runner_uid" --regid "$runner_gid" --clear-groups -- \
+            /usr/bin/python3 -c '
           import os
           pid = os.readlink("/proc/self/ns/pid")
           net = os.readlink("/proc/self/ns/net")
@@ -557,7 +560,6 @@ jobs:
           runner_gid="$(id -g)"
           sandbox=(
             --unshare-pid --unshare-net --die-with-parent --new-session
-            --uid "$runner_uid" --gid "$runner_gid"
             --ro-bind / /
             --tmpfs /tmp --chmod 1777 /tmp
             --dir /tmp/workspace
@@ -578,11 +580,13 @@ jobs:
               --setenv HERDR_S9B3_SANDBOX 1 \
               --setenv HERDR_S9B3_SOURCE /tmp/workspace \
               --setenv HERDR_S9B3_SUPERVISOR /tmp/runner/herdr-mobile-relay-supervisor \
-              -- /usr/bin/python3 /tmp/workspace/tests/test_tailscale_process_groups.py -v &&
+              -- /usr/bin/setpriv --reuid "$runner_uid" --regid "$runner_gid" --clear-groups -- \
+              /usr/bin/python3 /tmp/workspace/tests/test_tailscale_process_groups.py -v &&
             sudo bwrap "${sandbox[@]}" \
               --setenv HERDR_S9B2_SANDBOX 1 \
               --setenv HERDR_S9B2_SOURCE /tmp/workspace \
-              -- /usr/bin/python3 /tmp/workspace/tests/test_tailscale_child_jobs.py -v
+              -- /usr/bin/setpriv --reuid "$runner_uid" --regid "$runner_gid" --clear-groups -- \
+              /usr/bin/python3 /tmp/workspace/tests/test_tailscale_child_jobs.py -v
           } 2>&1 | tee "$RUNNER_TEMP/tailscale-linux-preflight/linux-lifecycle.log"
 
       - name: Upload Linux preflight logs
