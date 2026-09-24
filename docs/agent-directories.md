@@ -80,6 +80,7 @@ Every other case needs to be named explicitly:
 | `HERDR_OMP_CONFIG_DIRS` | `~/.omp/agent` | `PI_CODING_AGENT_DIR` (Oh My Pi is a Pi fork and shares Pi's default) |
 | `HERDR_OPENCODE_DATA_DIRS` | `${XDG_DATA_HOME:-~/.local/share}/opencode` | none |
 | `HERDR_HERMES_DATA_DIRS` | `~/.hermes` | `HERMES_HOME` |
+| `HERDR_GROK_CONFIG_DIRS` | `~/.grok` | `GROK_HOME` |
 | `HERDR_OMO_CONFIG_DIRS` | `~/.senpi/agent` plus supported `~/.omo` layouts | `OMO_CODING_AGENT_DIR`, `SENPI_CODING_AGENT_DIR`, `PI_CODING_AGENT_DIR` |
 Three things to get right:
 
@@ -88,7 +89,7 @@ Three things to get right:
 - Entries are directories, not pre-joined `projects`/`sessions` paths — the
   relay appends the right leaf itself. Use the same value you'd put in that
   row's own "Agent's own directory variable": a full config directory for
-  Claude, Qoder, and Codex, but already the *agent* directory for Pi and Oh My
+  Claude, Qoder, Codex, and Grok, but already the *agent* directory for Pi and Oh My
   Pi, since that is what `PI_CODING_AGENT_DIR` takes.
 - What you configure is searched before what the relay discovered, and the home
   default is searched last.

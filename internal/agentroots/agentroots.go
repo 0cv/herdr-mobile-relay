@@ -56,6 +56,7 @@ const (
 	OpenCodeListEnv = "HERDR_OPENCODE_DATA_DIRS"
 	OMOListEnv      = "HERDR_OMO_CONFIG_DIRS"
 	HermesListEnv   = "HERDR_HERMES_DATA_DIRS"
+	GrokListEnv     = "HERDR_GROK_CONFIG_DIRS"
 )
 
 // Claude reports the transcript roots for Claude Code, honouring
@@ -73,6 +74,11 @@ func Qoder(home string) []string {
 // Codex reports the rollout roots for OpenAI Codex.
 func Codex(home string) []string {
 	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "sessions")
+}
+
+// Grok reports the session roots for Grok CLI, honouring GROK_HOME.
+func Grok(home string) []string {
+	return resolve(home, GrokListEnv, "GROK_HOME", filepath.Join(home, ".grok"), "sessions")
 }
 
 // CodexHomes reports the Codex config directories themselves, for consumers
