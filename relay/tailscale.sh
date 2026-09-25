@@ -60,6 +60,8 @@ if [ -z "$TS_BIN" ] || [ ! -x "$TS_BIN" ]; then
     echo "✗ Tailscale CLI is unavailable. Install and authenticate Tailscale first." >&2
     exit 1
 fi
+# Both shell preflight and Go's read-only owner preflight use this resolved CLI.
+export HERDR_TAILSCALE_BIN="$TS_BIN"
 PORT="${HERDR_RELAY_PORT:-8375}"
 PLUGIN_PORT="${HERDR_RELAY_PLUGIN_PORT:-8376}"
 case "$PORT:$PLUGIN_PORT" in
@@ -220,9 +222,9 @@ snapshot_matches() {
     fi
 }
 restore_file_if_unchanged() {
-    local path="$1" original_exists="$2" original="$3" expected_exists="$4" expected_mode="$5" expected="$6"
+    local path="$1" original_exists="$2" original="$3" expected_exists="$4" expected_mode="$5" expected="$6" label="$7"
     if ! snapshot_matches "$path" "$expected_exists" "$expected_mode" "$expected"; then
-        echo "✗ Refusing rollback after concurrent modification of a managed selection file." >&2
+        echo "✗ Refusing rollback of $label after concurrent modification." >&2
         return 1
     fi
     if [ "$original_exists" = true ]; then
@@ -235,12 +237,14 @@ restore_file_if_unchanged() {
     fi
 }
 rollback_selection() {
+    local status=0
     if [ "$MUTATED_ENV" = true ]; then
-        restore_file_if_unchanged "$ENV_FILE" "$ORIGINAL_ENV_EXISTS" "$ORIGINAL_ENV_SNAPSHOT" "$EXPECTED_ENV_EXISTS" "$EXPECTED_ENV_MODE" "$EXPECTED_ENV_SNAPSHOT" || return 1
+        restore_file_if_unchanged "$ENV_FILE" "$ORIGINAL_ENV_EXISTS" "$ORIGINAL_ENV_SNAPSHOT" "$EXPECTED_ENV_EXISTS" "$EXPECTED_ENV_MODE" "$EXPECTED_ENV_SNAPSHOT" relay.env || status=1
     fi
     if [ "$MUTATED_ORIGIN" = true ]; then
-        restore_file_if_unchanged "$ORIGIN_FILE" "$ORIGINAL_ORIGIN_EXISTS" "$ORIGINAL_ORIGIN_SNAPSHOT" "$EXPECTED_ORIGIN_EXISTS" "$EXPECTED_ORIGIN_MODE" "$EXPECTED_ORIGIN_SNAPSHOT" || return 1
+        restore_file_if_unchanged "$ORIGIN_FILE" "$ORIGINAL_ORIGIN_EXISTS" "$ORIGINAL_ORIGIN_SNAPSHOT" "$EXPECTED_ORIGIN_EXISTS" "$EXPECTED_ORIGIN_MODE" "$EXPECTED_ORIGIN_SNAPSHOT" phone-app-origin-configured || status=1
     fi
+    return "$status"
 }
 write_session() {
     local temporary

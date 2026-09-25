@@ -43,7 +43,11 @@ func prepareManagedTailscale(cfg *config.Config) (*tailscale.SessionAuthority, e
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	inspection, err := tailscale.Inspect(ctx, "tailscale", port)
+	tailscaleBin := cfg.TailscaleBin
+	if tailscaleBin == "" {
+		tailscaleBin = "tailscale"
+	}
+	inspection, err := tailscale.Inspect(ctx, tailscaleBin, port)
 	if err != nil {
 		return nil, fmt.Errorf("read-only Tailscale inspection failed: %w", err)
 	}

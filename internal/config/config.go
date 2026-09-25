@@ -48,6 +48,7 @@ type Config struct {
 	ServiceName       string
 	Transport         string
 	TailscaleOrigin   string
+	TailscaleBin      string
 	PairingSocketPath string
 	ManagedRunID      string
 
@@ -93,6 +94,7 @@ func Load() (*Config, error) {
 		ServiceName:       envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
 		Transport:         transport,
 		TailscaleOrigin:   os.Getenv("HERDR_TAILSCALE_ORIGIN"),
+		TailscaleBin:      envOr("HERDR_TAILSCALE_BIN", "tailscale"),
 		PairingSocketPath: os.Getenv("HERDR_RELAY_PAIRING_SOCKET"),
 		ManagedRunID:      os.Getenv("HERDR_RELAY_RUN_ID"),
 

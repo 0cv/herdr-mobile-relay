@@ -25,6 +25,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.PluginPort != 8376 {
 		t.Errorf("plugin port = %d, want 8376", cfg.PluginPort)
 	}
+	if cfg.TailscaleBin != "tailscale" {
+		t.Errorf("Tailscale binary = %q, want default tailscale", cfg.TailscaleBin)
+	}
 	if cfg.PollInterval != 2.0 {
 		t.Errorf("poll interval = %f, want 2.0", cfg.PollInterval)
 	}
@@ -239,6 +242,20 @@ func TestLoadTailscaleRequiresSafeLoopbackAndNoRearm(t *testing.T) {
 	t.Setenv("HERDR_RELAY_REARM_BOOTSTRAP", "1")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REARM_BOOTSTRAP") {
 		t.Fatalf("rearm accepted: %v", err)
+	}
+}
+
+func TestLoadUsesSelectedTailscaleBinary(t *testing.T) {
+	isolateTailscaleEnvironment(t)
+	selected := filepath.Join(t.TempDir(), "custom-tailscale")
+	t.Setenv("HERDR_TAILSCALE_BIN", selected)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TailscaleBin != selected {
+		t.Fatalf("Tailscale binary = %q, want %q", cfg.TailscaleBin, selected)
 	}
 }
 
@@ -474,6 +491,7 @@ func isolateLoadEnvironment(t *testing.T) {
 	t.Setenv("HERDR_RELAY_REARM_BOOTSTRAP", "")
 	t.Setenv("HERDR_RELAY_TRANSPORT", "")
 	t.Setenv("HERDR_TAILSCALE_ORIGIN", "")
+	t.Setenv("HERDR_TAILSCALE_BIN", "")
 	t.Setenv("HERDR_RELAY_PAIRING_SOCKET", "")
 	t.Setenv("HERDR_RELAY_RUN_ID", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))

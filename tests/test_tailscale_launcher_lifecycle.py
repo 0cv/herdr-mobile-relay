@@ -702,7 +702,37 @@ class ManagedLauncherLifecycle(unittest.TestCase):
                 self.assert_exact_file(fixture.origin_file, fixture.original_origin, "phone-app origin changed before owner readiness")
                 self.assert_no_tailscale_writes(fixture)
 
-    def test_transport_mode_precedence_refuses_without_entering_tailscale(self):
+    def test_persisted_tailscale_mode_overrides_stale_inherited_cloudflare(self):
+        fixture = self.fixture("preexisting-route")
+        fixture.original_env = fixture.original_env.replace(
+            b"HERDR_RELAY_TRANSPORT='cloudflare'", b"HERDR_RELAY_TRANSPORT='tailscale'"
+        )
+        fixture.env_file.write_bytes(fixture.original_env)
+        fixture.env_file.chmod(0o640)
+        fixture.env["HERDR_RELAY_TRANSPORT"] = "cloudflare"
+        fixture.env["HERDR_TAILSCALE_REQUEST"] = "0"
+        precedence = subprocess.run(
+            ["/bin/bash", "-c", '. "$1/common.sh"; test "$(relay_transport_mode "$2")" = tailscale',
+             "bash", str(fixture.scripts), str(fixture.env_file)],
+            cwd=fixture.root, env=fixture.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(
+            precedence.returncode, 0,
+            f"persisted Tailscale mode did not beat stale inherited Cloudflare: {precedence.stderr!r}",
+        )
+        fixture.launch()
+        code, output, error = fixture.communicate()
+        self.assertNotEqual(code, 0)
+        self.assert_contains(output + error, b"Existing Tailscale Serve/Funnel configuration", "persisted Tailscale mode did not reach its Tailscale preflight")
+        self.assert_no_link(output + error)
+        self.assertFalse(fixture.server_ready.exists())
+        self.assertEqual(fixture.event_names().count("inspect"), 1, "stale inherited Cloudflare mode prevented persisted Tailscale preflight")
+        self.assert_exact_file(fixture.env_file, fixture.original_env, "mode-precedence refusal changed relay.env")
+        self.assert_exact_file(fixture.origin_file, fixture.original_origin, "mode-precedence refusal changed phone-app origin")
+        self.assert_no_tailscale_writes(fixture)
+
+    def test_transport_mode_refuses_persisted_cloudflare_without_request(self):
         fixture = self.fixture()
         fixture.env["HERDR_TAILSCALE_REQUEST"] = "0"
         fixture.launch()
@@ -886,14 +916,19 @@ class ManagedLauncherLifecycle(unittest.TestCase):
         code, output, error = fixture.communicate()
         self.assertNotEqual(code, 0)
         self.assert_contains(error, b"Selection rollback was refused", "concurrent selection edit was not detected")
+        self.assert_contains(error, b"Refusing rollback of relay.env", "rollback evidence did not identify the conflicting file")
+        self.assert_not_contains(error, b"Refusing rollback of phone-app-origin-configured", "unmodified phone-app origin was incorrectly classified as conflicting")
         current = fixture.env_file.read_bytes()
         self.assertTrue(b"concurrent-edit" in current, "rollback overwrote an unrelated concurrent relay.env edit")
         self.assertTrue(current != fixture.original_env, "concurrent selection edit disappeared")
+        self.assert_exact_file(fixture.origin_file, fixture.original_origin, "safe origin rollback was skipped after relay.env conflict")
+        self.assertEqual(fixture.origin_file.stat().st_mode & 0o777, 0o640)
         self.assertTrue(fixture.server_retired.exists(), "known no-write arm refusal did not retire the fake owner")
         self.assertFalse(fixture.session_file.exists(), "successful retirement retained the foreground journal")
         snapshots = list(fixture.config.glob(".tailscale-rollback.*"))
         self.assertEqual(len(snapshots), 1)
         self.assert_exact_file(snapshots[0] / "original-env", fixture.original_env, "private rollback evidence lost the original relay.env")
+        self.assert_exact_file(snapshots[0] / "original-origin", fixture.original_origin, "private rollback evidence lost the original phone-app origin")
         self.assert_no_link(output + error)
         self.assert_no_tailscale_writes(fixture)
 

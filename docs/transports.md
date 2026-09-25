@@ -57,7 +57,8 @@ complete web bundle before an invitation is armed. If this relay already has a
 shared app origin, the setup flow keeps it; choose the Tailscale origin or
 another installed Herdr app to switch explicitly. `HERDR_TAILSCALE_HTTPS_PORT`
 can select a free HTTPS Serve port (the default is `443`);
-`HERDR_TAILSCALE_BIN` can point at a non-default CLI. Public HTTPS checks use
+`HERDR_TAILSCALE_BIN` can point at a non-default CLI; the launcher and Go-side
+read-only preflight use that same selected executable. Public HTTPS checks use
 the operating system's normal
 certificate and hostname verification; the launcher has no certificate-bypass
 or custom-CA option.
