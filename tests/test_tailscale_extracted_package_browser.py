@@ -293,14 +293,6 @@ class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
         self._headers(200, b"")
 
 
-def status_document(config: dict) -> dict:
-    routes: dict = {}
-    foreground = config.get("Foreground", {}) if isinstance(config, dict) else {}
-    if isinstance(foreground, dict):
-        routes = foreground
-    return {"Foreground": routes} if routes else {}
-
-
 def fake_cli_program() -> str:
     # This is the test-only CLI shim, not a LocalAPI endpoint override. The
     # package's Go owner still dials /var/run/tailscale/tailscaled.sock.
@@ -328,7 +320,7 @@ if args == ["status", "--json"]:
 if args == ["version", "--json", "--daemon"]:
   print(json.dumps(version,separators=(",",":"))); raise SystemExit(0)
 if args == ["serve", "status", "--json"]:
-  print(json.dumps({"TCP":config.get("TCP",{}),"Web":config.get("Web",{}),"Services":config.get("Services",{}),"AllowFunnel":config.get("AllowFunnel",{}),"Foreground":config.get("Foreground",{})},separators=(",",":")))
+  print(json.dumps(config,separators=(",",":")))
   raise SystemExit(0)
 # No CLI write operation is part of managed ownership; fail any attempt.
 raise SystemExit(97)
