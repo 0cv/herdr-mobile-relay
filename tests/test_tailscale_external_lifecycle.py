@@ -31,6 +31,22 @@ from typing import Any
 
 CASES: dict[str, str] = {}
 PHASE = "setup"
+DIAGNOSTIC_CODE = ""
+
+
+def safe_launcher_diagnostic(output: bytes) -> str:
+    markers = (
+        (b"External Serve relay failed to start.", "relay_process_exited_before_health"),
+        (b"Local relay health, instance, or startup identity did not match", "local_health_identity_mismatch"),
+        (b"Trusted HTTPS did not prove this relay instance", "external_https_identity_mismatch"),
+        (b"selected phone-app origin does not serve this exact release", "phone_app_bundle_mismatch"),
+        (b"Setup link was not printed.", "setup_link_arm_failure"),
+        (b"Relay loopback port", "relay_port_conflict"),
+    )
+    for marker, code in markers:
+        if marker in output:
+            return code
+    return "no_safe_launcher_diagnostic"
 
 
 def record(name: str) -> None:
@@ -227,6 +243,7 @@ def read_setup_state(config_dir: pathlib.Path) -> tuple[bytes, list[str]]:
 
 
 def read_until_setup_link(process: subprocess.Popen[bytes], timeout: float = 90.0) -> bytes:
+    global DIAGNOSTIC_CODE
     if process.stdout is None:
         fail("relay launcher output pipe is unavailable")
     output = bytearray()
@@ -234,15 +251,23 @@ def read_until_setup_link(process: subprocess.Popen[bytes], timeout: float = 90.
     descriptor = process.stdout.fileno()
     while time.monotonic() < deadline:
         if process.poll() is not None:
+            while select.select([descriptor], [], [], 0)[0]:
+                chunk = os.read(descriptor, 4096)
+                if not chunk:
+                    break
+                output.extend(chunk)
+            DIAGNOSTIC_CODE = safe_launcher_diagnostic(bytes(output))
             fail("external Serve launcher exited before printing its verified setup link")
         ready, _, _ = select.select([descriptor], [], [], 0.25)
         if ready:
             chunk = os.read(descriptor, 4096)
             if not chunk:
+                DIAGNOSTIC_CODE = safe_launcher_diagnostic(bytes(output))
                 fail("external Serve launcher closed output before the setup link")
             output.extend(chunk)
             if b"This link pairs one phone within 10 minutes" in output:
                 return bytes(output)
+    DIAGNOSTIC_CODE = safe_launcher_diagnostic(bytes(output))
     fail("external Serve launcher did not reach verified setup-link output in time")
     return b""
 
@@ -372,6 +397,7 @@ def write_evidence(result: str, candidate: str, error_type: str = "") -> None:
         "result": result,
         "cases": [{"name": name, "result": CASES[name]} for name in sorted(CASES)],
         "diagnostic_class": error_type,
+        "diagnostic_code": DIAGNOSTIC_CODE,
         "contains_credentials": False,
         "system_trust_store_modified": False,
         "tailscale_cli_invoked": False,
@@ -514,8 +540,10 @@ def run_fixture() -> str:
         try:
             PHASE = "first_foreground_start"
             first, first_output = start_launcher(root, env, active)
+            PHASE = "first_setup_output_contract"
             if b"operator-owned HTTPS Serve" not in first_output or b"This link pairs one phone" not in first_output:
                 fail("candidate did not print its operator-owned verified setup link")
+            PHASE = "first_tailscale_cli_refusal"
             if sentinel.exists():
                 fail("BYO launcher invoked the Tailscale CLI")
             relay_context = ssl.create_default_context(cafile=str(certificate))
@@ -524,9 +552,11 @@ def run_fixture() -> str:
             relay_only_response = relay_only.getresponse()
             relay_only_response.read()
             relay_only.close()
+            PHASE = "relay_https_origin_behavior"
             if relay_only_response.status != 404:
                 fail("relay HTTPS fixture unexpectedly served the independent phone-app bundle")
             record("relay_https_origin_proved_health_wss_only")
+            PHASE = "persisted_external_transport_origin"
             saved_config = dict(
                 line.split("=", 1)
                 for line in env_file.read_text(encoding="utf-8").splitlines()
@@ -535,10 +565,12 @@ def run_fixture() -> str:
             if saved_config.get("HERDR_RELAY_TRANSPORT") != "tailscale-external" or \
                     saved_config.get("HERDR_EXTERNAL_HTTPS_ORIGIN") != origin:
                 fail("operator-owned transport/origin selection was not persisted canonically")
+            PHASE = "persisted_independent_phone_app_origin"
             saved_app_origin = (config_dir / "phone-app-origin-configured").read_text(encoding="utf-8").strip()
             if saved_app_origin != phone_app_origin:
                 fail("independently hosted phone-app origin was not retained")
             record("independent_phone_app_bundle_trusted_and_retained")
+            PHASE = "no_managed_or_transient_run_ownership"
             if "HERDR_RELAY_CONTROL_RUN_ID" in saved_config or "HERDR_RELAY_RUN_ID" in saved_config:
                 fail("transient external or managed run ownership leaked into persistent configuration")
             record("foreground_start_trusted_https_release_identity_and_qr")
@@ -719,7 +751,8 @@ def main() -> int:
     except Exception as error:  # noqa: BLE001 - report only a sanitized diagnostic class.
         CASES.setdefault(PHASE, "fail")
         write_evidence("fail", candidate, type(error).__name__)
-        print(f"FAIL hosted operator-owned HTTPS Serve fixture at {PHASE} ({type(error).__name__})", file=sys.stderr)
+        diagnostic = f"; {DIAGNOSTIC_CODE}" if DIAGNOSTIC_CODE else ""
+        print(f"FAIL hosted operator-owned HTTPS Serve fixture at {PHASE} ({type(error).__name__}{diagnostic})", file=sys.stderr)
         return 1
 
 
