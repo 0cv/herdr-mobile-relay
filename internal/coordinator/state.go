@@ -16,6 +16,9 @@ import (
 )
 
 type AgentState struct {
+	MachineID                    string                 `json:"machine_id,omitempty"`
+	MachineLabel                 string                 `json:"machine_label,omitempty"`
+	ReadOnly                     bool                   `json:"read_only,omitzero"`
 	PaneID                       string                 `json:"pane_id"`
 	RawPaneID                    string                 `json:"raw_pane_id"`
 	TerminalID                   string                 `json:"terminal_id"`

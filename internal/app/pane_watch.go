@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
@@ -64,6 +65,9 @@ func (s *Server) startPaneWatch(client *transport.ClientConn, message map[string
 		target = *inbound.Target
 	}
 	interval := requestedPaneWatchInterval(message["interval_ms"])
+	if herdr.IsRemoteID(paneID) {
+		interval = max(interval, 2*time.Second)
+	}
 	ctx, cancel := context.WithCancel(client.Context())
 	watch := &paneWatch{
 		client:   client,

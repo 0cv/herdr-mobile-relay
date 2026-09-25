@@ -511,7 +511,7 @@ func projectContextForAgent(agent *coordinator.AgentState) conversation.ProjectC
 }
 
 func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
-	if agent == nil {
+	if agent == nil || herdr.IsRemoteID(agent.PaneID) {
 		return
 	}
 	agent.SessionName = ""
@@ -597,6 +597,9 @@ func (s *Server) Run(ctx context.Context) error {
 	s.pushM = pm
 
 	s.state.SetOnTransition(func(paneID, agent, project, status string, revision int64) {
+		if herdr.IsRemoteID(paneID) {
+			return
+		}
 		transitionAt := time.Now().UnixMilli()
 		s.transitionTasks.Start(func(taskCtx context.Context) {
 			s.handleTransition(taskCtx, paneID, agent, project, status, revision, transitionAt)
@@ -687,6 +690,13 @@ func (s *Server) Run(ctx context.Context) error {
 		if targetErr := validateExactPaneTarget(s.state, inbound, authenticated); targetErr != nil {
 			admitted()
 			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *targetErr))
+			return
+		}
+
+		if remoteRequestDenied(inbound) {
+			admitted()
+			s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed",
+				"Saved remote machines are read-only: only inventory and terminal viewing are supported; connect a relay on that machine for control and history.", inbound.PaneID, nil)
 			return
 		}
 		action := scope.Action.Operation
@@ -1353,6 +1363,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.hybrid = s.startHybridTransport(ctx)
 	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
+	startBackground(func() { s.poller.RunRemoteInventory(ctx) })
 	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
 	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
 	eventClient.SetWorkspaceReorderedCapability(
@@ -1615,6 +1626,9 @@ func (s *Server) handleTransition(
 	revision int64,
 	observedAt ...int64,
 ) {
+	if herdr.IsRemoteID(paneID) {
+		return
+	}
 	transitionAt := time.Now().UnixMilli()
 	if len(observedAt) > 0 && observedAt[0] > 0 {
 		transitionAt = observedAt[0]
@@ -2072,7 +2086,7 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 }
 
 func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
-	if s.historyTasks == nil {
+	if s.historyTasks == nil || herdr.IsRemoteID(paneID) {
 		return
 	}
 	s.historyCaptureMu.Lock()
@@ -3570,12 +3584,18 @@ func (s *Server) publishCurrentInventory(ctx context.Context) error {
 		return batchErr
 	}
 	if runAgentSideEffects {
-		s.reconcileRecoveredPush(ctx, sideEffectAgents)
-		s.syncHistoryPanes(sideEffectAgents)
+		localAgents := make([]*coordinator.AgentState, 0, len(sideEffectAgents))
+		for _, agent := range sideEffectAgents {
+			if !herdr.IsRemoteID(agent.PaneID) {
+				localAgents = append(localAgents, agent)
+			}
+		}
+		s.reconcileRecoveredPush(ctx, localAgents)
+		s.syncHistoryPanes(localAgents)
 		active := make(map[string]bool, len(sideEffectAgents))
 		for _, agent := range sideEffectAgents {
 			active[agent.PaneID] = true
-			if isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
+			if !herdr.IsRemoteID(agent.PaneID) && isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
 				s.scheduleHistoryCapture(ctx, agent.PaneID)
 			}
 		}

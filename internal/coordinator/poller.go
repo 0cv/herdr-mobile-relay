@@ -170,6 +170,7 @@ func (p *Poller) poll(ctx context.Context) {
 		p.enrich(ctx, agents)
 	}
 
+	agents, workspaces = p.appendRemoteInventory(agents, workspaces)
 	_, committed := p.state.CommitPoll(agents, workspaces, token)
 	if !committed {
 		p.logger.Debug("discarded topology-stale inventory sample")
@@ -206,11 +207,18 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 			pane.TabLabel = tab.Label
 			pane.TabNumber = tab.Number
 		}
+		host := p.hostname
+		if pane.MachineID != "" {
+			host = pane.MachineLabel
+		}
 		project := ""
 		if pane.Cwd != "" {
 			project = filepath.Base(pane.Cwd)
 		}
 		agents = append(agents, &AgentState{
+			MachineID:       pane.MachineID,
+			MachineLabel:    pane.MachineLabel,
+			ReadOnly:        pane.MachineID != "",
 			PaneID:          pane.ID,
 			RawPaneID:       pane.ID,
 			TerminalID:      pane.TerminalID,
@@ -225,7 +233,7 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 			Focused:         pane.Focused,
 			Cwd:             pane.Cwd,
 			Project:         project,
-			Host:            p.hostname,
+			Host:            host,
 			Session:         pane.Session,
 			ActivitySeq:     pane.StateChangeSeq,
 			PaneRevision:    pane.Revision,
@@ -358,7 +366,8 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 	// public poll-health counter, but must not erase a reconciliation retry
 	// streak while required polling fetches are failing.
 	p.consecutiveFailures.Store(0)
-	p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
+	agents, workspaces := p.appendRemoteInventory(agents, topology.Workspaces)
+	p.state.CommitTopology(agents, workspaces, baseRevision)
 	p.notifyInventoryChange()
 	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())
 }
@@ -457,4 +466,37 @@ func pollRetryInterval(healthyInterval time.Duration, failures int) time.Duratio
 		interval *= 2
 	}
 	return interval
+}
+
+// RunRemoteInventory is independent of local socket polling and events. An
+// unreachable saved machine cannot delay publication of local agents.
+func (p *Poller) RunRemoteInventory(ctx context.Context) {
+	for {
+		if err := p.client.RefreshRemoteInventory(ctx); err != nil && ctx.Err() == nil {
+			p.logger.Debug("remote inventory refresh incomplete", "error", err)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		p.Wake()
+		timer := time.NewTimer(idlePollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (p *Poller) appendRemoteInventory(agents []*AgentState, workspaces []herdr.Workspace) ([]*AgentState, []herdr.Workspace) {
+	remote := p.client.RemoteInventory()
+	remoteAgents := p.agentsFromTopology(remote.Panes, remote.Tabs)
+	agents = append(agents, remoteAgents...)
+	// Copy before append: event topology owns its backing slice.
+	combined := append([]herdr.Workspace(nil), workspaces...)
+	remoteWorkspaces := append([]herdr.Workspace(nil), remote.Workspaces...)
+	hydrateWorkspaceCwds(remoteWorkspaces, remote.Tabs, remote.Panes)
+	combined = append(combined, remoteWorkspaces...)
+	return agents, combined
 }
