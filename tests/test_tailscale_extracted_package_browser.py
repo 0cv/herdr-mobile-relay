@@ -48,6 +48,10 @@ FAILURE_CODES = {
     "archive_binary_rejected", "archive_managed_wrapper_missing",
     "archive_external_wrapper_missing", "archive_managed_wrapper_not_executable",
     "archive_external_wrapper_not_executable", "archive_binary_not_executable",
+    "managed_launcher_spawn", "managed_launcher_output_limit",
+    "managed_launcher_exit_before_link", "managed_launcher_link_timeout",
+    "fixture_localapi_watch_missing", "fixture_localapi_registration_missing",
+    "fixture_localapi_session_missing",
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
@@ -480,11 +484,14 @@ def safe_link_from_output(output: bytes, origin: str) -> str | None:
 
 
 def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expect_link: bool = True) -> tuple[subprocess.Popen[bytes], str, bytes, bytes]:
-    process = subprocess.Popen(
-        ["/bin/bash", str(package / "relay" / "tailscale.sh"), "--confirm-serve"],
-        cwd=package, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, close_fds=True,
-    )
+    try:
+        process = subprocess.Popen(
+            ["/bin/bash", str(package / "relay" / "tailscale.sh"), "--confirm-serve"],
+            cwd=package, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, close_fds=True,
+        )
+    except OSError:
+        die("packaged managed launcher could not be started", "managed_launcher_spawn")
     assert process.stdout is not None and process.stderr is not None
     output = bytearray()
     state: dict[str, object] = {"link": None, "stderr_bytes": 0, "output_limit": False}
@@ -533,7 +540,7 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 pass
-            die("launcher output exceeded the package acceptance bound")
+            die("launcher output exceeded the package acceptance bound", "managed_launcher_output_limit")
         if link:
             return process, str(link), bytes(output), b""
         if process.poll() is not None and all(event.wait(0.05) for event in done):
@@ -542,7 +549,7 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
                 stderr_bytes = int(state["stderr_bytes"])
             if not expect_link:
                 return process, "", captured, b""
-            die(f"packaged managed launcher exited before setup-link emission (exit={process.returncode}, stderr_bytes={stderr_bytes})")
+            die(f"packaged managed launcher exited before setup-link emission (exit={process.returncode}, stderr_bytes={stderr_bytes})", "managed_launcher_exit_before_link")
         time.sleep(0.05)
     try:
         os.killpg(process.pid, 9)
@@ -556,7 +563,7 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
         reader.join(timeout=2)
     with lock:
         stderr_bytes = int(state["stderr_bytes"])
-    die(f"packaged managed launcher timed out (stderr_bytes={stderr_bytes})")
+    die(f"packaged managed launcher timed out (stderr_bytes={stderr_bytes})", "managed_launcher_link_timeout")
 
 
 def launch_managed_rejection(package: Path, env: dict[str, str], timeout: float = 90) -> tuple[subprocess.Popen[bytes], bytes]:
@@ -835,10 +842,12 @@ def main() -> int:
         set_stage("managed_launch")
         launcher, link, _private_stdout, _ = launch_managed(package, relay_env)
         transitions.extend(["preflight:read-only", "watch:mask=2", "route:conditional-register", "launcher:setup-link"])
-        if (state.events.count("localapi:watch:mask=2") != 1
-                or state.events.count("localapi:config:post") < 1
-                or WATCH_ID not in state.config.get("Foreground", {})):
-            die("fixed production LocalAPI did not record exact watch and conditional registration")
+        if state.events.count("localapi:watch:mask=2") != 1:
+            die("fixed production LocalAPI did not record the required watch mask", "fixture_localapi_watch_missing")
+        if state.events.count("localapi:config:post") < 1:
+            die("fixed production LocalAPI did not record conditional registration", "fixture_localapi_registration_missing")
+        if WATCH_ID not in state.config.get("Foreground", {}):
+            die("fixed production LocalAPI did not retain the exact session", "fixture_localapi_session_missing")
         browser_record = {"setup_url": link, "origin": origin, "profiles": str(temporary_root / "profiles"), "fake_herdr_operations": str(operations)}
         set_stage("browser_enroll")
         browser_evidence = run_playwright(package, browser_record, "enroll", evidence_path)
