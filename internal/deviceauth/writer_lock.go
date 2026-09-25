@@ -15,9 +15,37 @@ type storeWriterLock struct {
 	file *os.File
 }
 
-// acquireStoreWriterLock reserves a stable lockfile in the existing runtime
-// parent. The file remains in place after unlock so cooperating processes
-// always lock the same inode; it is created only when a write is authorized.
+// prepareStoreWriterLockParent is used only by ordinary Open. Legacy Open
+// protected the store with MkdirAll, so it also created missing parent
+// components. Deferred managed opens deliberately do not call this helper.
+func prepareStoreWriterLockParent(storeDir string) error {
+	if !storeWriterLockSupported() {
+		return errors.New("cooperating device-store writer locks are unsupported on this platform")
+	}
+	parent := filepath.Dir(filepath.Clean(storeDir))
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create device-store lock parent: %w", err)
+	}
+	parentInfo, err := os.Lstat(parent)
+	if err != nil {
+		return fmt.Errorf("inspect device-store lock parent: %w", err)
+	}
+	return validateStoreWriterLockParent(parentInfo)
+}
+
+func validateStoreWriterLockParent(info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("device-store lock parent is not a protected directory")
+	}
+	if uid, ok := fileOwner(info); !ok || uid != uint32(os.Getuid()) {
+		return errors.New("device-store lock parent is not owned by the current user")
+	}
+	return nil
+}
+
+// acquireStoreWriterLock reserves a stable lockfile in the runtime parent. The
+// file remains in place after unlock so cooperating processes always lock the
+// same inode; it is created only when a write is authorized.
 func acquireStoreWriterLock(storeDir string) (*storeWriterLock, error) {
 	if !storeWriterLockSupported() {
 		return nil, errors.New("cooperating device-store writer locks are unsupported on this platform")
@@ -27,11 +55,8 @@ func acquireStoreWriterLock(storeDir string) (*storeWriterLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect device-store lock parent: %w", err)
 	}
-	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o022 != 0 {
-		return nil, errors.New("device-store lock parent is not a protected directory")
-	}
-	if uid, ok := fileOwner(parentInfo); !ok || uid != uint32(os.Getuid()) {
-		return nil, errors.New("device-store lock parent is not owned by the current user")
+	if err := validateStoreWriterLockParent(parentInfo); err != nil {
+		return nil, err
 	}
 
 	path := filepath.Join(parent, storeWriterLockName)

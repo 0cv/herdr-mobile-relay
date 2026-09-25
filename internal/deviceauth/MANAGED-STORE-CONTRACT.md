@@ -12,13 +12,16 @@ indefinitely. Other platforms explicitly refuse writes rather than silently
 falling back to an uncoordinated writer.
 
 The lock file is created only when a write is authorized. `OpenDeferred` stays
-read-only: it does not create/chmod the device directory, store file, or lock
-file. A normal `Open` takes the lock before protecting/creating the device
-store. It loads an existing valid file without rewriting it merely to
-initialize a `Store`. Invitation, bootstrap, reset, authentication/enrollment,
-rename, revoke, and every other `persistLocked` mutation use the same lock.
-Managed transactional bootstrap arm holds it across baseline validation,
-installation, final admission and any exact rollback.
+read-only: it does not create/chmod the device directory, store file, runtime
+parent, or lock file. A normal `Open` may create missing runtime-parent
+components with mode `0700` (existing components are never chmodded), validates
+the immediate lock parent, and then takes the lock before protecting/creating
+the device store. Newly created parent components and the stable lock file are
+not removed if a later step fails. `Open` loads an existing valid file without
+rewriting it merely to initialize a `Store`. Invitation, bootstrap, reset,
+authentication/enrollment, rename, revoke, and every other `persistLocked`
+mutation use the same lock. Managed transactional bootstrap arm holds it across
+baseline validation, installation, final admission and any exact rollback.
 
 Every opened Store retains a bounded snapshot of the device directory and file
 identity, mode and bytes. A writer checks that snapshot while exclusively

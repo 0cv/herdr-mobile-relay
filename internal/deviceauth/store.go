@@ -155,6 +155,9 @@ func Open(dir string, options ...Option) (_ *Store, resultErr error) {
 	if store.now == nil || store.random == nil {
 		return nil, errors.New("device store requires clock and random source")
 	}
+	if err := prepareStoreWriterLockParent(dir); err != nil {
+		return nil, err
+	}
 	writer, err := acquireStoreWriterLock(dir)
 	if err != nil {
 		return nil, err
