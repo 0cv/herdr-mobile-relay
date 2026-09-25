@@ -887,7 +887,9 @@ test -z "$(unset HERDR_GATEWAY_URL; gateway_url "$CHOICE_ENV")"
 # choice until the local backend stops; a refusal leaves the saved BYO origin
 # byte-for-byte intact.
 (
-    EXTERNAL_CHOICE_ENV="$WORK_DIR/config/external-choice.env"
+    EXTERNAL_CHOICE_DIR="$WORK_DIR/external-choice"
+    mkdir -p "$EXTERNAL_CHOICE_DIR"
+    EXTERNAL_CHOICE_ENV="$EXTERNAL_CHOICE_DIR/relay.env"
     : > "$EXTERNAL_CHOICE_ENV"
     set_relay_transport "$EXTERNAL_CHOICE_ENV" tailscale-external
     set_env_value_atomic "$EXTERNAL_CHOICE_ENV" HERDR_EXTERNAL_HTTPS_ORIGIN "https://relay.example.test"
