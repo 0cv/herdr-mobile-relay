@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,10 @@ printf '%s\n' "$*" >> '` + dir + `/calls'
 if [ "$1" = machine ]; then cat '` + dir + `/machines'; exit; fi
 if [ "$1" != --machine ]; then echo local-fallback >&2; exit 9; fi
 if [ "$2" = offline ]; then exit 1; fi
-if [ "$2" = slow ]; then sleep 30; exit 1; fi
+# Use a single executable for the deadline propagation test. A shell waiting
+# on sleep can leave an orphan zombie on Linux, exercising the separate
+# process-group cleanup grace period instead of this request's cancellation.
+if [ "$2" = slow ]; then exec sleep 30; fi
 case "$3 $4" in
  'agent list') printf '%s' '{"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term1","tab_id":"w1:t1","workspace_id":"w1","agent":"claude","cwd":"/remote/project","agent_status":"idle","agent_session":{"value":"remote-session"}}]}}' ;;
  'workspace list') printf '%s' '{"result":{"workspaces":[{"workspace_id":"w1","label":"Project","active_tab_id":"w1:t1"}]}}' ;;
@@ -106,11 +110,11 @@ func TestRemoteDiscoveryMalformedAndCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	if err := client.RefreshRemoteInventory(ctx); err == nil {
-		t.Fatal("expected cancellation")
+	if err := client.RefreshRemoteInventory(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline cancellation, got %v", err)
 	}
 	if time.Since(started) > 2*time.Second {
-		t.Fatal("remote cancellation did not terminate process group")
+		t.Fatal("remote cancellation did not stop the CLI")
 	}
 }
 
