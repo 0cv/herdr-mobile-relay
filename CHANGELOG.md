@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Discover enabled saved SSH machines through the Herdr CLI, with machine-qualified
+  workspace/agent identities and read-only terminal viewing. Remote refreshes are
+  isolated from local inventory; unsupported remote actions fail closed instead
+  of using local files, sessions, or command targets.
+
 ## [0.22.0] - 2026-09-24
 
 ### Added

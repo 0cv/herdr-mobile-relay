@@ -112,6 +112,9 @@ func (d *Dispatcher) SetProfiles(resolver *profiles.Resolver) {
 	d.state.onInventory = func(agents []*AgentState) {
 		targets := make([]profiles.PaneIdentity, 0, len(agents))
 		for _, agent := range agents {
+			if herdr.IsRemoteID(agent.PaneID) {
+				continue
+			}
 			targets = append(targets, profiles.PaneIdentity{PaneID: agent.PaneID, TerminalID: agent.TerminalID, TabID: agent.TabID, WorkspaceID: agent.WorkspaceID})
 		}
 		if err := resolver.ReconcileOwnership(targets); err != nil {

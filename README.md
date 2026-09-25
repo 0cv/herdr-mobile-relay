@@ -114,6 +114,40 @@ fallback; Cloudflare tunnel traffic stays on Cloudflare.
 - **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**
 - **[Run your own gateway →](docs/gateway-self-hosting.md)**
 
+## Saved SSH machines (read-only preview)
+
+The relay also discovers enabled machines from `herdr machine list --json` and
+queries their agents, workspaces, and tabs using `herdr --machine <id> … list`.
+No relay needs to be installed on those machines for **inventory and terminal
+viewing**. The local Herdr CLI must support saved machines and already have SSH
+access. No shell commands, prompts, or keys are sent during discovery.
+
+Remote refresh runs independently of local socket polling, approximately every
+15 seconds, with bounded concurrency and timeouts. Disabled, removed, or
+unreachable machines disappear from the next remote snapshot; a remote failure
+does not remove local agents. Local inventory health does not certify remote
+connectivity. Older Herdr clients without saved-machine support keep working
+locally.
+
+Remote resource IDs are qualified as `remote/<machine-id>/<resource-id>`, so
+`w1:p1` on two machines cannot collide. Workspaces include the machine label;
+agents and workspaces expose `machine_id`, `machine_label`, and `read_only`.
+Clients should honor `read_only`; the relay enforces it even for older clients
+that still show action buttons. Remote terminal watches are throttled to at
+least two seconds because reads cross SSH.
+
+Remote prompts, approvals, agent/workspace mutations, uploads, filesystem
+browsing, native conversation history, resize leases, and notifications are not
+supported by this preview. Unsupported requests fail explicitly, never falling
+back to the local machine. To use those features, run a relay on that remote
+computer and pair it separately as before.
+
+Optional read-only live verification (does not log terminal content):
+
+```bash
+HERDR_REMOTE_SMOKE_MACHINE=my-saved-machine go test ./internal/herdr -run TestSavedRemoteMachineSmoke -v
+```
+
 ## Agents with a non-default config directory
 
 The relay runs as a background service and does not see a pane's
