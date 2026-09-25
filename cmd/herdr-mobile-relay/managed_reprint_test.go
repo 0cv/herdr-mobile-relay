@@ -224,6 +224,37 @@ func TestManagedReprintBudgetCoversArmAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestManagedStateReprintFirstOriginAppliesAndAcks(t *testing.T) {
+	dir := reprintOwnedRoot(t)
+	origin := filepath.Join(dir, reprintOriginFile)
+	socket := startReprintControlServer(t, `{"ok":true,"invitation_armed":true,"invitation_expires_at":"2026-06-01T00:00:00Z"}`)
+
+	var stdout, stderr bytes.Buffer
+	code := runManagedReprint([]string{
+		"--dir", dir, "--socket", socket,
+		"--run-id", "run-first", "--instance", "instance-first",
+		"--origin-value", "https://first.example",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("first reprint exit = %d, want 0 (stderr=%s)", code, stderr.String())
+	}
+	if got := string(readReprintFile(t, origin)); got != "https://first.example" {
+		t.Fatalf("first origin = %q, want first value", got)
+	}
+	info, err := os.Stat(origin)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("first origin mode: info=%v err=%v, want 0600", info, err)
+	}
+	assertNoReprintJournal(t, dir)
+	assertNoReprintTransactionLock(t, dir)
+	if stdout.String() != "{\"ok\":true,\"invitation_expires_at\":\"2026-06-01T00:00:00Z\"}\n" {
+		t.Fatalf("first reprint acknowledgement = %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("first reprint stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestManagedStateReprintAppliesOriginAndAcks(t *testing.T) {
 	dir := reprintOwnedRoot(t)
 	origin := filepath.Join(dir, reprintOriginFile)

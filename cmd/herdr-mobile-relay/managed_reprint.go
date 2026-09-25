@@ -238,9 +238,10 @@ func safeArmFailureCode(code string) string {
 // sets the requested new content. The new file is always installed at 0600.
 func captureReprintEntry(dir, originFile, originValue string) (managedstate.JournalEntry, error) {
 	entry := managedstate.JournalEntry{
-		Path:     originFile,
-		NewBytes: []byte(originValue),
-		NewMode:  0o600,
+		Path:      originFile,
+		PriorMode: 0o600, // schema requires a safe mode even when the prior file is absent
+		NewBytes:  []byte(originValue),
+		NewMode:   0o600,
 	}
 	target := filepath.Join(dir, originFile)
 	info, err := os.Lstat(target)
