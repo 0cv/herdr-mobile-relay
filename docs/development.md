@@ -16,11 +16,44 @@ make dev-tunnel
 and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
 installed production relay.
 
+For an **explicitly selected, already running and authenticated** supported
+Tailscale Unix daemon, `make dev-tailscale` builds a matching frontend and
+relay into a separate private directory and invokes the real foreground
+managed launcher. It never installs, logs in, or starts Tailscale. No personal
+Tailscale client, default runtime directory, or daemon is probed merely by
+running `make help` or the setup menu. Create an empty root with mode 0700,
+choose three nonproduction ports, and supply the exact CLI, Herdr executable,
+and Herdr socket yourself:
+
+```bash
+mkdir -m 700 /path/to/private/dev-state
+HERDR_DEV_TAILSCALE_ENABLE=1 \
+HERDR_DEV_TAILSCALE_DIR=/path/to/private/dev-state \
+HERDR_DEV_TAILSCALE_BIN=/path/to/supported/tailscale \
+HERDR_DEV_HERDR_BIN=/path/to/herdr \
+HERDR_DEV_HERDR_SOCKET=/path/to/herdr.sock \
+HERDR_DEV_TAILSCALE_PORT=18377 HERDR_DEV_TAILSCALE_PLUGIN_PORT=18378 \
+HERDR_DEV_TAILSCALE_HTTPS_PORT=8443 make dev-tailscale
+```
+
+This is **not** a command to run on an unqualified personal daemon. Use it
+only after deliberately preparing an isolated supported profile and trusted
+HTTPS frontend route. The managed launcher still asks for fresh Serve consent;
+`DEV_TAILSCALE_ARGS=--confirm-serve` is an explicit per-invocation alternative
+for unattended disposable CI. A missing private root/marker, unsupported
+platform/profile, occupied port, existing foreground owner or uncertain cleanup
+is refused. A pre-existing marked dev root retains its token, device store and
+port choice; no rearm or automatic recovery is performed. Build replacements
+preserve the previous generated version for inspection. The phone setup URL
+requires a trusted certificate, live owner and exact matching web bundle.
+MacSys/App Store and physical-phone use are not qualified by this entrypoint.
+
 ## Common targets
 
 ```bash
 make check             # all backend, frontend, browser, and release checks
 make backend-check     # format, vet, tests, race detector, shell checks
+make dev-tailscale     # explicit opt-in managed dev relay, private root/ports
 make web-release       # replace committed web/ with a verified frontend build
 make web-release-check # compare and browser-test the shipped web/ bundle
 make relay-plugin      # link this checkout as a Herdr plugin

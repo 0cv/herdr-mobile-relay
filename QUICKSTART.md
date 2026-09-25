@@ -111,7 +111,9 @@ the Tailscale origin or another installed app. Tailscale must be installed and
 authenticated manually.
 
 See [Managed Tailscale Serve in the transport guide](docs/transports.md#managed-tailscale-serve)
-for custom HTTPS ports and the trusted certificate check.
+for custom HTTPS ports and the trusted certificate check. Checkout developers
+can use the separately isolated, explicit opt-in [`make dev-tailscale`](docs/development.md#running-from-a-checkout)
+entrypoint; it never substitutes for installation or qualifies an untested daemon.
 
 ## Use operator-owned HTTPS Serve (BYO)
 

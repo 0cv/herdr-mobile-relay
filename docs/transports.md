@@ -68,7 +68,11 @@ or custom-CA option.
 
 Managed Tailscale Serve therefore needs no separately hosted app for a new
 configuration. Tailscale must be installed and authenticated manually; the relay
-does not mutate Tailscale account state.
+does not mutate Tailscale account state. Checkout developers can use the
+explicitly isolated [`make dev-tailscale`](development.md#running-from-a-checkout)
+entrypoint with a user-selected private root, supported CLI and nonproduction
+ports; it uses the same per-run consent and owner checks, not a personal daemon
+default.
 
 ## Operator-owned HTTPS Serve (BYO)
 

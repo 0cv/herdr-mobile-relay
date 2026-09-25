@@ -16,12 +16,13 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel dev-tailscale stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
 	@echo "  make quick-start                First run: install missing tools and start the phone app"
 	@echo "  make dev-tunnel                Build and tunnel an isolated frontend for development"
+	@echo "  make dev-tailscale             Build an isolated managed tailnet development relay (explicit opt-in)"
 	@echo "  make stable-setup               Provision/resume a stable tunnel, service, and verified QR"
 	@echo "  make stable-teardown            Remove only resources recorded by the stable wizard"
 	@echo "  make setup                      Prepare config and check prerequisites without installing"
@@ -63,6 +64,9 @@ quick-start:
 
 dev-tunnel:
 	relay/dev-tunnel.sh
+
+dev-tailscale:
+	relay/dev-tailscale.sh $(DEV_TAILSCALE_ARGS)
 
 speech-voices:
 	relay/speech-voices.sh
@@ -111,6 +115,7 @@ shell-check:
 	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
 	bash tests/test_tailscale.sh
+	HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py
 	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
 	bash tests/test_speech_voices.sh
