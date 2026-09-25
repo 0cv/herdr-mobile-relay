@@ -74,6 +74,110 @@ def free_port(excluded: set[int] | None = None) -> int:
             return candidate
 
 
+class HerdrSocketFixture:
+    """Small disposable Herdr socket API for relay inventory/readiness."""
+
+    def __init__(self, path: pathlib.Path, scenario_path: pathlib.Path):
+        scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+        self.panes = scenario.get("panes") or []
+        self.tabs = scenario.get("tabs") or []
+        self.workspaces = scenario.get("workspaces") or []
+        if not self.workspaces:
+            workspace_ids = dict.fromkeys(
+                item.get("workspace_id")
+                for item in [*self.panes, *self.tabs]
+                if isinstance(item.get("workspace_id"), str) and item["workspace_id"]
+            )
+            self.workspaces = [
+                {"workspace_id": workspace_id, "label": workspace_id}
+                for workspace_id in workspace_ids
+            ]
+        self.path = path
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(str(path))
+        os.chmod(path, 0o600)
+        self.listener.listen(8)
+        self.listener.settimeout(0.25)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        while not self.stopped.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(connection,), daemon=True).start()
+
+    def _handle(self, connection: socket.socket) -> None:
+        with connection:
+            try:
+                request_line = bytearray()
+                while b"\n" not in request_line and len(request_line) <= 1024 * 1024:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        return
+                    request_line.extend(chunk)
+                request = json.loads(bytes(request_line).split(b"\n", 1)[0])
+                method = request.get("method")
+                result: dict[str, Any]
+                if method == "ping":
+                    result = {
+                        "type": "pong",
+                        "version": "0.9.0",
+                        "protocol": 1,
+                        "capabilities": {"endpoint_protocol_generation": 1},
+                    }
+                elif method == "agent.list":
+                    result = {"type": "agent_list", "agents": self.panes}
+                elif method == "pane.list":
+                    result = {"type": "pane_list", "panes": self.panes}
+                elif method == "workspace.list":
+                    result = {"type": "workspace_list", "workspaces": self.workspaces}
+                elif method == "tab.list":
+                    result = {"type": "tab_list", "tabs": self.tabs}
+                elif method == "session.snapshot":
+                    result = {
+                        "type": "session_snapshot",
+                        "snapshot": {
+                            "version": "0.9.0",
+                            "protocol": 1,
+                            "workspaces": self.workspaces,
+                            "tabs": self.tabs,
+                            "panes": self.panes,
+                            "agents": self.panes,
+                        },
+                    }
+                elif method == "events.subscribe":
+                    result = {"type": "subscription_started"}
+                else:
+                    connection.sendall(json.dumps({
+                        "id": request.get("id", ""),
+                        "error": {"code": "unknown_method", "message": "fixture method unavailable"},
+                    }).encode("utf-8") + b"\n")
+                    return
+                connection.sendall(json.dumps({
+                    "id": request.get("id", ""), "result": result,
+                }).encode("utf-8") + b"\n")
+                if method == "events.subscribe":
+                    while connection.recv(4096):
+                        pass
+            except (OSError, ValueError, AttributeError, TypeError):
+                return
+
+    def close(self) -> None:
+        self.stopped.set()
+        self.listener.close()
+        self.thread.join(timeout=3)
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class RelayProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -288,6 +392,11 @@ def local_health_diagnostic(env: dict[str, str]) -> str:
             return f"local_health_missing_{field}"
         if health[field] != value:
             if field == "readiness" and health[field] in {"starting", "degraded"}:
+                inventory = health.get("inventory")
+                if health[field] == "degraded" and isinstance(inventory, dict):
+                    error_code = inventory.get("error_code")
+                    if error_code in {"command_failed", "server_not_running", "topology_churn"}:
+                        return f"local_health_readiness_degraded_{error_code}"
                 return f"local_health_readiness_{health[field]}"
             return f"local_health_mismatch_{field}"
     return "local_health_matches_all_launcher_checks"
@@ -607,6 +716,7 @@ def run_fixture() -> str:
                 "no_proxy": "127.0.0.1,localhost",
             }
         )
+        herdr_socket = HerdrSocketFixture(socket_path, scenario)
         active: list[subprocess.Popen[bytes]] = []
         try:
             PHASE = "first_foreground_start"
@@ -800,6 +910,7 @@ def run_fixture() -> str:
         finally:
             for process in list(active):
                 stop_launcher(process)
+            herdr_socket.close()
             proxy.shutdown()
             proxy.server_close()
             proxy_thread.join(timeout=3)
