@@ -49,7 +49,7 @@ FAILURE_CODES = {
     "archive_binary_rejected", "archive_managed_wrapper_missing",
     "archive_external_wrapper_missing", "archive_managed_wrapper_not_executable",
     "archive_external_wrapper_not_executable", "archive_binary_not_executable",
-    "managed_launcher_spawn", "managed_launcher_output_limit",
+    "fixture_browser_nss_setup_failed", "managed_launcher_spawn", "managed_launcher_output_limit",
     "managed_launcher_exit_before_link", "managed_launcher_link_timeout",
     "managed_launcher_cli_refusal", "managed_launcher_pre_serve_status_exit",
     "managed_launcher_pre_watch_exit", "managed_launcher_pre_registration_exit",
@@ -80,7 +80,12 @@ BROWSER_STORAGE_TYPES = {
 BROWSER_STORAGE_CHECKPOINTS = {"after_navigation", "credential_wait_failed", "credentialed"}
 BROWSER_DIAGNOSTIC_CATEGORIES = {
     "websocket", "network", "storage", "tls", "type_error", "reference_error",
-    "syntax_error", "dom_exception", "console_error", "page_error",
+    "syntax_error", "dom_exception", "console_error", "page_error", "navigation_error",
+}
+BROWSER_EXCEPTION_TYPES = {
+    "BrowserScriptMissing", "BrowserProtocolError", "BrowserAssertionError", "BrowserBudgetTimeout",
+    "BrowserError", "TimeoutExpired", "TimeoutError", "Error", "TypeError", "ReferenceError",
+    "SyntaxError", "RangeError", "DOMException", "TargetClosedError", "ProtocolError", "PageClosedError",
 }
 EXPECTED_CASES = [
     "archive_checksum_and_exact_release_identity",
@@ -868,10 +873,36 @@ class PublicRequestState:
     TLS_REASON_LABELS = {
         "CERTIFICATE_VERIFY_FAILED": "certificate_verify_failed",
         "TLSV1_ALERT_UNKNOWN_CA": "alert_unknown_ca",
+        "SSLV3_ALERT_UNKNOWN_CA": "alert_unknown_ca",
         "TLSV1_ALERT_CERTIFICATE_UNKNOWN": "alert_certificate_unknown",
+        "SSLV3_ALERT_CERTIFICATE_UNKNOWN": "alert_certificate_unknown",
         "TLSV1_ALERT_BAD_CERTIFICATE": "alert_bad_certificate",
+        "SSLV3_ALERT_BAD_CERTIFICATE": "alert_bad_certificate",
         "TLSV1_ALERT_HANDSHAKE_FAILURE": "alert_handshake_failure",
+        "SSLV3_ALERT_HANDSHAKE_FAILURE": "alert_handshake_failure",
         "TLSV1_ALERT_CERTIFICATE_REQUIRED": "alert_certificate_required",
+        "TLSV1_ALERT_UNSUPPORTED_CERTIFICATE": "alert_unsupported_certificate",
+        "SSLV3_ALERT_UNSUPPORTED_CERTIFICATE": "alert_unsupported_certificate",
+        "TLSV1_ALERT_CERTIFICATE_EXPIRED": "alert_certificate_expired",
+        "TLSV1_ALERT_CERTIFICATE_REVOKED": "alert_certificate_revoked",
+        "TLSV1_ALERT_INTERNAL_ERROR": "alert_internal_error",
+        "SSLV3_ALERT_INTERNAL_ERROR": "alert_internal_error",
+        "TLSV1_ALERT_DECODE_ERROR": "alert_decode_error",
+        "TLSV1_ALERT_DECRYPT_ERROR": "alert_decrypt_error",
+        "TLSV1_ALERT_DECRYPTION_FAILED": "alert_decrypt_error",
+        "TLSV1_ALERT_ILLEGAL_PARAMETER": "alert_illegal_parameter",
+        "TLSV1_ALERT_NO_RENEGOTIATION": "alert_no_renegotiation",
+        "TLSV1_ALERT_USER_CANCELLED": "alert_user_cancelled",
+        "TLSV1_ALERT_EXPORT_RESTRICTION": "alert_export_restriction",
+        "SSLV3_ALERT_NO_CERTIFICATE": "alert_no_certificate",
+        "SSLV3_ALERT_UNEXPECTED_MESSAGE": "alert_unexpected_message",
+        "SSLV3_ALERT_DECOMPRESSION_FAILURE": "alert_decompression_failure",
+        "TLSV1_ALERT_PROTOCOL_VERSION": "alert_protocol_version",
+        "TLSV1_ALERT_ACCESS_DENIED": "alert_access_denied",
+        "TLSV1_ALERT_INSUFFICIENT_SECURITY": "alert_insufficient_security",
+        "TLSV1_ALERT_NO_APPLICATION_PROTOCOL": "alert_no_application_protocol",
+        "SSLV3_ALERT_BAD_RECORD_MAC": "alert_bad_record_mac",
+        "TLSV1_UNRECOGNIZED_NAME": "alert_unrecognized_name",
         "WRONG_VERSION_NUMBER": "wrong_version",
         "UNKNOWN_PROTOCOL": "unknown_protocol",
         "NO_SHARED_CIPHER": "no_shared_cipher",
@@ -917,7 +948,13 @@ class PublicRequestState:
             self.tls_handshake_successes += 1
 
     def record_tls_handshake_failure(self, reason: object) -> None:
-        reason_label = self.TLS_REASON_LABELS.get(reason, "other") if isinstance(reason, str) else "other"
+        reason_label = self.TLS_REASON_LABELS.get(reason) if isinstance(reason, str) else None
+        if reason_label is None and isinstance(reason, str) and re.fullmatch(
+            r"(?:SSLV3|TLSV1|TLSV1_2|TLSV1_3)_ALERT_[A-Z0-9_]{1,48}", reason,
+        ):
+            reason_label = "unlisted_tls_alert"
+        if reason_label is None:
+            reason_label = "other"
         with self.lock:
             self.tls_failure_counts[reason_label] = self.tls_failure_counts.get(reason_label, 0) + 1
 
@@ -1119,6 +1156,28 @@ def make_certificates(root: Path) -> tuple[Path, Path, Path]:
     return ca_cert, leaf_cert, leaf_key
 
 
+def prepare_chromium_nss_trust(ca_certificate: Path, browser_home: Path) -> None:
+    nss_database = browser_home / ".pki" / "nssdb"
+    try:
+        nss_database.mkdir(mode=0o700, parents=True)
+        database_arg = f"sql:{nss_database}"
+        subprocess.run(
+            ["certutil", "-N", "-d", database_arg, "--empty-password"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True, timeout=15,
+        )
+        subprocess.run(
+            [
+                "certutil", "-A", "-d", database_arg, "-n", "Herdr disposable package fixture CA",
+                "-t", "C,,", "-i", str(ca_certificate),
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True, timeout=15,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        die("isolated Chromium NSS trust store setup failed", "fixture_browser_nss_setup_failed")
+
+
 def safe_link_from_output(output: bytes, origin: str) -> str | None:
     # This value remains in memory and is sent only through a private pipe to
     # Playwright. It is never printed, put in a log, or included in evidence.
@@ -1282,7 +1341,8 @@ def stop_launcher(process: subprocess.Popen[bytes]) -> bool:
 browser_stage = "browser_runner"
 browser_exception_type = ""
 browser_progress_record: dict[str, object] = {
-    "mode": "other", "stage": "browser_runner", "passed_cases": [], "profiles": [],
+    "mode": "other", "result": "unknown", "stage": "browser_runner",
+    "passed_cases": [], "profiles": [], "exception_type": "",
 }
 
 
@@ -1330,6 +1390,7 @@ def safe_browser_profile(value: object) -> dict[str, object] | None:
         "storage": storage,
         "console_errors": safe_counts("console_errors"),
         "page_errors": safe_counts("page_errors"),
+        "navigation_errors": safe_counts("navigation_errors"),
         "websockets": {
             field: count for field, count in value.get("websockets", {}).items()
             if field in {"attempts", "closed", "errors"} and type(count) is int and 0 <= count <= 16
@@ -1342,6 +1403,8 @@ def safe_browser_progress(value: object, mode: str) -> dict[str, object]:
     stage = record.get("stage")
     passed_cases = record.get("passed_cases")
     profiles = record.get("profiles")
+    result = record.get("result")
+    exception_type = record.get("exception_type")
     safe_profiles = []
     if isinstance(profiles, list):
         seen = set()
@@ -1352,11 +1415,13 @@ def safe_browser_progress(value: object, mode: str) -> dict[str, object]:
                 safe_profiles.append(safe_profile)
     return {
         "mode": mode if mode in {"enroll", "reprint", "restart"} else "other",
+        "result": result if isinstance(result, str) and result in {"pass", "fail"} else "unknown",
         "stage": stage if isinstance(stage, str) and stage in BROWSER_STAGES else "browser_runner",
         "passed_cases": [
             name for name in passed_cases if isinstance(name, str) and name in EXPECTED_CASES
         ] if isinstance(passed_cases, list) else [],
         "profiles": safe_profiles,
+        "exception_type": exception_type if isinstance(exception_type, str) and exception_type in BROWSER_EXCEPTION_TYPES else "",
     }
 
 
@@ -1389,12 +1454,31 @@ def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_p
         completed = subprocess.run(
             ["node", str(script)], input=json.dumps(browser_input).encode(), stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=180, check=False,
-            env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright"},
+            env={
+                **os.environ,
+                "HOME": str(package_root.parent / "chromium-home"),
+                "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright",
+            },
         )
     except subprocess.TimeoutExpired as error:
-        browser_progress_record = read_browser_progress(progress_path, mode)
+        output_record = None
+        raw_output = error.stdout
+        if isinstance(raw_output, bytes) and len(raw_output) <= 65536:
+            try:
+                output_record = json.loads(raw_output.decode("utf-8"))
+            except (UnicodeError, ValueError):
+                output_record = None
+        elif isinstance(raw_output, str) and len(raw_output) <= 65536:
+            try:
+                output_record = json.loads(raw_output)
+            except ValueError:
+                output_record = None
+        if isinstance(output_record, dict) and output_record.get("mode") == mode:
+            browser_progress_record = safe_browser_progress(output_record, mode)
+        else:
+            browser_progress_record = read_browser_progress(progress_path, mode)
         browser_stage = str(browser_progress_record["stage"])
-        browser_exception_type = type(error).__name__
+        browser_exception_type = "TimeoutExpired"
         die("persistent-profile browser acceptance exceeded its bounded runtime")
     # stdout is a bounded, sanitized JSON protocol, not Playwright's console.
     try:
@@ -1410,7 +1494,7 @@ def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_p
     browser_progress_record = safe_browser_progress(value, mode)
     browser_stage = str(browser_progress_record["stage"])
     error_value = value.get("exception_type", "")
-    browser_exception_type = error_value if isinstance(error_value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,47}", error_value) else ""
+    browser_exception_type = error_value if isinstance(error_value, str) and error_value in BROWSER_EXCEPTION_TYPES else ""
     if completed.returncode != 0 and not browser_exception_type:
         browser_exception_type = "BrowserAssertionError"
     return value
@@ -1646,6 +1730,7 @@ def main() -> int:
                     "revision_matches", "bundle_version_matches", "bundle_revision_matches", "origin_matches",
                 ))):
             die("exact packaged local health and bundle identity were not ready at route registration", "fixture_registration_health_identity")
+        prepare_chromium_nss_trust(ca, temporary_root / "chromium-home")
         browser_record = {
             "setup_url": link, "origin": origin, "profiles": str(temporary_root / "profiles"),
             "fake_herdr_operations": str(operations),
@@ -1881,7 +1966,7 @@ def main() -> int:
             "archive_path": str(archive),
             "workflow_url": workflow_url,
             "isolation": "docker-network-none-fixed-localapi-socket",
-            "tls_verification": "system-trust-inside-disposable-container; browser-ignore-disabled",
+            "tls_verification": "system-and-isolated-chromium-nss; browser-ignore-disabled",
             "current_stage": current_stage,
             "completed_stages": completed_stages,
             "exception_type": failure_type,

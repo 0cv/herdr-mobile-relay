@@ -64,7 +64,7 @@ const profileNames = new Set(['controller', 'reader']);
 const storageCheckpoints = new Set(['after_navigation', 'credential_wait_failed', 'credentialed']);
 const diagnosticCategories = new Set([
   'websocket', 'network', 'storage', 'tls', 'type_error', 'reference_error',
-  'syntax_error', 'dom_exception', 'console_error', 'page_error',
+  'syntax_error', 'dom_exception', 'console_error', 'page_error', 'navigation_error',
 ]);
 const profileDiagnostics = new Map();
 let progressWriteQueue = Promise.resolve();
@@ -73,9 +73,9 @@ function classifyDiagnostic(message, errorName, fallback) {
   const sample = String(message ?? '').slice(0, 2048);
   const rules = [
     [/websocket|web socket/i, 'websocket'],
+    [/certificate|tls|ssl|err_cert_/i, 'tls'],
     [/fetch|network|net::err_|failed to load resource/i, 'network'],
     [/localstorage|storage|quota/i, 'storage'],
-    [/certificate|tls|ssl|err_cert_/i, 'tls'],
     [/typeerror/i, 'type_error'],
     [/referenceerror/i, 'reference_error'],
     [/syntaxerror/i, 'syntax_error'],
@@ -106,7 +106,7 @@ function incrementWebSocket(profile, kind) {
 function observePage(profile, page) {
   const label = profileNames.has(profile) ? profile : 'controller';
   const diagnostics = {
-    profile: label, storage: [], console_errors: {}, page_errors: {},
+    profile: label, storage: [], console_errors: {}, page_errors: {}, navigation_errors: {},
     websockets: { attempts: 0, closed: 0, errors: 0 },
   };
   profileDiagnostics.set(label, diagnostics);
@@ -176,14 +176,24 @@ async function openProfile(profile, path, url) {
     viewport: { width: 412, height: 915 },
     deviceScaleFactor: 1,
     serviceWorkers: 'allow',
-    // No ignoreHTTPSErrors and no certificate-ignore launch flags: the
-    // disposable container trusts the fixture CA using its ordinary CA store.
+    // No ignoreHTTPSErrors or certificate-ignore launch flags; the fixture CA
+    // is imported into this run's private HOME NSS store.
   });
   context.setDefaultTimeout(deadline);
   context.setDefaultNavigationTimeout(deadline);
   const page = context.pages()[0] || await context.newPage();
   observePage(profile, page);
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: deadline });
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: deadline });
+  } catch (error) {
+    let text = '';
+    let name = '';
+    try { text = String(error?.message ?? '').slice(0, 2048); } catch { /* category remains allowlisted */ }
+    try { name = String(error?.name ?? '').slice(0, 64); } catch { /* category remains allowlisted */ }
+    incrementDiagnostic(profile, 'navigation_errors', classifyDiagnostic(text, name, 'navigation_error'));
+    await writeProgress();
+    throw error;
+  }
   await recordStorageSnapshot(profile, 'after_navigation', page);
   return { context, page };
 }
@@ -290,6 +300,7 @@ function profileEvidence() {
     storage: profile.storage.slice(0, 8),
     console_errors: { ...profile.console_errors },
     page_errors: { ...profile.page_errors },
+    navigation_errors: { ...profile.navigation_errors },
     websockets: { ...profile.websockets },
   }));
 }
@@ -312,6 +323,34 @@ function writeProgress() {
     }
   });
   return progressWriteQueue;
+}
+
+let resultEmitted = false;
+async function emitBrowserResult(values = {}, error = null) {
+  if (resultEmitted) return;
+  const expectedCount = input.mode === 'enroll' ? 3 : 1;
+  const passed = cases.length === expectedCount && cases.every((entry) => entry.passed);
+  const safeResult = {
+    mode: ['enroll', 'reprint', 'restart'].includes(input.mode) ? input.mode : 'other',
+    result: error ? 'fail' : passed ? 'pass' : 'fail',
+    passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name),
+    stage: progressStages.has(stage) ? stage : 'browser_runner',
+    profiles: profileEvidence(),
+  };
+  for (const key of [
+    'controller_enrolled', 'controller_read', 'controller_command', 'reader_enrolled',
+    'reader_read', 'reader_mutation_denied', 'credentials_preserved',
+  ]) {
+    if (typeof values?.[key] === 'boolean') safeResult[key] = values[key];
+  }
+  if (error) {
+    const name = error && typeof error === 'object' && typeof error.constructor?.name === 'string'
+      ? error.constructor.name : 'BrowserError';
+    safeResult.exception_type = /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(name) ? name : 'BrowserError';
+  } else if (!passed) safeResult.exception_type = 'BrowserAssertionError';
+  resultEmitted = true;
+  await new Promise((resolve) => process.stdout.write(JSON.stringify(safeResult) + '\n', resolve));
+  await writeProgress();
 }
 
 async function setStage(value) {
@@ -389,7 +428,7 @@ async function initialEnrollment() {
       controller: fingerprint(controllerNow),
       reader: fingerprint(readerNow),
     }), { mode: 0o600 });
-    return {
+    const values = {
       controller_enrolled: controllerCredential?.role === 'controller',
       controller_read: readWorked,
       controller_command: (await operationKinds(input.fake_herdr_operations)).includes('agent prompt'),
@@ -398,6 +437,11 @@ async function initialEnrollment() {
       reader_mutation_denied: denied && before === after,
       credentials_preserved: true,
     };
+    await emitBrowserResult(values);
+    return values;
+  } catch (error) {
+    await emitBrowserResult({}, error);
+    throw error;
   } finally {
     await closeContextBounded(reader?.context);
     await closeContextBounded(controller?.context);
@@ -419,11 +463,16 @@ async function preserveExistingProfiles() {
     await waitForAgent(controller.page);
     await waitForAgent(reader.page);
     record('reprint_and_managed_restart_preserve_enrolled_device_credentials', same);
-    return {
+    const values = {
       controller_enrolled: true,
       reader_enrolled: true,
       credentials_preserved: same,
     };
+    await emitBrowserResult(values);
+    return values;
+  } catch (error) {
+    await emitBrowserResult({}, error);
+    throw error;
   } finally {
     await closeContextBounded(reader?.context);
     await closeContextBounded(controller?.context);
@@ -431,6 +480,10 @@ async function preserveExistingProfiles() {
 }
 
 const jsDeadlineTimer = setTimeout(() => {
+  if (resultEmitted) {
+    process.exit(1);
+    return;
+  }
   const timeoutRecord = {
     mode: ['enroll', 'reprint', 'restart'].includes(input.mode) ? input.mode : 'other',
     result: 'fail',
@@ -439,6 +492,7 @@ const jsDeadlineTimer = setTimeout(() => {
     stage: progressStages.has(stage) ? stage : 'browser_runner',
     profiles: profileEvidence(),
   };
+  resultEmitted = true;
   process.stdout.write(JSON.stringify(timeoutRecord) + '\n', () => process.exit(1));
 }, 150000);
 
@@ -461,6 +515,8 @@ try {
   result = { mode: input.mode, result: 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name), exception_type: /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(type) ? type : 'BrowserError' };
 }
 clearTimeout(jsDeadlineTimer);
-await writeProgress();
-process.stdout.write(JSON.stringify({ ...result, stage, profiles: profileEvidence() }) + '\n');
+if (!resultEmitted) {
+  await writeProgress();
+  process.stdout.write(JSON.stringify({ ...result, stage, profiles: profileEvidence() }) + '\n');
+}
 process.exitCode = result.result === 'pass' ? 0 : 1;
