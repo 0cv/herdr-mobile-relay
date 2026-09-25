@@ -370,7 +370,28 @@ func defaultWebRoot() string {
 		}
 		return filepath.Join(filepath.Dir(exe), "web")
 	}
+	if webRoot := extractedReleaseWebRoot(exe); webRoot != "" {
+		return webRoot
+	}
 	return filepath.Join(filepath.Dir(filepath.Dir(exe)), "web")
+}
+
+func extractedReleaseWebRoot(exe string) string {
+	releaseDir := filepath.Dir(exe)
+	manifest, err := os.Lstat(filepath.Join(releaseDir, "release-manifest.json"))
+	if err != nil || !manifest.Mode().IsRegular() {
+		return ""
+	}
+	webRoot := filepath.Join(releaseDir, "web")
+	webInfo, err := os.Lstat(webRoot)
+	if err != nil || !webInfo.IsDir() {
+		return ""
+	}
+	descriptor, err := os.Lstat(filepath.Join(webRoot, "release.json"))
+	if err != nil || !descriptor.Mode().IsRegular() {
+		return ""
+	}
+	return webRoot
 }
 
 func installedReleaseRoot() string {

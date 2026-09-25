@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -33,6 +34,30 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.LogLevel != slog.LevelInfo {
 		t.Errorf("log level = %v, want %v", cfg.LogLevel, slog.LevelInfo)
+	}
+}
+
+func TestExtractedReleaseWebRootRequiresPackagedProvenance(t *testing.T) {
+	releaseDir := filepath.Join(t.TempDir(), "release")
+	webRoot := filepath.Join(releaseDir, "web")
+	if err := os.MkdirAll(webRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(releaseDir, "herdr-mobile-relay")
+	if got := extractedReleaseWebRoot(executable); got != "" {
+		t.Fatalf("web root without release manifest = %q, want empty", got)
+	}
+	if err := os.WriteFile(filepath.Join(releaseDir, "release-manifest.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := extractedReleaseWebRoot(executable); got != "" {
+		t.Fatalf("web root without public release descriptor = %q, want empty", got)
+	}
+	if err := os.WriteFile(filepath.Join(webRoot, "release.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := extractedReleaseWebRoot(executable); got != webRoot {
+		t.Fatalf("extracted release web root = %q, want %q", got, webRoot)
 	}
 }
 
