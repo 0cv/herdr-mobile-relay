@@ -16,9 +16,13 @@ policy. The LocalAPI-specific admission additionally requires `extraGitCommit`
 and `osVariant` to be absent or empty; supplemental GUI builds need a separately
 source-qualified exact policy and are refused here. Matching source metadata is
 not cryptographic artifact provenance. The legacy `Inspect` version contract is
-unchanged. Test injection exists only in package `_test.go` code and uses an
-in-memory `RoundTripper`; there is no environment, CLI, arbitrary-URL, or fake
-owned-session escape hatch.
+unchanged. Ordinary unit tests use in-memory `RoundTripper`s in `_test.go` files.
+The positive hosted app test uses `session_testbridge.go`, which is compiled only
+with the explicit `herdr_tailscale_test` build tag and accepts only a raw
+protocol `RoundTripper`; fixed LocalAPI host/path allowlists and production
+response validation still execute. It exposes no owned/readiness injection and
+is absent from normal production builds. There is no environment, CLI, or
+arbitrary-URL escape hatch.
 
 ## Pinned source and request protocol
 
@@ -36,7 +40,7 @@ The adapter permits only these requests to `http://local-tailscaled.sock`:
 | GET | `/localapi/v0/status` | Bounded complete JSON; existing strict status parser; response status version and `Tailscale-Version` must equal the independently admitted pinned version. The session owner additionally validates pinned `Self.CapMap` and requires the exact `https` capability key (`tailcfg.CapabilityHTTPS`); legacy `Capabilities` and `CertDomains` alone do not qualify. |
 | GET | `/localapi/v0/serve-config` | Bounded complete JSON object, or source-valid `null` for absent config; exactly one nonempty source SHA-256 ETag (64 lowercase hex characters); response version checked. The raw value is preserved. |
 | POST | `/localapi/v0/serve-config` | One conditional attempt only; a nonempty source-shaped ETag is mandatory; config must be one bounded strict JSON object before dispatch. No idempotency header or body replay handle. |
-| GET | `/localapi/v0/watch-ipn-bus?mask=NotifyInitialState` | Long-lived newline-delimited JSON stream; bounded first event and locally retained initial nonempty session ID. |
+| GET | `/localapi/v0/watch-ipn-bus?mask=2` | The pinned `ipn.NotifyWatchOpt` text codec encodes `NotifyInitialState` as decimal `2`; the daemon parses `mask` with `strconv.ParseUint`. Long-lived newline-delimited JSON stream; bounded first event and locally retained initial nonempty session ID. |
 
 No other methods, query strings, path aliases, hosts, schemes, proxy authorization,
 redirect targets, custom sockets, or network endpoints are accepted. The configured
@@ -47,7 +51,7 @@ One-shot requests (including response reads)
 use five-second contexts; each response body and each watch JSON event is capped
 at 1 MiB. The existing `strictJSON` enforces the byte, UTF-8, single-document,
 depth, value,
-duplicate-name, and case-conflict rules. Watch lines require a terminating LF;
+duplicate-name, and case-conflict rules. The watch allowlist requires the pinned numeric query `mask=2`; symbolic Go constant names are not accepted by the daemon's decimal parser. Watch lines require a terminating LF;
 unterminated, malformed, oversized, invalid UTF-8, wrong-version, or unexpected
 post-initial-session events fail closed. Cancellation closes the body and joins
 the local reader. The five-second initial-watch deadline includes connection,

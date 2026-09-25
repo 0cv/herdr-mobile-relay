@@ -23,7 +23,7 @@ const (
 	localAPIStatusPath      = "/localapi/v0/status"
 	localAPIServeConfigPath = "/localapi/v0/serve-config"
 	localAPIWatchPath       = "/localapi/v0/watch-ipn-bus"
-	localAPIWatchQuery      = "mask=NotifyInitialState"
+	localAPIWatchQuery      = "mask=2"
 	localAPIRequestTimeout  = 5 * time.Second
 	localAPIWatchMaxEvent   = 1 << 20
 	localAPIDiagnosticLimit = 64 << 10

@@ -25,6 +25,7 @@ const managedHealthTimeout = 5 * time.Second
 type managedTailscaleAuthority interface {
 	Activate(context.Context) error
 	Validate(context.Context) error
+	WithValidatedRoute(context.Context, func() error, func() error) error
 	Retire(context.Context) error
 	Invalidation() <-chan struct{}
 	Status() tailscale.AuthorityStatus
@@ -94,14 +95,24 @@ func (s *Server) managedLocalReady() bool {
 }
 
 func (s *Server) validateTailscaleOwner(ctx context.Context) error {
-	if s == nil || s.tailscaleSession == nil || s.managedOwner == nil {
+	if s == nil || s.tailscaleSession == nil {
 		return errors.New("managed Tailscale owner is unavailable")
 	}
-	if err := s.managedOwner.Validate(); err != nil {
-		return fmt.Errorf("managed owner validation failed: %w", err)
+	if err := s.validateManagedOwner(); err != nil {
+		return err
 	}
 	if err := s.tailscaleSession.Validate(ctx); err != nil {
 		return fmt.Errorf("live Tailscale route validation failed: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) validateManagedOwner() error {
+	if s == nil || s.managedOwner == nil {
+		return errors.New("managed owner is unavailable")
+	}
+	if err := s.managedOwner.Validate(); err != nil {
+		return fmt.Errorf("managed owner validation failed: %w", err)
 	}
 	return nil
 }
@@ -151,53 +162,164 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 	if err := s.ensureManagedDeviceStore(); err != nil {
 		return s.pairingControlStatusContext(ctx), err
 	}
-	if err := s.checkManagedTailscaleReadiness(ctx, false); err != nil {
-		s.quarantineTailscale()
-		return s.pairingControlStatusContext(ctx), err
-	}
-	select {
-	case <-s.tailscaleSession.Invalidation():
-		s.quarantineTailscale()
-		return s.pairingControlStatusContext(ctx), errors.New("Tailscale owner was invalidated before invitation persistence")
-	default:
-	}
-	store := s.deviceStore()
-	if err := store.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en"); err != nil {
+
+	// Pairing revocation, the final owner validation, and durable arm are
+	// serialized together. SessionAuthority holds its operation lock from the
+	// post-health revalidation through this gate commit, so watcher loss is
+	// ordered either before the invitation write or after its linearization.
+	s.pairingAdmissionMu.Lock()
+	err := s.tailscaleSession.WithValidatedRoute(ctx, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.checkManagedTailscaleReadinessWithoutOwner(ctx, true); err != nil {
+			return err
+		}
+		return s.validateManagedOwner()
+	}, func() error {
+		return s.bootstrapGate.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en", func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return s.validateManagedOwner()
+		}, func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return s.validateManagedOwner()
+		})
+	})
+	if err != nil {
+		s.pairingAdmissionMu.Unlock()
+		if errors.Is(err, deviceauth.ErrManagedArmRecovery) || s.tailscaleSession.Status().Invalidated || s.tailscaleSession.Status().Quarantined {
+			s.quarantineTailscale()
+		}
 		s.recordSafeError("bootstrap invitation arm failed", err)
 		return s.pairingControlStatusContext(ctx), err
 	}
-	if err := s.checkManagedTailscaleReadiness(ctx, false); err != nil {
-		s.quarantineTailscale()
-		return s.pairingControlStatusContext(ctx), err
+
+	// Snapshot the durable invitation before accepting sessions. A phone may
+	// consume it as soon as Hub admission opens; the control ACK still reports
+	// the committed arm rather than mistaking that race for a failed write.
+	invitation := s.deviceStore().BootstrapStatus()
+	ownerStatus := s.tailscaleSession.Status()
+	serveReady := ownerStatus.Active && ownerStatus.RouteValidated && !ownerStatus.Quarantined && !ownerStatus.Invalidated && !ownerStatus.RouteCleared
+	status := localcontrol.Status{
+		Ready:                        serveReady && invitation.Armed,
+		OwnerHeld:                    true,
+		LocalReady:                   true,
+		ServeReady:                   serveReady,
+		Quarantined:                  ownerStatus.Quarantined || ownerStatus.Invalidated,
+		RouteCleared:                 ownerStatus.RouteCleared,
+		LocalWatchClosed:             ownerStatus.LocalWatchClosed,
+		RemoteWatchRetirementUnknown: ownerStatus.RemoteWatchRetirementUnknown,
+		Transport:                    s.cfg.Transport,
+		Version:                      s.version,
+		Revision:                     s.revision,
+		InvitationArmed:              invitation.Armed,
+		InvitationPending:            invitation.Pending,
 	}
-	select {
-	case <-s.tailscaleSession.Invalidation():
-		s.quarantineTailscale()
-		return s.pairingControlStatusContext(ctx), errors.New("Tailscale owner was invalidated before pairing arm")
-	default:
+	if s.webH != nil {
+		status.BundleHash = s.webH.BundleHash()
 	}
-	if err := s.bootstrapGate.Open(); err != nil {
-		return s.pairingControlStatusContext(ctx), err
+	if !invitation.ExpiresAt.IsZero() {
+		status.InvitationExpiresAt = invitation.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	s.hub.SetAccepting(true)
-	s.mu.Lock()
-	s.quarantined = false
-	s.mu.Unlock()
-	status := s.pairingControlStatusContext(ctx)
-	if !status.Ready || !status.InvitationArmed {
-		s.quarantineTailscale()
-		return s.pairingControlStatusContext(ctx), errors.New("pairing readiness was not acknowledged")
+	if status.Quarantined || !status.ServeReady {
+		s.quarantineTailscaleLocked()
+	} else {
+		s.hub.SetAccepting(true)
+		s.mu.Lock()
+		s.quarantined = false
+		s.mu.Unlock()
 	}
+	s.pairingAdmissionMu.Unlock()
 	return status, nil
+}
+
+// unwindManagedStartup is used only before the private control socket is
+// published. In that phase activation is provably undispatched, so the real
+// SessionAuthority can safely retire its prepared state without a route POST.
+// An unexpected dispatched/active state is not silently released.
+func (s *Server) unwindManagedStartup(startupErr error) error {
+	if s == nil || s.tailscaleSession == nil {
+		return startupErr
+	}
+	state := s.tailscaleSession.Status()
+	if state.RouteCleared && state.LocalWatchClosed {
+		s.CompleteManagedTailscaleRetirement()
+		return startupErr
+	}
+	if state.Active || state.RegistrationOutcome != "not-dispatched" {
+		return s.retainManagedOwnerForStartupFailure(startupErr, errors.New("startup failure occurred after Tailscale activation may have been dispatched"))
+	}
+	retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+	retireErr := s.RetireManagedTailscale(retireCtx)
+	cancel()
+	if retireErr != nil || !s.ManagedOwnerReleaseSafe() {
+		if retireErr == nil {
+			retireErr = errors.New("pre-activation retirement did not prove route clear and local watch closure")
+		}
+		return s.retainManagedOwnerForStartupFailure(startupErr, fmt.Errorf("safe pre-activation Tailscale unwind failed: %w", retireErr))
+	}
+	s.CompleteManagedTailscaleRetirement()
+	return startupErr
+}
+
+// retainManagedOwnerForStartupFailure prevents a cleanup failure before the
+// normal control server exists from returning through runServe and dropping O.
+// It publishes a retirement-only control endpoint when possible and blocks
+// until the real SessionAuthority proves route clear and local watch closure.
+func (s *Server) retainManagedOwnerForStartupFailure(startupErr, unwindErr error) error {
+	s.quarantineTailscale()
+	combinedErr := errors.Join(startupErr, unwindErr)
+	if s.cfg.PairingSocketPath == "" {
+		s.logger.Error("startup cleanup is unresolved and no private control socket is configured; retaining managed owner", "error", combinedErr)
+		<-s.managedRetired
+		return combinedErr
+	}
+	control, err := localcontrol.NewManaged(s.cfg.PairingSocketPath, s.cfg.ManagedRunID, s.cfg.InstanceID, localcontrol.Callbacks{
+		Status: s.pairingControlStatusContext,
+		Activate: func(ctx context.Context) (localcontrol.Status, error) {
+			return s.controlStatus(ctx), errors.New("startup failed; Tailscale activation is unavailable")
+		},
+		Arm: func(ctx context.Context) (localcontrol.Status, error) {
+			return s.controlStatus(ctx), errors.New("startup failed; bootstrap arming is unavailable")
+		},
+		Retire:  s.retireForControl,
+		Retired: s.CompleteManagedTailscaleRetirement,
+	})
+	if err != nil {
+		s.logger.Error("startup cleanup is unresolved and retirement control could not be published; retaining managed owner", "error", errors.Join(combinedErr, err))
+		<-s.managedRetired
+		return errors.Join(combinedErr, err)
+	}
+	s.pairingControl = control
+	controlCtx, cancel := context.WithCancel(context.Background())
+	controlDone := make(chan error, 1)
+	go func() { controlDone <- control.Run(controlCtx) }()
+	select {
+	case <-s.managedRetired:
+	case controlErr := <-controlDone:
+		s.logger.Error("startup retirement control stopped while cleanup is unresolved; retaining managed owner", "error", controlErr)
+		<-s.managedRetired
+	}
+	cancel()
+	if err := control.Close(); err != nil {
+		s.logger.Error("close startup retirement control", "error", err)
+		combinedErr = errors.Join(combinedErr, err)
+	}
+	s.pairingControl = nil
+	return combinedErr
 }
 
 func (s *Server) ensureManagedDeviceStore() error {
 	store := s.deviceStore()
 	if store == nil {
 		var err error
-		store, err = deviceauth.Open(filepath.Join(s.cfg.RuntimeDir, "device-auth"))
+		store, err = deviceauth.OpenDeferred(filepath.Join(s.cfg.RuntimeDir, "device-auth"))
 		if err != nil {
-			return fmt.Errorf("initialize device authentication after Tailscale readiness: %w", err)
+			return fmt.Errorf("open device authentication read-only after Tailscale readiness: %w", err)
 		}
 		if err := s.attachDeviceStore(store); err != nil {
 			return err
@@ -215,6 +337,20 @@ func (s *Server) checkManagedTailscaleReadiness(ctx context.Context, verifyBundl
 	}
 	if err := s.validateTailscaleOwner(ctx); err != nil {
 		return err
+	}
+	if err := s.checkManagedTailscaleReadinessWithoutOwner(ctx, verifyBundle); err != nil {
+		return err
+	}
+	return s.validateTailscaleOwner(ctx)
+}
+
+// checkManagedTailscaleReadinessWithoutOwner is used only while
+// SessionAuthority.WithValidatedRoute holds its operation lock across the
+// health pass and invitation commit. That method performs live route
+// validation both before and after this callback.
+func (s *Server) checkManagedTailscaleReadinessWithoutOwner(ctx context.Context, verifyBundle bool) error {
+	if !s.managedLocalReady() {
+		return errors.New("local relay readiness is incomplete")
 	}
 	if s.udp == nil {
 		return errors.New("managed UDP listener is unavailable")
@@ -237,13 +373,13 @@ func (s *Server) checkManagedTailscaleReadiness(ctx context.Context, verifyBundl
 			return fmt.Errorf("public HTTPS bundle verification failed: %w", err)
 		}
 	}
-	return s.validateTailscaleOwner(ctx)
+	return nil
 }
 
 func (s *Server) checkLocalHealth(ctx context.Context) error {
 	checkCtx, cancel := context.WithTimeout(ctx, managedHealthTimeout)
 	defer cancel()
-	client := managedHealthClient(managedHealthTimeout)
+	client := managedHealthClientForServer(s, managedHealthTimeout)
 	request, err := http.NewRequestWithContext(checkCtx, http.MethodGet, "http://"+s.cfg.Addr()+"/readyz", nil)
 	if err != nil {
 		return err
@@ -268,7 +404,7 @@ func (s *Server) checkLocalHealth(ctx context.Context) error {
 func (s *Server) checkPublicHealth(ctx context.Context, origin string) error {
 	checkCtx, cancel := context.WithTimeout(ctx, managedHealthTimeout)
 	defer cancel()
-	client := managedHealthClient(managedHealthTimeout)
+	client := managedHealthClientForServer(s, managedHealthTimeout)
 	request, err := http.NewRequestWithContext(checkCtx, http.MethodGet, strings.TrimSuffix(origin, "/")+"/healthz", nil)
 	if err != nil {
 		return err
@@ -334,6 +470,12 @@ func (s *Server) quarantineTailscale() {
 	if s == nil || s.tailscaleSession == nil {
 		return
 	}
+	s.pairingAdmissionMu.Lock()
+	defer s.pairingAdmissionMu.Unlock()
+	s.quarantineTailscaleLocked()
+}
+
+func (s *Server) quarantineTailscaleLocked() {
 	if s.bootstrapGate != nil {
 		s.bootstrapGate.Revoke()
 	}

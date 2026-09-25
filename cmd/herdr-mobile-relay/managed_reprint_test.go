@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/managedstate"
 )
 
@@ -80,6 +82,48 @@ func startReprintControlServer(t *testing.T, response string) string {
 	return socket
 }
 
+func startControllableReprintControlServer(t *testing.T, response string) (string, <-chan struct{}, func(), <-chan struct{}) {
+	t.Helper()
+	socket := filepath.Join(shortReprintDir(t), "control.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen delayed fake control socket: %v", err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	clientClosed := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		unblock()
+		_ = listener.Close()
+	})
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_ = connection.SetDeadline(time.Now().Add(10 * time.Second))
+		if _, err := bufio.NewReader(connection).ReadString('\n'); err != nil {
+			return
+		}
+		close(started)
+		go func() {
+			var extra [1]byte
+			_, _ = connection.Read(extra[:])
+			close(clientClosed)
+		}()
+		select {
+		case <-release:
+			_, _ = io.WriteString(connection, response+"\n")
+		case <-clientClosed:
+		case <-time.After(10 * time.Second):
+		}
+	}()
+	return socket, started, unblock, clientClosed
+}
+
 // stageReprintJournal leaves a real staged S7A journal on the root and releases
 // T so the command can observe retained evidence.
 func stageReprintJournal(t *testing.T, dir, runID, originFile string, prior, next []byte) {
@@ -141,6 +185,15 @@ func assertNoReprintTransactionLock(t *testing.T, dir string) {
 	}
 }
 
+func TestManagedReprintBudgetCoversArmAcknowledgement(t *testing.T) {
+	if managedReprintArmTimeout != localcontrol.ArmTimeout {
+		t.Fatalf("reprint arm timeout = %s, control arm timeout = %s", managedReprintArmTimeout, localcontrol.ArmTimeout)
+	}
+	if managedReprintDefaultDeadline <= localcontrol.ArmTimeout || managedReprintMaxDeadline <= localcontrol.ArmTimeout {
+		t.Fatalf("reprint transaction bounds (default=%s max=%s) do not include the full arm operation (%s)", managedReprintDefaultDeadline, managedReprintMaxDeadline, localcontrol.ArmTimeout)
+	}
+}
+
 func TestManagedStateReprintAppliesOriginAndAcks(t *testing.T) {
 	dir := reprintOwnedRoot(t)
 	origin := filepath.Join(dir, reprintOriginFile)
@@ -176,6 +229,98 @@ func TestManagedStateReprintAppliesOriginAndAcks(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestManagedStateReprintWaitsForDelayedArmAcknowledgementWithinBudget(t *testing.T) {
+	dir := reprintOwnedRoot(t)
+	origin := filepath.Join(dir, reprintOriginFile)
+	if err := os.WriteFile(origin, []byte("https://old.example"), 0o600); err != nil {
+		t.Fatalf("write prior origin: %v", err)
+	}
+	socket, started, release, _ := startControllableReprintControlServer(t, `{"ok":true,"invitation_armed":true,"invitation_expires_at":"2026-06-01T00:00:00Z"}`)
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- runManagedReprint([]string{
+			"--dir", dir, "--socket", socket,
+			"--run-id", "run-delayed", "--instance", "instance-delayed",
+			"--origin-value", "https://new.example",
+		}, &stdout, &stderr)
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reprint did not reach the deliberately delayed arm acknowledgement")
+	}
+	release()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("delayed reprint exit = %d (stderr=%s)", code, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reprint did not complete after delayed arm acknowledgement")
+	}
+	if got := string(readReprintFile(t, origin)); got != "https://new.example" {
+		t.Fatalf("delayed reprint origin = %q, want new value", got)
+	}
+	assertNoReprintJournal(t, dir)
+}
+
+func TestManagedStateReprintCancellationRetainsStagedJournal(t *testing.T) {
+	dir := reprintOwnedRoot(t)
+	origin := filepath.Join(dir, reprintOriginFile)
+	if err := os.WriteFile(origin, []byte("https://old.example"), 0o600); err != nil {
+		t.Fatalf("write prior origin: %v", err)
+	}
+	socket, started, _, clientClosed := startControllableReprintControlServer(t, "")
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- runManagedReprint([]string{
+			"--dir", dir, "--socket", socket,
+			"--run-id", "run-canceled", "--instance", "instance-canceled",
+			"--origin-value", "https://new.example", "--deadline", "3s",
+		}, &stdout, &stderr)
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reprint did not reach the delayed arm acknowledgement")
+	}
+	select {
+	case code := <-done:
+		if code != 6 {
+			t.Fatalf("canceled reprint exit = %d, want uncertain outcome 6 (stderr=%s)", code, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reprint did not honor its bounded transaction cancellation")
+	}
+	select {
+	case <-clientClosed:
+	case <-time.After(time.Second):
+		t.Fatal("reprint cancellation did not close the pending control request")
+	}
+	if got := string(readReprintFile(t, origin)); got != "https://old.example" {
+		t.Fatalf("canceled reprint changed origin to %q", got)
+	}
+	root, err := managedstate.OpenExistingRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenExistingRoot after cancellation: %v", err)
+	}
+	status, err := managedstate.RecoverJournal(root)
+	if err != nil {
+		t.Fatalf("RecoverJournal after cancellation: %v", err)
+	}
+	if !status.Present || status.State != "staged" {
+		t.Fatalf("canceled reprint journal = %+v, want present staged", status)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatalf("close root after cancellation: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("canceled reprint stdout = %q, want empty", stdout.String())
 	}
 }
 
@@ -247,6 +392,13 @@ func TestManagedStateReprintArmRejectionRollsBack(t *testing.T) {
 	assertNoReprintTransactionLock(t, dir)
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
+func TestManagedReprintDeadlineCoversArmBudgetAndOwnerAcquisition(t *testing.T) {
+	minimumSafeDeadline := managedReprintArmTimeout + managedReprintAcquireLimit
+	if managedReprintDefaultDeadline < minimumSafeDeadline || managedReprintMaxDeadline < minimumSafeDeadline {
+		t.Fatalf("reprint default/max budgets %s/%s do not cover arm %s plus owner acquisition %s", managedReprintDefaultDeadline, managedReprintMaxDeadline, managedReprintArmTimeout, managedReprintAcquireLimit)
 	}
 }
 

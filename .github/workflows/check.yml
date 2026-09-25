@@ -51,6 +51,121 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+  tailscale-app-integration:
+    needs: provenance
+    name: Managed Tailscale app/control integration (hosted, no credentials)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: true
+      - name: Run required app/control cases and write sanitized evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "candidate_sha=$GITHUB_SHA"
+          log="$RUNNER_TEMP/tailscale-app-integration.jsonl"
+          evidence="$RUNNER_TEMP/tailscale-app-integration-evidence.json"
+          if go test -json -tags=herdr_tailscale_test ./internal/app \
+            -run '^(TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire|TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets|TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation|TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation|TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement)$' \
+            -count=1 2>&1 | tee "$log"; then
+            test_exit=0
+          else
+            test_exit=$?
+          fi
+          python3 - "$log" "$evidence" "$GITHUB_SHA" "$test_exit" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          log_path, evidence_path, candidate_sha, test_exit_text = sys.argv[1:]
+          required = [
+              "TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire",
+              "TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets",
+              "TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation",
+              "TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation",
+              "TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement",
+          ]
+          actions = {}
+          observed_tests = set()
+          parse_failed = False
+          with pathlib.Path(log_path).open(encoding="utf-8") as stream:
+              for line in stream:
+                  try:
+                      event = json.loads(line)
+                  except json.JSONDecodeError:
+                      parse_failed = True
+                      continue
+                  name = event.get("Test")
+                  if name:
+                      observed_tests.add(name)
+                      actions.setdefault(name, []).append(event.get("Action"))
+
+          results = []
+          for name in required:
+              terminal = [action for action in actions.get(name, []) if action in {"pass", "skip", "fail"}]
+              descendants = [
+                  action
+                  for test_name, test_actions in actions.items()
+                  if test_name.startswith(name + "/")
+                  for action in test_actions
+                  if action in {"skip", "fail"}
+              ]
+              if "fail" in terminal or "fail" in descendants:
+                  result = "fail"
+              elif "skip" in terminal or "skip" in descendants:
+                  result = "skip"
+              elif terminal == ["pass"] and not descendants:
+                  result = "pass"
+              elif not terminal:
+                  result = "missing"
+              else:
+                  result = "invalid-event-count"
+              results.append({"name": name, "result": result})
+
+          try:
+              test_exit = int(test_exit_text)
+          except ValueError:
+              test_exit = 1
+              parse_failed = True
+          passed = (
+              test_exit == 0
+              and bool(observed_tests)
+              and all(case["result"] == "pass" for case in results)
+              and not parse_failed
+          )
+          evidence = {
+              "schema_version": 1,
+              "candidate_sha": candidate_sha,
+              "go_test_exit_code": test_exit,
+              "test_cases_observed": len(observed_tests),
+              "required_cases": results,
+              "json_parse_complete": not parse_failed,
+              "result": "pass" if passed else "fail",
+          }
+          pathlib.Path(evidence_path).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+          if not passed:
+              print("required tagged integration cases failed evidence validation", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+      - name: Upload sanitized integration evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tailscale-app-integration-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/tailscale-app-integration-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+
   journal:
     needs: provenance
     name: Linux journald logging acceptance

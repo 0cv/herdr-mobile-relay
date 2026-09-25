@@ -435,6 +435,56 @@ func TestSessionAuthorityZeroValueFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSessionAuthorityValidatedRouteSerializesCommitAgainstWatchLoss(t *testing.T) {
+	d := newSessionDaemon()
+	authority := prepareAndActivate(t, d)
+	authority.mu.Lock()
+	watch := authority.watch
+	authority.mu.Unlock()
+	if watch == nil {
+		t.Fatal("active SessionAuthority has no retained watch")
+	}
+	admissionStarted := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	operationDone := make(chan error, 1)
+	committed := false
+	go func() {
+		operationDone <- authority.WithValidatedRoute(context.Background(), func() error {
+			close(admissionStarted)
+			<-releaseAdmission
+			return nil
+		}, func() error {
+			committed = true
+			return nil
+		})
+	}()
+	select {
+	case <-admissionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("validated admission callback did not start")
+	}
+	d.loseWatch(sessionTestID)
+	select {
+	case <-watch.done():
+	case <-time.After(time.Second):
+		close(releaseAdmission)
+		t.Fatal("local watch did not observe injected EOF")
+	}
+	close(releaseAdmission)
+	select {
+	case err := <-operationDone:
+		if err == nil {
+			t.Fatal("owner commit proceeded after watch loss during final admission")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("validated owner operation did not finish after watch loss")
+	}
+	if committed {
+		t.Fatal("commit callback ran after the final live-watch check failed")
+	}
+	waitForSessionStatus(t, authority, func(status AuthorityStatus) bool { return status.Invalidated && status.LocalWatchClosed })
+}
+
 func TestSessionAuthorityRegistersAndValidatesOnlyItsLiveWatcher(t *testing.T) {
 	d := newSessionDaemon()
 	authority := newSessionTestAuthority(d)

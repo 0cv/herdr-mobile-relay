@@ -300,6 +300,40 @@ func (a *SessionAuthority) Validate(ctx context.Context) error {
 	}
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
+	return a.validateLocked(ctx)
+}
+
+// WithValidatedRoute holds the authority operation lock across admission and
+// commit. Watch loss, route retirement, and other owner transitions therefore
+// serialize either before the final validation or after the caller's commit
+// linearization point. The admission callback may perform bounded external
+// health checks; commit must be the one-way operation authorized by those facts.
+func (a *SessionAuthority) WithValidatedRoute(ctx context.Context, admit, commit func() error) error {
+	if !a.usable() || ctx == nil || commit == nil {
+		return errSessionUnavailable
+	}
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	if err := a.validateLocked(ctx); err != nil {
+		return err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
+	}
+	// Revalidate after readiness so an ended watch or changed route observed
+	// during the health/bundle pass cannot reach the durable commit.
+	if err := a.validateLocked(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return commit()
+}
+
+func (a *SessionAuthority) validateLocked(ctx context.Context) error {
 	a.mu.Lock()
 	watch := a.watch
 	identity := cloneIdentity(a.identity)

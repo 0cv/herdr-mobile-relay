@@ -8,6 +8,18 @@ import (
 	"time"
 )
 
+func TestManagedOperationBudgetsCoverNestedVerification(t *testing.T) {
+	if ActivateTimeout < 3*time.Minute {
+		t.Fatalf("activation budget = %s, does not cover six bounded LocalAPI steps plus the two-minute verifier and health checks", ActivateTimeout)
+	}
+	if ArmTimeout < 5*time.Minute || ArmTimeout <= ActivateTimeout {
+		t.Fatalf("arm budget = %s, does not cover two bounded readiness passes", ArmTimeout)
+	}
+	if RetireTimeout <= 0 || RetireTimeout >= ArmTimeout {
+		t.Fatalf("retirement budget = %s, want a positive cleanup-only bound", RetireTimeout)
+	}
+}
+
 func TestServerRequiresRunIdentityAndAcknowledgesArm(t *testing.T) {
 	path := testSocketPath(t)
 	armed := false

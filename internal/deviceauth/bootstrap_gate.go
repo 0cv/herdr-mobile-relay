@@ -59,6 +59,34 @@ func (g *BootstrapGate) Open() error {
 	return nil
 }
 
+// ArmBootstrapInvitation runs final admission while excluding Revoke, durably
+// stores the invitation with exact-state rollback on failure, then publishes
+// the already-committed record by opening the gate. The final store callback is
+// the last fallible admission point while this mutex is held; no resolver or
+// Revoke can interleave between that commit and OpenStatus becoming true. Once
+// the gate opens, callers must treat a lost acknowledgement as
+// committed/ambiguous and never roll back the invitation.
+func (g *BootstrapGate) ArmBootstrapInvitation(secret []byte, name, locale string, admit func() error, beforeCommit ...func() error) error {
+	if g == nil {
+		return ErrBootstrapGateClosed
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.revoked || !g.attached || g.store == nil {
+		return ErrBootstrapGateClosed
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
+	}
+	if err := g.store.ArmBootstrapInvitationTransactional(secret, name, locale, beforeCommit...); err != nil {
+		return err
+	}
+	g.invitationOpen = true
+	return nil
+}
+
 // Revoke closes invitation use and waits for every resolver operation already
 // in flight to leave the store before returning.
 func (g *BootstrapGate) Revoke() {

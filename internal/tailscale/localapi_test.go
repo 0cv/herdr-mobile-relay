@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
+	"tailscale.com/ipn"
 )
 
 const localAPITestVersion = "1.102.4-tbbcd7d1fc"
@@ -403,6 +404,23 @@ func newTestWatchAPI(body io.ReadCloser, header http.Header, status int) *localA
 		}
 		return localAPIResponse(request, status, header, body), nil
 	}))
+}
+
+func TestLocalAPIWatchMaskMatchesPinnedNumericContract(t *testing.T) {
+	encoded, err := ipn.NotifyInitialState.MarshalText()
+	if err != nil {
+		t.Fatalf("marshal pinned watch mask: %v", err)
+	}
+	if string(encoded) != "2" {
+		t.Fatalf("pinned NotifyInitialState encoding = %q, want numeric mask 2", encoded)
+	}
+	var decoded ipn.NotifyWatchOpt
+	if err := decoded.UnmarshalText([]byte("2")); err != nil || decoded != ipn.NotifyInitialState {
+		t.Fatalf("pinned numeric watch mask decode = %v, err = %v", decoded, err)
+	}
+	if localAPIWatchQuery != "mask=2" {
+		t.Fatalf("LocalAPI watch query = %q, want literal pinned protocol mask=2", localAPIWatchQuery)
+	}
 }
 
 func TestLocalAPIWatchYieldsItsInitialSessionAndJoinsOnClose(t *testing.T) {

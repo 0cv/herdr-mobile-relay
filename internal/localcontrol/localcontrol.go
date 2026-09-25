@@ -25,9 +25,13 @@ const (
 	MaxRequestBytes = 4096
 	IOTimeout       = 2 * time.Second
 	StatusTimeout   = 30 * time.Second
-	ActivateTimeout = 60 * time.Second
-	ArmTimeout      = 60 * time.Second
-	RetireTimeout   = 40 * time.Second
+	// Activation includes bounded LocalAPI steps, two live owner validations,
+	// local/public health, and the public bundle verifier's two-minute bound.
+	ActivateTimeout = 4 * time.Minute
+	// Arming may perform full readiness before a read-only store attachment and
+	// again under the synchronized durable-arm gate.
+	ArmTimeout    = 7 * time.Minute
+	RetireTimeout = 40 * time.Second
 )
 
 type Status struct {

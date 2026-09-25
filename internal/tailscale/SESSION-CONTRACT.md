@@ -28,6 +28,14 @@ therefore not a deferred watcher close and cannot become evidence that the POST
 did not apply. Callers must retain O/control and the inert listener when a
 result is unresolved.
 
+`WithValidatedRoute` is the serialized commit seam for owner-dependent durable
+arming: it holds the authority operation lock through a fresh pre-check, the
+caller's bounded health/admission callback, a second live route/watch check,
+and the caller's one-way commit callback. Retirement and watcher invalidation
+are ordered before that final check or after the commit; the method does not
+supply local readiness or change the obligation to treat a post-commit lost ACK
+as committed/ambiguous.
+
 ## Admission and registration
 
 Production construction is `NewSessionAuthority(expectedVersion,

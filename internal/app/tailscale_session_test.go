@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscale"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
@@ -23,16 +24,17 @@ import (
 // or supplies ready/owned facts. Production SessionAuthority behavior and
 // byte-level LocalAPI protocol cases are tested in internal/tailscale.
 type appAuthorityFixture struct {
-	mu              sync.Mutex
-	status          tailscale.AuthorityStatus
-	origin          string
-	activationCalls int
-	validationCalls int
-	retirementCalls int
-	invalidation    chan struct{}
-	activationErr   error
-	validationErr   error
-	retirementErr   error
+	mu                 sync.Mutex
+	status             tailscale.AuthorityStatus
+	origin             string
+	activationCalls    int
+	validationCalls    int
+	retirementCalls    int
+	retirementErrUntil int
+	invalidation       chan struct{}
+	activationErr      error
+	validationErr      error
+	retirementErr      error
 }
 
 func newAppAuthorityFixture() *appAuthorityFixture {
@@ -56,11 +58,33 @@ func (a *appAuthorityFixture) Validate(context.Context) error {
 	return a.validationErr
 }
 
+func (a *appAuthorityFixture) WithValidatedRoute(ctx context.Context, admit, commit func() error) error {
+	if err := a.Validate(ctx); err != nil {
+		return err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return err
+		}
+	}
+	if err := a.Validate(ctx); err != nil {
+		return err
+	}
+	return commit()
+}
+
 func (a *appAuthorityFixture) Retire(context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.retirementCalls++
-	return a.retirementErr
+	if a.retirementErr != nil && (a.retirementErrUntil == 0 || a.retirementCalls <= a.retirementErrUntil) {
+		return a.retirementErr
+	}
+	if a.status.RegistrationOutcome == "not-dispatched" {
+		a.status.RouteCleared = true
+		a.status.LocalWatchClosed = true
+	}
+	return nil
 }
 
 func (a *appAuthorityFixture) Invalidation() <-chan struct{} { return a.invalidation }
@@ -199,6 +223,139 @@ func TestManagedTailscaleConstructorLeavesDeviceStoreUntouched(t *testing.T) {
 				t.Fatalf("unarmed managed constructor created device-auth path: %v", err)
 			}
 		})
+	}
+}
+
+func TestManagedTailscaleInitFailureUnwindsPreparedOwnerAndReleasesO(t *testing.T) {
+	root := managedTestRoot(t)
+	owner, err := AcquireManagedOwner(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := newAppAuthorityFixture()
+	server := newServerWithSession(managedTailscaleFixtureConfig(root), "0.9.0", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)), owner, authority)
+	server.initErr = errors.New("injected early startup failure")
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = server.hub.Shutdown(ctx)
+		cancel()
+		_ = server.herdrC.Close()
+	}()
+	if err := server.Run(context.Background()); !errors.Is(err, server.initErr) {
+		t.Fatalf("Run error = %v, want injected startup failure", err)
+	}
+	if !server.ManagedOwnerReleaseSafe() || authority.retirementCalls != 1 {
+		t.Fatalf("pre-activation failure did not prove and perform safe unwind: status=%+v retireCalls=%d", authority.Status(), authority.retirementCalls)
+	}
+	if err := RetireManagedOwner(owner, nil); err != nil {
+		t.Fatalf("release owner after safe unwind: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "owner.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("safe startup failure retained owner lock: %v", err)
+	}
+}
+
+func TestManagedTailscalePushManagerFailureUnwindsBeforeControlExists(t *testing.T) {
+	root := managedTestRoot(t)
+	owner, err := AcquireManagedOwner(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "push"), []byte("block push directory creation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authority := newAppAuthorityFixture()
+	server := newServerWithSession(managedTailscaleFixtureConfig(root), "0.9.0", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)), owner, authority)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = server.hub.Shutdown(ctx)
+		cancel()
+		_ = server.herdrC.Close()
+	}()
+	if err := server.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "initialize push manager") {
+		t.Fatalf("Run error = %v, want push-manager startup failure", err)
+	}
+	if !server.ManagedOwnerReleaseSafe() || authority.retirementCalls != 1 {
+		t.Fatalf("push failure did not retire the undispatched authority: status=%+v retireCalls=%d", authority.Status(), authority.retirementCalls)
+	}
+	if err := RetireManagedOwner(owner, nil); err != nil {
+		t.Fatalf("release owner after safe push-failure unwind: %v", err)
+	}
+}
+
+func TestManagedStartupCleanupFailureRetainsOwnerUntilPrivateRetire(t *testing.T) {
+	root := managedTestRoot(t)
+	owner, err := AcquireManagedOwner(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := newAppAuthorityFixture()
+	authority.retirementErr = errors.New("first cleanup attempt unresolved")
+	authority.retirementErrUntil = 1
+	cfg := managedTailscaleFixtureConfig(root)
+	cfg.PairingSocketPath = filepath.Join(root, "control.sock")
+	server := newServerWithSession(cfg, "0.9.0", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)), owner, authority)
+	server.initErr = errors.New("injected pre-control startup failure")
+	runDone := make(chan error, 1)
+	go func() { runDone <- server.Run(context.Background()) }()
+	runDoneObserved := false
+	t.Cleanup(func() {
+		if !server.ManagedOwnerReleaseSafe() {
+			authority.mu.Lock()
+			authority.status.RouteCleared = true
+			authority.status.LocalWatchClosed = true
+			authority.mu.Unlock()
+			server.CompleteManagedTailscaleRetirement()
+		}
+		if !runDoneObserved {
+			select {
+			case <-runDone:
+			case <-time.After(time.Second):
+				t.Error("startup cleanup did not leave its owner-retaining wait")
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = server.hub.Shutdown(ctx)
+		cancel()
+		_ = server.herdrC.Close()
+		if server.ManagedOwnerReleaseSafe() {
+			if err := RetireManagedOwner(owner, nil); err != nil {
+				t.Errorf("release owner after startup cleanup: %v", err)
+			}
+		}
+	})
+
+	controlPath := cfg.PairingSocketPath
+	var status localcontrol.Response
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err = localcontrol.Request(context.Background(), controlPath, "status", cfg.ManagedRunID, cfg.InstanceID)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil || !status.OwnerHeld || status.RouteCleared {
+		t.Fatalf("startup cleanup did not retain O behind a live retirement-only control: status=%+v err=%v", status, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "owner.lock")); err != nil {
+		t.Fatalf("owner lock disappeared before cleanup proof: %v", err)
+	}
+	retired, err := localcontrol.Request(context.Background(), controlPath, "retire", cfg.ManagedRunID, cfg.InstanceID)
+	if err != nil || !retired.RouteCleared || !retired.LocalWatchClosed {
+		t.Fatalf("private retry retirement = %+v, err=%v", retired, err)
+	}
+	select {
+	case runErr := <-runDone:
+		runDoneObserved = true
+		if !errors.Is(runErr, server.initErr) {
+			t.Fatalf("Run error = %v, want original startup failure", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("safe private retirement did not release the startup wait")
+	}
+	if !server.ManagedOwnerReleaseSafe() {
+		t.Fatal("owner release was not enabled after private retirement proof")
 	}
 }
 

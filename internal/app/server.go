@@ -93,43 +93,45 @@ type Server struct {
 	transitionBroadcast interface {
 		Broadcast(any)
 	}
-	transitionEnrich func(context.Context, *coordinator.AgentState)
-	sessions         *session.Resolver
-	historyM         *history.Manager
-	conversationM    *conversation.Reader
-	conversationB    *conversation.Browser
-	profiles         *profiles.Resolver
-	webH             *web.Handler
-	herdrC           *herdr.Client
-	clipboardRead    func(context.Context) ([]byte, error)
-	clipboardWrite   func(context.Context, []byte) error
-	copyRunner       copyResponseRunner
-	speechSynth      func(context.Context, string, string) ([]byte, error)
-	speechStatus     func() speech.Catalog
-	speechInstall    func(context.Context, string) error
-	speechRemove     func(string) error
-	speechMu         sync.Mutex
-	speechLanguages  []string
-	speechRequests   map[string]*speechRequest
-	copyMu           sync.Mutex
-	paneSizeM        *panesize.Manager
-	dispatcher       *coordinator.Dispatcher
-	updateM          *relayupdate.Manager
-	appDeployM       *appdeploy.Manager
-	hybrid           *hybridTransport
-	uploadM          *upload.Manager
-	deviceAuth       *deviceauth.Store
-	deviceAuthMu     sync.RWMutex
-	bootstrapGate    *deviceauth.BootstrapGate
-	managedOwner     *ManagedOwner
-	tailscaleSession managedTailscaleAuthority
-	managedRetired   chan struct{}
-	managedRetireOne sync.Once
-	tailscaleOpMu    sync.Mutex
-	quarantined      bool
-	backendBound     bool
-	pairingControl   *localcontrol.Server
-	initErr          error
+	transitionEnrich   func(context.Context, *coordinator.AgentState)
+	sessions           *session.Resolver
+	historyM           *history.Manager
+	conversationM      *conversation.Reader
+	conversationB      *conversation.Browser
+	profiles           *profiles.Resolver
+	webH               *web.Handler
+	herdrC             *herdr.Client
+	clipboardRead      func(context.Context) ([]byte, error)
+	clipboardWrite     func(context.Context, []byte) error
+	copyRunner         copyResponseRunner
+	speechSynth        func(context.Context, string, string) ([]byte, error)
+	speechStatus       func() speech.Catalog
+	speechInstall      func(context.Context, string) error
+	speechRemove       func(string) error
+	speechMu           sync.Mutex
+	speechLanguages    []string
+	speechRequests     map[string]*speechRequest
+	copyMu             sync.Mutex
+	paneSizeM          *panesize.Manager
+	dispatcher         *coordinator.Dispatcher
+	updateM            *relayupdate.Manager
+	appDeployM         *appdeploy.Manager
+	hybrid             *hybridTransport
+	uploadM            *upload.Manager
+	deviceAuth         *deviceauth.Store
+	deviceAuthMu       sync.RWMutex
+	bootstrapGate      *deviceauth.BootstrapGate
+	managedOwner       *ManagedOwner
+	tailscaleSession   managedTailscaleAuthority
+	managedRetired     chan struct{}
+	managedRetireOne   sync.Once
+	tailscaleOpMu      sync.Mutex
+	pairingAdmissionMu sync.Mutex
+	quarantined        bool
+	backendBound       bool
+	backendListener    *retainedTCPListener
+	pairingControl     *localcontrol.Server
+	initErr            error
 
 	mu        sync.RWMutex
 	ready     bool
@@ -678,15 +680,11 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 
 func (s *Server) Run(ctx context.Context) error {
 	if s.initErr != nil {
-		if s.tailscaleSession != nil {
-			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
-			_ = s.RetireManagedTailscale(retireCtx)
-			cancel()
-		}
+		startupErr := s.unwindManagedStartup(s.initErr)
 		if s.conversationB != nil {
 			_ = s.conversationB.Close()
 		}
-		return s.initErr
+		return startupErr
 	}
 	if s.conversationB != nil {
 		defer s.conversationB.Close()
@@ -739,7 +737,7 @@ func (s *Server) Run(ctx context.Context) error {
 	pushDir := filepath.Join(s.cfg.RuntimeDir, "push")
 	pm, err := push.NewManager(pushDir, s.logger)
 	if err != nil {
-		return fmt.Errorf("initialize push manager: %w", err)
+		return s.unwindManagedStartup(fmt.Errorf("initialize push manager: %w", err))
 	}
 	s.pushM = pm
 
@@ -1382,12 +1380,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	if err := s.startUDPListener(); err != nil {
-		if s.tailscaleSession != nil {
-			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
-			_ = s.RetireManagedTailscale(retireCtx)
-			cancel()
-		}
-		return err
+		return s.unwindManagedStartup(err)
 	}
 
 	s.setInventoryPublisher(ctx)
@@ -1414,23 +1407,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	})
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("/ws", s.hub.HandleWebSocket)
-	mux.HandleFunc("/", s.handleRoot)
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !canonicalHTTPPath(r.URL.Path) {
-			http.NotFound(w, r)
-			return
-		}
-		if s.tailscaleSession != nil && s.isTailscaleQuarantined() {
-			http.Error(w, "Managed relay is quarantined", http.StatusServiceUnavailable)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	handler := s.httpHandler()
 
 	if s.tailscaleSession != nil {
 		// Tailscale must bind the backend before publishing localcontrol, so
@@ -1439,12 +1416,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	ln, err := net.Listen("tcp", s.cfg.Addr())
 	if err != nil {
-		if s.tailscaleSession != nil {
-			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
-			_ = s.RetireManagedTailscale(retireCtx)
-			cancel()
-		}
-		return fmt.Errorf("listen %s: %w", s.cfg.Addr(), err)
+		return s.unwindManagedStartup(fmt.Errorf("listen %s: %w", s.cfg.Addr(), err))
+	}
+	serveListener := net.Listener(ln)
+	if s.tailscaleSession != nil {
+		s.backendListener = retainTCPListener(ln)
+		serveListener = s.backendListener.ServeListener()
 	}
 
 	srv := &http.Server{
@@ -1460,10 +1437,17 @@ func (s *Server) Run(ctx context.Context) error {
 	s.mu.Unlock()
 
 	var errCh chan error
+	var serveDone chan struct{}
 	if s.tailscaleSession != nil {
 		errCh = make(chan error, 1)
+		serveDone = make(chan struct{})
 		go func() {
-			errCh <- srv.Serve(ln)
+			defer close(serveDone)
+			serveErr := srv.Serve(serveListener)
+			if serveErr != nil && serveErr != http.ErrServerClosed && !s.ManagedOwnerReleaseSafe() {
+				s.quarantineTailscale()
+			}
+			errCh <- serveErr
 		}()
 	}
 
@@ -1484,13 +1468,20 @@ func (s *Server) Run(ctx context.Context) error {
 			callbacks,
 		)
 		if controlErr != nil {
-			_ = ln.Close()
+			startupErr := fmt.Errorf("initialize pairing control: %w", controlErr)
 			if s.tailscaleSession != nil {
-				retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
-				_ = s.RetireManagedTailscale(retireCtx)
-				cancel()
+				startupErr = s.unwindManagedStartup(startupErr)
+			} else {
+				_ = ln.Close()
 			}
-			return fmt.Errorf("initialize pairing control: %w", controlErr)
+			if s.backendListener != nil && s.ManagedOwnerReleaseSafe() {
+				startupErr = errors.Join(startupErr, s.backendListener.Close())
+				<-serveDone
+			}
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownErr := srv.Shutdown(shutdownCtx)
+			cancel()
+			return errors.Join(startupErr, shutdownErr)
 		}
 		s.pairingControl = control
 		defer func() {
@@ -1576,12 +1567,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if errCh == nil {
 		errCh = make(chan error, 1)
-		go func() {
-			errCh <- srv.Serve(ln)
-		}()
+		go func() { errCh <- srv.Serve(ln) }()
 	}
 
 	var runErr error
+	var inertServer *http.Server
+	var inertDone <-chan struct{}
 	if s.tailscaleSession != nil {
 		select {
 		case <-s.managedRetired:
@@ -1597,18 +1588,21 @@ func (s *Server) Run(ctx context.Context) error {
 				<-s.managedRetired
 			}
 		case err := <-errCh:
-			if err != http.ErrServerClosed {
-				runErr = err
-				retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
-				retireErr := s.RetireManagedTailscale(retireCtx)
-				cancel()
-				if retireErr == nil {
-					s.CompleteManagedTailscaleRetirement()
-				}
-				if retireErr != nil {
-					s.logger.Error("HTTP service failed while Tailscale cleanup is unresolved; retaining owner control", "error", retireErr)
-					<-s.managedRetired
-				}
+			if err == nil {
+				err = errors.New("managed HTTP Serve stopped unexpectedly")
+			}
+			runErr = err
+			s.quarantineTailscale()
+			inertServer, inertDone = serveManagedInertHTTP(s.backendListener)
+			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+			retireErr := s.RetireManagedTailscale(retireCtx)
+			cancel()
+			if retireErr == nil {
+				s.CompleteManagedTailscaleRetirement()
+			}
+			if retireErr != nil {
+				s.logger.Error("HTTP service failed while Tailscale cleanup is unresolved; retaining owner control and backend port", "error", retireErr)
+				<-s.managedRetired
 			}
 		case <-ctx.Done():
 			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
@@ -1633,6 +1627,19 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
+	if s.tailscaleSession != nil && !s.ManagedOwnerReleaseSafe() {
+		s.logger.Error("Tailscale cleanup is still unresolved; retaining control, backend port and owner")
+		<-s.managedRetired
+	}
+	if s.backendListener != nil {
+		if !s.ManagedOwnerReleaseSafe() {
+			return errors.Join(runErr, errors.New("managed backend port retained because route clear and local watch closure were not both proven"))
+		}
+		if err := s.backendListener.Close(); runErr == nil && err != nil {
+			runErr = fmt.Errorf("release managed backend listener: %w", err)
+		}
+		<-serveDone
+	}
 	cancelRun()
 	if s.dispatcher != nil {
 		s.dispatcher.CancelInflight()
@@ -1647,6 +1654,13 @@ func (s *Server) Run(ctx context.Context) error {
 		runErr = fmt.Errorf("http shutdown: %w", err)
 	}
 	cancelHTTP()
+	if inertServer != nil {
+		inertShutdownCtx, cancelInert := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := inertServer.Shutdown(inertShutdownCtx); runErr == nil && err != nil {
+			runErr = fmt.Errorf("inert backend shutdown: %w", err)
+		}
+		cancelInert()
+	}
 	hubShutdownCtx, cancelHub := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := s.hub.Shutdown(hubShutdownCtx); runErr == nil && err != nil {
 		runErr = fmt.Errorf("websocket shutdown: %w", err)
@@ -1673,7 +1687,81 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.webH != nil {
 		_ = s.webH.Close()
 	}
+	if inertDone != nil {
+		<-inertDone
+	}
 	return runErr
+}
+
+func (s *Server) httpHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("/ws", s.hub.HandleWebSocket)
+	mux.HandleFunc("/", s.handleRoot)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !canonicalHTTPPath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		if s.tailscaleSession != nil && s.isTailscaleQuarantined() {
+			http.Error(w, "Managed relay is quarantined", http.StatusServiceUnavailable)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// retainedTCPListener separates the HTTP server's listener lifecycle from the
+// owner of the loopback port. net/http calls Listener.Close when Serve returns;
+// the view passed to it deliberately keeps the underlying socket reserved
+// until the app proves routeCleared and localWatchClosed.
+type retainedTCPListener struct {
+	listener net.Listener
+	closeOne sync.Once
+	closeErr error
+}
+
+func retainTCPListener(listener net.Listener) *retainedTCPListener {
+	return &retainedTCPListener{listener: listener}
+}
+
+func (l *retainedTCPListener) ServeListener() net.Listener {
+	return retainedListenerView{Listener: l.listener}
+}
+
+func (l *retainedTCPListener) Addr() net.Addr { return l.listener.Addr() }
+
+// Close physically releases the socket. Managed callers may invoke it only
+// after SessionAuthority reports both routeCleared and localWatchClosed.
+func (l *retainedTCPListener) Close() error {
+	if l == nil || l.listener == nil {
+		return nil
+	}
+	l.closeOne.Do(func() { l.closeErr = l.listener.Close() })
+	return l.closeErr
+}
+
+type retainedListenerView struct {
+	net.Listener
+}
+
+func (retainedListenerView) Close() error { return nil }
+
+// serveManagedInertHTTP keeps the reserved route's backend fail-closed after
+// the primary HTTP Serve loop has returned. The retained listener view ensures
+// even this fallback server cannot release the port when its Serve returns.
+func serveManagedInertHTTP(listener *retainedTCPListener) (*http.Server, <-chan struct{}) {
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Managed relay is quarantined", http.StatusServiceUnavailable)
+	})}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = server.Serve(listener.ServeListener())
+	}()
+	return server, done
 }
 
 func (s *Server) effectiveCapabilities() []string {

@@ -126,13 +126,15 @@ func WithBootstrapReenrollment() Option {
 }
 
 type Store struct {
-	mu             sync.Mutex
-	dir            string
-	path           string
-	now            func() time.Time
-	random         io.Reader
-	rearmBootstrap bool
-	state          diskState
+	mu                 sync.Mutex
+	dir                string
+	path               string
+	now                func() time.Time
+	random             io.Reader
+	rearmBootstrap     bool
+	state              diskState
+	managedArmBaseline *managedStoreSnapshot
+	managedArmFault    func(stage string) error
 }
 
 func Open(dir string, options ...Option) (*Store, error) {

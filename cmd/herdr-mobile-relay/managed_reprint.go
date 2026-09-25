@@ -32,16 +32,16 @@ import (
 
 const (
 	managedReprintDefaultOriginFile = "phone-app-origin-configured"
-	managedReprintDefaultDeadline   = 60 * time.Second
+	managedReprintDefaultDeadline   = 8 * time.Minute
 	managedReprintMinDeadline       = 1 * time.Second
-	managedReprintMaxDeadline       = 60 * time.Second
+	managedReprintMaxDeadline       = 8 * time.Minute
 	managedReprintAcquireLimit      = 5 * time.Second
 	managedReprintArmTimeout        = localcontrol.ArmTimeout
 	managedReprintMaxOriginValue    = 2048
 	managedReprintMaxIdentity       = 128
 )
 
-const managedReprintUsage = "usage: herdr-mobile-relay managed-state reprint --dir DIR --socket PATH --run-id ID --instance ID [--origin-file phone-app-origin-configured] --origin-value VALUE [--deadline 60s]"
+const managedReprintUsage = "usage: herdr-mobile-relay managed-state reprint --dir DIR --socket PATH --run-id ID --instance ID [--origin-file phone-app-origin-configured] --origin-value VALUE [--deadline 8m]"
 
 // reprintArmOutcome is the three-way classification of the arm IPC result.
 type reprintArmOutcome int
@@ -67,7 +67,7 @@ func runManagedReprint(args []string, stdout, stderr io.Writer) int {
 	instance := flags.String("instance", "", "relay instance identifier")
 	originFile := flags.String("origin-file", managedReprintDefaultOriginFile, "managed origin file name")
 	originValue := flags.String("origin-value", "", "new origin value")
-	deadline := flags.Duration("deadline", managedReprintDefaultDeadline, "overall transaction deadline (1-60s)")
+	deadline := flags.Duration("deadline", managedReprintDefaultDeadline, "overall transaction deadline (1s-8m)")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintln(stderr, managedReprintUsage)
 		return 2
@@ -259,7 +259,7 @@ func validateReprintFlags(dir, socket, runID, instance, originFile, originValue 
 		return errors.New("--origin-value must not contain a newline or NUL")
 	}
 	if deadline < managedReprintMinDeadline || deadline > managedReprintMaxDeadline {
-		return errors.New("--deadline must be between 1s and 60s")
+		return errors.New("--deadline must be between 1s and 8m")
 	}
 	return nil
 }
