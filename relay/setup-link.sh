@@ -14,12 +14,17 @@ assert_service_env_matches "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 MODE="$(relay_transport_mode "$ENV_FILE")"
 SESSION_FILE="$(tailscale_session_file "$ENV_FILE")"
+EXTERNAL_SESSION_FILE="$(tailscale_external_session_file "$ENV_FILE")"
 if [ -e "$SESSION_FILE" ] && [ "$MODE" != tailscale ]; then
-    echo "✗ A foreground Tailscale session is recorded with a conflicting transport; no link was printed." >&2
+    echo "✗ A managed Tailscale session is recorded with a conflicting transport; no link was printed." >&2
+    exit 1
+fi
+if [ -e "$EXTERNAL_SESSION_FILE" ] && [ "$MODE" != tailscale-external ]; then
+    echo "✗ An operator-owned HTTPS Serve session is recorded with a conflicting transport; no link was printed." >&2
     exit 1
 fi
 
-relay_binary >/dev/null
+RELAY_BIN="$(relay_binary)"
 if [ -z "${HERDR_RELAY_TOKEN:-}" ]; then
     echo "✗ No relay token in $ENV_FILE. Run make setup first."
     exit 1
@@ -130,6 +135,106 @@ if [ "$MODE" = tailscale ]; then
     print_setup_link_arming 0
     echo "  Tailscale origin: $ORIGIN"
     echo "  The foreground pane must remain open for the relay and Serve session."
+    exit 0
+fi
+
+if [ "$MODE" = tailscale-external ]; then
+    CONFIG_DIR="$(dirname "$ENV_FILE")"
+    ORIGIN="$(tailscale_session_value "$EXTERNAL_SESSION_FILE" HERDR_EXTERNAL_HTTPS_ORIGIN || true)"
+    SOCKET="$(tailscale_session_value "$EXTERNAL_SESSION_FILE" HERDR_RELAY_PAIRING_SOCKET || true)"
+    RUN_ID="$(tailscale_session_value "$EXTERNAL_SESSION_FILE" HERDR_RELAY_CONTROL_RUN_ID || true)"
+    SESSION_STAGE="$(tailscale_session_value "$EXTERNAL_SESSION_FILE" HERDR_RELAY_STAGE || true)"
+    INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
+    PERSISTED_ORIGIN="$(env_file_value "$ENV_FILE" HERDR_EXTERNAL_HTTPS_ORIGIN)"
+    TOKEN="$(env_file_value "$ENV_FILE" HERDR_RELAY_TOKEN)"
+    PHONE_APP_BASE="$(choose_phone_app_base_url "$ORIGIN" "$ENV_FILE" tailscale-external)" || exit 1
+    [ "$SESSION_STAGE" = ready ] && [ "$ORIGIN" = "$PERSISTED_ORIGIN" ] &&
+        [ -n "$SOCKET" ] && [ -n "$RUN_ID" ] && [ -n "$INSTANCE" ] && [ "${#TOKEN}" -eq 32 ] || {
+        echo "✗ No complete live operator-owned HTTPS Serve session is recorded; no setup link was printed." >&2
+        echo "  Start the BYO HTTPS Serve foreground action and verify its configured origin." >&2
+        exit 1
+    }
+    case "$SOCKET" in
+        "$CONFIG_DIR"/*) ;;
+        *) echo "✗ External pairing-control socket is outside the private relay configuration directory." >&2; exit 1 ;;
+    esac
+    [ "$("$(relay_binary)" normalize-external-origin "$ORIGIN" 2>/dev/null || true)" = "$ORIGIN" ] || {
+        echo "✗ Saved operator-owned HTTPS origin is not canonical; no link was printed." >&2
+        exit 1
+    }
+    CONTROL_STATUS="$("$(relay_binary)" pairing-control --socket "$SOCKET" --operation status \
+        --run-id "$RUN_ID" --instance "$INSTANCE" 2>/dev/null)" || {
+        echo "✗ The operator-owned relay control endpoint is unavailable; no link was printed." >&2
+        exit 1
+    }
+    RELAY_IDENTITY="$("$RELAY_BIN" version --json)" || {
+        echo "✗ Relay release identity could not be read; no setup link was printed." >&2
+        exit 1
+    }
+    [ "$(json_bool_field "$CONTROL_STATUS" local_ready)" = true ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" run_id)" = "$RUN_ID" ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" instance)" = "$INSTANCE" ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" transport)" = tailscale-external ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" phone_app_origin)" = "$PHONE_APP_BASE" ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" version)" = "$(json_string_field "$RELAY_IDENTITY" version "$RELAY_BIN")" ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" revision)" = "$(json_string_field "$RELAY_IDENTITY" revision "$RELAY_BIN")" ] &&
+        [ -n "$(json_string_field "$CONTROL_STATUS" bundle_hash)" ] || {
+        echo "✗ Private control identity or local release did not match; no setup link was printed." >&2
+        exit 1
+    }
+    HEALTH="$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 5 --max-redirs 0 \
+        "$ORIGIN/healthz" 2>/dev/null)" || {
+        echo "✗ Trusted HTTPS health verification failed; no link was printed." >&2
+        exit 1
+    }
+    [ "$(json_string_field "$HEALTH" status)" = ok ] &&
+        [ "$(json_string_field "$HEALTH" readiness)" = ready ] &&
+        [ "$(json_string_field "$HEALTH" instance)" = "$INSTANCE" ] &&
+        [ "$(json_string_field "$HEALTH" external_control_run_id)" = "$RUN_ID" ] &&
+        [ "$(json_string_field "$HEALTH" transport)" = tailscale-external ] &&
+        [ "$(json_string_field "$HEALTH" external_https_origin)" = "$ORIGIN" ] || {
+        echo "✗ HTTPS health belongs to a different instance, run, transport, or origin; no link was printed." >&2
+        exit 1
+    }
+    require_release_identity "$HEALTH" "$(relay_binary)" || exit 1
+    verify_phone_app_bundle "$PHONE_APP_BASE" "$(relay_binary)" || exit 1
+    REPRINT_OUTPUT=""
+    REPRINT_STATUS=0
+    REPRINT_OUTPUT="$("$(relay_binary)" managed-state reprint --external \
+        --dir "$CONFIG_DIR" --socket "$SOCKET" --run-id "$RUN_ID" --instance "$INSTANCE" \
+        --origin-file phone-app-origin-configured --origin-value "$PHONE_APP_BASE" 2>&1)" || REPRINT_STATUS=$?
+    if [ "$REPRINT_STATUS" -ne 0 ]; then
+        case "$REPRINT_STATUS" in
+            6)
+                echo "✗ The invitation acknowledgement was ambiguous; no link or QR was printed." >&2
+                echo "  Stop this foreground relay, then inspect/reconcile its retained journal with:" >&2
+                echo "  $(relay_binary) managed-state recover --dir '$CONFIG_DIR'" >&2
+                ;;
+            3)
+                echo "✗ External invitation arming was busy or definitely refused; no link was printed." >&2
+                ;;
+            *)
+                echo "✗ External invitation arming was refused; no link was printed." >&2
+                ;;
+        esac
+        printf '%s\n' "$REPRINT_OUTPUT" >&2
+        exit 1
+    fi
+    [ "$(json_bool_field "$REPRINT_OUTPUT" ok)" = true ] &&
+        [ -n "$(json_string_field "$REPRINT_OUTPUT" invitation_expires_at)" ] || {
+        echo "✗ Durable invitation acknowledgement was incomplete; no link was printed." >&2
+        exit 1
+    }
+    RELAY_URL="wss://${ORIGIN#https://}"
+    SETUP_FRAGMENT="$(build_setup_fragment "$TOKEN" "$(host_label)" "$RELAY_URL")"
+    echo "🐑 Herdr Mobile Relay phone setup — operator-owned HTTPS Serve"
+    echo ""
+    print_phone_setup "$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+    echo ""
+    print_setup_link_arming 0
+    echo "  Relay HTTPS origin: $ORIGIN"
+    echo "  Tailscale Serve/Funnel ingress is operator-owned and was not observed or changed."
+    echo "  Stopping Herdr stops only this local backend; ingress remains configured by you."
     exit 0
 fi
 

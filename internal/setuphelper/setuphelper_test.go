@@ -30,6 +30,37 @@ func TestNormalizeOrigin(t *testing.T) {
 	}
 }
 
+func TestNormalizeExternalHTTPSOrigin(t *testing.T) {
+	for _, origin := range []string{
+		"https://relay.example.test",
+		"https://relay.example.test:8443",
+		"https://[fd7a:115c:a1e0::1]:8443",
+	} {
+		got, err := NormalizeExternalHTTPSOrigin(origin)
+		if err != nil || got != origin {
+			t.Errorf("NormalizeExternalHTTPSOrigin(%q) = %q, %v", origin, got, err)
+		}
+	}
+	for _, origin := range []string{
+		"http://relay.example.test",
+		"relay.example.test",
+		"https://relay.example.test/",
+		"https://relay.example.test/path",
+		"https://relay.example.test?x=1",
+		"https://relay.example.test#fragment",
+		"https://user@relay.example.test",
+		"https://relay.example.test:443",
+		"https://relay.example.test:0",
+		"https://relay.example.test:65536",
+		"https://relay.example.test:08443",
+		"https://RELAY.example.test",
+	} {
+		if got, err := NormalizeExternalHTTPSOrigin(origin); err == nil {
+			t.Errorf("NormalizeExternalHTTPSOrigin(%q) = %q, want refusal", origin, got)
+		}
+	}
+}
+
 func TestTerminalQR(t *testing.T) {
 	rendered, err := TerminalQR("https://example.test/#setup=secret", 120)
 	if err != nil {

@@ -15,8 +15,10 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
-    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
-    echo "foreground Tailscale Serve cannot run under the background service wrapper" >&2
+    [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ]; then
+    echo "foreground Tailscale Serve transports cannot run under the background service wrapper" >&2
     exit 78
 fi
 

@@ -19,7 +19,9 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
-    [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ] ||
+    [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
+    [ -e "$(tailscale_external_session_file "$ENV_FILE")" ]; then
     echo "✗ Token rotation is unavailable while foreground Tailscale Serve is selected." >&2
     echo "  Stop the pane before rotating credentials, then start it again." >&2
     exit 1

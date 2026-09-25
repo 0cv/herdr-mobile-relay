@@ -31,6 +31,10 @@ load_relay_env "$ENV_FILE"
     exit 1
 }
 MODE="$(relay_transport_mode "$ENV_FILE")"
+if [ -e "$(tailscale_external_session_file "$ENV_FILE")" ]; then
+    echo "✗ Operator-owned HTTPS Serve is still running; stop its Herdr foreground pane before starting managed Serve." >&2
+    exit 1
+fi
 if [ "$MODE" != tailscale ] && [ "${HERDR_TAILSCALE_REQUEST:-}" != 1 ]; then
     echo "✗ Tailscale startup was requested without tailscale transport selection." >&2
     exit 1

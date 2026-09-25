@@ -51,6 +51,7 @@ type Status struct {
 	Version                      string `json:"version,omitempty"`
 	Revision                     string `json:"revision,omitempty"`
 	BundleHash                   string `json:"bundle_hash,omitempty"`
+	PhoneAppOrigin               string `json:"phone_app_origin,omitempty"`
 	InvitationArmed              bool   `json:"invitation_armed"`
 	InvitationPending            bool   `json:"invitation_pending"`
 	InvitationExpiresAt          string `json:"invitation_expires_at,omitempty"`

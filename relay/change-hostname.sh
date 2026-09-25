@@ -25,7 +25,9 @@ ENV_FILE="$(canonical_file_path "$ENV_FILE")"
 assert_service_env_matches "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
-    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
+    [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ]; then
     echo "✗ Hostname changes apply only to a Cloudflare tunnel, not Tailscale Serve." >&2
     exit 1
 fi

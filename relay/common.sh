@@ -1021,7 +1021,7 @@ relay_transport_mode() {
         fi
     fi
     case "$mode" in
-        cloudflare|gateway|tailscale) printf '%s\n' "$mode" ;;
+        cloudflare|gateway|tailscale|tailscale-external) printf '%s\n' "$mode" ;;
         *)
             echo "✗ Invalid HERDR_RELAY_TRANSPORT: $mode" >&2
             return 1
@@ -1036,8 +1036,10 @@ clear_tailscale_selection() {
     remove_env_value_atomic "$env_file" HERDR_RELAY_PAIRING_SOCKET
     remove_env_value_atomic "$env_file" HERDR_RELAY_RUN_ID
     remove_env_value_atomic "$env_file" HERDR_TAILSCALE_HTTPS_PORT
+    remove_env_value_atomic "$env_file" HERDR_EXTERNAL_HTTPS_ORIGIN
     unset HERDR_TAILSCALE_ORIGIN HERDR_RELAY_PAIRING_SOCKET HERDR_RELAY_RUN_ID
-    unset HERDR_TAILSCALE_HTTPS_PORT
+    unset HERDR_TAILSCALE_HTTPS_PORT HERDR_EXTERNAL_HTTPS_ORIGIN
+    unset HERDR_RELAY_CONTROL_RUN_ID
 }
 
 set_relay_transport() {
@@ -1045,7 +1047,7 @@ set_relay_transport() {
     local mode="$2"
 
     case "$mode" in
-        cloudflare|gateway|tailscale) ;;
+        cloudflare|gateway|tailscale|tailscale-external) ;;
         *) echo "✗ Invalid relay transport: $mode" >&2; return 1 ;;
     esac
     if [ "$mode" != tailscale ] && [ -e "$(tailscale_session_file "$env_file")" ]; then
@@ -1053,12 +1055,15 @@ set_relay_transport() {
         echo "  Stop that pane and verify its route before changing transport." >&2
         return 1
     fi
+    if [ -e "$(tailscale_external_session_file "$env_file")" ]; then
+        echo "✗ Cannot change transport while an operator-owned HTTPS Serve relay is running." >&2
+        echo "  Stop that foreground pane before changing transport." >&2
+        return 1
+    fi
     if [ "$mode" != tailscale ]; then
         clear_tailscale_selection "$env_file"
     fi
-    if [ "$mode" = cloudflare ]; then
-        # Tailscale selection deliberately leaves gateway settings intact so an
-        # explicit later gateway choice can reuse the user's existing transport.
+    if [ "$mode" = cloudflare ] || [ "$mode" = tailscale-external ]; then
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
         unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
@@ -1116,6 +1121,11 @@ json_number_field() {
 tailscale_session_file() {
     local env_file="$1"
     printf '%s/tailscale-session.env\n' "$(dirname "$env_file")"
+}
+
+tailscale_external_session_file() {
+    local env_file="$1"
+    printf '%s/tailscale-external-session.env\n' "$(dirname "$env_file")"
 }
 
 tailscale_session_value() {
@@ -1419,7 +1429,7 @@ require_release_identity() {
 }
 
 # Verify the selected phone-app origin against the release's extracted web
-# bundle using system TLS and hostname validation before any Tailscale invite
+# bundle using system TLS and hostname validation before any relay invitation
 # is armed. Suppress verifier diagnostics so operator URLs stay out of logs.
 verify_phone_app_bundle() {
     local origin="$1"
@@ -1839,9 +1849,9 @@ set_gateway_url() {
     local env_file="$1"
     local url="$2"
 
-    if [ -e "$(tailscale_session_file "$env_file")" ]; then
-        echo "✗ Cannot change gateway selection while a foreground Tailscale session is recorded." >&2
-        echo "  Stop that pane and verify its route before changing transport." >&2
+    if [ -e "$(tailscale_session_file "$env_file")" ] || [ -e "$(tailscale_external_session_file "$env_file")" ]; then
+        echo "✗ Cannot change gateway selection while a foreground Tailscale Serve relay is recorded." >&2
+        echo "  Stop that pane before changing transport." >&2
         return 1
     fi
     if [ -z "$url" ]; then
@@ -2106,8 +2116,9 @@ choose_tailscale_phone_app_base_url() {
         fi
     fi
 
-    # The Tailscale caller has already verified the HTTPS identity and relay
-    # run. Its packaged frontend is the safe default for a new configuration.
+    # The foreground Tailscale caller has already selected an HTTPS relay
+    # origin. Its packaged frontend is the safe default, but every app origin
+    # is independently checked against this release before an invite is armed.
     if ! stdin_is_terminal; then
         if [ -n "$current_origin" ]; then
             printf '%s\n' "$current_origin"
@@ -2125,12 +2136,12 @@ choose_tailscale_phone_app_base_url() {
         menu_item 1 "Keep current phone app (recommended)" >&2
         echo "     Reuse this shared app origin for the Tailscale relay." >&2
         echo "" >&2
-        menu_item 2 "Use this Tailscale relay instead" >&2
+        menu_item 2 "Use this Serve relay instead" >&2
         echo "     Use its verified HTTPS origin and packaged Herdr app." >&2
         echo "" >&2
         menu_item 3 "Use another installed Herdr app" >&2
     else
-        menu_item 1 "This Tailscale relay (recommended)" >&2
+        menu_item 1 "This Serve relay (recommended)" >&2
         echo "     Use its verified HTTPS origin and packaged Herdr app." >&2
         echo "" >&2
         menu_item 2 "An existing installed Herdr app" >&2
@@ -2188,7 +2199,7 @@ choose_phone_app_base_url() {
 
     configured_origin="$(dirname "$env_file")/phone-app-origin-configured"
     observed_origin="$(dirname "$env_file")/phone-app-origin"
-    if [ "$setup_kind" = tailscale ]; then
+    if [ "$setup_kind" = tailscale ] || [ "$setup_kind" = tailscale-external ]; then
         choose_tailscale_phone_app_base_url "$relay_fallback" "$env_file"
         return
     fi

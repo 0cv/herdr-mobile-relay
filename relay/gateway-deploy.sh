@@ -23,8 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common.sh"
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
-if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
-    echo "✗ Gateway deployment is unavailable while a foreground Tailscale Serve session is active." >&2
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ] || [ -e "$(tailscale_external_session_file "$ENV_FILE")" ]; then
+    echo "✗ Gateway deployment is unavailable while a foreground Tailscale Serve relay is active." >&2
     echo "  Stop the pane before changing transports or deploying a gateway." >&2
     exit 1
 fi

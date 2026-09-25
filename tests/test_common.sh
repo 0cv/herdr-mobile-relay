@@ -759,6 +759,7 @@ run_tailscale_chooser() (
     local mode="$1"
     local env_file="$2"
     local relay_origin="$3"
+    local setup_kind="${4:-tailscale}"
 
     if [ "$mode" = interactive ]; then
         stdin_is_terminal() { return 0; }
@@ -780,7 +781,7 @@ run_tailscale_chooser() (
     HERDR_RELAY_BIN="$NORMALIZE_BIN"
     PATH="$TAILSCALE_CHOOSER_FAIL_BIN:$PATH"
     export HERDR_RELAY_BIN PATH
-    choose_phone_app_base_url "$relay_origin" "$env_file" tailscale
+    choose_phone_app_base_url "$relay_origin" "$env_file" "$setup_kind"
 )
 
 TAILSCALE_FRESH_ENV="$WORK_DIR/config/tailscale-fresh.env"
@@ -788,6 +789,10 @@ TAILSCALE_FRESH_ENV="$WORK_DIR/config/tailscale-fresh.env"
 rm -f "$TAILSCALE_CHOOSER_DISCOVERY_SENTINEL" "$TAILSCALE_CHOOSER_NETWORK_SENTINEL"
 test "$(run_tailscale_chooser noninteractive "$TAILSCALE_FRESH_ENV" \
     https://relay.ts.example.test)" = "https://relay.ts.example.test"
+test ! -e "$TAILSCALE_CHOOSER_DISCOVERY_SENTINEL"
+test ! -e "$TAILSCALE_CHOOSER_NETWORK_SENTINEL"
+test "$(run_tailscale_chooser noninteractive "$TAILSCALE_FRESH_ENV" \
+    https://relay.ts.example.test tailscale-external)" = "https://relay.ts.example.test"
 test ! -e "$TAILSCALE_CHOOSER_DISCOVERY_SENTINEL"
 test ! -e "$TAILSCALE_CHOOSER_NETWORK_SENTINEL"
 
@@ -877,6 +882,31 @@ if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$CHOICE_ENV"; then
     exit 1
 fi
 test -z "$(unset HERDR_GATEWAY_URL; gateway_url "$CHOICE_ENV")"
+
+# The operator-owned foreground session serializes every cooperating transport
+# choice until the local backend stops; a refusal leaves the saved BYO origin
+# byte-for-byte intact.
+(
+    EXTERNAL_CHOICE_ENV="$WORK_DIR/config/external-choice.env"
+    : > "$EXTERNAL_CHOICE_ENV"
+    set_relay_transport "$EXTERNAL_CHOICE_ENV" tailscale-external
+    set_env_value_atomic "$EXTERNAL_CHOICE_ENV" HERDR_EXTERNAL_HTTPS_ORIGIN "https://relay.example.test"
+    SESSION_RECORD="$(tailscale_external_session_file "$EXTERNAL_CHOICE_ENV")"
+    printf '%s\n' 'HERDR_RELAY_STAGE=starting' > "$SESSION_RECORD"
+    EXTERNAL_CHOICE_BEFORE="$(cat "$EXTERNAL_CHOICE_ENV")"
+    for REFUSED_MODE in cloudflare tailscale-external; do
+        if set_relay_transport "$EXTERNAL_CHOICE_ENV" "$REFUSED_MODE"; then
+            echo "transport change to $REFUSED_MODE bypassed the live operator-owned session" >&2
+            exit 1
+        fi
+        test "$(cat "$EXTERNAL_CHOICE_ENV")" = "$EXTERNAL_CHOICE_BEFORE"
+    done
+    if set_gateway_url "$EXTERNAL_CHOICE_ENV" "wss://gw.example.test"; then
+        echo "gateway change bypassed the live operator-owned session" >&2
+        exit 1
+    fi
+    test "$(cat "$EXTERNAL_CHOICE_ENV")" = "$EXTERNAL_CHOICE_BEFORE"
+)
 
 # The community gateway is published, so an install that configures nothing gets
 # the shared one; an operator overrides it, and an explicitly empty value is the

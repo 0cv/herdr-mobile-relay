@@ -33,6 +33,22 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestTailscaleExternalBYOHostedE2EE(t *testing.T) {
+	origin := strings.TrimSuffix(os.Getenv("HERDR_EXTERNAL_FIXTURE_ORIGIN"), "/")
+	token := os.Getenv("HERDR_EXTERNAL_FIXTURE_TOKEN")
+	if !strings.HasPrefix(origin, "https://") || len(token) != 32 {
+		t.Fatal("hosted BYO HTTPS fixture origin/token is missing")
+	}
+	endpoint := "wss" + strings.TrimPrefix(origin, "https") + "/ws"
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	connection, enrollment := managedFixtureEnrollOverWebSocketURL(t, endpoint, token, client)
+	defer connection.CloseNow()
+	if enrollment.Role != "controller" || enrollment.CredentialID == "" || enrollment.CredentialSecret == "" {
+		t.Fatal("hosted BYO WSS did not complete authenticated E2EE enrollment")
+	}
+	enrollment.CredentialSecret = ""
+}
+
 func TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire(t *testing.T) {
 	fixture := newManagedTailscaleFixture(t)
 	var durableBeforeAcknowledgement atomic.Bool
@@ -509,11 +525,15 @@ func preArmStatus(response *http.Response) any {
 }
 
 func managedFixtureEnrollOverWebSocket(t *testing.T, fixture *managedTailscaleFixture) (*websocket.Conn, managedFixtureE2EEFinish) {
+	return managedFixtureEnrollOverWebSocketURL(t, "wss://"+fixture.hostPort+"/ws", fixture.server.cfg.Token, managedHealthClientForServer(fixture.server, 0))
+}
+
+func managedFixtureEnrollOverWebSocketURL(t *testing.T, endpoint, token string, client *http.Client) (*websocket.Conn, managedFixtureE2EEFinish) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	connection, response, err := websocket.Dial(ctx, "wss://"+fixture.hostPort+"/ws", &websocket.DialOptions{
-		HTTPClient:   managedHealthClientForServer(fixture.server, 0),
+	connection, response, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
+		HTTPClient:   client,
 		Subprotocols: []string{protocol.EncryptedWebSocketSubprotocol},
 	})
 	if err != nil {
@@ -525,7 +545,7 @@ func managedFixtureEnrollOverWebSocket(t *testing.T, fixture *managedTailscaleFi
 	}
 
 	selectorKind, selectorID, selectorVersion, locale := "invitation", "bootstrap", uint64(1), "en"
-	secret := []byte(fixture.server.cfg.Token)
+	secret := []byte(token)
 	defer clear(secret)
 	privateKey, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {

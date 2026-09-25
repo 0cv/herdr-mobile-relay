@@ -1,29 +1,32 @@
 # How your phone reaches your computer
 
-Four transports can carry traffic between your phone and a relay: a Cloudflare
-tunnel, the community gateway, a gateway you run yourself, or foreground
-Tailscale Serve. All four are end-to-end encrypted. Only the two gateway choices
+Five transport choices can carry traffic between your phone and relay: a
+Cloudflare tunnel, the community gateway, a gateway you run yourself, managed
+Tailscale Serve, or operator-owned Tailscale HTTPS Serve. All are end-to-end encrypted.
+Only the two gateway choices
 then try to leave the transport behind: phone and computer negotiate a direct
 peer-to-peer connection and the gateway is left carrying the fallback. Cloudflare
 and Tailscale traffic use their respective trusted HTTPS paths.
 
-## The four choices
+## The five choices
 
 | Choice | What it needs from you | Who carries the traffic | When to pick it |
 | --- | --- | --- | --- |
 | **Cloudflare tunnel** | Nothing for Quick Start's temporary URL; a Cloudflare account with a domain for a permanent hostname and background service. | Cloudflare's edge | The default. See [cloudflare-tunnel.md](cloudflare-tunnel.md) for the permanent hostname. |
 | **Community gateway** | No account and no domain, but the phone app must already be hosted somewhere — a gateway serves no app. | A gateway operated by the project, until the direct path forms | Free, shared, best-effort; not for heavy transfers. Pick it to avoid Cloudflare setup entirely. |
 | **Your own gateway** | A small VPS with Docker and a public hostname. | Your own gateway, until the direct path forms | Dedicated bandwidth, and the transport logs stay on your machine. See [gateway-self-hosting.md](gateway-self-hosting.md). |
-| **Tailscale Serve (foreground)** | A preinstalled, running, authenticated Tailscale node. | Your tailnet's Tailscale HTTPS path | Private tailnet access without Cloudflare or a public gateway; the setup pane must stay open. |
+| **Managed Tailscale Serve (foreground)** | A supported preinstalled, running, authenticated Tailscale node. | Your tailnet's Tailscale HTTPS path; Herdr manages its own temporary Serve route. | Private tailnet access without a public gateway; the setup pane must stay open. |
+| **Operator-owned Tailscale HTTPS Serve (BYO, foreground)** | An existing canonical HTTPS origin that you have routed to this relay's loopback listener. | Your independently configured ingress; Herdr does not inspect or change it. | Keep an existing operator-owned HTTPS route, and retain it after Herdr stops. |
 
 Pick **Temporary Cloudflare Tunnel**, **Community WebRTC Gateway**, **Deploy or
-Upgrade Your Own WebRTC Gateway**, **Tailscale Serve (foreground)**, or **Stable
-Tunnel** directly from the setup menu. A completed choice is recorded, starts or
-restarts the relay, and prints the phone QR; there is no second Quick Start step.
+Upgrade Your Own WebRTC Gateway**, **Managed Tailscale Serve (foreground)**,
+**Operator-owned Tailscale HTTPS Serve (BYO, foreground)**, or **Stable Tunnel**
+directly from the setup menu (`t` for managed, `b` for BYO). A completed choice
+starts or restarts the relay and verifies the phone app before printing a QR.
 
-## Tailscale Serve
+## Managed Tailscale Serve
 
-Choose **Tailscale Serve (foreground)**, or press `t` in the setup menu, when this
+Choose **Managed Tailscale Serve (foreground)**, or press `t` in the setup menu, when this
 computer already has a supported Tailscale Unix daemon installed, running, and
 authenticated. The relay binds only to `127.0.0.1`; the launcher performs a
 read-only identity/version/Serve/Funnel preflight, asks for per-run consent, then
@@ -63,9 +66,38 @@ the operating system's normal
 certificate and hostname verification; the launcher has no certificate-bypass
 or custom-CA option.
 
-Tailscale Serve therefore needs no separately hosted app for a new configuration.
-Tailscale must be installed and authenticated manually; the relay does not
-mutate Tailscale account state.
+Managed Tailscale Serve therefore needs no separately hosted app for a new
+configuration. Tailscale must be installed and authenticated manually; the relay
+does not mutate Tailscale account state.
+
+## Operator-owned HTTPS Serve (BYO)
+
+Choose this distinct foreground transport (menu key `b`) only after you have
+independently configured an HTTPS Serve origin to reach Herdr's local listener
+on `127.0.0.1:8375` by default (or your configured loopback port). Enter a canonical
+`https://host[:port]` origin with no path,
+query, fragment, or credentials. Herdr stores this as the distinct
+`HERDR_RELAY_TRANSPORT=tailscale-external` selection and
+`HERDR_EXTERNAL_HTTPS_ORIGIN`; the `tailscale` value remains the separate
+managed-Serve mode. Herdr listens only on loopback, checks the origin using
+normal system TLS trust and hostname verification, and requires
+that `/healthz` identify this exact relay instance, control run, transport, and
+release. The operator-owned Serve origin carries relay health and WSS; it need
+not host the phone frontend. Herdr keeps your saved phone-app origin or lets
+you choose this Serve origin or another installed Herdr app. The selected app
+origin must pass trusted TLS and serve this exact release's complete bundle
+(set `HERDR_PHONE_APP_URL` for an unattended explicit choice). Do not use a
+relay origin that reaches some other instance or an untrusted certificate.
+
+This BYO path never runs `tailscale`, opens Tailscale LocalAPI, or reads Serve,
+Funnel, account, or device state. It neither creates nor checks nor clears an
+ingress route. You own HTTPS Serve configuration, access policy, route health,
+and cleanup. Herdr prints the route as operator-owned and on Ctrl-C stops only
+its own loopback backend and private pairing control. The transport also
+disables automatic PCP/UPnP router mapping. Your ingress remains as configured,
+but is no longer backed by this stopped relay. A foreground pane is required;
+background service installation and phone-managed relay updates are refused. MacSys GUI, App Store, and other unqualified daemon profiles are not
+enabled by the managed adapter; BYO does not probe a daemon profile at all.
 
 ## The gateway path
 

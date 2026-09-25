@@ -296,6 +296,123 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 	return status, nil
 }
 
+// armExternalTailscale keeps operator-owned Serve separate from managed
+// SessionAuthority: it never probes Tailscale CLI/LocalAPI and never claims or
+// changes ingress. The relay HTTPS endpoint and selected phone-app bundle are
+// verified with normal system TLS immediately before the durable invitation
+// transaction and again at its commit boundary.
+func (s *Server) armExternalTailscale(ctx context.Context) (localcontrol.Status, error) {
+	refused := func(err error) (localcontrol.Status, error) {
+		status := s.externalControlStatus()
+		status.ArmOutcome = "not-committed"
+		if errors.Is(err, deviceauth.ErrManagedArmRecovery) {
+			status.ArmOutcome = "unresolved"
+		} else if errors.Is(err, deviceauth.ErrBootstrapGateCommittedRevoked) {
+			status.ArmOutcome = "committed"
+		}
+		return status, err
+	}
+	unlock, err := s.externalArmMu.Lock(ctx)
+	if err != nil {
+		return refused(err)
+	}
+	defer unlock()
+	if err := s.checkExternalTailscaleReadiness(ctx); err != nil {
+		return refused(err)
+	}
+	if err := s.ensureManagedDeviceStore(); err != nil {
+		return refused(err)
+	}
+
+	s.pairingAdmissionMu.Lock()
+	defer s.pairingAdmissionMu.Unlock()
+	if err := s.bootstrapGate.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en", nil, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.checkExternalTailscaleReadiness(ctx); err != nil {
+			return err
+		}
+		return s.hub.SetAcceptingContext(ctx, true)
+	}); err != nil {
+		s.recordSafeError("operator-owned Serve bootstrap arm failed", err)
+		return refused(err)
+	}
+	status := s.externalControlStatus()
+	status.Ready = status.LocalReady && s.bootstrapGate.OpenStatus()
+	status.InvitationArmed = true
+	status.ArmOutcome = "committed"
+	if store := s.deviceStore(); store != nil {
+		invitation := store.BootstrapStatus()
+		status.InvitationPending = invitation.Pending
+		if !invitation.ExpiresAt.IsZero() {
+			status.InvitationExpiresAt = invitation.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+	}
+	if !status.Ready {
+		return status, errors.New("operator-owned Serve invitation was committed but local admission is unavailable")
+	}
+	return status, nil
+}
+
+func (s *Server) checkExternalTailscaleReadiness(ctx context.Context) error {
+	if !s.managedLocalReady() {
+		return errors.New("local relay inventory or backend readiness is incomplete")
+	}
+	if s.webH == nil || s.webH.BundleVersion() != s.version || s.webH.BundleRevision() != s.revision {
+		return errors.New("local web bundle identity does not match the relay binary")
+	}
+	if err := s.checkLocalHealth(ctx); err != nil {
+		return err
+	}
+	origin := s.cfg.ExternalHTTPSOrigin
+	checkCtx, cancel := context.WithTimeout(ctx, managedHealthTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(checkCtx, http.MethodGet, strings.TrimSuffix(origin, "/")+"/healthz", nil)
+	if err != nil {
+		return err
+	}
+	client := managedHealthClientForServer(s, managedHealthTimeout)
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("trusted external HTTPS health check failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("X-Herdr-Relay-Instance") != s.cfg.InstanceID {
+		return errors.New("external HTTPS health endpoint identity did not match this relay")
+	}
+	var health struct {
+		Status         string `json:"status"`
+		Readiness      string `json:"readiness"`
+		Transport      string `json:"transport"`
+		Instance       string `json:"instance"`
+		ControlRunID   string `json:"external_control_run_id"`
+		Version        string `json:"version"`
+		Revision       string `json:"revision"`
+		Origin         string `json:"external_https_origin"`
+		BundleHash     string `json:"bundle_hash"`
+		BundleVersion  string `json:"bundle_version"`
+		BundleRevision string `json:"bundle_revision"`
+	}
+	if err := decodeManagedHealth(response.Body, &health); err != nil {
+		return errors.New("external HTTPS health response was invalid")
+	}
+	if health.Status != "ok" || health.Readiness != "ready" || health.Transport != config.TransportTailscaleExternal ||
+		health.Instance != s.cfg.InstanceID || health.ControlRunID != s.cfg.ControlRunID ||
+		health.Version != s.version || health.Revision != s.revision || health.Origin != origin ||
+		s.webH == nil || health.BundleHash != s.webH.BundleHash() ||
+		health.BundleVersion != s.version || health.BundleRevision != s.revision {
+		return errors.New("external HTTPS relay, release, or web-bundle identity did not match")
+	}
+	if s.cfg.PhoneAppOrigin == "" {
+		return errors.New("verified external phone app origin is unavailable")
+	}
+	if err := appdeploy.VerifyPublic(ctx, s.cfg.WebRoot, s.cfg.PhoneAppOrigin, s.version, s.revision); err != nil {
+		return fmt.Errorf("external phone app bundle verification failed: %w", err)
+	}
+	return nil
+}
+
 // unwindManagedStartup is used only before the private control socket is
 // published. In that phase activation is provably undispatched, so the real
 // SessionAuthority can safely retire its prepared state without a route POST.
@@ -626,6 +743,9 @@ func (s *Server) ManagedOwnerReleaseSafe() bool {
 }
 
 func (s *Server) controlStatus(ctx context.Context) localcontrol.Status {
+	if s.cfg.Transport == config.TransportTailscaleExternal {
+		return s.externalControlStatus()
+	}
 	status := localcontrol.Status{
 		Transport: s.cfg.Transport,
 		Version:   s.version,
@@ -697,7 +817,43 @@ func (s *Server) armForControl(ctx context.Context) (localcontrol.Status, error)
 	if s.tailscaleSession != nil {
 		return s.armManagedTailscale(ctx)
 	}
+	if s.cfg.Transport == config.TransportTailscaleExternal {
+		return s.armExternalTailscale(ctx)
+	}
 	return s.armBootstrapForControl()
+}
+
+func (s *Server) controlRunID() string {
+	if s.cfg.Transport == config.TransportTailscaleExternal {
+		return s.cfg.ControlRunID
+	}
+	return s.cfg.ManagedRunID
+}
+
+func (s *Server) externalControlStatus() localcontrol.Status {
+	status := localcontrol.Status{
+		Transport:      s.cfg.Transport,
+		Version:        s.version,
+		Revision:       s.revision,
+		PhoneAppOrigin: s.cfg.PhoneAppOrigin,
+	}
+	if s.webH != nil {
+		status.BundleHash = s.webH.BundleHash()
+	}
+	s.mu.RLock()
+	backendBound := s.backendBound
+	s.mu.RUnlock()
+	status.LocalReady = backendBound && s.udp != nil && s.state != nil && s.state.InventoryReady()
+	status.Ready = status.LocalReady && s.bootstrapGate != nil && s.bootstrapGate.OpenStatus()
+	if store := s.deviceStore(); store != nil {
+		invitation := store.BootstrapStatus()
+		status.InvitationArmed = invitation.Armed
+		status.InvitationPending = invitation.Pending
+		if !invitation.ExpiresAt.IsZero() {
+			status.InvitationExpiresAt = invitation.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+	}
+	return status
 }
 
 func (s *Server) retireForControl(ctx context.Context) (localcontrol.Status, error) {

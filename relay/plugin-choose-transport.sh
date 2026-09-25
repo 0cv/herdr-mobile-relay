@@ -12,9 +12,9 @@ cd "$SCRIPT_DIR"
 
 MODE="${1:-}"
 case "$MODE" in
-    temporary | stable | community | own | tailscale) ;;
+    temporary | stable | community | own | tailscale | tailscale-external) ;;
     *)
-        echo "Usage: $0 {temporary|stable|community|own|tailscale}" >&2
+        echo "Usage: $0 {temporary|stable|community|own|tailscale|tailscale-external}" >&2
         exit 2
         ;;
 esac
@@ -25,12 +25,20 @@ esac
 if [ "$MODE" = tailscale ]; then
     shift
     HERDR_TAILSCALE_REQUEST=1 HERDR_RELAY_TRANSPORT=tailscale exec "$SCRIPT_DIR/tailscale.sh" "$@"
+elif [ "$MODE" = tailscale-external ]; then
+    shift
+    exec "$SCRIPT_DIR/tailscale-external.sh" "$@"
 fi
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
-    echo "✗ Transport changes are unavailable while a foreground Tailscale Serve session is active." >&2
+    echo "✗ Transport changes are unavailable while a managed Tailscale Serve session is active." >&2
     echo "  Stop the pane before selecting another transport." >&2
+    exit 1
+fi
+if [ -e "$(tailscale_external_session_file "$ENV_FILE")" ]; then
+    echo "✗ Transport changes are unavailable while operator-owned HTTPS Serve is running." >&2
+    echo "  Stop that foreground pane before selecting another transport." >&2
     exit 1
 fi
 CURRENT="$(gateway_urls "$ENV_FILE")"

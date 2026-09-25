@@ -21,6 +21,69 @@ func SetupFragment(token, label, relay string) string {
 	return values.Encode()
 }
 
+// NormalizeExternalHTTPSOrigin accepts only a canonical, user-supplied HTTPS
+// origin. Unlike NormalizeOrigin, it never supplies a scheme or trims a path;
+// callers can therefore distinguish an operator's exact Serve address from a
+// URL that would otherwise be silently rewritten.
+func NormalizeExternalHTTPSOrigin(value string) (string, error) {
+	if value == "" || strings.TrimSpace(value) != value || !strings.HasPrefix(value, "https://") {
+		return "", errors.New("external Serve origin must be a canonical HTTPS origin")
+	}
+	if strings.ContainsAny(strings.TrimPrefix(value, "https://"), "/?#\\\\") {
+		return "", errors.New("external Serve origin must not contain a path, query, fragment, or backslash")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
+		return "", errors.New("external Serve origin must be a canonical HTTPS origin")
+	}
+	host := parsed.Hostname()
+	if host == "" || strings.ContainsAny(parsed.Host, "%@") {
+		return "", errors.New("external Serve origin has an invalid host")
+	}
+	canonicalHost := strings.ToLower(host)
+	if ip := net.ParseIP(host); ip != nil {
+		canonicalHost = ip.String()
+	} else if !validOriginHostname(canonicalHost) {
+		return "", errors.New("external Serve origin has an invalid host")
+	}
+	port := parsed.Port()
+	if port != "" {
+		number, portErr := strconv.Atoi(port)
+		if portErr != nil || number < 1 || number > 65535 || strconv.Itoa(number) != port || number == 443 {
+			return "", errors.New("external Serve origin has a non-canonical port")
+		}
+	}
+	canonicalAuthority := canonicalHost
+	if strings.Contains(canonicalHost, ":") {
+		canonicalAuthority = "[" + canonicalHost + "]"
+	}
+	if port != "" {
+		canonicalAuthority = net.JoinHostPort(canonicalHost, port)
+	}
+	canonical := "https://" + canonicalAuthority
+	if value != canonical {
+		return "", errors.New("external Serve origin is not canonical")
+	}
+	return canonical, nil
+}
+
+func validOriginHostname(host string) bool {
+	if host == "" || len(host) > 253 || strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func NormalizeOrigin(value string, allowLoopbackHTTP bool) (string, error) {
 	value = strings.TrimSpace(value)
 	if !strings.Contains(value, "://") {

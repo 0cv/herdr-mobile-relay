@@ -24,9 +24,12 @@ fi
 # wrapper—not only the chooser—must remove a previously selected gateway before
 # stable-setup and setup-link decide which transport to configure and encode.
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
-if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
-    echo "✗ Cloudflare service installation is unavailable while a foreground Tailscale Serve session is active." >&2
-    echo "  Stop the pane before changing transports." >&2
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
+    [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ]; then
+    echo "✗ Background service installation is unavailable for foreground Tailscale Serve transports." >&2
+    echo "  Stop the pane and explicitly choose a background-compatible transport." >&2
     exit 1
 fi
 CURRENT_TRANSPORT="$(relay_transport_mode "$ENV_FILE")"

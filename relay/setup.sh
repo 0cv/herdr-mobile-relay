@@ -88,8 +88,8 @@ install_tool() {
 }
 
 TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
-if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
-    echo "✗ Setup changes are unavailable while a foreground Tailscale Serve session is active." >&2
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ] || [ -e "$(tailscale_external_session_file "$ENV_FILE")" ]; then
+    echo "✗ Setup changes are unavailable while a foreground Tailscale Serve relay is active." >&2
     echo "  Stop the pane before changing relay prerequisites or credentials." >&2
     exit 1
 fi
@@ -129,7 +129,11 @@ if [ "$TRANSPORT" = gateway ]; then
     echo "Skipping the cloudflared prerequisite; no Cloudflare account is needed."
     echo ""
 elif [ "$TRANSPORT" = tailscale ]; then
-    echo "Tailscale transport selected: Serve will be configured only after explicit consent."
+    echo "Managed Tailscale Serve selected: Serve changes require explicit per-run consent."
+    echo ""
+elif [ "$TRANSPORT" = tailscale-external ]; then
+    echo "Operator-owned HTTPS Serve selected: Herdr will only use the origin you supply."
+    echo "  No Tailscale CLI/LocalAPI observation or Serve/Funnel change is performed."
     echo ""
 fi
 
@@ -179,6 +183,8 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
         echo "  cloudflared: https://developers.cloudflare.com/tunnel/downloads/"
     elif [ "$TRANSPORT" = tailscale ]; then
         echo "  Tailscale:   install and authenticate it manually, then retry setup"
+    elif [ "$TRANSPORT" = tailscale-external ]; then
+        echo "  HTTPS Serve: configure your existing Serve route to the local relay; no Tailscale CLI is needed"
     fi
     exit 1
 fi
@@ -210,10 +216,10 @@ if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
     install -m 0600 "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
     echo "Created $WEB_ENV_FILE"
 fi
-if [ "$TRANSPORT" = tailscale ] &&
-    [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_TRANSPORT)" = tailscale ] &&
+if { [ "$TRANSPORT" = tailscale ] || [ "$TRANSPORT" = tailscale-external ]; } &&
+    [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_TRANSPORT)" = "$TRANSPORT" ] &&
     [ -z "$(env_file_value "$ENV_FILE" HERDR_RELAY_TOKEN)" ]; then
-    echo "✗ Existing Tailscale configuration has no relay token; refusing to generate a new device identity." >&2
+    echo "✗ Existing Tailscale Serve configuration has no relay token; refusing to generate a new device identity." >&2
     echo "  Restore the recorded relay.env or choose another transport explicitly." >&2
     exit 1
 fi
@@ -229,7 +235,9 @@ echo "  Relay config: $ENV_FILE"
 if [ "$TRANSPORT" = gateway ]; then
     echo "  Gateway:      $GATEWAY_URL"
 elif [ "$TRANSPORT" = tailscale ]; then
-    echo "  Transport:    Tailscale Serve (foreground; no Funnel or cloudflared)"
+    echo "  Transport:    Managed Tailscale Serve (foreground; no Funnel or cloudflared)"
+elif [ "$TRANSPORT" = tailscale-external ]; then
+    echo "  Transport:    Operator-owned HTTPS Serve (foreground; no Tailscale CLI or Serve mutation)"
 fi
 if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
     echo "  Web config:   $WEB_ENV_FILE"

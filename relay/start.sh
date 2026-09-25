@@ -42,6 +42,8 @@ fi
 TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
 if [ "$TRANSPORT" = tailscale ]; then
     exec "$SCRIPT_DIR/tailscale.sh"
+elif [ "$TRANSPORT" = tailscale-external ]; then
+    exec "$SCRIPT_DIR/tailscale-external.sh" "$@"
 fi
 CONFIG_ROOT="$(dirname "$ENV_FILE")"
 if [ ! -d "$CONFIG_ROOT" ]; then

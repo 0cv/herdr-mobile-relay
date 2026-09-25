@@ -22,6 +22,17 @@ import (
 // referencing any identifier that the S7B1 mutant overlay does not define.
 const reprintOriginFile = "phone-app-origin-configured"
 
+func TestClassifyReprintArmRetainsUnresolvedInvitationJournal(t *testing.T) {
+	response := localcontrol.Response{Error: "durable arm rollback requires recovery", ArmOutcome: "unresolved"}
+	if got := classifyReprintArm(response, nil); got != reprintArmUncertain {
+		t.Fatalf("unresolved arm classified as %v, want uncertain", got)
+	}
+	response.ArmOutcome = "not-committed"
+	if got := classifyReprintArm(response, nil); got != reprintArmRejected {
+		t.Fatalf("definitely refused arm classified as %v, want rejected", got)
+	}
+}
+
 // reprintOwnedRoot creates a private 0700 canonical root with a published B1
 // owner so the reprint command's active-owner check passes.
 func reprintOwnedRoot(t *testing.T) string {

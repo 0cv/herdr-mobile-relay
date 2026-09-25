@@ -9,14 +9,17 @@ export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin:/home/linux
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
-if [ -e "$(tailscale_session_file "$ENV_FILE")" ]; then
-    echo "✗ Stable setup is unavailable while a foreground Tailscale Serve session is active." >&2
+if [ -e "$(tailscale_session_file "$ENV_FILE")" ] || [ -e "$(tailscale_external_session_file "$ENV_FILE")" ]; then
+    echo "✗ Stable setup is unavailable while a foreground Tailscale Serve relay is active." >&2
     echo "  Stop the pane before changing transports or installing a service." >&2
     exit 1
 fi
-if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
+if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ]; then
     set_gateway_url "$ENV_FILE" ""
     unset HERDR_TAILSCALE_ORIGIN HERDR_RELAY_PAIRING_SOCKET HERDR_RELAY_RUN_ID
+    unset HERDR_EXTERNAL_HTTPS_ORIGIN HERDR_RELAY_CONTROL_RUN_ID
+    remove_env_value_atomic "$ENV_FILE" HERDR_EXTERNAL_HTTPS_ORIGIN
     echo "Switching this relay from Tailscale Serve to Cloudflare."
     echo ""
 fi

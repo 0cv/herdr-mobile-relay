@@ -14,8 +14,8 @@ import (
 func transportAdmission(resolved, current string, requireCurrent bool) error {
 	resolved = strings.ToLower(strings.TrimSpace(resolved))
 	current = strings.ToLower(strings.TrimSpace(current))
-	if resolved == "tailscale" || current == "tailscale" {
-		return errors.New("Phone-managed updates are unavailable for foreground Tailscale Serve; stop the foreground owner and use the verified manual-update procedure")
+	if resolved == "tailscale" || current == "tailscale" || resolved == "tailscale-external" || current == "tailscale-external" {
+		return errors.New("Phone-managed updates are unavailable for foreground Tailscale Serve transports; stop the foreground relay and use the verified manual-update procedure")
 	}
 	legacy := func(value string) bool { return value == "cloudflare" || value == "gateway" }
 	if !legacy(resolved) || (requireCurrent && current == "") || (current != "" && (!legacy(current) || current != resolved)) {

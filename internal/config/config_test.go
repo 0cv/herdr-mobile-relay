@@ -245,6 +245,68 @@ func TestLoadTailscaleRequiresSafeLoopbackAndNoRearm(t *testing.T) {
 	}
 }
 
+func TestLoadTailscaleExternalRequiresCanonicalOriginAndSeparateControl(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		origin         string
+		phoneAppOrigin string
+		valid          bool
+	}{
+		{name: "canonical", origin: "https://relay.example.test:8443", valid: true},
+		{name: "separate phone app", origin: "https://relay.example.test:8443", phoneAppOrigin: "https://app.example.test", valid: true},
+		{name: "http", origin: "http://relay.example.test"},
+		{name: "path", origin: "https://relay.example.test/"},
+		{name: "query", origin: "https://relay.example.test?x=1"},
+		{name: "userinfo", origin: "https://user@relay.example.test"},
+		{name: "bad port", origin: "https://relay.example.test:70000"},
+		{name: "insecure phone app", origin: "https://relay.example.test", phoneAppOrigin: "http://app.example.test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateExternalTailscaleEnvironment(t)
+			t.Setenv("HERDR_EXTERNAL_HTTPS_ORIGIN", tc.origin)
+			phoneAppOrigin := tc.phoneAppOrigin
+			if phoneAppOrigin == "" {
+				phoneAppOrigin = "https://relay.example.test"
+			} else {
+				t.Setenv("HERDR_PHONE_APP_URL", phoneAppOrigin)
+			}
+			cfg, err := Load()
+			if tc.valid {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Transport != TransportTailscaleExternal || cfg.ExternalHTTPSOrigin != tc.origin ||
+					cfg.PhoneAppOrigin != phoneAppOrigin || cfg.ManagedRunID != "" || cfg.ControlRunID != "external-run" {
+					t.Fatalf("external config = %#v", cfg)
+				}
+				return
+			}
+			if cfg != nil || err == nil {
+				t.Fatalf("invalid external origin accepted: cfg=%#v err=%v", cfg, err)
+			}
+		})
+	}
+}
+
+func TestLoadTailscaleExternalRejectsManagedAndRearmSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value, want string
+	}{
+		{name: "managed run", key: "HERDR_RELAY_RUN_ID", value: "managed-run", want: "managed Tailscale"},
+		{name: "rearm", key: "HERDR_RELAY_REARM_BOOTSTRAP", value: "true", want: "REARM_BOOTSTRAP"},
+		{name: "gateway selection", key: "HERDR_GATEWAY_SELECTION", value: "latency", want: "GATEWAY_SELECTION"},
+		{name: "router mapping", key: "HERDR_REACHABILITY_PORT_MAPPING", value: "1", want: "automatic PCP/UPnP"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateExternalTailscaleEnvironment(t)
+			t.Setenv(tc.key, tc.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("invalid external config accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadUsesSelectedTailscaleBinary(t *testing.T) {
 	isolateTailscaleEnvironment(t)
 	selected := filepath.Join(t.TempDir(), "custom-tailscale")
@@ -456,6 +518,19 @@ func TestLoadLegacyTokenlessAdmission(t *testing.T) {
 	}
 }
 
+func isolateExternalTailscaleEnvironment(t *testing.T) {
+	t.Helper()
+	isolateLoadEnvironment(t)
+	t.Setenv("HERDR_RELAY_TOKEN", strings.Repeat("z", 32))
+	t.Setenv("HERDR_RELAY_TRANSPORT", TransportTailscaleExternal)
+	t.Setenv("HERDR_REACHABILITY_PORT_MAPPING", "0")
+	t.Setenv("HERDR_EXTERNAL_HTTPS_ORIGIN", "https://relay.example.test")
+	t.Setenv("HERDR_PHONE_APP_URL", "https://relay.example.test")
+	t.Setenv("HERDR_RELAY_INSTANCE_ID", "instance-1")
+	t.Setenv("HERDR_RELAY_PAIRING_SOCKET", filepath.Join(t.TempDir(), "external-control.sock"))
+	t.Setenv("HERDR_RELAY_CONTROL_RUN_ID", "external-run")
+}
+
 func isolateTailscaleEnvironment(t *testing.T) {
 	t.Helper()
 	isolateLoadEnvironment(t)
@@ -491,6 +566,9 @@ func isolateLoadEnvironment(t *testing.T) {
 	t.Setenv("HERDR_RELAY_REARM_BOOTSTRAP", "")
 	t.Setenv("HERDR_RELAY_TRANSPORT", "")
 	t.Setenv("HERDR_TAILSCALE_ORIGIN", "")
+	t.Setenv("HERDR_EXTERNAL_HTTPS_ORIGIN", "")
+	t.Setenv("HERDR_PHONE_APP_URL", "")
+	t.Setenv("HERDR_RELAY_CONTROL_RUN_ID", "")
 	t.Setenv("HERDR_TAILSCALE_BIN", "")
 	t.Setenv("HERDR_RELAY_PAIRING_SOCKET", "")
 	t.Setenv("HERDR_RELAY_RUN_ID", "")

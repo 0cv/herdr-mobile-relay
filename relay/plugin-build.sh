@@ -58,14 +58,20 @@ TARGET_TRANSPORT="$(env_file_value "$TARGET_ENV" HERDR_RELAY_TRANSPORT || true)"
 SOURCE_TRANSPORT=""
 [ -z "$SOURCE_ENV" ] || SOURCE_TRANSPORT="$(env_file_value "$SOURCE_ENV" HERDR_RELAY_TRANSPORT || true)"
 TARGET_SESSION="$(dirname "$TARGET_ENV")/tailscale-session.env"
+TARGET_EXTERNAL_SESSION="$(dirname "$TARGET_ENV")/tailscale-external-session.env"
 SOURCE_SESSION=""
+SOURCE_EXTERNAL_SESSION=""
 [ -z "$SOURCE_ENV" ] || SOURCE_SESSION="$(dirname "$SOURCE_ENV")/tailscale-session.env"
-if [ -e "$TARGET_SESSION" ] || { [ -n "$SOURCE_SESSION" ] && [ -e "$SOURCE_SESSION" ]; }; then
+[ -z "$SOURCE_ENV" ] || SOURCE_EXTERNAL_SESSION="$(dirname "$SOURCE_ENV")/tailscale-external-session.env"
+if [ -e "$TARGET_SESSION" ] || [ -e "$TARGET_EXTERNAL_SESSION" ] ||
+    { [ -n "$SOURCE_SESSION" ] && [ -e "$SOURCE_SESSION" ]; } ||
+    { [ -n "$SOURCE_EXTERNAL_SESSION" ] && [ -e "$SOURCE_EXTERNAL_SESSION" ]; }; then
     echo "herdr-mobile-relay: foreground Tailscale Serve must be stopped before updating" >&2
-    echo "herdr-mobile-relay: remove only a verified stale session record after its route is gone" >&2
+    echo "herdr-mobile-relay: do not remove a live session record or modify operator-owned ingress" >&2
     exit 1
 fi
-if [ "$TARGET_TRANSPORT" = tailscale ] || [ "$SOURCE_TRANSPORT" = tailscale ]; then
+if [ "$TARGET_TRANSPORT" = tailscale ] || [ "$SOURCE_TRANSPORT" = tailscale ] ||
+    [ "$TARGET_TRANSPORT" = tailscale-external ] || [ "$SOURCE_TRANSPORT" = tailscale-external ]; then
     if installed_relay_service_definition_present || installed_relay_service_active; then
         echo "herdr-mobile-relay: foreground Tailscale Serve cannot be updated through a running service" >&2
         echo "herdr-mobile-relay: stop the pane and remove the service definition before retrying" >&2

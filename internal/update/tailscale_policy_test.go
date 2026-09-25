@@ -67,6 +67,19 @@ func s3Seed(t *testing.T, root string, state State) {
 		t.Fatal(err)
 	}
 }
+func TestExternalTailscaleBlocksPhoneManagedUpdates(t *testing.T) {
+	for _, resolved := range []string{"tailscale-external", "cloudflare"} {
+		for _, current := range []string{"", "tailscale-external", "cloudflare"} {
+			err := transportAdmission(resolved, current, false)
+			if resolved == "tailscale-external" || current == "tailscale-external" {
+				if err == nil || !strings.Contains(err.Error(), "foreground Tailscale Serve") {
+					t.Errorf("transportAdmission(%q, %q) = %v, want foreground refusal", resolved, current, err)
+				}
+			}
+		}
+	}
+}
+
 func TestTailscaleS3State(t *testing.T) {
 	for _, raw := range []string{"tailscale", "", "cloudflare", "gateway", "unknown"} {
 		for _, phase := range []string{"available", "installing", "restarting", "memory"} {

@@ -394,6 +394,16 @@ func run(args []string) (int, error) {
 		}
 		fmt.Println(origin)
 		return 0, nil
+	case "normalize-external-origin":
+		if len(args) != 1 {
+			return 2, errors.New("usage: herdr-mobile-relay normalize-external-origin CANONICAL_HTTPS_ORIGIN")
+		}
+		origin, err := setuphelper.NormalizeExternalHTTPSOrigin(args[0])
+		if err != nil {
+			return 1, err
+		}
+		fmt.Println(origin)
+		return 0, nil
 	case "managed-state":
 		if len(args) > 0 && args[0] == "reprint" {
 			return runManagedReprint(args[1:], os.Stdout, os.Stderr), nil

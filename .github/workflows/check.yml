@@ -241,14 +241,26 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e .env
+          go_bin_dir="$(dirname "$(command -v go)")"
+          evidence="$RUNNER_TEMP/tailscale-external-evidence.json"
           env -i \
-            HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH=/usr/bin:/bin \
+            HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$go_bin_dir:/usr/bin:/bin" \
+            GOTOOLCHAIN=local GITHUB_SHA="$GITHUB_SHA" \
             HERDR_TAILSCALE_LAUNCHER_CI=1 \
+            HERDR_EXTERNAL_FIXTURE_EVIDENCE="$evidence" \
             BASH_ENV=/dev/null ENV=/dev/null \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-            /usr/bin/make PATH=/usr/bin:/bin \
+            /usr/bin/make PATH="$go_bin_dir:/usr/bin:/bin" \
               --eval='assert-shell-tools: ; @test "$$(command -v bash)" = /usr/bin/bash && test "$$(command -v sed)" = /usr/bin/sed' \
               assert-shell-tools shell-check production-path-audit
+      - name: Upload sanitized operator-owned Serve behavioral evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tailscale-external-behavior-${{ github.sha }}
+          path: ${{ runner.temp }}/tailscale-external-evidence.json
+          if-no-files-found: error
+          retention-days: 1
 
   frontend:
     needs: provenance

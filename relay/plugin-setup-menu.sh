@@ -85,7 +85,30 @@ transport_summary() {
     local current
     local count
     local origin
+    local external_run_id
+    local external_stage
+    local expected_instance
 
+    if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ]; then
+        origin="$(env_file_value "$ENV_FILE" HERDR_EXTERNAL_HTTPS_ORIGIN)"
+        expected_instance="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
+        external_run_id="$(tailscale_session_value "$(tailscale_external_session_file "$ENV_FILE")" HERDR_RELAY_CONTROL_RUN_ID || true)"
+        external_stage="$(tailscale_session_value "$(tailscale_external_session_file "$ENV_FILE")" HERDR_RELAY_STAGE || true)"
+        if [ -n "$origin" ]; then
+            if [ "$external_stage" = ready ] && [ -n "$external_run_id" ] &&
+                [ "$(json_string_field "$health" transport)" = tailscale-external ] &&
+                [ "$(json_string_field "$health" external_https_origin)" = "$origin" ] &&
+                [ "$(json_string_field "$health" external_control_run_id)" = "$external_run_id" ] &&
+                [ "$(json_string_field "$health" instance)" = "$expected_instance" ]; then
+                printf 'Operator-owned HTTPS Serve %s (relay process active; ingress is not verified)\n' "$origin"
+            else
+                printf 'Operator-owned HTTPS Serve %s (selected relay not active; ingress remains operator-owned)\n' "$origin"
+            fi
+        else
+            printf 'Operator-owned HTTPS Serve selected; origin not configured\n'
+        fi
+        return 0
+    fi
     if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
         origin="$(json_string_field "$health" tailscale_origin)"
         [ -n "$origin" ] || origin="$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_ORIGIN)"
@@ -195,9 +218,14 @@ render_menu() {
     echo "     Check the project's shared gateways, save the healthy candidates,"
     echo "     then start or restart the relay and print its QR."
     echo ""
-    menu_item t "Tailscale Serve (foreground)"
-    echo "     Use a preinstalled, authenticated Tailscale node over trusted HTTPS."
-    echo "     The relay stays on loopback and this pane owns the Serve session."
+    menu_item t "Managed Tailscale Serve (foreground)"
+    echo "     Herdr owns the exact Serve session through its in-process adapter."
+    echo "     Requires a supported authenticated Tailscale Unix daemon."
+    echo ""
+    menu_item b "Operator-owned Tailscale HTTPS Serve (BYO, foreground)"
+    echo "     Supply an HTTPS origin you already route to this loopback relay."
+    echo "     Herdr never inspects or changes Tailscale Serve/Funnel state."
+    echo "     The ingress remains operator-owned after the relay stops."
     echo ""
     menu_item 3 "Deploy or Upgrade Your Own WebRTC Gateway"
     echo "     Copy the gateway shipped by this plugin to your server over SSH,"
@@ -249,6 +277,7 @@ run_action() {
     ) || true
     unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION HERDR_RELAY_TRANSPORT
     unset HERDR_TAILSCALE_ORIGIN HERDR_RELAY_PAIRING_SOCKET HERDR_RELAY_RUN_ID
+    unset HERDR_EXTERNAL_HTTPS_ORIGIN HERDR_RELAY_CONTROL_RUN_ID
     load_relay_env "$ENV_FILE"
     trap - INT
     if [ -t 0 ]; then
@@ -269,6 +298,7 @@ while true; do
             2) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" community; break ;;
             3) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" own; break ;;
             t | T) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" tailscale; break ;;
+            b | B) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" tailscale-external; break ;;
             4) run_action "$SCRIPT_DIR/plugin-install-service.sh"; break ;;
             5) run_action "$SCRIPT_DIR/plugin-change-hostname.sh"; break ;;
             6) run_action "$SCRIPT_DIR/plugin-stable-teardown.sh"; break ;;
@@ -276,7 +306,7 @@ while true; do
             8) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
             9) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
             q | Q) exit 0 ;;
-            *) echo "Enter 1, 2, 3, t, 4, 5, 6, 7, 8, or 9, or q." ;;
+            *) echo "Enter 1, 2, 3, t, b, 4, 5, 6, 7, 8, or 9, or q." ;;
         esac
     done
 done

@@ -17,9 +17,10 @@ import (
 
 // Accepted relay transport values.
 const (
-	TransportCloudflare = "cloudflare"
-	TransportGateway    = "gateway"
-	TransportTailscale  = "tailscale"
+	TransportCloudflare        = "cloudflare"
+	TransportGateway           = "gateway"
+	TransportTailscale         = "tailscale"
+	TransportTailscaleExternal = "tailscale-external"
 
 	// Accepted HERDR_GATEWAY_SELECTION values.
 	// GatewaySelectionOrdered registers with the first healthy entry in
@@ -31,26 +32,29 @@ const (
 )
 
 type Config struct {
-	Host              string
-	Port              int
-	PluginPort        int
-	Token             string
-	InstanceID        string
-	AllowedOrigins    []string
-	WebRoot           string
-	HerdrBin          string
-	SocketPath        string
-	PollInterval      float64
-	RuntimeDir        string
-	LogFormat         string
-	LogLevel          slog.Level
-	ReleaseRoot       string
-	ServiceName       string
-	Transport         string
-	TailscaleOrigin   string
-	TailscaleBin      string
-	PairingSocketPath string
-	ManagedRunID      string
+	Host                string
+	Port                int
+	PluginPort          int
+	Token               string
+	InstanceID          string
+	AllowedOrigins      []string
+	WebRoot             string
+	HerdrBin            string
+	SocketPath          string
+	PollInterval        float64
+	RuntimeDir          string
+	LogFormat           string
+	LogLevel            slog.Level
+	ReleaseRoot         string
+	ServiceName         string
+	Transport           string
+	TailscaleOrigin     string
+	ExternalHTTPSOrigin string
+	PhoneAppOrigin      string
+	TailscaleBin        string
+	PairingSocketPath   string
+	ManagedRunID        string
+	ControlRunID        string
 
 	// GatewayURL is the configured tie-break leader, kept equal to
 	// GatewayURLs[0] so readers that only know one gateway keep working. The
@@ -81,22 +85,25 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
-		Host:              envOr("HERDR_RELAY_HOST", "127.0.0.1"),
-		Port:              envIntOr("HERDR_RELAY_PORT", 8375),
-		PluginPort:        envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
-		Token:             os.Getenv("HERDR_RELAY_TOKEN"),
-		InstanceID:        os.Getenv("HERDR_RELAY_INSTANCE_ID"),
-		WebRoot:           os.Getenv("HERDR_WEB_ROOT"),
-		HerdrBin:          os.Getenv("HERDR_BIN"),
-		SocketPath:        os.Getenv("HERDR_SOCKET_PATH"),
-		PollInterval:      envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
-		LogFormat:         envOr("HERDR_RELAY_LOG_FORMAT", "text"),
-		ServiceName:       envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
-		Transport:         transport,
-		TailscaleOrigin:   os.Getenv("HERDR_TAILSCALE_ORIGIN"),
-		TailscaleBin:      envOr("HERDR_TAILSCALE_BIN", "tailscale"),
-		PairingSocketPath: os.Getenv("HERDR_RELAY_PAIRING_SOCKET"),
-		ManagedRunID:      os.Getenv("HERDR_RELAY_RUN_ID"),
+		Host:                envOr("HERDR_RELAY_HOST", "127.0.0.1"),
+		Port:                envIntOr("HERDR_RELAY_PORT", 8375),
+		PluginPort:          envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
+		Token:               os.Getenv("HERDR_RELAY_TOKEN"),
+		InstanceID:          os.Getenv("HERDR_RELAY_INSTANCE_ID"),
+		WebRoot:             os.Getenv("HERDR_WEB_ROOT"),
+		HerdrBin:            os.Getenv("HERDR_BIN"),
+		SocketPath:          os.Getenv("HERDR_SOCKET_PATH"),
+		PollInterval:        envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
+		LogFormat:           envOr("HERDR_RELAY_LOG_FORMAT", "text"),
+		ServiceName:         envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		Transport:           transport,
+		TailscaleOrigin:     os.Getenv("HERDR_TAILSCALE_ORIGIN"),
+		ExternalHTTPSOrigin: os.Getenv("HERDR_EXTERNAL_HTTPS_ORIGIN"),
+		PhoneAppOrigin:      os.Getenv("HERDR_PHONE_APP_URL"),
+		TailscaleBin:        envOr("HERDR_TAILSCALE_BIN", "tailscale"),
+		PairingSocketPath:   os.Getenv("HERDR_RELAY_PAIRING_SOCKET"),
+		ManagedRunID:        os.Getenv("HERDR_RELAY_RUN_ID"),
+		ControlRunID:        os.Getenv("HERDR_RELAY_CONTROL_RUN_ID"),
 
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
@@ -168,7 +175,8 @@ func (c *Config) validate() error {
 	if c.Transport == "" {
 		c.Transport = inferredTransport(c.GatewayURLs)
 	}
-	if c.Transport != TransportCloudflare && c.Transport != TransportGateway && c.Transport != TransportTailscale {
+	if c.Transport != TransportCloudflare && c.Transport != TransportGateway &&
+		c.Transport != TransportTailscale && c.Transport != TransportTailscaleExternal {
 		return fmt.Errorf("invalid HERDR_RELAY_TRANSPORT %q", c.Transport)
 	}
 	if c.Token == "" && c.Host != "127.0.0.1" && c.Host != "::1" && c.Host != "localhost" {
@@ -197,6 +205,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.GatewayURLs) > 0 && c.Token == "" {
 		return fmt.Errorf("gateway url requires a relay key: the gateway path derives its credentials from it")
+	}
+	if c.Transport == TransportTailscaleExternal {
+		return c.validateExternalTailscale()
 	}
 	if c.Transport != TransportTailscale {
 		return nil
@@ -236,6 +247,48 @@ func (c *Config) validate() error {
 	return nil
 }
 
+func (c *Config) validateExternalTailscale() error {
+	if c.Token == "" {
+		return errors.New("tailscale-external transport requires a relay key of exactly 32 bytes")
+	}
+	if c.Host != "127.0.0.1" {
+		return fmt.Errorf("tailscale-external transport requires HERDR_RELAY_HOST=127.0.0.1, got %q", c.Host)
+	}
+	if strings.TrimSpace(os.Getenv("HERDR_GATEWAY_SELECTION")) != "" {
+		return errors.New("HERDR_GATEWAY_SELECTION conflicts with tailscale-external transport")
+	}
+	if c.RearmBootstrap {
+		return errors.New("tailscale-external transport refuses HERDR_RELAY_REARM_BOOTSTRAP; it would reset device credentials")
+	}
+	if c.PortMappingEnabled {
+		return errors.New("tailscale-external transport refuses automatic PCP/UPnP port mapping; set HERDR_REACHABILITY_PORT_MAPPING=0")
+	}
+	if c.ManagedRunID != "" {
+		return errors.New("tailscale-external transport must not use managed Tailscale run ownership")
+	}
+	if c.TailscaleOrigin != "" {
+		return errors.New("HERDR_TAILSCALE_ORIGIN conflicts with tailscale-external transport")
+	}
+	origin, err := setuphelper.NormalizeExternalHTTPSOrigin(c.ExternalHTTPSOrigin)
+	if err != nil || origin != c.ExternalHTTPSOrigin {
+		return errors.New("HERDR_EXTERNAL_HTTPS_ORIGIN must be a canonical HTTPS origin")
+	}
+	phoneAppOrigin, err := setuphelper.NormalizeExternalHTTPSOrigin(c.PhoneAppOrigin)
+	if err != nil || phoneAppOrigin != c.PhoneAppOrigin {
+		return errors.New("HERDR_PHONE_APP_URL must be a canonical HTTPS origin for external Serve")
+	}
+	if c.InstanceID == "" || !safeRunID(c.InstanceID) {
+		return errors.New("tailscale-external transport requires a valid relay instance ID")
+	}
+	if c.ControlRunID == "" || !safeRunID(c.ControlRunID) {
+		return errors.New("tailscale-external transport requires a valid private control run ID")
+	}
+	if c.PairingSocketPath == "" || !filepath.IsAbs(c.PairingSocketPath) {
+		return errors.New("tailscale-external transport requires an absolute HERDR_RELAY_PAIRING_SOCKET")
+	}
+	return nil
+}
+
 func resolveTransport(raw, gatewayRaw string) (string, error) {
 	transport := strings.ToLower(strings.TrimSpace(raw))
 	gatewayConfigured := len(parseGatewayURLs(gatewayRaw)) > 0
@@ -257,6 +310,10 @@ func resolveTransport(raw, gatewayRaw string) (string, error) {
 	case TransportTailscale:
 		if gatewayConfigured {
 			return "", errors.New("HERDR_RELAY_TRANSPORT=tailscale conflicts with HERDR_GATEWAY_URL")
+		}
+	case TransportTailscaleExternal:
+		if gatewayConfigured {
+			return "", errors.New("HERDR_RELAY_TRANSPORT=tailscale-external conflicts with HERDR_GATEWAY_URL")
 		}
 	default:
 		return "", fmt.Errorf("invalid HERDR_RELAY_TRANSPORT %q", raw)

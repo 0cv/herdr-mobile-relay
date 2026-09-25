@@ -41,7 +41,7 @@ const (
 	managedReprintMaxIdentity       = 128
 )
 
-const managedReprintUsage = "usage: herdr-mobile-relay managed-state reprint --dir DIR --socket PATH --run-id ID --instance ID [--origin-file phone-app-origin-configured] --origin-value VALUE [--deadline 8m]"
+const managedReprintUsage = "usage: herdr-mobile-relay managed-state reprint --dir DIR --socket PATH --run-id ID --instance ID [--external] [--origin-file phone-app-origin-configured] --origin-value VALUE [--deadline 8m]"
 
 // reprintArmOutcome is the three-way classification of the arm IPC result.
 type reprintArmOutcome int
@@ -68,6 +68,7 @@ func runManagedReprint(args []string, stdout, stderr io.Writer) int {
 	originFile := flags.String("origin-file", managedReprintDefaultOriginFile, "managed origin file name")
 	originValue := flags.String("origin-value", "", "new origin value")
 	deadline := flags.Duration("deadline", managedReprintDefaultDeadline, "overall transaction deadline (1s-8m)")
+	external := flags.Bool("external", false, "operator-owned HTTPS Serve; validate private control status instead of managed owner.lock")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintln(stderr, managedReprintUsage)
 		return 2
@@ -103,12 +104,26 @@ func runManagedReprint(args []string, stdout, stderr io.Writer) int {
 		return 4
 	}
 
-	// O is held by the live serve process. Reprint must prove an active owner
-	// exists but must never acquire, adopt or retire it.
-	ownerInfo, err := os.Lstat(filepath.Join(*dir, "owner.lock"))
-	if err != nil || ownerInfo.Mode()&os.ModeSymlink != 0 || !ownerInfo.IsDir() {
-		fmt.Fprintln(stderr, "managed-state reprint: no active owner lock; refusing without acquiring ownership")
-		return 4
+	if *external {
+		// External/BYO Serve intentionally has no managed Tailscale owner. Prove
+		// the active relay's private control identity and local readiness without
+		// treating route text, a CLI observation, or an owner boolean as authority.
+		status, statusErr := localcontrol.Request(ctx, *socket, "status", *runID, *instance)
+		if statusErr != nil || status.RunID != *runID || status.Instance != *instance ||
+			status.Transport != "tailscale-external" || !status.LocalReady ||
+			status.Version != version || status.Revision != revision || status.BundleHash == "" ||
+			status.PhoneAppOrigin != *originValue {
+			fmt.Fprintln(stderr, "managed-state reprint: active operator-owned Serve control identity or local release is unavailable")
+			return 4
+		}
+	} else {
+		// O is held by the live managed serve process. Reprint must prove an
+		// active owner exists but must never acquire, adopt or retire it.
+		ownerInfo, err := os.Lstat(filepath.Join(*dir, "owner.lock"))
+		if err != nil || ownerInfo.Mode()&os.ModeSymlink != 0 || !ownerInfo.IsDir() {
+			fmt.Fprintln(stderr, "managed-state reprint: no active owner lock; refusing without acquiring ownership")
+			return 4
+		}
 	}
 
 	txn, err := root.AcquireTransaction(ctx, managedReprintAcquireLimit)
@@ -177,6 +192,9 @@ func armBootstrapReprint(ctx context.Context, socket, runID, instance string) (l
 // rejection), so a non-empty response.Error is a definite rejection while a
 // non-nil error with an empty response is an ambiguous transport outcome.
 func classifyReprintArm(response localcontrol.Response, err error) reprintArmOutcome {
+	if response.ArmOutcome == "unresolved" {
+		return reprintArmUncertain
+	}
 	if response.Error != "" {
 		return reprintArmRejected
 	}

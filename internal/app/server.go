@@ -128,6 +128,7 @@ type Server struct {
 	tailscaleOpMu                   contextLock
 	admissionTransitionMu           contextLock
 	pairingAdmissionMu              sync.Mutex
+	externalArmMu                   contextLock
 	quarantined                     bool
 	managedAdmissionHandoffObserver func()
 	backendBound                    bool
@@ -181,6 +182,15 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 // newServer can create the device store, listeners, control socket or cache
 // directories. Legacy (non-managed) configurations must not supply an owner.
 func NewOwned(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner) (*Server, error) {
+	if cfg.Transport == config.TransportTailscaleExternal {
+		if owner != nil || cfg.ManagedRunID != "" {
+			return nil, errors.New("operator-owned Tailscale Serve must not acquire managed route ownership")
+		}
+		if cfg.ControlRunID == "" || cfg.PairingSocketPath == "" || cfg.ExternalHTTPSOrigin == "" || cfg.PhoneAppOrigin == "" {
+			return nil, errors.New("operator-owned Tailscale Serve requires relay/app HTTPS origins and a private control identity")
+		}
+		return newServerWithSession(cfg, version, revision, logger, nil, nil), nil
+	}
 	if cfg.Transport == config.TransportTailscale {
 		if cfg.ManagedRunID == "" {
 			return nil, errors.New("Tailscale transport requires an acquired managed owner")
@@ -304,15 +314,26 @@ func newServerWithSession(
 	var deviceStoreErr error
 	var bootstrapGate *deviceauth.BootstrapGate
 	managedTailscale := cfg.Transport == config.TransportTailscale
-	if authority != nil || managedTailscale {
+	externalTailscale := cfg.Transport == config.TransportTailscaleExternal
+	if authority != nil || managedTailscale || externalTailscale {
 		bootstrapGate = deviceauth.NewBootstrapGate()
 		if managedTailscale {
 			bootstrapGate.RequireAuthorityAdmission()
 		}
 		hub.SetE2EEAuthResolver(bootstrapGate)
 		hub.SetAccepting(false)
-		if authority == nil {
+		if managedTailscale && authority == nil {
 			deviceStoreErr = errors.New("managed Tailscale server requires a prepared in-process owner")
+		}
+		if externalTailscale {
+			store, err := deviceauth.OpenDeferred(filepath.Join(cfg.RuntimeDir, "device-auth"))
+			if err != nil {
+				deviceStoreErr = fmt.Errorf("open operator-owned Serve device store without modifying it: %w", err)
+			} else if err := bootstrapGate.Attach(store); err != nil {
+				deviceStoreErr = err
+			} else {
+				deviceStore = store
+			}
 		}
 	} else if cfg.Token != "" {
 		var storeOptions []deviceauth.Option
@@ -1468,7 +1489,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		control, controlErr := localcontrol.NewManaged(
 			s.cfg.PairingSocketPath,
-			s.cfg.ManagedRunID,
+			s.controlRunID(),
 			s.cfg.InstanceID,
 			callbacks,
 		)
@@ -2845,8 +2866,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"revision":        s.revision,
 		"protocol":        protocol.Version,
 	}
-	if s.cfg.ManagedRunID != "" {
+	if s.cfg.Transport == config.TransportTailscale && s.cfg.ManagedRunID != "" {
 		resp["managed_run_id"] = s.cfg.ManagedRunID
+	}
+	if s.cfg.Transport == config.TransportTailscaleExternal {
+		resp["external_control_run_id"] = s.cfg.ControlRunID
+		resp["external_https_origin"] = s.cfg.ExternalHTTPSOrigin
 	}
 	if s.cfg.TailscaleOrigin != "" {
 		resp["tailscale_origin"] = s.cfg.TailscaleOrigin

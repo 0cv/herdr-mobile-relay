@@ -11,7 +11,9 @@ ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
 load_relay_env "$ENV_FILE"
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
-    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ]; then
+    [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
+    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ]; then
     echo "✗ Stable Cloudflare teardown is unavailable while Tailscale Serve is selected." >&2
     echo "  Switch transports explicitly before invoking cloudflared." >&2
     exit 1

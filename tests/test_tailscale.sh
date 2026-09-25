@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LAUNCHER="$ROOT/relay/tailscale.sh"
+EXTERNAL_LAUNCHER="$ROOT/relay/tailscale-external.sh"
 REPRINT="$ROOT/relay/setup-link.sh"
 GO_MAIN="$ROOT/cmd/herdr-mobile-relay/main.go"
 ROUTE_CONTRACT="$ROOT/internal/tailscale/contract.go"
@@ -61,12 +62,36 @@ if grep -E '\$TS_BIN[[:space:]]+serve([[:space:]]|$)' "$LAUNCHER" >/dev/null; th
     exit 1
 fi
 
+# BYO Serve is a separate operator-owned HTTPS origin: its launcher must never
+# inspect the local Tailscale CLI or LocalAPI, and stop logic may own only Herdr.
+for text in \
+    'tailscale-external' \
+    'normalize-external-origin' \
+    'HERDR_EXTERNAL_HTTPS_ORIGIN' \
+    'HERDR_RELAY_CONTROL_RUN_ID' \
+    'write_external_session ready' \
+    'HTTPS Serve ingress remains operator-owned'; do
+    require_text "$EXTERNAL_LAUNCHER" "$text"
+done
+for text in '$TS_BIN' 'tailscale status' 'tailscale serve' '/localapi/v0/' 'HERDR_TAILSCALE_CA_FILE'; do
+    forbid_text "$EXTERNAL_LAUNCHER" "$text"
+done
+require_text "$REPRINT" 'tailscale-external'
+require_text "$EXTERNAL_LAUNCHER" 'verify_phone_app_bundle "$PHONE_APP_BASE"'
+require_text "$EXTERNAL_LAUNCHER" 'HERDR_PHONE_APP_URL="$PHONE_APP_BASE"'
+require_text "$EXTERNAL_LAUNCHER" 'HERDR_REACHABILITY_PORT_MAPPING=0'
+require_text "$ROOT/internal/config/config.go" 'TransportTailscaleExternal'
+require_text "$ROOT/internal/app/tailscale_session.go" 'armExternalTailscale'
+require_text "$ROOT/internal/app/tailscale_session.go" 'checkExternalTailscaleReadiness'
+require_text "$ROOT/internal/app/tailscale_session.go" 'externalControlStatus'
+
 for script in "$ROOT"/relay/*.sh; do
     bash -n "$script"
 done
 
 if [ "${HERDR_TAILSCALE_LAUNCHER_CI:-}" = 1 ]; then
     python3 -B "$ROOT/tests/test_tailscale_launcher_lifecycle.py" -v
+    python3 -B "$ROOT/tests/test_tailscale_external_lifecycle.py" -v
 else
     printf 'SKIP hosted-only Tailscale launcher lifecycle fixture (required hosted check enables it)\n'
 fi

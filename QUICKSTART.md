@@ -88,17 +88,17 @@ cut it out of the path with a direct WebRTC connection.
 [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) covers running your
 own gateway.
 
-## Use Tailscale Serve
+## Use managed Tailscale Serve
 
 If a supported Tailscale Unix daemon is already installed, running, and
-authenticated on the computer, choose **Tailscale Serve (foreground)** in the
-setup menu (or press `t`). The relay stays on `127.0.0.1`, and after read-only
+authenticated on the computer, choose **Managed Tailscale Serve (foreground)**
+in the setup menu (press `t`). The relay stays on `127.0.0.1`, and after read-only
 preflight and per-run consent the relay process owns its temporary HTTPS Serve
 route through LocalAPI. It does not run `tailscale login`, invoke `tailscale serve`,
 enable Funnel, adopt a route, or overwrite existing Serve configuration.
 The adapter is pinned to Tailscale v1.102.4; MacSys GUI, App Store, and other
 GUI/build variants are unsupported or unqualified. See the platform limits in
-[Transports](docs/transports.md#tailscale-serve).
+[Transports](docs/transports.md#managed-tailscale-serve).
 
 Keep this pane open: it owns the relay, LocalAPI watch/session, Serve route, and
 private pairing socket. Ctrl-C requests authenticated retirement; cleanup remains
@@ -110,8 +110,26 @@ already has a shared app origin, setup keeps it until you explicitly choose
 the Tailscale origin or another installed app. Tailscale must be installed and
 authenticated manually.
 
-See [Tailscale Serve in the transport guide](docs/transports.md#tailscale-serve)
+See [Managed Tailscale Serve in the transport guide](docs/transports.md#managed-tailscale-serve)
 for custom HTTPS ports and the trusted certificate check.
+
+## Use operator-owned HTTPS Serve (BYO)
+
+If you already configured Tailscale Serve to route a canonical HTTPS origin to
+the relay's loopback listener (`127.0.0.1:8375` by default, or your configured port), choose
+**Operator-owned Tailscale HTTPS Serve (BYO,
+foreground)** (press `b`). Enter that `https://` origin. Herdr checks its trusted
+TLS certificate, instance identity, and readiness. Choose this origin or keep an
+independently hosted Herdr phone app; the selected app must pass TLS checks and
+serve the exact packaged frontend before Herdr arms an invitation. For an
+unattended explicit app choice, set `HERDR_PHONE_APP_URL`. Herdr does not invoke
+the Tailscale CLI or inspect,
+create, replace, or remove any Serve/Funnel configuration, and it does not
+request automatic PCP/UPnP router mappings. The relay stays on loopback, the pane must remain open, and stopping Herdr leaves your ingress
+untouched. You must configure and verify that ingress yourself; its continued
+availability is not guaranteed by Herdr. This path does not support background
+service installation or phone-managed updates. See
+[Operator-owned Serve](docs/transports.md#operator-owned-https-serve-byo).
 
 ## Make It Permanent
 

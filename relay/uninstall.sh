@@ -34,10 +34,17 @@ resolve_cache_dir() {
 
 CONFIG_DIR="$(resolve_config_dir)"
 CACHE_DIR="$(resolve_cache_dir)"
+RELAY_ENV_FILE="${HERDR_RELAY_ENV:-$CONFIG_DIR/relay.env}"
 TAILSCALE_SESSION_FILE="$CONFIG_DIR/tailscale-session.env"
+EXTERNAL_SESSION_FILE="$CONFIG_DIR/tailscale-external-session.env"
 if [ -e "$TAILSCALE_SESSION_FILE" ]; then
-    echo "✗ A foreground Tailscale Serve session is recorded at $TAILSCALE_SESSION_FILE." >&2
-    echo "  Stop that pane and verify its Serve route is gone before uninstalling." >&2
+    echo "✗ A managed foreground Tailscale Serve session is recorded at $TAILSCALE_SESSION_FILE." >&2
+    echo "  Stop that pane and verify managed cleanup before uninstalling." >&2
+    exit 1
+fi
+if [ -e "$EXTERNAL_SESSION_FILE" ]; then
+    echo "✗ An operator-owned HTTPS Serve relay is running at $EXTERNAL_SESSION_FILE." >&2
+    echo "  Stop the Herdr pane before uninstalling; the operator-owned Tailscale ingress is not removed." >&2
     exit 1
 fi
 
@@ -183,6 +190,9 @@ echo "  Releases:     $RELEASE_ROOT"
 echo "  Binary link:  $BIN_LINK"
 echo "  Config/state: $CONFIG_DIR"
 echo "  Cache:        $CACHE_DIR"
+if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = tailscale-external ]; then
+    echo "  Operator-owned HTTPS Serve/Funnel ingress is not inspected or removed by this uninstall."
+fi
 echo ""
 read -r -p "Continue? [y/N] " choice
 case "$choice" in
