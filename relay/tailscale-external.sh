@@ -345,8 +345,15 @@ echo "The relay and selected Herdr instance are local to this pane. Ctrl-C stops
 while [ -n "$RELAY_PID" ]; do
     wait_status=0
     wait "$RELAY_PID" || wait_status=$?
-    if [ "$wait_status" -eq 137 ]; then
-        preserve_forced_shutdown
+    if [ "$wait_status" -ne 0 ]; then
+        # A nonzero child exit may bypass Go's deferred control-socket cleanup.
+        # Preserve the exact child PID and private log before clearing it; no
+        # numeric PID is signaled or treated as ownership after this point.
+        if [ "$wait_status" -eq 137 ]; then
+            preserve_unclean_shutdown forced-shutdown
+        else
+            preserve_unclean_shutdown unclean-shutdown
+        fi
     fi
     RELAY_PID=""
     [ "$wait_status" -eq 0 ] || exit "$wait_status"
