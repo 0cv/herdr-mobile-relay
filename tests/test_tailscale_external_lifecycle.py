@@ -249,7 +249,48 @@ def read_setup_state(config_dir: pathlib.Path) -> tuple[bytes, list[str]]:
     return data, identifiers
 
 
-def read_until_setup_link(process: subprocess.Popen[bytes], timeout: float = 90.0) -> bytes:
+def local_health_diagnostic(env: dict[str, str]) -> str:
+    session_file = pathlib.Path(env["HERDR_RELAY_ENV"]).parent / "tailscale-external-session.env"
+    try:
+        session = dict(
+            line.split("=", 1)
+            for line in session_file.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
+        run_id = session["HERDR_RELAY_CONTROL_RUN_ID"]
+        with http.client.HTTPConnection("127.0.0.1", int(env["HERDR_RELAY_PORT"]), timeout=2) as connection:
+            connection.request("GET", "/healthz")
+            response = connection.getresponse()
+            payload = response.read()
+            status = response.status
+    except (KeyError, OSError, ValueError, http.client.HTTPException):
+        return "local_health_probe_unavailable"
+    if status != 200:
+        return f"local_health_http_status_{status}"
+    try:
+        health = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "local_health_invalid_json"
+    if not isinstance(health, dict):
+        return "local_health_invalid_json"
+    expected = (
+        ("instance", env["HERDR_EXTERNAL_FIXTURE_INSTANCE"]),
+        ("transport", "tailscale-external"),
+        ("external_control_run_id", run_id),
+        ("external_https_origin", env["HERDR_EXTERNAL_HTTPS_FIXTURE_ORIGIN"]),
+        ("readiness", "ready"),
+    )
+    for field, value in expected:
+        if field not in health:
+            return f"local_health_missing_{field}"
+        if health[field] != value:
+            return f"local_health_mismatch_{field}"
+    return "local_health_matches_all_launcher_checks"
+
+
+def read_until_setup_link(
+    process: subprocess.Popen[bytes], timeout: float = 90.0, diagnostic_env: dict[str, str] | None = None
+) -> bytes:
     global DIAGNOSTIC_CODE
     if process.stdout is None:
         fail("relay launcher output pipe is unavailable")
@@ -281,7 +322,10 @@ def read_until_setup_link(process: subprocess.Popen[bytes], timeout: float = 90.
                 # Keep expanded trace commands out of the lifecycle assertions
                 # and later output buffers; they can include invitation data.
                 return b"\n".join(line for line in lines if re.match(rb"\++TRACE:", line) is None)
-    DIAGNOSTIC_CODE = safe_launcher_diagnostic(bytes(output))
+    if diagnostic_env is not None:
+        DIAGNOSTIC_CODE = local_health_diagnostic(diagnostic_env)
+    else:
+        DIAGNOSTIC_CODE = safe_launcher_diagnostic(bytes(output))
     fail("external Serve launcher did not reach verified setup-link output in time")
     return b""
 
@@ -300,7 +344,7 @@ def start_launcher(root: pathlib.Path, env: dict[str, str], active: list[subproc
         start_new_session=True,
     )
     active.append(process)
-    return process, read_until_setup_link(process)
+    return process, read_until_setup_link(process, diagnostic_env=env)
 
 
 def stop_launcher(process: subprocess.Popen[bytes]) -> None:
@@ -544,6 +588,7 @@ def run_fixture() -> str:
                 "HERDR_TAILSCALE_BIN": str(fake_tailscale),
                 "HERDR_TAILSCALE_SENTINEL": str(sentinel),
                 "HERDR_EXTERNAL_HTTPS_FIXTURE_ORIGIN": origin,
+                "HERDR_EXTERNAL_FIXTURE_INSTANCE": instance,
                 "HERDR_EXTERNAL_LAUNCH_TRACE": str(launcher_trace),
                 "HERDR_EXTERNAL_FIXTURE_TOKEN": token,
                 "HERDR_PHONE_APP_URL": phone_app_origin,
