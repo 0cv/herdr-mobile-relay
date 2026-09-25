@@ -46,6 +46,13 @@ def safe_launcher_diagnostic(output: bytes) -> str:
     for marker, code in markers:
         if marker in output:
             return code
+    # The shell trace is kept in memory only. Persist just a source basename and
+    # line number so unexpected early exits remain diagnosable without exposing
+    # expanded commands, origins, or invitation material in hosted evidence.
+    trace_sites = re.findall(rb"\+TRACE:([A-Za-z0-9._-]{1,80}):([0-9]{1,6}):", output)
+    if trace_sites:
+        filename, line = trace_sites[-1]
+        return f"launcher_trace_{filename.decode('ascii')}_line_{line.decode('ascii')}"
     return "no_safe_launcher_diagnostic"
 
 
@@ -265,18 +272,28 @@ def read_until_setup_link(process: subprocess.Popen[bytes], timeout: float = 90.
                 DIAGNOSTIC_CODE = safe_launcher_diagnostic(bytes(output))
                 fail("external Serve launcher closed output before the setup link")
             output.extend(chunk)
-            if b"This link pairs one phone within 10 minutes" in output:
-                return bytes(output)
+            lines = bytes(output).splitlines()
+            if any(
+                b"This link pairs one phone within 10 minutes" in line
+                and re.match(rb"\++TRACE:", line) is None
+                for line in lines
+            ):
+                # Keep expanded trace commands out of the lifecycle assertions
+                # and later output buffers; they can include invitation data.
+                return b"\n".join(line for line in lines if re.match(rb"\++TRACE:", line) is None)
     DIAGNOSTIC_CODE = safe_launcher_diagnostic(bytes(output))
     fail("external Serve launcher did not reach verified setup-link output in time")
     return b""
 
 
 def start_launcher(root: pathlib.Path, env: dict[str, str], active: list[subprocess.Popen[bytes]]) -> tuple[subprocess.Popen[bytes], bytes]:
+    launch_env = dict(env)
+    launch_env["BASH_ENV"] = env["HERDR_EXTERNAL_LAUNCH_TRACE"]
+    launch_env["PS4"] = "+TRACE:${BASH_SOURCE##*/}:${LINENO}: "
     process = subprocess.Popen(
         [str(root / "relay" / "tailscale-external.sh"), "--origin", env["HERDR_EXTERNAL_HTTPS_FIXTURE_ORIGIN"]],
         cwd=root,
-        env=env,
+        env=launch_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -502,6 +519,9 @@ def run_fixture() -> str:
         sentinel = directory / "tailscale-called"
         empty_ca = directory / "empty-ca.pem"
         empty_ca.write_bytes(b"")
+        launcher_trace = directory / "launcher-trace-init.sh"
+        launcher_trace.write_text("set -x\n", encoding="utf-8")
+        launcher_trace.chmod(0o600)
         env = dict(os.environ)
         env.update(
             {
@@ -524,6 +544,7 @@ def run_fixture() -> str:
                 "HERDR_TAILSCALE_BIN": str(fake_tailscale),
                 "HERDR_TAILSCALE_SENTINEL": str(sentinel),
                 "HERDR_EXTERNAL_HTTPS_FIXTURE_ORIGIN": origin,
+                "HERDR_EXTERNAL_LAUNCH_TRACE": str(launcher_trace),
                 "HERDR_EXTERNAL_FIXTURE_TOKEN": token,
                 "HERDR_PHONE_APP_URL": phone_app_origin,
                 "HERDR_RELAY_PORT": str(relay_port),
