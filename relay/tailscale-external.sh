@@ -129,8 +129,10 @@ write_external_session() {
         printf 'HERDR_RELAY_PAIRING_SOCKET=%s\n' "$CONTROL_SOCKET"
         printf 'HERDR_RELAY_CONTROL_RUN_ID=%s\n' "$RUN_ID"
         printf 'HERDR_RELAY_STAGE=%s\n' "$stage"
-        if [ "$stage" = forced-shutdown ]; then
+        if [ -n "$RELAY_PID" ]; then
             printf 'HERDR_RELAY_PID=%s\n' "$RELAY_PID"
+        fi
+        if [ "$stage" = forced-shutdown ]; then
             printf 'HERDR_RELAY_LOG=%s\n' "$RELAY_LOG"
         fi
     } > "$temporary"
@@ -148,26 +150,34 @@ remove_external_session() {
     fi
 }
 
+# A SIGKILLed Go child cannot run deferred control-socket cleanup. Preserve its
+# run identity whether our cleanup escalated or the child was killed elsewhere.
+preserve_forced_shutdown() {
+    FORCED_SHUTDOWN=1
+    if ! write_external_session forced-shutdown; then
+        echo "✗ Could not update the operator-owned Serve recovery record after forced shutdown." >&2
+    fi
+}
+
 stop_relay() {
-    local attempt stop_status=0 kill_sent=0
-    if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
-        kill -TERM "$RELAY_PID" 2>/dev/null || true
-        for ((attempt = 0; attempt < 10; attempt++)); do
-            if ! kill -0 "$RELAY_PID" 2>/dev/null; then
-                break
+    local attempt stop_status=0
+    if [ -n "$RELAY_PID" ]; then
+        if kill -0 "$RELAY_PID" 2>/dev/null; then
+            kill -TERM "$RELAY_PID" 2>/dev/null || true
+            for ((attempt = 0; attempt < 10; attempt++)); do
+                if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+            if kill -0 "$RELAY_PID" 2>/dev/null; then
+                kill -KILL "$RELAY_PID" 2>/dev/null || true
             fi
-            sleep 1
-        done
-        if kill -0 "$RELAY_PID" 2>/dev/null && kill -KILL "$RELAY_PID" 2>/dev/null; then
-            kill_sent=1
         fi
         wait "$RELAY_PID" 2>/dev/null || stop_status=$?
-        if [ "$kill_sent" -eq 1 ] && [ "$stop_status" -eq 137 ]; then
-            FORCED_SHUTDOWN=1
+        if [ "$stop_status" -eq 137 ]; then
+            preserve_forced_shutdown
         fi
-    fi
-    if [ "$FORCED_SHUTDOWN" -eq 1 ] && ! write_external_session forced-shutdown; then
-        echo "✗ Could not update the operator-owned Serve recovery record after forced shutdown." >&2
     fi
     RELAY_PID=""
 }
@@ -298,8 +308,12 @@ if ! "$SCRIPT_DIR/setup-link.sh"; then
 fi
 echo ""
 echo "The relay and selected Herdr instance are local to this pane. Ctrl-C stops only Herdr; HTTPS Serve ingress remains operator-owned."
-while kill -0 "$RELAY_PID" 2>/dev/null; do
-    wait "$RELAY_PID" || status=$?
+while [ -n "$RELAY_PID" ]; do
+    wait_status=0
+    wait "$RELAY_PID" || wait_status=$?
+    if [ "$wait_status" -eq 137 ]; then
+        preserve_forced_shutdown
+    fi
     RELAY_PID=""
-    [ "${status:-0}" -eq 0 ] || exit "$status"
+    [ "$wait_status" -eq 0 ] || exit "$wait_status"
 done

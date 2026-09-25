@@ -511,6 +511,71 @@ def stop_launcher(process: subprocess.Popen[bytes]) -> None:
         fail("external Serve launcher failed to exit")
 
 
+def assert_forced_shutdown_recovery(
+    root: pathlib.Path,
+    env: dict[str, str],
+    config_dir: pathlib.Path,
+    relay_port: int,
+    origin: str,
+    sentinel: pathlib.Path,
+    process: subprocess.Popen[bytes],
+    output: bytes,
+    expected_status: int,
+    relay_pid: int,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    if (
+        process.returncode != expected_status
+        or b"recovery evidence was retained and any control socket was left untouched" not in output
+    ):
+        fail("forced shutdown did not report recovery retention")
+    session_path = config_dir / "tailscale-external-session.env"
+    control_path = config_dir / "tailscale-external-control.sock"
+    if not session_path.exists() or not stat.S_ISSOCK(control_path.stat().st_mode):
+        fail("forced shutdown did not preserve its session record and stale control socket")
+    session_bytes = session_path.read_bytes()
+    forced_session = dict(
+        line.split("=", 1) for line in session_bytes.decode("utf-8").splitlines() if "=" in line
+    )
+    recovery_log = pathlib.Path(forced_session.get("HERDR_RELAY_LOG", ""))
+    if (
+        forced_session.get("HERDR_RELAY_STAGE") != "forced-shutdown"
+        or forced_session.get("HERDR_RELAY_PID") != str(relay_pid)
+        or not recovery_log.is_file()
+        or recovery_log.parent != config_dir
+    ):
+        fail("forced shutdown did not retain its stage, child PID, and private relay log")
+    if session_path.stat().st_mode & 0o777 != 0o600 or recovery_log.stat().st_mode & 0o777 != 0o600:
+        fail("forced-shutdown recovery evidence was not private")
+    try:
+        socket.create_connection(("127.0.0.1", relay_port), timeout=1).close()
+        fail("forced shutdown left the relay backend accepting connections")
+    except OSError:
+        pass
+    control_probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        if control_probe.connect_ex(str(control_path)) == 0:
+            fail("forced shutdown left a live pairing-control listener")
+    finally:
+        control_probe.close()
+    refused = subprocess.run(
+        [str(root / "relay" / "tailscale-external.sh"), "--origin", origin],
+        cwd=root,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+        check=False,
+    )
+    if refused.returncode == 0 or b"session or control socket already exists" not in refused.stdout:
+        fail("restart did not fail closed while recovery evidence remained")
+    if session_path.read_bytes() != session_bytes or not control_path.exists() or not recovery_log.is_file():
+        fail("refused restart changed retained recovery evidence")
+    if sentinel.exists():
+        fail("forced BYO cleanup invoked the Tailscale CLI")
+    return session_path, control_path, recovery_log
+
+
 def run_setup_link(root: pathlib.Path, env: dict[str, str]) -> tuple[int, bytes]:
     result = subprocess.run(
         [str(root / "relay" / "setup-link.sh")],
@@ -962,8 +1027,39 @@ sleep() {
             record("operator_https_ingress_remained_after_final_stop")
             record("independent_phone_app_remained_after_backend_stop")
 
-            PHASE = "forced_shutdown_recovery_evidence"
+            PHASE = "independent_sigkill_recovery_evidence"
+            independently_killed, _ = start_launcher(root, env, active)
+            ready_session = dict(
+                line.split("=", 1)
+                for line in (config_dir / "tailscale-external-session.env").read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            relay_pid = int(ready_session["HERDR_RELAY_PID"])
+            os.kill(relay_pid, signal.SIGKILL)
+            try:
+                killed_output, _ = independently_killed.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                fail("independently killed relay did not finish launcher cleanup")
+            active.remove(independently_killed)
+            session_path, control_path, recovery_log = assert_forced_shutdown_recovery(
+                root, env, config_dir, relay_port, origin, sentinel,
+                independently_killed, killed_output, 137, relay_pid,
+            )
+            record("independent_sigkill_preserves_recovery_record_socket_and_log")
+            # Test-only stale-state cleanup after the child is reaped and both
+            # backend and socket listener have been proven unavailable.
+            session_path.unlink()
+            control_path.unlink()
+            recovery_log.unlink()
+
+            PHASE = "launcher_sigkill_recovery_evidence"
             forced, _ = start_launcher(root, env, active)
+            forced_session = dict(
+                line.split("=", 1)
+                for line in (config_dir / "tailscale-external-session.env").read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            forced_pid = int(forced_session["HERDR_RELAY_PID"])
             pathlib.Path(env["HERDR_EXTERNAL_FORCE_KILL_MARKER"]).touch(mode=0o600)
             forced.send_signal(signal.SIGTERM)
             try:
@@ -971,56 +1067,11 @@ sleep() {
             except subprocess.TimeoutExpired:
                 fail("forced-shutdown fixture did not finish bounded cleanup")
             active.remove(forced)
-            if (
-                forced.returncode != 130
-                or b"recovery evidence was retained and any control socket was left untouched" not in forced_output
-            ):
-                fail("forced shutdown did not report recovery retention")
-            session_path = config_dir / "tailscale-external-session.env"
-            control_path = config_dir / "tailscale-external-control.sock"
-            if not session_path.exists() or not stat.S_ISSOCK(control_path.stat().st_mode):
-                fail("forced shutdown did not preserve its session record and stale control socket")
-            session_bytes = session_path.read_bytes()
-            forced_session = dict(
-                line.split("=", 1) for line in session_bytes.decode("utf-8").splitlines() if "=" in line
+            assert_forced_shutdown_recovery(
+                root, env, config_dir, relay_port, origin, sentinel,
+                forced, forced_output, 130, forced_pid,
             )
-            recovery_log = pathlib.Path(forced_session.get("HERDR_RELAY_LOG", ""))
-            if (
-                forced_session.get("HERDR_RELAY_STAGE") != "forced-shutdown"
-                or not forced_session.get("HERDR_RELAY_PID", "").isdigit()
-                or not recovery_log.is_file()
-            ):
-                fail("forced shutdown did not retain its stage, child PID, and private relay log")
-            if session_path.stat().st_mode & 0o777 != 0o600 or recovery_log.stat().st_mode & 0o777 != 0o600:
-                fail("forced-shutdown recovery evidence was not private")
-            try:
-                socket.create_connection(("127.0.0.1", relay_port), timeout=1).close()
-                fail("forced shutdown left the relay backend accepting connections")
-            except OSError:
-                pass
-            control_probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                if control_probe.connect_ex(str(control_path)) == 0:
-                    fail("forced shutdown left a live pairing-control listener")
-            finally:
-                control_probe.close()
-            refused = subprocess.run(
-                [str(root / "relay" / "tailscale-external.sh"), "--origin", origin],
-                cwd=root,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=10,
-                check=False,
-            )
-            if refused.returncode == 0 or b"session or control socket already exists" not in refused.stdout:
-                fail("restart did not fail closed while recovery evidence remained")
-            if session_path.read_bytes() != session_bytes or not control_path.exists() or not recovery_log.is_file():
-                fail("refused restart changed retained recovery evidence")
-            if sentinel.exists():
-                fail("forced BYO cleanup invoked the Tailscale CLI")
-            record("forced_shutdown_preserves_recovery_record_socket_and_log")
+            record("launcher_sigkill_preserves_recovery_record_socket_and_log")
         finally:
             for process in list(active):
                 stop_launcher(process)
