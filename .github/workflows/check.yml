@@ -406,7 +406,7 @@ jobs:
           docker run --rm \
             --network none \
             --add-host relay.tailnet.ts.net:127.0.0.1 \
-            --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=1g \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,size=1g \
             --mount "type=bind,src=$PWD,dst=/workspace,readonly" \
             --mount "type=bind,src=$PWD/dist/release,dst=/artifact,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/fake-herdr,dst=/fixture-bin/fake-herdr,readonly" \

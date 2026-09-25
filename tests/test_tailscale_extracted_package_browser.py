@@ -35,7 +35,7 @@ WATCH_ID = "package-watch-session"
 TOKEN_BYTES = 16
 STAGES = {
     "archive_verify", "archive_checksum", "archive_extract", "archive_manifest",
-    "archive_binary_verify", "fixture_startup", "managed_launch", "browser_enroll",
+    "archive_binary_verify", "archive_payload", "fixture_startup", "managed_launch", "browser_enroll",
     "setup_reprint", "browser_reprint", "managed_retirement", "managed_restart",
     "browser_restart", "foreign_route_rejection", "held_pipe_cleanup",
     "ambiguous_localapi_ack", "complete",
@@ -43,9 +43,11 @@ STAGES = {
 FAILURE_CODES = {
     "fixture_assertion", "unexpected_exception", "archive_checksum_io",
     "archive_checksum_mismatch", "archive_extract_failure", "archive_unsafe_entry",
-    "archive_binary_missing", "archive_wrapper_missing", "archive_manifest_missing",
+    "archive_binary_missing", "archive_manifest_missing",
     "archive_manifest_invalid", "archive_manifest_identity", "archive_binary_start",
-    "archive_binary_rejected",
+    "archive_binary_rejected", "archive_managed_wrapper_missing",
+    "archive_external_wrapper_missing", "archive_managed_wrapper_not_executable",
+    "archive_external_wrapper_not_executable", "archive_binary_not_executable",
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
@@ -629,7 +631,7 @@ def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_p
     return value
 
 
-def verify_archive(archive: Path, checksums: Path, version: str, revision: str, release: Path, mark_stage, record_digest) -> tuple[str, Path]:
+def verify_archive(archive: Path, checksums: Path, version: str, revision: str, release: Path, mark_stage, record_digest, record_wrapper) -> tuple[str, Path]:
     name = archive.name
     mark_stage("archive_checksum")
     try:
@@ -655,12 +657,25 @@ def verify_archive(archive: Path, checksums: Path, version: str, revision: str, 
     except (OSError, tarfile.TarError, ValueError):
         die("release archive extraction failed", "archive_extract_failure")
 
+    mark_stage("archive_payload")
     binary = release / "herdr-mobile-relay"
-    for wrapper in (release / "relay" / "tailscale.sh", release / "relay" / "tailscale-external.sh"):
-        if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
-            die("release archive omitted an executable Tailscale launcher", "archive_wrapper_missing")
-    if not binary.is_file() or not os.access(binary, os.X_OK):
+    wrappers = (
+        (release / "relay" / "tailscale.sh", "managed"),
+        (release / "relay" / "tailscale-external.sh", "external"),
+    )
+    for wrapper, kind in wrappers:
+        present = wrapper.is_file()
+        mode = stat.S_IMODE(wrapper.stat().st_mode) if present else None
+        executable = present and os.access(wrapper, os.X_OK)
+        record_wrapper(kind, present, oct(mode) if mode is not None else None, executable)
+        if not present:
+            die("release archive omitted a Tailscale launcher", f"archive_{kind}_wrapper_missing")
+        if not executable:
+            die("extracted Tailscale launcher was not executable", f"archive_{kind}_wrapper_not_executable")
+    if not binary.is_file():
         die("release archive omitted its executable relay binary", "archive_binary_missing")
+    if not os.access(binary, os.X_OK):
+        die("extracted relay binary was not executable", "archive_binary_not_executable")
 
     mark_stage("archive_manifest")
     manifest = release / "release-manifest.json"
@@ -704,6 +719,7 @@ def main() -> int:
     case_results: dict[str, str] = {}
     transitions: list[str] = []
     archive_digest = ""
+    archive_wrappers: dict[str, dict] = {}
     binary_digest = ""
     binary_path = ""
     browser_evidence: dict = {}
@@ -725,13 +741,17 @@ def main() -> int:
         nonlocal archive_digest
         archive_digest = value
 
+    def record_archive_wrapper(kind: str, present: bool, mode: str | None, executable: bool) -> None:
+        archive_wrappers[kind] = {"present": present, "mode": mode, "executable": executable}
+
     temporary_root = Path(tempfile.mkdtemp(prefix="herdr-package-browser-", dir="/tmp"))
     os.chmod(temporary_root, 0o700)
     origin = f"https://{HOST}:{os.environ['HERDR_TAILSCALE_HTTPS_PORT']}"
     try:
         set_stage("archive_verify")
         archive_digest, binary = verify_archive(
-            archive, checksums, version, source_sha, temporary_root / "release", set_stage, record_archive_digest,
+            archive, checksums, version, source_sha, temporary_root / "release", set_stage,
+            record_archive_digest, record_archive_wrapper,
         )
         binary_digest = sha256(binary)
         binary_path = str(binary.resolve())
@@ -1024,6 +1044,7 @@ def main() -> int:
             "schema_version": 1,
             "candidate_sha": source_sha,
             "archive_sha256": archive_digest,
+            "archive_wrappers": archive_wrappers,
             "tested_binary_sha256": binary_digest,
             "tested_binary_path": binary_path,
             "archive_path": str(archive),
