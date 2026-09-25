@@ -34,10 +34,18 @@ TS_COMMIT = "bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8"
 WATCH_ID = "package-watch-session"
 TOKEN_BYTES = 16
 STAGES = {
-    "archive_verify", "fixture_startup", "managed_launch", "browser_enroll",
+    "archive_verify", "archive_checksum", "archive_extract", "archive_manifest",
+    "archive_binary_verify", "fixture_startup", "managed_launch", "browser_enroll",
     "setup_reprint", "browser_reprint", "managed_retirement", "managed_restart",
     "browser_restart", "foreign_route_rejection", "held_pipe_cleanup",
     "ambiguous_localapi_ack", "complete",
+}
+FAILURE_CODES = {
+    "fixture_assertion", "unexpected_exception", "archive_checksum_io",
+    "archive_checksum_mismatch", "archive_extract_failure", "archive_unsafe_entry",
+    "archive_binary_missing", "archive_wrapper_missing", "archive_manifest_missing",
+    "archive_manifest_invalid", "archive_manifest_identity", "archive_binary_start",
+    "archive_binary_rejected",
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
@@ -58,8 +66,15 @@ EXPECTED_CASES = [
 ]
 
 
-def die(message: str) -> "NoReturn":
-    raise RuntimeError(message)
+class GateFailure(RuntimeError):
+    def __init__(self, code: str):
+        self.code = code if code in FAILURE_CODES else "fixture_assertion"
+        super().__init__(self.code)
+
+
+def die(message: str, code: str = "fixture_assertion") -> "NoReturn":
+    del message  # diagnostics remain code-only in stdout/stderr and artifacts
+    raise GateFailure(code)
 
 
 def sha256(path: Path) -> str:
@@ -614,39 +629,61 @@ def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_p
     return value
 
 
-def verify_archive(archive: Path, checksums: Path, version: str, revision: str, release: Path) -> tuple[str, Path]:
+def verify_archive(archive: Path, checksums: Path, version: str, revision: str, release: Path, mark_stage, record_digest) -> tuple[str, Path]:
     name = archive.name
-    lines = [line.split() for line in checksums.read_text(encoding="ascii").splitlines() if line.strip()]
+    mark_stage("archive_checksum")
+    try:
+        lines = [line.split() for line in checksums.read_text(encoding="ascii").splitlines() if line.strip()]
+        archive_digest = sha256(archive)
+        record_digest(archive_digest)
+    except (OSError, UnicodeError):
+        die("release checksum input could not be read", "archive_checksum_io")
     matches = [entry for entry in lines if len(entry) == 2 and entry[1] == name]
-    if len(matches) != 1 or matches[0][0] != sha256(archive):
-        die("release archive checksum did not match the exact release checksum file")
+    if len(matches) != 1 or matches[0][0] != archive_digest:
+        die("release archive checksum did not match the exact release checksum file", "archive_checksum_mismatch")
+
+    mark_stage("archive_extract")
     release.mkdir(mode=0o700, parents=True)
-    with tarfile.open(archive, "r:gz") as bundle:
-        members = bundle.getmembers()
-        for member in members:
-            path = Path(member.name)
-            if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
-                die("release archive contained an unsafe path or entry type")
-        bundle.extractall(release, members=members)
+    try:
+        with tarfile.open(archive, "r:gz") as bundle:
+            members = bundle.getmembers()
+            for member in members:
+                path = Path(member.name)
+                if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                    die("release archive contained an unsafe path or entry type", "archive_unsafe_entry")
+            bundle.extractall(release, members=members)
+    except (OSError, tarfile.TarError, ValueError):
+        die("release archive extraction failed", "archive_extract_failure")
+
     binary = release / "herdr-mobile-relay"
     for wrapper in (release / "relay" / "tailscale.sh", release / "relay" / "tailscale-external.sh"):
         if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
-            die("release archive omitted an executable Tailscale launcher")
+            die("release archive omitted an executable Tailscale launcher", "archive_wrapper_missing")
     if not binary.is_file() or not os.access(binary, os.X_OK):
-        die("release archive omitted its executable relay binary")
+        die("release archive omitted its executable relay binary", "archive_binary_missing")
+
+    mark_stage("archive_manifest")
     manifest = release / "release-manifest.json"
     if not manifest.is_file():
-        die("release archive omitted release manifest")
-    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+        die("release archive omitted release manifest", "archive_manifest_missing")
+    try:
+        manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        die("release manifest could not be read", "archive_manifest_invalid")
     if manifest_data.get("version") != version or manifest_data.get("revision") != revision or manifest_data.get("target") != "linux/amd64":
-        die("release manifest did not bind the tested package to the exact candidate")
-    verified = subprocess.run([
-        str(binary), "verify-release", "--target", "linux/amd64", "--version", version,
-        "--revision", revision, str(release),
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        die("release manifest did not bind the tested package to the exact candidate", "archive_manifest_identity")
+
+    mark_stage("archive_binary_verify")
+    try:
+        verified = subprocess.run([
+            str(binary), "verify-release", "--target", "linux/amd64", "--version", version,
+            "--revision", revision, str(release),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except OSError:
+        die("packaged relay verification could not be started", "archive_binary_start")
     if verified.returncode:
-        die("packaged relay refused exact candidate manifest verification")
-    return sha256(archive), binary
+        die("packaged relay refused exact candidate manifest verification", "archive_binary_rejected")
+    return archive_digest, binary
 
 
 def main() -> int:
@@ -673,6 +710,7 @@ def main() -> int:
     current_stage = "archive_verify"
     completed_stages: list[str] = []
     failure_type = ""
+    failure_code = ""
     ambiguous_owner_pid: int | None = None
 
     def set_stage(value: str) -> None:
@@ -683,12 +721,18 @@ def main() -> int:
         if not completed_stages or completed_stages[-1] != value:
             completed_stages.append(value)
 
+    def record_archive_digest(value: str) -> None:
+        nonlocal archive_digest
+        archive_digest = value
+
     temporary_root = Path(tempfile.mkdtemp(prefix="herdr-package-browser-", dir="/tmp"))
     os.chmod(temporary_root, 0o700)
     origin = f"https://{HOST}:{os.environ['HERDR_TAILSCALE_HTTPS_PORT']}"
     try:
         set_stage("archive_verify")
-        archive_digest, binary = verify_archive(archive, checksums, version, source_sha, temporary_root / "release")
+        archive_digest, binary = verify_archive(
+            archive, checksums, version, source_sha, temporary_root / "release", set_stage, record_archive_digest,
+        )
         binary_digest = sha256(binary)
         binary_path = str(binary.resolve())
         case_results[EXPECTED_CASES[0]] = "pass"
@@ -965,6 +1009,8 @@ def main() -> int:
         return 0
     except Exception as error:
         failure_type = type(error).__name__
+        failure_code = error.code if isinstance(error, GateFailure) else "unexpected_exception"
+        print(f"extracted package acceptance failed: stage={current_stage} code={failure_code}", file=sys.stderr)
         raise
     finally:
         if launcher is not None:
@@ -987,6 +1033,7 @@ def main() -> int:
             "current_stage": current_stage,
             "completed_stages": completed_stages,
             "exception_type": failure_type,
+            "failure_code": failure_code,
             "browser_stage": browser_stage,
             "browser_exception_type": browser_exception_type,
             "expected_case_count": len(EXPECTED_CASES),
