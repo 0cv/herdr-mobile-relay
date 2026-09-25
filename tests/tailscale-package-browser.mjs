@@ -65,6 +65,8 @@ const storageCheckpoints = new Set(['after_navigation', 'credential_wait_failed'
 const uiCheckpoints = new Set([
   'inventory_initial', 'agent_button_timeout', 'agent_button_disabled',
   'agent_button_ready', 'agent_click_failed', 'prompt_wait_failed', 'prompt_visible',
+  'command_initial', 'command_fill_failed', 'command_prompt_filled',
+  'command_send_failed', 'command_result',
 ]);
 const diagnosticCategories = new Set([
   'websocket', 'network', 'storage', 'tls', 'type_error', 'reference_error',
@@ -188,6 +190,13 @@ async function recordUISnapshot(profile, checkpoint, page) {
           if (dot?.classList.contains(`status-${tone}`)) tones[tone] += 1;
         }
       }
+      const prompt = document.querySelector('textarea[role="combobox"][aria-label="Prompt"]');
+      const actionButtons = [...document.querySelectorAll('button[aria-label]')];
+      const actionCounts = {
+        send_prompt: actionButtons.filter((button) => button.getAttribute('aria-label') === 'Send prompt').length,
+        submit_terminal_text: actionButtons.filter((button) => button.getAttribute('aria-label') === 'Submit terminal text').length,
+        submitting_input: actionButtons.filter((button) => button.getAttribute('aria-label') === 'Submitting input').length,
+      };
       const header = document.querySelector('header .status-dot[role="img"]');
       const headerLabel = header?.getAttribute('aria-label') || '';
       const relayMatch = headerLabel.match(/^(\d{1,4})\/(\d{1,4}) relays connected(?:; (\d{1,4}) agent inventory (unavailable|loading))?$/);
@@ -214,8 +223,18 @@ async function recordUISnapshot(profile, checkpoint, page) {
       ]);
       const headerTone = ['danger', 'warning', 'success', 'muted']
         .find((tone) => header?.classList.contains(`status-${tone}`)) || 'unknown';
+      const sendActionState = actionCounts.submitting_input ? 'submitting_input'
+        : actionCounts.send_prompt ? 'send_prompt'
+          : actionCounts.submit_terminal_text ? 'submit_terminal_text' : 'missing';
       return {
         view: views.has(view) ? view : 'other',
+        prompt_inputs: prompt ? 1 : 0,
+        enabled_prompt_inputs: prompt && !prompt.disabled ? 1 : 0,
+        disabled_prompt_inputs: prompt?.disabled ? 1 : 0,
+        send_prompt_buttons: actionCounts.send_prompt,
+        submit_terminal_text_buttons: actionCounts.submit_terminal_text,
+        submitting_input_buttons: actionCounts.submitting_input,
+        send_action_state: sendActionState,
         agent_cards: cards.length,
         open_buttons: buttons.length,
         enabled_open_buttons: buttons.filter((button) => !button.disabled).length,
@@ -232,7 +251,9 @@ async function recordUISnapshot(profile, checkpoint, page) {
     });
   } catch {
     summary = {
-      view: 'other', agent_cards: 0, open_buttons: 0, enabled_open_buttons: 0,
+      view: 'other', prompt_inputs: 0, enabled_prompt_inputs: 0, disabled_prompt_inputs: 0,
+      send_prompt_buttons: 0, submit_terminal_text_buttons: 0, submitting_input_buttons: 0,
+      send_action_state: 'missing', agent_cards: 0, open_buttons: 0, enabled_open_buttons: 0,
       disabled_open_buttons: 0, stale_agent_cards: 0,
       status_tones: { danger: 0, warning: 0, success: 0, muted: 0 },
       header_tone: 'unknown', connection_state: 'unknown', inventory_state: 'not_reported',
@@ -494,10 +515,23 @@ async function initialEnrollment() {
     await openFixtureAgent(controller.page, 'controller');
     const readWorked = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', controllerReadBaseline + 1);
     await setStage('controller_command');
+    await recordUISnapshot('controller', 'command_initial', controller.page);
     const prompt = controller.page.getByRole('combobox', { name: 'Prompt' });
-    await prompt.fill('package acceptance harmless ping');
-    await controller.page.getByRole('button', { name: 'Send prompt' }).click();
+    try {
+      await prompt.fill('package acceptance harmless ping');
+    } catch (error) {
+      await recordUISnapshot('controller', 'command_fill_failed', controller.page);
+      throw error;
+    }
+    await recordUISnapshot('controller', 'command_prompt_filled', controller.page);
+    try {
+      await controller.page.getByRole('button', { name: 'Send prompt' }).click();
+    } catch (error) {
+      await recordUISnapshot('controller', 'command_send_failed', controller.page);
+      throw error;
+    }
     const commandRecorded = await waitForSuccessfulOperation(input.fake_herdr_operations, 'agent prompt');
+    await recordUISnapshot('controller', 'command_result', controller.page);
     const kinds = await operationKinds(input.fake_herdr_operations);
     const commandWorked = commandRecorded && kinds.includes('agent prompt');
     record('controller_reads_fake_inventory_and_sends_harmless_command', readWorked && commandWorked);

@@ -81,6 +81,8 @@ BROWSER_STORAGE_CHECKPOINTS = {"after_navigation", "credential_wait_failed", "cr
 BROWSER_UI_CHECKPOINTS = {
     "inventory_initial", "agent_button_timeout", "agent_button_disabled",
     "agent_button_ready", "agent_click_failed", "prompt_wait_failed", "prompt_visible",
+    "command_initial", "command_fill_failed", "command_prompt_filled",
+    "command_send_failed", "command_result",
 }
 BROWSER_UI_VIEWS = {
     "agents", "terminal", "history", "settings", "workspaces", "launch",
@@ -89,6 +91,7 @@ BROWSER_UI_VIEWS = {
 BROWSER_CONNECTION_STATES = {"unknown", "disconnected", "connected", "partial", "active_agent"}
 BROWSER_INVENTORY_STATES = {"ready", "loading", "unavailable", "not_reported"}
 BROWSER_AGENT_STATES = {"idle", "needs inspection", "working", "done", "other", "not_applicable"}
+BROWSER_SEND_ACTION_STATES = {"missing", "send_prompt", "submit_terminal_text", "submitting_input"}
 BROWSER_STATUS_TONES = {"danger", "warning", "success", "muted", "unknown"}
 BROWSER_DIAGNOSTIC_CATEGORIES = {
     "websocket", "network", "storage", "tls", "type_error", "reference_error",
@@ -1414,9 +1417,12 @@ def safe_browser_profile(value: object) -> dict[str, object] | None:
                 "connection_state": enum_value("connection_state", BROWSER_CONNECTION_STATES, "unknown"),
                 "inventory_state": enum_value("inventory_state", BROWSER_INVENTORY_STATES, "not_reported"),
                 "active_agent_status": enum_value("active_agent_status", BROWSER_AGENT_STATES, "not_applicable"),
+                "send_action_state": enum_value("send_action_state", BROWSER_SEND_ACTION_STATES, "missing"),
                 "status_tones": safe_tones,
             }
             for field in (
+                "prompt_inputs", "enabled_prompt_inputs", "disabled_prompt_inputs",
+                "send_prompt_buttons", "submit_terminal_text_buttons", "submitting_input_buttons",
                 "agent_cards", "open_buttons", "enabled_open_buttons", "disabled_open_buttons",
                 "stale_agent_cards", "connected_relays", "configured_relays",
             ):
