@@ -94,14 +94,20 @@ PRIVATE_LOG_STATUS_CATEGORIES = {
 
 
 LAUNCHER_STDERR_PHASES = {
-    "stderr_absent", "stderr_unclassified", "local_ready_refused", "activation_refused",
+    "stderr_absent", "stderr_unclassified", "local_ready_refused",
+    "activation_refused_not_dispatched", "activation_refused_settled_no_write",
+    "activation_refused_settled_success", "activation_outcome_unresolved",
     "activation_response_unproven", "route_check_mismatch", "https_health_request_failed",
     "https_health_identity_mismatch", "release_identity_failed", "phone_bundle_verification_failed",
-    "bootstrap_arm_refused", "final_checks_failed", "selection_snapshot_mismatch",
+    "bootstrap_arm_refused", "bootstrap_outcome_unresolved", "bootstrap_arm_response_unproven",
+    "final_checks_failed", "selection_snapshot_mismatch",
 }
 LAUNCHER_STDERR_PATTERNS = (
     ("local_ready_refused", re.compile(r"Managed relay did not acknowledge local_ready with its owner held\.", re.IGNORECASE)),
-    ("activation_refused", re.compile(r"Tailscale activation was refused with a decoded (?:not-dispatched|settled-no-write|settled-success) result", re.IGNORECASE)),
+    ("activation_refused_not_dispatched", re.compile(r"Tailscale activation was refused with a decoded not-dispatched result", re.IGNORECASE)),
+    ("activation_refused_settled_no_write", re.compile(r"Tailscale activation was refused with a decoded settled-no-write result", re.IGNORECASE)),
+    ("activation_refused_settled_success", re.compile(r"Tailscale activation was refused with a decoded settled-success result", re.IGNORECASE)),
+    ("activation_outcome_unresolved", re.compile(r"Tailscale activation outcome is unresolved", re.IGNORECASE)),
     ("activation_response_unproven", re.compile(r"Tailscale activation response did not prove local readiness, live ownership, and Serve readiness", re.IGNORECASE)),
     ("route_check_mismatch", re.compile(r"Fresh Tailscale route observation did not match the exact managed backend\.", re.IGNORECASE)),
     ("https_health_request_failed", re.compile(r"Trusted HTTPS identity verification failed for ", re.IGNORECASE)),
@@ -109,6 +115,8 @@ LAUNCHER_STDERR_PATTERNS = (
     ("release_identity_failed", re.compile(r"Release identity could not be verified|Served release .* does not match|Served web bundle .* does not match|Release manifest .* does not match|Served release has no managed web bundle", re.IGNORECASE)),
     ("phone_bundle_verification_failed", re.compile(r"The selected phone-app origin does not serve this release's verified Herdr bundle|Final phone-app bundle verification failed", re.IGNORECASE)),
     ("bootstrap_arm_refused", re.compile(r"Bootstrap arm was refused with a decoded (?:not-committed|committed) result", re.IGNORECASE)),
+    ("bootstrap_outcome_unresolved", re.compile(r"Bootstrap invitation outcome is unresolved", re.IGNORECASE)),
+    ("bootstrap_arm_response_unproven", re.compile(r"Bootstrap arm response did not prove durable invitation and managed-route readiness", re.IGNORECASE)),
     ("final_checks_failed", re.compile(r"Final route, owner, TLS identity, bundle, or pairing checks failed", re.IGNORECASE)),
     ("selection_snapshot_mismatch", re.compile(r"Managed selection changed while setup was being verified|Relay selection changed during setup|Phone-app origin changed during setup", re.IGNORECASE)),
 )
