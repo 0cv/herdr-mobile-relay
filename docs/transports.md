@@ -95,8 +95,15 @@ ingress route. You own HTTPS Serve configuration, access policy, route health,
 and cleanup. Herdr prints the route as operator-owned and on Ctrl-C stops only
 its own loopback backend and private pairing control. The transport also
 disables automatic PCP/UPnP router mapping. Your ingress remains as configured,
-but is no longer backed by this stopped relay. A foreground pane is required;
-background service installation and phone-managed relay updates are refused. MacSys GUI, App Store, and other unqualified daemon profiles are not
+but is no longer backed by this stopped relay. If the backend does not exit after
+ten seconds, Herdr sends SIGKILL, retains the private session record, child
+PID (for inspection only), and relay log, and leaves any control socket pathname
+untouched; a later start refuses while that evidence remains. PIDs may be reused: inspect
+the process identity and confirm no relay process is live before manually
+removing stale recovery files, and never remove a socket that may belong to a
+live process. A foreground pane is required; background service installation
+and phone-managed relay updates are refused. MacSys GUI, App Store, and other
+unqualified daemon profiles are not
 enabled by the managed adapter; BYO does not probe a daemon profile at all.
 
 ## The gateway path

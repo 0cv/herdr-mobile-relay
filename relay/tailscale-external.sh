@@ -100,6 +100,7 @@ RELAY_PID=""
 RELAY_LOG="$(mktemp "$CONFIG_DIR/.tailscale-external-relay-log.XXXXXX")"
 chmod 600 "$RELAY_LOG"
 SESSION_CREATED=0
+FORCED_SHUTDOWN=0
 
 write_external_session() {
     local stage="$1"
@@ -128,6 +129,10 @@ write_external_session() {
         printf 'HERDR_RELAY_PAIRING_SOCKET=%s\n' "$CONTROL_SOCKET"
         printf 'HERDR_RELAY_CONTROL_RUN_ID=%s\n' "$RUN_ID"
         printf 'HERDR_RELAY_STAGE=%s\n' "$stage"
+        if [ "$stage" = forced-shutdown ]; then
+            printf 'HERDR_RELAY_PID=%s\n' "$RELAY_PID"
+            printf 'HERDR_RELAY_LOG=%s\n' "$RELAY_LOG"
+        fi
     } > "$temporary"
     chmod 600 "$temporary"
     mv "$temporary" "$SESSION_FILE"
@@ -144,7 +149,7 @@ remove_external_session() {
 }
 
 stop_relay() {
-    local attempt
+    local attempt stop_status=0 kill_sent=0
     if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
         kill -TERM "$RELAY_PID" 2>/dev/null || true
         for ((attempt = 0; attempt < 10; attempt++)); do
@@ -153,19 +158,33 @@ stop_relay() {
             fi
             sleep 1
         done
-        if kill -0 "$RELAY_PID" 2>/dev/null; then
-            kill -KILL "$RELAY_PID" 2>/dev/null || true
+        if kill -0 "$RELAY_PID" 2>/dev/null && kill -KILL "$RELAY_PID" 2>/dev/null; then
+            kill_sent=1
         fi
-        wait "$RELAY_PID" 2>/dev/null || true
+        wait "$RELAY_PID" 2>/dev/null || stop_status=$?
+        if [ "$kill_sent" -eq 1 ] && [ "$stop_status" -eq 137 ]; then
+            FORCED_SHUTDOWN=1
+        fi
+    fi
+    if [ "$FORCED_SHUTDOWN" -eq 1 ] && ! write_external_session forced-shutdown; then
+        echo "✗ Could not update the operator-owned Serve recovery record after forced shutdown." >&2
     fi
     RELAY_PID=""
 }
 
 cleanup() {
     stop_relay
-    remove_external_session
-    if [ -n "$RELAY_LOG" ]; then
-        rm -f "$RELAY_LOG"
+    if [ "$FORCED_SHUTDOWN" -eq 1 ]; then
+        echo "✗ The relay required SIGKILL; recovery evidence was retained and any control socket was left untouched." >&2
+        echo "  Session: $SESSION_FILE" >&2
+        echo "  Socket:  $CONTROL_SOCKET" >&2
+        echo "  Log:     $RELAY_LOG" >&2
+        echo "  Inspect these and confirm no relay process is live before retrying; Herdr did not remove the socket." >&2
+    else
+        remove_external_session
+        if [ -n "$RELAY_LOG" ]; then
+            rm -f "$RELAY_LOG"
+        fi
     fi
 }
 trap cleanup EXIT
