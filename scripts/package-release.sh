@@ -85,6 +85,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         stable-teardown.sh \
         start.sh \
         tailscale.sh \
+        tailscale-external.sh \
         uninstall.sh \
         uninstall-service.sh \
         uninstall-systemd-user-service.sh; do
