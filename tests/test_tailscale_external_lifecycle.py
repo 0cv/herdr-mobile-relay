@@ -287,6 +287,8 @@ def local_health_diagnostic(env: dict[str, str]) -> str:
         if field not in health:
             return f"local_health_missing_{field}"
         if health[field] != value:
+            if field == "readiness" and health[field] in {"starting", "degraded"}:
+                return f"local_health_readiness_{health[field]}"
             return f"local_health_mismatch_{field}"
     return "local_health_matches_all_launcher_checks"
 
