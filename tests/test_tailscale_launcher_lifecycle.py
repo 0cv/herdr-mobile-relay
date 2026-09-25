@@ -530,14 +530,20 @@ class Fixture:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             out, err = self.output_files() if self.process.stdout is None else self.read_pipe_output()
-            if b"Open this private setup link" in out and FIXTURE_APP.encode() in out:
+            if b"Open this private setup link" in out and FIXTURE_TOKEN.encode() in out:
                 self.outputs = (out, err)
                 return out, err
             if self.process.poll() is not None:
                 self.outputs = (out, err)
                 return out, err
             time.sleep(0.02)
-        raise AssertionError("launcher did not reach the private setup-link boundary")
+        out, err = self.output_files() if self.process.stdout is None else self.read_pipe_output()
+        link_origins = [line.split(b"/#", 1)[0].strip() for line in out.splitlines() if FIXTURE_TOKEN.encode() in line]
+        raise AssertionError(
+            "launcher did not reach the private setup-link boundary; "
+            f"banner={b'Open this private setup link' in out}, link_origins={link_origins!r}, "
+            f"events={self.event_names()!r}, stderr_bytes={len(err)}"
+        )
 
     def read_pipe_output(self):
         output = getattr(self, "_pipe_output", bytearray())
@@ -740,7 +746,9 @@ class ManagedLauncherLifecycle(unittest.TestCase):
         self.assertNotEqual(arm["env_sha256"], activation["env_sha256"])
         self.assertEqual(arm["session_stage"], "arm-pending")
         self.assert_contains(output, b"Open this private setup link", "committed launcher did not print its private link")
-        link_line = next(line for line in output.splitlines() if FIXTURE_APP.encode() in line)
+        link_line = next(line for line in output.splitlines() if FIXTURE_TOKEN.encode() in line)
+        link_origin = link_line.split(b"/#", 1)[0].strip()
+        self.assertTrue(link_origin == FIXTURE_APP.encode(), f"setup link did not use the explicit fixture app origin: {link_origin!r}")
         self.assertTrue(FIXTURE_FRAGMENT.encode() in link_line, "setup link omitted the expected fixture fragment")
         non_link_output = b"\n".join(line for line in output.splitlines() if FIXTURE_TOKEN.encode() not in line)
         self.assert_not_contains(error, FIXTURE_TOKEN.encode(), "fixture credential leaked into diagnostics")
