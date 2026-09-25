@@ -774,8 +774,11 @@ def run_fixture() -> str:
                 for line in env_file.read_text(encoding="utf-8").splitlines()
                 if "=" in line
             )
-            if saved_config.get("HERDR_RELAY_TRANSPORT") != "tailscale-external" or \
-                    saved_config.get("HERDR_EXTERNAL_HTTPS_ORIGIN") != origin:
+            # set_env_value_atomic writes shell-safe single-quoted values. Check
+            # the on-disk representation exactly rather than mistaking those
+            # required quotes for part of the configured HTTPS origin.
+            if saved_config.get("HERDR_RELAY_TRANSPORT") != "'tailscale-external'" or \
+                    saved_config.get("HERDR_EXTERNAL_HTTPS_ORIGIN") != f"'{origin}'":
                 fail("operator-owned transport/origin selection was not persisted canonically")
             PHASE = "persisted_independent_phone_app_origin"
             saved_app_origin = (config_dir / "phone-app-origin-configured").read_text(encoding="utf-8").strip()
