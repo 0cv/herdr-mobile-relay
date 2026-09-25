@@ -87,6 +87,7 @@ for WRAPPER in \
     tailscale.sh \
     tailscale-external.sh; do
     printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER"
+    chmod 755 "$RELEASE_DIR/relay/$WRAPPER"
 done
 
 "$RELEASE_DIR/herdr-mobile-relay" release-manifest \
