@@ -325,7 +325,7 @@ async function openFixtureAgent(page, profile) {
     throw error;
   }
   try {
-    await page.getByRole('textbox', { name: 'Prompt' }).waitFor({ state: 'visible', timeout: deadline });
+    await page.getByRole('combobox', { name: 'Prompt' }).waitFor({ state: 'visible', timeout: deadline });
   } catch (error) {
     await recordUISnapshot(profile, 'prompt_wait_failed', page);
     throw error;
@@ -432,6 +432,21 @@ function writeProgress() {
   return progressWriteQueue;
 }
 
+const browserExceptionTypes = new Set([
+  'BrowserScriptMissing', 'BrowserProtocolError', 'BrowserAssertionError', 'BrowserBudgetTimeout',
+  'BrowserError', 'TimeoutExpired', 'TimeoutError', 'Error', 'TypeError', 'ReferenceError',
+  'SyntaxError', 'RangeError', 'DOMException', 'TargetClosedError', 'ProtocolError', 'PageClosedError',
+]);
+
+function safeExceptionType(error) {
+  let name = '';
+  let message = '';
+  try { name = String(error?.name ?? error?.constructor?.name ?? '').slice(0, 64); } catch { /* allowlisted fallback */ }
+  try { message = String(error?.message ?? '').slice(0, 2048); } catch { /* allowlisted fallback */ }
+  if (/timeout|timed out|exceeded.{0,32}time/i.test(message)) return 'TimeoutError';
+  return browserExceptionTypes.has(name) ? name : 'BrowserError';
+}
+
 let resultEmitted = false;
 async function emitBrowserResult(values = {}, error = null) {
   if (resultEmitted) return;
@@ -450,11 +465,8 @@ async function emitBrowserResult(values = {}, error = null) {
   ]) {
     if (typeof values?.[key] === 'boolean') safeResult[key] = values[key];
   }
-  if (error) {
-    const name = error && typeof error === 'object' && typeof error.constructor?.name === 'string'
-      ? error.constructor.name : 'BrowserError';
-    safeResult.exception_type = /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(name) ? name : 'BrowserError';
-  } else if (!passed) safeResult.exception_type = 'BrowserAssertionError';
+  if (error) safeResult.exception_type = safeExceptionType(error);
+  else if (!passed) safeResult.exception_type = 'BrowserAssertionError';
   resultEmitted = true;
   await new Promise((resolve) => process.stdout.write(JSON.stringify(safeResult) + '\n', resolve));
   await writeProgress();
@@ -482,7 +494,7 @@ async function initialEnrollment() {
     await openFixtureAgent(controller.page, 'controller');
     const readWorked = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', controllerReadBaseline + 1);
     await setStage('controller_command');
-    const prompt = controller.page.getByRole('textbox', { name: 'Prompt' });
+    const prompt = controller.page.getByRole('combobox', { name: 'Prompt' });
     await prompt.fill('package acceptance harmless ping');
     await controller.page.getByRole('button', { name: 'Send prompt' }).click();
     const commandRecorded = await waitForSuccessfulOperation(input.fake_herdr_operations, 'agent prompt');
@@ -516,7 +528,7 @@ async function initialEnrollment() {
     const readerReadBaseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
     await openFixtureAgent(reader.page, 'reader');
     const readerRead = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', readerReadBaseline + 1);
-    const readerPrompt = reader.page.getByRole('textbox', { name: 'Prompt' });
+    const readerPrompt = reader.page.getByRole('combobox', { name: 'Prompt' });
     const denied = await readerPrompt.isDisabled();
     const before = await operationCount(input.fake_herdr_operations, 'agent prompt');
     if (!denied) {
@@ -617,9 +629,12 @@ try {
   if (result.result === 'pass') await setStage('browser_complete');
   else result.exception_type = 'BrowserAssertionError';
 } catch (error) {
-  const type = error && typeof error === 'object' && 'constructor' in error && typeof error.constructor?.name === 'string'
-    ? error.constructor.name : 'BrowserError';
-  result = { mode: input.mode, result: 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name), exception_type: /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(type) ? type : 'BrowserError' };
+  result = {
+    mode: input.mode,
+    result: 'fail',
+    passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name),
+    exception_type: safeExceptionType(error),
+  };
 }
 clearTimeout(jsDeadlineTimer);
 if (!resultEmitted) {
