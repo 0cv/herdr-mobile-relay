@@ -50,8 +50,10 @@ FAILURE_CODES = {
     "archive_external_wrapper_not_executable", "archive_binary_not_executable",
     "managed_launcher_spawn", "managed_launcher_output_limit",
     "managed_launcher_exit_before_link", "managed_launcher_link_timeout",
-    "fixture_localapi_watch_missing", "fixture_localapi_registration_missing",
-    "fixture_localapi_session_missing",
+    "managed_launcher_cli_refusal", "managed_launcher_pre_serve_status_exit",
+    "managed_launcher_pre_watch_exit", "managed_launcher_pre_registration_exit",
+    "managed_launcher_post_registration_exit", "fixture_localapi_watch_missing",
+    "fixture_localapi_registration_missing", "fixture_localapi_session_missing",
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
@@ -76,6 +78,40 @@ class GateFailure(RuntimeError):
     def __init__(self, code: str):
         self.code = code if code in FAILURE_CODES else "fixture_assertion"
         super().__init__(self.code)
+
+
+def safe_fixture_cli_operations(env: dict[str, str]) -> list[str]:
+    path = env.get("HERDR_FIXTURE_CLI_EVENTS")
+    if not path:
+        return []
+    try:
+        with Path(path).open("rb") as source:
+            lines = source.read(4096).decode("ascii", "ignore").splitlines()
+    except OSError:
+        return []
+    allowed = {"status_json", "version_daemon_json", "serve_status_json", "unsupported"}
+    return [line for line in lines if line in allowed][-16:]
+
+
+def managed_launcher_exit_code(env: dict[str, str]) -> str:
+    operations = safe_fixture_cli_operations(env)
+    if "unsupported" in operations:
+        return "managed_launcher_cli_refusal"
+    if "serve_status_json" not in operations:
+        return "managed_launcher_pre_serve_status_exit"
+    try:
+        state_path = Path(env["HERDR_FIXTURE_API_STATE"])
+        with state_path.open("rb") as source:
+            events = json.loads(source.read(16384)).get("events", [])
+    except (KeyError, OSError, UnicodeError, ValueError, TypeError):
+        events = []
+    if not isinstance(events, list):
+        events = []
+    if "localapi:watch:mask=2" not in events:
+        return "managed_launcher_pre_watch_exit"
+    if "localapi:config:post" not in events:
+        return "managed_launcher_pre_registration_exit"
+    return "managed_launcher_post_registration_exit"
 
 
 def die(message: str, code: str = "fixture_assertion") -> "NoReturn":
@@ -316,10 +352,23 @@ version = {
   "isDev":False, "gitDirty":False, "unstableBranch":False
 }
 if args == ["status", "--json"]:
+  operation = "status_json"
+elif args == ["version", "--json", "--daemon"]:
+  operation = "version_daemon_json"
+elif args == ["serve", "status", "--json"]:
+  operation = "serve_status_json"
+else:
+  operation = "unsupported"
+try:
+  with open(os.environ["HERDR_FIXTURE_CLI_EVENTS"], "a", encoding="ascii") as events:
+    events.write(operation + "\n")
+except OSError:
+  pass
+if operation == "status_json":
   print(json.dumps(status,separators=(",",":"))); raise SystemExit(0)
-if args == ["version", "--json", "--daemon"]:
+if operation == "version_daemon_json":
   print(json.dumps(version,separators=(",",":"))); raise SystemExit(0)
-if args == ["serve", "status", "--json"]:
+if operation == "serve_status_json":
   print(json.dumps(config,separators=(",",":")))
   raise SystemExit(0)
 # No CLI write operation is part of managed ownership; fail any attempt.
@@ -541,7 +590,10 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
                 stderr_bytes = int(state["stderr_bytes"])
             if not expect_link:
                 return process, "", captured, b""
-            die(f"packaged managed launcher exited before setup-link emission (exit={process.returncode}, stderr_bytes={stderr_bytes})", "managed_launcher_exit_before_link")
+            die(
+                f"packaged managed launcher exited before setup-link emission (exit={process.returncode}, stderr_bytes={stderr_bytes})",
+                managed_launcher_exit_code(env),
+            )
         time.sleep(0.05)
     try:
         os.killpg(process.pid, 9)
@@ -792,6 +844,7 @@ def main() -> int:
         threading.Thread(target=local_server.serve_forever, name="fixture-localapi", daemon=True).start()
         os.chmod(socket_path, 0o600)
 
+        cli_events_file = temporary_root / "tailscale-cli-events.log"
         cli_script = fixture_bin / "tailscale"
         cli_script.write_text(fake_cli_program(), encoding="utf-8")
         cli_script.chmod(0o700)
@@ -823,7 +876,8 @@ def main() -> int:
             "HERDR_RELEASE_ROOT": str(data / "releases"),
             "HERDR_RELAY_POLL_INTERVAL": "1",
             "FAKE_HERDR_SCENARIO": str(scenario), "FAKE_HERDR_OPERATIONS": str(operations),
-            "HERDR_FIXTURE_API_STATE": str(api_state_file), "HERDR_FIXTURE_ORIGIN": origin,
+            "HERDR_FIXTURE_API_STATE": str(api_state_file), "HERDR_FIXTURE_CLI_EVENTS": str(cli_events_file),
+            "HERDR_FIXTURE_ORIGIN": origin,
             "CURL_CA_BUNDLE": str(ca), "SSL_CERT_FILE": str(ca),
             "NO_PROXY": "*", "no_proxy": "*", "GITHUB_SHA": source_sha,
         })
@@ -1062,6 +1116,7 @@ def main() -> int:
             "executed_case_count": len([name for name in EXPECTED_CASES if case_results.get(name) == "pass"]),
             "cases": [{"name": name, "result": case_results.get(name, "missing")} for name in EXPECTED_CASES],
             "fixture_transitions": list(dict.fromkeys(transitions))[:64],
+            "fixture_cli_operations": safe_fixture_cli_operations(relay_env if "relay_env" in locals() else {}),
             "browser": {key: browser_evidence.get(key) for key in ("result", "controller_enrolled", "reader_enrolled", "controller_read", "controller_command", "reader_read", "reader_mutation_denied", "credentials_preserved") if key in browser_evidence},
             "result": "pass" if len(case_results) == len(EXPECTED_CASES) and all(case_results.get(name) == "pass" for name in EXPECTED_CASES) else "fail",
         }
