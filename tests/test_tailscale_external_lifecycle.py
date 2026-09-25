@@ -522,9 +522,11 @@ def assert_forced_shutdown_recovery(
     output: bytes,
     expected_status: int,
     relay_pid: int,
+    expected_stage: str = "forced-shutdown",
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     if (
         process.returncode != expected_status
+        or expected_status == 0
         or b"recovery evidence was retained and any control socket was left untouched" not in output
     ):
         fail("forced shutdown did not report recovery retention")
@@ -538,7 +540,7 @@ def assert_forced_shutdown_recovery(
     )
     recovery_log = pathlib.Path(forced_session.get("HERDR_RELAY_LOG", ""))
     if (
-        forced_session.get("HERDR_RELAY_STAGE") != "forced-shutdown"
+        forced_session.get("HERDR_RELAY_STAGE") != expected_stage
         or forced_session.get("HERDR_RELAY_PID") != str(relay_pid)
         or not recovery_log.is_file()
         or recovery_log.parent != config_dir
@@ -782,8 +784,7 @@ herdr_force_kill_test_active() {
 }
 kill() {
     if herdr_force_kill_test_active; then
-        if [ "${1:-}" = "-TERM" ] && [ "${2:-}" = "${RELAY_PID:-}" ]; then return 0; fi
-        if [ "${1:-}" = "-0" ] && [ "${2:-}" = "${RELAY_PID:-}" ]; then return 0; fi
+        if [ "${1:-}" = "-TERM" ] && [ "${2:-}" = "${RELAY_JOB:-}" ]; then return 0; fi
     fi
     builtin kill "$@"
 }
@@ -926,6 +927,32 @@ sleep() {
                 record(case)
             proxy.health_mode = "pass"
 
+            PHASE = "independent_phone_app_bundle_refusal"
+            app_version_path = web_root / "version.json"
+            original_app_version = app_version_path.read_bytes()
+            mismatched_version = json.loads(original_app_version)
+            mismatched_version["revision"] = "different-app-release"
+            try:
+                app_version_path.write_text(json.dumps(mismatched_version, separators=(",", ":")) + "\n", encoding="utf-8")
+                trusted_app = http.client.HTTPSConnection(
+                    "127.0.0.1", static_app.server_port,
+                    context=ssl.create_default_context(cafile=str(certificate)), timeout=3,
+                )
+                trusted_app.request("GET", "/version.json")
+                app_response = trusted_app.getresponse()
+                app_bytes = app_response.read()
+                trusted_app.close()
+                if app_response.status != 200 or b"different-app-release" not in app_bytes:
+                    fail("separate trusted phone-app fixture did not serve the mismatched release")
+                status, output = run_setup_link(root, env)
+                if status == 0 or b"Open this private setup link" in output or b"Scan this QR code" in output:
+                    fail("wrong independently hosted phone-app bundle did not refuse reprint")
+                if (config_dir / "device-auth" / "devices.json").read_bytes() != first_store:
+                    fail("wrong independent phone-app bundle changed invitation or device credentials")
+                record("independent_phone_app_bundle_refused_without_state_change")
+            finally:
+                app_version_path.write_bytes(original_app_version)
+
             PHASE = "wrong_private_control_identity_refusal"
             session_file = config_dir / "tailscale-external-session.env"
             session = dict(
@@ -1048,6 +1075,31 @@ sleep() {
             record("independent_sigkill_preserves_recovery_record_socket_and_log")
             # Test-only stale-state cleanup after the child is reaped and both
             # backend and socket listener have been proven unavailable.
+            session_path.unlink()
+            control_path.unlink()
+            recovery_log.unlink()
+
+            PHASE = "independent_nonkill_crash_recovery_evidence"
+            crashed, _ = start_launcher(root, env, active)
+            crash_session = dict(
+                line.split("=", 1)
+                for line in (config_dir / "tailscale-external-session.env").read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            crash_pid = int(crash_session["HERDR_RELAY_PID"])
+            os.kill(crash_pid, signal.SIGQUIT)
+            try:
+                crash_output, _ = crashed.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                fail("independently crashed relay did not finish launcher cleanup")
+            active.remove(crashed)
+            if crashed.returncode in (0, 137):
+                fail("independent non-KILL crash did not return a distinct abnormal status")
+            session_path, control_path, recovery_log = assert_forced_shutdown_recovery(
+                root, env, config_dir, relay_port, origin, sentinel,
+                crashed, crash_output, crashed.returncode, crash_pid, "unclean-shutdown",
+            )
+            record("independent_nonkill_crash_preserves_recovery_record_socket_and_log")
             session_path.unlink()
             control_path.unlink()
             recovery_log.unlink()

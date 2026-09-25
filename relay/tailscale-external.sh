@@ -97,10 +97,11 @@ export HERDR_PHONE_APP_URL
 # BYO starts fail closed before either can rewrite the saved selection.
 RUN_ID="$(generate_instance_id)"
 RELAY_PID=""
+RELAY_JOB=""
 RELAY_LOG="$(mktemp "$CONFIG_DIR/.tailscale-external-relay-log.XXXXXX")"
 chmod 600 "$RELAY_LOG"
 SESSION_CREATED=0
-FORCED_SHUTDOWN=0
+UNCLEAN_SHUTDOWN=0
 
 write_external_session() {
     local stage="$1"
@@ -132,7 +133,7 @@ write_external_session() {
         if [ -n "$RELAY_PID" ]; then
             printf 'HERDR_RELAY_PID=%s\n' "$RELAY_PID"
         fi
-        if [ "$stage" = forced-shutdown ]; then
+        if [ "$stage" = forced-shutdown ] || [ "$stage" = unclean-shutdown ]; then
             printf 'HERDR_RELAY_LOG=%s\n' "$RELAY_LOG"
         fi
     } > "$temporary"
@@ -150,33 +151,59 @@ remove_external_session() {
     fi
 }
 
-# A SIGKILLed Go child cannot run deferred control-socket cleanup. Preserve its
-# run identity whether our cleanup escalated or the child was killed elsewhere.
-preserve_forced_shutdown() {
-    FORCED_SHUTDOWN=1
-    if ! write_external_session forced-shutdown; then
-        echo "✗ Could not update the operator-owned Serve recovery record after forced shutdown." >&2
+# A child that dies without Go's deferred socket cleanup can leave the private
+# control pathname behind. Preserve its run identity on any abnormal exit,
+# unexpected socket, or unknown Bash job generation; PID is inspection only.
+preserve_unclean_shutdown() {
+    local stage="$1"
+    UNCLEAN_SHUTDOWN=1
+    if ! write_external_session "$stage"; then
+        echo "✗ Could not update the operator-owned Serve recovery record after unclean shutdown." >&2
     fi
 }
 
 stop_relay() {
-    local attempt stop_status=0
+    local attempt stop_status=0 details_status=0
     if [ -n "$RELAY_PID" ]; then
-        if kill -0 "$RELAY_PID" 2>/dev/null; then
-            kill -TERM "$RELAY_PID" 2>/dev/null || true
+        # A numeric PID is not authority to signal: the child may have been
+        # reaped and that number reused. Signal only the captured Bash job
+        # generation, and refuse to signal when its identity is unknown.
+        if [ -z "$RELAY_JOB" ]; then
+            preserve_unclean_shutdown unclean-shutdown
+            RELAY_PID=""
+            return
+        fi
+        if _child_job_details "$RELAY_JOB" "$RELAY_PID"; then
+            kill -TERM "$RELAY_JOB" 2>/dev/null || true
             for ((attempt = 0; attempt < 10; attempt++)); do
-                if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+                if _child_job_details "$RELAY_JOB" "$RELAY_PID"; then
+                    sleep 1
+                else
+                    details_status=$?
                     break
                 fi
-                sleep 1
             done
-            if kill -0 "$RELAY_PID" 2>/dev/null; then
-                kill -KILL "$RELAY_PID" 2>/dev/null || true
+            if [ "$details_status" -ne 0 ] && [ "$details_status" -ne 2 ]; then
+                preserve_unclean_shutdown unclean-shutdown
+                RELAY_PID=""
+                return
+            fi
+            if _child_job_details "$RELAY_JOB" "$RELAY_PID"; then
+                kill -KILL "$RELAY_JOB" 2>/dev/null || true
+            fi
+        else
+            details_status=$?
+            if [ "$details_status" -ne 2 ]; then
+                preserve_unclean_shutdown unclean-shutdown
+                RELAY_PID=""
+                return
             fi
         fi
         wait "$RELAY_PID" 2>/dev/null || stop_status=$?
         if [ "$stop_status" -eq 137 ]; then
-            preserve_forced_shutdown
+            preserve_unclean_shutdown forced-shutdown
+        elif [ "$stop_status" -ne 0 ]; then
+            preserve_unclean_shutdown unclean-shutdown
         fi
     fi
     RELAY_PID=""
@@ -184,8 +211,11 @@ stop_relay() {
 
 cleanup() {
     stop_relay
-    if [ "$FORCED_SHUTDOWN" -eq 1 ]; then
-        echo "✗ The relay required SIGKILL; recovery evidence was retained and any control socket was left untouched." >&2
+    if [ -e "$CONTROL_SOCKET" ] || [ -L "$CONTROL_SOCKET" ]; then
+        [ "$UNCLEAN_SHUTDOWN" -eq 1 ] || preserve_unclean_shutdown unclean-shutdown
+    fi
+    if [ "$UNCLEAN_SHUTDOWN" -eq 1 ]; then
+        echo "✗ The relay did not retire cleanly; recovery evidence was retained and any control socket was left untouched." >&2
         echo "  Session: $SESSION_FILE" >&2
         echo "  Socket:  $CONTROL_SOCKET" >&2
         echo "  Log:     $RELAY_LOG" >&2
@@ -231,10 +261,14 @@ fi
 echo "▸ Starting local Herdr relay backend on 127.0.0.1:$PORT..."
 "$RELAY_BIN" serve >"$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
+RELAY_JOB="$(capture_child_job "$RELAY_PID")" || {
+    echo "✗ Could not capture the relay's Bash job generation; retaining the private session and log for recovery." >&2
+    exit 1
+}
 
 HEALTH=""
 for attempt in $(seq 1 90); do
-    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+    if ! _child_job_details "$RELAY_JOB" "$RELAY_PID"; then
         echo "✗ External Serve relay failed to start. No Tailscale state was observed or changed." >&2
         exit 1
     fi
@@ -266,7 +300,7 @@ require_release_identity "$HEALTH" "$RELAY_BIN" || exit 1
 # CLI, or LocalAPI call exists.
 PUBLIC_HEALTH=""
 for attempt in $(seq 1 60); do
-    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+    if ! _child_job_details "$RELAY_JOB" "$RELAY_PID"; then
         echo "✗ External Serve relay exited before HTTPS verification; no setup link was printed." >&2
         exit 1
     fi
