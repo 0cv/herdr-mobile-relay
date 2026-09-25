@@ -29,6 +29,7 @@ import time
 import urllib.parse
 
 HOST = "relay.tailnet.ts.net"
+RELAY_PORT = 18377
 TS_VERSION = "1.102.4-tbbcd7d1fc"
 TS_COMMIT = "bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8"
 WATCH_ID = "package-watch-session"
@@ -52,6 +53,7 @@ FAILURE_CODES = {
     "managed_launcher_exit_before_link", "managed_launcher_link_timeout",
     "managed_launcher_cli_refusal", "managed_launcher_pre_serve_status_exit",
     "managed_launcher_pre_watch_exit", "managed_launcher_pre_registration_exit",
+    "managed_launcher_registration_state_unconfirmed",
     "managed_launcher_post_registration_exit", "managed_launcher_owner_prepare_failed",
     "managed_launcher_runtime_directory_failed", "managed_launcher_inspection_failed",
     "managed_launcher_inventory_failed", "managed_launcher_herdr_inventory_poll_failed",
@@ -204,7 +206,7 @@ def managed_launcher_exit_code(env: dict[str, str], launcher_log_category: str =
         category = launcher_log_category or managed_private_log_category(env)
         return PRIVATE_LOG_CATEGORY_CODES.get(category, "managed_launcher_pre_watch_exit")
     if "localapi:config:post" not in events:
-        return "managed_launcher_pre_registration_exit"
+        return "managed_launcher_registration_state_unconfirmed"
     return "managed_launcher_post_registration_exit"
 
 
@@ -228,8 +230,9 @@ def write_json(path: Path, value: object) -> None:
 
 
 class APIState:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, relay_port: int):
         self.path = path
+        self.relay_port = relay_port
         self.lock = threading.RLock()
         self.config: dict = {}
         self.etag = hashlib.sha256(b"{}").hexdigest()
@@ -574,7 +577,7 @@ class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
             if isinstance(foreground, dict) and WATCH_ID in foreground:
                 entry = foreground[WATCH_ID]
                 expected_host = f"{HOST}:{os.environ['HERDR_TAILSCALE_HTTPS_PORT']}"
-                expected_proxy = f"http://127.0.0.1:{os.environ['HERDR_RELAY_PORT']}"
+                expected_proxy = f"http://127.0.0.1:{fixture.relay_port}"
                 try:
                     valid_registration = (
                         entry["TCP"][os.environ["HERDR_TAILSCALE_HTTPS_PORT"]]["HTTPS"] is True
@@ -668,7 +671,7 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
         return
 
     def _websocket(self) -> None:
-        backend = socket.create_connection(("127.0.0.1", int(os.environ["HERDR_RELAY_PORT"])), timeout=10)
+        backend = socket.create_connection(("127.0.0.1", RELAY_PORT), timeout=10)
         headers = [(key, value) for key, value in self.headers.items() if key.lower() != "host"]
         request = f"{self.command} {self.path} HTTP/1.1\r\nHost: {self.headers.get('Host', HOST)}\r\n"
         request += "".join(f"{key}: {value}\r\n" for key, value in headers) + "\r\n"
@@ -704,7 +707,7 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
         backend.close()
 
     def _proxy(self) -> None:
-        connection = http.client.HTTPConnection("127.0.0.1", int(os.environ["HERDR_RELAY_PORT"]), timeout=15)
+        connection = http.client.HTTPConnection("127.0.0.1", RELAY_PORT, timeout=15)
         request_headers = {key: value for key, value in self.headers.items() if key.lower() not in {"host", "connection", "content-length"}}
         request_headers["Host"] = self.headers.get("Host", HOST)
         body = self.rfile.read(int(self.headers.get("Content-Length", "0"))) if self.headers.get("Content-Length") else None
@@ -1119,12 +1122,12 @@ def main() -> int:
         env_file.write_text(
             f"HERDR_RELAY_TOKEN={token}\nHERDR_RELAY_INSTANCE_ID={instance}\n"
             "HERDR_RELAY_TRANSPORT=tailscale\nHERDR_RELAY_HOST=127.0.0.1\n"
-            "HERDR_RELAY_REARM_BOOTSTRAP=0\nHERDR_RELAY_PORT=18377\nHERDR_RELAY_PLUGIN_PORT=18378\n",
+            f"HERDR_RELAY_REARM_BOOTSTRAP=0\nHERDR_RELAY_PORT={RELAY_PORT}\nHERDR_RELAY_PLUGIN_PORT=18378\n",
             encoding="ascii",
         )
         os.chmod(env_file, 0o600)
         api_state_file = temporary_root / "api-state.json"
-        state = APIState(api_state_file)
+        state = APIState(api_state_file, RELAY_PORT)
         state.persist()
         socket_dir = Path("/var/run/tailscale")
         socket_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -1169,6 +1172,7 @@ def main() -> int:
             "XDG_DATA_HOME": str(data), "HERDR_RELAY_ENV": str(env_file),
             "HERDR_TAILSCALE_REQUEST": "1", "HERDR_TAILSCALE_BIN": str(cli_script),
             "HERDR_TAILSCALE_HTTPS_PORT": os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
+            "HERDR_RELAY_PORT": str(state.relay_port),
             "HERDR_BIN": str(fake_herdr), "HERDR_SOCKET_PATH": str(herdr_socket.path),
             "HERDR_RELEASE_ROOT": str(data / "releases"),
             "HERDR_RELAY_POLL_INTERVAL": "1",
@@ -1330,12 +1334,12 @@ def main() -> int:
         ambiguous_env_file.write_text(
             f"HERDR_RELAY_TOKEN={ambiguous_token}\nHERDR_RELAY_INSTANCE_ID=package-ambiguous-instance\n"
             "HERDR_RELAY_TRANSPORT=tailscale\nHERDR_RELAY_HOST=127.0.0.1\n"
-            "HERDR_RELAY_REARM_BOOTSTRAP=0\nHERDR_RELAY_PORT=18377\nHERDR_RELAY_PLUGIN_PORT=18378\n",
+            f"HERDR_RELAY_REARM_BOOTSTRAP=0\nHERDR_RELAY_PORT={RELAY_PORT}\nHERDR_RELAY_PLUGIN_PORT=18378\n",
             encoding="ascii",
         )
         os.chmod(ambiguous_env_file, 0o600)
         ambiguous_state_file = ambiguous_root / "api-state.json"
-        state = APIState(ambiguous_state_file)
+        state = APIState(ambiguous_state_file, RELAY_PORT)
         state.drop_registration_ack = True
         state.persist()
         local_server.fixture = state  # type: ignore[attr-defined]
@@ -1348,6 +1352,7 @@ def main() -> int:
         ambiguous_env = dict(relay_env)
         ambiguous_env.update({
             "HOME": str(ambiguous_home), "TMPDIR": str(ambiguous_root),
+            "HERDR_RELAY_PORT": str(state.relay_port),
             "XDG_CONFIG_HOME": str(ambiguous_config), "XDG_CACHE_HOME": str(ambiguous_cache),
             "XDG_DATA_HOME": str(ambiguous_data), "HERDR_RELAY_ENV": str(ambiguous_env_file),
             "HERDR_SOCKET_PATH": str(ambiguous_runtime / "herdr.sock"),
