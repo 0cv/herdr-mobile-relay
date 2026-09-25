@@ -524,39 +524,43 @@ def assert_forced_shutdown_recovery(
     relay_pid: int,
     expected_stage: str = "forced-shutdown",
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
-    if (
-        process.returncode != expected_status
-        or expected_status == 0
-        or b"recovery evidence was retained and any control socket was left untouched" not in output
-    ):
-        fail("forced shutdown did not report recovery retention")
+    def refuse(code: str) -> None:
+        global DIAGNOSTIC_CODE
+        DIAGNOSTIC_CODE = code
+        fail("forced shutdown recovery contract failed")
+
+    if process.returncode != expected_status or expected_status == 0:
+        refuse("recovery_launcher_status_mismatch")
+    if b"recovery evidence was retained and any control socket was left untouched" not in output:
+        refuse("recovery_retention_message_missing")
     session_path = config_dir / "tailscale-external-session.env"
     control_path = config_dir / "tailscale-external-control.sock"
-    if not session_path.exists() or not stat.S_ISSOCK(control_path.stat().st_mode):
-        fail("forced shutdown did not preserve its session record and stale control socket")
+    if not session_path.exists():
+        refuse("recovery_session_missing")
+    if not control_path.exists() or not stat.S_ISSOCK(control_path.stat().st_mode):
+        refuse("recovery_socket_missing")
     session_bytes = session_path.read_bytes()
     forced_session = dict(
         line.split("=", 1) for line in session_bytes.decode("utf-8").splitlines() if "=" in line
     )
     recovery_log = pathlib.Path(forced_session.get("HERDR_RELAY_LOG", ""))
-    if (
-        forced_session.get("HERDR_RELAY_STAGE") != expected_stage
-        or forced_session.get("HERDR_RELAY_PID") != str(relay_pid)
-        or not recovery_log.is_file()
-        or recovery_log.parent != config_dir
-    ):
-        fail("forced shutdown did not retain its stage, child PID, and private relay log")
+    if forced_session.get("HERDR_RELAY_STAGE") != expected_stage:
+        refuse("recovery_stage_mismatch")
+    if forced_session.get("HERDR_RELAY_PID") != str(relay_pid):
+        refuse("recovery_child_identity_mismatch")
+    if not recovery_log.is_file() or recovery_log.parent != config_dir:
+        refuse("recovery_log_missing")
     if session_path.stat().st_mode & 0o777 != 0o600 or recovery_log.stat().st_mode & 0o777 != 0o600:
-        fail("forced-shutdown recovery evidence was not private")
+        refuse("recovery_mode_not_private")
     try:
         socket.create_connection(("127.0.0.1", relay_port), timeout=1).close()
-        fail("forced shutdown left the relay backend accepting connections")
+        refuse("recovery_backend_still_live")
     except OSError:
         pass
     control_probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         if control_probe.connect_ex(str(control_path)) == 0:
-            fail("forced shutdown left a live pairing-control listener")
+            refuse("recovery_control_listener_still_live")
     finally:
         control_probe.close()
     refused = subprocess.run(
@@ -570,11 +574,11 @@ def assert_forced_shutdown_recovery(
         check=False,
     )
     if refused.returncode == 0 or b"session or control socket already exists" not in refused.stdout:
-        fail("restart did not fail closed while recovery evidence remained")
+        refuse("recovery_retry_not_refused")
     if session_path.read_bytes() != session_bytes or not control_path.exists() or not recovery_log.is_file():
-        fail("refused restart changed retained recovery evidence")
+        refuse("recovery_retry_changed_evidence")
     if sentinel.exists():
-        fail("forced BYO cleanup invoked the Tailscale CLI")
+        refuse("recovery_tailscale_cli_invoked")
     return session_path, control_path, recovery_log
 
 
