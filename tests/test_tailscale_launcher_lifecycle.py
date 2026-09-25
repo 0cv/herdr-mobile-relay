@@ -530,7 +530,9 @@ class Fixture:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             out, err = self.output_files() if self.process.stdout is None else self.read_pipe_output()
-            if b"Open this private setup link" in out and FIXTURE_TOKEN.encode() in out:
+            has_link_banner = (b"Open this private setup link" in out or
+                                b"Or open this private setup link" in out)
+            if has_link_banner and FIXTURE_TOKEN.encode() in out:
                 self.outputs = (out, err)
                 return out, err
             if self.process.poll() is not None:
@@ -541,7 +543,8 @@ class Fixture:
         link_origins = [line.split(b"/#", 1)[0].strip() for line in out.splitlines() if FIXTURE_TOKEN.encode() in line]
         raise AssertionError(
             "launcher did not reach the private setup-link boundary; "
-            f"banner={b'Open this private setup link' in out}, link_origins={link_origins!r}, "
+            f"banner={(b'Open this private setup link' in out or b'Or open this private setup link' in out)}, "
+            f"link_origins={link_origins!r}, "
             f"events={self.event_names()!r}, stderr_bytes={len(err)}"
         )
 
@@ -638,6 +641,7 @@ class ManagedLauncherLifecycle(unittest.TestCase):
     def assert_no_link(self, output):
         self.assert_not_contains(output, b"Scan this QR code", "QR output appeared before the launcher committed")
         self.assert_not_contains(output, b"Open this private setup link", "setup link appeared before the launcher committed")
+        self.assert_not_contains(output, b"Or open this private setup link", "setup link appeared before the launcher committed")
         self.assert_not_contains(output, FIXTURE_TOKEN.encode(), "fixture credential leaked outside the setup-link boundary")
         self.assert_not_contains(output, FIXTURE_RUN_ID.encode(), "fixture session identifier leaked outside the private recovery record")
 
@@ -745,7 +749,10 @@ class ManagedLauncherLifecycle(unittest.TestCase):
         arm = next(entry for entry in events if entry["event"] == "arm")
         self.assertNotEqual(arm["env_sha256"], activation["env_sha256"])
         self.assertEqual(arm["session_stage"], "arm-pending")
-        self.assert_contains(output, b"Open this private setup link", "committed launcher did not print its private link")
+        self.assertTrue(
+            b"Open this private setup link" in output or b"Or open this private setup link" in output,
+            "committed launcher did not print its private-link banner",
+        )
         link_line = next(line for line in output.splitlines() if FIXTURE_TOKEN.encode() in line)
         link_origin = link_line.split(b"/#", 1)[0].strip()
         self.assertTrue(link_origin == FIXTURE_APP.encode(), f"setup link did not use the explicit fixture app origin: {link_origin!r}")
