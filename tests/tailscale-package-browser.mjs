@@ -99,6 +99,28 @@ async function operationCount(path, expected) {
   return (await operationKinds(path)).filter((kind) => kind === expected).length;
 }
 
+async function socketOperationCount(path, method, outcome = 'succeeded') {
+  try {
+    const operations = JSON.parse(await readFile(path, 'utf8'));
+    if (!Array.isArray(operations)) return 0;
+    return operations.reduce((count, item) => count + (
+      item?.method === method && item?.outcome === outcome && Number.isInteger(item?.count)
+        ? item.count : 0
+    ), 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function waitForSocketOperation(path, method, minimumCount = 1) {
+  const end = Date.now() + deadline;
+  while (Date.now() < end) {
+    if (await socketOperationCount(path, method) >= minimumCount) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
 async function waitForOperation(path, expected, minimumCount = 1) {
   const end = Date.now() + deadline;
   while (Date.now() < end) {
@@ -130,11 +152,10 @@ async function initialEnrollment() {
     const controllerCredential = await waitForCredential(controller.page, 'controller');
     record('launcher_generated_setup_link_enrolls_real_controller_profile', controllerCredential?.role === 'controller');
 
-    const controllerReadBaseline = await operationCount(input.fake_herdr_operations, 'pane read');
+    const controllerReadBaseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
     stage = 'controller_inventory';
     await openFixtureAgent(controller.page);
-    const readWorked = await waitForOperation(input.fake_herdr_operations, 'pane read', controllerReadBaseline + 1)
-      && await waitForSuccessfulOperation(input.fake_herdr_operations, 'pane read');
+    const readWorked = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', controllerReadBaseline + 1);
     stage = 'controller_command';
     const prompt = controller.page.getByRole('textbox', { name: 'Prompt' });
     await prompt.fill('package acceptance harmless ping');
@@ -167,10 +188,9 @@ async function initialEnrollment() {
     reader = await openProfile(readerPath, readerSetupURL);
     const readerCredential = await waitForCredential(reader.page, 'reader');
     stage = 'reader_read_only';
-    const readerReadBaseline = await operationCount(input.fake_herdr_operations, 'pane read');
+    const readerReadBaseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
     await openFixtureAgent(reader.page);
-    const readerRead = await waitForOperation(input.fake_herdr_operations, 'pane read', readerReadBaseline + 1)
-      && await waitForSuccessfulOperation(input.fake_herdr_operations, 'pane read');
+    const readerRead = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', readerReadBaseline + 1);
     const readerPrompt = reader.page.getByRole('textbox', { name: 'Prompt' });
     const denied = await readerPrompt.isDisabled();
     const before = await operationCount(input.fake_herdr_operations, 'agent prompt');

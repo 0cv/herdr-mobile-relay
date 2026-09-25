@@ -54,8 +54,10 @@ FAILURE_CODES = {
     "managed_launcher_pre_watch_exit", "managed_launcher_pre_registration_exit",
     "managed_launcher_post_registration_exit", "managed_launcher_owner_prepare_failed",
     "managed_launcher_runtime_directory_failed", "managed_launcher_inspection_failed",
-    "managed_launcher_inventory_failed", "managed_launcher_bootstrap_failed",
-    "managed_launcher_session_authority_failed", "managed_launcher_owner_validation_failed",
+    "managed_launcher_inventory_failed", "managed_launcher_herdr_inventory_poll_failed",
+    "managed_launcher_herdr_workspace_poll_failed", "managed_launcher_local_readiness_failed",
+    "managed_launcher_bootstrap_failed", "managed_launcher_session_authority_failed",
+    "managed_launcher_owner_validation_failed",
     "fixture_localapi_watch_missing", "fixture_localapi_registration_missing",
     "fixture_localapi_session_missing",
 }
@@ -89,13 +91,38 @@ class GateFailure(RuntimeError):
         self.code = code if code in FAILURE_CODES else "fixture_assertion"
         self.launcher_log_category = launcher_log_category if (
             launcher_log_category in PRIVATE_LOG_STATUS_CATEGORIES
-            or launcher_log_category in {
-                "owner_prepare_failed", "runtime_directory_failed", "inspection_failed",
-                "inventory_failed", "bootstrap_failed", "session_authority_failed",
-                "owner_validation_failed",
-            }
+            or launcher_log_category in PRIVATE_LOG_CATEGORY_CODES
         ) else ""
         super().__init__(self.code)
+
+
+def safe_fake_herdr_operations(path: str | None) -> list[dict[str, str | int]]:
+    if not path:
+        return []
+    try:
+        with Path(path).open("rb") as source:
+            lines = source.read(65536).decode("utf-8", "ignore").splitlines()
+    except OSError:
+        return []
+    commands = {"agent prompt", "agent list", "pane list", "workspace list", "tab list"}
+    outcomes = {"started", "succeeded", "failed"}
+    counts: dict[tuple[str, str], int] = {}
+    for line in lines:
+        try:
+            operation = json.loads(line)
+        except ValueError:
+            continue
+        args = operation.get("argv") if isinstance(operation, dict) else None
+        if not isinstance(args, list) or len(args) < 2 or not all(isinstance(arg, str) for arg in args[:2]):
+            continue
+        command = " ".join(args[:2])
+        outcome = operation.get("outcome")
+        key = (command if command in commands else "other", outcome if outcome in outcomes else "other")
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {"command": command, "outcome": outcome, "count": count}
+        for (command, outcome), count in sorted(counts.items())
+    ]
 
 
 def safe_fixture_cli_operations(env: dict[str, str]) -> list[str]:
@@ -115,6 +142,9 @@ PRIVATE_LOG_CATEGORY_CODES = {
     "owner_prepare_failed": "managed_launcher_owner_prepare_failed",
     "runtime_directory_failed": "managed_launcher_runtime_directory_failed",
     "inspection_failed": "managed_launcher_inspection_failed",
+    "local_readiness_failed": "managed_launcher_local_readiness_failed",
+    "herdr_inventory_poll_failed": "managed_launcher_herdr_inventory_poll_failed",
+    "herdr_workspace_poll_failed": "managed_launcher_herdr_workspace_poll_failed",
     "inventory_failed": "managed_launcher_inventory_failed",
     "bootstrap_failed": "managed_launcher_bootstrap_failed",
     "session_authority_failed": "managed_launcher_session_authority_failed",
@@ -124,6 +154,9 @@ PRIVATE_LOG_PATTERNS = (
     ("owner_prepare_failed", re.compile(r"read-only Tailscale owner preparation failed", re.IGNORECASE)),
     ("runtime_directory_failed", re.compile(r"resolve managed (?:runtime|control socket) directory", re.IGNORECASE)),
     ("inspection_failed", re.compile(r"read-only Tailscale inspection failed|Tailscale status/Serve inspection failed", re.IGNORECASE)),
+    ("local_readiness_failed", re.compile(r"local relay (?:inventory(?:, UDP,)? or backend readiness|readiness) is incomplete", re.IGNORECASE)),
+    ("herdr_workspace_poll_failed", re.compile(r"workspace inventory poll failed", re.IGNORECASE)),
+    ("herdr_inventory_poll_failed", re.compile(r"inventory poll failed", re.IGNORECASE)),
     ("inventory_failed", re.compile(r"inventory", re.IGNORECASE)),
     ("bootstrap_failed", re.compile(r"bootstrap", re.IGNORECASE)),
     ("session_authority_failed", re.compile(r"construct Tailscale session authority|Tailscale foreground route", re.IGNORECASE)),
@@ -220,6 +253,195 @@ class APIState:
         })
 
 
+class HerdrSocketFixture:
+    """Faithful disposable implementation of the production Herdr socket API."""
+
+    METHODS = {
+        "ping", "agent.list", "pane.list", "workspace.list", "tab.list",
+        "session.snapshot", "events.subscribe", "pane.read",
+    }
+
+    def __init__(self, path: Path, scenario_path: Path, operations_path: Path):
+        scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+        self.panes = scenario.get("panes") or []
+        self.tabs = scenario.get("tabs") or []
+        self.workspaces = scenario.get("workspaces") or []
+        self.content = scenario.get("content") or {}
+        self.path = path
+        self.operations_path = operations_path
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if self.path.exists() or self.path.is_symlink():
+            raise FileExistsError("selected Herdr fixture socket path already exists")
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(str(self.path))
+        os.chmod(self.path, 0o600)
+        self.listener.listen(8)
+        self.listener.settimeout(0.25)
+        self.stopped = threading.Event()
+        self.lock = threading.RLock()
+        self.counts: dict[tuple[str, str], int] = {}
+        self.connections: set[socket.socket] = set()
+        self.workers: list[threading.Thread] = []
+        self.thread = threading.Thread(target=self._serve, name="fixture-herdr-socket", daemon=True)
+        self.thread.start()
+        write_json(self.operations_path, self.operation_summary())
+
+    def operation_summary(self) -> list[dict[str, str | int]]:
+        with self.lock:
+            return [
+                {"method": method, "outcome": outcome, "count": count}
+                for (method, outcome), count in sorted(self.counts.items())
+            ]
+
+    def _record(self, method: str, outcome: str) -> None:
+        safe_method = method if method in self.METHODS else "other"
+        safe_outcome = outcome if outcome in {"succeeded", "failed"} else "other"
+        with self.lock:
+            key = (safe_method, safe_outcome)
+            self.counts[key] = self.counts.get(key, 0) + 1
+            write_json(self.operations_path, self.operation_summary())
+
+    def wait_ready(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            probe: socket.socket | None = None
+            try:
+                if not stat.S_ISSOCK(self.path.stat().st_mode):
+                    time.sleep(0.05)
+                    continue
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                probe.settimeout(0.5)
+                probe.connect(str(self.path))
+                request = {"id": "package-fixture-readiness", "method": "ping", "params": {}}
+                probe.sendall(json.dumps(request, separators=(",", ":")).encode() + b"\n")
+                response = bytearray()
+                while b"\n" not in response and len(response) <= 65536:
+                    chunk = probe.recv(4096)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+                decoded = json.loads(bytes(response).split(b"\n", 1)[0])
+                result = decoded.get("result", {})
+                if decoded.get("id") == request["id"] and result.get("type") == "pong":
+                    return
+            except (OSError, ValueError, TypeError, AttributeError):
+                time.sleep(0.05)
+            finally:
+                if probe is not None:
+                    probe.close()
+        raise TimeoutError("selected Herdr fixture socket did not become protocol-ready")
+
+    def _serve(self) -> None:
+        while not self.stopped.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if self.stopped.is_set():
+                connection.close()
+                return
+            with self.lock:
+                self.connections.add(connection)
+                worker = threading.Thread(target=self._handle, args=(connection,), daemon=True)
+                self.workers.append(worker)
+            worker.start()
+
+    def _result(self, method: str, request: dict) -> dict:
+        if method == "ping":
+            return {
+                "type": "pong", "version": "0.9.0", "protocol": 1,
+                "capabilities": {"endpoint_protocol_generation": 1},
+            }
+        if method == "agent.list":
+            return {"type": "agent_list", "agents": self.panes}
+        if method == "pane.list":
+            return {"type": "pane_list", "panes": self.panes}
+        if method == "workspace.list":
+            return {"type": "workspace_list", "workspaces": self.workspaces}
+        if method == "tab.list":
+            return {"type": "tab_list", "tabs": self.tabs}
+        if method == "session.snapshot":
+            return {"type": "session_snapshot", "snapshot": {
+                "version": "0.9.0", "protocol": 1, "workspaces": self.workspaces,
+                "tabs": self.tabs, "panes": self.panes, "agents": self.panes,
+            }}
+        if method == "events.subscribe":
+            return {"type": "subscription_started"}
+        if method == "pane.read":
+            params = request.get("params")
+            pane_id = params.get("pane_id") if isinstance(params, dict) else None
+            text = self.content.get(pane_id, "Harmless package fixture output")
+            return {"type": "pane_read", "read": {"text": text, "truncated": False}}
+        raise ValueError("unsupported fixture method")
+
+    def _handle(self, connection: socket.socket) -> None:
+        method = "other"
+        responded = False
+        try:
+            with connection:
+                connection.settimeout(5.0)
+                request_line = bytearray()
+                while b"\n" not in request_line and len(request_line) <= 1024 * 1024:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        return
+                    request_line.extend(chunk)
+                request = json.loads(bytes(request_line).split(b"\n", 1)[0])
+                method_value = request.get("method") if isinstance(request, dict) else None
+                method = method_value if isinstance(method_value, str) else "other"
+                request_id = request.get("id", "") if isinstance(request, dict) else ""
+                if method not in self.METHODS:
+                    self._record(method, "failed")
+                    response = {"id": request_id, "error": {
+                        "code": "unknown_method", "message": "fixture method unavailable",
+                    }}
+                else:
+                    result = self._result(method, request)
+                    response = {"id": request_id, "result": result}
+                connection.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
+                responded = True
+                if method in self.METHODS:
+                    self._record(method, "succeeded")
+                if method == "events.subscribe":
+                    connection.settimeout(None)
+                    while connection.recv(4096):
+                        pass
+        except (OSError, ValueError, TypeError, AttributeError):
+            if method in self.METHODS and not responded:
+                self._record(method, "failed")
+        finally:
+            with self.lock:
+                self.connections.discard(connection)
+
+    def close(self) -> None:
+        self.stopped.set()
+        try:
+            self.listener.close()
+        except OSError:
+            pass
+        with self.lock:
+            connections = list(self.connections)
+            workers = list(self.workers)
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
+        self.thread.join(timeout=3)
+        for worker in workers:
+            worker.join(timeout=3)
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class UnixHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     address_family = socket.AF_UNIX
     daemon_threads = True
@@ -267,10 +489,10 @@ class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             try:
-                self.wfile.write((json.dumps({"Version": TS_VERSION, "SessionID": WATCH_ID}) + "\\n").encode())
+                self.wfile.write((json.dumps({"Version": TS_VERSION, "SessionID": WATCH_ID}) + "\n").encode())
                 self.wfile.flush()
                 while not fixture.watch_closed.wait(0.1):
-                    self.wfile.write((json.dumps({"Version": TS_VERSION}) + "\\n").encode())
+                    self.wfile.write((json.dumps({"Version": TS_VERSION}) + "\n").encode())
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
@@ -831,6 +1053,8 @@ def main() -> int:
     archive = Path("/artifact/herdr-mobile-relay_" + version + "_linux_amd64.tar.gz")
     checksums = Path("/artifact/checksums.txt")
     state: APIState | None = None
+    herdr_socket: HerdrSocketFixture | None = None
+    ambiguous_herdr_socket: HerdrSocketFixture | None = None
     local_server: UnixHTTPServer | None = None
     public_server: http.server.ThreadingHTTPServer | None = None
     launcher: subprocess.Popen[bytes] | None = None
@@ -933,6 +1157,10 @@ def main() -> int:
             "tabs": [{"tab_id": "tab", "workspace_id": "workspace", "label": "Package fixture", "cwd": "/tmp/herdr-package-fixture"}],
             "content": {"workspace:agent": "Harmless package fixture output"},
         }), encoding="utf-8")
+        herdr_socket_operations = temporary_root / "herdr-socket-operations.json"
+        herdr_socket = HerdrSocketFixture(runtime / "herdr.sock", scenario, herdr_socket_operations)
+        herdr_socket.wait_ready()
+        transitions.append("herdr-socket:ready")
         operations = temporary_root / "fake-herdr-operations.jsonl"
         relay_env = os.environ.copy()
         relay_env.update({
@@ -941,7 +1169,7 @@ def main() -> int:
             "XDG_DATA_HOME": str(data), "HERDR_RELAY_ENV": str(env_file),
             "HERDR_TAILSCALE_REQUEST": "1", "HERDR_TAILSCALE_BIN": str(cli_script),
             "HERDR_TAILSCALE_HTTPS_PORT": os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
-            "HERDR_BIN": str(fake_herdr), "HERDR_SOCKET_PATH": str(runtime / "herdr.sock"),
+            "HERDR_BIN": str(fake_herdr), "HERDR_SOCKET_PATH": str(herdr_socket.path),
             "HERDR_RELEASE_ROOT": str(data / "releases"),
             "HERDR_RELAY_POLL_INTERVAL": "1",
             "FAKE_HERDR_SCENARIO": str(scenario), "FAKE_HERDR_OPERATIONS": str(operations),
@@ -963,7 +1191,11 @@ def main() -> int:
             die("fixed production LocalAPI did not record conditional registration", "fixture_localapi_registration_missing")
         if WATCH_ID not in state.config.get("Foreground", {}):
             die("fixed production LocalAPI did not retain the exact session", "fixture_localapi_session_missing")
-        browser_record = {"setup_url": link, "origin": origin, "profiles": str(temporary_root / "profiles"), "fake_herdr_operations": str(operations)}
+        browser_record = {
+            "setup_url": link, "origin": origin, "profiles": str(temporary_root / "profiles"),
+            "fake_herdr_operations": str(operations),
+            "herdr_socket_operations": str(herdr_socket_operations),
+        }
         set_stage("browser_enroll")
         browser_evidence = run_playwright(package, browser_record, "enroll", evidence_path)
         for name in browser_evidence.get("passed_cases", []):
@@ -1108,6 +1340,11 @@ def main() -> int:
         state.persist()
         local_server.fixture = state  # type: ignore[attr-defined]
         ambiguous_operations = ambiguous_root / "fake-herdr-operations.jsonl"
+        ambiguous_socket_operations = ambiguous_root / "herdr-socket-operations.json"
+        ambiguous_herdr_socket = HerdrSocketFixture(
+            ambiguous_runtime / "herdr.sock", scenario, ambiguous_socket_operations,
+        )
+        ambiguous_herdr_socket.wait_ready()
         ambiguous_env = dict(relay_env)
         ambiguous_env.update({
             "HOME": str(ambiguous_home), "TMPDIR": str(ambiguous_root),
@@ -1190,6 +1427,13 @@ def main() -> int:
             "cases": [{"name": name, "result": case_results.get(name, "missing")} for name in EXPECTED_CASES],
             "fixture_transitions": list(dict.fromkeys(transitions))[:64],
             "fixture_cli_operations": safe_fixture_cli_operations(relay_env if "relay_env" in locals() else {}),
+            "fake_herdr_operations": safe_fake_herdr_operations(
+                (relay_env.get("FAKE_HERDR_OPERATIONS") if "relay_env" in locals() else None),
+            ),
+            "herdr_socket_operations": herdr_socket.operation_summary() if herdr_socket is not None else [],
+            "ambiguous_herdr_socket_operations": (
+                ambiguous_herdr_socket.operation_summary() if ambiguous_herdr_socket is not None else []
+            ),
             "launcher_log_category": launcher_log_category,
             "browser": {key: browser_evidence.get(key) for key in ("result", "controller_enrolled", "reader_enrolled", "controller_read", "controller_command", "reader_read", "reader_mutation_denied", "credentials_preserved") if key in browser_evidence},
             "result": "pass" if len(case_results) == len(EXPECTED_CASES) and all(case_results.get(name) == "pass" for name in EXPECTED_CASES) else "fail",
@@ -1201,6 +1445,10 @@ def main() -> int:
                 os.kill(ambiguous_owner_pid, 15)
             except ProcessLookupError:
                 pass
+        if ambiguous_herdr_socket is not None:
+            ambiguous_herdr_socket.close()
+        if herdr_socket is not None:
+            herdr_socket.close()
         if local_server is not None:
             local_server.fixture.watch_closed.set()  # type: ignore[attr-defined]
             local_server.shutdown()
