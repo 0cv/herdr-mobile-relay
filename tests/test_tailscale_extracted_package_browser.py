@@ -58,8 +58,13 @@ FAILURE_CODES = {
     "managed_launcher_runtime_directory_failed", "managed_launcher_inspection_failed",
     "managed_launcher_inventory_failed", "managed_launcher_herdr_inventory_poll_failed",
     "managed_launcher_herdr_workspace_poll_failed", "managed_launcher_local_readiness_failed",
+    "managed_launcher_owner_changed_root", "managed_launcher_owner_foreign_state",
+    "managed_launcher_owner_invalid_record", "managed_launcher_owner_unknown_authority",
+    "managed_launcher_owner_retained_evidence", "managed_launcher_owner_busy",
+    "managed_launcher_owner_timeout", "managed_launcher_owner_random_failure",
+    "managed_launcher_owner_io_failure", "managed_launcher_owner_unavailable",
     "managed_launcher_bootstrap_failed", "managed_launcher_session_authority_failed",
-    "managed_launcher_owner_validation_failed",
+    "managed_launcher_owner_validation_marker",
     "fixture_localapi_watch_missing", "fixture_localapi_registration_missing",
     "fixture_localapi_session_missing",
 }
@@ -88,13 +93,35 @@ PRIVATE_LOG_STATUS_CATEGORIES = {
 }
 
 
+LAUNCHER_STDERR_PHASES = {
+    "stderr_absent", "stderr_unclassified", "local_ready_refused", "activation_refused",
+    "activation_response_unproven", "route_check_mismatch", "https_health_request_failed",
+    "https_health_identity_mismatch", "release_identity_failed", "phone_bundle_verification_failed",
+    "bootstrap_arm_refused", "final_checks_failed", "selection_snapshot_mismatch",
+}
+LAUNCHER_STDERR_PATTERNS = (
+    ("local_ready_refused", re.compile(r"Managed relay did not acknowledge local_ready with its owner held\.", re.IGNORECASE)),
+    ("activation_refused", re.compile(r"Tailscale activation was refused with a decoded (?:not-dispatched|settled-no-write|settled-success) result", re.IGNORECASE)),
+    ("activation_response_unproven", re.compile(r"Tailscale activation response did not prove local readiness, live ownership, and Serve readiness", re.IGNORECASE)),
+    ("route_check_mismatch", re.compile(r"Fresh Tailscale route observation did not match the exact managed backend\.", re.IGNORECASE)),
+    ("https_health_request_failed", re.compile(r"Trusted HTTPS identity verification failed for ", re.IGNORECASE)),
+    ("https_health_identity_mismatch", re.compile(r"HTTPS health belongs to a different foreground relay session\.", re.IGNORECASE)),
+    ("release_identity_failed", re.compile(r"Release identity could not be verified|Served release .* does not match|Served web bundle .* does not match|Release manifest .* does not match|Served release has no managed web bundle", re.IGNORECASE)),
+    ("phone_bundle_verification_failed", re.compile(r"The selected phone-app origin does not serve this release's verified Herdr bundle|Final phone-app bundle verification failed", re.IGNORECASE)),
+    ("bootstrap_arm_refused", re.compile(r"Bootstrap arm was refused with a decoded (?:not-committed|committed) result", re.IGNORECASE)),
+    ("final_checks_failed", re.compile(r"Final route, owner, TLS identity, bundle, or pairing checks failed", re.IGNORECASE)),
+    ("selection_snapshot_mismatch", re.compile(r"Managed selection changed while setup was being verified|Relay selection changed during setup|Phone-app origin changed during setup", re.IGNORECASE)),
+)
+
+
 class GateFailure(RuntimeError):
-    def __init__(self, code: str, launcher_log_category: str = ""):
+    def __init__(self, code: str, launcher_log_category: str = "", launcher_stderr_phase: str = ""):
         self.code = code if code in FAILURE_CODES else "fixture_assertion"
         self.launcher_log_category = launcher_log_category if (
             launcher_log_category in PRIVATE_LOG_STATUS_CATEGORIES
             or launcher_log_category in PRIVATE_LOG_CATEGORY_CODES
         ) else ""
+        self.launcher_stderr_phase = launcher_stderr_phase if launcher_stderr_phase in LAUNCHER_STDERR_PHASES else ""
         super().__init__(self.code)
 
 
@@ -147,10 +174,20 @@ PRIVATE_LOG_CATEGORY_CODES = {
     "local_readiness_failed": "managed_launcher_local_readiness_failed",
     "herdr_inventory_poll_failed": "managed_launcher_herdr_inventory_poll_failed",
     "herdr_workspace_poll_failed": "managed_launcher_herdr_workspace_poll_failed",
+    "managed_owner_changed_root": "managed_launcher_owner_changed_root",
+    "managed_owner_foreign_state": "managed_launcher_owner_foreign_state",
+    "managed_owner_invalid_record": "managed_launcher_owner_invalid_record",
+    "managed_owner_unknown_authority": "managed_launcher_owner_unknown_authority",
+    "managed_owner_retained_evidence": "managed_launcher_owner_retained_evidence",
+    "managed_owner_busy": "managed_launcher_owner_busy",
+    "managed_owner_timeout": "managed_launcher_owner_timeout",
+    "managed_owner_random_failure": "managed_launcher_owner_random_failure",
+    "managed_owner_io_failure": "managed_launcher_owner_io_failure",
+    "managed_owner_unavailable": "managed_launcher_owner_unavailable",
     "inventory_failed": "managed_launcher_inventory_failed",
     "bootstrap_failed": "managed_launcher_bootstrap_failed",
     "session_authority_failed": "managed_launcher_session_authority_failed",
-    "owner_validation_failed": "managed_launcher_owner_validation_failed",
+    "owner_validation_marker": "managed_launcher_owner_validation_marker",
 }
 PRIVATE_LOG_PATTERNS = (
     ("owner_prepare_failed", re.compile(r"read-only Tailscale owner preparation failed", re.IGNORECASE)),
@@ -159,10 +196,20 @@ PRIVATE_LOG_PATTERNS = (
     ("local_readiness_failed", re.compile(r"local relay (?:inventory(?:, UDP,)? or backend readiness|readiness) is incomplete", re.IGNORECASE)),
     ("herdr_workspace_poll_failed", re.compile(r"workspace inventory poll failed", re.IGNORECASE)),
     ("herdr_inventory_poll_failed", re.compile(r"inventory poll failed", re.IGNORECASE)),
-    ("inventory_failed", re.compile(r"inventory", re.IGNORECASE)),
+    ("managed_owner_changed_root", re.compile(r"managedstate: canonical root identity changed", re.IGNORECASE)),
+    ("managed_owner_foreign_state", re.compile(r"managedstate: foreign managed state", re.IGNORECASE)),
+    ("managed_owner_invalid_record", re.compile(r"managedstate: invalid managed record", re.IGNORECASE)),
+    ("managed_owner_unknown_authority", re.compile(r"managedstate: unknown managed authority", re.IGNORECASE)),
+    ("managed_owner_retained_evidence", re.compile(r"managedstate: retained managed evidence", re.IGNORECASE)),
+    ("managed_owner_busy", re.compile(r"managedstate: lock held by another owner or acquisition", re.IGNORECASE)),
+    ("managed_owner_timeout", re.compile(r"managedstate: bounded transaction contention expired", re.IGNORECASE)),
+    ("managed_owner_random_failure", re.compile(r"managedstate: random source failure", re.IGNORECASE)),
+    ("managed_owner_io_failure", re.compile(r"managedstate: filesystem operation failed", re.IGNORECASE)),
+    ("managed_owner_unavailable", re.compile(r"managed owner is unavailable|managed owner is not acquired", re.IGNORECASE)),
+    ("inventory_failed", re.compile(r"(?:initial inventory|inventory (?:initialization|startup|refresh)) failed", re.IGNORECASE)),
     ("bootstrap_failed", re.compile(r"bootstrap", re.IGNORECASE)),
     ("session_authority_failed", re.compile(r"construct Tailscale session authority|Tailscale foreground route", re.IGNORECASE)),
-    ("owner_validation_failed", re.compile(r"managed owner|managed ownership", re.IGNORECASE)),
+    ("owner_validation_marker", re.compile(r"managed owner validation failed(?: before Tailscale retirement)?|managed owner is (?:unavailable|not acquired)", re.IGNORECASE)),
 )
 
 
@@ -210,9 +257,22 @@ def managed_launcher_exit_code(env: dict[str, str], launcher_log_category: str =
     return "managed_launcher_post_registration_exit"
 
 
-def die(message: str, code: str = "fixture_assertion", launcher_log_category: str = "") -> "NoReturn":
+def die(
+    message: str, code: str = "fixture_assertion", launcher_log_category: str = "",
+    launcher_stderr_phase: str = "",
+) -> "NoReturn":
     del message  # diagnostics remain code-only in stdout/stderr and artifacts
-    raise GateFailure(code, launcher_log_category)
+    raise GateFailure(code, launcher_log_category, launcher_stderr_phase)
+
+
+def managed_launcher_stderr_phase(private_stderr: bytes) -> str:
+    if not private_stderr:
+        return "stderr_absent"
+    text = private_stderr.decode("utf-8", "ignore")
+    for phase, pattern in LAUNCHER_STDERR_PATTERNS:
+        if pattern.search(text):
+            return phase
+    return "stderr_unclassified"
 
 
 def sha256(path: Path) -> str:
@@ -455,6 +515,9 @@ class UnixHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.server_name = "local-tailscaled.sock"
         self.server_port = 80
 
+    def handle_error(self, _request: object, _client_address: object) -> None:
+        return
+
 
 class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -662,6 +725,37 @@ raise SystemExit(97)
 '''
 
 
+class PublicRequestState:
+    METHODS = {"GET", "POST", "HEAD"}
+    PATHS = {"/healthz": "healthz", "/release.json": "release.json", "/version.json": "version.json", "/": "root", "/index.html": "index.html"}
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.counts: dict[tuple[str, str], int] = {}
+
+    def record(self, method: str, request_path: str) -> None:
+        path = urllib.parse.urlsplit(request_path).path
+        path_kind = self.PATHS.get(path)
+        if path_kind is None:
+            path_kind = "asset" if path.startswith("/assets/") else "other"
+        method_kind = method if method in self.METHODS else "other"
+        with self.lock:
+            key = (method_kind, path_kind)
+            self.counts[key] = self.counts.get(key, 0) + 1
+
+    def operation_summary(self) -> list[dict[str, str | int]]:
+        with self.lock:
+            return [
+                {"method": method, "path": path, "count": count}
+                for (method, path), count in sorted(self.counts.items())
+            ]
+
+
+class PublicHTTPServer(http.server.ThreadingHTTPServer):
+    def handle_error(self, _request: object, _client_address: object) -> None:
+        return
+
+
 class PublicHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = ""
@@ -669,6 +763,10 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
+
+    @property
+    def request_state(self) -> PublicRequestState:
+        return self.server.fixture  # type: ignore[attr-defined]
 
     def _websocket(self) -> None:
         backend = socket.create_connection(("127.0.0.1", RELAY_PORT), timeout=10)
@@ -727,6 +825,7 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
         connection.close()
 
     def do_GET(self) -> None:
+        self.request_state.record(self.command, self.path)
         if self.headers.get("Upgrade", "").lower() == "websocket":
             try:
                 self._websocket()
@@ -739,7 +838,11 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
     def do_POST(self) -> None:
-        self._proxy()
+        self.request_state.record(self.command, self.path)
+        try:
+            self._proxy()
+        except (OSError, http.client.HTTPException):
+            self.close_connection = True
 
 
 # http.client is intentionally imported after the fixture-only class declaration
@@ -748,7 +851,8 @@ import http.client
 
 
 def start_public_server(certificate: Path, key: Path) -> http.server.ThreadingHTTPServer:
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", int(os.environ["HERDR_TAILSCALE_HTTPS_PORT"])), PublicHandler)
+    server = PublicHTTPServer(("127.0.0.1", int(os.environ["HERDR_TAILSCALE_HTTPS_PORT"])), PublicHandler)
+    server.fixture = PublicRequestState()  # type: ignore[attr-defined]
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(certificate), str(key))
@@ -821,7 +925,9 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
         die("packaged managed launcher could not be started", "managed_launcher_spawn")
     assert process.stdout is not None and process.stderr is not None
     output = bytearray()
-    state: dict[str, object] = {"link": None, "stderr_bytes": 0, "output_limit": False}
+    state: dict[str, object] = {
+        "link": None, "stderr_bytes": 0, "stderr_private": bytearray(), "output_limit": False,
+    }
     launcher_log_category = "private_log_not_observed"
     lock = threading.Lock()
     done = [threading.Event(), threading.Event()]
@@ -843,6 +949,11 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
                                 state["link"] = safe_link_from_output(bytes(output), env["HERDR_FIXTURE_ORIGIN"])
                     else:
                         state["stderr_bytes"] = int(state["stderr_bytes"]) + len(chunk)
+                        private_stderr = state["stderr_private"]
+                        if isinstance(private_stderr, bytearray):
+                            private_stderr.extend(chunk)
+                            if len(private_stderr) > 65536:
+                                del private_stderr[:len(private_stderr) - 65536]
         except OSError:
             return
         finally:
@@ -857,7 +968,8 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         observed_log_category = managed_private_log_category(env)
-        if observed_log_category in PRIVATE_LOG_CATEGORY_CODES:
+        if (observed_log_category in PRIVATE_LOG_CATEGORY_CODES
+                or observed_log_category in PRIVATE_LOG_STATUS_CATEGORIES):
             launcher_log_category = observed_log_category
         with lock:
             link = state["link"]
@@ -876,16 +988,19 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
             return process, str(link), bytes(output), b"", launcher_log_category
         if process.poll() is not None and all(event.wait(0.05) for event in done):
             observed_log_category = managed_private_log_category(env)
-            if observed_log_category in PRIVATE_LOG_CATEGORY_CODES:
+            if (observed_log_category in PRIVATE_LOG_CATEGORY_CODES
+                    or observed_log_category in PRIVATE_LOG_STATUS_CATEGORIES):
                 launcher_log_category = observed_log_category
             with lock:
                 captured = bytes(output)
                 stderr_bytes = int(state["stderr_bytes"])
+                private_stderr = bytes(state["stderr_private"])
             if not expect_link:
                 return process, "", captured, b"", launcher_log_category
             die(
                 f"packaged managed launcher exited before setup-link emission (exit={process.returncode}, stderr_bytes={stderr_bytes})",
                 managed_launcher_exit_code(env, launcher_log_category), launcher_log_category,
+                managed_launcher_stderr_phase(private_stderr),
             )
         time.sleep(0.05)
     try:
@@ -900,7 +1015,12 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
         reader.join(timeout=2)
     with lock:
         stderr_bytes = int(state["stderr_bytes"])
-    die(f"packaged managed launcher timed out (stderr_bytes={stderr_bytes})", "managed_launcher_link_timeout", launcher_log_category)
+        private_stderr = bytes(state["stderr_private"])
+    die(
+        f"packaged managed launcher timed out (stderr_bytes={stderr_bytes})",
+        "managed_launcher_link_timeout", launcher_log_category,
+        managed_launcher_stderr_phase(private_stderr),
+    )
 
 
 def launch_managed_rejection(package: Path, env: dict[str, str], timeout: float = 90) -> tuple[subprocess.Popen[bytes], bytes]:
@@ -1074,6 +1194,7 @@ def main() -> int:
     failure_type = ""
     failure_code = ""
     launcher_log_category = "private_log_not_observed"
+    launcher_stderr_phase = ""
     ambiguous_owner_pid: int | None = None
 
     def set_stage(value: str) -> None:
@@ -1400,6 +1521,8 @@ def main() -> int:
         failure_code = error.code if isinstance(error, GateFailure) else "unexpected_exception"
         if isinstance(error, GateFailure) and error.launcher_log_category:
             launcher_log_category = error.launcher_log_category
+        if isinstance(error, GateFailure) and error.launcher_stderr_phase:
+            launcher_stderr_phase = error.launcher_stderr_phase
         print(f"extracted package acceptance failed: stage={current_stage} code={failure_code}", file=sys.stderr)
         raise
     finally:
@@ -1440,6 +1563,10 @@ def main() -> int:
                 ambiguous_herdr_socket.operation_summary() if ambiguous_herdr_socket is not None else []
             ),
             "launcher_log_category": launcher_log_category,
+            "launcher_stderr_phase": launcher_stderr_phase,
+            "public_http_requests": (
+                public_server.fixture.operation_summary() if public_server is not None else []
+            ),
             "browser": {key: browser_evidence.get(key) for key in ("result", "controller_enrolled", "reader_enrolled", "controller_read", "controller_command", "reader_read", "reader_mutation_denied", "credentials_preserved") if key in browser_evidence},
             "result": "pass" if len(case_results) == len(EXPECTED_CASES) and all(case_results.get(name) == "pass" for name in EXPECTED_CASES) else "fail",
         }
