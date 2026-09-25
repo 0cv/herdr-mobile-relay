@@ -52,8 +52,12 @@ FAILURE_CODES = {
     "managed_launcher_exit_before_link", "managed_launcher_link_timeout",
     "managed_launcher_cli_refusal", "managed_launcher_pre_serve_status_exit",
     "managed_launcher_pre_watch_exit", "managed_launcher_pre_registration_exit",
-    "managed_launcher_post_registration_exit", "fixture_localapi_watch_missing",
-    "fixture_localapi_registration_missing", "fixture_localapi_session_missing",
+    "managed_launcher_post_registration_exit", "managed_launcher_owner_prepare_failed",
+    "managed_launcher_runtime_directory_failed", "managed_launcher_inspection_failed",
+    "managed_launcher_inventory_failed", "managed_launcher_bootstrap_failed",
+    "managed_launcher_session_authority_failed", "managed_launcher_owner_validation_failed",
+    "fixture_localapi_watch_missing", "fixture_localapi_registration_missing",
+    "fixture_localapi_session_missing",
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
@@ -93,6 +97,35 @@ def safe_fixture_cli_operations(env: dict[str, str]) -> list[str]:
     return [line for line in lines if line in allowed][-16:]
 
 
+PRIVATE_LOG_PATTERNS = (
+    ("owner_prepare_failed", re.compile(r"read-only Tailscale owner preparation failed", re.IGNORECASE)),
+    ("runtime_directory_failed", re.compile(r"resolve managed (?:runtime|control socket) directory", re.IGNORECASE)),
+    ("inspection_failed", re.compile(r"read-only Tailscale inspection failed|Tailscale status/Serve inspection failed", re.IGNORECASE)),
+    ("inventory_failed", re.compile(r"inventory", re.IGNORECASE)),
+    ("bootstrap_failed", re.compile(r"bootstrap", re.IGNORECASE)),
+    ("session_authority_failed", re.compile(r"construct Tailscale session authority|Tailscale foreground route", re.IGNORECASE)),
+    ("owner_validation_failed", re.compile(r"managed owner|managed ownership", re.IGNORECASE)),
+)
+
+
+def managed_private_log_category(env: dict[str, str]) -> str:
+    env_file = env.get("HERDR_RELAY_ENV")
+    if not env_file:
+        return "private_log_not_configured"
+    candidates = sorted(Path(env_file).parent.glob(".tailscale-relay-log.*"))
+    if not candidates:
+        return "private_log_absent"
+    try:
+        with candidates[-1].open("rb") as source:
+            private_log = source.read(65536).decode("utf-8", "ignore")
+    except OSError:
+        return "private_log_unreadable"
+    for category, pattern in PRIVATE_LOG_PATTERNS:
+        if pattern.search(private_log):
+            return category
+    return "private_log_unclassified"
+
+
 def managed_launcher_exit_code(env: dict[str, str]) -> str:
     operations = safe_fixture_cli_operations(env)
     if "unsupported" in operations:
@@ -108,7 +141,17 @@ def managed_launcher_exit_code(env: dict[str, str]) -> str:
     if not isinstance(events, list):
         events = []
     if "localapi:watch:mask=2" not in events:
-        return "managed_launcher_pre_watch_exit"
+        category = managed_private_log_category(env)
+        category_codes = {
+            "owner_prepare_failed": "managed_launcher_owner_prepare_failed",
+            "runtime_directory_failed": "managed_launcher_runtime_directory_failed",
+            "inspection_failed": "managed_launcher_inspection_failed",
+            "inventory_failed": "managed_launcher_inventory_failed",
+            "bootstrap_failed": "managed_launcher_bootstrap_failed",
+            "session_authority_failed": "managed_launcher_session_authority_failed",
+            "owner_validation_failed": "managed_launcher_owner_validation_failed",
+        }
+        return category_codes.get(category, "managed_launcher_pre_watch_exit")
     if "localapi:config:post" not in events:
         return "managed_launcher_pre_registration_exit"
     return "managed_launcher_post_registration_exit"
@@ -1117,6 +1160,7 @@ def main() -> int:
             "cases": [{"name": name, "result": case_results.get(name, "missing")} for name in EXPECTED_CASES],
             "fixture_transitions": list(dict.fromkeys(transitions))[:64],
             "fixture_cli_operations": safe_fixture_cli_operations(relay_env if "relay_env" in locals() else {}),
+            "launcher_log_category": managed_private_log_category(relay_env if "relay_env" in locals() else {}),
             "browser": {key: browser_evidence.get(key) for key in ("result", "controller_enrolled", "reader_enrolled", "controller_read", "controller_command", "reader_read", "reader_mutation_denied", "credentials_preserved") if key in browser_evidence},
             "result": "pass" if len(case_results) == len(EXPECTED_CASES) and all(case_results.get(name) == "pass" for name in EXPECTED_CASES) else "fail",
         }

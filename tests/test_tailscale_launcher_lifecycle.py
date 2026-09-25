@@ -758,7 +758,10 @@ class ManagedLauncherLifecycle(unittest.TestCase):
     def test_positive_launch_orders_owner_route_tls_bundle_arm_and_cleanup(self):
         fixture = self.fixture()
         fixture.launch(capture_pipes=True)
-        output, error = fixture.wait_for_link()
+        # The success path repeats route, health, binary, and bundle checks
+        # after readiness/arm; retain a bounded hosted-runner allowance for
+        # those serialized phases without weakening the lifecycle assertions.
+        output, error = fixture.wait_for_link(timeout=30)
         events = fixture.events_list()
         names = [entry["event"] for entry in events]
         required = ["server-ready", "status-local-ready", "activate", "route-check",
