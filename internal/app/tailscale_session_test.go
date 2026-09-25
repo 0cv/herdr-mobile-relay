@@ -359,6 +359,54 @@ func TestManagedStartupCleanupFailureRetainsOwnerUntilPrivateRetire(t *testing.T
 	}
 }
 
+func TestManagedTailscaleRetireDeadlineBoundsHeldLifecycleOperation(t *testing.T) {
+	root := managedTestRoot(t)
+	owner, err := AcquireManagedOwner(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := newAppAuthorityFixture()
+	server := newServerWithSession(managedTailscaleFixtureConfig(root), "0.9.0", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)), owner, authority)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = server.hub.Shutdown(ctx)
+		cancel()
+		_ = server.herdrC.Close()
+		if server.ManagedOwnerReleaseSafe() {
+			if err := RetireManagedOwner(owner, nil); err != nil {
+				t.Errorf("release managed owner: %v", err)
+			}
+		}
+	})
+
+	releaseHeld, err := server.tailscaleOpMu.Lock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	retireCtx, cancelRetire := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	started := time.Now()
+	err = server.RetireManagedTailscale(retireCtx)
+	cancelRetire()
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) || elapsed > 500*time.Millisecond {
+		releaseHeld()
+		t.Fatalf("retirement behind held lifecycle lock = %v after %s", err, elapsed)
+	}
+	if server.ManagedOwnerReleaseSafe() || server.bootstrapGate.OpenStatus() || !server.isTailscaleQuarantined() {
+		releaseHeld()
+		t.Fatal("timed-out retirement released O or left pairing admission open")
+	}
+	releaseHeld()
+	finishCtx, cancelFinish := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFinish()
+	if err := server.RetireManagedTailscale(finishCtx); err != nil {
+		t.Fatalf("later authenticated retirement did not finish: %v", err)
+	}
+	if !server.ManagedOwnerReleaseSafe() {
+		t.Fatal("later retirement did not prove route clear and local watch closure")
+	}
+}
+
 func TestManagedTailscaleUnresolvedRetirementKeepsOwnerInert(t *testing.T) {
 	root := managedTestRoot(t)
 	owner, err := AcquireManagedOwner(root)

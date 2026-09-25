@@ -63,6 +63,7 @@ type appLocalAPIFake struct {
 	watchCalls        int
 	postCalls         int
 	watchQuery        string
+	watchWriter       *io.PipeWriter
 	registrationValid bool
 	events            []string
 }
@@ -129,8 +130,9 @@ func (f *appLocalAPIFake) RoundTrip(request *http.Request) (*http.Response, erro
 			f.mu.Unlock()
 			return appLocalAPIResponse(request, http.StatusBadRequest, appLocalAPIHeader(), io.NopCloser(strings.NewReader("bad mask\n"))), nil
 		}
-		f.mu.Unlock()
 		reader, writer := io.Pipe()
+		f.watchWriter = writer
+		f.mu.Unlock()
 		go func() {
 			_, _ = io.WriteString(writer, `{"Version":"1.102.4-tbbcd7d1fc","SessionID":"hosted-fixture-watch"}`+"\n")
 			<-request.Context().Done()
@@ -169,6 +171,15 @@ func (f *appLocalAPIFake) restoreIdentity() {
 	f.mu.Lock()
 	f.status = []byte(managedFixtureStatus)
 	f.mu.Unlock()
+}
+
+func (f *appLocalAPIFake) endWatch() {
+	f.mu.Lock()
+	writer := f.watchWriter
+	f.mu.Unlock()
+	if writer != nil {
+		_ = writer.Close()
+	}
 }
 
 func (f *appLocalAPIFake) snapshot() (watchCount, postCount int, watchQuery string, registrationValid bool, events []string) {

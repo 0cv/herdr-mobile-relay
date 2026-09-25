@@ -2,6 +2,7 @@ package deviceauth
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
 func managedArmStoreFixture(t *testing.T, existing bool) (string, *Store, []byte) {
@@ -123,6 +126,29 @@ func TestManagedArmFinalAdmissionFailureRestoresExactPriorState(t *testing.T) {
 	}
 }
 
+func TestManagedArmDetectsReplacementAtBeforeRenameBoundary(t *testing.T) {
+	dir, store, _ := managedArmStoreFixture(t, false)
+	store.managedArmFault = func(stage string) error {
+		if stage != "before-rename" {
+			return nil
+		}
+		foreign := filepath.Join(dir, "foreign.tmp")
+		if err := os.WriteFile(foreign, []byte("foreign replacement"), 0o640); err != nil {
+			return err
+		}
+		return os.Rename(foreign, filepath.Join(dir, storeFilename))
+	}
+	err := store.ArmBootstrapInvitationTransactional(bytes.Repeat([]byte("k"), secretBytes), "relay", "en")
+	if !errors.Is(err, ErrManagedArmRecovery) {
+		t.Fatalf("arm error = %v, want explicit recovery error", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(dir, storeFilename))
+	info, statErr := os.Stat(filepath.Join(dir, storeFilename))
+	if readErr != nil || statErr != nil || string(got) != "foreign replacement" || info.Mode().Perm() != 0o640 {
+		t.Fatalf("foreign pre-commit replacement was not preserved: bytes=%q mode=%v errors=%v/%v", got, info, readErr, statErr)
+	}
+}
+
 func TestManagedArmRollbackPreservesReplacedTargetAndRequiresRecovery(t *testing.T) {
 	dir, store, _ := managedArmStoreFixture(t, false)
 	store.managedArmFault = func(stage string) error {
@@ -145,6 +171,91 @@ func TestManagedArmRollbackPreservesReplacedTargetAndRequiresRecovery(t *testing
 	got, readErr := os.ReadFile(filepath.Join(dir, storeFilename))
 	if readErr != nil || string(got) != "foreign replacement" {
 		t.Fatalf("foreign replacement was not preserved: %q, %v", got, readErr)
+	}
+}
+
+func TestManagedStoreRearmAfterEnrollmentRenameAndRevoke(t *testing.T) {
+	_, store, _ := managedArmStoreFixture(t, false)
+	gate := NewBootstrapGate()
+	if err := gate.Attach(store); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	invitationSelector := transport.E2EEAuthSelector{Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1, Locale: "en"}
+	credentialSelector := func(result transport.E2EEAuthResult) transport.E2EEAuthSelector {
+		return transport.E2EEAuthSelector{Kind: transport.E2EEAuthCredential, ID: result.Identity.CredentialID, Version: result.Identity.CredentialVersion, Locale: "en"}
+	}
+	arm := func(value byte) {
+		t.Helper()
+		if err := gate.ArmBootstrapInvitation(bytes.Repeat([]byte{value}, secretBytes), "relay", "en", nil); err != nil {
+			t.Fatalf("rearm bootstrap with %q: %v", value, err)
+		}
+		secret, err := gate.ResolveE2EESecret(ctx, invitationSelector)
+		if err != nil || !bytes.Equal(secret, bytes.Repeat([]byte{value}, secretBytes)) {
+			t.Fatalf("usable rearmed invitation secret = %x, err=%v", secret, err)
+		}
+		clear(secret)
+	}
+
+	arm(1)
+	first, err := gate.CompleteE2EEAuth(ctx, invitationSelector, true)
+	if err != nil {
+		t.Fatalf("complete first enrollment: %v", err)
+	}
+	if _, err := gate.CompleteE2EEAuth(ctx, credentialSelector(first), true); err != nil {
+		t.Fatalf("confirm first enrollment: %v", err)
+	}
+	arm(2) // enrollment consumed the previous invitation through persistLocked.
+	second, err := gate.CompleteE2EEAuth(ctx, invitationSelector, true)
+	if err != nil {
+		t.Fatalf("complete second enrollment: %v", err)
+	}
+	if _, err := gate.CompleteE2EEAuth(ctx, credentialSelector(second), true); err != nil {
+		t.Fatalf("confirm second enrollment: %v", err)
+	}
+	if _, err := store.RenameCredential(first.Identity.CredentialID, "renamed first"); err != nil {
+		t.Fatalf("persist credential rename: %v", err)
+	}
+	arm(3) // the rename must refresh the snapshot used by managed reprint.
+	if _, err := store.RevokeCredential(second.Identity.CredentialID); err != nil {
+		t.Fatalf("persist credential revoke: %v", err)
+	}
+	arm(4) // the revoke must also refresh it, without losing the remaining device.
+
+	credentials := store.ListCredentials("")
+	if len(credentials) != 2 || credentials[0].CredentialID != first.Identity.CredentialID || credentials[0].Name != "renamed first" || credentials[0].Revoked || !credentials[1].Revoked {
+		t.Fatalf("enrolled credentials after successive reprints = %+v", credentials)
+	}
+	secret, err := gate.ResolveE2EESecret(ctx, invitationSelector)
+	if err != nil || !bytes.Equal(secret, bytes.Repeat([]byte{4}, secretBytes)) {
+		t.Fatalf("final reprint invitation is not usable: secret=%x err=%v", secret, err)
+	}
+	clear(secret)
+}
+
+func TestManagedArmRefusesStaleDeferredStoreWriter(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "device-auth")
+	first, err := OpenDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := OpenDeferred(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.ArmBootstrapInvitationTransactional(bytes.Repeat([]byte{1}, secretBytes), "first", "en"); err != nil {
+		t.Fatalf("first cooperating writer: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, storeFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.ArmBootstrapInvitationTransactional(bytes.Repeat([]byte{2}, secretBytes), "stale", "en"); err == nil {
+		t.Fatal("stale Store instance overwrote a newer committed invitation")
+	}
+	after, err := os.ReadFile(filepath.Join(dir, storeFilename))
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("stale writer changed committed bytes: equal=%t err=%v", bytes.Equal(after, before), err)
 	}
 }
 
@@ -183,33 +294,26 @@ func TestBootstrapGateArmCommitSerializesWithRevoke(t *testing.T) {
 		})
 	}()
 	<-admitStarted
-	revokeStarted := make(chan struct{})
 	revokeDone := make(chan struct{})
 	go func() {
-		close(revokeStarted)
 		gate.Revoke()
 		close(revokeDone)
 	}()
-	<-revokeStarted
-	select {
-	case <-revokeDone:
-		t.Fatal("Revoke crossed the serialized durable-arm operation")
-	case <-time.After(10 * time.Millisecond):
-	}
-	close(admitRelease)
-	if err := <-armDone; err != nil {
-		t.Fatalf("arm: %v", err)
-	}
 	select {
 	case <-revokeDone:
 	case <-time.After(time.Second):
-		t.Fatal("Revoke did not complete after arm linearized")
+		close(admitRelease)
+		t.Fatal("Revoke waited behind a pending arm callback")
+	}
+	close(admitRelease)
+	if err := <-armDone; !errors.Is(err, ErrBootstrapGateClosed) {
+		t.Fatalf("arm after atomic revocation = %v, want closed-gate refusal", err)
 	}
 	if gate.OpenStatus() {
 		t.Fatal("revocation left the invitation gate open")
 	}
-	if _, err := os.Stat(filepath.Join(dir, storeFilename)); err != nil {
-		t.Fatalf("successful arm was rolled back after revoke: %v", err)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("revoked arm left device-store state behind: %v", err)
 	}
 	if err := gate.ArmBootstrapInvitation(bytes.Repeat([]byte("n"), secretBytes), "relay", "en", nil); !errors.Is(err, ErrBootstrapGateClosed) {
 		t.Fatalf("revoked gate admitted another arm: %v", err)

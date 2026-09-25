@@ -53,9 +53,13 @@ jobs:
 
   tailscale-app-integration:
     needs: provenance
-    name: Managed Tailscale app/control integration (hosted, no credentials)
+    name: Managed Tailscale app/control integration (${{ matrix.mode }}, hosted, no credentials)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [normal, race]
     permissions:
       contents: read
     steps:
@@ -67,33 +71,44 @@ jobs:
         with:
           go-version: 1.27.1
           cache: true
-      - name: Run required app/control cases and write sanitized evidence
+      - name: Run exact required app/control cases and write sanitized SHA-bound evidence
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           echo "candidate_sha=$GITHUB_SHA"
-          log="$RUNNER_TEMP/tailscale-app-integration.jsonl"
-          evidence="$RUNNER_TEMP/tailscale-app-integration-evidence.json"
-          if go test -json -tags=herdr_tailscale_test ./internal/app \
-            -run '^(TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire|TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets|TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation|TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation|TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement)$' \
-            -count=1 2>&1 | tee "$log"; then
-            test_exit=0
+          log="$RUNNER_TEMP/tailscale-app-integration-${{ matrix.mode }}.jsonl"
+          diagnostics="$RUNNER_TEMP/tailscale-app-integration-${{ matrix.mode }}.stderr"
+          evidence="$RUNNER_TEMP/tailscale-app-integration-evidence-${{ matrix.mode }}.json"
+          pattern='^(TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire|TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets|TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation|TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation|TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement|TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls|TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement)$'
+          if [[ "${{ matrix.mode }}" == race ]]; then
+            if go test -json -race -tags=herdr_tailscale_test ./internal/app -run "$pattern" -count=1 >"$log" 2>"$diagnostics"; then
+              test_exit=0
+            else
+              test_exit=$?
+            fi
           else
-            test_exit=$?
+            if go test -json -tags=herdr_tailscale_test ./internal/app -run "$pattern" -count=1 >"$log" 2>"$diagnostics"; then
+              test_exit=0
+            else
+              test_exit=$?
+            fi
           fi
-          python3 - "$log" "$evidence" "$GITHUB_SHA" "$test_exit" <<'PY'
+          cat "$diagnostics" >&2
+          python3 - "$log" "$evidence" "$GITHUB_SHA" "${{ matrix.mode }}" "$test_exit" <<'PY'
           import json
           import pathlib
           import sys
 
-          log_path, evidence_path, candidate_sha, test_exit_text = sys.argv[1:]
+          log_path, evidence_path, candidate_sha, mode, test_exit_text = sys.argv[1:]
           required = [
               "TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire",
               "TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets",
               "TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation",
               "TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation",
               "TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement",
+              "TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls",
+              "TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement",
           ]
           actions = {}
           observed_tests = set()
@@ -146,6 +161,7 @@ jobs:
           evidence = {
               "schema_version": 1,
               "candidate_sha": candidate_sha,
+              "mode": mode,
               "go_test_exit_code": test_exit,
               "test_cases_observed": len(observed_tests),
               "required_cases": results,
@@ -161,8 +177,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: tailscale-app-integration-evidence-${{ github.sha }}
-          path: ${{ runner.temp }}/tailscale-app-integration-evidence.json
+          name: tailscale-app-integration-evidence-${{ matrix.mode }}-${{ github.sha }}
+          path: ${{ runner.temp }}/tailscale-app-integration-evidence-${{ matrix.mode }}.json
           if-no-files-found: error
           retention-days: 1
 

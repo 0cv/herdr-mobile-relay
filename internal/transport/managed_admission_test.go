@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -32,6 +33,29 @@ func (c *inertFrameConn) Close(CloseStatus, string)              { c.CloseNow() 
 func (c *inertFrameConn) CloseNow()                              { c.once.Do(func() { close(c.closed) }) }
 func (*inertFrameConn) Codec() FrameCodec                        { return CodecJSON }
 func (*inertFrameConn) TransportName() string                    { return "test-managed" }
+
+func TestHubAdmissionTransitionHonorsCallerDeadlineWithoutQueuedMutation(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hub.register.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := hub.SetAcceptingContext(ctx, false)
+	cancel()
+	hub.register.Unlock()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SetAcceptingContext with held registration lock = %v", err)
+	}
+	hub.mu.RLock()
+	accepting := hub.accepting
+	hub.mu.RUnlock()
+	if !accepting {
+		t.Fatal("expired Hub admission transition ran after returning")
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	if err := hub.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("hub shutdown: %v", err)
+	}
+}
 
 func TestManagedHubAdmissionClosedBeforeHandshake(t *testing.T) {
 	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))

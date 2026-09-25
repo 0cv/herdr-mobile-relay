@@ -82,7 +82,7 @@ type ConnectedIdentity struct {
 type Hub struct {
 	cfg             *config.Config
 	logger          *slog.Logger
-	register        sync.Mutex
+	register        registrationLock
 	mu              sync.RWMutex
 	clients         map[string]*ClientConn
 	pending         map[FrameConn]struct{}
@@ -690,7 +690,19 @@ func (h *Hub) SetE2EEAuthResolver(resolver E2EEAuthResolver) {
 // clients, so a quarantined managed backend cannot keep serving authenticated
 // connections over WebSocket, gateway relay, or WebRTC.
 func (h *Hub) SetAccepting(accepting bool) {
-	h.register.Lock()
+	_ = h.SetAcceptingContext(context.Background(), accepting)
+}
+
+// SetAcceptingContext applies the same registration barrier as SetAccepting,
+// but lets managed lifecycle callers abandon lock acquisition at their own
+// deadline. A canceled waiter never applies a later admission transition.
+func (h *Hub) SetAcceptingContext(ctx context.Context, accepting bool) error {
+	if h == nil {
+		return errors.New("Hub is unavailable")
+	}
+	if err := h.register.LockContext(ctx); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	h.accepting = accepting
 	var clients []*ClientConn
@@ -714,6 +726,7 @@ func (h *Hub) SetAccepting(accepting bool) {
 		client.conn.Close(CloseGoingAway, "managed relay is quarantined")
 		h.removeClient(client)
 	}
+	return nil
 }
 
 // DropConnections closes current clients without making the hub unavailable to

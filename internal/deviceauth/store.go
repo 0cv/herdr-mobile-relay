@@ -1,6 +1,7 @@
 package deviceauth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -137,7 +138,7 @@ type Store struct {
 	managedArmFault    func(stage string) error
 }
 
-func Open(dir string, options ...Option) (*Store, error) {
+func Open(dir string, options ...Option) (_ *Store, resultErr error) {
 	store := &Store{
 		dir:    dir,
 		path:   filepath.Join(dir, storeFilename),
@@ -154,14 +155,33 @@ func Open(dir string, options ...Option) (*Store, error) {
 	if store.now == nil || store.random == nil {
 		return nil, errors.New("device store requires clock and random source")
 	}
+	writer, err := acquireStoreWriterLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, writer.Close()) }()
 	if err := protectDirectory(dir); err != nil {
+		return nil, err
+	}
+	before, err := readManagedStoreSnapshot(store.dir, store.path)
+	if err != nil {
 		return nil, err
 	}
 	if err := store.load(); err != nil {
 		return nil, err
 	}
-	if err := store.persistLocked(); err != nil {
-		return nil, fmt.Errorf("initialize device store: %w", err)
+	after, err := readManagedStoreSnapshot(store.dir, store.path)
+	if err != nil {
+		return nil, err
+	}
+	if !sameManagedStoreSnapshot(before, after) {
+		return nil, errors.New("device store changed while being opened")
+	}
+	store.managedArmBaseline = &after
+	if !after.fileExists {
+		if err := store.persistLockedWithWriterLock(); err != nil {
+			return nil, fmt.Errorf("initialize device store: %w", err)
+		}
 	}
 	return store, nil
 }
@@ -457,6 +477,30 @@ func (s *Store) load() error {
 }
 
 func (s *Store) persistLocked() error {
+	writer, err := acquireStoreWriterLock(s.dir)
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
+	return s.persistLockedWithWriterLock()
+}
+
+// persistLockedWithWriterLock requires Store.mu and the shared process lock.
+// The snapshot check rejects stale cooperating Store instances; pathname
+// replacement by a same-UID writer that bypasses this lock remains a documented
+// non-atomic filesystem race.
+func (s *Store) persistLockedWithWriterLock() error {
+	if s.managedArmBaseline == nil {
+		return errors.New("device store has no authoritative disk baseline")
+	}
+	baseline := *s.managedArmBaseline
+	current, err := readManagedStoreSnapshot(s.dir, s.path)
+	if err != nil {
+		return err
+	}
+	if !sameManagedStoreSnapshot(baseline, current) {
+		return errors.New("device store changed since this store instance was opened")
+	}
 	data, err := json.Marshal(s.state)
 	if err != nil {
 		return err
@@ -480,16 +524,47 @@ func (s *Store) persistLocked() error {
 		_ = temp.Close()
 		return err
 	}
+	installedInfo, err := temp.Stat()
+	if err != nil {
+		_ = temp.Close()
+		return err
+	}
 	if err := temp.Close(); err != nil {
 		return err
+	}
+	current, err = readManagedStoreSnapshot(s.dir, s.path)
+	if err != nil {
+		return err
+	}
+	if !sameManagedStoreSnapshot(baseline, current) {
+		return errors.New("device store changed before the authoritative write")
 	}
 	if err := os.Rename(tempPath, s.path); err != nil {
 		return err
 	}
-	if err := os.Chmod(s.path, 0o600); err != nil {
-		return err
+	rollback := func(writeErr error) error {
+		rollbackErr := s.rollbackManagedArm(baseline, nil, installedInfo)
+		if rollbackErr != nil {
+			return errors.Join(writeErr, fmt.Errorf("%w: %v", ErrManagedArmRecovery, rollbackErr))
+		}
+		return writeErr
 	}
-	return syncDirectory(s.dir)
+	currentInfo, err := os.Lstat(s.path)
+	if err != nil || !os.SameFile(installedInfo, currentInfo) {
+		return rollback(errors.New("device store target changed after installation"))
+	}
+	if err := syncDirectory(s.dir); err != nil {
+		return rollback(err)
+	}
+	committed, err := readManagedStoreSnapshot(s.dir, s.path)
+	if err != nil {
+		return rollback(err)
+	}
+	if !committed.fileExists || !os.SameFile(installedInfo, committed.fileInfo) || !bytes.Equal(data, committed.fileBytes) {
+		return rollback(errors.New("device store changed after installation"))
+	}
+	s.managedArmBaseline = &committed
+	return nil
 }
 
 func protectDirectory(dir string) error {

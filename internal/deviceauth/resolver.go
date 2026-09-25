@@ -73,26 +73,42 @@ func (s *Store) ResolveE2EESecret(_ context.Context, selector transport.E2EEAuth
 	}
 }
 
-func (s *Store) CompleteE2EEAuth(_ context.Context, selector transport.E2EEAuthSelector, authenticated bool) (transport.E2EEAuthResult, error) {
+func (s *Store) CompleteE2EEAuth(ctx context.Context, selector transport.E2EEAuthSelector, authenticated bool) (transport.E2EEAuthResult, error) {
+	return s.completeE2EEAuth(ctx, selector, authenticated, nil)
+}
+
+func (s *Store) completeE2EEAuth(_ context.Context, selector transport.E2EEAuthSelector, authenticated bool, admissionCheck func() error) (transport.E2EEAuthResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if admissionCheck != nil {
+		if err := admissionCheck(); err != nil {
+			return transport.E2EEAuthResult{}, err
+		}
+	}
 	if !authenticated {
 		if selector.Kind != transport.E2EEAuthInvitation {
 			return transport.E2EEAuthResult{}, ErrAuthentication
 		}
-		return transport.E2EEAuthResult{}, s.recordFailedInvitationLocked(selector)
+		return transport.E2EEAuthResult{}, s.recordFailedInvitationLocked(selector, admissionCheck)
 	}
 	switch selector.Kind {
 	case transport.E2EEAuthInvitation:
-		return s.redeemInvitationLocked(selector)
+		return s.redeemInvitationLocked(selector, admissionCheck)
 	case transport.E2EEAuthCredential:
-		return s.completeCredentialLocked(selector)
+		return s.completeCredentialLocked(selector, admissionCheck)
 	default:
 		return transport.E2EEAuthResult{}, ErrAuthentication
 	}
 }
 
-func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector) error {
+func checkAdmissionBeforeStoreCommit(admissionCheck func() error) error {
+	if admissionCheck == nil {
+		return nil
+	}
+	return admissionCheck()
+}
+
+func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector, admissionCheck func() error) error {
 	record := s.state.Invitation
 	if record == nil || record.InvitationID != selector.ID || record.Version != selector.Version {
 		return ErrAuthentication
@@ -106,6 +122,10 @@ func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector
 	if !now.Before(record.ExpiresAt) {
 		previous := record
 		s.state.Invitation = nil
+		if err := checkAdmissionBeforeStoreCommit(admissionCheck); err != nil {
+			s.state.Invitation = previous
+			return err
+		}
 		if err := s.persistLocked(); err != nil {
 			s.state.Invitation = previous
 			return err
@@ -121,6 +141,14 @@ func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector
 		delay := time.Second << (record.FailedAttempts - 1)
 		record.NextAttemptAt = now.Add(delay)
 	}
+	if err := checkAdmissionBeforeStoreCommit(admissionCheck); err != nil {
+		if burned {
+			s.state.Invitation = &previous
+		} else {
+			*record = previous
+		}
+		return err
+	}
 	if err := s.persistLocked(); err != nil {
 		if burned {
 			s.state.Invitation = &previous
@@ -135,7 +163,7 @@ func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector
 	return ErrAuthentication
 }
 
-func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (transport.E2EEAuthResult, error) {
+func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector, admissionCheck func() error) (transport.E2EEAuthResult, error) {
 	record := s.state.Invitation
 	if record == nil || record.InvitationID != selector.ID || record.Version != selector.Version {
 		return transport.E2EEAuthResult{}, ErrAuthentication
@@ -144,6 +172,10 @@ func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (tra
 	if !now.Before(record.ExpiresAt) {
 		previous := record
 		s.state.Invitation = nil
+		if err := checkAdmissionBeforeStoreCommit(admissionCheck); err != nil {
+			s.state.Invitation = previous
+			return transport.E2EEAuthResult{}, err
+		}
 		if err := s.persistLocked(); err != nil {
 			s.state.Invitation = previous
 			return transport.E2EEAuthResult{}, err
@@ -183,6 +215,12 @@ func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (tra
 	}
 	record.PendingCredentialID = credentialID
 	s.state.Credentials = append(s.state.Credentials, credential)
+	if err := checkAdmissionBeforeStoreCommit(admissionCheck); err != nil {
+		s.state.Credentials = s.state.Credentials[:len(s.state.Credentials)-1]
+		record.PendingCredentialID = ""
+		clear(secretBytesValue)
+		return transport.E2EEAuthResult{}, err
+	}
 	if err := s.persistLocked(); err != nil {
 		s.state.Credentials = s.state.Credentials[:len(s.state.Credentials)-1]
 		record.PendingCredentialID = ""
@@ -198,7 +236,7 @@ func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (tra
 	}, nil
 }
 
-func (s *Store) completeCredentialLocked(selector transport.E2EEAuthSelector) (transport.E2EEAuthResult, error) {
+func (s *Store) completeCredentialLocked(selector transport.E2EEAuthSelector, admissionCheck func() error) (transport.E2EEAuthResult, error) {
 	index := s.credentialIndex(selector.ID)
 	if index < 0 {
 		return transport.E2EEAuthResult{}, ErrAuthentication
@@ -215,6 +253,12 @@ func (s *Store) completeCredentialLocked(selector transport.E2EEAuthSelector) (t
 	if invitation := s.state.Invitation; invitation != nil &&
 		invitation.PendingCredentialID == record.CredentialID {
 		s.state.Invitation = nil
+	}
+	if err := checkAdmissionBeforeStoreCommit(admissionCheck); err != nil {
+		record.LastSeenAt = previousLastSeen
+		record.Locale = previousLocale
+		s.state.Invitation = previousInvitation
+		return transport.E2EEAuthResult{}, err
 	}
 	if err := s.persistLocked(); err != nil {
 		record.LastSeenAt = previousLastSeen

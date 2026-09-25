@@ -118,8 +118,11 @@ func (s *Server) validateManagedOwner() error {
 }
 
 func (s *Server) activateTailscale(ctx context.Context) (localcontrol.Status, error) {
-	s.tailscaleOpMu.Lock()
-	defer s.tailscaleOpMu.Unlock()
+	unlock, err := s.tailscaleOpMu.Lock(ctx)
+	if err != nil {
+		return s.pairingControlStatusContext(ctx), err
+	}
+	defer unlock()
 	if !s.managedLocalReady() {
 		return s.pairingControlStatusContext(ctx), errors.New("local relay inventory, UDP, or backend readiness is incomplete")
 	}
@@ -145,6 +148,10 @@ func (s *Server) activateTailscale(ctx context.Context) (localcontrol.Status, er
 			return s.pairingControlStatusContext(ctx), err
 		}
 	}
+	if err := s.bindManagedAdmissionWatch(); err != nil {
+		s.quarantineTailscale()
+		return s.pairingControlStatusContext(ctx), err
+	}
 	if err := s.checkManagedTailscaleReadiness(ctx, true); err != nil {
 		s.quarantineTailscale()
 		return s.pairingControlStatusContext(ctx), err
@@ -152,9 +159,26 @@ func (s *Server) activateTailscale(ctx context.Context) (localcontrol.Status, er
 	return s.pairingControlStatusContext(ctx), nil
 }
 
+func (s *Server) bindManagedAdmissionWatch() error {
+	authority, ok := s.tailscaleSession.(interface {
+		AdmissionChannels() (<-chan struct{}, <-chan struct{})
+	})
+	if !ok || s.bootstrapGate == nil {
+		return errors.New("managed Tailscale authority has no live admission guard")
+	}
+	watchEnded, invalidated := authority.AdmissionChannels()
+	if err := s.bootstrapGate.BindAuthorityAdmission(watchEnded, invalidated); err != nil {
+		return fmt.Errorf("bind live Tailscale admission guard: %w", err)
+	}
+	return nil
+}
+
 func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, error) {
-	s.tailscaleOpMu.Lock()
-	defer s.tailscaleOpMu.Unlock()
+	unlock, err := s.tailscaleOpMu.Lock(ctx)
+	if err != nil {
+		return s.pairingControlStatusContext(ctx), err
+	}
+	defer unlock()
 	if err := s.checkManagedTailscaleReadiness(ctx, true); err != nil {
 		s.quarantineTailscale()
 		return s.pairingControlStatusContext(ctx), err
@@ -163,12 +187,14 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 		return s.pairingControlStatusContext(ctx), err
 	}
 
-	// Pairing revocation, the final owner validation, and durable arm are
-	// serialized together. SessionAuthority holds its operation lock from the
-	// post-health revalidation through this gate commit, so watcher loss is
-	// ordered either before the invitation write or after its linearization.
+	// Pairing revocation, the final owner validation, durable arm and Hub
+	// admission handoff are serialized together. The authority operation lock
+	// remains held through the transition; the gate independently checks raw
+	// watch EOF and invalidation channels without taking authority locks.
 	s.pairingAdmissionMu.Lock()
-	err := s.tailscaleSession.WithValidatedRoute(ctx, func() error {
+	defer s.pairingAdmissionMu.Unlock()
+	var invitation deviceauth.BootstrapStatus
+	err = s.tailscaleSession.WithValidatedRoute(ctx, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -177,7 +203,12 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 		}
 		return s.validateManagedOwner()
 	}, func() error {
-		return s.bootstrapGate.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en", func() error {
+		unlockAdmission, err := s.admissionTransitionMu.Lock(ctx)
+		if err != nil {
+			return err
+		}
+		defer unlockAdmission()
+		if err := s.bootstrapGate.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en", func() error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -186,22 +217,33 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			return s.validateManagedOwner()
-		})
+			if err := s.validateManagedOwner(); err != nil {
+				return err
+			}
+			if s.managedAdmissionHandoffObserver != nil {
+				s.managedAdmissionHandoffObserver()
+			}
+			return s.hub.SetAcceptingContext(ctx, true)
+		}); err != nil {
+			return err
+		}
+		invitation = s.deviceStore().BootstrapStatus()
+		s.mu.Lock()
+		s.quarantined = false
+		s.mu.Unlock()
+		return nil
 	})
 	if err != nil {
-		s.pairingAdmissionMu.Unlock()
-		if errors.Is(err, deviceauth.ErrManagedArmRecovery) || s.tailscaleSession.Status().Invalidated || s.tailscaleSession.Status().Quarantined {
+		if errors.Is(err, deviceauth.ErrManagedArmRecovery) || s.tailscaleSession.Status().Invalidated || s.tailscaleSession.Status().Quarantined || errors.Is(err, deviceauth.ErrBootstrapGateClosed) {
 			s.quarantineTailscale()
 		}
 		s.recordSafeError("bootstrap invitation arm failed", err)
 		return s.pairingControlStatusContext(ctx), err
 	}
 
-	// Snapshot the durable invitation before accepting sessions. A phone may
-	// consume it as soon as Hub admission opens; the control ACK still reports
-	// the committed arm rather than mistaking that race for a failed write.
-	invitation := s.deviceStore().BootstrapStatus()
+	// The durable invitation was snapshotted inside the authority-locked
+	// commit before the Hub handoff. A phone may consume it immediately after
+	// that transition; the control acknowledgement still reports the commit.
 	ownerStatus := s.tailscaleSession.Status()
 	serveReady := ownerStatus.Active && ownerStatus.RouteValidated && !ownerStatus.Quarantined && !ownerStatus.Invalidated && !ownerStatus.RouteCleared
 	status := localcontrol.Status{
@@ -225,15 +267,10 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 	if !invitation.ExpiresAt.IsZero() {
 		status.InvitationExpiresAt = invitation.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	if status.Quarantined || !status.ServeReady {
+	if status.Quarantined || !status.ServeReady || !s.bootstrapGate.OpenStatus() {
 		s.quarantineTailscaleLocked()
-	} else {
-		s.hub.SetAccepting(true)
-		s.mu.Lock()
-		s.quarantined = false
-		s.mu.Unlock()
+		return status, errors.New("Tailscale admission was revoked after the durable invitation commit")
 	}
-	s.pairingAdmissionMu.Unlock()
 	return status, nil
 }
 
@@ -470,8 +507,6 @@ func (s *Server) quarantineTailscale() {
 	if s == nil || s.tailscaleSession == nil {
 		return
 	}
-	s.pairingAdmissionMu.Lock()
-	defer s.pairingAdmissionMu.Unlock()
 	s.quarantineTailscaleLocked()
 }
 
@@ -479,12 +514,37 @@ func (s *Server) quarantineTailscaleLocked() {
 	if s.bootstrapGate != nil {
 		s.bootstrapGate.Revoke()
 	}
+	s.mu.Lock()
+	s.quarantined = true
+	s.mu.Unlock()
 	if s.hub != nil {
-		s.hub.SetAccepting(false)
+		unlock, err := s.admissionTransitionMu.Lock(context.Background())
+		if err == nil {
+			s.hub.SetAccepting(false)
+			unlock()
+		}
+	}
+}
+
+func (s *Server) quarantineTailscaleContext(ctx context.Context) error {
+	if s == nil || s.tailscaleSession == nil || ctx == nil {
+		return errors.New("managed Tailscale session is unavailable")
+	}
+	if s.bootstrapGate != nil {
+		s.bootstrapGate.Revoke()
 	}
 	s.mu.Lock()
 	s.quarantined = true
 	s.mu.Unlock()
+	if s.hub == nil {
+		return nil
+	}
+	unlock, err := s.admissionTransitionMu.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.hub.SetAcceptingContext(ctx, false)
 }
 
 // RetireManagedTailscale revokes pairing first, then asks the real in-process
@@ -495,9 +555,19 @@ func (s *Server) RetireManagedTailscale(ctx context.Context) error {
 	if s == nil || s.tailscaleSession == nil || ctx == nil {
 		return errors.New("managed Tailscale session is unavailable")
 	}
-	s.tailscaleOpMu.Lock()
-	defer s.tailscaleOpMu.Unlock()
-	s.quarantineTailscale()
+	// Revoke authentication and inert HTTP first, then bound both the Hub
+	// handoff barrier and lifecycle-operation lock by the retirement context.
+	if err := s.quarantineTailscaleContext(ctx); err != nil {
+		return fmt.Errorf("close managed Tailscale admission before retirement: %w", err)
+	}
+	unlock, err := s.tailscaleOpMu.Lock(ctx)
+	if err != nil {
+		return fmt.Errorf("wait for managed Tailscale operation before retirement: %w", err)
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	status := s.tailscaleSession.Status()
 	if status.RouteCleared && status.LocalWatchClosed {
 		return nil
@@ -508,7 +578,7 @@ func (s *Server) RetireManagedTailscale(ctx context.Context) error {
 	if err := s.managedOwner.Validate(); err != nil {
 		return fmt.Errorf("managed owner validation failed before Tailscale retirement: %w", err)
 	}
-	err := s.tailscaleSession.Retire(ctx)
+	err = s.tailscaleSession.Retire(ctx)
 	status = s.tailscaleSession.Status()
 	if status.RouteCleared && status.LocalWatchClosed {
 		return nil

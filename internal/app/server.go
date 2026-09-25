@@ -93,45 +93,47 @@ type Server struct {
 	transitionBroadcast interface {
 		Broadcast(any)
 	}
-	transitionEnrich   func(context.Context, *coordinator.AgentState)
-	sessions           *session.Resolver
-	historyM           *history.Manager
-	conversationM      *conversation.Reader
-	conversationB      *conversation.Browser
-	profiles           *profiles.Resolver
-	webH               *web.Handler
-	herdrC             *herdr.Client
-	clipboardRead      func(context.Context) ([]byte, error)
-	clipboardWrite     func(context.Context, []byte) error
-	copyRunner         copyResponseRunner
-	speechSynth        func(context.Context, string, string) ([]byte, error)
-	speechStatus       func() speech.Catalog
-	speechInstall      func(context.Context, string) error
-	speechRemove       func(string) error
-	speechMu           sync.Mutex
-	speechLanguages    []string
-	speechRequests     map[string]*speechRequest
-	copyMu             sync.Mutex
-	paneSizeM          *panesize.Manager
-	dispatcher         *coordinator.Dispatcher
-	updateM            *relayupdate.Manager
-	appDeployM         *appdeploy.Manager
-	hybrid             *hybridTransport
-	uploadM            *upload.Manager
-	deviceAuth         *deviceauth.Store
-	deviceAuthMu       sync.RWMutex
-	bootstrapGate      *deviceauth.BootstrapGate
-	managedOwner       *ManagedOwner
-	tailscaleSession   managedTailscaleAuthority
-	managedRetired     chan struct{}
-	managedRetireOne   sync.Once
-	tailscaleOpMu      sync.Mutex
-	pairingAdmissionMu sync.Mutex
-	quarantined        bool
-	backendBound       bool
-	backendListener    *retainedTCPListener
-	pairingControl     *localcontrol.Server
-	initErr            error
+	transitionEnrich                func(context.Context, *coordinator.AgentState)
+	sessions                        *session.Resolver
+	historyM                        *history.Manager
+	conversationM                   *conversation.Reader
+	conversationB                   *conversation.Browser
+	profiles                        *profiles.Resolver
+	webH                            *web.Handler
+	herdrC                          *herdr.Client
+	clipboardRead                   func(context.Context) ([]byte, error)
+	clipboardWrite                  func(context.Context, []byte) error
+	copyRunner                      copyResponseRunner
+	speechSynth                     func(context.Context, string, string) ([]byte, error)
+	speechStatus                    func() speech.Catalog
+	speechInstall                   func(context.Context, string) error
+	speechRemove                    func(string) error
+	speechMu                        sync.Mutex
+	speechLanguages                 []string
+	speechRequests                  map[string]*speechRequest
+	copyMu                          sync.Mutex
+	paneSizeM                       *panesize.Manager
+	dispatcher                      *coordinator.Dispatcher
+	updateM                         *relayupdate.Manager
+	appDeployM                      *appdeploy.Manager
+	hybrid                          *hybridTransport
+	uploadM                         *upload.Manager
+	deviceAuth                      *deviceauth.Store
+	deviceAuthMu                    sync.RWMutex
+	bootstrapGate                   *deviceauth.BootstrapGate
+	managedOwner                    *ManagedOwner
+	tailscaleSession                managedTailscaleAuthority
+	managedRetired                  chan struct{}
+	managedRetireOne                sync.Once
+	tailscaleOpMu                   contextLock
+	admissionTransitionMu           contextLock
+	pairingAdmissionMu              sync.Mutex
+	quarantined                     bool
+	managedAdmissionHandoffObserver func()
+	backendBound                    bool
+	backendListener                 *retainedTCPListener
+	pairingControl                  *localcontrol.Server
+	initErr                         error
 
 	mu        sync.RWMutex
 	ready     bool
@@ -304,6 +306,9 @@ func newServerWithSession(
 	managedTailscale := cfg.Transport == config.TransportTailscale
 	if authority != nil || managedTailscale {
 		bootstrapGate = deviceauth.NewBootstrapGate()
+		if managedTailscale {
+			bootstrapGate.RequireAuthorityAdmission()
+		}
 		hub.SetE2EEAuthResolver(bootstrapGate)
 		hub.SetAccepting(false)
 		if authority == nil {
@@ -1713,25 +1718,77 @@ func (s *Server) httpHandler() http.Handler {
 	})
 }
 
-// retainedTCPListener separates the HTTP server's listener lifecycle from the
-// owner of the loopback port. net/http calls Listener.Close when Serve returns;
-// the view passed to it deliberately keeps the underlying socket reserved
-// until the app proves routeCleared and localWatchClosed.
+// retainedTCPListener owns the physical loopback listener independently of the
+// HTTP listener views. Its accept broker lets a closed view stop blocking in
+// Accept without closing the socket; a replacement view can then take over
+// the still-bound port while route/watch retirement is unresolved.
 type retainedTCPListener struct {
 	listener net.Listener
-	closeOne sync.Once
-	closeErr error
+
+	mu               sync.Mutex
+	current          *retainedListenerView
+	viewChanged      chan struct{}
+	physicallyClosed bool
+	closed           chan struct{}
+	acceptDone       chan struct{}
+	closeOne         sync.Once
+	closeErr         error
+}
+
+type retainedAcceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+type retainedListenerView struct {
+	owner   *retainedTCPListener
+	done    chan struct{}
+	accepts chan retainedAcceptResult
+	close   sync.Once
 }
 
 func retainTCPListener(listener net.Listener) *retainedTCPListener {
-	return &retainedTCPListener{listener: listener}
+	retained := &retainedTCPListener{
+		listener:    listener,
+		viewChanged: make(chan struct{}),
+		closed:      make(chan struct{}),
+		acceptDone:  make(chan struct{}),
+	}
+	go retained.acceptLoop()
+	return retained
 }
 
+// ServeListener returns a net.Listener view with its own Close lifecycle. At
+// most one view owns delivery at a time; replacing one wakes its Accept and
+// prevents two HTTP servers from consuming the same physical listener.
 func (l *retainedTCPListener) ServeListener() net.Listener {
-	return retainedListenerView{Listener: l.listener}
+	view := &retainedListenerView{
+		owner:   l,
+		done:    make(chan struct{}),
+		accepts: make(chan retainedAcceptResult),
+	}
+	l.mu.Lock()
+	if l.physicallyClosed {
+		l.mu.Unlock()
+		_ = view.Close()
+		return view
+	}
+	previous := l.current
+	l.current = view
+	l.notifyViewChangeLocked()
+	l.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	return view
 }
 
-func (l *retainedTCPListener) Addr() net.Addr { return l.listener.Addr() }
+func (l *retainedTCPListener) Addr() net.Addr {
+	if l == nil || l.listener == nil {
+		return nil
+	}
+	return l.listener.Addr()
+}
 
 // Close physically releases the socket. Managed callers may invoke it only
 // after SessionAuthority reports both routeCleared and localWatchClosed.
@@ -1739,15 +1796,187 @@ func (l *retainedTCPListener) Close() error {
 	if l == nil || l.listener == nil {
 		return nil
 	}
-	l.closeOne.Do(func() { l.closeErr = l.listener.Close() })
+	l.closeOne.Do(func() {
+		l.closeErr = l.listener.Close()
+		l.mu.Lock()
+		l.physicallyClosed = true
+		close(l.closed)
+		view := l.current
+		l.current = nil
+		l.notifyViewChangeLocked()
+		l.mu.Unlock()
+		if view != nil {
+			_ = view.Close()
+		}
+	})
 	return l.closeErr
 }
 
-type retainedListenerView struct {
-	net.Listener
+func (l *retainedTCPListener) notifyViewChangeLocked() {
+	close(l.viewChanged)
+	l.viewChanged = make(chan struct{})
 }
 
-func (retainedListenerView) Close() error { return nil }
+func (l *retainedTCPListener) activeView() *retainedListenerView {
+	for {
+		l.mu.Lock()
+		if l.physicallyClosed {
+			l.mu.Unlock()
+			return nil
+		}
+		view := l.current
+		changed := l.viewChanged
+		l.mu.Unlock()
+		if view != nil && !view.isClosed() {
+			return view
+		}
+		select {
+		case <-l.closed:
+			return nil
+		case <-changed:
+		}
+	}
+}
+
+func (l *retainedTCPListener) isCurrent(view *retainedListenerView) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.physicallyClosed || l.current != view {
+		return false
+	}
+	return !view.isClosed()
+}
+
+func (l *retainedTCPListener) waitForViewChange(view *retainedListenerView) {
+	for {
+		l.mu.Lock()
+		if l.physicallyClosed || l.current != view {
+			l.mu.Unlock()
+			return
+		}
+		changed := l.viewChanged
+		l.mu.Unlock()
+		select {
+		case <-l.closed:
+			return
+		case <-changed:
+		}
+	}
+}
+
+func (l *retainedTCPListener) deliver(view *retainedListenerView, result retainedAcceptResult) bool {
+	select {
+	case view.accepts <- result:
+		return true
+	case <-view.done:
+		if result.conn != nil {
+			_ = result.conn.Close()
+		}
+		return false
+	case <-l.closed:
+		if result.conn != nil {
+			_ = result.conn.Close()
+		}
+		return false
+	}
+}
+
+func (l *retainedTCPListener) acceptLoop() {
+	defer close(l.acceptDone)
+	for {
+		view := l.activeView()
+		if view == nil {
+			return
+		}
+		conn, err := l.listener.Accept()
+		if err != nil {
+			select {
+			case <-l.closed:
+				return
+			default:
+			}
+			if !l.isCurrent(view) {
+				continue
+			}
+			if !l.deliver(view, retainedAcceptResult{err: err}) {
+				continue
+			}
+			// A permanent Accept error ends net/http's Serve loop. Wait for its
+			// replacement view before retrying so a broken listener cannot spin.
+			if !isTemporaryAcceptError(err) {
+				l.waitForViewChange(view)
+			}
+			continue
+		}
+		if !l.isCurrent(view) {
+			_ = conn.Close()
+			continue
+		}
+		l.deliver(view, retainedAcceptResult{conn: conn})
+	}
+}
+
+func isTemporaryAcceptError(err error) bool {
+	var networkErr net.Error
+	return errors.As(err, &networkErr) && networkErr.Temporary()
+}
+
+func (v *retainedListenerView) isClosed() bool {
+	select {
+	case <-v.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (v *retainedListenerView) Accept() (net.Conn, error) {
+	select {
+	case <-v.done:
+		return nil, net.ErrClosed
+	default:
+	}
+	select {
+	case <-v.done:
+		return nil, net.ErrClosed
+	case result := <-v.accepts:
+		select {
+		case <-v.done:
+			if result.conn != nil {
+				_ = result.conn.Close()
+			}
+			return nil, net.ErrClosed
+		default:
+		}
+		return result.conn, result.err
+	}
+}
+
+func (v *retainedListenerView) Close() error {
+	if v == nil {
+		return nil
+	}
+	v.close.Do(func() {
+		close(v.done)
+		if v.owner == nil {
+			return
+		}
+		v.owner.mu.Lock()
+		if v.owner.current == v {
+			v.owner.current = nil
+			v.owner.notifyViewChangeLocked()
+		}
+		v.owner.mu.Unlock()
+	})
+	return nil
+}
+
+func (v *retainedListenerView) Addr() net.Addr {
+	if v == nil || v.owner == nil {
+		return nil
+	}
+	return v.owner.Addr()
+}
 
 // serveManagedInertHTTP keeps the reserved route's backend fail-closed after
 // the primary HTTP Serve loop has returned. The retained listener view ensures

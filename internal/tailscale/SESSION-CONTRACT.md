@@ -34,7 +34,15 @@ caller's bounded health/admission callback, a second live route/watch check,
 and the caller's one-way commit callback. Retirement and watcher invalidation
 are ordered before that final check or after the commit; the method does not
 supply local readiness or change the obligation to treat a post-commit lost ACK
-as committed/ambiguous.
+as committed/ambiguous. Lifecycle-operation lock acquisition is context-aware,
+so cancellation while queued returns without scheduling later work. The raw
+watch reader closes its done channel at EOF; the monitor publishes invalidation
+before waiting for that lock. `AdmissionChannels` exposes only the ended-watch
+and invalidation channels to the managed BootstrapGate; it exposes no route/owner
+status and acquires no
+authority mutex during the gate's final admission check. That lets the gate
+reject Resolve and Complete on raw watch EOF while asynchronous status
+revocation is still queued.
 
 ## Admission and registration
 

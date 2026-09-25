@@ -59,7 +59,7 @@ type SessionAuthority struct {
 	httpsPort   int
 	backendPort int
 
-	opMu sync.Mutex
+	opMu contextLock
 	mu   sync.Mutex
 
 	invalidationCh chan struct{}
@@ -130,8 +130,11 @@ func (a *SessionAuthority) Prepare(ctx context.Context) error {
 	if !a.usable() || ctx == nil {
 		return errSessionUnavailable
 	}
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	unlock, err := a.opMu.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	a.mu.Lock()
 	if a.prepared {
 		a.mu.Unlock()
@@ -180,8 +183,11 @@ func (a *SessionAuthority) Activate(ctx context.Context) error {
 	if !a.usable() || ctx == nil {
 		return errSessionUnavailable
 	}
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	unlock, err := a.opMu.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	a.mu.Lock()
 	prepared := a.prepared
 	identity := cloneIdentity(a.identity)
@@ -298,8 +304,11 @@ func (a *SessionAuthority) Validate(ctx context.Context) error {
 	if !a.usable() || ctx == nil {
 		return errSessionUnavailable
 	}
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	unlock, err := a.opMu.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return a.validateLocked(ctx)
 }
 
@@ -312,8 +321,11 @@ func (a *SessionAuthority) WithValidatedRoute(ctx context.Context, admit, commit
 	if !a.usable() || ctx == nil || commit == nil {
 		return errSessionUnavailable
 	}
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	unlock, err := a.opMu.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := a.validateLocked(ctx); err != nil {
 		return err
 	}
@@ -392,8 +404,11 @@ func (a *SessionAuthority) Retire(ctx context.Context) error {
 	if !a.usable() || ctx == nil {
 		return errSessionUnavailable
 	}
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	unlock, err := a.opMu.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return a.retireLocked(ctx)
 }
 
@@ -587,10 +602,16 @@ func (a *SessionAuthority) monitorAuthority(watch *localAPIWatch) {
 
 func (a *SessionAuthority) monitorWatch(watch *localAPIWatch) {
 	<-watch.done()
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
+	// Publish revocation from the ended raw stream before contending for the
+	// authority operation lock. Admission checks the watch's done channel
+	// directly; this state/channel closes promptly even while a health pass is
+	// holding the lifecycle lock.
 	a.mu.Lock()
-	if a.closingWatch || a.watch != watch {
+	if a.watch != watch {
+		a.mu.Unlock()
+		return
+	}
+	if a.closingWatch {
 		a.localClosed = true
 		a.mu.Unlock()
 		return
@@ -608,6 +629,11 @@ func (a *SessionAuthority) monitorWatch(watch *localAPIWatch) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), localAPIRequestTimeout)
 	defer cancel()
+	unlock, err := a.opMu.Lock(ctx)
+	if err != nil {
+		return
+	}
+	defer unlock()
 	config, _, err := a.api.serveConfig(ctx)
 	if err != nil {
 		return
@@ -696,6 +722,28 @@ func (a *SessionAuthority) Invalidation() <-chan struct{} {
 		return closed
 	}
 	return a.invalidationCh
+}
+
+// AdmissionChannels exposes only direct revocation signals to the managed
+// bootstrap gate. The watch channel closes at raw reader EOF; Invalidation
+// closes for other in-process authority failures. Neither channel conveys an
+// ownership boolean or route data.
+func (a *SessionAuthority) AdmissionChannels() (watchEnded, invalidated <-chan struct{}) {
+	if !a.usable() {
+		closed := make(chan struct{})
+		close(closed)
+		return closed, closed
+	}
+	a.mu.Lock()
+	watch := a.watch
+	invalidated = a.invalidationCh
+	a.mu.Unlock()
+	if watch == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed, invalidated
+	}
+	return watch.done(), invalidated
 }
 
 func (a *SessionAuthority) invalidate() { a.quarantine() }

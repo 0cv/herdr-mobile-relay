@@ -86,6 +86,11 @@ func (s *Store) ArmBootstrapInvitationTransactional(secret []byte, name, locale 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	writer, err := acquireStoreWriterLock(s.dir)
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
 	if s.managedArmBaseline == nil {
 		return errors.New("managed device store was not opened read-only")
 	}
@@ -231,6 +236,16 @@ func (s *Store) persistManagedArm(data []byte, baseline managedStoreSnapshot) (o
 			return nil, err
 		}
 	}
+	// Recheck after the deterministic seam while still holding the shared
+	// cooperating-writer lock. A raw same-UID writer can still race this
+	// final check and rename; that unsupported residual is documented.
+	current, err = readManagedStoreSnapshot(s.dir, s.path)
+	if err != nil {
+		return nil, err
+	}
+	if !sameManagedStoreSnapshot(baseline, current) {
+		return nil, errors.New("device store changed at the managed write boundary")
+	}
 	if err := os.Rename(tempPath, s.path); err != nil {
 		return nil, err
 	}
@@ -365,6 +380,9 @@ func readManagedStoreSnapshot(dir, path string) (managedStoreSnapshot, error) {
 	}
 	if uid, ok := fileOwner(fileInfo); !ok || uid != uint32(os.Getuid()) {
 		return snapshot, errors.New("managed device store file is not owned by the current user")
+	}
+	if fileInfo.Size() < 0 || fileInfo.Size() > 4<<20 {
+		return snapshot, errors.New("managed device store file exceeds its 4 MiB limit")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

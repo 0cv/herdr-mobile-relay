@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -25,8 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
+	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
 
@@ -130,6 +133,69 @@ func TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire(t *testing.T
 	credentials = fixture.server.deviceStore().ListCredentials("")
 	if len(credentials) != 1 {
 		t.Fatalf("retirement removed enrolled credentials: count=%d", len(credentials))
+	}
+}
+
+func TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls(t *testing.T) {
+	fixture := newManagedTailscaleFixture(t)
+	fixture.startControl(nil)
+	activated := fixture.activate(t)
+	if !activated.ServeReady {
+		t.Fatalf("activation status = %+v", activated)
+	}
+	// This barrier runs while SessionAuthority still owns its operation lock,
+	// after the app has observed the arm commit state but immediately before
+	// the gate-to-Hub admission transition. The raw LocalAPI stream closes
+	// synchronously; asynchronous invalidation cannot be the security gate.
+	authority, ok := fixture.server.tailscaleSession.(interface {
+		AdmissionChannels() (<-chan struct{}, <-chan struct{})
+	})
+	if !ok {
+		t.Fatal("fixture does not expose the real authority admission channels")
+	}
+	watchEnded, _ := authority.AdmissionChannels()
+	fixture.server.managedAdmissionHandoffObserver = func() {
+		fixture.localAPI.endWatch()
+		select {
+		case <-watchEnded:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	armed, armErr := fixture.arm(t)
+	if armErr == nil {
+		t.Fatalf("watch EOF at Hub handoff unexpectedly returned an arm acknowledgement: %+v", armed)
+	}
+	if fixture.server.bootstrapGate.OpenStatus() {
+		t.Fatal("watch EOF at handoff left invitation resolution logically open")
+	}
+	if status := fixture.server.tailscaleSession.Status(); !status.Invalidated || status.RouteCleared {
+		t.Fatalf("authority status after raw watch EOF = %+v", status)
+	}
+	store := fixture.server.deviceStore()
+	if store == nil || len(store.ListCredentials("")) != 0 {
+		t.Fatalf("watch EOF at handoff enrolled a device: store=%v", store != nil)
+	}
+	selector := transport.E2EEAuthSelector{Kind: transport.E2EEAuthInvitation, ID: "bootstrap", Version: 1, Locale: "en"}
+	if _, err := fixture.server.bootstrapGate.ResolveE2EESecret(context.Background(), selector); !errors.Is(err, deviceauth.ErrBootstrapGateClosed) {
+		t.Fatalf("watch-ended invitation resolution = %v", err)
+	}
+	if _, err := fixture.server.bootstrapGate.CompleteE2EEAuth(context.Background(), selector, true); !errors.Is(err, deviceauth.ErrBootstrapGateClosed) {
+		t.Fatalf("watch-ended invitation completion = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	connection, response, dialErr := websocket.Dial(ctx, "wss://"+fixture.hostPort+"/ws", &websocket.DialOptions{
+		HTTPClient:   managedHealthClientForServer(fixture.server, 0),
+		Subprotocols: []string{protocol.EncryptedWebSocketSubprotocol},
+	})
+	cancel()
+	if connection != nil {
+		_ = connection.CloseNow()
+	}
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if dialErr == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("watch-ended Hub admission = status %v, error %v; want HTTP 503", preArmStatus(response), dialErr)
 	}
 }
 
@@ -292,6 +358,85 @@ func TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation(t *testing
 				fixture.localAPI.restoreIdentity()
 			}
 		})
+	}
+}
+
+func TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement(t *testing.T) {
+	fixture := newManagedTailscaleFixture(t)
+	var armCalls atomic.Int32
+	committed := make(chan struct{})
+	callbackDone := make(chan struct{})
+	fixture.startControl(func(ctx context.Context) (localcontrol.Status, error) {
+		call := armCalls.Add(1)
+		status, err := fixture.server.armForControl(ctx)
+		if err != nil || call != 2 {
+			return status, err
+		}
+		close(committed)
+		<-ctx.Done()
+		close(callbackDone)
+		return status, ctx.Err()
+	})
+	fixture.activate(t)
+	if status, err := fixture.arm(t); err != nil || !status.InvitationArmed {
+		t.Fatalf("initial arm = %+v, %v", status, err)
+	}
+	connection, enrolled := managedFixtureEnrollOverWebSocket(t, fixture)
+	defer connection.CloseNow()
+	waitManagedFixture(t, "first enrolled device", func() bool {
+		return len(fixture.server.deviceStore().ListCredentials("")) == 1
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := localcontrol.Request(ctx, fixture.server.cfg.PairingSocketPath, "arm_bootstrap", managedFixtureRun, managedFixtureInstance)
+		requestDone <- err
+	}()
+	select {
+	case <-committed:
+	case <-time.After(30 * time.Second):
+		cancel()
+		t.Fatal("reprint did not commit after normal enrollment")
+	}
+	cancel()
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("lost reprint acknowledgement unexpectedly succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lost reprint acknowledgement did not return")
+	}
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("lost reprint acknowledgement did not cancel the control callback")
+	}
+	fixture.waitControlCallback(t, "arm_bootstrap")
+
+	store := fixture.server.deviceStore()
+	credentials := store.ListCredentials("")
+	if len(credentials) != 1 || credentials[0].CredentialID != enrolled.CredentialID {
+		t.Fatalf("reprint reset or lost enrolled credentials: %+v", credentials)
+	}
+	if !fixture.server.bootstrapGate.OpenStatus() || !store.BootstrapStatus().Armed {
+		t.Fatal("committed reprint invitation was rolled back after its lost acknowledgement")
+	}
+	selector := transport.E2EEAuthSelector{Kind: transport.E2EEAuthInvitation, ID: "bootstrap", Version: 1, Locale: "en"}
+	secret, err := fixture.server.bootstrapGate.ResolveE2EESecret(context.Background(), selector)
+	if err != nil || !bytes.Equal(secret, []byte(fixture.server.cfg.Token)) {
+		t.Fatalf("persisted reprint invitation is unusable: err=%v", err)
+	}
+	clear(secret)
+	secondConnection, secondEnrollment := managedFixtureEnrollOverWebSocket(t, fixture)
+	defer secondConnection.CloseNow()
+	waitManagedFixture(t, "reprinted invitation enrollment", func() bool {
+		return len(store.ListCredentials("")) == 2
+	})
+	credentials = store.ListCredentials("")
+	if secondEnrollment.CredentialID == enrolled.CredentialID || len(credentials) != 2 {
+		t.Fatalf("reprinted invitation did not create a distinct credential: first=%q second=%q stored=%+v", enrolled.CredentialID, secondEnrollment.CredentialID, credentials)
 	}
 }
 

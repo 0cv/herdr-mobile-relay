@@ -1044,6 +1044,42 @@ func TestSessionAuthorityUnknownSchemaRefusesCleanupAndWatchClose(t *testing.T) 
 	waitForSessionStatus(t, authority, func(s AuthorityStatus) bool { return s.LocalWatchClosed })
 }
 
+func TestSessionAuthorityRetireDeadlineBoundsHeldLifecycleOperation(t *testing.T) {
+	daemon := newSessionDaemon()
+	authority := prepareAndActivate(t, daemon)
+	release, err := authority.opMu.Lock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	started := time.Now()
+	err = authority.Retire(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 500*time.Millisecond {
+		release()
+		t.Fatalf("authority retirement behind held operation = %v after %s", err, time.Since(started))
+	}
+	if status := authority.Status(); !status.Active || status.RouteCleared || status.LocalWatchClosed {
+		release()
+		t.Fatalf("timed-out retirement changed live route state: %+v", status)
+	}
+	_, posts := daemon.counts()
+	if posts != 1 {
+		release()
+		t.Fatalf("timed-out retirement dispatched a later write: POST count=%d", posts)
+	}
+	release()
+	finishCtx, finishCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer finishCancel()
+	if err := authority.Retire(finishCtx); err != nil {
+		t.Fatalf("later authority retirement did not finish: %v", err)
+	}
+	status := authority.Status()
+	if !status.RouteCleared || !status.LocalWatchClosed {
+		t.Fatalf("later authority retirement status = %+v", status)
+	}
+}
+
 func TestSessionAuthorityConcurrentValidateRetireSerializesAndNeverMutatesAfterClear(t *testing.T) {
 	d := newSessionDaemon()
 	authority := prepareAndActivate(t, d)
