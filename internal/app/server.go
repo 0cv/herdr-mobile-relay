@@ -119,6 +119,15 @@ type Server struct {
 	hybrid           *hybridTransport
 	uploadM          *upload.Manager
 	deviceAuth       *deviceauth.Store
+	deviceAuthMu     sync.RWMutex
+	bootstrapGate    *deviceauth.BootstrapGate
+	managedOwner     *ManagedOwner
+	tailscaleSession managedTailscaleAuthority
+	managedRetired   chan struct{}
+	managedRetireOne sync.Once
+	tailscaleOpMu    sync.Mutex
+	quarantined      bool
+	backendBound     bool
 	pairingControl   *localcontrol.Server
 	initErr          error
 
@@ -168,11 +177,24 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 // newServer can create the device store, listeners, control socket or cache
 // directories. Legacy (non-managed) configurations must not supply an owner.
 func NewOwned(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner) (*Server, error) {
+	if cfg.Transport == config.TransportTailscale {
+		if cfg.ManagedRunID == "" {
+			return nil, errors.New("Tailscale transport requires an acquired managed owner")
+		}
+		if err := validateManagedAdmission(cfg, owner); err != nil {
+			return nil, err
+		}
+		authority, err := prepareManagedTailscale(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return newServerWithSession(cfg, version, revision, logger, owner, authority), nil
+	}
 	if cfg.ManagedRunID != "" {
 		if err := validateManagedAdmission(cfg, owner); err != nil {
 			return nil, err
 		}
-		return newServer(cfg, version, revision, logger), nil
+		return newServerWithSession(cfg, version, revision, logger, owner, nil), nil
 	}
 	if owner != nil {
 		return nil, errors.New("managed owner supplied for a legacy (non-managed) run")
@@ -223,6 +245,16 @@ func canonicalDirectory(path string) (string, error) {
 }
 
 func newServer(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
+	return newServerWithSession(cfg, version, revision, logger, nil, nil)
+}
+
+func newServerWithSession(
+	cfg *config.Config,
+	version, revision string,
+	logger *slog.Logger,
+	owner *ManagedOwner,
+	authority managedTailscaleAuthority,
+) *Server {
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
 	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
@@ -266,7 +298,16 @@ func newServer(cfg *config.Config, version, revision string, logger *slog.Logger
 	}
 	var deviceStore *deviceauth.Store
 	var deviceStoreErr error
-	if cfg.Token != "" {
+	var bootstrapGate *deviceauth.BootstrapGate
+	managedTailscale := cfg.Transport == config.TransportTailscale
+	if authority != nil || managedTailscale {
+		bootstrapGate = deviceauth.NewBootstrapGate()
+		hub.SetE2EEAuthResolver(bootstrapGate)
+		hub.SetAccepting(false)
+		if authority == nil {
+			deviceStoreErr = errors.New("managed Tailscale server requires a prepared in-process owner")
+		}
+	} else if cfg.Token != "" {
 		var storeOptions []deviceauth.Option
 		if cfg.RearmBootstrap {
 			storeOptions = append(storeOptions, deviceauth.WithBootstrapReenrollment())
@@ -316,6 +357,10 @@ func newServer(cfg *config.Config, version, revision string, logger *slog.Logger
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		uploadM:             uploadManager,
 		deviceAuth:          deviceStore,
+		bootstrapGate:       bootstrapGate,
+		managedOwner:        owner,
+		tailscaleSession:    authority,
+		managedRetired:      make(chan struct{}),
 		initErr:             deviceStoreErr,
 		startedAt:           time.Now(),
 		refreshClients:      make(map[string]bool),
@@ -346,10 +391,33 @@ func armBootstrap(store *deviceauth.Store, cfg *config.Config, hostname string) 
 	return store.EnsureBootstrapInvitation([]byte(cfg.Token), hostname, "en")
 }
 
+func (s *Server) deviceStore() *deviceauth.Store {
+	s.deviceAuthMu.RLock()
+	defer s.deviceAuthMu.RUnlock()
+	return s.deviceAuth
+}
+
+func (s *Server) attachDeviceStore(store *deviceauth.Store) error {
+	if store == nil {
+		return errors.New("device store is unavailable")
+	}
+	s.deviceAuthMu.Lock()
+	defer s.deviceAuthMu.Unlock()
+	if s.deviceAuth != nil {
+		if s.deviceAuth == store {
+			return nil
+		}
+		return errors.New("device store was already attached")
+	}
+	s.deviceAuth = store
+	return nil
+}
+
 func (s *Server) authorizeDeviceAction(client *transport.ClientConn, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
 	identity, authenticated := client.Identity()
-	if authenticated && s.deviceAuth != nil {
-		credential, current := s.deviceAuth.AuthorizeCredential(identity.CredentialID, identity.CredentialVersion)
+	store := s.deviceStore()
+	if authenticated && store != nil {
+		credential, current := store.AuthorizeCredential(identity.CredentialID, identity.CredentialVersion)
 		if !current || credential.DeviceID != identity.DeviceID {
 			apiErr := protocol.NewApiError(protocol.ErrorReaderDenied, map[string]any{
 				"operation": action.Operation,
@@ -610,6 +678,11 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 
 func (s *Server) Run(ctx context.Context) error {
 	if s.initErr != nil {
+		if s.tailscaleSession != nil {
+			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+			_ = s.RetireManagedTailscale(retireCtx)
+			cancel()
+		}
 		if s.conversationB != nil {
 			_ = s.conversationB.Close()
 		}
@@ -618,7 +691,15 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.conversationB != nil {
 		defer s.conversationB.Close()
 	}
-	runCtx, cancelRun := context.WithCancel(ctx)
+	runParent := ctx
+	if s.tailscaleSession != nil {
+		// Signal cancellation is observed by runServe, which requests a bounded
+		// owner retirement. The owner/control lifetime itself is independent so
+		// unresolved cleanup cannot release O through a canceled context.
+		runParent = context.Background()
+	}
+	requestCtx := ctx
+	runCtx, cancelRun := context.WithCancel(runParent)
 	defer cancelRun()
 	ctx = runCtx
 	s.transitionTasks = newLifecycleTasks(ctx)
@@ -852,54 +933,58 @@ func (s *Server) Run(ctx context.Context) error {
 			s.handleConversationHistory(client, inbound)
 		case "device_list":
 			identity, authenticated := client.Identity()
-			if s.deviceAuth == nil || !authenticated {
+			store := s.deviceStore()
+			if store == nil || !authenticated {
 				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
 				break
 			}
 			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", "", map[string]any{
-				"devices":           activeDeviceCredentials(s.deviceAuth, identity.CredentialID),
+				"devices":           activeDeviceCredentials(store, identity.CredentialID),
 				"current_device_id": identity.DeviceID,
 				"role":              identity.Role,
 			})
 		case "create_device_invitation":
 			identity, authenticated := client.Identity()
-			if s.deviceAuth == nil || !authenticated {
+			store := s.deviceStore()
+			if store == nil || !authenticated {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
 				break
 			}
-			invitation, invitationErr := s.deviceAuth.CreateInvitation(inbound.Name, deviceauth.Role(inbound.Role), identity.Locale)
+			invitation, invitationErr := store.CreateInvitation(inbound.Name, deviceauth.Role(inbound.Role), identity.Locale)
 			if invitationErr != nil {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", invitationErr.Error(), "", nil)
 				break
 			}
 			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"invitation": invitation})
 		case "rename_device":
-			if s.deviceAuth == nil {
+			store := s.deviceStore()
+			if store == nil {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
 				break
 			}
-			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+			credentialID, found := deviceCredentialID(store, inbound.DeviceID)
 			if !found {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device credential was not found", "", nil)
 				break
 			}
-			credential, renameErr := s.deviceAuth.RenameCredential(credentialID, inbound.Name)
+			credential, renameErr := store.RenameCredential(credentialID, inbound.Name)
 			if renameErr != nil {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", renameErr.Error(), "", nil)
 				break
 			}
 			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"device": credential})
 		case "revoke_device":
-			if s.deviceAuth == nil {
+			store := s.deviceStore()
+			if store == nil {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
 				break
 			}
-			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+			credentialID, found := deviceCredentialID(store, inbound.DeviceID)
 			if !found {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device credential was not found", "", nil)
 				break
 			}
-			credential, revokeErr := s.deviceAuth.RevokeCredential(credentialID)
+			credential, revokeErr := store.RevokeCredential(credentialID)
 			if revokeErr != nil {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", revokeErr.Error(), "", nil)
 				break
@@ -919,12 +1004,13 @@ func (s *Server) Run(ctx context.Context) error {
 			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"device": credential})
 		case "reset_devices":
 			identity, authenticated := client.Identity()
-			if s.deviceAuth == nil || !authenticated {
+			store := s.deviceStore()
+			if store == nil || !authenticated {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
 				break
 			}
-			credentials := activeDeviceCredentials(s.deviceAuth, "")
-			if resetErr := s.deviceAuth.ResetWithBootstrap([]byte(s.cfg.Token), s.hostname, identity.Locale); resetErr != nil {
+			credentials := activeDeviceCredentials(store, "")
+			if resetErr := store.ResetWithBootstrap([]byte(s.cfg.Token), s.hostname, identity.Locale); resetErr != nil {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", resetErr.Error(), "", nil)
 				break
 			}
@@ -1296,6 +1382,11 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	if err := s.startUDPListener(); err != nil {
+		if s.tailscaleSession != nil {
+			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+			_ = s.RetireManagedTailscale(retireCtx)
+			cancel()
+		}
 		return err
 	}
 
@@ -1334,11 +1425,25 @@ func (s *Server) Run(ctx context.Context) error {
 			http.NotFound(w, r)
 			return
 		}
+		if s.tailscaleSession != nil && s.isTailscaleQuarantined() {
+			http.Error(w, "Managed relay is quarantined", http.StatusServiceUnavailable)
+			return
+		}
 		mux.ServeHTTP(w, r)
 	})
 
+	if s.tailscaleSession != nil {
+		// Tailscale must bind the backend before publishing localcontrol, so
+		// initialize immutable handler dependencies before Serve can accept.
+		s.hybrid = s.startHybridTransport(ctx)
+	}
 	ln, err := net.Listen("tcp", s.cfg.Addr())
 	if err != nil {
+		if s.tailscaleSession != nil {
+			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+			_ = s.RetireManagedTailscale(retireCtx)
+			cancel()
+		}
 		return fmt.Errorf("listen %s: %w", s.cfg.Addr(), err)
 	}
 
@@ -1351,18 +1456,40 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.ready = true
+	s.backendBound = true
 	s.mu.Unlock()
 
+	var errCh chan error
+	if s.tailscaleSession != nil {
+		errCh = make(chan error, 1)
+		go func() {
+			errCh <- srv.Serve(ln)
+		}()
+	}
+
 	if s.cfg.PairingSocketPath != "" {
-		control, controlErr := localcontrol.New(
+		callbacks := localcontrol.Callbacks{
+			Status:   s.pairingControlStatusContext,
+			Activate: s.activateForControl,
+			Arm:      s.armForControl,
+			Retire:   s.retireForControl,
+		}
+		if s.tailscaleSession != nil {
+			callbacks.Retired = s.CompleteManagedTailscaleRetirement
+		}
+		control, controlErr := localcontrol.NewManaged(
 			s.cfg.PairingSocketPath,
 			s.cfg.ManagedRunID,
 			s.cfg.InstanceID,
-			s.pairingControlStatus,
-			s.armBootstrapForControl,
+			callbacks,
 		)
 		if controlErr != nil {
 			_ = ln.Close()
+			if s.tailscaleSession != nil {
+				retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+				_ = s.RetireManagedTailscale(retireCtx)
+				cancel()
+			}
 			return fmt.Errorf("initialize pairing control: %w", controlErr)
 		}
 		s.pairingControl = control
@@ -1389,7 +1516,9 @@ func (s *Server) Run(ctx context.Context) error {
 			work()
 		}()
 	}
-	s.hybrid = s.startHybridTransport(ctx)
+	if s.tailscaleSession == nil {
+		s.hybrid = s.startHybridTransport(ctx)
+	}
 	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
 	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
@@ -1427,24 +1556,80 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 		})
 	}
+	if s.tailscaleSession != nil {
+		startBackground(func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.tailscaleSession.Invalidation():
+				status := s.tailscaleSession.Status()
+				if !status.RouteCleared || !status.LocalWatchClosed {
+					s.quarantineTailscale()
+				}
+			}
+		})
+	}
 	startBackground(func() { s.watchJobStates(ctx) })
 	startBackground(func() { s.updateCheckLoop(ctx) })
 	if s.hybrid != nil {
 		s.hybrid.run(ctx, startBackground)
 	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.Serve(ln)
-	}()
+	if errCh == nil {
+		errCh = make(chan error, 1)
+		go func() {
+			errCh <- srv.Serve(ln)
+		}()
+	}
 
 	var runErr error
-	select {
-	case <-ctx.Done():
-		s.logger.Info("shutting down")
-	case err := <-errCh:
-		if err != http.ErrServerClosed {
-			runErr = err
+	if s.tailscaleSession != nil {
+		select {
+		case <-s.managedRetired:
+		case <-requestCtx.Done():
+			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+			retireErr := s.RetireManagedTailscale(retireCtx)
+			cancel()
+			if retireErr == nil {
+				s.CompleteManagedTailscaleRetirement()
+			}
+			if retireErr != nil {
+				s.logger.Error("managed shutdown is quarantined; retaining owner and private control", "error", retireErr)
+				<-s.managedRetired
+			}
+		case err := <-errCh:
+			if err != http.ErrServerClosed {
+				runErr = err
+				retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+				retireErr := s.RetireManagedTailscale(retireCtx)
+				cancel()
+				if retireErr == nil {
+					s.CompleteManagedTailscaleRetirement()
+				}
+				if retireErr != nil {
+					s.logger.Error("HTTP service failed while Tailscale cleanup is unresolved; retaining owner control", "error", retireErr)
+					<-s.managedRetired
+				}
+			}
+		case <-ctx.Done():
+			retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+			retireErr := s.RetireManagedTailscale(retireCtx)
+			cancel()
+			if retireErr == nil {
+				s.CompleteManagedTailscaleRetirement()
+			}
+			if retireErr != nil {
+				s.logger.Error("managed shutdown is quarantined; retaining owner and private control", "error", retireErr)
+				<-s.managedRetired
+			}
+		}
+	} else {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("shutting down")
+		case err := <-errCh:
+			if err != http.ErrServerClosed {
+				runErr = err
+			}
 		}
 	}
 
@@ -1525,7 +1710,7 @@ func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []stri
 	if s.hybrid != nil && s.hybrid.directEnabled() {
 		capabilities = append(capabilities, "webrtc_direct")
 	}
-	if s.deviceAuth != nil {
+	if s.deviceStore() != nil {
 		capabilities = append(capabilities, "device_management")
 	}
 	return capabilities
@@ -2314,6 +2499,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Herdr-Relay-Instance", s.cfg.InstanceID)
 	s.mu.RLock()
 	ready := s.ready
 	s.mu.RUnlock()
@@ -2830,36 +3016,19 @@ func (s *Server) armBootstrapInvitation() string {
 }
 
 func (s *Server) pairingControlStatus() localcontrol.Status {
-	s.mu.RLock()
-	ready := s.ready
-	s.mu.RUnlock()
-	status := localcontrol.Status{
-		Ready:     ready,
-		RunID:     s.cfg.ManagedRunID,
-		Instance:  s.cfg.InstanceID,
-		Transport: s.cfg.Transport,
-		Version:   s.version,
-		Revision:  s.revision,
-	}
-	if s.webH != nil {
-		status.BundleHash = s.webH.BundleHash()
-	}
-	if s.deviceAuth != nil {
-		invitation := s.deviceAuth.BootstrapStatus()
-		status.InvitationArmed = invitation.Armed
-		status.InvitationPending = invitation.Pending
-		if !invitation.ExpiresAt.IsZero() {
-			status.InvitationExpiresAt = invitation.ExpiresAt.UTC().Format(time.RFC3339)
-		}
-	}
-	return status
+	return s.controlStatus(context.Background())
+}
+
+func (s *Server) pairingControlStatusContext(ctx context.Context) localcontrol.Status {
+	return s.controlStatus(ctx)
 }
 
 func (s *Server) armBootstrapForControl() (localcontrol.Status, error) {
-	if s.deviceAuth == nil {
+	store := s.deviceStore()
+	if store == nil {
 		return localcontrol.Status{}, errors.New("no relay key configured")
 	}
-	if err := s.deviceAuth.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en"); err != nil {
+	if err := store.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en"); err != nil {
 		s.recordSafeError("bootstrap invitation re-arm failed", err)
 		return localcontrol.Status{}, err
 	}

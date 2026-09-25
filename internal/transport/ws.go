@@ -93,6 +93,7 @@ type Hub struct {
 	onConnect       ConnectHandler
 	onDisconnect    DisconnectHandler
 	closing         bool
+	accepting       bool
 	receiptSequence atomic.Uint64
 	receiptMu       sync.Mutex
 	orderedIngress  chan inboundMessage
@@ -116,6 +117,7 @@ func NewHub(cfg *config.Config, logger *slog.Logger) *Hub {
 		logger:         logger,
 		clients:        make(map[string]*ClientConn),
 		pending:        make(map[FrameConn]struct{}),
+		accepting:      true,
 		blocked:        make(map[string]uint64),
 		orderedIngress: make(chan inboundMessage, orderedIngressCapacity),
 		handlerSlots:   make(chan struct{}, handlerCapacity),
@@ -140,7 +142,12 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	h.mu.RLock()
 	closing := h.closing
+	accepting := h.accepting
 	h.mu.RUnlock()
+	if !accepting {
+		http.Error(w, "Relay pairing is not ready", http.StatusServiceUnavailable)
+		return
+	}
 	if closing {
 		http.Error(w, "Relay is shutting down", http.StatusServiceUnavailable)
 		return
@@ -171,7 +178,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 // eviction, metrics, and shutdown are shared.
 func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 	h.mu.Lock()
-	if h.closing {
+	if h.closing || !h.accepting {
 		h.mu.Unlock()
 		conn.CloseNow()
 		return
@@ -211,7 +218,7 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 	h.mu.Lock()
 	delete(h.pending, conn)
 	blockedVersion := h.blocked[identity.CredentialID]
-	if h.closing || (identity.CredentialID != "" && identity.CredentialVersion <= blockedVersion) {
+	if h.closing || !h.accepting || (identity.CredentialID != "" && identity.CredentialVersion <= blockedVersion) {
 		h.mu.Unlock()
 		h.register.Unlock()
 		cancel()
@@ -676,6 +683,37 @@ func (h *Hub) SetE2EEAuthResolver(resolver E2EEAuthResolver) {
 	h.mu.Lock()
 	h.authResolver = resolver
 	h.mu.Unlock()
+}
+
+// SetAccepting controls admission of new encrypted sessions. Closing admission
+// serializes with registration and closes both pending handshakes and current
+// clients, so a quarantined managed backend cannot keep serving authenticated
+// connections over WebSocket, gateway relay, or WebRTC.
+func (h *Hub) SetAccepting(accepting bool) {
+	h.register.Lock()
+	h.mu.Lock()
+	h.accepting = accepting
+	var clients []*ClientConn
+	var pending []FrameConn
+	if !accepting {
+		clients = make([]*ClientConn, 0, len(h.clients))
+		for _, client := range h.clients {
+			clients = append(clients, client)
+		}
+		pending = make([]FrameConn, 0, len(h.pending))
+		for conn := range h.pending {
+			pending = append(pending, conn)
+		}
+	}
+	h.mu.Unlock()
+	h.register.Unlock()
+	for _, conn := range pending {
+		conn.CloseNow()
+	}
+	for _, client := range clients {
+		client.conn.Close(CloseGoingAway, "managed relay is quarantined")
+		h.removeClient(client)
+	}
 }
 
 // DropConnections closes current clients without making the hub unavailable to

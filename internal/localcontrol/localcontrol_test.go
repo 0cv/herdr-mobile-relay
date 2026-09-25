@@ -41,6 +41,109 @@ func TestServerRequiresRunIdentityAndAcknowledgesArm(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 }
 
+func TestManagedLifecycleOperationsReturnRedactedOwnerState(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "control.sock")
+	retired := make(chan struct{})
+	server, err := NewManaged(path, "run-managed", "instance-managed", Callbacks{
+		Status: func(context.Context) Status {
+			return Status{OwnerHeld: true, LocalReady: true, RemoteWatchRetirementUnknown: true}
+		},
+		Activate: func(context.Context) (Status, error) {
+			return Status{OwnerHeld: true, LocalReady: true, ServeReady: true}, nil
+		},
+		Arm: func(context.Context) (Status, error) {
+			return Status{OwnerHeld: true, LocalReady: true, ServeReady: true, Ready: true,
+				InvitationArmed: true, InvitationExpiresAt: "2026-01-01T00:00:00Z"}, nil
+		},
+		Retire: func(context.Context) (Status, error) {
+			return Status{OwnerHeld: true, Quarantined: true, RouteCleared: true,
+				LocalWatchClosed: true, RemoteWatchRetirementUnknown: true}, nil
+		},
+		Retired: func() { close(retired) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.Run(ctx) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	status, err := Request(context.Background(), path, "status", "run-managed", "instance-managed")
+	if err != nil || !status.OwnerHeld || !status.LocalReady || !status.RemoteWatchRetirementUnknown {
+		t.Fatalf("status = %+v, err = %v", status, err)
+	}
+	activated, err := Request(context.Background(), path, "activate", "run-managed", "instance-managed")
+	if err != nil || !activated.ServeReady {
+		t.Fatalf("activate = %+v, err = %v", activated, err)
+	}
+	armed, err := Request(context.Background(), path, "arm_bootstrap", "run-managed", "instance-managed")
+	if err != nil || !armed.Ready || !armed.InvitationArmed {
+		t.Fatalf("arm = %+v, err = %v", armed, err)
+	}
+	retirement, err := Request(context.Background(), path, "retire", "run-managed", "instance-managed")
+	if err != nil || !retirement.RouteCleared || !retirement.LocalWatchClosed || !retirement.RemoteWatchRetirementUnknown {
+		t.Fatalf("retire = %+v, err = %v", retirement, err)
+	}
+	select {
+	case <-retired:
+	case <-time.After(time.Second):
+		t.Fatal("retirement acknowledgement callback was not invoked")
+	}
+}
+
+func TestManagedControlClientCancellationCancelsLifecycleCallback(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "control.sock")
+	started := make(chan struct{})
+	callbackCancelled := make(chan struct{})
+	server, err := NewManaged(path, "run-cancel", "instance-cancel", Callbacks{
+		Status: func(context.Context) Status { return Status{OwnerHeld: true} },
+		Activate: func(ctx context.Context) (Status, error) {
+			close(started)
+			<-ctx.Done()
+			close(callbackCancelled)
+			return Status{}, ctx.Err()
+		},
+		Arm: func(context.Context) (Status, error) { return Status{}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancelServer := context.WithCancel(context.Background())
+	defer cancelServer()
+	go func() { _ = server.Run(ctx) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := Request(requestCtx, path, "activate", "run-cancel", "instance-cancel")
+		requestDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("activation callback did not start")
+	}
+	cancelRequest()
+	select {
+	case <-callbackCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("client disconnect did not cancel activation callback")
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled client request did not return")
+	}
+	status, err := Request(context.Background(), path, "status", "run-cancel", "instance-cancel")
+	if err != nil || !status.OwnerHeld {
+		t.Fatalf("control server did not recover after cancellation: %+v, %v", status, err)
+	}
+}
+
 func TestNewRejectsSocketCollision(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "control.sock")

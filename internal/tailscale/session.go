@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"strconv"
 	"sync"
@@ -371,9 +372,19 @@ func (a *SessionAuthority) retireLocked(parent context.Context) error {
 	registration := a.registration
 	writeSettled := a.writeSettled
 	cleared := a.routeCleared
+	prepared := a.prepared
 	a.mu.Unlock()
 	if cleared {
 		return a.closeWatchAfterClear(watch)
+	}
+	if watch == nil && prepared && registration == registrationNotDispatched {
+		// No POST was dispatched and no LocalAPI watch exists, so there is no
+		// route or local stream to retire. This is the safe pre-activation unwind.
+		a.mu.Lock()
+		a.routeCleared = true
+		a.localClosed = true
+		a.mu.Unlock()
+		return nil
 	}
 	if watch == nil || identity == nil {
 		return errSessionUnavailable
@@ -681,6 +692,23 @@ func registrationName(state registrationState) string {
 
 // Status returns only redacted lifecycle facts. Remote watcher retirement has
 // no source-backed acknowledgement and therefore remains explicitly unknown.
+// Origin returns the canonical HTTPS origin derived from the prepared live
+// identity and Serve listener port. It is redacted (contains no watcher ID).
+func (a *SessionAuthority) Origin() (string, bool) {
+	if !a.usable() {
+		return "", false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.prepared || a.route.Host == "" || a.route.Port < 1 || a.route.Port > 65535 {
+		return "", false
+	}
+	if a.route.Port == 443 {
+		return "https://" + a.route.Host, true
+	}
+	return "https://" + net.JoinHostPort(a.route.Host, strconv.Itoa(a.route.Port)), true
+}
+
 func (a *SessionAuthority) Status() AuthorityStatus {
 	if !a.usable() {
 		return AuthorityStatus{RemoteWatchRetirementUnknown: true}

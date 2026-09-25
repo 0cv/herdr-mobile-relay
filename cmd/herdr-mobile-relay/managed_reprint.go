@@ -32,16 +32,16 @@ import (
 
 const (
 	managedReprintDefaultOriginFile = "phone-app-origin-configured"
-	managedReprintDefaultDeadline   = 20 * time.Second
+	managedReprintDefaultDeadline   = 60 * time.Second
 	managedReprintMinDeadline       = 1 * time.Second
 	managedReprintMaxDeadline       = 60 * time.Second
 	managedReprintAcquireLimit      = 5 * time.Second
-	managedReprintArmTimeout        = 2 * time.Second
+	managedReprintArmTimeout        = localcontrol.ArmTimeout
 	managedReprintMaxOriginValue    = 2048
 	managedReprintMaxIdentity       = 128
 )
 
-const managedReprintUsage = "usage: herdr-mobile-relay managed-state reprint --dir DIR --socket PATH --run-id ID --instance ID [--origin-file phone-app-origin-configured] --origin-value VALUE [--deadline 20s]"
+const managedReprintUsage = "usage: herdr-mobile-relay managed-state reprint --dir DIR --socket PATH --run-id ID --instance ID [--origin-file phone-app-origin-configured] --origin-value VALUE [--deadline 60s]"
 
 // reprintArmOutcome is the three-way classification of the arm IPC result.
 type reprintArmOutcome int
@@ -160,8 +160,8 @@ func runManagedReprint(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// armBootstrapReprint performs the arm IPC bounded to two seconds and further
-// bounded by the overall transaction context.
+// armBootstrapReprint performs the arm IPC under the lifecycle operation bound
+// and the overall transaction context.
 func armBootstrapReprint(ctx context.Context, socket, runID, instance string) (localcontrol.Response, error) {
 	armCtx, cancel := context.WithTimeout(ctx, managedReprintArmTimeout)
 	defer cancel()

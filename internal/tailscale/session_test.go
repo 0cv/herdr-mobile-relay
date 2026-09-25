@@ -528,6 +528,28 @@ func TestSessionAuthorityRejectsIdentityAndCapabilityDriftBeforeWrite(t *testing
 	}
 }
 
+func TestSessionAuthorityPreparedOriginAndSafePreActivationRetirement(t *testing.T) {
+	d := newSessionDaemon()
+	authority := newSessionTestAuthority(d)
+	if err := authority.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if origin, ok := authority.Origin(); !ok || origin != "https://relay.tailnet.ts.net" {
+		t.Fatalf("prepared origin = %q, %t", origin, ok)
+	}
+	if err := authority.Retire(context.Background()); err != nil {
+		t.Fatalf("retire before activation: %v", err)
+	}
+	status := authority.Status()
+	if !status.RouteCleared || !status.LocalWatchClosed || !status.RemoteWatchRetirementUnknown {
+		t.Fatalf("safe pre-activation retirement status = %+v", status)
+	}
+	watches, posts := d.counts()
+	if watches != 0 || posts != 0 {
+		t.Fatalf("pre-activation retirement opened %d watches and issued %d writes", watches, posts)
+	}
+}
+
 func TestSessionAuthorityRequiresEmptyConfigAndETagBeforeWatchOrWrite(t *testing.T) {
 	d := newSessionDaemon()
 	d.omitETag = true

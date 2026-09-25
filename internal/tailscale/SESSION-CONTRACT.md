@@ -130,10 +130,21 @@ owner makes no claim of guaranteed same-key preservation across those races.
 
 The watcher/session authority is in-process only and does not constrain other
 processes with LocalAPI authority. `routeCleared` is config-level, not proof of
-daemon bookkeeping/ingress drain. This slice does not implement app gate
-revocation, keep-the-process-alive quarantine, shell O persistence, platform
-GUI/token discovery, actual daemon qualification, the held-output-pipe
-supervisor case, or hosted CI. Those remain later integration/review/CI gates.
+daemon bookkeeping/ingress drain. This R2B slice did not implement app gate revocation, keep-the-process-alive
+quarantine, shell O persistence, platform GUI/token discovery, actual daemon
+qualification, the held-output-pipe supervisor case, or hosted CI. The separate
+R2C app/control integration connects `SessionAuthority` to a revocable device
+bootstrap gate and private lifecycle control without changing the owner,
+selective-retirement, or remote-watch-unknown contract; see
+[`../app/TAILSCALE-INTEGRATION.md`](../app/TAILSCALE-INTEGRATION.md). Native
+daemon/runtime qualification and final hosted CI remain independent gates.
+
+`SessionAuthority.Origin()` exposes only the canonical HTTPS origin derived
+from the immutable prepared node identity and listener port. It contains no
+watcher/session identifier, performs no independent ownership admission, and
+is used only for configured-origin admission and app-health consistency
+tests; every mutation and lifecycle fact still comes from the production
+authority's live LocalAPI checks.
 
 ## Source and test evidence map
 

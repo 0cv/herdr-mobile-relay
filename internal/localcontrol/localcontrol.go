@@ -5,6 +5,7 @@ package localcontrol
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,25 +17,37 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
 	ProtocolVersion = 1
 	MaxRequestBytes = 4096
 	IOTimeout       = 2 * time.Second
+	StatusTimeout   = 30 * time.Second
+	ActivateTimeout = 60 * time.Second
+	ArmTimeout      = 60 * time.Second
+	RetireTimeout   = 40 * time.Second
 )
 
 type Status struct {
-	Ready               bool   `json:"ready"`
-	RunID               string `json:"run_id"`
-	Instance            string `json:"instance"`
-	Transport           string `json:"transport,omitempty"`
-	Version             string `json:"version,omitempty"`
-	Revision            string `json:"revision,omitempty"`
-	BundleHash          string `json:"bundle_hash,omitempty"`
-	InvitationArmed     bool   `json:"invitation_armed"`
-	InvitationPending   bool   `json:"invitation_pending"`
-	InvitationExpiresAt string `json:"invitation_expires_at,omitempty"`
+	Ready                        bool   `json:"ready"`
+	OwnerHeld                    bool   `json:"owner_held"`
+	LocalReady                   bool   `json:"local_ready"`
+	ServeReady                   bool   `json:"serve_ready"`
+	Quarantined                  bool   `json:"quarantined"`
+	RouteCleared                 bool   `json:"route_cleared"`
+	LocalWatchClosed             bool   `json:"local_watch_closed"`
+	RemoteWatchRetirementUnknown bool   `json:"remote_watch_retirement_unknown"`
+	RunID                        string `json:"run_id"`
+	Instance                     string `json:"instance"`
+	Transport                    string `json:"transport,omitempty"`
+	Version                      string `json:"version,omitempty"`
+	Revision                     string `json:"revision,omitempty"`
+	BundleHash                   string `json:"bundle_hash,omitempty"`
+	InvitationArmed              bool   `json:"invitation_armed"`
+	InvitationPending            bool   `json:"invitation_pending"`
+	InvitationExpiresAt          string `json:"invitation_expires_at,omitempty"`
 }
 
 type Response struct {
@@ -50,24 +63,44 @@ type request struct {
 	Instance string `json:"instance"`
 }
 
+type Callbacks struct {
+	Status   func(context.Context) Status
+	Activate func(context.Context) (Status, error)
+	Arm      func(context.Context) (Status, error)
+	Retire   func(context.Context) (Status, error)
+	Retired  func()
+}
+
 type Server struct {
 	path       string
 	runID      string
 	instance   string
 	listener   net.Listener
 	socketInfo os.FileInfo
-	status     func() Status
-	arm        func() (Status, error)
+	callbacks  Callbacks
 }
 
 func New(path, runID, instance string, status func() Status, arm func() (Status, error)) (*Server, error) {
+	if status == nil || arm == nil {
+		return nil, errors.New("pairing control callbacks are required")
+	}
+	return NewManaged(path, runID, instance, Callbacks{
+		Status: func(context.Context) Status { return status() },
+		Arm:    func(context.Context) (Status, error) { return arm() },
+	})
+}
+
+// NewManaged creates the private control server with bounded, context-aware
+// lifecycle callbacks. Status/activation/retirement callbacks must perform
+// their own live owner validation; status flags from a caller are not accepted.
+func NewManaged(path, runID, instance string, callbacks Callbacks) (*Server, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("pairing control socket path must be absolute")
 	}
 	if !validIdentity(runID) || !validIdentity(instance) {
 		return nil, errors.New("pairing control identity is invalid")
 	}
-	if status == nil || arm == nil {
+	if callbacks.Status == nil || callbacks.Arm == nil {
 		return nil, errors.New("pairing control callbacks are required")
 	}
 	parent := filepath.Dir(path)
@@ -109,7 +142,7 @@ func New(path, runID, instance string, status func() Status, arm func() (Status,
 	}
 	server := &Server{
 		path: path, runID: runID, instance: instance, listener: listener,
-		status: status, arm: arm,
+		callbacks: callbacks,
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = listener.Close()
@@ -205,16 +238,26 @@ func Request(ctx context.Context, path, op, runID, instance string) (Response, e
 	if !filepath.IsAbs(path) || !validIdentity(runID) || !validIdentity(instance) {
 		return Response{}, errors.New("invalid pairing control request identity")
 	}
-	if op != "status" && op != "arm_bootstrap" {
+	if !supportedOperation(op) {
 		return Response{}, errors.New("unsupported pairing control operation")
 	}
+	timeout := operationTimeout(op)
 	dialer := net.Dialer{Timeout: IOTimeout}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < dialer.Timeout {
+		dialer.Timeout = max(0, time.Until(deadline))
+	}
 	connection, err := dialer.DialContext(ctx, "unix", path)
 	if err != nil {
 		return Response{}, fmt.Errorf("connect to pairing control socket: %w", err)
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(IOTimeout))
+	deadline := time.Now().Add(timeout)
+	if requested, ok := ctx.Deadline(); ok && requested.Before(deadline) {
+		deadline = requested
+	}
+	_ = connection.SetDeadline(deadline)
+	stopClose := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stopClose()
 	payload, err := json.Marshal(request{Protocol: ProtocolVersion, Op: op, RunID: runID, Instance: instance})
 	if err != nil {
 		return Response{}, err
@@ -231,7 +274,7 @@ func Request(ctx context.Context, path, op, runID, instance string) (Response, e
 		return Response{}, errors.New("pairing control response is too large")
 	}
 	var response Response
-	if err := json.Unmarshal(data, &response); err != nil {
+	if err := decodeControlJSON(data, &response); err != nil {
 		return Response{}, fmt.Errorf("decode pairing control response: %w", err)
 	}
 	if !response.OK {
@@ -240,17 +283,17 @@ func Request(ctx context.Context, path, op, runID, instance string) (Response, e
 	return response, nil
 }
 
-func (s *Server) handle(ctx context.Context, connection net.Conn) {
+func (s *Server) handle(parent context.Context, connection net.Conn) {
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(IOTimeout))
-	data, err := bufio.NewReader(io.LimitReader(connection, MaxRequestBytes+1)).ReadBytes('\n')
+	_ = connection.SetReadDeadline(time.Now().Add(IOTimeout))
+	data, err := readControlLine(connection)
 	data = []byte(strings.TrimSpace(string(data)))
 	if err != nil || len(data) > MaxRequestBytes {
 		s.writeResponse(connection, Response{Error: "invalid or oversized request"})
 		return
 	}
 	var incoming request
-	if err := json.Unmarshal(data, &incoming); err != nil {
+	if err := decodeControlJSON(data, &incoming); err != nil {
 		s.writeResponse(connection, Response{Error: "invalid request"})
 		return
 	}
@@ -258,39 +301,225 @@ func (s *Server) handle(ctx context.Context, connection net.Conn) {
 		s.writeResponse(connection, Response{Error: "pairing control identity mismatch"})
 		return
 	}
-	if ctx.Err() != nil {
+	if !supportedOperation(incoming.Op) {
+		s.writeResponse(connection, Response{Error: "unsupported pairing control operation"})
+		return
+	}
+	if parent.Err() != nil {
 		s.writeResponse(connection, Response{Error: "relay is shutting down"})
 		return
 	}
+
+	timeout := operationTimeout(incoming.Op)
+	opCtx, cancel := context.WithTimeout(parent, timeout)
+	_ = connection.SetDeadline(time.Now().Add(timeout))
+	peerDone := make(chan struct{})
+	go func() {
+		defer close(peerDone)
+		var extra [1]byte
+		n, readErr := connection.Read(extra[:])
+		if n != 0 || (readErr != nil && !errors.Is(readErr, os.ErrDeadlineExceeded)) {
+			cancel()
+		}
+	}()
+	stopClose := context.AfterFunc(opCtx, func() { _ = connection.Close() })
+	defer func() {
+		cancel()
+		stopClose()
+		_ = connection.Close()
+		<-peerDone
+	}()
+
+	var status Status
+	var callbackErr error
 	switch incoming.Op {
 	case "status":
-		status := s.status()
-		status.RunID = s.runID
-		status.Instance = s.instance
-		s.writeResponse(connection, Response{OK: true, Status: status})
+		status = s.callbacks.Status(opCtx)
+	case "activate":
+		if s.callbacks.Activate == nil {
+			callbackErr = errUnsupportedOperation
+		} else {
+			status, callbackErr = s.callbacks.Activate(opCtx)
+		}
 	case "arm_bootstrap":
-		status, err := s.arm()
-		if err != nil {
-			s.writeResponse(connection, Response{Error: "bootstrap invitation could not be persisted"})
-			return
+		status, callbackErr = s.callbacks.Arm(opCtx)
+	case "retire":
+		if s.callbacks.Retire == nil {
+			callbackErr = errUnsupportedOperation
+		} else {
+			status, callbackErr = s.callbacks.Retire(opCtx)
 		}
-		status.RunID = s.runID
-		status.Instance = s.instance
-		if !status.InvitationArmed || status.InvitationExpiresAt == "" {
-			s.writeResponse(connection, Response{Error: "bootstrap invitation persistence was not acknowledged"})
-			return
+	}
+	if callbackErr != nil {
+		message := "pairing control operation was refused"
+		if incoming.Op == "arm_bootstrap" {
+			message = "bootstrap invitation could not be persisted"
+		} else if errors.Is(callbackErr, errUnsupportedOperation) {
+			message = "unsupported pairing control operation"
 		}
-		s.writeResponse(connection, Response{OK: true, Status: status})
-	default:
-		s.writeResponse(connection, Response{Error: "unsupported pairing control operation"})
+		s.writeResponse(connection, Response{Error: message})
+		return
+	}
+	status.RunID = s.runID
+	status.Instance = s.instance
+	if incoming.Op == "arm_bootstrap" && (!status.InvitationArmed || status.InvitationExpiresAt == "") {
+		s.writeResponse(connection, Response{Error: "bootstrap invitation persistence was not acknowledged"})
+		return
+	}
+	if err := s.writeResponse(connection, Response{OK: true, Status: status}); err == nil && incoming.Op == "retire" && s.callbacks.Retired != nil {
+		s.callbacks.Retired()
 	}
 }
 
-func (s *Server) writeResponse(connection net.Conn, response Response) {
-	data, err := json.Marshal(response)
-	if err == nil {
-		_, _ = connection.Write(append(data, '\n'))
+var errUnsupportedOperation = errors.New("unsupported pairing control operation")
+
+func supportedOperation(op string) bool {
+	switch op {
+	case "status", "activate", "arm_bootstrap", "retire":
+		return true
+	default:
+		return false
 	}
+}
+
+func operationTimeout(op string) time.Duration {
+	switch op {
+	case "status":
+		return StatusTimeout
+	case "activate":
+		return ActivateTimeout
+	case "arm_bootstrap":
+		return ArmTimeout
+	case "retire":
+		return RetireTimeout
+	default:
+		return IOTimeout
+	}
+}
+
+func readControlLine(reader io.Reader) ([]byte, error) {
+	line := make([]byte, 0, 256)
+	var one [1]byte
+	for {
+		n, err := reader.Read(one[:])
+		if n != 0 {
+			if one[0] == '\n' {
+				return line, nil
+			}
+			line = append(line, one[0])
+			if len(line) > MaxRequestBytes {
+				return nil, errors.New("pairing control request is too large")
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+func decodeControlJSON(data []byte, destination any) error {
+	if !utf8.Valid(data) {
+		return errors.New("invalid UTF-8 JSON")
+	}
+	if err := validateControlJSON(data); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func validateControlJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	tokens := 0
+	var scan func(int) error
+	scan = func(depth int) error {
+		if depth > 32 || tokens > 10000 {
+			return errors.New("pairing control JSON exceeds structural limits")
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		tokens++
+		delim, composite := token.(json.Delim)
+		if !composite {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				tokens++
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("pairing control JSON object key is invalid")
+				}
+				canonicalKey := strings.ToLower(key)
+				if _, exists := seen[canonicalKey]; exists {
+					return errors.New("duplicate or case-conflicting pairing control JSON member")
+				}
+				seen[canonicalKey] = struct{}{}
+				if err := scan(depth + 1); err != nil {
+					return err
+				}
+			}
+			closeToken, err := decoder.Token()
+			if err != nil || closeToken != json.Delim('}') {
+				return errors.New("pairing control JSON object is incomplete")
+			}
+			tokens++
+		case '[':
+			for decoder.More() {
+				if err := scan(depth + 1); err != nil {
+					return err
+				}
+			}
+			closeToken, err := decoder.Token()
+			if err != nil || closeToken != json.Delim(']') {
+				return errors.New("pairing control JSON array is incomplete")
+			}
+			tokens++
+		default:
+			return errors.New("unexpected pairing control JSON delimiter")
+		}
+		return nil
+	}
+	if err := scan(0); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("multiple pairing control JSON values")
+	}
+	return nil
+}
+
+func (s *Server) writeResponse(connection net.Conn, response Response) error {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	if len(data) > MaxRequestBytes {
+		return errors.New("pairing control response is too large")
+	}
+	_, err = connection.Write(append(data, '\n'))
+	return err
 }
 
 func ensurePrivateDirectory(path string) error {

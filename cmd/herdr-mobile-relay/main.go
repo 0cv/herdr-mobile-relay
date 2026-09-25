@@ -293,14 +293,14 @@ func run(args []string) (int, error) {
 		controlFlags := flag.NewFlagSet("pairing-control", flag.ContinueOnError)
 		controlFlags.SetOutput(os.Stderr)
 		socket := controlFlags.String("socket", "", "managed pairing control socket")
-		op := controlFlags.String("operation", "status", "status or arm_bootstrap")
+		op := controlFlags.String("operation", "status", "status, activate, arm_bootstrap, or retire")
 		runID := controlFlags.String("run-id", "", "managed foreground run identifier")
 		instance := controlFlags.String("instance", "", "relay instance identifier")
 		if err := controlFlags.Parse(args); err != nil {
 			return 2, err
 		}
 		if controlFlags.NArg() != 0 || *socket == "" || *runID == "" || *instance == "" {
-			return 2, errors.New("usage: herdr-mobile-relay pairing-control --socket PATH --operation status|arm_bootstrap --run-id ID --instance ID")
+			return 2, errors.New("usage: herdr-mobile-relay pairing-control --socket PATH --operation status|activate|arm_bootstrap|retire --run-id ID --instance ID")
 		}
 		response, err := localcontrol.Request(context.Background(), *socket, *op, *runID, *instance)
 		if err != nil {
@@ -435,10 +435,9 @@ func runServe() (int, error) {
 	logger := newRelayLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr))
 	slog.SetDefault(logger)
 
-	// The serve process is the long-lived foreground owner. In managed mode it
-	// takes the ownership lock O before opening the device store or control
-	// socket and retires it cleanly on normal exit. A SIGKILL leaves the lock as
-	// fail-closed evidence; there is no automatic recovery or takeover.
+	// O is acquired before managed app/control resources. Tailscale ownership
+	// is released only after exact route clearing and local watch closure; an
+	// unresolved result never falls through this defer to retire O.
 	var owner *app.ManagedOwner
 	if cfg.ManagedRunID != "" {
 		acquired, acquireErr := app.AcquireManagedOwner(cfg.RuntimeDir)
@@ -446,22 +445,64 @@ func runServe() (int, error) {
 			return 1, fmt.Errorf("acquire managed ownership of %s: %w", cfg.RuntimeDir, acquireErr)
 		}
 		owner = acquired
-		defer func() {
-			if retireErr := app.RetireManagedOwner(owner, logger); retireErr != nil {
-				logger.Error("managed ownership retirement was refused; retained lock evidence must be inspected",
-					"runtime_dir", cfg.RuntimeDir, "error", retireErr)
+	}
+	var srv *app.Server
+	defer func() {
+		if owner == nil {
+			return
+		}
+		if cfg.Transport == config.TransportTailscale && srv != nil && !srv.ManagedOwnerReleaseSafe() {
+			logger.Error("Tailscale cleanup is unresolved; retained owner lock must not be released", "runtime_dir", cfg.RuntimeDir)
+			return
+		}
+		if retireErr := app.RetireManagedOwner(owner, logger); retireErr != nil {
+			logger.Error("managed ownership retirement was refused; retained lock evidence must be inspected",
+				"runtime_dir", cfg.RuntimeDir, "error", retireErr)
+		}
+	}()
+
+	if cfg.Transport == config.TransportTailscale {
+		srv, err = app.NewOwned(cfg, version, revision, logger, owner)
+		if err != nil {
+			return 1, err
+		}
+		signals := make(chan os.Signal, 2)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(signals)
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case <-signals:
+					retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
+					retireErr := srv.RetireManagedTailscale(retireCtx)
+					cancel()
+					if retireErr == nil {
+						srv.CompleteManagedTailscaleRetirement()
+						return
+					}
+					logger.Error("Tailscale shutdown is quarantined; process and owner remain live for explicit cleanup", "error", retireErr)
+				}
 			}
 		}()
+		if err := srv.Run(context.Background()); err != nil {
+			return 1, err
+		}
+		if !srv.ManagedOwnerReleaseSafe() {
+			return 1, errors.New("Tailscale owner returned before route cleanup was proven")
+		}
+		return 0, nil
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	srv, err := app.NewOwned(cfg, version, revision, logger, owner)
+	srv, err = app.NewOwned(cfg, version, revision, logger, owner)
 	if err != nil {
 		return 1, err
 	}
-
 	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
 		return 1, err
 	}
