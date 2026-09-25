@@ -133,6 +133,38 @@ class GateFailure(RuntimeError):
         super().__init__(self.code)
 
 
+LOCALAPI_COUNT_EVENTS = (
+    "localapi:status",
+    "localapi:config:get",
+    "localapi:config:post",
+    "localapi:watch:mask=2",
+    "localapi:watch:closed",
+    "localapi:conditional:if-match",
+    "localapi:registration:foreground-exact",
+    "localapi:retirement:selective-delete",
+    "localapi:unexpected",
+)
+
+
+def safe_localapi_event_counts(events: list[str]) -> dict[str, int]:
+    return {event: events.count(event) for event in LOCALAPI_COUNT_EVENTS}
+
+
+def safe_localapi_registration_window(events: list[str]) -> dict[str, object]:
+    registration = "localapi:registration:foreground-exact"
+    retirement = "localapi:retirement:selective-delete"
+    try:
+        start = events.index(registration) + 1
+    except ValueError:
+        return {"observed": False, "retirement_observed": False, "counts": safe_localapi_event_counts([])}
+    end = next((index for index in range(start, len(events)) if events[index] == retirement), len(events))
+    return {
+        "observed": True,
+        "retirement_observed": end < len(events),
+        "counts": safe_localapi_event_counts(events[start:end]),
+    }
+
+
 def safe_fake_herdr_operations(path: str | None) -> list[dict[str, str | int]]:
     if not path:
         return []
@@ -739,23 +771,44 @@ class PublicRequestState:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.counts: dict[tuple[str, str], int] = {}
+        self.requests: dict[tuple[str, str], int] = {}
+        self.responses: dict[tuple[str, str, int | str], int] = {}
 
-    def record(self, method: str, request_path: str) -> None:
+    def _kinds(self, method: str, request_path: str) -> tuple[str, str]:
         path = urllib.parse.urlsplit(request_path).path
         path_kind = self.PATHS.get(path)
         if path_kind is None:
-            path_kind = "asset" if path.startswith("/assets/") else "other"
-        method_kind = method if method in self.METHODS else "other"
-        with self.lock:
-            key = (method_kind, path_kind)
-            self.counts[key] = self.counts.get(key, 0) + 1
+            path_kind = "asset" if path.startswith(("/assets/", "/static/")) else "other"
+        return (method if method in self.METHODS else "other", path_kind)
 
-    def operation_summary(self) -> list[dict[str, str | int]]:
+    def record(self, method: str, request_path: str) -> None:
+        key = self._kinds(method, request_path)
+        with self.lock:
+            self.requests[key] = self.requests.get(key, 0) + 1
+
+    def record_response(self, method: str, request_path: str, status: int) -> None:
+        method_kind, path_kind = self._kinds(method, request_path)
+        status_kind: int | str = status if 100 <= status <= 599 else "other"
+        with self.lock:
+            key = (method_kind, path_kind, status_kind)
+            self.responses[key] = self.responses.get(key, 0) + 1
+
+    def operation_summary(self) -> list[dict[str, object]]:
         with self.lock:
             return [
-                {"method": method, "path": path, "count": count}
-                for (method, path), count in sorted(self.counts.items())
+                {
+                    "method": method,
+                    "path": path,
+                    "request_count": count,
+                    "responses": [
+                        {"status": status, "count": response_count}
+                        for (response_method, response_path, status), response_count in sorted(
+                            self.responses.items(), key=lambda item: (item[0][0], item[0][1], str(item[0][2])),
+                        )
+                        if (response_method, response_path) == (method, path)
+                    ],
+                }
+                for (method, path), count in sorted(self.requests.items())
             ]
 
 
@@ -790,6 +843,10 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
             response.extend(chunk)
             if len(response) > 64 * 1024:
                 raise ConnectionError("backend WebSocket headers exceeded fixture bound")
+        status_line = bytes(response).split(b"\r\n", 1)[0]
+        status_match = re.match(rb"HTTP/1\.[01] ([1-5][0-9][0-9])(?:[ \t]|$)", status_line)
+        if status_match:
+            self.request_state.record_response(self.command, self.path, int(status_match.group(1)))
         self.connection.sendall(response)
 
         def copy(source: socket.socket, destination: socket.socket) -> None:
@@ -819,6 +876,7 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0"))) if self.headers.get("Content-Length") else None
         connection.request(self.command, self.path, body=body, headers=request_headers)
         response = connection.getresponse()
+        self.request_state.record_response(self.command, self.path, response.status)
         data = response.read()
         self.send_response(response.status, response.reason)
         for key, value in response.getheaders():
@@ -1540,7 +1598,11 @@ def main() -> int:
             public_server.shutdown()
             public_server.server_close()
         if state is not None:
-            transitions.extend(state.events[-12:])
+            with state.lock:
+                localapi_events = list(state.events)
+            transitions.extend(localapi_events[-12:])
+        else:
+            localapi_events = []
         record = {
             "schema_version": 1,
             "candidate_sha": source_sha,
@@ -1563,6 +1625,8 @@ def main() -> int:
             "cases": [{"name": name, "result": case_results.get(name, "missing")} for name in EXPECTED_CASES],
             "fixture_transitions": list(dict.fromkeys(transitions))[:64],
             "fixture_cli_operations": safe_fixture_cli_operations(relay_env if "relay_env" in locals() else {}),
+            "localapi_operation_counts": safe_localapi_event_counts(localapi_events),
+            "localapi_first_registration_window_counts": safe_localapi_registration_window(localapi_events),
             "fake_herdr_operations": safe_fake_herdr_operations(
                 (relay_env.get("FAKE_HERDR_OPERATIONS") if "relay_env" in locals() else None),
             ),
