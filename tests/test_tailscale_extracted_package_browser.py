@@ -66,12 +66,21 @@ FAILURE_CODES = {
     "managed_launcher_bootstrap_failed", "managed_launcher_session_authority_failed",
     "managed_launcher_owner_validation_marker",
     "fixture_localapi_watch_missing", "fixture_localapi_registration_missing",
-    "fixture_localapi_session_missing",
+    "fixture_localapi_session_missing", "fixture_registration_health_identity",
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
     "controller_command", "reader_invitation", "reader_enrollment",
     "reader_read_only", "credential_preservation", "browser_complete",
+}
+BROWSER_PROFILE_NAMES = {"controller", "reader"}
+BROWSER_STORAGE_TYPES = {
+    "absent", "invalid_json", "object", "array", "string", "number", "boolean", "null", "unavailable",
+}
+BROWSER_STORAGE_CHECKPOINTS = {"after_navigation", "credential_wait_failed", "credentialed"}
+BROWSER_DIAGNOSTIC_CATEGORIES = {
+    "websocket", "network", "storage", "tls", "type_error", "reference_error",
+    "syntax_error", "dom_exception", "console_error", "page_error",
 }
 EXPECTED_CASES = [
     "archive_checksum_and_exact_release_identity",
@@ -1272,24 +1281,119 @@ def stop_launcher(process: subprocess.Popen[bytes]) -> bool:
 
 browser_stage = "browser_runner"
 browser_exception_type = ""
+browser_progress_record: dict[str, object] = {
+    "mode": "other", "stage": "browser_runner", "passed_cases": [], "profiles": [],
+}
+
+
+def safe_browser_profile(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    profile_name = value.get("profile")
+    if not isinstance(profile_name, str) or profile_name not in BROWSER_PROFILE_NAMES:
+        return None
+    storage_records = value.get("storage")
+    storage = []
+    if isinstance(storage_records, list):
+        for snapshot in storage_records[:8]:
+            if not isinstance(snapshot, dict):
+                continue
+            checkpoint = snapshot.get("checkpoint")
+            if not isinstance(checkpoint, str) or checkpoint not in BROWSER_STORAGE_CHECKPOINTS:
+                continue
+            keys = {}
+            for key in ("device_auth", "relays"):
+                item = snapshot.get(key)
+                if not isinstance(item, dict):
+                    continue
+                value_type = item.get("type")
+                present = item.get("present")
+                if isinstance(value_type, str) and value_type in BROWSER_STORAGE_TYPES and isinstance(present, bool):
+                    keys[key] = {"present": present, "type": value_type}
+            storage.append({
+                "checkpoint": checkpoint,
+                "available": snapshot.get("available") is True,
+                "keys": keys,
+            })
+
+    def safe_counts(name: str) -> dict[str, int]:
+        counts = value.get(name)
+        if not isinstance(counts, dict):
+            return {}
+        return {
+            category: count for category, count in counts.items()
+            if category in BROWSER_DIAGNOSTIC_CATEGORIES and type(count) is int and 0 <= count <= 16
+        }
+
+    return {
+        "profile": profile_name,
+        "storage": storage,
+        "console_errors": safe_counts("console_errors"),
+        "page_errors": safe_counts("page_errors"),
+        "websockets": {
+            field: count for field, count in value.get("websockets", {}).items()
+            if field in {"attempts", "closed", "errors"} and type(count) is int and 0 <= count <= 16
+        } if isinstance(value.get("websockets"), dict) else {},
+    }
+
+
+def safe_browser_progress(value: object, mode: str) -> dict[str, object]:
+    record = value if isinstance(value, dict) else {}
+    stage = record.get("stage")
+    passed_cases = record.get("passed_cases")
+    profiles = record.get("profiles")
+    safe_profiles = []
+    if isinstance(profiles, list):
+        seen = set()
+        for profile in profiles[:2]:
+            safe_profile = safe_browser_profile(profile)
+            if safe_profile and safe_profile["profile"] not in seen:
+                seen.add(safe_profile["profile"])
+                safe_profiles.append(safe_profile)
+    return {
+        "mode": mode if mode in {"enroll", "reprint", "restart"} else "other",
+        "stage": stage if isinstance(stage, str) and stage in BROWSER_STAGES else "browser_runner",
+        "passed_cases": [
+            name for name in passed_cases if isinstance(name, str) and name in EXPECTED_CASES
+        ] if isinstance(passed_cases, list) else [],
+        "profiles": safe_profiles,
+    }
+
+
+def read_browser_progress(path: Path, mode: str) -> dict[str, object]:
+    try:
+        with path.open("rb") as source:
+            value = json.loads(source.read(4096))
+    except (OSError, UnicodeError, ValueError):
+        value = None
+    return safe_browser_progress(value, mode)
 
 
 def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_path: Path) -> dict:
-    global browser_stage, browser_exception_type
+    global browser_stage, browser_exception_type, browser_progress_record
     script = Path("/workspace/tests/tailscale-package-browser.mjs")
     if not script.is_file():
         browser_stage = "browser_runner"
         browser_exception_type = "BrowserScriptMissing"
         die("browser acceptance script is missing from exact candidate checkout")
-    browser_input = {**input_record, "mode": mode, "evidence_path": str(evidence_path)}
+    progress_path = package_root.parent / f"browser-progress-{mode}.json"
+    try:
+        progress_path.unlink()
+    except FileNotFoundError:
+        pass
+    browser_input = {
+        **input_record, "mode": mode, "evidence_path": str(evidence_path),
+        "progress_path": str(progress_path),
+    }
     try:
         completed = subprocess.run(
             ["node", str(script)], input=json.dumps(browser_input).encode(), stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=240, check=False,
+            stderr=subprocess.DEVNULL, timeout=180, check=False,
             env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright"},
         )
     except subprocess.TimeoutExpired as error:
-        browser_stage = "browser_runner"
+        browser_progress_record = read_browser_progress(progress_path, mode)
+        browser_stage = str(browser_progress_record["stage"])
         browser_exception_type = type(error).__name__
         die("persistent-profile browser acceptance exceeded its bounded runtime")
     # stdout is a bounded, sanitized JSON protocol, not Playwright's console.
@@ -1303,8 +1407,8 @@ def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_p
         browser_stage = "browser_runner"
         browser_exception_type = "BrowserProtocolError"
         die("browser acceptance evidence mode mismatch")
-    stage_value = value.get("stage")
-    browser_stage = stage_value if isinstance(stage_value, str) and stage_value in BROWSER_STAGES else "browser_runner"
+    browser_progress_record = safe_browser_progress(value, mode)
+    browser_stage = str(browser_progress_record["stage"])
     error_value = value.get("exception_type", "")
     browser_exception_type = error_value if isinstance(error_value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,47}", error_value) else ""
     if completed.returncode != 0 and not browser_exception_type:
@@ -1533,6 +1637,15 @@ def main() -> int:
             die("fixed production LocalAPI did not record conditional registration", "fixture_localapi_registration_missing")
         if WATCH_ID not in state.config.get("Foreground", {}):
             die("fixed production LocalAPI did not retain the exact session", "fixture_localapi_session_missing")
+        if not state.registration_healthz_probes:
+            die("registration fixture did not observe local health and bundle identity")
+        health_probe = state.registration_healthz_probes[0]
+        if (health_probe.get("http_status") != 200 or health_probe.get("result") != "response"
+                or any(health_probe.get(key) is not True for key in (
+                    "health_status_ok", "readiness_ready", "transport_tailscale", "version_matches",
+                    "revision_matches", "bundle_version_matches", "bundle_revision_matches", "origin_matches",
+                ))):
+            die("exact packaged local health and bundle identity were not ready at route registration", "fixture_registration_health_identity")
         browser_record = {
             "setup_url": link, "origin": origin, "profiles": str(temporary_root / "profiles"),
             "fake_herdr_operations": str(operations),
@@ -1775,6 +1888,7 @@ def main() -> int:
             "failure_code": failure_code,
             "browser_stage": browser_stage,
             "browser_exception_type": browser_exception_type,
+            "browser_progress": browser_progress_record,
             "expected_case_count": len(EXPECTED_CASES),
             "executed_case_count": len([name for name in EXPECTED_CASES if case_results.get(name) == "pass"]),
             "cases": [{"name": name, "result": case_results.get(name, "missing")} for name in EXPECTED_CASES],

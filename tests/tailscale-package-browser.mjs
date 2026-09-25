@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const require = createRequire('/workspace/frontend/package.json');
@@ -17,7 +17,7 @@ const cases = [];
 const record = (name, passed) => cases.push({ name, passed: Boolean(passed) });
 const authKey = 'herdr_device_auth_v1';
 const relaysKey = 'herdr_relays';
-const deadline = 45000;
+const deadline = 15000;
 
 function authFrom(localStorageValue) {
   const state = JSON.parse(localStorageValue || 'null');
@@ -25,16 +25,22 @@ function authFrom(localStorageValue) {
   return Object.values(state.relays).find((value) => value?.kind === 'credential') || null;
 }
 
-async function waitForCredential(page, role) {
-  await page.waitForFunction(({ key, expectedRole }) => {
-    try {
-      const state = JSON.parse(localStorage.getItem(key) || 'null');
-      const entries = Object.values(state?.relays || {});
-      return entries.some((entry) => entry?.kind === 'credential' && entry.role === expectedRole);
-    } catch {
-      return false;
-    }
-  }, { key: authKey, expectedRole: role }, { timeout: deadline });
+async function waitForCredential(page, role, profile = role) {
+  try {
+    await page.waitForFunction(({ key, expectedRole }) => {
+      try {
+        const state = JSON.parse(localStorage.getItem(key) || 'null');
+        const entries = Object.values(state?.relays || {});
+        return entries.some((entry) => entry?.kind === 'credential' && entry.role === expectedRole);
+      } catch {
+        return false;
+      }
+    }, { key: authKey, expectedRole: role }, { timeout: deadline });
+  } catch (error) {
+    await recordStorageSnapshot(profile, 'credential_wait_failed', page);
+    throw error;
+  }
+  await recordStorageSnapshot(profile, 'credentialed', page);
   const stored = await page.evaluate((key) => localStorage.getItem(key), authKey);
   return authFrom(stored);
 }
@@ -54,9 +60,118 @@ function fingerprint(value) {
   })).digest('hex');
 }
 
-async function openProfile(path, url) {
+const profileNames = new Set(['controller', 'reader']);
+const storageCheckpoints = new Set(['after_navigation', 'credential_wait_failed', 'credentialed']);
+const diagnosticCategories = new Set([
+  'websocket', 'network', 'storage', 'tls', 'type_error', 'reference_error',
+  'syntax_error', 'dom_exception', 'console_error', 'page_error',
+]);
+const profileDiagnostics = new Map();
+let progressWriteQueue = Promise.resolve();
+
+function classifyDiagnostic(message, errorName, fallback) {
+  const sample = String(message ?? '').slice(0, 2048);
+  const rules = [
+    [/websocket|web socket/i, 'websocket'],
+    [/fetch|network|net::err_|failed to load resource/i, 'network'],
+    [/localstorage|storage|quota/i, 'storage'],
+    [/certificate|tls|ssl|err_cert_/i, 'tls'],
+    [/typeerror/i, 'type_error'],
+    [/referenceerror/i, 'reference_error'],
+    [/syntaxerror/i, 'syntax_error'],
+  ];
+  for (const [pattern, category] of rules) if (pattern.test(sample)) return category;
+  if (errorName === 'TypeError') return 'type_error';
+  if (errorName === 'ReferenceError') return 'reference_error';
+  if (errorName === 'SyntaxError') return 'syntax_error';
+  if (errorName === 'DOMException') return 'dom_exception';
+  return fallback;
+}
+
+function incrementDiagnostic(profile, kind, category) {
+  const diagnostics = profileDiagnostics.get(profile);
+  if (!diagnostics || !diagnosticCategories.has(category)) return;
+  const counts = diagnostics[kind];
+  counts[category] = Math.min(16, (counts[category] || 0) + 1);
+  void writeProgress();
+}
+
+function incrementWebSocket(profile, kind) {
+  const diagnostics = profileDiagnostics.get(profile);
+  if (!diagnostics || !['attempts', 'closed', 'errors'].includes(kind)) return;
+  diagnostics.websockets[kind] = Math.min(16, diagnostics.websockets[kind] + 1);
+  void writeProgress();
+}
+
+function observePage(profile, page) {
+  const label = profileNames.has(profile) ? profile : 'controller';
+  const diagnostics = {
+    profile: label, storage: [], console_errors: {}, page_errors: {},
+    websockets: { attempts: 0, closed: 0, errors: 0 },
+  };
+  profileDiagnostics.set(label, diagnostics);
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return;
+    let text = '';
+    try { text = message.text().slice(0, 2048); } catch { /* category remains allowlisted */ }
+    incrementDiagnostic(label, 'console_errors', classifyDiagnostic(text, '', 'console_error'));
+  });
+  page.on('pageerror', (error) => {
+    let text = '';
+    let name = '';
+    try { text = String(error?.message ?? '').slice(0, 2048); } catch { /* category remains allowlisted */ }
+    try { name = String(error?.name ?? '').slice(0, 64); } catch { /* category remains allowlisted */ }
+    incrementDiagnostic(label, 'page_errors', classifyDiagnostic(text, name, 'page_error'));
+  });
+  page.on('websocket', (socket) => {
+    incrementWebSocket(label, 'attempts');
+    socket.on('close', () => incrementWebSocket(label, 'closed'));
+    socket.on('socketerror', () => incrementWebSocket(label, 'errors'));
+  });
+}
+
+async function recordStorageSnapshot(profile, checkpoint, page) {
+  const label = profileNames.has(profile) ? profile : 'controller';
+  const diagnostics = profileDiagnostics.get(label);
+  if (!diagnostics || !storageCheckpoints.has(checkpoint) || diagnostics.storage.length >= 8) return;
+  let storage;
+  try {
+    storage = await page.evaluate(({ auth, relays }) => {
+      const describe = (key) => {
+        const raw = localStorage.getItem(key);
+        if (raw === null) return { present: false, type: 'absent' };
+        try {
+          const value = JSON.parse(raw);
+          return { present: true, type: value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value };
+        } catch {
+          return { present: true, type: 'invalid_json' };
+        }
+      };
+      try {
+        return { available: true, device_auth: describe(auth), relays: describe(relays) };
+      } catch {
+        return {
+          available: false,
+          device_auth: { present: false, type: 'unavailable' },
+          relays: { present: false, type: 'unavailable' },
+        };
+      }
+    }, { auth: authKey, relays: relaysKey });
+  } catch {
+    storage = {
+      available: false,
+      device_auth: { present: false, type: 'unavailable' },
+      relays: { present: false, type: 'unavailable' },
+    };
+  }
+  diagnostics.storage.push({ checkpoint, ...storage });
+  await writeProgress();
+}
+
+async function openProfile(profile, path, url) {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const context = await chromium.launchPersistentContext(path, {
+    timeout: deadline,
     headless: true,
     viewport: { width: 412, height: 915 },
     deviceScaleFactor: 1,
@@ -64,9 +179,32 @@ async function openProfile(path, url) {
     // No ignoreHTTPSErrors and no certificate-ignore launch flags: the
     // disposable container trusts the fixture CA using its ordinary CA store.
   });
+  context.setDefaultTimeout(deadline);
+  context.setDefaultNavigationTimeout(deadline);
   const page = context.pages()[0] || await context.newPage();
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  observePage(profile, page);
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: deadline });
+  await recordStorageSnapshot(profile, 'after_navigation', page);
   return { context, page };
+}
+
+async function closeContextBounded(context) {
+  if (!context) return;
+  let timer;
+  const timedOut = await Promise.race([
+    context.close().then(() => false, () => false),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(true), 5000); }),
+  ]);
+  clearTimeout(timer);
+  if (!timedOut) return;
+  const browser = context.browser();
+  if (!browser) return;
+  let browserTimer;
+  await Promise.race([
+    browser.close().catch(() => {}),
+    new Promise((resolve) => { browserTimer = setTimeout(resolve, 2500); }),
+  ]);
+  clearTimeout(browserTimer);
 }
 
 async function waitForAgent(page) {
@@ -140,6 +278,47 @@ async function waitForSuccessfulOperation(path, expected) {
   return false;
 }
 
+let stage = 'browser_runner';
+const progressStages = new Set([
+  'browser_runner', 'controller_enrollment', 'controller_inventory', 'controller_command',
+  'reader_invitation', 'reader_enrollment', 'reader_read_only', 'credential_preservation', 'browser_complete',
+]);
+
+function profileEvidence() {
+  return [...profileDiagnostics.values()].map((profile) => ({
+    profile: profile.profile,
+    storage: profile.storage.slice(0, 8),
+    console_errors: { ...profile.console_errors },
+    page_errors: { ...profile.page_errors },
+    websockets: { ...profile.websockets },
+  }));
+}
+
+function writeProgress() {
+  if (typeof input.progress_path !== 'string') return Promise.resolve();
+  const progress = {
+    mode: ['enroll', 'reprint', 'restart'].includes(input.mode) ? input.mode : 'other',
+    stage: progressStages.has(stage) ? stage : 'browser_runner',
+    passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name),
+    profiles: profileEvidence(),
+  };
+  const temporary = `${input.progress_path}.tmp`;
+  progressWriteQueue = progressWriteQueue.catch(() => {}).then(async () => {
+    try {
+      await writeFile(temporary, JSON.stringify(progress), { mode: 0o600 });
+      await rename(temporary, input.progress_path);
+    } catch {
+      // Progress is optional, bounded diagnostic evidence; it never gates the flow.
+    }
+  });
+  return progressWriteQueue;
+}
+
+async function setStage(value) {
+  stage = progressStages.has(value) ? value : 'browser_runner';
+  await writeProgress();
+}
+
 async function initialEnrollment() {
   const profiles = input.profiles;
   const controllerPath = join(profiles, 'controller');
@@ -147,16 +326,16 @@ async function initialEnrollment() {
   let controller;
   let reader;
   try {
-    stage = 'controller_enrollment';
-    controller = await openProfile(controllerPath, input.setup_url);
-    const controllerCredential = await waitForCredential(controller.page, 'controller');
+    await setStage('controller_enrollment');
+    controller = await openProfile('controller', controllerPath, input.setup_url);
+    const controllerCredential = await waitForCredential(controller.page, 'controller', 'controller');
     record('launcher_generated_setup_link_enrolls_real_controller_profile', controllerCredential?.role === 'controller');
 
     const controllerReadBaseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
-    stage = 'controller_inventory';
+    await setStage('controller_inventory');
     await openFixtureAgent(controller.page);
     const readWorked = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', controllerReadBaseline + 1);
-    stage = 'controller_command';
+    await setStage('controller_command');
     const prompt = controller.page.getByRole('textbox', { name: 'Prompt' });
     await prompt.fill('package acceptance harmless ping');
     await controller.page.getByRole('button', { name: 'Send prompt' }).click();
@@ -167,7 +346,7 @@ async function initialEnrollment() {
 
     await controller.page.getByRole('button', { name: /Settings/ }).click();
     await controller.page.getByRole('heading', { name: 'Devices' }).waitFor({ state: 'visible', timeout: deadline });
-    stage = 'reader_invitation';
+    await setStage('reader_invitation');
     await controller.page.getByRole('button', { name: 'Invite Device' }).click();
     await controller.page.getByLabel('Device name').fill('Package reader');
     await controller.page.getByLabel('Role').selectOption('reader');
@@ -184,10 +363,10 @@ async function initialEnrollment() {
       || !invitationParams.get('relay')?.startsWith('wss://')) {
       throw new Error('live controller UI did not produce the source-format one-use invitation fragment');
     }
-    stage = 'reader_enrollment';
-    reader = await openProfile(readerPath, readerSetupURL);
-    const readerCredential = await waitForCredential(reader.page, 'reader');
-    stage = 'reader_read_only';
+    await setStage('reader_enrollment');
+    reader = await openProfile('reader', readerPath, readerSetupURL);
+    const readerCredential = await waitForCredential(reader.page, 'reader', 'reader');
+    await setStage('reader_read_only');
     const readerReadBaseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
     await openFixtureAgent(reader.page);
     const readerRead = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', readerReadBaseline + 1);
@@ -202,7 +381,7 @@ async function initialEnrollment() {
     const after = await operationCount(input.fake_herdr_operations, 'agent prompt');
     record('second_persistent_profile_enrolls_reader_and_read_only_is_enforced', readerCredential?.role === 'reader' && readerRead && denied && before === after);
 
-    stage = 'credential_preservation';
+    await setStage('credential_preservation');
     const controllerNow = await credential(controller.page);
     const readerNow = await credential(reader.page);
     await mkdir(profiles, { recursive: true, mode: 0o700 });
@@ -220,22 +399,22 @@ async function initialEnrollment() {
       credentials_preserved: true,
     };
   } finally {
-    await reader?.context.close().catch(() => {});
-    await controller?.context.close().catch(() => {});
+    await closeContextBounded(reader?.context);
+    await closeContextBounded(controller?.context);
   }
 }
 
 async function preserveExistingProfiles() {
   const profiles = input.profiles;
-  stage = 'credential_preservation';
+  await setStage('credential_preservation');
   const before = JSON.parse(await readFile(join(profiles, '.credential-fingerprints'), 'utf8'));
   let controller;
   let reader;
   try {
-    controller = await openProfile(join(profiles, 'controller'), input.origin + '/');
-    reader = await openProfile(join(profiles, 'reader'), input.origin + '/');
-    const controllerCredential = await waitForCredential(controller.page, 'controller');
-    const readerCredential = await waitForCredential(reader.page, 'reader');
+    controller = await openProfile('controller', join(profiles, 'controller'), input.origin + '/');
+    reader = await openProfile('reader', join(profiles, 'reader'), input.origin + '/');
+    const controllerCredential = await waitForCredential(controller.page, 'controller', 'controller');
+    const readerCredential = await waitForCredential(reader.page, 'reader', 'reader');
     const same = fingerprint(controllerCredential) === before.controller && fingerprint(readerCredential) === before.reader;
     await waitForAgent(controller.page);
     await waitForAgent(reader.page);
@@ -246,29 +425,42 @@ async function preserveExistingProfiles() {
       credentials_preserved: same,
     };
   } finally {
-    await reader?.context.close().catch(() => {});
-    await controller?.context.close().catch(() => {});
+    await closeContextBounded(reader?.context);
+    await closeContextBounded(controller?.context);
   }
 }
 
-let stage = 'browser_runner';
+const jsDeadlineTimer = setTimeout(() => {
+  const timeoutRecord = {
+    mode: ['enroll', 'reprint', 'restart'].includes(input.mode) ? input.mode : 'other',
+    result: 'fail',
+    passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name),
+    exception_type: 'BrowserBudgetTimeout',
+    stage: progressStages.has(stage) ? stage : 'browser_runner',
+    profiles: profileEvidence(),
+  };
+  process.stdout.write(JSON.stringify(timeoutRecord) + '\n', () => process.exit(1));
+}, 150000);
+
 let result = { mode: input.mode, result: 'fail', passed_cases: [] };
 try {
   if (input.mode === 'enroll') {
-    stage = 'controller_enrollment';
+    await setStage('controller_enrollment');
     const values = await initialEnrollment();
     result = { mode: input.mode, ...values, result: cases.length === 3 && cases.every((entry) => entry.passed) ? 'pass' : 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name) };
   } else if (input.mode === 'reprint' || input.mode === 'restart') {
-    stage = 'credential_preservation';
+    await setStage('credential_preservation');
     const values = await preserveExistingProfiles();
     result = { mode: input.mode, ...values, result: cases.length === 1 && cases.every((entry) => entry.passed) ? 'pass' : 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name) };
   } else throw new Error('unknown browser acceptance mode');
-  if (result.result === 'pass') stage = 'browser_complete';
+  if (result.result === 'pass') await setStage('browser_complete');
   else result.exception_type = 'BrowserAssertionError';
 } catch (error) {
   const type = error && typeof error === 'object' && 'constructor' in error && typeof error.constructor?.name === 'string'
     ? error.constructor.name : 'BrowserError';
   result = { mode: input.mode, result: 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name), exception_type: /^[A-Za-z][A-Za-z0-9]{0,47}$/.test(type) ? type : 'BrowserError' };
 }
-process.stdout.write(JSON.stringify({ ...result, stage }) + '\n');
+clearTimeout(jsDeadlineTimer);
+await writeProgress();
+process.stdout.write(JSON.stringify({ ...result, stage, profiles: profileEvidence() }) + '\n');
 process.exitCode = result.result === 'pass' ? 0 : 1;
