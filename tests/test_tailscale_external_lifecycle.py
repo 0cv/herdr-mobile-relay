@@ -530,7 +530,10 @@ def assert_forced_shutdown_recovery(
         fail("forced shutdown recovery contract failed")
 
     if process.returncode != expected_status or expected_status == 0:
-        refuse("recovery_launcher_status_mismatch")
+        actual = process.returncode
+        if actual is None or actual < -128 or actual > 255:
+            refuse("recovery_launcher_status_invalid")
+        refuse(f"recovery_launcher_status_{actual}_expected_{expected_status}")
     if b"recovery evidence was retained and any control socket was left untouched" not in output:
         refuse("recovery_retention_message_missing")
     session_path = config_dir / "tailscale-external-session.env"
