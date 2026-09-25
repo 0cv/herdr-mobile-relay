@@ -83,7 +83,9 @@ for WRAPPER in \
     setup-link.sh \
     stable-setup.sh \
     stable-teardown.sh \
-    start.sh; do
+    start.sh \
+    tailscale.sh \
+    tailscale-external.sh; do
     printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER"
 done
 
