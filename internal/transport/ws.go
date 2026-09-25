@@ -26,17 +26,18 @@ const (
 )
 
 type ClientConn struct {
-	id        string
-	conn      FrameConn
-	transport string
-	buf       *sendBuffer
-	secure    *e2eeSession
-	identity  AuthenticatedIdentity
-	logger    *slog.Logger
-	ctx       context.Context
-	cancel    context.CancelFunc
-	done      chan struct{}
-	closeOne  sync.Once
+	id             string
+	conn           FrameConn
+	transport      string
+	buf            *sendBuffer
+	secure         *e2eeSession
+	identity       AuthenticatedIdentity
+	logger         *slog.Logger
+	ctx            context.Context
+	cancel         context.CancelFunc
+	done           chan struct{}
+	closeOne       sync.Once
+	disconnectOnce sync.Once
 }
 
 func (c *ClientConn) Identity() (AuthenticatedIdentity, bool) {
@@ -80,28 +81,29 @@ type ConnectedIdentity struct {
 }
 
 type Hub struct {
-	cfg             *config.Config
-	logger          *slog.Logger
-	register        registrationLock
-	mu              sync.RWMutex
-	clients         map[string]*ClientConn
-	pending         map[FrameConn]struct{}
-	blocked         map[string]uint64
-	authResolver    E2EEAuthResolver
-	nextID          int
-	handler         MessageHandler
-	onConnect       ConnectHandler
-	onDisconnect    DisconnectHandler
-	closing         bool
-	accepting       bool
-	receiptSequence atomic.Uint64
-	receiptMu       sync.Mutex
-	orderedIngress  chan inboundMessage
-	handlerSlots    chan struct{}
-	connectionWG    sync.WaitGroup
-	handlerWG       sync.WaitGroup
-	ingressDone     chan struct{}
-	closeIngress    sync.Once
+	cfg              *config.Config
+	logger           *slog.Logger
+	register         registrationLock
+	mu               sync.RWMutex
+	clients          map[string]*ClientConn
+	pending          map[FrameConn]struct{}
+	blocked          map[string]uint64
+	authResolver     E2EEAuthResolver
+	nextID           int
+	handler          MessageHandler
+	onConnect        ConnectHandler
+	onDisconnect     DisconnectHandler
+	closing          bool
+	accepting        bool
+	admissionRevoked bool
+	receiptSequence  atomic.Uint64
+	receiptMu        sync.Mutex
+	orderedIngress   chan inboundMessage
+	handlerSlots     chan struct{}
+	connectionWG     sync.WaitGroup
+	handlerWG        sync.WaitGroup
+	ingressDone      chan struct{}
+	closeIngress     sync.Once
 
 	ingressHighWater      atomic.Uint64
 	ingressRejected       atomic.Uint64
@@ -216,9 +218,9 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 	ctx, cancel := context.WithCancel(parent)
 	h.register.Lock()
 	h.mu.Lock()
-	delete(h.pending, conn)
 	blockedVersion := h.blocked[identity.CredentialID]
-	if h.closing || !h.accepting || (identity.CredentialID != "" && identity.CredentialVersion <= blockedVersion) {
+	if h.closing || !h.accepting || h.admissionRevoked || (identity.CredentialID != "" && identity.CredentialVersion <= blockedVersion) {
+		delete(h.pending, conn)
 		h.mu.Unlock()
 		h.register.Unlock()
 		cancel()
@@ -245,12 +247,25 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 		h.onConnect(client)
 	}
 	if client.ctx.Err() != nil {
+		h.mu.Lock()
+		delete(h.pending, conn)
+		h.mu.Unlock()
 		h.register.Unlock()
+		cancel()
 		conn.CloseNow()
 		<-client.done
 		return
 	}
 	h.mu.Lock()
+	delete(h.pending, conn)
+	if h.closing || !h.accepting || h.admissionRevoked || client.ctx.Err() != nil {
+		h.mu.Unlock()
+		h.register.Unlock()
+		cancel()
+		conn.CloseNow()
+		<-client.done
+		return
+	}
 	h.clients[clientID] = client
 	h.mu.Unlock()
 	h.register.Unlock()
@@ -662,7 +677,7 @@ func observeAtomicMax(target *atomic.Uint64, value uint64) {
 	}
 }
 
-func (h *Hub) removeClient(client *ClientConn) {
+func (h *Hub) detachClient(client *ClientConn) {
 	client.closeOne.Do(func() {
 		h.mu.Lock()
 		delete(h.clients, client.id)
@@ -670,6 +685,12 @@ func (h *Hub) removeClient(client *ClientConn) {
 		client.cancel()
 		client.buf.Close()
 		h.logger.Info("client disconnected", "client_id", client.id, "transport", client.transport)
+	})
+}
+
+func (h *Hub) removeClient(client *ClientConn) {
+	h.detachClient(client)
+	client.disconnectOnce.Do(func() {
 		if h.onDisconnect != nil {
 			h.onDisconnect(client)
 		}
@@ -704,6 +725,11 @@ func (h *Hub) SetAcceptingContext(ctx context.Context, accepting bool) error {
 		return err
 	}
 	h.mu.Lock()
+	if accepting && h.admissionRevoked {
+		h.mu.Unlock()
+		h.register.Unlock()
+		return errors.New("Hub admission was permanently revoked")
+	}
 	h.accepting = accepting
 	var clients []*ClientConn
 	var pending []FrameConn
@@ -727,6 +753,35 @@ func (h *Hub) SetAcceptingContext(ctx context.Context, accepting bool) error {
 		h.removeClient(client)
 	}
 	return nil
+}
+
+// RevokeAdmission permanently closes this Hub's admission without waiting for
+// the registration barrier. It is the emergency fence for canceled managed
+// retirement: existing sessions are closed synchronously and a concurrent
+// handshake cannot be registered after the latch is set.
+func (h *Hub) RevokeAdmission() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.admissionRevoked = true
+	h.accepting = false
+	clients := make([]*ClientConn, 0, len(h.clients))
+	for _, client := range h.clients {
+		clients = append(clients, client)
+	}
+	pending := make([]FrameConn, 0, len(h.pending))
+	for conn := range h.pending {
+		pending = append(pending, conn)
+	}
+	h.mu.Unlock()
+	for _, conn := range pending {
+		conn.CloseNow()
+	}
+	for _, client := range clients {
+		client.conn.CloseNow()
+		h.detachClient(client)
+	}
 }
 
 // DropConnections closes current clients without making the hub unavailable to

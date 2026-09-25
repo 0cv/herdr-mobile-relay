@@ -14,6 +14,12 @@ import (
 // completed owner and route validation yet.
 var ErrBootstrapGateClosed = errors.New("device authentication is temporarily unavailable")
 
+// ErrBootstrapGateCommittedRevoked means the durable invitation write returned
+// successfully, but the admission guard was revoked before the gate could
+// acknowledge it. Callers must retain recovery state rather than treating this
+// as a no-write refusal.
+var ErrBootstrapGateCommittedRevoked = errors.New("bootstrap invitation committed but admission was revoked")
+
 // BootstrapGate is the stable resolver installed in transport.Hub for a
 // managed Tailscale run. A required authority admission guard is composed only
 // from live channels exported by the real SessionAuthority; the guard reads
@@ -139,7 +145,7 @@ func (g *BootstrapGate) ArmBootstrapInvitation(secret []byte, name, locale strin
 	}
 	if g.revoked.Load() || g.admissionErrorLocked() != nil {
 		g.invitationOpen = false
-		return ErrBootstrapGateClosed
+		return errors.Join(ErrBootstrapGateClosed, ErrBootstrapGateCommittedRevoked)
 	}
 	return nil
 }

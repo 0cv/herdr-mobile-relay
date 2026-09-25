@@ -24,29 +24,43 @@ restarts the relay, and prints the phone QR; there is no second Quick Start step
 ## Tailscale Serve
 
 Choose **Tailscale Serve (foreground)**, or press `t` in the setup menu, when this
-computer already has Tailscale installed, running, and authenticated. The relay
-still binds only to `127.0.0.1`; the launcher verifies the node's authenticated
-`*.ts.net` identity and configures a temporary HTTPS Serve route to that loopback
-port. It never runs `tailscale login`, enables Funnel, resets devices, or replaces
-an existing Serve route. Existing Serve or Funnel configuration is treated as a
-conflict and is left untouched.
+computer already has a supported Tailscale Unix daemon installed, running, and
+authenticated. The relay binds only to `127.0.0.1`; the launcher performs a
+read-only identity/version/Serve/Funnel preflight, asks for per-run consent, then
+the relay process owns its LocalAPI watcher and conditionally manages the exact
+HTTPS route. It never runs `tailscale login`, invokes `tailscale serve`, enables
+Funnel, resets devices, adopts an existing route, or overwrites existing Serve
+configuration. Existing Serve or Funnel configuration is a refusal and is left
+untouched.
 
-This mode is deliberately foreground-only. The setup pane owns the relay, the
-Serve process, and the pairing-control socket; keep it open while using the
-phone. Ctrl-C removes only the verified route created by that run. Background
-service installation and phone-managed relay updates are refused while Tailscale
-Serve is selected, so stop the pane and remove the foreground selection before
-using the Cloudflare service/update path. A stopped Tailscale selection can be
-started again with the normal Quick Start action.
+This is a source-supported, not real-daemon-qualified, profile pinned to
+Tailscale v1.102.4: Linux and the open-source Darwin Unix-daemon socket. MacSys
+GUI, App Store, and other GUI/build variants are unsupported or unqualified; the
+adapter refuses unrecognized version metadata rather than guessing which daemon
+the CLI addresses. A running daemon and tailnet HTTPS reachability are operator
+prerequisites. No physical phone or real-daemon qualification is implied.
+
+This mode is deliberately foreground-only. The setup pane owns the relay,
+LocalAPI watch/session, conditional route, and private pairing-control socket;
+keep it open while using the phone. Ctrl-C requests authenticated retirement;
+the route, owner, and backend are not released unless route clearing and local
+watch closure are separately acknowledged. If cleanup is unresolved, the
+foreground owner/control and recovery evidence are retained for inspection.
+Background service installation and phone-managed relay updates are refused
+while Tailscale Serve is selected, so stop the pane and remove the foreground
+selection before using the Cloudflare service/update path.
 
 The printed link uses the verified Tailscale HTTPS origin and its packaged
-Herdr phone frontend by default. If this relay already has a shared app origin,
-the setup flow keeps it; choose the Tailscale origin or another installed Herdr
-app to switch explicitly. `HERDR_TAILSCALE_HTTPS_PORT` can select a free HTTPS
-Serve port (the default is `443`); `HERDR_TAILSCALE_BIN` can point at a
-non-default CLI. For isolated development certificate testing only,
-`HERDR_TAILSCALE_CA_FILE` supplies a CA file to the launcher's health check; it
-is never an insecure TLS bypass.
+Herdr phone frontend by default. A reused or explicitly selected app origin is
+checked with normal TLS hostname verification and must serve this release's
+complete web bundle before an invitation is armed. If this relay already has a
+shared app origin, the setup flow keeps it; choose the Tailscale origin or
+another installed Herdr app to switch explicitly. `HERDR_TAILSCALE_HTTPS_PORT`
+can select a free HTTPS Serve port (the default is `443`);
+`HERDR_TAILSCALE_BIN` can point at a non-default CLI. Public HTTPS checks use
+the operating system's normal
+certificate and hostname verification; the launcher has no certificate-bypass
+or custom-CA option.
 
 Tailscale Serve therefore needs no separately hosted app for a new configuration.
 Tailscale must be installed and authenticated manually; the relay does not

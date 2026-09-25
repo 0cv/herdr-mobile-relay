@@ -408,6 +408,22 @@ func sameManagedStoreSnapshot(a, b managedStoreSnapshot) bool {
 	return os.SameFile(a.fileInfo, b.fileInfo) && a.fileMode == b.fileMode && bytes.Equal(a.fileBytes, b.fileBytes)
 }
 
+// sameManagedStoreContents checks rollback fidelity while allowing the file
+// inode to change: restoring a prior snapshot uses atomic replacement, so the
+// prior bytes and modes are preserved in a new, verified file identity.
+func sameManagedStoreContents(a, b managedStoreSnapshot) bool {
+	if a.dirExists != b.dirExists || a.fileExists != b.fileExists {
+		return false
+	}
+	if a.dirExists && (!os.SameFile(a.dirInfo, b.dirInfo) || a.dirMode != b.dirMode) {
+		return false
+	}
+	if !a.fileExists {
+		return true
+	}
+	return a.fileMode == b.fileMode && bytes.Equal(a.fileBytes, b.fileBytes)
+}
+
 func validateManagedStoreDirectory(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {

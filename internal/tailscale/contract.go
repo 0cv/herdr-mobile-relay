@@ -545,6 +545,36 @@ func validateVersion(data []byte, statusVersion string) error {
 	return nil
 }
 
+// ManagedRouteMatches verifies the exact observed route shape for a managed
+// foreground launch. The route's nonempty session is only an observation; its
+// authority comes from the separately authenticated in-process SessionAuthority.
+func ManagedRouteMatches(inspection Inspection, origin string, httpsPort, backendPort int) bool {
+	if httpsPort < 1 || httpsPort > 65535 || backendPort < 1 || backendPort > 65535 {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	if parsed.Port() != "" {
+		port, err := strconv.Atoi(parsed.Port())
+		if err != nil || strconv.Itoa(port) != parsed.Port() || port != httpsPort {
+			return false
+		}
+	} else if httpsPort != DefaultHTTPSPort {
+		return false
+	}
+	if !inspection.LoggedIn || inspection.BackendState != "Running" || inspection.Origin != origin ||
+		!inspection.ServeInspected || !inspection.ExposureComplete || !inspection.ServeConfigured ||
+		inspection.FunnelConfigured || inspection.ServeRouteCount != 1 || len(inspection.ObservedRoutes) != 1 {
+		return false
+	}
+	route := inspection.ObservedRoutes[0]
+	return route.Session != "" && route.Listener == "HTTPS" && route.Host == strings.ToLower(parsed.Hostname()) &&
+		route.Port == httpsPort && route.Handler == "Proxy" && route.Path == "/" &&
+		route.Backend == "http://127.0.0.1:"+strconv.Itoa(backendPort)
+}
+
 // ExactRouteMatch compares independently supplied authority, never discovers it.
 func ExactRouteMatch(observed ServeStatus, expected Route) bool {
 	if !observed.Complete || !observed.Configured || observed.FunnelConfigured || len(observed.ObservedRoutes) != 1 || expected.Session == "" || expected.Listener != "HTTPS" || expected.Handler != "Proxy" || expected.Path != "/" {

@@ -289,6 +289,27 @@ func run(args []string) (int, error) {
 		}
 		fmt.Println(string(encoded))
 		return 0, nil
+	case "tailscale-route-check":
+		routeFlags := flag.NewFlagSet("tailscale-route-check", flag.ContinueOnError)
+		routeFlags.SetOutput(os.Stderr)
+		binary := routeFlags.String("binary", "tailscale", "Tailscale CLI path")
+		origin := routeFlags.String("origin", "", "expected canonical HTTPS origin")
+		httpsPort := routeFlags.Int("https-port", tailscale.DefaultHTTPSPort, "expected Tailscale HTTPS Serve port")
+		backendPort := routeFlags.Int("backend-port", 0, "expected loopback relay backend port")
+		if err := routeFlags.Parse(args); err != nil {
+			return 2, err
+		}
+		if routeFlags.NArg() != 0 || *origin == "" || *backendPort < 1 || *backendPort > 65535 {
+			return 2, errors.New("usage: herdr-mobile-relay tailscale-route-check --origin HTTPS_ORIGIN --backend-port PORT [--binary PATH] [--https-port PORT]")
+		}
+		inspection, err := tailscale.Inspect(context.Background(), *binary, *httpsPort)
+		if err != nil {
+			return 1, err
+		}
+		if !tailscale.ManagedRouteMatches(inspection, *origin, *httpsPort, *backendPort) {
+			return 1, errors.New("observed Tailscale route does not match the authenticated managed relay")
+		}
+		return 0, nil
 	case "pairing-control":
 		controlFlags := flag.NewFlagSet("pairing-control", flag.ContinueOnError)
 		controlFlags.SetOutput(os.Stderr)
@@ -303,7 +324,7 @@ func run(args []string) (int, error) {
 			return 2, errors.New("usage: herdr-mobile-relay pairing-control --socket PATH --operation status|activate|arm_bootstrap|retire --run-id ID --instance ID")
 		}
 		response, err := localcontrol.Request(context.Background(), *socket, *op, *runID, *instance)
-		if err != nil {
+		if err != nil && response.Error == "" {
 			return 1, err
 		}
 		encoded, err := json.Marshal(response)
@@ -311,6 +332,8 @@ func run(args []string) (int, error) {
 			return 1, err
 		}
 		fmt.Println(string(encoded))
+		// Keep decoded negative replies available for identity and operation-
+		// outcome inspection. Transport/decode failures still exit non-zero.
 		return 0, nil
 	case "check-port":
 		portFlags := flag.NewFlagSet("check-port", flag.ContinueOnError)

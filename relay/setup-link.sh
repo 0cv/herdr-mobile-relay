@@ -38,6 +38,7 @@ if [ "$MODE" = tailscale ]; then
     SOCKET="$(tailscale_session_value "$SESSION_FILE" HERDR_RELAY_PAIRING_SOCKET || true)"
     RUN_ID="$(tailscale_session_value "$SESSION_FILE" HERDR_RELAY_RUN_ID || true)"
     ORIGIN="$(tailscale_session_value "$SESSION_FILE" HERDR_TAILSCALE_ORIGIN || true)"
+    SESSION_STAGE="$(tailscale_session_value "$SESSION_FILE" HERDR_RELAY_STAGE || true)"
     INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
     PERSISTED_TOKEN="$(env_file_value "$ENV_FILE" HERDR_RELAY_TOKEN)"
     [ -n "$PERSISTED_TOKEN" ] && [ "$PERSISTED_TOKEN" = "${HERDR_RELAY_TOKEN:-}" ] || {
@@ -50,6 +51,10 @@ if [ "$MODE" = tailscale ]; then
     esac
     [ -n "$RUN_ID" ] && [ -n "$ORIGIN" ] && [ -n "$INSTANCE" ] || {
         echo "✗ Tailscale session state is incomplete; no setup link was printed." >&2
+        exit 1
+    }
+    [ "$SESSION_STAGE" = ready ] || {
+        echo "✗ Tailscale activation/arm recovery is pending; no setup link was printed." >&2
         exit 1
     }
     TS_BIN="${HERDR_TAILSCALE_BIN:-$(command -v tailscale || true)}"
@@ -66,9 +71,9 @@ if [ "$MODE" = tailscale ]; then
         [ "$(json_bool_field "$INSPECTION" exposure_complete)" = true ] &&
         [ "$(json_bool_field "$INSPECTION" serve_configured)" = true ] &&
         [ "$(json_bool_field "$INSPECTION" funnel_configured)" = false ] &&
-        [ "$(json_number_field "$INSPECTION" serve_route_count)" = 1 ] &&
-        [ "$(json_bool_field "$INSPECTION" serve_route_owned)" = true ] || {
-        echo "✗ The owned Tailscale Serve route is not active; no link was printed." >&2
+        "$(relay_binary)" tailscale-route-check --binary "$TS_BIN" --origin "$ORIGIN" \
+            --https-port "$(tailscale_https_port)" --backend-port "${HERDR_RELAY_PORT:-8375}" || {
+        echo "✗ The authenticated managed route is not active; no link was printed." >&2
         exit 1
     }
     STATUS_RESPONSE="$(tailscale_control_request "$SOCKET" status "$RUN_ID" "$INSTANCE" 2>/dev/null)" || {
@@ -80,10 +85,6 @@ if [ "$MODE" = tailscale ]; then
         exit 1
     }
     CURL_ARGS=(--fail --silent --show-error --noproxy '*' --connect-timeout 3 --max-time 5 --max-redirs 0)
-    if [ -n "${HERDR_TAILSCALE_CA_FILE:-}" ]; then
-        [ -r "$HERDR_TAILSCALE_CA_FILE" ] || { echo "✗ Tailscale CA file is unreadable." >&2; exit 1; }
-        CURL_ARGS+=(--cacert "$HERDR_TAILSCALE_CA_FILE")
-    fi
     HEALTH="$(curl "${CURL_ARGS[@]}" "$ORIGIN/healthz" 2>/dev/null)" || {
         echo "✗ Trusted HTTPS health verification failed; no link was printed." >&2
         exit 1
@@ -97,6 +98,7 @@ if [ "$MODE" = tailscale ]; then
     }
     require_release_identity "$HEALTH" "$(relay_binary)" || exit 1
     PHONE_APP_BASE="$(choose_phone_app_base_url "$ORIGIN" "$ENV_FILE" tailscale)" || exit 1
+    verify_phone_app_bundle "$PHONE_APP_BASE" "$(relay_binary)" || exit 1
     REPRINT_OUTPUT=""
     REPRINT_STATUS=0
     REPRINT_OUTPUT="$("$(relay_binary)" managed-state reprint \

@@ -2,6 +2,7 @@ package localcontrol
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,6 +101,37 @@ func TestManagedLifecycleOperationsReturnRedactedOwnerState(t *testing.T) {
 	case <-retired:
 	case <-time.After(time.Second):
 		t.Fatal("retirement acknowledgement callback was not invoked")
+	}
+}
+
+func TestDecodedNegativeReplyPreservesRedactedOutcomeForCaller(t *testing.T) {
+	path := testSocketPath(t)
+	server, err := NewManaged(path, "run-negative", "instance-negative", Callbacks{
+		Status: func(context.Context) Status { return Status{OwnerHeld: true} },
+		Activate: func(context.Context) (Status, error) {
+			return Status{OwnerHeld: true, RegistrationOutcome: "settled-no-write"}, errors.New("fixture refusal")
+		},
+		Arm: func(context.Context) (Status, error) {
+			return Status{OwnerHeld: true, ArmOutcome: "not-committed"}, errors.New("fixture refusal")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.Run(ctx) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	response, err := Request(context.Background(), path, "activate", "run-negative", "instance-negative")
+	if err == nil || response.OK || response.Error != "pairing control operation was refused" ||
+		response.RegistrationOutcome != "settled-no-write" || response.RunID != "run-negative" || response.Instance != "instance-negative" {
+		t.Fatalf("decoded negative activation = %+v, %v", response, err)
+	}
+	response, err = Request(context.Background(), path, "arm_bootstrap", "run-negative", "instance-negative")
+	if err == nil || response.OK || response.Error != "bootstrap invitation could not be persisted" ||
+		response.ArmOutcome != "not-committed" || response.RunID != "run-negative" || response.Instance != "instance-negative" {
+		t.Fatalf("decoded negative arm = %+v, %v", response, err)
 	}
 }
 

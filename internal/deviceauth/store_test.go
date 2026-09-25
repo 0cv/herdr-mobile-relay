@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,6 +25,36 @@ func testCredential(deviceID, credentialID string, role Role) credentialRecord {
 			Role: role, Locale: "en", PairedAt: time.Unix(1, 0).UTC(), Version: 1,
 		},
 		Secret: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, secretBytes)),
+	}
+}
+
+func TestOrdinaryStoreRollbackRefreshesBaselineForRetry(t *testing.T) {
+	dir := testDeviceStoreDir(t)
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.persistFault = func(stage string) error {
+		if stage == "after-rename" {
+			return errors.New("injected post-rename persistence failure")
+		}
+		return nil
+	}
+	if _, err := store.CreateInvitation("first phone", RoleController, "en"); err == nil {
+		t.Fatal("injected post-rename persistence failure was ignored")
+	}
+	afterRollback, err := os.ReadFile(store.path)
+	if err != nil || !bytes.Equal(afterRollback, before) {
+		t.Fatalf("failed write did not restore prior bytes: equal=%t err=%v", bytes.Equal(afterRollback, before), err)
+	}
+
+	store.persistFault = nil
+	if _, err := store.CreateInvitation("retry phone", RoleController, "en"); err != nil {
+		t.Fatalf("legitimate write after verified rollback failed: %v", err)
 	}
 }
 

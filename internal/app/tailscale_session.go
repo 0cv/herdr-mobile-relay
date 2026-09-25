@@ -49,7 +49,7 @@ func prepareManagedTailscale(cfg *config.Config) (*tailscale.SessionAuthority, e
 	}
 	if !inspection.LoggedIn || !inspection.ServeInspected || !inspection.ExposureComplete ||
 		inspection.ServeConfigured || inspection.FunnelConfigured || inspection.ServeRouteCount != 0 ||
-		len(inspection.ServeRoutes) != 0 || inspection.ServeRouteOwned {
+		len(inspection.ServeRoutes) != 0 {
 		return nil, errors.New("Tailscale is not in the supported authenticated, empty-Serve state")
 	}
 	if inspection.Origin != cfg.TailscaleOrigin || inspection.StatusVersion == "" || len(inspection.VersionMetadata) == 0 {
@@ -174,17 +174,22 @@ func (s *Server) bindManagedAdmissionWatch() error {
 }
 
 func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, error) {
+	refused := func(outcome string, err error) (localcontrol.Status, error) {
+		status := s.pairingControlStatusContext(ctx)
+		status.ArmOutcome = outcome
+		return status, err
+	}
 	unlock, err := s.tailscaleOpMu.Lock(ctx)
 	if err != nil {
-		return s.pairingControlStatusContext(ctx), err
+		return refused("not-committed", err)
 	}
 	defer unlock()
 	if err := s.checkManagedTailscaleReadiness(ctx, true); err != nil {
 		s.quarantineTailscale()
-		return s.pairingControlStatusContext(ctx), err
+		return refused("not-committed", err)
 	}
 	if err := s.ensureManagedDeviceStore(); err != nil {
-		return s.pairingControlStatusContext(ctx), err
+		return refused("not-committed", err)
 	}
 
 	// Pairing revocation, the final owner validation, durable arm and Hub
@@ -194,6 +199,8 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 	s.pairingAdmissionMu.Lock()
 	defer s.pairingAdmissionMu.Unlock()
 	var invitation deviceauth.BootstrapStatus
+	armOutcome := "not-committed"
+	armCommitted := false
 	err = s.tailscaleSession.WithValidatedRoute(ctx, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -225,8 +232,15 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 			}
 			return s.hub.SetAcceptingContext(ctx, true)
 		}); err != nil {
+			if errors.Is(err, deviceauth.ErrManagedArmRecovery) {
+				armOutcome = "unresolved"
+			} else if errors.Is(err, deviceauth.ErrBootstrapGateCommittedRevoked) {
+				armOutcome = "committed"
+			}
 			return err
 		}
+		armCommitted = true
+		armOutcome = "committed"
 		invitation = s.deviceStore().BootstrapStatus()
 		s.mu.Lock()
 		s.quarantined = false
@@ -234,11 +248,14 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 		return nil
 	})
 	if err != nil {
+		if armCommitted {
+			armOutcome = "committed"
+		}
 		if errors.Is(err, deviceauth.ErrManagedArmRecovery) || s.tailscaleSession.Status().Invalidated || s.tailscaleSession.Status().Quarantined || errors.Is(err, deviceauth.ErrBootstrapGateClosed) {
 			s.quarantineTailscale()
 		}
 		s.recordSafeError("bootstrap invitation arm failed", err)
-		return s.pairingControlStatusContext(ctx), err
+		return refused(armOutcome, err)
 	}
 
 	// The durable invitation was snapshotted inside the authority-locked
@@ -260,6 +277,7 @@ func (s *Server) armManagedTailscale(ctx context.Context) (localcontrol.Status, 
 		Revision:                     s.revision,
 		InvitationArmed:              invitation.Armed,
 		InvitationPending:            invitation.Pending,
+		ArmOutcome:                   "committed",
 	}
 	if s.webH != nil {
 		status.BundleHash = s.webH.BundleHash()
@@ -518,11 +536,7 @@ func (s *Server) quarantineTailscaleLocked() {
 	s.quarantined = true
 	s.mu.Unlock()
 	if s.hub != nil {
-		unlock, err := s.admissionTransitionMu.Lock(context.Background())
-		if err == nil {
-			s.hub.SetAccepting(false)
-			unlock()
-		}
+		s.hub.RevokeAdmission()
 	}
 }
 
@@ -539,12 +553,11 @@ func (s *Server) quarantineTailscaleContext(ctx context.Context) error {
 	if s.hub == nil {
 		return nil
 	}
-	unlock, err := s.admissionTransitionMu.Lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	return s.hub.SetAcceptingContext(ctx, false)
+	// Fence admission and disconnect already-authenticated sessions before
+	// waiting on the context-bound lifecycle lock. A timeout must not return
+	// with an existing Hub client still admitted to the managed backend.
+	s.hub.RevokeAdmission()
+	return nil
 }
 
 // RetireManagedTailscale revokes pairing first, then asks the real in-process
@@ -555,8 +568,8 @@ func (s *Server) RetireManagedTailscale(ctx context.Context) error {
 	if s == nil || s.tailscaleSession == nil || ctx == nil {
 		return errors.New("managed Tailscale session is unavailable")
 	}
-	// Revoke authentication and inert HTTP first, then bound both the Hub
-	// handoff barrier and lifecycle-operation lock by the retirement context.
+	// Revoke authentication and inert HTTP first, then establish the Hub
+	// admission fence before waiting on the context-bound lifecycle lock.
 	if err := s.quarantineTailscaleContext(ctx); err != nil {
 		return fmt.Errorf("close managed Tailscale admission before retirement: %w", err)
 	}
@@ -647,6 +660,7 @@ func (s *Server) controlStatus(ctx context.Context) localcontrol.Status {
 	status.RouteCleared = ownerState.RouteCleared
 	status.LocalWatchClosed = ownerState.LocalWatchClosed
 	status.RemoteWatchRetirementUnknown = ownerState.RemoteWatchRetirementUnknown
+	status.RegistrationOutcome = ownerState.RegistrationOutcome
 	if ownerState.Active && !status.Quarantined && status.OwnerHeld && status.LocalReady {
 		validateCtx, cancel := context.WithTimeout(ctx, localcontrol.StatusTimeout)
 		err := s.checkManagedTailscaleReadiness(validateCtx, false)

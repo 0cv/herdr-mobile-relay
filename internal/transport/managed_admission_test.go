@@ -57,6 +57,52 @@ func TestHubAdmissionTransitionHonorsCallerDeadlineWithoutQueuedMutation(t *test
 	}
 }
 
+func TestHubAdmissionRevocationClosesConnectedClientsWithoutRegistrationBarrier(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	conn := newInertFrameConn()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		hub.Serve(context.Background(), conn)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for hub.ClientCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := hub.ClientCount(); got != 1 {
+		t.Fatalf("connected clients before revocation = %d, want 1", got)
+	}
+
+	// A normal admission transition can wait behind this lock; the emergency
+	// retirement fence must still close authenticated existing sessions now.
+	hub.register.Lock()
+	hub.RevokeAdmission()
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		hub.register.Unlock()
+		t.Fatal("admission revocation left an existing client connected")
+	}
+	if got := hub.ClientCount(); got != 0 {
+		hub.register.Unlock()
+		t.Fatalf("connected clients after revocation = %d, want 0", got)
+	}
+	hub.register.Unlock()
+	if err := hub.SetAcceptingContext(context.Background(), true); err == nil {
+		t.Fatal("permanently revoked Hub admission was reopened")
+	}
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("revoked connection did not finish")
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	if err := hub.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("hub shutdown: %v", err)
+	}
+}
+
 func TestManagedHubAdmissionClosedBeforeHandshake(t *testing.T) {
 	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hub.SetAccepting(false)

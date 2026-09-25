@@ -1418,6 +1418,28 @@ require_release_identity() {
     return 0
 }
 
+# Verify the selected phone-app origin against the release's extracted web
+# bundle using system TLS and hostname validation before any Tailscale invite
+# is armed. Suppress verifier diagnostics so operator URLs stay out of logs.
+verify_phone_app_bundle() {
+    local origin="$1"
+    local binary="${2:-}"
+    local identity version revision web_root
+
+    [ -n "$binary" ] && [ -x "$binary" ] || binary="$(relay_binary)" || return 1
+    identity="$("$binary" version --json 2>/dev/null)" || return 1
+    version="$(json_string_field "$identity" version "$binary")"
+    revision="$(json_string_field "$identity" revision "$binary")"
+    [ -n "$version" ] && [ -n "$revision" ] || return 1
+    web_root="${HERDR_WEB_ROOT:-$(dirname "$binary")/web}"
+    if ! "$binary" verify-public --web-root "$web_root" --origin "$origin" \
+        --version "$version" --revision "$revision" >/dev/null 2>&1; then
+        echo "✗ The selected phone-app origin does not serve this release's verified Herdr bundle." >&2
+        return 1
+    fi
+    return 0
+}
+
 # Reads the relay's own /healthz gateway object, which reports
 # {"enabled":bool,"registered":bool,"relay_id":"...","clients":int}. Only the
 # registered flag is echoed; the relay id stays out of terminal output.

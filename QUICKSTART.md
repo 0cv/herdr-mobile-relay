@@ -90,14 +90,19 @@ own gateway.
 
 ## Use Tailscale Serve
 
-If Tailscale is already installed, running, and authenticated on the computer,
-choose **Tailscale Serve (foreground)** in the setup menu (or press `t`). The
-relay stays on `127.0.0.1`, and the launcher verifies the authenticated node
-before exposing it through a temporary tailnet HTTPS Serve route. It does not
-run `tailscale login`, enable Funnel, or overwrite an existing Serve route.
+If a supported Tailscale Unix daemon is already installed, running, and
+authenticated on the computer, choose **Tailscale Serve (foreground)** in the
+setup menu (or press `t`). The relay stays on `127.0.0.1`, and after read-only
+preflight and per-run consent the relay process owns its temporary HTTPS Serve
+route through LocalAPI. It does not run `tailscale login`, invoke `tailscale serve`,
+enable Funnel, adopt a route, or overwrite existing Serve configuration.
+The adapter is pinned to Tailscale v1.102.4; MacSys GUI, App Store, and other
+GUI/build variants are unsupported or unqualified. See the platform limits in
+[Transports](docs/transports.md#tailscale-serve).
 
-Keep this pane open: it owns the relay, Serve session, and pairing socket. Ctrl-C
-stops the relay and removes only the route verified as belonging to this run.
+Keep this pane open: it owns the relay, LocalAPI watch/session, Serve route, and
+private pairing socket. Ctrl-C requests authenticated retirement; cleanup remains
+quarantined if route clearing and local watch closure cannot both be verified.
 Background service installation and phone-managed updates are intentionally
 unavailable while this transport is selected. The verified Tailscale HTTPS
 origin serves the packaged Herdr phone frontend by default. If this relay

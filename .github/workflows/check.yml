@@ -243,6 +243,7 @@ jobs:
           test ! -e .env
           env -i \
             HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH=/usr/bin:/bin \
+            HERDR_TAILSCALE_LAUNCHER_CI=1 \
             BASH_ENV=/dev/null ENV=/dev/null \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
             /usr/bin/make PATH=/usr/bin:/bin \

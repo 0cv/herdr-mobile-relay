@@ -43,6 +43,8 @@ type Status struct {
 	RouteCleared                 bool   `json:"route_cleared"`
 	LocalWatchClosed             bool   `json:"local_watch_closed"`
 	RemoteWatchRetirementUnknown bool   `json:"remote_watch_retirement_unknown"`
+	RegistrationOutcome          string `json:"registration_outcome,omitempty"`
+	ArmOutcome                   string `json:"arm_outcome,omitempty"`
 	RunID                        string `json:"run_id"`
 	Instance                     string `json:"instance"`
 	Transport                    string `json:"transport,omitempty"`
@@ -354,6 +356,8 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 			status, callbackErr = s.callbacks.Retire(opCtx)
 		}
 	}
+	status.RunID = s.runID
+	status.Instance = s.instance
 	if callbackErr != nil {
 		message := "pairing control operation was refused"
 		if incoming.Op == "arm_bootstrap" {
@@ -361,11 +365,9 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		} else if errors.Is(callbackErr, errUnsupportedOperation) {
 			message = "unsupported pairing control operation"
 		}
-		s.writeResponse(connection, Response{Error: message})
+		s.writeResponse(connection, Response{Error: message, Status: status})
 		return
 	}
-	status.RunID = s.runID
-	status.Instance = s.instance
 	if incoming.Op == "arm_bootstrap" && (!status.InvitationArmed || status.InvitationExpiresAt == "") {
 		s.writeResponse(connection, Response{Error: "bootstrap invitation persistence was not acknowledged"})
 		return

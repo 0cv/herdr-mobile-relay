@@ -90,7 +90,7 @@ jobs:
           set -euo pipefail
           go build -trimpath -o "$RUNNER_TEMP/herdr-mobile-relay-supervisor" ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/go-build.log"
 
-      - name: Run gated inert-fixture Darwin lifecycle tests
+      - name: Run managed Tailscale launcher lifecycle fixtures
         id: darwin_lifecycle
         if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' && steps.supervisor_build.outcome == 'success' }}
         continue-on-error: true
@@ -105,12 +105,11 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-          supervisor = Path(os.environ["RUNNER_TEMP"]) / "herdr-mobile-relay-supervisor"
           env = os.environ.copy()
           env.update({
               "HERDR_S9B3_DISPOSABLE_DARWIN": "1",
               "HERDR_S9B3_SOURCE": str(root),
-              "HERDR_S9B3_SUPERVISOR": str(supervisor),
+              "HERDR_TAILSCALE_LAUNCHER_CI": "1",
           })
           command = [sys.executable, str(root / "tests/test_tailscale_process_groups_darwin.py"), "-v"]
           child = subprocess.Popen(command, cwd=root, env=env, start_new_session=True)
@@ -183,17 +182,15 @@ jobs:
               ("relay_control_not_ready", b"Managed relay pairing control did not become ready"),
               ("relay_endpoint_not_acknowledged", b"Managed relay did not acknowledge a bound HTTP endpoint"),
               ("relay_owner_capture_failure", b"Could not capture the relay's active Bash job generation"),
-              ("serve_owner_capture_failure", b"Could not capture Tailscale Serve's active Bash job generation"),
-              ("serve_exit_before_route", b"Tailscale Serve exited before its route became ready"),
-              ("serve_route_not_observed", b"Tailscale Serve did not report the owned route"),
+              ("managed_route_mismatch", b"Fresh Tailscale route observation did not match the exact managed backend"),
               ("trusted_https_identity_failure", b"Trusted HTTPS identity verification failed"),
               ("https_instance_mismatch", b"HTTPS health belongs to a different relay instance"),
               ("https_run_mismatch", b"HTTPS health belongs to a different foreground run"),
               ("https_origin_mismatch", b"HTTPS health did not identify the verified Tailscale origin"),
-              ("invitation_not_armed", b"relay did not acknowledge persistent invitation arming"),
-              ("serve_route_no_longer_active", b"The owned Tailscale Serve route is no longer active"),
-              ("serve_cleanup_unverified", b"Could not verify Tailscale Serve/Funnel state during cleanup"),
-              ("child_cleanup_unverified", b"Child cleanup could not verify a managed generation"),
+              ("invitation_arm_unresolved", b"Bootstrap arm response did not prove durable invitation and managed-route readiness"),
+              ("managed_route_lost", b"Managed Tailscale readiness or exact route changed"),
+              ("retirement_unacknowledged", b"Authenticated retirement did not separately acknowledge route clear and local watch closure"),
+              ("child_cleanup_unverified", b"Relay did not exit after retirement acknowledgement"),
           )
 
           def real_directory(path):
@@ -266,7 +263,7 @@ jobs:
                           if scanned > MAX_TMP_ENTRIES:
                               limited_scan = True
                               break
-                          if not entry.name.startswith("s9d-"):
+                          if not entry.name.startswith("herdr-tailscale-launcher-"):
                               continue
                           try:
                               info = entry.stat(follow_symlinks=False)
@@ -287,7 +284,8 @@ jobs:
                   root = temp_root / name
                   if not owned_directory(root):
                       continue
-                  launcher_state, launcher_size, launcher_data, launcher_truncated = read_log(root / "launcher.log", MAX_TOTAL_BYTES - total_read)
+                  # Never read stdout: it intentionally contains the private setup URL.
+                  launcher_state, launcher_size, launcher_data, launcher_truncated = read_log(root / "launcher.stderr", MAX_TOTAL_BYTES - total_read)
                   total_read += len(launcher_data)
                   for label, marker in MARKERS:
                       if marker in launcher_data:
@@ -579,7 +577,7 @@ jobs:
             sudo bwrap "${sandbox[@]}" \
               --setenv HERDR_S9B3_SANDBOX 1 \
               --setenv HERDR_S9B3_SOURCE /tmp/workspace \
-              --setenv HERDR_S9B3_SUPERVISOR /tmp/runner/herdr-mobile-relay-supervisor \
+              --setenv HERDR_TAILSCALE_LAUNCHER_CI 1 \
               -- /usr/bin/setpriv --reuid "$runner_uid" --regid "$runner_gid" --clear-groups -- \
               /usr/bin/python3 /tmp/workspace/tests/test_tailscale_process_groups.py -v &&
             sudo bwrap "${sandbox[@]}" \

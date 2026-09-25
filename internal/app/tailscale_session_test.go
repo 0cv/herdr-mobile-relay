@@ -37,6 +37,32 @@ type appAuthorityFixture struct {
 	retirementErr      error
 }
 
+type retirementTestConn struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func newRetirementTestConn() *retirementTestConn {
+	return &retirementTestConn{closed: make(chan struct{})}
+}
+
+func (c *retirementTestConn) ReadFrame(ctx context.Context) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.closed:
+		return nil, transport.ErrFrameConnClosed
+	}
+}
+
+func (*retirementTestConn) WriteFrame(context.Context, []byte) error { return nil }
+func (c *retirementTestConn) Close(transport.CloseStatus, string)    { c.CloseNow() }
+func (c *retirementTestConn) CloseNow() {
+	c.once.Do(func() { close(c.closed) })
+}
+func (*retirementTestConn) Codec() transport.FrameCodec { return transport.CodecJSON }
+func (*retirementTestConn) TransportName() string       { return "test-managed" }
+
 func newAppAuthorityFixture() *appAuthorityFixture {
 	return &appAuthorityFixture{
 		status:       tailscale.AuthorityStatus{Prepared: true, RemoteWatchRetirementUnknown: true, RegistrationOutcome: "not-dispatched"},
@@ -404,6 +430,85 @@ func TestManagedTailscaleRetireDeadlineBoundsHeldLifecycleOperation(t *testing.T
 	}
 	if !server.ManagedOwnerReleaseSafe() {
 		t.Fatal("later retirement did not prove route clear and local watch closure")
+	}
+}
+
+func TestCanceledManagedRetirementClosesConnectedHubClients(t *testing.T) {
+	root := managedTestRoot(t)
+	owner, err := AcquireManagedOwner(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := newAppAuthorityFixture()
+	cfg := managedTailscaleFixtureConfig(root)
+	server := newServerWithSession(cfg, "0.9.0", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)), owner, authority)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = server.hub.Shutdown(ctx)
+		cancel()
+		_ = server.herdrC.Close()
+		if !server.ManagedOwnerReleaseSafe() {
+			authority.mu.Lock()
+			authority.status.RouteCleared = true
+			authority.status.LocalWatchClosed = true
+			authority.mu.Unlock()
+		}
+		if server.ManagedOwnerReleaseSafe() {
+			if err := RetireManagedOwner(owner, nil); err != nil {
+				t.Errorf("retire temporary managed owner: %v", err)
+			}
+		}
+	})
+
+	// Use the same Hub lifecycle with an unauthenticated fixture connection so
+	// the test focuses on retirement revocation rather than E2EE handshake.
+	server.cfg.Token = ""
+	if err := server.hub.SetAcceptingContext(context.Background(), true); err != nil {
+		t.Fatalf("open fixture Hub admission: %v", err)
+	}
+	conn := newRetirementTestConn()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		server.hub.Serve(context.Background(), conn)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for server.hub.ClientCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := server.hub.ClientCount(); got != 1 {
+		t.Fatalf("connected Hub clients before retirement = %d, want 1", got)
+	}
+
+	releaseTransition, err := server.tailscaleOpMu.Lock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	retireCtx, cancelRetire := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	retireErr := server.RetireManagedTailscale(retireCtx)
+	cancelRetire()
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		releaseTransition()
+		t.Fatal("timed-out retirement left an authenticated Hub client connected")
+	}
+	if !errors.Is(retireErr, context.DeadlineExceeded) {
+		releaseTransition()
+		t.Fatalf("retirement behind held lifecycle lock = %v, want deadline", retireErr)
+	}
+	if server.ManagedOwnerReleaseSafe() || server.hub.ClientCount() != 0 {
+		releaseTransition()
+		t.Fatal("timed-out retirement released the owner or retained a connected client")
+	}
+	releaseTransition()
+	select {
+	case <-serveDone:
+	case <-time.After(time.Second):
+		t.Fatal("revoked Hub connection did not finish")
+	}
+	if err := server.RetireManagedTailscale(context.Background()); err != nil {
+		t.Fatalf("retry retirement after timeout: %v", err)
 	}
 }
 

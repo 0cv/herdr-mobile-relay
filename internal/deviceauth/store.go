@@ -136,6 +136,7 @@ type Store struct {
 	state              diskState
 	managedArmBaseline *managedStoreSnapshot
 	managedArmFault    func(stage string) error
+	persistFault       func(stage string) error
 }
 
 func Open(dir string, options ...Option) (_ *Store, resultErr error) {
@@ -550,7 +551,20 @@ func (s *Store) persistLockedWithWriterLock() error {
 		if rollbackErr != nil {
 			return errors.Join(writeErr, fmt.Errorf("%w: %v", ErrManagedArmRecovery, rollbackErr))
 		}
+		restored, snapshotErr := readManagedStoreSnapshot(s.dir, s.path)
+		if snapshotErr != nil {
+			return errors.Join(writeErr, fmt.Errorf("%w: verify restored device store: %v", ErrManagedArmRecovery, snapshotErr))
+		}
+		if !sameManagedStoreContents(baseline, restored) {
+			return errors.Join(writeErr, fmt.Errorf("%w: restored device store differs from its prior contents", ErrManagedArmRecovery))
+		}
+		s.managedArmBaseline = &restored
 		return writeErr
+	}
+	if s.persistFault != nil {
+		if err := s.persistFault("after-rename"); err != nil {
+			return rollback(err)
+		}
 	}
 	currentInfo, err := os.Lstat(s.path)
 	if err != nil || !os.SameFile(installedInfo, currentInfo) {

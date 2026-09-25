@@ -88,6 +88,46 @@ func TestTailscaleS5ForegroundRoutes(t *testing.T) {
 	}
 }
 
+func TestManagedRouteMatchesExactObservedHTTPSBackend(t *testing.T) {
+	inspection := Inspection{
+		BackendState:     "Running",
+		LoggedIn:         true,
+		Origin:           "https://relay.tailnet.ts.net",
+		ServeInspected:   true,
+		ExposureComplete: true,
+		ServeConfigured:  true,
+		ServeRouteCount:  1,
+		ObservedRoutes: []Route{{
+			Session: "fixture-session", Listener: "HTTPS", Host: "relay.tailnet.ts.net", Port: 443,
+			Handler: "Proxy", Path: "/", Backend: "http://127.0.0.1:8375",
+		}},
+	}
+	if !ManagedRouteMatches(inspection, "https://relay.tailnet.ts.net", 443, 8375) {
+		t.Fatal("exact in-process managed route observation was refused")
+	}
+	for _, mutate := range []func(*Inspection){
+		func(i *Inspection) { i.FunnelConfigured = true },
+		func(i *Inspection) { i.ExposureComplete = false },
+		func(i *Inspection) { i.ObservedRoutes[0].Session = "" },
+		func(i *Inspection) { i.ObservedRoutes[0].Host = "other.tailnet.ts.net" },
+		func(i *Inspection) { i.ObservedRoutes[0].Port = 8443 },
+		func(i *Inspection) { i.ObservedRoutes[0].Backend = "http://127.0.0.1:8376" },
+		func(i *Inspection) { i.ServeRouteCount = 2 },
+	} {
+		candidate := inspection
+		candidate.ObservedRoutes = append([]Route(nil), inspection.ObservedRoutes...)
+		mutate(&candidate)
+		if ManagedRouteMatches(candidate, "https://relay.tailnet.ts.net", 443, 8375) {
+			t.Errorf("accepted mismatched route: %+v", candidate)
+		}
+	}
+	for _, origin := range []string{"http://relay.tailnet.ts.net", "https://relay.tailnet.ts.net/path", "https://relay.tailnet.ts.net:8443"} {
+		if ManagedRouteMatches(inspection, origin, 443, 8375) {
+			t.Errorf("accepted noncanonical or mismatched origin %q", origin)
+		}
+	}
+}
+
 func TestTailscaleS5FunnelAndServices(t *testing.T) {
 	for _, scope := range []string{`{"AllowFunnel":{"relay.tailnet.ts.net:443":true}}`, strings.TrimSuffix(sourceScope, "}") + `,"AllowFunnel":{"relay.tailnet.ts.net:443":true}}`} {
 		for _, input := range []string{scope, `{"Foreground":{"s":` + scope + `}}`} {
