@@ -2,11 +2,12 @@
 
 ## Scope and authority boundary
 
-This package-internal adapter is a transport slice for a later same-package
-session owner. It does **not** enable callers, create `SessionAuthority`, clean up
-Serve state, or change `Inspect`; the existing CLI adapter remains read-only and
-`ServeRouteOwned=false`. A route, status response, PID, health check, copied
-session ID, or this transport alone does not establish relay ownership.
+This bounded adapter is used by the same-package in-process owner described in
+[`SESSION-CONTRACT.md`](SESSION-CONTRACT.md). It still does **not** enable app,
+shell, bootstrap, or pairing callers, and it does not change `Inspect`; the CLI
+adapter remains read-only and `ServeRouteOwned=false`. A route, status response,
+PID, health check, copied session ID, or this transport alone does not establish
+relay ownership.
 
 The only production constructor is unexported `newLocalAPI(expectedVersion,
 versionMetadata)`. It requires independently obtained, source-valid version
@@ -32,7 +33,7 @@ The adapter permits only these requests to `http://local-tailscaled.sock`:
 
 | Method | Exact path | Contract |
 | --- | --- | --- |
-| GET | `/localapi/v0/status` | Bounded complete JSON; existing strict status parser; response status version and `Tailscale-Version` must equal the independently admitted pinned version. |
+| GET | `/localapi/v0/status` | Bounded complete JSON; existing strict status parser; response status version and `Tailscale-Version` must equal the independently admitted pinned version. The session owner additionally validates pinned `Self.CapMap` and requires the exact `https` capability key (`tailcfg.CapabilityHTTPS`); legacy `Capabilities` and `CertDomains` alone do not qualify. |
 | GET | `/localapi/v0/serve-config` | Bounded complete JSON object, or source-valid `null` for absent config; exactly one nonempty source SHA-256 ETag (64 lowercase hex characters); response version checked. The raw value is preserved. |
 | POST | `/localapi/v0/serve-config` | One conditional attempt only; a nonempty source-shaped ETag is mandatory; config must be one bounded strict JSON object before dispatch. No idempotency header or body replay handle. |
 | GET | `/localapi/v0/watch-ipn-bus?mask=NotifyInitialState` | Long-lived newline-delimited JSON stream; bounded first event and locally retained initial nonempty session ID. |
@@ -194,14 +195,14 @@ per-file SPDX audit. The sampled unstripped Darwin/arm64 throwaway binary grew
 by 9,909,632 bytes versus an import-free throwaway baseline. That is **not** the
 relay binary size or a final release-size/license audit.
 
-## Required next owner contract
+## Owner binding (R2B)
 
-A later same-package owner may receive the initial session ID only from this
-live `localAPIWatch`. No public caller can construct ownership from an observed
-ID. The owner must retain the watch and reconcile the complete
-`Foreground[sessionID]` while the watch remains live before intentional local
-cancellation. `localAPIWatch.Close` closes the local response and joins its
-reader only; it is not evidence of daemon-side watcher retirement, route
-absence, a cleanup deadline, or permission to release the managed owner. No
-`SessionAuthority`, callers, cleanup, readiness, or feature enablement are
-implemented in this transport slice.
+`SessionAuthority` now receives the initial session ID only from its live
+`localAPIWatch`; no public caller can construct ownership from an observed ID.
+It retains the watch and reconciles the complete `Foreground[sessionID]` while
+the watch is live before intentional local cancellation. `localAPIWatch.Close`
+closes the local response and joins its reader only; it is not evidence of
+daemon-side watcher retirement, route absence, a cleanup deadline, or
+permission to release the managed owner. See `SESSION-CONTRACT.md` for the
+implemented owner behavior and the remaining caller/runtime qualification
+limits.

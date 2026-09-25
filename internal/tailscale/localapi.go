@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"mime"
@@ -100,8 +101,60 @@ func (c *localAPI) status(ctx context.Context) (Status, error) {
 	return status, nil
 }
 
+// statusWithHTTPSCapability reads the pinned CapMap schema used by upstream
+// PeerStatus.HasCap. The legacy Capabilities slice is not an equivalent signal.
+func (c *localAPI) statusWithHTTPSCapability(ctx context.Context) (Status, bool, error) {
+	body, err := c.getJSON(ctx, localAPIStatusPath)
+	if err != nil {
+		return Status{}, false, err
+	}
+	status, err := ParseStatus(body)
+	if err != nil || status.Version != c.expectedVersion {
+		return Status{}, false, errLocalAPIResponse
+	}
+	capable, err := pinnedHTTPSCapability(body)
+	if err != nil {
+		return Status{}, false, errLocalAPIResponse
+	}
+	return status, capable, nil
+}
+
+func pinnedHTTPSCapability(data []byte) (bool, error) {
+	root, err := object(data)
+	if err != nil {
+		return false, err
+	}
+	self, err := object(root["Self"])
+	if err != nil || canonicalKeys(self, "CapMap") != nil {
+		return false, ErrNotJSON
+	}
+	raw, exists := self["CapMap"]
+	if !exists {
+		return false, nil
+	}
+	capabilities, err := object(raw)
+	if err != nil {
+		return false, err
+	}
+	capable := false
+	for name, values := range capabilities {
+		trimmed := bytes.TrimSpace(values)
+		if len(trimmed) == 0 || (trimmed[0] != '[' && !bytes.Equal(trimmed, []byte("null"))) {
+			return false, ErrNotJSON
+		}
+		var entries []json.RawMessage
+		if json.Unmarshal(values, &entries) != nil {
+			return false, ErrNotJSON
+		}
+		if name == "https" {
+			capable = true
+		}
+	}
+	return capable, nil
+}
+
 // serveConfig returns the exact bounded document and its mandatory source ETag.
-// The full Serve schema is deliberately left to the later schema-preserving owner.
+// SessionAuthority performs the full pinned-schema validation and preservation.
 func (c *localAPI) serveConfig(ctx context.Context) ([]byte, string, error) {
 	resp, cancel, err := c.doOne(ctx, http.MethodGet, localAPIServeConfigPath, nil, "")
 	if err != nil {
