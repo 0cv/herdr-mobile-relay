@@ -78,9 +78,23 @@ EXPECTED_CASES = [
 ]
 
 
+PRIVATE_LOG_STATUS_CATEGORIES = {
+    "private_log_not_observed", "private_log_not_configured", "private_log_absent",
+    "private_log_unreadable", "private_log_unclassified",
+}
+
+
 class GateFailure(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, launcher_log_category: str = ""):
         self.code = code if code in FAILURE_CODES else "fixture_assertion"
+        self.launcher_log_category = launcher_log_category if (
+            launcher_log_category in PRIVATE_LOG_STATUS_CATEGORIES
+            or launcher_log_category in {
+                "owner_prepare_failed", "runtime_directory_failed", "inspection_failed",
+                "inventory_failed", "bootstrap_failed", "session_authority_failed",
+                "owner_validation_failed",
+            }
+        ) else ""
         super().__init__(self.code)
 
 
@@ -97,6 +111,15 @@ def safe_fixture_cli_operations(env: dict[str, str]) -> list[str]:
     return [line for line in lines if line in allowed][-16:]
 
 
+PRIVATE_LOG_CATEGORY_CODES = {
+    "owner_prepare_failed": "managed_launcher_owner_prepare_failed",
+    "runtime_directory_failed": "managed_launcher_runtime_directory_failed",
+    "inspection_failed": "managed_launcher_inspection_failed",
+    "inventory_failed": "managed_launcher_inventory_failed",
+    "bootstrap_failed": "managed_launcher_bootstrap_failed",
+    "session_authority_failed": "managed_launcher_session_authority_failed",
+    "owner_validation_failed": "managed_launcher_owner_validation_failed",
+}
 PRIVATE_LOG_PATTERNS = (
     ("owner_prepare_failed", re.compile(r"read-only Tailscale owner preparation failed", re.IGNORECASE)),
     ("runtime_directory_failed", re.compile(r"resolve managed (?:runtime|control socket) directory", re.IGNORECASE)),
@@ -116,7 +139,11 @@ def managed_private_log_category(env: dict[str, str]) -> str:
     if not candidates:
         return "private_log_absent"
     try:
-        with candidates[-1].open("rb") as source:
+        latest = candidates[-1]
+        with latest.open("rb") as source:
+            size = latest.stat().st_size
+            if size > 65536:
+                source.seek(size - 65536)
             private_log = source.read(65536).decode("utf-8", "ignore")
     except OSError:
         return "private_log_unreadable"
@@ -126,7 +153,7 @@ def managed_private_log_category(env: dict[str, str]) -> str:
     return "private_log_unclassified"
 
 
-def managed_launcher_exit_code(env: dict[str, str]) -> str:
+def managed_launcher_exit_code(env: dict[str, str], launcher_log_category: str = "") -> str:
     operations = safe_fixture_cli_operations(env)
     if "unsupported" in operations:
         return "managed_launcher_cli_refusal"
@@ -141,25 +168,16 @@ def managed_launcher_exit_code(env: dict[str, str]) -> str:
     if not isinstance(events, list):
         events = []
     if "localapi:watch:mask=2" not in events:
-        category = managed_private_log_category(env)
-        category_codes = {
-            "owner_prepare_failed": "managed_launcher_owner_prepare_failed",
-            "runtime_directory_failed": "managed_launcher_runtime_directory_failed",
-            "inspection_failed": "managed_launcher_inspection_failed",
-            "inventory_failed": "managed_launcher_inventory_failed",
-            "bootstrap_failed": "managed_launcher_bootstrap_failed",
-            "session_authority_failed": "managed_launcher_session_authority_failed",
-            "owner_validation_failed": "managed_launcher_owner_validation_failed",
-        }
-        return category_codes.get(category, "managed_launcher_pre_watch_exit")
+        category = launcher_log_category or managed_private_log_category(env)
+        return PRIVATE_LOG_CATEGORY_CODES.get(category, "managed_launcher_pre_watch_exit")
     if "localapi:config:post" not in events:
         return "managed_launcher_pre_registration_exit"
     return "managed_launcher_post_registration_exit"
 
 
-def die(message: str, code: str = "fixture_assertion") -> "NoReturn":
+def die(message: str, code: str = "fixture_assertion", launcher_log_category: str = "") -> "NoReturn":
     del message  # diagnostics remain code-only in stdout/stderr and artifacts
-    raise GateFailure(code)
+    raise GateFailure(code, launcher_log_category)
 
 
 def sha256(path: Path) -> str:
@@ -567,7 +585,7 @@ def safe_link_from_output(output: bytes, origin: str) -> str | None:
     return None
 
 
-def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expect_link: bool = True) -> tuple[subprocess.Popen[bytes], str, bytes, bytes]:
+def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expect_link: bool = True) -> tuple[subprocess.Popen[bytes], str, bytes, bytes, str]:
     try:
         process = subprocess.Popen(
             ["/bin/bash", str(package / "relay" / "tailscale.sh"), "--confirm-serve"],
@@ -579,6 +597,7 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
     assert process.stdout is not None and process.stderr is not None
     output = bytearray()
     state: dict[str, object] = {"link": None, "stderr_bytes": 0, "output_limit": False}
+    launcher_log_category = "private_log_not_observed"
     lock = threading.Lock()
     done = [threading.Event(), threading.Event()]
 
@@ -612,6 +631,9 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
         reader.start()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        observed_log_category = managed_private_log_category(env)
+        if observed_log_category in PRIVATE_LOG_CATEGORY_CODES:
+            launcher_log_category = observed_log_category
         with lock:
             link = state["link"]
             output_limit = bool(state["output_limit"])
@@ -624,18 +646,21 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 pass
-            die("launcher output exceeded the package acceptance bound", "managed_launcher_output_limit")
+            die("launcher output exceeded the package acceptance bound", "managed_launcher_output_limit", launcher_log_category)
         if link:
-            return process, str(link), bytes(output), b""
+            return process, str(link), bytes(output), b"", launcher_log_category
         if process.poll() is not None and all(event.wait(0.05) for event in done):
+            observed_log_category = managed_private_log_category(env)
+            if observed_log_category in PRIVATE_LOG_CATEGORY_CODES:
+                launcher_log_category = observed_log_category
             with lock:
                 captured = bytes(output)
                 stderr_bytes = int(state["stderr_bytes"])
             if not expect_link:
-                return process, "", captured, b""
+                return process, "", captured, b"", launcher_log_category
             die(
                 f"packaged managed launcher exited before setup-link emission (exit={process.returncode}, stderr_bytes={stderr_bytes})",
-                managed_launcher_exit_code(env),
+                managed_launcher_exit_code(env, launcher_log_category), launcher_log_category,
             )
         time.sleep(0.05)
     try:
@@ -650,11 +675,11 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
         reader.join(timeout=2)
     with lock:
         stderr_bytes = int(state["stderr_bytes"])
-    die(f"packaged managed launcher timed out (stderr_bytes={stderr_bytes})", "managed_launcher_link_timeout")
+    die(f"packaged managed launcher timed out (stderr_bytes={stderr_bytes})", "managed_launcher_link_timeout", launcher_log_category)
 
 
 def launch_managed_rejection(package: Path, env: dict[str, str], timeout: float = 90) -> tuple[subprocess.Popen[bytes], bytes]:
-    process, link, stdout, _ = launch_managed(package, env, timeout, expect_link=False)
+    process, link, stdout, _, _ = launch_managed(package, env, timeout, expect_link=False)
     if link or process.poll() is None or process.returncode == 0:
         stop_launcher(process)
         die("managed launcher rejection was not bounded, nonzero, and link-free")
@@ -821,6 +846,7 @@ def main() -> int:
     completed_stages: list[str] = []
     failure_type = ""
     failure_code = ""
+    launcher_log_category = "private_log_not_observed"
     ambiguous_owner_pid: int | None = None
 
     def set_stage(value: str) -> None:
@@ -929,7 +955,7 @@ def main() -> int:
         relay_env.pop("HERDR_WEB_ROOT", None)
         package = temporary_root / "release"
         set_stage("managed_launch")
-        launcher, link, _private_stdout, _ = launch_managed(package, relay_env)
+        launcher, link, _private_stdout, _, launcher_log_category = launch_managed(package, relay_env)
         transitions.extend(["preflight:read-only", "watch:mask=2", "route:conditional-register", "launcher:setup-link"])
         if state.events.count("localapi:watch:mask=2") != 1:
             die("fixed production LocalAPI did not record the required watch mask", "fixture_localapi_watch_missing")
@@ -980,7 +1006,9 @@ def main() -> int:
         # then reconnect both independent persistent profiles using credentials
         # already enrolled by the production frontend.
         set_stage("managed_restart")
-        launcher, restart_link, _restart_stdout, _ = launch_managed(package, relay_env)
+        launcher, restart_link, _restart_stdout, _, restart_log_category = launch_managed(package, relay_env)
+        if restart_log_category in PRIVATE_LOG_CATEGORY_CODES:
+            launcher_log_category = restart_log_category
         if not restart_link:
             die("packaged managed restart did not create a fresh launcher-generated invitation")
         set_stage("browser_restart")
@@ -1128,6 +1156,8 @@ def main() -> int:
     except Exception as error:
         failure_type = type(error).__name__
         failure_code = error.code if isinstance(error, GateFailure) else "unexpected_exception"
+        if isinstance(error, GateFailure) and error.launcher_log_category:
+            launcher_log_category = error.launcher_log_category
         print(f"extracted package acceptance failed: stage={current_stage} code={failure_code}", file=sys.stderr)
         raise
     finally:
@@ -1160,7 +1190,7 @@ def main() -> int:
             "cases": [{"name": name, "result": case_results.get(name, "missing")} for name in EXPECTED_CASES],
             "fixture_transitions": list(dict.fromkeys(transitions))[:64],
             "fixture_cli_operations": safe_fixture_cli_operations(relay_env if "relay_env" in locals() else {}),
-            "launcher_log_category": managed_private_log_category(relay_env if "relay_env" in locals() else {}),
+            "launcher_log_category": launcher_log_category,
             "browser": {key: browser_evidence.get(key) for key in ("result", "controller_enrolled", "reader_enrolled", "controller_read", "controller_command", "reader_read", "reader_mutation_denied", "credentials_preserved") if key in browser_evidence},
             "result": "pass" if len(case_results) == len(EXPECTED_CASES) and all(case_results.get(name) == "pass" for name in EXPECTED_CASES) else "fail",
         }
