@@ -330,12 +330,16 @@ def write_json(path: Path, value: object) -> None:
 
 
 class APIState:
-    def __init__(self, path: Path, relay_port: int):
+    def __init__(self, path: Path, relay_port: int, expected_version: str, expected_revision: str, expected_origin: str):
         self.path = path
         self.relay_port = relay_port
+        self.expected_version = expected_version
+        self.expected_revision = expected_revision
+        self.expected_origin = expected_origin
         self.lock = threading.RLock()
         self.config: dict = {}
         self.registration_readyz_probes: list[dict[str, int | str]] = []
+        self.registration_healthz_probes: list[dict[str, bool | int | str]] = []
         self.etag = hashlib.sha256(b"{}").hexdigest()
         self.events: list[str] = []
         self.foreign_after_registration = False
@@ -386,6 +390,53 @@ class APIState:
         with self.lock:
             if len(self.registration_readyz_probes) < 8:
                 self.registration_readyz_probes.append(probe)
+
+    def probe_local_healthz_after_registration(self) -> None:
+        probe: dict[str, bool | int | str] = {"trigger": "registration_post", "result": "other"}
+        connection = http.client.HTTPConnection("127.0.0.1", self.relay_port, timeout=0.5)
+        try:
+            connection.request("GET", "/healthz", headers={"Connection": "close"})
+            response = connection.getresponse()
+            status: int | str = response.status if 100 <= response.status <= 599 else "other"
+            body = response.read(65537)
+            if status != 200:
+                probe = {"trigger": "registration_post", "http_status": status, "result": "http_error"}
+            elif len(body) > 65536:
+                probe = {"trigger": "registration_post", "http_status": status, "result": "body_too_large"}
+            else:
+                try:
+                    health = json.loads(body)
+                except (ValueError, TypeError):
+                    health = None
+                if isinstance(health, dict):
+                    probe = {
+                        "trigger": "registration_post",
+                        "http_status": status,
+                        "result": "response",
+                        "health_status_ok": health.get("status") == "ok",
+                        "readiness_ready": health.get("readiness") == "ready",
+                        "transport_tailscale": health.get("transport") == "tailscale",
+                        "version_matches": health.get("version") == self.expected_version,
+                        "revision_matches": health.get("revision") == self.expected_revision,
+                        "bundle_version_matches": health.get("bundle_version") == self.expected_version,
+                        "bundle_revision_matches": health.get("bundle_revision") == self.expected_revision,
+                        "origin_matches": health.get("tailscale_origin") == self.expected_origin,
+                    }
+                else:
+                    probe = {"trigger": "registration_post", "http_status": status, "result": "invalid_json"}
+        except (socket.timeout, TimeoutError):
+            probe["result"] = "timeout"
+        except ConnectionRefusedError:
+            probe["result"] = "connection_refused"
+        except ConnectionResetError:
+            probe["result"] = "connection_reset"
+        except (OSError, http.client.HTTPException):
+            probe["result"] = "other"
+        finally:
+            connection.close()
+        with self.lock:
+            if len(self.registration_healthz_probes) < 8:
+                self.registration_healthz_probes.append(probe)
 
 
 class HerdrSocketFixture:
@@ -747,6 +798,7 @@ class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
                 drop_response = True
         if registration_post_committed:
             fixture.probe_local_readyz_after_registration()
+            fixture.probe_local_healthz_after_registration()
         if drop_response:
             fixture.event("localapi:ack:dropped-after-commit")
             self.close_connection = True
@@ -1413,7 +1465,7 @@ def main() -> int:
         )
         os.chmod(env_file, 0o600)
         api_state_file = temporary_root / "api-state.json"
-        state = APIState(api_state_file, RELAY_PORT)
+        state = APIState(api_state_file, RELAY_PORT, version, source_sha, origin)
         state.persist()
         socket_dir = Path("/var/run/tailscale")
         socket_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -1625,7 +1677,7 @@ def main() -> int:
         )
         os.chmod(ambiguous_env_file, 0o600)
         ambiguous_state_file = ambiguous_root / "api-state.json"
-        state = APIState(ambiguous_state_file, RELAY_PORT)
+        state = APIState(ambiguous_state_file, RELAY_PORT, version, source_sha, origin)
         state.drop_registration_ack = True
         state.persist()
         local_server.fixture = state  # type: ignore[attr-defined]
@@ -1700,10 +1752,12 @@ def main() -> int:
             with state.lock:
                 localapi_events = list(state.events)
                 registration_readyz_probes = list(state.registration_readyz_probes)
+                registration_healthz_probes = list(state.registration_healthz_probes)
             transitions.extend(localapi_events[-12:])
         else:
             localapi_events = []
             registration_readyz_probes = []
+            registration_healthz_probes = []
         record = {
             "schema_version": 1,
             "candidate_sha": source_sha,
@@ -1729,6 +1783,7 @@ def main() -> int:
             "localapi_operation_counts": safe_localapi_event_counts(localapi_events),
             "localapi_first_registration_window_counts": safe_localapi_registration_window(localapi_events),
             "registration_readyz_probes": registration_readyz_probes,
+            "registration_healthz_probes": registration_healthz_probes,
             "fake_herdr_operations": safe_fake_herdr_operations(
                 (relay_env.get("FAKE_HERDR_OPERATIONS") if "relay_env" in locals() else None),
             ),
