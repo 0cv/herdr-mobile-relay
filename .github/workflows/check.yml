@@ -360,6 +360,73 @@ jobs:
             dist/release/checksums.txt "$version" "$GITHUB_SHA" \
             "${target%_*}/${target#*_}"
 
+  tailscale-extracted-package-browser:
+    needs: [release, provenance]
+    name: Extracted-package Tailscale browser acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-bundles
+          path: dist/release
+      - name: Install locked browser tooling and build only the inventory fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -m 700 -p "$RUNNER_TEMP/tailscale-package-browser-evidence"
+          printf '{"schema_version":1,"candidate_sha":"%s","current_stage":"runner_image_build","expected_case_count":10,"executed_case_count":0,"result":"not_run"}\n' "$GITHUB_SHA" > "$RUNNER_TEMP/tailscale-package-browser-evidence/tailscale-extracted-package-browser.json"
+          bun install --frozen-lockfile --cwd frontend
+          go build -trimpath -o "$RUNNER_TEMP/fake-herdr" ./cmd/fake-herdr
+          playwright_version="$(node -p "require('./frontend/package.json').devDependencies['@playwright/test']")"
+          test "$(grep '^FROM ' tests/tailscale-package-browser.Dockerfile)" = "FROM mcr.microsoft.com/playwright:v${playwright_version}-noble"
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
+          test -n "$version"
+          printf 'HERDR_PACKAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+      - name: Build pinned disposable runner image
+        run: cd tests && docker build --pull --tag herdr-tailscale-package-browser --file tailscale-package-browser.Dockerfile .
+      - name: Run exact release archive in network-disabled package fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --network none \
+            --add-host relay.tailnet.ts.net:127.0.0.1 \
+            --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=1g \
+            --mount "type=bind,src=$PWD,dst=/workspace,readonly" \
+            --mount "type=bind,src=$PWD/dist/release,dst=/artifact,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/fake-herdr,dst=/fixture-bin/fake-herdr,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/tailscale-package-browser-evidence,dst=/evidence" \
+            --env HERDR_EXTRACTED_PACKAGE_BROWSER_CI=1 \
+            --env HERDR_PACKAGE_VERSION="$HERDR_PACKAGE_VERSION" \
+            --env HERDR_TAILSCALE_HTTPS_PORT=18443 \
+            --env GITHUB_SHA="$GITHUB_SHA" \
+            --env GITHUB_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            herdr-tailscale-package-browser \
+            python3 /workspace/tests/test_tailscale_extracted_package_browser.py
+      - name: Upload sanitized extracted-package browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tailscale-extracted-package-browser-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/tailscale-package-browser-evidence/tailscale-extracted-package-browser.json
+          if-no-files-found: error
+          retention-days: 1
+
   mobile-host-check:
     needs: provenance
     name: Mobile harness checks
