@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -194,11 +195,13 @@ func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
 func (b *limitedBuffer) String() string { return b.buf.String() }
 
 type Client struct {
-	bin          string
-	socketPath   string
-	sem          chan struct{}
-	api          *socketAPIClient
-	capabilities *capabilityManager
+	remoteMu        sync.RWMutex
+	remoteInventory RemoteInventory
+	bin             string
+	socketPath      string
+	sem             chan struct{}
+	api             *socketAPIClient
+	capabilities    *capabilityManager
 }
 
 func NewClient(bin, socketPath string) *Client {
@@ -213,6 +216,8 @@ func NewClient(bin, socketPath string) *Client {
 }
 
 type Pane struct {
+	MachineID      string `json:"machine_id,omitempty"`
+	MachineLabel   string `json:"machine_label,omitempty"`
 	ID             string `json:"pane_id"`
 	TerminalID     string `json:"terminal_id"`
 	TabID          string `json:"tab_id"`
@@ -238,16 +243,19 @@ type Pane struct {
 }
 
 type Workspace struct {
-	ID          string             `json:"workspace_id"`
-	Number      int                `json:"number"`
-	Label       string             `json:"label"`
-	Focused     bool               `json:"focused"`
-	PaneCount   int                `json:"pane_count"`
-	TabCount    int                `json:"tab_count"`
-	ActiveTabID string             `json:"active_tab_id"`
-	AgentStatus string             `json:"agent_status"`
-	Cwd         string             `json:"cwd,omitempty"`
-	Worktree    *WorkspaceWorktree `json:"worktree,omitempty"`
+	MachineID    string             `json:"machine_id,omitempty"`
+	MachineLabel string             `json:"machine_label,omitempty"`
+	ReadOnly     bool               `json:"read_only,omitzero"`
+	ID           string             `json:"workspace_id"`
+	Number       int                `json:"number"`
+	Label        string             `json:"label"`
+	Focused      bool               `json:"focused"`
+	PaneCount    int                `json:"pane_count"`
+	TabCount     int                `json:"tab_count"`
+	ActiveTabID  string             `json:"active_tab_id"`
+	AgentStatus  string             `json:"agent_status"`
+	Cwd          string             `json:"cwd,omitempty"`
+	Worktree     *WorkspaceWorktree `json:"worktree,omitempty"`
 }
 
 type WorkspaceWorktree struct {
@@ -655,6 +663,9 @@ func (c *Client) readPane(ctx context.Context, paneID string, lines int, format,
 	if format != "ansi" {
 		format = "text"
 	}
+	if IsRemoteID(paneID) {
+		return c.readRemotePane(ctx, paneID, lines, format, source)
+	}
 	epoch := c.capabilityEpoch()
 	read, err := c.api.readPane(ctx, paneID, lines, format, source)
 	c.noteSocketFeature(epoch, FeaturePaneRead, err)
@@ -679,6 +690,10 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 	}
 	if format != "ansi" {
 		format = "text"
+	}
+	if IsRemoteID(paneID) {
+		read, err := c.readRemotePane(ctx, paneID, lines, format, "visible")
+		return read.Content, err
 	}
 	epoch := c.capabilityEpoch()
 	read, err := c.api.readPane(ctx, paneID, lines, format, "visible")
