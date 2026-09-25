@@ -305,6 +305,7 @@ func (s *Server) armExternalTailscale(ctx context.Context) (localcontrol.Status,
 	refused := func(err error) (localcontrol.Status, error) {
 		status := s.externalControlStatus()
 		status.ArmOutcome = "not-committed"
+		status.ArmFailureCode = externalArmFailureCode(err)
 		if errors.Is(err, deviceauth.ErrManagedArmRecovery) {
 			status.ArmOutcome = "unresolved"
 		} else if errors.Is(err, deviceauth.ErrBootstrapGateCommittedRevoked) {
@@ -350,9 +351,55 @@ func (s *Server) armExternalTailscale(ctx context.Context) (localcontrol.Status,
 		}
 	}
 	if !status.Ready {
+		status.ArmFailureCode = "local_admission_unavailable"
 		return status, errors.New("operator-owned Serve invitation was committed but local admission is unavailable")
 	}
 	return status, nil
+}
+
+func externalArmFailureCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, deviceauth.ErrManagedArmRecovery):
+		return "bootstrap_recovery_required"
+	case errors.Is(err, deviceauth.ErrBootstrapGateCommittedRevoked):
+		return "bootstrap_committed_revoked"
+	case errors.Is(err, deviceauth.ErrBootstrapGateClosed):
+		return "bootstrap_gate_closed"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "external_operation_timeout"
+	case errors.Is(err, context.Canceled):
+		return "external_operation_cancelled"
+	}
+	message := err.Error()
+	switch {
+	case message == "local relay inventory or backend readiness is incomplete":
+		return "local_readiness_incomplete"
+	case message == "local web bundle identity does not match the relay binary":
+		return "local_bundle_identity_mismatch"
+	case strings.HasPrefix(message, "local relay health check failed:"):
+		return "local_health_check_failed"
+	case strings.HasPrefix(message, "trusted external HTTPS health check failed:"):
+		return "external_https_unavailable"
+	case message == "external HTTPS health endpoint identity did not match this relay":
+		return "external_https_endpoint_identity_mismatch"
+	case message == "external HTTPS health response was invalid":
+		return "external_https_health_invalid"
+	case message == "external HTTPS relay, release, or web-bundle identity did not match":
+		return "external_https_release_identity_mismatch"
+	case message == "verified external phone app origin is unavailable":
+		return "phone_app_origin_unavailable"
+	case strings.HasPrefix(message, "external phone app bundle verification failed:"):
+		return "phone_app_bundle_mismatch"
+	case strings.HasPrefix(message, "open device authentication"):
+		return "device_store_unavailable"
+	case message == "operator-owned Serve invitation was committed but local admission is unavailable":
+		return "local_admission_unavailable"
+	default:
+		return "bootstrap_invitation_refused"
+	}
 }
 
 func (s *Server) checkExternalTailscaleReadiness(ctx context.Context) error {

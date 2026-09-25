@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,24 @@ func TestTailscaleExternalConstructionIsDeferredAndUnowned(t *testing.T) {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("construction created or inspected a managed/external resource at %q: %v", path, err)
 		}
+	}
+}
+
+func TestExternalArmFailureCodeIsSafeAndSpecific(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "local readiness", err: errors.New("local relay inventory or backend readiness is incomplete"), want: "local_readiness_incomplete"},
+		{name: "phone bundle", err: errors.New("external phone app bundle verification failed: https://private.example.test/token"), want: "phone_app_bundle_mismatch"},
+		{name: "unknown detail is not exposed", err: errors.New("private origin https://private.example.test/token"), want: "bootstrap_invitation_refused"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := externalArmFailureCode(test.err); got != test.want {
+				t.Fatalf("failure code = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

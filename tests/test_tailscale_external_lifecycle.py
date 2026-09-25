@@ -35,6 +35,19 @@ DIAGNOSTIC_CODE = ""
 
 
 def safe_launcher_diagnostic(output: bytes) -> str:
+    arm_failure = re.search(rb"managed-state reprint: arm failure code: ([a-z_]{1,80})", output)
+    if arm_failure is not None:
+        code = arm_failure.group(1).decode("ascii")
+        if code in {
+            "bootstrap_recovery_required", "bootstrap_committed_revoked", "bootstrap_gate_closed",
+            "external_operation_timeout", "external_operation_cancelled", "external_arm_busy",
+            "local_readiness_incomplete", "local_bundle_identity_mismatch", "local_health_check_failed",
+            "external_https_unavailable", "external_https_endpoint_identity_mismatch",
+            "external_https_health_invalid", "external_https_release_identity_mismatch",
+            "phone_app_origin_unavailable", "phone_app_bundle_mismatch", "device_store_unavailable",
+            "local_admission_unavailable", "bootstrap_invitation_refused",
+        }:
+            return f"external_arm_failure_{code}"
     markers = (
         (b"External Serve relay failed to start.", "relay_process_exited_before_health"),
         (b"Local relay health, instance, or startup identity did not match", "local_health_identity_mismatch"),

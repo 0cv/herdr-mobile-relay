@@ -27,9 +27,28 @@ func TestClassifyReprintArmRetainsUnresolvedInvitationJournal(t *testing.T) {
 	if got := classifyReprintArm(response, nil); got != reprintArmUncertain {
 		t.Fatalf("unresolved arm classified as %v, want uncertain", got)
 	}
-	response.ArmOutcome = "not-committed"
+	response.ArmOutcome = "committed"
+	if got := classifyReprintArm(response, nil); got != reprintArmUncertain {
+		t.Fatalf("committed but negatively acknowledged arm classified as %v, want uncertain", got)
+	}
+	response = localcontrol.Response{
+		OK: true, ArmOutcome: "committed", InvitationArmed: true, InvitationExpiresAt: "fixture-expiry",
+	}
+	if got := classifyReprintArm(response, nil); got != reprintArmAcknowledged {
+		t.Fatalf("durably committed arm acknowledgement classified as %v, want acknowledged", got)
+	}
+	response = localcontrol.Response{Error: "definite refusal", ArmOutcome: "not-committed"}
 	if got := classifyReprintArm(response, nil); got != reprintArmRejected {
 		t.Fatalf("definitely refused arm classified as %v, want rejected", got)
+	}
+}
+
+func TestSafeArmFailureCodeFiltersUnknownValues(t *testing.T) {
+	if got := safeArmFailureCode("local_readiness_incomplete"); got != "local_readiness_incomplete" {
+		t.Fatalf("known failure code = %q", got)
+	}
+	if got := safeArmFailureCode("secret https://private.example.test/token"); got != "" {
+		t.Fatalf("unknown failure detail escaped filter: %q", got)
 	}
 }
 

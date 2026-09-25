@@ -45,6 +45,7 @@ type Status struct {
 	RemoteWatchRetirementUnknown bool   `json:"remote_watch_retirement_unknown"`
 	RegistrationOutcome          string `json:"registration_outcome,omitempty"`
 	ArmOutcome                   string `json:"arm_outcome,omitempty"`
+	ArmFailureCode               string `json:"arm_failure_code,omitempty"`
 	RunID                        string `json:"run_id"`
 	Instance                     string `json:"instance"`
 	Transport                    string `json:"transport,omitempty"`

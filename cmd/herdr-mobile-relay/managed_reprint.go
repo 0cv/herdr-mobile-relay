@@ -168,9 +168,11 @@ func runManagedReprint(args []string, stdout, stderr io.Writer) int {
 			return 4
 		}
 		fmt.Fprintln(stderr, "managed-state reprint: pairing control rejected the bootstrap invitation; the origin change was rolled back")
+		printArmFailureCode(stderr, response)
 		return 3
 	default:
 		fmt.Fprintf(stderr, "managed-state reprint: the bootstrap invitation state is uncertain (%v); the staged journal is retained and later reprints are blocked until the documented recovery runs\n", armErr)
+		printArmFailureCode(stderr, response)
 		return 6
 	}
 }
@@ -188,12 +190,17 @@ func armBootstrapReprint(ctx context.Context, socket, runID, instance string) (l
 //
 // localcontrol.Request returns a non-nil error both for transport failures and
 // for a decoded `ok:false` response. A decoded response always carries the
-// server's error text (the pairing-control server sets `error` on every
-// rejection), so a non-empty response.Error is a definite rejection while a
-// non-nil error with an empty response is an ambiguous transport outcome.
+// server's error text on rejection, but committed or unresolved arm outcomes
+// must retain the journal even when that response also carries an error.
 func classifyReprintArm(response localcontrol.Response, err error) reprintArmOutcome {
 	if response.ArmOutcome == "unresolved" {
 		return reprintArmUncertain
+	}
+	if response.ArmOutcome == "committed" {
+		if err != nil || response.Error != "" || !response.OK || !response.InvitationArmed || response.InvitationExpiresAt == "" {
+			return reprintArmUncertain
+		}
+		return reprintArmAcknowledged
 	}
 	if response.Error != "" {
 		return reprintArmRejected
@@ -205,6 +212,26 @@ func classifyReprintArm(response localcontrol.Response, err error) reprintArmOut
 		return reprintArmRejected
 	}
 	return reprintArmAcknowledged
+}
+
+func printArmFailureCode(stderr io.Writer, response localcontrol.Response) {
+	if code := safeArmFailureCode(response.ArmFailureCode); code != "" {
+		fmt.Fprintf(stderr, "managed-state reprint: arm failure code: %s\n", code)
+	}
+}
+
+func safeArmFailureCode(code string) string {
+	switch code {
+	case "bootstrap_recovery_required", "bootstrap_committed_revoked", "bootstrap_gate_closed",
+		"external_operation_timeout", "external_operation_cancelled", "external_arm_busy",
+		"local_readiness_incomplete", "local_bundle_identity_mismatch", "local_health_check_failed",
+		"external_https_unavailable", "external_https_endpoint_identity_mismatch", "external_https_health_invalid",
+		"external_https_release_identity_mismatch", "phone_app_origin_unavailable", "phone_app_bundle_mismatch",
+		"device_store_unavailable", "local_admission_unavailable", "bootstrap_invitation_refused":
+		return code
+	default:
+		return ""
+	}
 }
 
 // captureReprintEntry snapshots the origin file's prior bytes/absence/mode and
