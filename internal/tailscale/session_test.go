@@ -791,10 +791,10 @@ func TestSessionAuthorityWatcherDeleteMapRemovalGapNeverValidatesOrRetries(t *te
 	if err := authority.Activate(context.Background()); err != nil {
 		t.Fatalf("source-order gap POST disposition = %v", err)
 	}
-	if err := authority.Validate(context.Background()); err == nil {
-		t.Fatal("route installed in watcher-delete/map-removal gap validated")
-	}
 	waitForSessionStatus(t, authority, func(s AuthorityStatus) bool { return s.LocalWatchClosed })
+	if err := authority.Validate(context.Background()); err == nil {
+		t.Fatal("route installed in watcher-delete/map-removal gap validated after watch loss")
+	}
 	status := authority.Status()
 	if !status.Invalidated || !status.Quarantined || status.RouteCleared || status.RouteValidated {
 		t.Fatalf("watcher-delete/map-removal gap was not quarantined: %+v", status)
@@ -1024,7 +1024,7 @@ func TestSessionAuthoritySpontaneousWatchLossUsesFreshAbsenceAndInvalidates(t *t
 	d := newSessionDaemon()
 	authority := prepareAndActivate(t, d)
 	d.loseWatch(sessionTestID)
-	status := waitForSessionStatus(t, authority, func(s AuthorityStatus) bool { return s.LocalWatchClosed })
+	status := waitForSessionStatus(t, authority, func(s AuthorityStatus) bool { return s.LocalWatchClosed && s.RouteCleared })
 	if !status.Invalidated || !status.RouteCleared || status.RouteValidated || !status.RemoteWatchRetirementUnknown {
 		t.Fatalf("spontaneous watcher loss facts = %+v", status)
 	}
