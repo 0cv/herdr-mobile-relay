@@ -335,6 +335,7 @@ class APIState:
         self.relay_port = relay_port
         self.lock = threading.RLock()
         self.config: dict = {}
+        self.registration_readyz_probes: list[dict[str, int | str]] = []
         self.etag = hashlib.sha256(b"{}").hexdigest()
         self.events: list[str] = []
         self.foreign_after_registration = False
@@ -354,6 +355,37 @@ class APIState:
             "etag": self.etag,
             "watch_closed": self.watch_closed.is_set(),
         })
+
+    def probe_local_readyz_after_registration(self) -> None:
+        probe: dict[str, int | str] = {"trigger": "registration_post", "result": "other"}
+        connection = http.client.HTTPConnection("127.0.0.1", self.relay_port, timeout=0.5)
+        try:
+            connection.request("GET", "/readyz", headers={"Connection": "close"})
+            response = connection.getresponse()
+            status: int | str = response.status if 100 <= response.status <= 599 else "other"
+            body = response.read(4097)
+            readiness = "other"
+            if len(body) <= 4096:
+                try:
+                    value = json.loads(body).get("status")
+                except (ValueError, AttributeError, TypeError):
+                    value = None
+                if value in {"ready", "unavailable"}:
+                    readiness = value
+            probe = {"trigger": "registration_post", "http_status": status, "readiness": readiness}
+        except (socket.timeout, TimeoutError):
+            probe["result"] = "timeout"
+        except ConnectionRefusedError:
+            probe["result"] = "connection_refused"
+        except ConnectionResetError:
+            probe["result"] = "connection_reset"
+        except (OSError, http.client.HTTPException):
+            probe["result"] = "other"
+        finally:
+            connection.close()
+        with self.lock:
+            if len(self.registration_readyz_probes) < 8:
+                self.registration_readyz_probes.append(probe)
 
 
 class HerdrSocketFixture:
@@ -655,6 +687,7 @@ class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         drop_response = False
+        registration_post_committed = False
         with fixture.lock:
             fixture.events.append("localapi:config:post")
             if self.path != "/localapi/v0/serve-config" or self.headers.get("If-Match") != fixture.etag:
@@ -707,10 +740,13 @@ class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
                     return
             fixture.config = next_config
             fixture.etag = hashlib.sha256(body).hexdigest()
+            registration_post_committed = WATCH_ID in (next_config.get("Foreground") or {})
             fixture.persist()
-            if WATCH_ID in (next_config.get("Foreground") or {}) and fixture.drop_registration_ack:
+            if registration_post_committed and fixture.drop_registration_ack:
                 fixture.drop_registration_ack = False
                 drop_response = True
+        if registration_post_committed:
+            fixture.probe_local_readyz_after_registration()
         if drop_response:
             fixture.event("localapi:ack:dropped-after-commit")
             self.close_connection = True
@@ -768,11 +804,29 @@ raise SystemExit(97)
 class PublicRequestState:
     METHODS = {"GET", "POST", "HEAD"}
     PATHS = {"/healthz": "healthz", "/release.json": "release.json", "/version.json": "version.json", "/": "root", "/index.html": "index.html"}
+    TLS_REASON_LABELS = {
+        "CERTIFICATE_VERIFY_FAILED": "certificate_verify_failed",
+        "TLSV1_ALERT_UNKNOWN_CA": "alert_unknown_ca",
+        "TLSV1_ALERT_CERTIFICATE_UNKNOWN": "alert_certificate_unknown",
+        "TLSV1_ALERT_BAD_CERTIFICATE": "alert_bad_certificate",
+        "TLSV1_ALERT_HANDSHAKE_FAILURE": "alert_handshake_failure",
+        "TLSV1_ALERT_CERTIFICATE_REQUIRED": "alert_certificate_required",
+        "WRONG_VERSION_NUMBER": "wrong_version",
+        "UNKNOWN_PROTOCOL": "unknown_protocol",
+        "NO_SHARED_CIPHER": "no_shared_cipher",
+        "HANDSHAKE_FAILURE": "handshake_failure",
+        "UNEXPECTED_EOF_WHILE_READING": "unexpected_eof",
+        "HTTP_REQUEST": "plaintext_http",
+        "HTTPS_PROXY_REQUEST": "https_proxy_request",
+    }
 
     def __init__(self):
         self.lock = threading.Lock()
         self.requests: dict[tuple[str, str], int] = {}
         self.responses: dict[tuple[str, str, int | str], int] = {}
+        self.tls_accept_attempts = 0
+        self.tls_handshake_successes = 0
+        self.tls_failure_counts: dict[str, int] = {}
 
     def _kinds(self, method: str, request_path: str) -> tuple[str, str]:
         path = urllib.parse.urlsplit(request_path).path
@@ -792,6 +846,34 @@ class PublicRequestState:
         with self.lock:
             key = (method_kind, path_kind, status_kind)
             self.responses[key] = self.responses.get(key, 0) + 1
+
+    def record_tls_accept_attempt(self) -> None:
+        with self.lock:
+            self.tls_accept_attempts += 1
+
+    def record_tls_handshake_success(self) -> None:
+        with self.lock:
+            self.tls_handshake_successes += 1
+
+    def record_tls_handshake_failure(self, reason: object) -> None:
+        reason_label = self.TLS_REASON_LABELS.get(reason, "other") if isinstance(reason, str) else "other"
+        with self.lock:
+            self.tls_failure_counts[reason_label] = self.tls_failure_counts.get(reason_label, 0) + 1
+
+    def tls_summary(self) -> dict[str, object]:
+        with self.lock:
+            failures = sum(self.tls_failure_counts.values())
+            return {
+                "accept_attempts": self.tls_accept_attempts,
+                "handshake_successes": self.tls_handshake_successes,
+                "ssl_errors": [
+                    {"reason": reason, "count": count}
+                    for reason, count in sorted(self.tls_failure_counts.items())
+                ],
+                "accepts_without_tls_result": max(
+                    0, self.tls_accept_attempts - self.tls_handshake_successes - failures,
+                ),
+            }
 
     def operation_summary(self) -> list[dict[str, object]]:
         with self.lock:
@@ -813,6 +895,23 @@ class PublicRequestState:
 
 
 class PublicHTTPServer(http.server.ThreadingHTTPServer):
+    def get_request(self):
+        self.fixture.record_tls_accept_attempt()  # type: ignore[attr-defined]
+        request = None
+        try:
+            request, client_address = super().get_request()
+            request.do_handshake()
+        except ssl.SSLError as error:
+            if request is not None:
+                try:
+                    request.close()
+                except OSError:
+                    pass
+            self.fixture.record_tls_handshake_failure(error.reason)  # type: ignore[attr-defined]
+            raise
+        self.fixture.record_tls_handshake_success()  # type: ignore[attr-defined]
+        return request, client_address
+
     def handle_error(self, _request: object, _client_address: object) -> None:
         return
 
@@ -922,7 +1021,7 @@ def start_public_server(certificate: Path, key: Path) -> http.server.ThreadingHT
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(certificate), str(key))
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, name="fixture-tailnet-https", daemon=True)
     thread.start()
@@ -1600,9 +1699,11 @@ def main() -> int:
         if state is not None:
             with state.lock:
                 localapi_events = list(state.events)
+                registration_readyz_probes = list(state.registration_readyz_probes)
             transitions.extend(localapi_events[-12:])
         else:
             localapi_events = []
+            registration_readyz_probes = []
         record = {
             "schema_version": 1,
             "candidate_sha": source_sha,
@@ -1627,6 +1728,7 @@ def main() -> int:
             "fixture_cli_operations": safe_fixture_cli_operations(relay_env if "relay_env" in locals() else {}),
             "localapi_operation_counts": safe_localapi_event_counts(localapi_events),
             "localapi_first_registration_window_counts": safe_localapi_registration_window(localapi_events),
+            "registration_readyz_probes": registration_readyz_probes,
             "fake_herdr_operations": safe_fake_herdr_operations(
                 (relay_env.get("FAKE_HERDR_OPERATIONS") if "relay_env" in locals() else None),
             ),
@@ -1638,6 +1740,12 @@ def main() -> int:
             "launcher_stderr_phase": launcher_stderr_phase,
             "public_http_requests": (
                 public_server.fixture.operation_summary() if public_server is not None else []
+            ),
+            "public_tls_handshakes": (
+                public_server.fixture.tls_summary() if public_server is not None else {
+                    "accept_attempts": 0, "handshake_successes": 0, "ssl_errors": [],
+                    "accepts_without_tls_result": 0,
+                }
             ),
             "browser": {key: browser_evidence.get(key) for key in ("result", "controller_enrolled", "reader_enrolled", "controller_read", "controller_command", "reader_read", "reader_mutation_denied", "credentials_preserved") if key in browser_evidence},
             "result": "pass" if len(case_results) == len(EXPECTED_CASES) and all(case_results.get(name) == "pass" for name in EXPECTED_CASES) else "fail",
