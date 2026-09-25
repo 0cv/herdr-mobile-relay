@@ -62,6 +62,10 @@ function fingerprint(value) {
 
 const profileNames = new Set(['controller', 'reader']);
 const storageCheckpoints = new Set(['after_navigation', 'credential_wait_failed', 'credentialed']);
+const uiCheckpoints = new Set([
+  'inventory_initial', 'agent_button_timeout', 'agent_button_disabled',
+  'agent_button_ready', 'agent_click_failed', 'prompt_wait_failed', 'prompt_visible',
+]);
 const diagnosticCategories = new Set([
   'websocket', 'network', 'storage', 'tls', 'type_error', 'reference_error',
   'syntax_error', 'dom_exception', 'console_error', 'page_error', 'navigation_error',
@@ -106,7 +110,7 @@ function incrementWebSocket(profile, kind) {
 function observePage(profile, page) {
   const label = profileNames.has(profile) ? profile : 'controller';
   const diagnostics = {
-    profile: label, storage: [], console_errors: {}, page_errors: {}, navigation_errors: {},
+    profile: label, storage: [], ui_snapshots: [], console_errors: {}, page_errors: {}, navigation_errors: {},
     websockets: { attempts: 0, closed: 0, errors: 0 },
   };
   profileDiagnostics.set(label, diagnostics);
@@ -168,6 +172,77 @@ async function recordStorageSnapshot(profile, checkpoint, page) {
   await writeProgress();
 }
 
+async function recordUISnapshot(profile, checkpoint, page) {
+  const label = profileNames.has(profile) ? profile : 'controller';
+  const diagnostics = profileDiagnostics.get(label);
+  if (!diagnostics || !uiCheckpoints.has(checkpoint) || diagnostics.ui_snapshots.length >= 8) return;
+  let summary;
+  try {
+    summary = await page.evaluate(() => {
+      const cards = [...document.querySelectorAll('.agent-card')];
+      const buttons = [...document.querySelectorAll('button.agent-open')];
+      const tones = { danger: 0, warning: 0, success: 0, muted: 0 };
+      for (const card of cards) {
+        const dot = card.querySelector('.status-dot');
+        for (const tone of Object.keys(tones)) {
+          if (dot?.classList.contains(`status-${tone}`)) tones[tone] += 1;
+        }
+      }
+      const header = document.querySelector('header .status-dot[role="img"]');
+      const headerLabel = header?.getAttribute('aria-label') || '';
+      const relayMatch = headerLabel.match(/^(\d{1,4})\/(\d{1,4}) relays connected(?:; (\d{1,4}) agent inventory (unavailable|loading))?$/);
+      let connectionState = 'unknown';
+      let inventoryState = 'not_reported';
+      let activeAgentStatus = 'not_applicable';
+      let connectedRelays = 0;
+      let configuredRelays = 0;
+      if (relayMatch) {
+        connectedRelays = Number(relayMatch[1]);
+        configuredRelays = Number(relayMatch[2]);
+        connectionState = connectedRelays === 0 ? 'disconnected'
+          : connectedRelays >= configuredRelays ? 'connected' : 'partial';
+        inventoryState = relayMatch[4] || 'ready';
+      } else if (headerLabel.startsWith('Agent ')) {
+        connectionState = 'active_agent';
+        const status = headerLabel.slice('Agent '.length).toLowerCase();
+        activeAgentStatus = ['idle', 'needs inspection', 'working', 'done'].includes(status) ? status : 'other';
+      }
+      const view = document.body.dataset.view || '';
+      const views = new Set([
+        'agents', 'terminal', 'history', 'settings', 'workspaces', 'launch',
+        'activity', 'activity_detail', 'push', 'push_unavailable', 'notification',
+      ]);
+      const headerTone = ['danger', 'warning', 'success', 'muted']
+        .find((tone) => header?.classList.contains(`status-${tone}`)) || 'unknown';
+      return {
+        view: views.has(view) ? view : 'other',
+        agent_cards: cards.length,
+        open_buttons: buttons.length,
+        enabled_open_buttons: buttons.filter((button) => !button.disabled).length,
+        disabled_open_buttons: buttons.filter((button) => button.disabled).length,
+        stale_agent_cards: cards.filter((card) => card.classList.contains('stale')).length,
+        status_tones: tones,
+        header_tone: headerTone,
+        connection_state: connectionState,
+        inventory_state: inventoryState,
+        connected_relays: connectedRelays,
+        configured_relays: configuredRelays,
+        active_agent_status: activeAgentStatus,
+      };
+    });
+  } catch {
+    summary = {
+      view: 'other', agent_cards: 0, open_buttons: 0, enabled_open_buttons: 0,
+      disabled_open_buttons: 0, stale_agent_cards: 0,
+      status_tones: { danger: 0, warning: 0, success: 0, muted: 0 },
+      header_tone: 'unknown', connection_state: 'unknown', inventory_state: 'not_reported',
+      connected_relays: 0, configured_relays: 0, active_agent_status: 'not_applicable',
+    };
+  }
+  diagnostics.ui_snapshots.push({ checkpoint, ...summary });
+  await writeProgress();
+}
+
 async function openProfile(profile, path, url) {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const context = await chromium.launchPersistentContext(path, {
@@ -221,10 +296,41 @@ async function waitForAgent(page) {
   await page.getByRole('button', { name: /^Open / }).first().waitFor({ state: 'visible', timeout: deadline });
 }
 
-async function openFixtureAgent(page) {
-  await waitForAgent(page);
-  await page.getByRole('button', { name: /^Open / }).first().click();
-  await page.getByRole('textbox', { name: 'Prompt' }).waitFor({ state: 'visible', timeout: deadline });
+async function openFixtureAgent(page, profile) {
+  const button = page.getByRole('button', { name: /^Open / }).first();
+  await recordUISnapshot(profile, 'inventory_initial', page);
+  try {
+    await button.waitFor({ state: 'visible', timeout: deadline });
+  } catch (error) {
+    await recordUISnapshot(profile, 'agent_button_timeout', page);
+    throw error;
+  }
+  if (!await button.isEnabled()) {
+    await recordUISnapshot(profile, 'agent_button_disabled', page);
+    try {
+      await page.waitForFunction(() => {
+        const candidate = document.querySelector('button.agent-open');
+        return candidate instanceof HTMLButtonElement && !candidate.disabled;
+      }, null, { timeout: deadline });
+    } catch (error) {
+      await recordUISnapshot(profile, 'agent_button_disabled', page);
+      throw error;
+    }
+  }
+  await recordUISnapshot(profile, 'agent_button_ready', page);
+  try {
+    await button.click();
+  } catch (error) {
+    await recordUISnapshot(profile, 'agent_click_failed', page);
+    throw error;
+  }
+  try {
+    await page.getByRole('textbox', { name: 'Prompt' }).waitFor({ state: 'visible', timeout: deadline });
+  } catch (error) {
+    await recordUISnapshot(profile, 'prompt_wait_failed', page);
+    throw error;
+  }
+  await recordUISnapshot(profile, 'prompt_visible', page);
 }
 
 async function operationKinds(path) {
@@ -298,6 +404,7 @@ function profileEvidence() {
   return [...profileDiagnostics.values()].map((profile) => ({
     profile: profile.profile,
     storage: profile.storage.slice(0, 8),
+    ui_snapshots: profile.ui_snapshots.slice(0, 8),
     console_errors: { ...profile.console_errors },
     page_errors: { ...profile.page_errors },
     navigation_errors: { ...profile.navigation_errors },
@@ -372,7 +479,7 @@ async function initialEnrollment() {
 
     const controllerReadBaseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
     await setStage('controller_inventory');
-    await openFixtureAgent(controller.page);
+    await openFixtureAgent(controller.page, 'controller');
     const readWorked = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', controllerReadBaseline + 1);
     await setStage('controller_command');
     const prompt = controller.page.getByRole('textbox', { name: 'Prompt' });
@@ -407,7 +514,7 @@ async function initialEnrollment() {
     const readerCredential = await waitForCredential(reader.page, 'reader', 'reader');
     await setStage('reader_read_only');
     const readerReadBaseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
-    await openFixtureAgent(reader.page);
+    await openFixtureAgent(reader.page, 'reader');
     const readerRead = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', readerReadBaseline + 1);
     const readerPrompt = reader.page.getByRole('textbox', { name: 'Prompt' });
     const denied = await readerPrompt.isDisabled();

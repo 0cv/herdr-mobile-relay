@@ -78,6 +78,18 @@ BROWSER_STORAGE_TYPES = {
     "absent", "invalid_json", "object", "array", "string", "number", "boolean", "null", "unavailable",
 }
 BROWSER_STORAGE_CHECKPOINTS = {"after_navigation", "credential_wait_failed", "credentialed"}
+BROWSER_UI_CHECKPOINTS = {
+    "inventory_initial", "agent_button_timeout", "agent_button_disabled",
+    "agent_button_ready", "agent_click_failed", "prompt_wait_failed", "prompt_visible",
+}
+BROWSER_UI_VIEWS = {
+    "agents", "terminal", "history", "settings", "workspaces", "launch",
+    "activity", "activity_detail", "push", "push_unavailable", "notification", "other",
+}
+BROWSER_CONNECTION_STATES = {"unknown", "disconnected", "connected", "partial", "active_agent"}
+BROWSER_INVENTORY_STATES = {"ready", "loading", "unavailable", "not_reported"}
+BROWSER_AGENT_STATES = {"idle", "needs inspection", "working", "done", "other", "not_applicable"}
+BROWSER_STATUS_TONES = {"danger", "warning", "success", "muted", "unknown"}
 BROWSER_DIAGNOSTIC_CATEGORIES = {
     "websocket", "network", "storage", "tls", "type_error", "reference_error",
     "syntax_error", "dom_exception", "console_error", "page_error", "navigation_error",
@@ -1376,6 +1388,43 @@ def safe_browser_profile(value: object) -> dict[str, object] | None:
                 "keys": keys,
             })
 
+    ui_records = value.get("ui_snapshots")
+    ui_snapshots = []
+    if isinstance(ui_records, list):
+        for snapshot in ui_records[:8]:
+            if not isinstance(snapshot, dict):
+                continue
+            checkpoint = snapshot.get("checkpoint")
+            if not isinstance(checkpoint, str) or checkpoint not in BROWSER_UI_CHECKPOINTS:
+                continue
+            tones = snapshot.get("status_tones")
+            safe_tones = {
+                tone: count for tone, count in tones.items()
+                if tone in {"danger", "warning", "success", "muted"}
+                and type(count) is int and 0 <= count <= 1000
+            } if isinstance(tones, dict) else {}
+            def enum_value(field: str, allowed: set[str], default: str) -> str:
+                candidate = snapshot.get(field)
+                return candidate if isinstance(candidate, str) and candidate in allowed else default
+
+            ui_snapshot = {
+                "checkpoint": checkpoint,
+                "view": enum_value("view", BROWSER_UI_VIEWS, "other"),
+                "header_tone": enum_value("header_tone", BROWSER_STATUS_TONES, "unknown"),
+                "connection_state": enum_value("connection_state", BROWSER_CONNECTION_STATES, "unknown"),
+                "inventory_state": enum_value("inventory_state", BROWSER_INVENTORY_STATES, "not_reported"),
+                "active_agent_status": enum_value("active_agent_status", BROWSER_AGENT_STATES, "not_applicable"),
+                "status_tones": safe_tones,
+            }
+            for field in (
+                "agent_cards", "open_buttons", "enabled_open_buttons", "disabled_open_buttons",
+                "stale_agent_cards", "connected_relays", "configured_relays",
+            ):
+                count = snapshot.get(field)
+                if type(count) is int and 0 <= count <= 1000:
+                    ui_snapshot[field] = count
+            ui_snapshots.append(ui_snapshot)
+
     def safe_counts(name: str) -> dict[str, int]:
         counts = value.get(name)
         if not isinstance(counts, dict):
@@ -1388,6 +1437,7 @@ def safe_browser_profile(value: object) -> dict[str, object] | None:
     return {
         "profile": profile_name,
         "storage": storage,
+        "ui_snapshots": ui_snapshots,
         "console_errors": safe_counts("console_errors"),
         "page_errors": safe_counts("page_errors"),
         "navigation_errors": safe_counts("navigation_errors"),
