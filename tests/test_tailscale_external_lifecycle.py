@@ -258,11 +258,14 @@ def local_health_diagnostic(env: dict[str, str]) -> str:
             if "=" in line
         )
         run_id = session["HERDR_RELAY_CONTROL_RUN_ID"]
-        with http.client.HTTPConnection("127.0.0.1", int(env["HERDR_RELAY_PORT"]), timeout=2) as connection:
+        connection = http.client.HTTPConnection("127.0.0.1", int(env["HERDR_RELAY_PORT"]), timeout=2)
+        try:
             connection.request("GET", "/healthz")
             response = connection.getresponse()
             payload = response.read()
             status = response.status
+        finally:
+            connection.close()
     except (KeyError, OSError, ValueError, http.client.HTTPException):
         return "local_health_probe_unavailable"
     if status != 200:
