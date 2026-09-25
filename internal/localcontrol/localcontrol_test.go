@@ -9,8 +9,7 @@ import (
 )
 
 func TestServerRequiresRunIdentityAndAcknowledgesArm(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "control.sock")
+	path := testSocketPath(t)
 	armed := false
 	server, err := New(path, "run-1", "instance-1", func() Status {
 		return Status{Ready: true, InvitationArmed: armed, InvitationExpiresAt: "2026-01-01T00:00:00Z"}
@@ -42,8 +41,7 @@ func TestServerRequiresRunIdentityAndAcknowledgesArm(t *testing.T) {
 }
 
 func TestManagedLifecycleOperationsReturnRedactedOwnerState(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "control.sock")
+	path := testSocketPath(t)
 	retired := make(chan struct{})
 	server, err := NewManaged(path, "run-managed", "instance-managed", Callbacks{
 		Status: func(context.Context) Status {
@@ -94,8 +92,7 @@ func TestManagedLifecycleOperationsReturnRedactedOwnerState(t *testing.T) {
 }
 
 func TestManagedControlClientCancellationCancelsLifecycleCallback(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "control.sock")
+	path := testSocketPath(t)
 	started := make(chan struct{})
 	callbackCancelled := make(chan struct{})
 	server, err := NewManaged(path, "run-cancel", "instance-cancel", Callbacks{
@@ -144,9 +141,18 @@ func TestManagedControlClientCancellationCancelsLifecycleCallback(t *testing.T) 
 	}
 }
 
+func testSocketPath(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("/tmp", "lc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return filepath.Join(root, "control.sock")
+}
+
 func TestNewRejectsSocketCollision(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "control.sock")
+	path := testSocketPath(t)
 	if err := os.WriteFile(path, []byte("owned by another run"), 0o600); err != nil {
 		t.Fatal(err)
 	}
