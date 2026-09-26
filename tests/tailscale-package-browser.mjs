@@ -543,12 +543,14 @@ async function initialEnrollment() {
       .getByRole('button', { name: /^Settings/ }).click();
     await setStage('controller_settings_devices');
     await recordUISnapshot('controller', 'settings_navigated', controller.page);
-    await controller.page.getByRole('heading', { name: 'Devices' }).waitFor({ state: 'visible', timeout: deadline });
+    await controller.page.getByRole('heading', { name: 'Devices', exact: true, level: 3 })
+      .waitFor({ state: 'visible', timeout: deadline });
     await setStage('reader_invitation');
-    await controller.page.getByRole('button', { name: 'Invite Device' }).click();
-    await controller.page.getByLabel('Device name').fill('Package reader');
-    await controller.page.getByLabel('Role').selectOption('reader');
-    await controller.page.getByRole('button', { name: 'Create Invitation' }).click();
+    await controller.page.getByRole('button', { name: 'Invite Device', exact: true }).click();
+    const inviteDialog = controller.page.getByRole('dialog', { name: 'Invite Device' });
+    await inviteDialog.getByLabel('Device name').fill('Package reader');
+    await inviteDialog.getByLabel('Role').selectOption('reader');
+    await inviteDialog.getByRole('button', { name: 'Create Invitation' }).click();
     const invitation = controller.page.getByLabel('One-use invitation link');
     await invitation.waitFor({ state: 'visible', timeout: deadline });
     const readerSetupURL = await invitation.inputValue();
