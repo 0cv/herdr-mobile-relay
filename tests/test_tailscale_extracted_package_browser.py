@@ -897,7 +897,12 @@ if operation == "status_json":
 if operation == "version_daemon_json":
   print(json.dumps(version,separators=(",",":"))); raise SystemExit(0)
 if operation == "serve_status_json":
-  print(json.dumps(config,separators=(",",":")))
+  # Pinned ipn.ServeConfig uses json omitempty for Foreground: the CLI's
+  # decoded status cannot expose an empty retired session map as a route.
+  cli_config = dict(config)
+  if cli_config.get("Foreground") == {}:
+    del cli_config["Foreground"]
+  print(json.dumps(cli_config,separators=(",",":")))
   raise SystemExit(0)
 # No CLI write operation is part of managed ownership; fail any attempt.
 raise SystemExit(97)
