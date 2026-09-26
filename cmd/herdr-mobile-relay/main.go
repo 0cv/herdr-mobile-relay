@@ -510,6 +510,23 @@ func runServe() (int, error) {
 				case <-done:
 					return
 				case <-signals:
+					// Terminal Ctrl-C reaches both the foreground launcher and this
+					// child. Give the launcher its authenticated retire/ack exchange
+					// first; otherwise autonomous cleanup can close the control socket
+					// before the launcher proves route and watch retirement. Retire
+					// independently after a bounded grace if the launcher is gone.
+					grace := time.NewTimer(3 * time.Second)
+					select {
+					case <-done:
+						grace.Stop()
+						return
+					case <-grace.C:
+					}
+					select {
+					case <-done:
+						return
+					default:
+					}
 					retireCtx, cancel := context.WithTimeout(context.Background(), localcontrol.RetireTimeout)
 					retireErr := srv.RetireManagedTailscale(retireCtx)
 					cancel()
