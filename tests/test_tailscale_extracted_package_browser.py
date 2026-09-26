@@ -840,6 +840,12 @@ class LocalAPIHandler(http.server.BaseHTTPRequestHandler):
                     fixture.persist()
                     self._headers(409, b"foreign session removal refused", "text/plain; charset=utf-8")
                     return
+            # The pinned daemon decodes into ipn.ServeConfig, whose
+            # Foreground field is omitempty on subsequent LocalAPI GETs.
+            # Preserve the submitted route for the removal assertion above,
+            # then model the daemon's canonical empty configuration.
+            if next_config.get("Foreground") == {}:
+                del next_config["Foreground"]
             fixture.config = next_config
             fixture.etag = hashlib.sha256(body).hexdigest()
             registration_post_committed = WATCH_ID in (next_config.get("Foreground") or {})
@@ -897,12 +903,7 @@ if operation == "status_json":
 if operation == "version_daemon_json":
   print(json.dumps(version,separators=(",",":"))); raise SystemExit(0)
 if operation == "serve_status_json":
-  # Pinned ipn.ServeConfig uses json omitempty for Foreground: the CLI's
-  # decoded status cannot expose an empty retired session map as a route.
-  cli_config = dict(config)
-  if cli_config.get("Foreground") == {}:
-    del cli_config["Foreground"]
-  print(json.dumps(cli_config,separators=(",",":")))
+  print(json.dumps(config,separators=(",",":")))
   raise SystemExit(0)
 # No CLI write operation is part of managed ownership; fail any attempt.
 raise SystemExit(97)
