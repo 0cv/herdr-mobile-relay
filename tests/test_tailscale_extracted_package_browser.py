@@ -1961,7 +1961,13 @@ def main() -> int:
             "exec \"" + str(cli_script) + "\" \"$@\"\n", encoding="utf-8",
         )
         held.chmod(0o700)
-        held_env = dict(relay_env, HERDR_TAILSCALE_BIN=str(held))
+        # The previous case intentionally retains a foreign route whose
+        # operator-owned Text handler the strict read-only parser refuses.
+        # Exercise pipe bounding against an independent empty CLI snapshot;
+        # never alter or conceal the preserved foreign LocalAPI state.
+        held_state_file = temporary_root / "held-inspection-state.json"
+        write_json(held_state_file, {"config": {}})
+        held_env = dict(relay_env, HERDR_TAILSCALE_BIN=str(held), HERDR_FIXTURE_API_STATE=str(held_state_file))
         set_stage("held_pipe_cleanup")
         started = time.monotonic()
         inspection = subprocess.run(
@@ -1969,11 +1975,13 @@ def main() -> int:
             env=held_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8, check=False,
         )
         elapsed = time.monotonic() - started
-        child_file = temporary_root / "held-child.pid"
         try:
             child_pid = int(child_file.read_text(encoding="ascii").strip())
-            os.kill(child_pid, 15)
         except (OSError, ValueError):
+            die("held-pipe shim did not spawn the inherited-pipe descendant")
+        try:
+            os.kill(child_pid, 15)
+        except ProcessLookupError:
             pass
         if elapsed > 7.0 or inspection.returncode != 0:
             die("held inherited child pipe was not bounded by the production CLI inspection")
