@@ -1737,8 +1737,9 @@ def main() -> int:
         scenario = temporary_root / "scenario.json"
         scenario.write_text(json.dumps({
             "panes": [{
-                "pane_id": "workspace:agent", "agent": "codex", "name": "Package fixture",
-                "agent_status": "idle", "workspace_id": "workspace", "tab_id": "tab",
+                "pane_id": "workspace:agent", "terminal_id": "package-terminal",
+                "agent": "codex", "name": "Package fixture", "agent_status": "idle",
+                "workspace_id": "workspace", "tab_id": "tab",
                 "cwd": "/tmp/herdr-package-fixture", "revision": 1,
             }],
             "workspaces": [{"workspace_id": "workspace", "label": "Package fixture"}],
