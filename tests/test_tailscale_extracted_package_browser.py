@@ -132,9 +132,13 @@ LAUNCHER_STDERR_PHASES = {
     "activation_response_unproven", "route_check_mismatch", "https_health_request_failed",
     "https_health_identity_mismatch", "release_identity_failed", "phone_bundle_verification_failed",
     "bootstrap_arm_refused", "bootstrap_outcome_unresolved", "bootstrap_arm_response_unproven",
-    "final_checks_failed", "selection_snapshot_mismatch",
+    "final_checks_failed", "selection_snapshot_mismatch", "prior_session_or_socket",
+    "relay_port_occupied", "operator_ingress_running",
 }
 LAUNCHER_STDERR_PATTERNS = (
+    ("prior_session_or_socket", re.compile(r"A prior Tailscale session or control socket exists", re.IGNORECASE)),
+    ("relay_port_occupied", re.compile(r"Relay or Herdr event port is occupied", re.IGNORECASE)),
+    ("operator_ingress_running", re.compile(r"Operator-owned HTTPS Serve is still running", re.IGNORECASE)),
     ("local_ready_refused", re.compile(r"Managed relay did not acknowledge local_ready with its owner held\.", re.IGNORECASE)),
     ("activation_refused_not_dispatched", re.compile(r"Tailscale activation was refused with a decoded not-dispatched result", re.IGNORECASE)),
     ("activation_refused_settled_no_write", re.compile(r"Tailscale activation was refused with a decoded settled-no-write result", re.IGNORECASE)),
