@@ -12,27 +12,34 @@ cd herdr-mobile-relay
 make dev-tunnel
 ```
 
-`make dev-tunnel` now asks on a terminal whether to use (1) the temporary
+`make dev-tunnel` asks on a terminal whether to use (1) the temporary
 Cloudflare tunnel / saved gateway or (2) managed Tailscale Serve. Option 1
 builds the current Go source and frontend, uses isolated ports and state under
 `relay/.dev/`, and never uses the installed production relay. Enter selects
-option 1, preserving the old default. In automation, `make dev-tunnel` retains
-that default; set `HERDR_DEV_TRANSPORT=tailscale` to select option 2 without a
-menu (the Tailscale opt-in and explicit paths are still required). “Tunnel”
-means the Cloudflare/gateway path here; Tailscale Serve is tailnet HTTPS, not
-Cloudflare tunneling. Neither choice reads the other's development state.
+option 1, preserving the old default. Choosing 2 is the interactive development
+opt-in; the managed launcher separately asks before changing the exact Serve
+route. In automation, `make dev-tunnel` retains the tunnel default; set
+`HERDR_DEV_TRANSPORT=tailscale` to select option 2 without a menu (the separate
+Tailscale opt-in and explicit paths are still required). “Tunnel” means the
+Cloudflare/gateway path here; Tailscale Serve is tailnet HTTPS, not Cloudflare
+tunneling. Neither choice reads the other's development state.
 
 For an **explicitly selected, already running and authenticated** supported
 Tailscale v1.102.4 Unix daemon, `make dev-tailscale` guides a terminal user
-through consent, an existing private directory, exact CLI, Herdr executable,
-Herdr socket, and three nonproduction ports. It builds a matching frontend and
-relay into that separate directory and invokes the real foreground managed
-launcher. It never installs, logs in, or starts Tailscale. It does not discover
-or select your personal daemon for you; the macOS GUI (MacSys) and App Store
-variants are unsupported by this adapter. Declining consent or running without
-a terminal and without the explicit opt-in fails before contacting any daemon.
-For a scripted run, create an empty root with mode 0700 and supply the values
-explicitly:
+through development opt-in (skipped if you already chose menu option 2), a
+private directory, exact CLI, Herdr executable, Herdr socket, and three
+nonproduction ports. Press Enter at the directory prompt to use
+`relay/.dev-tailscale/`; the script creates that checkout-local directory with
+mode 0700 only after validating the other inputs. A custom directory must
+already exist with mode 0700. It builds a matching frontend and relay into the
+separate directory and invokes the real foreground managed launcher. The
+launcher shows the exact HTTPS Serve route and requires separate per-run
+consent before configuring it. It never installs, logs in, or starts Tailscale.
+It does not discover or select your personal daemon for you; the macOS GUI
+(MacSys) and App Store variants are unsupported by this adapter. Declining
+opt-in or running without a terminal and without the explicit opt-in fails
+before contacting any daemon. For a scripted run, create an empty root with
+mode 0700 and supply the values explicitly:
 
 ```bash
 mkdir -m 700 /path/to/private/dev-state

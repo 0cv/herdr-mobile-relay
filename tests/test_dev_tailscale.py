@@ -79,6 +79,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             stdout, stderr = process.communicate(timeout=5)
             if process.returncode == 0 or expected not in stdout + stderr:
                 raise AssertionError(f"{case}: unsafe interactive outcome: {stdout + stderr!r}")
+            if entrypoint == tunnel_script and b"Set up isolated managed Tailscale" in stdout + stderr:
+                raise AssertionError("menu selection demanded redundant development consent")
             if sentinel.exists() or (dev / "relay.env").exists() or (base / "unused-tunnel").exists():
                 raise AssertionError(f"{case}: touched a CLI or dev state before consent")
             print(f"PASS dev-tailscale preflight: {case}")
@@ -86,10 +88,20 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             os.close(master)
 
     interactive_refused("direct_interactive_decline", script, b"n\n", b"Cancelled; nothing was started.")
-    interactive_refused("dev_tunnel_tailscale_choice_decline", tunnel_script, b"2\nn\n", b"Cancelled; nothing was started.")
-    interactive_refused("consent_does_not_create_root", script, b"y\n",
-                        b"Create a private development root first",
+    interactive_refused("dev_tunnel_tailscale_choice", tunnel_script, b"2\nrelative\n",
+                        b"Choose an absolute private state directory, or press Enter",
+                        HERDR_DEV_TAILSCALE_DIR="")
+    interactive_refused("consent_does_not_create_custom_root", script, b"y\n",
+                        b"Create a custom private state directory first",
                         HERDR_DEV_TAILSCALE_DIR=str(base / "missing"))
+    checkout_default = root / "relay" / ".dev-tailscale"
+    if checkout_default.exists():
+        raise AssertionError("hosted fixture expected an unused checkout-local dev root")
+    interactive_refused("invalid_cli_does_not_create_default", tunnel_script, b"2\n\n",
+                        b"Not an executable file:",
+                        HERDR_DEV_TAILSCALE_DIR="", HERDR_DEV_TAILSCALE_BIN=str(base / "missing-cli"))
+    if checkout_default.exists():
+        raise AssertionError("created checkout-local state before validating the selected CLI")
     delegated = subprocess.run(
         [str(tunnel_script)], env=dict(without_consent, HERDR_DEV_TRANSPORT="tailscale",
                                         HERDR_DEV_CONFIG_DIR=str(base / "unused-tunnel")),

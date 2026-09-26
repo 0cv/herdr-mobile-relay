@@ -13,6 +13,7 @@ test-results/
 relay/.env
 relay/gateway-deploy
 relay/.dev/
+relay/.dev-tailscale/
 /herdr-gateway-deploy/
 relay/push/
 /internal/app/push/

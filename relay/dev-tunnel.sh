@@ -18,7 +18,7 @@ if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
     read -r -p "Choice [1]: " choice || { echo "Cancelled; nothing was started." >&2; exit 2; }
     case "$choice" in
         ''|1) ;;
-        2) exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
+        2) HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
         *) echo "✗ Choose 1 or 2." >&2; exit 2 ;;
     esac
 fi

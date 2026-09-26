@@ -7,18 +7,19 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+DEFAULT_DEV_ROOT="$SCRIPT_DIR/.dev-tailscale"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
 usage() {
     echo "Managed Tailscale development requires a supported authenticated v1.102.4 Unix daemon." >&2
     echo "MacSys GUI and App Store Tailscale are not supported by this LocalAPI adapter." >&2
-    echo "Interactive: make dev-tailscale (select an existing private root, exact binaries/socket, and ports)." >&2
+    echo "Interactive: make dev-tailscale (choose a private root, exact binaries/socket, and ports)." >&2
     echo "Scripted: HERDR_DEV_TAILSCALE_ENABLE=1 HERDR_DEV_TAILSCALE_DIR=/private/path \\" >&2
     echo "  HERDR_DEV_TAILSCALE_BIN=/path/to/tailscale HERDR_DEV_HERDR_BIN=/path/to/herdr \\" >&2
     echo "  HERDR_DEV_HERDR_SOCKET=/path/to/herdr.sock HERDR_DEV_TAILSCALE_PORT=18377 \\" >&2
     echo "  HERDR_DEV_TAILSCALE_PLUGIN_PORT=18378 HERDR_DEV_TAILSCALE_HTTPS_PORT=8443 make dev-tailscale" >&2
-    echo "Create the private root first with mkdir -m 700 /private/path. No daemon is started or logged in." >&2
+    echo "Create custom roots first with mkdir -m 700 /private/path. No daemon is started or logged in." >&2
 }
 
 prompt_missing() {
@@ -40,9 +41,7 @@ case "${HERDR_DEV_TAILSCALE_ENABLE:-}" in
     1) ;;
     '')
         [ -t 0 ] || { usage; exit 2; }
-        echo "Managed Tailscale Serve is NOT a Cloudflare tunnel: it changes one tailnet HTTPS route for this foreground pane."
-        echo "No Tailscale CLI, daemon, LocalAPI or Herdr socket is contacted before you explicitly select them."
-        read -r -p "Continue with a supported, already authenticated Unix daemon? [y/N] " consent || exit 2
+        read -r -p "Set up isolated managed Tailscale development? [y/N] " consent || exit 2
         case "$consent" in
             y|Y|yes|YES) export HERDR_DEV_TAILSCALE_ENABLE=1 ;;
             *) echo "Cancelled; nothing was started."; exit 2 ;;
@@ -51,7 +50,12 @@ case "${HERDR_DEV_TAILSCALE_ENABLE:-}" in
     *) echo "✗ HERDR_DEV_TAILSCALE_ENABLE must be 1 to opt in." >&2; exit 2 ;;
 esac
 
-prompt_missing HERDR_DEV_TAILSCALE_DIR "Existing absolute private state directory (mkdir -m 700 PATH first)"
+if [ -t 0 ]; then
+    echo "Managed Tailscale development needs an authenticated v1.102.4 Unix daemon (not the macOS GUI)."
+    echo "The launcher will show the exact HTTPS Serve route and ask before changing it."
+    echo "Press Enter for checkout-local private state; a custom directory must already exist with mode 0700."
+fi
+prompt_missing HERDR_DEV_TAILSCALE_DIR "Private development state directory" "$DEFAULT_DEV_ROOT"
 prompt_missing HERDR_DEV_TAILSCALE_BIN "Absolute path to supported Tailscale CLI"
 prompt_missing HERDR_DEV_HERDR_BIN "Absolute path to Herdr executable"
 prompt_missing HERDR_DEV_HERDR_SOCKET "Absolute path to running Herdr Unix socket"
@@ -60,20 +64,19 @@ prompt_missing HERDR_DEV_TAILSCALE_PLUGIN_PORT "Development plugin UDP port" 183
 prompt_missing HERDR_DEV_TAILSCALE_HTTPS_PORT "Tailscale HTTPS Serve port" 8443
 case "${HERDR_DEV_TAILSCALE_DIR:-}" in
     /*) ;;
-    *) usage; echo "✗ Choose an existing absolute private development root." >&2; exit 2 ;;
+    *) echo "✗ Choose an absolute private state directory, or press Enter for $DEFAULT_DEV_ROOT." >&2; exit 2 ;;
 esac
-[ -d "$HERDR_DEV_TAILSCALE_DIR" ] && [ ! -L "$HERDR_DEV_TAILSCALE_DIR" ] || {
-    echo "✗ Create a private development root first (mkdir -m 700 PATH)." >&2
-    exit 2
-}
-DEV_ROOT="$(cd "$HERDR_DEV_TAILSCALE_DIR" && pwd -P)"
+[ ! -L "$HERDR_DEV_TAILSCALE_DIR" ] || { echo "✗ Development root cannot be a symlink." >&2; exit 2; }
+if [ -d "$HERDR_DEV_TAILSCALE_DIR" ]; then
+    DEV_ROOT="$(cd "$HERDR_DEV_TAILSCALE_DIR" && pwd -P)"
+else
+    [ "$HERDR_DEV_TAILSCALE_DIR" = "$DEFAULT_DEV_ROOT" ] && [ ! -e "$DEFAULT_DEV_ROOT" ] || {
+        echo "✗ Create a custom private state directory first (mkdir -m 700 PATH)." >&2
+        exit 2
+    }
+    DEV_ROOT="$DEFAULT_DEV_ROOT"
+fi
 [ "$DEV_ROOT" != / ] && [ "$DEV_ROOT" != "$HOME" ] || { echo "✗ Root or home cannot be a dev state directory." >&2; exit 2; }
-case "$(uname -s)" in
-    Darwin) ROOT_MODE="$(stat -f '%Lp' "$DEV_ROOT")" ;;
-    Linux) ROOT_MODE="$(stat -c '%a' "$DEV_ROOT")" ;;
-    *) echo "✗ Only Linux and macOS development are supported." >&2; exit 2 ;;
-esac
-[ "$ROOT_MODE" = 700 ] || { echo "✗ Development state root must have mode 0700." >&2; exit 2; }
 for protected in "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay" \
     "${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr-mobile-relay}" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay"; do
@@ -94,7 +97,10 @@ esac
     exit 2
 }
 for binary in "${HERDR_DEV_TAILSCALE_BIN:-}" "${HERDR_DEV_HERDR_BIN:-}"; do
-    case "$binary" in /*) [ -x "$binary" ] && [ ! -d "$binary" ] || { usage; exit 2; } ;; *) usage; exit 2 ;; esac
+    case "$binary" in
+        /*) [ -x "$binary" ] && [ ! -d "$binary" ] || { echo "✗ Not an executable file: $binary" >&2; exit 2; } ;;
+        *) echo "✗ Select an absolute path to each executable (Tailscale CLI and Herdr)." >&2; exit 2 ;;
+    esac
 done
 case "${HERDR_DEV_HERDR_SOCKET:-}" in /*) ;; *) usage; exit 2 ;; esac
 for port in "${HERDR_DEV_TAILSCALE_PORT:-}" "${HERDR_DEV_TAILSCALE_PLUGIN_PORT:-}" "${HERDR_DEV_TAILSCALE_HTTPS_PORT:-}"; do
@@ -114,6 +120,24 @@ case "${1:-}" in
     *) usage; exit 2 ;;
 esac
 
+# Only the checkout-local default may be created, and only after the isolation,
+# binary, port and argument checks. Existing roots are never chmod'ed or repaired.
+case "$(uname -s)" in
+    Darwin|Linux) ;;
+    *) echo "✗ Only Linux and macOS development are supported." >&2; exit 2 ;;
+esac
+if [ ! -d "$DEV_ROOT" ]; then
+    mkdir -m 700 "$DEV_ROOT" || { echo "✗ Could not create private development state." >&2; exit 2; }
+fi
+case "$(uname -s)" in
+    Darwin) ROOT_MODE="$(stat -f '%Lp' "$DEV_ROOT")" ;;
+    Linux) ROOT_MODE="$(stat -c '%a' "$DEV_ROOT")" ;;
+    *) echo "✗ Only Linux and macOS development are supported." >&2; exit 2 ;;
+esac
+[ "$ROOT_MODE" = 700 ] && [ ! -L "$DEV_ROOT" ] || {
+    echo "✗ Development state root must be a real directory with mode 0700." >&2
+    exit 2
+}
 ENV_FILE="$DEV_ROOT/relay.env"
 MARKER="$DEV_ROOT/.herdr-dev-tailscale"
 for leaf in relay.env .herdr-dev-tailscale bin bin/herdr-mobile-relay home config cache data web; do
