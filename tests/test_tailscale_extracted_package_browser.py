@@ -1337,15 +1337,34 @@ def launch_managed_rejection(package: Path, env: dict[str, str], timeout: float 
     return process, stdout
 
 
+launcher_stop_outcomes: list[dict[str, str]] = []
+
+
+def record_launcher_stop(outcome: str, returncode: int | None = None) -> None:
+    if len(launcher_stop_outcomes) >= 4:
+        return
+    exit_class = "unknown"
+    if returncode == 130:
+        exit_class = "interrupt_130"
+    elif returncode == 0:
+        exit_class = "zero"
+    elif returncode is not None:
+        exit_class = "signal" if returncode < 0 else "other_nonzero"
+    launcher_stop_outcomes.append({"outcome": outcome, "exit_class": exit_class})
+
+
 def stop_launcher(process: subprocess.Popen[bytes]) -> bool:
     if process.poll() is not None:
+        record_launcher_stop("exited_before_interrupt", process.returncode)
         return False
     try:
         os.killpg(process.pid, 2)
     except ProcessLookupError:
+        record_launcher_stop("process_group_missing", process.poll())
         return False
     try:
         process.wait(timeout=20)
+        record_launcher_stop("interrupted", process.returncode)
         return process.returncode == 130
     except subprocess.TimeoutExpired:
         try:
@@ -1356,6 +1375,7 @@ def stop_launcher(process: subprocess.Popen[bytes]) -> bool:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
+        record_launcher_stop("interrupt_timeout", process.poll())
         return False
 
 
@@ -2055,6 +2075,7 @@ def main() -> int:
             ),
             "launcher_log_category": launcher_log_category,
             "launcher_stderr_phase": launcher_stderr_phase,
+            "launcher_stop_outcomes": launcher_stop_outcomes,
             "public_http_requests": (
                 public_server.fixture.operation_summary() if public_server is not None else []
             ),
