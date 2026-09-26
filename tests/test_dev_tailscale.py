@@ -8,6 +8,7 @@ It does not replace the extracted-package managed browser acceptance gate.
 import os
 from pathlib import Path
 import pty
+import shutil
 import subprocess
 import tempfile
 
@@ -115,6 +116,34 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     print("PASS dev-tailscale preflight: noninteractive_delegation_requires_opt_in")
 
     enabled = dict(env, HERDR_DEV_TAILSCALE_ENABLE="1")
+    discovered = subprocess.run(
+        [str(script)], env=dict(enabled, HERDR_DEV_TAILSCALE_BIN="",
+                                HERDR_DEV_HERDR_BIN=str(base / "missing-herdr"),
+                                PATH=f"{base}:/usr/bin:/bin"),
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if (discovered.returncode == 0 or
+        f"Tailscale CLI from PATH: {cli}".encode() not in discovered.stdout or
+        b"Not an executable file:" not in discovered.stderr or
+        sentinel.exists() or (dev / "relay.env").exists()):
+        raise AssertionError("PATH selection did not locate the fake CLI safely before other validation")
+    print("PASS dev-tailscale preflight: resolves_cli_from_path_without_running_it")
+
+    no_cli_path = base / "no-cli-path"
+    no_cli_path.mkdir(mode=0o700)
+    (no_cli_path / "dirname").symlink_to(shutil.which("dirname"))
+    missing_cli = subprocess.run(
+        [str(script)], env=dict(enabled, HERDR_DEV_TAILSCALE_BIN="", PATH=str(no_cli_path)),
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if (missing_cli.returncode == 0 or
+        b"No executable Tailscale CLI found on PATH" not in missing_cli.stderr or
+        sentinel.exists() or (dev / "relay.env").exists()):
+        raise AssertionError("missing CLI did not fail closed before development state creation")
+    print("PASS dev-tailscale preflight: missing_cli_requires_explicit_path")
+
     reserved = dict(enabled, HERDR_DEV_TAILSCALE_PORT="8375")
     refused("rejects_production_backend_port", reserved)
 

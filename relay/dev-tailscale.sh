@@ -1,7 +1,7 @@
 #!/bin/bash
 # Explicit, isolated development entrypoint for the managed foreground owner.
-# It never installs, logs in, discovers a personal profile, or runs the CLI
-# until the operator has selected a private root, binaries and ports.
+# It never installs, logs in, or probes a daemon. After explicit opt-in it may
+# locate a CLI on PATH without running it; the launcher validates the profile.
 set -euo pipefail
 umask 077
 
@@ -14,9 +14,10 @@ DEFAULT_DEV_ROOT="$SCRIPT_DIR/.dev-tailscale"
 usage() {
     echo "Managed Tailscale development requires a supported authenticated v1.102.4 Unix daemon." >&2
     echo "MacSys GUI and App Store Tailscale are not supported by this LocalAPI adapter." >&2
-    echo "Interactive: make dev-tailscale (choose a private root, exact binaries/socket, and ports)." >&2
+    echo "Interactive: make dev-tailscale (choose private state, Herdr executable/socket, and ports)." >&2
+    echo "Tailscale CLI is located on PATH after opt-in; override with HERDR_DEV_TAILSCALE_BIN=/absolute/path." >&2
     echo "Scripted: HERDR_DEV_TAILSCALE_ENABLE=1 HERDR_DEV_TAILSCALE_DIR=/private/path \\" >&2
-    echo "  HERDR_DEV_TAILSCALE_BIN=/path/to/tailscale HERDR_DEV_HERDR_BIN=/path/to/herdr \\" >&2
+    echo "  HERDR_DEV_HERDR_BIN=/path/to/herdr \\" >&2
     echo "  HERDR_DEV_HERDR_SOCKET=/path/to/herdr.sock HERDR_DEV_TAILSCALE_PORT=18377 \\" >&2
     echo "  HERDR_DEV_TAILSCALE_PLUGIN_PORT=18378 HERDR_DEV_TAILSCALE_HTTPS_PORT=8443 make dev-tailscale" >&2
     echo "Create custom roots first with mkdir -m 700 /private/path. No daemon is started or logged in." >&2
@@ -56,7 +57,24 @@ if [ -t 0 ]; then
     echo "Press Enter for checkout-local private state; a custom directory must already exist with mode 0700."
 fi
 prompt_missing HERDR_DEV_TAILSCALE_DIR "Private development state directory" "$DEFAULT_DEV_ROOT"
-prompt_missing HERDR_DEV_TAILSCALE_BIN "Absolute path to supported Tailscale CLI"
+if [ -z "${HERDR_DEV_TAILSCALE_BIN:-}" ]; then
+    # PATH lookup does not execute Tailscale or inspect any daemon/profile. A
+    # non-absolute, missing or non-executable result is not a usable selection.
+    tailscale_candidate="$(type -P tailscale 2>/dev/null || true)"
+    case "$tailscale_candidate" in
+        /*)
+            if [ -x "$tailscale_candidate" ] && [ ! -d "$tailscale_candidate" ]; then
+                HERDR_DEV_TAILSCALE_BIN="$tailscale_candidate"
+                export HERDR_DEV_TAILSCALE_BIN
+                echo "Tailscale CLI from PATH: $HERDR_DEV_TAILSCALE_BIN (profile checked by launcher)"
+            fi
+            ;;
+    esac
+    if [ -z "${HERDR_DEV_TAILSCALE_BIN:-}" ]; then
+        echo "No executable Tailscale CLI found on PATH; choose its absolute path." >&2
+        prompt_missing HERDR_DEV_TAILSCALE_BIN "Absolute path to supported Tailscale CLI"
+    fi
+fi
 prompt_missing HERDR_DEV_HERDR_BIN "Absolute path to Herdr executable"
 prompt_missing HERDR_DEV_HERDR_SOCKET "Absolute path to running Herdr Unix socket"
 prompt_missing HERDR_DEV_TAILSCALE_PORT "Development relay TCP port" 18377
