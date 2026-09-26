@@ -66,7 +66,7 @@ const uiCheckpoints = new Set([
   'inventory_initial', 'agent_button_timeout', 'agent_button_disabled',
   'agent_button_ready', 'agent_click_failed', 'prompt_wait_failed', 'prompt_visible',
   'command_initial', 'command_fill_failed', 'command_prompt_filled',
-  'command_send_failed', 'command_result',
+  'command_send_failed', 'command_result', 'settings_navigated',
 ]);
 const diagnosticCategories = new Set([
   'websocket', 'network', 'storage', 'tls', 'type_error', 'reference_error',
@@ -418,7 +418,7 @@ async function waitForSuccessfulOperation(path, expected) {
 let stage = 'browser_runner';
 const progressStages = new Set([
   'browser_runner', 'controller_enrollment', 'controller_inventory', 'controller_command',
-  'controller_settings', 'reader_invitation', 'reader_enrollment', 'reader_read_only',
+  'controller_settings', 'controller_settings_devices', 'reader_invitation', 'reader_enrollment', 'reader_read_only',
   'credential_preservation', 'browser_complete',
 ]);
 
@@ -456,7 +456,7 @@ function writeProgress() {
 
 const browserExceptionTypes = new Set([
   'BrowserScriptMissing', 'BrowserProtocolError', 'BrowserAssertionError', 'BrowserBudgetTimeout',
-  'BrowserError', 'TimeoutExpired', 'TimeoutError', 'Error', 'TypeError', 'ReferenceError',
+  'BrowserError', 'TimeoutExpired', 'TimeoutError', 'StrictLocatorError', 'Error', 'TypeError', 'ReferenceError',
   'SyntaxError', 'RangeError', 'DOMException', 'TargetClosedError', 'ProtocolError', 'PageClosedError',
 ]);
 
@@ -465,6 +465,7 @@ function safeExceptionType(error) {
   let message = '';
   try { name = String(error?.name ?? error?.constructor?.name ?? '').slice(0, 64); } catch { /* allowlisted fallback */ }
   try { message = String(error?.message ?? '').slice(0, 2048); } catch { /* allowlisted fallback */ }
+  if (/strict mode violation/i.test(message)) return 'StrictLocatorError';
   if (/timeout|timed out|exceeded.{0,32}time/i.test(message)) return 'TimeoutError';
   return browserExceptionTypes.has(name) ? name : 'BrowserError';
 }
@@ -540,6 +541,8 @@ async function initialEnrollment() {
     await setStage('controller_settings');
     await controller.page.getByRole('navigation', { name: 'Application' })
       .getByRole('button', { name: /^Settings/ }).click();
+    await setStage('controller_settings_devices');
+    await recordUISnapshot('controller', 'settings_navigated', controller.page);
     await controller.page.getByRole('heading', { name: 'Devices' }).waitFor({ state: 'visible', timeout: deadline });
     await setStage('reader_invitation');
     await controller.page.getByRole('button', { name: 'Invite Device' }).click();

@@ -70,7 +70,8 @@ FAILURE_CODES = {
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
-    "controller_command", "controller_settings", "reader_invitation", "reader_enrollment",
+    "controller_command", "controller_settings", "controller_settings_devices",
+    "reader_invitation", "reader_enrollment",
     "reader_read_only", "credential_preservation", "browser_complete",
 }
 BROWSER_PROFILE_NAMES = {"controller", "reader"}
@@ -81,6 +82,7 @@ BROWSER_STORAGE_CHECKPOINTS = {"after_navigation", "credential_wait_failed", "cr
 BROWSER_UI_CHECKPOINTS = {
     "inventory_initial", "agent_button_timeout", "agent_button_disabled",
     "agent_button_ready", "agent_click_failed", "prompt_wait_failed", "prompt_visible",
+    "settings_navigated",
     "command_initial", "command_fill_failed", "command_prompt_filled",
     "command_send_failed", "command_result",
 }
@@ -99,7 +101,8 @@ BROWSER_DIAGNOSTIC_CATEGORIES = {
 }
 BROWSER_EXCEPTION_TYPES = {
     "BrowserScriptMissing", "BrowserProtocolError", "BrowserAssertionError", "BrowserBudgetTimeout",
-    "BrowserError", "TimeoutExpired", "TimeoutError", "Error", "TypeError", "ReferenceError",
+    "BrowserError", "TimeoutExpired", "TimeoutError", "StrictLocatorError",
+    "Error", "TypeError", "ReferenceError",
     "SyntaxError", "RangeError", "DOMException", "TargetClosedError", "ProtocolError", "PageClosedError",
 }
 EXPECTED_CASES = [
