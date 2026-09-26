@@ -1271,6 +1271,21 @@ def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expe
     ]
     for reader in readers:
         reader.start()
+    def stop_phase() -> str:
+        with lock:
+            private = bytes(state["stderr_private"])
+        text = private.decode("utf-8", "ignore")
+        for phrase, category in (
+            ("Private retirement control is unavailable", "control_unavailable"),
+            ("Authenticated retirement did not separately acknowledge", "retirement_ack_missing"),
+            ("Relay did not exit after retirement acknowledgement", "relay_exit_missing"),
+            ("Managed Tailscale readiness or exact route changed", "readiness_changed"),
+            ("Foreground managed relay stopped", "child_exited"),
+        ):
+            if phrase in text:
+                return category
+        return "no_matching_launcher_error"
+    process.fixture_stop_phase = stop_phase  # type: ignore[attr-defined]
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         observed_log_category = managed_private_log_category(env)
@@ -1337,10 +1352,11 @@ def launch_managed_rejection(package: Path, env: dict[str, str], timeout: float 
     return process, stdout
 
 
-launcher_stop_outcomes: list[dict[str, str]] = []
+launcher_stop_outcomes: list[dict[str, str | int]] = []
 
 
-def record_launcher_stop(outcome: str, returncode: int | None = None) -> None:
+def record_launcher_stop(outcome: str, process: subprocess.Popen[bytes]) -> None:
+    returncode = process.poll()
     if len(launcher_stop_outcomes) >= 4:
         return
     exit_class = "unknown"
@@ -1350,21 +1366,25 @@ def record_launcher_stop(outcome: str, returncode: int | None = None) -> None:
         exit_class = "zero"
     elif returncode is not None:
         exit_class = "signal" if returncode < 0 else "other_nonzero"
-    launcher_stop_outcomes.append({"outcome": outcome, "exit_class": exit_class})
+    phase = getattr(process, "fixture_stop_phase", lambda: "no_matching_launcher_error")()
+    record: dict[str, str | int] = {"outcome": outcome, "exit_class": exit_class, "launcher_phase": phase}
+    if returncode is not None and -255 <= returncode <= 255:
+        record["exit_code"] = returncode
+    launcher_stop_outcomes.append(record)
 
 
 def stop_launcher(process: subprocess.Popen[bytes]) -> bool:
     if process.poll() is not None:
-        record_launcher_stop("exited_before_interrupt", process.returncode)
+        record_launcher_stop("exited_before_interrupt", process)
         return False
     try:
         os.killpg(process.pid, 2)
     except ProcessLookupError:
-        record_launcher_stop("process_group_missing", process.poll())
+        record_launcher_stop("process_group_missing", process)
         return False
     try:
         process.wait(timeout=20)
-        record_launcher_stop("interrupted", process.returncode)
+        record_launcher_stop("interrupted", process)
         return process.returncode == 130
     except subprocess.TimeoutExpired:
         try:
@@ -1375,7 +1395,7 @@ def stop_launcher(process: subprocess.Popen[bytes]) -> bool:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
-        record_launcher_stop("interrupt_timeout", process.poll())
+        record_launcher_stop("interrupt_timeout", process)
         return False
 
 
