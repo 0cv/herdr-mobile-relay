@@ -70,7 +70,7 @@ FAILURE_CODES = {
 }
 BROWSER_STAGES = {
     "browser_runner", "controller_enrollment", "controller_inventory",
-    "controller_command", "reader_invitation", "reader_enrollment",
+    "controller_command", "controller_settings", "reader_invitation", "reader_enrollment",
     "reader_read_only", "credential_preservation", "browser_complete",
 }
 BROWSER_PROFILE_NAMES = {"controller", "reader"}
@@ -1060,6 +1060,9 @@ class PublicHandler(http.server.BaseHTTPRequestHandler):
         if status_match:
             self.request_state.record_response(self.command, self.path, int(status_match.group(1)))
         self.connection.sendall(response)
+        # The ten-second dial/upgrade bound must not become an idle timeout on
+        # the long-lived E2EE WebSocket. A quiet controller is still connected.
+        backend.settimeout(None)
 
         def copy(source: socket.socket, destination: socket.socket) -> None:
             try:

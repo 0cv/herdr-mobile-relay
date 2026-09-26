@@ -418,7 +418,8 @@ async function waitForSuccessfulOperation(path, expected) {
 let stage = 'browser_runner';
 const progressStages = new Set([
   'browser_runner', 'controller_enrollment', 'controller_inventory', 'controller_command',
-  'reader_invitation', 'reader_enrollment', 'reader_read_only', 'credential_preservation', 'browser_complete',
+  'controller_settings', 'reader_invitation', 'reader_enrollment', 'reader_read_only',
+  'credential_preservation', 'browser_complete',
 ]);
 
 function profileEvidence() {
@@ -536,7 +537,9 @@ async function initialEnrollment() {
     const commandWorked = commandRecorded && kinds.includes('agent prompt');
     record('controller_reads_fake_inventory_and_sends_harmless_command', readWorked && commandWorked);
 
-    await controller.page.getByRole('button', { name: /Settings/ }).click();
+    await setStage('controller_settings');
+    await controller.page.getByRole('navigation', { name: 'Application' })
+      .getByRole('button', { name: /^Settings/ }).click();
     await controller.page.getByRole('heading', { name: 'Devices' }).waitFor({ state: 'visible', timeout: deadline });
     await setStage('reader_invitation');
     await controller.page.getByRole('button', { name: 'Invite Device' }).click();
