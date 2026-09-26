@@ -21,8 +21,8 @@ export PATH
 help:
 	@echo "Common targets:"
 	@echo "  make quick-start                First run: install missing tools and start the phone app"
-	@echo "  make dev-tunnel                Build and tunnel an isolated frontend for development"
-	@echo "  make dev-tailscale             Build an isolated managed tailnet development relay (explicit opt-in)"
+	@echo "  make dev-tunnel                Choose temporary tunnel/gateway or managed Tailscale (interactive)"
+	@echo "  make dev-tailscale             Guided, isolated managed Tailscale Serve (supported Unix daemon only)"
 	@echo "  make stable-setup               Provision/resume a stable tunnel, service, and verified QR"
 	@echo "  make stable-teardown            Remove only resources recorded by the stable wizard"
 	@echo "  make setup                      Prepare config and check prerequisites without installing"

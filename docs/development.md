@@ -12,18 +12,27 @@ cd herdr-mobile-relay
 make dev-tunnel
 ```
 
-`make dev-tunnel` builds the current Go source and frontend, uses isolated ports
-and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
-installed production relay.
+`make dev-tunnel` now asks on a terminal whether to use (1) the temporary
+Cloudflare tunnel / saved gateway or (2) managed Tailscale Serve. Option 1
+builds the current Go source and frontend, uses isolated ports and state under
+`relay/.dev/`, and never uses the installed production relay. Enter selects
+option 1, preserving the old default. In automation, `make dev-tunnel` retains
+that default; set `HERDR_DEV_TRANSPORT=tailscale` to select option 2 without a
+menu (the Tailscale opt-in and explicit paths are still required). “Tunnel”
+means the Cloudflare/gateway path here; Tailscale Serve is tailnet HTTPS, not
+Cloudflare tunneling. Neither choice reads the other's development state.
 
 For an **explicitly selected, already running and authenticated** supported
-Tailscale Unix daemon, `make dev-tailscale` builds a matching frontend and
-relay into a separate private directory and invokes the real foreground
-managed launcher. It never installs, logs in, or starts Tailscale. No personal
-Tailscale client, default runtime directory, or daemon is probed merely by
-running `make help` or the setup menu. Create an empty root with mode 0700,
-choose three nonproduction ports, and supply the exact CLI, Herdr executable,
-and Herdr socket yourself:
+Tailscale v1.102.4 Unix daemon, `make dev-tailscale` guides a terminal user
+through consent, an existing private directory, exact CLI, Herdr executable,
+Herdr socket, and three nonproduction ports. It builds a matching frontend and
+relay into that separate directory and invokes the real foreground managed
+launcher. It never installs, logs in, or starts Tailscale. It does not discover
+or select your personal daemon for you; the macOS GUI (MacSys) and App Store
+variants are unsupported by this adapter. Declining consent or running without
+a terminal and without the explicit opt-in fails before contacting any daemon.
+For a scripted run, create an empty root with mode 0700 and supply the values
+explicitly:
 
 ```bash
 mkdir -m 700 /path/to/private/dev-state
@@ -53,7 +62,7 @@ MacSys/App Store and physical-phone use are not qualified by this entrypoint.
 ```bash
 make check             # all backend, frontend, browser, and release checks
 make backend-check     # format, vet, tests, race detector, shell checks
-make dev-tailscale     # explicit opt-in managed dev relay, private root/ports
+make dev-tailscale     # guided managed Serve; explicit private root/daemon/ports
 make web-release       # replace committed web/ with a verified frontend build
 make web-release-check # compare and browser-test the shipped web/ bundle
 make relay-plugin      # link this checkout as a Herdr plugin

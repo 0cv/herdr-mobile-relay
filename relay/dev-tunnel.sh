@@ -3,6 +3,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Choose before building or opening the tunnel: managed Serve has its own
+# private root and consent gate and must never inherit this path's .dev state.
+case "${HERDR_DEV_TRANSPORT:-}" in
+    tailscale) exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
+    ''|tunnel) ;;
+    *) echo "✗ HERDR_DEV_TRANSPORT must be tunnel or tailscale." >&2; exit 2 ;;
+esac
+if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
+    echo "Development transport:"
+    echo "  1. Temporary Cloudflare tunnel (or saved gateway); relay/.dev state"
+    echo "  2. Managed Tailscale Serve; separate private state and explicit consent"
+    read -r -p "Choice [1]: " choice || { echo "Cancelled; nothing was started." >&2; exit 2; }
+    case "$choice" in
+        ''|1) ;;
+        2) exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
+        *) echo "✗ Choose 1 or 2." >&2; exit 2 ;;
+    esac
+fi
 DEV_DIR="${HERDR_DEV_CONFIG_DIR:-$SCRIPT_DIR/.dev}"
 
 # Canonicalize a directory without requiring it to exist. Existing parents are

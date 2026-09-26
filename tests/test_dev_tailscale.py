@@ -7,6 +7,7 @@ It does not replace the extracted-package managed browser acceptance gate.
 
 import os
 from pathlib import Path
+import pty
 import subprocess
 import tempfile
 
@@ -15,6 +16,7 @@ if os.environ.get("HERDR_TAILSCALE_LAUNCHER_CI") != "1":
 
 root = Path(__file__).resolve().parents[1]
 script = root / "relay" / "dev-tailscale.sh"
+tunnel_script = root / "relay" / "dev-tunnel.sh"
 with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     base = Path(tmp)
     home = base / "home"
@@ -59,7 +61,46 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
 
     without_consent = dict(env)
     without_consent.pop("HERDR_DEV_TAILSCALE_ENABLE", None)
+    without_consent.pop("HERDR_DEV_TRANSPORT", None)
     refused("requires_explicit_opt_in", without_consent)
+
+    def interactive_refused(case: str, entrypoint: Path, answers: bytes,
+                            expected: bytes, **overrides: str) -> None:
+        master, slave = pty.openpty()
+        settings = dict(without_consent, HERDR_DEV_CONFIG_DIR=str(base / "unused-tunnel"))
+        settings.update(overrides)
+        try:
+            process = subprocess.Popen(
+                [str(entrypoint)], env=settings, cwd=root, stdin=slave,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            os.close(slave)
+            os.write(master, answers)
+            stdout, stderr = process.communicate(timeout=5)
+            if process.returncode == 0 or expected not in stdout + stderr:
+                raise AssertionError(f"{case}: unsafe interactive outcome: {stdout + stderr!r}")
+            if sentinel.exists() or (dev / "relay.env").exists() or (base / "unused-tunnel").exists():
+                raise AssertionError(f"{case}: touched a CLI or dev state before consent")
+            print(f"PASS dev-tailscale preflight: {case}")
+        finally:
+            os.close(master)
+
+    interactive_refused("direct_interactive_decline", script, b"n\n", b"Cancelled; nothing was started.")
+    interactive_refused("dev_tunnel_tailscale_choice_decline", tunnel_script, b"2\nn\n", b"Cancelled; nothing was started.")
+    interactive_refused("consent_does_not_create_root", script, b"y\n",
+                        b"Create a private development root first",
+                        HERDR_DEV_TAILSCALE_DIR=str(base / "missing"))
+    delegated = subprocess.run(
+        [str(tunnel_script)], env=dict(without_consent, HERDR_DEV_TRANSPORT="tailscale",
+                                        HERDR_DEV_CONFIG_DIR=str(base / "unused-tunnel")),
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if delegated.returncode == 0 or b"Interactive: make dev-tailscale" not in delegated.stderr:
+        raise AssertionError("noninteractive Tailscale selection bypassed opt-in")
+    if sentinel.exists() or (base / "unused-tunnel").exists():
+        raise AssertionError("noninteractive Tailscale selection touched a CLI or tunnel state")
+    print("PASS dev-tailscale preflight: noninteractive_delegation_requires_opt_in")
 
     enabled = dict(env, HERDR_DEV_TAILSCALE_ENABLE="1")
     reserved = dict(enabled, HERDR_DEV_TAILSCALE_PORT="8375")

@@ -112,8 +112,10 @@ authenticated manually.
 
 See [Managed Tailscale Serve in the transport guide](docs/transports.md#managed-tailscale-serve)
 for custom HTTPS ports and the trusted certificate check. Checkout developers
-can use the separately isolated, explicit opt-in [`make dev-tailscale`](docs/development.md#running-from-a-checkout)
-entrypoint; it never substitutes for installation or qualifies an untested daemon.
+can use the guided, separately isolated [`make dev-tailscale`](docs/development.md#running-from-a-checkout)
+entrypoint (also offered by interactive `make dev-tunnel`); it requires explicit
+consent, private state and a supported Unix daemon. It never substitutes for
+installation or qualifies an untested daemon.
 
 ## Use operator-owned HTTPS Serve (BYO)
 

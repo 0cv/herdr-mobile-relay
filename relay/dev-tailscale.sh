@@ -11,9 +11,53 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 . "$SCRIPT_DIR/common.sh"
 
 usage() {
-    echo "Usage: HERDR_DEV_TAILSCALE_ENABLE=1 HERDR_DEV_TAILSCALE_DIR=/private/path HERDR_DEV_TAILSCALE_BIN=/path/to/tailscale HERDR_DEV_HERDR_BIN=/path/to/herdr HERDR_DEV_HERDR_SOCKET=/path/to/socket HERDR_DEV_TAILSCALE_PORT=18377 HERDR_DEV_TAILSCALE_PLUGIN_PORT=18378 HERDR_DEV_TAILSCALE_HTTPS_PORT=8443 make dev-tailscale [DEV_TAILSCALE_ARGS=--confirm-serve]" >&2
+    echo "Managed Tailscale development requires a supported authenticated v1.102.4 Unix daemon." >&2
+    echo "MacSys GUI and App Store Tailscale are not supported by this LocalAPI adapter." >&2
+    echo "Interactive: make dev-tailscale (select an existing private root, exact binaries/socket, and ports)." >&2
+    echo "Scripted: HERDR_DEV_TAILSCALE_ENABLE=1 HERDR_DEV_TAILSCALE_DIR=/private/path \\" >&2
+    echo "  HERDR_DEV_TAILSCALE_BIN=/path/to/tailscale HERDR_DEV_HERDR_BIN=/path/to/herdr \\" >&2
+    echo "  HERDR_DEV_HERDR_SOCKET=/path/to/herdr.sock HERDR_DEV_TAILSCALE_PORT=18377 \\" >&2
+    echo "  HERDR_DEV_TAILSCALE_PLUGIN_PORT=18378 HERDR_DEV_TAILSCALE_HTTPS_PORT=8443 make dev-tailscale" >&2
+    echo "Create the private root first with mkdir -m 700 /private/path. No daemon is started or logged in." >&2
 }
-[ "${HERDR_DEV_TAILSCALE_ENABLE:-}" = 1 ] || { usage; exit 2; }
+
+prompt_missing() {
+    local variable="$1" label="$2" default="${3:-}" entered=""
+    [ -n "${!variable:-}" ] && return 0
+    [ -t 0 ] || { usage; exit 2; }
+    if [ -n "$default" ]; then
+        read -r -p "$label [$default]: " entered || { echo "Cancelled; nothing was started." >&2; exit 2; }
+        entered="${entered:-$default}"
+    else
+        read -r -p "$label: " entered || { echo "Cancelled; nothing was started." >&2; exit 2; }
+        [ -n "$entered" ] || { echo "✗ $label is required; nothing was started." >&2; exit 2; }
+    fi
+    printf -v "$variable" '%s' "$entered"
+    export "${variable?}"
+}
+
+case "${HERDR_DEV_TAILSCALE_ENABLE:-}" in
+    1) ;;
+    '')
+        [ -t 0 ] || { usage; exit 2; }
+        echo "Managed Tailscale Serve is NOT a Cloudflare tunnel: it changes one tailnet HTTPS route for this foreground pane."
+        echo "No Tailscale CLI, daemon, LocalAPI or Herdr socket is contacted before you explicitly select them."
+        read -r -p "Continue with a supported, already authenticated Unix daemon? [y/N] " consent || exit 2
+        case "$consent" in
+            y|Y|yes|YES) export HERDR_DEV_TAILSCALE_ENABLE=1 ;;
+            *) echo "Cancelled; nothing was started."; exit 2 ;;
+        esac
+        ;;
+    *) echo "✗ HERDR_DEV_TAILSCALE_ENABLE must be 1 to opt in." >&2; exit 2 ;;
+esac
+
+prompt_missing HERDR_DEV_TAILSCALE_DIR "Existing absolute private state directory (mkdir -m 700 PATH first)"
+prompt_missing HERDR_DEV_TAILSCALE_BIN "Absolute path to supported Tailscale CLI"
+prompt_missing HERDR_DEV_HERDR_BIN "Absolute path to Herdr executable"
+prompt_missing HERDR_DEV_HERDR_SOCKET "Absolute path to running Herdr Unix socket"
+prompt_missing HERDR_DEV_TAILSCALE_PORT "Development relay TCP port" 18377
+prompt_missing HERDR_DEV_TAILSCALE_PLUGIN_PORT "Development plugin UDP port" 18378
+prompt_missing HERDR_DEV_TAILSCALE_HTTPS_PORT "Tailscale HTTPS Serve port" 8443
 case "${HERDR_DEV_TAILSCALE_DIR:-}" in
     /*) ;;
     *) usage; echo "✗ Choose an existing absolute private development root." >&2; exit 2 ;;
