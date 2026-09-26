@@ -44,7 +44,9 @@ for platform in systemd launchd; do
         printf 'hostname: relay.example.test\n' > "$HOME/config/tunnel.yml"
         printf '#!/bin/sh\nexit 0\n' > "$HOME/releases/current/relay/herdr-mobile-relay-service.sh"
         chmod 700 "$HOME/releases/current/relay/herdr-mobile-relay-service.sh"
-        printf '{"bundle_hash":"web"}\n' > "$HOME/releases/current/web/release.json"
+        cp "$REPO_DIR/web/release.json" "$HOME/releases/current/web/release.json"
+        printf '{"version":"version","revision":"revision","web_hash":"web"}\n' \
+            > "$HOME/releases/current/release-manifest.json"
         cat > "$HOME/releases/current/herdr-mobile-relay" <<'EOF'
 #!/bin/sh
 case "$1" in

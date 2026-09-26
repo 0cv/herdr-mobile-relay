@@ -824,7 +824,7 @@ wait_for_relay_health() {
     local expected_version="${5:-}"
     local expected_revision="${6:-}"
     local expected_web_hash="${7:-}"
-    local binary identity web_root
+    local binary identity manifest manifest_json
     binary="$(relay_binary)" || return 1
     if [ -z "$expected_version" ] || [ -z "$expected_revision" ]; then
         identity="$("$binary" version --json)" || return 1
@@ -832,8 +832,22 @@ wait_for_relay_health() {
         expected_revision="$(json_string_field "$identity" revision)"
     fi
     if [ -z "$expected_web_hash" ]; then
-        web_root="${HERDR_WEB_ROOT:-$(dirname "$binary")/web}"
-        expected_web_hash="$(json_string_field "$(cat "$web_root/release.json")" bundle_hash)" || return 1
+        manifest="$(dirname "$binary")/release-manifest.json"
+        if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
+            echo "✗ Relay release identity manifest is missing or unreadable: $manifest" >&2
+            echo "  Reinstall the verified relay release before checking readiness." >&2
+            return 1
+        fi
+        if ! manifest_json="$(cat "$manifest" 2>/dev/null)"; then
+            echo "✗ Relay release identity manifest is unreadable: $manifest" >&2
+            return 1
+        fi
+        expected_web_hash="$(json_string_field "$manifest_json" web_hash)"
+        if [ -z "$expected_web_hash" ]; then
+            echo "✗ Relay release identity manifest has no non-empty web_hash: $manifest" >&2
+            echo "  Reinstall the verified relay release before checking readiness." >&2
+            return 1
+        fi
     fi
     [ -n "$expected_instance" ] && [ -n "$expected_version" ] && [ -n "$expected_revision" ] && [ -n "$expected_web_hash" ] || return 1
 
