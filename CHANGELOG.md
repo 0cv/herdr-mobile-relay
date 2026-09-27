@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Read Hermes and OpenCode conversation history through an in-process SQLite
+  backend by default (`HERDR_SQLITE_BACKEND=auto|native|cli`), so History works
+  without a system `sqlite3` CLI. The CLI path remains available as a fallback.
+
 ## [0.22.1] - 2026-09-26
 
 ### Fixed

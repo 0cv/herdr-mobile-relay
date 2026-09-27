@@ -1,18 +1,19 @@
 package conversation
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
-	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
 
 const (
@@ -21,8 +22,9 @@ const (
 )
 
 type hermesReader struct {
-	home   string
-	binary string
+	home     string
+	binary   string
+	executor sqliteexec.Executor
 }
 
 type hermesRow struct {
@@ -48,11 +50,22 @@ type hermesToolRow struct {
 }
 
 func newHermesReader(home string) *hermesReader {
-	return &hermesReader{home: home, binary: "sqlite3"}
+	return &hermesReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv()}
+}
+
+func (r *hermesReader) queryExec() sqliteexec.Executor {
+	if r.executor != nil {
+		return r.executor
+	}
+	exec, err := sqliteexec.Resolve(sqliteexec.BackendCLI, r.binary)
+	if err != nil {
+		return sqliteexec.MustFromEnv()
+	}
+	return exec
 }
 
 func (r *hermesReader) databases() ([]string, string) {
-	if _, err := exec.LookPath(r.binary); err != nil {
+	if exec := r.queryExec(); exec == nil || !exec.Ready() {
 		return nil, "source_unavailable"
 	}
 	roots := agentroots.HermesData(r.home)
@@ -205,20 +218,18 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := childenv.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
-	stdout := &boundedBuffer{remaining: maxHermesOutput}
-	var stderr boundedBuffer
-	stderr.remaining = 4096
-	command.Stdout = stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		if stdout.overflow {
+	raw, err := r.queryExec().QueryJSON(queryCtx, database, query, maxHermesOutput)
+	if err != nil {
+		if errors.Is(err, sqliteexec.ErrOutputLimit) {
 			return nil, false, "output_limit"
 		}
 		return nil, false, "query_failed"
 	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		raw = []byte("[]")
+	}
 	var rows []hermesRow
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, false, "source_corrupt"
 	}
 	anchorCount := 0
@@ -312,20 +323,18 @@ func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessi
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := childenv.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
-	stdout := &boundedBuffer{remaining: maxHermesOutput}
-	var stderr boundedBuffer
-	stderr.remaining = 4096
-	command.Stdout = stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		if stdout.overflow {
+	raw, err := r.queryExec().QueryJSON(queryCtx, database, query, maxHermesOutput)
+	if err != nil {
+		if errors.Is(err, sqliteexec.ErrOutputLimit) {
 			return nil, "output_limit"
 		}
 		return nil, "query_failed"
 	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		raw = []byte("[]")
+	}
 	var rows []hermesToolRow
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, "source_corrupt"
 	}
 	return rows, ""
