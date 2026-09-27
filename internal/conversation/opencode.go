@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	openCodeQueryTimeout = 3 * time.Second
+	openCodeQueryTimeout = 10 * time.Second
 	maxOpenCodeOutput    = 8 * 1024 * 1024
 	maxOpenCodeCache     = 128
 )
@@ -63,10 +63,7 @@ func newOpenCodeReader(home string) *openCodeReader {
 }
 
 func (r *openCodeReader) queryExec() sqliteexec.Executor {
-	if r.executor != nil {
-		return r.executor
-	}
-	return sqliteexec.MustFromEnv()
+	return resolveQueryExecutor(r.executor, r.binary)
 }
 
 func (r *openCodeReader) databases() ([]string, string) {

@@ -12,7 +12,8 @@ project follows [Semantic Versioning](https://semver.org/).
   without a system `sqlite3` CLI. The CLI path remains available as a fallback.
   Native queries stream JSON with early size limits, encode DB paths safely for
   spaces/special characters, and share one error-mapping helper in conversation
-  readers.
+  readers. Query timeouts are 10s; an overridden `sqlite3` binary path still
+  prefers the CLI (test and escape-hatch compatibility).
 
 ## [0.22.1] - 2026-09-26
 

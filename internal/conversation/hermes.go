@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	hermesQueryTimeout = 3 * time.Second
+	hermesQueryTimeout = 10 * time.Second
 	maxHermesOutput    = 8 * 1024 * 1024
 )
 
@@ -52,10 +52,7 @@ func newHermesReader(home string) *hermesReader {
 }
 
 func (r *hermesReader) queryExec() sqliteexec.Executor {
-	if r.executor != nil {
-		return r.executor
-	}
-	return sqliteexec.MustFromEnv()
+	return resolveQueryExecutor(r.executor, r.binary)
 }
 
 func (r *hermesReader) databases() ([]string, string) {

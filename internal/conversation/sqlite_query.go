@@ -22,3 +22,21 @@ func runSQLiteJSON(ctx context.Context, exec sqliteexec.Executor, database, quer
 	}
 	return sqliteexec.NormalizeJSONArray(raw), ""
 }
+
+// resolveQueryExecutor picks the SQLite backend for a reader.
+//
+// When binary is overridden away from the default name "sqlite3" (tests pass an
+// absolute LookPath result), prefer that CLI so fixtures keep the pre-native
+// behavior. If the override is missing or unusable, fall back to primary
+// (usually MustFromEnv / native).
+func resolveQueryExecutor(primary sqliteexec.Executor, binary string) sqliteexec.Executor {
+	if binary != "" && binary != "sqlite3" {
+		if cli, err := sqliteexec.Resolve(sqliteexec.BackendCLI, binary); err == nil {
+			return cli
+		}
+	}
+	if primary != nil {
+		return primary
+	}
+	return sqliteexec.MustFromEnv()
+}
