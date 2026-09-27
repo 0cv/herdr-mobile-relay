@@ -89,9 +89,9 @@ func Resolve(backend Backend, cliBinary string) (Executor, error) {
 // MustFromEnv returns FromEnv or a CLI fallback that reports not Ready when
 // nothing works. Callers still check Ready/databases().
 func MustFromEnv() Executor {
-	exec, err := FromEnv()
+	executor, err := FromEnv()
 	if err == nil {
-		return exec
+		return executor
 	}
 	return newCLI("sqlite3")
 }

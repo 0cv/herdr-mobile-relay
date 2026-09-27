@@ -1,11 +1,9 @@
 package conversation
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,8 +20,6 @@ const (
 	maxOpenCodeOutput    = 8 * 1024 * 1024
 	maxOpenCodeCache     = 128
 )
-
-var errOpenCodeOutputLimit = errors.New("opencode query output limit exceeded")
 
 type openCodeReader struct {
 	home     string
@@ -70,11 +66,7 @@ func (r *openCodeReader) queryExec() sqliteexec.Executor {
 	if r.executor != nil {
 		return r.executor
 	}
-	exec, err := sqliteexec.Resolve(sqliteexec.BackendCLI, r.binary)
-	if err != nil {
-		return sqliteexec.MustFromEnv()
-	}
-	return exec
+	return sqliteexec.MustFromEnv()
 }
 
 func (r *openCodeReader) databases() ([]string, string) {
@@ -217,15 +209,9 @@ func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, 
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	raw, err := r.queryExec().QueryJSON(queryCtx, database, query, maxOpenCodeOutput)
-	if err != nil {
-		if errors.Is(err, sqliteexec.ErrOutputLimit) || errors.Is(err, errOpenCodeOutputLimit) {
-			return nil, false, "output_limit"
-		}
-		return nil, false, "query_failed"
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		raw = []byte("[]")
+	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxOpenCodeOutput)
+	if code != "" {
+		return nil, false, code
 	}
 	var rows []openCodeRow
 	if err := json.Unmarshal(raw, &rows); err != nil {

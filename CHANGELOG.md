@@ -10,6 +10,9 @@ project follows [Semantic Versioning](https://semver.org/).
 - Read Hermes and OpenCode conversation history through an in-process SQLite
   backend by default (`HERDR_SQLITE_BACKEND=auto|native|cli`), so History works
   without a system `sqlite3` CLI. The CLI path remains available as a fallback.
+  Native queries stream JSON with early size limits, encode DB paths safely for
+  spaces/special characters, and share one error-mapping helper in conversation
+  readers.
 
 ## [0.22.1] - 2026-09-26
 

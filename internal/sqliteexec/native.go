@@ -1,10 +1,12 @@
 package sqliteexec
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -33,6 +35,9 @@ func (n *nativeExecutor) QueryJSON(ctx context.Context, database, query string, 
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
 
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -45,7 +50,9 @@ func (n *nativeExecutor) QueryJSON(ctx context.Context, database, query string, 
 		return nil, fmt.Errorf("columns: %w", err)
 	}
 
-	var objects []map[string]any
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	rowCount := 0
 	for rows.Next() {
 		holders := make([]any, len(columns))
 		ptrs := make([]any, len(columns))
@@ -59,29 +66,31 @@ func (n *nativeExecutor) QueryJSON(ctx context.Context, database, query string, 
 		for i, name := range columns {
 			object[name] = normalizeJSONValue(holders[i])
 		}
-		objects = append(objects, object)
-		encoded, err := json.Marshal(objects)
+		chunk, err := json.Marshal(object)
 		if err != nil {
 			return nil, fmt.Errorf("encode: %w", err)
 		}
-		if len(encoded) > maxBytes {
+		need := len(chunk)
+		if rowCount > 0 {
+			need++ // comma
+		}
+		if buf.Len()+need+1 > maxBytes { // +1 for closing ']'
 			return nil, ErrOutputLimit
 		}
+		if rowCount > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(chunk)
+		rowCount++
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
-	if objects == nil {
-		return []byte("[]"), nil
-	}
-	encoded, err := json.Marshal(objects)
-	if err != nil {
-		return nil, fmt.Errorf("encode: %w", err)
-	}
-	if len(encoded) > maxBytes {
+	buf.WriteByte(']')
+	if buf.Len() > maxBytes {
 		return nil, ErrOutputLimit
 	}
-	return encoded, nil
+	return buf.Bytes(), nil
 }
 
 func readOnlyDSN(database string) (string, error) {
@@ -96,8 +105,14 @@ func readOnlyDSN(database string) (string, error) {
 		}
 		path = abs
 	}
-	// mode=ro refuses create; query_only blocks writes if the open succeeds.
-	return "file:" + filepath.ToSlash(path) + "?mode=ro&_pragma=query_only(1)", nil
+	// url.URL encodes spaces and reserved characters; scheme file + absolute
+	// Path yields file:///... which modernc accepts for read-only opens.
+	u := url.URL{
+		Scheme:   "file",
+		Path:     filepath.ToSlash(path),
+		RawQuery: "mode=ro&_pragma=query_only(1)",
+	}
+	return u.String(), nil
 }
 
 func normalizeJSONValue(value any) any {
@@ -109,4 +124,13 @@ func normalizeJSONValue(value any) any {
 	default:
 		return v
 	}
+}
+
+// NormalizeJSONArray turns empty CLI stdout into a JSON array so callers can
+// always json.Unmarshal into a slice.
+func NormalizeJSONArray(raw []byte) []byte {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return []byte("[]")
+	}
+	return raw
 }

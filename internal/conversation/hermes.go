@@ -1,11 +1,9 @@
 package conversation
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -57,11 +55,7 @@ func (r *hermesReader) queryExec() sqliteexec.Executor {
 	if r.executor != nil {
 		return r.executor
 	}
-	exec, err := sqliteexec.Resolve(sqliteexec.BackendCLI, r.binary)
-	if err != nil {
-		return sqliteexec.MustFromEnv()
-	}
-	return exec
+	return sqliteexec.MustFromEnv()
 }
 
 func (r *hermesReader) databases() ([]string, string) {
@@ -218,15 +212,9 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	raw, err := r.queryExec().QueryJSON(queryCtx, database, query, maxHermesOutput)
-	if err != nil {
-		if errors.Is(err, sqliteexec.ErrOutputLimit) {
-			return nil, false, "output_limit"
-		}
-		return nil, false, "query_failed"
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		raw = []byte("[]")
+	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	if code != "" {
+		return nil, false, code
 	}
 	var rows []hermesRow
 	if err := json.Unmarshal(raw, &rows); err != nil {
@@ -323,15 +311,9 @@ func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessi
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	raw, err := r.queryExec().QueryJSON(queryCtx, database, query, maxHermesOutput)
-	if err != nil {
-		if errors.Is(err, sqliteexec.ErrOutputLimit) {
-			return nil, "output_limit"
-		}
-		return nil, "query_failed"
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		raw = []byte("[]")
+	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxHermesOutput)
+	if code != "" {
+		return nil, code
 	}
 	var rows []hermesToolRow
 	if err := json.Unmarshal(raw, &rows); err != nil {
