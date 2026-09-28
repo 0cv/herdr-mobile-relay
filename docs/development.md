@@ -37,7 +37,11 @@ default used by the relay and event hook, before development HOME/XDG isolation
 is applied. The script checks that it is a Unix socket but does not connect to
 it during selection. The binaries, socket, root and ports can all be overridden
 explicitly when using a different profile; a custom root must already exist
-with mode 0700. Direct interactive `make dev-tailscale` first asks for
+with mode 0700. An installed relay service can keep running only when the
+managed launcher independently verifies the dev marker, separate private
+binary/web/state paths and nonproduction ports. The ordinary managed launcher
+still refuses coexistence; a pre-existing Serve route is never adopted or
+cleared. Direct interactive `make dev-tailscale` first asks for
 development opt-in; noninteractive runs require `HERDR_DEV_TAILSCALE_ENABLE=1`.
 The script builds a matching frontend and relay into private state and invokes
 the real foreground managed launcher. It shows the exact HTTPS Serve route and
@@ -64,8 +68,9 @@ HERDR_DEV_TAILSCALE_HTTPS_PORT=8443 make dev-tailscale
 ```
 
 This is **not** a command to run on an unqualified personal daemon. Use it
-only after deliberately preparing an isolated supported profile and trusted
-HTTPS frontend route. The managed launcher still asks for fresh Serve consent;
+only after deliberately preparing a supported profile and trusted HTTPS
+frontend route. The installed relay service is not stopped or modified.
+The managed launcher still asks for fresh Serve consent;
 `DEV_TAILSCALE_ARGS=--confirm-serve` is an explicit per-invocation alternative
 for unattended disposable CI. A missing private root/marker, unsupported
 platform/profile, occupied port, existing foreground owner or uncertain cleanup

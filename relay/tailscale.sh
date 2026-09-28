@@ -52,12 +52,6 @@ unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
     echo "✗ Relay configuration directory is missing; run setup first." >&2
     exit 1
 }
-if installed_relay_service_definition_present || installed_relay_service_active; then
-    echo "✗ A Herdr Mobile Relay service definition is installed." >&2
-    echo "  Stop and remove the service before using foreground Tailscale Serve." >&2
-    exit 1
-fi
-
 RELAY_BIN="$(relay_binary)"
 TS_BIN="${HERDR_TAILSCALE_BIN:-$(command -v tailscale || true)}"
 if [ -z "$TS_BIN" ] || [ ! -x "$TS_BIN" ]; then
@@ -80,6 +74,49 @@ esac
     echo "✗ Tailscale Serve requires the relay backend to remain on 127.0.0.1." >&2
     exit 1
 }
+
+# A service name alone cannot collide with an isolated development backend.
+# Require the dev launcher's private marker, paths and ports independently.
+# This exemption does not authorize a Serve write: read-only inspection and the
+# managed owner's exact-route consent/collision checks still follow.
+isolated_dev_service_coexistence() {
+    local root marker root_mode reserved
+    [ "${HERDR_DEV_TAILSCALE_COEXIST:-}" = 1 ] && [ "${HERDR_TAILSCALE_REQUEST:-}" = 1 ] || return 1
+    root="$(dirname "$ENV_FILE")"
+    [ "$ENV_FILE" = "$root/relay.env" ] && [ -d "$root" ] && [ ! -L "$root" ] &&
+        [ "$(cd "$root" && pwd -P)" = "$root" ] || return 1
+    case "$(uname -s)" in
+        Darwin) root_mode="$(stat -f '%Lp' "$root")" ;;
+        Linux) root_mode="$(stat -c '%a' "$root")" ;;
+        *) return 1 ;;
+    esac
+    [ "$root_mode" = 700 ] || return 1
+    marker="$root/.herdr-dev-tailscale"
+    [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(wc -l < "$marker")" -eq 1 ] &&
+        grep -Fxq 'HERDR_DEV_TAILSCALE_ROOT=1' "$marker" || return 1
+    [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] &&
+        [ "${HERDR_RELAY_BIN:-}" = "$root/bin/herdr-mobile-relay" ] &&
+        [ -x "$HERDR_RELAY_BIN" ] && [ ! -L "$HERDR_RELAY_BIN" ] &&
+        [ "${HERDR_WEB_ROOT:-}" = "$root/web" ] &&
+        [ "${HERDR_RELEASE_ROOT:-}" = "$root/data/herdr-mobile-relay" ] &&
+        [ "$HOME" = "$root/home" ] && [ "${XDG_CONFIG_HOME:-}" = "$root/config" ] &&
+        [ "${XDG_CACHE_HOME:-}" = "$root/cache" ] && [ "${XDG_DATA_HOME:-}" = "$root/data" ] || return 1
+    [ "$PORT" -ge 1024 ] && [ "$PLUGIN_PORT" -ge 1024 ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)" = "$PORT" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_PLUGIN_PORT)" = "$PLUGIN_PORT" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_HOST)" = 127.0.0.1 ] || return 1
+    for reserved in 8375 8376 18375 18376; do
+        [ "$PORT" != "$reserved" ] && [ "$PLUGIN_PORT" != "$reserved" ] || return 1
+    done
+}
+if installed_relay_service_definition_present || installed_relay_service_active; then
+    if ! isolated_dev_service_coexistence; then
+        echo "✗ A Herdr Mobile Relay service definition is installed." >&2
+        echo "  Stop and remove the service before using foreground Tailscale Serve." >&2
+        exit 1
+    fi
+    echo "▸ Installed relay service left running; isolated development state and ports verified."
+fi
 HTTPS_PORT="$(tailscale_https_port)"
 SESSION_FILE="$(tailscale_session_file "$ENV_FILE")"
 CONFIG_DIR="$(dirname "$ENV_FILE")"

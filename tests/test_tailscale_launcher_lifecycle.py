@@ -397,6 +397,8 @@ def main():
         time.sleep(min(float(args[0]) if args else 0.01, 0.02))
         return
     if mode in ("systemctl", "launchctl"):
+        if os.environ.get("HERDR_FIXTURE_SERVICE_ACTIVE") == "1":
+            return
         raise SystemExit(1)
     if mode == "tput":
         print("80")
@@ -625,6 +627,31 @@ class ManagedLauncherLifecycle(unittest.TestCase):
         self.fixtures.append(fixture)
         return fixture
 
+    def isolated_service_fixture(self, mode="success"):
+        fixture = self.fixture(mode)
+        private = fixture.config
+        (private / ".herdr-dev-tailscale").write_text("HERDR_DEV_TAILSCALE_ROOT=1\n")
+        for name in ("home", "config", "cache", "data", "web", "bin"):
+            (private / name).mkdir(mode=0o700)
+        shutil.copy2(fixture.bin / "herdr-mobile-relay", private / "bin" / "herdr-mobile-relay")
+        fixture.original_env += ("HERDR_RELAY_HOST=127.0.0.1\n"
+                                 "HERDR_RELAY_PORT=18377\n"
+                                 "HERDR_RELAY_PLUGIN_PORT=18378\n").encode()
+        fixture.env_file.write_bytes(fixture.original_env)
+        fixture.env.update({
+            "HOME": str(private / "home"),
+            "XDG_CONFIG_HOME": str(private / "config"),
+            "XDG_CACHE_HOME": str(private / "cache"),
+            "XDG_DATA_HOME": str(private / "data"),
+            "HERDR_RELEASE_ROOT": str(private / "data" / "herdr-mobile-relay"),
+            "HERDR_WEB_ROOT": str(private / "web"),
+            "HERDR_RELAY_BIN": str(private / "bin" / "herdr-mobile-relay"),
+            "HERDR_RELAY_PORT": "18377", "HERDR_RELAY_PLUGIN_PORT": "18378",
+            "HERDR_DEV_TAILSCALE_COEXIST": "1",
+            "HERDR_FIXTURE_SERVICE_ACTIVE": "1",
+        })
+        return fixture
+
     def tearDown(self):
         for fixture in reversed(self.fixtures):
             fixture.close()
@@ -682,6 +709,43 @@ class ManagedLauncherLifecycle(unittest.TestCase):
         self.assert_not_contains(event_data, FIXTURE_TOKEN.encode(), "fixture credential entered fake status/event evidence")
         self.assert_not_contains(event_data, FIXTURE_FRAGMENT.encode(), "setup fragment entered fake status/event evidence")
         self.assert_not_contains(event_data, FIXTURE_RUN_ID.encode(), "session identifier entered fake status/event evidence")
+
+    def test_installed_service_still_blocks_regular_managed_launcher(self):
+        fixture = self.fixture()
+        fixture.env["HERDR_FIXTURE_SERVICE_ACTIVE"] = "1"
+        fixture.env["HERDR_DEV_TAILSCALE_COEXIST"] = "1"  # a bare flag is not proof
+        fixture.launch()
+        code, output, error = fixture.communicate()
+        self.assertNotEqual(code, 0)
+        self.assert_contains(error, b"service definition is installed", "ordinary owner bypassed installed service guard")
+        self.assertFalse(fixture.events.exists(), "regular launcher inspected Tailscale after service refusal")
+        self.assertFalse(fixture.session_file.exists())
+        self.assert_exact_file(fixture.env_file, fixture.original_env, "service refusal changed relay.env")
+
+    def test_isolated_dev_with_service_still_refuses_foreign_serve_route(self):
+        fixture = self.isolated_service_fixture("preexisting-route")
+        fixture.launch()
+        code, output, error = fixture.communicate()
+        self.assertNotEqual(code, 0)
+        self.assert_contains(output + error, b"Installed relay service left running", "private dev proof was not accepted")
+        self.assert_contains(output + error, b"Existing Tailscale Serve/Funnel configuration", "foreign route was adopted")
+        self.assertFalse(fixture.server_ready.exists())
+        self.assertFalse(fixture.session_file.exists())
+        self.assert_exact_file(fixture.env_file, fixture.original_env, "foreign-route refusal changed dev state")
+        self.assert_no_tailscale_writes(fixture)
+
+    def test_isolated_dev_coexists_with_active_service(self):
+        fixture = self.isolated_service_fixture()
+        fixture.launch(capture_pipes=True)
+        output, error = fixture.wait_for_link(timeout=30)
+        self.assert_contains(output + error, b"Installed relay service left running", "active service blocked isolated dev launch")
+        self.assertIn("activate", fixture.event_names())
+        self.assert_no_tailscale_writes(fixture)
+        fixture.process.send_signal(signal.SIGTERM)
+        code, output, error = fixture.communicate()
+        self.assertEqual(code, 130)
+        self.assertTrue(fixture.server_retired.exists())
+        self.assertFalse(fixture.session_file.exists())
 
     def test_existing_or_incomplete_route_refuses_before_relay_start(self):
         for mode, expected in (("preexisting-route", b"Existing Tailscale Serve/Funnel configuration"),
