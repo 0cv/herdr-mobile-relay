@@ -1,7 +1,8 @@
 #!/bin/bash
 # Explicit, isolated development entrypoint for the managed foreground owner.
 # It never installs, logs in, or probes a daemon. After explicit opt-in it may
-# locate a CLI on PATH without running it; the launcher validates the profile.
+# locate CLI executables on PATH without running them; the launcher validates
+# the selected Tailscale profile.
 set -euo pipefail
 umask 077
 
@@ -14,8 +15,9 @@ DEFAULT_DEV_ROOT="$SCRIPT_DIR/.dev-tailscale"
 usage() {
     echo "Managed Tailscale development requires a supported authenticated v1.102.4 Unix daemon." >&2
     echo "MacSys GUI and App Store Tailscale are not supported by this LocalAPI adapter." >&2
-    echo "Interactive: make dev-tailscale (choose private state, Herdr executable/socket, and ports)." >&2
-    echo "Tailscale CLI is located on PATH after opt-in; override with HERDR_DEV_TAILSCALE_BIN=/absolute/path." >&2
+    echo "Interactive: make dev-tailscale (choose private state, Herdr socket, and ports)." >&2
+    echo "Tailscale and Herdr executables are located on PATH after opt-in; override with" >&2
+    echo "  HERDR_DEV_TAILSCALE_BIN=/absolute/path and HERDR_DEV_HERDR_BIN=/absolute/path." >&2
     echo "Scripted: HERDR_DEV_TAILSCALE_ENABLE=1 HERDR_DEV_TAILSCALE_DIR=/private/path \\" >&2
     echo "  HERDR_DEV_HERDR_BIN=/path/to/herdr \\" >&2
     echo "  HERDR_DEV_HERDR_SOCKET=/path/to/herdr.sock HERDR_DEV_TAILSCALE_PORT=18377 \\" >&2
@@ -75,7 +77,23 @@ if [ -z "${HERDR_DEV_TAILSCALE_BIN:-}" ]; then
         prompt_missing HERDR_DEV_TAILSCALE_BIN "Absolute path to supported Tailscale CLI"
     fi
 fi
-prompt_missing HERDR_DEV_HERDR_BIN "Absolute path to Herdr executable"
+if [ -z "${HERDR_DEV_HERDR_BIN:-}" ]; then
+    # Locating Herdr does not execute it or discover a running Herdr socket.
+    herdr_candidate="$(type -P herdr 2>/dev/null || true)"
+    case "$herdr_candidate" in
+        /*)
+            if [ -x "$herdr_candidate" ] && [ ! -d "$herdr_candidate" ]; then
+                HERDR_DEV_HERDR_BIN="$herdr_candidate"
+                export HERDR_DEV_HERDR_BIN
+                echo "Herdr executable from PATH: $HERDR_DEV_HERDR_BIN"
+            fi
+            ;;
+    esac
+    if [ -z "${HERDR_DEV_HERDR_BIN:-}" ]; then
+        echo "No executable Herdr found on PATH; choose its absolute path." >&2
+        prompt_missing HERDR_DEV_HERDR_BIN "Absolute path to Herdr executable"
+    fi
+fi
 prompt_missing HERDR_DEV_HERDR_SOCKET "Absolute path to running Herdr Unix socket"
 prompt_missing HERDR_DEV_TAILSCALE_PORT "Development relay TCP port" 18377
 prompt_missing HERDR_DEV_TAILSCALE_PLUGIN_PORT "Development plugin UDP port" 18378

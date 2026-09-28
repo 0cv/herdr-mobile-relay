@@ -144,6 +144,30 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         raise AssertionError("missing CLI did not fail closed before development state creation")
     print("PASS dev-tailscale preflight: missing_cli_requires_explicit_path")
 
+    discovered_herdr = subprocess.run(
+        [str(script)], env=dict(enabled, HERDR_DEV_HERDR_BIN="",
+                                HERDR_DEV_TAILSCALE_PORT="8375", PATH=f"{base}:/usr/bin:/bin"),
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if (discovered_herdr.returncode == 0 or
+        f"Herdr executable from PATH: {herdr}".encode() not in discovered_herdr.stdout or
+        b"Production and dev-tunnel ports are reserved" not in discovered_herdr.stderr or
+        sentinel.exists() or (dev / "relay.env").exists()):
+        raise AssertionError("PATH selection did not locate fake Herdr without executing it")
+    print("PASS dev-tailscale preflight: resolves_herdr_from_path_without_running_it")
+
+    missing_herdr = subprocess.run(
+        [str(script)], env=dict(enabled, HERDR_DEV_HERDR_BIN="", PATH=str(no_cli_path)),
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if (missing_herdr.returncode == 0 or
+        b"No executable Herdr found on PATH" not in missing_herdr.stderr or
+        sentinel.exists() or (dev / "relay.env").exists()):
+        raise AssertionError("missing Herdr did not fail closed before development state creation")
+    print("PASS dev-tailscale preflight: missing_herdr_requires_explicit_path")
+
     reserved = dict(enabled, HERDR_DEV_TAILSCALE_PORT="8375")
     refused("rejects_production_backend_port", reserved)
 

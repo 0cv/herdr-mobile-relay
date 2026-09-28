@@ -27,13 +27,15 @@ tunneling. Neither choice reads the other's development state.
 For an **explicitly selected, already running and authenticated** supported
 Tailscale v1.102.4 Unix daemon, `make dev-tailscale` guides a terminal user
 through development opt-in (skipped if you already chose menu option 2), a
-private directory, Herdr executable, Herdr socket, and three nonproduction
-ports. After opt-in, it locates an executable `tailscale` on `PATH` without
-running it; `HERDR_DEV_TAILSCALE_BIN=/absolute/path` overrides that choice. If
-none is found, the interactive flow asks for its absolute path. Press Enter at
+private directory, Herdr Unix socket, and three nonproduction ports. After
+opt-in, it locates executable `tailscale` and `herdr` binaries on `PATH`
+without running them; `HERDR_DEV_TAILSCALE_BIN` and `HERDR_DEV_HERDR_BIN`
+override those choices. If either is missing, the interactive flow asks for its
+absolute path. The running Herdr socket must still be selected explicitly; no
+default socket or personal Herdr instance is probed. Press Enter at
 the directory prompt to use `relay/.dev-tailscale/`; the script creates that
-checkout-local directory with mode 0700 only after validating the other inputs. A custom directory must
-already exist with mode 0700. It builds a matching frontend and relay into the
+checkout-local directory with mode 0700 only after validating the other inputs.
+A custom directory must already exist with mode 0700. It builds a matching frontend and relay into the
 separate directory and invokes the real foreground managed launcher. The
 launcher shows the exact HTTPS Serve route and requires separate per-run
 consent before configuring it. It never installs, logs in, or starts Tailscale.
@@ -42,8 +44,8 @@ the managed launcher checks the selected daemon's compatibility later. The
 macOS GUI (MacSys) and App Store variants remain unsupported by this adapter.
 Declining opt-in or running without a terminal and without the explicit opt-in
 fails before contacting any daemon. For a scripted run, create an empty root with
-mode 0700 and supply the values explicitly (the pinned CLI path below overrides
-`PATH` resolution for reproducibility):
+mode 0700 and supply the values explicitly (the pinned CLI and Herdr paths
+below override `PATH` resolution for reproducibility):
 
 ```bash
 mkdir -m 700 /path/to/private/dev-state
