@@ -18,6 +18,8 @@ func testReader(t *testing.T) (*Reader, string) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("HERMES_HOME", "")
+	t.Setenv("GROK_HOME", "")
+	t.Setenv(agentroots.GrokListEnv, "")
 	t.Setenv(agentroots.ClaudeListEnv, "")
 	t.Setenv(agentroots.QoderListEnv, "")
 	t.Setenv(agentroots.CodexListEnv, "")

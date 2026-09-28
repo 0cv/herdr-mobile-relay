@@ -30,7 +30,9 @@ func TestMain(m *testing.M) {
 		agentroots.PiListEnv,
 		agentroots.OMPListEnv,
 		agentroots.HermesListEnv,
+		agentroots.GrokListEnv,
 		"HERMES_HOME",
+		"GROK_HOME",
 		"CLAUDE_CONFIG_DIR",
 		"CODEX_HOME",
 		"PI_CODING_AGENT_DIR",
@@ -38,6 +40,26 @@ func TestMain(m *testing.M) {
 		os.Setenv(key, "")
 	}
 	os.Exit(m.Run())
+}
+
+func TestGrokSessionNameReadsSummary(t *testing.T) {
+	home := t.TempDir()
+	sessionDir := filepath.Join(home, ".grok", "sessions", "%2Fwork%2Fapp", "grok-session-1")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "updates.jsonl"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	summary := `{"info":{"id":"grok-session-1","cwd":"/work/app"},"session_summary":"Renamed session","generated_title":"Generated title"}`
+	if err := os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(summary), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewResolver(home)
+	if name := r.SessionName("grok", "/work/app", "grok-session-1"); name != "Generated title" {
+		t.Fatalf("session name = %q, want generated_title first", name)
+	}
 }
 
 func TestQoderSessionName(t *testing.T) {

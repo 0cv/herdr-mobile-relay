@@ -83,7 +83,7 @@ func (r *Resolver) SessionNameWithProject(agent string, project conversation.Pro
 		name = extractOMPSessionTitle(location.Path)
 	case isPiSessionAgent(agentLower):
 		name = extractPiSessionTitle(location.Path)
-	case isHermesSessionAgent(agentLower):
+	case isHermesSessionAgent(agentLower), agentLower == "grok":
 		name = location.Title
 	case strings.Contains(agentLower, "qoder"), strings.Contains(agentLower, "claude"):
 		name = extractTitle(location.Path)

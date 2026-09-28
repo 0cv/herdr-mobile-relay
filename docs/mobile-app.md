@@ -19,7 +19,7 @@ setup and want to know what every screen and control is for.
 - Inspect the current agent's workspace files, images, Git status, upstream
   ahead/behind counts, and unified diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, OpenCode,
-  Qoder, Pi, Oh My Pi, and Oh My OpenCode in focused conversation or
+  Qoder, Pi, Oh My Pi, Oh My OpenCode, and Grok in focused conversation or
   full-history form; validated Oh My OpenCode plans appear with their current
   task states.
 - Configure durable notification categories, settle delay, cooldown, snooze,
@@ -296,16 +296,27 @@ of the available source have separate status messages. Search filters loaded
 content only. Older browsing keeps a fixed chain snapshot and continues across
 large parent files through the local index; a missing, invalid, ambiguous,
 cyclic, or bounded-out continuation remains readable and displays an
-incomplete-history warning. Reads are confined to known session directories and
-the newest 16 MiB of very large logs. When that bound omits older turns, they
-remain in the harness log on the computer. Preparation reports progress and
+incomplete-history warning. Reads are confined to known session directories and,
+for JSONL transcripts other than Grok's, the newest 16 MiB of very large logs.
+When that bound omits older turns, they remain in the harness log on the
+computer. Preparation reports progress and
 never blocks the relay's live terminal paths. Snapshot pages remain stable while
 new turns are written, and storage, source-change, corruption, oversized-record,
 and expired-cursor states are reported without exposing transcript paths or raw
 records. Pagination uses only short-lived opaque cursors; the app never
 constructs a cursor from a displayed entry ID. OpenCode and Hermes retain their
 native database pagination semantics while binding cursors to the selected
-source identity.
+source identity. Grok is read natively from its session `updates.jsonl`, which
+keeps turns from before `/compact`; its cursors are entry offsets bound to the
+file's identity, so a replaced log reports a source change and a fresh request
+reads the new file. Grok is read in full on every request, so very long Grok
+sessions take longer to open; single records over 16 MiB are skipped and
+reported as oversized. A `/rewind` hides the rewound turn and every turn after
+it, matching Grok's own turn numbering, and invalidates earlier cursors; a
+rewind marker that does not match a known turn is reported as corrupt and
+ignored. Session titles use Grok's generated title, then its session summary.
+Grok thoughts, hook and other server-side events, and images are not shown;
+Grok's own web and X search calls appear as tools.
 
 ### Conversation history cache and limits
 
@@ -343,8 +354,8 @@ server session, terminal, and target generation, and contain an expiry and
 source revision. They bind a file range digest, snapshot identity, or native
 source identity; appends are accepted only when the captured range remains
 stable. Tampering, scope changes, expiry, truncation, replacement, rewrite,
-and symlink retargeting are rejected. OpenCode and Hermes keep their native
-pagination anchors while applying the same scope and source checks.
+and symlink retargeting are rejected. OpenCode, Hermes, and Grok keep their
+native pagination anchors while applying the same scope and source checks.
 
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second; 250 ms is the default.

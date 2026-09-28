@@ -125,11 +125,13 @@ func (r *Reader) piRoots() []string { return agentroots.Pi(r.home) }
 
 func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 
+func (r *Reader) grokRoots() []string { return agentroots.Grok(r.home) }
+
 func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
 		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode",
-		"hermes", "hermesagent":
+		"hermes", "hermesagent", "grok":
 		return true
 	default:
 		return false
@@ -173,6 +175,9 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 	}
 	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
 		return r.readOMO(project.CWD, sessionID, before, limit)
+	}
+	if normalizedAgent(agent) == "grok" {
+		return r.readGrokFor(project, sessionID, before, limit)
 	}
 	if !Supported(agent) {
 		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
@@ -323,6 +328,11 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
 		return r.hermes.locate(project.CWD, sessionID)
+	case "grok":
+		if !safeSessionID(sessionID) {
+			return Location{}
+		}
+		return findGrokSession(r.grokRoots(), project, sessionID)
 	default:
 		return Location{}
 	}

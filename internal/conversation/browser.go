@@ -677,6 +677,9 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 	if isHermesAgent(provider) {
 		return b.readHermesPage(ctx, request)
 	}
+	if provider == "grok" {
+		return b.readGrokPage(ctx, request)
+	}
 	return b.readFilePage(ctx, request, false)
 }
 
@@ -2474,27 +2477,43 @@ func (b *Browser) readHermesPage(ctx context.Context, request BrowseRequest) (Br
 	return b.readNativePage(ctx, request, true)
 }
 
+func (b *Browser) readGrokPage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
+	cursor, failure := b.nativeCursor(request)
+	if failure != nil {
+		return *failure, nil
+	}
+	return b.readGrokNative(ctx, request, cursor, cursor.NativeBefore)
+}
+
 func (b *Browser) readNativePage(ctx context.Context, request BrowseRequest, hermes bool) (BrowsePage, error) {
-	var cursor browseCursor
-	var err error
-	if request.Cursor != "" {
-		cursor, err = decodeBrowseCursor(b.key, request.Cursor, request.Scope)
-		if err != nil {
-			code, reason := browseCursorError(err)
-			return browseFailure(true, code, reason, browseErrorFor(code, reason, code == "cursor_expired")), nil
-		}
-		if cursor.Mode != "native" || cursor.Revision == "" || cursor.NativeBefore == "" {
-			return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
-		}
+	cursor, failure := b.nativeCursor(request)
+	if failure != nil {
+		return *failure, nil
 	}
-	before := ""
-	if cursor.NativeBefore != "" {
-		before = cursor.NativeBefore
-	}
+	before := cursor.NativeBefore
 	if hermes {
 		return b.readHermesNative(ctx, request, cursor, before)
 	}
 	return b.readOpenCodeNative(ctx, request, cursor, before)
+}
+
+// nativeCursor decodes an optional native pagination cursor, returning the
+// failure page when it is present but unusable.
+func (b *Browser) nativeCursor(request BrowseRequest) (browseCursor, *BrowsePage) {
+	if request.Cursor == "" {
+		return browseCursor{}, nil
+	}
+	cursor, err := decodeBrowseCursor(b.key, request.Cursor, request.Scope)
+	if err != nil {
+		code, reason := browseCursorError(err)
+		page := browseFailure(true, code, reason, browseErrorFor(code, reason, code == "cursor_expired"))
+		return browseCursor{}, &page
+	}
+	if cursor.Mode != "native" || cursor.Revision == "" || cursor.NativeBefore == "" {
+		page := browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false))
+		return browseCursor{}, &page
+	}
+	return cursor, nil
 }
 
 func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
@@ -2544,6 +2563,59 @@ func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, c
 		return browseFailure(true, "source_changed", "The Hermes database changed while history was being browsed.", browseErrorFor("source_changed", "The Hermes database changed while history was being browsed.", false)), nil
 	}
 	return b.nativePage(request.Scope, entries, hasMore, corrupt, metadata.Total, fmt.Sprint(metadata.MessageID), revision, cursor), nil
+}
+
+func (b *Browser) readGrokNative(ctx context.Context, request BrowseRequest, cursor browseCursor, before string) (BrowsePage, error) {
+	const unavailableReason = "Grok conversation history is unavailable."
+	const changedReason = "The Grok session log changed while history was being browsed."
+	cancelled := browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
+	if ctx.Err() != nil {
+		return cancelled, nil
+	}
+	if !safeSessionID(request.Scope.SessionID) {
+		return nativeFailure("invalid_session", unavailableReason), nil
+	}
+	if !validGrokCursor(before) {
+		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+	}
+	location := b.reader.LocateWithProject("grok", ProjectContext{CWD: request.Scope.CWD}, request.Scope.SessionID)
+	if location.Path == "" {
+		return nativeFailure("invalid_session", unavailableReason), nil
+	}
+	identity := nativeSourceIdentityRevision(location.Path)
+	projection, err := parseGrokUpdates(ctx, location.Path)
+	if ctx.Err() != nil {
+		return cancelled, nil
+	}
+	if err != nil {
+		return nativeFailure("source_unavailable", unavailableReason), nil
+	}
+	revision := grokRevision(identity, projection.RewindOffset)
+	if nativeSourceIdentityRevision(location.Path) != identity || (cursor.Revision != "" && cursor.Revision != revision) {
+		return browseFailure(true, "source_changed", changedReason, browseErrorFor("source_changed", changedReason, false)), nil
+	}
+	page, hasMore, total, ok := grokPage(projection.Entries, before, request.Limit)
+	if !ok {
+		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+	}
+	result := b.nativePage(request.Scope, page, hasMore, projection.Corrupt > 0, total, "", revision, cursor)
+	if result.Available {
+		result.Diagnostics.CorruptRecords = max(result.Diagnostics.CorruptRecords, projection.Corrupt)
+		result.Diagnostics.OversizedRecords += projection.Oversized
+	}
+	return result, nil
+}
+
+// grokRevision binds cursors to the file identity and to the last rewind
+// marker: a rewind appended after a page was served drops turns that page may
+// have shown, so older cursors must report a source change.
+func grokRevision(identity string, rewindOffset int64) string {
+	if rewindOffset < 0 {
+		return identity
+	}
+	data, _ := json.Marshal([]string{identity, fmt.Sprint(rewindOffset)})
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 func nativeFailure(code, reason string) BrowsePage {
