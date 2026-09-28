@@ -19,7 +19,7 @@ setup and want to know what every screen and control is for.
 - Inspect the current agent's workspace files, images, Git status, upstream
   ahead/behind counts, and unified diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, OpenCode,
-  Qoder, Pi, Oh My Pi, and Oh My OpenCode in focused conversation or
+  Qoder, Pi, Oh My Pi, Oh My OpenCode, and Grok in focused conversation or
   full-history form; validated Oh My OpenCode plans appear with their current
   task states.
 - Configure durable notification categories, settle delay, cooldown, snooze,
@@ -305,7 +305,11 @@ and expired-cursor states are reported without exposing transcript paths or raw
 records. Pagination uses only short-lived opaque cursors; the app never
 constructs a cursor from a displayed entry ID. OpenCode and Hermes retain their
 native database pagination semantics while binding cursors to the selected
-source identity.
+source identity. Grok is read natively from its session `updates.jsonl`, which
+keeps turns from before `/compact`; its cursors are entry offsets bound to the
+file's identity, so a replaced log reports a source change and a fresh request
+reads the new file. Grok thoughts, hook and other server-side events, and
+images are not shown; Grok's own web and X search calls appear as tools.
 
 ### Conversation history cache and limits
 
@@ -343,8 +347,8 @@ server session, terminal, and target generation, and contain an expiry and
 source revision. They bind a file range digest, snapshot identity, or native
 source identity; appends are accepted only when the captured range remains
 stable. Tampering, scope changes, expiry, truncation, replacement, rewrite,
-and symlink retargeting are rejected. OpenCode and Hermes keep their native
-pagination anchors while applying the same scope and source checks.
+and symlink retargeting are rejected. OpenCode, Hermes, and Grok keep their
+native pagination anchors while applying the same scope and source checks.
 
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second; 250 ms is the default.

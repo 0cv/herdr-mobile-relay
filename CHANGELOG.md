@@ -7,10 +7,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Read Grok CLI conversation history from
-  `~/.grok/sessions/<project>/<session>/chat_history.jsonl`, with user prompts,
-  assistant replies, and tool activity. `GROK_HOME` and
-  `HERDR_GROK_CONFIG_DIRS` select additional session roots.
+- Read Grok CLI conversation history natively from
+  `~/.grok/sessions/<encoded cwd>/<session>/updates.jsonl`, including turns
+  from before `/compact`, with user prompts, assistant replies, and tool
+  activity; failed tools are marked from the update status. Session titles come
+  from `summary.json`. Thoughts, hook and other server-side events, and images
+  are not shown; Grok's own web and X search calls appear as tools. `GROK_HOME`
+  and `HERDR_GROK_CONFIG_DIRS` select additional session roots.
 
 ### Changed
 
