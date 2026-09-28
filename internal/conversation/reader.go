@@ -176,6 +176,9 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
 		return r.readOMO(project.CWD, sessionID, before, limit)
 	}
+	if normalizedAgent(agent) == "grok" {
+		return r.readGrokFor(project, sessionID, before, limit)
+	}
 	if !Supported(agent) {
 		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
 	}
@@ -654,8 +657,6 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parseCodexRecord(record)
 		case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 			role, body = parsePiRecord(record)
-		case "grok":
-			role, body = parseGrokRecord(record)
 		}
 		body = sanitizeText(body)
 		if role == "" && len(calls) > 0 {
@@ -722,8 +723,6 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 		}
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
-	case "grok":
-		return grokToolActivity(record)
 	}
 	return nil, nil
 }
