@@ -123,6 +123,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                         HERDR_DEV_TAILSCALE_DIR="", HERDR_DEV_TAILSCALE_BIN="",
                         HERDR_DEV_HERDR_BIN="", HERDR_DEV_HERDR_SOCKET="",
                         HERDR_SOCKET_PATH="", HERDR_DEV_TAILSCALE_PORT="8375",
+                        HERDR_DEV_TAILSCALE_PLUGIN_PORT="", HERDR_DEV_TAILSCALE_HTTPS_PORT="",
                         PATH=f"{base}:/usr/bin:/bin")
     if checkout_default.exists():
         raise AssertionError("created checkout-local state before validating the selected CLI")

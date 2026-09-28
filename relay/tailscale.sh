@@ -155,7 +155,7 @@ require_empty_supported_inspection() {
 }
 INSPECTION="$(inspect_tailscale)" || {
     echo "✗ Tailscale status/Serve inspection failed without changing configuration." >&2
-    echo "  Check that the installed CLI supports the exact structured profile." >&2
+    echo "  Managed Serve requires a matching standalone v1.102.4 CLI and daemon; macOS GUI/App Store variants are unsupported." >&2
     exit 1
 }
 require_empty_supported_inspection "$INSPECTION" || exit 1
