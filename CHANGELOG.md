@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Read Cursor Agent Conversation History from
+  `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`, locating by
+  pane cwd slug with a UUID scan fallback, and unwrapping Cursor `<user_query>`
+  envelopes for the phone transcript view.
+
 ## [0.22.3] - 2026-09-30
 
 ### Added

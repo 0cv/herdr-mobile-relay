@@ -125,11 +125,13 @@ func (r *Reader) piRoots() []string { return agentroots.Pi(r.home) }
 
 func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 
+func (r *Reader) cursorRoots() []string { return agentroots.Cursor(r.home) }
+
 func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
 		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode",
-		"hermes", "hermesagent":
+		"hermes", "hermesagent", "cursor", "cursoragent":
 		return true
 	default:
 		return false
@@ -323,6 +325,8 @@ func (r *Reader) locateWithProject(agent string, project ProjectContext, session
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
 		return r.hermes.locate(project.CWD, sessionID)
+	case "cursor", "cursoragent":
+		return findCursorSession(r.cursorRoots(), project, sessionID)
 	default:
 		return Location{}
 	}
@@ -647,6 +651,8 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parseCodexRecord(record)
 		case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 			role, body = parsePiRecord(record)
+		case "cursor", "cursoragent":
+			role, body = parseCursorRecord(record)
 		}
 		body = sanitizeText(body)
 		if role == "" && len(calls) > 0 {
@@ -711,6 +717,10 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 				failed: message["isError"] == true || message["is_error"] == true,
 			}}
 		}
+		blocks, _ := message["content"].([]any)
+		return toolsFromBlocks(blocks)
+	case "cursor", "cursoragent":
+		message, _ := record["message"].(map[string]any)
 		blocks, _ := message["content"].([]any)
 		return toolsFromBlocks(blocks)
 	}

@@ -56,6 +56,7 @@ const (
 	OpenCodeListEnv = "HERDR_OPENCODE_DATA_DIRS"
 	OMOListEnv      = "HERDR_OMO_CONFIG_DIRS"
 	HermesListEnv   = "HERDR_HERMES_DATA_DIRS"
+	CursorListEnv   = "HERDR_CURSOR_PROJECTS_DIRS"
 )
 
 // Claude reports the transcript roots for Claude Code, honouring
@@ -79,6 +80,13 @@ func Codex(home string) []string {
 // that read a file stored beside the sessions tree (session_index.jsonl).
 func CodexHomes(home string) []string {
 	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "")
+}
+
+// Cursor reports the project roots that hold Cursor Agent transcripts under
+// <root>/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl. List entries are the
+// projects directories themselves (the same shape as ~/.cursor/projects).
+func Cursor(home string) []string {
+	return resolve(home, CursorListEnv, "", filepath.Join(home, ".cursor", "projects"), "")
 }
 
 // OpenCodeData reports the only directories in which the relay will accept an

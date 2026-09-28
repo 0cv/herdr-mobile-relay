@@ -19,8 +19,9 @@ setup and want to know what every screen and control is for.
 - Inspect the current agent's workspace files, images, Git status, upstream
   ahead/behind counts, and unified diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, OpenCode,
-  Qoder, Pi, Oh My Pi, and Oh My OpenCode in focused conversation or
-  full-history form; validated Oh My OpenCode plans appear with their current
+  Qoder, Pi, Oh My Pi, Oh My OpenCode, Hermes, and Cursor Agent in focused
+  conversation or full-history form; validated Oh My OpenCode plans appear with
+  their current
   task states.
 - Configure durable notification categories, settle delay, cooldown, snooze,
   and a neutral delivery test separately for each paired relay and device.
