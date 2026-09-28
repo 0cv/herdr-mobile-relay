@@ -1,13 +1,16 @@
 package sqliteexec
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNativeQueryJSONRoundTrip(t *testing.T) {
@@ -118,6 +121,103 @@ func TestNativeQueryJSONOutputLimit(t *testing.T) {
 	_, err = exec.QueryJSON(context.Background(), database, `SELECT id AS session_id FROM sessions;`, 8)
 	if !errors.Is(err, ErrOutputLimit) {
 		t.Fatalf("err = %v, want ErrOutputLimit", err)
+	}
+}
+
+func TestNativeQueryJSONDoesNotHTMLEscape(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "state.db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Many '<' characters expand ~6x under encoding/json's default HTML
+	// escaping (\u003c). Keep the budget between the unescaped and escaped
+	// sizes so only SetEscapeHTML(false) succeeds — matching sqlite3 -json.
+	html := strings.Repeat("<div>", 200_000) // 1_200_000 bytes raw
+	if _, err := db.Exec(`CREATE TABLE tool(content TEXT); INSERT INTO tool VALUES(?);`, html); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	exec, err := Resolve(BackendNative, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Envelope is ["{...}"] — raw HTML fits in ~1.3 MiB; HTML-escaped would be ~7+ MiB.
+	maxBytes := 2 << 20
+	raw, err := exec.QueryJSON(context.Background(), database, `SELECT content FROM tool;`, maxBytes)
+	if err != nil {
+		t.Fatalf("native should accept HTML payload under %d bytes: %v", maxBytes, err)
+	}
+	if !bytes.Contains(raw, []byte("<div>")) {
+		t.Fatalf("expected literal <div> in JSON (no \\u003c escaping): %s", raw[:min(80, len(raw))])
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["content"] != html {
+		t.Fatalf("round-trip mismatch")
+	}
+}
+
+func TestNativeQueryJSONHonoursCancellationDuringScan(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "state.db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE sessions(id TEXT, payload TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.Repeat("x", 64*1024)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO sessions(id, payload) VALUES(?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 400; i++ {
+		if _, err := stmt.Exec(fmt.Sprintf("%d", i), payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	exec, err := Resolve(BackendNative, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done before QueryJSON — must not succeed
+	_, err = exec.QueryJSON(ctx, database, `SELECT id, payload FROM sessions;`, 32<<20)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = exec.QueryJSON(ctx, database, `SELECT id, payload FROM sessions;`, 32<<20)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("expected deadline/cancel during large scan")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want deadline or cancel", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("cancellation too slow: %s", elapsed)
 	}
 }
 

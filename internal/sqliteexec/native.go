@@ -25,6 +25,9 @@ func (n *nativeExecutor) QueryJSON(ctx context.Context, database, query string, 
 	if maxBytes < 1 {
 		maxBytes = 1
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dsn, err := readOnlyDSN(database)
 	if err != nil {
 		return nil, err
@@ -54,6 +57,9 @@ func (n *nativeExecutor) QueryJSON(ctx context.Context, database, query string, 
 	buf.WriteByte('[')
 	rowCount := 0
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		holders := make([]any, len(columns))
 		ptrs := make([]any, len(columns))
 		for i := range holders {
@@ -66,7 +72,7 @@ func (n *nativeExecutor) QueryJSON(ctx context.Context, database, query string, 
 		for i, name := range columns {
 			object[name] = normalizeJSONValue(holders[i])
 		}
-		chunk, err := json.Marshal(object)
+		chunk, err := marshalJSONObject(object)
 		if err != nil {
 			return nil, fmt.Errorf("encode: %w", err)
 		}
@@ -86,11 +92,27 @@ func (n *nativeExecutor) QueryJSON(ctx context.Context, database, query string, 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	buf.WriteByte(']')
 	if buf.Len() > maxBytes {
 		return nil, ErrOutputLimit
 	}
 	return buf.Bytes(), nil
+}
+
+// marshalJSONObject encodes one result object the way sqlite3 -json does:
+// without HTML escaping, so large HTML tool payloads stay under the same
+// byte budget as the CLI backend.
+func marshalJSONObject(object map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(object); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 func readOnlyDSN(database string) (string, error) {
