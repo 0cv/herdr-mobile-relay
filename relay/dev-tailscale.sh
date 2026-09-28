@@ -15,29 +15,13 @@ DEFAULT_DEV_ROOT="$SCRIPT_DIR/.dev-tailscale"
 usage() {
     echo "Managed Tailscale development requires a supported authenticated v1.102.4 Unix daemon." >&2
     echo "MacSys GUI and App Store Tailscale are not supported by this LocalAPI adapter." >&2
-    echo "Interactive: make dev-tailscale (choose private state, Herdr socket, and ports)." >&2
-    echo "Tailscale and Herdr executables are located on PATH after opt-in; override with" >&2
-    echo "  HERDR_DEV_TAILSCALE_BIN=/absolute/path and HERDR_DEV_HERDR_BIN=/absolute/path." >&2
-    echo "Scripted: HERDR_DEV_TAILSCALE_ENABLE=1 HERDR_DEV_TAILSCALE_DIR=/private/path \\" >&2
-    echo "  HERDR_DEV_HERDR_BIN=/path/to/herdr \\" >&2
-    echo "  HERDR_DEV_HERDR_SOCKET=/path/to/herdr.sock HERDR_DEV_TAILSCALE_PORT=18377 \\" >&2
-    echo "  HERDR_DEV_TAILSCALE_PLUGIN_PORT=18378 HERDR_DEV_TAILSCALE_HTTPS_PORT=8443 make dev-tailscale" >&2
-    echo "Create custom roots first with mkdir -m 700 /private/path. No daemon is started or logged in." >&2
-}
-
-prompt_missing() {
-    local variable="$1" label="$2" default="${3:-}" entered=""
-    [ -n "${!variable:-}" ] && return 0
-    [ -t 0 ] || { usage; exit 2; }
-    if [ -n "$default" ]; then
-        read -r -p "$label [$default]: " entered || { echo "Cancelled; nothing was started." >&2; exit 2; }
-        entered="${entered:-$default}"
-    else
-        read -r -p "$label: " entered || { echo "Cancelled; nothing was started." >&2; exit 2; }
-        [ -n "$entered" ] || { echo "✗ $label is required; nothing was started." >&2; exit 2; }
-    fi
-    printf -v "$variable" '%s' "$entered"
-    export "${variable?}"
+    echo "Interactive: make dev-tailscale (development opt-in; launcher separately asks Serve consent)." >&2
+    echo "After opt-in, CLI paths come from PATH, Herdr socket from HERDR_SOCKET_PATH or" >&2
+    echo "  the standard XDG config path, and private checkout state/ports have defaults." >&2
+    echo "Scripted: HERDR_DEV_TAILSCALE_ENABLE=1 make dev-tailscale" >&2
+    echo "Optional overrides: HERDR_DEV_TAILSCALE_DIR, HERDR_DEV_TAILSCALE_BIN," >&2
+    echo "  HERDR_DEV_HERDR_BIN, HERDR_DEV_HERDR_SOCKET and HERDR_DEV_TAILSCALE_*_PORT." >&2
+    echo "Custom roots must already exist with mode 0700. No daemon is started or logged in." >&2
 }
 
 case "${HERDR_DEV_TAILSCALE_ENABLE:-}" in
@@ -56,9 +40,10 @@ esac
 if [ -t 0 ]; then
     echo "Managed Tailscale development needs an authenticated v1.102.4 Unix daemon (not the macOS GUI)."
     echo "The launcher will show the exact HTTPS Serve route and ask before changing it."
-    echo "Press Enter for checkout-local private state; a custom directory must already exist with mode 0700."
 fi
-prompt_missing HERDR_DEV_TAILSCALE_DIR "Private development state directory" "$DEFAULT_DEV_ROOT"
+HERDR_DEV_TAILSCALE_DIR="${HERDR_DEV_TAILSCALE_DIR:-$DEFAULT_DEV_ROOT}"
+export HERDR_DEV_TAILSCALE_DIR
+echo "Private development state: $HERDR_DEV_TAILSCALE_DIR"
 if [ -z "${HERDR_DEV_TAILSCALE_BIN:-}" ]; then
     # PATH lookup does not execute Tailscale or inspect any daemon/profile. A
     # non-absolute, missing or non-executable result is not a usable selection.
@@ -73,8 +58,8 @@ if [ -z "${HERDR_DEV_TAILSCALE_BIN:-}" ]; then
             ;;
     esac
     if [ -z "${HERDR_DEV_TAILSCALE_BIN:-}" ]; then
-        echo "No executable Tailscale CLI found on PATH; choose its absolute path." >&2
-        prompt_missing HERDR_DEV_TAILSCALE_BIN "Absolute path to supported Tailscale CLI"
+        echo "✗ No executable Tailscale CLI found on PATH; install it or set HERDR_DEV_TAILSCALE_BIN." >&2
+        exit 2
     fi
 fi
 if [ -z "${HERDR_DEV_HERDR_BIN:-}" ]; then
@@ -90,17 +75,24 @@ if [ -z "${HERDR_DEV_HERDR_BIN:-}" ]; then
             ;;
     esac
     if [ -z "${HERDR_DEV_HERDR_BIN:-}" ]; then
-        echo "No executable Herdr found on PATH; choose its absolute path." >&2
-        prompt_missing HERDR_DEV_HERDR_BIN "Absolute path to Herdr executable"
+        echo "✗ No executable Herdr found on PATH; install it or set HERDR_DEV_HERDR_BIN." >&2
+        exit 2
     fi
 fi
-prompt_missing HERDR_DEV_HERDR_SOCKET "Absolute path to running Herdr Unix socket"
-prompt_missing HERDR_DEV_TAILSCALE_PORT "Development relay TCP port" 18377
-prompt_missing HERDR_DEV_TAILSCALE_PLUGIN_PORT "Development plugin UDP port" 18378
-prompt_missing HERDR_DEV_TAILSCALE_HTTPS_PORT "Tailscale HTTPS Serve port" 8443
+# Match the relay's config and event-hook default before HOME/XDG_CONFIG_HOME
+# are changed to the private development root. Selection checks the path,
+# not the running service; the foreground relay connects later.
+HERDR_DEV_HERDR_SOCKET="${HERDR_DEV_HERDR_SOCKET:-${HERDR_SOCKET_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock}}"
+export HERDR_DEV_HERDR_SOCKET
+echo "Herdr socket path: $HERDR_DEV_HERDR_SOCKET (not contacted during selection)"
+HERDR_DEV_TAILSCALE_PORT="${HERDR_DEV_TAILSCALE_PORT:-18377}"
+HERDR_DEV_TAILSCALE_PLUGIN_PORT="${HERDR_DEV_TAILSCALE_PLUGIN_PORT:-18378}"
+HERDR_DEV_TAILSCALE_HTTPS_PORT="${HERDR_DEV_TAILSCALE_HTTPS_PORT:-8443}"
+export HERDR_DEV_TAILSCALE_PORT HERDR_DEV_TAILSCALE_PLUGIN_PORT HERDR_DEV_TAILSCALE_HTTPS_PORT
+echo "Development ports: relay $HERDR_DEV_TAILSCALE_PORT, plugin $HERDR_DEV_TAILSCALE_PLUGIN_PORT, HTTPS Serve $HERDR_DEV_TAILSCALE_HTTPS_PORT"
 case "${HERDR_DEV_TAILSCALE_DIR:-}" in
     /*) ;;
-    *) echo "✗ Choose an absolute private state directory, or press Enter for $DEFAULT_DEV_ROOT." >&2; exit 2 ;;
+    *) echo "✗ Choose an absolute private state directory, or unset HERDR_DEV_TAILSCALE_DIR for $DEFAULT_DEV_ROOT." >&2; exit 2 ;;
 esac
 [ ! -L "$HERDR_DEV_TAILSCALE_DIR" ] || { echo "✗ Development root cannot be a symlink." >&2; exit 2; }
 if [ -d "$HERDR_DEV_TAILSCALE_DIR" ]; then
@@ -138,7 +130,10 @@ for binary in "${HERDR_DEV_TAILSCALE_BIN:-}" "${HERDR_DEV_HERDR_BIN:-}"; do
         *) echo "✗ Select an absolute path to each executable (Tailscale CLI and Herdr)." >&2; exit 2 ;;
     esac
 done
-case "${HERDR_DEV_HERDR_SOCKET:-}" in /*) ;; *) usage; exit 2 ;; esac
+case "$HERDR_DEV_HERDR_SOCKET" in
+    /*) ;;
+    *) echo "✗ Herdr socket path must be absolute; set HERDR_DEV_HERDR_SOCKET or HERDR_SOCKET_PATH." >&2; exit 2 ;;
+esac
 for port in "${HERDR_DEV_TAILSCALE_PORT:-}" "${HERDR_DEV_TAILSCALE_PLUGIN_PORT:-}" "${HERDR_DEV_TAILSCALE_HTTPS_PORT:-}"; do
     case "$port" in ''|*[!0-9]*) usage; exit 2 ;; esac
     [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || { usage; exit 2; }
@@ -155,6 +150,11 @@ case "${1:-}" in
     --confirm-serve) [ "$#" -eq 1 ] || { usage; exit 2; } ;;
     *) usage; exit 2 ;;
 esac
+[ -S "$HERDR_DEV_HERDR_SOCKET" ] || {
+    echo "✗ No Herdr Unix socket at $HERDR_DEV_HERDR_SOCKET." >&2
+    echo "  Start Herdr or set HERDR_SOCKET_PATH (or HERDR_DEV_HERDR_SOCKET) to its existing socket." >&2
+    exit 2
+}
 
 # Only the checkout-local default may be created, and only after the isolation,
 # binary, port and argument checks. Existing roots are never chmod'ed or repaired.

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import pty
 import shutil
+import socket
 import subprocess
 import tempfile
 
@@ -24,6 +25,12 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     home.mkdir(mode=0o700)
     production = home / ".config" / "herdr-mobile-relay"
     production.mkdir(mode=0o700, parents=True)
+    default_socket_dir = home / ".config" / "herdr"
+    default_socket_dir.mkdir(mode=0o700)
+    default_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    default_socket.bind(str(default_socket_dir / "herdr.sock"))
+    fixture_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    fixture_socket.bind(str(base / "herdr.sock"))
     dev = base / "dev"
     dev.mkdir(mode=0o700)
     cli = base / "tailscale"
@@ -82,6 +89,16 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                 raise AssertionError(f"{case}: unsafe interactive outcome: {stdout + stderr!r}")
             if entrypoint == tunnel_script and b"Set up isolated managed Tailscale" in stdout + stderr:
                 raise AssertionError("menu selection demanded redundant development consent")
+            if case == "menu_uses_all_safe_defaults":
+                for value in (
+                    b"Private development state: " + str(root / "relay" / ".dev-tailscale").encode(),
+                    f"Tailscale CLI from PATH: {cli}".encode(),
+                    f"Herdr executable from PATH: {herdr}".encode(),
+                    f"Herdr socket path: {default_socket_dir / 'herdr.sock'}".encode(),
+                    b"Development ports: relay 8375, plugin 18378, HTTPS Serve 8443",
+                ):
+                    if value not in stdout + stderr:
+                        raise AssertionError(f"{case}: default not selected: {value!r}")
             if sentinel.exists() or (dev / "relay.env").exists() or (base / "unused-tunnel").exists():
                 raise AssertionError(f"{case}: touched a CLI or dev state before consent")
             print(f"PASS dev-tailscale preflight: {case}")
@@ -89,18 +106,24 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             os.close(master)
 
     interactive_refused("direct_interactive_decline", script, b"n\n", b"Cancelled; nothing was started.")
-    interactive_refused("dev_tunnel_tailscale_choice", tunnel_script, b"2\nrelative\n",
-                        b"Choose an absolute private state directory, or press Enter",
-                        HERDR_DEV_TAILSCALE_DIR="")
+    interactive_refused("dev_tunnel_rejects_relative_state", tunnel_script, b"2\n",
+                        b"Choose an absolute private state directory, or unset HERDR_DEV_TAILSCALE_DIR",
+                        HERDR_DEV_TAILSCALE_DIR="relative")
     interactive_refused("consent_does_not_create_custom_root", script, b"y\n",
                         b"Create a custom private state directory first",
                         HERDR_DEV_TAILSCALE_DIR=str(base / "missing"))
     checkout_default = root / "relay" / ".dev-tailscale"
     if checkout_default.exists():
         raise AssertionError("hosted fixture expected an unused checkout-local dev root")
-    interactive_refused("invalid_cli_does_not_create_default", tunnel_script, b"2\n\n",
+    interactive_refused("invalid_cli_does_not_create_default", tunnel_script, b"2\n",
                         b"Not an executable file:",
                         HERDR_DEV_TAILSCALE_DIR="", HERDR_DEV_TAILSCALE_BIN=str(base / "missing-cli"))
+    interactive_refused("menu_uses_all_safe_defaults", tunnel_script, b"2\n",
+                        b"Production and dev-tunnel ports are reserved",
+                        HERDR_DEV_TAILSCALE_DIR="", HERDR_DEV_TAILSCALE_BIN="",
+                        HERDR_DEV_HERDR_BIN="", HERDR_DEV_HERDR_SOCKET="",
+                        HERDR_SOCKET_PATH="", HERDR_DEV_TAILSCALE_PORT="8375",
+                        PATH=f"{base}:/usr/bin:/bin")
     if checkout_default.exists():
         raise AssertionError("created checkout-local state before validating the selected CLI")
     delegated = subprocess.run(
@@ -168,6 +191,30 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         raise AssertionError("missing Herdr did not fail closed before development state creation")
     print("PASS dev-tailscale preflight: missing_herdr_requires_explicit_path")
 
+    inherited_socket = subprocess.run(
+        [str(script)], env=dict(enabled, HERDR_DEV_HERDR_SOCKET="",
+                                HERDR_SOCKET_PATH=str(base / "herdr.sock"),
+                                HERDR_DEV_TAILSCALE_PORT="8375"),
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if (inherited_socket.returncode == 0 or
+        f"Herdr socket path: {base / 'herdr.sock'}".encode() not in inherited_socket.stdout or
+        sentinel.exists() or (dev / "relay.env").exists()):
+        raise AssertionError("explicit inherited Herdr socket was not selected before isolated HOME")
+    print("PASS dev-tailscale preflight: inherits_herdr_socket_path")
+
+    missing_socket = subprocess.run(
+        [str(script)], env=dict(enabled, HERDR_DEV_HERDR_SOCKET=str(base / "missing.sock")),
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if (missing_socket.returncode == 0 or
+        b"No Herdr Unix socket at" not in missing_socket.stderr or
+        sentinel.exists() or (dev / "relay.env").exists()):
+        raise AssertionError("missing Herdr socket was not refused before state creation")
+    print("PASS dev-tailscale preflight: missing_herdr_socket_fails_early")
+
     reserved = dict(enabled, HERDR_DEV_TAILSCALE_PORT="8375")
     refused("rejects_production_backend_port", reserved)
 
@@ -187,3 +234,5 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     if result.returncode == 0 or (dev / "relay.env").read_bytes() != before or sentinel.exists():
         raise AssertionError("unmarked existing state was accepted or changed")
     print("PASS dev-tailscale preflight: rejects_unmarked_existing_state")
+    fixture_socket.close()
+    default_socket.close()

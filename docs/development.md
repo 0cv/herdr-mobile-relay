@@ -19,33 +19,38 @@ builds the current Go source and frontend, uses isolated ports and state under
 option 1, preserving the old default. Choosing 2 is the interactive development
 opt-in; the managed launcher separately asks before changing the exact Serve
 route. In automation, `make dev-tunnel` retains the tunnel default; set
-`HERDR_DEV_TRANSPORT=tailscale` to select option 2 without a menu (the separate
-Tailscale opt-in and explicit paths are still required). “Tunnel” means the
+`HERDR_DEV_TRANSPORT=tailscale` to select option 2 without a menu (the
+noninteractive Tailscale opt-in is still required). “Tunnel” means the
 Cloudflare/gateway path here; Tailscale Serve is tailnet HTTPS, not Cloudflare
 tunneling. Neither choice reads the other's development state.
 
 For an **explicitly selected, already running and authenticated** supported
-Tailscale v1.102.4 Unix daemon, `make dev-tailscale` guides a terminal user
-through development opt-in (skipped if you already chose menu option 2), a
-private directory, Herdr Unix socket, and three nonproduction ports. After
-opt-in, it locates executable `tailscale` and `herdr` binaries on `PATH`
-without running them; `HERDR_DEV_TAILSCALE_BIN` and `HERDR_DEV_HERDR_BIN`
-override those choices. If either is missing, the interactive flow asks for its
-absolute path. The running Herdr socket must still be selected explicitly; no
-default socket or personal Herdr instance is probed. Press Enter at
-the directory prompt to use `relay/.dev-tailscale/`; the script creates that
-checkout-local directory with mode 0700 only after validating the other inputs.
-A custom directory must already exist with mode 0700. It builds a matching frontend and relay into the
-separate directory and invokes the real foreground managed launcher. The
-launcher shows the exact HTTPS Serve route and requires separate per-run
-consent before configuring it. It never installs, logs in, or starts Tailscale.
+Tailscale v1.102.4 Unix daemon, choosing menu option 2 starts managed
+development without asking for paths or ports. The checkout-local state root
+`relay/.dev-tailscale/` is created with mode 0700 only after input checks.
+The development relay, plugin and HTTPS Serve ports default to 18377, 18378
+and 8443; conflicts are refused rather than adopting a listener or changing
+an enrolled port. After opt-in, executable `tailscale` and `herdr` binaries
+are located on `PATH` without running them. The Herdr socket is selected from
+`HERDR_SOCKET_PATH` or the same `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`
+default used by the relay and event hook, before development HOME/XDG isolation
+is applied. The script checks that it is a Unix socket but does not connect to
+it during selection. The binaries, socket, root and ports can all be overridden
+explicitly when using a different profile; a custom root must already exist
+with mode 0700. Direct interactive `make dev-tailscale` first asks for
+development opt-in; noninteractive runs require `HERDR_DEV_TAILSCALE_ENABLE=1`.
+The script builds a matching frontend and relay into private state and invokes
+the real foreground managed launcher. It shows the exact HTTPS Serve route and
+requires separate per-run consent before configuring it. It never installs, logs in, or starts Tailscale.
 Locating the CLI does not discover, authenticate, or select a daemon for you;
 the managed launcher checks the selected daemon's compatibility later. The
 macOS GUI (MacSys) and App Store variants remain unsupported by this adapter.
 Declining opt-in or running without a terminal and without the explicit opt-in
-fails before contacting any daemon. For a scripted run, create an empty root with
-mode 0700 and supply the values explicitly (the pinned CLI and Herdr paths
-below override `PATH` resolution for reproducibility):
+fails before contacting any daemon. For a noninteractive disposable CI run
+with supported binaries and an existing Herdr socket, set
+`HERDR_DEV_TAILSCALE_ENABLE=1` and explicitly consent to Serve with
+`DEV_TAILSCALE_ARGS=--confirm-serve`. For custom state or reproducible binary
+paths, explicitly override the defaults:
 
 ```bash
 mkdir -m 700 /path/to/private/dev-state
