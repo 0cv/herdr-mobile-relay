@@ -413,7 +413,9 @@ if __name__ == "__main__":
 
 class Fixture:
     def __init__(self, mode="success"):
-        self.root = Path(tempfile.mkdtemp(prefix="herdr-tailscale-launcher-", dir="/tmp"))
+        # macOS /tmp aliases /private/tmp; the dev launcher exports physical
+        # paths, so fixtures must do the same for the coexistence proof.
+        self.root = Path(tempfile.mkdtemp(prefix="herdr-tailscale-launcher-", dir="/tmp")).resolve()
         self.root.chmod(0o700)
         self.mode = mode
         self.config = self.root / "config"
