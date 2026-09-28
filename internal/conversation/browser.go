@@ -2582,25 +2582,40 @@ func (b *Browser) readGrokNative(ctx context.Context, request BrowseRequest, cur
 	if location.Path == "" {
 		return nativeFailure("invalid_session", unavailableReason), nil
 	}
-	revision := nativeSourceIdentityRevision(location.Path)
-	if cursor.Revision != "" && cursor.Revision != revision {
-		return browseFailure(true, "source_changed", changedReason, browseErrorFor("source_changed", changedReason, false)), nil
-	}
-	entries, corrupt, err := parseGrokUpdates(ctx, location.Path)
+	identity := nativeSourceIdentityRevision(location.Path)
+	projection, err := parseGrokUpdates(ctx, location.Path)
 	if ctx.Err() != nil {
 		return cancelled, nil
 	}
 	if err != nil {
 		return nativeFailure("source_unavailable", unavailableReason), nil
 	}
-	if nativeSourceIdentityRevision(location.Path) != revision {
+	revision := grokRevision(identity, projection.RewindOffset)
+	if nativeSourceIdentityRevision(location.Path) != identity || (cursor.Revision != "" && cursor.Revision != revision) {
 		return browseFailure(true, "source_changed", changedReason, browseErrorFor("source_changed", changedReason, false)), nil
 	}
-	page, hasMore, total, ok := grokPage(entries, before, request.Limit)
+	page, hasMore, total, ok := grokPage(projection.Entries, before, request.Limit)
 	if !ok {
 		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
 	}
-	return b.nativePage(request.Scope, page, hasMore, corrupt, total, "", revision, cursor), nil
+	result := b.nativePage(request.Scope, page, hasMore, projection.Corrupt > 0, total, "", revision, cursor)
+	if result.Available {
+		result.Diagnostics.CorruptRecords = max(result.Diagnostics.CorruptRecords, projection.Corrupt)
+		result.Diagnostics.OversizedRecords += projection.Oversized
+	}
+	return result, nil
+}
+
+// grokRevision binds cursors to the file identity and to the last rewind
+// marker: a rewind appended after a page was served drops turns that page may
+// have shown, so older cursors must report a source change.
+func grokRevision(identity string, rewindOffset int64) string {
+	if rewindOffset < 0 {
+		return identity
+	}
+	data, _ := json.Marshal([]string{identity, fmt.Sprint(rewindOffset)})
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 func nativeFailure(code, reason string) BrowsePage {

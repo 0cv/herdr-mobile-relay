@@ -336,7 +336,7 @@ func TestGrokParseHonoursCancellation(t *testing.T) {
 	normalGrokSession().write(t, path)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := parseGrokUpdates(ctx, path); !errors.Is(err, context.Canceled) {
+	if _, err := parseGrokUpdates(ctx, path); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
@@ -487,15 +487,24 @@ func TestGrokLocateRejectsUnsafeSessionIDs(t *testing.T) {
 }
 
 func TestGrokSessionTitleFromSummary(t *testing.T) {
-	reader, home := testReader(t)
-	path := grokUpdatesPath(home, grokCWD, testSessionID)
-	grokTurns(1).write(t, path)
-	summary := filepath.Join(filepath.Dir(path), "summary.json")
-	if err := os.WriteFile(summary, []byte(`{"info":{"cwd":"/work/grok app"},"session_summary":"","generated_title":"Synthetic title"}`), 0o600); err != nil {
-		t.Fatal(err)
+	long := strings.Repeat("t", maxGrokTitleBytes+50)
+	cases := []struct{ body, want string }{
+		{`{"session_summary":"Summary","generated_title":"Synthetic title"}`, "Synthetic title"},
+		{`{"session_summary":"Summary","generated_title":""}`, "Summary"},
+		{`{"generated_title":"` + long + `"}`, long[:maxGrokTitleBytes]},
 	}
-	if location := reader.Locate("grok", grokCWD, testSessionID); location.Title != "Synthetic title" {
-		t.Fatalf("title = %q, want generated_title fallback", location.Title)
+	for _, test := range cases {
+		reader, home := testReader(t)
+		path := grokUpdatesPath(home, grokCWD, testSessionID)
+		grokTurns(1).write(t, path)
+		summary := filepath.Join(filepath.Dir(path), "summary.json")
+		if err := os.WriteFile(summary, []byte(test.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		title := reader.Locate("grok", grokCWD, testSessionID).Title
+		if title != test.want {
+			t.Fatalf("summary %s: title = %q, want %q", test.body, title, test.want)
+		}
 	}
 }
 

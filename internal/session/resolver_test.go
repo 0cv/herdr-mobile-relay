@@ -57,8 +57,8 @@ func TestGrokSessionNameReadsSummary(t *testing.T) {
 	}
 
 	r := NewResolver(home)
-	if name := r.SessionName("grok", "/work/app", "grok-session-1"); name != "Renamed session" {
-		t.Fatalf("session name = %q, want session_summary", name)
+	if name := r.SessionName("grok", "/work/app", "grok-session-1"); name != "Generated title" {
+		t.Fatalf("session name = %q, want generated_title first", name)
 	}
 }
 

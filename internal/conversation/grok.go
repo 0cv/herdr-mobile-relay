@@ -23,6 +23,7 @@ const (
 	grokSummaryName     = "summary.json"
 	maxGrokRecordBytes  = maxConversationBytes
 	maxGrokSummaryBytes = 256 * 1024
+	maxGrokTitleBytes   = 400
 	grokCancelInterval  = 1024
 )
 
@@ -105,8 +106,8 @@ func findGrokSession(roots []string, project ProjectContext, sessionID string) L
 }
 
 // grokSessionTitle reads the session title from summary.json beside the
-// update stream. session_summary is preferred; generated_title is the model
-// title Grok writes once the session has a first turn.
+// update stream in the order Grok's own session list uses: generated_title,
+// the model title written after the first turn, then session_summary.
 func grokSessionTitle(path, root string) string {
 	contained := containedRegularFile(path, root)
 	if contained == "" {
@@ -124,11 +125,11 @@ func grokSessionTitle(path, root string) string {
 	if json.NewDecoder(io.LimitReader(file, maxGrokSummaryBytes)).Decode(&summary) != nil {
 		return ""
 	}
-	title := sanitizeText(summary.SessionSummary)
+	title := sanitizeText(summary.GeneratedTitle)
 	if title == "" {
-		title = sanitizeText(summary.GeneratedTitle)
+		title = sanitizeText(summary.SessionSummary)
 	}
-	title, _ = clampText(title, maxToolNameBytes)
+	title, _ = clampText(title, maxGrokTitleBytes)
 	return title
 }
 
@@ -144,6 +145,7 @@ type grokRecord struct {
 
 type grokUpdate struct {
 	SessionUpdate string          `json:"sessionUpdate"`
+	TargetPrompt  *int64          `json:"target_prompt_index"`
 	Content       json.RawMessage `json:"content"`
 	ToolCallID    string          `json:"toolCallId"`
 	Title         string          `json:"title"`
@@ -153,6 +155,7 @@ type grokUpdate struct {
 	Meta          struct {
 		PromptIndex        *int64 `json:"promptIndex"`
 		HideFromScrollback bool   `json:"hideFromScrollback"`
+		HostTurn           bool   `json:"hostTurn"`
 	} `json:"_meta"`
 }
 
@@ -171,7 +174,7 @@ type grokToolContent struct {
 // markers, ...) are skipped without decoding.
 var grokRelevantKinds = [][]byte{
 	[]byte(`"user_message_chunk"`), []byte(`"agent_message_chunk"`),
-	[]byte(`"tool_call"`), []byte(`"tool_call_update"`),
+	[]byte(`"tool_call"`), []byte(`"tool_call_update"`), []byte(`"rewind_marker"`),
 }
 
 type grokPending struct {
@@ -183,16 +186,62 @@ type grokPending struct {
 	acceptsText bool
 }
 
+// grokTurnTracker mirrors Grok's user-run turn tracker, which maps a rewind
+// marker's target_prompt_index to a turn by position rather than by value:
+// after a rewind the next prompt reuses the rewound index. Host turns (slash
+// command echoes) never count. Until any chunk carries a promptIndex, each run
+// of untagged user chunks is one turn; after that only tagged chunks start
+// turns. Hidden turns count even though they are not shown.
+type grokTurnTracker struct {
+	starts []int
+	tagged bool
+	open   bool
+	last   *int64
+}
+
+func (t *grokTurnTracker) observe(prompt *int64, next int) {
+	switch {
+	case prompt != nil:
+		t.tagged = true
+		if !t.open || t.last == nil || *t.last != *prompt {
+			t.starts = append(t.starts, next)
+		}
+		t.last = prompt
+	case t.tagged:
+		return
+	case !t.open:
+		t.starts = append(t.starts, next)
+	}
+	t.open = true
+}
+
+func (t *grokTurnTracker) close() {
+	t.open = false
+}
+
+// grokProjection is the visible history of one updates.jsonl with counts of
+// records that could not be shown. RewindOffset is the byte offset of the last
+// rewind marker, or -1, and is folded into the source revision.
+type grokProjection struct {
+	Entries      []Entry
+	Corrupt      int
+	Oversized    int
+	RewindOffset int64
+}
+
 type grokProjector struct {
 	entries   []*grokPending
 	tools     map[string]toolLocation
+	turns     grokTurnTracker
 	user      *grokPending
 	assistant *grokPending
-	corrupt   bool
+	corrupt   int
+	oversized int
+	rewind    int64
 }
 
 func newGrokProjector() *grokProjector {
-	return &grokProjector{tools: make(map[string]toolLocation)}
+	return &grokProjector{tools: make(map[string]toolLocation), rewind: -1}
 }
 
 func (p *grokProjector) start(role string, offset int64, timestamp string) *grokPending {
@@ -207,7 +256,7 @@ func (p *grokProjector) start(role string, offset int64, timestamp string) *grok
 func (p *grokProjector) apply(line []byte, offset int64) {
 	var record grokRecord
 	if json.Unmarshal(line, &record) != nil {
-		p.corrupt = true
+		p.corrupt++
 		return
 	}
 	update := record.Params.Update
@@ -221,11 +270,45 @@ func (p *grokProjector) apply(line []byte, offset int64) {
 		p.applyToolCall(update, offset, timestamp)
 	case "tool_call_update":
 		p.applyToolUpdate(update)
+	case "rewind_marker":
+		p.applyRewind(update, offset)
+	}
+}
+
+// applyRewind drops the rewound turn and everything after it. Grok appends
+// the marker without removing earlier records. A target that does not map to
+// a known turn is counted as corrupt and ignored rather than guessed; a target
+// just past the last turn removes nothing.
+func (p *grokProjector) applyRewind(update grokUpdate, offset int64) {
+	p.rewind = offset
+	target := update.TargetPrompt
+	if target == nil || *target < 0 || *target > int64(len(p.turns.starts)) {
+		p.corrupt++
+		return
+	}
+	p.user, p.assistant = nil, nil
+	p.turns = grokTurnTracker{starts: p.turns.starts, tagged: p.turns.tagged}
+	if *target == int64(len(p.turns.starts)) {
+		return
+	}
+	cut := p.turns.starts[*target]
+	p.entries = p.entries[:cut]
+	p.turns.starts = p.turns.starts[:*target]
+	for id, location := range p.tools {
+		if location.entry >= cut {
+			delete(p.tools, id)
+		}
 	}
 }
 
 func (p *grokProjector) applyUser(update grokUpdate, offset int64, timestamp string) {
 	p.assistant = nil
+	prompt := update.Meta.PromptIndex
+	if update.Meta.HostTurn {
+		p.turns.close()
+	} else {
+		p.turns.observe(prompt, len(p.entries))
+	}
 	if update.Meta.HideFromScrollback {
 		// Injected <system-reminder> notices (background tasks, subagents).
 		p.user = nil
@@ -233,15 +316,14 @@ func (p *grokProjector) applyUser(update grokUpdate, offset int64, timestamp str
 	}
 	var block grokContentBlock
 	if json.Unmarshal(update.Content, &block) != nil {
-		p.corrupt = true
+		p.corrupt++
 		return
 	}
 	if block.Type != "text" {
 		return
 	}
-	prompt := update.Meta.PromptIndex
 	current := p.user
-	if current == nil || current.prompt == nil || prompt == nil || *current.prompt != *prompt {
+	if update.Meta.HostTurn || current == nil || !sameGrokPrompt(current.prompt, prompt) {
 		current = p.start("user", offset, timestamp)
 		current.prompt = prompt
 		p.user = current
@@ -249,13 +331,25 @@ func (p *grokProjector) applyUser(update grokUpdate, offset int64, timestamp str
 		appendGrokText(current, "\n")
 	}
 	appendGrokText(current, block.Text)
+	if update.Meta.HostTurn {
+		// A host turn is a standalone echo; the next chunk starts a new row.
+		p.user = nil
+	}
+}
+
+func sameGrokPrompt(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (p *grokProjector) applyAgent(update grokUpdate, offset int64, timestamp string) {
 	p.user = nil
+	p.turns.close()
 	var block grokContentBlock
 	if json.Unmarshal(update.Content, &block) != nil {
-		p.corrupt = true
+		p.corrupt++
 		return
 	}
 	if block.Type != "text" || block.Text == "" {
@@ -270,9 +364,10 @@ func (p *grokProjector) applyAgent(update grokUpdate, offset int64, timestamp st
 
 func (p *grokProjector) applyToolCall(update grokUpdate, offset int64, timestamp string) {
 	p.user = nil
+	p.turns.close()
 	id := strings.TrimSpace(update.ToolCallID)
 	if id == "" {
-		p.corrupt = true
+		p.corrupt++
 		return
 	}
 	if p.assistant == nil {
@@ -306,7 +401,7 @@ func (p *grokProjector) applyToolUpdate(update grokUpdate) {
 	}
 	output, corrupt := grokToolOutput(update)
 	if corrupt {
-		p.corrupt = true
+		p.corrupt++
 	}
 	if output == "" {
 		return
@@ -317,8 +412,9 @@ func (p *grokProjector) applyToolUpdate(update grokUpdate) {
 }
 
 // grokToolOutput prefers the text blocks Grok renders; when there are none
-// (edits, backend searches) it falls back to the structured rawOutput. Image
-// blocks are omitted.
+// (directory listings, background task output, edits) it uses the text inside
+// rawOutput, falling back to the structured rawOutput. Image blocks are
+// omitted.
 func grokToolOutput(update grokUpdate) (string, bool) {
 	corrupt := false
 	texts := make([]string, 0, 1)
@@ -335,9 +431,50 @@ func grokToolOutput(update grokUpdate) (string, bool) {
 	}
 	output := sanitizeText(strings.Join(texts, "\n"))
 	if output == "" {
-		output = sanitizeText(grokRawJSON(update.RawOutput))
+		output = sanitizeText(grokRawOutputText(update.RawOutput))
 	}
 	return output, corrupt
+}
+
+// grokRawOutputText extracts the text Grok shows for rawOutput shapes without
+// text blocks: {"Content":{"content":...}} (ListDir, WebFetch),
+// {"Result":{"output":...}} (TaskOutput), {"Result":"..."} and {"text":...}.
+// Other shapes are returned as compact JSON.
+func grokRawOutputText(raw json.RawMessage) string {
+	fallback := grokRawJSON(raw)
+	var fields map[string]json.RawMessage
+	if fallback == "" || json.Unmarshal(raw, &fields) != nil {
+		return fallback
+	}
+	if text := grokJSONString(fields["text"]); text != "" {
+		return text
+	}
+	if text := grokNestedString(fields["Content"], "content"); text != "" {
+		return text
+	}
+	if text := grokJSONString(fields["Result"]); text != "" {
+		return text
+	}
+	if text := grokNestedString(fields["Result"], "output"); text != "" {
+		return text
+	}
+	return fallback
+}
+
+func grokJSONString(raw json.RawMessage) string {
+	var text string
+	if len(raw) == 0 || json.Unmarshal(raw, &text) != nil {
+		return ""
+	}
+	return text
+}
+
+func grokNestedString(raw json.RawMessage, key string) string {
+	var fields map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &fields) != nil {
+		return ""
+	}
+	return grokJSONString(fields[key])
 }
 
 func grokRawJSON(raw json.RawMessage) string {
@@ -361,7 +498,7 @@ func appendGrokText(pending *grokPending, text string) {
 	pending.text.WriteString(text)
 }
 
-func (p *grokProjector) finish() []Entry {
+func (p *grokProjector) finish() grokProjection {
 	entries := make([]Entry, 0, len(p.entries))
 	for _, pending := range p.entries {
 		entry := pending.entry
@@ -381,7 +518,7 @@ func (p *grokProjector) finish() []Entry {
 		normalizeEntryTools(&entry)
 		entries = append(entries, entry)
 	}
-	return entries
+	return grokProjection{Entries: entries, Corrupt: p.corrupt, Oversized: p.oversized, RewindOffset: p.rewind}
 }
 
 func grokTimestamp(agentMillis, seconds int64) string {
@@ -397,24 +534,26 @@ func grokTimestamp(agentMillis, seconds int64) string {
 
 // parseGrokUpdates streams updates.jsonl line by line. Entry IDs are the byte
 // offset of each entry's first record, which is stable while the file is only
-// appended; replacement is caught by the source identity revision.
-func parseGrokUpdates(ctx context.Context, path string) ([]Entry, bool, error) {
+// appended; replacement is caught by the source identity revision and a
+// rewind by the marker offset folded into it. The whole file is parsed on
+// every request.
+func parseGrokUpdates(ctx context.Context, path string) (grokProjection, error) {
 	file, err := openConversationSource(path)
 	if err != nil {
-		return nil, false, err
+		return grokProjection{}, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return nil, false, err
+		return grokProjection{}, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, false, errors.New("conversation source is not a regular file")
+		return grokProjection{}, errors.New("conversation source is not a regular file")
 	}
 	return projectGrokUpdates(ctx, file)
 }
 
-func projectGrokUpdates(ctx context.Context, source io.Reader) ([]Entry, bool, error) {
+func projectGrokUpdates(ctx context.Context, source io.Reader) (grokProjection, error) {
 	reader := bufio.NewReaderSize(source, 256*1024)
 	projector := newGrokProjector()
 	var line []byte
@@ -422,7 +561,7 @@ func projectGrokUpdates(ctx context.Context, source io.Reader) ([]Entry, bool, e
 	for count := 0; ; count++ {
 		if count%grokCancelInterval == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, false, err
+				return grokProjection{}, err
 			}
 		}
 		start := offset
@@ -432,11 +571,11 @@ func projectGrokUpdates(ctx context.Context, source io.Reader) ([]Entry, bool, e
 		line, consumed, oversized, complete, err = readGrokLine(reader, line)
 		offset += consumed
 		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, false, err
+			return grokProjection{}, err
 		}
 		switch {
 		case oversized:
-			projector.corrupt = true
+			projector.oversized++
 		case !grokRelevantLine(line):
 		case !complete && !json.Valid(line):
 			// A trailing record still being written is not corruption.
@@ -444,7 +583,7 @@ func projectGrokUpdates(ctx context.Context, source io.Reader) ([]Entry, bool, e
 			projector.apply(line, start)
 		}
 		if errors.Is(err, io.EOF) {
-			return projector.finish(), projector.corrupt, nil
+			return projector.finish(), nil
 		}
 	}
 }
@@ -539,14 +678,14 @@ func (r *Reader) readGrokFor(project ProjectContext, sessionID, before string, l
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
-	entries, corrupt, err := parseGrokUpdates(context.Background(), location.Path)
+	projection, err := parseGrokUpdates(context.Background(), location.Path)
 	if err != nil {
 		return Page{}, fmt.Errorf("read conversation log: %w", err)
 	}
-	page, hasMore, total, ok := grokPage(entries, before, limit)
+	page, hasMore, total, ok := grokPage(projection.Entries, before, limit)
 	if !ok {
 		return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
 	}
 	normalizeEntriesForResponse(page)
-	return Page{Available: true, Entries: page, HasMore: hasMore, Total: total, SourceCorrupt: corrupt}, nil
+	return Page{Available: true, Entries: page, HasMore: hasMore, Total: total, SourceCorrupt: projection.Corrupt > 0}, nil
 }
