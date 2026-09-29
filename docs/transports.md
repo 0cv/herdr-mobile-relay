@@ -77,13 +77,15 @@ default.
 ## CLI-backed background Tailscale Serve (development only)
 
 A separate `tailscale-cli` transport supports isolated foreground development
-only for the exact recognized macOS App Store Tailscale 1.102.4 profile. That
-profile is development-enabled, not runtime-qualified. `make dev-tailscale-cli`
+only for the exact recognized macOS/arm64 App Store Tailscale 1.102.4 profile.
+That profile is development-enabled, not runtime-qualified. `make dev-tailscale-cli`
 requires explicit development opt-in, read-only profile and node preflight, and
 an exact route-bound confirmation on stdin for the selected node, HTTPS origin,
 listener and loopback backend. An environment variable cannot consent. The
 persistent route survives relay stop and Ctrl-C; removal is a separate explicit
-operation. The launcher uses isolated development state and does not install a
+operation. Real manager calls are bound to the launcher's marked private root,
+exact registration child and recorded coordination root. The launcher uses
+isolated development state and does not install a
 service. Production and installed-service activation remain refused until
 physical-phone qualification is recorded and separately enabled. Linux, MacSys,
 other versions and unrecognized profiles remain unsupported. This is not a

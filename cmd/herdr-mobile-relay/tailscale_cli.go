@@ -99,6 +99,7 @@ func runTailscaleCLIWithInput(args []string, stdin io.Reader, stdout, stderr io.
 	flags := flag.NewFlagSet("tailscale-cli "+operation, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	binary := flags.String("binary", os.Getenv("HERDR_TAILSCALE_CLI_BIN"), "selected absolute Tailscale CLI path")
+	developmentRoot := flags.String("development-root", "", "private marked CLI development root")
 	stateRoot := flags.String("state-root", os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT"), "private registration root")
 	coordinationRoot := flags.String("coordination-root", os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT"), "shared private node-lock root")
 	scope := flags.String("scope", os.Getenv("HERDR_TAILSCALE_CLI_SCOPE"), "production or development registration scope")
@@ -132,7 +133,7 @@ func runTailscaleCLIWithInput(args []string, stdin io.Reader, stdout, stderr io.
 	if err != nil {
 		return 1, err
 	}
-	manager, err := tailscalecli.NewManager(*stateRoot, *coordinationRoot, client)
+	manager, err := tailscalecli.NewDevelopmentManager(*developmentRoot, *stateRoot, *coordinationRoot, client)
 	if err != nil {
 		return 1, err
 	}
@@ -286,5 +287,5 @@ func readRouteConfirmation(stdin io.Reader, expected string) (string, error) {
 }
 
 func tailscaleCLIUsageError() error {
-	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check [--scope development]|resolve-binary|preflight --scope development|check-transport-switch|reserve-backend-port|release-backend-port|status|recover|reconcile|assert-ready|publish|unpublish} [options]")
+	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check [--scope development]|resolve-binary|preflight --scope development|check-transport-switch|reserve-backend-port|release-backend-port|status|recover|reconcile|assert-ready|publish|unpublish} [--development-root <marked-private-root>] [options]")
 }

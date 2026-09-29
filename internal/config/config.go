@@ -56,6 +56,7 @@ type Config struct {
 	TailscaleCLIOrigin           string
 	TailscaleCLIStateRoot        string
 	TailscaleCLICoordinationRoot string
+	TailscaleCLIDevelopmentRoot  string
 	TailscaleCLIScope            string
 	TailscaleCLIBin              string
 	PairingSocketPath            string
@@ -110,6 +111,7 @@ func Load() (*Config, error) {
 		TailscaleCLIOrigin:           os.Getenv("HERDR_TAILSCALE_CLI_ORIGIN"),
 		TailscaleCLIStateRoot:        os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT"),
 		TailscaleCLICoordinationRoot: os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT"),
+		TailscaleCLIDevelopmentRoot:  os.Getenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT"),
 		TailscaleCLIScope:            os.Getenv("HERDR_TAILSCALE_CLI_SCOPE"),
 		TailscaleCLIBin:              os.Getenv("HERDR_TAILSCALE_CLI_BIN"),
 		PairingSocketPath:            os.Getenv("HERDR_RELAY_PAIRING_SOCKET"),
@@ -348,6 +350,10 @@ func (c *Config) validateTailscaleCLI() error {
 	case "development":
 		if !TailscaleCLIDevelopmentQualificationEnabled() {
 			return errors.New("tailscale-cli development scope is disabled pending separate development qualification")
+		}
+		if !filepath.IsAbs(c.TailscaleCLIDevelopmentRoot) ||
+			filepath.Clean(c.TailscaleCLIStateRoot) != filepath.Join(filepath.Clean(c.TailscaleCLIDevelopmentRoot), "registration") {
+			return errors.New("development CLI state must be bound to its absolute private launcher root")
 		}
 	case "production":
 		if !tailscaleCLIProfilesEnabled {

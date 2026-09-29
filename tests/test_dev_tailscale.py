@@ -255,7 +255,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     custom_dev_root = base / "custom-cli-dev"
     custom_dev_root.mkdir(mode=0o700)
     custom_dev_state = custom_dev_root / "registration"
-    custom_dev_root.mkdir(mode=0o700, exist_ok=True)
+    custom_dev_state.mkdir(mode=0o700)
+    custom_coordination_root.mkdir(mode=0o700)
     (custom_dev_root / "relay.env").write_text(
         "HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_INSTANCE_ID=coord-fixture\n"
         "HERDR_RELAY_PORT=18377\nHERDR_RELAY_PLUGIN_PORT=18378\n"
@@ -263,9 +264,14 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         f"HERDR_TAILSCALE_CLI_STATE_ROOT={custom_dev_state}\n",
         encoding="utf-8",
     )
-    (custom_dev_root / ".herdr-dev-tailscale-cli").write_text(
-        "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n", encoding="utf-8",
+    custom_marker = custom_dev_root / ".herdr-dev-tailscale-cli"
+    custom_marker.write_text(
+        "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
+        f"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT={custom_dev_state}\n"
+        f"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT={custom_coordination_root}\n",
+        encoding="utf-8",
     )
+    custom_marker.chmod(0o600)
     coordination_record = base / "coordination-root-args"
     coordination_relay = base / "coordination-root-relay"
     coordination_relay.write_text(
@@ -303,6 +309,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     # exact scoped node/port and narrow route-removal consent to the manager.
     unpublish_root = base / "cli-unpublish-consent"
     unpublish_root.mkdir(mode=0o700)
+    unpublish_coordination = base / "cli-unpublish-coordination"
+    unpublish_coordination.mkdir(mode=0o700)
     unpublish_scripts = unpublish_root / "relay"
     unpublish_scripts.mkdir(mode=0o700)
     for name in ("common.sh", "tailscale-cli.sh"):
@@ -315,13 +323,22 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         "HERDR_TAILSCALE_CLI_SCOPE=development\n"
         f"HERDR_TAILSCALE_CLI_BIN={cli}\n"
         f"HERDR_TAILSCALE_CLI_STATE_ROOT={unpublish_root}/registration\n"
-        f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={unpublish_root}/coordination\n"
+        f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={unpublish_coordination}\n"
+        f"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT={unpublish_root}\n"
         "HERDR_TAILSCALE_CLI_HTTPS_PORT=9443\n"
         "HERDR_TAILSCALE_CLI_NODE_ID=node-unpublish-fixture\n",
         encoding="utf-8",
     )
     unpublish_registration = unpublish_root / "registration"
     unpublish_registration.mkdir(mode=0o700)
+    unpublish_marker = unpublish_root / ".herdr-dev-tailscale-cli"
+    unpublish_marker.write_text(
+        "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
+        f"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT={unpublish_registration}\n"
+        f"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT={unpublish_coordination}\n",
+        encoding="utf-8",
+    )
+    unpublish_marker.chmod(0o600)
     unpublish_journal = unpublish_registration / "registration.json"
     unpublish_journal.write_text('{"state":"registered","fixture":true}\n', encoding="utf-8")
     unpublish_journal_before = unpublish_journal.read_bytes()
@@ -368,7 +385,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     accepted_status, accepted_output = run_unpublish_consent(b"y\n")
     accepted_events = unpublish_record.read_text(encoding="utf-8").splitlines()
     if (accepted_status != 0 or not accepted_events[-1].startswith(
-            "tailscale-cli unpublish --binary " + str(cli) + " --state-root ") or
+            "tailscale-cli unpublish --development-root " + str(unpublish_root) +
+            " --binary " + str(cli) + " --state-root ") or
         "--scope development --installation-id fixture-unpublish-instance" not in accepted_events[-1] or
         "--https-port 9443 --backend-port 18577 --accepted --node-id node-unpublish-fixture" not in accepted_events[-1] or
         "--accept-route-removal --accept-check-to-write-race --accept-no-remote-drain" not in accepted_events[-1] or
@@ -582,6 +600,7 @@ else:
     cli_install_root = base / "cli install & 'quoted' fixture"
     cli_install_home = cli_install_root / "home"
     cli_install_home.mkdir(mode=0o700, parents=True)
+    cli_install_root.chmod(0o700)
     cli_install_scripts = cli_install_root / "relay"
     cli_install_scripts.mkdir(mode=0o700)
     for name in ("common.sh", "install-systemd-user-service.sh", "herdr-mobile-relay-service.sh",
@@ -621,6 +640,18 @@ printf 'Linux'
         encoding="utf-8",
     )
     manager_relay.chmod(0o700)
+    cli_install_coordination = base / "cli-install-coordination"
+    cli_install_coordination.mkdir(mode=0o700)
+    cli_install_state = cli_install_root / "registration"
+    cli_install_state.mkdir(mode=0o700)
+    cli_install_marker = cli_install_root / ".herdr-dev-tailscale-cli"
+    cli_install_marker.write_text(
+        "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
+        f"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT={cli_install_state}\n"
+        f"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT={cli_install_coordination}\n",
+        encoding="utf-8",
+    )
+    cli_install_marker.chmod(0o600)
     cli_install_env = cli_install_root / "relay.env"
     cli_install_env.write_text(
         "HERDR_RELAY_TRANSPORT=tailscale-cli\n"
@@ -631,8 +662,9 @@ printf 'Linux'
         "HERDR_RELAY_HOST=127.0.0.1\nHERDR_RELAY_PORT=18577\nHERDR_RELAY_PLUGIN_PORT=18578\n"
         f"HERDR_TAILSCALE_CLI_BIN={shlex.quote(str(cli))}\nHERDR_TAILSCALE_CLI_SCOPE=development\n"
         f"HERDR_TAILSCALE_CLI_ORIGIN=https://relay.fixture.invalid:9443\n"
-        f"HERDR_TAILSCALE_CLI_STATE_ROOT={shlex.quote(str(cli_install_root / 'registration'))}\n"
-        f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={shlex.quote(str(cli_install_root / 'coordination'))}\n"
+        f"HERDR_TAILSCALE_CLI_STATE_ROOT={shlex.quote(str(cli_install_state))}\n"
+        f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={shlex.quote(str(cli_install_coordination))}\n"
+        f"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT={shlex.quote(str(cli_install_root))}\n"
         "HERDR_TAILSCALE_CLI_HTTPS_PORT=9443\nHERDR_REACHABILITY_PORT_MAPPING=0\n",
         encoding="utf-8",
     )
@@ -642,8 +674,9 @@ printf 'Linux'
         "HERDR_RELAY_BIN": str(manager_relay),
         "HERDR_RELEASE_ROOT": str(cli_install_home / ".local" / "share" / "herdr-mobile-relay"),
         "HERDR_TAILSCALE_CLI_BIN": str(cli), "HERDR_TAILSCALE_CLI_SCOPE": "development",
-        "HERDR_TAILSCALE_CLI_STATE_ROOT": str(cli_install_root / "registration"),
-        "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(cli_install_root / "coordination"),
+        "HERDR_TAILSCALE_CLI_STATE_ROOT": str(cli_install_state),
+        "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(cli_install_coordination),
+        "HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT": str(cli_install_root),
         "HERDR_TAILSCALE_CLI_HTTPS_PORT": "9443", "HERDR_RELAY_INSTANCE_ID": "fixture-installation",
         "HERDR_RELAY_PORT": "18577", "SYSTEMCTL_RECORD": str(systemctl_record),
         "MANAGER_RECORD": str(manager_record),
@@ -702,6 +735,7 @@ printf 'Linux'
     mac_fixture = base / "mac service & 'quoted' fixture"
     mac_home = mac_fixture / "home"
     mac_home.mkdir(mode=0o700, parents=True)
+    mac_fixture.chmod(0o700)
     mac_scripts = mac_fixture / "relay"
     mac_scripts.mkdir(mode=0o700)
     for name in ("common.sh", "install-service.sh", "herdr-mobile-relay-service.sh",
@@ -741,6 +775,18 @@ printf 'Linux'
         encoding="utf-8",
     )
     mac_manager.chmod(0o700)
+    mac_coordination = base / "mac-service-coordination"
+    mac_coordination.mkdir(mode=0o700)
+    mac_state = mac_fixture / "registration"
+    mac_state.mkdir(mode=0o700)
+    mac_marker = mac_fixture / ".herdr-dev-tailscale-cli"
+    mac_marker.write_text(
+        "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
+        f"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT={mac_state}\n"
+        f"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT={mac_coordination}\n",
+        encoding="utf-8",
+    )
+    mac_marker.chmod(0o600)
     mac_env = mac_fixture / "relay.env"
     mac_env.write_text(
         "HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_TOKEN=0123456789abcdef0123456789abcdef\n"
@@ -749,8 +795,9 @@ printf 'Linux'
         "HERDR_RELAY_HOST=127.0.0.1\nHERDR_RELAY_PORT=18577\nHERDR_RELAY_PLUGIN_PORT=18578\n"
         f"HERDR_TAILSCALE_CLI_BIN={cli}\nHERDR_TAILSCALE_CLI_SCOPE=development\n"
         "HERDR_TAILSCALE_CLI_ORIGIN=https://relay.fixture.invalid:9443\n"
-        f"HERDR_TAILSCALE_CLI_STATE_ROOT={shlex.quote(str(mac_fixture / 'registration'))}\n"
-        f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={shlex.quote(str(mac_fixture / 'coordination'))}\n"
+        f"HERDR_TAILSCALE_CLI_STATE_ROOT={shlex.quote(str(mac_state))}\n"
+        f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={shlex.quote(str(mac_coordination))}\n"
+        f"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT={shlex.quote(str(mac_fixture))}\n"
         "HERDR_TAILSCALE_CLI_HTTPS_PORT=9443\nHERDR_REACHABILITY_PORT_MAPPING=0\n",
         encoding="utf-8",
     )
@@ -760,8 +807,9 @@ printf 'Linux'
         "HERDR_RELAY_BIN": str(mac_manager), "HERDR_RELAY_PORT": "18577",
         "HERDR_RELEASE_ROOT": str(mac_home / ".local" / "share" / "herdr-mobile-relay"),
         "HERDR_TAILSCALE_CLI_BIN": str(cli), "HERDR_TAILSCALE_CLI_SCOPE": "development",
-        "HERDR_TAILSCALE_CLI_STATE_ROOT": str(mac_fixture / "registration"),
-        "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(mac_fixture / "coordination"),
+        "HERDR_TAILSCALE_CLI_STATE_ROOT": str(mac_state),
+        "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(mac_coordination),
+        "HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT": str(mac_fixture),
         "HERDR_TAILSCALE_CLI_HTTPS_PORT": "9443", "MAC_MANAGER_RECORD": str(mac_manager_record),
         "LAUNCHCTL_RECORD": str(launchctl_record), "MAC_SYSTEMCTL_RECORD": str(mac_systemctl_record),
         "PATH": f"{mac_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -1045,6 +1093,7 @@ exit 0
     bootstrap_event = next((event for event in all_events if event.startswith("control|pairing-control") and "--operation arm_bootstrap" in event), "")
     if (len(manager_events) != 2 or not manager_events[0].startswith("manager|tailscale-cli reserve-backend-port ") or
         not manager_events[1].startswith("manager|tailscale-cli publish ") or
+        any("--development-root " + str(cli_dev_root) not in event for event in manager_events) or
         "--scope development" not in manager_events[1] or "--node-id dev-node-fixture" not in manager_events[1] or
         "--origin https://relay.fixture.invalid:8443" not in manager_events[1] or
         "--accept-persistent-route" not in manager_events[1] or len(runtime_events) != 1 or
@@ -1073,7 +1122,8 @@ exit 0
     update_managers = [event for event in update_events if event.startswith("manager|")]
     if (len(update_managers) != 3 or
         not update_managers[0].startswith("manager|tailscale-cli activation-check") or
-        any(not event.startswith("manager|tailscale-cli assert-ready ") for event in update_managers[1:]) or
+        any(not event.startswith("manager|tailscale-cli assert-ready ") or
+            "--development-root " + str(cli_dev_root) not in event for event in update_managers[1:]) or
         any("publish" in event or "unpublish" in event for event in update_managers[1:]) or
         sum("--operation arm_bootstrap" in event for event in updated_events) != setup_bootstrap_count or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):

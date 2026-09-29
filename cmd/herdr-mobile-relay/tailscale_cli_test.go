@@ -53,6 +53,34 @@ func TestActivationScopeKeepsProductionDisabledAndDevelopmentExplicit(t *testing
 	}
 }
 
+func TestDevelopmentManagerCommandRequiresLauncherBoundRootBeforeCLIUse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the synthetic CLI fixture uses a POSIX executable")
+	}
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "cli-invoked")
+	binary := filepath.Join(root, "fake-tailscale")
+	contents := "#!/bin/sh\n# HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1\nprintf invoked > \"" + sentinel + "\"\nexit 97\n"
+	if err := os.WriteFile(binary, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code, err := runTailscaleCLIWithInput([]string{
+		"status", "--scope", "development", "--binary", binary,
+		"--state-root", filepath.Join(root, "registration"),
+		"--coordination-root", filepath.Join(root, "coordination"),
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 || !errors.Is(err, tailscalecli.ErrPermissionDenied) {
+		t.Fatalf("unbound development manager command = code %d err=%v", code, err)
+	}
+	if _, err := os.Lstat(sentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unbound development command executed the CLI: %v", err)
+	}
+}
+
 func TestRouteConfirmationReaderBindsExactInputAndRejectsTokens(t *testing.T) {
 	expected := tailscalecli.PublishRouteConfirmation("node-example", "https://relay.example.test:8443", 8443, 18377)
 	if got, err := readRouteConfirmation(strings.NewReader(expected+"\n"), expected); err != nil || got != expected {

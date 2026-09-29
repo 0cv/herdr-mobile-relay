@@ -266,17 +266,42 @@ func TestTailscaleCLITransportIsRecognizedButActivationDisabled(t *testing.T) {
 func TestTailscaleCLIDevelopmentScopeIsConfigEnabled(t *testing.T) {
 	isolateLoadEnvironment(t)
 	configureTailscaleCLIEnvironment(t)
+	developmentRoot := t.TempDir()
 	t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "development")
+	t.Setenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT", developmentRoot)
+	t.Setenv("HERDR_TAILSCALE_CLI_STATE_ROOT", filepath.Join(developmentRoot, "registration"))
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("development CLI config was refused: %v", err)
 	}
-	if cfg.TailscaleCLIScope != "development" {
-		t.Fatalf("CLI scope = %q, want development", cfg.TailscaleCLIScope)
+	if cfg.TailscaleCLIScope != "development" || cfg.TailscaleCLIDevelopmentRoot != developmentRoot {
+		t.Fatalf("CLI scope/root = %q/%q, want development/%q", cfg.TailscaleCLIScope, cfg.TailscaleCLIDevelopmentRoot, developmentRoot)
 	}
 	if TailscaleCLIProfilesEnabled() {
 		t.Fatal("development scope must not enable production CLI profiles")
+	}
+}
+
+func TestTailscaleCLIDevelopmentScopeRequiresBoundAbsoluteRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name, root, state string
+	}{
+		{name: "missing root"},
+		{name: "unbound registration", root: "/private/dev", state: "/private/elsewhere/registration"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateLoadEnvironment(t)
+			configureTailscaleCLIEnvironment(t)
+			t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "development")
+			t.Setenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT", tc.root)
+			if tc.state != "" {
+				t.Setenv("HERDR_TAILSCALE_CLI_STATE_ROOT", tc.state)
+			}
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "bound to its absolute private launcher root") {
+				t.Fatalf("unbound development configuration error = %v", err)
+			}
+		})
 	}
 }
 
@@ -657,6 +682,7 @@ func configureTailscaleCLIEnvironment(t *testing.T) {
 	t.Setenv("HERDR_TAILSCALE_CLI_ORIGIN", "https://relay.tailnet.ts.net:8443")
 	t.Setenv("HERDR_TAILSCALE_CLI_STATE_ROOT", filepath.Join(root, "registration"))
 	t.Setenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT", filepath.Join(root, "coordination"))
+	t.Setenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT", "")
 	t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "production")
 	t.Setenv("HERDR_TAILSCALE_CLI_BIN", filepath.Join(root, "Tailscale.app", "Contents", "MacOS", "Tailscale"))
 }

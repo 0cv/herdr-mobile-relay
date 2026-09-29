@@ -17,6 +17,7 @@ SCOPE="${HERDR_TAILSCALE_CLI_SCOPE:-production}"
 INSTALLATION_ID="${HERDR_RELAY_INSTANCE_ID:-}"
 STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-registration}"
 COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination}"
+DEVELOPMENT_ROOT="${HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT:-}"
 HTTPS_PORT="${HERDR_TAILSCALE_CLI_HTTPS_PORT:-443}"
 BACKEND_PORT="${HERDR_RELAY_PORT:-8375}"
 CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
@@ -80,7 +81,14 @@ activation_check() {
 manager_call() {
     local operation="$1"
     shift
-    "$RELAY_BIN" tailscale-cli "$operation" \
+    local development_root_args=()
+    if [ "$SCOPE" = development ]; then
+        case "$DEVELOPMENT_ROOT" in
+            /*) development_root_args=(--development-root "$DEVELOPMENT_ROOT") ;;
+            *) echo "✗ Development-scope CLI operations require the launcher-bound private root." >&2; return 1 ;;
+        esac
+    fi
+    "$RELAY_BIN" tailscale-cli "$operation" "${development_root_args[@]}" \
         --binary "$CLI_BIN" --state-root "$STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
         --scope "$SCOPE" --installation-id "$INSTALLATION_ID" --origin "$ORIGIN" \
         --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" "$@"

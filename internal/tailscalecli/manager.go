@@ -154,6 +154,7 @@ type RecoveryReport struct {
 type Manager struct {
 	stateRoot            string
 	coordinationRoot     string
+	developmentRoot      string
 	client               *Client
 	fixtureMutations     bool
 	skipBackendReadiness bool
@@ -1055,7 +1056,8 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 }
 
 func (m *Manager) requireDevelopmentScope(scope string) error {
-	if scope == "development" || (scope == "production" && m.fixtureMutations) {
+	if (scope == "development" && (m.developmentRoot != "" || m.fixtureMutations)) ||
+		(scope == "production" && m.fixtureMutations) {
 		return nil
 	}
 	return fmt.Errorf("%w: real CLI-backed operations are limited to isolated development scope; production activation is disabled", ErrUnsupported)

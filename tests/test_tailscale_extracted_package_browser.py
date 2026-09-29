@@ -2147,17 +2147,26 @@ def main() -> int:
             die("separately tagged CLI fixture binary did not enable synthetic development coverage")
 
         cli_root = temporary_root / "cli-backed-package"
+        cli_root.mkdir(mode=0o700)
         cli_config = cli_root / "config"
         cli_runtime = cli_root / "runtime"
         cli_cache = cli_root / "cache"
         cli_data = cli_root / "data"
         cli_home = cli_root / "home"
         cli_state_root = cli_root / "registration"
-        cli_coordination_root = cli_root / "coordination"
+        cli_coordination_root = temporary_root / "cli-coordination"
         cli_fixture_bin = cli_root / "bin"
         for path in (cli_config, cli_runtime, cli_cache, cli_data, cli_home,
                      cli_state_root, cli_coordination_root, cli_fixture_bin):
             path.mkdir(mode=0o700, parents=True)
+        development_marker = cli_root / ".herdr-dev-tailscale-cli"
+        development_marker.write_text(
+            "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
+            f"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT={cli_state_root}\n"
+            f"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT={cli_coordination_root}\n",
+            encoding="ascii",
+        )
+        os.chmod(development_marker, 0o600)
         unmarked_cli_sentinel = cli_root / "unmarked-cli-executed"
         unmarked_cli = cli_fixture_bin / "unmarked-tailscale"
         unmarked_cli.write_text(
@@ -2255,6 +2264,7 @@ else:
             f"HERDR_TAILSCALE_CLI_HTTPS_PORT={os.environ['HERDR_TAILSCALE_HTTPS_PORT']}\n"
             f"HERDR_TAILSCALE_CLI_STATE_ROOT={cli_state_root}\n"
             f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={cli_coordination_root}\n"
+            f"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT={cli_root}\n"
             "HERDR_REACHABILITY_PORT_MAPPING=0\n",
             encoding="ascii",
         )
@@ -2276,6 +2286,7 @@ else:
             "HERDR_TAILSCALE_CLI_SCOPE": "development", "HERDR_TAILSCALE_CLI_ORIGIN": cli_origin,
             "HERDR_TAILSCALE_CLI_STATE_ROOT": str(cli_state_root),
             "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(cli_coordination_root),
+            "HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT": str(cli_root),
             "HERDR_TAILSCALE_CLI_HTTPS_PORT": os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
             "HERDR_REACHABILITY_PORT_MAPPING": "0", "HERDR_PHONE_APP_URL": cli_origin,
             "HERDR_WEB_ROOT": str(package / "web"), "HERDR_BIN": str(fake_herdr),
@@ -2326,7 +2337,8 @@ else:
         cli_reservation_id = os.urandom(16).hex()
         reserve_args = [
             str(cli_fixture_binary), "tailscale-cli", "reserve-backend-port", "--binary", str(cli_fake_path),
-            "--state-root", str(cli_state_root), "--coordination-root", str(cli_coordination_root),
+            "--development-root", str(cli_root), "--state-root", str(cli_state_root),
+            "--coordination-root", str(cli_coordination_root),
             "--scope", "development", "--installation-id", cli_instance,
             "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
             "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
@@ -2340,7 +2352,8 @@ else:
             die("synthetic CLI manager did not reserve its private loopback backend")
         publish_args = [
             str(cli_fixture_binary), "tailscale-cli", "publish", "--binary", str(cli_fake_path),
-            "--state-root", str(cli_state_root), "--coordination-root", str(cli_coordination_root),
+            "--development-root", str(cli_root), "--state-root", str(cli_state_root),
+            "--coordination-root", str(cli_coordination_root),
             "--scope", "development", "--installation-id", cli_instance,
             "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
             "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
@@ -2494,7 +2507,8 @@ else:
             cli_app_log_handle = None
         unpublish_args = [
             str(cli_fixture_binary), "tailscale-cli", "unpublish", "--binary", str(cli_fake_path),
-            "--state-root", str(cli_state_root), "--coordination-root", str(cli_coordination_root),
+            "--development-root", str(cli_root), "--state-root", str(cli_state_root),
+            "--coordination-root", str(cli_coordination_root),
             "--scope", "development", "--installation-id", cli_instance,
             "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
             "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],

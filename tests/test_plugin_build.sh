@@ -478,7 +478,8 @@ grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP
 # Exercise the complete update entrypoint with only a fake relay manager,
 # release installer, health endpoint and systemctl. The selected CLI is a
 # sentinel and the persistent route journal is checked byte-for-byte.
-CLI_UPDATE_STATE="$TEST_HOME/.local/state/herdr-mobile-relay/tailscale-cli-registration"
+CLI_UPDATE_DEVELOPMENT_ROOT="$TEST_HOME/.local/state/herdr-mobile-relay/tailscale-cli-development"
+CLI_UPDATE_STATE="$CLI_UPDATE_DEVELOPMENT_ROOT/registration"
 CLI_UPDATE_COORDINATION="$TEST_HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination"
 CLI_UPDATE_MANAGER="$WORK_DIR/cli-update-manager"
 CLI_UPDATE_MANAGER_RECORD="$WORK_DIR/cli-update-manager-record"
@@ -487,6 +488,11 @@ CLI_HEALTH_RECORD="$WORK_DIR/cli-health-record"
 CLI_TAILSCALE="$WORK_DIR/cli-update-tailscale"
 CLI_TAILSCALE_SENTINEL="$WORK_DIR/cli-update-tailscale-touched"
 mkdir -p "$CLI_UPDATE_STATE" "$CLI_UPDATE_COORDINATION"
+printf '%s\n' 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' \
+    "HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=$CLI_UPDATE_STATE" \
+    "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$CLI_UPDATE_COORDINATION" \
+    > "$CLI_UPDATE_DEVELOPMENT_ROOT/.herdr-dev-tailscale-cli"
+chmod 600 "$CLI_UPDATE_DEVELOPMENT_ROOT/.herdr-dev-tailscale-cli"
 printf '{"state":"registered","fixture":true}\n' > "$CLI_UPDATE_STATE/registration.json"
 cp "$CLI_UPDATE_STATE/registration.json" "$WORK_DIR/cli-registration-before"
 cat > "$CLI_TAILSCALE" <<EOF
@@ -521,6 +527,7 @@ HERDR_TAILSCALE_CLI_SCOPE=development
 HERDR_TAILSCALE_CLI_BIN=$CLI_TAILSCALE
 HERDR_TAILSCALE_CLI_STATE_ROOT=$CLI_UPDATE_STATE
 HERDR_TAILSCALE_CLI_COORDINATION_ROOT=$CLI_UPDATE_COORDINATION
+HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT=$CLI_UPDATE_DEVELOPMENT_ROOT
 HERDR_TAILSCALE_CLI_HTTPS_PORT=9443
 HERDR_TAILSCALE_CLI_ORIGIN=https://relay.fixture.invalid:9443
 HERDR_TAILSCALE_CLI_NODE_ID=node-update-fixture
@@ -615,7 +622,7 @@ test "$(cat "$RESTART_LOG")" = restart
 grep -F "persistent Serve route and registration journal are retained" \
     "$WORK_DIR/cli-update-success" >/dev/null
 [ "$(wc -l < "$CLI_ROUTE_RECORD")" -eq 1 ]
-grep -F "tailscale-cli assert-ready --binary $CLI_TAILSCALE" "$CLI_ROUTE_RECORD" >/dev/null
+grep -F "tailscale-cli assert-ready --development-root $CLI_UPDATE_DEVELOPMENT_ROOT --binary $CLI_TAILSCALE" "$CLI_ROUTE_RECORD" >/dev/null
 if grep -E 'tailscale-cli (publish|unpublish)' "$CLI_UPDATE_MANAGER_RECORD" "$CLI_ROUTE_RECORD" >/dev/null; then
     echo "operator-managed package update mutated the persistent Serve route" >&2
     exit 1

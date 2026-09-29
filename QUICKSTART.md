@@ -135,11 +135,15 @@ availability is not guaranteed by Herdr. This path does not support background
 service installation or phone-managed updates. See
 [Operator-owned Serve](docs/transports.md#operator-owned-https-serve-byo).
 
-A distinct CLI-backed background Serve transport is being implemented, but the
-candidate App Store/Linux profiles are not runtime-qualified and it is not
-available in setup. Do not select a profile or publish a persistent route based
-on the source/fixture implementation alone; separate P6 qualification and risk
-acceptance remain pending.
+A separate CLI-backed foreground development entrypoint is available to
+checkout developers as `make dev-tailscale-cli`; it is not part of setup or an
+installed service. Only the exact supplied macOS/arm64 App Store Tailscale
+1.102.4 profile is enabled for isolated development, and real-runtime and
+physical-phone qualification remain pending. Production and installed-service
+activation are still refused. Do not publish a persistent route based on the
+source/fixture implementation alone; review the current limits and live-run
+boundary in [the CLI qualification guide](docs/tailscale-cli-qualification.md)
+before using this development-only path.
 
 ## Make It Permanent
 

@@ -352,6 +352,9 @@ func TestStrictVersionJSONAndProfileCandidates(t *testing.T) {
 	if got := identifyProfileFor(metadata, "darwin", "arm64"); got != ProfileAppStoreSupplied {
 		t.Fatalf("App Store source metadata profile = %q", got)
 	}
+	if got := identifyProfileFor(metadata, "darwin", "amd64"); got != ProfileUnknown {
+		t.Fatalf("App Store metadata accepted on Darwin amd64: %q", got)
+	}
 	if got := identifyProfileFor(metadata, "linux", "amd64"); got != ProfileUnknown {
 		t.Fatalf("App Store metadata accepted on Linux: %q", got)
 	}

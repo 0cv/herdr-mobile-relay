@@ -351,7 +351,7 @@ func identifyProfileFor(metadata VersionMetadata, goos, goarch string) Profile {
 		metadata.IsDev || metadata.GitDirty || metadata.UnstableBranch {
 		return ProfileUnknown
 	}
-	if goos == "darwin" && metadata.OSVariant == "appstore" &&
+	if goos == "darwin" && goarch == "arm64" && metadata.OSVariant == "appstore" &&
 		metadata.GitCommit == "3caf7d9e7dcaba589cfc58beda596929733e4fea" &&
 		metadata.ExtraGitCommit == "084ee3b64537a1276e56fc38cdf0a711da9f4936" &&
 		metadata.Capability == 142 {

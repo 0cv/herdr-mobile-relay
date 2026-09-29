@@ -114,6 +114,14 @@ if [ -n "${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-}" ] &&
     exit 2
 fi
 case "$COORDINATION_ROOT" in /*) ;; *) echo "✗ Shared coordination root must be absolute." >&2; exit 2 ;; esac
+case "$DEV_ROOT$COORDINATION_ROOT" in *$'\n'*|*$'\r'*) echo "✗ Development and coordination roots cannot contain line breaks." >&2; exit 2 ;; esac
+if [ -e "$COORDINATION_ROOT" ] || [ -L "$COORDINATION_ROOT" ]; then
+    [ -d "$COORDINATION_ROOT" ] && [ ! -L "$COORDINATION_ROOT" ] || {
+        echo "✗ Shared coordination root must be a real directory." >&2
+        exit 2
+    }
+    COORDINATION_ROOT="$(cd "$COORDINATION_ROOT" && pwd -P)"
+fi
 case "$DEV_ROOT/" in "$COORDINATION_ROOT/"*) echo "✗ Shared coordination root overlaps development state." >&2; exit 2 ;; esac
 case "$COORDINATION_ROOT/" in "$DEV_ROOT/"*) echo "✗ Shared coordination root overlaps development state." >&2; exit 2 ;; esac
 
@@ -161,7 +169,8 @@ cleanup_dev_backend_reservation() {
     # cleanup_relay calls this only after stopping the backend. The manager
     # retains reservations whenever a journal or observed route is present.
     if cli_relay_call tailscale-cli release-backend-port --binary "$CLI_BIN" \
-        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --development-root "$DEV_ROOT" --state-root "$DEV_ROOT/registration" \
+        --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --node-id "$NODE_ID" \
         --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
         --reservation-id "$DEV_RESERVATION_ID" --service-stopped >/dev/null 2>&1; then
@@ -175,9 +184,17 @@ cleanup_dev_setup() {
     cleanup_dev_build_stage
     cleanup_dev_backend_reservation
 }
+dev_root_marker_matches() {
+    local expected_marker actual_marker
+    [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || return 1
+    expected_marker="$(printf '%s\n' 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' \
+        "HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=$DEV_ROOT/registration" \
+        "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$COORDINATION_ROOT")"
+    actual_marker="$(<"$MARKER")" || return 1
+    [ "$actual_marker" = "$expected_marker" ]
+}
 if [ "$ACTION" != setup ]; then
-    if [ ! -d "$DEV_ROOT" ] || [ ! -f "$ENV_FILE" ] || [ ! -f "$MARKER" ] ||
-        ! grep -Fxq 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' "$MARKER"; then
+    if [ ! -d "$DEV_ROOT" ] || [ ! -f "$ENV_FILE" ] || ! dev_root_marker_matches; then
         echo "✗ No marked CLI development state exists; nothing was inspected or removed." >&2
         exit 1
     fi
@@ -196,8 +213,9 @@ if [ "$ACTION" != setup ]; then
         exit 1
     fi
     CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
-    manager_args=(--binary "$CLI_BIN" --state-root "$HERDR_TAILSCALE_CLI_STATE_ROOT" \
-        --coordination-root "$COORDINATION_ROOT" --scope development \
+    manager_args=(--binary "$CLI_BIN" --development-root "$DEV_ROOT" \
+        --state-root "$HERDR_TAILSCALE_CLI_STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
+        --scope development \
         --installation-id "$HERDR_RELAY_INSTANCE_ID" --https-port "$HERDR_TAILSCALE_CLI_HTTPS_PORT" \
         --backend-port "$HERDR_RELAY_PORT")
     case "$ACTION" in
@@ -405,13 +423,22 @@ if [ -e "$COORDINATION_ROOT" ]; then
 else
     mkdir -p "$COORDINATION_ROOT"
     chmod 700 "$COORDINATION_ROOT"
+    COORDINATION_ROOT="$(cd "$COORDINATION_ROOT" && pwd -P)"
+fi
+if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+    dev_root_marker_matches || {
+        echo "✗ Development root binding is missing or inconsistent; existing state was retained." >&2
+        exit 1
+    }
 fi
 if [ ! -f "$ENV_FILE" ]; then
     token="$(generate_token)"
     instance="$(generate_instance_id)"
     control_run="$(generate_instance_id)"
     [ "${#token}" -eq 32 ] && [ -n "$instance" ] && [ -n "$control_run" ] || { echo "✗ Could not prepare private development identity." >&2; exit 2; }
-    printf 'HERDR_DEV_TAILSCALE_CLI_ROOT=1\n' > "$MARKER"
+    printf '%s\n' 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' \
+        "HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=$DEV_ROOT/registration" \
+        "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$COORDINATION_ROOT" > "$MARKER"
     chmod 600 "$MARKER"
     initializing_env="$DEV_ROOT/.relay-env.initializing.$$"
     : > "$initializing_env"
@@ -429,6 +456,7 @@ if [ ! -f "$ENV_FILE" ]; then
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_BIN "$CLI_BIN"
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_STATE_ROOT "$DEV_ROOT/registration"
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT "$DEV_ROOT"
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_HTTPS_PORT "$HTTPS_PORT"
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_NODE_ID "$NODE_ID"
     set_env_value_atomic "$initializing_env" HERDR_PHONE_APP_URL "$PHONE_APP"
@@ -448,6 +476,7 @@ else
         exit 1
     }
     [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_ORIGIN)" = "$ORIGIN" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT)" = "$DEV_ROOT" ] &&
         [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_BIN)" = "$CLI_BIN" ] &&
         [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_NODE_ID)" = "$NODE_ID" ] &&
         [ "$(env_file_value "$ENV_FILE" HERDR_BIN)" = "$HERDR_DEV_HERDR_BIN" ] &&
@@ -464,7 +493,8 @@ if [ "$ACTION" = setup ]; then
     DEV_RESERVATION_ID="$(generate_instance_id)"
     [ "${#DEV_RESERVATION_ID}" -eq 32 ] || { echo "✗ Could not create an exact reservation attempt identifier." >&2; exit 1; }
     cli_relay_call tailscale-cli reserve-backend-port --binary "$CLI_BIN" \
-        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --development-root "$DEV_ROOT" --state-root "$DEV_ROOT/registration" \
+        --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --node-id "$NODE_ID" \
         --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
         --reservation-id "$DEV_RESERVATION_ID"
@@ -516,6 +546,7 @@ unset GH_TOKEN CURL_CA_BUNDLE SSL_CERT_FILE NODE_EXTRA_CA_CERTS
 export HERDR_BIN="$HERDR_DEV_HERDR_BIN" HERDR_SOCKET_PATH="$HERDR_DEV_HERDR_SOCKET"
 export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN" HERDR_TAILSCALE_CLI_SCOPE=development
 export HERDR_TAILSCALE_CLI_STATE_ROOT="$DEV_ROOT/registration" HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT"
+export HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT="$DEV_ROOT"
 export HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT" HERDR_PHONE_APP_URL="$PHONE_APP"
 export HERDR_RELAY_PAIRING_SOCKET="$DEV_ROOT/config/pairing-control.sock"
 export HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
@@ -543,7 +574,8 @@ fi
 if [ "$ACTION" = setup ]; then
     DEV_PUBLISH_STARTED=true
     if "$RELAY_BIN" tailscale-cli publish --binary "$CLI_BIN" \
-        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --development-root "$DEV_ROOT" --state-root "$DEV_ROOT/registration" \
+        --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --origin "$ORIGIN" \
         --node-id "$NODE_ID" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
         --reservation-id "$DEV_RESERVATION_ID" --accepted --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
@@ -556,7 +588,8 @@ if [ "$ACTION" = setup ]; then
     fi
 else
     "$RELAY_BIN" tailscale-cli assert-ready --binary "$CLI_BIN" \
-        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --development-root "$DEV_ROOT" --state-root "$DEV_ROOT/registration" \
+        --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --origin "$ORIGIN" \
         --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" >/dev/null || {
         echo "✗ Development route drifted after update; no route repair was attempted." >&2

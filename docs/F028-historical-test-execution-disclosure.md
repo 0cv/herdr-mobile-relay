@@ -20,3 +20,13 @@ close F028. Keep the finding available for independent adjudication. Future
 verification must use the repository's configured hosted CI and must not
 recreate a hosted-only environment locally. No process-compliance claim should
 be inferred from this disclosure.
+
+## Historical outcome record remains incomplete
+
+The retained disclosure records the command strings but contains no
+contemporaneous exit codes, stdout/stderr, or test summaries for either run.
+Later or similarly named test results are not reliable substitutes, so this
+worker does not infer a pass or failure. The independent review reports that
+historical outcomes are known, but those primary outcome details were not
+included in the source evidence available for this update. F028 remains open;
+provide or locate the contemporaneous transcript/log before recording outcomes.

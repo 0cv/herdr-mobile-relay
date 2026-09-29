@@ -51,6 +51,11 @@ func prepareTailscaleCLIRegistration(cfg *config.Config) (*tailscalecli.Manager,
 	if err != nil {
 		return nil, err
 	}
+	if cfg.TailscaleCLIScope == "development" {
+		return tailscalecli.NewDevelopmentManager(
+			cfg.TailscaleCLIDevelopmentRoot, cfg.TailscaleCLIStateRoot, cfg.TailscaleCLICoordinationRoot, client,
+		)
+	}
 	return tailscalecli.NewManager(cfg.TailscaleCLIStateRoot, cfg.TailscaleCLICoordinationRoot, client)
 }
 

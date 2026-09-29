@@ -1,6 +1,6 @@
 # CLI-backed Tailscale qualification matrix
 
-**Status: development-only enablement for the exact supplied App Store macOS
+**Status: development-only enablement for the exact supplied App Store macOS/arm64
 1.102.4 profile. No real-runtime or physical-phone qualification is recorded.**
 Source-backed fixtures establish parser/adapter behavior only; a recognized
 profile is not proof of runtime compatibility. Production and installed-service
@@ -13,9 +13,9 @@ acceptance is not runtime qualification or production approval.
 
 | Candidate | Provenance available to this implementation | Source-described | Fixture-tested | Real-runtime-qualified | Activation |
 | --- | --- | --- | --- | --- | --- |
-| App Store macOS 1.102.4 | Handoff-supplied metadata: `osVariant=appstore`; client/daemon long strings reportedly match; reported `gitCommit=3caf7d9e7dcaba589cfc58beda596929733e4fea`, supplemental commit `084ee3b64537a1276e56fc38cdf0a711da9f4936`, capability `142`. This metadata is not an independently verified binary/capture. | CLI command and upstream schema behavior are described by pinned v1.102.4 source; App Store noninteractive execution, daemon/profile match, sandbox permission and login-service behavior remain unknown. | Synthetic version/status/Serve fixtures may cover the supplied metadata shape. Not a live capture. | No | Enabled only for isolated foreground development after exact route-bound consent; never production or installed-service activation. |
+| App Store macOS/arm64 1.102.4 | Handoff-supplied metadata: `osVariant=appstore`; client/daemon long strings reportedly match; reported `gitCommit=3caf7d9e7dcaba589cfc58beda596929733e4fea`, supplemental commit `084ee3b64537a1276e56fc38cdf0a711da9f4936`, capability `142`. This metadata is not an independently verified binary/capture. | CLI command and upstream schema behavior are described by pinned v1.102.4 source; App Store noninteractive execution, daemon/profile match, sandbox permission and login-service behavior remain unknown. | Synthetic version/status/Serve fixtures may cover the supplied metadata shape. Not a live capture. | No | Enabled only on Darwin/arm64 for isolated foreground development after exact route-bound consent; never production or installed-service activation. |
 | Upstream Linux/amd64 v1.102.4 candidate | Public source tag v1.102.4 / upstream commit `bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8`; module checksum is in `go.sum`. No official distro artifact metadata or actual binary was inspected as part of this work. | CLI commands/schemas and source version metadata are described. The exact distributed binary/build string and socket permissions are not inferred from the source alone. | Clearly synthetic Linux candidate fixtures; no official build string is invented. | No | Disabled pending exact artifact and P6 Linux qualification. |
-| MacSys GUI, other macOS/Linux versions, architectures or channels | No selected exact profile evidence in this task. | Partial source similarities do not qualify a profile. | No profile fixture is an approval. | No | Unsupported/refuse. |
+| MacSys GUI, Darwin/amd64, other macOS/Linux versions, architectures or channels | No selected exact profile evidence in this task. | Partial source similarities do not qualify a profile. | No profile fixture is an approval. | No | Unsupported/refuse. |
 
 A profile parser recognizes source/supplied candidate metadata only to provide
 bounded diagnostics and exercise refusal/fixture code. It does not set a
@@ -110,8 +110,11 @@ credential, invitation or QR data appears. Required automated cases:
 - **Development:** `.dev-tailscale-cli/` is a separate foreground workspace with
   default ports 18377/18378/8443, separate registration/coordination roots,
   read-only status/recovery, explicit unpublish, and route-preserving Ctrl-C.
-  Only exact supplied App Store 1.102.4 metadata enables this path; Linux,
-  MacSys, other versions and unrecognized profiles refuse before Serve mutation.
+  Only the exact supplied App Store 1.102.4 metadata on Darwin/arm64 enables
+  this path; Linux, Darwin/amd64, MacSys, other versions and unrecognized
+  profiles refuse before Serve mutation. Real development-scope manager calls
+  require the launcher's private root marker, exact `registration` child, and
+  coordination root recorded in that marker; arbitrary roots are refused.
   Setup displays the selected node, canonical origin, HTTPS listener and backend,
   then requires the exact route-bound phrase on stdin. No environment variable
   can supply consent. This path does not claim live-runtime or phone qualification;
@@ -165,36 +168,49 @@ not runtime qualification or production authorization:
 4. There is no guarantee that remote connections drain after route removal.
 
 The supervising assistant executes this runbook only after the independent
-review gates. Do not substitute another node, account, profile, action or scope.
-The only live candidate is the current Mac's App Store Tailscale 1.102.4 profile
-on the owner's current node/account, in isolated development, with HTTPS Serve
-port 8443 and loopback backend 127.0.0.1:18377 (plugin backend 18378). Production,
+review gates and within the owner's explicit development-route authorization.
+Do not substitute another node, account, profile, action or scope. The only live
+candidate is the current Mac's App Store Tailscale 1.102.4 profile on Darwin/arm64,
+on the owner's current node/account, in isolated foreground development, with
+HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377 (plugin backend
+18378). That authorization does not include unpublishing the route. Production,
 installed-service activation/migration, physical-phone enrollment and release
 qualification are outside this runbook.
 
-1. Confirm the executable, client/daemon identity and version exactly match the
-   supplied App Store profile; stop immediately for an unrecognized or inconsistent
-   profile, wrong account/node, permission error, logged-out daemon, or ambiguity.
-2. Capture a sanitized pre-change summary of the complete Serve configuration,
-   including unrelated routes. Preserve all unrelated state. The manager must
-   refuse if listener 8443 or backend 18377 is occupied, conflicting, unrecorded,
-   or cannot be parsed completely. Do not free a port or remove another mapping.
-3. Review the exact canonical node origin and the four limitations displayed by
-   the development launcher. The operator must type the exact node/origin/8443/
-   127.0.0.1:18377 confirmation shown by the tool on stdin; no environment-based
-   consent bypass exists. A mismatch or EOF means cancel before state or route
-   mutation.
-4. Run only the foreground development setup. Verify the readback is exactly the
-   selected HTTPS route to 127.0.0.1:18377 and record a sanitized post-change
-   Serve summary. Confirm unrelated routes are byte-for-byte/semantically
-   unchanged. Do not install or start a service and do not enroll a phone.
-5. Stop and retain the route/journal by default. If cleanup is explicitly chosen,
-   use the separate exact-route unpublish consent. On timeout, mismatch, unknown
-   fields, CLI error after dispatch or any uncertainty, stop, retain evidence and
-   do not retry, reset Serve or remove other routes.
-6. Record the result as development-only. Physical-phone qualification remains
-   a separate future phase; production stays disabled until that qualification
-   is recorded and separately enabled.
+0. Confirm the reviewed checkout/revision and launcher are the ones intended for
+   this run. Confirm the host is Darwin/arm64 and the selected executable/profile
+   is the exact App Store 1.102.4 candidate. Do not run a direct CLI mutation,
+   select another profile or node, or override the fixed development ports.
+1. Start only the isolated foreground development launcher. Its read-only
+   preflight must establish the exact client/daemon identity, version, current
+   node and canonical origin. Stop for any unrecognized/inconsistent profile,
+   architecture, wrong account/node, permission error, logged-out daemon or
+   ambiguity. Do not retry to overcome a refusal.
+2. Before publication, run the selected executable with the read-only argv
+   `serve status --json` to capture a sanitized summary of the complete Serve
+   configuration, including unrelated routes. Do not invoke a Serve mutator for
+   this snapshot. Keep raw account/status output private; record only the minimum
+   needed to compare before/after. Publication
+   must refuse if listener 8443 or backend 18377 is occupied, conflicting,
+   unrecorded, or cannot be parsed completely. Do not free a port, adopt a route,
+   or remove another mapping.
+3. Review the exact canonical node origin and all four limitations displayed by
+   the launcher. Type the exact node/origin/8443/127.0.0.1:18377 confirmation
+   shown by the tool on stdin. No environment variable can consent; a mismatch
+   or EOF cancels before route mutation.
+4. Run only foreground development setup. Verify readback is exactly the
+   selected HTTPS route to 127.0.0.1:18377 and compare the sanitized post-change
+   Serve summary. Confirm unrelated routes remain unchanged. Do not install or
+   start a service, enroll a phone, or print/share a setup link.
+5. Stop the foreground relay and retain the persistent route/journal by default.
+   Do not unpublish under this authorization. Route removal needs separate
+   explicit authorization and the launcher's exact-route unpublish consent. On
+   timeout, mismatch, unknown fields, CLI error after dispatch or any uncertainty,
+   stop, retain evidence and do not retry, reset Serve or remove other routes.
+6. Record only a development-only outcome, with secrets and raw identity data
+   redacted. Physical-phone qualification remains a separate future phase;
+   production stays disabled until that qualification is recorded and separately
+   enabled.
 
 This runbook is not a deployment instruction. Development, PWA enrollment,
 sleep/wake, installed-service migration and release approval are distinct cells.

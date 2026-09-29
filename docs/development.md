@@ -40,8 +40,11 @@ The development relay, plugin and HTTPS Serve ports default to 18377, 18378
 and 8443; conflicts are refused rather than adopting a listener or changing
 an enrolled port. CLI-backed development uses the same separate port contract, with state under
 `relay/.dev-tailscale-cli/` and an independently consented persistent route.
-The supported candidate is only the exact App Store 1.102.4 profile; its status
-reports development enablement separately from runtime qualification. The
+The supported candidate is only the exact App Store macOS/arm64 1.102.4
+profile; its status reports development enablement separately from runtime
+qualification. Real CLI manager commands also require the launcher-marked private
+development root with the exact registration child and recorded coordination
+root; arbitrary caller-supplied roots are refused. The
 persistent route survives stop and Ctrl-C; explicit unpublish is separate. After opt-in, executable `tailscale` and `herdr` binaries
 are located on `PATH` without running them. The Herdr socket is selected from
 `HERDR_SOCKET_PATH` or the same `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`

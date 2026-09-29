@@ -1,6 +1,6 @@
 # CLI-backed Tailscale Serve contract
 
-**Status: development-only enablement for the exact supplied App Store macOS
+**Status: development-only enablement for the exact supplied App Store macOS/arm64
 1.102.4 profile; runtime qualification remains pending.** The new transport is
 named `tailscale-cli`. It is a distinct, persistent CLI-owned background Serve
 route and is not an alias for the existing foreground LocalAPI transport
@@ -232,35 +232,47 @@ runtime qualification or production authorization:
 
 ### Development runbook
 
-The supervising assistant executes this runbook only after independent review.
-The only live candidate is the current Mac's App Store Tailscale 1.102.4 profile
-on the owner's current node/account, in isolated foreground development, with
-HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377 (plugin backend
-18378). Production, installed-service activation/migration, physical-phone
+The supervising assistant executes this runbook only after independent review
+and within the owner's explicit development-route authorization. The only live
+candidate is the current Mac's App Store Tailscale 1.102.4 profile on
+Darwin/arm64, on the owner's current node/account, in isolated foreground
+development, with HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377
+(plugin backend 18378). That authorization does not include unpublishing the
+route. Production, installed-service activation/migration, physical-phone
 enrollment and release qualification are outside this runbook.
 
-1. Confirm the executable, client/daemon identity and version exactly match the
-   supplied App Store profile; stop for any unrecognized or inconsistent profile,
-   wrong account/node, permission error, logged-out daemon or ambiguity.
-2. Capture a sanitized pre-change summary of the complete Serve configuration,
-   including unrelated routes. Preserve all unrelated state. The manager refuses
-   if listener 8443 or backend 18377 is occupied, conflicting, unrecorded, or
-   cannot be parsed completely. Do not free a port or remove another mapping.
-3. Review the canonical node origin and four limitations shown by the launcher.
-   Type the exact node/origin/8443/127.0.0.1:18377 confirmation displayed by the
-   tool on stdin. No environment variable can consent; mismatch or EOF cancels
-   before state or route mutation.
+0. Confirm the reviewed checkout/revision and launcher are the ones intended
+   for this run. Confirm Darwin/arm64 and the exact App Store 1.102.4 profile.
+   Do not run a direct CLI mutation, select another profile/node, or override
+   the fixed development ports.
+1. Start only the isolated foreground development launcher. Its read-only
+   preflight must establish the exact client/daemon identity, version, current
+   node and canonical origin. Stop for an unrecognized/inconsistent profile or
+   architecture, wrong account/node, permission error, logged-out daemon or
+   ambiguity. Do not retry to overcome a refusal.
+2. Before publication, run the selected executable with the read-only argv
+   `serve status --json` and capture a sanitized summary of the complete Serve
+   configuration, including unrelated routes. Keep raw account/status output
+   private and record only the minimum needed to compare before/after. The
+   manager refuses if listener 8443 or backend 18377 is occupied, conflicting,
+   unrecorded, or cannot be parsed completely. Do not free a port, adopt a route,
+   or remove another mapping.
+3. Review the canonical node origin and all four limitations displayed by the
+   launcher. Type the exact node/origin/8443/127.0.0.1:18377 confirmation on
+   stdin. No environment variable can consent; mismatch or EOF cancels before
+   route mutation.
 4. Run only foreground development setup. Verify readback is exactly the
-   selected HTTPS route to 127.0.0.1:18377 and record a sanitized post-change
-   Serve summary. Confirm unrelated routes are unchanged. Do not install/start a
-   service or enroll a phone.
-5. Stop and retain route/journal by default. If cleanup is explicitly chosen,
-   use separate exact-route unpublish consent. On timeout, mismatch, unknown
-   fields, CLI error after dispatch or uncertainty, stop and retain evidence; do
-   not retry, reset Serve or remove another route.
-6. Record the result as development-only. Physical-phone qualification remains
-   separate; production stays disabled until it is recorded and separately
-   enabled.
+   selected HTTPS route to 127.0.0.1:18377 and compare the sanitized post-change
+   Serve summary. Confirm unrelated routes remain unchanged. Do not install or
+   start a service, enroll a phone, or print/share a setup link.
+5. Stop the foreground relay and retain the persistent route/journal by default.
+   Do not unpublish under this authorization. Route removal needs separate
+   explicit authorization and the exact-route unpublish consent. On timeout,
+   mismatch, unknown fields, CLI error after dispatch or uncertainty, stop,
+   retain evidence and do not retry, reset Serve or remove other routes.
+6. Record only a development-only outcome with secrets and raw identity data
+   redacted. Physical-phone qualification remains separate; production stays
+   disabled until qualification is recorded and separately enabled.
 
 This runbook is not a deployment instruction. PWA enrollment, sleep/wake,
 installed-service migration and release approval are distinct future phases.
@@ -274,7 +286,11 @@ from runtime qualification, while the default production scope remains hard-gate
 routes those actions through the journal manager, installs only a per-user
 service after `assert-ready`, and keeps stop separate from unpublish. The
 foreground development entrypoint uses `.dev-tailscale-cli/` with independent
-configuration, release, cache, runtime, and registration roots. It stages each
+configuration, release, cache, runtime, and registration roots. Real development-
+scope manager commands require the marked private root, its exact `registration`
+child and the coordination root recorded in that marker; an unbound `NewManager`
+cannot execute real development operations. Read-only preflight remains separate.
+It stages each
 complete binary/web pair in a versioned release directory and atomically swaps
 a single `current` symlink, retaining the prior coherent release if staging or
 cutover fails.
