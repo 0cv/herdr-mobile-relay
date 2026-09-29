@@ -179,7 +179,10 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                         if event.startswith("tailscale-cli activation-check")]
     if (activation_checks.count("tailscale-cli activation-check --scope development") != 3 or
         activation_checks.count("tailscale-cli activation-check") != 1):
-        raise AssertionError("CLI-backed development and production activation scopes were not kept distinct")
+        raise AssertionError(
+            "CLI-backed development and production activation scopes were not kept distinct: "
+            f"{activation_checks!r}"
+        )
     print("PASS dev-tailscale preflight: development_scope_is_explicit_and_production_remains_disabled")
 
     private_cli_dev = base / "cli-dev-private"

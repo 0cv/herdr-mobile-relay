@@ -344,8 +344,15 @@ func (c *Config) validateTailscaleCLI() error {
 			}
 		}
 	}
-	if !tailscaleCLIProfilesEnabled {
-		return errors.New("tailscale-cli is not enabled: candidate profiles remain unqualified pending separate live qualification")
+	switch c.TailscaleCLIScope {
+	case "development":
+		if !TailscaleCLIDevelopmentQualificationEnabled() {
+			return errors.New("tailscale-cli development scope is disabled pending separate development qualification")
+		}
+	case "production":
+		if !tailscaleCLIProfilesEnabled {
+			return errors.New("tailscale-cli is not enabled: candidate profiles remain unqualified pending separate live qualification")
+		}
 	}
 	return nil
 }

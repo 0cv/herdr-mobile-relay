@@ -263,6 +263,23 @@ func TestTailscaleCLITransportIsRecognizedButActivationDisabled(t *testing.T) {
 	}
 }
 
+func TestTailscaleCLIDevelopmentScopeIsConfigEnabled(t *testing.T) {
+	isolateLoadEnvironment(t)
+	configureTailscaleCLIEnvironment(t)
+	t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "development")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("development CLI config was refused: %v", err)
+	}
+	if cfg.TailscaleCLIScope != "development" {
+		t.Fatalf("CLI scope = %q, want development", cfg.TailscaleCLIScope)
+	}
+	if TailscaleCLIProfilesEnabled() {
+		t.Fatal("development scope must not enable production CLI profiles")
+	}
+}
+
 func TestTailscaleCLIConfigRejectsInvalidStateAndOriginsBeforeActivationGate(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
