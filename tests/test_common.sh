@@ -132,9 +132,12 @@ mkdir -p "$FAKE_HOME/.ssh"
 printf 'key\n' > "$FAKE_HOME/.ssh/ovh"
 printf 'key\n' > "$WORK_DIR/local-key"
 test "$(HOME="$FAKE_HOME" ssh_key_path ovh)" = "$FAKE_HOME/.ssh/ovh"
-test "$(HOME="$FAKE_HOME" ssh_key_path '~/.ssh/ovh')" = "$FAKE_HOME/.ssh/ovh"
+TILDE_PREFIX="$(printf '\176')"
+TILDE_SSH_PATH="${TILDE_PREFIX}/.ssh/ovh"
+test "$(HOME="$FAKE_HOME" ssh_key_path "$TILDE_SSH_PATH")" = "$FAKE_HOME/.ssh/ovh"
 test "$(HOME="$FAKE_HOME" ssh_key_path "$WORK_DIR/local-key")" = "$WORK_DIR/local-key"
-for MISSING in absent "$WORK_DIR/absent" "~/.ssh/absent" "" ".ssh"; do
+TILDE_MISSING_PATH="${TILDE_PREFIX}/.ssh/absent"
+for MISSING in absent "$WORK_DIR/absent" "$TILDE_MISSING_PATH" "" ".ssh"; do
     if HOME="$FAKE_HOME" ssh_key_path "$MISSING" >/dev/null 2>&1; then
         echo "ssh key resolver accepted '$MISSING'" >&2
         exit 1
@@ -209,7 +212,7 @@ test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH="$NODE_TOOL_PATH" node_
 # Titles are bold on a terminal only. A pipe is not one, so logs, tests, and
 # non-terminal panes keep the plain text they parse, and NO_COLOR is honoured
 # even when a terminal is present.
-test "$(NO_COLOR= menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
+test "$(NO_COLOR='' menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
 test "$(NO_COLOR=1 menu_item q "Exit, change nothing")" = "  q. Exit, change nothing"
 
 # Use the same origin contract as the packaged binary without depending on an
@@ -482,16 +485,56 @@ else
 fi
 test "$mode" = "600"
 
-FAKE_PLIST_BUDDY="$WORK_DIR/PlistBuddy"
+SAFE_ENV_FILE="$WORK_DIR/shell-escaped.env"
+SHELL_INJECTION_MARKER="$WORK_DIR/shell-injection-ran"
+SHELL_VALUE="space ' quote; touch $SHELL_INJECTION_MARKER \$HOME & \"double\""
+set_env_value_atomic "$SAFE_ENV_FILE" HERDR_SAFE_TEST_VALUE "$SHELL_VALUE"
+load_relay_env "$SAFE_ENV_FILE"
+test "$HERDR_SAFE_TEST_VALUE" = "$SHELL_VALUE"
+test ! -e "$SHELL_INJECTION_MARKER"
+test "$(systemd_quote_value '/tmp/path with spaces%')" = '"/tmp/path with spaces%%"'
+test "$(systemd_unquote_value '"/tmp/path with spaces%%"')" = '/tmp/path with spaces%'
+test "$(xml_escape_text 'a&b<c>')" = 'a&amp;b&lt;c&gt;'
+
+FAKE_PLUTIL="$WORK_DIR/plutil"
 PLIST_LOG="$WORK_DIR/plist.log"
-cat > "$FAKE_PLIST_BUDDY" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$PLIST_LOG"
-EOF
-chmod 700 "$FAKE_PLIST_BUDDY"
+cat > "$FAKE_PLUTIL" <<'PY'
+#!/usr/bin/env python3
+import os
+import plistlib
+import sys
+
+args = sys.argv[1:]
+with open(args[-1], "rb") as handle:
+    document = plistlib.load(handle)
+if args[0] == "-replace":
+    key, kind, value = args[1], args[2], args[3]
+    with open(args[-1], "r+b") as handle:
+        handle.seek(0)
+        if key == "ProgramArguments.0":
+            document["ProgramArguments"][0] = value
+        elif key == "WorkingDirectory":
+            document["WorkingDirectory"] = value
+        elif key == "EnvironmentVariables.HERDR_RELAY_ENV":
+            document["EnvironmentVariables"]["HERDR_RELAY_ENV"] = value
+        else:
+            raise SystemExit("unexpected plist key: " + key)
+        handle.seek(0)
+        handle.truncate()
+        plistlib.dump(document, handle)
+    with open(os.environ["PLIST_LOG"], "a", encoding="utf-8") as log:
+        log.write(" ".join(args) + "\n")
+elif args[0] == "-extract":
+    print(document["EnvironmentVariables"]["HERDR_RELAY_ENV"])
+elif args[0] == "-lint":
+    pass
+else:
+    raise SystemExit("unexpected plutil invocation: " + repr(args))
+PY
+chmod 700 "$FAKE_PLUTIL"
 export PLIST_LOG
-HERDR_PLIST_BUDDY="$FAKE_PLIST_BUDDY"
-export HERDR_PLIST_BUDDY
+HERDR_PLUTIL="$FAKE_PLUTIL"
+export HERDR_PLUTIL
 cat > "$WORK_DIR/service.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -513,13 +556,20 @@ cat > "$WORK_DIR/service.plist" <<EOF
 </dict>
 </plist>
 EOF
+PLIST_SERVICE_WRAPPER="$WORK_DIR/releases/current path/relay/service & 'quoted' \"percent%\".sh"
+PLIST_WORK_DIR="$WORK_DIR/releases/current path/worker & data"
+PLIST_ENV_FILE="$WORK_DIR/config/relay 'quoted' &.env"
 update_launchd_release_paths "$WORK_DIR/service.plist" \
-    "$WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" \
-    "$WORK_DIR/releases/current" \
-    "$WORK_DIR/config/relay.env"
-grep -F "Set :ProgramArguments:0 $WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" "$PLIST_LOG" >/dev/null
-grep -F "Set :WorkingDirectory $WORK_DIR/releases/current" "$PLIST_LOG" >/dev/null
-grep -F "Set :EnvironmentVariables:HERDR_RELAY_ENV $WORK_DIR/config/relay.env" "$PLIST_LOG" >/dev/null
+    "$PLIST_SERVICE_WRAPPER" "$PLIST_WORK_DIR" "$PLIST_ENV_FILE"
+python3 - "$WORK_DIR/service.plist" "$PLIST_SERVICE_WRAPPER" "$PLIST_WORK_DIR" "$PLIST_ENV_FILE" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as handle:
+    document = plistlib.load(handle)
+assert document["ProgramArguments"][0] == sys.argv[2]
+assert document["WorkingDirectory"] == sys.argv[3]
+assert document["EnvironmentVariables"]["HERDR_RELAY_ENV"] == sys.argv[4]
+PY
 
 FAKE_LAUNCHCTL_DIR="$WORK_DIR/launchctl-bin"
 LAUNCHCTL_LOG="$WORK_DIR/launchctl.log"
@@ -1164,7 +1214,7 @@ export START_SERVICE_LOG START_RELAY_LOG START_BIN_DIR
 START_OUTPUT="$(
     HOME="$START_HOME" \
         PATH="$START_BIN_DIR:/usr/bin:/bin" \
-        BASH_ENV="$START_BASH_ENV" ENV=/dev/null HERDR_DEV_TUNNEL= \
+        BASH_ENV="$START_BASH_ENV" ENV=/dev/null HERDR_DEV_TUNNEL='' \
         HERDR_RELAY_BIN="$START_BIN_DIR/relay-bin" \
         HERDR_RELAY_ENV="$START_ENV" \
         bash "$START_SCRIPT_DIR/start.sh"

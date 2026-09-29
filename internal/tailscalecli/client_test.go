@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/tailscale"
 )
@@ -170,7 +175,8 @@ func newFixtureManager(t *testing.T, f *fakeCLI, stateLeaf string) *Manager {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.fixtureMutations = true // unexported, package-test-only fixture capability
+	manager.fixtureMutations = true     // unexported, package-test-only fixture capability
+	manager.skipBackendReadiness = true // ordinary CLI fixtures do not start a loopback relay
 	return manager
 }
 
@@ -179,6 +185,7 @@ func fixtureRequest(consent bool) PublishRequest {
 		InstallationID: "install-fixture",
 		Scope:          "development",
 		ExpectedNodeID: "node-fixture",
+		Origin:         "https://herdr.tailnet.ts.net:8443",
 		HTTPSPort:      8443,
 		BackendPort:    18377,
 		Consent:        fixtureConsent(consent),
@@ -190,6 +197,7 @@ func fixtureConsent(accepted bool) Consent {
 		Accepted:                 accepted,
 		Scope:                    "development",
 		NodeID:                   "node-fixture",
+		Origin:                   "https://herdr.tailnet.ts.net:8443",
 		HTTPSPort:                8443,
 		BackendPort:              18377,
 		PersistentRouteAccepted:  accepted,
@@ -469,7 +477,7 @@ func TestVerifyRegisteredRouteReportsReadyAndDriftWithoutMutation(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	status, err := manager.VerifyRegisteredRoute(context.Background(), "development", "install-fixture", 8443, 18377)
+	status, err := manager.VerifyRegisteredRoute(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 	if err != nil || status.Readiness != ReadinessReady || status.JournalState != StateRegistered || status.RuntimeQualified {
 		t.Fatalf("registered route status = %+v, %v", status, err)
 	}
@@ -479,7 +487,7 @@ func TestVerifyRegisteredRouteReportsReadyAndDriftWithoutMutation(t *testing.T) 
 	}
 
 	fixture.serve = unrelatedRoute
-	status, err = manager.VerifyRegisteredRoute(context.Background(), "development", "install-fixture", 8443, 18377)
+	status, err = manager.VerifyRegisteredRoute(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 	if !errors.Is(err, ErrConflict) || status.Readiness != ReadinessDegraded {
 		t.Fatalf("missing route status = %+v, %v", status, err)
 	}
@@ -507,7 +515,7 @@ func TestRecoverNeverResolvesAmbiguousPublicationFromObservedRoute(t *testing.T)
 	} {
 		t.Run(observed.name, func(t *testing.T) {
 			fixture.serve = observed.route
-			report, err := manager.Recover(context.Background(), "development", "install-fixture", 8443, 18377)
+			report, err := manager.Recover(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 			if !errors.Is(err, ErrUncertain) || report.Route.JournalState != StatePublishUncertain ||
 				report.Route.Readiness != ReadinessUncertain || !report.RequiresOperatorAction || report.Observation != observed.want {
 				t.Fatalf("recovery report = %+v, %v", report, err)
@@ -520,6 +528,59 @@ func TestRecoverNeverResolvesAmbiguousPublicationFromObservedRoute(t *testing.T)
 	}
 	if got := fixture.mutationCalls(); got != 1 {
 		t.Fatalf("recovery replayed a Serve mutation: %d total calls", got)
+	}
+}
+
+func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		serve       string
+		observation string
+		wantState   RegistrationState
+	}{
+		{name: "present", serve: fixtureRoute, observation: "present", wantState: StateRegistered},
+		{name: "absent", serve: `{}`, observation: "absent", wantState: StateUnconfigured},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newFakeCLI(t)
+			fixture.publishErr = errors.New("publication acknowledgement lost")
+			fixture.publishDispatched = true
+			manager := newFixtureManager(t, fixture, "reconcile "+tc.name)
+			if err := manager.Publish(context.Background(), fixtureRequest(true)); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("ambiguous publish = %v", err)
+			}
+			record, err := manager.readRegistration()
+			if err != nil || record == nil || record.State != StatePublishUncertain {
+				t.Fatalf("pending record = %+v, %v", record, err)
+			}
+			fixture.serve = tc.serve
+			report, recoverErr := manager.Recover(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377)
+			if !errors.Is(recoverErr, ErrUncertain) || report.OperationID != record.OperationID {
+				t.Fatalf("recovery report = %+v, %v", report, recoverErr)
+			}
+			consent := fixtureConsent(true)
+			consent.OperationID = record.OperationID
+			consent.RecoveryObservation = tc.observation
+			consent.RecoveryAccepted = true
+			wrongOperation := consent
+			wrongOperation.OperationID = "00000000000000000000000000000000"
+			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377, wrongOperation); err == nil {
+				t.Fatal("reconciliation accepted consent for a different pending operation")
+			}
+			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377, consent); err != nil {
+				t.Fatalf("exact consented journal reconciliation: %v", err)
+			}
+			resolved, err := manager.readRegistration()
+			if err != nil || resolved == nil || resolved.State != tc.wantState {
+				t.Fatalf("reconciled record = %+v, %v", resolved, err)
+			}
+			if fixture.mutationCalls() != 1 {
+				t.Fatalf("local journal reconciliation retried Serve mutation: %d calls", fixture.mutationCalls())
+			}
+		})
 	}
 }
 
@@ -538,6 +599,7 @@ func TestReopenedManagerRecoversRegisteredRouteWithoutMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.fixtureMutations = true
+	first.skipBackendReadiness = true
 	if err := first.Publish(context.Background(), fixtureRequest(true)); err != nil {
 		t.Fatalf("register fixture route: %v", err)
 	}
@@ -547,7 +609,7 @@ func TestReopenedManagerRecoversRegisteredRouteWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen registration manager: %v", err)
 	}
-	report, err := reopened.Recover(context.Background(), "development", "install-fixture", 8443, 18377)
+	report, err := reopened.Recover(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 	if err != nil || report.Route.JournalState != StateRegistered ||
 		report.Route.Readiness != ReadinessReady || report.Route.RuntimeQualified ||
 		report.RequiresOperatorAction {
@@ -557,6 +619,77 @@ func TestReopenedManagerRecoversRegisteredRouteWithoutMutation(t *testing.T) {
 		if strings.HasPrefix(strings.Join(call, " "), "serve --bg") {
 			t.Fatalf("read-only restart recovery mutated Serve route: %q", call)
 		}
+	}
+}
+
+func TestNodeMutationLockCrashHelper(t *testing.T) {
+	if os.Getenv("HERDR_TEST_HOLD_NODE_LOCK") != "1" {
+		return
+	}
+	manager := &Manager{coordinationRoot: os.Getenv("HERDR_TEST_COORDINATION_ROOT")}
+	marker := os.Getenv("HERDR_TEST_LOCK_HELD_MARKER")
+	if err := manager.withNodeLock(context.Background(), "node-crash-fixture", func() error {
+		if err := os.WriteFile(marker, []byte("held"), 0o600); err != nil {
+			return err
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}); err != nil {
+		t.Fatalf("hold node lock: %v", err)
+	}
+}
+
+func TestNodeMutationLockIsReleasedAfterProcessCrash(t *testing.T) {
+	coordinationRoot := filepath.Join(t.TempDir(), "shared coordination")
+	if err := os.Mkdir(coordinationRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "lock-held")
+	command := exec.Command(os.Args[0], "-test.run=^TestNodeMutationLockCrashHelper$")
+	command.Env = append(os.Environ(),
+		"HERDR_TEST_HOLD_NODE_LOCK=1",
+		"HERDR_TEST_COORDINATION_ROOT="+coordinationRoot,
+		"HERDR_TEST_LOCK_HELD_MARKER="+marker)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childRunning := true
+	defer func() {
+		if childRunning {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child did not acquire the node lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatalf("kill lock holder: %v", err)
+	}
+	_ = command.Wait()
+	childRunning = false
+
+	manager := &Manager{coordinationRoot: coordinationRoot}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.withNodeLock(ctx, "node-crash-fixture", func() error { return nil }); err != nil {
+		t.Fatalf("process crash stranded the node lock: %v", err)
+	}
+	entries, err := os.ReadDir(coordinationRoot)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("crash-safe lock file state: entries=%v err=%v", entries, err)
+	}
+	info, err := entries[0].Info()
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("persistent private lock file = %v, %v", info, err)
 	}
 }
 
@@ -578,6 +711,7 @@ func TestProductionAndDevelopmentRegistrationsCoexistOnFixtureNode(t *testing.T)
 			t.Fatal(err)
 		}
 		manager.fixtureMutations = true
+		manager.skipBackendReadiness = true
 		return manager
 	}
 	production := newManager(productionRoot)
@@ -585,18 +719,18 @@ func TestProductionAndDevelopmentRegistrationsCoexistOnFixtureNode(t *testing.T)
 	requests := []PublishRequest{
 		{
 			InstallationID: "install-production-fixture", Scope: "production", ExpectedNodeID: "node-fixture",
-			HTTPSPort: 9443, BackendPort: 19375,
+			Origin: "https://herdr.tailnet.ts.net:9443", HTTPSPort: 9443, BackendPort: 19375,
 			Consent: Consent{
-				Accepted: true, Scope: "production", NodeID: "node-fixture", HTTPSPort: 9443, BackendPort: 19375,
+				Accepted: true, Scope: "production", NodeID: "node-fixture", Origin: "https://herdr.tailnet.ts.net:9443", HTTPSPort: 9443, BackendPort: 19375,
 				PersistentRouteAccepted: true, CheckToWriteRaceAccepted: true, PortReuseRiskAccepted: true,
 				NoRollbackAccepted: true, NoRemoteDrainAccepted: true,
 			},
 		},
 		{
 			InstallationID: "install-development-fixture", Scope: "development", ExpectedNodeID: "node-fixture",
-			HTTPSPort: 8443, BackendPort: 18377,
+			Origin: "https://herdr.tailnet.ts.net:8443", HTTPSPort: 8443, BackendPort: 18377,
 			Consent: Consent{
-				Accepted: true, Scope: "development", NodeID: "node-fixture", HTTPSPort: 8443, BackendPort: 18377,
+				Accepted: true, Scope: "development", NodeID: "node-fixture", Origin: "https://herdr.tailnet.ts.net:8443", HTTPSPort: 8443, BackendPort: 18377,
 				PersistentRouteAccepted: true, CheckToWriteRaceAccepted: true, PortReuseRiskAccepted: true,
 				NoRollbackAccepted: true, NoRemoteDrainAccepted: true,
 			},
@@ -630,7 +764,7 @@ func TestProductionAndDevelopmentRegistrationsCoexistOnFixtureNode(t *testing.T)
 		t.Fatalf("production/development fixture routes overwrote one another: %+v", observed)
 	}
 	for index, request := range requests {
-		report, err := managers[index].Recover(context.Background(), request.Scope, request.InstallationID,
+		report, err := managers[index].Recover(context.Background(), request.Scope, request.InstallationID, request.Origin,
 			request.HTTPSPort, request.BackendPort)
 		if err != nil || report.Route.JournalState != StateRegistered || report.Route.Readiness != ReadinessReady ||
 			report.Route.RuntimeQualified || report.RequiresOperatorAction {
@@ -659,7 +793,7 @@ func TestRecoverRefusesUnregisteredObservedRoute(t *testing.T) {
 	fixture.serve = fixtureRoute
 	manager := newFixtureManager(t, fixture, "recover unregistered route")
 
-	report, err := manager.Recover(context.Background(), "development", "install-fixture", 8443, 18377)
+	report, err := manager.Recover(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 	if !errors.Is(err, ErrConflict) || report.Route.JournalState != StateUnconfigured ||
 		report.Route.Readiness != ReadinessConflicted || !report.RequiresOperatorAction ||
 		report.Observation != "selected-listener-present-without-registration" {
@@ -675,7 +809,7 @@ func TestVerifyRegisteredRouteRefusesUnrecordedMatchingRoute(t *testing.T) {
 	fixture.serve = fixtureRoute
 	manager := newFixtureManager(t, fixture, "instance state")
 
-	status, err := manager.VerifyRegisteredRoute(context.Background(), "development", "install-fixture", 8443, 18377)
+	status, err := manager.VerifyRegisteredRoute(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 	if !errors.Is(err, ErrConflict) || status.Readiness != ReadinessConflicted || status.JournalState != StateUnconfigured {
 		t.Fatalf("unrecorded route status = %+v, %v", status, err)
 	}
@@ -715,6 +849,40 @@ func TestProductionManagerRefusesAllUnqualifiedProfilesBeforeMutation(t *testing
 	}
 }
 
+func TestPublishRejectsWrongBackendIdentityBeforeJournalOrServeWrite(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","readiness":"ready","transport":"tailscale-cli","instance":"other-install","tailscale_cli_origin":"https://herdr.tailnet.ts.net:8443"}`))
+	}))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	backendPort, err := strconv.Atoi(strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := newFakeCLI(t)
+	manager := newFixtureManager(t, fixture, "backend identity")
+	manager.skipBackendReadiness = false
+	request := fixtureRequest(true)
+	request.BackendPort = backendPort
+	request.Consent.BackendPort = backendPort
+	if err := manager.Publish(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("publish accepted a backend with another installation identity: %v", err)
+	}
+	if fixture.mutationCalls() != 0 {
+		t.Fatalf("backend mismatch dispatched a Serve mutation: %d", fixture.mutationCalls())
+	}
+	if _, err := os.Lstat(filepath.Join(manager.stateRoot, journalName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backend mismatch persisted a publish intent: %v", err)
+	}
+}
+
 func TestPublishRequiresAllRiskConsentAndRefusesListenerConflict(t *testing.T) {
 	fixture := newFakeCLI(t)
 	manager := newFixtureManager(t, fixture, "instance state")
@@ -726,6 +894,15 @@ func TestPublishRequiresAllRiskConsentAndRefusesListenerConflict(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(manager.stateRoot, journalName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing consent persisted a mutation intent: %v", err)
+	}
+
+	misbound := fixtureRequest(true)
+	misbound.Consent.Origin = "https://other.tailnet.ts.net:8443"
+	if err := manager.Publish(context.Background(), misbound); err == nil {
+		t.Fatal("consent bound to a different HTTPS origin was accepted")
+	}
+	if fixture.mutationCalls() != 0 {
+		t.Fatal("misbound HTTPS-origin consent dispatched a route mutation")
 	}
 
 	fixture.serve = `{"TCP":{"8443":{"HTTPS":true}},"Web":{"other.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}}}}`
@@ -887,6 +1064,7 @@ func TestSharedNodeLockSerializesDevelopmentAndProductionMutations(t *testing.T)
 			t.Fatal(err)
 		}
 		manager.fixtureMutations = true
+		manager.skipBackendReadiness = true
 		managers[i] = manager
 	}
 	requests := []PublishRequest{fixtureRequest(true), fixtureRequest(true)}

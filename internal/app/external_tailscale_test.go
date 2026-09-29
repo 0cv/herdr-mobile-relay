@@ -39,7 +39,7 @@ type fixedCLIRouteVerifier struct {
 	calls  int
 }
 
-func (v *fixedCLIRouteVerifier) VerifyRegisteredRoute(context.Context, string, string, int, int) (tailscalecli.RouteStatus, error) {
+func (v *fixedCLIRouteVerifier) VerifyRegisteredRoute(context.Context, string, string, string, int, int) (tailscalecli.RouteStatus, error) {
 	v.calls++
 	return v.status, v.err
 }

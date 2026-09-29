@@ -2,6 +2,11 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../relay/common.sh
+. "$REPO_DIR/relay/common.sh"
+unit_exec_line() { printf 'ExecStart=%s' "$(systemd_quote_exec "$1")"; }
+unit_work_line() { printf 'WorkingDirectory=%s' "$(systemd_quote_value "$1")"; }
+unit_env_line() { printf 'Environment=HERDR_RELAY_ENV=%s' "$(systemd_quote_value "$1")"; }
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-build-test.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -275,9 +280,9 @@ test "$(readlink -f "$RELEASE_ROOT/current")" = "$NEW_RELEASE"
 # The release comes from the repository the plugin was installed from, so a
 # private canary or a fork never downloads this project's bundle.
 test "$(cat "$REPO_RECORD")" = 0cv/herdr-mobile-relay-dev
-grep -Fx "ExecStart=$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null
-grep -Fx "WorkingDirectory=$RELEASE_ROOT/current" "$UNIT_FILE" >/dev/null
-grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/dev/null
+grep -Fx "$(unit_exec_line "$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh")" "$UNIT_FILE" >/dev/null
+grep -Fx "$(unit_work_line "$RELEASE_ROOT/current")" "$UNIT_FILE" >/dev/null
+grep -Fx "$(unit_env_line "$TARGET_CONFIG/relay.env")" "$UNIT_FILE" >/dev/null
 grep -F source-token "$TARGET_CONFIG/relay.env" >/dev/null
 grep -F source-instance "$TARGET_CONFIG/relay.env" >/dev/null
 grep -F "HERDR_GITHUB_TOKEN_FILE='$TARGET_CONFIG/github-token'" "$TARGET_CONFIG/relay.env" >/dev/null
@@ -336,10 +341,10 @@ fi
 grep -F "recovering broken service paths from persistent plugin config" \
     "$WORK_DIR/recovery-output" >/dev/null
 test "$(readlink -f "$RELEASE_ROOT/current")" = "$NEW_RELEASE"
-grep -Fx "ExecStart=$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh" \
+grep -Fx "$(unit_exec_line "$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh")" \
     "$UNIT_FILE" >/dev/null
-grep -Fx "WorkingDirectory=$RELEASE_ROOT/current" "$UNIT_FILE" >/dev/null
-grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/dev/null
+grep -Fx "$(unit_work_line "$RELEASE_ROOT/current")" "$UNIT_FILE" >/dev/null
+grep -Fx "$(unit_env_line "$TARGET_CONFIG/relay.env")" "$UNIT_FILE" >/dev/null
 test "$(cat "$RESTART_LOG")" = "restart"
 grep -F source-token "$TARGET_CONFIG/relay.env" >/dev/null
 
@@ -362,10 +367,10 @@ if HOME="$TEST_HOME" \
 fi
 
 test "$(readlink -f "$RELEASE_ROOT/current")" = "$OLD_RELEASE"
-grep -Fx "ExecStart=$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh" \
+grep -Fx "$(unit_exec_line "$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh")" \
     "$UNIT_FILE" >/dev/null
-grep -Fx "WorkingDirectory=$RELEASE_ROOT/current" "$UNIT_FILE" >/dev/null
-grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/dev/null
+grep -Fx "$(unit_work_line "$RELEASE_ROOT/current")" "$UNIT_FILE" >/dev/null
+grep -Fx "$(unit_env_line "$TARGET_CONFIG/relay.env")" "$UNIT_FILE" >/dev/null
 test "$(wc -l < "$RESTART_LOG")" -eq 2
 grep -F "previous service recovered successfully" \
     "$WORK_DIR/recovery-rollback-output" >/dev/null
@@ -412,8 +417,8 @@ run_fresh_build() {
         UNIT_FILE="$FRESH_HOME/.config/systemd/user/herdr-mobile-relay.service" \
         REPLACEMENT_REVISION=new-revision \
         FORCE_INACTIVE=1 \
-        GH_TOKEN= \
-        GITHUB_TOKEN= \
+        GH_TOKEN='' \
+        GITHUB_TOKEN='' \
         "$@" \
         bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/fresh-output" 2>&1
 }

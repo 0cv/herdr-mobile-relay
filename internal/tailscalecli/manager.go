@@ -11,22 +11,25 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscale"
 )
 
 const (
-	journalName         = "registration.json"
-	journalMaxBytes     = 16 * 1024
-	mutationLockWait    = 5 * time.Second
-	mutationLockDelay   = 20 * time.Millisecond
-	publishConsentScope = "persistent-route-and-four-risks-v1"
-	removeConsentScope  = "explicit-route-removal-and-no-remote-drain-v1"
+	journalName           = "registration.json"
+	journalMaxBytes       = 16 * 1024
+	mutationLockWait      = 5 * time.Second
+	mutationLockDelay     = 20 * time.Millisecond
+	publishConsentScope   = "persistent-route-and-four-risks-v1"
+	removeConsentScope    = "explicit-route-removal-and-no-remote-drain-v1"
+	reconcileConsentScope = "explicit-journal-reconciliation-v1"
 )
 
 type RegistrationState string
@@ -53,12 +56,17 @@ type Consent struct {
 	PortReuseRiskAccepted    bool
 	NoRollbackAccepted       bool
 	NoRemoteDrainAccepted    bool
+	Origin                   string
+	OperationID              string
+	RecoveryObservation      string
+	RecoveryAccepted         bool
 }
 
 type PublishRequest struct {
 	InstallationID string
 	Scope          string
 	ExpectedNodeID string
+	Origin         string
 	HTTPSPort      int
 	BackendPort    int
 	Consent        Consent
@@ -111,14 +119,16 @@ type RouteStatus struct {
 type RecoveryReport struct {
 	Route                  RouteStatus `json:"route"`
 	Observation            string      `json:"observation"`
+	OperationID            string      `json:"recovery_operation_id,omitempty"`
 	RequiresOperatorAction bool        `json:"requires_operator_action"`
 }
 
 type Manager struct {
-	stateRoot        string
-	coordinationRoot string
-	client           *Client
-	fixtureMutations bool
+	stateRoot            string
+	coordinationRoot     string
+	client               *Client
+	fixtureMutations     bool
+	skipBackendReadiness bool
 }
 
 // NewManager opens an adapter manager over existing private roots. It performs
@@ -151,7 +161,7 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 	if err != nil {
 		return err
 	}
-	if inspection.Identity.NodeID != request.ExpectedNodeID {
+	if inspection.Identity.NodeID != request.ExpectedNodeID || !originMatchesIdentity(request.Origin, inspection.Identity, request.HTTPSPort) {
 		return ErrConflict
 	}
 	if err := m.requireMutationProfile(inspection); err != nil {
@@ -162,7 +172,8 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 		if err != nil {
 			return err
 		}
-		if !sameInspectionIdentity(inspection, current) || current.Identity.NodeID != request.ExpectedNodeID {
+		if !sameInspectionIdentity(inspection, current) || current.Identity.NodeID != request.ExpectedNodeID ||
+			!originMatchesIdentity(request.Origin, current.Identity, request.HTTPSPort) {
 			return ErrConflict
 		}
 		if err := m.requireMutationProfile(current); err != nil {
@@ -184,11 +195,16 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 		if record != nil && record.State != StateRemoved && record.State != StateUnconfigured {
 			return fmt.Errorf("%w: recovery state %s requires explicit reconciliation", ErrUncertain, record.State)
 		}
-		if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.HTTPSPort, request.BackendPort); err != nil {
+		if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
 			return err
 		}
 		if routeConflicts(current.Serve, request.HTTPSPort) {
 			return ErrConflict
+		}
+		if !m.skipBackendReadiness {
+			if err := verifyBackendReadiness(ctx, request.BackendPort, request.InstallationID, request.Origin); err != nil {
+				return err
+			}
 		}
 		opID, err := newOperationID()
 		if err != nil {
@@ -248,12 +264,12 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 // VerifyRegisteredRoute performs bounded, read-only drift detection for a
 // previously acknowledged registration. A matching observation without a
 // valid journal is never adopted, and this method never repairs a route.
-func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installationID string, httpsPort, backendPort int) (RouteStatus, error) {
+func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int) (RouteStatus, error) {
 	status := RouteStatus{JournalState: StateUnconfigured, Readiness: ReadinessWaiting}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if (scope != "production" && scope != "development") || !validLabel(installationID) ||
+	if (scope != "production" && scope != "development") || !validLabel(installationID) || !validCanonicalOrigin(origin) ||
 		httpsPort < 1 || httpsPort > 65535 || backendPort < 1 || backendPort > 65535 || httpsPort == backendPort {
 		status.Readiness = ReadinessConflicted
 		return status, ErrConflict
@@ -281,8 +297,8 @@ func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installation
 	status.Profile = record.Profile
 	status.HTTPSPort = record.HTTPSPort
 	status.BackendPort = record.BackendPort
-	if record.Scope != scope || record.InstallationID != installationID ||
-		record.HTTPSPort != httpsPort || record.BackendPort != backendPort {
+	if record.Scope != scope || record.InstallationID != installationID || record.HTTPSPort != httpsPort ||
+		record.BackendPort != backendPort || !registrationOriginMatches(*record, origin) {
 		status.Readiness = ReadinessConflicted
 		return status, ErrConflict
 	}
@@ -314,12 +330,12 @@ func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installation
 // Pending/uncertain operations remain unresolved even when a matching or absent
 // route is observed; only a later explicit consented lifecycle operation can
 // change an acknowledged registration.
-func (m *Manager) Recover(ctx context.Context, scope, installationID string, httpsPort, backendPort int) (RecoveryReport, error) {
+func (m *Manager) Recover(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int) (RecoveryReport, error) {
 	report := RecoveryReport{Route: RouteStatus{JournalState: StateUnconfigured, Readiness: ReadinessWaiting}}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if (scope != "production" && scope != "development") || !validLabel(installationID) ||
+	if (scope != "production" && scope != "development") || !validLabel(installationID) || !validCanonicalOrigin(origin) ||
 		httpsPort < 1 || httpsPort > 65535 || backendPort < 1 || backendPort > 65535 || httpsPort == backendPort {
 		report.Route.Readiness = ReadinessConflicted
 		report.RequiresOperatorAction = true
@@ -340,6 +356,12 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID string, htt
 	report.Route.Profile = inspection.Profile
 	report.Route.RuntimeQualified = inspection.RuntimeQualified
 	if record == nil {
+		if !originMatchesIdentity(origin, inspection.Identity, httpsPort) {
+			report.Route.Readiness = ReadinessConflicted
+			report.RequiresOperatorAction = true
+			report.Observation = "live-node-origin-does-not-match-selection"
+			return report, ErrConflict
+		}
 		if hasRouteAtPort(inspection.Serve, httpsPort) {
 			report.Observation = "selected-listener-present-without-registration"
 			report.Route.Readiness = ReadinessConflicted
@@ -352,8 +374,8 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID string, htt
 	report.Route.JournalState = record.State
 	report.Route.HTTPSPort = record.HTTPSPort
 	report.Route.BackendPort = record.BackendPort
-	if record.Scope != scope || record.InstallationID != installationID ||
-		record.HTTPSPort != httpsPort || record.BackendPort != backendPort {
+	if record.Scope != scope || record.InstallationID != installationID || record.HTTPSPort != httpsPort ||
+		record.BackendPort != backendPort || !registrationOriginMatches(*record, origin) {
 		report.Route.Readiness = ReadinessConflicted
 		report.RequiresOperatorAction = true
 		return report, ErrConflict
@@ -367,6 +389,10 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID string, htt
 	}
 	matching := registeredRouteMatches(inspection, *record)
 	listenerPresent := hasRouteAtPort(inspection.Serve, record.HTTPSPort)
+	if record.State == StatePublishPending || record.State == StatePublishUncertain ||
+		record.State == StateRemovePending || record.State == StateRemoveUncertain {
+		report.OperationID = record.OperationID
+	}
 	switch {
 	case matching:
 		report.Observation = "exact-registered-route-present"
@@ -409,6 +435,97 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID string, htt
 	}
 }
 
+// Reconcile changes only the local journal after an operator explicitly
+// confirms the exact operation ID and one read-only Serve observation. It never
+// invokes a Serve mutator or adopts a route without a matching pending intent.
+func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int, consent Consent) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	record, err := m.readRegistration()
+	if err != nil {
+		return err
+	}
+	if record == nil || (record.State != StatePublishPending && record.State != StatePublishUncertain &&
+		record.State != StateRemovePending && record.State != StateRemoveUncertain) {
+		return ErrUncertain
+	}
+	if record.Scope != scope || record.InstallationID != installationID || record.HTTPSPort != httpsPort ||
+		record.BackendPort != backendPort || !registrationOriginMatches(*record, origin) {
+		return ErrConflict
+	}
+	if err := validateRecoveryConsent(consent, *record, origin); err != nil {
+		return err
+	}
+	initial, err := m.client.Inspect(ctx)
+	if err != nil {
+		return err
+	}
+	if initial.Identity.NodeID != record.NodeID || initial.Identity.DNSName != record.DNSName ||
+		!originMatchesIdentity(origin, initial.Identity, record.HTTPSPort) || !sameProfile(initial, *record) ||
+		m.client.binary != record.BinaryPath {
+		return ErrConflict
+	}
+	if err := m.requireMutationProfile(initial); err != nil {
+		return err
+	}
+	return m.withNodeLock(ctx, record.NodeID, func() error {
+		currentRecord, err := m.readRegistration()
+		if err != nil {
+			return err
+		}
+		if currentRecord == nil || *currentRecord != *record {
+			return ErrUncertain
+		}
+		current, err := m.client.Inspect(ctx)
+		if err != nil {
+			return err
+		}
+		if current.Identity.NodeID != record.NodeID || current.Identity.DNSName != record.DNSName ||
+			!originMatchesIdentity(origin, current.Identity, record.HTTPSPort) || !sameProfile(current, *record) ||
+			m.client.binary != record.BinaryPath {
+			return ErrConflict
+		}
+		matching := registeredRouteMatches(current, *record)
+		listenerPresent := hasRouteAtPort(current.Serve, record.HTTPSPort)
+		if consent.RecoveryObservation == "present" && !matching {
+			return ErrConflict
+		}
+		if consent.RecoveryObservation == "absent" && listenerPresent {
+			return ErrConflict
+		}
+		resolved := *record
+		resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		switch consent.RecoveryObservation {
+		case "present":
+			resolved.State = StateRegistered
+			resolved.ConsentScope = publishConsentScope
+			resolved.MutationAcknowledged = true
+		case "absent":
+			if record.State == StatePublishPending || record.State == StatePublishUncertain {
+				resolved.State = StateUnconfigured
+				resolved.ConsentScope = publishConsentScope
+				resolved.MutationAcknowledged = false
+			} else {
+				resolved.State = StateRemoved
+				resolved.ConsentScope = removeConsentScope
+				resolved.MutationAcknowledged = true
+			}
+		default:
+			return ErrConflict
+		}
+		return m.writeRegistration(resolved)
+	})
+}
+
+func validateRecoveryConsent(consent Consent, record registration, origin string) error {
+	if !consent.RecoveryAccepted || consent.OperationID != record.OperationID ||
+		(consent.RecoveryObservation != "present" && consent.RecoveryObservation != "absent") {
+		return errors.New("explicit recovery consent must bind to the pending operation and observed route state")
+	}
+	return validateConsentBinding(consent, record.NodeID, record.Scope, origin, record.HTTPSPort, record.BackendPort)
+}
+
 func readinessForError(err error) RouteReadiness {
 	switch {
 	case errors.Is(err, ErrConflict):
@@ -435,14 +552,19 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 	if record == nil || record.State != StateRegistered || !record.MutationAcknowledged {
 		return ErrUncertain
 	}
-	if err := validateUnpublishConsent(consent, record.NodeID, record.Scope, record.HTTPSPort, record.BackendPort); err != nil {
+	origin, err := tailscale.Origin(record.DNSName, record.HTTPSPort)
+	if err != nil {
+		return ErrConflict
+	}
+	if err := validateUnpublishConsent(consent, record.NodeID, record.Scope, origin, record.HTTPSPort, record.BackendPort); err != nil {
 		return err
 	}
 	initial, err := m.client.Inspect(ctx)
 	if err != nil {
 		return err
 	}
-	if initial.Identity.NodeID != record.NodeID || !sameProfile(initial, *record) || m.client.binary != record.BinaryPath {
+	if initial.Identity.NodeID != record.NodeID || !originMatchesIdentity(origin, initial.Identity, record.HTTPSPort) ||
+		!sameProfile(initial, *record) || m.client.binary != record.BinaryPath {
 		return ErrConflict
 	}
 	if err := m.requireMutationProfile(initial); err != nil {
@@ -460,7 +582,8 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 		if err != nil {
 			return err
 		}
-		if current.Identity.NodeID != record.NodeID || !sameProfile(current, *record) || m.client.binary != record.BinaryPath {
+		if current.Identity.NodeID != record.NodeID || !originMatchesIdentity(origin, current.Identity, record.HTTPSPort) ||
+			!sameProfile(current, *record) || m.client.binary != record.BinaryPath {
 			return ErrConflict
 		}
 		if err := m.requireMutationProfile(current); err != nil {
@@ -508,7 +631,8 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 			_ = m.writeRegistration(pending)
 			return fmt.Errorf("%w: removal readback unavailable", ErrUncertain)
 		}
-		if readback.Identity.NodeID != record.NodeID || !sameProfile(readback, *record) || hasRouteAtPort(readback.Serve, record.HTTPSPort) {
+		if readback.Identity.NodeID != record.NodeID || !originMatchesIdentity(origin, readback.Identity, record.HTTPSPort) ||
+			!sameProfile(readback, *record) || hasRouteAtPort(readback.Serve, record.HTTPSPort) {
 			pending.State = StateRemoveUncertain
 			pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 			_ = m.writeRegistration(pending)
@@ -536,23 +660,23 @@ func (m *Manager) requireMutationProfile(inspection Inspection) error {
 func validateRequest(request PublishRequest) error {
 	if !validLabel(request.InstallationID) ||
 		(request.Scope != "production" && request.Scope != "development") ||
-		!validNodeID(request.ExpectedNodeID) || !validLoopbackBackend(request.BackendPort) ||
+		!validNodeID(request.ExpectedNodeID) || !validCanonicalOrigin(request.Origin) || !validLoopbackBackend(request.BackendPort) ||
 		request.HTTPSPort < 1 || request.HTTPSPort > 65535 || request.HTTPSPort == request.BackendPort {
 		return ErrConflict
 	}
 	return nil
 }
 
-func validateConsentBinding(consent Consent, nodeID, scope string, httpsPort, backendPort int) error {
-	if !consent.Accepted || consent.Scope != scope || consent.NodeID != nodeID ||
+func validateConsentBinding(consent Consent, nodeID, scope, origin string, httpsPort, backendPort int) error {
+	if !consent.Accepted || consent.Scope != scope || consent.NodeID != nodeID || consent.Origin != origin ||
 		consent.HTTPSPort != httpsPort || consent.BackendPort != backendPort {
-		return errors.New("explicit consent must bind to this node, scope and exact ports")
+		return errors.New("explicit consent must bind to this node, origin, scope and exact ports")
 	}
 	return nil
 }
 
-func validatePublishConsent(consent Consent, nodeID, scope string, httpsPort, backendPort int) error {
-	if err := validateConsentBinding(consent, nodeID, scope, httpsPort, backendPort); err != nil {
+func validatePublishConsent(consent Consent, nodeID, scope, origin string, httpsPort, backendPort int) error {
+	if err := validateConsentBinding(consent, nodeID, scope, origin, httpsPort, backendPort); err != nil {
 		return err
 	}
 	if !consent.PersistentRouteAccepted || !consent.CheckToWriteRaceAccepted ||
@@ -562,8 +686,8 @@ func validatePublishConsent(consent Consent, nodeID, scope string, httpsPort, ba
 	return nil
 }
 
-func validateUnpublishConsent(consent Consent, nodeID, scope string, httpsPort, backendPort int) error {
-	if err := validateConsentBinding(consent, nodeID, scope, httpsPort, backendPort); err != nil {
+func validateUnpublishConsent(consent Consent, nodeID, scope, origin string, httpsPort, backendPort int) error {
+	if err := validateConsentBinding(consent, nodeID, scope, origin, httpsPort, backendPort); err != nil {
 		return err
 	}
 	if !consent.RouteRemovalAccepted || !consent.NoRemoteDrainAccepted {
@@ -575,9 +699,67 @@ func validateUnpublishConsent(consent Consent, nodeID, scope string, httpsPort, 
 func sameRequest(record registration, request PublishRequest, inspection Inspection, binary string) bool {
 	return record.InstallationID == request.InstallationID && record.Scope == request.Scope &&
 		record.NodeID == request.ExpectedNodeID && record.DNSName == inspection.Identity.DNSName &&
+		registrationOriginMatches(record, request.Origin) &&
 		record.Profile == inspection.Profile && record.BinaryPath == binary &&
 		record.HTTPSPort == request.HTTPSPort && record.BackendPort == request.BackendPort &&
 		record.Path == "/" && record.Backend == fmt.Sprintf("http://127.0.0.1:%d", request.BackendPort)
+}
+
+func validCanonicalOrigin(origin string) bool {
+	canonical, err := setuphelper.NormalizeExternalHTTPSOrigin(origin)
+	return err == nil && canonical == origin
+}
+
+func originMatchesIdentity(origin string, identity Identity, httpsPort int) bool {
+	derived, err := tailscale.Origin(identity.DNSName, httpsPort)
+	return err == nil && origin == derived
+}
+
+func registrationOriginMatches(record registration, origin string) bool {
+	derived, err := tailscale.Origin(record.DNSName, record.HTTPSPort)
+	return err == nil && origin == derived
+}
+
+func verifyBackendReadiness(ctx context.Context, port int, installationID, origin string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if port < 1 || port > 65535 || !validLabel(installationID) || !validCanonicalOrigin(origin) {
+		return ErrConflict
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	request, err := http.NewRequestWithContext(checkCtx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/healthz", port), nil)
+	if err != nil {
+		return ErrConflict
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("%w: expected relay backend is not serving readiness", ErrConflict)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("X-Herdr-Relay-Instance") != installationID {
+		return fmt.Errorf("%w: loopback backend identity did not match this installation", ErrConflict)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
+	if err != nil || len(body) > 64*1024 {
+		return fmt.Errorf("%w: loopback backend health response was invalid", ErrConflict)
+	}
+	var health struct {
+		Status    string `json:"status"`
+		Readiness string `json:"readiness"`
+		Transport string `json:"transport"`
+		Instance  string `json:"instance"`
+		CLIOrigin string `json:"tailscale_cli_origin"`
+	}
+	if json.Unmarshal(body, &health) != nil || health.Status != "ok" || health.Readiness != "ready" ||
+		health.Transport != "tailscale-cli" || health.Instance != installationID || health.CLIOrigin != origin {
+		return fmt.Errorf("%w: loopback backend is not the ready CLI-backed relay for this origin", ErrConflict)
+	}
+	return nil
 }
 
 func sameInspectionIdentity(left, right Inspection) bool {
@@ -641,70 +823,44 @@ func (m *Manager) withNodeLock(ctx context.Context, nodeID string, operation fun
 	}
 	digest := sha256.Sum256([]byte(nodeID))
 	lockPath := filepath.Join(m.coordinationRoot, "node-"+hex.EncodeToString(digest[:])[:24]+".lock")
+	fd, err := syscall.Open(lockPath, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	if err != nil {
+		return ErrPermissionDenied
+	}
+	lockFile := os.NewFile(uintptr(fd), lockPath)
+	defer lockFile.Close()
+	info, err := lockFile.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
+		linkCount(info) != 1 || !ownedByCurrentUser(info) {
+		return ErrPermissionDenied
+	}
+
 	deadline := time.Now().Add(mutationLockWait)
-	var dev, ino uint64
 	for {
-		if err := os.Mkdir(lockPath, 0o700); err == nil {
-			info, statErr := os.Lstat(lockPath)
-			if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 || !ownedByCurrentUser(info) {
-				return ErrPermissionDenied
-			}
-			dev, ino = fileIDs(info)
-			if err := syncDirectory(m.coordinationRoot); err != nil {
-				_ = os.Remove(lockPath)
-				return err
-			}
+		err = syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
 			break
-		} else if !os.IsExist(err) {
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN && err != syscall.EINTR {
 			return ErrPermissionDenied
-		} else {
-			info, statErr := os.Lstat(lockPath)
-			if statErr != nil {
-				if os.IsNotExist(statErr) {
-					continue
-				}
-				return ErrPermissionDenied
-			}
-			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ownedByCurrentUser(info) {
-				return ErrPermissionDenied
-			}
-			if !time.Now().Before(deadline) {
-				return ErrUncertain
-			}
-			select {
-			case <-ctx.Done():
-				return ErrUncertain
-			case <-time.After(mutationLockDelay):
-			}
+		}
+		if !time.Now().Before(deadline) {
+			return ErrUncertain
+		}
+		select {
+		case <-ctx.Done():
+			return ErrUncertain
+		case <-time.After(mutationLockDelay):
 		}
 	}
 	operationErr := operation()
-	if releaseErr := removeNodeLock(lockPath, m.coordinationRoot, dev, ino); releaseErr != nil {
+	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
 		if operationErr != nil {
-			return errors.Join(operationErr, releaseErr)
+			return errors.Join(operationErr, ErrUncertain)
 		}
-		return fmt.Errorf("%w: coordination lock could not be durably released", ErrUncertain)
+		return fmt.Errorf("%w: coordination lock could not be released", ErrUncertain)
 	}
 	return operationErr
-}
-
-func removeNodeLock(lockPath, parent string, dev, ino uint64) error {
-	info, err := os.Lstat(lockPath)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return ErrPermissionDenied
-	}
-	currentDev, currentIno := fileIDs(info)
-	if currentDev != dev || currentIno != ino {
-		return ErrPermissionDenied
-	}
-	entries, err := os.ReadDir(lockPath)
-	if err != nil || len(entries) != 0 {
-		return ErrPermissionDenied
-	}
-	if err := os.Remove(lockPath); err != nil {
-		return ErrPermissionDenied
-	}
-	return syncDirectory(parent)
 }
 
 func syncDirectory(path string) error {

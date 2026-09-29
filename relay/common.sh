@@ -372,7 +372,7 @@ tailscale_cli_registration_status() {
     https_port="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_HTTPS_PORT)"
     backend_port="$(env_file_value "$env_file" HERDR_RELAY_PORT)"
     state_root="${state_root:-$state_home/herdr-mobile-relay/tailscale-cli-registration}"
-    coordination_root="${coordination_root:-$state_home/herdr-mobile-relay/tailscale-cli-coordination}"
+    coordination_root="${coordination_root:-$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination}"
     case "$https_port" in ''|*[!0-9]*) echo "✗ HERDR_TAILSCALE_CLI_HTTPS_PORT must be an explicit port." >&2; return 2 ;; esac
     case "$backend_port" in ''|*[!0-9]*) echo "✗ HERDR_RELAY_PORT must be an explicit backend port." >&2; return 2 ;; esac
     "$binary" tailscale-cli assert-ready \
@@ -720,21 +720,17 @@ installed_service_env_file() {
         Linux)
             service_file="$HOME/.config/systemd/user/herdr-mobile-relay.service"
             if [ -r "$service_file" ]; then
-                sed -n 's/^Environment=HERDR_RELAY_ENV=//p' "$service_file" | tail -1
+                local environment_value
+                environment_value="$(sed -n 's/^Environment=HERDR_RELAY_ENV=//p' "$service_file" | tail -1)"
+                systemd_unquote_value "$environment_value"
             fi
             ;;
         Darwin)
             service_file="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
             if [ -r "$service_file" ]; then
-                awk '
-                    /<key>HERDR_RELAY_ENV<\/key>/ { found = 1; next }
-                    found && /<string>/ {
-                        sub(/^.*<string>/, "")
-                        sub(/<\/string>.*$/, "")
-                        print
-                        exit
-                    }
-                ' "$service_file"
+                local plist_tool="${HERDR_PLUTIL:-/usr/bin/plutil}"
+                [ -x "$plist_tool" ] || return 1
+                "$plist_tool" -extract EnvironmentVariables.HERDR_RELAY_ENV raw -o - "$service_file"
             fi
             ;;
     esac
@@ -745,17 +741,30 @@ update_launchd_release_paths() {
     local service_wrapper="$2"
     local work_dir="$3"
     local env_file="${4:-}"
-    local plist_buddy="${HERDR_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
+    local plist_tool="${HERDR_PLUTIL:-/usr/bin/plutil}"
+    local temp
 
-    [ -x "$plist_buddy" ] || {
-        echo "PlistBuddy is unavailable: $plist_buddy" >&2
+    [ -x "$plist_tool" ] || {
+        echo "plutil is unavailable: $plist_tool" >&2
         return 1
     }
-    "$plist_buddy" -c "Set :ProgramArguments:0 $service_wrapper" "$plist"
-    "$plist_buddy" -c "Set :WorkingDirectory $work_dir" "$plist"
-    if [ -n "$env_file" ]; then
-        "$plist_buddy" -c "Set :EnvironmentVariables:HERDR_RELAY_ENV $env_file" "$plist"
+    [ -f "$plist" ] && [ ! -L "$plist" ] || return 1
+    temp="$(mktemp "${plist}.XXXXXX")" || return 1
+    cp -p "$plist" "$temp" || { rm -f "$temp"; return 1; }
+    if ! "$plist_tool" -replace ProgramArguments.0 -string "$service_wrapper" "$temp" ||
+        ! "$plist_tool" -replace WorkingDirectory -string "$work_dir" "$temp"; then
+        rm -f "$temp"
+        return 1
     fi
+    if [ -n "$env_file" ] && ! "$plist_tool" -replace EnvironmentVariables.HERDR_RELAY_ENV -string "$env_file" "$temp"; then
+        rm -f "$temp"
+        return 1
+    fi
+    if ! "$plist_tool" -lint "$temp"; then
+        rm -f "$temp"
+        return 1
+    fi
+    mv -f "$temp" "$plist"
 }
 
 require_user_service_context() {
@@ -1209,6 +1218,18 @@ arm_tailscale_setup_link() {
     printf '%s\n' "$response"
 }
 
+shell_quote_value() {
+    local value="$1"
+    local prefix
+    printf "'"
+    while [[ "$value" == *"'"* ]]; do
+        prefix="${value%%"'"*}"
+        printf "%s'\\\\''" "$prefix"
+        value="${value#*"'"}"
+    done
+    printf "%s'\n" "$value"
+}
+
 set_env_value_atomic() {
     local env_file="$1"
     local key="$2"
@@ -1216,12 +1237,12 @@ set_env_value_atomic() {
     local directory
     local temp_file
 
-    case "$value" in
-        *"'"*)
-            echo "Cannot write $key: single quotes are not supported in relay environment values." >&2
-            return 1
-            ;;
+    case "$key" in
+        [A-Z_]* ) ;;
+        *) echo "Cannot write an invalid relay environment key." >&2; return 1 ;;
     esac
+    case "$key" in *[!A-Z0-9_]* ) echo "Cannot write an invalid relay environment key." >&2; return 1 ;; esac
+    case "$value" in *$'\n'*|*$'\r'*) echo "Cannot write $key: line breaks are unsupported." >&2; return 1 ;; esac
 
     directory="$(dirname "$env_file")"
     mkdir -p "$directory"
@@ -1229,7 +1250,8 @@ set_env_value_atomic() {
     if [ -f "$env_file" ]; then
         grep -v "^${key}=" "$env_file" > "$temp_file" || true
     fi
-    printf "%s='%s'\n" "$key" "$value" >> "$temp_file"
+    printf '%s=' "$key" >> "$temp_file"
+    shell_quote_value "$value" >> "$temp_file"
     chmod 600 "$temp_file"
     mv "$temp_file" "$env_file"
 }
@@ -1341,6 +1363,111 @@ load_relay_env() {
     # shellcheck source=/dev/null
     . "$env_file"
     set +a
+}
+
+wait_for_relay_identity_health() {
+    local port="$1"
+    local instance="$2"
+    local origin="$3"
+    local attempts="${4:-30}"
+    local attempt
+    local health
+
+    command -v curl >/dev/null 2>&1 || return 1
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if health="$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+            "http://127.0.0.1:$port/healthz" 2>/dev/null)" &&
+            [ "$(json_string_field "$health" status)" = ok ] &&
+            [ "$(json_string_field "$health" readiness)" = ready ] &&
+            [ "$(json_string_field "$health" transport)" = tailscale-cli ] &&
+            [ "$(json_string_field "$health" instance)" = "$instance" ] &&
+            [ "$(json_string_field "$health" tailscale_cli_origin)" = "$origin" ]; then
+            printf '%s\n' "$health"
+            return 0
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then sleep 1; fi
+    done
+    return 1
+}
+
+systemd_quote_value() {
+    local value="$1"
+    case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//%/%%}"
+    printf '"%s"' "$value"
+}
+
+systemd_quote_exec() {
+    local value="$1"
+    value="${value//\$/\$\$}"
+    systemd_quote_value "$value"
+}
+
+sed_escape_replacement() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//&/\\&}"
+    value="${value//|/\\|}"
+    printf '%s' "$value"
+}
+
+systemd_unquote_value() {
+    local value="$1"
+    local result=""
+    local character
+    local escaped=false
+    local index
+    if [[ "$value" == \"*\" ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    for ((index = 0; index < ${#value}; index++)); do
+        character="${value:index:1}"
+        if [ "$escaped" = true ]; then
+            result+="$character"
+            escaped=false
+        elif [ "$character" = \\ ]; then
+            escaped=true
+        else
+            result+="$character"
+        fi
+    done
+    [ "$escaped" = false ] || return 1
+    result="${result//%%/%}"
+    printf '%s' "$result"
+}
+
+xml_escape_text() {
+    local value="$1"
+    case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    value="${value//&/&amp;}"
+    value="${value//</&lt;}"
+    value="${value//>/&gt;}"
+    printf '%s' "$value"
+}
+
+wait_for_cli_admission() {
+    local relay_bin="$1"
+    local socket="$2"
+    local run_id="$3"
+    local instance="$4"
+    local attempts="${5:-30}"
+    local attempt
+    local status
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if status="$("$relay_bin" pairing-control --socket "$socket" --operation status \
+            --run-id "$run_id" --instance "$instance" 2>/dev/null)" &&
+            [ "$(json_bool_field "$status" ready)" = true ] &&
+            [ "$(json_bool_field "$status" persistent_route_ready)" = true ] &&
+            [ "$(json_bool_field "$status" invitation_armed)" = true ]; then
+            printf '%s\n' "$status"
+            return 0
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then sleep 1; fi
+    done
+    return 1
 }
 
 wait_for_relay_health() {

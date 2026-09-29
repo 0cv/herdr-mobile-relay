@@ -28,11 +28,15 @@ fi
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
 
 if [ "$TRANSPORT" = tailscale-cli ]; then
-    relay_binary >/dev/null
-    tailscale_cli_registration_status "$ENV_FILE" >/dev/null || {
-        echo "✗ A verified CLI-backed registration is required before installing its user service." >&2
-        exit 1
-    }
+    RELAY_BIN="$(relay_binary)"
+    if [ "${HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START:-}" = 1 ]; then
+        "$RELAY_BIN" tailscale-cli activation-check >/dev/null || exit $?
+    else
+        tailscale_cli_registration_status "$ENV_FILE" >/dev/null || {
+            echo "✗ A verified CLI-backed registration is required before installing its user service." >&2
+            exit 1
+        }
+    fi
     ensure_relay_env "$ENV_FILE"
 else
     if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
@@ -54,6 +58,10 @@ fi
 if [ ! -d "$WORK_DIR" ]; then
     WORK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
+SERVICE_WRAPPER_XML="$(xml_escape_text "$SERVICE_WRAPPER")" || { echo "✗ Service executable path contains unsupported XML characters." >&2; exit 1; }
+WORK_DIR_XML="$(xml_escape_text "$WORK_DIR")" || { echo "✗ Service work path contains unsupported XML characters." >&2; exit 1; }
+ENV_FILE_XML="$(xml_escape_text "$ENV_FILE")" || { echo "✗ Service environment path contains unsupported XML characters." >&2; exit 1; }
+LOG_DIR_XML="$(xml_escape_text "$LOG_DIR")" || { echo "✗ Service log path contains unsupported XML characters." >&2; exit 1; }
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -64,7 +72,7 @@ cat > "$PLIST" <<EOF
     <string>$LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$SERVICE_WRAPPER</string>
+        <string>$SERVICE_WRAPPER_XML</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -78,16 +86,16 @@ cat > "$PLIST" <<EOF
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>WorkingDirectory</key>
-    <string>$WORK_DIR</string>
+    <string>$WORK_DIR_XML</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HERDR_RELAY_ENV</key>
-        <string>$ENV_FILE</string>
+        <string>$ENV_FILE_XML</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>$LOG_DIR/service.log</string>
+    <string>$LOG_DIR_XML/service.log</string>
     <key>StandardErrorPath</key>
-    <string>$LOG_DIR/service.err</string>
+    <string>$LOG_DIR_XML/service.err</string>
 </dict>
 </plist>
 EOF

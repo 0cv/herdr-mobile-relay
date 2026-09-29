@@ -319,8 +319,8 @@ func (c *Config) validateTailscaleCLI() error {
 	if c.ControlRunID == "" || !safeRunID(c.ControlRunID) || c.PairingSocketPath == "" || !filepath.IsAbs(c.PairingSocketPath) {
 		return errors.New("tailscale-cli requires a private control run ID and absolute pairing socket")
 	}
-	if !filepath.IsAbs(c.TailscaleCLIBin) {
-		return errors.New("HERDR_TAILSCALE_CLI_BIN must be the selected absolute Tailscale CLI path")
+	if c.TailscaleCLIBin != "" && !filepath.IsAbs(c.TailscaleCLIBin) {
+		return errors.New("HERDR_TAILSCALE_CLI_BIN override must be an absolute Tailscale CLI path")
 	}
 	if c.TailscaleCLIScope != "production" && c.TailscaleCLIScope != "development" {
 		return errors.New("HERDR_TAILSCALE_CLI_SCOPE must be production or development")

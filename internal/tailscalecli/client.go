@@ -84,6 +84,14 @@ type Inspection struct {
 	Serve            tailscale.ServeStatus
 }
 
+type PreflightReport struct {
+	NodeID    string  `json:"node_id"`
+	DNSName   string  `json:"dns_name"`
+	Origin    string  `json:"origin"`
+	Profile   Profile `json:"profile"`
+	HTTPSPort int     `json:"https_port"`
+}
+
 type commandResult struct {
 	stdout     []byte
 	dispatched bool
@@ -273,6 +281,26 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 		RuntimeQualified: false,
 		Version:          metadata,
 		Serve:            serve,
+	}, nil
+}
+
+// Preflight performs read-only CLI inspection and derives the exact canonical
+// HTTPS origin for the selected live node. It does not reserve or mutate Serve.
+func (c *Client) Preflight(ctx context.Context, httpsPort int) (PreflightReport, error) {
+	if httpsPort < 1 || httpsPort > 65535 {
+		return PreflightReport{}, ErrConflict
+	}
+	inspection, err := c.Inspect(ctx)
+	if err != nil {
+		return PreflightReport{}, err
+	}
+	origin, err := tailscale.Origin(inspection.Identity.DNSName, httpsPort)
+	if err != nil {
+		return PreflightReport{}, ErrUnsupported
+	}
+	return PreflightReport{
+		NodeID: inspection.Identity.NodeID, DNSName: inspection.Identity.DNSName,
+		Origin: origin, Profile: inspection.Profile, HTTPSPort: httpsPort,
 	}, nil
 }
 

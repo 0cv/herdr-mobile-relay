@@ -16,15 +16,16 @@ RELAY_BIN="$(relay_binary)"
 SCOPE="${HERDR_TAILSCALE_CLI_SCOPE:-production}"
 INSTALLATION_ID="${HERDR_RELAY_INSTANCE_ID:-}"
 STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-registration}"
-COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-coordination}"
+COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination}"
 HTTPS_PORT="${HERDR_TAILSCALE_CLI_HTTPS_PORT:-443}"
 BACKEND_PORT="${HERDR_RELAY_PORT:-8375}"
 CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
 NODE_ID="${HERDR_TAILSCALE_CLI_NODE_ID:-}"
+ORIGIN="${HERDR_TAILSCALE_CLI_ORIGIN:-}"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: relay/tailscale-cli.sh {setup|status|recover|stop|unpublish|update|uninstall}
+Usage: relay/tailscale-cli.sh {setup|status|recover|reconcile|stop|unpublish|update|uninstall}
 
 setup requires an explicit tailscale-cli relay.env selection, absolute selected
 CLI path, canonical HTTPS origin, private registration roots, and operator-bound
@@ -45,8 +46,9 @@ check_action() {
         return 1
     }
     case "$CLI_BIN" in
+        "") ;;
         /*) [ -x "$CLI_BIN" ] && [ ! -d "$CLI_BIN" ] || { echo "✗ Selected Tailscale CLI is not executable." >&2; return 1; } ;;
-        *) echo "✗ HERDR_TAILSCALE_CLI_BIN must be the selected absolute executable path." >&2; return 1 ;;
+        *) echo "✗ Explicit HERDR_TAILSCALE_CLI_BIN override must be absolute." >&2; return 1 ;;
     esac
 }
 
@@ -80,7 +82,7 @@ manager_call() {
     shift
     "$RELAY_BIN" tailscale-cli "$operation" \
         --binary "$CLI_BIN" --state-root "$STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
-        --scope "$SCOPE" --installation-id "$INSTALLATION_ID" \
+        --scope "$SCOPE" --installation-id "$INSTALLATION_ID" --origin "$ORIGIN" \
         --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" "$@"
 }
 
@@ -96,6 +98,35 @@ request_node_id() {
     [ -t 0 ] || { echo "✗ Set HERDR_TAILSCALE_CLI_NODE_ID to the explicitly approved node ID." >&2; return 1; }
     read -r -p "Exact node ID approved for this route: " NODE_ID || return 1
     [ -n "$NODE_ID" ] || { echo "✗ A node ID is required." >&2; return 1; }
+}
+
+reconcile_pending() {
+    activation_check
+    check_action
+    [ -t 0 ] || { echo "✗ Journal reconciliation requires an interactive terminal." >&2; return 2; }
+    local report operation_id observation answer
+    if report="$(manager_call recover)"; then
+        :
+    else
+        [ -n "$report" ] || { echo "✗ Recovery report is unavailable; journal was not changed." >&2; return 1; }
+    fi
+    operation_id="$(json_string_field "$report" recovery_operation_id)"
+    observation="$(json_string_field "$report" observation)"
+    [ -n "$operation_id" ] || { echo "✗ No exact pending operation is available for reconciliation." >&2; return 1; }
+    case "$observation" in
+        exact-registered-route-present) observation=present ;;
+        selected-listener-absent) observation=absent ;;
+        *) echo "✗ Observed route does not match a reconcilable exact pending operation." >&2; return 1 ;;
+    esac
+    printf '%s\n' "$report"
+    echo "This changes only the local journal after a fresh exact-operation and route-state check."
+    read -r -p "Type RECONCILE $operation_id $observation to authorize: " answer || return 1
+    [ "$answer" = "RECONCILE $operation_id $observation" ] || {
+        echo "Cancelled; journal and route are unchanged."
+        return 1
+    }
+    manager_call reconcile --operation-id "$operation_id" --confirm-observed-route "$observation" \
+        --accepted --accept-journal-reconciliation --node-id "$NODE_ID"
 }
 
 explicit_unpublish() {
@@ -116,11 +147,36 @@ setup_cli() {
         echo "✗ Select tailscale-cli explicitly in relay.env before setup; no transport is migrated implicitly." >&2
         return 1
     }
+    activation_check
     check_action
-    case "${HERDR_TAILSCALE_CLI_ORIGIN:-}" in https://*) ;; *) echo "✗ Set a canonical HERDR_TAILSCALE_CLI_ORIGIN first." >&2; return 1 ;; esac
     [ -n "${HERDR_PHONE_APP_URL:-}" ] || { echo "✗ Set the exact verified HERDR_PHONE_APP_URL first." >&2; return 1; }
-    request_node_id
-    echo "Persistent HTTPS route: $HERDR_TAILSCALE_CLI_ORIGIN -> 127.0.0.1:$BACKEND_PORT"
+    CLI_BIN="$("$RELAY_BIN" tailscale-cli resolve-binary --binary "$CLI_BIN")" || {
+        echo "✗ No unambiguous absolute Tailscale CLI candidate was selected." >&2
+        return 1
+    }
+    PREFLIGHT="$("$RELAY_BIN" tailscale-cli preflight --binary "$CLI_BIN" --https-port "$HTTPS_PORT")" || {
+        echo "✗ Read-only Tailscale node/origin preflight failed; no route or service was changed." >&2
+        return 1
+    }
+    LIVE_NODE_ID="$(json_string_field "$PREFLIGHT" node_id)"
+    LIVE_ORIGIN="$(json_string_field "$PREFLIGHT" origin)"
+    LIVE_DNS_NAME="$(json_string_field "$PREFLIGHT" dns_name)"
+    [ -n "$LIVE_NODE_ID" ] && [ -n "$LIVE_ORIGIN" ] && [ -n "$LIVE_DNS_NAME" ] || {
+        echo "✗ Read-only preflight did not establish a complete node identity and origin." >&2
+        return 1
+    }
+    [ -z "$NODE_ID" ] || [ "$NODE_ID" = "$LIVE_NODE_ID" ] || {
+        echo "✗ Configured node ID does not match the live read-only preflight." >&2
+        return 1
+    }
+    [ -z "${HERDR_TAILSCALE_CLI_ORIGIN:-}" ] || [ "$HERDR_TAILSCALE_CLI_ORIGIN" = "$LIVE_ORIGIN" ] || {
+        echo "✗ Configured HTTPS origin does not match the live node's canonical origin." >&2
+        return 1
+    }
+    NODE_ID="$LIVE_NODE_ID"
+    ORIGIN="$LIVE_ORIGIN"
+    echo "Read-only preflight selected node $NODE_ID ($LIVE_DNS_NAME), profile $(json_string_field "$PREFLIGHT" profile), HTTPS origin $ORIGIN."
+    echo "Persistent HTTPS route: $ORIGIN -> 127.0.0.1:$BACKEND_PORT"
     echo "Scope: $SCOPE; node: $NODE_ID; HTTPS port: $HTTPS_PORT"
     echo "The route persists after relay stop; a local process may later reuse its backend port."
     echo "No global rollback or remote-drain guarantee is provided."
@@ -129,38 +185,37 @@ setup_cli() {
         return 1
     }
     # The compile-time P6 gate is checked before roots, services or CLI access.
-    activation_check
     ensure_private_root "$STATE_ROOT"
     ensure_private_root "$COORDINATION_ROOT"
+    set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_BIN "$CLI_BIN"
+    set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_ORIGIN "$ORIGIN"
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_NODE_ID "$NODE_ID"
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_STATE_ROOT "$STATE_ROOT"
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_HTTPS_PORT "$HTTPS_PORT"
+    export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN"
+    export HERDR_TAILSCALE_CLI_NODE_ID="$NODE_ID" HERDR_TAILSCALE_CLI_STATE_ROOT="$STATE_ROOT"
+    export HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT" HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT"
+    echo "▸ Installing and starting the loopback relay before publishing the persistent route."
+    HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START=1 "$SCRIPT_DIR/service.sh" install || {
+        echo "✗ Service setup failed before route publication; no new Serve route was requested." >&2
+        return 1
+    }
+    wait_for_relay_identity_health "$BACKEND_PORT" "$INSTALLATION_ID" "$ORIGIN" || {
+        echo "✗ The exact relay instance did not bind and pass local readiness; no route was published." >&2
+        return 1
+    }
     manager_call publish --node-id "$NODE_ID" --accepted \
         --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
         --accept-no-rollback --accept-no-remote-drain
-    echo "▸ Installing the per-user relay service; route publication is not repeated on restart."
-    "$SCRIPT_DIR/service.sh" install || {
-        echo "✗ Service setup failed after route publication; registration was retained for recovery." >&2
-        echo "  Run: relay/tailscale-cli.sh recover" >&2
-        return 1
-    }
     local socket="${HERDR_RELAY_PAIRING_SOCKET:-}"
     local run_id="${HERDR_RELAY_CONTROL_RUN_ID:-}"
-    local armed
     [ -S "$socket" ] && [ -n "$run_id" ] || {
         echo "✗ Service is installed, but its private pairing-control endpoint is unavailable; route was retained." >&2
         return 1
     }
-    armed="$("$RELAY_BIN" pairing-control --socket "$socket" --operation arm_bootstrap \
-        --run-id "$run_id" --instance "$INSTALLATION_ID")" || {
-        echo "✗ Invitation arming failed after route publication; registration was retained for recovery." >&2
-        return 1
-    }
-    [ "$(json_bool_field "$armed" ready)" = true ] &&
-        [ "$(json_bool_field "$armed" persistent_route_ready)" = true ] &&
-        [ "$(json_bool_field "$armed" invitation_armed)" = true ] || {
-        echo "✗ Service did not confirm qualified route and durable invitation admission; route was retained." >&2
+    wait_for_cli_admission "$RELAY_BIN" "$socket" "$run_id" "$INSTALLATION_ID" || {
+        echo "✗ Service did not confirm the route and a fresh durable readiness arm; route was retained." >&2
         return 1
     }
     echo "✓ CLI-backed service and invitation are ready."
@@ -188,6 +243,10 @@ case "$ACTION" in
         activation_check
         check_action
         manager_call recover
+        ;;
+    reconcile)
+        [ "$#" -eq 0 ] || { usage; exit 2; }
+        reconcile_pending
         ;;
     stop)
         [ "$#" -eq 0 ] || { usage; exit 2; }

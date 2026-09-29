@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +26,7 @@ import (
 const managedHealthTimeout = 5 * time.Second
 
 type tailscaleCLIRegistrationVerifier interface {
-	VerifyRegisteredRoute(context.Context, string, string, int, int) (tailscalecli.RouteStatus, error)
+	VerifyRegisteredRoute(context.Context, string, string, string, int, int) (tailscalecli.RouteStatus, error)
 }
 
 type managedTailscaleAuthority interface {
@@ -38,10 +40,14 @@ type managedTailscaleAuthority interface {
 }
 
 // prepareTailscaleCLIRegistration opens private, pre-created registration roots
-// and selects the persisted absolute CLI path without executing the CLI. The
-// activation gate in NewOwned prevents this production path before P6.
+// and resolves the explicit CLI override or an unambiguous service PATH candidate.
+// The activation gate in NewOwned prevents this production path before P6.
 func prepareTailscaleCLIRegistration(cfg *config.Config) (*tailscalecli.Manager, error) {
-	client, err := tailscalecli.NewClient(cfg.TailscaleCLIBin)
+	binary, err := tailscalecli.ResolveBinary(cfg.TailscaleCLIBin, os.Getenv("PATH"), runtime.GOOS)
+	if err != nil {
+		return nil, err
+	}
+	client, err := tailscalecli.NewClient(binary)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +401,7 @@ func (s *Server) checkTailscaleCLIReadiness(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	route, err := s.tailscaleCLIRegistration.VerifyRegisteredRoute(ctx, s.cfg.TailscaleCLIScope, s.cfg.InstanceID, port, s.cfg.Port)
+	route, err := s.tailscaleCLIRegistration.VerifyRegisteredRoute(ctx, s.cfg.TailscaleCLIScope, s.cfg.InstanceID, s.cfg.TailscaleCLIOrigin, port, s.cfg.Port)
 	if err != nil || route.Readiness != tailscalecli.ReadinessReady || !route.RuntimeQualified {
 		return errors.New("persistent CLI-backed Serve route is not runtime-qualified and ready")
 	}
@@ -482,7 +488,7 @@ func (s *Server) tailscaleCLIControlStatus(ctx context.Context) localcontrol.Sta
 	port, err := tailscaleCLIHTTPSPort(s.cfg.TailscaleCLIOrigin)
 	if err == nil {
 		var route tailscalecli.RouteStatus
-		route, err = s.tailscaleCLIRegistration.VerifyRegisteredRoute(ctx, s.cfg.TailscaleCLIScope, s.cfg.InstanceID, port, s.cfg.Port)
+		route, err = s.tailscaleCLIRegistration.VerifyRegisteredRoute(ctx, s.cfg.TailscaleCLIScope, s.cfg.InstanceID, s.cfg.TailscaleCLIOrigin, port, s.cfg.Port)
 		status.PersistentRouteState = string(route.JournalState)
 		status.PersistentRouteReadiness = string(route.Readiness)
 		status.PersistentRouteReady = err == nil && route.Readiness == tailscalecli.ReadinessReady && route.RuntimeQualified

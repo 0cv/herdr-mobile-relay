@@ -35,10 +35,14 @@ fi
 relay_binary >/dev/null
 
 if [ "$TRANSPORT" = tailscale-cli ]; then
-    tailscale_cli_registration_status "$ENV_FILE" >/dev/null || {
-        echo "✗ A verified CLI-backed registration is required before installing its user service." >&2
-        exit 1
-    }
+    if [ "${HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START:-}" = 1 ]; then
+        "$RELAY_BIN" tailscale-cli activation-check >/dev/null || exit $?
+    else
+        tailscale_cli_registration_status "$ENV_FILE" >/dev/null || {
+            echo "✗ A verified CLI-backed registration is required before installing its user service." >&2
+            exit 1
+        }
+    fi
     ensure_relay_env "$ENV_FILE"
 else
     if ! command -v cloudflared >/dev/null 2>&1; then
@@ -60,10 +64,13 @@ if [ ! -x "$SERVICE_WRAPPER" ]; then
 fi
 WORK_DIR="$RELEASE_ROOT/current"
 if [ ! -d "$WORK_DIR" ]; then
-    WORK_DIR="$SCRIPT_DIR/.."
+    WORK_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 fi
 chmod +x "$SERVICE_WRAPPER"
 mkdir -p "$UNIT_DIR"
+WORK_DIR_ESCAPED="$(systemd_quote_value "$WORK_DIR")" || { echo "✗ Service work path contains unsupported control characters." >&2; exit 1; }
+ENVIRONMENT_ESCAPED="$(systemd_quote_value "$ENV_FILE")" || { echo "✗ Service environment path contains unsupported control characters." >&2; exit 1; }
+SERVICE_WRAPPER_ESCAPED="$(systemd_quote_exec "$SERVICE_WRAPPER")" || { echo "✗ Service executable path contains unsupported control characters." >&2; exit 1; }
 
 cat > "$UNIT_FILE" <<EOF
 [Unit]
@@ -73,9 +80,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$WORK_DIR
-Environment=HERDR_RELAY_ENV=$ENV_FILE
-ExecStart=$SERVICE_WRAPPER
+WorkingDirectory=$WORK_DIR_ESCAPED
+Environment=HERDR_RELAY_ENV=$ENVIRONMENT_ESCAPED
+ExecStart=$SERVICE_WRAPPER_ESCAPED
 Restart=on-failure
 RestartSec=10
 

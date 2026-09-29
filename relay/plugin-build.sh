@@ -163,8 +163,8 @@ validate_migration_source() {
     # shellcheck disable=SC2015
     case "$PLATFORM" in
         Linux)
-            grep -F "Environment=HERDR_RELAY_ENV=$source_env" "$SERVICE_FILE" >/dev/null &&
-                grep -E '^ExecStart=.*herdr-(mobile-relay|remote)-service\.sh([[:space:]]|$)' \
+            [ "$(installed_service_env_file)" = "$source_env" ] &&
+                grep -E '^ExecStart=.*herdr-(mobile-relay|remote)-service\.sh("|[[:space:]]|$)' \
                     "$SERVICE_FILE" >/dev/null || {
                     echo "herdr-mobile-relay: refusing to migrate an unrecognized systemd service" >&2
                     return 1
@@ -184,8 +184,8 @@ validate_migration_source() {
 recognized_service_definition() {
     case "$PLATFORM" in
         Linux)
-            grep -E '^Environment=HERDR_RELAY_ENV=/.+' "$SERVICE_FILE" >/dev/null &&
-                grep -E '^ExecStart=.*herdr-(mobile-relay|remote)-service\.sh([[:space:]]|$)' \
+            grep -E '^Environment=HERDR_RELAY_ENV=(".+"|/.+)$' "$SERVICE_FILE" >/dev/null &&
+                grep -E '^ExecStart=.*herdr-(mobile-relay|remote)-service\.sh("|[[:space:]]|$)' \
                     "$SERVICE_FILE" >/dev/null
             ;;
         Darwin)
@@ -219,12 +219,19 @@ rewrite_service_release_paths() {
     [ -f "$service_file" ] && [ -x "$service_wrapper" ] || return 1
     case "$PLATFORM" in
         Linux)
-            local temp
+            local temp service_escaped work_escaped env_escaped
+            local service_replacement work_replacement env_replacement
+            service_escaped="$(systemd_quote_exec "$service_wrapper")" || return 1
+            work_escaped="$(systemd_quote_value "$work_dir")" || return 1
+            env_escaped="$(systemd_quote_value "$env_file")" || return 1
+            service_replacement="$(sed_escape_replacement "ExecStart=$service_escaped")"
+            work_replacement="$(sed_escape_replacement "WorkingDirectory=$work_escaped")"
+            env_replacement="$(sed_escape_replacement "Environment=HERDR_RELAY_ENV=$env_escaped")"
             temp="$(mktemp "${service_file}.XXXXXX")" || return 1
             if ! sed \
-                -e "s|^ExecStart=.*|ExecStart=$service_wrapper|" \
-                -e "s|^WorkingDirectory=.*|WorkingDirectory=$work_dir|" \
-                -e "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$env_file|" \
+                -e "s|^ExecStart=.*|$service_replacement|" \
+                -e "s|^WorkingDirectory=.*|$work_replacement|" \
+                -e "s|^Environment=HERDR_RELAY_ENV=.*|$env_replacement|" \
                 "$service_file" > "$temp"; then
                 rm -f "$temp"
                 return 1
@@ -234,9 +241,9 @@ rewrite_service_release_paths() {
                 rm -f "$temp"
                 return 1
             fi
-            grep -Fx "ExecStart=$service_wrapper" "$service_file" >/dev/null &&
-                grep -Fx "WorkingDirectory=$work_dir" "$service_file" >/dev/null &&
-                grep -Fx "Environment=HERDR_RELAY_ENV=$env_file" "$service_file" >/dev/null
+            grep -Fx "ExecStart=$service_escaped" "$service_file" >/dev/null &&
+                grep -Fx "WorkingDirectory=$work_escaped" "$service_file" >/dev/null &&
+                grep -Fx "Environment=HERDR_RELAY_ENV=$env_escaped" "$service_file" >/dev/null
             ;;
         Darwin)
             update_launchd_release_paths \

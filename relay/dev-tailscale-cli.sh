@@ -21,6 +21,14 @@ else
     (cd "$REPO_DIR" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go run ./cmd/herdr-mobile-relay tailscale-cli activation-check) || exit $?
 fi
 
+cli_relay_call() {
+    if [ -n "$RELAY_BIN" ]; then
+        "$RELAY_BIN" "$@"
+    else
+        (cd "$REPO_DIR" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go run ./cmd/herdr-mobile-relay "$@")
+    fi
+}
+
 usage() {
     echo "CLI-backed development uses a separate development-scope registration and private state." >&2
     echo "It requires a selected absolute Tailscale CLI, exact HTTPS origin, node ID, and explicit risk consent." >&2
@@ -56,6 +64,21 @@ elif [ "$DEV_ROOT" != "$DEFAULT_DEV_ROOT" ]; then
 fi
 [ "$DEV_ROOT" != / ] && [ "$DEV_ROOT" != "$HOME" ] || { echo "✗ Root or home cannot be a development state directory." >&2; exit 2; }
 
+DEFAULT_SHARED_COORDINATION_ROOT="$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination"
+if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+    PRODUCTION_ENV_FILE="$HERDR_PLUGIN_CONFIG_DIR/relay.env"
+else
+    PRODUCTION_ENV_FILE="$SCRIPT_DIR/.env"
+fi
+PRODUCTION_COORDINATION_ROOT=""
+if [ -f "$PRODUCTION_ENV_FILE" ] && [ ! -L "$PRODUCTION_ENV_FILE" ]; then
+    PRODUCTION_COORDINATION_ROOT="$(env_file_value "$PRODUCTION_ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT)"
+fi
+COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-${PRODUCTION_COORDINATION_ROOT:-$DEFAULT_SHARED_COORDINATION_ROOT}}"
+case "$COORDINATION_ROOT" in /*) ;; *) echo "✗ Shared coordination root must be absolute." >&2; exit 2 ;; esac
+case "$DEV_ROOT/" in "$COORDINATION_ROOT/"*) echo "✗ Shared coordination root overlaps development state." >&2; exit 2 ;; esac
+case "$COORDINATION_ROOT/" in "$DEV_ROOT/"*) echo "✗ Shared coordination root overlaps development state." >&2; exit 2 ;; esac
+
 for protected in \
     "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay" \
     "${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr-mobile-relay}" \
@@ -90,7 +113,7 @@ if [ "$ACTION" != setup ]; then
     RELAY_BIN="${HERDR_DEV_TAILSCALE_CLI_RELAY_BIN:-$DEV_ROOT/bin/herdr-mobile-relay}"
     CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
     manager_args=(--binary "$CLI_BIN" --state-root "$HERDR_TAILSCALE_CLI_STATE_ROOT" \
-        --coordination-root "$HERDR_TAILSCALE_CLI_COORDINATION_ROOT" --scope development \
+        --coordination-root "$COORDINATION_ROOT" --scope development \
         --installation-id "$HERDR_RELAY_INSTANCE_ID" --https-port "$HERDR_TAILSCALE_CLI_HTTPS_PORT" \
         --backend-port "$HERDR_RELAY_PORT")
     case "$ACTION" in
@@ -145,7 +168,11 @@ else
 fi
 
 CLI_BIN="${HERDR_DEV_TAILSCALE_CLI_BIN:-${HERDR_TAILSCALE_CLI_BIN:-}}"
-case "$CLI_BIN" in /*) [ -x "$CLI_BIN" ] && [ ! -d "$CLI_BIN" ] || { echo "✗ Select an absolute executable Tailscale CLI path." >&2; exit 2; } ;; *) echo "✗ Set HERDR_DEV_TAILSCALE_CLI_BIN to the selected absolute executable." >&2; exit 2 ;; esac
+case "$CLI_BIN" in
+    "") ;;
+    /*) [ -x "$CLI_BIN" ] && [ ! -d "$CLI_BIN" ] || { echo "✗ Selected Tailscale CLI override is not executable." >&2; exit 2; } ;;
+    *) echo "✗ An explicit Tailscale CLI override must be absolute." >&2; exit 2 ;;
+esac
 HERDR_DEV_HERDR_BIN="${HERDR_DEV_HERDR_BIN:-${HERDR_BIN:-}}"
 case "$HERDR_DEV_HERDR_BIN" in /*) [ -x "$HERDR_DEV_HERDR_BIN" ] && [ ! -d "$HERDR_DEV_HERDR_BIN" ] || { echo "✗ Select an absolute executable Herdr path." >&2; exit 2; } ;; *) echo "✗ Set HERDR_DEV_HERDR_BIN to the absolute Herdr executable." >&2; exit 2 ;; esac
 HERDR_DEV_HERDR_SOCKET="${HERDR_DEV_HERDR_SOCKET:-${HERDR_SOCKET_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock}}"
@@ -162,18 +189,45 @@ for port in "$RELAY_PORT" "$PLUGIN_PORT" "$HTTPS_PORT"; do
 done
 [ "$RELAY_PORT" != "$PLUGIN_PORT" ] && [ "$RELAY_PORT" != "$HTTPS_PORT" ] && [ "$PLUGIN_PORT" != "$HTTPS_PORT" ] || { echo "✗ Choose three distinct development ports." >&2; exit 2; }
 
-ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-${HERDR_TAILSCALE_CLI_ORIGIN:-}}"
+CONFIGURED_ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-${HERDR_TAILSCALE_CLI_ORIGIN:-}}"
 PHONE_APP="${HERDR_DEV_PHONE_APP_URL:-${HERDR_PHONE_APP_URL:-}}"
-NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-${HERDR_TAILSCALE_CLI_NODE_ID:-}}"
-[ -n "$ORIGIN" ] && [ -n "$PHONE_APP" ] || { echo "✗ Set exact CLI HTTPS and verified phone-app origins." >&2; exit 2; }
-if [ -n "$RELAY_BIN" ]; then
-    [ "$("$RELAY_BIN" normalize-external-origin "$ORIGIN" 2>/dev/null || true)" = "$ORIGIN" ] || { echo "✗ Development HTTPS origin is not canonical." >&2; exit 2; }
+CONFIGURED_NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-${HERDR_TAILSCALE_CLI_NODE_ID:-}}"
+[ -n "$PHONE_APP" ] || { echo "✗ Set the exact verified phone-app origin." >&2; exit 2; }
+if [ "$ACTION" = setup ]; then
+    CLI_BIN="$(cli_relay_call tailscale-cli resolve-binary --binary "$CLI_BIN")" || {
+        echo "✗ No unambiguous absolute Tailscale CLI candidate was selected." >&2
+        exit 2
+    }
+    PREFLIGHT="$(cli_relay_call tailscale-cli preflight --binary "$CLI_BIN" --https-port "$HTTPS_PORT")" || {
+        echo "✗ Read-only Tailscale node/origin preflight failed; no route or state was changed." >&2
+        exit 1
+    }
+    NODE_ID="$(json_string_field "$PREFLIGHT" node_id "$RELAY_BIN")"
+    ORIGIN="$(json_string_field "$PREFLIGHT" origin "$RELAY_BIN")"
+    DNS_NAME="$(json_string_field "$PREFLIGHT" dns_name "$RELAY_BIN")"
+    [ -n "$NODE_ID" ] && [ -n "$ORIGIN" ] && [ -n "$DNS_NAME" ] || {
+        echo "✗ Read-only preflight did not establish a complete node identity and origin." >&2
+        exit 1
+    }
+    [ -z "$CONFIGURED_NODE_ID" ] || [ "$CONFIGURED_NODE_ID" = "$NODE_ID" ] || {
+        echo "✗ Configured node ID does not match the live read-only preflight." >&2
+        exit 1
+    }
+    [ -z "$CONFIGURED_ORIGIN" ] || [ "$CONFIGURED_ORIGIN" = "$ORIGIN" ] || {
+        echo "✗ Configured HTTPS origin does not match the live node's canonical origin." >&2
+        exit 1
+    }
+    if [ -n "${HERDR_DEV_TAILSCALE_CLI_RELAY_BIN:-}" ]; then
+        [ "$("$RELAY_BIN" normalize-external-origin "$ORIGIN" 2>/dev/null || true)" = "$ORIGIN" ] || {
+            echo "✗ Development HTTPS origin is not canonical." >&2
+            exit 2
+        }
+    fi
+else
+    ORIGIN="$CONFIGURED_ORIGIN"
+    NODE_ID="$CONFIGURED_NODE_ID"
+    [ -n "$ORIGIN" ] && [ -n "$NODE_ID" ] || { echo "✗ Existing CLI development identity is incomplete." >&2; exit 2; }
 fi
-[ -n "$NODE_ID" ] || {
-    [ -t 0 ] || { echo "✗ Set HERDR_DEV_TAILSCALE_CLI_NODE_ID before scripted setup." >&2; exit 2; }
-    read -r -p "Exact development node ID approved for route publication: " NODE_ID || exit 2
-}
-[ -n "$NODE_ID" ] || { echo "✗ Development node ID is required." >&2; exit 2; }
 
 if [ "$ACTION" = setup ]; then
     if [ -t 0 ]; then
@@ -203,7 +257,7 @@ if [ ! -d "$DEV_ROOT" ]; then mkdir -m 700 "$DEV_ROOT"; fi
 [ -d "$DEV_ROOT" ] && [ ! -L "$DEV_ROOT" ] || { echo "✗ Development root is not a real directory." >&2; exit 2; }
 case "$(uname -s)" in Darwin) root_mode="$(stat -f '%Lp' "$DEV_ROOT")" ;; Linux) root_mode="$(stat -c '%a' "$DEV_ROOT")" ;; esac
 [ "$root_mode" = 700 ] || { echo "✗ Development root must be mode 0700." >&2; exit 2; }
-for leaf in config cache data web bin registration coordination; do
+for leaf in config cache data web bin registration; do
     path="$DEV_ROOT/$leaf"
     [ ! -L "$path" ] || { echo "✗ Symlink inside development root is refused." >&2; exit 2; }
     if [ -e "$path" ]; then
@@ -218,6 +272,22 @@ for leaf in config cache data web bin registration coordination; do
         mkdir -m 700 "$path"
     fi
 done
+[ ! -L "$COORDINATION_ROOT" ] || { echo "✗ Shared node-coordination root cannot be a symlink." >&2; exit 2; }
+if [ -e "$COORDINATION_ROOT" ]; then
+    [ -d "$COORDINATION_ROOT" ] || { echo "✗ Shared node-coordination path is not a directory." >&2; exit 2; }
+    case "$(uname -s)" in
+        Darwin) coordination_mode="$(stat -f '%Lp' "$COORDINATION_ROOT")"; coordination_owner="$(stat -f '%u' "$COORDINATION_ROOT")" ;;
+        Linux) coordination_mode="$(stat -c '%a' "$COORDINATION_ROOT")"; coordination_owner="$(stat -c '%u' "$COORDINATION_ROOT")" ;;
+        *) echo "✗ Only Linux and macOS development are supported." >&2; exit 2 ;;
+    esac
+    [ "$coordination_mode" = 700 ] && [ "$coordination_owner" = "$(id -u)" ] || {
+        echo "✗ Shared node-coordination root has unsafe ownership or permissions." >&2
+        exit 2
+    }
+else
+    mkdir -p "$COORDINATION_ROOT"
+    chmod 700 "$COORDINATION_ROOT"
+fi
 if [ ! -f "$ENV_FILE" ]; then
     token="$(generate_token)"
     instance="$(generate_instance_id)"
@@ -225,19 +295,31 @@ if [ ! -f "$ENV_FILE" ]; then
     [ "${#token}" -eq 32 ] && [ -n "$instance" ] && [ -n "$control_run" ] || { echo "✗ Could not prepare private development identity." >&2; exit 2; }
     printf 'HERDR_DEV_TAILSCALE_CLI_ROOT=1\n' > "$MARKER"
     chmod 600 "$MARKER"
-    {
-        printf 'HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_TOKEN=%s\n' "$token"
-        printf 'HERDR_RELAY_INSTANCE_ID=%s\nHERDR_RELAY_CONTROL_RUN_ID=%s\n' "$instance" "$control_run"
-        printf 'HERDR_RELAY_HOST=127.0.0.1\nHERDR_RELAY_PORT=%s\nHERDR_RELAY_PLUGIN_PORT=%s\n' "$RELAY_PORT" "$PLUGIN_PORT"
-        printf 'HERDR_RELAY_PAIRING_SOCKET=%s/config/pairing-control.sock\n' "$DEV_ROOT"
-        printf 'HERDR_TAILSCALE_CLI_ORIGIN=%s\nHERDR_TAILSCALE_CLI_SCOPE=development\n' "$ORIGIN"
-        printf 'HERDR_TAILSCALE_CLI_BIN=%s\nHERDR_TAILSCALE_CLI_STATE_ROOT=%s/registration\n' "$CLI_BIN" "$DEV_ROOT"
-        printf 'HERDR_TAILSCALE_CLI_COORDINATION_ROOT=%s/coordination\nHERDR_TAILSCALE_CLI_HTTPS_PORT=%s\n' "$DEV_ROOT" "$HTTPS_PORT"
-        printf 'HERDR_TAILSCALE_CLI_NODE_ID=%s\nHERDR_PHONE_APP_URL=%s\n' "$NODE_ID" "$PHONE_APP"
-        printf 'HERDR_BIN=%s\nHERDR_SOCKET_PATH=%s\n' "$HERDR_DEV_HERDR_BIN" "$HERDR_DEV_HERDR_SOCKET"
-        printf 'HERDR_REACHABILITY_PORT_MAPPING=0\nHERDR_RELAY_REARM_BOOTSTRAP=0\nHERDR_RELAY_POLL_INTERVAL=2\n'
-    } > "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
+    initializing_env="$DEV_ROOT/.relay-env.initializing.$$"
+    : > "$initializing_env"
+    chmod 600 "$initializing_env"
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_TRANSPORT tailscale-cli
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_TOKEN "$token"
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_INSTANCE_ID "$instance"
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_CONTROL_RUN_ID "$control_run"
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_HOST 127.0.0.1
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_PORT "$RELAY_PORT"
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_PLUGIN_PORT "$PLUGIN_PORT"
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_PAIRING_SOCKET "$DEV_ROOT/config/pairing-control.sock"
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_ORIGIN "$ORIGIN"
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_SCOPE development
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_BIN "$CLI_BIN"
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_STATE_ROOT "$DEV_ROOT/registration"
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_HTTPS_PORT "$HTTPS_PORT"
+    set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_NODE_ID "$NODE_ID"
+    set_env_value_atomic "$initializing_env" HERDR_PHONE_APP_URL "$PHONE_APP"
+    set_env_value_atomic "$initializing_env" HERDR_BIN "$HERDR_DEV_HERDR_BIN"
+    set_env_value_atomic "$initializing_env" HERDR_SOCKET_PATH "$HERDR_DEV_HERDR_SOCKET"
+    set_env_value_atomic "$initializing_env" HERDR_REACHABILITY_PORT_MAPPING 0
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_REARM_BOOTSTRAP 0
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_POLL_INTERVAL 2
+    mv "$initializing_env" "$ENV_FILE"
 else
     [ "$(env_file_value "$ENV_FILE" HERDR_RELAY_TRANSPORT)" = tailscale-cli ] &&
         [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_SCOPE)" = development ] &&
@@ -259,6 +341,7 @@ else
 fi
 
 load_relay_env "$ENV_FILE"
+set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
 RELAY_BIN="$DEV_ROOT/bin/herdr-mobile-relay"
 version="$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.toml")"
 revision="$(git -C "$REPO_DIR" rev-parse HEAD)"
@@ -286,28 +369,60 @@ unset HERDR_PLUGIN_CONFIG_DIR HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION HERDR_TA
 unset GH_TOKEN CURL_CA_BUNDLE SSL_CERT_FILE NODE_EXTRA_CA_CERTS
 export HERDR_BIN="$HERDR_DEV_HERDR_BIN" HERDR_SOCKET_PATH="$HERDR_DEV_HERDR_SOCKET"
 export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN" HERDR_TAILSCALE_CLI_SCOPE=development
-export HERDR_TAILSCALE_CLI_STATE_ROOT="$DEV_ROOT/registration" HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$DEV_ROOT/coordination"
+export HERDR_TAILSCALE_CLI_STATE_ROOT="$DEV_ROOT/registration" HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT"
 export HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT" HERDR_PHONE_APP_URL="$PHONE_APP"
 export HERDR_RELAY_PAIRING_SOCKET="$DEV_ROOT/config/pairing-control.sock"
 export HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
 
+RELAY_PID=""
+cleanup_relay() {
+    if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
+        kill "$RELAY_PID" 2>/dev/null || true
+        wait "$RELAY_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup_relay EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$RELAY_BIN" serve &
+RELAY_PID=$!
+if ! wait_for_relay_identity_health "$RELAY_PORT" "$HERDR_RELAY_INSTANCE_ID" "$ORIGIN"; then
+    echo "✗ The exact development relay did not bind and pass local readiness; no route was published." >&2
+    exit 1
+fi
+
 if [ "$ACTION" = setup ]; then
     "$RELAY_BIN" tailscale-cli publish --binary "$CLI_BIN" \
-        --state-root "$DEV_ROOT/registration" --coordination-root "$DEV_ROOT/coordination" \
-        --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" \
+        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --origin "$ORIGIN" \
         --node-id "$NODE_ID" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
         --accepted --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
         --accept-no-rollback --accept-no-remote-drain
 else
     "$RELAY_BIN" tailscale-cli assert-ready --binary "$CLI_BIN" \
-        --state-root "$DEV_ROOT/registration" --coordination-root "$DEV_ROOT/coordination" \
-        --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" \
+        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --origin "$ORIGIN" \
         --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" >/dev/null || {
-        echo "✗ Development route drifted during update; no route repair was attempted." >&2
+        echo "✗ Development route drifted after update; no route repair was attempted." >&2
         exit 1
     }
 fi
 
+armed="$("$RELAY_BIN" pairing-control --socket "$DEV_ROOT/config/pairing-control.sock" \
+    --operation arm_bootstrap --run-id "$HERDR_RELAY_CONTROL_RUN_ID" --instance "$HERDR_RELAY_INSTANCE_ID")" || {
+    echo "✗ Fresh development readiness arm failed; the persistent route was retained." >&2
+    exit 1
+}
+[ "$(json_bool_field "$armed" ready)" = true ] &&
+    [ "$(json_bool_field "$armed" persistent_route_ready)" = true ] &&
+    [ "$(json_bool_field "$armed" invitation_armed)" = true ] || {
+    echo "✗ Development admission did not confirm the exact route and invitation arm." >&2
+    exit 1
+}
+
 echo "CLI Serve route published to the private development journal. Ctrl-C stops only this relay process; the route remains configured."
 echo "Run '$SCRIPT_DIR/dev-tailscale-cli.sh status|recover|unpublish' for later route lifecycle operations."
-exec "$RELAY_BIN"
+status=0
+wait "$RELAY_PID" || status=$?
+RELAY_PID=""
+exit "$status"
