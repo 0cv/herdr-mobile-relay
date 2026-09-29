@@ -92,10 +92,20 @@ CLI_SERVICE_INSTALL_ATTEMPTED=false
 cleanup_cli_backend_reservation() {
     [ "$CLI_RESERVATION_CLAIMED" = true ] && [ "$CLI_PUBLISH_ATTEMPTED" != true ] || return 0
     if [ "$CLI_SERVICE_INSTALL_ATTEMPTED" = true ]; then
-        "$SCRIPT_DIR/service.sh" stop >/dev/null 2>&1 || {
-            echo "⚠ Backend reservation retained because the installed service could not be stopped safely." >&2
-            return 0
-        }
+        if installed_relay_service_definition_present; then
+            HERDR_CLI_SETUP_ROLLBACK=1 "$SCRIPT_DIR/service.sh" rollback-cli-setup >/dev/null 2>&1 || {
+                "$SCRIPT_DIR/service.sh" stop >/dev/null 2>&1 || true
+                echo "⚠ Newly installed service could not be rolled back; it may restart later, so its backend reservation is retained." >&2
+                echo "  Inspect and disable the service before attempting explicit reservation recovery." >&2
+                return 0
+            }
+            echo "Removed the newly installed service definition; persistent Serve state was not changed."
+        else
+            "$SCRIPT_DIR/service.sh" stop >/dev/null 2>&1 || {
+                echo "⚠ Backend reservation retained because the service could not be stopped safely." >&2
+                return 0
+            }
+        fi
         CLI_SERVICE_INSTALL_ATTEMPTED=false
     fi
     if manager_call release-backend-port --node-id "$NODE_ID" >/dev/null 2>&1; then
@@ -176,6 +186,10 @@ setup_cli() {
         echo "✗ Select tailscale-cli explicitly in relay.env before setup; no transport is migrated implicitly." >&2
         return 1
     }
+    if installed_relay_service_definition_present; then
+        echo "✗ A relay service definition already exists; inspect/remove it with explicit route disposition before CLI setup." >&2
+        return 1
+    fi
     activation_check
     check_action
     [ -n "${HERDR_PHONE_APP_URL:-}" ] || { echo "✗ Set the exact verified HERDR_PHONE_APP_URL first." >&2; return 1; }
@@ -241,6 +255,10 @@ setup_cli() {
     CLI_RESERVATION_CLAIMED=true
     trap cleanup_cli_backend_reservation EXIT
     echo "▸ Installing and starting the loopback relay before publishing the persistent route."
+    if installed_relay_service_definition_present; then
+        echo "✗ A relay service appeared during CLI setup; refusing to replace it." >&2
+        return 1
+    fi
     CLI_SERVICE_INSTALL_ATTEMPTED=true
     HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START=1 "$SCRIPT_DIR/service.sh" install || {
         echo "✗ Service setup failed before route publication; no new Serve route was requested." >&2
@@ -258,18 +276,8 @@ setup_cli() {
     else
         publish_status=$?
         if [ "$publish_status" -eq 3 ]; then
-            echo "Publish was not dispatched; stopping the backend before reservation cleanup." >&2
-            if "$SCRIPT_DIR/service.sh" stop; then
-                CLI_SERVICE_INSTALL_ATTEMPTED=false
-                CLI_PUBLISH_ATTEMPTED=false
-                if manager_call release-backend-port --node-id "$NODE_ID"; then
-                    CLI_RESERVATION_CLAIMED=false
-                else
-                    echo "⚠ Backend reservation retained because read-only route inspection did not prove safe release." >&2
-                fi
-            else
-                echo "⚠ Service stop failed; backend reservation is retained." >&2
-            fi
+            echo "Publish was not dispatched; cleaning up the backend service before reservation recovery." >&2
+            CLI_PUBLISH_ATTEMPTED=false
         fi
         return "$publish_status"
     fi

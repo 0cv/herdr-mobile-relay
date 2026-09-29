@@ -123,6 +123,7 @@ shell-check:
 	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
 	python3 tests/test_service_uninstall_cli.py
+	HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_tailscale_cli_setup_failure.py
 	bash tests/test_speech_voices.sh
 	tests/test_stable_setup.sh
 
