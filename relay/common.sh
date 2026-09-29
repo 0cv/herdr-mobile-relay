@@ -1082,8 +1082,21 @@ env_file_value() {
 service_cli_route_disposition() {
     local env_file="$1"
     local script_dir="$2"
+    local prior_disposition="${3:-}"
     local choice line transport_value transport_mode=""
 
+    case "$prior_disposition" in
+        retained)
+            echo "Full uninstall already obtained explicit consent to retain the persistent CLI Serve route."
+            return 0
+            ;;
+        removed)
+            echo "Full uninstall already completed exact-route removal and readback."
+            return 0
+            ;;
+        "") ;;
+        *) echo "✗ Invalid prior CLI route disposition." >&2; return 1 ;;
+    esac
     [ -r "$env_file" ] || return 0
     while IFS= read -r line; do
         case "$line" in

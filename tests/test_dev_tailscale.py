@@ -776,7 +776,9 @@ printf 'Linux'
     registration_snapshot = registration_fixture.read_bytes()
     uninstall_unit_dir = cli_uninstall_home / ".config" / "systemd" / "user"
     uninstall_unit_dir.mkdir(mode=0o700, parents=True)
-    (uninstall_unit_dir / "herdr-mobile-relay.service").write_text("fixture service\n", encoding="utf-8")
+    (uninstall_unit_dir / "herdr-mobile-relay.service").write_text(
+        f'[Service]\nEnvironment="HERDR_RELAY_ENV={uninstall_env}"\n', encoding="utf-8",
+    )
     uninstall_env_settings = dict(env)
     uninstall_env_settings.update({
         "HOME": str(cli_uninstall_home), "HERDR_RELAY_ENV": str(uninstall_env),

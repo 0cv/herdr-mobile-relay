@@ -183,6 +183,7 @@ preflight_removal_target "$RELEASE_ROOT" "releases"
 preflight_removal_target "$CONFIG_DIR" "config/state"
 preflight_removal_target "$CACHE_DIR" "cache"
 
+CLI_ROUTE_DISPOSITION=""
 if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = tailscale-cli ]; then
     CLI_STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-registration}"
     CLI_COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-coordination}"
@@ -217,6 +218,7 @@ if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = t
                 echo "✗ Exact route removal did not complete; uninstall stopped and the journal was preserved." >&2
                 exit 1
             }
+            CLI_ROUTE_DISPOSITION=removed
             ;;
         *)
             if [ -t 0 ]; then
@@ -225,7 +227,10 @@ if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = t
                 leave_route="no"
             fi
             case "$leave_route" in
-                y|Y|yes|YES) echo "Leaving persistent route and private registration journal intact." ;;
+                y|Y|yes|YES)
+                    echo "Leaving persistent route and private registration journal intact."
+                    CLI_ROUTE_DISPOSITION=retained
+                    ;;
                 *) echo "Uninstall cancelled; choose route removal or explicit route preservation."; exit 1 ;;
             esac
             ;;
@@ -257,7 +262,12 @@ service_stopped=false
 case "$(uname -s)" in
     Darwin)
         if [ -f "$SCRIPT_DIR/uninstall-service.sh" ]; then
-            if sh "$SCRIPT_DIR/uninstall-service.sh"; then
+            if [ -n "$CLI_ROUTE_DISPOSITION" ]; then
+                uninstall_args=("--cli-route-disposition=$CLI_ROUTE_DISPOSITION")
+            else
+                uninstall_args=()
+            fi
+            if sh "$SCRIPT_DIR/uninstall-service.sh" "${uninstall_args[@]}"; then
                 service_stopped=true
             fi
         else
@@ -266,7 +276,12 @@ case "$(uname -s)" in
         ;;
     Linux)
         if [ -f "$SCRIPT_DIR/uninstall-systemd-user-service.sh" ]; then
-            if bash "$SCRIPT_DIR/uninstall-systemd-user-service.sh"; then
+            if [ -n "$CLI_ROUTE_DISPOSITION" ]; then
+                uninstall_args=("--cli-route-disposition=$CLI_ROUTE_DISPOSITION")
+            else
+                uninstall_args=()
+            fi
+            if bash "$SCRIPT_DIR/uninstall-systemd-user-service.sh" "${uninstall_args[@]}"; then
                 service_stopped=true
             fi
         else
