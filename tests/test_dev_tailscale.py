@@ -843,7 +843,7 @@ exit 0
     for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG"):
         positive_env.pop(name, None)
     setup_cli = subprocess.run(
-        [str(root / "relay" / "dev-tailscale-cli.sh")], env=positive_env,
+        ["/bin/bash", "-x", str(root / "relay" / "dev-tailscale-cli.sh")], env=positive_env,
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=30, check=False,
     )
