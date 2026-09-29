@@ -175,17 +175,6 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     if sentinel.exists() or (base / "unused-cli-mode").exists():
         raise AssertionError("CLI-backed refusal touched a Tailscale CLI or development state")
     check_checkout_root_existence_unchanged()
-    activation_events = activation_record.read_text(encoding="utf-8").splitlines()
-    activation_checks = [event for event in activation_events
-                         if event.startswith("tailscale-cli activation-check")]
-    if (activation_checks.count("tailscale-cli activation-check --scope development") != 3 or
-        activation_checks.count("tailscale-cli activation-check") != 1):
-        raise AssertionError(
-            "CLI-backed development and production activation scopes were not kept distinct: "
-            f"activation_checks={activation_checks!r}, all_cli_calls={activation_events!r}"
-        )
-    print("PASS dev-tailscale preflight: development_scope_is_explicit_and_production_remains_disabled")
-
     private_cli_dev = base / "cli-dev-private"
     private_cli_dev.mkdir(mode=0o700)
     cli_dev_gate = subprocess.run(
@@ -229,6 +218,17 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         cli_registration.exists() or cli_coordination.exists() or sentinel.exists()):
         raise AssertionError("installed CLI lifecycle did not stop at the production activation gate")
     print("PASS CLI lifecycle fixture: installed-service recovery remains production-gated")
+
+    activation_events = activation_record.read_text(encoding="utf-8").splitlines()
+    activation_checks = [event for event in activation_events
+                         if event.startswith("tailscale-cli activation-check")]
+    if (activation_checks.count("tailscale-cli activation-check --scope development") != 3 or
+        activation_checks.count("tailscale-cli activation-check") != 1):
+        raise AssertionError(
+            "CLI-backed development and production activation scopes were not kept distinct: "
+            f"activation_checks={activation_checks!r}, all_cli_calls={activation_events!r}"
+        )
+    print("PASS dev-tailscale preflight: development_scope_is_explicit_and_production_remains_disabled")
 
     # Development uses the installed service's actual relay.env coordination
     # root, even when its custom state path differs from the checkout defaults.

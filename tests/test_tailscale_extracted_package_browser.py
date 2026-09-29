@@ -2349,8 +2349,13 @@ else:
             "--accept-check-to-write-race", "--accept-port-reuse", "--accept-no-rollback",
             "--accept-no-remote-drain",
         ]
+        publish_confirmation = (
+            f"PUBLISH DEVELOPMENT ROUTE node=package-cli-fixture-node origin={cli_origin} "
+            f"https-port={os.environ['HERDR_TAILSCALE_HTTPS_PORT']} "
+            f"backend=127.0.0.1:{RELAY_PORT}\n"
+        ).encode("ascii")
         publish_result = subprocess.run(
-            publish_args, env=cli_env, cwd=package, stdin=subprocess.DEVNULL,
+            publish_args, env=cli_env, cwd=package, input=publish_confirmation,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False,
         )
         try:
