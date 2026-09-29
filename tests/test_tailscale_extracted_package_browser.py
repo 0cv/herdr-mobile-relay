@@ -42,7 +42,8 @@ STAGES = {
     "setup_reprint", "browser_reprint", "managed_retirement", "managed_restart",
     "browser_restart", "foreign_route_rejection", "held_pipe_cleanup",
     "ambiguous_localapi_ack", "cli_fixture_startup", "cli_route_publish",
-    "cli_app_admission", "cli_browser_enroll", "complete",
+    "cli_app_admission", "cli_admit", "cli_bootstrap_arm", "cli_setup_link",
+    "cli_browser_enroll", "complete",
 }
 FAILURE_CODES = {
     "fixture_assertion", "unexpected_exception", "archive_checksum_io",
@@ -1736,6 +1737,7 @@ def main() -> int:
     cli_fixture_binary_digest = ""
     cli_tailscale_events: list[str] = []
     cli_registration_summary: dict[str, bool] = {}
+    cli_app_summary: dict[str, int | bool] = {}
     current_stage = "archive_verify"
     completed_stages: list[str] = []
     failure_type = ""
@@ -2343,10 +2345,12 @@ else:
         transitions.extend(["cli-manager:exact-publish", "cli-manager:durable-registration-acknowledged"])
 
         set_stage("cli_app_admission")
+        cli_app_summary["backend_ready"] = True
         control_args = [
             str(cli_fixture_binary), "pairing-control", "--socket", str(cli_pairing_socket),
             "--run-id", cli_run_id, "--instance", cli_instance,
         ]
+        set_stage("cli_admit")
         admission = subprocess.run(
             control_args + ["--operation", "admit"], env=cli_env, cwd=package,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=False,
@@ -2355,8 +2359,16 @@ else:
             admission_record = json.loads(admission.stdout)
         except (ValueError, UnicodeError):
             die("packaged CLI app admission did not return bounded control evidence")
+        cli_app_summary.update({
+            "admission_returncode": admission.returncode,
+            "admission_ok": admission_record.get("ok") is True,
+            "admission_ready": admission_record.get("ready") is True,
+            "admission_serve_ready": admission_record.get("serve_ready") is True,
+            "admission_local_ready": admission_record.get("local_ready") is True,
+        })
         if admission.returncode != 0 or admission_record.get("ok") is not True or admission_record.get("ready") is not True:
             die("packaged CLI app did not admit only its exact verified Serve route")
+        set_stage("cli_bootstrap_arm")
         armed = subprocess.run(
             control_args + ["--operation", "arm_bootstrap"], env=cli_env, cwd=package,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=False,
@@ -2365,15 +2377,23 @@ else:
             armed_record = json.loads(armed.stdout)
         except (ValueError, UnicodeError):
             die("packaged CLI app bootstrap arm did not return bounded control evidence")
+        cli_app_summary.update({
+            "arm_returncode": armed.returncode,
+            "arm_ok": armed_record.get("ok") is True,
+            "arm_invitation_armed": armed_record.get("invitation_armed") is True,
+        })
         if armed.returncode != 0 or armed_record.get("ok") is not True or armed_record.get("invitation_armed") is not True:
             die("packaged CLI app did not persist explicit bootstrap admission")
+        set_stage("cli_setup_link")
         cli_setup = subprocess.run(
             ["/bin/bash", str(package / "relay" / "setup-link.sh")], cwd=package, env=cli_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45, check=False,
         )
+        cli_app_summary["setup_link_returncode"] = cli_setup.returncode
         if cli_setup.returncode != 0:
             die("extracted CLI setup-link did not accept its armed packaged app")
         cli_link = safe_link_from_output(cli_setup.stdout, cli_origin)
+        cli_app_summary["setup_link_found"] = bool(cli_link)
         if not cli_link:
             die("extracted CLI setup-link did not produce its private invitation link")
         case_results[EXPECTED_CASES[12]] = "pass"
@@ -2488,6 +2508,7 @@ else:
                 name: cli_tailscale_events.count(name) for name in sorted(set(cli_tailscale_events))
             },
             "cli_registration_summary": cli_registration_summary,
+            "cli_app_summary": cli_app_summary,
             "cli_localapi_event_count_unchanged": bool(
                 cli_localapi_event_count_before == len(localapi_events) if state is not None else False
             ),
