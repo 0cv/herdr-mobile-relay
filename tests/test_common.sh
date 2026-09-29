@@ -469,9 +469,8 @@ ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"
 export GH_TOKEN
-if [ "${HERDR_TRACE_COMMON_ENV:-0}" = 1 ]; then set -x; fi
 ensure_relay_env "$ENV_FILE"
-if [ "${HERDR_TRACE_COMMON_ENV:-0}" = 1 ]; then set +x; fi
+remove_env_value_atomic "$ENV_FILE" MISSING_TEST_KEY
 
 if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
     echo "relay.env exposed GH_TOKEN" >&2
@@ -495,6 +494,8 @@ if [ "$mode" != "600" ]; then
     echo "ensure_relay_env wrote GitHub token mode $mode instead of 600" >&2
     exit 1
 fi
+remove_env_value_if_equals_atomic "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE "$WORK_DIR/config/other-token"
+test "$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)" = "$TOKEN_FILE"
 
 SAFE_ENV_FILE="$WORK_DIR/shell-escaped.env"
 SHELL_INJECTION_MARKER="$WORK_DIR/shell-injection-ran"

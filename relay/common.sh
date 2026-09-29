@@ -1265,7 +1265,7 @@ remove_env_value_if_equals_atomic() {
     local temp_file
 
     if [ ! -f "$env_file" ]; then
-        return
+        return 0
     fi
     current="$(
         set -a
@@ -1275,7 +1275,7 @@ remove_env_value_if_equals_atomic() {
         printenv "$key" 2>/dev/null || true
     )"
     if [ "$current" != "$expected" ]; then
-        return
+        return 0
     fi
 
     directory="$(dirname "$env_file")"
@@ -1292,7 +1292,7 @@ remove_env_value_atomic() {
     local temp_file
 
     if [ ! -f "$env_file" ] || ! grep -q "^${key}=" "$env_file"; then
-        return
+        return 0
     fi
     directory="$(dirname "$env_file")"
     temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
