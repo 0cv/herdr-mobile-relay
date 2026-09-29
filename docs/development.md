@@ -17,16 +17,20 @@ Cloudflare tunnel / saved gateway, (2) the new CLI-backed persistent Tailscale
 transport, or (3) the legacy foreground/session-owned Tailscale Serve transport.
 Option 1 builds the current Go source and frontend, uses isolated ports and state
 under `relay/.dev/`, and never uses the installed production relay. Enter selects
-option 1. Option 2 is currently displayed as unavailable and refuses before CLI
-lookup, socket/service access, route mutation, or development-state creation.
-The source/fixture implementation does not establish live App Store/Linux
-qualification; activation remains disabled pending P6. Option 3 retains the
-existing LocalAPI temporary-session contract and its own consent/compatibility
-checks; it is not a fallback for option 2. In automation,
-`make dev-tunnel` retains the tunnel default; `HERDR_DEV_TRANSPORT=tailscale-cli`
-selects fail-closed option 2, while `HERDR_DEV_TRANSPORT=tailscale` selects the
-legacy option 3. “Tunnel” means the Cloudflare/gateway path here; Tailscale Serve
-is tailnet HTTPS, not Cloudflare tunneling. Development roots remain separate.
+option 1. Option 2 enables only isolated foreground development for the exact
+recognized macOS App Store Tailscale 1.102.4 profile. It is not runtime-qualified
+or production-enabled. Setup performs read-only CLI profile/preflight checks,
+refuses conflicting Serve listeners, and requires exact node/origin/listener/
+backend confirmation on stdin; no environment variable can consent. It creates
+separate `.dev-tailscale-cli/` state only after checks and consent and never
+installs a service. Option 3 retains the existing LocalAPI temporary-session
+contract and its own consent/compatibility checks; it is not a fallback for
+option 2. In automation, `make dev-tunnel` retains the tunnel default;
+`HERDR_DEV_TRANSPORT=tailscale-cli` selects option 2 but still requires the
+explicit dev opt-in and route phrase on stdin, while
+`HERDR_DEV_TRANSPORT=tailscale` selects legacy option 3. “Tunnel” means the
+Cloudflare/gateway path here; Tailscale Serve is tailnet HTTPS, not Cloudflare
+tunneling. Development roots remain separate.
 
 For an **explicitly selected, already running and authenticated** supported
 Tailscale v1.102.4 Unix daemon, choosing menu option 3 starts legacy managed
@@ -34,9 +38,11 @@ development without asking for paths or ports. The checkout-local state root
 `relay/.dev-tailscale/` is created with mode 0700 only after input checks.
 The development relay, plugin and HTTPS Serve ports default to 18377, 18378
 and 8443; conflicts are refused rather than adopting a listener or changing
-an enrolled port. CLI-backed development uses the same separate port contract,
-with state under `relay/.dev-tailscale-cli/` and an independently consented
-persistent route. After opt-in, executable `tailscale` and `herdr` binaries
+an enrolled port. CLI-backed development uses the same separate port contract, with state under
+`relay/.dev-tailscale-cli/` and an independently consented persistent route.
+The supported candidate is only the exact App Store 1.102.4 profile; its status
+reports development enablement separately from runtime qualification. The
+persistent route survives stop and Ctrl-C; explicit unpublish is separate. After opt-in, executable `tailscale` and `herdr` binaries
 are located on `PATH` without running them. The Herdr socket is selected from
 `HERDR_SOCKET_PATH` or the same `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`
 default used by the relay and event hook, before development HOME/XDG isolation
@@ -84,7 +90,8 @@ is refused. A pre-existing marked dev root retains its token, device store and
 port choice; no rearm or automatic recovery is performed. Build replacements
 preserve the previous generated version for inspection. The phone setup URL
 requires a trusted certificate, live owner and exact matching web bundle.
-MacSys/App Store and physical-phone use are not qualified by this entrypoint.
+MacSys is unsupported. The App Store profile is development-enabled only; no
+real-runtime or physical-phone qualification is implied by this entrypoint.
 
 ## Common targets
 
@@ -92,7 +99,7 @@ MacSys/App Store and physical-phone use are not qualified by this entrypoint.
 make check             # all backend, frontend, browser, and release checks
 make backend-check     # format, vet, tests, race detector, shell checks
 make dev-tailscale     # guided legacy foreground Serve; explicit private root/daemon/ports
-make dev-tailscale-cli # CLI-backed persistent mode; currently refuses pending P6
+make dev-tailscale-cli # isolated App Store 1.102.4 development; runtime qualification pending
 make web-release       # replace committed web/ with a verified frontend build
 make web-release-check # compare and browser-test the shipped web/ bundle
 make relay-plugin      # link this checkout as a Herdr plugin

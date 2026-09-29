@@ -1,6 +1,7 @@
 #!/bin/bash
 # Isolated foreground development transport for the separate CLI Serve owner.
-# The real HOME is preserved for the selected Tailscale CLI; all relay roots,
+# Only the exact App Store 1.102.4 candidate is development-enabled; this is not
+# runtime qualification. The real HOME is preserved for the selected Tailscale CLI; all relay roots,
 # credentials, release data, sockets, caches, and journals live in the private
 # .dev-tailscale-cli tree. Stopping the process never removes the persistent route.
 set -euo pipefail
@@ -15,10 +16,10 @@ DEFAULT_DEV_ROOT="$SCRIPT_DIR/.dev-tailscale-cli"
 RELAY_BIN="${HERDR_DEV_TAILSCALE_CLI_RELAY_BIN:-}"
 if [ -n "$RELAY_BIN" ]; then
     case "$RELAY_BIN" in /*) [ -x "$RELAY_BIN" ] && [ ! -d "$RELAY_BIN" ] || { echo "✗ Selected relay binary is not executable." >&2; exit 2; } ;; *) echo "✗ Relay binary path must be absolute." >&2; exit 2 ;; esac
-    "$RELAY_BIN" tailscale-cli activation-check || exit $?
+    "$RELAY_BIN" tailscale-cli activation-check --scope development || exit $?
 else
-    command -v go >/dev/null 2>&1 || { echo "✗ Go is required to check the compile-time activation gate." >&2; exit 2; }
-    (cd "$REPO_DIR" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go run ./cmd/herdr-mobile-relay tailscale-cli activation-check) || exit $?
+    command -v go >/dev/null 2>&1 || { echo "✗ Go is required to check development-qualification enablement." >&2; exit 2; }
+    (cd "$REPO_DIR" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go run ./cmd/herdr-mobile-relay tailscale-cli activation-check --scope development) || exit $?
 fi
 
 GATE_RELAY_BIN="$RELAY_BIN"
@@ -34,7 +35,8 @@ usage() {
     echo "CLI-backed development uses a separate development-scope registration and private state." >&2
     echo "It requires a selected absolute Tailscale CLI, exact HTTPS origin, node ID, and explicit risk consent." >&2
     echo "Interactive: make dev-tailscale-cli (development opt-in; then route publication consent)." >&2
-    echo "Scripted: HERDR_DEV_TAILSCALE_CLI_ENABLE=1 make dev-tailscale-cli" >&2
+    echo "Scripted transport opt-in: HERDR_DEV_TAILSCALE_CLI_ENABLE=1 make dev-tailscale-cli"
+    echo "Route publication still requires an exact node/origin/listener/backend confirmation on stdin; no environment variable can consent." >&2
     echo "Optional: HERDR_DEV_TAILSCALE_CLI_DIR, HERDR_DEV_TAILSCALE_CLI_BIN," >&2
     echo "  HERDR_DEV_TAILSCALE_CLI_ORIGIN, HERDR_DEV_TAILSCALE_CLI_NODE_ID, HERDR_DEV_HERDR_BIN." >&2
     echo "Lifecycle: setup, status, setup-link, recover, release-reservation, update, unpublish, and stop (Ctrl-C)." >&2
@@ -307,7 +309,7 @@ if [ "$ACTION" = setup ]; then
         echo "✗ No unambiguous absolute Tailscale CLI candidate was selected." >&2
         exit 2
     }
-    PREFLIGHT="$(cli_relay_call tailscale-cli preflight --binary "$CLI_BIN" --https-port "$HTTPS_PORT")" || {
+    PREFLIGHT="$(cli_relay_call tailscale-cli preflight --scope development --binary "$CLI_BIN" --https-port "$HTTPS_PORT")" || {
         echo "✗ Read-only Tailscale node/origin preflight failed; no route or state was changed." >&2
         exit 1
     }
@@ -339,17 +341,18 @@ else
 fi
 
 if [ "$ACTION" = setup ]; then
-    if [ -t 0 ]; then
-        echo "Development-only persistent HTTPS route: $ORIGIN -> 127.0.0.1:$RELAY_PORT"
-        echo "Scope: development; HTTPS port: $HTTPS_PORT; selected node: $NODE_ID"
-        echo "The route survives Ctrl-C, stop, and checkout deletion unless explicitly unpublished."
-        echo "Consent also accepts the CLI check/write race, backend port reuse, no global rollback, and no remote-drain guarantee."
-        read -r -p "Type PUBLISH to authorize this exact route and all listed risks: " answer || exit 2
-        [ "$answer" = PUBLISH ] || { echo "Cancelled; no state or route was changed."; exit 1; }
-    else
-        [ "${HERDR_DEV_TAILSCALE_CLI_PUBLISH:-}" = PUBLISH ] || { echo "✗ Set HERDR_DEV_TAILSCALE_CLI_PUBLISH=PUBLISH for the exact route consent." >&2; exit 2; }
-    fi
+    echo "Development-qualification enabled: exact App Store 1.102.4 profile only; real-runtime qualification remains pending."
+    echo "Development-only persistent HTTPS route: $ORIGIN -> 127.0.0.1:$RELAY_PORT"
+    echo "Scope: development; HTTPS listener: $HTTPS_PORT; selected node: $NODE_ID"
+    echo "The route survives Ctrl-C, stop, and checkout deletion unless explicitly unpublished."
+    echo "Consent accepts the CLI check/write race, backend port reuse, no global rollback, and no remote-drain guarantee."
+    ROUTE_CONFIRMATION="PUBLISH DEVELOPMENT ROUTE node=$NODE_ID origin=$ORIGIN https-port=$HTTPS_PORT backend=127.0.0.1:$RELAY_PORT"
+    read -r -p "Type exactly '$ROUTE_CONFIRMATION': " answer || exit 2
+    [ "$answer" = "$ROUTE_CONFIRMATION" ] || { echo "Cancelled; no state or route was changed." >&2; exit 1; }
+    PUBLISH_CONFIRMATION="$answer"
+
 else
+    PUBLISH_CONFIRMATION=""
     [ -f "$ENV_FILE" ] || { echo "✗ Update requires existing marked CLI development state." >&2; exit 1; }
 fi
 
@@ -544,7 +547,7 @@ if [ "$ACTION" = setup ]; then
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --origin "$ORIGIN" \
         --node-id "$NODE_ID" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
         --reservation-id "$DEV_RESERVATION_ID" --accepted --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
-        --accept-no-rollback --accept-no-remote-drain; then
+        --accept-no-rollback --accept-no-remote-drain <<<"$PUBLISH_CONFIRMATION"; then
         :
     else
         publish_status=$?

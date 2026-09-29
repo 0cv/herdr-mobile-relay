@@ -1,16 +1,19 @@
 # CLI-backed Tailscale qualification matrix
 
-**Status: qualification plan; no live tests or approval recorded.** Source-backed
-fixtures establish parser/adapter behavior only. All real profile qualification
-and activation remain deferred to separately authorized P6 work. `ownerAcceptance`
-for the persistent-route limitations is **pending live enablement**; implementation
-or review of this matrix is not acceptance.
+**Status: development-only enablement for the exact supplied App Store macOS
+1.102.4 profile. No real-runtime or physical-phone qualification is recorded.**
+Source-backed fixtures establish parser/adapter behavior only; a recognized
+profile is not proof of runtime compatibility. Production and installed-service
+activation remain disabled until physical-phone qualification is recorded and a
+separate production enablement is authorized. The owner accepted the four
+persistent-route limitations for this isolated development route only; that
+acceptance is not runtime qualification or production approval.
 
 ## Provenance and candidate profiles
 
 | Candidate | Provenance available to this implementation | Source-described | Fixture-tested | Real-runtime-qualified | Activation |
 | --- | --- | --- | --- | --- | --- |
-| App Store macOS 1.102.4 | Handoff-supplied metadata: `osVariant=appstore`; client/daemon long strings reportedly match; reported `gitCommit=3caf7d9e7dcaba589cfc58beda596929733e4fea`, supplemental commit `084ee3b64537a1276e56fc38cdf0a711da9f4936`, capability `142`. This metadata is not an independently verified binary/capture. | CLI command and upstream schema behavior are described by pinned v1.102.4 source; App Store noninteractive execution, daemon/profile match, sandbox permission and login-service behavior remain unknown. | Synthetic version/status/Serve fixtures may cover the supplied metadata shape. Not a live capture. | No | Disabled pending P6 App Store invocation and service/phone qualification. |
+| App Store macOS 1.102.4 | Handoff-supplied metadata: `osVariant=appstore`; client/daemon long strings reportedly match; reported `gitCommit=3caf7d9e7dcaba589cfc58beda596929733e4fea`, supplemental commit `084ee3b64537a1276e56fc38cdf0a711da9f4936`, capability `142`. This metadata is not an independently verified binary/capture. | CLI command and upstream schema behavior are described by pinned v1.102.4 source; App Store noninteractive execution, daemon/profile match, sandbox permission and login-service behavior remain unknown. | Synthetic version/status/Serve fixtures may cover the supplied metadata shape. Not a live capture. | No | Enabled only for isolated foreground development after exact route-bound consent; never production or installed-service activation. |
 | Upstream Linux/amd64 v1.102.4 candidate | Public source tag v1.102.4 / upstream commit `bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8`; module checksum is in `go.sum`. No official distro artifact metadata or actual binary was inspected as part of this work. | CLI commands/schemas and source version metadata are described. The exact distributed binary/build string and socket permissions are not inferred from the source alone. | Clearly synthetic Linux candidate fixtures; no official build string is invented. | No | Disabled pending exact artifact and P6 Linux qualification. |
 | MacSys GUI, other macOS/Linux versions, architectures or channels | No selected exact profile evidence in this task. | Partial source similarities do not qualify a profile. | No profile fixture is an approval. | No | Unsupported/refuse. |
 
@@ -79,7 +82,11 @@ credential, invitation or QR data appears. Required automated cases:
   an external-writer race is modeled to demonstrate the check-to-write limit;
   uncertain/corrupt state cannot be silently repaired, adopted, erased or used to
   repurpose its backend.
-- **Admission/service:** no CLI profile can activate before P6; pairing remains
+- **Admission/service:** the exact App Store profile may activate only in
+  isolated foreground development after development qualification and route consent.
+  Production and installed-service activation remain disabled pending physical-
+  phone qualification and separate enablement. Status distinguishes
+  `development_qualification_enabled` from `runtime_qualified`; pairing remains
   closed until trusted HTTPS, exact bundle, current identity and app readiness;
   service stop preserves route; service restart performs no route write; bounded
   waiting does not mutate or restart-storm. `TestCLITailscaleControlStatusFailsClosedOnUnqualifiedRoute`
@@ -100,17 +107,16 @@ credential, invitation or QR data appears. Required automated cases:
   fake-only manager, service, installer, and health fixtures. Phone-managed
   updates remain refused; real profile coexistence and live qualification remain
   outstanding.
-- **Development:** source now has a separate `.dev-tailscale-cli/` foreground
-  workspace, default ports 18377/18378/8443 (as specified by the development
-  plan and distinct from production and managed-Tailscale backends), separate registration/coordination roots,
+- **Development:** `.dev-tailscale-cli/` is a separate foreground workspace with
+  default ports 18377/18378/8443, separate registration/coordination roots,
   read-only status/recovery, explicit unpublish, and route-preserving Ctrl-C.
-  The fake-only hosted fixture passed positive start/update, exact-route recheck,
-  development-scope isolation, and production-state preservation. Activation-gate
-  refusal, Linux/macOS service fixtures, route-preserving stop/uninstall, and
-  exact shell-unpublish consent were exercised without a real Tailscale CLI or
-  service manager. Operator-managed package update is interactive and fixture-
-  tested but remains unavailable until separate P6 profile qualification and
-  activation; no profile is runtime-qualified.
+  Only exact supplied App Store 1.102.4 metadata enables this path; Linux,
+  MacSys, other versions and unrecognized profiles refuse before Serve mutation.
+  Setup displays the selected node, canonical origin, HTTPS listener and backend,
+  then requires the exact route-bound phrase on stdin. No environment variable
+  can supply consent. This path does not claim live-runtime or phone qualification;
+  it is not an installed service or production migration. Current-revision hosted
+  fixture verification is still required.
 - **Packaging and unchanged paths:** exact release archive uses no end-user Go,
   Bun or Python; existing direct-session and BYO regression suites stay intact.
   `test_dev_tailscale.py` and the extracted-package checker use an inert relay
@@ -145,26 +151,50 @@ per-call timeouts and jittered backoff when the daemon is unavailable. This
 polling has detection latency and is not a live LocalAPI watch or instantaneous
 remote revocation.
 
-## Risk acceptance and P6 runbook questions
+## Development risk acceptance and live runbook
 
-All four limits in the contract must be disclosed in setup consent, status and
-recovery instructions: non-atomic CLI check-to-write race, persistent route and
-local port reuse, no automatic global rollback, and no remote-drain guarantee.
-Operator acceptance remains pending. Prior to real tests, ask the operator to
-confirm, in one scoped decision:
+The owner accepted these four limits only for this isolated development route;
+they must be shown before consent and in status/recovery guidance. Acceptance is
+not runtime qualification or production authorization:
 
-1. Which exact user account, tailnet/node, Tailscale app/package, OS version and
-   release/profile may be contacted?
-2. Which unused development HTTPS listener/backend and resulting origin may be
-   published, and which unrelated Serve state must be preserved?
-3. Is permission granted to run the listed read-only status/version/Serve checks
-   and the exact publish/readback/removal commands against that node?
-4. Should cleanup remove the exact acknowledged route or deliberately leave it?
-   What should happen if acknowledgement/readback is uncertain?
-5. After development qualification, is a separately scoped installed-service
-   migration and physical-phone test authorized?
+1. The CLI check-to-write race is not atomic with respect to external Serve writers.
+2. The persistent route and local backend-port reuse can survive relay stop and
+   expose a later process bound to the same port.
+3. There is no automatic global rollback; unrelated Serve state must never be
+   reset or restored from a snapshot.
+4. There is no guarantee that remote connections drain after route removal.
 
-No question is answered by this document. The run starts with sanitized pre-state
-capture and a selected unused development listener, stops on any mismatch, and
-retains evidence on uncertainty. Installed-service migration, PWA enrollment,
-sleep/wake/update and release approval are separate cells and permissions.
+The supervising assistant executes this runbook only after the independent
+review gates. Do not substitute another node, account, profile, action or scope.
+The only live candidate is the current Mac's App Store Tailscale 1.102.4 profile
+on the owner's current node/account, in isolated development, with HTTPS Serve
+port 8443 and loopback backend 127.0.0.1:18377 (plugin backend 18378). Production,
+installed-service activation/migration, physical-phone enrollment and release
+qualification are outside this runbook.
+
+1. Confirm the executable, client/daemon identity and version exactly match the
+   supplied App Store profile; stop immediately for an unrecognized or inconsistent
+   profile, wrong account/node, permission error, logged-out daemon, or ambiguity.
+2. Capture a sanitized pre-change summary of the complete Serve configuration,
+   including unrelated routes. Preserve all unrelated state. The manager must
+   refuse if listener 8443 or backend 18377 is occupied, conflicting, unrecorded,
+   or cannot be parsed completely. Do not free a port or remove another mapping.
+3. Review the exact canonical node origin and the four limitations displayed by
+   the development launcher. The operator must type the exact node/origin/8443/
+   127.0.0.1:18377 confirmation shown by the tool on stdin; no environment-based
+   consent bypass exists. A mismatch or EOF means cancel before state or route
+   mutation.
+4. Run only the foreground development setup. Verify the readback is exactly the
+   selected HTTPS route to 127.0.0.1:18377 and record a sanitized post-change
+   Serve summary. Confirm unrelated routes are byte-for-byte/semantically
+   unchanged. Do not install or start a service and do not enroll a phone.
+5. Stop and retain the route/journal by default. If cleanup is explicitly chosen,
+   use the separate exact-route unpublish consent. On timeout, mismatch, unknown
+   fields, CLI error after dispatch or any uncertainty, stop, retain evidence and
+   do not retry, reset Serve or remove other routes.
+6. Record the result as development-only. Physical-phone qualification remains
+   a separate future phase; production stays disabled until that qualification
+   is recorded and separately enabled.
+
+This runbook is not a deployment instruction. Development, PWA enrollment,
+sleep/wake, installed-service migration and release approval are distinct cells.

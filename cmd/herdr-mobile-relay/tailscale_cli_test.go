@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
@@ -26,6 +28,40 @@ func TestNonzeroCLIProcessExitIsNotMappedToRetryStatus(t *testing.T) {
 	if _, err := client.Preflight(context.Background(), 8443); err == nil ||
 		!errors.Is(err, tailscalecli.ErrCommandFailed) || tailscalePreflightExitCode(err) != 78 {
 		t.Fatalf("unsuccessful CLI process was treated as transient: err=%v code=%d", err, tailscalePreflightExitCode(err))
+	}
+}
+
+func TestActivationScopeKeepsProductionDisabledAndDevelopmentExplicit(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code, err := runTailscaleCLIWithInput([]string{"activation-check"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 || err == nil || !strings.Contains(err.Error(), "production activation remains disabled") || stdout.Len() != 0 {
+		t.Fatalf("production activation-check = code %d err=%v stdout=%q", code, err, stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code, err = runTailscaleCLIWithInput([]string{"activation-check", "--scope", "development"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 || err != nil || !strings.Contains(stdout.String(), "development-qualification-enabled") ||
+		!strings.Contains(stdout.String(), "runtime qualification remains pending") {
+		t.Fatalf("development activation-check conflated qualification states: code %d err=%v stdout=%q", code, err, stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code, err = runTailscaleCLIWithInput([]string{"status", "--scope", "production", "--binary", "/not-a-real-cli"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 2 || err == nil || !strings.Contains(err.Error(), "limited to isolated development scope") {
+		t.Fatalf("production status was not refused before CLI selection: code %d err=%v", code, err)
+	}
+}
+
+func TestRouteConfirmationReaderBindsExactInputAndRejectsTokens(t *testing.T) {
+	expected := tailscalecli.PublishRouteConfirmation("node-example", "https://relay.example.test:8443", 8443, 18377)
+	if got, err := readRouteConfirmation(strings.NewReader(expected+"\n"), expected); err != nil || got != expected {
+		t.Fatalf("exact stdin route confirmation = %q, %v", got, err)
+	}
+	for _, input := range []string{"PUBLISH\n", expected, expected + " extra\n", strings.Repeat("x", 600) + "\n"} {
+		if _, err := readRouteConfirmation(strings.NewReader(input), expected); err == nil {
+			t.Fatalf("accepted non-exact route confirmation %q", input)
+		}
 	}
 }
 

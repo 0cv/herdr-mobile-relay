@@ -2,4 +2,8 @@
 
 package tailscalecli
 
-func fixtureRuntimeQualificationEnabled() bool { return false }
+import "runtime"
+
+func fixtureCLIExecutableRequired() bool { return false }
+
+func profilePlatform() (string, string) { return runtime.GOOS, runtime.GOARCH }

@@ -88,19 +88,24 @@ type Inspection struct {
 	Identity     Identity
 	Profile      Profile
 	ProfileKnown bool
-	// RuntimeQualified remains false in shipped builds. The hosted fixture tag
-	// may set it true only in a non-release test binary with synthetic CLI I/O.
+	// DevelopmentQualificationEnabled is a code policy limited to the exact
+	// App Store candidate. It is not evidence of a real runtime qualification.
+	DevelopmentQualificationEnabled bool
+	// RuntimeQualified is independent. Shipped builds keep it false; the hosted
+	// fixture build may set it only for a marked synthetic CLI executable.
 	RuntimeQualified bool
 	Version          VersionMetadata
 	Serve            tailscale.ServeStatus
 }
 
 type PreflightReport struct {
-	NodeID    string  `json:"node_id"`
-	DNSName   string  `json:"dns_name"`
-	Origin    string  `json:"origin"`
-	Profile   Profile `json:"profile"`
-	HTTPSPort int     `json:"https_port"`
+	NodeID                          string  `json:"node_id"`
+	DNSName                         string  `json:"dns_name"`
+	Origin                          string  `json:"origin"`
+	Profile                         Profile `json:"profile"`
+	HTTPSPort                       int     `json:"https_port"`
+	DevelopmentQualificationEnabled bool    `json:"development_qualification_enabled"`
+	RuntimeQualified                bool    `json:"runtime_qualified"`
 }
 
 type commandResult struct {
@@ -187,10 +192,11 @@ func NewClient(binary string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fixtureRuntimeQualificationEnabled() && !isSyntheticFixtureCLI(selected) {
+	if fixtureCLIExecutableRequired() && !isSyntheticFixtureCLI(selected) {
 		return nil, fmt.Errorf("%w: fixture builds require an injected synthetic CLI executable", ErrProfileUnavailable)
 	}
-	return &Client{binary: selected, run: runCommand, validateBinary: true, profileOS: runtime.GOOS, profileArch: runtime.GOARCH}, nil
+	profileOS, profileArch := profilePlatform()
+	return &Client{binary: selected, run: runCommand, validateBinary: true, profileOS: profileOS, profileArch: profileArch}, nil
 }
 
 const syntheticFixtureCLIMarker = "HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1"
@@ -280,6 +286,9 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 	if profile == ProfileUnknown {
 		return Inspection{}, fmt.Errorf("%w: unrecognized version metadata", ErrUnsupported)
 	}
+	if !developmentQualificationEnabledFor(profile) {
+		return Inspection{}, fmt.Errorf("%w: %s is not enabled for development operations", ErrUnsupported, profile)
+	}
 
 	serveResult, err := c.execute(ctx, "serve", "status", "--json")
 	if err != nil {
@@ -302,11 +311,12 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 			TailnetName: status.TailnetName,
 			UserID:      status.UserID,
 		},
-		Profile:          profile,
-		ProfileKnown:     true,
-		RuntimeQualified: fixtureRuntimeQualificationEnabled(),
-		Version:          metadata,
-		Serve:            serve,
+		Profile:                         profile,
+		ProfileKnown:                    true,
+		DevelopmentQualificationEnabled: developmentQualificationEnabledFor(profile),
+		RuntimeQualified:                false,
+		Version:                         metadata,
+		Serve:                           serve,
 	}, nil
 }
 
@@ -327,7 +337,13 @@ func (c *Client) Preflight(ctx context.Context, httpsPort int) (PreflightReport,
 	return PreflightReport{
 		NodeID: inspection.Identity.NodeID, DNSName: inspection.Identity.DNSName,
 		Origin: origin, Profile: inspection.Profile, HTTPSPort: httpsPort,
+		DevelopmentQualificationEnabled: inspection.DevelopmentQualificationEnabled,
+		RuntimeQualified:                inspection.RuntimeQualified,
 	}, nil
+}
+
+func developmentQualificationEnabledFor(profile Profile) bool {
+	return profile == ProfileAppStoreSupplied
 }
 
 func identifyProfileFor(metadata VersionMetadata, goos, goarch string) Profile {

@@ -57,6 +57,7 @@ type Consent struct {
 	NodeID                   string
 	HTTPSPort                int
 	BackendPort              int
+	RouteConfirmation        string
 	PersistentRouteAccepted  bool
 	RouteRemovalAccepted     bool
 	CheckToWriteRaceAccepted bool
@@ -127,12 +128,13 @@ const (
 // RouteStatus is a redacted read-only view of registration and observed route
 // readiness. It deliberately omits account and node identifiers.
 type RouteStatus struct {
-	JournalState     RegistrationState `json:"journal_state"`
-	Readiness        RouteReadiness    `json:"readiness"`
-	Profile          Profile           `json:"profile,omitempty"`
-	HTTPSPort        int               `json:"https_port,omitempty"`
-	BackendPort      int               `json:"backend_port,omitempty"`
-	RuntimeQualified bool              `json:"runtime_qualified"`
+	JournalState                    RegistrationState `json:"journal_state"`
+	Readiness                       RouteReadiness    `json:"readiness"`
+	Profile                         Profile           `json:"profile,omitempty"`
+	HTTPSPort                       int               `json:"https_port,omitempty"`
+	BackendPort                     int               `json:"backend_port,omitempty"`
+	DevelopmentQualificationEnabled bool              `json:"development_qualification_enabled"`
+	RuntimeQualified                bool              `json:"runtime_qualified"`
 }
 
 // RecoveryReport is a redacted, read-only reconciliation view. Observed route
@@ -253,6 +255,9 @@ func optionalPrivateDirectory(path string) (string, bool, error) {
 // root until the exact route is explicitly unpublished or setup proves no
 // route was published and releases its own reservation.
 func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int, reservationID string) error {
+	if err := m.requireDevelopmentScope(scope); err != nil {
+		return err
+	}
 	reservation := backendPortReservation{
 		Schema: 1, InstallationID: installationID, Scope: scope, NodeID: nodeID,
 		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin, ReservationID: reservationID,
@@ -268,7 +273,7 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 	if inspection.Identity.NodeID != nodeID || !originMatchesIdentity(origin, inspection.Identity, httpsPort) {
 		return ErrConflict
 	}
-	if err := m.requireMutationProfile(inspection); err != nil {
+	if err := m.requireProfileForScope(inspection, scope); err != nil {
 		return err
 	}
 	return m.withBackendReservationLock(ctx, func() error {
@@ -318,6 +323,9 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 // ReleaseBackendPort removes only the caller's reservation after read-only CLI
 // inspection proves no Serve route still targets the selected backend port.
 func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int, reservationID string, serviceStopped bool) error {
+	if err := m.requireDevelopmentScope(scope); err != nil {
+		return err
+	}
 	if !serviceStopped || !validReservationID(reservationID) {
 		return ErrConflict
 	}
@@ -361,6 +369,9 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 			if inspection.Identity.NodeID != nodeID || !originMatchesIdentity(origin, inspection.Identity, httpsPort) || !inspection.Serve.Complete {
 				return ErrConflict
 			}
+			if err := m.requireProfileForScope(inspection, scope); err != nil {
+				return err
+			}
 			if backendPortHasRoute(inspection.Serve, backendPort, nil) {
 				return ErrConflict
 			}
@@ -379,13 +390,17 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 	})
 }
 
-// Publish creates exactly one persistent background HTTPS proxy route. Normal
-// production managers fail closed because no profile is runtime-qualified.
+// Publish creates exactly one persistent background HTTPS proxy route. Real
+// operations are development-scoped; production remains separately gated even
+// when the candidate profile is recognized.
 func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 	if m.fixtureMutations && request.ReservationID == "" {
 		request.ReservationID = "00000000000000000000000000000001"
 	}
 	if err := validateRequest(request); err != nil {
+		return m.publishNotDispatched(err)
+	}
+	if err := m.requireDevelopmentScope(request.Scope); err != nil {
 		return m.publishNotDispatched(err)
 	}
 	if !validReservationID(request.ReservationID) {
@@ -398,7 +413,7 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 	if inspection.Identity.NodeID != request.ExpectedNodeID || !originMatchesIdentity(request.Origin, inspection.Identity, request.HTTPSPort) {
 		return m.publishNotDispatched(ErrConflict)
 	}
-	if err := m.requireMutationProfile(inspection); err != nil {
+	if err := m.requireProfileForScope(inspection, request.Scope); err != nil {
 		return m.publishNotDispatched(err)
 	}
 	err = m.withNodeLock(ctx, inspection.Identity.NodeID, func() error {
@@ -411,7 +426,7 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 				!originMatchesIdentity(request.Origin, current.Identity, request.HTTPSPort) {
 				return ErrConflict
 			}
-			if err := m.requireMutationProfile(current); err != nil {
+			if err := m.requireProfileForScope(current, request.Scope); err != nil {
 				return err
 			}
 			record, err := m.readRegistration()
@@ -449,6 +464,10 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 			if err != nil || reserved == nil || reserved.ReservationID != request.ReservationID ||
 				!sameBackendReservation(*reserved, desiredReservation) {
 				return ErrConflict
+			}
+			if !m.fixtureMutations && (request.Scope != "development" ||
+				request.Consent.RouteConfirmation != PublishRouteConfirmation(request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort)) {
+				return errors.New("exact route-bound development confirmation is required")
 			}
 			if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
 				return err
@@ -549,6 +568,10 @@ func (m *Manager) publishNotDispatched(err error) error {
 // valid journal is never adopted, and this method never repairs a route.
 func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int) (RouteStatus, error) {
 	status := RouteStatus{JournalState: StateUnconfigured, Readiness: ReadinessWaiting}
+	if err := m.requireDevelopmentScope(scope); err != nil {
+		status.Readiness = ReadinessUnqualified
+		return status, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -569,7 +592,12 @@ func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installation
 			return status, inspectErr
 		}
 		status.Profile = inspection.Profile
+		status.DevelopmentQualificationEnabled = scope == "development" && inspection.DevelopmentQualificationEnabled
 		status.RuntimeQualified = inspection.RuntimeQualified
+		if err := m.requireProfileForScope(inspection, scope); err != nil {
+			status.Readiness = ReadinessUnqualified
+			return status, err
+		}
 		if hasRouteAtPort(inspection.Serve, httpsPort) {
 			status.Readiness = ReadinessConflicted
 			return status, ErrConflict
@@ -595,7 +623,12 @@ func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installation
 		return status, err
 	}
 	status.Profile = inspection.Profile
+	status.DevelopmentQualificationEnabled = scope == "development" && inspection.DevelopmentQualificationEnabled
 	status.RuntimeQualified = inspection.RuntimeQualified
+	if err := m.requireProfileForScope(inspection, scope); err != nil {
+		status.Readiness = ReadinessUnqualified
+		return status, err
+	}
 	if inspection.Identity.NodeID != record.NodeID || inspection.Identity.DNSName != record.DNSName ||
 		inspection.Profile != record.Profile || m.client.binary != record.BinaryPath {
 		status.Readiness = ReadinessConflicted
@@ -615,6 +648,11 @@ func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installation
 // change an acknowledged registration.
 func (m *Manager) Recover(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int) (RecoveryReport, error) {
 	report := RecoveryReport{Route: RouteStatus{JournalState: StateUnconfigured, Readiness: ReadinessWaiting}}
+	if err := m.requireDevelopmentScope(scope); err != nil {
+		report.Route.Readiness = ReadinessUnqualified
+		report.RequiresOperatorAction = true
+		return report, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -663,7 +701,13 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		return report, err
 	}
 	report.Route.Profile = inspection.Profile
+	report.Route.DevelopmentQualificationEnabled = scope == "development" && inspection.DevelopmentQualificationEnabled
 	report.Route.RuntimeQualified = inspection.RuntimeQualified
+	if err := m.requireProfileForScope(inspection, scope); err != nil {
+		report.Route.Readiness = ReadinessUnqualified
+		report.RequiresOperatorAction = true
+		return report, err
+	}
 	if record == nil {
 		if !originMatchesIdentity(origin, inspection.Identity, httpsPort) {
 			report.Route.Readiness = ReadinessConflicted
@@ -778,6 +822,9 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 // confirms the exact operation ID and one read-only Serve observation. It never
 // invokes a Serve mutator or adopts a route without a matching pending intent.
 func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int, consent Consent) error {
+	if err := m.requireDevelopmentScope(scope); err != nil {
+		return err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -805,7 +852,7 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 		m.client.binary != record.BinaryPath {
 		return ErrConflict
 	}
-	if err := m.requireMutationProfile(initial); err != nil {
+	if err := m.requireProfileForScope(initial, scope); err != nil {
 		return err
 	}
 	return m.withNodeLock(ctx, record.NodeID, func() error {
@@ -897,6 +944,9 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 		(record.State == StateReconciledPresent && !record.MutationAcknowledged)) {
 		return ErrUncertain
 	}
+	if err := m.requireDevelopmentScope(record.Scope); err != nil {
+		return err
+	}
 	origin, err := tailscale.Origin(record.DNSName, record.HTTPSPort)
 	if err != nil {
 		return ErrConflict
@@ -912,7 +962,7 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 		!sameProfile(initial, *record) || m.client.binary != record.BinaryPath {
 		return ErrConflict
 	}
-	if err := m.requireMutationProfile(initial); err != nil {
+	if err := m.requireProfileForScope(initial, record.Scope); err != nil {
 		return err
 	}
 	return m.withNodeLock(ctx, record.NodeID, func() error {
@@ -938,7 +988,7 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 				!sameProfile(current, *record) || m.client.binary != record.BinaryPath {
 				return ErrConflict
 			}
-			if err := m.requireMutationProfile(current); err != nil {
+			if err := m.requireProfileForScope(current, record.Scope); err != nil {
 				return err
 			}
 			if !registeredRouteMatches(current, *record) {
@@ -1004,14 +1054,24 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 	})
 }
 
-func (m *Manager) requireMutationProfile(inspection Inspection) error {
+func (m *Manager) requireDevelopmentScope(scope string) error {
+	if scope == "development" || (scope == "production" && m.fixtureMutations) {
+		return nil
+	}
+	return fmt.Errorf("%w: real CLI-backed operations are limited to isolated development scope; production activation is disabled", ErrUnsupported)
+}
+
+func (m *Manager) requireProfileForScope(inspection Inspection, scope string) error {
 	if !inspection.ProfileKnown {
 		return ErrUnsupported
 	}
-	if inspection.RuntimeQualified || m.fixtureMutations {
+	if m.fixtureMutations {
 		return nil
 	}
-	return fmt.Errorf("%w: %s is source/fixture-only; live qualification and enablement are pending P6", ErrUnsupported, inspection.Profile)
+	if scope == "development" && inspection.DevelopmentQualificationEnabled {
+		return nil
+	}
+	return fmt.Errorf("%w: %s is not development-enabled for this scope; runtime qualification remains pending", ErrUnsupported, inspection.Profile)
 }
 
 func validateRequest(request PublishRequest) error {
@@ -1030,6 +1090,11 @@ func validateConsentBinding(consent Consent, nodeID, scope, origin string, https
 		return errors.New("explicit consent must bind to this node, origin, scope and exact ports")
 	}
 	return nil
+}
+
+func PublishRouteConfirmation(nodeID, origin string, httpsPort, backendPort int) string {
+	return fmt.Sprintf("PUBLISH DEVELOPMENT ROUTE node=%s origin=%s https-port=%d backend=127.0.0.1:%d",
+		nodeID, origin, httpsPort, backendPort)
 }
 
 func validatePublishConsent(consent Consent, nodeID, scope, origin string, httpsPort, backendPort int) error {

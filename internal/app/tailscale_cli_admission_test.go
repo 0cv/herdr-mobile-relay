@@ -99,9 +99,10 @@ func TestTailscaleCLIReadinessArmAndDrift(t *testing.T) {
 	installManagedHealthTestNetwork(t, server, managedFixtureHost+":"+publicPort, public.Addr().String(), roots)
 
 	verifier := &fixedCLIRouteVerifier{status: tailscalecli.RouteStatus{
-		JournalState:     tailscalecli.StateRegistered,
-		Readiness:        tailscalecli.ReadinessReady,
-		RuntimeQualified: true,
+		JournalState:                    tailscalecli.StateRegistered,
+		Readiness:                       tailscalecli.ReadinessReady,
+		DevelopmentQualificationEnabled: true,
+		RuntimeQualified:                false,
 	}}
 	server.tailscaleCLIRegistration = verifier
 	// A fresh service may poll before first publication. That expected absence
@@ -116,6 +117,11 @@ func TestTailscaleCLIReadinessArmAndDrift(t *testing.T) {
 	verifier.status.JournalState = tailscalecli.StateRegistered
 	verifier.status.Readiness = tailscalecli.ReadinessReady
 	verifier.err = nil
+	qualificationStatus := server.tailscaleCLIControlStatus(context.Background())
+	if !qualificationStatus.PersistentRouteDevelopmentQualificationEnabled ||
+		qualificationStatus.PersistentRouteRuntimeQualified || !qualificationStatus.PersistentRouteReady {
+		t.Fatalf("status conflated development enablement with runtime qualification: %+v", qualificationStatus)
+	}
 	var bundleChecks int
 	verifyExactBundle := server.verifyPublicBundle
 	server.verifyPublicBundle = func(ctx context.Context, gotRoot, gotOrigin, gotVersion, gotRevision string) error {

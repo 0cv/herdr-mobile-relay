@@ -2124,7 +2124,7 @@ def main() -> int:
             stderr=subprocess.PIPE, timeout=5, check=False,
         )
         if (fixture_activation.returncode != 2 or
-            b"pending P6" not in fixture_activation.stderr or b"no CLI or service was contacted" not in fixture_activation.stderr):
+            b"pending physical-phone qualification" not in fixture_activation.stderr or b"no CLI or service was contacted" not in fixture_activation.stderr):
             die("extracted release binary did not keep CLI profile activation disabled")
         case_results[EXPECTED_CASES[10]] = "pass"
         transitions.append("release-binary:cli-activation-disabled")
@@ -2137,8 +2137,14 @@ def main() -> int:
             [str(cli_fixture_binary), "tailscale-cli", "activation-check"], stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=5, check=False,
         )
-        if fixture_tag_activation.returncode != 0:
-            die("separately tagged CLI fixture binary did not enable synthetic hosted coverage")
+        if fixture_tag_activation.returncode != 2:
+            die("separately tagged CLI fixture binary enabled production activation")
+        fixture_tag_development = subprocess.run(
+            [str(fixture_cli_binary), "tailscale-cli", "activation-check", "--scope", "development"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
+        )
+        if fixture_tag_development.returncode != 0:
+            die("separately tagged CLI fixture binary did not enable synthetic development coverage")
 
         cli_root = temporary_root / "cli-backed-package"
         cli_config = cli_root / "config"
@@ -2152,6 +2158,25 @@ def main() -> int:
         for path in (cli_config, cli_runtime, cli_cache, cli_data, cli_home,
                      cli_state_root, cli_coordination_root, cli_fixture_bin):
             path.mkdir(mode=0o700, parents=True)
+        unmarked_cli_sentinel = cli_root / "unmarked-cli-executed"
+        unmarked_cli = cli_fixture_bin / "unmarked-tailscale"
+        unmarked_cli.write_text(
+            "#!/bin/sh\nprintf invoked >> \"$UNMARKED_CLI_SENTINEL\"\nexit 97\n",
+            encoding="utf-8",
+        )
+        unmarked_cli.chmod(0o700)
+        unmarked_cli_result = subprocess.run(
+            [str(cli_fixture_binary), "tailscale-cli", "status", "--binary", str(unmarked_cli),
+             "--scope", "development", "--state-root", str(cli_state_root),
+             "--coordination-root", str(cli_coordination_root), "--installation-id", "unmarked-fixture",
+             "--origin", "https://relay.tailnet.ts.net:8443", "--https-port", "8443", "--backend-port", "18377"],
+            env=dict(os.environ, UNMARKED_CLI_SENTINEL=str(unmarked_cli_sentinel)),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
+        )
+        if (unmarked_cli_result.returncode == 0 or
+            b"fixture builds require an injected synthetic CLI executable" not in unmarked_cli_result.stderr or
+            unmarked_cli_sentinel.exists()):
+            die("tagged fixture binary executed an unmarked Tailscale CLI")
         cli_token = os.urandom(TOKEN_BYTES).hex()
         cli_instance = "package-cli-fixture-instance"
         cli_run_id = "package-cli-fixture-run"
@@ -2159,17 +2184,19 @@ def main() -> int:
         cli_fake_path = cli_fixture_bin / "tailscale"
         cli_serve_state = cli_root / "serve-status.json"
         cli_events_file = cli_root / "tailscale-cli-events.jsonl"
+        cli_fixture_version = "1.102.4-t3caf7d9e7d-g084ee3b64537"
         cli_status = {
-            "Version": TS_VERSION, "BackendState": "Running",
+            "Version": cli_fixture_version, "BackendState": "Running",
             "Self": {"ID": "package-cli-fixture-node", "UserID": 41, "DNSName": "relay.tailnet.ts.net."},
             "CurrentTailnet": {"Name": "Disposable CLI fixture", "MagicDNSSuffix": "tailnet.ts.net", "MagicDNSEnabled": True},
             "CertDomains": ["relay.tailnet.ts.net"],
             "User": {"41": {"ID": 41, "LoginName": "fixture@example.invalid", "DisplayName": "Disposable fixture", "ProfilePicURL": ""}},
         }
         cli_version = {
-            "majorMinorPatch": "1.102.4", "short": "1.102.4", "long": TS_VERSION,
-            "gitCommit": TS_COMMIT, "daemonLong": TS_VERSION, "extraGitCommit": "",
-            "osVariant": "", "cap": 141,
+            "majorMinorPatch": "1.102.4", "short": "1.102.4", "long": cli_fixture_version,
+            "gitCommit": "3caf7d9e7dcaba589cfc58beda596929733e4fea",
+            "daemonLong": cli_fixture_version, "extraGitCommit": "084ee3b64537a1276e56fc38cdf0a711da9f4936",
+            "osVariant": "appstore", "cap": 142,
         }
         cli_fake_program = r'''#!/usr/bin/env python3
 # HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1

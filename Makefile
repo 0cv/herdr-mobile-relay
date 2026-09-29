@@ -23,7 +23,7 @@ help:
 	@echo "  make quick-start                First run: install missing tools and start the phone app"
 	@echo "  make dev-tunnel                Choose tunnel, gated CLI Tailscale, or legacy mode (interactive)"
 	@echo "  make dev-tailscale             Guided legacy foreground/session-owned Tailscale development"
-	@echo "  make dev-tailscale-cli         CLI-backed persistent Tailscale development (currently disabled pending P6)"
+	@echo "  make dev-tailscale-cli         CLI-backed development qualification (App Store 1.102.4 only; not runtime-qualified)"
 	@echo "  make stable-setup               Provision/resume a stable tunnel, service, and verified QR"
 	@echo "  make stable-teardown            Remove only resources recorded by the stable wizard"
 	@echo "  make setup                      Prepare config and check prerequisites without installing"

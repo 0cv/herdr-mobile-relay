@@ -55,9 +55,11 @@ route, or **Operator-owned Tailscale HTTPS Serve (BYO, foreground)**, which uses
 a canonical HTTPS origin you already route to this loopback relay. BYO can keep
 an independently hosted phone app, whose exact bundle Herdr verifies before
 pairing. It does not inspect or change Tailscale state; the ingress remains
-yours when Herdr stops. Both are foreground-only. A separate CLI-backed persistent background mode is
-under implementation, but its candidate App Store/Linux profiles are not
-runtime-qualified and cannot be activated; it is not yet a setup choice. See
+yours when Herdr stops. Both are foreground-only. A separate CLI-backed
+persistent mode is available only for isolated development on the exact macOS
+App Store Tailscale 1.102.4 profile; it is not runtime-qualified and is not a
+regular setup choice. Production and installed-service activation remain
+refused pending physical-phone qualification and separate enablement. See
 [Transports](docs/transports.md#managed-tailscale-serve) for the separate
 lifecycle and platform limits.
 
@@ -144,6 +146,7 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 | [docs/mobile-app.md](docs/mobile-app.md) | Every feature: agent list, terminal, devices, speech, notifications |
 | [docs/transports.md](docs/transports.md) | Cloudflare, community gateway, own gateway, Tailscale transport lifecycle |
 | [docs/tailscale-cli-contract.md](docs/tailscale-cli-contract.md) | CLI-backed persistent Serve safety contract and recovery states |
+| [docs/F028-historical-test-execution-disclosure.md](docs/F028-historical-test-execution-disclosure.md) | Durable disclosure of the historical F028 execution; not current verification evidence |
 | [docs/tailscale-cli-qualification.md](docs/tailscale-cli-qualification.md) | Candidate profile evidence and qualification matrix |
 | [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
 | [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |

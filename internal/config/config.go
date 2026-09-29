@@ -178,10 +178,15 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// TailscaleCLIProfilesEnabled reports the compile-time activation gate. The
-// shipped build remains false until P6; only the explicitly tagged disposable
-// hosted fixture build enables synthetic CLI-backed lifecycle coverage.
+// TailscaleCLIProfilesEnabled is the separate production activation gate. It
+// remains false in ordinary and fixture builds until physical-phone
+// qualification is recorded and production enablement receives its own change.
 func TailscaleCLIProfilesEnabled() bool { return tailscaleCLIProfilesEnabled }
+
+// TailscaleCLIDevelopmentQualificationEnabled enables only the isolated
+// development qualification path. The adapter still accepts exactly the
+// recognized App Store 1.102.4 profile; this does not mean runtime-qualified.
+func TailscaleCLIDevelopmentQualificationEnabled() bool { return true }
 
 func (c *Config) Addr() string {
 	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))

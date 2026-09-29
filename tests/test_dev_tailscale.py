@@ -45,7 +45,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     cli_relay.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$ACTIVATION_CHECK_RECORD\"\n"
-        "echo 'tailscale-cli is not enabled pending P6' >&2\n"
+        "if [ \"$1\" = tailscale-cli ] && [ \"$2\" = activation-check ] && [ \"$3\" = --scope ] && [ \"$4\" = development ]; then exit 0; fi\n"
+        "echo 'production CLI activation remains disabled' >&2\n"
         "exit 2\n",
         encoding="utf-8",
     )
@@ -120,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             os.close(master)
 
     interactive_refused("direct_interactive_decline", script, b"n\n", b"Cancelled; nothing was started.")
-    interactive_refused("cli_menu_choice_refuses_before_p6", tunnel_script, b"2\n", b"not enabled",
+    interactive_refused("cli_menu_choice_requires_route_confirmation", tunnel_script, b"2\nn\n", b"Cancelled; no state or route was changed.",
                         HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(cli_relay),
                         ACTIVATION_CHECK_RECORD=str(activation_record))
     interactive_refused("dev_tunnel_rejects_relative_state", tunnel_script, b"3\n",
@@ -169,15 +170,16 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=5, check=False,
     )
-    if cli_delegated.returncode == 0 or b"not enabled" not in cli_delegated.stdout + cli_delegated.stderr:
-        raise AssertionError("CLI-backed development selection did not fail closed pending P6")
+    if cli_delegated.returncode == 0 or b"Scripted transport opt-in" not in cli_delegated.stdout + cli_delegated.stderr:
+        raise AssertionError("CLI-backed development selection bypassed its explicit transport opt-in")
     if sentinel.exists() or (base / "unused-cli-mode").exists():
         raise AssertionError("CLI-backed refusal touched a Tailscale CLI or development state")
     check_checkout_root_existence_unchanged()
     activation_checks = activation_record.read_text(encoding="utf-8").splitlines()
-    if not activation_checks or any(event != "tailscale-cli activation-check" for event in activation_checks):
-        raise AssertionError("CLI-backed entrypoint did not stop at the compile-time activation gate")
-    print("PASS dev-tailscale preflight: cli_mode_refuses_before_state_or_tool_access")
+    if (activation_checks.count("tailscale-cli activation-check --scope development") != 3 or
+        activation_checks.count("tailscale-cli activation-check") != 1):
+        raise AssertionError("CLI-backed development and production activation scopes were not kept distinct")
+    print("PASS dev-tailscale preflight: development_scope_is_explicit_and_production_remains_disabled")
 
     private_cli_dev = base / "cli-dev-private"
     private_cli_dev.mkdir(mode=0o700)
@@ -186,14 +188,16 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         env=dict(without_consent, HERDR_DEV_TAILSCALE_CLI_ENABLE="1",
                  HERDR_DEV_TAILSCALE_CLI_DIR=str(private_cli_dev),
                  HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(cli_relay),
+                 HERDR_DEV_PHONE_APP_URL="https://app.fixture.invalid",
                  ACTIVATION_CHECK_RECORD=str(activation_record)),
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=5, check=False,
     )
-    if (cli_dev_gate.returncode == 0 or b"not enabled" not in cli_dev_gate.stdout + cli_dev_gate.stderr or
+    if (cli_dev_gate.returncode == 0 or
+        b"No unambiguous absolute Tailscale CLI candidate was selected" not in cli_dev_gate.stdout + cli_dev_gate.stderr or
         list(private_cli_dev.iterdir()) or sentinel.exists()):
-        raise AssertionError("CLI development touched its isolated root or Tailscale executable before P6")
-    print("PASS dev-tailscale-cli isolation: activation gate precedes private state and service access")
+        raise AssertionError("development qualification skipped profile selection or touched private state")
+    print("PASS dev-tailscale-cli isolation: development qualification remains profile-gated and production state untouched")
 
     cli_lifecycle_env = base / "cli-lifecycle.env"
     cli_registration = base / "cli-registration"
@@ -216,10 +220,10 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=5, check=False,
     )
-    if (lifecycle.returncode == 0 or b"not enabled" not in lifecycle.stdout + lifecycle.stderr or
+    if (lifecycle.returncode == 0 or b"production CLI activation remains disabled" not in lifecycle.stdout + lifecycle.stderr or
         cli_registration.exists() or cli_coordination.exists() or sentinel.exists()):
-        raise AssertionError("CLI recovery did not stop before real CLI or private registration access")
-    print("PASS CLI lifecycle fixture: read-only recovery obeys activation gate before CLI/state access")
+        raise AssertionError("installed CLI lifecycle did not stop at the production activation gate")
+    print("PASS CLI lifecycle fixture: installed-service recovery remains production-gated")
 
     # Development uses the installed service's actual relay.env coordination
     # root, even when its custom state path differs from the checkout defaults.
@@ -1002,7 +1006,6 @@ exit 0
         "HERDR_DEV_PHONE_APP_URL": "https://app.fixture.invalid",
         "HERDR_DEV_HERDR_BIN": str(fake_herdr),
         "HERDR_DEV_HERDR_SOCKET": str(cli_dev_fixture / "herdr.sock"),
-        "HERDR_DEV_TAILSCALE_CLI_PUBLISH": "PUBLISH",
         "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(home / ".local" / "state" / "herdr-mobile-relay" / "tailscale-cli-coordination"),
         "HERDR_DEV_TAILSCALE_CLI_PORT": "18377",
         "HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT": "18378",
@@ -1013,10 +1016,20 @@ exit 0
     })
     for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG"):
         positive_env.pop(name, None)
+    bypass_env = dict(positive_env, HERDR_DEV_TAILSCALE_CLI_PUBLISH="PUBLISH")
+    bypass_cli = subprocess.run(
+        [str(root / "relay" / "dev-tailscale-cli.sh")], env=bypass_env,
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=10, check=False,
+    )
+    if (bypass_cli.returncode == 0 or (cli_dev_root / "relay.env").exists() or
+        (cli_dev_root / "registration").exists()):
+        raise AssertionError("blanket environment-variable consent bypassed exact route confirmation")
     setup_cli = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh")], env=positive_env,
-        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=30, check=False,
+        cwd=root, input=(b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
+                        b"origin=https://relay.fixture.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
     )
     if setup_cli.returncode != 0:
         raise AssertionError(f"positive CLI development setup failed: {setup_cli.stdout + setup_cli.stderr!r}")

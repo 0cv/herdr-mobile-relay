@@ -451,8 +451,8 @@ func (s *Server) checkTailscaleCLIReadiness(ctx context.Context) error {
 		return err
 	}
 	route, err := s.tailscaleCLIRegistration.VerifyRegisteredRoute(ctx, s.cfg.TailscaleCLIScope, s.cfg.InstanceID, s.cfg.TailscaleCLIOrigin, port, s.cfg.Port)
-	if err != nil || route.Readiness != tailscalecli.ReadinessReady || !route.RuntimeQualified {
-		return errors.New("persistent CLI-backed Serve route is not runtime-qualified and ready")
+	if err != nil || route.Readiness != tailscalecli.ReadinessReady || !tailscaleCLIRouteEnabledForScope(s.cfg.TailscaleCLIScope, route) {
+		return errors.New("persistent CLI-backed Serve route is not enabled for this scope and ready")
 	}
 	if err := s.checkLocalHealth(ctx); err != nil {
 		return err
@@ -540,7 +540,10 @@ func (s *Server) tailscaleCLIControlStatus(ctx context.Context) localcontrol.Sta
 		route, err = s.tailscaleCLIRegistration.VerifyRegisteredRoute(ctx, s.cfg.TailscaleCLIScope, s.cfg.InstanceID, s.cfg.TailscaleCLIOrigin, port, s.cfg.Port)
 		status.PersistentRouteState = string(route.JournalState)
 		status.PersistentRouteReadiness = string(route.Readiness)
-		status.PersistentRouteReady = err == nil && route.Readiness == tailscalecli.ReadinessReady && route.RuntimeQualified
+		status.PersistentRouteDevelopmentQualificationEnabled = route.DevelopmentQualificationEnabled
+		status.PersistentRouteRuntimeQualified = route.RuntimeQualified
+		status.PersistentRouteReady = err == nil && route.Readiness == tailscalecli.ReadinessReady &&
+			tailscaleCLIRouteEnabledForScope(s.cfg.TailscaleCLIScope, route)
 	} else {
 		status.PersistentRouteReadiness = string(tailscalecli.ReadinessConflicted)
 	}
@@ -554,6 +557,17 @@ func (s *Server) tailscaleCLIControlStatus(ctx context.Context) localcontrol.Sta
 	}
 	status.Ready = status.LocalReady && status.ServeReady && s.bootstrapGate != nil && s.bootstrapGate.OpenStatus() && !status.Quarantined
 	return status
+}
+
+func tailscaleCLIRouteEnabledForScope(scope string, route tailscalecli.RouteStatus) bool {
+	switch scope {
+	case "development":
+		return config.TailscaleCLIDevelopmentQualificationEnabled() && route.DevelopmentQualificationEnabled
+	case "production":
+		return config.TailscaleCLIProfilesEnabled() && route.RuntimeQualified
+	default:
+		return false
+	}
 }
 
 func (s *Server) watchTailscaleCLIRegistration(ctx context.Context) {

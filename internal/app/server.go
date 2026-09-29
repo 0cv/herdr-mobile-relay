@@ -185,8 +185,17 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 // directories. Legacy (non-managed) configurations must not supply an owner.
 func NewOwned(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner) (*Server, error) {
 	if cfg.Transport == config.TransportTailscaleCLI {
-		if !config.TailscaleCLIProfilesEnabled() {
-			return nil, errors.New("tailscale-cli startup is disabled until separate live profile qualification and activation")
+		switch cfg.TailscaleCLIScope {
+		case "development":
+			if !config.TailscaleCLIDevelopmentQualificationEnabled() {
+				return nil, errors.New("CLI-backed development qualification is not enabled")
+			}
+		case "production":
+			if !config.TailscaleCLIProfilesEnabled() {
+				return nil, errors.New("production CLI-backed startup remains disabled pending physical-phone qualification and separate enablement")
+			}
+		default:
+			return nil, errors.New("CLI-backed startup requires explicit development or production scope")
 		}
 		registration, err := prepareTailscaleCLIRegistration(cfg)
 		if err != nil {

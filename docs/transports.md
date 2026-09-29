@@ -74,20 +74,21 @@ entrypoint with a user-selected private root, supported CLI and nonproduction
 ports; it uses the same per-run consent and owner checks, not a personal daemon
 default.
 
-## CLI-backed background Tailscale Serve (not enabled)
+## CLI-backed background Tailscale Serve (development only)
 
-A separate `tailscale-cli` transport is under source/fixture implementation for
-persistent background Serve. It is intentionally unavailable for ordinary
-activation: the supplied App Store metadata is not an independently verified
-artifact or live test, and the Linux candidate has not been runtime-qualified.
-The `make dev-tailscale-cli` and explicit setup paths fail closed before looking
-up or executing a real CLI, contacting a daemon/socket, changing Serve state, or
-installing a service. This is not a fallback for the legacy foreground
-LocalAPI-owned transport or operator-owned BYO mode. P6 needs separate scoped
-operator authorization, exact profile/service/phone evidence, risk acceptance,
-and a reviewed activation change. Until then, use one of the qualified choices
-above or BYO; the implementation does not enable a profile or promise App Store
-support.
+A separate `tailscale-cli` transport supports isolated foreground development
+only for the exact recognized macOS App Store Tailscale 1.102.4 profile. That
+profile is development-enabled, not runtime-qualified. `make dev-tailscale-cli`
+requires explicit development opt-in, read-only profile and node preflight, and
+an exact route-bound confirmation on stdin for the selected node, HTTPS origin,
+listener and loopback backend. An environment variable cannot consent. The
+persistent route survives relay stop and Ctrl-C; removal is a separate explicit
+operation. The launcher uses isolated development state and does not install a
+service. Production and installed-service activation remain refused until
+physical-phone qualification is recorded and separately enabled. Linux, MacSys,
+other versions and unrecognized profiles remain unsupported. This is not a
+fallback for the legacy foreground LocalAPI-owned transport or operator-owned
+BYO mode.
 
 ## Operator-owned HTTPS Serve (BYO)
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,23 +10,38 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
 func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
+	return runTailscaleCLIWithInput(args, os.Stdin, stdout, stderr)
+}
+
+func runTailscaleCLIWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(args) > 0 && args[0] == "check-transport-switch" {
 		return runTailscaleCLITransportSwitchCheck(args[1:], stdout, stderr)
 	}
-	if len(args) == 1 && args[0] == "activation-check" {
-		if !config.TailscaleCLIProfilesEnabled() {
-			return 2, errors.New("tailscale-cli is not enabled: candidate profiles remain unqualified pending P6; no CLI or service was contacted")
+	if len(args) > 0 && args[0] == "activation-check" {
+		flags := flag.NewFlagSet("tailscale-cli activation-check", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		scope := flags.String("scope", "production", "production or development activation scope")
+		if err := flags.Parse(args[1:]); err != nil {
+			return 2, err
 		}
-		return 0, nil
-	}
-	if !config.TailscaleCLIProfilesEnabled() {
-		return 2, errors.New("tailscale-cli is not enabled: candidate profiles remain unqualified pending P6; no CLI or service was contacted")
+		if flags.NArg() != 0 {
+			return 2, errors.New("activation-check accepts no positional arguments")
+		}
+		if *scope == "development" && config.TailscaleCLIDevelopmentQualificationEnabled() {
+			_, err := fmt.Fprintln(stdout, "development-qualification-enabled; runtime qualification remains pending")
+			return status(err)
+		}
+		if *scope == "production" && config.TailscaleCLIProfilesEnabled() {
+			return 0, nil
+		}
+		return 2, errors.New("production activation remains disabled pending physical-phone qualification and separate production enablement; no CLI or service was contacted")
 	}
 	if len(args) == 0 {
 		return 2, tailscaleCLIUsageError()
@@ -52,12 +68,16 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 		flags := flag.NewFlagSet("tailscale-cli preflight", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		binary := flags.String("binary", os.Getenv("HERDR_TAILSCALE_CLI_BIN"), "selected absolute Tailscale CLI path")
+		scope := flags.String("scope", "", "development only")
 		httpsPort := flags.Int("https-port", 443, "Tailscale HTTPS Serve listener port")
 		if err := flags.Parse(operationArgs); err != nil {
 			return 2, err
 		}
 		if flags.NArg() != 0 {
 			return 2, errors.New("preflight accepts no positional arguments")
+		}
+		if *scope != "development" || !config.TailscaleCLIDevelopmentQualificationEnabled() {
+			return 2, errors.New("Tailscale CLI preflight is limited to development scope")
 		}
 		client, err := selectedCLIClient(*binary)
 		if err != nil {
@@ -66,6 +86,9 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 		report, err := client.Preflight(context.Background(), *httpsPort)
 		if err != nil {
 			return tailscalePreflightExitCode(err), err
+		}
+		if report.Profile != tailscalecli.ProfileAppStoreSupplied || !report.DevelopmentQualificationEnabled {
+			return 78, tailscalecli.ErrUnsupported
 		}
 		if err := json.NewEncoder(stdout).Encode(report); err != nil {
 			return 1, err
@@ -102,6 +125,9 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	if flags.NArg() != 0 {
 		return 2, fmt.Errorf("unexpected arguments for tailscale-cli %s", operation)
 	}
+	if *scope != "development" || !config.TailscaleCLIDevelopmentQualificationEnabled() {
+		return 2, errors.New("real Tailscale CLI operations are limited to isolated development scope; production activation remains disabled")
+	}
 	client, err := selectedCLIClient(*binary)
 	if err != nil {
 		return 1, err
@@ -124,14 +150,35 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 		if recoverErr != nil {
 			return 1, recoverErr
 		}
+		qualificationEnabled := report.Route.RuntimeQualified
+		if *scope == "development" {
+			qualificationEnabled = report.Route.DevelopmentQualificationEnabled
+		}
 		if operation == "assert-ready" && (report.Route.JournalState != tailscalecli.StateRegistered ||
-			report.Route.Readiness != tailscalecli.ReadinessReady || !report.Route.RuntimeQualified) {
-			return 1, errors.New("persistent route is not registered, runtime-qualified and ready")
+			report.Route.Readiness != tailscalecli.ReadinessReady || !qualificationEnabled) {
+			return 1, errors.New("persistent route is not registered, development-enabled or runtime-qualified, and ready")
 		}
 		return 0, nil
 	case "publish":
+		preflight, err := client.Preflight(ctx, *httpsPort)
+		if err != nil {
+			return tailscalePreflightExitCode(err), err
+		}
+		if preflight.Profile != tailscalecli.ProfileAppStoreSupplied || !preflight.DevelopmentQualificationEnabled ||
+			preflight.NodeID != *nodeID || preflight.Origin != *origin {
+			return 78, errors.New("read-only App Store 1.102.4 development preflight does not match the requested route")
+		}
+		confirmation := tailscalecli.PublishRouteConfirmation(preflight.NodeID, preflight.Origin, *httpsPort, *backendPort)
+		_, _ = fmt.Fprintln(stderr, "Development qualification is enabled for this exact profile; this is not runtime qualification.")
+		_, _ = fmt.Fprintln(stderr, "The route persists after stop; consent includes the CLI check-to-write race, local port reuse, no global rollback, and no remote-drain guarantee.")
+		_, _ = fmt.Fprintf(stderr, "Type this exact route-bound confirmation on stdin:\n%s\n", confirmation)
+		typedConfirmation, err := readRouteConfirmation(stdin, confirmation)
+		if err != nil {
+			return 2, err
+		}
 		consent := tailscalecli.Consent{
 			Accepted:                 *accepted,
+			RouteConfirmation:        typedConfirmation,
 			Scope:                    *scope,
 			NodeID:                   *nodeID,
 			Origin:                   *origin,
@@ -143,7 +190,7 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 			NoRollbackAccepted:       *noRollback,
 			NoRemoteDrainAccepted:    *noRemoteDrain,
 		}
-		err := manager.Publish(ctx, tailscalecli.PublishRequest{
+		err = manager.Publish(ctx, tailscalecli.PublishRequest{
 			InstallationID: *installationID,
 			Scope:          *scope,
 			ExpectedNodeID: *nodeID,
@@ -222,6 +269,22 @@ func selectedCLIClient(binary string) (*tailscalecli.Client, error) {
 	return tailscalecli.NewClient(selected)
 }
 
+func readRouteConfirmation(stdin io.Reader, expected string) (string, error) {
+	if stdin == nil {
+		return "", errors.New("route-bound confirmation must be supplied on stdin")
+	}
+	reader := bufio.NewReaderSize(stdin, 512)
+	line, err := reader.ReadSlice('\n')
+	if err != nil || len(line) > 512 {
+		return "", errors.New("route-bound confirmation line is missing or oversized")
+	}
+	typed := strings.TrimSuffix(string(line), "\n")
+	if typed != expected {
+		return "", errors.New("route-bound confirmation did not exactly match the selected node, listener and backend")
+	}
+	return typed, nil
+}
+
 func tailscaleCLIUsageError() error {
-	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check|resolve-binary|preflight|check-transport-switch|reserve-backend-port|release-backend-port|status|recover|reconcile|assert-ready|publish|unpublish} [options]")
+	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check [--scope development]|resolve-binary|preflight --scope development|check-transport-switch|reserve-backend-port|release-backend-port|status|recover|reconcile|assert-ready|publish|unpublish} [options]")
 }

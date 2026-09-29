@@ -108,7 +108,7 @@ func newFixtureClient(f *fakeCLI) *Client {
 }
 
 func TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution(t *testing.T) {
-	if !fixtureRuntimeQualificationEnabled() {
+	if !fixtureCLIExecutableRequired() {
 		t.Skip("fixture executable admission applies only to tagged fixture builds")
 	}
 	marker := filepath.Join(t.TempDir(), "ordinary-cli-was-executed")
@@ -188,6 +188,14 @@ func (f *coexistenceCLI) run(_ context.Context, binary string, args ...string) (
 
 func newFixtureManager(t *testing.T, f *fakeCLI, stateLeaf string) *Manager {
 	t.Helper()
+	manager := newPolicyManager(t, f, "darwin", "arm64", stateLeaf)
+	manager.fixtureMutations = true     // unexported, package-test-only fixture capability
+	manager.skipBackendReadiness = true // ordinary CLI fixtures do not start a loopback relay
+	return manager
+}
+
+func newPolicyManager(t *testing.T, f *fakeCLI, goos, goarch, stateLeaf string) *Manager {
+	t.Helper()
 	base := t.TempDir()
 	stateRoot := filepath.Join(base, stateLeaf)
 	coordinationRoot := filepath.Join(base, "shared coordination")
@@ -197,12 +205,12 @@ func newFixtureManager(t *testing.T, f *fakeCLI, stateLeaf string) *Manager {
 	if err := os.Mkdir(coordinationRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(stateRoot, coordinationRoot, newFixtureClient(f))
+	client := newTestClientForPlatform("/fixture path/tailscale", f.run, goos, goarch)
+	manager, err := NewManager(stateRoot, coordinationRoot, client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.fixtureMutations = true     // unexported, package-test-only fixture capability
-	manager.skipBackendReadiness = true // ordinary CLI fixtures do not start a loopback relay
+	manager.skipBackendReadiness = true
 	return manager
 }
 
@@ -227,6 +235,7 @@ func fixtureConsent(accepted bool) Consent {
 		Origin:                   "https://herdr.tailnet.ts.net:8443",
 		HTTPSPort:                8443,
 		BackendPort:              18377,
+		RouteConfirmation:        PublishRouteConfirmation("node-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377),
 		PersistentRouteAccepted:  accepted,
 		RouteRemovalAccepted:     accepted,
 		CheckToWriteRaceAccepted: accepted,
@@ -845,7 +854,7 @@ func TestRecoverRefusesUnregisteredObservedRoute(t *testing.T) {
 	report, err := manager.Recover(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 	if !errors.Is(err, ErrConflict) || report.Route.JournalState != StateUnconfigured ||
 		report.Route.Readiness != ReadinessConflicted || !report.RequiresOperatorAction ||
-		report.Observation != "selected-listener-present-without-registration" {
+		report.Observation != "selected-listener-or-backend-present-without-registration" {
 		t.Fatalf("unregistered route recovery = %+v, %v", report, err)
 	}
 	if got := fixture.mutationCalls(); got != 0 {
@@ -883,18 +892,20 @@ func TestPublishModelsNonCooperatingExternalWriterRace(t *testing.T) {
 	}
 }
 
-func TestProductionManagerRefusesAllUnqualifiedProfilesBeforeMutation(t *testing.T) {
+func TestProductionManagerRefusesExactDevelopmentCandidateBeforeMutation(t *testing.T) {
 	fixture := newFakeCLI(t)
-	manager := newFixtureManager(t, fixture, "instance state")
-	manager.fixtureMutations = false
-	if err := manager.Publish(context.Background(), fixtureRequest(true)); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("unqualified profile activation = %v", err)
+	manager := newPolicyManager(t, fixture, "darwin", "arm64", "production scope")
+	request := fixtureRequest(true)
+	request.Scope = "production"
+	request.Consent.Scope = "production"
+	if err := manager.Publish(context.Background(), request); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("production profile activation = %v", err)
 	}
-	if fixture.mutationCalls() != 0 {
-		t.Fatalf("unqualified profile reached a Serve mutator: %d", fixture.mutationCalls())
+	if fixture.mutationCalls() != 0 || len(fixture.calls) != 0 {
+		t.Fatalf("production scope reached the CLI: calls=%d mutations=%d", len(fixture.calls), fixture.mutationCalls())
 	}
 	if _, err := os.Lstat(filepath.Join(manager.stateRoot, journalName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unqualified profile wrote a journal: %v", err)
+		t.Fatalf("production scope wrote a journal: %v", err)
 	}
 }
 

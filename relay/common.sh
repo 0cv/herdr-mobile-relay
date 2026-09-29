@@ -2196,7 +2196,7 @@ set_gateway_url() {
         return 1
     fi
     if [ -z "$url" ]; then
-        set_relay_transport "$env_file" cloudflare
+        set_relay_transport "$env_file" cloudflare || return
         return 0
     fi
     set_relay_transport "$env_file" gateway

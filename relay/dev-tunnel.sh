@@ -15,7 +15,7 @@ esac
 if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
     echo "Development transport:"
     echo "  1. Temporary Cloudflare tunnel (or saved gateway); relay/.dev state"
-    echo "  2. CLI-backed persistent Tailscale Serve (not enabled; runtime qualification pending)"
+    echo "  2. CLI-backed Tailscale Serve development (App Store 1.102.4 only; runtime qualification pending)"
     echo "  3. Legacy managed Tailscale Serve (advanced foreground/session-owned mode)"
     read -r -p "Choice [1]: " choice || { echo "Cancelled; nothing was started." >&2; exit 2; }
     case "$choice" in

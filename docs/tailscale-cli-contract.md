@@ -1,12 +1,13 @@
 # CLI-backed Tailscale Serve contract
 
-**Status: implementation contract draft; not independently reviewed.** The new
-transport is named `tailscale-cli`. It is a distinct, persistent CLI-owned
-background Serve route and is not an alias for the existing foreground
-LocalAPI transport (`tailscale`) or operator-owned transport
-(`tailscale-external`). The code and fixture work do not establish runtime
-support. P6 live enablement and operator risk acceptance are pending; no profile
-is currently enabled for ordinary activation.
+**Status: development-only enablement for the exact supplied App Store macOS
+1.102.4 profile; runtime qualification remains pending.** The new transport is
+named `tailscale-cli`. It is a distinct, persistent CLI-owned background Serve
+route and is not an alias for the existing foreground LocalAPI transport
+(`tailscale`) or operator-owned transport (`tailscale-external`). Only isolated
+foreground development is enabled, with exact route-bound stdin consent.
+Production and installed-service activation remain disabled until physical-phone
+qualification is recorded and separate production enablement is authorized.
 
 ## Source and evidence boundary
 
@@ -187,11 +188,13 @@ admission reversibly; the service may resume existing-device admission only
 after a fresh exact-route and readiness check, without minting a new invitation.
 Polling is not an instantaneous revocation watch.
 
-Production activation is currently hard-gated off: a recognized source/fixture
-profile is not a runtime-qualified profile. There is no environment-variable,
-config-file or test-fixture switch that makes a real profile live-qualified.
-Existing `tailscale` and `tailscale-external` configuration contracts remain
-unchanged.
+Production activation is currently hard-gated off: a recognized profile is
+not runtime-qualified. The exact supplied App Store 1.102.4 profile has a
+separate development-qualification bit, reported distinctly from
+`runtime_qualified`; it is usable only in isolated foreground development.
+There is no environment-variable, config-file or fixture switch that makes a
+real profile runtime-qualified or production-enabled. Existing `tailscale` and
+`tailscale-external` configuration contracts remain unchanged.
 
 ## Lifecycle and residual risks
 
@@ -208,8 +211,9 @@ unchanged.
 | Service-only uninstall | Interactively require exact-route removal, explicit route retention, or cancellation; noninteractive mode refuses; never erase unresolved recovery evidence. |
 | Transport switch | Decide old persistent-route disposition; unresolved removal blocks backend reuse. |
 
-Four limits must appear in consent and recovery guidance. Operator acceptance is
-**pending live enablement**:
+Four limits must appear in setup consent and recovery guidance. The owner
+accepted these limits only for this isolated development route; this is not
+runtime qualification or production authorization:
 
 1. **CLI check-to-write race.** A fresh CLI inspection and Herdr's cooperative
    lock cannot atomically compare-and-swap against external writers. Tailscale's
@@ -226,26 +230,47 @@ Four limits must appear in consent and recovery guidance. Operator acceptance is
 4. **No remote-drain guarantee.** A successful scoped removal and readback does
    not prove that existing connections have drained or all remote traffic ceased.
 
-### Proposed live-test runbook and future decisions (not authorization)
+### Development runbook
 
-Before any P6 access, record the exact release, OS, executable path, client and
-daemon profile/version, node/account identity, target backend/listeners, unrelated
-Serve state and selected HTTPS origin in a sanitized record. Begin with a
-user-selected unused development HTTPS listener and isolated development state.
-Show the exact read/publish/readback operations, expected persistent route,
-residual risks and cleanup choice. Obtain explicit confirmation of the named
-node/account, exact route/ports, expected mutations, cleanup policy and permission
-to contact the CLI/daemon and HTTPS endpoint. Check and record unrelated state
-before and after; stop on any mismatch or uncertainty and retain recovery data.
-Installed-service migration needs separate permission. Physical App Store, phone,
-login/sleep/wake/update and release tests remain separate cells. Writing this
-runbook grants no permission to execute it.
+The supervising assistant executes this runbook only after independent review.
+The only live candidate is the current Mac's App Store Tailscale 1.102.4 profile
+on the owner's current node/account, in isolated foreground development, with
+HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377 (plugin backend
+18378). Production, installed-service activation/migration, physical-phone
+enrollment and release qualification are outside this runbook.
+
+1. Confirm the executable, client/daemon identity and version exactly match the
+   supplied App Store profile; stop for any unrecognized or inconsistent profile,
+   wrong account/node, permission error, logged-out daemon or ambiguity.
+2. Capture a sanitized pre-change summary of the complete Serve configuration,
+   including unrelated routes. Preserve all unrelated state. The manager refuses
+   if listener 8443 or backend 18377 is occupied, conflicting, unrecorded, or
+   cannot be parsed completely. Do not free a port or remove another mapping.
+3. Review the canonical node origin and four limitations shown by the launcher.
+   Type the exact node/origin/8443/127.0.0.1:18377 confirmation displayed by the
+   tool on stdin. No environment variable can consent; mismatch or EOF cancels
+   before state or route mutation.
+4. Run only foreground development setup. Verify readback is exactly the
+   selected HTTPS route to 127.0.0.1:18377 and record a sanitized post-change
+   Serve summary. Confirm unrelated routes are unchanged. Do not install/start a
+   service or enroll a phone.
+5. Stop and retain route/journal by default. If cleanup is explicitly chosen,
+   use separate exact-route unpublish consent. On timeout, mismatch, unknown
+   fields, CLI error after dispatch or uncertainty, stop and retain evidence; do
+   not retry, reset Serve or remove another route.
+6. Record the result as development-only. Physical-phone qualification remains
+   separate; production stays disabled until it is recorded and separately
+   enabled.
+
+This runbook is not a deployment instruction. PWA enrollment, sleep/wake,
+installed-service migration and release approval are distinct future phases.
 
 ## Source entrypoints and current gate
 
 The Go `tailscale-cli` subcommand exposes read-only `status`/`recover`, strict
 `assert-ready`, and separately consented `publish`/`unpublish`; its
-`activation-check` reads only the compile-time P6 gate. The relay shell lifecycle
+`activation-check --scope development` reports development enablement separately
+from runtime qualification, while the default production scope remains hard-gated. The relay shell lifecycle
 routes those actions through the journal manager, installs only a per-user
 service after `assert-ready`, and keeps stop separate from unpublish. The
 foreground development entrypoint uses `.dev-tailscale-cli/` with independent
@@ -254,16 +279,13 @@ complete binary/web pair in a versioned release directory and atomically swaps
 a single `current` symlink, retaining the prior coherent release if staging or
 cutover fails.
 
-These production source paths do not enable the transport:
-`TailscaleCLIProfilesEnabled` remains false. The `herdr_tailscale_test` build
-hook only admits a CLI executable carrying the explicit synthetic-fixture marker;
-ordinary installed Tailscale executables are rejected by `NewClient` before
-execution. That test hook is not runtime qualification or production activation.
-Consequently release setup, service installation, route commands and the
-development launcher refuse before any Tailscale CLI/daemon access. Fixture E2EE
-enrollment, server reconstruction with durable credential reopen/re-arm,
-read-only registration recovery, exact shell-unpublish consent, concurrent
-production/development scope registrations on a synthetic node, and fake-only
-operator-managed package-update/service fixtures have passed. Real profile
-coexistence and live runtime qualification remain outstanding. Source support
-and fake-dispatch fixtures are not qualification or permission to activate.
+`TailscaleCLIProfilesEnabled` remains false in ordinary and fixture builds.
+The exact App Store candidate has a separate development-qualification bit; it is
+not runtime-qualified. Production and installed-service activation remain
+refused. The `herdr_tailscale_test` build hook only admits a CLI executable
+carrying the explicit synthetic-fixture marker; ordinary installed Tailscale
+executables are rejected by `NewClient` before execution. The fixture hook is
+not runtime qualification or production activation. Current-revision ordinary,
+native and extracted-package CI must establish the fixture results; no live
+Tailscale CLI, daemon, tailnet, service, phone or Herdr socket was contacted by
+this implementation phase.
