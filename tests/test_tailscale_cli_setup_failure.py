@@ -200,9 +200,9 @@ def main() -> None:
         raise AssertionError(f"service rollback and reservation release order was unsafe: {events}")
 
     status, output, events, unit_contents = run_setup(prior_definition=True)
-    if status == 0 or unit_contents != "preexisting service definition\\n":
+    if status == 0 or unit_contents != "preexisting service definition\n":
         raise AssertionError(f"pre-existing service definition was changed ({status}): {output} {events}")
-    if "existing service definition already exists" not in output.lower() or events:
+    if "relay service definition already exists" not in output.lower() or events:
         raise AssertionError(f"existing service setup was not refused before mutation: {output} {events}")
 
     for platform in ("Linux", "Darwin"):
