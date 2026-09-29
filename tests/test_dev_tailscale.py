@@ -977,6 +977,7 @@ exit 0
         "HERDR_RELAY_TRANSPORT='tailscale-cli'" not in (cli_dev_root / "relay.env").read_text(encoding="utf-8") or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI setup escaped development boundaries: {all_events!r}")
+    setup_bootstrap_count = sum("--operation arm_bootstrap" in event for event in all_events)
     update_env = dict(positive_env)
     update_env["HERDR_DEV_TAILSCALE_CLI_RELAY_BIN"] = str(cli_dev_root / "bin" / "herdr-mobile-relay")
     update_cli = subprocess.run(
@@ -987,11 +988,13 @@ exit 0
     if update_cli.returncode != 0:
         raise AssertionError(f"positive CLI development update failed: {update_cli.stdout + update_cli.stderr!r}")
     updated_events = fixture_log.read_text(encoding="utf-8").splitlines()
-    update_managers = [event for event in updated_events if event.startswith("manager|")]
-    if (len(update_managers) != 4 or not update_managers[1].startswith("manager|tailscale-cli activation-check") or
-        any(not event.startswith("manager|tailscale-cli assert-ready ") for event in update_managers[2:]) or
-        any("publish" in event or "unpublish" in event for event in update_managers[2:]) or
-        sum("--operation arm_bootstrap" in event for event in updated_events) != 1 or
+    update_events = updated_events[len(all_events):]
+    update_managers = [event for event in update_events if event.startswith("manager|")]
+    if (len(update_managers) != 3 or
+        not update_managers[0].startswith("manager|tailscale-cli activation-check") or
+        any(not event.startswith("manager|tailscale-cli assert-ready ") for event in update_managers[1:]) or
+        any("publish" in event or "unpublish" in event for event in update_managers[1:]) or
+        sum("--operation arm_bootstrap" in event for event in updated_events) != setup_bootstrap_count or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI update mutated route or production state: {updated_events!r}")
     positive_socket.close()
