@@ -476,14 +476,23 @@ if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
     exit 1
 fi
 TOKEN_FILE="$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)"
-test "$TOKEN_FILE" = "$WORK_DIR/config/github-token"
-test "$(cat "$TOKEN_FILE")" = "$GH_TOKEN"
+if [ "$TOKEN_FILE" != "$WORK_DIR/config/github-token" ]; then
+    echo "ensure_relay_env stored an unexpected GitHub token path" >&2
+    exit 1
+fi
+if [ "$(cat "$TOKEN_FILE")" != "$GH_TOKEN" ]; then
+    echo "ensure_relay_env did not preserve the GitHub token bytes" >&2
+    exit 1
+fi
 if stat -c '%a' "$TOKEN_FILE" >/dev/null 2>&1; then
     mode="$(stat -c '%a' "$TOKEN_FILE")"
 else
     mode="$(stat -f '%Lp' "$TOKEN_FILE")"
 fi
-test "$mode" = "600"
+if [ "$mode" != "600" ]; then
+    echo "ensure_relay_env wrote GitHub token mode $mode instead of 600" >&2
+    exit 1
+fi
 
 SAFE_ENV_FILE="$WORK_DIR/shell-escaped.env"
 SHELL_INJECTION_MARKER="$WORK_DIR/shell-injection-ran"
