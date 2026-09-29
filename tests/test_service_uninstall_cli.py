@@ -33,7 +33,7 @@ def fixture(
         if platform == "Linux":
             unit = home / ".config" / "systemd" / "user" / "herdr-mobile-relay.service"
             unit.parent.mkdir(parents=True)
-            unit.write_text(f'[Service]\nEnvironment="HERDR_RELAY_ENV={env_file}"\n', encoding="utf-8")
+            unit.write_text(f'[Service]\nEnvironment=HERDR_RELAY_ENV="{env_file}"\n', encoding="utf-8")
         else:
             plist = home / "Library" / "LaunchAgents" / "com.herdr-mobile-relay.service.plist"
             plist.parent.mkdir(parents=True)

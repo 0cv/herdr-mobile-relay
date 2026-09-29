@@ -474,7 +474,11 @@ service_environment_file() {
                     case "$line" in
                         Environment=*)
                             decoded="$(systemd_unquote_value "${line#Environment=}")" || return 1
-                            case "$decoded" in HERDR_RELAY_ENV=*) configured="${decoded#*=}" ;; esac
+                            case "$decoded" in
+                                HERDR_RELAY_ENV=*)
+                                    configured="$(systemd_unquote_value "${decoded#*=}")" || return 1
+                                    ;;
+                            esac
                             ;;
                     esac
                 done < "$unit_file"
