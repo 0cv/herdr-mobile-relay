@@ -807,7 +807,7 @@ exit 0
     bun_fixture.chmod(0o700)
     positive_curl = fixture_bin / "curl"
     positive_curl.write_text(
-        "#!/bin/sh\\nprintf '%s\\n' '{\"status\":\"ok\",\"readiness\":\"ready\",\"transport\":\"tailscale-cli\",\"instance\":\"'\"$HERDR_RELAY_INSTANCE_ID\"'\",\"tailscale_cli_origin\":\"'\"$HERDR_TAILSCALE_CLI_ORIGIN\"'\"}'\\n",
+        "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"ok\",\"readiness\":\"ready\",\"transport\":\"tailscale-cli\",\"instance\":\"'\"$HERDR_RELAY_INSTANCE_ID\"'\",\"tailscale_cli_origin\":\"'\"$HERDR_TAILSCALE_CLI_ORIGIN\"'\"}'\n",
         encoding="utf-8",
     )
     positive_curl.chmod(0o700)
@@ -843,7 +843,7 @@ exit 0
     for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG"):
         positive_env.pop(name, None)
     setup_cli = subprocess.run(
-        ["/bin/bash", "-x", str(root / "relay" / "dev-tailscale-cli.sh")], env=positive_env,
+        [str(root / "relay" / "dev-tailscale-cli.sh")], env=positive_env,
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=30, check=False,
     )
