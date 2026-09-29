@@ -1440,11 +1440,21 @@ systemd_unquote_value() {
 
 xml_escape_text() {
     local value="$1"
+    local result=""
+    local character
+    local index
+
     case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-    value="${value//&/&amp;}"
-    value="${value//</&lt;}"
-    value="${value//>/&gt;}"
-    printf '%s' "$value"
+    for ((index = 0; index < ${#value}; index++)); do
+        character="${value:index:1}"
+        case "$character" in
+            '&') result+='&amp;' ;;
+            '<') result+='&lt;' ;;
+            '>') result+='&gt;' ;;
+            *) result+="$character" ;;
+        esac
+    done
+    printf '%s' "$result"
 }
 
 wait_for_cli_admission() {

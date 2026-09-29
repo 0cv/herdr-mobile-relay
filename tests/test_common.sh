@@ -470,10 +470,7 @@ mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"
 export GH_TOKEN
 ensure_relay_env "$ENV_FILE"
-printf '%s\n' 'relay.env token fixture initialized' >&2
 remove_env_value_atomic "$ENV_FILE" MISSING_TEST_KEY
-printf '%s\n' 'absent relay.env cleanup was idempotent' >&2
-set -x
 
 if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
     echo "relay.env exposed GH_TOKEN" >&2
