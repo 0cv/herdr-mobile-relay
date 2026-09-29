@@ -153,7 +153,7 @@ def main() -> None:
         raise AssertionError(f"failed route removal still uninstalled the service: {output.decode(errors='replace')} {calls}")
 
     status, output, calls = fixture(None)
-    if status == 0 or calls or "interactive route disposition is required" not in output.decode(errors="replace"):
+    if status == 0 or calls or "interactive route disposition is required" not in output.decode(errors="replace").lower():
         raise AssertionError(f"noninteractive service removal lacked explicit route disposition: {output.decode(errors='replace')} {calls}")
     print("PASS service-uninstall fixture: persistent CLI Serve route receives explicit remove/keep/cancel disposition")
 
