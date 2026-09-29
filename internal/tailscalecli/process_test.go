@@ -43,14 +43,15 @@ func TestRunCommandNonzeroExitIsTypedRedactedAndNonRetryable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := client.Preflight(context.Background(), 8443); err == nil ||
-				!errors.Is(err, ErrCommandFailed) || errors.Is(err, ErrTransientUnavailable) ||
-				strings.Contains(err.Error(), "private@example.invalid") || strings.Contains(err.Error(), "secret-token") {
-				t.Fatalf("nonzero child exit was not redacted/non-retryable: %v", err)
+			_, preflightErr := client.Preflight(context.Background(), 8443)
+			if preflightErr == nil || !errors.Is(preflightErr, ErrCommandFailed) ||
+				errors.Is(preflightErr, ErrTransientUnavailable) ||
+				strings.Contains(preflightErr.Error(), "private@example.invalid") || strings.Contains(preflightErr.Error(), "secret-token") {
+				t.Fatalf("nonzero child exit was not redacted/non-retryable: %v", preflightErr)
 			}
 			var failure CommandFailureError
-			if !errors.As(err, &failure) {
-				t.Fatalf("nonzero child exit was not represented by CommandFailureError: %T %v", err, err)
+			if !errors.As(preflightErr, &failure) {
+				t.Fatalf("nonzero child exit was not represented by CommandFailureError: %T %v", preflightErr, preflightErr)
 			}
 		})
 	}
@@ -216,7 +217,8 @@ func TestRealCLICommandFailureRetainsAmbiguousUnpublishEvidence(t *testing.T) {
 		t.Fatalf("ambiguous unpublish was automatically replayed: %v", err)
 	}
 	events, err := os.ReadFile(binary + ".events")
-	if err != nil || strings.Count(string(events), "publish\n") != 1 || strings.Count(string(events), "unpublish\n") != 1 {
+	operations := strings.Split(strings.TrimSpace(string(events)), "\n")
+	if err != nil || len(operations) != 2 || operations[0] != "publish" || operations[1] != "unpublish" {
 		t.Fatalf("ambiguous mutation dispatch counts changed across recovery: %q err=%v", events, err)
 	}
 }

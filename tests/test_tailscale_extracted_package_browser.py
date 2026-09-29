@@ -2323,14 +2323,18 @@ else:
         if (publish_result.returncode != 0 or cli_tailscale_events.count("serve_publish") != 1 or
             cli_route_state != expected_cli_route or cli_journal.get("state") != "registered" or
             cli_journal.get("mutation_acknowledged") is not True or cli_journal.get("node_id") != "package-cli-fixture-node" or
-            cli_journal.get("origin") != cli_origin or cli_journal.get("backend") != f"http://127.0.0.1:{RELAY_PORT}"):
+            cli_journal.get("dns_name") != "relay.tailnet.ts.net" or
+            cli_journal.get("https_port") != int(os.environ["HERDR_TAILSCALE_HTTPS_PORT"]) or
+            cli_journal.get("backend") != f"http://127.0.0.1:{RELAY_PORT}"):
             die("synthetic CLI adapter/manager did not publish and journal exactly the fixture route")
         cli_registration_summary = {
             "registered": cli_journal.get("state") == "registered",
             "mutation_acknowledged": cli_journal.get("mutation_acknowledged") is True,
             "exact_node_origin_backend": (
                 cli_journal.get("node_id") == "package-cli-fixture-node" and
-                cli_journal.get("origin") == cli_origin and
+                cli_journal.get("dns_name") == "relay.tailnet.ts.net" and
+                cli_journal.get("https_port") == int(os.environ["HERDR_TAILSCALE_HTTPS_PORT"]) and
+                cli_origin == f"https://{cli_journal.get('dns_name')}:{cli_journal.get('https_port')}" and
                 cli_journal.get("backend") == f"http://127.0.0.1:{RELAY_PORT}"
             ),
             "single_publish": cli_tailscale_events.count("serve_publish") == 1,

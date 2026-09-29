@@ -770,7 +770,7 @@ printf 'Linux'
     mac_manager_events = mac_manager_record.read_text(encoding="utf-8").splitlines()
     launchctl_events = launchctl_record.read_text(encoding="utf-8").splitlines()
     if ("com.herdr-mobile-relay.service" not in plist_text or "&amp;" not in plist_text or "CLOUDFLARED_CONFIG" in plist_text or
-        "<key>KeepAlive</key>" not in plist_text or "<key>SuccessfulExit</key>\n            <false/>" not in plist_text or
+        "<key>KeepAlive</key>" not in plist_text or "<key>SuccessfulExit</key>\n        <false/>" not in plist_text or
         "<key>ThrottleInterval</key>\n    <integer>10</integer>" not in plist_text or
         not mac_manager_events or not mac_manager_events[0].startswith("tailscale-cli assert-ready ") or
         any("publish" in event or "unpublish" in event for event in mac_manager_events) or
