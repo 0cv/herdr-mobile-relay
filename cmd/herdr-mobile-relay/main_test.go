@@ -16,6 +16,31 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
+func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
+	root := t.TempDir()
+	invoked := filepath.Join(root, "cli-invoked")
+	binary := filepath.Join(root, "fake-tailscale")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf invoked > '"+invoked+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Join(root, "registration")
+	coordinationRoot := filepath.Join(root, "coordination")
+	code, err := run([]string{
+		"tailscale-cli", "status", "--binary", binary,
+		"--state-root", stateRoot, "--coordination-root", coordinationRoot,
+		"--scope", "development", "--installation-id", "fixture-installation",
+		"--https-port", "8443", "--backend-port", "18377",
+	})
+	if code != 2 || err == nil || !strings.Contains(err.Error(), "not enabled") {
+		t.Fatalf("unqualified CLI management command = (%d, %v), want fail-closed refusal", code, err)
+	}
+	for _, path := range []string{invoked, stateRoot, coordinationRoot} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Errorf("refused CLI command touched %q: %v", path, statErr)
+		}
+	}
+}
+
 func TestVerifyReleaseIdentity(t *testing.T) {
 	originalVersion, originalRevision := version, revision
 	version, revision = "1.2.3", "candidate-revision"

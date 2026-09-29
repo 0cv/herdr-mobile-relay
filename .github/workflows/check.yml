@@ -80,7 +80,7 @@ jobs:
           log="$RUNNER_TEMP/tailscale-app-integration-${{ matrix.mode }}.jsonl"
           diagnostics="$RUNNER_TEMP/tailscale-app-integration-${{ matrix.mode }}.stderr"
           evidence="$RUNNER_TEMP/tailscale-app-integration-evidence-${{ matrix.mode }}.json"
-          pattern='^(TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire|TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets|TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation|TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation|TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement|TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls|TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement)$'
+          pattern='^(TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire|TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets|TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation|TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation|TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement|TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls|TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement|TestTailscaleCLIReadinessArmAndDrift)$'
           if [[ "${{ matrix.mode }}" == race ]]; then
             if go test -json -race -tags=herdr_tailscale_test ./internal/app -run "$pattern" -count=1 >"$log" 2>"$diagnostics"; then
               test_exit=0
@@ -109,6 +109,7 @@ jobs:
               "TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement",
               "TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls",
               "TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement",
+              "TestTailscaleCLIReadinessArmAndDrift",
           ]
           actions = {}
           observed_tests = set()

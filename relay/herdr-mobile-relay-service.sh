@@ -14,10 +14,14 @@ if [ -f "$ENV_FILE" ]; then
     . "$ENV_FILE"
     set +a
 fi
+TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
+if [ "$TRANSPORT" = tailscale-cli ]; then
+    exec "$SCRIPT_DIR/tailscale-cli-service.sh"
+fi
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
     [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
-    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
-    [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-external ]; then
+    [ "$TRANSPORT" = tailscale ] ||
+    [ "$TRANSPORT" = tailscale-external ]; then
     echo "foreground Tailscale Serve transports cannot run under the background service wrapper" >&2
     exit 78
 fi

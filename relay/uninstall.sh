@@ -35,6 +35,7 @@ resolve_cache_dir() {
 CONFIG_DIR="$(resolve_config_dir)"
 CACHE_DIR="$(resolve_cache_dir)"
 RELAY_ENV_FILE="${HERDR_RELAY_ENV:-$CONFIG_DIR/relay.env}"
+[ ! -f "$RELAY_ENV_FILE" ] || load_relay_env "$RELAY_ENV_FILE"
 TAILSCALE_SESSION_FILE="$CONFIG_DIR/tailscale-session.env"
 EXTERNAL_SESSION_FILE="$CONFIG_DIR/tailscale-external-session.env"
 if [ -e "$TAILSCALE_SESSION_FILE" ]; then
@@ -181,6 +182,55 @@ safe_remove_bin_link() {
 preflight_removal_target "$RELEASE_ROOT" "releases"
 preflight_removal_target "$CONFIG_DIR" "config/state"
 preflight_removal_target "$CACHE_DIR" "cache"
+
+if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = tailscale-cli ]; then
+    CLI_STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-registration}"
+    CLI_COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-coordination}"
+    for registration_root in "$CLI_STATE_ROOT" "$CLI_COORDINATION_ROOT"; do
+        registration_root="$(canonicalize "$registration_root")"
+        for removable_root in "$CONFIG_DIR" "$CACHE_DIR" "$RELEASE_ROOT"; do
+            removable_root="$(canonicalize "$removable_root")"
+            case "$registration_root" in
+                "$removable_root"|"$removable_root"/*)
+                    echo "✗ CLI registration root overlaps uninstall target $removable_root: $registration_root" >&2
+                    echo "  Move the registration journal outside removable relay directories before uninstalling." >&2
+                    exit 1
+                    ;;
+            esac
+            case "$removable_root" in
+                "$registration_root"|"$registration_root"/*)
+                    echo "✗ Uninstall target $removable_root contains CLI registration root $registration_root." >&2
+                    exit 1
+                    ;;
+            esac
+        done
+    done
+    echo "The CLI-backed HTTPS Serve route persists independently of this service and uninstall."
+    if [ -t 0 ]; then
+        read -r -p "Remove only the exact journaled route before uninstall? [y/N] " remove_route
+    else
+        remove_route="no"
+    fi
+    case "$remove_route" in
+        y|Y|yes|YES)
+            HERDR_RELAY_ENV="$RELAY_ENV_FILE" "$SCRIPT_DIR/tailscale-cli.sh" unpublish || {
+                echo "✗ Exact route removal did not complete; uninstall stopped and the journal was preserved." >&2
+                exit 1
+            }
+            ;;
+        *)
+            if [ -t 0 ]; then
+                read -r -p "Explicitly leave the route configured and preserve its journal? [y/N] " leave_route
+            else
+                leave_route="no"
+            fi
+            case "$leave_route" in
+                y|Y|yes|YES) echo "Leaving persistent route and private registration journal intact." ;;
+                *) echo "Uninstall cancelled; choose route removal or explicit route preservation."; exit 1 ;;
+            esac
+            ;;
+    esac
+fi
 
 echo "Herdr Mobile Relay — full uninstall"
 echo ""

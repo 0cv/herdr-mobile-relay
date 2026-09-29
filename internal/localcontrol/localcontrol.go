@@ -53,6 +53,10 @@ type Status struct {
 	Revision                     string `json:"revision,omitempty"`
 	BundleHash                   string `json:"bundle_hash,omitempty"`
 	PhoneAppOrigin               string `json:"phone_app_origin,omitempty"`
+	PersistentRouteState         string `json:"persistent_route_state,omitempty"`
+	PersistentRouteReadiness     string `json:"persistent_route_readiness,omitempty"`
+	PersistentRouteReady         bool   `json:"persistent_route_ready"`
+	HTTPSOrigin                  string `json:"https_origin,omitempty"`
 	InvitationArmed              bool   `json:"invitation_armed"`
 	InvitationPending            bool   `json:"invitation_pending"`
 	InvitationExpiresAt          string `json:"invitation_expires_at,omitempty"`

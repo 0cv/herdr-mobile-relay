@@ -74,6 +74,21 @@ entrypoint with a user-selected private root, supported CLI and nonproduction
 ports; it uses the same per-run consent and owner checks, not a personal daemon
 default.
 
+## CLI-backed background Tailscale Serve (not enabled)
+
+A separate `tailscale-cli` transport is under source/fixture implementation for
+persistent background Serve. It is intentionally unavailable for ordinary
+activation: the supplied App Store metadata is not an independently verified
+artifact or live test, and the Linux candidate has not been runtime-qualified.
+The `make dev-tailscale-cli` and explicit setup paths fail closed before looking
+up or executing a real CLI, contacting a daemon/socket, changing Serve state, or
+installing a service. This is not a fallback for the legacy foreground
+LocalAPI-owned transport or operator-owned BYO mode. P6 needs separate scoped
+operator authorization, exact profile/service/phone evidence, risk acceptance,
+and a reviewed activation change. Until then, use one of the qualified choices
+above or BYO; the implementation does not enable a profile or promise App Store
+support.
+
 ## Operator-owned HTTPS Serve (BYO)
 
 Choose this distinct foreground transport (menu key `b`) only after you have

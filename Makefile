@@ -16,13 +16,14 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel dev-tailscale stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel dev-tailscale dev-tailscale-cli stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
 	@echo "  make quick-start                First run: install missing tools and start the phone app"
-	@echo "  make dev-tunnel                Choose temporary tunnel/gateway or managed Tailscale (interactive)"
-	@echo "  make dev-tailscale             Guided, isolated managed Tailscale Serve (supported Unix daemon only)"
+	@echo "  make dev-tunnel                Choose tunnel, gated CLI Tailscale, or legacy mode (interactive)"
+	@echo "  make dev-tailscale             Guided legacy foreground/session-owned Tailscale development"
+	@echo "  make dev-tailscale-cli         CLI-backed persistent Tailscale development (currently disabled pending P6)"
 	@echo "  make stable-setup               Provision/resume a stable tunnel, service, and verified QR"
 	@echo "  make stable-teardown            Remove only resources recorded by the stable wizard"
 	@echo "  make setup                      Prepare config and check prerequisites without installing"
@@ -67,6 +68,9 @@ dev-tunnel:
 
 dev-tailscale:
 	relay/dev-tailscale.sh $(DEV_TAILSCALE_ARGS)
+
+dev-tailscale-cli:
+	relay/dev-tailscale-cli.sh
 
 speech-voices:
 	relay/speech-voices.sh

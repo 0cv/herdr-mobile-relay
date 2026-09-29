@@ -10,7 +10,18 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 
 ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
 
-assert_service_env_matches "$ENV_FILE"
+if [ "${HERDR_DEV_TAILSCALE_CLI_ROOT:-}" = 1 ]; then
+    DEV_CLI_ROOT="$(dirname "$ENV_FILE")"
+    if [ "${HERDR_RELAY_ENV:-}" != "$ENV_FILE" ] ||
+        [ ! -f "$DEV_CLI_ROOT/.herdr-dev-tailscale-cli" ] ||
+        [ -L "$DEV_CLI_ROOT/.herdr-dev-tailscale-cli" ] ||
+        ! grep -Fxq 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' "$DEV_CLI_ROOT/.herdr-dev-tailscale-cli"; then
+        echo "✗ Isolated CLI development marker did not match; no setup link was printed." >&2
+        exit 1
+    fi
+else
+    assert_service_env_matches "$ENV_FILE"
+fi
 load_relay_env "$ENV_FILE"
 MODE="$(relay_transport_mode "$ENV_FILE")"
 SESSION_FILE="$(tailscale_session_file "$ENV_FILE")"
@@ -36,6 +47,83 @@ fi
 write_phone_app_origin() {
     record_phone_app_origin "$@"
 }
+
+if [ "$MODE" = tailscale-cli ]; then
+    CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
+    STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-}"
+    COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-}"
+    SCOPE="${HERDR_TAILSCALE_CLI_SCOPE:-}"
+    INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
+    RUN_ID="${HERDR_RELAY_CONTROL_RUN_ID:-}"
+    ORIGIN="${HERDR_TAILSCALE_CLI_ORIGIN:-}"
+    HTTPS_PORT="${HERDR_TAILSCALE_CLI_HTTPS_PORT:-443}"
+    BACKEND_PORT="${HERDR_RELAY_PORT:-8375}"
+    PHONE_APP_BASE="${HERDR_PHONE_APP_URL:-}"
+    [ -x "$CLI_BIN" ] && [ -n "$STATE_ROOT" ] && [ -n "$COORDINATION_ROOT" ] &&
+        [ -n "$INSTANCE" ] && [ -n "$RUN_ID" ] && [ -n "$ORIGIN" ] &&
+        [ -n "$PHONE_APP_BASE" ] || {
+        echo "✗ CLI-backed setup identity is incomplete; no setup link was printed." >&2
+        exit 1
+    }
+    [ "$("$RELAY_BIN" normalize-external-origin "$ORIGIN" 2>/dev/null || true)" = "$ORIGIN" ] || {
+        echo "✗ CLI-backed HTTPS origin is not canonical; no setup link was printed." >&2
+        exit 1
+    }
+    "$RELAY_BIN" tailscale-cli assert-ready --binary "$CLI_BIN" \
+        --state-root "$STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
+        --scope "$SCOPE" --installation-id "$INSTANCE" \
+        --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" >/dev/null || {
+        echo "✗ The exact persistent CLI route is not qualified and ready; no link was printed." >&2
+        exit 1
+    }
+    CONTROL_STATUS="$("$RELAY_BIN" pairing-control --socket "${HERDR_RELAY_PAIRING_SOCKET:-}" \
+        --operation status --run-id "$RUN_ID" --instance "$INSTANCE" 2>/dev/null)" || {
+        echo "✗ The CLI-backed relay control endpoint is unavailable; no link was printed." >&2
+        exit 1
+    }
+    [ "$(json_bool_field "$CONTROL_STATUS" ready)" = true ] &&
+        [ "$(json_bool_field "$CONTROL_STATUS" local_ready)" = true ] &&
+        [ "$(json_bool_field "$CONTROL_STATUS" serve_ready)" = true ] &&
+        [ "$(json_bool_field "$CONTROL_STATUS" persistent_route_ready)" = true ] &&
+        [ "$(json_bool_field "$CONTROL_STATUS" invitation_armed)" = true ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" run_id)" = "$RUN_ID" ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" instance)" = "$INSTANCE" ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" transport)" = tailscale-cli ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" https_origin)" = "$ORIGIN" ] &&
+        [ "$(json_string_field "$CONTROL_STATUS" phone_app_origin)" = "$PHONE_APP_BASE" ] || {
+        echo "✗ Private CLI route, app, or invitation status did not match; no link was printed." >&2
+        exit 1
+    }
+    HEALTH="$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 5 --max-redirs 0 \
+        "$ORIGIN/healthz" 2>/dev/null)" || {
+        echo "✗ Trusted CLI-backed HTTPS health verification failed; no link was printed." >&2
+        exit 1
+    }
+    [ "$(json_string_field "$HEALTH" status)" = ok ] &&
+        [ "$(json_string_field "$HEALTH" readiness)" = ready ] &&
+        [ "$(json_string_field "$HEALTH" instance)" = "$INSTANCE" ] &&
+        [ "$(json_string_field "$HEALTH" tailscale_cli_control_run_id)" = "$RUN_ID" ] &&
+        [ "$(json_string_field "$HEALTH" transport)" = tailscale-cli ] &&
+        [ "$(json_string_field "$HEALTH" tailscale_cli_origin)" = "$ORIGIN" ] &&
+        [ "$(json_string_field "$HEALTH" bundle_hash)" = "$(json_string_field "$CONTROL_STATUS" bundle_hash)" ] || {
+        echo "✗ Trusted HTTPS belongs to a different CLI route, run, or bundle; no link was printed." >&2
+        exit 1
+    }
+    require_release_identity "$HEALTH" "$RELAY_BIN" || exit 1
+    verify_phone_app_bundle "$PHONE_APP_BASE" "$RELAY_BIN" || {
+        echo "✗ Exact phone-app bundle verification failed; no link was printed." >&2
+        exit 1
+    }
+    RELAY_URL="wss://${ORIGIN#https://}"
+    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$(host_label)" "$RELAY_URL")"
+    echo "🐑 Herdr Mobile Relay phone setup"
+    echo ""
+    print_phone_setup "$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+    echo ""
+    echo "CLI-backed persistent HTTPS route: $ORIGIN"
+    echo "Stopping the service leaves the route configured; use stop, unpublish, and recover separately."
+    exit 0
+fi
 
 if [ "$MODE" = tailscale ]; then
     SESSION_FILE="$(tailscale_session_file "$ENV_FILE")"
@@ -72,15 +160,17 @@ if [ "$MODE" = tailscale ]; then
         echo "✗ Tailscale's authenticated node identity no longer matches this session." >&2
         exit 1
     }
-    [ "$(json_bool_field "$INSPECTION" serve_inspected)" = true ] &&
-        [ "$(json_bool_field "$INSPECTION" exposure_complete)" = true ] &&
-        [ "$(json_bool_field "$INSPECTION" serve_configured)" = true ] &&
-        [ "$(json_bool_field "$INSPECTION" funnel_configured)" = false ] &&
-        "$(relay_binary)" tailscale-route-check --binary "$TS_BIN" --origin "$ORIGIN" \
-            --https-port "$(tailscale_https_port)" --backend-port "${HERDR_RELAY_PORT:-8375}" || {
+    if ! {
+        [ "$(json_bool_field "$INSPECTION" serve_inspected)" = true ] &&
+            [ "$(json_bool_field "$INSPECTION" exposure_complete)" = true ] &&
+            [ "$(json_bool_field "$INSPECTION" serve_configured)" = true ] &&
+            [ "$(json_bool_field "$INSPECTION" funnel_configured)" = false ] &&
+            "$(relay_binary)" tailscale-route-check --binary "$TS_BIN" --origin "$ORIGIN" \
+                --https-port "$(tailscale_https_port)" --backend-port "${HERDR_RELAY_PORT:-8375}"
+    }; then
         echo "✗ The authenticated managed route is not active; no link was printed." >&2
         exit 1
-    }
+    fi
     STATUS_RESPONSE="$(tailscale_control_request "$SOCKET" status "$RUN_ID" "$INSTANCE" 2>/dev/null)" || {
         echo "✗ The foreground relay is not running; start Tailscale again." >&2
         exit 1

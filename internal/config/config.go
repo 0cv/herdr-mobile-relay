@@ -17,9 +17,14 @@ import (
 
 // Accepted relay transport values.
 const (
+	// tailscaleCLIProfilesEnabled is a deliberate P6 activation gate. Source and
+	// fixture support must not make a candidate profile available at runtime.
+	tailscaleCLIProfilesEnabled = false
+
 	TransportCloudflare        = "cloudflare"
 	TransportGateway           = "gateway"
 	TransportTailscale         = "tailscale"
+	TransportTailscaleCLI      = "tailscale-cli"
 	TransportTailscaleExternal = "tailscale-external"
 
 	// Accepted HERDR_GATEWAY_SELECTION values.
@@ -32,29 +37,34 @@ const (
 )
 
 type Config struct {
-	Host                string
-	Port                int
-	PluginPort          int
-	Token               string
-	InstanceID          string
-	AllowedOrigins      []string
-	WebRoot             string
-	HerdrBin            string
-	SocketPath          string
-	PollInterval        float64
-	RuntimeDir          string
-	LogFormat           string
-	LogLevel            slog.Level
-	ReleaseRoot         string
-	ServiceName         string
-	Transport           string
-	TailscaleOrigin     string
-	ExternalHTTPSOrigin string
-	PhoneAppOrigin      string
-	TailscaleBin        string
-	PairingSocketPath   string
-	ManagedRunID        string
-	ControlRunID        string
+	Host                         string
+	Port                         int
+	PluginPort                   int
+	Token                        string
+	InstanceID                   string
+	AllowedOrigins               []string
+	WebRoot                      string
+	HerdrBin                     string
+	SocketPath                   string
+	PollInterval                 float64
+	RuntimeDir                   string
+	LogFormat                    string
+	LogLevel                     slog.Level
+	ReleaseRoot                  string
+	ServiceName                  string
+	Transport                    string
+	TailscaleOrigin              string
+	ExternalHTTPSOrigin          string
+	PhoneAppOrigin               string
+	TailscaleBin                 string
+	TailscaleCLIOrigin           string
+	TailscaleCLIStateRoot        string
+	TailscaleCLICoordinationRoot string
+	TailscaleCLIScope            string
+	TailscaleCLIBin              string
+	PairingSocketPath            string
+	ManagedRunID                 string
+	ControlRunID                 string
 
 	// GatewayURL is the configured tie-break leader, kept equal to
 	// GatewayURLs[0] so readers that only know one gateway keep working. The
@@ -85,25 +95,30 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
-		Host:                envOr("HERDR_RELAY_HOST", "127.0.0.1"),
-		Port:                envIntOr("HERDR_RELAY_PORT", 8375),
-		PluginPort:          envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
-		Token:               os.Getenv("HERDR_RELAY_TOKEN"),
-		InstanceID:          os.Getenv("HERDR_RELAY_INSTANCE_ID"),
-		WebRoot:             os.Getenv("HERDR_WEB_ROOT"),
-		HerdrBin:            os.Getenv("HERDR_BIN"),
-		SocketPath:          os.Getenv("HERDR_SOCKET_PATH"),
-		PollInterval:        envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
-		LogFormat:           envOr("HERDR_RELAY_LOG_FORMAT", "text"),
-		ServiceName:         envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
-		Transport:           transport,
-		TailscaleOrigin:     os.Getenv("HERDR_TAILSCALE_ORIGIN"),
-		ExternalHTTPSOrigin: os.Getenv("HERDR_EXTERNAL_HTTPS_ORIGIN"),
-		PhoneAppOrigin:      os.Getenv("HERDR_PHONE_APP_URL"),
-		TailscaleBin:        envOr("HERDR_TAILSCALE_BIN", "tailscale"),
-		PairingSocketPath:   os.Getenv("HERDR_RELAY_PAIRING_SOCKET"),
-		ManagedRunID:        os.Getenv("HERDR_RELAY_RUN_ID"),
-		ControlRunID:        os.Getenv("HERDR_RELAY_CONTROL_RUN_ID"),
+		Host:                         envOr("HERDR_RELAY_HOST", "127.0.0.1"),
+		Port:                         envIntOr("HERDR_RELAY_PORT", 8375),
+		PluginPort:                   envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
+		Token:                        os.Getenv("HERDR_RELAY_TOKEN"),
+		InstanceID:                   os.Getenv("HERDR_RELAY_INSTANCE_ID"),
+		WebRoot:                      os.Getenv("HERDR_WEB_ROOT"),
+		HerdrBin:                     os.Getenv("HERDR_BIN"),
+		SocketPath:                   os.Getenv("HERDR_SOCKET_PATH"),
+		PollInterval:                 envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
+		LogFormat:                    envOr("HERDR_RELAY_LOG_FORMAT", "text"),
+		ServiceName:                  envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		Transport:                    transport,
+		TailscaleOrigin:              os.Getenv("HERDR_TAILSCALE_ORIGIN"),
+		ExternalHTTPSOrigin:          os.Getenv("HERDR_EXTERNAL_HTTPS_ORIGIN"),
+		PhoneAppOrigin:               os.Getenv("HERDR_PHONE_APP_URL"),
+		TailscaleBin:                 envOr("HERDR_TAILSCALE_BIN", "tailscale"),
+		TailscaleCLIOrigin:           os.Getenv("HERDR_TAILSCALE_CLI_ORIGIN"),
+		TailscaleCLIStateRoot:        os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT"),
+		TailscaleCLICoordinationRoot: os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT"),
+		TailscaleCLIScope:            os.Getenv("HERDR_TAILSCALE_CLI_SCOPE"),
+		TailscaleCLIBin:              os.Getenv("HERDR_TAILSCALE_CLI_BIN"),
+		PairingSocketPath:            os.Getenv("HERDR_RELAY_PAIRING_SOCKET"),
+		ManagedRunID:                 os.Getenv("HERDR_RELAY_RUN_ID"),
+		ControlRunID:                 os.Getenv("HERDR_RELAY_CONTROL_RUN_ID"),
 
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
@@ -167,6 +182,10 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// TailscaleCLIProfilesEnabled reports the compile-time production activation
+// gate. It has no environment/config override and remains false until P6.
+func TailscaleCLIProfilesEnabled() bool { return tailscaleCLIProfilesEnabled }
+
 func (c *Config) Addr() string {
 	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 }
@@ -176,7 +195,7 @@ func (c *Config) validate() error {
 		c.Transport = inferredTransport(c.GatewayURLs)
 	}
 	if c.Transport != TransportCloudflare && c.Transport != TransportGateway &&
-		c.Transport != TransportTailscale && c.Transport != TransportTailscaleExternal {
+		c.Transport != TransportTailscale && c.Transport != TransportTailscaleCLI && c.Transport != TransportTailscaleExternal {
 		return fmt.Errorf("invalid HERDR_RELAY_TRANSPORT %q", c.Transport)
 	}
 	if c.Token == "" && c.Host != "127.0.0.1" && c.Host != "::1" && c.Host != "localhost" {
@@ -205,6 +224,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.GatewayURLs) > 0 && c.Token == "" {
 		return fmt.Errorf("gateway url requires a relay key: the gateway path derives its credentials from it")
+	}
+	if c.Transport == TransportTailscaleCLI {
+		return c.validateTailscaleCLI()
 	}
 	if c.Transport == TransportTailscaleExternal {
 		return c.validateExternalTailscale()
@@ -245,6 +267,99 @@ func (c *Config) validate() error {
 		return errors.New("HERDR_RELAY_RUN_ID is invalid")
 	}
 	return nil
+}
+
+func (c *Config) validateTailscaleCLI() error {
+	if c.Token == "" {
+		return errors.New("tailscale-cli requires a relay key of exactly 32 bytes")
+	}
+	if c.Host != "127.0.0.1" {
+		return fmt.Errorf("tailscale-cli requires HERDR_RELAY_HOST=127.0.0.1, got %q", c.Host)
+	}
+	if strings.TrimSpace(os.Getenv("HERDR_GATEWAY_SELECTION")) != "" {
+		return errors.New("HERDR_GATEWAY_SELECTION conflicts with tailscale-cli transport")
+	}
+	if c.RearmBootstrap {
+		return errors.New("tailscale-cli refuses HERDR_RELAY_REARM_BOOTSTRAP; it would reset device credentials")
+	}
+	if c.PortMappingEnabled {
+		return errors.New("tailscale-cli refuses automatic PCP/UPnP port mapping; set HERDR_REACHABILITY_PORT_MAPPING=0")
+	}
+	if c.TailscaleOrigin != "" {
+		return errors.New("HERDR_TAILSCALE_ORIGIN conflicts with tailscale-cli transport")
+	}
+	origin, err := setuphelper.NormalizeExternalHTTPSOrigin(c.TailscaleCLIOrigin)
+	if err != nil || origin != c.TailscaleCLIOrigin {
+		return errors.New("HERDR_TAILSCALE_CLI_ORIGIN must be a canonical HTTPS origin")
+	}
+	if c.PhoneAppOrigin == "" {
+		c.PhoneAppOrigin = origin
+	}
+	phoneAppOrigin, err := setuphelper.NormalizeExternalHTTPSOrigin(c.PhoneAppOrigin)
+	if err != nil || phoneAppOrigin != c.PhoneAppOrigin {
+		return errors.New("HERDR_PHONE_APP_URL must be a canonical HTTPS origin for tailscale-cli transport")
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return errors.New("HERDR_TAILSCALE_CLI_ORIGIN is invalid")
+	}
+	originPort := 443
+	if parsed.Port() != "" {
+		originPort, err = strconv.Atoi(parsed.Port())
+		if err != nil {
+			return errors.New("HERDR_TAILSCALE_CLI_ORIGIN has an invalid port")
+		}
+	}
+	if originPort == c.Port || originPort == c.PluginPort {
+		return errors.New("tailscale-cli HTTPS listener must differ from relay and plugin backend ports")
+	}
+	if c.InstanceID == "" || !safeRunID(c.InstanceID) {
+		return errors.New("tailscale-cli requires a valid relay instance ID")
+	}
+	if c.ControlRunID == "" || !safeRunID(c.ControlRunID) || c.PairingSocketPath == "" || !filepath.IsAbs(c.PairingSocketPath) {
+		return errors.New("tailscale-cli requires a private control run ID and absolute pairing socket")
+	}
+	if !filepath.IsAbs(c.TailscaleCLIBin) {
+		return errors.New("HERDR_TAILSCALE_CLI_BIN must be the selected absolute Tailscale CLI path")
+	}
+	if c.TailscaleCLIScope != "production" && c.TailscaleCLIScope != "development" {
+		return errors.New("HERDR_TAILSCALE_CLI_SCOPE must be production or development")
+	}
+	for _, path := range []string{c.TailscaleCLIStateRoot, c.TailscaleCLICoordinationRoot} {
+		if !filepath.IsAbs(path) {
+			return errors.New("tailscale-cli registration and coordination roots must be absolute")
+		}
+	}
+	if pathsOverlap(c.TailscaleCLIStateRoot, c.TailscaleCLICoordinationRoot) ||
+		pathsOverlap(c.RuntimeDir, c.TailscaleCLIStateRoot) ||
+		pathsOverlap(c.RuntimeDir, c.TailscaleCLICoordinationRoot) {
+		return errors.New("tailscale-cli private state roots must not overlap relay runtime state")
+	}
+	for _, stateRoot := range []string{c.TailscaleCLIStateRoot, c.TailscaleCLICoordinationRoot} {
+		for _, removableRoot := range []string{c.ConfigHome, c.CacheDir, c.ReleaseRoot} {
+			if removableRoot != "" && pathsOverlap(stateRoot, removableRoot) {
+				return errors.New("tailscale-cli registration roots must remain outside relay config, cache, and release directories")
+			}
+		}
+	}
+	if !tailscaleCLIProfilesEnabled {
+		return errors.New("tailscale-cli is not enabled: candidate profiles remain unqualified pending separate live qualification")
+	}
+	return nil
+}
+
+func pathsOverlap(left, right string) bool {
+	left, right = filepath.Clean(left), filepath.Clean(right)
+	if left == right {
+		return true
+	}
+	return pathWithin(left, right) || pathWithin(right, left)
+}
+
+func pathWithin(parent, child string) bool {
+	parent, child = filepath.Clean(parent), filepath.Clean(child)
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (c *Config) validateExternalTailscale() error {
@@ -310,6 +425,10 @@ func resolveTransport(raw, gatewayRaw string) (string, error) {
 	case TransportTailscale:
 		if gatewayConfigured {
 			return "", errors.New("HERDR_RELAY_TRANSPORT=tailscale conflicts with HERDR_GATEWAY_URL")
+		}
+	case TransportTailscaleCLI:
+		if gatewayConfigured {
+			return "", errors.New("HERDR_RELAY_TRANSPORT=tailscale-cli conflicts with HERDR_GATEWAY_URL")
 		}
 	case TransportTailscaleExternal:
 		if gatewayConfigured {

@@ -24,6 +24,10 @@ fi
 # wrapper—not only the chooser—must remove a previously selected gateway before
 # stable-setup and setup-link decide which transport to configure and encode.
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-cli ]; then
+    echo "✗ Tailscale CLI background Serve is not runtime-qualified; this action will not switch transports or alter service state." >&2
+    exit 1
+fi
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
     [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
     [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||

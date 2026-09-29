@@ -55,8 +55,11 @@ route, or **Operator-owned Tailscale HTTPS Serve (BYO, foreground)**, which uses
 a canonical HTTPS origin you already route to this loopback relay. BYO can keep
 an independently hosted phone app, whose exact bundle Herdr verifies before
 pairing. It does not inspect or change Tailscale state; the ingress remains
-yours when Herdr stops. Both are foreground-only. See [Transports](docs/transports.md#managed-tailscale-serve)
-for the separate lifecycle and platform limits.
+yours when Herdr stops. Both are foreground-only. A separate CLI-backed persistent background mode is
+under implementation, but its candidate App Store/Linux profiles are not
+runtime-qualified and cannot be activated; it is not yet a setup choice. See
+[Transports](docs/transports.md#managed-tailscale-serve) for the separate
+lifecycle and platform limits.
 
 **Temporary Cloudflare Tunnel** is the fastest getting-started option for a
 one-computer trial. It installs any missing user-level tools with confirmation,
@@ -115,6 +118,7 @@ The setup menu exposes each complete connection path directly:
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
 | Managed Tailscale Serve (foreground) | a supported authenticated Tailscale node | private tailnet access; Herdr owns only its temporary route |
 | Operator-owned Tailscale HTTPS Serve (BYO, foreground) | an existing HTTPS Serve origin routed to the loopback relay | use ingress you configure and retain |
+| CLI-backed background Serve (not enabled) | pending App Store/Linux runtime qualification and separate risk acceptance | planned persistent user-service lifecycle; unavailable today |
 
 All five are end-to-end encrypted. On either gateway the phone and the computer
 then negotiate a direct peer-to-peer connection, leaving the gateway with the
@@ -138,7 +142,9 @@ point the relay at that profile with `HERDR_*_CONFIG_DIRS`:
 | --- | --- |
 | [QUICKSTART.md](QUICKSTART.md) | The fast path, start to paired phone |
 | [docs/mobile-app.md](docs/mobile-app.md) | Every feature: agent list, terminal, devices, speech, notifications |
-| [docs/transports.md](docs/transports.md) | Cloudflare, community gateway, own gateway, direct WebRTC |
+| [docs/transports.md](docs/transports.md) | Cloudflare, community gateway, own gateway, Tailscale transport lifecycle |
+| [docs/tailscale-cli-contract.md](docs/tailscale-cli-contract.md) | CLI-backed persistent Serve safety contract and recovery states |
+| [docs/tailscale-cli-qualification.md](docs/tailscale-cli-qualification.md) | Candidate profile evidence and qualification matrix |
 | [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
 | [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |
 | [docs/agent-directories.md](docs/agent-directories.md) | Agents that use a non-default config or profile directory |

@@ -14,6 +14,9 @@ import (
 func transportAdmission(resolved, current string, requireCurrent bool) error {
 	resolved = strings.ToLower(strings.TrimSpace(resolved))
 	current = strings.ToLower(strings.TrimSpace(current))
+	if resolved == "tailscale-cli" || current == "tailscale-cli" {
+		return errors.New("Phone-managed updates are unavailable for CLI-backed Tailscale Serve; complete the tested operator-managed update procedure instead")
+	}
 	if resolved == "tailscale" || current == "tailscale" || resolved == "tailscale-external" || current == "tailscale-external" {
 		return errors.New("Phone-managed updates are unavailable for foreground Tailscale Serve transports; stop the foreground relay and use the verified manual-update procedure")
 	}

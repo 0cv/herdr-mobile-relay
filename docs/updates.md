@@ -114,6 +114,25 @@ tag and that tag's Atom commit feed for its revision. Loading a
 newly deployed phone app uses a versioned navigation, so a sleeping browser or
 installed PWA does not reuse a stale document.
 
+## CLI-backed Tailscale Serve qualification
+
+The source/fixture implementation for persistent CLI-backed Tailscale Serve is
+not a released or runtime-qualified transport. App Store 1.102.4 metadata is
+operator-supplied, the Linux build remains a source candidate, and both profiles
+are unavailable for ordinary activation. Do not migrate an existing foreground
+or operator-owned Serve configuration based on these implementation artifacts.
+Phone-driven plugin updates remain refused for CLI-backed installations. Once a
+profile has been separately qualified and activated, an operator may run
+`relay/tailscale-cli.sh update` from the installed plugin checkout. That
+interactive procedure requires the installed user service to be active, checks
+the exact journaled route before download and after restart, preserves the route
+and registration journal, and rolls the release/service back if restart or
+route recovery fails. It does not repair/remove Serve routes or guarantee remote
+connection drain. The compile-time activation gate remains closed in this
+candidate, so the procedure is not currently available. Live qualification,
+acceptance of the persistent-route risks, and any profile activation require a
+separate P6 decision; none is implied by a relay update.
+
 ## Herdr version compatibility
 
 The relay continues to support Herdr 0.7.5 or newer.

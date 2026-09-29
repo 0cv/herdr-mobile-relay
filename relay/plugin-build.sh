@@ -12,6 +12,23 @@ REPO_DIR=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+OPERATOR_CLI_UPDATE=false
+case "$#" in
+    0) ;;
+    1)
+        if [ "$1" = --operator-managed-tailscale-cli ]; then
+            OPERATOR_CLI_UPDATE=true
+        else
+            echo "Usage: relay/plugin-build.sh [--operator-managed-tailscale-cli]" >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "Usage: relay/plugin-build.sh [--operator-managed-tailscale-cli]" >&2
+        exit 2
+        ;;
+esac
+
 require_user_service_context
 
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_DIR/herdr-plugin.toml")
@@ -63,6 +80,19 @@ SOURCE_SESSION=""
 SOURCE_EXTERNAL_SESSION=""
 [ -z "$SOURCE_ENV" ] || SOURCE_SESSION="$(dirname "$SOURCE_ENV")/tailscale-session.env"
 [ -z "$SOURCE_ENV" ] || SOURCE_EXTERNAL_SESSION="$(dirname "$SOURCE_ENV")/tailscale-external-session.env"
+if [ "$TARGET_TRANSPORT" = tailscale-cli ] || [ "$SOURCE_TRANSPORT" = tailscale-cli ]; then
+    if [ "$OPERATOR_CLI_UPDATE" != true ] ||
+       [ "$TARGET_TRANSPORT" != tailscale-cli ] || [ "$SOURCE_TRANSPORT" != tailscale-cli ]; then
+        echo "herdr-mobile-relay: CLI-backed Tailscale Serve updates are not qualified or available through the phone-managed updater" >&2
+        echo "herdr-mobile-relay: retain the current release, persistent route, and registration journal; do not bypass this guard" >&2
+        exit 1
+    fi
+fi
+if [ "$OPERATOR_CLI_UPDATE" = true ] &&
+   { [ "$TARGET_TRANSPORT" != tailscale-cli ] || [ "$SOURCE_TRANSPORT" != tailscale-cli ]; }; then
+    echo "herdr-mobile-relay: operator-managed CLI update requires matching installed and persistent tailscale-cli transports" >&2
+    exit 1
+fi
 if [ -e "$TARGET_SESSION" ] || [ -e "$TARGET_EXTERNAL_SESSION" ] ||
     { [ -n "$SOURCE_SESSION" ] && [ -e "$SOURCE_SESSION" ]; } ||
     { [ -n "$SOURCE_EXTERNAL_SESSION" ] && [ -e "$SOURCE_EXTERNAL_SESSION" ]; }; then
@@ -129,6 +159,8 @@ validate_migration_source() {
         return 1
     }
 
+    # A single rejection path validates both exact service markers.
+    # shellcheck disable=SC2015
     case "$PLATFORM" in
         Linux)
             grep -F "Environment=HERDR_RELAY_ENV=$source_env" "$SERVICE_FILE" >/dev/null &&
@@ -434,6 +466,11 @@ rollback_plugin_migration() {
                 "gui/$(id -u)/com.herdr-mobile-relay.service" || return 1
             ;;
     esac
+    if [ "$OPERATOR_CLI_UPDATE" = true ] &&
+       ! tailscale_cli_registration_status "$rollback_env" "$INSTALL_ROOT/current/herdr-mobile-relay" >/dev/null; then
+        echo "herdr-mobile-relay: previous relay restarted but exact CLI Serve route recovery failed" >&2
+        return 1
+    fi
     echo "herdr-mobile-relay: previous service recovered successfully." >&2
 }
 
@@ -452,6 +489,33 @@ cleanup_plugin_build() {
     exit "$status"
 }
 trap cleanup_plugin_build EXIT
+
+if [ "$OPERATOR_CLI_UPDATE" = true ]; then
+    if [ "$service_was_active" != true ] || [ -z "$SERVICE_FILE" ] ||
+       [ ! -f "$SERVICE_FILE" ] || [ -z "$SERVICE_BACKUP" ] || [ -z "$SOURCE_ENV" ]; then
+        echo "herdr-mobile-relay: operator-managed CLI update requires the recognized installed user service to be active" >&2
+        exit 1
+    fi
+    if ! validate_migration_source "$SOURCE_ENV"; then
+        exit 1
+    fi
+    if ! tailscale_cli_registration_status "$SOURCE_ENV" >/dev/null; then
+        echo "herdr-mobile-relay: the exact journaled CLI Serve route is not ready; update was not started" >&2
+        exit 1
+    fi
+    if [ ! -t 0 ]; then
+        echo "herdr-mobile-relay: CLI-backed package updates require an interactive operator confirmation" >&2
+        exit 1
+    fi
+    echo "This replaces the verified relay release and restarts the existing user service."
+    echo "The exact persistent Serve route and registration journal are retained; no route repair or removal is attempted."
+    echo "Active phone sessions may be interrupted, and remote connections are not drained."
+    read -r -p "Continue with this operator-managed update? [y/N] " update_answer || exit 1
+    case "$update_answer" in
+        y|Y|yes|YES) ;;
+        *) echo "Cancelled; release, service, route, and journal were left unchanged."; exit 1 ;;
+    esac
+fi
 
 # A private plugin may clone through SSH while its release API still requires an
 # HTTPS token. Reuse an existing gh login when no explicit or plugin-configured
@@ -503,6 +567,8 @@ if [ -z "$INSTALL_TOKEN" ]; then
         if [ "$configured_token_file" = "$expected_token_file" ] &&
            [ -f "$configured_token_file" ] &&
            [ ! -L "$configured_token_file" ]; then
+            # Read only the permission field; this works with GNU and BSD ls.
+            # shellcheck disable=SC2012
             case "$(ls -ld "$configured_token_file" | awk '{print $1}')" in
                 -rw-------*) ;;
                 *) configured_token_file= ;;
@@ -630,6 +696,17 @@ if [ "$service_restarted" = true ]; then
             }
             ;;
     esac
+fi
+
+if [ "$OPERATOR_CLI_UPDATE" = true ]; then
+    if [ "$service_restarted" != true ]; then
+        echo "herdr-mobile-relay: operator-managed CLI update did not restart its active service" >&2
+        exit 1
+    fi
+    if ! tailscale_cli_registration_status "$TARGET_ENV" "$INSTALL_ROOT/current/herdr-mobile-relay" >/dev/null; then
+        echo "herdr-mobile-relay: replacement release did not recover the exact registered CLI Serve route" >&2
+        exit 1
+    fi
 fi
 
 rollback_armed=false

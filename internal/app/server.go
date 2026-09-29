@@ -123,6 +123,8 @@ type Server struct {
 	bootstrapGate                   *deviceauth.BootstrapGate
 	managedOwner                    *ManagedOwner
 	tailscaleSession                managedTailscaleAuthority
+	tailscaleCLIRegistration        tailscaleCLIRegistrationVerifier
+	verifyPublicBundle              func(context.Context, string, string, string, string) error
 	managedRetired                  chan struct{}
 	managedRetireOne                sync.Once
 	tailscaleOpMu                   contextLock
@@ -182,6 +184,18 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 // newServer can create the device store, listeners, control socket or cache
 // directories. Legacy (non-managed) configurations must not supply an owner.
 func NewOwned(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner) (*Server, error) {
+	if cfg.Transport == config.TransportTailscaleCLI {
+		if !config.TailscaleCLIProfilesEnabled() {
+			return nil, errors.New("tailscale-cli startup is disabled until separate live profile qualification and activation")
+		}
+		registration, err := prepareTailscaleCLIRegistration(cfg)
+		if err != nil {
+			return nil, err
+		}
+		server := newServerWithSession(cfg, version, revision, logger, nil, nil)
+		server.tailscaleCLIRegistration = registration
+		return server, nil
+	}
 	if cfg.Transport == config.TransportTailscaleExternal {
 		if owner != nil || cfg.ManagedRunID != "" {
 			return nil, errors.New("operator-owned Tailscale Serve must not acquire managed route ownership")
@@ -315,7 +329,8 @@ func newServerWithSession(
 	var bootstrapGate *deviceauth.BootstrapGate
 	managedTailscale := cfg.Transport == config.TransportTailscale
 	externalTailscale := cfg.Transport == config.TransportTailscaleExternal
-	if authority != nil || managedTailscale || externalTailscale {
+	cliTailscale := cfg.Transport == config.TransportTailscaleCLI
+	if authority != nil || managedTailscale || externalTailscale || cliTailscale {
 		bootstrapGate = deviceauth.NewBootstrapGate()
 		if managedTailscale {
 			bootstrapGate.RequireAuthorityAdmission()
@@ -325,10 +340,14 @@ func newServerWithSession(
 		if managedTailscale && authority == nil {
 			deviceStoreErr = errors.New("managed Tailscale server requires a prepared in-process owner")
 		}
-		if externalTailscale {
+		if externalTailscale || cliTailscale {
 			store, err := deviceauth.OpenDeferred(filepath.Join(cfg.RuntimeDir, "device-auth"))
 			if err != nil {
-				deviceStoreErr = fmt.Errorf("open operator-owned Serve device store without modifying it: %w", err)
+				transportName := "operator-owned Serve"
+				if cliTailscale {
+					transportName = "CLI-backed Serve"
+				}
+				deviceStoreErr = fmt.Errorf("open %s device store without modifying it: %w", transportName, err)
 			} else if err := bootstrapGate.Attach(store); err != nil {
 				deviceStoreErr = err
 			} else {
@@ -388,6 +407,7 @@ func newServerWithSession(
 		bootstrapGate:       bootstrapGate,
 		managedOwner:        owner,
 		tailscaleSession:    authority,
+		verifyPublicBundle:  appdeploy.VerifyPublic,
 		managedRetired:      make(chan struct{}),
 		initErr:             deviceStoreErr,
 		startedAt:           time.Now(),
@@ -1585,6 +1605,9 @@ func (s *Server) Run(ctx context.Context) error {
 				}
 			}
 		})
+	}
+	if s.cfg.Transport == config.TransportTailscaleCLI {
+		startBackground(func() { s.watchTailscaleCLIRegistration(ctx) })
 	}
 	startBackground(func() { s.watchJobStates(ctx) })
 	startBackground(func() { s.updateCheckLoop(ctx) })
@@ -2872,6 +2895,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Transport == config.TransportTailscaleExternal {
 		resp["external_control_run_id"] = s.cfg.ControlRunID
 		resp["external_https_origin"] = s.cfg.ExternalHTTPSOrigin
+	}
+	if s.cfg.Transport == config.TransportTailscaleCLI {
+		resp["tailscale_cli_control_run_id"] = s.cfg.ControlRunID
+		resp["tailscale_cli_origin"] = s.cfg.TailscaleCLIOrigin
 	}
 	if s.cfg.TailscaleOrigin != "" {
 		resp["tailscale_origin"] = s.cfg.TailscaleOrigin

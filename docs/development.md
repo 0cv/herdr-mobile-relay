@@ -13,19 +13,23 @@ make dev-tunnel
 ```
 
 `make dev-tunnel` asks on a terminal whether to use (1) the temporary
-Cloudflare tunnel / saved gateway or (2) managed Tailscale Serve. Option 1
-builds the current Go source and frontend, uses isolated ports and state under
-`relay/.dev/`, and never uses the installed production relay. Enter selects
-option 1, preserving the old default. Choosing 2 is the interactive development
-opt-in; the managed launcher separately asks before changing the exact Serve
-route. In automation, `make dev-tunnel` retains the tunnel default; set
-`HERDR_DEV_TRANSPORT=tailscale` to select option 2 without a menu (the
-noninteractive Tailscale opt-in is still required). “Tunnel” means the
-Cloudflare/gateway path here; Tailscale Serve is tailnet HTTPS, not Cloudflare
-tunneling. Neither choice reads the other's development state.
+Cloudflare tunnel / saved gateway, (2) the new CLI-backed persistent Tailscale
+transport, or (3) the legacy foreground/session-owned Tailscale Serve transport.
+Option 1 builds the current Go source and frontend, uses isolated ports and state
+under `relay/.dev/`, and never uses the installed production relay. Enter selects
+option 1. Option 2 is currently displayed as unavailable and refuses before CLI
+lookup, socket/service access, route mutation, or development-state creation.
+The source/fixture implementation does not establish live App Store/Linux
+qualification; activation remains disabled pending P6. Option 3 retains the
+existing LocalAPI temporary-session contract and its own consent/compatibility
+checks; it is not a fallback for option 2. In automation,
+`make dev-tunnel` retains the tunnel default; `HERDR_DEV_TRANSPORT=tailscale-cli`
+selects fail-closed option 2, while `HERDR_DEV_TRANSPORT=tailscale` selects the
+legacy option 3. “Tunnel” means the Cloudflare/gateway path here; Tailscale Serve
+is tailnet HTTPS, not Cloudflare tunneling. Development roots remain separate.
 
 For an **explicitly selected, already running and authenticated** supported
-Tailscale v1.102.4 Unix daemon, choosing menu option 2 starts managed
+Tailscale v1.102.4 Unix daemon, choosing menu option 3 starts legacy managed
 development without asking for paths or ports. The checkout-local state root
 `relay/.dev-tailscale/` is created with mode 0700 only after input checks.
 The development relay, plugin and HTTPS Serve ports default to 18377, 18378
@@ -85,7 +89,8 @@ MacSys/App Store and physical-phone use are not qualified by this entrypoint.
 ```bash
 make check             # all backend, frontend, browser, and release checks
 make backend-check     # format, vet, tests, race detector, shell checks
-make dev-tailscale     # guided managed Serve; explicit private root/daemon/ports
+make dev-tailscale     # guided legacy foreground Serve; explicit private root/daemon/ports
+make dev-tailscale-cli # CLI-backed persistent mode; currently refuses pending P6
 make web-release       # replace committed web/ with a verified frontend build
 make web-release-check # compare and browser-test the shipped web/ bundle
 make relay-plugin      # link this checkout as a Herdr plugin

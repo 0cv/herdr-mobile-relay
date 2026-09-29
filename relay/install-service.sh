@@ -16,6 +16,7 @@ require_user_service_context
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
+TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
     [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
     [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
@@ -26,13 +27,21 @@ if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
 fi
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
 
-if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
-    echo "Missing Cloudflare tunnel config: $CLOUDFLARED_CONFIG"
-    echo "Create it first, or set CLOUDFLARED_CONFIG before running this installer."
-    exit 1
+if [ "$TRANSPORT" = tailscale-cli ]; then
+    relay_binary >/dev/null
+    tailscale_cli_registration_status "$ENV_FILE" >/dev/null || {
+        echo "✗ A verified CLI-backed registration is required before installing its user service." >&2
+        exit 1
+    }
+    ensure_relay_env "$ENV_FILE"
+else
+    if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
+        echo "Missing Cloudflare tunnel config: $CLOUDFLARED_CONFIG"
+        echo "Create it first, or set CLOUDFLARED_CONFIG before running this installer."
+        exit 1
+    fi
+    ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 fi
-
-ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 chmod +x "$SCRIPT_DIR/herdr-mobile-relay-service.sh"
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 

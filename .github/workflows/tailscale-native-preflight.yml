@@ -70,7 +70,9 @@ jobs:
           set -euo pipefail
           printf 'go_path=%s\n' "$(command -v go)" | tee "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           go version | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
-          go test -count=1 ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          go test -count=1 ./internal/processsupervisor ./internal/tailscale ./internal/tailscalecli ./cmd/herdr-mobile-relay 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          go test -count=1 ./internal/app -run '^TestCLITailscaleControlStatusFailsClosedOnUnqualifiedRoute$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          go test -count=1 -tags=herdr_tailscale_test ./internal/app -run '^TestTailscaleCLIReadinessArmAndDrift$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
 
       - name: Run Go vet
         id: go_vet
@@ -79,7 +81,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go vet ./internal/processsupervisor ./internal/tailscale ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/go-vet.log"
+          go vet ./internal/processsupervisor ./internal/tailscale ./internal/tailscalecli ./internal/app ./cmd/herdr-mobile-relay 2>&1 | tee "$RUNNER_TEMP/tailscale-native-preflight/go-vet.log"
 
       - name: Build the exact relay supervisor
         id: supervisor_build

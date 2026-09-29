@@ -85,8 +85,14 @@ for WRAPPER in \
     stable-teardown.sh \
     start.sh \
     tailscale.sh \
-    tailscale-external.sh; do
-    printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER"
+    tailscale-external.sh \
+    tailscale-cli-service.sh; do
+    case "$WRAPPER" in
+        common.sh|herdr-mobile-relay-service.sh|tailscale-cli-service.sh)
+            cp "$REPO_DIR/relay/$WRAPPER" "$RELEASE_DIR/relay/$WRAPPER"
+            ;;
+        *) printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER" ;;
+    esac
     chmod 755 "$RELEASE_DIR/relay/$WRAPPER"
 done
 

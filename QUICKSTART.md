@@ -135,6 +135,12 @@ availability is not guaranteed by Herdr. This path does not support background
 service installation or phone-managed updates. See
 [Operator-owned Serve](docs/transports.md#operator-owned-https-serve-byo).
 
+A distinct CLI-backed background Serve transport is being implemented, but the
+candidate App Store/Linux profiles are not runtime-qualified and it is not
+available in setup. Do not select a profile or publish a persistent route based
+on the source/fixture implementation alone; separate P6 qualification and risk
+acceptance remain pending.
+
 ## Make It Permanent
 
 Add a domain to Cloudflare, then run:

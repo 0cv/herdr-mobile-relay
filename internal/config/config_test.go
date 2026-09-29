@@ -247,6 +247,67 @@ func TestLoadRejectsNonWebSocketGatewayURL(t *testing.T) {
 	}
 }
 
+func TestTailscaleCLITransportIsRecognizedButActivationDisabled(t *testing.T) {
+	isolateLoadEnvironment(t)
+	configureTailscaleCLIEnvironment(t)
+
+	cfg, err := Load()
+	if cfg != nil || err == nil || !strings.Contains(err.Error(), "pending separate live qualification") {
+		t.Fatalf("unqualified CLI transport was not refused: config=%#v err=%v", cfg, err)
+	}
+	if got, err := resolveTransport(TransportTailscaleCLI, ""); err != nil || got != TransportTailscaleCLI {
+		t.Fatalf("transport identity was not parsed: got=%q err=%v", got, err)
+	}
+	if _, err := resolveTransport(TransportTailscaleCLI, "wss://gateway.example.test"); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("CLI transport/gateway conflict was not rejected: %v", err)
+	}
+}
+
+func TestTailscaleCLIConfigRejectsInvalidStateAndOriginsBeforeActivationGate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]string
+		want      string
+	}{
+		{
+			name:      "non-loopback",
+			overrides: map[string]string{"HERDR_RELAY_HOST": "0.0.0.0"},
+			want:      "requires HERDR_RELAY_HOST=127.0.0.1",
+		},
+		{
+			name:      "port collision",
+			overrides: map[string]string{"HERDR_TAILSCALE_CLI_ORIGIN": "https://relay.tailnet.ts.net:8375"},
+			want:      "listener must differ",
+		},
+		{
+			name:      "overlapping registration root",
+			overrides: map[string]string{"HERDR_TAILSCALE_CLI_COORDINATION_ROOT": "<runtime-root>"},
+			want:      "roots must not overlap",
+		},
+		{
+			name:      "registration journal inside removable releases",
+			overrides: map[string]string{"HERDR_TAILSCALE_CLI_STATE_ROOT": "<release-root>"},
+			want:      "remain outside relay config, cache, and release",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateLoadEnvironment(t)
+			configureTailscaleCLIEnvironment(t)
+			for key, value := range tc.overrides {
+				if value == "<runtime-root>" {
+					value = filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "herdr-mobile-relay")
+				} else if value == "<release-root>" {
+					value = filepath.Join(os.Getenv("XDG_DATA_HOME"), "herdr-mobile-relay")
+				}
+				t.Setenv(key, value)
+			}
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("invalid CLI config error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadTailscaleRequiresSafeLoopbackAndNoRearm(t *testing.T) {
 	isolateLoadEnvironment(t)
 	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
@@ -567,6 +628,22 @@ func isolateTailscaleEnvironment(t *testing.T) {
 	t.Setenv("HERDR_RELAY_RUN_ID", "run-1")
 }
 
+func configureTailscaleCLIEnvironment(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HERDR_RELAY_TRANSPORT", TransportTailscaleCLI)
+	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HERDR_RELAY_INSTANCE_ID", "cli-instance")
+	t.Setenv("HERDR_RELAY_CONTROL_RUN_ID", "cli-control-run")
+	t.Setenv("HERDR_RELAY_PAIRING_SOCKET", filepath.Join(root, "control.sock"))
+	t.Setenv("HERDR_REACHABILITY_PORT_MAPPING", "0")
+	t.Setenv("HERDR_TAILSCALE_CLI_ORIGIN", "https://relay.tailnet.ts.net:8443")
+	t.Setenv("HERDR_TAILSCALE_CLI_STATE_ROOT", filepath.Join(root, "registration"))
+	t.Setenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT", filepath.Join(root, "coordination"))
+	t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "production")
+	t.Setenv("HERDR_TAILSCALE_CLI_BIN", filepath.Join(root, "Tailscale.app", "Contents", "MacOS", "Tailscale"))
+}
+
 func isolateLoadEnvironment(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
@@ -595,6 +672,11 @@ func isolateLoadEnvironment(t *testing.T) {
 	t.Setenv("HERDR_PHONE_APP_URL", "")
 	t.Setenv("HERDR_RELAY_CONTROL_RUN_ID", "")
 	t.Setenv("HERDR_TAILSCALE_BIN", "")
+	t.Setenv("HERDR_TAILSCALE_CLI_ORIGIN", "")
+	t.Setenv("HERDR_TAILSCALE_CLI_STATE_ROOT", "")
+	t.Setenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT", "")
+	t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "")
+	t.Setenv("HERDR_TAILSCALE_CLI_BIN", "")
 	t.Setenv("HERDR_RELAY_PAIRING_SOCKET", "")
 	t.Setenv("HERDR_RELAY_RUN_ID", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))

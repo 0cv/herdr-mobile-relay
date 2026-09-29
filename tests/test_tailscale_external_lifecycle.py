@@ -780,6 +780,22 @@ def run_fixture() -> str:
             encoding="utf-8",
         )
         fake_tailscale.chmod(0o700)
+        fake_launchctl = fake_bin / "launchctl"
+        fake_launchctl.write_text(
+            "#!/bin/sh\n"
+            "[ \"${1:-}\" = print ] && exit 1\n"
+            "exit 97\n",
+            encoding="utf-8",
+        )
+        fake_launchctl.chmod(0o700)
+        fake_systemctl = fake_bin / "systemctl"
+        fake_systemctl.write_text(
+            "#!/bin/sh\n"
+            "case \" $* \" in *\" is-active \"*) exit 3 ;; esac\n"
+            "exit 97\n",
+            encoding="utf-8",
+        )
+        fake_systemctl.chmod(0o700)
         sentinel = directory / "tailscale-called"
         empty_ca = directory / "empty-ca.pem"
         empty_ca.write_bytes(b"")

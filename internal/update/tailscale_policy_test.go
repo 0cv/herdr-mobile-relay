@@ -67,6 +67,19 @@ func s3Seed(t *testing.T, root string, state State) {
 		t.Fatal(err)
 	}
 }
+func TestCLITailscaleBlocksPhoneManagedUpdates(t *testing.T) {
+	for _, resolved := range []string{"tailscale-cli", "cloudflare"} {
+		for _, current := range []string{"", "tailscale-cli", "cloudflare"} {
+			err := transportAdmission(resolved, current, false)
+			if resolved == "tailscale-cli" || current == "tailscale-cli" {
+				if err == nil || !strings.Contains(err.Error(), "CLI-backed Tailscale Serve") {
+					t.Errorf("transportAdmission(%q, %q) = %v, want CLI-backed Serve refusal", resolved, current, err)
+				}
+			}
+		}
+	}
+}
+
 func TestExternalTailscaleBlocksPhoneManagedUpdates(t *testing.T) {
 	for _, resolved := range []string{"tailscale-external", "cloudflare"} {
 		for _, current := range []string{"", "tailscale-external", "cloudflare"} {

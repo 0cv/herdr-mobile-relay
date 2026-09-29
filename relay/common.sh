@@ -349,6 +349,38 @@ relay_release_root() {
 }
 
 
+tailscale_cli_registration_status() {
+    local env_file="$1"
+    local binary="${2:-}"
+    local cli_binary
+    local state_root
+    local coordination_root
+    local scope
+    local installation_id
+    local https_port
+    local backend_port
+    local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+    if [ -z "$binary" ]; then
+        binary="$(relay_binary)" || return 1
+    fi
+    cli_binary="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_BIN)"
+    state_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_STATE_ROOT)"
+    coordination_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_COORDINATION_ROOT)"
+    scope="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_SCOPE)"
+    installation_id="$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)"
+    https_port="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_HTTPS_PORT)"
+    backend_port="$(env_file_value "$env_file" HERDR_RELAY_PORT)"
+    state_root="${state_root:-$state_home/herdr-mobile-relay/tailscale-cli-registration}"
+    coordination_root="${coordination_root:-$state_home/herdr-mobile-relay/tailscale-cli-coordination}"
+    case "$https_port" in ''|*[!0-9]*) echo "✗ HERDR_TAILSCALE_CLI_HTTPS_PORT must be an explicit port." >&2; return 2 ;; esac
+    case "$backend_port" in ''|*[!0-9]*) echo "✗ HERDR_RELAY_PORT must be an explicit backend port." >&2; return 2 ;; esac
+    "$binary" tailscale-cli assert-ready \
+        --binary "$cli_binary" --state-root "$state_root" --coordination-root "$coordination_root" \
+        --scope "$scope" --installation-id "$installation_id" \
+        --https-port "$https_port" --backend-port "$backend_port"
+}
+
 relay_binary() {
     local binary
     local common_dir
@@ -578,6 +610,8 @@ read_cloudflared_relay_config() {
         echo "✗ Config tunnel $configured_tunnel does not match credentials for $TUNNEL_UUID." >&2
         return 1
     fi
+    # This value is the documented output of this sourced helper for callers.
+    # shellcheck disable=SC2034
     TUNNEL_NAME="$configured_tunnel"
 }
 
@@ -648,7 +682,8 @@ cloudflare_cert_zone_name() {
 relogin_for_cloudflare_zone() {
     local origin_cert="$1"
     local zone="$2"
-    local backup="$origin_cert.$(date +%Y%m%d%H%M%S)"
+    local backup
+    backup="$origin_cert.$(date +%Y%m%d%H%M%S)"
 
     echo "▸ Signing in to Cloudflare for $zone."
     echo "  The current certificate is kept as $backup."
@@ -741,7 +776,8 @@ launchd_service_loaded() {
 reload_launchd_service_definition() {
     local plist="$1"
     local label="$2"
-    local domain="gui/$(id -u)"
+    local domain
+    domain="gui/$(id -u)"
     local service_target="$domain/$label"
     local attempt
     local unloaded=false
@@ -897,10 +933,13 @@ node_bin_dir() {
     local major
     local recorded=""
     local on_path=""
+    local node_version_bin
 
     if [ -n "$env_file" ] && [ -f "$env_file" ]; then
         recorded="$(env_file_value "$env_file" HERDR_APP_DEPLOY_NODE_DIR)"
     fi
+    node_version_bin="$(find "${NVM_DIR:-$HOME/.nvm}/versions/node" -mindepth 2 -maxdepth 2 \
+        -type d -name bin -print 2>/dev/null | sort -V | tail -1)"
     if on_path="$(command -v node 2>/dev/null)"; then
         on_path="$(dirname "$on_path")"
     fi
@@ -911,7 +950,7 @@ node_bin_dir() {
         "${FNM_DIR:-$HOME/.local/share/fnm}/aliases/default/bin" \
         "$HOME/.volta/bin" \
         "$HOME/.asdf/shims" \
-        "$(ls -d "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin 2>/dev/null | sort -V | tail -1)" \
+        "$node_version_bin" \
         /opt/homebrew/bin \
         /usr/local/bin \
         "$HOME/.local/bin" \
@@ -1021,7 +1060,7 @@ relay_transport_mode() {
         fi
     fi
     case "$mode" in
-        cloudflare|gateway|tailscale|tailscale-external) printf '%s\n' "$mode" ;;
+        cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) printf '%s\n' "$mode" ;;
         *)
             echo "✗ Invalid HERDR_RELAY_TRANSPORT: $mode" >&2
             return 1
@@ -1047,7 +1086,7 @@ set_relay_transport() {
     local mode="$2"
 
     case "$mode" in
-        cloudflare|gateway|tailscale|tailscale-external) ;;
+        cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) ;;
         *) echo "✗ Invalid relay transport: $mode" >&2; return 1 ;;
     esac
     if [ "$mode" != tailscale ] && [ -e "$(tailscale_session_file "$env_file")" ]; then

@@ -4,7 +4,6 @@ set -euo pipefail
 LABEL="herdr-mobile-relay.service"
 LEGACY_LABEL="herdr-remote.service"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT_FILE="$UNIT_DIR/$LABEL"
 LEGACY_UNIT_FILE="$UNIT_DIR/$LEGACY_LABEL"
@@ -17,6 +16,7 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:/usr
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
+TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
     [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
     [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
@@ -34,19 +34,25 @@ fi
 
 relay_binary >/dev/null
 
-if ! command -v cloudflared >/dev/null 2>&1; then
-    echo "cloudflared not found in PATH"
-    echo "Install cloudflared before installing the service."
-    exit 1
+if [ "$TRANSPORT" = tailscale-cli ]; then
+    tailscale_cli_registration_status "$ENV_FILE" >/dev/null || {
+        echo "✗ A verified CLI-backed registration is required before installing its user service." >&2
+        exit 1
+    }
+    ensure_relay_env "$ENV_FILE"
+else
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo "cloudflared not found in PATH"
+        echo "Install cloudflared before installing the service."
+        exit 1
+    fi
+    if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
+        echo "Missing Cloudflare tunnel config: $CLOUDFLARED_CONFIG"
+        echo "Create it first, or set CLOUDFLARED_CONFIG in $ENV_FILE."
+        exit 1
+    fi
+    ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 fi
-
-if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
-    echo "Missing Cloudflare tunnel config: $CLOUDFLARED_CONFIG"
-    echo "Create it first, or set CLOUDFLARED_CONFIG in $ENV_FILE."
-    exit 1
-fi
-
-ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 RELEASE_ROOT="$(relay_release_root)"
 SERVICE_WRAPPER="$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh"
 if [ ! -x "$SERVICE_WRAPPER" ]; then
@@ -61,7 +67,7 @@ mkdir -p "$UNIT_DIR"
 
 cat > "$UNIT_FILE" <<EOF
 [Unit]
-Description=Herdr Mobile Relay and Cloudflare tunnel
+Description=Herdr Mobile Relay $TRANSPORT
 After=network-online.target
 Wants=network-online.target
 

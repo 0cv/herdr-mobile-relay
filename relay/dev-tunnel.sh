@@ -8,18 +8,21 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # private root and consent gate and must never inherit this path's .dev state.
 case "${HERDR_DEV_TRANSPORT:-}" in
     tailscale) exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
+    tailscale-cli) exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@" ;;
     ''|tunnel) ;;
-    *) echo "✗ HERDR_DEV_TRANSPORT must be tunnel or tailscale." >&2; exit 2 ;;
+    *) echo "✗ HERDR_DEV_TRANSPORT must be tunnel, tailscale, or tailscale-cli." >&2; exit 2 ;;
 esac
 if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
     echo "Development transport:"
     echo "  1. Temporary Cloudflare tunnel (or saved gateway); relay/.dev state"
-    echo "  2. Managed Tailscale Serve; separate private state and explicit consent"
+    echo "  2. CLI-backed persistent Tailscale Serve (not enabled; runtime qualification pending)"
+    echo "  3. Legacy managed Tailscale Serve (advanced foreground/session-owned mode)"
     read -r -p "Choice [1]: " choice || { echo "Cancelled; nothing was started." >&2; exit 2; }
     case "$choice" in
         ''|1) ;;
-        2) HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
-        *) echo "✗ Choose 1 or 2." >&2; exit 2 ;;
+        2) exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@" ;;
+        3) HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
+        *) echo "✗ Choose 1, 2, or 3." >&2; exit 2 ;;
     esac
 fi
 DEV_DIR="${HERDR_DEV_CONFIG_DIR:-$SCRIPT_DIR/.dev}"

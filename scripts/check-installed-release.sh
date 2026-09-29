@@ -104,7 +104,7 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     echo "release does not contain an executable relay" >&2
     exit 1
 }
-for WRAPPER in tailscale.sh tailscale-external.sh; do
+for WRAPPER in tailscale.sh tailscale-external.sh tailscale-cli-service.sh; do
     [ -x "$RELEASE_DIR/relay/$WRAPPER" ] || {
         echo "release does not contain executable $WRAPPER" >&2
         exit 1
@@ -115,6 +115,46 @@ done
     --version "$EXPECTED_VERSION" \
     --revision "$EXPECTED_REVISION" \
     "$RELEASE_DIR" >/dev/null
+
+# Exercise the exact extracted CLI service dispatch with an inert relay fixture.
+# Copying the packaged wrappers under a manifest-free temporary root guarantees
+# relay_binary cannot prefer or execute the extracted production binary.
+CLI_FIXTURE_ROOT="$WORK_DIR/cli-service-fixture"
+CLI_FIXTURE_HOME="$WORK_DIR/cli-service-home"
+CLI_FIXTURE_ENV="$WORK_DIR/cli-service.env"
+CLI_FIXTURE_RECORD="$WORK_DIR/cli-service.record"
+CLI_FIXTURE_RELAY="$WORK_DIR/cli-fake-relay"
+mkdir -p "$CLI_FIXTURE_ROOT/relay" "$CLI_FIXTURE_HOME"
+for WRAPPER in common.sh herdr-mobile-relay-service.sh tailscale-cli-service.sh; do
+    cp "$RELEASE_DIR/relay/$WRAPPER" "$CLI_FIXTURE_ROOT/relay/$WRAPPER"
+done
+cat > "$CLI_FIXTURE_ENV" <<'EOF'
+HERDR_RELAY_TRANSPORT='tailscale-cli'
+HERDR_RELAY_PORT='18377'
+EOF
+cat > "$CLI_FIXTURE_RELAY" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" > "$HERDR_CLI_SERVICE_RECORD"
+printf '%s|%s|%s\n' "$HERDR_RELAY_TRANSPORT" "$HERDR_RELAY_HOST" "$HERDR_RELAY_PORT" >> "$HERDR_CLI_SERVICE_RECORD"
+EOF
+chmod 700 "$CLI_FIXTURE_RELAY"
+HOME="$CLI_FIXTURE_HOME" \
+HERDR_RELAY_ENV="$CLI_FIXTURE_ENV" \
+HERDR_RELAY_BIN="$CLI_FIXTURE_RELAY" \
+HERDR_CLI_SERVICE_RECORD="$CLI_FIXTURE_RECORD" \
+"$CLI_FIXTURE_ROOT/relay/herdr-mobile-relay-service.sh" >"$WORK_DIR/cli-service.log" 2>&1 || {
+    echo "extracted CLI service dispatch failed" >&2
+    sed -n '1,80p' "$WORK_DIR/cli-service.log" >&2
+    exit 1
+}
+[ "$(sed -n '1p' "$CLI_FIXTURE_RECORD")" = serve ] || {
+    echo "extracted CLI service did not exec the inert relay fixture" >&2
+    exit 1
+}
+[ "$(sed -n '2p' "$CLI_FIXTURE_RECORD")" = 'tailscale-cli|127.0.0.1|18377' ] || {
+    echo "extracted CLI service passed unexpected transport or bind settings" >&2
+    exit 1
+}
 
 PORT=$((40000 + ($$ % 20000)))
 PLUGIN_PORT=$((PORT + 1))

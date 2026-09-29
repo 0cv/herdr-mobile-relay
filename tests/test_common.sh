@@ -146,7 +146,7 @@ done
 NODE_HOME="$WORK_DIR/nodehome"
 NODE_TOOL_PATH="$WORK_DIR/node-tools"
 mkdir -p "$NODE_TOOL_PATH"
-for tool in ls sort tail printenv; do
+for tool in find ls sort tail printenv; do
     ln -s "$(command -v "$tool")" "$NODE_TOOL_PATH/$tool"
 done
 fake_node_dir() {

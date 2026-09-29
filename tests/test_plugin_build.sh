@@ -76,6 +76,15 @@ case "$1" in
         ln -s "$release" "$temp"
         mv -f "$temp" "$root/current"
         ;;
+    tailscale-cli)
+        [ "${2:-}" = assert-ready ] || exit 1
+        printf '%s|%s\n' "$0" "$*" >> "$CLI_ROUTE_RECORD"
+        if [ "${CLI_POST_ROUTE_FAIL:-}" = 1 ] &&
+           [ "$(readlink -f "$0" 2>/dev/null || true)" = "$NEW_RELEASE/herdr-mobile-relay" ]; then
+            exit 42
+        fi
+        printf '%s\n' '{"route":{"journal_state":"registered","readiness":"ready","runtime_qualified":true}}'
+        ;;
     *) exit 1 ;;
 esac
 EOF
@@ -95,6 +104,8 @@ WorkingDirectory=$TEST_HOME/source-checkout
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$SOURCE_CONFIG/herdr-mobile-relay-service.sh"
 chmod 700 "$SOURCE_CONFIG/herdr-mobile-relay-service.sh"
+cp "$SOURCE_ENV" "$WORK_DIR/source-env-original"
+cp "$UNIT_FILE" "$WORK_DIR/initial-unit"
 
 FAKE_INSTALLER="$WORK_DIR/install.sh"
 cat > "$FAKE_INSTALLER" <<EOF
@@ -143,7 +154,10 @@ case "$*" in
         [ "${GH_API_PUBLIC:-}" = 1 ] || exit 22
         printf '{}\n'
         ;;
-    *) cat "$HEALTH_FILE" ;;
+    *)
+        if [ -n "${CLI_HEALTH_RECORD:-}" ]; then cat "$HEALTH_FILE" >> "$CLI_HEALTH_RECORD"; fi
+        cat "$HEALTH_FILE"
+        ;;
 esac
 EOF
 cat > "$FAKE_BIN/herdr" <<'EOF'
@@ -181,9 +195,26 @@ chmod 700 "$FAKE_BIN/gh"
 chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" \
     "$FAKE_BIN/sleep" "$FAKE_BIN/uname"
 
-export SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
+export REPO_DIR SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
 export SETUP_RECORD
-export RELEASE_ROOT OLD_RELEASE
+export RELEASE_ROOT OLD_RELEASE NEW_RELEASE
+# CLI-backed Serve has no qualified update path; refuse before the installer,
+# service manager, release pointer, or persisted state is touched.
+printf "HERDR_RELAY_TRANSPORT='tailscale-cli'\n" >> "$TARGET_CONFIG/relay.env"
+cp -pR "$TARGET_CONFIG" "$WORK_DIR/cli-target-before"
+if HOME="$TEST_HOME" \
+    PATH="$FAKE_BIN:$PATH" \
+    HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
+    HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+    bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/cli-output" 2>&1; then
+    echo "CLI-backed Serve unexpectedly admitted a phone-managed update" >&2
+    exit 1
+fi
+grep -F "CLI-backed Tailscale Serve updates are not qualified or available" "$WORK_DIR/cli-output" >/dev/null
+test ! -e "$RESTART_LOG"
+test "$(readlink -f "$RELEASE_ROOT/current")" = "$OLD_RELEASE"
+diff -qr "$WORK_DIR/cli-target-before" "$TARGET_CONFIG" >/dev/null
+cp "$WORK_DIR/target-before/relay.env" "$TARGET_CONFIG/relay.env"
 if HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
@@ -438,4 +469,173 @@ sleep 1
 grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||
     { echo "a configured relay did not open the setup menu" >&2; exit 1; }
 
-echo "plugin build migration, rollback, and recovery tests passed"
+# --- Explicit operator-managed CLI package update ---------------------------
+# Exercise the complete update entrypoint with only a fake relay manager,
+# release installer, health endpoint and systemctl. The selected CLI is a
+# sentinel and the persistent route journal is checked byte-for-byte.
+CLI_UPDATE_STATE="$TEST_HOME/.local/state/herdr-mobile-relay/tailscale-cli-registration"
+CLI_UPDATE_COORDINATION="$TEST_HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination"
+CLI_UPDATE_MANAGER="$WORK_DIR/cli-update-manager"
+CLI_UPDATE_MANAGER_RECORD="$WORK_DIR/cli-update-manager-record"
+CLI_ROUTE_RECORD="$WORK_DIR/cli-route-record"
+CLI_HEALTH_RECORD="$WORK_DIR/cli-health-record"
+CLI_TAILSCALE="$WORK_DIR/cli-update-tailscale"
+CLI_TAILSCALE_SENTINEL="$WORK_DIR/cli-update-tailscale-touched"
+mkdir -p "$CLI_UPDATE_STATE" "$CLI_UPDATE_COORDINATION"
+printf '{"state":"registered","fixture":true}\n' > "$CLI_UPDATE_STATE/registration.json"
+cp "$CLI_UPDATE_STATE/registration.json" "$WORK_DIR/cli-registration-before"
+cat > "$CLI_TAILSCALE" <<EOF
+#!/bin/sh
+printf 'invoked\\n' >> "$CLI_TAILSCALE_SENTINEL"
+exit 97
+EOF
+cat > "$CLI_UPDATE_MANAGER" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = json-field ]; then
+    [ "${2:-}" = string ] || exit 1
+    case "${3:-}" in status|release_version|revision|bundle_hash) ;; *) exit 1 ;; esac
+    sed -n "s/.*\"${3}\":\"\\([^\"]*\\)\".*/\\1/p"
+    exit 0
+fi
+printf '%s\n' "$*" >> "$CLI_UPDATE_MANAGER_RECORD"
+case "$*" in
+    'tailscale-cli activation-check') exit 0 ;;
+    'tailscale-cli assert-ready '*)
+        printf '%s\n' '{"route":{"journal_state":"registered","readiness":"ready","runtime_qualified":true}}'
+        exit 0
+        ;;
+esac
+exit 97
+EOF
+chmod 700 "$CLI_TAILSCALE" "$CLI_UPDATE_MANAGER"
+write_cli_update_config() {
+    local env_file="$1"
+    cat >> "$env_file" <<EOF
+HERDR_RELAY_TRANSPORT=tailscale-cli
+HERDR_TAILSCALE_CLI_SCOPE=development
+HERDR_TAILSCALE_CLI_BIN=$CLI_TAILSCALE
+HERDR_TAILSCALE_CLI_STATE_ROOT=$CLI_UPDATE_STATE
+HERDR_TAILSCALE_CLI_COORDINATION_ROOT=$CLI_UPDATE_COORDINATION
+HERDR_TAILSCALE_CLI_HTTPS_PORT=9443
+HERDR_TAILSCALE_CLI_ORIGIN=https://relay.fixture.invalid:9443
+HERDR_TAILSCALE_CLI_NODE_ID=node-update-fixture
+EOF
+}
+reset_cli_update_fixture() {
+    rm -rf "$TARGET_CONFIG"
+    cp -pR "$WORK_DIR/target-before/." "$TARGET_CONFIG/"
+    cp "$WORK_DIR/source-env-original" "$SOURCE_ENV"
+    cp "$WORK_DIR/initial-unit" "$UNIT_FILE"
+    rm -f "$RELEASE_ROOT/current"
+    ln -s "releases/0.8.6-old" "$RELEASE_ROOT/current"
+    rm -f "$RESTART_LOG" "$CLI_UPDATE_MANAGER_RECORD" "$CLI_ROUTE_RECORD" "$CLI_HEALTH_RECORD"
+}
+reset_cli_update_fixture
+write_cli_update_config "$SOURCE_ENV"
+write_cli_update_config "$TARGET_CONFIG/relay.env"
+cp -pR "$TARGET_CONFIG" "$WORK_DIR/cli-update-target-before"
+export CLI_UPDATE_MANAGER_RECORD CLI_ROUTE_RECORD CLI_HEALTH_RECORD NEW_RELEASE
+
+run_cli_update() {
+    local answer="$1" output="$2"
+    if CLI_UPDATE_ANSWER="$answer" \
+        HOME="$TEST_HOME" \
+        PATH="$FAKE_BIN:$PATH" \
+        HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
+        HERDR_PLUGIN_CONFIG_DIR="$TARGET_CONFIG" \
+        HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+        HERDR_RELAY_ENV="$SOURCE_ENV" \
+        HERDR_RELAY_BIN="$CLI_UPDATE_MANAGER" \
+        HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay \
+        REPLACEMENT_REVISION=new-revision \
+        HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 \
+        CLI_TAILSCALE_SENTINEL="$CLI_TAILSCALE_SENTINEL" \
+        CLI_ROUTE_RECORD="$CLI_ROUTE_RECORD" \
+        CLI_HEALTH_RECORD="$CLI_HEALTH_RECORD" \
+        bash -c 'python3 - "$REPO_DIR" <<'"'"'PY'"'"'
+import os
+import pty
+import subprocess
+import sys
+
+root = sys.argv[1]
+master, slave = pty.openpty()
+try:
+    process = subprocess.Popen(
+        [os.path.join(root, "relay", "tailscale-cli.sh"), "update"],
+        cwd=root, env=os.environ.copy(), stdin=slave,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    os.close(slave)
+    os.write(master, os.environ["CLI_UPDATE_ANSWER"].encode())
+    stdout, stderr = process.communicate(timeout=90)
+    sys.stdout.buffer.write(stdout)
+    sys.stderr.buffer.write(stderr)
+    raise SystemExit(process.returncode)
+finally:
+    os.close(master)
+PY
+' > "$output" 2>&1; then
+        return 0
+    else
+        return $?
+    fi
+}
+
+if run_cli_update $'n\n' "$WORK_DIR/cli-update-declined"; then
+    echo "operator-managed CLI update unexpectedly ignored a declined confirmation" >&2
+    exit 1
+fi
+grep -F "Cancelled; release, service, route, and journal were left unchanged." \
+    "$WORK_DIR/cli-update-declined" >/dev/null || {
+    echo "declined CLI update fixture produced unexpected output:" >&2
+    while IFS= read -r line; do echo "$line" >&2; done < "$WORK_DIR/cli-update-declined"
+    exit 1
+}
+test "$(readlink -f "$RELEASE_ROOT/current")" = "$OLD_RELEASE"
+test ! -e "$RESTART_LOG"
+diff -qr "$WORK_DIR/cli-update-target-before" "$TARGET_CONFIG" >/dev/null
+test "$(cat "$CLI_UPDATE_STATE/registration.json")" = "$(cat "$WORK_DIR/cli-registration-before")"
+test ! -e "$CLI_TAILSCALE_SENTINEL"
+
+if ! run_cli_update $'y\n' "$WORK_DIR/cli-update-success"; then
+    while IFS= read -r line; do echo "$line" >&2; done < "$WORK_DIR/cli-update-success"
+    if [ -f "$HEALTH_FILE" ]; then while IFS= read -r line; do echo "health: $line" >&2; done < "$HEALTH_FILE"; fi
+    if [ -f "$CLI_HEALTH_RECORD" ]; then while IFS= read -r line; do echo "health history: $line" >&2; done < "$CLI_HEALTH_RECORD"; fi
+    if [ -f "$CLI_ROUTE_RECORD" ]; then while IFS= read -r line; do echo "route: $line" >&2; done < "$CLI_ROUTE_RECORD"; fi
+    exit 1
+fi
+test "$(readlink -f "$RELEASE_ROOT/current")" = "$NEW_RELEASE"
+test "$(cat "$RESTART_LOG")" = restart
+grep -F "persistent Serve route and registration journal are retained" \
+    "$WORK_DIR/cli-update-success" >/dev/null
+[ "$(wc -l < "$CLI_ROUTE_RECORD")" -eq 1 ]
+grep -F "tailscale-cli assert-ready --binary $CLI_TAILSCALE" "$CLI_ROUTE_RECORD" >/dev/null
+if grep -E 'tailscale-cli (publish|unpublish)' "$CLI_UPDATE_MANAGER_RECORD" "$CLI_ROUTE_RECORD" >/dev/null; then
+    echo "operator-managed package update mutated the persistent Serve route" >&2
+    exit 1
+fi
+test "$(cat "$CLI_UPDATE_STATE/registration.json")" = "$(cat "$WORK_DIR/cli-registration-before")"
+test ! -e "$CLI_TAILSCALE_SENTINEL"
+
+# If the installed process restarts successfully but exact route recovery fails,
+# the previous release/service/config are restored and its route is rechecked.
+reset_cli_update_fixture
+write_cli_update_config "$SOURCE_ENV"
+write_cli_update_config "$TARGET_CONFIG/relay.env"
+if CLI_POST_ROUTE_FAIL=1 run_cli_update $'y\n' "$WORK_DIR/cli-update-route-drift"; then
+    echo "operator-managed CLI update unexpectedly accepted post-restart route drift" >&2
+    exit 1
+fi
+grep -F "replacement release did not recover the exact registered CLI Serve route" \
+    "$WORK_DIR/cli-update-route-drift" >/dev/null
+grep -F "previous service recovered successfully" "$WORK_DIR/cli-update-route-drift" >/dev/null
+test "$(readlink -f "$RELEASE_ROOT/current")" = "$OLD_RELEASE"
+grep -Fx "ExecStart=$SOURCE_CONFIG/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null
+grep -Fx "Environment=HERDR_RELAY_ENV=$SOURCE_ENV" "$UNIT_FILE" >/dev/null
+test "$(wc -l < "$RESTART_LOG")" -eq 2
+[ "$(wc -l < "$CLI_ROUTE_RECORD")" -eq 2 ]
+test "$(cat "$CLI_UPDATE_STATE/registration.json")" = "$(cat "$WORK_DIR/cli-registration-before")"
+test ! -e "$CLI_TAILSCALE_SENTINEL"
+
+echo "plugin build migration, rollback, recovery, and operator-managed CLI update tests passed"
