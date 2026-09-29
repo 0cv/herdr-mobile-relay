@@ -104,6 +104,18 @@ func TestTailscaleCLIReadinessArmAndDrift(t *testing.T) {
 		RuntimeQualified: true,
 	}}
 	server.tailscaleCLIRegistration = verifier
+	// A fresh service may poll before first publication. That expected absence
+	// quarantines admission reversibly; a later exact route must still arm.
+	verifier.status.JournalState = tailscalecli.StateUnconfigured
+	verifier.status.Readiness = tailscalecli.ReadinessWaiting
+	verifier.err = tailscalecli.ErrUncertain
+	prePublication := server.tailscaleCLIControlStatus(context.Background())
+	if prePublication.PersistentRouteReady || !prePublication.Quarantined || server.bootstrapGate.OpenStatus() {
+		t.Fatalf("fresh pre-publication state was not safely suspended: %+v", prePublication)
+	}
+	verifier.status.JournalState = tailscalecli.StateRegistered
+	verifier.status.Readiness = tailscalecli.ReadinessReady
+	verifier.err = nil
 	var bundleChecks int
 	verifyExactBundle := server.verifyPublicBundle
 	server.verifyPublicBundle = func(ctx context.Context, gotRoot, gotOrigin, gotVersion, gotRevision string) error {
@@ -260,6 +272,37 @@ func TestTailscaleCLIReadinessArmAndDrift(t *testing.T) {
 	restartedInvitation := restarted.deviceStore().BootstrapStatus()
 	if !restartedInvitation.Armed || !restartedInvitation.Pending {
 		t.Fatalf("restarted CLI E2EE invitation state = %+v", restartedInvitation)
+	}
+
+	// A transient read-only CLI outage closes Hub admission but does not
+	// irreversibly revoke the invitation gate or reset enrolled credentials.
+	verifier.status.Readiness = tailscalecli.ReadinessWaiting
+	verifier.err = errors.New("fixture CLI temporarily unavailable")
+	outage := restarted.tailscaleCLIControlStatus(context.Background())
+	if outage.Ready || outage.PersistentRouteReady || !outage.Quarantined ||
+		outage.PersistentRouteReadiness != string(tailscalecli.ReadinessWaiting) || restarted.bootstrapGate.OpenStatus() {
+		t.Fatalf("transient route outage did not suspend admission reversibly: %+v", outage)
+	}
+	waitManagedFixture(t, "CLI outage closes websocket admission", func() bool { return restarted.hub.ClientCount() == 0 })
+	outageInvitation := restarted.deviceStore().BootstrapStatus()
+	if outageInvitation.Armed != restartedInvitation.Armed || outageInvitation.Pending != restartedInvitation.Pending ||
+		!outageInvitation.ExpiresAt.Equal(restartedInvitation.ExpiresAt) {
+		t.Fatalf("CLI outage reset invitation state: before=%+v after=%+v", restartedInvitation, outageInvitation)
+	}
+	if credential, ok := restarted.deviceStore().AuthorizeCredential(enrolled.CredentialID, enrolled.CredentialVersion); !ok ||
+		credential.DeviceID != enrolled.DeviceID {
+		t.Fatalf("CLI outage invalidated prior phone credential: %+v %t", credential, ok)
+	}
+	verifier.err = nil
+	verifier.status.Readiness = tailscalecli.ReadinessReady
+	recovered, recoverErr := restarted.admitTailscaleCLI(context.Background())
+	if recoverErr != nil || !recovered.Ready || !restarted.bootstrapGate.OpenStatus() {
+		t.Fatalf("CLI admission did not recover after transient inspection outage: %+v err=%v", recovered, recoverErr)
+	}
+	recoveredInvitation := restarted.deviceStore().BootstrapStatus()
+	if recoveredInvitation.Armed != outageInvitation.Armed || recoveredInvitation.Pending != outageInvitation.Pending ||
+		!recoveredInvitation.ExpiresAt.Equal(outageInvitation.ExpiresAt) {
+		t.Fatalf("CLI recovery replaced the bootstrap invitation: before=%+v after=%+v", outageInvitation, recoveredInvitation)
 	}
 
 	verifier.status.Readiness = tailscalecli.ReadinessDegraded

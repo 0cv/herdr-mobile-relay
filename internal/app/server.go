@@ -1504,6 +1504,9 @@ func (s *Server) Run(ctx context.Context) error {
 			Arm:      s.armForControl,
 			Retire:   s.retireForControl,
 		}
+		if s.cfg.Transport == config.TransportTailscaleCLI {
+			callbacks.Admit = s.admitTailscaleCLI
+		}
 		if s.tailscaleSession != nil {
 			callbacks.Retired = s.CompleteManagedTailscaleRetirement
 		}

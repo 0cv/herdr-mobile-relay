@@ -316,14 +316,14 @@ func run(args []string) (int, error) {
 		controlFlags := flag.NewFlagSet("pairing-control", flag.ContinueOnError)
 		controlFlags.SetOutput(os.Stderr)
 		socket := controlFlags.String("socket", "", "managed pairing control socket")
-		op := controlFlags.String("operation", "status", "status, activate, arm_bootstrap, or retire")
+		op := controlFlags.String("operation", "status", "status, activate, admit, arm_bootstrap, or retire")
 		runID := controlFlags.String("run-id", "", "managed foreground run identifier")
 		instance := controlFlags.String("instance", "", "relay instance identifier")
 		if err := controlFlags.Parse(args); err != nil {
 			return 2, err
 		}
 		if controlFlags.NArg() != 0 || *socket == "" || *runID == "" || *instance == "" {
-			return 2, errors.New("usage: herdr-mobile-relay pairing-control --socket PATH --operation status|activate|arm_bootstrap|retire --run-id ID --instance ID")
+			return 2, errors.New("usage: herdr-mobile-relay pairing-control --socket PATH --operation status|activate|admit|arm_bootstrap|retire --run-id ID --instance ID")
 		}
 		response, err := localcontrol.Request(context.Background(), *socket, *op, *runID, *instance)
 		if err != nil && response.Error == "" {

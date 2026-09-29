@@ -733,7 +733,20 @@ test_teardown_recovers_uuid_config_by_tunnel_name() {
 }
 
 
-echo "1..17"
+test_cli_transport_refuses_direct_stable_setup() {
+    new_case
+    cat > "$HERDR_RELAY_ENV" <<'EOF'
+HERDR_RELAY_TRANSPORT=tailscale-cli
+HERDR_TAILSCALE_CLI_ORIGIN=https://relay.fixture.invalid
+EOF
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "stable setup must refuse a persistent CLI Serve route"
+    assert_contains "$OUTPUT" 'Stable Cloudflare setup cannot replace a persistent CLI-backed Serve route implicitly.'
+    assert_not_contains "$STUB_LOG" 'cloudflared '
+    pass "direct stable setup refuses CLI transport before Cloudflare provisioning"
+}
+
+echo "1..18"
 test_success_and_alternate_port
 test_existing_phone_app_origin
 test_deployed_phone_app_origin
@@ -751,3 +764,4 @@ test_inventory_failure_suppresses_qr
 test_separate_readiness_timeouts
 test_teardown_ownership_and_dns_retention
 test_teardown_recovers_uuid_config_by_tunnel_name
+test_cli_transport_refuses_direct_stable_setup

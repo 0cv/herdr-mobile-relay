@@ -9,13 +9,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
 [ -f "$ENV_FILE" ] || {
-    echo "Tailscale CLI relay configuration is missing: $ENV_FILE" >&2
-    exit 78
+    echo "Tailscale CLI relay configuration is missing: $ENV_FILE; install or repair the service, then restart it." >&2
+    exit 0
 }
 load_relay_env "$ENV_FILE"
 [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-cli ] || {
-    echo "Tailscale CLI service requires HERDR_RELAY_TRANSPORT=tailscale-cli" >&2
-    exit 78
+    echo "Tailscale CLI service requires HERDR_RELAY_TRANSPORT=tailscale-cli; repair the service environment, then restart it." >&2
+    exit 0
 }
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -29,25 +29,56 @@ if [ -z "${HERDR_BIN:-}" ] && command -v herdr >/dev/null 2>&1; then
 fi
 export HERDR_RELAY_HOST=127.0.0.1
 export HERDR_RELAY_PORT="${HERDR_RELAY_PORT:-8375}"
-RELAY_BIN="$(relay_binary)"
-"$RELAY_BIN" tailscale-cli activation-check >/dev/null || exit $?
-CLI_BIN="$("$RELAY_BIN" tailscale-cli resolve-binary --binary "${HERDR_TAILSCALE_CLI_BIN:-}")" || {
-    echo "No unambiguous absolute Tailscale CLI executable is available to the service." >&2
-    exit 78
-}
-export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN"
+if ! RELAY_BIN="$(relay_binary)"; then
+    echo "Verified relay executable is unavailable; repair the installation and restart the service." >&2
+    exit 0
+fi
+if ! "$RELAY_BIN" tailscale-cli activation-check >/dev/null; then
+    echo "CLI-backed profiles are not enabled; the service remains stopped until an authorized configuration change and restart." >&2
+    exit 0
+fi
+trap 'exit 130' INT
+trap 'exit 143' TERM
 HTTPS_PORT="${HERDR_TAILSCALE_CLI_HTTPS_PORT:-443}"
-PREFLIGHT="$("$RELAY_BIN" tailscale-cli preflight --binary "$CLI_BIN" --https-port "$HTTPS_PORT")" || {
-    echo "Read-only Tailscale service preflight failed; no Serve route was changed." >&2
-    exit 78
-}
-[ "$(json_string_field "$PREFLIGHT" node_id)" = "${HERDR_TAILSCALE_CLI_NODE_ID:-}" ] &&
-    [ "$(json_string_field "$PREFLIGHT" origin)" = "${HERDR_TAILSCALE_CLI_ORIGIN:-}" ] || {
-    echo "Live Tailscale node or HTTPS origin drifted from the registered service identity." >&2
-    exit 78
-}
+PREFLIGHT_ATTEMPTS=7
+PREFLIGHT_DELAY=1
+attempt=1
+while [ "$attempt" -le "$PREFLIGHT_ATTEMPTS" ]; do
+    if ! CLI_BIN="$("$RELAY_BIN" tailscale-cli resolve-binary --binary "${HERDR_TAILSCALE_CLI_BIN:-}")"; then
+        echo "Tailscale CLI binary resolution failed; install/select the CLI and restart the service." >&2
+        exit 0
+    fi
+    export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN"
+    if PREFLIGHT="$("$RELAY_BIN" tailscale-cli preflight --binary "$CLI_BIN" --https-port "$HTTPS_PORT")"; then
+        [ "$(json_string_field "$PREFLIGHT" node_id)" = "${HERDR_TAILSCALE_CLI_NODE_ID:-}" ] &&
+            [ "$(json_string_field "$PREFLIGHT" origin)" = "${HERDR_TAILSCALE_CLI_ORIGIN:-}" ] || {
+            echo "Permanent Tailscale node/origin drift: service stopped without changing Serve; reconcile and restart." >&2
+            exit 0
+        }
+        break
+    else
+        preflight_status=$?
+    fi
+    if [ "$preflight_status" -ne 75 ]; then
+        echo "Permanent Tailscale CLI preflight failure (status $preflight_status); repair authentication, permissions, profile, or Serve state, then restart." >&2
+        exit 0
+    fi
+    if [ "$attempt" -eq "$PREFLIGHT_ATTEMPTS" ]; then
+        echo "Tailscale CLI stayed temporarily unavailable after $PREFLIGHT_ATTEMPTS read-only attempts; service stopped without changing Serve. Restart it after recovery." >&2
+        exit 0
+    fi
+    jitter=$((RANDOM % (PREFLIGHT_DELAY / 2 + 1)))
+    retry_delay=$((PREFLIGHT_DELAY + jitter))
+    [ "$retry_delay" -le 30 ] || retry_delay=30
+    echo "Tailscale CLI is temporarily unavailable (attempt $attempt/$PREFLIGHT_ATTEMPTS); retrying read-only in ${retry_delay}s." >&2
+    sleep "$retry_delay"
+    PREFLIGHT_DELAY=$((PREFLIGHT_DELAY * 2))
+    [ "$PREFLIGHT_DELAY" -le 30 ] || PREFLIGHT_DELAY=30
+    attempt=$((attempt + 1))
+done
 
 RELAY_PID=""
+# shellcheck disable=SC2329 # Registered as the service wrapper's EXIT trap.
 cleanup() {
     if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
         kill "$RELAY_PID" 2>/dev/null || true
@@ -79,18 +110,26 @@ INSTANCE_ID="${HERDR_RELAY_INSTANCE_ID:-}"
     exit 1
 }
 
+ADMITTED=false
 while kill -0 "$RELAY_PID" 2>/dev/null; do
     status="$("$RELAY_BIN" pairing-control --socket "$PAIRING_SOCKET" --operation status \
         --run-id "$CONTROL_RUN_ID" --instance "$INSTANCE_ID" 2>/dev/null || true)"
-    if [ "$(json_bool_field "$status" persistent_route_ready)" = true ] &&
-        [ "$(json_bool_field "$status" invitation_armed)" != true ]; then
-        armed="$("$RELAY_BIN" pairing-control --socket "$PAIRING_SOCKET" --operation arm_bootstrap \
-            --run-id "$CONTROL_RUN_ID" --instance "$INSTANCE_ID" 2>/dev/null || true)"
-        if [ "$(json_bool_field "$armed" ready)" != true ] ||
-            [ "$(json_bool_field "$armed" persistent_route_ready)" != true ] ||
-            [ "$(json_bool_field "$armed" invitation_armed)" != true ]; then
-            echo "Route verification or fresh readiness arm is not complete; admission remains closed." >&2
+    if [ "$(json_bool_field "$status" persistent_route_ready)" = true ]; then
+        if [ "$ADMITTED" != true ] || [ "$(json_bool_field "$status" quarantined)" = true ]; then
+            admitted="$("$RELAY_BIN" pairing-control --socket "$PAIRING_SOCKET" --operation admit \
+                --run-id "$CONTROL_RUN_ID" --instance "$INSTANCE_ID" 2>/dev/null || true)"
+            if [ "$(json_bool_field "$admitted" ready)" = true ] &&
+                [ "$(json_bool_field "$admitted" persistent_route_ready)" = true ] &&
+                [ "$(json_bool_field "$admitted" local_ready)" = true ] &&
+                [ "$(json_bool_field "$admitted" serve_ready)" = true ]; then
+                ADMITTED=true
+            else
+                ADMITTED=false
+                echo "Route verification failed; relay admission remains suspended." >&2
+            fi
         fi
+    else
+        ADMITTED=false
     fi
     sleep 5
 done

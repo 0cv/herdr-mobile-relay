@@ -74,8 +74,7 @@ trap cleanup EXIT INT TERM
 
 stop_child() {
     local pid="$1"
-    local attempt
-    for attempt in 1 2 3 4 5; do
+    for _ in 1 2 3 4 5; do
         if ! kill -0 "$pid" 2>/dev/null; then
             wait "$pid" 2>/dev/null || true
             return

@@ -59,8 +59,10 @@ binary hash as the compatibility policy.
 Commands use fixed argv arrays, no shell, `sudo`, downloaded helper or mutable
 environment override. Preserve only the user/session environment required by the
 CLI (including the real `HOME`); do not replace `HOME` with the relay's isolated
-state root. Use bounded deadlines, stdout and stderr, child/pipe cleanup and
-redacted errors. Never log raw status/config/version JSON.
+state root. The subprocess receives only `/usr/bin:/bin:/usr/sbin:/sbin` as
+`PATH`; caller-controlled search paths are never inherited. Use bounded deadlines,
+stdout and stderr, child/pipe cleanup and redacted errors. Never log raw
+status/config/version JSON.
 
 Read-only inspection is exactly:
 
@@ -97,14 +99,21 @@ The schema-versioned registration journal is operational attribution, not a
 capability. It contains an installation identifier, scope (`production` or
 `development`), node/profile identity, listener and mount, loopback backend,
 consent scope, operation ID, state and acknowledged CLI result. It contains no
-Tailscale authentication token. Create/validate private roots as real mode-0700
-directories and journal files as mode 0600. Serialize Herdr writers for the same
-user/node with a shared private lock; this does not lock external CLI writers or
-other UIDs. Persist intent atomically with file and parent-directory sync before
+Tailscale authentication token. Create/validate private roots as real, non-symlink
+mode-0700 directories and journal files as mode 0600. Serialize Herdr writers
+for the same user/node with a shared private lock; this does not lock external
+CLI writers or other UIDs. Reserve each loopback backend port durably in that
+same shared root before starting a new relay listener; parse backend URLs so
+127/8, `localhost` names and IPv6 loopback aliases conflict by effective port,
+not just exact URL spelling. Release only after exact route removal or read-only
+proof that a pre-publication setup left no route targeting that port.
+Persist intent atomically with file and parent-directory sync before
 dispatch. Never overwrite corrupt, copied or mismatched recovery state.
 
 Persisted states are `unconfigured`, `publish-pending`, `registered`,
-`publish-uncertain`, `remove-pending`, `remove-uncertain`, and `removed`.
+`publish-uncertain`, `remove-pending`, `remove-uncertain`, `removed`,
+`reconciled-present`, and `reconciled-absent`. Reconciled states record only an
+operator-confirmed observation; they never claim a CLI mutation acknowledgement.
 `ready`, `waiting`, `conflicted` and `degraded` are runtime observations, never
 proof inferred from the journal alone. A pre-dispatch failure leaves the
 operation unmutated. Any failure after dispatch without a complete successful
@@ -120,18 +129,34 @@ host, port, URL, backend response or PID matches. An exact acknowledged mapping
 can be reused without another Serve write after fresh node/config validation.
 The read-only `Recover` operation reports only redacted journal/readback state;
 it never clears uncertainty or treats an observed matching/absent route as
-proof that a dispatched mutation was acknowledged. A disappeared registered
+proof that a dispatched mutation was acknowledged. Reconciled-present remains
+unready and unacknowledged until an explicit exact-route unpublish; reconciled-
+absent may be followed only by a fresh consented publication. A disappeared registered
 route is degraded and is not automatically recreated. Explicit repair and
 explicit unpublish require fresh preflight and consent. Routine service
-stop/restart retains the persistent route; only the relay process stops. Phone-
+stop/restart retains the persistent route; only the relay process stops. On
+restart the service rechecks the route and resumes existing-device admission
+without minting a new bootstrap invitation; invitation generation is an
+operator-initiated setup or arm-bootstrap action. Service preflight retries only
+classified transient read failures, for at most seven attempts with jittered
+backoff capped at 30 seconds; permanent binary, authentication, permission,
+identity, and schema failures stop the service without changing Serve. A publish
+rejected before CLI dispatch stops the backend first, then releases its shared
+backend-port reservation only after read-only inspection proves no Serve route
+uses that listener; uncertain post-dispatch state retains both journal and
+reservation. Phone-
 managed package updates remain refused for CLI-backed installations. After
 separate profile qualification and activation, `relay/tailscale-cli.sh update`
 provides an interactive operator-managed package procedure: it checks the exact
 journaled route before download and after restart, retains the route and journal,
 and restores the previous release/service if recovery fails. It does not repair
-or remove Serve routes or guarantee remote connection drain. Uninstall must preserve its journal until route
-removal is acknowledged or the operator explicitly chooses to leave the route.
-An unresolved previous route blocks repurposing its backend.
+or remove Serve routes or guarantee remote connection drain. Service-only uninstall interactively offers exact-route removal, retaining the
+persistent Serve route, or cancellation; noninteractive uninstall refuses to
+silently choose. Route removal delegates to the existing explicit consent and
+exact-route procedure, and failed removal leaves the service installed. The
+installed unit/plist environment path is inspected read-only so the prompt binds
+to the correct relay configuration. A retained route and its journal remain in
+place. An unresolved previous route blocks repurposing its backend.
 
 Start the app backend loopback-only and keep application/WebSocket admission and
 pairing closed until the verified HTTPS origin, current instance/run/transport/
@@ -141,8 +166,10 @@ revocation, invitation durability and credential reuse. Never reset devices on
 restart or infer authorization from tailnet membership. Pairing links remain
 operator-only actions and are never written to background-service logs. Monitor
 identity and route drift with bounded read-only polling; close admission on
-mismatch and do not auto-repair. Polling is not an instantaneous revocation
-watch.
+mismatch and do not auto-repair. Transient inspection failures suspend
+admission reversibly; the service may resume existing-device admission only
+after a fresh exact-route and readiness check, without minting a new invitation.
+Polling is not an instantaneous revocation watch.
 
 Production activation is currently hard-gated off: a recognized source/fixture
 profile is not a runtime-qualified profile. There is no environment-variable,
@@ -162,7 +189,7 @@ unchanged.
 | Route disappears or identity drifts | Degrade, close admission and retain devices; no automatic repair. |
 | Timeout/cancel/ambiguous post-dispatch result | Persist `publish-uncertain` or `remove-uncertain`; no automatic retry or cleanup. |
 | Explicit unpublish | Warn against concurrent Serve edits; consent; require valid acknowledged registration; fresh exact-route check; scoped `off`; persist acknowledgement and verify readback. |
-| Uninstall | Require explicit remove or leave choice; do not erase the only unresolved recovery record. |
+| Service-only uninstall | Interactively require exact-route removal, explicit route retention, or cancellation; noninteractive mode refuses; never erase unresolved recovery evidence. |
 | Transport switch | Decide old persistent-route disposition; unresolved removal blocks backend reuse. |
 
 Four limits must appear in consent and recovery guidance. Operator acceptance is

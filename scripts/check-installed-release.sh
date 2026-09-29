@@ -104,7 +104,7 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     echo "release does not contain an executable relay" >&2
     exit 1
 }
-for WRAPPER in tailscale.sh tailscale-external.sh tailscale-cli-service.sh; do
+for WRAPPER in tailscale.sh tailscale-external.sh tailscale-cli.sh tailscale-cli-service.sh; do
     [ -x "$RELEASE_DIR/relay/$WRAPPER" ] || {
         echo "release does not contain executable $WRAPPER" >&2
         exit 1

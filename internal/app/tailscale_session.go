@@ -328,7 +328,8 @@ func (s *Server) armTailscaleCLI(ctx context.Context) (localcontrol.Status, erro
 		status.ArmFailureCode = externalArmFailureCode(err)
 		if errors.Is(err, deviceauth.ErrManagedArmRecovery) {
 			status.ArmOutcome = "unresolved"
-		} else if errors.Is(err, deviceauth.ErrBootstrapGateCommittedRevoked) {
+		} else if errors.Is(err, deviceauth.ErrBootstrapGateCommittedRevoked) ||
+			errors.Is(err, deviceauth.ErrBootstrapGateCommittedSuspended) {
 			status.ArmOutcome = "committed"
 		}
 		return status, err
@@ -347,6 +348,9 @@ func (s *Server) armTailscaleCLI(ctx context.Context) (localcontrol.Status, erro
 
 	s.pairingAdmissionMu.Lock()
 	defer s.pairingAdmissionMu.Unlock()
+	if err := s.bootstrapGate.ResumeAdmission(); err != nil {
+		return refused(err)
+	}
 	if err := s.bootstrapGate.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en", nil, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -365,7 +369,10 @@ func (s *Server) armTailscaleCLI(ctx context.Context) (localcontrol.Status, erro
 		}
 		return nil
 	}); err != nil {
-		s.hub.RevokeAdmission()
+		_ = s.hub.SetAcceptingContext(ctx, false)
+		s.mu.Lock()
+		s.quarantined = true
+		s.mu.Unlock()
 		s.recordSafeError("CLI-backed Serve bootstrap arm failed", err)
 		return refused(err)
 	}
@@ -384,6 +391,48 @@ func (s *Server) armTailscaleCLI(ctx context.Context) (localcontrol.Status, erro
 		status.ArmFailureCode = "local_admission_unavailable"
 		return status, errors.New("CLI-backed Serve invitation was committed but admission is unavailable")
 	}
+	return status, nil
+}
+
+// admitTailscaleCLI reopens runtime admission only after the registered route
+// and trusted HTTPS identity pass fresh checks. It never creates or renews an
+// invitation; service restarts can resume existing devices without minting a
+// new bootstrap credential.
+func (s *Server) admitTailscaleCLI(ctx context.Context) (localcontrol.Status, error) {
+	refused := func(err error) (localcontrol.Status, error) {
+		status := s.tailscaleCLIControlStatus(ctx)
+		status.ArmOutcome = "not-committed"
+		status.ArmFailureCode = externalArmFailureCode(err)
+		return status, err
+	}
+	unlock, err := s.externalArmMu.Lock(ctx)
+	if err != nil {
+		return refused(err)
+	}
+	defer unlock()
+	if err := s.checkTailscaleCLIReadiness(ctx); err != nil {
+		return refused(err)
+	}
+	if err := s.ensureManagedDeviceStore(); err != nil {
+		return refused(err)
+	}
+	s.pairingAdmissionMu.Lock()
+	defer s.pairingAdmissionMu.Unlock()
+	if err := s.bootstrapGate.ResumeAdmission(); err != nil {
+		return refused(err)
+	}
+	if err := s.bootstrapGate.Open(); err != nil {
+		return refused(err)
+	}
+	s.mu.Lock()
+	s.quarantined = false
+	s.mu.Unlock()
+	if err := s.hub.SetAcceptingContext(ctx, true); err != nil {
+		s.quarantineTailscaleCLI()
+		return refused(err)
+	}
+	status := s.tailscaleCLIControlStatus(ctx)
+	status.Ready = status.LocalReady && status.ServeReady && s.bootstrapGate.OpenStatus() && !status.Quarantined
 	return status, nil
 }
 
@@ -528,13 +577,13 @@ func (s *Server) quarantineTailscaleCLI() {
 		return
 	}
 	if s.bootstrapGate != nil {
-		s.bootstrapGate.Revoke()
+		s.bootstrapGate.SuspendAdmission()
 	}
 	s.mu.Lock()
 	s.quarantined = true
 	s.mu.Unlock()
 	if s.hub != nil {
-		s.hub.RevokeAdmission()
+		_ = s.hub.SetAcceptingContext(context.Background(), false)
 	}
 }
 

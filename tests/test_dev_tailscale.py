@@ -219,6 +219,74 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         raise AssertionError("CLI recovery did not stop before real CLI or private registration access")
     print("PASS CLI lifecycle fixture: read-only recovery obeys activation gate before CLI/state access")
 
+    # Development uses the installed service's actual relay.env coordination
+    # root, even when its custom state path differs from the checkout defaults.
+    coordination_home = base / "coordination-home"
+    coordination_home.mkdir(mode=0o700)
+    custom_production_env = base / "installed-production.env"
+    custom_coordination_root = base / "installed-coordination"
+    custom_production_env.write_text(
+        f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={custom_coordination_root}\n",
+        encoding="utf-8",
+    )
+    service_config = coordination_home / ".config" / "systemd" / "user" / "herdr-mobile-relay.service"
+    if os.uname().sysname == "Linux":
+        service_config.parent.mkdir(mode=0o700, parents=True)
+        service_config.write_text(f"Environment=HERDR_RELAY_ENV={custom_production_env}\n", encoding="utf-8")
+    else:
+        service_config = coordination_home / "Library" / "LaunchAgents" / "com.herdr-mobile-relay.service.plist"
+        service_config.parent.mkdir(mode=0o700, parents=True)
+        service_config.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+            '<key>EnvironmentVariables</key><dict><key>HERDR_RELAY_ENV</key>'
+            f'<string>{custom_production_env}</string></dict></dict></plist>', encoding="utf-8",
+        )
+    custom_dev_root = base / "custom-cli-dev"
+    custom_dev_root.mkdir(mode=0o700)
+    custom_dev_state = custom_dev_root / "registration"
+    custom_dev_root.mkdir(mode=0o700, exist_ok=True)
+    (custom_dev_root / "relay.env").write_text(
+        "HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_INSTANCE_ID=coord-fixture\n"
+        "HERDR_RELAY_PORT=18377\nHERDR_RELAY_PLUGIN_PORT=18378\n"
+        "HERDR_TAILSCALE_CLI_SCOPE=development\nHERDR_TAILSCALE_CLI_HTTPS_PORT=8443\n"
+        f"HERDR_TAILSCALE_CLI_STATE_ROOT={custom_dev_state}\n",
+        encoding="utf-8",
+    )
+    (custom_dev_root / ".herdr-dev-tailscale-cli").write_text(
+        "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n", encoding="utf-8",
+    )
+    coordination_record = base / "coordination-root-args"
+    coordination_relay = base / "coordination-root-relay"
+    coordination_relay.write_text(
+        "#!/bin/sh\n"
+        "case \"$1 $2\" in 'tailscale-cli activation-check') exit 0 ;; esac\n"
+        "printf '%s\\n' \"$*\" > \"$COORDINATION_ARGS\"\n"
+        "exit 0\n", encoding="utf-8",
+    )
+    coordination_relay.chmod(0o700)
+    coordination_env = dict(env)
+    for name in ("HERDR_TAILSCALE_CLI_COORDINATION_ROOT", "HERDR_PLUGIN_CONFIG_DIR"):
+        coordination_env.pop(name, None)
+    coordination_env.update({
+        "HOME": str(coordination_home), "HERDR_RELAY_ENV": str(custom_dev_root / "relay.env"),
+        "HERDR_DEV_TAILSCALE_CLI_ENABLE": "1",
+        "HERDR_DEV_TAILSCALE_CLI_DIR": str(custom_dev_root),
+        "HERDR_DEV_TAILSCALE_CLI_RELAY_BIN": str(coordination_relay),
+        "COORDINATION_ARGS": str(coordination_record),
+    })
+    coordination_result = subprocess.run(
+        [str(root / "relay" / "dev-tailscale-cli.sh"), "status"], env=coordination_env,
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=5, check=False,
+    )
+    if (coordination_result.returncode != 0 or not coordination_record.exists() or
+        f"--coordination-root {custom_coordination_root}" not in coordination_record.read_text(encoding="utf-8")):
+        raise AssertionError(
+            f"development diverged from the installed service coordination root: "
+            f"{coordination_result.stdout + coordination_result.stderr!r}"
+        )
+    print("PASS CLI development fixture: coordination lock root matches installed service relay.env")
+
     # Explicit shell unpublish is exercised only through a fake relay manager.
     # Declining consent must not dispatch route removal; accepting it passes the
     # exact scoped node/port and narrow route-removal consent to the manager.
@@ -292,14 +360,14 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             "tailscale-cli unpublish --binary " + str(cli) + " --state-root ") or
         "--scope development --installation-id fixture-unpublish-instance" not in accepted_events[-1] or
         "--https-port 9443 --backend-port 18577 --accepted --node-id node-unpublish-fixture" not in accepted_events[-1] or
-        "--accept-route-removal --accept-no-remote-drain" not in accepted_events[-1] or
+        "--accept-route-removal --accept-check-to-write-race --accept-no-remote-drain" not in accepted_events[-1] or
         "--accept-persistent-route" in accepted_events[-1] or sentinel.exists()):
         raise AssertionError(f"accepted CLI unpublish did not pass exact narrow consent: {accepted_output!r} {accepted_events!r}")
     print("PASS CLI shell unpublish fixture: decline is non-mutating; acceptance authorizes only the journaled exact route")
 
     # The CLI service resolves its selected binary after the compile-time gate,
     # checks the live node/origin, binds the relay first, then performs a fresh
-    # route readiness arm on every process restart. All endpoints are fixtures.
+    # route admission resume on every process restart without minting invitations. All endpoints are fixtures.
     cli_service_home = base / "cli-service-home"
     cli_service_env = base / "cli-service.env"
     cli_service_record = base / "cli-service-record"
@@ -365,11 +433,30 @@ elif args and args[0] == "serve":
     os.execv("/bin/sleep", ["sleep", "300"])
 elif args and args[0] == "pairing-control":
     operation = args[args.index("--operation") + 1]
-    log("pairing-control " + operation)
     if operation == "status":
-        print('{"ready":false,"persistent_route_ready":true,"invitation_armed":false}')
+        restart = os.environ["HERDR_SERVICE_FIXTURE_RESTART"]
+        status_path = record + ".status-" + restart
+        try:
+            with open(status_path, encoding="utf-8") as source:
+                count = int(source.read()) + 1
+        except FileNotFoundError:
+            count = 1
+        with open(status_path, "w", encoding="utf-8") as output:
+            output.write(str(count))
+        if count == 1 and restart == "0":
+            log("pairing-control status pre-publication " + restart)
+            print('{"ready":false,"persistent_route_ready":false,"invitation_armed":false,"quarantined":true}')
+        elif count == 1 or count == 2:
+            log("pairing-control status registered-route " + restart)
+            print('{"ready":false,"persistent_route_ready":true,"invitation_armed":false,"quarantined":true}')
+        else:
+            log("pairing-control status admitted " + restart)
+            print('{"ready":true,"persistent_route_ready":true,"invitation_armed":false,"quarantined":false}')
+    elif operation == "admit":
+        log("pairing-control admit " + os.environ["HERDR_SERVICE_FIXTURE_RESTART"])
+        print('{"ready":true,"local_ready":true,"serve_ready":true,"persistent_route_ready":true,"invitation_armed":false}')
     else:
-        print('{"ready":true,"persistent_route_ready":true,"invitation_armed":true}')
+        raise SystemExit("unexpected automatic pairing-control operation: " + operation)
 else:
     raise SystemExit("unexpected fake relay command: " + repr(args))
 ''',
@@ -388,31 +475,38 @@ else:
     for restart_attempt in range(2):
         service = subprocess.Popen(
             [str(cli_service_scripts / "herdr-mobile-relay-service.sh")],
-            env=service_env, cwd=root, stdin=subprocess.DEVNULL,
+            env={**service_env, "HERDR_SERVICE_FIXTURE_RESTART": str(restart_attempt)}, cwd=root, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
             events = cli_service_record.read_text(encoding="utf-8").splitlines() if cli_service_record.exists() else []
-            if events.count("pairing-control arm_bootstrap") >= restart_attempt + 1:
+            if sum(event.startswith("pairing-control admit ") for event in events) >= restart_attempt + 1:
                 break
             if service.poll() is not None:
                 output, errors = service.communicate()
-                raise AssertionError(f"CLI service fixture exited before fresh arm: {output + errors!r} events={events!r}")
+                raise AssertionError(f"CLI service fixture exited before admission resume: {output + errors!r} events={events!r}")
             time.sleep(0.02)
         else:
             service.terminate()
             output, errors = service.communicate(timeout=5)
-            raise AssertionError(f"CLI service did not freshly arm after restart: {output + errors!r}")
+            raise AssertionError(f"CLI service did not resume admission after restart: {output + errors!r}")
         service.terminate()
         service.communicate(timeout=5)
     service_events = cli_service_record.read_text(encoding="utf-8").splitlines()
     if (service_events.count("activation-check") != 2 or service_events.count("resolve-binary") != 2 or
         service_events.count("preflight") != 2 or service_events.count("serve") != 2 or
-        service_events.count("pairing-control arm_bootstrap") != 2 or
-        service_events.count("pairing-control status") < 2):
-        raise AssertionError(f"CLI service restart ordering/admission failed: {service_events!r}")
-    print("PASS CLI service restart fixture: resolve/preflight before bind, fresh route arm after each restart")
+        sum(event.startswith("pairing-control admit ") for event in service_events) != 2 or
+        "pairing-control arm_bootstrap" in service_events or
+        not (
+            service_events.index("pairing-control status pre-publication 0") <
+            service_events.index("pairing-control status registered-route 0") <
+            service_events.index("pairing-control admit 0") and
+            service_events.index("pairing-control status registered-route 1") <
+            service_events.index("pairing-control admit 1")
+        )):
+        raise AssertionError(f"CLI service startup/restart admission ordering failed: {service_events!r}")
+    print("PASS CLI service fixture: expected pre-publication quarantine recovers after route publication without minting invitations")
 
     # A named user-service fixture admits only a fake exact-route verifier and
     # fake systemctl/curl. It never reaches the host service manager, Tailscale,
@@ -453,6 +547,7 @@ printf 'Linux'
     manager_relay = cli_install_root / "fake-manager-relay"
     manager_relay.write_text(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MANAGER_RECORD\"\n"
+        "case \"$*\" in 'tailscale-cli activation-check') exit 0 ;; esac\n"
         "case \"$*\" in 'tailscale-cli assert-ready'*) printf '%s\\n' '{\"route\":{\"journal_state\":\"registered\",\"readiness\":\"ready\",\"runtime_qualified\":true}}'; exit 0 ;; esac\n"
         "echo unexpected relay command >&2; exit 97\n",
         encoding="utf-8",
@@ -493,9 +588,17 @@ printf 'Linux'
         env=install_env, cwd=root, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
     )
+    setup_installed = subprocess.run(
+        [str(cli_install_scripts / "install-systemd-user-service.sh")],
+        env={**install_env, "HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START": "1"}, cwd=root,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
+    )
     unit = cli_install_home / ".config" / "systemd" / "user" / "herdr-mobile-relay.service"
-    if installed.returncode != 0 or not unit.is_file():
-        raise AssertionError(f"CLI service installer failed with only named fixtures: {installed.stdout + installed.stderr!r}")
+    if installed.returncode != 0 or setup_installed.returncode != 0 or not unit.is_file():
+        raise AssertionError(
+            f"CLI service installer failed with only named fixtures: "
+            f"{installed.stdout + installed.stderr + setup_installed.stdout + setup_installed.stderr!r}"
+        )
     unit_text = unit.read_text(encoding="utf-8")
     manager_events = manager_record.read_text(encoding="utf-8").splitlines()
     system_events = systemctl_record.read_text(encoding="utf-8").splitlines()
@@ -509,6 +612,7 @@ printf 'Linux'
         "Description=Herdr Mobile Relay tailscale-cli" not in unit_text or
         "CLOUDFLARED_CONFIG" in unit_text or not manager_events or
         not manager_events[0].startswith("tailscale-cli assert-ready ") or
+        manager_events.count("tailscale-cli activation-check") != 1 or
         any("serve" in event or "publish" in event or "unpublish" in event for event in manager_events) or
         not system_events or not cli_service_record.is_file() or sentinel.exists()):
         raise AssertionError(f"CLI installer touched an unexpected boundary: manager={manager_events!r}, system={system_events!r}, expected_unit={expected_unit_lines!r}, unit={unit_text!r}")
@@ -773,7 +877,7 @@ chmod 700 "$out"
         "  case \"$3\" in\n"
         "    node_id) printf '%s\\n' dev-node-fixture ;;\n"
         "    dns_name) printf '%s\\n' relay.fixture.invalid ;;\n"
-        "    origin) printf '%s\\n' https://relay.fixture.invalid:9443 ;;\n"
+        "    origin) printf '%s\\n' https://relay.fixture.invalid:8443 ;;\n"
         "    *) exit 1 ;;\n"
         "  esac\n"
         "  exit 0\n"
@@ -783,7 +887,9 @@ chmod 700 "$out"
         "    case \"$2\" in\n"
         "      activation-check) exit 0 ;;\n"
         "      resolve-binary) printf '%s\\n' \"$HERDR_DEV_TAILSCALE_CLI_BIN\"; exit 0 ;;\n"
-        "      preflight) printf '%s\\n' '{\"node_id\":\"dev-node-fixture\",\"dns_name\":\"relay.fixture.invalid\",\"origin\":\"https://relay.fixture.invalid:9443\",\"profile\":\"fixture\"}'; exit 0 ;;\n"
+        "      preflight) printf '%s\\n' '{\"node_id\":\"dev-node-fixture\",\"dns_name\":\"relay.fixture.invalid\",\"origin\":\"https://relay.fixture.invalid:8443\",\"profile\":\"fixture\"}'; exit 0 ;;\n"
+        "      reserve-backend-port) printf 'manager|%s\\n' \"$*\" >> \"$DEV_FIXTURE_LOG\"; exit 0 ;;\n"
+        "      release-backend-port) exit 0 ;;\n"
         "    esac ;;\n"
         "  normalize-external-origin) printf '%s\\n' \"$2\"; exit 0 ;;\n"
         "esac\n"
@@ -826,16 +932,16 @@ exit 0
         "HERDR_DEV_TAILSCALE_CLI_DIR": str(cli_dev_root),
         "HERDR_DEV_TAILSCALE_CLI_RELAY_BIN": str(positive_gate),
         "HERDR_DEV_TAILSCALE_CLI_BIN": str(fake_cli),
-        "HERDR_DEV_TAILSCALE_CLI_ORIGIN": "https://relay.fixture.invalid:9443",
+        "HERDR_DEV_TAILSCALE_CLI_ORIGIN": "https://relay.fixture.invalid:8443",
         "HERDR_DEV_TAILSCALE_CLI_NODE_ID": "dev-node-fixture",
         "HERDR_DEV_PHONE_APP_URL": "https://app.fixture.invalid",
         "HERDR_DEV_HERDR_BIN": str(fake_herdr),
         "HERDR_DEV_HERDR_SOCKET": str(cli_dev_fixture / "herdr.sock"),
         "HERDR_DEV_TAILSCALE_CLI_PUBLISH": "PUBLISH",
         "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(home / ".local" / "state" / "herdr-mobile-relay" / "tailscale-cli-coordination"),
-        "HERDR_DEV_TAILSCALE_CLI_PORT": "18577",
-        "HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT": "18578",
-        "HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT": "9443",
+        "HERDR_DEV_TAILSCALE_CLI_PORT": "18377",
+        "HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT": "18378",
+        "HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT": "8443",
         "HERDR_DEV_TAILSCALE_CLI_FIXTURE_LOG": str(fixture_log),
         "DEV_FIXTURE_LOG": str(fixture_log), "GH_TOKEN": "fixture-only-secret",
         "PATH": f"{fixture_bin}:/usr/bin:/bin",
@@ -852,16 +958,20 @@ exit 0
     all_events = fixture_log.read_text(encoding="utf-8").splitlines()
     manager_events = [event for event in all_events if event.startswith("manager|")]
     runtime_events = [event for event in all_events if event.startswith("runtime|")]
-    arm_event = next((event for event in all_events if event.startswith("control|pairing-control")), "")
-    if (len(manager_events) != 1 or not manager_events[0].startswith("manager|tailscale-cli publish ") or
-        "--scope development" not in manager_events[0] or "--node-id dev-node-fixture" not in manager_events[0] or
-        "--origin https://relay.fixture.invalid:9443" not in manager_events[0] or
-        "--accept-persistent-route" not in manager_events[0] or len(runtime_events) != 1 or
-        not runtime_events[0].startswith("runtime|tailscale-cli|127.0.0.1|18577|development|") or
+    arm_event = next((event for event in all_events if event.startswith("control|pairing-control") and "--operation admit" in event), "")
+    bootstrap_event = next((event for event in all_events if event.startswith("control|pairing-control") and "--operation arm_bootstrap" in event), "")
+    if (len(manager_events) != 2 or not manager_events[0].startswith("manager|tailscale-cli reserve-backend-port ") or
+        not manager_events[1].startswith("manager|tailscale-cli publish ") or
+        "--scope development" not in manager_events[1] or "--node-id dev-node-fixture" not in manager_events[1] or
+        "--origin https://relay.fixture.invalid:8443" not in manager_events[1] or
+        "--accept-persistent-route" not in manager_events[1] or len(runtime_events) != 1 or
+        not runtime_events[0].startswith("runtime|tailscale-cli|127.0.0.1|18377|development|") or
         str(cli_dev_root / "registration") not in runtime_events[0] or
         str(home / ".local" / "state" / "herdr-mobile-relay" / "tailscale-cli-coordination") not in runtime_events[0] or
         str(cli_dev_root / "config") not in runtime_events[0] or runtime_events[0].endswith("|fixture-only-secret") or
-        not arm_event or not (all_events.index(runtime_events[0]) < all_events.index(manager_events[0]) < all_events.index(arm_event)) or
+        not arm_event or not bootstrap_event or not (all_events.index(manager_events[0]) < all_events.index(runtime_events[0]) <
+                              all_events.index(manager_events[1]) < all_events.index(arm_event) <
+                              all_events.index(bootstrap_event)) or
         "HERDR_RELAY_TRANSPORT='tailscale-cli'" not in (cli_dev_root / "relay.env").read_text(encoding="utf-8") or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI setup escaped development boundaries: {all_events!r}")
@@ -879,6 +989,7 @@ exit 0
     if (len(update_managers) != 4 or not update_managers[1].startswith("manager|tailscale-cli activation-check") or
         any(not event.startswith("manager|tailscale-cli assert-ready ") for event in update_managers[2:]) or
         any("publish" in event or "unpublish" in event for event in update_managers[2:]) or
+        sum("--operation arm_bootstrap" in event for event in updated_events) != 1 or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI update mutated route or production state: {updated_events!r}")
     positive_socket.close()

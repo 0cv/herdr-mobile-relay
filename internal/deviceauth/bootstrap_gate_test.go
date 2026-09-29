@@ -62,6 +62,41 @@ func TestBootstrapGateClosedRejectsInvitationBeforeStoreAccess(t *testing.T) {
 	}
 }
 
+func TestBootstrapGateSuspensionIsReversibleAndPreservesInvitation(t *testing.T) {
+	gate, store, selector := closedGateFixture()
+	store.now = func() time.Time { return time.Unix(98, 0).UTC() }
+	store.mu.Lock()
+	store.state.Invitation.ExpiresAt = time.Unix(200, 0).UTC()
+	store.mu.Unlock()
+	if err := gate.Open(); err != nil {
+		t.Fatal(err)
+	}
+	before := store.BootstrapStatus()
+	gate.SuspendAdmission()
+	if gate.OpenStatus() {
+		t.Fatal("suspended gate remained open")
+	}
+	if _, err := gate.ResolveE2EESecret(context.Background(), selector); !errors.Is(err, ErrBootstrapGateClosed) {
+		t.Fatalf("ResolveE2EESecret while suspended = %v", err)
+	}
+	if err := gate.ResumeAdmission(); err != nil || !gate.OpenStatus() {
+		t.Fatalf("resume transient suspension: open=%t err=%v", gate.OpenStatus(), err)
+	}
+	secret, err := gate.ResolveE2EESecret(context.Background(), selector)
+	if err != nil || len(secret) != secretBytes {
+		t.Fatalf("resolve after suspension recovery: %d bytes, %v", len(secret), err)
+	}
+	clear(secret)
+	after := store.BootstrapStatus()
+	if before.Armed != after.Armed || before.Pending != after.Pending || !before.ExpiresAt.Equal(after.ExpiresAt) {
+		t.Fatalf("suspension changed durable invitation state: before=%+v after=%+v", before, after)
+	}
+	gate.Revoke()
+	if err := gate.ResumeAdmission(); !errors.Is(err, ErrBootstrapGateClosed) {
+		t.Fatalf("resume undid terminal revocation: %v", err)
+	}
+}
+
 func TestBootstrapGateRawWatchEOFDeniesResolveAndComplete(t *testing.T) {
 	store, err := OpenDeferred(filepath.Join(t.TempDir(), "device-auth"))
 	if err != nil {

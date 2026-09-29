@@ -19,6 +19,7 @@ var ErrBootstrapGateClosed = errors.New("device authentication is temporarily un
 // acknowledge it. Callers must retain recovery state rather than treating this
 // as a no-write refusal.
 var ErrBootstrapGateCommittedRevoked = errors.New("bootstrap invitation committed but admission was revoked")
+var ErrBootstrapGateCommittedSuspended = errors.New("bootstrap invitation committed but admission was suspended")
 
 // BootstrapGate is the stable resolver installed in transport.Hub for a
 // managed Tailscale run. A required authority admission guard is composed only
@@ -31,6 +32,7 @@ type BootstrapGate struct {
 	store                     *Store
 	invitationOpen            bool
 	revoked                   atomic.Bool
+	suspended                 atomic.Bool
 	attached                  bool
 	requireAuthorityAdmission bool
 	watchEnded                <-chan struct{}
@@ -93,10 +95,33 @@ func (g *BootstrapGate) Open() error {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.revoked.Load() || !g.attached || g.store == nil || g.admissionErrorLocked() != nil {
+	if g.revoked.Load() || g.suspended.Load() || !g.attached || g.store == nil || g.admissionErrorLocked() != nil {
 		return ErrBootstrapGateClosed
 	}
 	g.invitationOpen = true
+	return nil
+}
+
+// SuspendAdmission immediately and reversibly fences invitation and credential
+// resolution while preserving the durable invitation and enrolled devices.
+func (g *BootstrapGate) SuspendAdmission() {
+	if g != nil {
+		g.suspended.Store(true)
+	}
+}
+
+// ResumeAdmission clears a transient suspension after the caller has performed
+// fresh route/readiness checks. It cannot undo a terminal revocation.
+func (g *BootstrapGate) ResumeAdmission() error {
+	if g == nil {
+		return ErrBootstrapGateClosed
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.revoked.Load() || !g.attached || g.store == nil || g.admissionErrorLocked() != nil {
+		return ErrBootstrapGateClosed
+	}
+	g.suspended.Store(false)
 	return nil
 }
 
@@ -112,7 +137,7 @@ func (g *BootstrapGate) ArmBootstrapInvitation(secret []byte, name, locale strin
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.revoked.Load() || !g.attached || g.store == nil || g.admissionErrorLocked() != nil {
+	if g.revoked.Load() || g.suspended.Load() || !g.attached || g.store == nil || g.admissionErrorLocked() != nil {
 		return ErrBootstrapGateClosed
 	}
 	if admit != nil {
@@ -134,7 +159,7 @@ func (g *BootstrapGate) ArmBootstrapInvitation(secret []byte, name, locale strin
 		if err := g.admissionErrorLocked(); err != nil {
 			return err
 		}
-		if g.revoked.Load() {
+		if g.revoked.Load() || g.suspended.Load() {
 			return ErrBootstrapGateClosed
 		}
 		g.invitationOpen = true
@@ -146,6 +171,10 @@ func (g *BootstrapGate) ArmBootstrapInvitation(secret []byte, name, locale strin
 	if g.revoked.Load() || g.admissionErrorLocked() != nil {
 		g.invitationOpen = false
 		return errors.Join(ErrBootstrapGateClosed, ErrBootstrapGateCommittedRevoked)
+	}
+	if g.suspended.Load() {
+		g.invitationOpen = false
+		return errors.Join(ErrBootstrapGateClosed, ErrBootstrapGateCommittedSuspended)
 	}
 	return nil
 }
@@ -166,7 +195,7 @@ func (g *BootstrapGate) OpenStatus() bool {
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.invitationOpen && !g.revoked.Load() && g.store != nil && g.admissionErrorLocked() == nil
+	return g.invitationOpen && !g.revoked.Load() && !g.suspended.Load() && g.store != nil && g.admissionErrorLocked() == nil
 }
 
 func (g *BootstrapGate) ResolveE2EESecret(ctx context.Context, selector transport.E2EEAuthSelector) ([]byte, error) {
@@ -228,8 +257,9 @@ func (g *BootstrapGate) admissionProbeLocked() func() error {
 	invalidated := g.authorityInvalidated
 	required := g.requireAuthorityAdmission
 	revoked := &g.revoked
+	suspended := &g.suspended
 	return func() error {
-		if revoked.Load() || (required && (watchEnded == nil || invalidated == nil)) {
+		if revoked.Load() || suspended.Load() || (required && (watchEnded == nil || invalidated == nil)) {
 			return ErrBootstrapGateClosed
 		}
 		for _, channel := range []<-chan struct{}{watchEnded, invalidated} {
@@ -264,7 +294,7 @@ func (g *BootstrapGate) admissionErrorLocked() error {
 }
 
 func (g *BootstrapGate) storeForLocked(selector transport.E2EEAuthSelector) (*Store, bool) {
-	if g.revoked.Load() || g.store == nil || g.admissionErrorLocked() != nil {
+	if g.revoked.Load() || g.suspended.Load() || g.store == nil || g.admissionErrorLocked() != nil {
 		return nil, false
 	}
 	if selector.Kind == transport.E2EEAuthInvitation && !g.invitationOpen {

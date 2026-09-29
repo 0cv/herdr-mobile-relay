@@ -56,6 +56,10 @@ fi
 HOLDER_PID=""
 HOLDER_LOG=""
 managed_owner_acquire "$CONFIG_ROOT" || exit 1
+[ -n "$HOLDER_PID" ] && [ -f "$HOLDER_LOG" ] || {
+    echo "✗ Relay configuration ownership was not established." >&2
+    exit 1
+}
 ensure_relay_env "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 TRANSPORT="$(relay_transport_mode "$ENV_FILE")"

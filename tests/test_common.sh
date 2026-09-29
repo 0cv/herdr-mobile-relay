@@ -211,9 +211,14 @@ test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH="$NODE_TOOL_PATH" node_
 
 # Titles are bold on a terminal only. A pipe is not one, so logs, tests, and
 # non-terminal panes keep the plain text they parse, and NO_COLOR is honoured
-# even when a terminal is present.
-test "$(NO_COLOR='' menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
-test "$(NO_COLOR=1 menu_item q "Exit, change nothing")" = "  q. Exit, change nothing"
+# even when a terminal is present. Export these inputs for the sourced helper.
+NO_COLOR=''
+export NO_COLOR
+test "$(menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
+NO_COLOR=1
+export NO_COLOR
+test "$(menu_item q "Exit, change nothing")" = "  q. Exit, change nothing"
+unset NO_COLOR
 
 # Use the same origin contract as the packaged binary without depending on an
 # installed release.
@@ -231,11 +236,14 @@ chmod 700 "$PHONE_SETUP_NORMALIZER"
 
 PHONE_SETUP_URL='https://app.example.test/#setup=relay%3A%2F%2Fmachine.example.test%3A443%3Ftoken%3Dfixture-private-token-0123456789abcdef'
 run_phone_setup_helper() (
+    # shellcheck disable=SC2329 # Sourced setup code invokes this test hook indirectly.
     relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
+    # shellcheck disable=SC2329 # Sourced setup code invokes this test hook indirectly.
     render_setup_qr() {
         [ "${PHONE_SETUP_RENDER_BAD_QR:-}" != 1 ] ||
             printf 'attacker-controlled QR\n'
     }
+    # shellcheck disable=SC2329 # Sourced setup code invokes this test hook indirectly.
     stdout_is_terminal() { [ "${PHONE_SETUP_TTY:-}" = 1 ]; }
     unset NO_COLOR
     [ "${PHONE_SETUP_NO_COLOR:-}" != 1 ] || NO_COLOR=1
@@ -420,9 +428,7 @@ test "$(env_file_value "$DEPLOY_ENV" HERDR_APP_DEPLOY_ORIGIN)" = "https://app.ex
 test "$(env_file_value "$DEPLOY_ENV" HERDR_CLOUDFLARE_PAGES_PROJECT)" = "herdr-0cv"
 test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin-configured")" = "https://app.example.test"
 printf 'https://relay.example.test\n' > "$(dirname "$DEPLOY_ENV")/phone-app-origin"
-DEPLOY_REOPEN_OUTPUT="$(
-    run_configure_app_deploy '\nherdr-0cv\nn\n' 2>&1 || true
-)"
+run_configure_app_deploy '\nherdr-0cv\nn\n' >/dev/null 2>&1 || true
 test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin-configured")" = "https://app.example.test"
 test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin")" = "https://relay.example.test"
 
@@ -841,6 +847,7 @@ run_tailscale_chooser() (
         return 1
     }
     HERDR_RELAY_BIN="$NORMALIZE_BIN"
+    # shellcheck disable=SC2030 # This PATH override is intentionally local to the fixture subshell.
     PATH="$TAILSCALE_CHOOSER_FAIL_BIN:$PATH"
     export HERDR_RELAY_BIN PATH
     choose_phone_app_base_url "$relay_origin" "$env_file" "$setup_kind"
@@ -1087,6 +1094,7 @@ export CHOOSER_START_MARKER
 # to reset it: these candidates are interchangeable, and inheriting `ordered`
 # would silently pin the pool to whichever entry happens to be listed first.
 CHOOSER_OUTPUT="$(
+    # shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
     PATH="$CHOOSER_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELAY_ENV="$CHOOSER_ENV" \
@@ -1112,6 +1120,7 @@ esac
 # empty final answer accepts own-first plus all published community fallbacks.
 rm -f "$CHOOSER_START_MARKER"
 : > "$CHOOSER_ENV"
+# shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
 OWN_OUTPUT="$(
     printf 'b\nown.example.test\n\n' |
         PATH="$CHOOSER_BIN_DIR:$PATH" \
@@ -1133,6 +1142,7 @@ esac
 # before Quick Start builds the setup fragment. Otherwise the background relay
 # switches to Cloudflare while the QR still sends the phone to the old gateway.
 TEMPORARY_OUTPUT="$(
+    # shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
     PATH="$CHOOSER_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELAY_ENV="$CHOOSER_ENV" \
@@ -1306,6 +1316,7 @@ chmod 700 "$MENU_BIN_DIR/curl"
 # Entering an action and finishing it has to come back here, not end the pane:
 # 9 shows the status, then the menu is redrawn and q leaves. Without a terminal
 # the return prompt is skipped, so the input carries no extra newline.
+# shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
 MENU_OUTPUT="$(
     printf '9\nq\n' |
         PATH="$MENU_BIN_DIR:$PATH" \
@@ -1524,6 +1535,7 @@ printf '%s\n' '#!/bin/sh' \
 chmod 700 "$HOSTNAME_MOVE_DIR/service.sh"
 export MOVE_SERVICE_LOG  # change-hostname.sh resolves service.sh as an absolute sibling, so run it from this copied tree whose service.sh is a recording stub.
 
+# shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
 MOVE_OUTPUT="$(
     printf 'relay-fedora.new.test\n' |
         HOME="$MOVE_HOME" \
@@ -1551,6 +1563,7 @@ test "$(cat "$MOVE_STATE_RECORD" 2>/dev/null)" = "relay-fedora.new.test" ||
 # that is not in use.
 printf "HERDR_RELAY_TOKEN='move-token'\n" > "$MOVE_ENV"
 MOVE_OUTPUT="$(
+    # shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
     HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
         HERDR_RELAY_ENV="$MOVE_ENV" bash "$HOSTNAME_MOVE_DIR/change-hostname.sh" 2>&1 || true
 )"
@@ -1573,6 +1586,7 @@ printf 'INF Added CNAME relay-fedora.new.test.old.test which will route to your 
 exit 0
 EOF
 chmod 700 "$MOVE_BIN/cloudflared"
+# shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
 MOVE_OUTPUT="$(
     printf 'relay-fedora.new.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
@@ -1602,6 +1616,7 @@ cat > "$MOVE_BIN/curl" <<'EOF'
 exit 6
 EOF
 chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl"
+# shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
 MOVE_OUTPUT="$(
     printf 'relay-fedora.unreachable.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
@@ -1645,6 +1660,7 @@ printf '%s\n' "$*" >> "$MOVE_ROUTE_LOG"
 exit 0
 EOF
 chmod 700 "$MOVE_BIN/curl" "$MOVE_BIN/cloudflared"
+# shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
 MOVE_OUTPUT="$(
     printf 'relay-fedora.elsewhere.test\n' |
         HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \

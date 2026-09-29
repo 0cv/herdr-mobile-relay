@@ -34,7 +34,9 @@ development without asking for paths or ports. The checkout-local state root
 `relay/.dev-tailscale/` is created with mode 0700 only after input checks.
 The development relay, plugin and HTTPS Serve ports default to 18377, 18378
 and 8443; conflicts are refused rather than adopting a listener or changing
-an enrolled port. After opt-in, executable `tailscale` and `herdr` binaries
+an enrolled port. CLI-backed development uses the same separate port contract,
+with state under `relay/.dev-tailscale-cli/` and an independently consented
+persistent route. After opt-in, executable `tailscale` and `herdr` binaries
 are located on `PATH` without running them. The Herdr socket is selected from
 `HERDR_SOCKET_PATH` or the same `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`
 default used by the relay and event hook, before development HOME/XDG isolation

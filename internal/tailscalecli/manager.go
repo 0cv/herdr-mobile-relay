@@ -12,8 +12,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,25 +25,30 @@ import (
 )
 
 const (
-	journalName           = "registration.json"
-	journalMaxBytes       = 16 * 1024
-	mutationLockWait      = 5 * time.Second
-	mutationLockDelay     = 20 * time.Millisecond
-	publishConsentScope   = "persistent-route-and-four-risks-v1"
-	removeConsentScope    = "explicit-route-removal-and-no-remote-drain-v1"
-	reconcileConsentScope = "explicit-journal-reconciliation-v1"
+	journalName                = "registration.json"
+	journalMaxBytes            = 16 * 1024
+	backendReservationMaxBytes = 4 * 1024
+	mutationLockWait           = 5 * time.Second
+	mutationLockDelay          = 20 * time.Millisecond
+	publishConsentScope        = "persistent-route-and-four-risks-v1"
+	removeConsentScope         = "explicit-route-removal-and-no-remote-drain-v1"
+	reconcileConsentScope      = "explicit-journal-reconciliation-v1"
 )
+
+var ErrPublishNotDispatched = errors.New("Serve publish was not dispatched")
 
 type RegistrationState string
 
 const (
-	StateUnconfigured     RegistrationState = "unconfigured"
-	StatePublishPending   RegistrationState = "publish-pending"
-	StateRegistered       RegistrationState = "registered"
-	StatePublishUncertain RegistrationState = "publish-uncertain"
-	StateRemovePending    RegistrationState = "remove-pending"
-	StateRemoveUncertain  RegistrationState = "remove-uncertain"
-	StateRemoved          RegistrationState = "removed"
+	StateUnconfigured      RegistrationState = "unconfigured"
+	StatePublishPending    RegistrationState = "publish-pending"
+	StateRegistered        RegistrationState = "registered"
+	StatePublishUncertain  RegistrationState = "publish-uncertain"
+	StateRemovePending     RegistrationState = "remove-pending"
+	StateRemoveUncertain   RegistrationState = "remove-uncertain"
+	StateRemoved           RegistrationState = "removed"
+	StateReconciledPresent RegistrationState = "reconciled-present"
+	StateReconciledAbsent  RegistrationState = "reconciled-absent"
 )
 
 type Consent struct {
@@ -89,6 +96,18 @@ type registration struct {
 	State                RegistrationState `json:"state"`
 	MutationAcknowledged bool              `json:"mutation_acknowledged"`
 	UpdatedAt            string            `json:"updated_at"`
+}
+
+type backendPortReservation struct {
+	Schema         int               `json:"schema"`
+	InstallationID string            `json:"installation_id"`
+	Scope          string            `json:"scope"`
+	NodeID         string            `json:"node_id"`
+	HTTPSPort      int               `json:"https_port"`
+	BackendPort    int               `json:"backend_port"`
+	Origin         string            `json:"origin"`
+	State          RegistrationState `json:"state"`
+	UpdatedAt      string            `json:"updated_at"`
 }
 
 type RouteReadiness string
@@ -151,114 +170,249 @@ func NewManager(stateRoot, coordinationRoot string, client *Client) (*Manager, e
 	return &Manager{stateRoot: stateRoot, coordinationRoot: coordinationRoot, client: client}, nil
 }
 
-// Publish creates exactly one persistent background HTTPS proxy route. Normal
-// production managers fail closed because no profile is runtime-qualified.
-func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
-	if err := validateRequest(request); err != nil {
-		return err
+// ReserveBackendPort durably claims a local backend port before setup starts
+// the relay listener. Reservations live in the shared per-user coordination
+// root until the exact route is explicitly unpublished or setup proves no
+// route was published and releases its own reservation.
+func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int) error {
+	reservation := backendPortReservation{
+		Schema: 1, InstallationID: installationID, Scope: scope, NodeID: nodeID,
+		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin,
+		State: StatePublishPending, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if reservation.Validate() != nil {
+		return ErrConflict
 	}
 	inspection, err := m.client.Inspect(ctx)
 	if err != nil {
 		return err
 	}
-	if inspection.Identity.NodeID != request.ExpectedNodeID || !originMatchesIdentity(request.Origin, inspection.Identity, request.HTTPSPort) {
+	if inspection.Identity.NodeID != nodeID || !originMatchesIdentity(origin, inspection.Identity, httpsPort) {
 		return ErrConflict
 	}
 	if err := m.requireMutationProfile(inspection); err != nil {
 		return err
 	}
-	return m.withNodeLock(ctx, inspection.Identity.NodeID, func() error {
-		current, err := m.client.Inspect(ctx)
-		if err != nil {
-			return err
-		}
-		if !sameInspectionIdentity(inspection, current) || current.Identity.NodeID != request.ExpectedNodeID ||
-			!originMatchesIdentity(request.Origin, current.Identity, request.HTTPSPort) {
-			return ErrConflict
-		}
-		if err := m.requireMutationProfile(current); err != nil {
-			return err
-		}
+	return m.withBackendReservationLock(ctx, func() error {
 		record, err := m.readRegistration()
 		if err != nil {
 			return err
 		}
-		if record != nil && record.State == StateRegistered {
-			if !sameRequest(*record, request, current, m.client.binary) {
-				return ErrConflict
+		if record != nil {
+			switch record.State {
+			case StateRegistered:
+				if record.InstallationID != installationID || record.Scope != scope || record.NodeID != nodeID ||
+					record.HTTPSPort != httpsPort || record.BackendPort != backendPort || !registrationOriginMatches(*record, origin) {
+					return ErrConflict
+				}
+			case StateRemoved, StateUnconfigured, StateReconciledAbsent:
+			default:
+				return ErrUncertain
 			}
-			if registeredRouteMatches(current, *record) {
-				return nil // acknowledged registration reuse: no Serve write
-			}
-			return ErrConflict // drift never triggers automatic repair
 		}
-		if record != nil && record.State != StateRemoved && record.State != StateUnconfigured {
-			return fmt.Errorf("%w: recovery state %s requires explicit reconciliation", ErrUncertain, record.State)
-		}
-		if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
-			return err
-		}
-		if routeConflicts(current.Serve, request.HTTPSPort) {
+		routeAlreadyOurs := record != nil && record.State == StateRegistered && registeredRouteMatches(inspection, *record)
+		if routeConflicts(inspection.Serve, httpsPort) && !routeAlreadyOurs {
 			return ErrConflict
 		}
-		if !m.skipBackendReadiness {
-			if err := verifyBackendReadiness(ctx, request.BackendPort, request.InstallationID, request.Origin); err != nil {
+		var allowedRoute *registration
+		if routeAlreadyOurs {
+			allowedRoute = record
+		}
+		if backendPortHasRoute(inspection.Serve, backendPort, allowedRoute) {
+			return ErrConflict
+		}
+		return m.writeBackendReservation(reservation)
+	})
+}
+
+// ReleaseBackendPort removes only the caller's reservation after read-only CLI
+// inspection proves no Serve route still targets the selected backend port.
+func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int) error {
+	reservation := backendPortReservation{
+		Schema: 1, InstallationID: installationID, Scope: scope, NodeID: nodeID,
+		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin,
+		State: StatePublishPending, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if reservation.Validate() != nil {
+		return ErrConflict
+	}
+	return m.withNodeLock(ctx, nodeID, func() error {
+		return m.withBackendReservationLock(ctx, func() error {
+			record, err := m.readRegistration()
+			if err != nil {
 				return err
 			}
-		}
-		opID, err := newOperationID()
-		if err != nil {
-			return err
-		}
-		entry := registration{
-			Schema:         1,
-			InstallationID: request.InstallationID,
-			Scope:          request.Scope,
-			NodeID:         current.Identity.NodeID,
-			DNSName:        current.Identity.DNSName,
-			Profile:        current.Profile,
-			BinaryPath:     m.client.binary,
-			HTTPSPort:      request.HTTPSPort,
-			BackendPort:    request.BackendPort,
-			Path:           "/",
-			Backend:        fmt.Sprintf("http://127.0.0.1:%d", request.BackendPort),
-			ConsentScope:   publishConsentScope,
-			OperationID:    opID,
-			State:          StatePublishPending,
-			UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
-		}
-		if err := m.writeRegistration(entry); err != nil {
-			return fmt.Errorf("persist publish intent: %w", err)
-		}
-		result, publishErr := m.client.execute(ctx, "serve", "--bg", fmt.Sprintf("--https=%d", request.HTTPSPort), "--set-path=/", entry.Backend)
-		if publishErr != nil {
-			if !result.dispatched {
+			if record != nil && record.State != StateUnconfigured && record.State != StateRemoved && record.State != StateReconciledAbsent {
+				return ErrUncertain
+			}
+			inspection, err := m.client.Inspect(ctx)
+			if err != nil {
+				return err
+			}
+			if inspection.Identity.NodeID != nodeID || !originMatchesIdentity(origin, inspection.Identity, httpsPort) || !inspection.Serve.Complete {
+				return ErrConflict
+			}
+			if backendPortHasRoute(inspection.Serve, backendPort, nil) {
+				return ErrConflict
+			}
+			return m.removeBackendReservation(reservation)
+		})
+	})
+}
+
+// Publish creates exactly one persistent background HTTPS proxy route. Normal
+// production managers fail closed because no profile is runtime-qualified.
+func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
+	if err := validateRequest(request); err != nil {
+		return m.publishNotDispatched(err)
+	}
+	inspection, err := m.client.Inspect(ctx)
+	if err != nil {
+		return m.publishNotDispatched(err)
+	}
+	if inspection.Identity.NodeID != request.ExpectedNodeID || !originMatchesIdentity(request.Origin, inspection.Identity, request.HTTPSPort) {
+		return m.publishNotDispatched(ErrConflict)
+	}
+	if err := m.requireMutationProfile(inspection); err != nil {
+		return m.publishNotDispatched(err)
+	}
+	err = m.withNodeLock(ctx, inspection.Identity.NodeID, func() error {
+		return m.withBackendReservationLock(ctx, func() error {
+			current, err := m.client.Inspect(ctx)
+			if err != nil {
+				return err
+			}
+			if !sameInspectionIdentity(inspection, current) || current.Identity.NodeID != request.ExpectedNodeID ||
+				!originMatchesIdentity(request.Origin, current.Identity, request.HTTPSPort) {
+				return ErrConflict
+			}
+			if err := m.requireMutationProfile(current); err != nil {
+				return err
+			}
+			record, err := m.readRegistration()
+			if err != nil {
+				return err
+			}
+			if record != nil && record.State == StateRegistered {
+				if !sameRequest(*record, request, current, m.client.binary) {
+					return ErrConflict
+				}
+				if registeredRouteMatches(current, *record) {
+					return m.writeBackendReservation(reservationForRegistration(*record, StateRegistered))
+				}
+				return ErrConflict // drift never triggers automatic repair
+			}
+			if record != nil && record.State != StateRemoved && record.State != StateUnconfigured && record.State != StateReconciledAbsent {
+				return fmt.Errorf("%w: recovery state %s requires explicit reconciliation", ErrUncertain, record.State)
+			}
+			desiredReservation := backendPortReservation{
+				Schema: 1, InstallationID: request.InstallationID, Scope: request.Scope, NodeID: current.Identity.NodeID,
+				HTTPSPort: request.HTTPSPort, BackendPort: request.BackendPort, Origin: request.Origin,
+				State: StatePublishPending, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			}
+			if m.fixtureMutations {
+				if existing, readErr := m.readBackendReservation(request.BackendPort); readErr != nil {
+					return readErr
+				} else if existing == nil {
+					if err := m.writeBackendReservation(desiredReservation); err != nil {
+						return err
+					}
+				}
+			}
+			reserved, err := m.readBackendReservation(request.BackendPort)
+			if err != nil || reserved == nil || !sameBackendReservation(*reserved, desiredReservation) {
+				return ErrConflict
+			}
+			if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
+				return err
+			}
+			if routeConflicts(current.Serve, request.HTTPSPort) || backendPortHasRoute(current.Serve, request.BackendPort, nil) {
+				return ErrConflict
+			}
+			if !m.skipBackendReadiness {
+				if err := verifyBackendReadiness(ctx, request.BackendPort, request.InstallationID, request.Origin); err != nil {
+					return err
+				}
+			}
+			opID, err := newOperationID()
+			if err != nil {
+				return err
+			}
+			entry := registration{
+				Schema:         1,
+				InstallationID: request.InstallationID,
+				Scope:          request.Scope,
+				NodeID:         current.Identity.NodeID,
+				DNSName:        current.Identity.DNSName,
+				Profile:        current.Profile,
+				BinaryPath:     m.client.binary,
+				HTTPSPort:      request.HTTPSPort,
+				BackendPort:    request.BackendPort,
+				Path:           "/",
+				Backend:        fmt.Sprintf("http://127.0.0.1:%d", request.BackendPort),
+				ConsentScope:   publishConsentScope,
+				OperationID:    opID,
+				State:          StatePublishPending,
+				UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+			}
+			if err := m.writeRegistration(entry); err != nil {
+				return fmt.Errorf("persist publish intent: %w", err)
+			}
+			if err := m.writeBackendReservation(reservationForRegistration(entry, StatePublishPending)); err != nil {
 				entry.State = StateUnconfigured
 				entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				if saveErr := m.writeRegistration(entry); saveErr != nil {
-					return fmt.Errorf("publish was not dispatched but journal update failed: %w", saveErr)
-				}
-				return sanitizeCommandError("serve publish", publishErr)
+				_ = m.writeRegistration(entry)
+				return fmt.Errorf("reserve backend port before publication: %w", err)
 			}
-			entry.State = StatePublishUncertain
+			result, publishErr := m.client.execute(ctx, "serve", "--bg", fmt.Sprintf("--https=%d", request.HTTPSPort), "--set-path=/", entry.Backend)
+			if publishErr != nil {
+				if !result.dispatched {
+					entry.State = StateUnconfigured
+					entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					if saveErr := m.writeRegistration(entry); saveErr != nil {
+						return fmt.Errorf("publish was not dispatched but journal update failed: %w", saveErr)
+					}
+					return fmt.Errorf("publish invocation was not dispatched; backend reservation remains until the listener is stopped: %w",
+						sanitizeCommandError("serve publish", publishErr))
+				}
+				entry.State = StatePublishUncertain
+				entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				_ = m.writeRegistration(entry)
+				return fmt.Errorf("%w: publish acknowledgement unavailable", ErrUncertain)
+			}
+			entry.State = StateRegistered
+			entry.MutationAcknowledged = true
 			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			_ = m.writeRegistration(entry)
-			return fmt.Errorf("%w: publish acknowledgement unavailable", ErrUncertain)
-		}
-		entry.State = StateRegistered
-		entry.MutationAcknowledged = true
-		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		if err := m.writeRegistration(entry); err != nil {
-			// The durable publish-pending record remains as recovery evidence.
-			return fmt.Errorf("%w: publish acknowledged but receipt could not be persisted", ErrUncertain)
-		}
-		readback, err := m.client.Inspect(ctx)
-		if err != nil || !registeredRouteMatches(readback, entry) {
-			// Keep the durable receipt. Do not retry, roll back, or issue `off`.
-			return fmt.Errorf("%w: publish receipt recorded; route readback is not ready", ErrConflict)
-		}
-		return nil
+			if err := m.writeRegistration(entry); err != nil {
+				// The durable publish-pending record and port reservation remain as recovery evidence.
+				return fmt.Errorf("%w: publish acknowledged but receipt could not be persisted", ErrUncertain)
+			}
+			if err := m.writeBackendReservation(reservationForRegistration(entry, StateRegistered)); err != nil {
+				return fmt.Errorf("%w: publish receipt recorded but backend reservation update failed", ErrUncertain)
+			}
+			readback, err := m.client.Inspect(ctx)
+			if err != nil || !registeredRouteMatches(readback, entry) {
+				// Keep the durable receipt. Do not retry, roll back, or issue `off`.
+				return fmt.Errorf("%w: publish receipt recorded; route readback is not ready", ErrConflict)
+			}
+			return nil
+		})
 	})
+	return m.publishNotDispatched(err)
+}
+
+func (m *Manager) publishNotDispatched(err error) error {
+	if err == nil {
+		return nil
+	}
+	record, readErr := m.readRegistration()
+	if readErr != nil {
+		return err
+	}
+	if record != nil && record.State != StateUnconfigured && record.State != StateRemoved && record.State != StateReconciledAbsent {
+		return err
+	}
+	return errors.Join(ErrPublishNotDispatched, err)
 }
 
 // VerifyRegisteredRoute performs bounded, read-only drift detection for a
@@ -470,51 +624,56 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 		return err
 	}
 	return m.withNodeLock(ctx, record.NodeID, func() error {
-		currentRecord, err := m.readRegistration()
-		if err != nil {
-			return err
-		}
-		if currentRecord == nil || *currentRecord != *record {
-			return ErrUncertain
-		}
-		current, err := m.client.Inspect(ctx)
-		if err != nil {
-			return err
-		}
-		if current.Identity.NodeID != record.NodeID || current.Identity.DNSName != record.DNSName ||
-			!originMatchesIdentity(origin, current.Identity, record.HTTPSPort) || !sameProfile(current, *record) ||
-			m.client.binary != record.BinaryPath {
-			return ErrConflict
-		}
-		matching := registeredRouteMatches(current, *record)
-		listenerPresent := hasRouteAtPort(current.Serve, record.HTTPSPort)
-		if consent.RecoveryObservation == "present" && !matching {
-			return ErrConflict
-		}
-		if consent.RecoveryObservation == "absent" && listenerPresent {
-			return ErrConflict
-		}
-		resolved := *record
-		resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		switch consent.RecoveryObservation {
-		case "present":
-			resolved.State = StateRegistered
-			resolved.ConsentScope = publishConsentScope
-			resolved.MutationAcknowledged = true
-		case "absent":
-			if record.State == StatePublishPending || record.State == StatePublishUncertain {
-				resolved.State = StateUnconfigured
-				resolved.ConsentScope = publishConsentScope
-				resolved.MutationAcknowledged = false
-			} else {
-				resolved.State = StateRemoved
-				resolved.ConsentScope = removeConsentScope
-				resolved.MutationAcknowledged = true
+		return m.withBackendReservationLock(ctx, func() error {
+			currentRecord, err := m.readRegistration()
+			if err != nil {
+				return err
 			}
-		default:
-			return ErrConflict
-		}
-		return m.writeRegistration(resolved)
+			if currentRecord == nil || *currentRecord != *record {
+				return ErrUncertain
+			}
+			current, err := m.client.Inspect(ctx)
+			if err != nil {
+				return err
+			}
+			if current.Identity.NodeID != record.NodeID || current.Identity.DNSName != record.DNSName ||
+				!originMatchesIdentity(origin, current.Identity, record.HTTPSPort) || !sameProfile(current, *record) ||
+				m.client.binary != record.BinaryPath {
+				return ErrConflict
+			}
+			matching := registeredRouteMatches(current, *record)
+			listenerPresent := hasRouteAtPort(current.Serve, record.HTTPSPort)
+			if consent.RecoveryObservation == "present" && !matching {
+				return ErrConflict
+			}
+			if consent.RecoveryObservation == "absent" && listenerPresent {
+				return ErrConflict
+			}
+			resolved := *record
+			resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			switch consent.RecoveryObservation {
+			case "present":
+				resolved.State = StateReconciledPresent
+				resolved.ConsentScope = reconcileConsentScope
+				resolved.MutationAcknowledged = false
+				if err := m.writeBackendReservation(reservationForRegistration(resolved, StateReconciledPresent)); err != nil {
+					return err
+				}
+			case "absent":
+				resolved.State = StateReconciledAbsent
+				resolved.ConsentScope = reconcileConsentScope
+				resolved.MutationAcknowledged = false
+			default:
+				return ErrConflict
+			}
+			if err := m.writeRegistration(resolved); err != nil {
+				return err
+			}
+			if consent.RecoveryObservation == "absent" {
+				return m.removeBackendReservation(reservationForRegistration(resolved, record.State))
+			}
+			return nil
+		})
 	})
 }
 
@@ -549,7 +708,8 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 	if err != nil {
 		return err
 	}
-	if record == nil || record.State != StateRegistered || !record.MutationAcknowledged {
+	if record == nil || !((record.State == StateRegistered && record.MutationAcknowledged) ||
+		(record.State == StateReconciledPresent && !record.MutationAcknowledged)) {
 		return ErrUncertain
 	}
 	origin, err := tailscale.Origin(record.DNSName, record.HTTPSPort)
@@ -571,79 +731,91 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 		return err
 	}
 	return m.withNodeLock(ctx, record.NodeID, func() error {
-		currentRecord, err := m.readRegistration()
-		if err != nil {
-			return err
-		}
-		if currentRecord == nil || *currentRecord != *record || currentRecord.State != StateRegistered || !currentRecord.MutationAcknowledged {
-			return ErrUncertain
-		}
-		current, err := m.client.Inspect(ctx)
-		if err != nil {
-			return err
-		}
-		if current.Identity.NodeID != record.NodeID || !originMatchesIdentity(origin, current.Identity, record.HTTPSPort) ||
-			!sameProfile(current, *record) || m.client.binary != record.BinaryPath {
-			return ErrConflict
-		}
-		if err := m.requireMutationProfile(current); err != nil {
-			return err
-		}
-		if !registeredRouteMatches(current, *record) {
-			return ErrConflict
-		}
-		opID, err := newOperationID()
-		if err != nil {
-			return err
-		}
-		pending := *record
-		pending.OperationID = opID
-		pending.ConsentScope = removeConsentScope
-		pending.State = StateRemovePending
-		pending.MutationAcknowledged = false
-		pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		if err := m.writeRegistration(pending); err != nil {
-			return fmt.Errorf("persist removal intent: %w", err)
-		}
-		result, removeErr := m.client.execute(ctx, "serve", "--bg", fmt.Sprintf("--https=%d", record.HTTPSPort), "--set-path=/", "off")
-		if removeErr != nil {
-			if !result.dispatched {
-				// The prior successful publication receipt remains valid.
-				if saveErr := m.writeRegistration(*record); saveErr != nil {
-					return fmt.Errorf("removal was not dispatched but receipt restore failed: %w", saveErr)
-				}
-				return sanitizeCommandError("serve unpublish", removeErr)
+		return m.withBackendReservationLock(ctx, func() error {
+			currentRecord, err := m.readRegistration()
+			if err != nil {
+				return err
 			}
-			pending.State = StateRemoveUncertain
+			if currentRecord == nil || *currentRecord != *record ||
+				!((currentRecord.State == StateRegistered && currentRecord.MutationAcknowledged) ||
+					(currentRecord.State == StateReconciledPresent && !currentRecord.MutationAcknowledged)) {
+				return ErrUncertain
+			}
+			reservation, err := m.readBackendReservation(record.BackendPort)
+			if err != nil || reservation == nil || !sameBackendReservation(*reservation, reservationForRegistration(*record, record.State)) {
+				return ErrUncertain
+			}
+			current, err := m.client.Inspect(ctx)
+			if err != nil {
+				return err
+			}
+			if current.Identity.NodeID != record.NodeID || !originMatchesIdentity(origin, current.Identity, record.HTTPSPort) ||
+				!sameProfile(current, *record) || m.client.binary != record.BinaryPath {
+				return ErrConflict
+			}
+			if err := m.requireMutationProfile(current); err != nil {
+				return err
+			}
+			if !registeredRouteMatches(current, *record) {
+				return ErrConflict
+			}
+			opID, err := newOperationID()
+			if err != nil {
+				return err
+			}
+			pending := *record
+			pending.OperationID = opID
+			pending.ConsentScope = removeConsentScope
+			pending.State = StateRemovePending
+			pending.MutationAcknowledged = false
 			pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			_ = m.writeRegistration(pending)
-			return fmt.Errorf("%w: removal acknowledgement unavailable", ErrUncertain)
-		}
-		pending.MutationAcknowledged = true
-		pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		if err := m.writeRegistration(pending); err != nil {
-			return fmt.Errorf("%w: removal acknowledged but receipt could not be persisted", ErrUncertain)
-		}
-		readback, err := m.client.Inspect(ctx)
-		if err != nil {
-			pending.State = StateRemoveUncertain
+			if err := m.writeRegistration(pending); err != nil {
+				return fmt.Errorf("persist removal intent: %w", err)
+			}
+			result, removeErr := m.client.execute(ctx, "serve", "--bg", fmt.Sprintf("--https=%d", record.HTTPSPort), "--set-path=/", "off")
+			if removeErr != nil {
+				if !result.dispatched {
+					// The prior successful publication receipt remains valid.
+					if saveErr := m.writeRegistration(*record); saveErr != nil {
+						return fmt.Errorf("removal was not dispatched but receipt restore failed: %w", saveErr)
+					}
+					return sanitizeCommandError("serve unpublish", removeErr)
+				}
+				pending.State = StateRemoveUncertain
+				pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				_ = m.writeRegistration(pending)
+				return fmt.Errorf("%w: removal acknowledgement unavailable", ErrUncertain)
+			}
+			pending.MutationAcknowledged = true
 			pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			_ = m.writeRegistration(pending)
-			return fmt.Errorf("%w: removal readback unavailable", ErrUncertain)
-		}
-		if readback.Identity.NodeID != record.NodeID || !originMatchesIdentity(origin, readback.Identity, record.HTTPSPort) ||
-			!sameProfile(readback, *record) || hasRouteAtPort(readback.Serve, record.HTTPSPort) {
-			pending.State = StateRemoveUncertain
+			if err := m.writeRegistration(pending); err != nil {
+				return fmt.Errorf("%w: removal acknowledged but receipt could not be persisted", ErrUncertain)
+			}
+			readback, err := m.client.Inspect(ctx)
+			if err != nil {
+				pending.State = StateRemoveUncertain
+				pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				_ = m.writeRegistration(pending)
+				return fmt.Errorf("%w: removal readback unavailable", ErrUncertain)
+			}
+			if readback.Identity.NodeID != record.NodeID || !originMatchesIdentity(origin, readback.Identity, record.HTTPSPort) ||
+				!sameProfile(readback, *record) || hasRouteAtPort(readback.Serve, record.HTTPSPort) ||
+				backendPortHasRoute(readback.Serve, record.BackendPort, nil) {
+				pending.State = StateRemoveUncertain
+				pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				_ = m.writeRegistration(pending)
+				return fmt.Errorf("%w: selected listener remains or changed", ErrUncertain)
+			}
+			pending.State = StateRemoved
 			pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			_ = m.writeRegistration(pending)
-			return fmt.Errorf("%w: selected listener remains or changed", ErrUncertain)
-		}
-		pending.State = StateRemoved
-		pending.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		if err := m.writeRegistration(pending); err != nil {
-			return fmt.Errorf("%w: removal verified but final journal update failed", ErrUncertain)
-		}
-		return nil
+			if err := m.writeRegistration(pending); err != nil {
+				return fmt.Errorf("%w: removal verified but final journal update failed", ErrUncertain)
+			}
+			if err := m.removeBackendReservation(reservationForRegistration(pending, StateRemoved)); err != nil {
+				return fmt.Errorf("%w: route was removed but backend reservation could not be released", ErrUncertain)
+			}
+			return nil
+		})
 	})
 }
 
@@ -690,8 +862,8 @@ func validateUnpublishConsent(consent Consent, nodeID, scope, origin string, htt
 	if err := validateConsentBinding(consent, nodeID, scope, origin, httpsPort, backendPort); err != nil {
 		return err
 	}
-	if !consent.RouteRemovalAccepted || !consent.NoRemoteDrainAccepted {
-		return errors.New("explicit route-removal and no-remote-drain acknowledgements are required")
+	if !consent.RouteRemovalAccepted || !consent.CheckToWriteRaceAccepted || !consent.NoRemoteDrainAccepted {
+		return errors.New("explicit route-removal, check-to-write-race, and no-remote-drain acknowledgements are required")
 	}
 	return nil
 }
@@ -731,7 +903,13 @@ func verifyBackendReadiness(ctx context.Context, port int, installationID, origi
 	defer cancel()
 	transport := &http.Transport{Proxy: nil}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	request, err := http.NewRequestWithContext(checkCtx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/healthz", port), nil)
 	if err != nil {
 		return ErrConflict
@@ -799,7 +977,55 @@ func registeredRouteMatches(inspection Inspection, record registration) bool {
 		}
 		matching++
 	}
-	return matching == 1
+	return matching == 1 && !backendPortHasRoute(inspection.Serve, record.BackendPort, &record)
+}
+
+func backendPortHasRoute(serve tailscale.ServeStatus, backendPort int, allowed *registration) bool {
+	for _, route := range serve.ObservedRoutes {
+		usesPort, err := loopbackBackendUsesPort(route.Backend, backendPort)
+		if err != nil {
+			return true
+		}
+		if !usesPort {
+			continue
+		}
+		if allowed != nil && route.Port == allowed.HTTPSPort && route.Session == "" && route.Listener == "HTTPS" &&
+			route.Host == allowed.DNSName && route.Handler == "Proxy" && route.Path == allowed.Path && route.Backend == allowed.Backend {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func loopbackBackendUsesPort(backend string, port int) (bool, error) {
+	parsed, err := url.Parse(backend)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return false, ErrConflict
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	loopback := host == "localhost" || strings.HasSuffix(host, ".localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		loopback = ip.IsLoopback()
+		if ipv4 := ip.To4(); ipv4 != nil && ipv4[0] == 127 {
+			loopback = true
+		}
+	}
+	if !loopback {
+		return false, nil
+	}
+	backendPort := parsed.Port()
+	if backendPort == "" {
+		if parsed.Scheme == "http" {
+			return port == 80, nil
+		}
+		return port == 443, nil
+	}
+	parsedPort, err := strconv.Atoi(backendPort)
+	if err != nil || parsedPort < 1 || parsedPort > 65535 {
+		return false, ErrConflict
+	}
+	return parsedPort == port, nil
 }
 
 func hasRouteAtPort(serve tailscale.ServeStatus, port int) bool {
@@ -815,14 +1041,22 @@ func hasRouteAtPort(serve tailscale.ServeStatus, port int) bool {
 }
 
 func (m *Manager) withNodeLock(ctx context.Context, nodeID string, operation func() error) error {
+	digest := sha256.Sum256([]byte(nodeID))
+	return m.withCoordinationLock(ctx, "node-"+hex.EncodeToString(digest[:])[:24]+".lock", operation)
+}
+
+func (m *Manager) withBackendReservationLock(ctx context.Context, operation func() error) error {
+	return m.withCoordinationLock(ctx, "backend-reservations.lock", operation)
+}
+
+func (m *Manager) withCoordinationLock(ctx context.Context, name string, operation func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if _, err := validatePrivateDirectory(m.coordinationRoot); err != nil {
 		return ErrPermissionDenied
 	}
-	digest := sha256.Sum256([]byte(nodeID))
-	lockPath := filepath.Join(m.coordinationRoot, "node-"+hex.EncodeToString(digest[:])[:24]+".lock")
+	lockPath := filepath.Join(m.coordinationRoot, name)
 	fd, err := syscall.Open(lockPath, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return ErrPermissionDenied
@@ -873,6 +1107,143 @@ func syncDirectory(path string) error {
 		return ErrPermissionDenied
 	}
 	return nil
+}
+
+func reservationForRegistration(record registration, state RegistrationState) backendPortReservation {
+	origin, _ := tailscale.Origin(record.DNSName, record.HTTPSPort)
+	return backendPortReservation{
+		Schema: 1, InstallationID: record.InstallationID, Scope: record.Scope, NodeID: record.NodeID,
+		HTTPSPort: record.HTTPSPort, BackendPort: record.BackendPort, Origin: origin,
+		State: state, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func (r backendPortReservation) Validate() error {
+	if r.Schema != 1 || !validLabel(r.InstallationID) || (r.Scope != "production" && r.Scope != "development") ||
+		!validNodeID(r.NodeID) || r.HTTPSPort < 1 || r.HTTPSPort > 65535 || r.BackendPort < 1 || r.BackendPort > 65535 ||
+		r.HTTPSPort == r.BackendPort || !validCanonicalOrigin(r.Origin) {
+		return ErrUncertain
+	}
+	switch r.State {
+	case StateUnconfigured, StatePublishPending, StateRegistered, StatePublishUncertain,
+		StateRemovePending, StateRemoveUncertain, StateRemoved, StateReconciledPresent, StateReconciledAbsent:
+	default:
+		return ErrUncertain
+	}
+	if _, err := time.Parse(time.RFC3339Nano, r.UpdatedAt); err != nil {
+		return ErrUncertain
+	}
+	return nil
+}
+
+func sameBackendReservation(left, right backendPortReservation) bool {
+	return left.Schema == right.Schema && left.InstallationID == right.InstallationID && left.Scope == right.Scope &&
+		left.NodeID == right.NodeID && left.HTTPSPort == right.HTTPSPort && left.BackendPort == right.BackendPort && left.Origin == right.Origin
+}
+
+func (m *Manager) readBackendReservation(port int) (*backendPortReservation, error) {
+	if port < 1 || port > 65535 {
+		return nil, ErrConflict
+	}
+	root, err := validatePrivateDirectory(m.coordinationRoot)
+	if err != nil || root != m.coordinationRoot {
+		return nil, ErrUncertain
+	}
+	path := filepath.Join(m.coordinationRoot, fmt.Sprintf("backend-port-%d.json", port))
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
+		info.Size() > backendReservationMaxBytes || linkCount(info) != 1 || !ownedByCurrentUser(info) {
+		return nil, ErrUncertain
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || validateJSON(data, backendReservationMaxBytes, 6, 128) != nil {
+		return nil, ErrUncertain
+	}
+	var reservation backendPortReservation
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&reservation) != nil || decoder.Decode(new(any)) != io.EOF || reservation.Validate() != nil || reservation.BackendPort != port {
+		return nil, ErrUncertain
+	}
+	return &reservation, nil
+}
+
+func (m *Manager) writeBackendReservation(reservation backendPortReservation) error {
+	root, err := validatePrivateDirectory(m.coordinationRoot)
+	if err != nil || root != m.coordinationRoot || reservation.Validate() != nil {
+		return ErrUncertain
+	}
+	reservations, err := m.readAllBackendReservations()
+	if err != nil {
+		return err
+	}
+	for _, current := range reservations {
+		if current.BackendPort == reservation.BackendPort ||
+			(current.NodeID == reservation.NodeID && current.HTTPSPort == reservation.HTTPSPort) {
+			if !sameBackendReservation(current, reservation) {
+				return ErrConflict
+			}
+		}
+	}
+	current, err := m.readBackendReservation(reservation.BackendPort)
+	if err != nil {
+		return err
+	}
+	if current != nil && !sameBackendReservation(*current, reservation) {
+		return ErrConflict
+	}
+	data, err := json.Marshal(reservation)
+	if err != nil || len(data) > backendReservationMaxBytes {
+		return ErrUncertain
+	}
+	return writeAtomic(m.coordinationRoot, fmt.Sprintf("backend-port-%d.json", reservation.BackendPort), data)
+}
+
+func (m *Manager) readAllBackendReservations() ([]backendPortReservation, error) {
+	root, err := validatePrivateDirectory(m.coordinationRoot)
+	if err != nil || root != m.coordinationRoot {
+		return nil, ErrUncertain
+	}
+	entries, err := os.ReadDir(m.coordinationRoot)
+	if err != nil {
+		return nil, ErrUncertain
+	}
+	reservations := make([]backendPortReservation, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "backend-port-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		portText := strings.TrimSuffix(strings.TrimPrefix(name, "backend-port-"), ".json")
+		port, parseErr := strconv.Atoi(portText)
+		if parseErr != nil || port < 1 || port > 65535 || name != fmt.Sprintf("backend-port-%d.json", port) {
+			return nil, ErrUncertain
+		}
+		reservation, readErr := m.readBackendReservation(port)
+		if readErr != nil || reservation == nil {
+			return nil, ErrUncertain
+		}
+		reservations = append(reservations, *reservation)
+	}
+	return reservations, nil
+}
+
+func (m *Manager) removeBackendReservation(reservation backendPortReservation) error {
+	current, err := m.readBackendReservation(reservation.BackendPort)
+	if err != nil || current == nil {
+		return err
+	}
+	if !sameBackendReservation(*current, reservation) {
+		return ErrConflict
+	}
+	path := filepath.Join(m.coordinationRoot, fmt.Sprintf("backend-port-%d.json", reservation.BackendPort))
+	if err := os.Remove(path); err != nil {
+		return ErrUncertain
+	}
+	return syncDirectory(m.coordinationRoot)
 }
 
 func (m *Manager) readRegistration() (*registration, error) {
@@ -959,6 +1330,10 @@ func (r registration) Validate() error {
 		if r.ConsentScope != removeConsentScope || !r.MutationAcknowledged {
 			return ErrUncertain
 		}
+	case StateReconciledPresent, StateReconciledAbsent:
+		if r.ConsentScope != reconcileConsentScope || r.MutationAcknowledged {
+			return ErrUncertain
+		}
 	default:
 		return ErrUncertain
 	}
@@ -972,6 +1347,10 @@ func ownedByCurrentUser(info os.FileInfo) bool {
 
 func validatePrivateDirectory(path string) (string, error) {
 	if !filepath.IsAbs(path) {
+		return "", ErrPermissionDenied
+	}
+	rootInfo, err := os.Lstat(path)
+	if err != nil || rootInfo.Mode()&os.ModeSymlink != 0 {
 		return "", ErrPermissionDenied
 	}
 	resolved, err := filepath.EvalSymlinks(path)

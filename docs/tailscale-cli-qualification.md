@@ -101,8 +101,8 @@ credential, invitation or QR data appears. Required automated cases:
   updates remain refused; real profile coexistence and live qualification remain
   outstanding.
 - **Development:** source now has a separate `.dev-tailscale-cli/` foreground
-  workspace, default ports 18577/18578/9443 (distinct from production, tunnel,
-  and managed-Tailscale fixtures), separate registration/coordination roots,
+  workspace, default ports 18377/18378/8443 (as specified by the development
+  plan and distinct from production and managed-Tailscale backends), separate registration/coordination roots,
   read-only status/recovery, explicit unpublish, and route-preserving Ctrl-C.
   The fake-only hosted fixture passed positive start/update, exact-route recheck,
   development-scope isolation, and production-state preservation. Activation-gate

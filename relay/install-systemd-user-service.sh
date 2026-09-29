@@ -32,7 +32,7 @@ if ! command -v systemctl >/dev/null 2>&1; then
     exit 1
 fi
 
-relay_binary >/dev/null
+RELAY_BIN="$(relay_binary)"
 
 if [ "$TRANSPORT" = tailscale-cli ]; then
     if [ "${HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START:-}" = 1 ]; then

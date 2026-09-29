@@ -21,9 +21,10 @@ else
     (cd "$REPO_DIR" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go run ./cmd/herdr-mobile-relay tailscale-cli activation-check) || exit $?
 fi
 
+GATE_RELAY_BIN="$RELAY_BIN"
 cli_relay_call() {
-    if [ -n "$RELAY_BIN" ]; then
-        "$RELAY_BIN" "$@"
+    if [ -n "$GATE_RELAY_BIN" ]; then
+        "$GATE_RELAY_BIN" "$@"
     else
         (cd "$REPO_DIR" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly go run ./cmd/herdr-mobile-relay "$@")
     fi
@@ -65,16 +66,36 @@ fi
 [ "$DEV_ROOT" != / ] && [ "$DEV_ROOT" != "$HOME" ] || { echo "✗ Root or home cannot be a development state directory." >&2; exit 2; }
 
 DEFAULT_SHARED_COORDINATION_ROOT="$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination"
-if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+DEV_ENV_FILE="$DEV_ROOT/relay.env"
+INSTALLED_ENV_FILE="$(installed_service_env_file 2>/dev/null || true)"
+if [ -n "$INSTALLED_ENV_FILE" ]; then
+    PRODUCTION_ENV_FILE="$INSTALLED_ENV_FILE"
+    if [ -n "${HERDR_RELAY_ENV:-}" ] && [ "$HERDR_RELAY_ENV" != "$DEV_ENV_FILE" ] &&
+        [ "$(canonical_file_path "$HERDR_RELAY_ENV")" != "$(canonical_file_path "$INSTALLED_ENV_FILE")" ]; then
+        echo "✗ Inherited HERDR_RELAY_ENV differs from the installed service's environment file." >&2
+        exit 2
+    fi
+elif [ -n "${HERDR_RELAY_ENV:-}" ] && [ "$HERDR_RELAY_ENV" != "$DEV_ENV_FILE" ]; then
+    PRODUCTION_ENV_FILE="$HERDR_RELAY_ENV"
+elif [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
     PRODUCTION_ENV_FILE="$HERDR_PLUGIN_CONFIG_DIR/relay.env"
 else
     PRODUCTION_ENV_FILE="$SCRIPT_DIR/.env"
 fi
 PRODUCTION_COORDINATION_ROOT=""
-if [ -f "$PRODUCTION_ENV_FILE" ] && [ ! -L "$PRODUCTION_ENV_FILE" ]; then
+if [ -e "$PRODUCTION_ENV_FILE" ] || [ -L "$PRODUCTION_ENV_FILE" ]; then
+    [ -f "$PRODUCTION_ENV_FILE" ] && [ ! -L "$PRODUCTION_ENV_FILE" ] || {
+        echo "✗ Installed production environment is not a regular file." >&2
+        exit 2
+    }
     PRODUCTION_COORDINATION_ROOT="$(env_file_value "$PRODUCTION_ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT)"
 fi
-COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-${PRODUCTION_COORDINATION_ROOT:-$DEFAULT_SHARED_COORDINATION_ROOT}}"
+COORDINATION_ROOT="${PRODUCTION_COORDINATION_ROOT:-$DEFAULT_SHARED_COORDINATION_ROOT}"
+if [ -n "${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-}" ] &&
+    [ "$HERDR_TAILSCALE_CLI_COORDINATION_ROOT" != "$COORDINATION_ROOT" ]; then
+    echo "✗ Inherited coordination root differs from the installed service's shared root." >&2
+    exit 2
+fi
 case "$COORDINATION_ROOT" in /*) ;; *) echo "✗ Shared coordination root must be absolute." >&2; exit 2 ;; esac
 case "$DEV_ROOT/" in "$COORDINATION_ROOT/"*) echo "✗ Shared coordination root overlaps development state." >&2; exit 2 ;; esac
 case "$COORDINATION_ROOT/" in "$DEV_ROOT/"*) echo "✗ Shared coordination root overlaps development state." >&2; exit 2 ;; esac
@@ -103,6 +124,26 @@ fi
 
 ENV_FILE="$DEV_ROOT/relay.env"
 MARKER="$DEV_ROOT/.herdr-dev-tailscale-cli"
+DEV_RESERVATION_CLAIMED=false
+DEV_PUBLISH_STARTED=false
+DEV_PUBLISH_NOT_DISPATCHED=false
+# shellcheck disable=SC2329 # Registered as an EXIT trap after the reservation is claimed.
+cleanup_dev_backend_reservation() {
+    [ "$DEV_RESERVATION_CLAIMED" = true ] || return 0
+    if [ "$DEV_PUBLISH_STARTED" = true ] && [ "$DEV_PUBLISH_NOT_DISPATCHED" != true ]; then
+        return 0
+    fi
+    # cleanup_relay calls this only after stopping the backend. The manager
+    # retains reservations whenever a journal or observed route is present.
+    if cli_relay_call tailscale-cli release-backend-port --binary "$CLI_BIN" \
+        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --node-id "$NODE_ID" \
+        --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" >/dev/null 2>&1; then
+        DEV_RESERVATION_CLAIMED=false
+    else
+        echo "⚠ Development backend reservation retained because read-only inspection did not prove safe release." >&2
+    fi
+}
 if [ "$ACTION" != setup ]; then
     if [ ! -d "$DEV_ROOT" ] || [ ! -f "$ENV_FILE" ] || [ ! -f "$MARKER" ] ||
         ! grep -Fxq 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' "$MARKER"; then
@@ -138,12 +179,13 @@ if [ "$ACTION" != setup ]; then
         unpublish)
             [ -t 0 ] || { echo "✗ Route removal requires an interactive terminal." >&2; exit 2; }
             echo "This removes only the exact development route in the private journal."
+            echo "The CLI check-to-write interval is not atomic; do not edit Serve concurrently."
             echo "It cannot guarantee remote connection drain and will not reset other Serve routes."
-            read -r -p "Authorize removal of this exact development route? [y/N] " answer || exit 2
+            read -r -p "Authorize removal and accept the check-to-write race and no-remote-drain limits? [y/N] " answer || exit 2
             case "$answer" in y|Y|yes|YES) ;; *) echo "Cancelled; route and journal are unchanged."; exit 1 ;; esac
             exec "$RELAY_BIN" tailscale-cli unpublish "${manager_args[@]}" \
                 --accepted --node-id "${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-}" \
-                --accept-route-removal --accept-no-remote-drain
+                --accept-route-removal --accept-check-to-write-race --accept-no-remote-drain
             ;;
     esac
 fi
@@ -179,13 +221,13 @@ HERDR_DEV_HERDR_SOCKET="${HERDR_DEV_HERDR_SOCKET:-${HERDR_SOCKET_PATH:-${XDG_CON
 case "$HERDR_DEV_HERDR_SOCKET" in /*) ;; *) echo "✗ Herdr socket path must be absolute." >&2; exit 2 ;; esac
 [ -S "$HERDR_DEV_HERDR_SOCKET" ] || { echo "✗ Herdr socket does not exist; it is not contacted during selection." >&2; exit 2; }
 
-RELAY_PORT="${HERDR_DEV_TAILSCALE_CLI_PORT:-${HERDR_RELAY_PORT:-18577}}"
-PLUGIN_PORT="${HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT:-${HERDR_RELAY_PLUGIN_PORT:-18578}}"
-HTTPS_PORT="${HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT:-${HERDR_TAILSCALE_CLI_HTTPS_PORT:-9443}}"
+RELAY_PORT="${HERDR_DEV_TAILSCALE_CLI_PORT:-18377}"
+PLUGIN_PORT="${HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT:-18378}"
+HTTPS_PORT="${HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT:-8443}"
 for port in "$RELAY_PORT" "$PLUGIN_PORT" "$HTTPS_PORT"; do
     case "$port" in ''|*[!0-9]*) usage; exit 2 ;; esac
     [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || { echo "✗ Development ports must be unprivileged." >&2; exit 2; }
-    case "$port" in 8375|8376|18375|18376|18377|18378|8443) echo "✗ Production, tunnel, and managed-Tailscale ports are reserved." >&2; exit 2 ;; esac
+    case "$port" in 8375|8376|18375|18376) echo "✗ Production, tunnel, and managed-Tailscale ports are reserved." >&2; exit 2 ;; esac
 done
 [ "$RELAY_PORT" != "$PLUGIN_PORT" ] && [ "$RELAY_PORT" != "$HTTPS_PORT" ] && [ "$PLUGIN_PORT" != "$HTTPS_PORT" ] || { echo "✗ Choose three distinct development ports." >&2; exit 2; }
 
@@ -342,6 +384,14 @@ fi
 
 load_relay_env "$ENV_FILE"
 set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
+if [ "$ACTION" = setup ]; then
+    cli_relay_call tailscale-cli reserve-backend-port --binary "$CLI_BIN" \
+        --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
+        --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --node-id "$NODE_ID" \
+        --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT"
+    DEV_RESERVATION_CLAIMED=true
+    trap cleanup_dev_backend_reservation EXIT
+fi
 RELAY_BIN="$DEV_ROOT/bin/herdr-mobile-relay"
 version="$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.toml")"
 revision="$(git -C "$REPO_DIR" rev-parse HEAD)"
@@ -375,11 +425,13 @@ export HERDR_RELAY_PAIRING_SOCKET="$DEV_ROOT/config/pairing-control.sock"
 export HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
 
 RELAY_PID=""
+# shellcheck disable=SC2329 # Registered as EXIT trap to stop the foreground fixture relay.
 cleanup_relay() {
     if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
     fi
+    cleanup_dev_backend_reservation
 }
 trap cleanup_relay EXIT
 trap 'exit 130' INT
@@ -392,12 +444,19 @@ if ! wait_for_relay_identity_health "$RELAY_PORT" "$HERDR_RELAY_INSTANCE_ID" "$O
 fi
 
 if [ "$ACTION" = setup ]; then
-    "$RELAY_BIN" tailscale-cli publish --binary "$CLI_BIN" \
+    DEV_PUBLISH_STARTED=true
+    if "$RELAY_BIN" tailscale-cli publish --binary "$CLI_BIN" \
         --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --origin "$ORIGIN" \
         --node-id "$NODE_ID" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
         --accepted --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
-        --accept-no-rollback --accept-no-remote-drain
+        --accept-no-rollback --accept-no-remote-drain; then
+        :
+    else
+        publish_status=$?
+        [ "$publish_status" -eq 3 ] && DEV_PUBLISH_NOT_DISPATCHED=true
+        exit "$publish_status"
+    fi
 else
     "$RELAY_BIN" tailscale-cli assert-ready --binary "$CLI_BIN" \
         --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
@@ -408,17 +467,27 @@ else
     }
 fi
 
-armed="$("$RELAY_BIN" pairing-control --socket "$DEV_ROOT/config/pairing-control.sock" \
-    --operation arm_bootstrap --run-id "$HERDR_RELAY_CONTROL_RUN_ID" --instance "$HERDR_RELAY_INSTANCE_ID")" || {
-    echo "✗ Fresh development readiness arm failed; the persistent route was retained." >&2
+admitted="$("$RELAY_BIN" pairing-control --socket "$DEV_ROOT/config/pairing-control.sock" \
+    --operation admit --run-id "$HERDR_RELAY_CONTROL_RUN_ID" --instance "$HERDR_RELAY_INSTANCE_ID")" || {
+    echo "✗ Development admission could not resume the exact registered route." >&2
     exit 1
 }
-[ "$(json_bool_field "$armed" ready)" = true ] &&
-    [ "$(json_bool_field "$armed" persistent_route_ready)" = true ] &&
+[ "$(json_bool_field "$admitted" ready)" = true ] &&
+    [ "$(json_bool_field "$admitted" persistent_route_ready)" = true ] || {
+    echo "✗ Development admission did not confirm the exact registered route." >&2
+    exit 1
+}
+if [ "$ACTION" = setup ]; then
+    armed="$("$RELAY_BIN" pairing-control --socket "$DEV_ROOT/config/pairing-control.sock" \
+        --operation arm_bootstrap --run-id "$HERDR_RELAY_CONTROL_RUN_ID" --instance "$HERDR_RELAY_INSTANCE_ID")" || {
+        echo "✗ Operator-initiated development invitation could not be armed; the route was retained." >&2
+        exit 1
+    }
     [ "$(json_bool_field "$armed" invitation_armed)" = true ] || {
-    echo "✗ Development admission did not confirm the exact route and invitation arm." >&2
-    exit 1
-}
+        echo "✗ Development invitation was not durably armed." >&2
+        exit 1
+    }
+fi
 
 echo "CLI Serve route published to the private development journal. Ctrl-C stops only this relay process; the route remains configured."
 echo "Run '$SCRIPT_DIR/dev-tailscale-cli.sh status|recover|unpublish' for later route lifecycle operations."

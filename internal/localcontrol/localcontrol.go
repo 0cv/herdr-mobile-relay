@@ -78,6 +78,7 @@ type request struct {
 type Callbacks struct {
 	Status   func(context.Context) Status
 	Activate func(context.Context) (Status, error)
+	Admit    func(context.Context) (Status, error)
 	Arm      func(context.Context) (Status, error)
 	Retire   func(context.Context) (Status, error)
 	Retired  func()
@@ -353,6 +354,12 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		} else {
 			status, callbackErr = s.callbacks.Activate(opCtx)
 		}
+	case "admit":
+		if s.callbacks.Admit == nil {
+			callbackErr = errUnsupportedOperation
+		} else {
+			status, callbackErr = s.callbacks.Admit(opCtx)
+		}
 	case "arm_bootstrap":
 		status, callbackErr = s.callbacks.Arm(opCtx)
 	case "retire":
@@ -387,7 +394,7 @@ var errUnsupportedOperation = errors.New("unsupported pairing control operation"
 
 func supportedOperation(op string) bool {
 	switch op {
-	case "status", "activate", "arm_bootstrap", "retire":
+	case "status", "activate", "admit", "arm_bootstrap", "retire":
 		return true
 	default:
 		return false
@@ -400,7 +407,7 @@ func operationTimeout(op string) time.Duration {
 		return StatusTimeout
 	case "activate":
 		return ActivateTimeout
-	case "arm_bootstrap":
+	case "admit", "arm_bootstrap":
 		return ArmTimeout
 	case "retire":
 		return RetireTimeout

@@ -62,7 +62,7 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		report, err := client.Preflight(context.Background(), *httpsPort)
 		if err != nil {
-			return 1, err
+			return tailscalePreflightExitCode(err), err
 		}
 		if err := json.NewEncoder(stdout).Encode(report); err != nil {
 			return 1, err
@@ -107,6 +107,10 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	ctx := context.Background()
 	switch operation {
+	case "reserve-backend-port":
+		return status(manager.ReserveBackendPort(ctx, *installationID, *scope, *nodeID, *origin, *httpsPort, *backendPort))
+	case "release-backend-port":
+		return status(manager.ReleaseBackendPort(ctx, *installationID, *scope, *nodeID, *origin, *httpsPort, *backendPort))
 	case "status", "recover", "assert-ready":
 		report, recoverErr := manager.Recover(ctx, *scope, *installationID, *origin, *httpsPort, *backendPort)
 		if err := json.NewEncoder(stdout).Encode(report); err != nil {
@@ -143,17 +147,21 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 			BackendPort:    *backendPort,
 			Consent:        consent,
 		})
+		if errors.Is(err, tailscalecli.ErrPublishNotDispatched) {
+			return 3, err
+		}
 		return status(err)
 	case "unpublish":
 		consent := tailscalecli.Consent{
-			Accepted:              *accepted,
-			Scope:                 *scope,
-			NodeID:                *nodeID,
-			Origin:                *origin,
-			HTTPSPort:             *httpsPort,
-			BackendPort:           *backendPort,
-			RouteRemovalAccepted:  *removeRoute,
-			NoRemoteDrainAccepted: *noRemoteDrain,
+			Accepted:                 *accepted,
+			Scope:                    *scope,
+			NodeID:                   *nodeID,
+			Origin:                   *origin,
+			HTTPSPort:                *httpsPort,
+			BackendPort:              *backendPort,
+			RouteRemovalAccepted:     *removeRoute,
+			CheckToWriteRaceAccepted: *checkToWriteRace,
+			NoRemoteDrainAccepted:    *noRemoteDrain,
 		}
 		return status(manager.Unpublish(ctx, consent))
 	case "reconcile":
@@ -174,6 +182,13 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 }
 
+func tailscalePreflightExitCode(err error) int {
+	if errors.Is(err, tailscalecli.ErrTransientUnavailable) {
+		return 75
+	}
+	return 78
+}
+
 func selectedCLIClient(binary string) (*tailscalecli.Client, error) {
 	selected, err := tailscalecli.ResolveBinary(binary, os.Getenv("PATH"), runtime.GOOS)
 	if err != nil {
@@ -183,5 +198,5 @@ func selectedCLIClient(binary string) (*tailscalecli.Client, error) {
 }
 
 func tailscaleCLIUsageError() error {
-	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check|resolve-binary|preflight|status|recover|reconcile|assert-ready|publish|unpublish} [options]")
+	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check|resolve-binary|preflight|reserve-backend-port|release-backend-port|status|recover|reconcile|assert-ready|publish|unpublish} [options]")
 }

@@ -9,6 +9,11 @@ export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin:/home/linux
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 ENV_FILE="$(canonical_file_path "$ENV_FILE")"
+if [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-cli ]; then
+    echo "✗ Stable Cloudflare setup cannot replace a persistent CLI-backed Serve route implicitly." >&2
+    echo "  Decide explicitly whether to unpublish or retain that route before changing transports." >&2
+    exit 1
+fi
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] || [ -e "$(tailscale_external_session_file "$ENV_FILE")" ]; then
     echo "✗ Stable setup is unavailable while a foreground Tailscale Serve relay is active." >&2
     echo "  Stop the pane before changing transports or installing a service." >&2

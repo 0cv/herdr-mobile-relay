@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -283,7 +284,7 @@ func TestResolveAppStoreBundleCandidateFromPrivateFixture(t *testing.T) {
 	}
 }
 
-func TestCLIEnvironmentPreservesHomeAndDropsTailscaleOverrides(t *testing.T) {
+func TestCLIEnvironmentUsesConstrainedPathAndDropsTailscaleOverrides(t *testing.T) {
 	t.Setenv("HOME", "/Users/fixture home")
 	t.Setenv("PATH", "/fixture/bin")
 	t.Setenv("TS_SOCKET", "/private/socket")
@@ -298,8 +299,8 @@ func TestCLIEnvironmentPreservesHomeAndDropsTailscaleOverrides(t *testing.T) {
 		}
 		values[key] = value
 	}
-	if values["HOME"] != "/Users/fixture home" || values["PATH"] != "/fixture/bin" {
-		t.Fatalf("required environment context was not preserved: %#v", values)
+	if values["HOME"] != "/Users/fixture home" || values["PATH"] != "/usr/bin:/bin:/usr/sbin:/sbin" {
+		t.Fatalf("required environment context or constrained PATH is wrong: %#v", values)
 	}
 	for _, key := range []string{"TS_SOCKET", "TS_AUTHKEY", "TS_DEBUG", "HERDR_RELAY_ENV"} {
 		if _, ok := values[key]; ok {
@@ -397,7 +398,8 @@ func TestInspectRefusesLoggedOutUnknownSchemaAndRedactsCommandError(t *testing.T
 	}{
 		{state: "NeedsLogin", want: ErrLoggedOut},
 		{state: "NeedsMachineAuth", want: ErrPermissionDenied},
-		{state: "Stopped", want: ErrProfileUnavailable},
+		{state: "Starting", want: ErrTransientUnavailable},
+		{state: "Stopped", want: ErrTransientUnavailable},
 	} {
 		fixture := newFakeCLI(t)
 		fixture.status = `{"BackendState":"` + tc.state + `"}`
@@ -428,8 +430,9 @@ func TestInspectRefusesLoggedOutUnknownSchemaAndRedactsCommandError(t *testing.T
 		}
 		return commandResult{dispatched: true}, secretOutput
 	}, "darwin", "arm64")
-	if _, err := client.Inspect(context.Background()); err == nil || strings.Contains(err.Error(), "private@example.invalid") || strings.Contains(err.Error(), "credential-bearing") {
-		t.Fatalf("command failure was not safely redacted: %v", err)
+	if _, err := client.Inspect(context.Background()); err == nil || !errors.Is(err, ErrTransientUnavailable) ||
+		strings.Contains(err.Error(), "private@example.invalid") || strings.Contains(err.Error(), "credential-bearing") {
+		t.Fatalf("command failure was not safely redacted and classified transient: %v", err)
 	}
 }
 
@@ -538,8 +541,8 @@ func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *tes
 		observation string
 		wantState   RegistrationState
 	}{
-		{name: "present", serve: fixtureRoute, observation: "present", wantState: StateRegistered},
-		{name: "absent", serve: `{}`, observation: "absent", wantState: StateUnconfigured},
+		{name: "present", serve: fixtureRoute, observation: "present", wantState: StateReconciledPresent},
+		{name: "absent", serve: `{}`, observation: "absent", wantState: StateReconciledAbsent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newFakeCLI(t)
@@ -574,8 +577,8 @@ func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *tes
 				t.Fatalf("exact consented journal reconciliation: %v", err)
 			}
 			resolved, err := manager.readRegistration()
-			if err != nil || resolved == nil || resolved.State != tc.wantState {
-				t.Fatalf("reconciled record = %+v, %v", resolved, err)
+			if err != nil || resolved == nil || resolved.State != tc.wantState || resolved.MutationAcknowledged {
+				t.Fatalf("reconciled observation was promoted to mutation acknowledgement: %+v, %v", resolved, err)
 			}
 			if fixture.mutationCalls() != 1 {
 				t.Fatalf("local journal reconciliation retried Serve mutation: %d calls", fixture.mutationCalls())
@@ -849,6 +852,35 @@ func TestProductionManagerRefusesAllUnqualifiedProfilesBeforeMutation(t *testing
 	}
 }
 
+func TestBackendReadinessDoesNotFollowRedirect(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirectedRequests.Add(1)
+	}))
+	defer target.Close()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL+"/redirect-target")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	backend.Listener = listener
+	backend.Start()
+	defer backend.Close()
+	port, err := strconv.Atoi(strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackendReadiness(context.Background(), port, "install-fixture", "https://herdr.tailnet.ts.net:8443"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("readiness accepted a redirect response: %v", err)
+	}
+	if got := redirectedRequests.Load(); got != 0 {
+		t.Fatalf("loopback readiness followed a redirect to another HTTP service: %d requests", got)
+	}
+}
+
 func TestPublishRejectsWrongBackendIdentityBeforeJournalOrServeWrite(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -939,20 +971,34 @@ func TestPublishDispatchUncertaintyIsDurableAndNeverReplayed(t *testing.T) {
 	}
 }
 
-func TestPreDispatchFailureDoesNotClaimMutation(t *testing.T) {
+func TestPreDispatchFailureKeepsReservationUntilSafeRelease(t *testing.T) {
 	fixture := newFakeCLI(t)
 	fixture.publishErr = ErrProfileUnavailable
 	fixture.publishDispatched = false
 	manager := newFixtureManager(t, fixture, "instance state")
-	if err := manager.Publish(context.Background(), fixtureRequest(true)); !errors.Is(err, ErrProfileUnavailable) {
-		t.Fatalf("pre-dispatch failure = %v", err)
+	request := fixtureRequest(true)
+	if err := manager.Publish(context.Background(), request); !errors.Is(err, ErrProfileUnavailable) ||
+		!errors.Is(err, ErrPublishNotDispatched) {
+		t.Fatalf("pre-dispatch failure classification = %v", err)
 	}
 	record, err := manager.readRegistration()
 	if err != nil || record == nil || record.State != StateUnconfigured || record.MutationAcknowledged {
 		t.Fatalf("pre-dispatch state = %+v, %v", record, err)
 	}
+	reservation, err := manager.readBackendReservation(request.BackendPort)
+	if err != nil || reservation == nil {
+		t.Fatalf("pre-dispatch failure lost the reservation before listener shutdown: %+v, %v", reservation, err)
+	}
 	if fixture.mutationCalls() != 1 {
 		t.Fatalf("expected one attempted, non-dispatched invocation, got %d", fixture.mutationCalls())
+	}
+	fixture.serve = `{}` // The fixture listener is stopped before verified cleanup.
+	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
+		t.Fatalf("release safe no-route reservation after stop: %v", err)
+	}
+	if reservation, err = manager.readBackendReservation(request.BackendPort); err != nil || reservation != nil {
+		t.Fatalf("reservation remained after verified release: %+v, %v", reservation, err)
 	}
 }
 
@@ -989,6 +1035,14 @@ func TestUnpublishRequiresAcknowledgedExactRouteAndPersistsRemoval(t *testing.T)
 	if fixture.mutationCalls() != 1 {
 		t.Fatal("missing route-removal consent dispatched an unpublish")
 	}
+	missingRaceConsent := fixtureConsent(true)
+	missingRaceConsent.CheckToWriteRaceAccepted = false
+	if err := manager.Unpublish(context.Background(), missingRaceConsent); err == nil {
+		t.Fatal("unpublish without explicit check-to-write-race consent was accepted")
+	}
+	if fixture.mutationCalls() != 1 {
+		t.Fatal("missing race consent dispatched an unpublish")
+	}
 	if err := manager.Unpublish(context.Background(), fixtureConsent(true)); err != nil {
 		t.Fatal(err)
 	}
@@ -1001,6 +1055,10 @@ func TestUnpublishRequiresAcknowledgedExactRouteAndPersistsRemoval(t *testing.T)
 	}
 	if fixture.serve != `{}` {
 		t.Fatalf("unpublish did not remove only selected fixture route: %s", fixture.serve)
+	}
+	reservation, err := manager.readBackendReservation(18377)
+	if err != nil || reservation != nil {
+		t.Fatalf("backend reservation survived acknowledged route removal: %+v, %v", reservation, err)
 	}
 	last := fixture.calls[len(fixture.calls)-4]
 	if strings.Join(last, " ") != "serve --bg --https=8443 --set-path=/ off" {
@@ -1043,6 +1101,102 @@ func TestUnpublishNoWriteWhenRegisteredRouteWasReplaced(t *testing.T) {
 	}
 	if fixture.mutationCalls() != 1 {
 		t.Fatal("replaced backend was removed")
+	}
+}
+
+func TestBackendReservationRejectsServeRouteAlreadyUsingLocalPort(t *testing.T) {
+	fixture := newFakeCLI(t)
+	fixture.serve = unrelatedRoute
+	manager := newFixtureManager(t, fixture, "backend route reservation")
+	request := fixtureRequest(true)
+	request.BackendPort = 8080
+	request.Consent.BackendPort = 8080
+	if err := manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort); !errors.Is(err, ErrConflict) {
+		t.Fatalf("backend port already referenced by another Serve route was reserved: %v", err)
+	}
+}
+
+func TestBackendPortConflictRecognizesEquivalentLoopbackURLs(t *testing.T) {
+	for _, test := range []struct {
+		backend string
+		want    bool
+	}{
+		{backend: "http://127.0.0.1:18377", want: true},
+		{backend: "http://127.0.0.2:18377/", want: true},
+		{backend: "http://localhost:18377/", want: true},
+		{backend: "https://[::1]:18377/ready", want: true},
+		{backend: "http://127.0.0.1", want: false},
+		{backend: "http://relay.example.test:18377/", want: false},
+	} {
+		t.Run(test.backend, func(t *testing.T) {
+			serve := tailscale.ServeStatus{Complete: true, ObservedRoutes: []tailscale.Route{{
+				Port: 443, Listener: "HTTPS", Handler: "Proxy", Backend: test.backend,
+			}}}
+			if got := backendPortHasRoute(serve, 18377, nil); got != test.want {
+				t.Fatalf("backend conflict for %q = %t, want %t", test.backend, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPersistentBackendReservationPreventsCrossInstallationReuse(t *testing.T) {
+	base := t.TempDir()
+	coordinationRoot := filepath.Join(base, "shared coordination")
+	stateOne := filepath.Join(base, "production registration")
+	stateTwo := filepath.Join(base, "development registration")
+	for _, root := range []string{coordinationRoot, stateOne, stateTwo} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture := newFakeCLI(t)
+	production, err := NewManager(stateOne, coordinationRoot, newFixtureClient(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	production.fixtureMutations = true
+	production.skipBackendReadiness = true
+	productionRequest := fixtureRequest(true)
+	productionRequest.Scope = "production"
+	productionRequest.Consent.Scope = "production"
+	if err := production.ReserveBackendPort(context.Background(), productionRequest.InstallationID,
+		productionRequest.Scope, productionRequest.ExpectedNodeID, productionRequest.Origin,
+		productionRequest.HTTPSPort, productionRequest.BackendPort); err != nil {
+		t.Fatalf("reserve production backend before bind: %v", err)
+	}
+	development, err := NewManager(stateTwo, coordinationRoot, newFixtureClient(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	development.fixtureMutations = true
+	development.skipBackendReadiness = true
+	conflictingListener := fixtureRequest(true)
+	conflictingListener.InstallationID = "install-other-listener"
+	conflictingListener.BackendPort = 19377
+	conflictingListener.Consent.BackendPort = 19377
+	if err := development.ReserveBackendPort(context.Background(), conflictingListener.InstallationID,
+		conflictingListener.Scope, conflictingListener.ExpectedNodeID, conflictingListener.Origin,
+		conflictingListener.HTTPSPort, conflictingListener.BackendPort); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second installation reserved an already-claimed HTTPS listener: %v", err)
+	}
+	if err := production.Publish(context.Background(), productionRequest); err != nil {
+		t.Fatal(err)
+	}
+	request := fixtureRequest(true)
+	request.InstallationID = "install-other-fixture"
+	request.Scope = "development"
+	request.Origin = "https://herdr.tailnet.ts.net:9443"
+	request.HTTPSPort = 9443
+	request.Consent = fixtureConsent(true)
+	request.Consent.Scope = request.Scope
+	request.Consent.Origin = request.Origin
+	request.Consent.HTTPSPort = request.HTTPSPort
+	if err := development.Publish(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second Herdr registration reused the reserved backend port: %v", err)
+	}
+	if fixture.mutationCalls() != 1 {
+		t.Fatalf("conflicting backend reservation dispatched a route mutation: %d", fixture.mutationCalls())
 	}
 }
 
@@ -1114,6 +1268,29 @@ func TestDefaultManagerRefusesNonPrivateOrOverlappingRoots(t *testing.T) {
 	}
 	if _, err := NewManager(state, state, newFixtureClient(newFakeCLI(t))); !errors.Is(err, ErrPermissionDenied) {
 		t.Fatalf("overlapping roots accepted: %v", err)
+	}
+
+	linkBase := t.TempDir()
+	stateTarget := filepath.Join(linkBase, "state-target")
+	coordTarget := filepath.Join(linkBase, "coord-target")
+	for _, root := range []string{stateTarget, coordTarget} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stateLink := filepath.Join(linkBase, "state-link")
+	coordLink := filepath.Join(linkBase, "coord-link")
+	if err := os.Symlink(stateTarget, stateLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(coordTarget, coordLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(stateLink, coordTarget, newFixtureClient(newFakeCLI(t))); !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("symlink registration root accepted: %v", err)
+	}
+	if _, err := NewManager(stateTarget, coordLink, newFixtureClient(newFakeCLI(t))); !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("symlink coordination root accepted: %v", err)
 	}
 }
 

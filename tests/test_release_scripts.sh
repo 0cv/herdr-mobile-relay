@@ -86,9 +86,10 @@ for WRAPPER in \
     start.sh \
     tailscale.sh \
     tailscale-external.sh \
+    tailscale-cli.sh \
     tailscale-cli-service.sh; do
     case "$WRAPPER" in
-        common.sh|herdr-mobile-relay-service.sh|tailscale-cli-service.sh)
+        common.sh|herdr-mobile-relay-service.sh|tailscale-cli.sh|tailscale-cli-service.sh)
             cp "$REPO_DIR/relay/$WRAPPER" "$RELEASE_DIR/relay/$WRAPPER"
             ;;
         *) printf '%s\n' '#!/bin/sh' > "$RELEASE_DIR/relay/$WRAPPER" ;;

@@ -86,6 +86,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         start.sh \
         tailscale.sh \
         tailscale-external.sh \
+        tailscale-cli.sh \
         tailscale-cli-service.sh \
         uninstall.sh \
         uninstall-service.sh \

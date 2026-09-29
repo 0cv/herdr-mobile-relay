@@ -461,6 +461,49 @@ relay_env_file_read_only() {
     fi
 }
 
+service_environment_file() {
+    local script_dir="$1"
+    local unit_file="$HOME/.config/systemd/user/herdr-mobile-relay.service"
+    local plist_file="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+    local line decoded configured=""
+
+    case "$(uname -s)" in
+        Linux)
+            if [ -f "$unit_file" ]; then
+                while IFS= read -r line; do
+                    case "$line" in
+                        Environment=*)
+                            decoded="$(systemd_unquote_value "${line#Environment=}")" || return 1
+                            case "$decoded" in HERDR_RELAY_ENV=*) configured="${decoded#*=}" ;; esac
+                            ;;
+                    esac
+                done < "$unit_file"
+                [ -n "$configured" ] && [ -r "$configured" ] || {
+                    echo "Cannot read the installed HERDR_RELAY_ENV; refusing silent CLI route retention." >&2
+                    return 1
+                }
+                printf '%s\n' "$configured"
+                return 0
+            fi
+            ;;
+        Darwin)
+            if [ -f "$plist_file" ]; then
+                configured="$(plutil -extract EnvironmentVariables.HERDR_RELAY_ENV raw -o - "$plist_file" 2>/dev/null)" || {
+                    echo "Cannot identify HERDR_RELAY_ENV in the installed launchd service; refusing silent CLI route retention." >&2
+                    return 1
+                }
+                [ -n "$configured" ] && [ -r "$configured" ] || {
+                    echo "Cannot read the installed HERDR_RELAY_ENV; refusing silent CLI route retention." >&2
+                    return 1
+                }
+                printf '%s\n' "$configured"
+                return 0
+            fi
+            ;;
+    esac
+    relay_env_file_read_only "$script_dir"
+}
+
 relay_env_file() {
     local script_dir="$1"
     local config_dir
@@ -1032,6 +1075,60 @@ env_file_value() {
         set +a
         printenv "$key" 2>/dev/null || true
     )
+}
+
+# Inspect only the exact literal transport assignment; uninstall must not source
+# arbitrary relay.env shell code just to decide whether a persistent route exists.
+service_cli_route_disposition() {
+    local env_file="$1"
+    local script_dir="$2"
+    local choice line transport_value transport_mode=""
+
+    [ -r "$env_file" ] || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            HERDR_RELAY_TRANSPORT=*|export\ HERDR_RELAY_TRANSPORT=*)
+                transport_value="${line#*=}"
+                transport_value="${transport_value//\'/}"
+                transport_value="${transport_value//\"/}"
+                case "$transport_value" in
+                    tailscale-cli) transport_mode=tailscale-cli ;;
+                    cloudflare|gateway|tailscale|tailscale-external) transport_mode=other ;;
+                    *) transport_mode=unknown ;;
+                esac
+                ;;
+        esac
+    done < "$env_file"
+    case "$transport_mode" in
+        tailscale-cli) ;;
+        unknown)
+            echo "Cannot safely identify the installed relay transport; refusing service-only uninstall." >&2
+            return 1
+            ;;
+        *) return 0 ;;
+    esac
+    echo "The CLI-backed Tailscale Serve route is persistent and is not removed with this service."
+    echo "Choose whether to remove that exact route, retain it, or cancel service removal."
+    [ -t 0 ] || {
+        echo "✗ Interactive route disposition is required; the service was left installed." >&2
+        return 1
+    }
+    read -r -p "Route disposition [r]emove / [k]eep route / [c]ancel: " choice || return 1
+    case "$choice" in
+        r|R|remove|REMOVE)
+            (unset HERDR_TAILSCALE_REQUEST; HERDR_RELAY_ENV="$env_file" "$script_dir/tailscale-cli.sh" unpublish) || {
+                echo "✗ Exact route removal failed; the service was left installed. Choose keep explicitly or retry after recovery." >&2
+                return 1
+            }
+            ;;
+        k|K|keep|KEEP)
+            echo "Persistent Tailscale Serve route will remain after this service is removed."
+            ;;
+        *)
+            echo "Cancelled; service and Tailscale Serve route were left unchanged."
+            return 1
+            ;;
+    esac
 }
 
 # Transport selection is intentionally centralized. An unset mode preserves the

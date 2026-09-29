@@ -32,14 +32,15 @@ const (
 )
 
 var (
-	ErrProfileUnavailable = errors.New("Tailscale CLI profile unavailable")
-	ErrLoggedOut          = errors.New("Tailscale node is not authenticated")
-	ErrPermissionDenied   = errors.New("Tailscale CLI permission denied")
-	ErrUnsupported        = errors.New("unsupported Tailscale CLI profile or schema")
-	ErrConflict           = errors.New("Tailscale Serve configuration conflicts with this route")
-	ErrUncertain          = errors.New("Tailscale Serve operation has an uncertain outcome")
-	ErrOutputTooLong      = errors.New("Tailscale CLI output exceeded the safety limit")
-	ErrInvalidJSON        = errors.New("Tailscale CLI returned invalid JSON")
+	ErrProfileUnavailable   = errors.New("Tailscale CLI profile unavailable")
+	ErrTransientUnavailable = errors.New("Tailscale CLI temporarily unavailable")
+	ErrLoggedOut            = errors.New("Tailscale node is not authenticated")
+	ErrPermissionDenied     = errors.New("Tailscale CLI permission denied")
+	ErrUnsupported          = errors.New("unsupported Tailscale CLI profile or schema")
+	ErrConflict             = errors.New("Tailscale Serve configuration conflicts with this route")
+	ErrUncertain            = errors.New("Tailscale Serve operation has an uncertain outcome")
+	ErrOutputTooLong        = errors.New("Tailscale CLI output exceeded the safety limit")
+	ErrInvalidJSON          = errors.New("Tailscale CLI returned invalid JSON")
 )
 
 type Profile string
@@ -227,7 +228,7 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 		case "NeedsMachineAuth":
 			return Inspection{}, ErrPermissionDenied
 		case "Starting", "Stopped":
-			return Inspection{}, ErrProfileUnavailable
+			return Inspection{}, ErrTransientUnavailable
 		default:
 			return Inspection{}, ErrUnsupported
 		}
@@ -548,13 +549,18 @@ func validateJSON(data []byte, maxBytes, maxDepth, maxTokens int) error {
 }
 
 func sanitizeCommandError(operation string, err error) error {
+	if errors.Is(err, ErrUncertain) {
+		// These calls are read-only, so an incomplete observation is retryable;
+		// it cannot represent an ambiguous Serve mutation.
+		return fmt.Errorf("%w: Tailscale CLI %s observation was incomplete", ErrTransientUnavailable, operation)
+	}
 	if errors.Is(err, ErrOutputTooLong) || errors.Is(err, ErrInvalidJSON) ||
 		errors.Is(err, ErrPermissionDenied) || errors.Is(err, ErrProfileUnavailable) ||
-		errors.Is(err, ErrLoggedOut) || errors.Is(err, ErrUnsupported) ||
-		errors.Is(err, ErrConflict) || errors.Is(err, ErrUncertain) {
+		errors.Is(err, ErrTransientUnavailable) || errors.Is(err, ErrLoggedOut) || errors.Is(err, ErrUnsupported) ||
+		errors.Is(err, ErrConflict) {
 		return err
 	}
-	return fmt.Errorf("Tailscale CLI %s failed; details were omitted", operation)
+	return fmt.Errorf("%w: Tailscale CLI %s failed; details were omitted", ErrTransientUnavailable, operation)
 }
 
 type captureBudget struct {
@@ -629,14 +635,16 @@ func runCommand(parent context.Context, binary string, args ...string) (commandR
 // shell and Tailscale override variables. The absolute CLI path does not need
 // PATH for executable selection.
 func cliEnvironment() []string {
-	keys := []string{"HOME", "USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL", "PATH"}
-	result := make([]string, 0, len(keys))
+	keys := []string{"HOME", "USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL"}
+	result := make([]string, 0, len(keys)+1)
 	for _, key := range keys {
 		if value, ok := os.LookupEnv(key); ok {
 			result = append(result, key+"="+value)
 		}
 	}
-	return result
+	// The selected CLI is absolute; its helpers receive only the platform's
+	// system tool directories, never a caller-controlled PATH.
+	return append(result, "PATH=/usr/bin:/bin:/usr/sbin:/sbin")
 }
 
 func validLoopbackBackend(port int) bool {

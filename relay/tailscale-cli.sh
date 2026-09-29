@@ -25,7 +25,7 @@ ORIGIN="${HERDR_TAILSCALE_CLI_ORIGIN:-}"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: relay/tailscale-cli.sh {setup|status|recover|reconcile|stop|unpublish|update|uninstall}
+Usage: relay/tailscale-cli.sh {setup|status|recover|reconcile|arm-bootstrap|stop|unpublish|update|uninstall}
 
 setup requires an explicit tailscale-cli relay.env selection, absolute selected
 CLI path, canonical HTTPS origin, private registration roots, and operator-bound
@@ -86,6 +86,34 @@ manager_call() {
         --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" "$@"
 }
 
+CLI_RESERVATION_CLAIMED=false
+CLI_PUBLISH_ATTEMPTED=false
+CLI_SERVICE_INSTALL_ATTEMPTED=false
+cleanup_cli_backend_reservation() {
+    [ "$CLI_RESERVATION_CLAIMED" = true ] && [ "$CLI_PUBLISH_ATTEMPTED" != true ] || return 0
+    if [ "$CLI_SERVICE_INSTALL_ATTEMPTED" = true ]; then
+        "$SCRIPT_DIR/service.sh" stop >/dev/null 2>&1 || {
+            echo "⚠ Backend reservation retained because the installed service could not be stopped safely." >&2
+            return 0
+        }
+        CLI_SERVICE_INSTALL_ATTEMPTED=false
+    fi
+    if manager_call release-backend-port --node-id "$NODE_ID" >/dev/null 2>&1; then
+        CLI_RESERVATION_CLAIMED=false
+    else
+        echo "⚠ Backend reservation retained; explicit read-only inspection/release is required." >&2
+    fi
+}
+
+arm_cli_bootstrap() {
+    "$RELAY_BIN" pairing-control --socket "${HERDR_RELAY_PAIRING_SOCKET:-}" \
+        --operation arm_bootstrap --run-id "${HERDR_RELAY_CONTROL_RUN_ID:-}" \
+        --instance "$INSTALLATION_ID" >/dev/null || {
+        echo "✗ Operator-requested bootstrap invitation could not be armed." >&2
+        return 1
+    }
+}
+
 prompt_yes() {
     local message="$1" answer
     [ -t 0 ] || { echo "✗ $message requires an interactive terminal." >&2; return 1; }
@@ -132,13 +160,14 @@ reconcile_pending() {
 explicit_unpublish() {
     request_node_id || return 1
     echo "This removes only the journaled HTTPS $HTTPS_PORT / route on node $NODE_ID."
+    echo "The CLI cannot atomically protect the check-to-write interval; avoid concurrent Serve edits."
     echo "It does not reset Serve, remove other routes, or guarantee remote connection drain."
-    prompt_yes "Authorize this exact route removal and accept the no-remote-drain limit?" || {
+    prompt_yes "Authorize this exact route removal and accept the check-to-write race and no-remote-drain limits?" || {
         echo "Cancelled; registration and route were left unchanged."
         return 1
     }
     manager_call unpublish --accepted --node-id "$NODE_ID" \
-        --accept-route-removal --accept-no-remote-drain
+        --accept-route-removal --accept-check-to-write-race --accept-no-remote-drain
 }
 
 setup_cli() {
@@ -179,12 +208,14 @@ setup_cli() {
     echo "Persistent HTTPS route: $ORIGIN -> 127.0.0.1:$BACKEND_PORT"
     echo "Scope: $SCOPE; node: $NODE_ID; HTTPS port: $HTTPS_PORT"
     echo "The route persists after relay stop; a local process may later reuse its backend port."
+    echo "CLI check-to-write is non-atomic; concurrent Serve edits can race."
     echo "No global rollback or remote-drain guarantee is provided."
-    prompt_yes "Publish this exact route and accept every documented risk?" || {
+    prompt_yes "Publish this exact route and accept persistence, backend-port reuse, the check-to-write race, no rollback, and no remote-drain limits?" || {
         echo "Cancelled; no route or service was changed."
         return 1
     }
     # The compile-time P6 gate is checked before roots, services or CLI access.
+    [ "$SCOPE" = production ] || { echo "✗ Production CLI setup requires production scope." >&2; return 1; }
     ensure_private_root "$STATE_ROOT"
     ensure_private_root "$COORDINATION_ROOT"
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_BIN "$CLI_BIN"
@@ -193,10 +224,24 @@ setup_cli() {
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_STATE_ROOT "$STATE_ROOT"
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
     set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_HTTPS_PORT "$HTTPS_PORT"
+    CONTROL_SOCKET="${HERDR_RELAY_PAIRING_SOCKET:-$(dirname "$ENV_FILE")/tailscale-cli-control.sock}"
+    CONTROL_RUN_ID="${HERDR_RELAY_CONTROL_RUN_ID:-$(generate_instance_id)}"
+    set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_SCOPE production
+    set_env_value_atomic "$ENV_FILE" HERDR_RELAY_CONTROL_RUN_ID "$CONTROL_RUN_ID"
+    set_env_value_atomic "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET "$CONTROL_SOCKET"
+    set_env_value_atomic "$ENV_FILE" HERDR_REACHABILITY_PORT_MAPPING 0
+    set_env_value_atomic "$ENV_FILE" HERDR_PHONE_APP_URL "$HERDR_PHONE_APP_URL"
+    SCOPE=production
     export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN"
     export HERDR_TAILSCALE_CLI_NODE_ID="$NODE_ID" HERDR_TAILSCALE_CLI_STATE_ROOT="$STATE_ROOT"
     export HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT" HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT"
+    export HERDR_TAILSCALE_CLI_SCOPE=production HERDR_RELAY_CONTROL_RUN_ID="$CONTROL_RUN_ID"
+    export HERDR_RELAY_PAIRING_SOCKET="$CONTROL_SOCKET" HERDR_REACHABILITY_PORT_MAPPING=0
+    manager_call reserve-backend-port --node-id "$NODE_ID"
+    CLI_RESERVATION_CLAIMED=true
+    trap cleanup_cli_backend_reservation EXIT
     echo "▸ Installing and starting the loopback relay before publishing the persistent route."
+    CLI_SERVICE_INSTALL_ATTEMPTED=true
     HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START=1 "$SCRIPT_DIR/service.sh" install || {
         echo "✗ Service setup failed before route publication; no new Serve route was requested." >&2
         return 1
@@ -205,9 +250,30 @@ setup_cli() {
         echo "✗ The exact relay instance did not bind and pass local readiness; no route was published." >&2
         return 1
     }
-    manager_call publish --node-id "$NODE_ID" --accepted \
+    CLI_PUBLISH_ATTEMPTED=true
+    if manager_call publish --node-id "$NODE_ID" --accepted \
         --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
-        --accept-no-rollback --accept-no-remote-drain
+        --accept-no-rollback --accept-no-remote-drain; then
+        :
+    else
+        publish_status=$?
+        if [ "$publish_status" -eq 3 ]; then
+            echo "Publish was not dispatched; stopping the backend before reservation cleanup." >&2
+            if "$SCRIPT_DIR/service.sh" stop; then
+                CLI_SERVICE_INSTALL_ATTEMPTED=false
+                CLI_PUBLISH_ATTEMPTED=false
+                if manager_call release-backend-port --node-id "$NODE_ID"; then
+                    CLI_RESERVATION_CLAIMED=false
+                else
+                    echo "⚠ Backend reservation retained because read-only route inspection did not prove safe release." >&2
+                fi
+            else
+                echo "⚠ Service stop failed; backend reservation is retained." >&2
+            fi
+        fi
+        return "$publish_status"
+    fi
+    arm_cli_bootstrap || return 1
     local socket="${HERDR_RELAY_PAIRING_SOCKET:-}"
     local run_id="${HERDR_RELAY_CONTROL_RUN_ID:-}"
     [ -S "$socket" ] && [ -n "$run_id" ] || {
@@ -259,6 +325,22 @@ case "$ACTION" in
         check_action
         explicit_unpublish
         ;;
+    arm-bootstrap)
+        [ "$#" -eq 0 ] || { usage; exit 2; }
+        activation_check
+        check_action
+        prompt_yes "Create a new one-use bootstrap invitation for this exact registered route?" || exit 1
+        manager_call assert-ready >/dev/null
+        "$RELAY_BIN" pairing-control --socket "${HERDR_RELAY_PAIRING_SOCKET:-}" \
+            --operation admit --run-id "${HERDR_RELAY_CONTROL_RUN_ID:-}" --instance "$INSTALLATION_ID" >/dev/null || {
+            echo "✗ The exact route is not ready for admission." >&2
+            exit 1
+        }
+        arm_cli_bootstrap
+        wait_for_cli_admission "$RELAY_BIN" "${HERDR_RELAY_PAIRING_SOCKET:-}" \
+            "${HERDR_RELAY_CONTROL_RUN_ID:-}" "$INSTALLATION_ID" || exit 1
+        exec "$SCRIPT_DIR/setup-link.sh"
+        ;;
     update)
         [ "$#" -eq 0 ] || { usage; exit 2; }
         activation_check
@@ -274,12 +356,6 @@ case "$ACTION" in
         [ "$#" -eq 0 ] || { usage; exit 2; }
         activation_check
         check_action
-        echo "Choose whether to remove the exact route before uninstalling."
-        if prompt_yes "Remove the journaled persistent Serve route first?"; then
-            explicit_unpublish
-        else
-            prompt_yes "Leave the route configured and preserve its registration journal?" || exit 1
-        fi
         exec "$SCRIPT_DIR/uninstall.sh"
         ;;
     *) usage; exit 2 ;;
