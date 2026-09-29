@@ -469,7 +469,9 @@ ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"
 export GH_TOKEN
+if [ "${HERDR_TRACE_COMMON_ENV:-0}" = 1 ]; then set -x; fi
 ensure_relay_env "$ENV_FILE"
+if [ "${HERDR_TRACE_COMMON_ENV:-0}" = 1 ]; then set +x; fi
 
 if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
     echo "relay.env exposed GH_TOKEN" >&2
