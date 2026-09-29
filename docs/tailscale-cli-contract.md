@@ -105,12 +105,14 @@ for the same user/node with a shared private lock; this does not lock external
 CLI writers or other UIDs. Reserve each loopback backend port durably in that
 same shared root before starting a new relay listener; parse backend URLs so
 127/8, `localhost` names and IPv6 loopback aliases conflict by effective port,
-not just exact URL spelling. A `publish-pending` reservation is exclusive: a
-second setup for the same tuple conflicts rather than taking over the first
-attempt's claim. Release only after exact route removal or read-only proof that
-a pre-publication setup left no route targeting that port. If setup is
-interrupted or a service appears during setup, retain the claim until the
-service and route are explicitly inspected and safe release is established.
+not just exact URL spelling. A `publish-pending` reservation is exclusive and
+carries a unique setup-attempt ID: a second setup conflicts rather than taking
+over the first attempt's claim, and cleanup/release must present that exact ID.
+Recovery reports the pending claim and attempt ID. Release requires explicit
+interactive confirmation, a stopped/unloaded service, a locally free backend
+listener, and read-only proof that no Serve route targets the port. If setup is
+interrupted or a service appears during setup, retain the claim until those
+checks and the exact attempt-bound release are established.
 
 CLI setup refuses to replace either current or legacy relay service definitions
 on Linux or macOS. It does not stop or delete `herdr-remote.service` or
@@ -141,9 +143,13 @@ The read-only `Recover` operation reports only redacted journal/readback state;
 it never clears uncertainty or treats an observed matching/absent route as
 proof that a dispatched mutation was acknowledged. Reconciled-present remains
 unready and unacknowledged until an explicit exact-route unpublish; reconciled-
-absent may be followed only by a fresh consented publication. A disappeared registered
-route is degraded and is not automatically recreated. Explicit repair and
-explicit unpublish require fresh preflight and consent. Routine service
+absent may be followed only by a fresh consented publication. A disappeared
+registered route is degraded and is not automatically recreated. Explicit repair
+and explicit unpublish require fresh preflight and consent. Transport-selection
+helpers run a local-only journal/reservation guard before changing away from
+`tailscale-cli`; active, uncertain, or pending state blocks the change until the
+exact route is explicitly unpublished and any owned pending reservation is
+safely released. Routine service
 stop/restart retains the persistent route; only the relay process stops. On
 restart the service rechecks the route and resumes existing-device admission
 without minting a new bootstrap invitation; invitation generation is an
@@ -243,10 +249,17 @@ The Go `tailscale-cli` subcommand exposes read-only `status`/`recover`, strict
 routes those actions through the journal manager, installs only a per-user
 service after `assert-ready`, and keeps stop separate from unpublish. The
 foreground development entrypoint uses `.dev-tailscale-cli/` with independent
-configuration, release, cache, runtime, and registration roots.
+configuration, release, cache, runtime, and registration roots. It stages each
+complete binary/web pair in a versioned release directory and atomically swaps
+a single `current` symlink, retaining the prior coherent release if staging or
+cutover fails.
 
-These source paths do not enable the transport: `TailscaleCLIProfilesEnabled`
-remains false. Consequently setup, service installation, route commands and the
+These production source paths do not enable the transport:
+`TailscaleCLIProfilesEnabled` remains false. The `herdr_tailscale_test` build
+hook only admits a CLI executable carrying the explicit synthetic-fixture marker;
+ordinary installed Tailscale executables are rejected by `NewClient` before
+execution. That test hook is not runtime qualification or production activation.
+Consequently release setup, service installation, route commands and the
 development launcher refuse before any Tailscale CLI/daemon access. Fixture E2EE
 enrollment, server reconstruction with durable credential reopen/re-arm,
 read-only registration recovery, exact shell-unpublish consent, concurrent

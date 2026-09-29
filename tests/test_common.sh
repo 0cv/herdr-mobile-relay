@@ -952,6 +952,49 @@ if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$CHOICE_ENV"; then
 fi
 test -z "$(unset HERDR_GATEWAY_URL; gateway_url "$CHOICE_ENV")"
 
+# A configured CLI route must be explicitly removed and its pending backend
+# claim released before gateway/Cloudflare selection can repurpose the port.
+CLI_SWITCH_ENV="$WORK_DIR/config/cli-switch.env"
+cat > "$CLI_SWITCH_ENV" <<EOF
+HERDR_RELAY_TRANSPORT=tailscale-cli
+HERDR_RELAY_INSTANCE_ID=fixture-installation
+HERDR_RELAY_PORT=18377
+HERDR_TAILSCALE_CLI_SCOPE=development
+HERDR_TAILSCALE_CLI_STATE_ROOT=$WORK_DIR/cli-registration
+HERDR_TAILSCALE_CLI_COORDINATION_ROOT=$WORK_DIR/cli-coordination
+HERDR_GATEWAY_URL=wss://previous.example.test
+EOF
+CLI_SWITCH_RELAY="$WORK_DIR/bin/cli-switch-relay"
+mkdir -p "$(dirname "$CLI_SWITCH_RELAY")"
+cat > "$CLI_SWITCH_RELAY" <<'EOF'
+#!/bin/sh
+[ "$1" = tailscale-cli ] && [ "$2" = check-transport-switch ] || exit 97
+printf '%s\n' "$*" >> "$CLI_SWITCH_LOG"
+[ "${CLI_SWITCH_ALLOWED:-}" = 1 ]
+EOF
+chmod 700 "$CLI_SWITCH_RELAY"
+CLI_SWITCH_BEFORE="$(cat "$CLI_SWITCH_ENV")"
+if CLI_SWITCH_LOG="$WORK_DIR/cli-switch.log" HERDR_RELAY_BIN="$CLI_SWITCH_RELAY" \
+    set_relay_transport "$CLI_SWITCH_ENV" cloudflare; then
+    echo "transport change ignored unresolved CLI route" >&2
+    exit 1
+fi
+test "$(cat "$CLI_SWITCH_ENV")" = "$CLI_SWITCH_BEFORE"
+if CLI_SWITCH_LOG="$WORK_DIR/cli-switch.log" HERDR_RELAY_BIN="$CLI_SWITCH_RELAY" \
+    set_gateway_url "$CLI_SWITCH_ENV" ""; then
+    echo "empty gateway selection bypassed unresolved CLI route guard" >&2
+    exit 1
+fi
+test "$(cat "$CLI_SWITCH_ENV")" = "$CLI_SWITCH_BEFORE"
+CLI_SWITCH_ALLOWED=1 CLI_SWITCH_LOG="$WORK_DIR/cli-switch.log" HERDR_RELAY_BIN="$CLI_SWITCH_RELAY" \
+    set_gateway_url "$CLI_SWITCH_ENV" ""
+test "$(env_file_value "$CLI_SWITCH_ENV" HERDR_RELAY_TRANSPORT)" = cloudflare
+if grep -qE '^HERDR_GATEWAY_URL=' "$CLI_SWITCH_ENV"; then
+    echo "transport switch left the prior gateway URL behind" >&2
+    exit 1
+fi
+grep -q 'tailscale-cli check-transport-switch' "$WORK_DIR/cli-switch.log"
+
 # The operator-owned foreground session serializes every cooperating transport
 # choice until the local backend stops; a refusal leaves the saved BYO origin
 # byte-for-byte intact.

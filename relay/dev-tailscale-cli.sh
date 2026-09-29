@@ -37,12 +37,12 @@ usage() {
     echo "Scripted: HERDR_DEV_TAILSCALE_CLI_ENABLE=1 make dev-tailscale-cli" >&2
     echo "Optional: HERDR_DEV_TAILSCALE_CLI_DIR, HERDR_DEV_TAILSCALE_CLI_BIN," >&2
     echo "  HERDR_DEV_TAILSCALE_CLI_ORIGIN, HERDR_DEV_TAILSCALE_CLI_NODE_ID, HERDR_DEV_HERDR_BIN." >&2
-    echo "Lifecycle: setup, status, setup-link, recover, update, unpublish, and stop (Ctrl-C)." >&2
+    echo "Lifecycle: setup, status, setup-link, recover, release-reservation, update, unpublish, and stop (Ctrl-C)." >&2
 }
 
 ACTION="${1:-setup}"
 [ "$#" -eq 0 ] || shift
-case "$ACTION" in setup|status|recover|unpublish|setup-link|update|stop) ;; *) usage; exit 2 ;; esac
+case "$ACTION" in setup|status|recover|release-reservation|unpublish|setup-link|update|stop) ;; *) usage; exit 2 ;; esac
 
 case "${HERDR_DEV_TAILSCALE_CLI_ENABLE:-}" in
     1) ;;
@@ -64,6 +64,21 @@ elif [ "$DEV_ROOT" != "$DEFAULT_DEV_ROOT" ]; then
     exit 2
 fi
 [ "$DEV_ROOT" != / ] && [ "$DEV_ROOT" != "$HOME" ] || { echo "✗ Root or home cannot be a development state directory." >&2; exit 2; }
+
+dev_current_release() {
+    local target release_name resolved
+    [ -L "$DEV_ROOT/current" ] || return 1
+    target="$(readlink "$DEV_ROOT/current")" || return 1
+    case "$target" in releases/*) release_name="${target#releases/}" ;; *) return 1 ;; esac
+    case "$release_name" in ''|.|..|*/*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    [ -d "$DEV_ROOT/releases/$release_name" ] && [ ! -L "$DEV_ROOT/releases/$release_name" ] || return 1
+    resolved="$(cd "$DEV_ROOT/current" 2>/dev/null && pwd -P)" || return 1
+    [ "$resolved" = "$DEV_ROOT/releases/$release_name" ] || return 1
+    [ -d "$resolved/bin" ] && [ ! -L "$resolved/bin" ] &&
+        [ -f "$resolved/bin/herdr-mobile-relay" ] && [ ! -L "$resolved/bin/herdr-mobile-relay" ] &&
+        [ -x "$resolved/bin/herdr-mobile-relay" ] && [ -d "$resolved/web" ] && [ ! -L "$resolved/web" ] || return 1
+    printf '%s\n' "$resolved"
+}
 
 DEFAULT_SHARED_COORDINATION_ROOT="$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination"
 DEV_ENV_FILE="$DEV_ROOT/relay.env"
@@ -125,9 +140,17 @@ fi
 ENV_FILE="$DEV_ROOT/relay.env"
 MARKER="$DEV_ROOT/.herdr-dev-tailscale-cli"
 DEV_RESERVATION_CLAIMED=false
+DEV_RESERVATION_ID=""
 DEV_PUBLISH_STARTED=false
 DEV_PUBLISH_NOT_DISPATCHED=false
-# shellcheck disable=SC2329 # Registered as an EXIT trap after the reservation is claimed.
+BUILD_DIR=""
+NEXT_POINTER=""
+# shellcheck disable=SC2329 # Invoked through the setup EXIT-trap cleanup function.
+cleanup_dev_build_stage() {
+    case "$BUILD_DIR" in "$DEV_ROOT"/.build.*) [ ! -d "$BUILD_DIR" ] || rm -rf "$BUILD_DIR" ;; esac
+    case "$NEXT_POINTER" in "$DEV_ROOT"/.current.*) [ ! -L "$NEXT_POINTER" ] || rm -f "$NEXT_POINTER" ;; esac
+}
+# shellcheck disable=SC2329 # Registered as an EXIT trap after reservation/build staging begins.
 cleanup_dev_backend_reservation() {
     [ "$DEV_RESERVATION_CLAIMED" = true ] || return 0
     if [ "$DEV_PUBLISH_STARTED" = true ] && [ "$DEV_PUBLISH_NOT_DISPATCHED" != true ]; then
@@ -138,11 +161,17 @@ cleanup_dev_backend_reservation() {
     if cli_relay_call tailscale-cli release-backend-port --binary "$CLI_BIN" \
         --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --node-id "$NODE_ID" \
-        --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" >/dev/null 2>&1; then
+        --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
+        --reservation-id "$DEV_RESERVATION_ID" --service-stopped >/dev/null 2>&1; then
         DEV_RESERVATION_CLAIMED=false
     else
         echo "⚠ Development backend reservation retained because read-only inspection did not prove safe release." >&2
     fi
+}
+# shellcheck disable=SC2329 # Registered indirectly as an EXIT trap.
+cleanup_dev_setup() {
+    cleanup_dev_build_stage
+    cleanup_dev_backend_reservation
 }
 if [ "$ACTION" != setup ]; then
     if [ ! -d "$DEV_ROOT" ] || [ ! -f "$ENV_FILE" ] || [ ! -f "$MARKER" ] ||
@@ -151,7 +180,19 @@ if [ "$ACTION" != setup ]; then
         exit 1
     fi
     load_relay_env "$ENV_FILE"
-    RELAY_BIN="${HERDR_DEV_TAILSCALE_CLI_RELAY_BIN:-$DEV_ROOT/bin/herdr-mobile-relay}"
+    if [ -n "${HERDR_DEV_TAILSCALE_CLI_RELAY_BIN:-}" ]; then
+        RELAY_BIN="$HERDR_DEV_TAILSCALE_CLI_RELAY_BIN"
+        if current_release="$(dev_current_release)"; then WEB_ROOT="$DEV_ROOT/current/web"; else WEB_ROOT="$DEV_ROOT/web"; fi
+    elif current_release="$(dev_current_release)"; then
+        RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"
+        WEB_ROOT="$DEV_ROOT/current/web"
+    elif [ -x "$DEV_ROOT/bin/herdr-mobile-relay" ]; then
+        RELAY_BIN="$DEV_ROOT/bin/herdr-mobile-relay" # Legacy root from pre-transactional development builds.
+        WEB_ROOT="$DEV_ROOT/web"
+    else
+        echo "✗ No coherent CLI development release is available; no state was changed." >&2
+        exit 1
+    fi
     CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
     manager_args=(--binary "$CLI_BIN" --state-root "$HERDR_TAILSCALE_CLI_STATE_ROOT" \
         --coordination-root "$COORDINATION_ROOT" --scope development \
@@ -160,9 +201,35 @@ if [ "$ACTION" != setup ]; then
     case "$ACTION" in
         status) exec "$RELAY_BIN" tailscale-cli status "${manager_args[@]}" ;;
         recover) exec "$RELAY_BIN" tailscale-cli recover "${manager_args[@]}" ;;
+        release-reservation)
+            [ -t 0 ] || { echo "✗ Reservation recovery requires an interactive terminal." >&2; exit 2; }
+            report="$("$RELAY_BIN" tailscale-cli recover "${manager_args[@]}" 2>/dev/null)" || {
+                [ -n "$report" ] || { echo "✗ Read-only recovery report is unavailable." >&2; exit 1; }
+            }
+            reservation_id="$(json_string_field "$report" reservation_attempt_id "$RELAY_BIN")"
+            reservation_state="$(json_string_field "$report" reservation_state "$RELAY_BIN")"
+            releasable="$(json_bool_field "$report" reservation_releasable "$RELAY_BIN")"
+            [ -n "$reservation_id" ] && [ "$reservation_state" = publish-pending ] && [ "$releasable" = true ] || {
+                printf '%s\n' "$report"
+                echo "✗ No exact pending development reservation is available." >&2
+                exit 1
+            }
+            printf '%s\n' "$report"
+            [ ! -S "$DEV_ROOT/config/pairing-control.sock" ] || {
+                echo "✗ Stop the foreground development relay before releasing its backend reservation." >&2
+                exit 1
+            }
+            read -r -p "Type RELEASE BACKEND RESERVATION $reservation_id to release only this stopped development setup attempt: " answer || exit 1
+            [ "$answer" = "RELEASE BACKEND RESERVATION $reservation_id" ] || {
+                echo "Cancelled; backend reservation was retained."
+                exit 1
+            }
+            exec "$RELAY_BIN" tailscale-cli release-backend-port "${manager_args[@]}" \
+                --node-id "${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-}" --reservation-id "$reservation_id" --service-stopped
+            ;;
         setup-link)
             export HERDR_DEV_TAILSCALE_CLI_ROOT=1 HERDR_RELAY_ENV="$ENV_FILE" HERDR_RELAY_BIN="$RELAY_BIN"
-            export HERDR_WEB_ROOT="$DEV_ROOT/web" HERDR_RELEASE_ROOT="$DEV_ROOT/data/herdr-mobile-relay"
+            export HERDR_WEB_ROOT="$WEB_ROOT" HERDR_RELEASE_ROOT="$DEV_ROOT/data/herdr-mobile-relay"
             export XDG_CONFIG_HOME="$DEV_ROOT/config" XDG_CACHE_HOME="$DEV_ROOT/cache" XDG_DATA_HOME="$DEV_ROOT/data"
             exec "$SCRIPT_DIR/setup-link.sh"
             ;;
@@ -299,7 +366,7 @@ if [ ! -d "$DEV_ROOT" ]; then mkdir -m 700 "$DEV_ROOT"; fi
 [ -d "$DEV_ROOT" ] && [ ! -L "$DEV_ROOT" ] || { echo "✗ Development root is not a real directory." >&2; exit 2; }
 case "$(uname -s)" in Darwin) root_mode="$(stat -f '%Lp' "$DEV_ROOT")" ;; Linux) root_mode="$(stat -c '%a' "$DEV_ROOT")" ;; esac
 [ "$root_mode" = 700 ] || { echo "✗ Development root must be mode 0700." >&2; exit 2; }
-for leaf in config cache data web bin registration; do
+for leaf in config cache data web bin registration releases; do
     path="$DEV_ROOT/$leaf"
     [ ! -L "$path" ] || { echo "✗ Symlink inside development root is refused." >&2; exit 2; }
     if [ -e "$path" ]; then
@@ -314,6 +381,12 @@ for leaf in config cache data web bin registration; do
         mkdir -m 700 "$path"
     fi
 done
+if [ -e "$DEV_ROOT/current" ] || [ -L "$DEV_ROOT/current" ]; then
+    dev_current_release >/dev/null || {
+        echo "✗ Current development release pointer is not a complete managed release." >&2
+        exit 1
+    }
+fi
 [ ! -L "$COORDINATION_ROOT" ] || { echo "✗ Shared node-coordination root cannot be a symlink." >&2; exit 2; }
 if [ -e "$COORDINATION_ROOT" ]; then
     [ -d "$COORDINATION_ROOT" ] || { echo "✗ Shared node-coordination path is not a directory." >&2; exit 2; }
@@ -385,14 +458,18 @@ fi
 load_relay_env "$ENV_FILE"
 set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_COORDINATION_ROOT "$COORDINATION_ROOT"
 if [ "$ACTION" = setup ]; then
+    DEV_RESERVATION_ID="$(generate_instance_id)"
+    [ "${#DEV_RESERVATION_ID}" -eq 32 ] || { echo "✗ Could not create an exact reservation attempt identifier." >&2; exit 1; }
     cli_relay_call tailscale-cli reserve-backend-port --binary "$CLI_BIN" \
         --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --node-id "$NODE_ID" \
-        --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT"
+        --origin "$ORIGIN" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
+        --reservation-id "$DEV_RESERVATION_ID"
     DEV_RESERVATION_CLAIMED=true
-    trap cleanup_dev_backend_reservation EXIT
 fi
-RELAY_BIN="$DEV_ROOT/bin/herdr-mobile-relay"
+trap cleanup_dev_setup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 version="$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.toml")"
 revision="$(git -C "$REPO_DIR" rev-parse HEAD)"
 [ -n "$version" ] && [ "${#revision}" -eq 40 ] || { echo "✗ Cannot determine coherent development build identity." >&2; exit 1; }
@@ -403,15 +480,31 @@ bun "$REPO_DIR/frontend/scripts/validate-build.mjs" "$BUILD_DIR/web"
 CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly go build -trimpath \
     -ldflags "-s -w -X main.version=$version -X main.revision=$revision" \
     -o "$BUILD_DIR/herdr-mobile-relay" "$REPO_DIR/cmd/herdr-mobile-relay"
-[ ! -L "$DEV_ROOT/bin/herdr-mobile-relay" ] && [ ! -L "$DEV_ROOT/web" ] || {
-    echo "✗ Refusing to replace symlinked development build state." >&2
+[ -x "$BUILD_DIR/herdr-mobile-relay" ] && [ -d "$BUILD_DIR/web" ] && [ ! -L "$BUILD_DIR/web" ] || {
+    echo "✗ Staged development release is incomplete; prior release remains active." >&2
     exit 1
 }
-[ ! -e "$DEV_ROOT/bin/herdr-mobile-relay" ] || mv "$DEV_ROOT/bin/herdr-mobile-relay" "$BUILD_DIR/herdr-mobile-relay.previous"
-[ ! -e "$DEV_ROOT/web" ] || mv "$DEV_ROOT/web" "$BUILD_DIR/web.previous"
-mv "$BUILD_DIR/herdr-mobile-relay" "$DEV_ROOT/bin/herdr-mobile-relay"
-mv "$BUILD_DIR/web" "$DEV_ROOT/web"
-export HERDR_RELAY_ENV="$ENV_FILE" HERDR_RELAY_BIN="$RELAY_BIN" HERDR_WEB_ROOT="$DEV_ROOT/web"
+mkdir -m 700 "$BUILD_DIR/bin"
+mv "$BUILD_DIR/herdr-mobile-relay" "$BUILD_DIR/bin/herdr-mobile-relay"
+release_id="$(generate_instance_id)"
+release_name="${version}-${revision}-${release_id}"
+RELEASE_DIR="$DEV_ROOT/releases/$release_name"
+[ ! -e "$RELEASE_DIR" ] && [ ! -L "$RELEASE_DIR" ] || { echo "✗ Staged release identifier already exists." >&2; exit 1; }
+mv "$BUILD_DIR" "$RELEASE_DIR"
+BUILD_DIR=""
+NEXT_POINTER="$DEV_ROOT/.current.$$"
+[ ! -e "$NEXT_POINTER" ] && [ ! -L "$NEXT_POINTER" ] || { echo "✗ Staged release pointer already exists." >&2; exit 1; }
+ln -s "releases/$release_name" "$NEXT_POINTER"
+case "$(uname -s)" in
+    Linux) mv -fT "$NEXT_POINTER" "$DEV_ROOT/current" ;;
+    Darwin) mv -f -h "$NEXT_POINTER" "$DEV_ROOT/current" ;;
+    *) echo "✗ Only Linux and macOS development are supported." >&2; exit 2 ;;
+esac
+NEXT_POINTER=""
+current_release="$(dev_current_release)" || { echo "✗ Atomic cutover did not select a complete development release." >&2; exit 1; }
+[ "$current_release" = "$RELEASE_DIR" ] || { echo "✗ Current release pointer did not select the staged build." >&2; exit 1; }
+RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"
+export HERDR_RELAY_ENV="$ENV_FILE" HERDR_RELAY_BIN="$RELAY_BIN" HERDR_WEB_ROOT="$DEV_ROOT/current/web"
 export HERDR_RELEASE_ROOT="$DEV_ROOT/data/herdr-mobile-relay"
 export XDG_CONFIG_HOME="$DEV_ROOT/config" XDG_CACHE_HOME="$DEV_ROOT/cache" XDG_DATA_HOME="$DEV_ROOT/data"
 export HERDR_RELAY_HOST=127.0.0.1 HERDR_RELAY_TRANSPORT=tailscale-cli HERDR_RELAY_REARM_BOOTSTRAP=0 HERDR_REACHABILITY_PORT_MAPPING=0
@@ -427,6 +520,7 @@ export HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
 RELAY_PID=""
 # shellcheck disable=SC2329 # Registered as EXIT trap to stop the foreground fixture relay.
 cleanup_relay() {
+    cleanup_dev_build_stage
     if [ -n "$RELAY_PID" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
@@ -449,7 +543,7 @@ if [ "$ACTION" = setup ]; then
         --state-root "$DEV_ROOT/registration" --coordination-root "$COORDINATION_ROOT" \
         --scope development --installation-id "$HERDR_RELAY_INSTANCE_ID" --origin "$ORIGIN" \
         --node-id "$NODE_ID" --https-port "$HTTPS_PORT" --backend-port "$RELAY_PORT" \
-        --accepted --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
+        --reservation-id "$DEV_RESERVATION_ID" --accepted --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
         --accept-no-rollback --accept-no-remote-drain; then
         :
     else

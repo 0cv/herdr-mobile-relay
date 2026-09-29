@@ -1042,7 +1042,7 @@ exit 0
         raise AssertionError(f"positive CLI setup escaped development boundaries: {all_events!r}")
     setup_bootstrap_count = sum("--operation arm_bootstrap" in event for event in all_events)
     update_env = dict(positive_env)
-    update_env["HERDR_DEV_TAILSCALE_CLI_RELAY_BIN"] = str(cli_dev_root / "bin" / "herdr-mobile-relay")
+    update_env["HERDR_DEV_TAILSCALE_CLI_RELAY_BIN"] = str(cli_dev_root / "current" / "bin" / "herdr-mobile-relay")
     update_cli = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=update_env,
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1060,6 +1060,55 @@ exit 0
         sum("--operation arm_bootstrap" in event for event in updated_events) != setup_bootstrap_count or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI update mutated route or production state: {updated_events!r}")
+
+    current_pointer = cli_dev_root / "current"
+    prior_target = os.readlink(current_pointer)
+    prior_release = cli_dev_root / prior_target
+    prior_binary = (prior_release / "bin" / "herdr-mobile-relay").read_bytes()
+    prior_bundle = (prior_release / "web" / "version.json").read_bytes()
+    cutover_tools = cli_dev_fixture / "cutover-tools"
+    cutover_tools.mkdir(mode=0o700)
+    mv_wrapper = cutover_tools / "mv"
+    mv_wrapper.write_text(
+        '''#!/bin/sh
+first=$1
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$DEV_FIXTURE_ROOT/current" ]; then
+    printf '%s\\n' "$DEV_FIXTURE_CUTOVER_MODE" > "$DEV_FIXTURE_CUTOVER_MARKER"
+    case "$DEV_FIXTURE_CUTOVER_MODE" in
+        fail) exit 71 ;;
+        signal) kill -TERM "$PPID"; exit 143 ;;
+    esac
+fi
+exec "$DEV_FIXTURE_REAL_MV" "$@"
+''',
+        encoding="utf-8",
+    )
+    mv_wrapper.chmod(0o700)
+    for cutover_mode in ("fail", "signal"):
+        cutover_marker = cli_dev_fixture / f"cutover-{cutover_mode}.marker"
+        cutover_env = dict(update_env)
+        cutover_env.update({
+            "PATH": f"{cutover_tools}:{fixture_bin}:/usr/bin:/bin",
+            "DEV_FIXTURE_ROOT": str(cli_dev_root),
+            "DEV_FIXTURE_CUTOVER_MODE": cutover_mode,
+            "DEV_FIXTURE_CUTOVER_MARKER": str(cutover_marker),
+            "DEV_FIXTURE_REAL_MV": shutil.which("mv") or "/bin/mv",
+        })
+        cutover_result = subprocess.run(
+            [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=cutover_env,
+            cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False,
+        )
+        if (cutover_result.returncode == 0 or not cutover_marker.exists() or
+            os.readlink(current_pointer) != prior_target or
+            (prior_release / "bin" / "herdr-mobile-relay").read_bytes() != prior_binary or
+            (prior_release / "web" / "version.json").read_bytes() != prior_bundle):
+            raise AssertionError(
+                f"{cutover_mode} release cutover did not preserve the prior coherent release: "
+                f"{cutover_result.stdout + cutover_result.stderr!r}"
+            )
     positive_socket.close()
     print("PASS CLI development lifecycle fixture: isolated positive setup/update, development scope, exact-route recheck, production state preserved")
 

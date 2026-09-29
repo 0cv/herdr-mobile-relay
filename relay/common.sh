@@ -1204,14 +1204,41 @@ clear_tailscale_selection() {
     unset HERDR_RELAY_CONTROL_RUN_ID
 }
 
+tailscale_cli_transport_switch_safe() {
+    local env_file="$1"
+    local binary state_root coordination_root installation_id backend_port state_home
+
+    [ "$(relay_transport_mode "$env_file")" = tailscale-cli ] || return 0
+    binary="$(relay_binary)" || return 1
+    state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+    state_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_STATE_ROOT)"
+    coordination_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_COORDINATION_ROOT)"
+    installation_id="$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)"
+    backend_port="$(env_file_value "$env_file" HERDR_RELAY_PORT)"
+    state_root="${state_root:-$state_home/herdr-mobile-relay/tailscale-cli-registration}"
+    coordination_root="${coordination_root:-$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination}"
+    case "$backend_port" in ''|*[!0-9]*) echo "✗ Cannot change transport without a valid CLI backend port." >&2; return 1 ;; esac
+    "$binary" tailscale-cli check-transport-switch --state-root "$state_root" \
+        --coordination-root "$coordination_root" --installation-id "$installation_id" \
+        --backend-port "$backend_port" || {
+        echo "✗ The CLI Serve route or backend reservation is unresolved; explicitly unpublish/recover it before changing transport." >&2
+        return 1
+    }
+}
+
 set_relay_transport() {
     local env_file="$1"
     local mode="$2"
+    local current_mode
 
     case "$mode" in
         cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) ;;
         *) echo "✗ Invalid relay transport: $mode" >&2; return 1 ;;
     esac
+    current_mode="$(relay_transport_mode "$env_file")"
+    if [ "$current_mode" = tailscale-cli ] && [ "$mode" != tailscale-cli ]; then
+        tailscale_cli_transport_switch_safe "$env_file" || return 1
+    fi
     if [ "$mode" != tailscale ] && [ -e "$(tailscale_session_file "$env_file")" ]; then
         echo "✗ Cannot change transport while a foreground Tailscale session is recorded." >&2
         echo "  Stop that pane and verify its route before changing transport." >&2
@@ -2169,9 +2196,6 @@ set_gateway_url() {
         return 1
     fi
     if [ -z "$url" ]; then
-        remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
-        remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
-        unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
         set_relay_transport "$env_file" cloudflare
         return 0
     fi

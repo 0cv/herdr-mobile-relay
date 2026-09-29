@@ -76,6 +76,7 @@ type PublishRequest struct {
 	Origin         string
 	HTTPSPort      int
 	BackendPort    int
+	ReservationID  string
 	Consent        Consent
 }
 
@@ -93,6 +94,7 @@ type registration struct {
 	Backend              string            `json:"backend"`
 	ConsentScope         string            `json:"consent_scope"`
 	OperationID          string            `json:"operation_id"`
+	ReservationID        string            `json:"reservation_id,omitempty"`
 	State                RegistrationState `json:"state"`
 	MutationAcknowledged bool              `json:"mutation_acknowledged"`
 	UpdatedAt            string            `json:"updated_at"`
@@ -106,6 +108,7 @@ type backendPortReservation struct {
 	HTTPSPort      int               `json:"https_port"`
 	BackendPort    int               `json:"backend_port"`
 	Origin         string            `json:"origin"`
+	ReservationID  string            `json:"reservation_id,omitempty"`
 	State          RegistrationState `json:"state"`
 	UpdatedAt      string            `json:"updated_at"`
 }
@@ -136,10 +139,14 @@ type RouteStatus struct {
 // text is never ownership evidence and Recover never repairs or clears journal
 // state, even when the observed route matches a pending operation.
 type RecoveryReport struct {
-	Route                  RouteStatus `json:"route"`
-	Observation            string      `json:"observation"`
-	OperationID            string      `json:"recovery_operation_id,omitempty"`
-	RequiresOperatorAction bool        `json:"requires_operator_action"`
+	Route                  RouteStatus       `json:"route"`
+	Observation            string            `json:"observation"`
+	OperationID            string            `json:"recovery_operation_id,omitempty"`
+	ReservationAttemptID   string            `json:"reservation_attempt_id,omitempty"`
+	ReservationState       RegistrationState `json:"reservation_state,omitempty"`
+	ReservationBackendPort int               `json:"reservation_backend_port,omitempty"`
+	ReservationReleasable  bool              `json:"reservation_releasable"`
+	RequiresOperatorAction bool              `json:"requires_operator_action"`
 }
 
 type Manager struct {
@@ -170,17 +177,88 @@ func NewManager(stateRoot, coordinationRoot string, client *Client) (*Manager, e
 	return &Manager{stateRoot: stateRoot, coordinationRoot: coordinationRoot, client: client}, nil
 }
 
+// CheckTransportSwitch is a local-only guard. It refuses to repurpose a CLI
+// backend while a registration or backend reservation can still own it; it
+// never resolves or contacts a Tailscale executable.
+func CheckTransportSwitch(stateRoot, coordinationRoot, installationID string, backendPort int) error {
+	if !validLabel(installationID) || backendPort < 1 || backendPort > 65535 {
+		return ErrConflict
+	}
+	statePath, stateExists, err := optionalPrivateDirectory(stateRoot)
+	if err != nil {
+		return err
+	}
+	coordinationPath, coordinationExists, err := optionalPrivateDirectory(coordinationRoot)
+	if err != nil {
+		return err
+	}
+	if stateExists && coordinationExists && pathsOverlap(statePath, coordinationPath) {
+		return ErrPermissionDenied
+	}
+	var record *registration
+	if stateExists {
+		manager := &Manager{stateRoot: statePath}
+		record, err = manager.readRegistration()
+		if err != nil {
+			return err
+		}
+		if record != nil {
+			if record.InstallationID != installationID {
+				return ErrConflict
+			}
+			switch record.State {
+			case StateUnconfigured, StateRemoved, StateReconciledAbsent:
+			default:
+				return ErrUncertain
+			}
+		}
+	}
+	if !coordinationExists {
+		return nil
+	}
+	manager := &Manager{coordinationRoot: coordinationPath}
+	reservations, err := manager.readAllBackendReservations()
+	if err != nil {
+		return err
+	}
+	for _, reservation := range reservations {
+		if reservation.InstallationID == installationID || reservation.BackendPort == backendPort ||
+			(record != nil && reservation.NodeID == record.NodeID && reservation.HTTPSPort == record.HTTPSPort) {
+			return ErrUncertain
+		}
+	}
+	return nil
+}
+
+func optionalPrivateDirectory(path string) (string, bool, error) {
+	if !filepath.IsAbs(path) {
+		return "", false, ErrPermissionDenied
+	}
+	info, err := os.Lstat(filepath.Clean(path))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return "", false, ErrPermissionDenied
+	}
+	resolved, err := validatePrivateDirectory(path)
+	if err != nil {
+		return "", false, err
+	}
+	return resolved, true, nil
+}
+
 // ReserveBackendPort durably claims a local backend port before setup starts
 // the relay listener. Reservations live in the shared per-user coordination
 // root until the exact route is explicitly unpublished or setup proves no
 // route was published and releases its own reservation.
-func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int) error {
+func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int, reservationID string) error {
 	reservation := backendPortReservation{
 		Schema: 1, InstallationID: installationID, Scope: scope, NodeID: nodeID,
-		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin,
+		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin, ReservationID: reservationID,
 		State: StatePublishPending, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if reservation.Validate() != nil {
+	if !validReservationID(reservationID) || reservation.Validate() != nil {
 		return ErrConflict
 	}
 	inspection, err := m.client.Inspect(ctx)
@@ -239,10 +317,13 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 
 // ReleaseBackendPort removes only the caller's reservation after read-only CLI
 // inspection proves no Serve route still targets the selected backend port.
-func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int) error {
+func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int, reservationID string, serviceStopped bool) error {
+	if !serviceStopped || !validReservationID(reservationID) {
+		return ErrConflict
+	}
 	reservation := backendPortReservation{
 		Schema: 1, InstallationID: installationID, Scope: scope, NodeID: nodeID,
-		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin,
+		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin, ReservationID: reservationID,
 		State: StatePublishPending, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if reservation.Validate() != nil {
@@ -254,8 +335,24 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 			if err != nil {
 				return err
 			}
-			if record != nil && record.State != StateUnconfigured && record.State != StateRemoved && record.State != StateReconciledAbsent {
+			if record != nil && (record.State != StateUnconfigured && record.State != StateRemoved && record.State != StateReconciledAbsent) {
 				return ErrUncertain
+			}
+			currentReservation, err := m.readBackendReservation(backendPort)
+			if err != nil || currentReservation == nil || currentReservation.ReservationID != reservationID ||
+				currentReservation.State != StatePublishPending || !sameBackendReservation(*currentReservation, reservation) {
+				return ErrConflict
+			}
+			if record != nil && record.InstallationID == installationID && record.State == StateUnconfigured &&
+				record.ReservationID != reservationID {
+				return ErrConflict
+			}
+			if !m.skipBackendReadiness {
+				listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(backendPort)))
+				if err != nil {
+					return fmt.Errorf("%w: backend listener is not stopped", ErrConflict)
+				}
+				defer listener.Close()
 			}
 			inspection, err := m.client.Inspect(ctx)
 			if err != nil {
@@ -267,7 +364,17 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 			if backendPortHasRoute(inspection.Serve, backendPort, nil) {
 				return ErrConflict
 			}
-			return m.removeBackendReservation(reservation)
+			if err := m.removeBackendReservation(reservation); err != nil {
+				return err
+			}
+			if record != nil && record.State == StateUnconfigured && record.ReservationID == reservationID {
+				record.ReservationID = ""
+				record.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				if err := m.writeRegistration(*record); err != nil {
+					return fmt.Errorf("%w: reservation released but local journal cleanup failed", ErrUncertain)
+				}
+			}
+			return nil
 		})
 	})
 }
@@ -275,8 +382,14 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 // Publish creates exactly one persistent background HTTPS proxy route. Normal
 // production managers fail closed because no profile is runtime-qualified.
 func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
+	if m.fixtureMutations && request.ReservationID == "" {
+		request.ReservationID = "00000000000000000000000000000001"
+	}
 	if err := validateRequest(request); err != nil {
 		return m.publishNotDispatched(err)
+	}
+	if !validReservationID(request.ReservationID) {
+		return m.publishNotDispatched(ErrConflict)
 	}
 	inspection, err := m.client.Inspect(ctx)
 	if err != nil {
@@ -320,7 +433,8 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 			desiredReservation := backendPortReservation{
 				Schema: 1, InstallationID: request.InstallationID, Scope: request.Scope, NodeID: current.Identity.NodeID,
 				HTTPSPort: request.HTTPSPort, BackendPort: request.BackendPort, Origin: request.Origin,
-				State: StatePublishPending, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				ReservationID: request.ReservationID, State: StatePublishPending,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 			}
 			if m.fixtureMutations {
 				if existing, readErr := m.readBackendReservation(request.BackendPort); readErr != nil {
@@ -332,7 +446,8 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 				}
 			}
 			reserved, err := m.readBackendReservation(request.BackendPort)
-			if err != nil || reserved == nil || !sameBackendReservation(*reserved, desiredReservation) {
+			if err != nil || reserved == nil || reserved.ReservationID != request.ReservationID ||
+				!sameBackendReservation(*reserved, desiredReservation) {
 				return ErrConflict
 			}
 			if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
@@ -364,6 +479,7 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 				Backend:        fmt.Sprintf("http://127.0.0.1:%d", request.BackendPort),
 				ConsentScope:   publishConsentScope,
 				OperationID:    opID,
+				ReservationID:  request.ReservationID,
 				State:          StatePublishPending,
 				UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
 			}
@@ -393,6 +509,7 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 				return fmt.Errorf("%w: publish acknowledgement unavailable", ErrUncertain)
 			}
 			entry.State = StateRegistered
+			entry.ReservationID = ""
 			entry.MutationAcknowledged = true
 			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 			if err := m.writeRegistration(entry); err != nil {
@@ -513,10 +630,36 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		report.RequiresOperatorAction = true
 		return report, err
 	}
+	reservations, err := m.readAllBackendReservations()
+	if err != nil {
+		report.Route.Readiness = ReadinessUncertain
+		report.RequiresOperatorAction = true
+		return report, err
+	}
+	var reservation *backendPortReservation
+	for index := range reservations {
+		candidate := &reservations[index]
+		if candidate.InstallationID != installationID && candidate.BackendPort != backendPort &&
+			(record == nil || candidate.NodeID != record.NodeID || candidate.HTTPSPort != record.HTTPSPort) {
+			continue
+		}
+		if reservation != nil {
+			report.Route.Readiness = ReadinessConflicted
+			report.RequiresOperatorAction = true
+			return report, ErrConflict
+		}
+		copy := *candidate
+		reservation = &copy
+	}
+	if reservation != nil {
+		report.ReservationAttemptID = reservation.ReservationID
+		report.ReservationState = reservation.State
+		report.ReservationBackendPort = reservation.BackendPort
+	}
 	inspection, err := m.client.Inspect(ctx)
 	if err != nil {
 		report.Route.Readiness = readinessForError(err)
-		report.RequiresOperatorAction = record != nil || errors.Is(err, ErrConflict) || errors.Is(err, ErrUncertain)
+		report.RequiresOperatorAction = record != nil || reservation != nil || errors.Is(err, ErrConflict) || errors.Is(err, ErrUncertain)
 		return report, err
 	}
 	report.Route.Profile = inspection.Profile
@@ -528,11 +671,24 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 			report.Observation = "live-node-origin-does-not-match-selection"
 			return report, ErrConflict
 		}
-		if hasRouteAtPort(inspection.Serve, httpsPort) {
-			report.Observation = "selected-listener-present-without-registration"
+		if hasRouteAtPort(inspection.Serve, httpsPort) || backendPortHasRoute(inspection.Serve, backendPort, nil) {
+			report.Observation = "selected-listener-or-backend-present-without-registration"
 			report.Route.Readiness = ReadinessConflicted
 			report.RequiresOperatorAction = true
 			return report, ErrConflict
+		}
+		if reservation != nil {
+			if reservation.InstallationID != installationID || reservation.Scope != scope || reservation.NodeID != inspection.Identity.NodeID ||
+				reservation.HTTPSPort != httpsPort || reservation.Origin != origin || reservation.BackendPort != backendPort {
+				report.Observation = "backend-reservation-identity-conflicts-with-selection"
+				report.Route.Readiness = ReadinessConflicted
+				return report, ErrConflict
+			}
+			report.Observation = "pending-backend-reservation-without-registration"
+			report.Route.Readiness = ReadinessUncertain
+			report.ReservationReleasable = reservation.State == StatePublishPending && validReservationID(reservation.ReservationID)
+			report.RequiresOperatorAction = true
+			return report, ErrUncertain
 		}
 		report.Observation = "selected-listener-absent-without-registration"
 		return report, nil
@@ -546,12 +702,29 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		report.RequiresOperatorAction = true
 		return report, ErrConflict
 	}
+	if reservation != nil && (reservation.InstallationID != record.InstallationID || reservation.Scope != record.Scope ||
+		reservation.NodeID != record.NodeID || reservation.HTTPSPort != record.HTTPSPort ||
+		reservation.BackendPort != record.BackendPort || !registrationOriginMatches(*record, reservation.Origin)) {
+		report.Route.Readiness = ReadinessConflicted
+		report.RequiresOperatorAction = true
+		report.Observation = "backend-reservation-identity-conflicts-with-registration"
+		return report, ErrConflict
+	}
 	if inspection.Identity.NodeID != record.NodeID || inspection.Identity.DNSName != record.DNSName ||
 		!sameProfile(inspection, *record) || m.client.binary != record.BinaryPath {
 		report.Route.Readiness = ReadinessConflicted
 		report.RequiresOperatorAction = true
 		report.Observation = "node-profile-or-cli-identity-changed"
 		return report, ErrConflict
+	}
+	if reservation != nil && reservation.ReservationID != "" &&
+		(record.State == StateUnconfigured || record.State == StateRemoved || record.State == StateReconciledAbsent) {
+		report.Observation = "pending-backend-reservation-awaiting-stopped-service-release"
+		report.Route.Readiness = ReadinessUncertain
+		report.ReservationReleasable = reservation.State == StatePublishPending && validReservationID(reservation.ReservationID) &&
+			!hasRouteAtPort(inspection.Serve, httpsPort) && !backendPortHasRoute(inspection.Serve, backendPort, nil)
+		report.RequiresOperatorAction = true
+		return report, ErrUncertain
 	}
 	matching := registeredRouteMatches(inspection, *record)
 	listenerPresent := hasRouteAtPort(inspection.Serve, record.HTTPSPort)
@@ -1123,17 +1296,23 @@ func syncDirectory(path string) error {
 
 func reservationForRegistration(record registration, state RegistrationState) backendPortReservation {
 	origin, _ := tailscale.Origin(record.DNSName, record.HTTPSPort)
+	reservationID := ""
+	if state == StatePublishPending || state == StatePublishUncertain ||
+		(state == StateUnconfigured && record.State == StateUnconfigured) {
+		reservationID = record.ReservationID
+	}
 	return backendPortReservation{
 		Schema: 1, InstallationID: record.InstallationID, Scope: record.Scope, NodeID: record.NodeID,
 		HTTPSPort: record.HTTPSPort, BackendPort: record.BackendPort, Origin: origin,
-		State: state, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		ReservationID: reservationID, State: state, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 }
 
 func (r backendPortReservation) Validate() error {
 	if r.Schema != 1 || !validLabel(r.InstallationID) || (r.Scope != "production" && r.Scope != "development") ||
 		!validNodeID(r.NodeID) || r.HTTPSPort < 1 || r.HTTPSPort > 65535 || r.BackendPort < 1 || r.BackendPort > 65535 ||
-		r.HTTPSPort == r.BackendPort || !validCanonicalOrigin(r.Origin) {
+		r.HTTPSPort == r.BackendPort || !validCanonicalOrigin(r.Origin) ||
+		(r.ReservationID != "" && !validReservationID(r.ReservationID)) {
 		return ErrUncertain
 	}
 	switch r.State {
@@ -1309,6 +1488,7 @@ func (m *Manager) writeRegistration(record registration) error {
 
 func (r registration) Validate() error {
 	if r.Schema != 1 || !validLabel(r.InstallationID) ||
+		(r.ReservationID != "" && !validReservationID(r.ReservationID)) ||
 		(r.Scope != "production" && r.Scope != "development") || !validNodeID(r.NodeID) ||
 		!validDNSName(r.DNSName) || !filepath.IsAbs(r.BinaryPath) ||
 		(r.Profile != ProfileAppStoreSupplied && r.Profile != ProfileLinuxSource) ||
@@ -1444,6 +1624,14 @@ func validOperationID(id string) bool {
 	}
 	_, err := hex.DecodeString(id)
 	return err == nil
+}
+
+func validReservationID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 16 && strings.ToLower(value) == value
 }
 
 func validLabel(value string) bool {

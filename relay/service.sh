@@ -10,7 +10,7 @@ ACTION="${1:-}"
 require_supported_platform
 
 case "$ACTION" in
-    install|uninstall|status|stop|logs|rollback-cli-setup)
+    install|uninstall|status|stop|logs|rollback-cli-setup|assert-stopped)
         ;;
     *)
         echo "Usage: $0 {install|uninstall|status|stop|logs} (rollback-cli-setup is internal)"
@@ -22,6 +22,18 @@ case "$(uname -s)" in
     Darwin)
         case "$ACTION" in
             install) exec "$SCRIPT_DIR/install-service.sh" ;;
+            assert-stopped)
+                loaded_jobs="$(launchctl list 2>/dev/null)" || {
+                    echo "✗ Could not inspect launchd user jobs." >&2
+                    exit 1
+                }
+                for label in com.herdr-mobile-relay.service com.herdr-remote.service; do
+                    if printf '%s\n' "$loaded_jobs" | awk -v label="$label" '$3 == label { found=1 } END { exit !found }'; then
+                        echo "✗ LaunchAgent $label remains loaded; unload it before releasing a backend reservation." >&2
+                        exit 1
+                    fi
+                done
+                ;;
             rollback-cli-setup)
                 [ "${HERDR_CLI_SETUP_ROLLBACK:-}" = 1 ] || {
                     echo "✗ CLI setup rollback is an internal service cleanup operation." >&2
@@ -45,6 +57,26 @@ case "$(uname -s)" in
     Linux)
         case "$ACTION" in
             install) exec "$SCRIPT_DIR/install-systemd-user-service.sh" ;;
+            assert-stopped)
+                for label in herdr-mobile-relay.service herdr-remote.service; do
+                    state="$(systemctl --user show "$label" --property=LoadState --property=ActiveState --property=UnitFileState --no-pager 2>/dev/null)" || {
+                        echo "✗ Could not verify systemd user-unit state for $label." >&2
+                        exit 1
+                    }
+                    load_state="$(printf '%s\n' "$state" | awk -F= '$1 == "LoadState" { print $2 }')"
+                    active="$(printf '%s\n' "$state" | awk -F= '$1 == "ActiveState" { print $2 }')"
+                    enabled="$(printf '%s\n' "$state" | awk -F= '$1 == "UnitFileState" { print $2 }')"
+                    [ "$load_state" = not-found ] && continue
+                    case "$active" in inactive|failed) ;; *) echo "✗ User service $label is not stopped (state: $active)." >&2; exit 1 ;; esac
+                    case "$enabled" in enabled|enabled-runtime|linked|linked-runtime|alias)
+                        echo "✗ User service $label is still enabled and may restart." >&2
+                        exit 1
+                        ;;
+                        disabled|static|indirect|generated|masked|not-found) ;;
+                        *) echo "✗ Could not prove user service $label is disabled (state: $enabled)." >&2; exit 1 ;;
+                    esac
+                done
+                ;;
             rollback-cli-setup)
                 [ "${HERDR_CLI_SETUP_ROLLBACK:-}" = 1 ] || {
                     echo "✗ CLI setup rollback is an internal service cleanup operation." >&2

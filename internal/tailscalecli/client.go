@@ -187,7 +187,22 @@ func NewClient(binary string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if fixtureRuntimeQualificationEnabled() && !isSyntheticFixtureCLI(selected) {
+		return nil, fmt.Errorf("%w: fixture builds require an injected synthetic CLI executable", ErrProfileUnavailable)
+	}
 	return &Client{binary: selected, run: runCommand, validateBinary: true, profileOS: runtime.GOOS, profileArch: runtime.GOARCH}, nil
+}
+
+const syntheticFixtureCLIMarker = "HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1"
+
+func isSyntheticFixtureCLI(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	prefix, err := io.ReadAll(io.LimitReader(file, 4096))
+	return err == nil && bytes.Contains(prefix, []byte(syntheticFixtureCLIMarker))
 }
 
 func newTestClient(binary string, run runner) *Client {

@@ -25,7 +25,7 @@ ORIGIN="${HERDR_TAILSCALE_CLI_ORIGIN:-}"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: relay/tailscale-cli.sh {setup|status|recover|reconcile|arm-bootstrap|stop|unpublish|update|uninstall}
+Usage: relay/tailscale-cli.sh {setup|status|recover|release-reservation|reconcile|arm-bootstrap|stop|unpublish|update|uninstall}
 
 setup requires an explicit tailscale-cli relay.env selection, absolute selected
 CLI path, canonical HTTPS origin, private registration roots, and operator-bound
@@ -87,6 +87,7 @@ manager_call() {
 }
 
 CLI_RESERVATION_CLAIMED=false
+CLI_RESERVATION_ID=""
 CLI_PUBLISH_ATTEMPTED=false
 CLI_SERVICE_INSTALL_ATTEMPTED=false
 cleanup_cli_backend_reservation() {
@@ -108,7 +109,7 @@ cleanup_cli_backend_reservation() {
         fi
         CLI_SERVICE_INSTALL_ATTEMPTED=false
     fi
-    if manager_call release-backend-port --node-id "$NODE_ID" >/dev/null 2>&1; then
+    if manager_call release-backend-port --node-id "$NODE_ID" --reservation-id "$CLI_RESERVATION_ID" --service-stopped >/dev/null 2>&1; then
         CLI_RESERVATION_CLAIMED=false
     else
         echo "⚠ Backend reservation retained; explicit read-only inspection/release is required." >&2
@@ -136,6 +137,37 @@ request_node_id() {
     [ -t 0 ] || { echo "✗ Set HERDR_TAILSCALE_CLI_NODE_ID to the explicitly approved node ID." >&2; return 1; }
     read -r -p "Exact node ID approved for this route: " NODE_ID || return 1
     [ -n "$NODE_ID" ] || { echo "✗ A node ID is required." >&2; return 1; }
+}
+
+release_pending_reservation() {
+    activation_check
+    check_action
+    [ -t 0 ] || { echo "✗ Backend reservation recovery requires an interactive terminal." >&2; return 2; }
+    local report reservation_id reservation_state releasable answer
+    if report="$(manager_call recover)"; then
+        :
+    else
+        [ -n "$report" ] || { echo "✗ Recovery report is unavailable; reservation was not changed." >&2; return 1; }
+    fi
+    reservation_id="$(json_string_field "$report" reservation_attempt_id)"
+    reservation_state="$(json_string_field "$report" reservation_state)"
+    releasable="$(json_bool_field "$report" reservation_releasable)"
+    [ -n "$reservation_id" ] && [ "$reservation_state" = publish-pending ] && [ "$releasable" = true ] || {
+        echo "✗ No exact pending setup reservation is available for release." >&2
+        printf '%s\n' "$report"
+        return 1
+    }
+    printf '%s\n' "$report"
+    "$SCRIPT_DIR/service.sh" assert-stopped || {
+        echo "✗ Stop the installed relay service and verify its backend listener is gone before releasing this claim." >&2
+        return 1
+    }
+    read -r -p "Type RELEASE BACKEND RESERVATION $reservation_id to release only this stopped setup attempt: " answer || return 1
+    [ "$answer" = "RELEASE BACKEND RESERVATION $reservation_id" ] || {
+        echo "Cancelled; backend reservation was retained."
+        return 1
+    }
+    manager_call release-backend-port --node-id "$NODE_ID" --reservation-id "$reservation_id" --service-stopped
 }
 
 reconcile_pending() {
@@ -251,7 +283,9 @@ setup_cli() {
     export HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT" HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT"
     export HERDR_TAILSCALE_CLI_SCOPE=production HERDR_RELAY_CONTROL_RUN_ID="$CONTROL_RUN_ID"
     export HERDR_RELAY_PAIRING_SOCKET="$CONTROL_SOCKET" HERDR_REACHABILITY_PORT_MAPPING=0
-    manager_call reserve-backend-port --node-id "$NODE_ID"
+    CLI_RESERVATION_ID="$(generate_instance_id)"
+    [ "${#CLI_RESERVATION_ID}" -eq 32 ] || { echo "✗ Could not create an exact reservation attempt identifier." >&2; return 1; }
+    manager_call reserve-backend-port --node-id "$NODE_ID" --reservation-id "$CLI_RESERVATION_ID"
     CLI_RESERVATION_CLAIMED=true
     trap cleanup_cli_backend_reservation EXIT
     echo "▸ Installing and starting the loopback relay before publishing the persistent route."
@@ -279,7 +313,7 @@ setup_cli() {
         return 1
     }
     CLI_PUBLISH_ATTEMPTED=true
-    if manager_call publish --node-id "$NODE_ID" --accepted \
+    if manager_call publish --node-id "$NODE_ID" --reservation-id "$CLI_RESERVATION_ID" --accepted \
         --accept-persistent-route --accept-check-to-write-race --accept-port-reuse \
         --accept-no-rollback --accept-no-remote-drain; then
         :
@@ -327,6 +361,10 @@ case "$ACTION" in
         activation_check
         check_action
         manager_call recover
+        ;;
+    release-reservation)
+        [ "$#" -eq 0 ] || { usage; exit 2; }
+        release_pending_reservation
         ;;
     reconcile)
         [ "$#" -eq 0 ] || { usage; exit 2; }

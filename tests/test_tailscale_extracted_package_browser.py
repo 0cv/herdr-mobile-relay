@@ -2172,6 +2172,7 @@ def main() -> int:
             "osVariant": "", "cap": 141,
         }
         cli_fake_program = r'''#!/usr/bin/env python3
+# HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1
 import json, sys
 from pathlib import Path
 args = sys.argv[1:]
@@ -2295,13 +2296,14 @@ else:
             die("test-tagged CLI app failed bounded exact-instance loopback readiness")
 
         set_stage("cli_route_publish")
+        cli_reservation_id = os.urandom(16).hex()
         reserve_args = [
             str(cli_fixture_binary), "tailscale-cli", "reserve-backend-port", "--binary", str(cli_fake_path),
             "--state-root", str(cli_state_root), "--coordination-root", str(cli_coordination_root),
             "--scope", "development", "--installation-id", cli_instance,
             "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
             "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
-            "--backend-port", str(RELAY_PORT),
+            "--backend-port", str(RELAY_PORT), "--reservation-id", cli_reservation_id,
         ]
         reservation = subprocess.run(
             reserve_args, env=cli_env, cwd=package, stdin=subprocess.DEVNULL,
@@ -2315,7 +2317,8 @@ else:
             "--scope", "development", "--installation-id", cli_instance,
             "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
             "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
-            "--backend-port", str(RELAY_PORT), "--accepted", "--accept-persistent-route",
+            "--backend-port", str(RELAY_PORT), "--reservation-id", cli_reservation_id,
+            "--accepted", "--accept-persistent-route",
             "--accept-check-to-write-race", "--accept-port-reuse", "--accept-no-rollback",
             "--accept-no-remote-drain",
         ]

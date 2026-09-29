@@ -107,6 +107,31 @@ func newFixtureClient(f *fakeCLI) *Client {
 	return newTestClientForPlatform("/fixture path/tailscale", f.run, "darwin", "arm64")
 }
 
+func TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution(t *testing.T) {
+	if !fixtureRuntimeQualificationEnabled() {
+		t.Skip("fixture executable admission applies only to tagged fixture builds")
+	}
+	marker := filepath.Join(t.TempDir(), "ordinary-cli-was-executed")
+	ordinary := filepath.Join(t.TempDir(), "tailscale")
+	if err := os.WriteFile(ordinary, []byte("#!/bin/sh\ntouch \""+marker+"\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewClient(ordinary); !errors.Is(err, ErrProfileUnavailable) {
+		t.Fatalf("fixture build accepted ordinary executable: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ordinary executable was contacted during fixture validation: %v", err)
+	}
+
+	synthetic := filepath.Join(t.TempDir(), "tailscale-fixture")
+	if err := os.WriteFile(synthetic, []byte("#!/bin/sh\n# "+syntheticFixtureCLIMarker+"\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewClient(synthetic); err != nil {
+		t.Fatalf("tagged fixture rejected its marked synthetic CLI: %v", err)
+	}
+}
+
 type coexistenceCLI struct {
 	t        *testing.T
 	mu       sync.Mutex
@@ -189,6 +214,7 @@ func fixtureRequest(consent bool) PublishRequest {
 		Origin:         "https://herdr.tailnet.ts.net:8443",
 		HTTPSPort:      8443,
 		BackendPort:    18377,
+		ReservationID:  "00000000000000000000000000000001",
 		Consent:        fixtureConsent(consent),
 	}
 }
@@ -1014,7 +1040,7 @@ func TestPreDispatchFailureKeepsReservationUntilSafeRelease(t *testing.T) {
 	}
 	fixture.serve = `{}` // The fixture listener is stopped before verified cleanup.
 	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
-		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID, true); err != nil {
 		t.Fatalf("release safe no-route reservation after stop: %v", err)
 	}
 	if reservation, err = manager.readBackendReservation(request.BackendPort); err != nil || reservation != nil {
@@ -1124,6 +1150,60 @@ func TestUnpublishNoWriteWhenRegisteredRouteWasReplaced(t *testing.T) {
 	}
 }
 
+func TestTransportSwitchRequiresExactRouteDisposition(t *testing.T) {
+	fixture := newFakeCLI(t)
+	manager := newFixtureManager(t, fixture, "transport switch journal")
+	request := fixtureRequest(true)
+	if err := manager.Publish(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTransportSwitch(manager.stateRoot, manager.coordinationRoot, request.InstallationID, request.BackendPort); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("transport switch accepted an acknowledged persistent route: %v", err)
+	}
+	if err := manager.Unpublish(context.Background(), fixtureConsent(true)); err != nil {
+		t.Fatalf("explicit exact route removal: %v", err)
+	}
+	if err := CheckTransportSwitch(manager.stateRoot, manager.coordinationRoot, request.InstallationID, request.BackendPort); err != nil {
+		t.Fatalf("transport switch remained blocked after exact route removal: %v", err)
+	}
+}
+
+func TestPendingBackendReservationIsReportedAndReleasedOnlyByStoppedAttempt(t *testing.T) {
+	fixture := newFakeCLI(t)
+	manager := newFixtureManager(t, fixture, "stale backend reservation")
+	request := fixtureRequest(true)
+	if err := manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTransportSwitch(manager.stateRoot, manager.coordinationRoot, request.InstallationID, request.BackendPort); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("transport switch ignored a pending backend claim: %v", err)
+	}
+	report, recoverErr := manager.Recover(context.Background(), request.Scope, request.InstallationID,
+		request.Origin, request.HTTPSPort, request.BackendPort)
+	if !errors.Is(recoverErr, ErrUncertain) || report.ReservationAttemptID != request.ReservationID ||
+		report.ReservationState != StatePublishPending || !report.ReservationReleasable ||
+		report.Observation != "pending-backend-reservation-without-registration" {
+		t.Fatalf("pending reservation was not reported for recovery: report=%+v err=%v", report, recoverErr)
+	}
+	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID, false); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reservation release accepted without a stopped-service confirmation: %v", err)
+	}
+	wrongID := "00000000000000000000000000000002"
+	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, wrongID, true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different setup attempt released the reservation: %v", err)
+	}
+	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID, true); err != nil {
+		t.Fatalf("exact stopped setup attempt could not release its claim: %v", err)
+	}
+	if err := CheckTransportSwitch(manager.stateRoot, manager.coordinationRoot, request.InstallationID, request.BackendPort); err != nil {
+		t.Fatalf("transport switch remained blocked after exact reservation release: %v", err)
+	}
+}
+
 func TestConcurrentSetupCannotReclaimPendingBackendReservation(t *testing.T) {
 	fixture := newFakeCLI(t)
 	managerA := newFixtureManager(t, fixture, "concurrent setup A")
@@ -1145,7 +1225,7 @@ func TestConcurrentSetupCannotReclaimPendingBackendReservation(t *testing.T) {
 		go func(manager *Manager) {
 			<-start
 			results <- manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
-				request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort)
+				request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID)
 		}(manager)
 	}
 	close(start)
@@ -1172,7 +1252,7 @@ func TestBackendReservationRejectsServeRouteAlreadyUsingLocalPort(t *testing.T) 
 	request.BackendPort = 8080
 	request.Consent.BackendPort = 8080
 	if err := manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
-		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort); !errors.Is(err, ErrConflict) {
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("backend port already referenced by another Serve route was reserved: %v", err)
 	}
 }
@@ -1222,7 +1302,7 @@ func TestPersistentBackendReservationPreventsCrossInstallationReuse(t *testing.T
 	productionRequest.Consent.Scope = "production"
 	if err := production.ReserveBackendPort(context.Background(), productionRequest.InstallationID,
 		productionRequest.Scope, productionRequest.ExpectedNodeID, productionRequest.Origin,
-		productionRequest.HTTPSPort, productionRequest.BackendPort); err != nil {
+		productionRequest.HTTPSPort, productionRequest.BackendPort, productionRequest.ReservationID); err != nil {
 		t.Fatalf("reserve production backend before bind: %v", err)
 	}
 	development, err := NewManager(stateTwo, coordinationRoot, newFixtureClient(fixture))
@@ -1237,7 +1317,7 @@ func TestPersistentBackendReservationPreventsCrossInstallationReuse(t *testing.T
 	conflictingListener.Consent.BackendPort = 19377
 	if err := development.ReserveBackendPort(context.Background(), conflictingListener.InstallationID,
 		conflictingListener.Scope, conflictingListener.ExpectedNodeID, conflictingListener.Origin,
-		conflictingListener.HTTPSPort, conflictingListener.BackendPort); !errors.Is(err, ErrConflict) {
+		conflictingListener.HTTPSPort, conflictingListener.BackendPort, conflictingListener.ReservationID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second installation reserved an already-claimed HTTPS listener: %v", err)
 	}
 	if err := production.Publish(context.Background(), productionRequest); err != nil {

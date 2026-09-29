@@ -15,6 +15,9 @@ import (
 )
 
 func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
+	if len(args) > 0 && args[0] == "check-transport-switch" {
+		return runTailscaleCLITransportSwitchCheck(args[1:], stdout, stderr)
+	}
 	if len(args) == 1 && args[0] == "activation-check" {
 		if !config.TailscaleCLIProfilesEnabled() {
 			return 2, errors.New("tailscale-cli is not enabled: candidate profiles remain unqualified pending P6; no CLI or service was contacted")
@@ -82,6 +85,7 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	httpsPort := flags.Int("https-port", 443, "Tailscale HTTPS Serve listener port")
 	backendPort := flags.Int("backend-port", 0, "loopback relay backend port")
 	operationID := flags.String("operation-id", "", "exact pending journal operation identifier")
+	reservationID := flags.String("reservation-id", "", "exact backend reservation attempt identifier")
 	recoveryObservation := flags.String("confirm-observed-route", "", "operator confirmation of exact observed route state: present or absent")
 	accepted := flags.Bool("accepted", false, "affirm the exact scoped operation")
 	persistentRoute := flags.Bool("accept-persistent-route", false, "accept persistence after relay stop")
@@ -91,6 +95,7 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	noRemoteDrain := flags.Bool("accept-no-remote-drain", false, "accept that remote connections may not be drained")
 	removeRoute := flags.Bool("accept-route-removal", false, "authorize removal of only the journaled route")
 	reconcile := flags.Bool("accept-journal-reconciliation", false, "authorize local journal reconciliation for the exact pending operation")
+	serviceStopped := flags.Bool("service-stopped", false, "confirm the relay service is stopped/disabled before reservation release")
 	if err := flags.Parse(operationArgs); err != nil {
 		return 2, err
 	}
@@ -108,9 +113,9 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	ctx := context.Background()
 	switch operation {
 	case "reserve-backend-port":
-		return status(manager.ReserveBackendPort(ctx, *installationID, *scope, *nodeID, *origin, *httpsPort, *backendPort))
+		return status(manager.ReserveBackendPort(ctx, *installationID, *scope, *nodeID, *origin, *httpsPort, *backendPort, *reservationID))
 	case "release-backend-port":
-		return status(manager.ReleaseBackendPort(ctx, *installationID, *scope, *nodeID, *origin, *httpsPort, *backendPort))
+		return status(manager.ReleaseBackendPort(ctx, *installationID, *scope, *nodeID, *origin, *httpsPort, *backendPort, *reservationID, *serviceStopped))
 	case "status", "recover", "assert-ready":
 		report, recoverErr := manager.Recover(ctx, *scope, *installationID, *origin, *httpsPort, *backendPort)
 		if err := json.NewEncoder(stdout).Encode(report); err != nil {
@@ -145,6 +150,7 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 			Origin:         *origin,
 			HTTPSPort:      *httpsPort,
 			BackendPort:    *backendPort,
+			ReservationID:  *reservationID,
 			Consent:        consent,
 		})
 		if errors.Is(err, tailscalecli.ErrPublishNotDispatched) {
@@ -182,6 +188,25 @@ func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 }
 
+func runTailscaleCLITransportSwitchCheck(args []string, stdout, stderr io.Writer) (int, error) {
+	flags := flag.NewFlagSet("tailscale-cli check-transport-switch", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	stateRoot := flags.String("state-root", os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT"), "private registration root")
+	coordinationRoot := flags.String("coordination-root", os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT"), "shared private node-lock root")
+	installationID := flags.String("installation-id", os.Getenv("HERDR_RELAY_INSTANCE_ID"), "stable relay installation identifier")
+	backendPort := flags.Int("backend-port", 0, "loopback relay backend port")
+	if err := flags.Parse(args); err != nil {
+		return 2, err
+	}
+	if flags.NArg() != 0 {
+		return 2, errors.New("check-transport-switch accepts no positional arguments")
+	}
+	if err := tailscalecli.CheckTransportSwitch(*stateRoot, *coordinationRoot, *installationID, *backendPort); err != nil {
+		return 1, err
+	}
+	return 0, nil
+}
+
 func tailscalePreflightExitCode(err error) int {
 	if errors.Is(err, tailscalecli.ErrTransientUnavailable) {
 		return 75
@@ -198,5 +223,5 @@ func selectedCLIClient(binary string) (*tailscalecli.Client, error) {
 }
 
 func tailscaleCLIUsageError() error {
-	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check|resolve-binary|preflight|reserve-backend-port|release-backend-port|status|recover|reconcile|assert-ready|publish|unpublish} [options]")
+	return errors.New("usage: herdr-mobile-relay tailscale-cli {activation-check|resolve-binary|preflight|check-transport-switch|reserve-backend-port|release-backend-port|status|recover|reconcile|assert-ready|publish|unpublish} [options]")
 }
