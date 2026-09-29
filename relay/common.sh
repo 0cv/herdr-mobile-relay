@@ -355,6 +355,8 @@ tailscale_cli_registration_status() {
     local cli_binary
     local state_root
     local coordination_root
+    local development_root
+    local development_root_args=()
     local scope
     local installation_id
     local https_port
@@ -367,6 +369,7 @@ tailscale_cli_registration_status() {
     cli_binary="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_BIN)"
     state_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_STATE_ROOT)"
     coordination_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_COORDINATION_ROOT)"
+    development_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT)"
     scope="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_SCOPE)"
     installation_id="$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)"
     https_port="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_HTTPS_PORT)"
@@ -375,7 +378,13 @@ tailscale_cli_registration_status() {
     coordination_root="${coordination_root:-$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination}"
     case "$https_port" in ''|*[!0-9]*) echo "✗ HERDR_TAILSCALE_CLI_HTTPS_PORT must be an explicit port." >&2; return 2 ;; esac
     case "$backend_port" in ''|*[!0-9]*) echo "✗ HERDR_RELAY_PORT must be an explicit backend port." >&2; return 2 ;; esac
-    "$binary" tailscale-cli assert-ready \
+    if [ "$scope" = development ]; then
+        case "$development_root" in
+            /*) development_root_args=(--development-root "$development_root") ;;
+            *) echo "✗ Development-scope CLI status requires its launcher-bound private root." >&2; return 2 ;;
+        esac
+    fi
+    "$binary" tailscale-cli assert-ready "${development_root_args[@]}" \
         --binary "$cli_binary" --state-root "$state_root" --coordination-root "$coordination_root" \
         --scope "$scope" --installation-id "$installation_id" \
         --https-port "$https_port" --backend-port "$backend_port"

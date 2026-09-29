@@ -52,6 +52,8 @@ if [ "$MODE" = tailscale-cli ]; then
     CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
     STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-}"
     COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-}"
+    DEVELOPMENT_ROOT="${HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT:-}"
+    DEVELOPMENT_ROOT_ARGS=()
     SCOPE="${HERDR_TAILSCALE_CLI_SCOPE:-}"
     INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
     RUN_ID="${HERDR_RELAY_CONTROL_RUN_ID:-}"
@@ -69,7 +71,13 @@ if [ "$MODE" = tailscale-cli ]; then
         echo "✗ CLI-backed HTTPS origin is not canonical; no setup link was printed." >&2
         exit 1
     }
-    "$RELAY_BIN" tailscale-cli assert-ready --binary "$CLI_BIN" \
+    if [ "$SCOPE" = development ]; then
+        case "$DEVELOPMENT_ROOT" in
+            /*) DEVELOPMENT_ROOT_ARGS=(--development-root "$DEVELOPMENT_ROOT") ;;
+            *) echo "✗ Development-scope CLI setup requires its launcher-bound private root; no link was printed." >&2; exit 1 ;;
+        esac
+    fi
+    "$RELAY_BIN" tailscale-cli assert-ready "${DEVELOPMENT_ROOT_ARGS[@]}" --binary "$CLI_BIN" \
         --state-root "$STATE_ROOT" --coordination-root "$COORDINATION_ROOT" \
         --scope "$SCOPE" --installation-id "$INSTANCE" \
         --https-port "$HTTPS_PORT" --backend-port "$BACKEND_PORT" >/dev/null || {

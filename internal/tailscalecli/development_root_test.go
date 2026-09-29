@@ -24,7 +24,10 @@ func writeDevelopmentRootMarkerForTest(t *testing.T, root, state, coordination s
 
 func developmentManagerFixturePaths(t *testing.T) (root, state, coordination string) {
 	t.Helper()
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	root = filepath.Join(base, "development")
 	state = filepath.Join(root, "registration")
 	coordination = filepath.Join(base, "coordination")
@@ -74,7 +77,22 @@ func TestNewDevelopmentManagerRequiresExactMarkedPrivateRoots(t *testing.T) {
 
 func TestUnboundManagerCannotUseRealDevelopmentScope(t *testing.T) {
 	fixture := newFakeCLI(t)
-	manager := newPolicyManager(t, fixture, "darwin", "arm64", "unbound development")
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Join(base, "registration")
+	coordinationRoot := filepath.Join(base, "coordination")
+	for _, root := range []string{stateRoot, coordinationRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager, err := NewManager(stateRoot, coordinationRoot,
+		newTestClientForPlatform("/fixture path/tailscale", fixture.run, "darwin", "arm64"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := manager.Publish(context.Background(), fixtureRequest(true)); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("unbound development manager publish = %v", err)
 	}

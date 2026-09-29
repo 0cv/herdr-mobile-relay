@@ -196,17 +196,21 @@ func newFixtureManager(t *testing.T, f *fakeCLI, stateLeaf string) *Manager {
 
 func newPolicyManager(t *testing.T, f *fakeCLI, goos, goarch, stateLeaf string) *Manager {
 	t.Helper()
-	base := t.TempDir()
-	stateRoot := filepath.Join(base, stateLeaf)
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	developmentRoot := filepath.Join(base, stateLeaf)
+	stateRoot := filepath.Join(developmentRoot, "registration")
 	coordinationRoot := filepath.Join(base, "shared coordination")
-	if err := os.Mkdir(stateRoot, 0o700); err != nil {
-		t.Fatal(err)
+	for _, root := range []string{developmentRoot, stateRoot, coordinationRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.Mkdir(coordinationRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeDevelopmentRootMarkerForTest(t, developmentRoot, stateRoot, coordinationRoot)
 	client := newTestClientForPlatform("/fixture path/tailscale", f.run, goos, goarch)
-	manager, err := NewManager(stateRoot, coordinationRoot, client)
+	manager, err := NewDevelopmentManager(developmentRoot, stateRoot, coordinationRoot, client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,6 +674,7 @@ func TestReopenedManagerRecoversRegisteredRouteWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen registration manager: %v", err)
 	}
+	reopened.fixtureMutations = true // package-test-only fixture capability after simulated restart
 	report, err := reopened.Recover(context.Background(), "development", "install-fixture", "https://herdr.tailnet.ts.net:8443", 8443, 18377)
 	if err != nil || report.Route.JournalState != StateRegistered ||
 		report.Route.Readiness != ReadinessReady || report.Route.RuntimeQualified ||
