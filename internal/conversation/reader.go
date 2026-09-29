@@ -653,6 +653,9 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parsePiRecord(record)
 		case "cursor", "cursoragent":
 			role, body = parseCursorRecord(record)
+			if timestamp == "" {
+				timestamp = cursorTimestampFromRecord(record)
+			}
 		}
 		body = sanitizeText(body)
 		if role == "" && len(calls) > 0 {
