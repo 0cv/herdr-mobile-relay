@@ -17,6 +17,15 @@ ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
 TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
+if [ "$TRANSPORT" = tailscale-cli ] && installed_legacy_relay_service_definition_present; then
+    echo "✗ CLI setup refuses a legacy relay service definition; it will not stop or remove it. Preserve it and resolve its route before migrating." >&2
+    exit 4
+fi
+if [ "$TRANSPORT" = tailscale-cli ] && [ "${HERDR_CLI_SETUP_NEW_SERVICE:-}" = 1 ] &&
+    installed_relay_service_definition_present; then
+    echo "✗ CLI setup refuses to replace a relay service definition that appeared during setup." >&2
+    exit 4
+fi
 if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
     [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
     [ "$(relay_transport_mode "$ENV_FILE")" = tailscale ] ||
@@ -91,9 +100,11 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user disable --now "$LEGACY_LABEL" >/dev/null 2>&1 || true
-rm -f "$LEGACY_UNIT_FILE"
-systemctl --user daemon-reload
+if [ "$TRANSPORT" != tailscale-cli ]; then
+    systemctl --user disable --now "$LEGACY_LABEL" >/dev/null 2>&1 || true
+    rm -f "$LEGACY_UNIT_FILE"
+    systemctl --user daemon-reload
+fi
 systemctl --user enable "$LABEL"
 systemctl --user restart "$LABEL"
 

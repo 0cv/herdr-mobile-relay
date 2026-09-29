@@ -186,8 +186,8 @@ setup_cli() {
         echo "✗ Select tailscale-cli explicitly in relay.env before setup; no transport is migrated implicitly." >&2
         return 1
     }
-    if installed_relay_service_definition_present; then
-        echo "✗ A relay service definition already exists; inspect/remove it with explicit route disposition before CLI setup." >&2
+    if cli_setup_service_definition_present; then
+        echo "✗ A current or legacy relay service definition already exists; preserve it and resolve its route disposition before CLI setup." >&2
         return 1
     fi
     activation_check
@@ -255,15 +255,25 @@ setup_cli() {
     CLI_RESERVATION_CLAIMED=true
     trap cleanup_cli_backend_reservation EXIT
     echo "▸ Installing and starting the loopback relay before publishing the persistent route."
-    if installed_relay_service_definition_present; then
-        echo "✗ A relay service appeared during CLI setup; refusing to replace it." >&2
+    if cli_setup_service_definition_present; then
+        CLI_RESERVATION_CLAIMED=false
+        echo "✗ A current or legacy relay service appeared during CLI setup; refusing to replace it." >&2
+        echo "⚠ Backend reservation retained for explicit read-only inspection and recovery." >&2
         return 1
     fi
     CLI_SERVICE_INSTALL_ATTEMPTED=true
-    HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START=1 "$SCRIPT_DIR/service.sh" install || {
+    if HERDR_CLI_SETUP_NEW_SERVICE=1 HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START=1 \
+        "$SCRIPT_DIR/service.sh" install; then
+        :
+    else
+        install_status=$?
+        if [ "$install_status" -eq 4 ]; then
+            CLI_RESERVATION_CLAIMED=false
+            echo "⚠ A current or legacy relay service appeared during installation; backend reservation retained for explicit recovery." >&2
+        fi
         echo "✗ Service setup failed before route publication; no new Serve route was requested." >&2
         return 1
-    }
+    fi
     wait_for_relay_identity_health "$BACKEND_PORT" "$INSTALLATION_ID" "$ORIGIN" || {
         echo "✗ The exact relay instance did not bind and pass local readiness; no route was published." >&2
         return 1

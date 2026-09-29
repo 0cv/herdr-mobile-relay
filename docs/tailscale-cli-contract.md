@@ -105,8 +105,18 @@ for the same user/node with a shared private lock; this does not lock external
 CLI writers or other UIDs. Reserve each loopback backend port durably in that
 same shared root before starting a new relay listener; parse backend URLs so
 127/8, `localhost` names and IPv6 loopback aliases conflict by effective port,
-not just exact URL spelling. Release only after exact route removal or read-only
-proof that a pre-publication setup left no route targeting that port.
+not just exact URL spelling. A `publish-pending` reservation is exclusive: a
+second setup for the same tuple conflicts rather than taking over the first
+attempt's claim. Release only after exact route removal or read-only proof that
+a pre-publication setup left no route targeting that port. If setup is
+interrupted or a service appears during setup, retain the claim until the
+service and route are explicitly inspected and safe release is established.
+
+CLI setup refuses to replace either current or legacy relay service definitions
+on Linux or macOS. It does not stop or delete `herdr-remote.service` or
+`com.herdr-remote.service.plist`; resolve/migrate an existing service explicitly
+before retrying setup. The service installers also recheck this boundary before
+creating a new CLI-backed service.
 Persist intent atomically with file and parent-directory sync before
 dispatch. Never overwrite corrupt, copied or mismatched recovery state.
 

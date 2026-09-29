@@ -1124,6 +1124,46 @@ func TestUnpublishNoWriteWhenRegisteredRouteWasReplaced(t *testing.T) {
 	}
 }
 
+func TestConcurrentSetupCannotReclaimPendingBackendReservation(t *testing.T) {
+	fixture := newFakeCLI(t)
+	managerA := newFixtureManager(t, fixture, "concurrent setup A")
+	stateRootB := filepath.Join(t.TempDir(), "concurrent setup B")
+	if err := os.Mkdir(stateRootB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	managerB, err := NewManager(stateRootB, managerA.coordinationRoot, newFixtureClient(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	managerB.fixtureMutations = true
+	managerB.skipBackendReadiness = true
+
+	request := fixtureRequest(true)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, manager := range []*Manager{managerA, managerB} {
+		go func(manager *Manager) {
+			<-start
+			results <- manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
+				request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort)
+		}(manager)
+	}
+	close(start)
+	first, second := <-results, <-results
+	if (first == nil) == (second == nil) ||
+		(first != nil && !errors.Is(first, ErrConflict)) || (second != nil && !errors.Is(second, ErrConflict)) {
+		t.Fatalf("concurrent reservations must produce exactly one owner and one conflict, got %v and %v", first, second)
+	}
+	reservation, err := managerA.readBackendReservation(request.BackendPort)
+	if err != nil || reservation == nil || reservation.State != StatePublishPending ||
+		reservation.InstallationID != request.InstallationID || reservation.NodeID != request.ExpectedNodeID {
+		t.Fatalf("winning setup reservation was lost or changed: %+v, %v", reservation, err)
+	}
+	if err := managerA.Publish(context.Background(), request); err != nil {
+		t.Fatalf("winning setup could not publish with its retained reservation: %v", err)
+	}
+}
+
 func TestBackendReservationRejectsServeRouteAlreadyUsingLocalPort(t *testing.T) {
 	fixture := newFakeCLI(t)
 	fixture.serve = unrelatedRoute

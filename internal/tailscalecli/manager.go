@@ -221,6 +221,18 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 		if backendPortHasRoute(inspection.Serve, backendPort, allowedRoute) {
 			return ErrConflict
 		}
+		currentReservation, err := m.readBackendReservation(backendPort)
+		if err != nil {
+			return err
+		}
+		if currentReservation != nil {
+			if routeAlreadyOurs && sameBackendReservation(*currentReservation, reservation) {
+				return m.writeBackendReservation(reservationForRegistration(*record, StateRegistered))
+			}
+			// A pending reservation is an in-flight setup claim, not an
+			// idempotent lease. A second setup must not take ownership of it.
+			return ErrConflict
+		}
 		return m.writeBackendReservation(reservation)
 	})
 }

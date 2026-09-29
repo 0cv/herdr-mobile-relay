@@ -1236,10 +1236,34 @@ set_relay_transport() {
 
 installed_relay_service_definition_present() {
     case "$(uname -s)" in
-        Linux) [ -f "$HOME/.config/systemd/user/herdr-mobile-relay.service" ] ;;
-        Darwin) [ -f "$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist" ] ;;
+        Linux)
+            local path="$HOME/.config/systemd/user/herdr-mobile-relay.service"
+            [ -e "$path" ] || [ -L "$path" ]
+            ;;
+        Darwin)
+            local path="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+            [ -e "$path" ] || [ -L "$path" ]
+            ;;
         *) return 1 ;;
     esac
+}
+
+installed_legacy_relay_service_definition_present() {
+    case "$(uname -s)" in
+        Linux)
+            local path="$HOME/.config/systemd/user/herdr-remote.service"
+            [ -e "$path" ] || [ -L "$path" ]
+            ;;
+        Darwin)
+            local path="$HOME/Library/LaunchAgents/com.herdr-remote.service.plist"
+            [ -e "$path" ] || [ -L "$path" ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+cli_setup_service_definition_present() {
+    installed_relay_service_definition_present || installed_legacy_relay_service_definition_present
 }
 
 # JSON scalar accessors use the packaged relay's bounded strict decoder. A
