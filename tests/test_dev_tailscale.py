@@ -454,6 +454,16 @@ printf 'Linux'
     mac_bin.mkdir(mode=0o700)
     launchctl_record = mac_fixture / "launchctl-record"
     mac_manager_record = mac_fixture / "manager-record"
+    mac_systemctl_record = mac_fixture / "systemctl-record"
+    (mac_bin / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+    (mac_bin / "uname").chmod(0o700)
+    (mac_bin / "systemctl").write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$MAC_SYSTEMCTL_RECORD\"\n"
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    (mac_bin / "systemctl").chmod(0o700)
     (mac_bin / "launchctl").write_text(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LAUNCHCTL_RECORD\"\n"
         "case \"$1\" in print) exit 1 ;; bootout|bootstrap|enable|kickstart) exit 0 ;; esac\n"
@@ -495,7 +505,8 @@ printf 'Linux'
         "HERDR_TAILSCALE_CLI_STATE_ROOT": str(mac_fixture / "registration"),
         "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(mac_fixture / "coordination"),
         "HERDR_TAILSCALE_CLI_HTTPS_PORT": "9443", "MAC_MANAGER_RECORD": str(mac_manager_record),
-        "LAUNCHCTL_RECORD": str(launchctl_record), "PATH": f"{mac_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "LAUNCHCTL_RECORD": str(launchctl_record), "MAC_SYSTEMCTL_RECORD": str(mac_systemctl_record),
+        "PATH": f"{mac_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
     })
     for name in ("CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG", "GH_TOKEN", "SUDO_USER"):
         mac_env_settings.pop(name, None)
@@ -513,7 +524,8 @@ printf 'Linux'
         not mac_manager_events or not mac_manager_events[0].startswith("tailscale-cli assert-ready ") or
         any("publish" in event or "unpublish" in event for event in mac_manager_events) or
         not any(event.startswith("bootstrap ") for event in launchctl_events) or
-        not any(event.startswith("kickstart ") for event in launchctl_events) or sentinel.exists()):
+        not any(event.startswith("kickstart ") for event in launchctl_events) or sentinel.exists() or
+        mac_systemctl_record.exists()):
         raise AssertionError(f"macOS service fixture escaped its fake boundaries: manager={mac_manager_events!r}, launchctl={launchctl_events!r}")
     mac_stopped = subprocess.run(
         [str(mac_scripts / "service.sh"), "stop"], env=mac_env_settings, cwd=root,
@@ -521,7 +533,8 @@ printf 'Linux'
     )
     if (mac_stopped.returncode != 0 or
         launchctl_record.read_text(encoding="utf-8").splitlines()[-1].startswith("bootout gui/") is False or
-        mac_manager_record.read_text(encoding="utf-8").splitlines() != mac_manager_events or sentinel.exists()):
+        mac_manager_record.read_text(encoding="utf-8").splitlines() != mac_manager_events or sentinel.exists() or
+        mac_systemctl_record.exists()):
         raise AssertionError("macOS CLI service stop mutated registration or escaped fake launchd")
     print("PASS macOS CLI user-service fixture: launchd install/health/stop, exact-route gate, no route mutation")
 
