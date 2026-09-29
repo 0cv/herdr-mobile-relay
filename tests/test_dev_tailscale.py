@@ -175,7 +175,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     if sentinel.exists() or (base / "unused-cli-mode").exists():
         raise AssertionError("CLI-backed refusal touched a Tailscale CLI or development state")
     check_checkout_root_existence_unchanged()
-    activation_checks = activation_record.read_text(encoding="utf-8").splitlines()
+    activation_checks = [event for event in activation_record.read_text(encoding="utf-8").splitlines()
+                        if event.startswith("tailscale-cli activation-check")]
     if (activation_checks.count("tailscale-cli activation-check --scope development") != 3 or
         activation_checks.count("tailscale-cli activation-check") != 1):
         raise AssertionError("CLI-backed development and production activation scopes were not kept distinct")

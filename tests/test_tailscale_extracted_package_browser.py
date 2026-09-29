@@ -2140,7 +2140,7 @@ def main() -> int:
         if fixture_tag_activation.returncode != 2:
             die("separately tagged CLI fixture binary enabled production activation")
         fixture_tag_development = subprocess.run(
-            [str(fixture_cli_binary), "tailscale-cli", "activation-check", "--scope", "development"],
+            [str(cli_fixture_binary), "tailscale-cli", "activation-check", "--scope", "development"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
         )
         if fixture_tag_development.returncode != 0:

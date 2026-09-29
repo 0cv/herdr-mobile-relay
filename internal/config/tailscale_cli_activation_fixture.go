@@ -2,6 +2,6 @@
 
 package config
 
-// This tag is used only by disposable hosted fixtures and is never used to
-// produce release archives.
-const tailscaleCLIProfilesEnabled = true
+// The fixture build tag never enables production profile activation. Hosted
+// fixtures use synthetic CLI executables with an explicit marker instead.
+const tailscaleCLIProfilesEnabled = false
