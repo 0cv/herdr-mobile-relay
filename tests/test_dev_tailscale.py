@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             os.close(master)
 
     interactive_refused("direct_interactive_decline", script, b"n\n", b"Cancelled; nothing was started.")
-    interactive_refused("cli_menu_choice_requires_route_confirmation", tunnel_script, b"2\nn\n", b"Cancelled; no state or route was changed.",
+    interactive_refused("cli_menu_choice_requires_explicit_opt_in", tunnel_script, b"2\nn\n", b"Cancelled; nothing was started.",
                         HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(cli_relay),
                         ACTIVATION_CHECK_RECORD=str(activation_record))
     interactive_refused("dev_tunnel_rejects_relative_state", tunnel_script, b"3\n",

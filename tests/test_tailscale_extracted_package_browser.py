@@ -2308,7 +2308,7 @@ else:
         health_deadline = time.monotonic() + 45
         while time.monotonic() < health_deadline:
             if cli_server_process.poll() is not None:
-                die("test-tagged CLI app process exited before local readiness")
+                die("test-tagged CLI app process exited before local readiness", code="cli_app_exited_before_local_ready")
             try:
                 with urllib.request.urlopen(local_health_url, timeout=2) as response:
                     local_health = json.loads(response.read(65536))
@@ -2320,7 +2320,7 @@ else:
                 time.sleep(0.05)
         if (not isinstance(local_health, dict) or local_health.get("status") != "ok" or
             local_health.get("readiness") != "ready" or local_health.get("instance") != cli_instance):
-            die("test-tagged CLI app failed bounded exact-instance loopback readiness")
+            die("test-tagged CLI app failed bounded exact-instance loopback readiness", code="cli_app_local_readiness_timeout")
 
         set_stage("cli_route_publish")
         cli_reservation_id = os.urandom(16).hex()

@@ -15,9 +15,10 @@ import (
 func TestTailscaleCLIConstructionFailsBeforeOpeningResources(t *testing.T) {
 	runtimeDir := t.TempDir()
 	cfg := &config.Config{
-		Transport:    config.TransportTailscaleCLI,
-		RuntimeDir:   runtimeDir,
-		TailscaleBin: filepath.Join(runtimeDir, "must-not-run"),
+		Transport:         config.TransportTailscaleCLI,
+		TailscaleCLIScope: "production",
+		RuntimeDir:        runtimeDir,
+		TailscaleBin:      filepath.Join(runtimeDir, "must-not-run"),
 	}
 	if _, err := NewOwned(cfg, "1.2.3", strings.Repeat("a", 40), managedTestLogger(), nil); err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("unqualified CLI transport construction was not refused: %v", err)

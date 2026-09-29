@@ -28,10 +28,10 @@ func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
 	code, err := run([]string{
 		"tailscale-cli", "status", "--binary", binary,
 		"--state-root", stateRoot, "--coordination-root", coordinationRoot,
-		"--scope", "development", "--installation-id", "fixture-installation",
+		"--scope", "production", "--installation-id", "fixture-installation",
 		"--https-port", "8443", "--backend-port", "18377",
 	})
-	if code != 2 || err == nil || !strings.Contains(err.Error(), "not enabled") {
+	if code != 2 || err == nil || !strings.Contains(err.Error(), "limited to isolated development scope") {
 		t.Fatalf("unqualified CLI management command = (%d, %v), want fail-closed refusal", code, err)
 	}
 	for _, path := range []string{invoked, stateRoot, coordinationRoot} {
