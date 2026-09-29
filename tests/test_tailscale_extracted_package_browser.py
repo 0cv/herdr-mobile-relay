@@ -2101,6 +2101,19 @@ def main() -> int:
         else:
             die("previous hosted fixture relay did not release its private ports")
         ambiguous_owner_pid = None
+        ambiguous_shutdown_complete = False
+        shutdown_deadline = time.monotonic() + 5
+        while time.monotonic() < shutdown_deadline:
+            with state.lock:
+                ambiguous_shutdown_complete = (
+                    "localapi:retirement:selective-delete" in state.events and
+                    "localapi:watch:closed" in state.events
+                )
+            if ambiguous_shutdown_complete:
+                break
+            time.sleep(0.05)
+        if not ambiguous_shutdown_complete:
+            die("ambiguous-ACK owner did not finish its scoped LocalAPI retirement before the CLI-only fixture")
 
         # The release archive must remain fail-closed. A separate test-tagged
         # executable is mounted by hosted CI solely to exercise the extracted
