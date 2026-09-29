@@ -2385,8 +2385,20 @@ else:
         if armed.returncode != 0 or armed_record.get("ok") is not True or armed_record.get("invitation_armed") is not True:
             die("packaged CLI app did not persist explicit bootstrap admission")
         set_stage("cli_setup_link")
+        cli_setup_relay = cli_root / "extracted-relay-helpers"
+        cli_setup_relay.mkdir(mode=0o700)
+        for name in ("common.sh", "setup-link.sh"):
+            source_helper = package / "relay" / name
+            fixture_helper = cli_setup_relay / name
+            shutil.copy2(source_helper, fixture_helper)
+            if sha256(source_helper) != sha256(fixture_helper):
+                die("CLI setup helper copy differed from the exact extracted release")
+        cli_app_summary["setup_helpers_unchanged"] = True
+        # The extracted release binary was just proven activation-disabled.
+        # Run its unchanged setup helpers with the separate hosted fixture
+        # binary, rather than bypassing the release marker in place.
         cli_setup = subprocess.run(
-            ["/bin/bash", str(package / "relay" / "setup-link.sh")], cwd=package, env=cli_env,
+            ["/bin/bash", str(cli_setup_relay / "setup-link.sh")], cwd=cli_setup_relay, env=cli_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45, check=False,
         )
         cli_app_summary["setup_link_returncode"] = cli_setup.returncode
