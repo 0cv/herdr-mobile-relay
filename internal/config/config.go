@@ -17,10 +17,6 @@ import (
 
 // Accepted relay transport values.
 const (
-	// tailscaleCLIProfilesEnabled is a deliberate P6 activation gate. Source and
-	// fixture support must not make a candidate profile available at runtime.
-	tailscaleCLIProfilesEnabled = false
-
 	TransportCloudflare        = "cloudflare"
 	TransportGateway           = "gateway"
 	TransportTailscale         = "tailscale"
@@ -182,8 +178,9 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// TailscaleCLIProfilesEnabled reports the compile-time production activation
-// gate. It has no environment/config override and remains false until P6.
+// TailscaleCLIProfilesEnabled reports the compile-time activation gate. The
+// shipped build remains false until P6; only the explicitly tagged disposable
+// hosted fixture build enables synthetic CLI-backed lifecycle coverage.
 func TailscaleCLIProfilesEnabled() bool { return tailscaleCLIProfilesEnabled }
 
 func (c *Config) Addr() string {

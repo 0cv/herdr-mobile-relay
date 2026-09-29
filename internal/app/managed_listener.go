@@ -1,4 +1,4 @@
-//go:build !herdr_tailscale_test
+//go:build !herdr_tailscale_test || herdr_tailscale_cli_fixture_binary
 
 package app
 
@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// The production build always uses the fixed system-trust, proxy-free client.
-// The hosted test build supplies its isolated fixture-CA variant from the
-// tagged app test file instead; no runtime client injection is shipped.
+// Release builds and the separately tagged hosted CLI fixture app use the
+// fixed system-trust, proxy-free client. The lifecycle test binary substitutes
+// its isolated fixture-CA variant; no runtime client injection is shipped.
 func managedHealthClientForServer(_ *Server, timeout time.Duration) *http.Client {
 	return managedHealthClient(timeout)
 }

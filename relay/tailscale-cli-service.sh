@@ -64,8 +64,8 @@ while [ "$attempt" -le "$PREFLIGHT_ATTEMPTS" ]; do
         exit 0
     fi
     if [ "$attempt" -eq "$PREFLIGHT_ATTEMPTS" ]; then
-        echo "Tailscale CLI stayed temporarily unavailable after $PREFLIGHT_ATTEMPTS read-only attempts; service stopped without changing Serve. Restart it after recovery." >&2
-        exit 0
+        echo "Tailscale CLI stayed temporarily unavailable after $PREFLIGHT_ATTEMPTS read-only attempts; service will be retried by its user-service supervisor without changing Serve." >&2
+        exit 75
     fi
     jitter=$((RANDOM % (PREFLIGHT_DELAY / 2 + 1)))
     retry_delay=$((PREFLIGHT_DELAY + jitter))

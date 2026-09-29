@@ -1,4 +1,4 @@
-//go:build herdr_tailscale_test
+//go:build herdr_tailscale_test && !herdr_tailscale_cli_fixture_binary
 
 package app
 

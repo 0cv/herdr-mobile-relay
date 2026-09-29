@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Hosted-only refusal/isolation checks for the explicit managed dev entrypoint.
+"""Hosted-only refusal/isolation checks for managed Tailscale CLI fixtures.
 
-This suite deliberately never runs a Tailscale CLI or an app/relay listener.
-It does not replace the extracted-package managed browser acceptance gate.
+Any service process in this suite is paired with a named fake executable and
+private temporary state. It never invokes a real Tailscale CLI/daemon or a
+personal service. The separate extracted-package browser gate exercises the
+packaged CLI-backed app only inside its disposable network-disabled container.
 """
 
 import os
@@ -427,6 +429,9 @@ elif args[:2] == ["tailscale-cli", "resolve-binary"]:
     print(os.environ["HERDR_SERVICE_CLI"])
 elif args[:2] == ["tailscale-cli", "preflight"]:
     log("preflight")
+    status = int(os.environ.get("HERDR_FIXTURE_PREFLIGHT_STATUS", "0"))
+    if status:
+        raise SystemExit(status)
     print(json.dumps({"node_id": "service-fixture-node", "origin": "https://relay.fixture.invalid:9443"}))
 elif args and args[0] == "serve":
     log("serve")
@@ -507,6 +512,60 @@ else:
         )):
         raise AssertionError(f"CLI service startup/restart admission ordering failed: {service_events!r}")
     print("PASS CLI service fixture: expected pre-publication quarantine recovers after route publication without minting invitations")
+
+    # Bounded transient exhaustion must remain nonzero so both supported user
+    # service supervisors retry it. A named fake sleep removes wall-clock delay;
+    # the permanent-category control case must stop after one preflight.
+    retry_record = base / "cli-service-retry-record"
+    retry_sleep_record = base / "cli-service-retry-sleeps"
+    fake_sleep = cli_service_home / ".local" / "bin" / "sleep"
+    fake_sleep.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$HERDR_SERVICE_SLEEP_RECORD\"\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_sleep.chmod(0o700)
+    retry_env = dict(service_env)
+    retry_env.update({
+        "HERDR_CLI_SERVICE_RECORD": str(retry_record),
+        "HERDR_SERVICE_SLEEP_RECORD": str(retry_sleep_record),
+        "HERDR_SERVICE_FIXTURE_RESTART": "transient-exhaustion",
+        "HERDR_FIXTURE_PREFLIGHT_STATUS": "75",
+    })
+    exhausted = subprocess.run(
+        [str(cli_service_scripts / "tailscale-cli-service.sh")], env=retry_env, cwd=root,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
+    )
+    retry_events = retry_record.read_text(encoding="utf-8").splitlines()
+    sleep_events = retry_sleep_record.read_text(encoding="utf-8").splitlines()
+    if (exhausted.returncode != 75 or retry_events.count("preflight") != 7 or
+        len(sleep_events) != 6 or any(not 1 <= int(delay) <= 30 for delay in sleep_events) or
+        "serve" in retry_events or "pairing-control admit" in retry_events or
+        b"will be retried by its user-service supervisor" not in exhausted.stderr):
+        raise AssertionError(
+            f"transient retry exhaustion did not return supervisor-retry status 75: "
+            f"status={exhausted.returncode} events={retry_events!r} sleeps={sleep_events!r} "
+            f"stderr={exhausted.stderr!r}"
+        )
+
+    permanent_record = base / "cli-service-permanent-record"
+    permanent_env = dict(service_env)
+    permanent_env.update({
+        "HERDR_CLI_SERVICE_RECORD": str(permanent_record),
+        "HERDR_SERVICE_FIXTURE_RESTART": "permanent-control",
+        "HERDR_FIXTURE_PREFLIGHT_STATUS": "78",
+    })
+    permanent = subprocess.run(
+        [str(cli_service_scripts / "tailscale-cli-service.sh")], env=permanent_env, cwd=root,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
+    )
+    permanent_events = permanent_record.read_text(encoding="utf-8").splitlines()
+    if (permanent.returncode != 0 or permanent_events.count("preflight") != 1 or
+        "serve" in permanent_events or b"Permanent Tailscale CLI preflight failure" not in permanent.stderr):
+        raise AssertionError(
+            f"permanent preflight failure was retried or started the relay: "
+            f"status={permanent.returncode} events={permanent_events!r}"
+        )
+    print("PASS CLI service retry fixture: seven transient probes return 75 for supervisor restart; permanent failure stops after one")
 
     # A named user-service fixture admits only a fake exact-route verifier and
     # fake systemctl/curl. It never reaches the host service manager, Tailscale,
@@ -607,6 +666,8 @@ printf 'Linux'
         "ExecStart=" + systemd_quote(str(cli_install_scripts / "herdr-mobile-relay-service.sh")),
         "WorkingDirectory=" + systemd_quote(os.path.realpath(cli_install_root)),
         "Environment=HERDR_RELAY_ENV=" + systemd_quote(str(cli_install_env)),
+        "Restart=on-failure",
+        "RestartSec=10",
     }
     if (not expected_unit_lines.issubset(set(unit_text.splitlines())) or
         "Description=Herdr Mobile Relay tailscale-cli" not in unit_text or
@@ -709,6 +770,8 @@ printf 'Linux'
     mac_manager_events = mac_manager_record.read_text(encoding="utf-8").splitlines()
     launchctl_events = launchctl_record.read_text(encoding="utf-8").splitlines()
     if ("com.herdr-mobile-relay.service" not in plist_text or "&amp;" not in plist_text or "CLOUDFLARED_CONFIG" in plist_text or
+        "<key>KeepAlive</key>" not in plist_text or "<key>SuccessfulExit</key>\n            <false/>" not in plist_text or
+        "<key>ThrottleInterval</key>\n    <integer>10</integer>" not in plist_text or
         not mac_manager_events or not mac_manager_events[0].startswith("tailscale-cli assert-ready ") or
         any("publish" in event or "unpublish" in event for event in mac_manager_events) or
         not any(event.startswith("bootstrap ") for event in launchctl_events) or

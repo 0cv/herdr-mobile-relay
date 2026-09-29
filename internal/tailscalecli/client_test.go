@@ -430,9 +430,29 @@ func TestInspectRefusesLoggedOutUnknownSchemaAndRedactsCommandError(t *testing.T
 		}
 		return commandResult{dispatched: true}, secretOutput
 	}, "darwin", "arm64")
-	if _, err := client.Inspect(context.Background()); err == nil || !errors.Is(err, ErrTransientUnavailable) ||
-		strings.Contains(err.Error(), "private@example.invalid") || strings.Contains(err.Error(), "credential-bearing") {
-		t.Fatalf("command failure was not safely redacted and classified transient: %v", err)
+	if _, err := client.Inspect(context.Background()); err == nil || !errors.Is(err, ErrUnclassified) ||
+		errors.Is(err, ErrTransientUnavailable) || strings.Contains(err.Error(), "private@example.invalid") ||
+		strings.Contains(err.Error(), "credential-bearing") {
+		t.Fatalf("untyped runner failure was not safely redacted and kept non-retryable: %v", err)
+	}
+}
+
+func TestReadOnlyIncompleteObservationIsExplicitlyTransient(t *testing.T) {
+	client := newTestClient("/fixture path/tailscale", func(context.Context, string, ...string) (commandResult, error) {
+		return commandResult{dispatched: true}, ErrUncertain
+	})
+	if _, err := client.Preflight(context.Background(), 8443); !errors.Is(err, ErrTransientUnavailable) {
+		t.Fatalf("incomplete read-only observation = %v, want transient unavailable", err)
+	}
+}
+
+func TestReadOnlyCallerCancellationRemainsCancellation(t *testing.T) {
+	client := newTestClient("/fixture path/tailscale", func(context.Context, string, ...string) (commandResult, error) {
+		return commandResult{dispatched: true}, context.Canceled
+	})
+	if _, err := client.Preflight(context.Background(), 8443); !errors.Is(err, context.Canceled) ||
+		errors.Is(err, ErrTransientUnavailable) {
+		t.Fatalf("caller cancellation was not preserved as non-retryable: %v", err)
 	}
 }
 
@@ -1286,11 +1306,15 @@ func TestDefaultManagerRefusesNonPrivateOrOverlappingRoots(t *testing.T) {
 	if err := os.Symlink(coordTarget, coordLink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewManager(stateLink, coordTarget, newFixtureClient(newFakeCLI(t))); !errors.Is(err, ErrPermissionDenied) {
-		t.Fatalf("symlink registration root accepted: %v", err)
+	for _, statePath := range []string{stateLink, stateLink + string(os.PathSeparator)} {
+		if _, err := NewManager(statePath, coordTarget, newFixtureClient(newFakeCLI(t))); !errors.Is(err, ErrPermissionDenied) {
+			t.Errorf("symlink registration root %q accepted: %v", statePath, err)
+		}
 	}
-	if _, err := NewManager(stateTarget, coordLink, newFixtureClient(newFakeCLI(t))); !errors.Is(err, ErrPermissionDenied) {
-		t.Fatalf("symlink coordination root accepted: %v", err)
+	for _, coordinationPath := range []string{coordLink, coordLink + string(os.PathSeparator)} {
+		if _, err := NewManager(stateTarget, coordinationPath, newFixtureClient(newFakeCLI(t))); !errors.Is(err, ErrPermissionDenied) {
+			t.Errorf("symlink coordination root %q accepted: %v", coordinationPath, err)
+		}
 	}
 }
 

@@ -1346,6 +1346,7 @@ func ownedByCurrentUser(info os.FileInfo) bool {
 }
 
 func validatePrivateDirectory(path string) (string, error) {
+	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
 		return "", ErrPermissionDenied
 	}

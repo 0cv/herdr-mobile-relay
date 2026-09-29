@@ -41,7 +41,17 @@ var (
 	ErrUncertain            = errors.New("Tailscale Serve operation has an uncertain outcome")
 	ErrOutputTooLong        = errors.New("Tailscale CLI output exceeded the safety limit")
 	ErrInvalidJSON          = errors.New("Tailscale CLI returned invalid JSON")
+	ErrCommandFailed        = errors.New("Tailscale CLI command failed with an unclassified outcome")
+	ErrUnclassified         = errors.New("Tailscale CLI failure is unclassified")
 )
+
+// CommandFailureError records only that a started CLI process exited
+// unsuccessfully. Exit codes and stderr are deliberately not interpreted or
+// retained: their meanings are profile-specific and may contain private data.
+type CommandFailureError struct{}
+
+func (CommandFailureError) Error() string { return ErrCommandFailed.Error() }
+func (CommandFailureError) Unwrap() error { return ErrCommandFailed }
 
 type Profile string
 
@@ -78,8 +88,8 @@ type Inspection struct {
 	Identity     Identity
 	Profile      Profile
 	ProfileKnown bool
-	// RuntimeQualified is intentionally false for every profile in this
-	// implementation. P6 must separately qualify and enable a profile.
+	// RuntimeQualified remains false in shipped builds. The hosted fixture tag
+	// may set it true only in a non-release test binary with synthetic CLI I/O.
 	RuntimeQualified bool
 	Version          VersionMetadata
 	Serve            tailscale.ServeStatus
@@ -279,7 +289,7 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 		},
 		Profile:          profile,
 		ProfileKnown:     true,
-		RuntimeQualified: false,
+		RuntimeQualified: fixtureRuntimeQualificationEnabled(),
 		Version:          metadata,
 		Serve:            serve,
 	}, nil
@@ -549,6 +559,12 @@ func validateJSON(data []byte, maxBytes, maxDepth, maxTokens int) error {
 }
 
 func sanitizeCommandError(operation string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
 	if errors.Is(err, ErrUncertain) {
 		// These calls are read-only, so an incomplete observation is retryable;
 		// it cannot represent an ambiguous Serve mutation.
@@ -560,7 +576,17 @@ func sanitizeCommandError(operation string, err error) error {
 		errors.Is(err, ErrConflict) {
 		return err
 	}
-	return fmt.Errorf("%w: Tailscale CLI %s failed; details were omitted", ErrTransientUnavailable, operation)
+	if errors.Is(err, ErrUnclassified) {
+		return fmt.Errorf("%w: Tailscale CLI %s failure requires diagnosis; details omitted", ErrUnclassified, operation)
+	}
+	var commandFailure CommandFailureError
+	if errors.As(err, &commandFailure) {
+		return fmt.Errorf("%w: Tailscale CLI %s failed; raw output omitted", commandFailure, operation)
+	}
+	if errors.Is(err, ErrCommandFailed) {
+		return fmt.Errorf("%w: Tailscale CLI %s failed; raw output omitted", ErrCommandFailed, operation)
+	}
+	return fmt.Errorf("%w: Tailscale CLI %s failure requires diagnosis; details were omitted", ErrUnclassified, operation)
 }
 
 type captureBudget struct {
@@ -613,6 +639,9 @@ func runCommand(parent context.Context, binary string, args ...string) (commandR
 		_ = terminateProcessGroup(command)
 		return result, ErrOutputTooLong
 	}
+	if parent.Err() != nil {
+		return result, parent.Err()
+	}
 	if ctx.Err() != nil {
 		return result, ErrUncertain
 	}
@@ -623,7 +652,9 @@ func runCommand(parent context.Context, binary string, args ...string) (commandR
 			_ = terminateProcessGroup(command)
 			return result, ErrUncertain
 		}
-		return result, fmt.Errorf("Tailscale CLI exited unsuccessfully")
+		// Keep dispatch evidence for mutation recovery but discard all captured
+		// stdout/stderr from an unsuccessful process.
+		return commandResult{dispatched: result.dispatched}, CommandFailureError{}
 	}
 	budget.mu.Lock()
 	result.stdout = append([]byte(nil), stdout.output.Bytes()...)
