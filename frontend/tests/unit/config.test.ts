@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   importQuickSetup,
@@ -12,6 +14,7 @@ import {
 } from '$lib/config';
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
+const TEST_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 
 /** A setup link as the relay prints it: everything secret stays in the fragment. */
 function setupLink(fragment: string): Pick<Location, 'hash' | 'protocol' | 'host'> {
@@ -21,7 +24,7 @@ function setupLink(fragment: string): Pick<Location, 'hash' | 'protocol' | 'host
 describe('Home Screen setup handoff', () => {
   it('imports the exact Go-generated managed and development fragment contracts', () => {
     const fixture = JSON.parse(readFileSync(
-      new URL('../../../internal/setuphelper/testdata/setup-fragments.json', import.meta.url),
+      resolve(TEST_DIRECTORY, '..', '..', '..', 'internal', 'setuphelper', 'testdata', 'setup-fragments.json'),
       'utf8',
     )) as {
       token: string;
