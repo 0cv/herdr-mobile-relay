@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-09-30
+
+### Fixed
+
+- Load conversation history whenever the relay connection is live, even when
+  the phone's browser reports itself offline. Previously the Conversation view
+  stayed blank, with no loading status or error, while the terminal kept
+  working.
+
 ### Changed
 
 - Read Hermes and OpenCode conversation history through an in-process SQLite
@@ -1577,7 +1586,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.1...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...HEAD
+[0.22.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...v0.22.0
 [0.21.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...v0.21.3

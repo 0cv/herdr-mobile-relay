@@ -4183,6 +4183,34 @@ test('default agent view: Conversation opens directly and persists across reload
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
 });
 
+test('conversation loads while the browser reports offline over a live relay', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, 'onLine', { configurable: true, get: () => false });
+    localStorage.setItem('herdr_default_agent_view', 'conversation');
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Offline flag conversation',
+      agent: 'pi',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  await setConversationFixture(page, {
+    entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'Answer despite offline flag' }],
+    total: 1,
+  });
+  await page.getByRole('button', { name: 'Open Offline flag conversation on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('Answer despite offline flag')).toBeVisible();
+});
+
 test('pane view override: both directions, inheritance, and explicit equal values', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
