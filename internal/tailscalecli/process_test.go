@@ -10,12 +10,36 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestRunCommandSelectsCLIInsteadOfGUIForMarkedAppStoreFixture(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the production selector is added only on Darwin")
+	}
+	t.Setenv("TAILSCALE_BE_CLI", "0")
+	binary := filepath.Join(t.TempDir(), "fake-app-store-tailscale")
+	script := `#!/bin/sh
+# HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1
+if [ "${TAILSCALE_BE_CLI:-}" != "1" ]; then
+    printf '%s\n' "The Tailscale GUI failed to start: The operation couldn't be completed. (Tailscale.CLIError error 3.)"
+    exit 0
+fi
+printf '%s\n' 'CLI mode selected'
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := runCommand(context.Background(), binary, "status", "--json")
+	if err != nil || !result.dispatched || string(result.stdout) != "CLI mode selected\n" {
+		t.Fatalf("real subprocess path did not select CLI mode: result=%+v err=%v", result, err)
+	}
+}
 
 func TestRunCommandBoundsOutput(t *testing.T) {
 	result, err := runCommand(context.Background(), "/bin/sh", "-c", "printf '%1200000s' x")

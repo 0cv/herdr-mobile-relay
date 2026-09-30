@@ -60,10 +60,26 @@ binary hash as the compatibility policy.
 Commands use fixed argv arrays, no shell, `sudo`, downloaded helper or mutable
 environment override. Preserve only the user/session environment required by the
 CLI (including the real `HOME`); do not replace `HOME` with the relay's isolated
-state root. The subprocess receives only `/usr/bin:/bin:/usr/sbin:/sbin` as
-`PATH`; caller-controlled search paths are never inherited. Use bounded deadlines,
+state root. On Darwin, the curated child environment includes exactly one
+`TAILSCALE_BE_CLI=1`, replacing any inherited value; Linux does not receive this
+variable. The subprocess receives only `/usr/bin:/bin:/usr/sbin:/sbin` as `PATH`;
+caller-controlled search paths are never inherited. Use bounded deadlines,
 stdout and stderr, child/pipe cleanup and redacted errors. Never log raw
 status/config/version JSON.
+
+The selector addresses a confirmed App Store GUI fallback: during the supervised
+read-only rehearsal on the supplied App Store 1.102.4 Darwin/arm64 build, the
+three read-only commands returned `The Tailscale GUI failed to start` on stdout
+and exited zero under the curated environment without a terminal variable.
+Bisection showed `TAILSCALE_BE_CLI=1` selects CLI mode on that exact build. This is
+empirical evidence for that closed-source build only, not a source guarantee for
+other packaging/version profiles. Tailscale documents this escape hatch in
+[upstream issue #7140](https://github.com/tailscale/tailscale/issues/7140) and
+historical `ActLikeCLI` behavior, but the selector is absent from the open-source
+v1.102.4 module tree. Do not infer support for another App Store build or qualify
+a profile from the fixture. If the known GUI-startup text is returned, the
+adapter reports a distinct redacted GUI-mode diagnostic rather than weakening
+strict JSON parsing or misclassifying it as generic invalid JSON.
 
 Read-only inspection is exactly:
 

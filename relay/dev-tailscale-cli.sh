@@ -450,7 +450,8 @@ version="$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$REPO_DIR/herdr-plugin.tom
 revision="$(git -C "$REPO_DIR" rev-parse HEAD)"
 [ -n "$version" ] && [ "${#revision}" -eq 40 ] || { echo "✗ Cannot determine coherent development build identity." >&2; exit 1; }
 BUILD_DIR="$(mktemp -d "$DEV_ROOT/.build.XXXXXX")"
-bun run --cwd "$REPO_DIR/frontend" build --outDir "$BUILD_DIR/web"
+bun run --cwd "$REPO_DIR/frontend" build
+cp -R "$REPO_DIR/frontend/dist" "$BUILD_DIR/web"
 bun "$REPO_DIR/scripts/stamp-web-version.mjs" "$BUILD_DIR/web/version.json" "$version" "$revision"
 bun "$REPO_DIR/frontend/scripts/validate-build.mjs" "$BUILD_DIR/web"
 CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly go build -trimpath \

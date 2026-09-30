@@ -40,6 +40,7 @@ var (
 	ErrConflict             = errors.New("Tailscale Serve configuration conflicts with this route")
 	ErrUncertain            = errors.New("Tailscale Serve operation has an uncertain outcome")
 	ErrOutputTooLong        = errors.New("Tailscale CLI output exceeded the safety limit")
+	ErrGUIMode              = errors.New("Tailscale App Store CLI entered GUI mode; verify that the installed build supports TAILSCALE_BE_CLI")
 	ErrInvalidJSON          = errors.New("Tailscale CLI returned invalid JSON")
 	ErrCommandFailed        = errors.New("Tailscale CLI command failed with an unclassified outcome")
 	ErrUnclassified         = errors.New("Tailscale CLI failure is unclassified")
@@ -254,6 +255,9 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 	if err != nil {
 		return Inspection{}, sanitizeCommandError("status", err)
 	}
+	if isGUIModeFailure(statusResult.stdout) {
+		return Inspection{}, ErrGUIMode
+	}
 	status, err := tailscale.ParseStatus(statusResult.stdout)
 	if err != nil {
 		if validateJSON(statusResult.stdout, MaxOutputBytes, 32, 100000) != nil {
@@ -281,6 +285,9 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 	if err != nil {
 		return Inspection{}, sanitizeCommandError("version", err)
 	}
+	if isGUIModeFailure(versionResult.stdout) {
+		return Inspection{}, ErrGUIMode
+	}
 	metadata, err := parseVersion(versionResult.stdout)
 	if errors.Is(err, ErrUnsupported) {
 		return Inspection{}, err
@@ -302,6 +309,9 @@ func (c *Client) Inspect(ctx context.Context) (Inspection, error) {
 	serveResult, err := c.execute(ctx, "serve", "status", "--json")
 	if err != nil {
 		return Inspection{}, sanitizeCommandError("serve status", err)
+	}
+	if isGUIModeFailure(serveResult.stdout) {
+		return Inspection{}, ErrGUIMode
 	}
 	serve, err := tailscale.ParseServeStatus(serveResult.stdout)
 	if err != nil {
@@ -349,6 +359,10 @@ func (c *Client) Preflight(ctx context.Context, httpsPort int) (PreflightReport,
 		DevelopmentQualificationEnabled: inspection.DevelopmentQualificationEnabled,
 		RuntimeQualified:                inspection.RuntimeQualified,
 	}, nil
+}
+
+func isGUIModeFailure(output []byte) bool {
+	return bytes.HasPrefix(bytes.TrimSpace(output), []byte("The Tailscale GUI failed to start:"))
 }
 
 func developmentQualificationEnabledFor(profile Profile) bool {
@@ -706,12 +720,25 @@ func runCommand(parent context.Context, binary string, args ...string) (commandR
 // shell and Tailscale override variables. The absolute CLI path does not need
 // PATH for executable selection.
 func cliEnvironment() []string {
+	return cliEnvironmentFor(runtime.GOOS, os.LookupEnv)
+}
+
+// cliEnvironmentFor builds the curated child environment. On macOS the App
+// Store CLI is the GUI executable: without a terminal-like environment it tries
+// to start the GUI and prints "The Tailscale GUI failed to start" on stdout with
+// exit status 0 (observed live with App Store 1.102.4). TAILSCALE_BE_CLI=1 is
+// Tailscale's explicit escape hatch that forces CLI mode; any inherited value is
+// replaced so a caller cannot select GUI mode.
+func cliEnvironmentFor(goos string, lookup func(string) (string, bool)) []string {
 	keys := []string{"HOME", "USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", "LC_ALL"}
-	result := make([]string, 0, len(keys)+1)
+	result := make([]string, 0, len(keys)+2)
 	for _, key := range keys {
-		if value, ok := os.LookupEnv(key); ok {
+		if value, ok := lookup(key); ok {
 			result = append(result, key+"="+value)
 		}
+	}
+	if goos == "darwin" {
+		result = append(result, "TAILSCALE_BE_CLI=1")
 	}
 	// The selected CLI is absolute; its helpers receive only the platform's
 	// system tool directories, never a caller-controlled PATH.

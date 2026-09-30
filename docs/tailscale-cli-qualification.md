@@ -135,6 +135,38 @@ credential, invitation or QR data appears. Required automated cases:
   earlier green revisions do not apply to later code. Acceptance evidence must
   identify the exact SHA for every hosted result.
 
+## P6 read-only rehearsal findings
+
+The supervising assistant's owner-authorized, read-only P6 rehearsal against the
+supplied App Store Tailscale 1.102.4 Darwin/arm64 build exposed two implementation
+defects before any Serve publication. No Serve mutation occurred; complete Serve
+status was `{}` throughout. This is evidence for the narrow read-only preflight
+cell only, not general runtime, publication, HTTPS, bundle, phone, cleanup, or
+production qualification.
+
+The rehearsal used approved baseline run `d87691fe-47fa-49da-b344-0c4338ed5a2b`
+for exact SHA `6199f00a1ab6a5f63fba1cc902f3ca6c9586ad4a`, with prior ordinary run
+`36715113355` and native run `36715112983`. Its development release reported
+revision `6199f00`, although the checkout contained the two uncommitted fixes
+below; that stamped revision therefore did not identify those source changes.
+The current task must be committed and pass all exact-SHA hosted gates before a
+supervised follow-up run.
+
+| Finding | Rehearsal observation and correction | Qualification status |
+| --- | --- | --- |
+| Frontend build staging | The launcher appended `--outDir` to the `bun run build` command. The frontend build is an `&&` script chain, so Bun passed that option to the final validator rather than Vite; Vite wrote only `frontend/dist`, and stamping failed because staged `web/version.json` did not exist. The launcher now runs the normal build then copies `frontend/dist` to the staged release before stamping/validation. A hosted fake-Bun regression models the argument forwarding and checks both a complete staged bundle and refusal without `web/version.json`. | Fixed in task tree; hosted exact-SHA test required. |
+| App Store CLI GUI fallback | With the curated child environment, the App Store executable treated all three read-only invocations as GUI requests, printed `The Tailscale GUI failed to start` to stdout, and exited zero. The adapter now forces `TAILSCALE_BE_CLI=1` only on Darwin, replacing inherited values; a strict, redacted GUI-mode error handles the known fallback text. The live read-only preflight then passed and reported the supplied profile with `development_qualification_enabled=true` and `runtime_qualified=false`. | Narrow read-only preflight observed passing with both fixes; hosted exact-SHA regression tests required. |
+
+The GUI-mode result is empirical for the exact supplied App Store build only. It is
+not evidence for other App Store versions, MacSys builds, Linux distributions, or
+future updates, and it does not qualify route publication or production use.
+
+The following physical/live cells remain pending: scoped publication, trusted
+HTTPS, exact bundle/readiness verification, phone enrollment and E2EE, device
+roles/reconnect, exact scoped cleanup, and before/after noninterference. The
+[supervised runbook](tailscale-cli-contract.md#supervised-owner-development-phone-smoke-and-cleanup-runbook)
+remains the authority boundary for those separate steps.
+
 ## Owner-phone development smoke and broader qualification
 
 The supervised development runbook includes one owner-authorized enrollment and

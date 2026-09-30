@@ -936,11 +936,26 @@ chmod 700 "$out"
     bun_fixture.write_text(
         '''#!/bin/sh
 if [ "$1" = run ]; then
-    while [ $# -gt 0 ]; do if [ "$1" = --outDir ]; then out=$2; break; fi; shift; done
-    [ -n "${out:-}" ] || exit 97
-    mkdir -p "$out"
-    printf '{}\\n' > "$out/version.json"
+    [ "$2" = --cwd ] || exit 97
+    frontend=$3
+    [ "$4" = build ] || exit 97
+    # Deliberately ignore extra build arguments, as bun forwards them through
+    # the frontend's && script chain rather than to Vite.
+    if [ "${DEV_FIXTURE_BUN_MODE:-}" = missing-version ]; then
+        rm -rf "$frontend/dist"
+        mkdir -p "$frontend/dist"
+        printf 'fixture asset\\n' > "$frontend/dist/app.js"
+        exit 0
+    fi
+    mkdir -p "$frontend/dist"
+    printf '{}\\n' > "$frontend/dist/version.json"
+    exit 0
 fi
+case "$1" in
+    */stamp-web-version.mjs) [ -f "$2" ] || exit 97 ;;
+    */validate-build.mjs) [ -f "$2/version.json" ] || exit 97 ;;
+    *) exit 97 ;;
+esac
 exit 0
 ''',
         encoding="utf-8",
@@ -1025,6 +1040,9 @@ exit 0
         "HERDR_RELAY_TRANSPORT='tailscale-cli'" not in (cli_dev_root / "relay.env").read_text(encoding="utf-8") or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI setup escaped development boundaries: {all_events!r}")
+    setup_target = os.readlink(cli_dev_root / "current")
+    if not (cli_dev_root / setup_target / "web" / "version.json").is_file():
+        raise AssertionError("staged development release omitted web/version.json")
     setup_bootstrap_count = sum("--operation arm_bootstrap" in event for event in all_events)
     update_env = dict(positive_env)
     update_env["HERDR_DEV_TAILSCALE_CLI_RELAY_BIN"] = str(cli_dev_root / "current" / "bin" / "herdr-mobile-relay")
@@ -1052,6 +1070,19 @@ exit 0
     prior_release = cli_dev_root / prior_target
     prior_binary = (prior_release / "bin" / "herdr-mobile-relay").read_bytes()
     prior_bundle = (prior_release / "web" / "version.json").read_bytes()
+    missing_bundle = subprocess.run(
+        [str(root / "relay" / "dev-tailscale-cli.sh"), "update"],
+        env=dict(update_env, DEV_FIXTURE_BUN_MODE="missing-version"), cwd=root,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=30, check=False,
+    )
+    if (missing_bundle.returncode == 0 or os.readlink(current_pointer) != prior_target or
+        (prior_release / "bin" / "herdr-mobile-relay").read_bytes() != prior_binary or
+        (prior_release / "web" / "version.json").read_bytes() != prior_bundle):
+        raise AssertionError(
+            "development release cut over without staged web/version.json or damaged the prior release: "
+            f"{missing_bundle.stdout + missing_bundle.stderr!r}"
+        )
     cutover_tools = cli_dev_fixture / "cutover-tools"
     cutover_tools.mkdir(mode=0o700)
     mv_wrapper = cutover_tools / "mv"

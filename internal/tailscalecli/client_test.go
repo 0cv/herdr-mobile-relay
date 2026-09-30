@@ -391,6 +391,58 @@ func TestCLIEnvironmentUsesConstrainedPathAndDropsTailscaleOverrides(t *testing.
 	}
 }
 
+func TestCLIEnvironmentForUsesAppStoreSelectorOnlyOnDarwin(t *testing.T) {
+	inherited := map[string]string{"TAILSCALE_BE_CLI": "0", "HOME": "/Users/fixture"}
+	lookup := func(key string) (string, bool) {
+		value, ok := inherited[key]
+		return value, ok
+	}
+
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			values := map[string][]string{}
+			for _, entry := range cliEnvironmentFor(goos, lookup) {
+				key, value, ok := strings.Cut(entry, "=")
+				if !ok {
+					t.Fatalf("malformed environment entry %q", entry)
+				}
+				values[key] = append(values[key], value)
+			}
+			selectors := values["TAILSCALE_BE_CLI"]
+			if goos == "darwin" {
+				if len(selectors) != 1 || selectors[0] != "1" {
+					t.Fatalf("Darwin CLI selector = %#v, want exactly one TAILSCALE_BE_CLI=1", selectors)
+				}
+				return
+			}
+			if len(selectors) != 0 {
+				t.Fatalf("non-Darwin environment unexpectedly has TAILSCALE_BE_CLI: %#v", selectors)
+			}
+		})
+	}
+}
+
+func TestInspectClassifiesGUIFallbackWithoutLeakingOutput(t *testing.T) {
+	const guiFailure = "The Tailscale GUI failed to start: The operation couldn't be completed. (Tailscale.CLIError error 3.)"
+	for _, command := range []string{"status", "version", "serve"} {
+		t.Run(command, func(t *testing.T) {
+			fixture := newFakeCLI(t)
+			switch command {
+			case "status":
+				fixture.status = guiFailure
+			case "version":
+				fixture.version = guiFailure
+			case "serve":
+				fixture.serve = guiFailure
+			}
+			_, err := newFixtureClient(fixture).Inspect(context.Background())
+			if !errors.Is(err, ErrGUIMode) || strings.Contains(err.Error(), "Tailscale.CLIError") || strings.Contains(err.Error(), guiFailure) {
+				t.Fatalf("GUI fallback error was not distinctly redacted: %v", err)
+			}
+		})
+	}
+}
+
 func TestStrictVersionJSONAndProfileCandidates(t *testing.T) {
 	metadata, err := parseVersion([]byte(fixtureVersion))
 	if err != nil {
