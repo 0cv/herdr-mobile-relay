@@ -78,19 +78,32 @@ esac
 if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
     option2_unavailable_reason=""
     option3_unavailable_reason=""
-    if [ "$(uname -s)" = Darwin ] && tailscale_app_store_installed; then
+    menu_os="$(uname -s 2>/dev/null || true)"
+    menu_arch="$(uname -m 2>/dev/null || true)"
+    if [ "$menu_os" = Darwin ] && tailscale_app_store_installed; then
         option3_unavailable_reason="App Store Tailscale was detected; legacy mode requires a standalone tailscaled."
+    fi
+    if [ "$menu_os" != Darwin ] || [ "$menu_arch" != arm64 ]; then
+        option2_unavailable_reason="CLI-backed development requires macOS/arm64 and the supported App Store Tailscale 1.102.4 profile."
+    elif [ -z "$TAILSCALE_APP_STORE_BUNDLE" ]; then
+        option2_unavailable_reason="No App Store Tailscale bundle was detected; CLI-backed development requires the supported App Store Tailscale 1.102.4 profile."
+    else
         app_store_version="$(tailscale_app_store_version "$TAILSCALE_APP_STORE_BUNDLE" || true)"
-        if [ -n "$app_store_version" ] && [ "$app_store_version" != "1.102.4" ]; then
-            option2_unavailable_reason="Only the App Store Tailscale 1.102.4 profile is enabled for CLI-backed development."
+        if [ "$app_store_version" != "1.102.4" ]; then
+            if [ -n "$app_store_version" ]; then
+                option2_unavailable_reason="Only the App Store Tailscale 1.102.4 profile is enabled for CLI-backed development; detected version $app_store_version."
+            else
+                option2_unavailable_reason="Could not read the App Store bundle version; CLI-backed development requires the supported 1.102.4 profile."
+            fi
         fi
     fi
     echo "Development transport:"
     echo "  1. Temporary Cloudflare tunnel — quick public URL + QR; no Tailscale needed (or use a saved gateway)."
+    option2_description="CLI-backed Tailscale Serve — for the supported App Store Tailscale 1.102.4 profile on macOS/arm64; needs the signed-in app's CLI and explicit route consent. The HTTPS route persists after stop; runtime/phone qualification is pending."
     if [ -n "$option2_unavailable_reason" ]; then
-        echo "  2. CLI-backed Tailscale Serve — for the supported App Store Tailscale 1.102.4 profile on macOS/arm64; needs the signed-in app's CLI and route consent. [UNAVAILABLE: $option2_unavailable_reason]"
+        echo "  2. $option2_description [UNAVAILABLE: $option2_unavailable_reason]"
     else
-        echo "  2. CLI-backed Tailscale Serve — for the supported App Store Tailscale 1.102.4 profile on macOS/arm64; needs the signed-in app's CLI and explicit route consent. The HTTPS route persists after stop; runtime/phone qualification is pending."
+        echo "  2. $option2_description"
     fi
     if [ -n "$option3_unavailable_reason" ]; then
         echo "  3. Legacy Tailscale Serve — for advanced users with a supported standalone tailscaled; needs an authenticated Unix daemon. Not for the App Store app. [UNAVAILABLE: $option3_unavailable_reason]"

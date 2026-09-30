@@ -331,18 +331,20 @@ outcomes and do not themselves establish live qualification.
    expires after ten minutes. If the phone reports that the bootstrap setup link
    expired or was already used before enrollment, and the same authorized foreground relay is
    still running, re-arm only its existing bootstrap token through the private
-   local control socket using the values from that relay's private environment:
+   local control socket. Use a second terminal at the same checkout because the
+   foreground launcher's exported variables do not exist in that shell. The
+   self-contained command in [the development runbook](development.md#running-from-a-checkout)
+   derives `RELAY_BIN` from the private root (default `relay/.dev-tailscale-cli/`,
+   or set the same absolute `HERDR_DEV_TAILSCALE_CLI_DIR` used at setup) and
+   reads only the pairing socket, control-run ID, and instance ID from that
+   root's generated `relay.env` using `env_file_value` in a subshell. Do not
+   source the whole environment file; it contains the relay token. The command
+   requires response JSON `ok: true`, `invitation_armed: true`, matching
+   `run_id` and `instance`, and a nonempty `invitation_expires_at`. This matters
+   because a decoded negative control reply can still exit zero.
 
-   ```bash
-   "$HERDR_RELAY_BIN" pairing-control \
-     --socket "$HERDR_RELAY_PAIRING_SOCKET" \
-     --operation arm_bootstrap \
-     --run-id "$HERDR_RELAY_CONTROL_RUN_ID" \
-     --instance "$HERDR_RELAY_INSTANCE_ID"
-   ```
-
-   Require a successful durable arm acknowledgement before asking the phone to
-   retry the same setup link. This is not a token reset, device reset, route
+   Require this successful durable arm acknowledgement before asking the phone
+   to retry the same setup link. This is not a token reset, device reset, route
    mutation, or invitation-lifetime extension. If the foreground relay is
    stopped or the arm is not acknowledged, stop and use the documented recovery
    path rather than retrying with guessed state. A refused enrolled device needs

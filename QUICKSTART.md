@@ -141,10 +141,12 @@ no Tailscale needed; 2 is CLI-backed Tailscale Serve for the supported macOS
 App Store profile and leaves its HTTPS route configured after stop; 3 is the
 older foreground mode for an authenticated standalone `tailscaled`, not the App
 Store app. Option 3 is shown as unavailable when a local App Store receipt makes
-that incompatibility knowable from files; option 2 is also marked unavailable
-when the bundle's readable version is not 1.102.4. Enter still picks option 1.
-Menu availability checks read local files only; choosing option 2 still requires
-its explicit opt-in and route-consent gates.
+that incompatibility knowable from files. Option 2 is available only on
+macOS/arm64 with a locally detected App Store bundle whose readable version is
+1.102.4; a missing or unreadable bundle, another version, or an unsupported
+platform marks it unavailable. Enter still picks option 1. Menu checks read
+local files and platform metadata only; they never run Tailscale. Choosing
+option 2 still requires its explicit opt-in and route-consent gates.
 
 A separate CLI-backed foreground development entrypoint is available as
 `make dev-tailscale-cli`; it is not part of setup or an installed service. Only

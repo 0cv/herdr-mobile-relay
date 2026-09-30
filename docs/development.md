@@ -25,10 +25,12 @@ make dev-tunnel
    confirmation. The HTTPS route remains configured after the foreground relay
    stops. Only the supplied macOS/arm64 1.102.4 profile is enabled for this
    isolated development path; runtime and phone qualification remain pending.
-   If the App Store bundle's filesystem-readable `Info.plist` reports another
-   version, option 2 is marked unavailable and refuses before CLI-backed mode.
-   Menu inspection uses `plutil` to read that file only; it never runs Tailscale.
-   It uses separate `.dev-tailscale-cli/` relay state and installs no service.
+   Option 2 is marked unavailable unless the menu confirms Darwin/arm64 and finds
+   a local App Store receipt with a readable `Info.plist` version exactly equal
+   to 1.102.4. Missing/unreadable bundle metadata, another version, or an
+   unsupported platform is refused before CLI-backed mode. Menu inspection reads
+   local files and `uname` platform metadata only; it never runs Tailscale. It
+   uses separate `.dev-tailscale-cli/` relay state and installs no service.
 3. **Legacy Tailscale Serve** — choose this only if you run a supported,
    authenticated standalone `tailscaled` Unix daemon and want the older direct-
    LocalAPI temporary/session-owned route. It is for advanced users, is not a
@@ -127,19 +129,51 @@ real-runtime or physical-phone qualification is implied by this entrypoint.
 Bootstrap setup invitations expire after ten minutes and remain one-use. If a
 bootstrap link expires or is reported as already used before enrollment, and the
 same foreground relay is still running, re-arm its existing bootstrap token over
-its private local control socket:
+its private local control socket. Open a second terminal in the same checkout;
+the foreground launcher's exported variables are not available there. The
+private root defaults to `relay/.dev-tailscale-cli/`; if setup used a custom
+`HERDR_DEV_TAILSCALE_CLI_DIR`, set that same absolute path in this terminal.
+This command reads only the required values from the generated private
+`relay.env` in a subshell (do not source the whole file, which contains the
+relay token) and derives the built relay binary from that root:
 
 ```bash
-"$HERDR_RELAY_BIN" pairing-control \
-  --socket "$HERDR_RELAY_PAIRING_SOCKET" \
-  --operation arm_bootstrap \
-  --run-id "$HERDR_RELAY_CONTROL_RUN_ID" \
-  --instance "$HERDR_RELAY_INSTANCE_ID"
+set -euo pipefail
+REPO_ROOT="$(pwd -P)"
+DEV_ROOT="${HERDR_DEV_TAILSCALE_CLI_DIR:-$REPO_ROOT/relay/.dev-tailscale-cli}"
+ENV_FILE="$DEV_ROOT/relay.env"
+RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"
+[ -d "$DEV_ROOT" ] && [ ! -L "$DEV_ROOT" ] && [ "$(stat -f '%Lp' "$DEV_ROOT")" = 700 ]
+[ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] && [ "$(stat -f '%Lp' "$ENV_FILE")" = 600 ]
+[ -x "$RELAY_BIN" ] || { echo "Private development relay files are unavailable." >&2; exit 1; }
+. "$REPO_ROOT/relay/common.sh"
+PAIRING_SOCKET="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
+CONTROL_RUN_ID="$(env_file_value "$ENV_FILE" HERDR_RELAY_CONTROL_RUN_ID)"
+INSTANCE_ID="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
+[ -n "$PAIRING_SOCKET" ] && [ -n "$CONTROL_RUN_ID" ] && [ -n "$INSTANCE_ID" ] || {
+  echo "Required identity values are absent from this private relay state." >&2; exit 1;
+}
+response="$("$RELAY_BIN" pairing-control \
+  --socket "$PAIRING_SOCKET" --operation arm_bootstrap \
+  --run-id "$CONTROL_RUN_ID" --instance "$INSTANCE_ID")" || {
+  echo "Pairing-control transport/decode failed; do not retry blindly." >&2; exit 1;
+}
+if [ "$(json_bool_field "$response" ok "$RELAY_BIN")" != true ] ||
+   [ "$(json_bool_field "$response" invitation_armed "$RELAY_BIN")" != true ] ||
+   [ "$(json_string_field "$response" run_id "$RELAY_BIN")" != "$CONTROL_RUN_ID" ] ||
+   [ "$(json_string_field "$response" instance "$RELAY_BIN")" != "$INSTANCE_ID" ] ||
+   [ -z "$(json_string_field "$response" invitation_expires_at "$RELAY_BIN")" ]; then
+  echo "No matching successful arm acknowledgement; retain state and stop." >&2
+  exit 1
+fi
+echo "Bootstrap invitation re-armed; acknowledgement identity matched."
 ```
 
-Run this only against that running isolated development relay with the values
-from its private environment. Wait for a successful arm acknowledgement, then
-retry the same setup link. This does not extend the ten-minute lifetime, reset
+Run this only against that same still-running isolated development relay. The
+checks require JSON `ok` and `invitation_armed` to be true, matching run and
+instance identities, and a nonempty expiry; a decoded negative reply may still
+have exit status zero. Only after this acknowledgement should you retry the
+same setup link. Re-arming does not extend its ten-minute lifetime, reset
 devices, or change the Tailscale route. A refused already-enrolled device needs
 a fresh device invitation, not bootstrap re-arming. If the relay is stopped or
 acknowledgement is unclear, retain state and follow the qualification runbook

@@ -139,7 +139,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             os.close(master)
 
     interactive_refused("direct_interactive_decline", script, b"n\n", b"Cancelled; nothing was started.")
-    interactive_refused("cli_menu_choice_requires_explicit_opt_in", tunnel_script, b"2\nn\n", b"Cancelled; nothing was started.",
+    interactive_refused("explicit_cli_transport_requires_opt_in", tunnel_script, b"n\n", b"Cancelled; nothing was started.",
+                        HERDR_DEV_TRANSPORT="tailscale-cli",
                         HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(cli_relay),
                         ACTIVATION_CHECK_RECORD=str(activation_record))
     interactive_refused("dev_tunnel_rejects_relative_state", tunnel_script, b"3\n",
@@ -185,7 +186,15 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     menu_cli.write_text(f"#!/bin/sh\nprintf invoked >> '{sentinel}'\nexit 97\n", encoding="utf-8")
     menu_cli.chmod(0o700)
     menu_uname = menu_cli_dir / "uname"
-    menu_uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+    menu_uname.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  -s) printf '%s\\n' \"${HERDR_TEST_UNAME_S:-Darwin}\" ;;\n"
+        "  -m) printf '%s\\n' \"${HERDR_TEST_UNAME_M:-arm64}\" ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
     menu_uname.chmod(0o700)
     menu_plutil = menu_cli_dir / "plutil"
     menu_plutil.write_text(
@@ -196,10 +205,28 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         encoding="utf-8",
     )
     menu_plutil.chmod(0o700)
+    receipt.unlink()
     app_store_settings = {
         "HERDR_DEV_TAILSCALE_CLI_BIN": str(menu_cli),
+        "HERDR_DEV_TAILSCALE_CLI_RELAY_BIN": str(cli_relay),
+        "ACTIVATION_CHECK_RECORD": str(activation_record),
         "PATH": f"{menu_cli_dir}:/usr/bin:/bin",
     }
+    interactive_refused(
+        "app_store_missing_marks_cli_mode_unavailable", tunnel_script, b"2\n",
+        b"No App Store Tailscale bundle was detected", **app_store_settings,
+    )
+    for system, arch, case in (
+        ("Linux", "x86_64", "linux_marks_cli_mode_unavailable"),
+        ("Darwin", "x86_64", "macos_amd64_marks_cli_mode_unavailable"),
+    ):
+        interactive_refused(
+            case, tunnel_script, b"2\n",
+            b"CLI-backed development requires macOS/arm64",
+            HERDR_TEST_UNAME_S=system, HERDR_TEST_UNAME_M=arch,
+            **app_store_settings,
+        )
+    receipt.write_bytes(b"synthetic App Store receipt marker")
     activation_before_menu = activation_record.read_bytes() if activation_record.exists() else None
     interactive_refused(
         "app_store_unsupported_version_marks_cli_mode_unavailable", tunnel_script, b"2\n",
@@ -210,10 +237,22 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     if activation_after_menu != activation_before_menu:
         raise AssertionError("unsupported App Store version selection reached the CLI activation fixture")
     app_store_info.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict></dict></plist>\n',
+        encoding="utf-8",
+    )
+    interactive_refused(
+        "app_store_unreadable_version_marks_cli_mode_unavailable", tunnel_script, b"2\n",
+        b"Could not read the App Store bundle version", **app_store_settings,
+    )
+    app_store_info.write_text(
         '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>\n'
         '<key>CFBundleShortVersionString</key>\n<string>1.102.4</string>\n'
         '</dict></plist>\n',
         encoding="utf-8",
+    )
+    interactive_refused(
+        "app_store_supported_version_still_requires_explicit_opt_in", tunnel_script, b"2\nn\n",
+        b"Cancelled; nothing was started.", **app_store_settings,
     )
     interactive_refused(
         "app_store_supported_version_keeps_cli_option_available", tunnel_script, b"4\n",
