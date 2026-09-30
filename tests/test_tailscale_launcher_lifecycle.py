@@ -745,7 +745,15 @@ class ManagedLauncherLifecycle(unittest.TestCase):
         self.assert_no_tailscale_writes(fixture)
         fixture.process.send_signal(signal.SIGTERM)
         code, output, error = fixture.communicate()
-        self.assertEqual(code, 130)
+        safe_output = output.replace(FIXTURE_TOKEN.encode(), b"<fixture-token>").replace(
+            FIXTURE_RUN_ID.encode(), b"<fixture-run-id>"
+        )
+        safe_error = error.replace(FIXTURE_TOKEN.encode(), b"<fixture-token>").replace(
+            FIXTURE_RUN_ID.encode(), b"<fixture-run-id>"
+        )
+        self.assertEqual(
+            code, 130, f"SIGTERM exit = {code}; stdout={safe_output!r}; stderr={safe_error!r}"
+        )
         self.assertTrue(fixture.server_retired.exists())
         self.assertFalse(fixture.session_file.exists())
 
