@@ -32,8 +32,12 @@ func TestQuestionDeadlineDuringInterKeyDelayIsDispatchedUnknown(t *testing.T) {
 	}()
 	deadline := time.Now().Add(time.Second)
 	for {
-		if _, readErr := os.Stat(record); readErr == nil {
+		data, readErr := os.ReadFile(record)
+		if readErr == nil && strings.Contains(string(data), "pane send-keys") {
 			break
+		}
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			t.Fatalf("read first key dispatch record: %v", readErr)
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("first key was not dispatched")
