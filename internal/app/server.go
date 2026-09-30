@@ -128,6 +128,8 @@ type Server struct {
 	developmentCLIWorkflow          *tailscalecli.DevelopmentWorkflow
 	developmentBackendBound         chan struct{}
 	developmentBackendBoundOnce     sync.Once
+	developmentBackendMu            sync.RWMutex
+	developmentBackendActive        bool
 	verifyPublicBundle              func(context.Context, string, string, string, string) error
 	managedRetired                  chan struct{}
 	managedRetireOne                sync.Once
@@ -218,6 +220,58 @@ func (s *Server) DevelopmentBackendBound() <-chan struct{} {
 		return nil
 	}
 	return s.developmentBackendBound
+}
+
+// DevelopmentBackendLease keeps this process's backend listener from closing
+// while publication readiness and the scoped Serve mutation are in progress.
+func (s *Server) DevelopmentBackendLease() tailscalecli.BackendLease {
+	if s == nil || s.developmentBackendBound == nil {
+		return nil
+	}
+	return developmentBackendLease{server: s}
+}
+
+type developmentBackendLease struct {
+	server *Server
+}
+
+func (l developmentBackendLease) WithLease(ctx context.Context, publish func() error) error {
+	if l.server == nil || publish == nil {
+		return tailscalecli.ErrWorkflowRequired
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	l.server.developmentBackendMu.RLock()
+	defer l.server.developmentBackendMu.RUnlock()
+	if !l.server.developmentBackendActive {
+		return tailscalecli.ErrConflict
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return publish()
+}
+
+type developmentBackendListener struct {
+	net.Listener
+	server    *Server
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (l *developmentBackendListener) Close() error {
+	if l == nil || l.server == nil || l.Listener == nil {
+		return net.ErrClosed
+	}
+	l.server.developmentBackendMu.Lock()
+	defer l.server.developmentBackendMu.Unlock()
+	l.server.developmentBackendActive = false
+	l.closeOnce.Do(func() { l.closeErr = l.Listener.Close() })
+	return l.closeErr
 }
 
 // NewOwned constructs a server for a managed run only after the supplied
@@ -1507,6 +1561,8 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.tailscaleSession != nil {
 		s.backendListener = retainTCPListener(ln)
 		serveListener = s.backendListener.ServeListener()
+	} else if s.developmentBackendBound != nil {
+		serveListener = &developmentBackendListener{Listener: ln, server: s}
 	}
 
 	srv := &http.Server{
@@ -1521,7 +1577,10 @@ func (s *Server) Run(ctx context.Context) error {
 	s.backendBound = true
 	s.mu.Unlock()
 	if s.developmentBackendBound != nil {
+		s.developmentBackendMu.Lock()
+		s.developmentBackendActive = true
 		s.developmentBackendBoundOnce.Do(func() { close(s.developmentBackendBound) })
+		s.developmentBackendMu.Unlock()
 	}
 
 	var errCh chan error
@@ -1562,6 +1621,8 @@ func (s *Server) Run(ctx context.Context) error {
 			startupErr := fmt.Errorf("initialize pairing control: %w", controlErr)
 			if s.tailscaleSession != nil {
 				startupErr = s.unwindManagedStartup(startupErr)
+			} else if s.developmentBackendBound != nil {
+				_ = serveListener.Close()
 			} else {
 				_ = ln.Close()
 			}
@@ -1661,7 +1722,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if errCh == nil {
 		errCh = make(chan error, 1)
-		go func() { errCh <- srv.Serve(ln) }()
+		go func() { errCh <- srv.Serve(serveListener) }()
 	}
 
 	var runErr error

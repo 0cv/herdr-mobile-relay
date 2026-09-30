@@ -296,10 +296,14 @@ state whenever identity, readback, readiness, or a command result is uncertain.
    by Go on stdin. There is no environment-variable consent. The fixed plugin
    UDP listener must bind before the backend can become ready; an occupied
    `127.0.0.1:18378` aborts startup before any Serve publication. Go waits for
-   the foreground server's own backend-bind signal before checking local health,
-   so a matching stale listener on 18377 cannot authorize publication. Any
-   occupied port, conflicting/unrecorded mapping, identity drift, or incomplete
-   parse cancels without freeing ports, adopting routes, or touching production.
+   the foreground server's own backend-bind signal, then obtains a process-local
+   listener lease across readiness, durable publication intent, Serve dispatch,
+   and readback. Shutdown cannot release that listener until the lease ends; if
+   it was released first, publication refuses even if a foreign matching health
+   responder has rebound 18377. A health response alone is not ownership proof.
+   Any occupied port, conflicting/unrecorded mapping, identity drift, or
+   incomplete parse cancels without freeing ports, adopting routes, or touching
+   production.
 3. **Readback, HTTPS, bundle, and local readiness.** After Go reports setup
    ready, read `serve status --json` again and compare the complete supported
    configuration: exactly the intended HTTPS 8443 `/` proxy to

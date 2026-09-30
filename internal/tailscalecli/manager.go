@@ -70,6 +70,14 @@ type Consent struct {
 	RecoveryAccepted         bool
 }
 
+// BackendLease keeps the process-owned loopback listener from being released
+// while publication readiness is checked and the Serve mutation is dispatched.
+// Implementations must reject an inactive listener and serialize its close with
+// the callback; a latched bind notification is not a lease.
+type BackendLease interface {
+	WithLease(context.Context, func() error) error
+}
+
 type PublishRequest struct {
 	InstallationID string
 	Scope          string
@@ -78,7 +86,7 @@ type PublishRequest struct {
 	HTTPSPort      int
 	BackendPort    int
 	ReservationID  string
-	BackendBound   <-chan struct{}
+	BackendLease   BackendLease
 	Consent        Consent
 }
 
@@ -422,6 +430,9 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 	if !validReservationID(request.ReservationID) {
 		return m.publishNotDispatched(ErrConflict)
 	}
+	if !m.skipBackendReadiness && request.BackendLease == nil {
+		return m.publishNotDispatched(ErrWorkflowRequired)
+	}
 	inspection, err := m.client.Inspect(ctx)
 	if err != nil {
 		return m.publishNotDispatched(err)
@@ -432,136 +443,146 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 	if err := m.requireProfileForScope(inspection, request.Scope); err != nil {
 		return m.publishNotDispatched(err)
 	}
-	err = m.withNodeLock(ctx, inspection.Identity.NodeID, func() error {
-		return m.withBackendReservationLock(ctx, func() error {
-			current, err := m.client.Inspect(ctx)
-			if err != nil {
-				return err
-			}
-			if !sameInspectionIdentity(inspection, current) || current.Identity.NodeID != request.ExpectedNodeID ||
-				!originMatchesIdentity(request.Origin, current.Identity, request.HTTPSPort) {
-				return ErrConflict
-			}
-			if err := m.requireProfileForScope(current, request.Scope); err != nil {
-				return err
-			}
-			record, err := m.readRegistration()
-			if err != nil {
-				return err
-			}
-			if record != nil && record.State == StateRegistered {
-				if !sameRequest(*record, request, current, m.client.binary) {
-					return ErrConflict
-				}
-				if registeredRouteMatches(current, *record) {
-					return m.writeBackendReservation(reservationForRegistration(*record, StateRegistered))
-				}
-				return ErrConflict // drift never triggers automatic repair
-			}
-			if record != nil && record.State != StateRemoved && record.State != StateUnconfigured && record.State != StateReconciledAbsent {
-				return fmt.Errorf("%w: recovery state %s requires explicit reconciliation", ErrUncertain, record.State)
-			}
-			desiredReservation := backendPortReservation{
-				Schema: 1, InstallationID: request.InstallationID, Scope: request.Scope, NodeID: current.Identity.NodeID,
-				HTTPSPort: request.HTTPSPort, BackendPort: request.BackendPort, Origin: request.Origin,
-				ReservationID: request.ReservationID, State: StatePublishPending,
-				UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-			}
-			if m.fixtureMutations {
-				if existing, readErr := m.readBackendReservation(request.BackendPort); readErr != nil {
-					return readErr
-				} else if existing == nil {
-					if err := m.writeBackendReservation(desiredReservation); err != nil {
-						return err
-					}
-				}
-			}
-			reserved, err := m.readBackendReservation(request.BackendPort)
-			if err != nil || reserved == nil || reserved.ReservationID != request.ReservationID ||
-				!sameBackendReservation(*reserved, desiredReservation) {
-				return ErrConflict
-			}
-			if !m.fixtureMutations && (request.Scope != "development" ||
-				request.Consent.RouteConfirmation != PublishRouteConfirmation(request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort)) {
-				return errors.New("exact route-bound development confirmation is required")
-			}
-			if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
-				return err
-			}
-			if routeConflicts(current.Serve, request.HTTPSPort) || backendPortHasRoute(current.Serve, request.BackendPort, nil) {
-				return ErrConflict
-			}
-			if !m.skipBackendReadiness {
-				if err := verifyBackendReadiness(ctx, request.BackendPort, request.InstallationID, request.Origin, request.BackendBound); err != nil {
+	operation := func() error {
+		return m.withNodeLock(ctx, inspection.Identity.NodeID, func() error {
+			return m.withBackendReservationLock(ctx, func() error {
+				current, err := m.client.Inspect(ctx)
+				if err != nil {
 					return err
 				}
-			}
-			opID, err := newOperationID()
-			if err != nil {
-				return err
-			}
-			entry := registration{
-				Schema:         1,
-				InstallationID: request.InstallationID,
-				Scope:          request.Scope,
-				NodeID:         current.Identity.NodeID,
-				DNSName:        current.Identity.DNSName,
-				Profile:        current.Profile,
-				BinaryPath:     m.client.binary,
-				HTTPSPort:      request.HTTPSPort,
-				BackendPort:    request.BackendPort,
-				Path:           "/",
-				Backend:        fmt.Sprintf("http://127.0.0.1:%d", request.BackendPort),
-				ConsentScope:   publishConsentScope,
-				OperationID:    opID,
-				ReservationID:  request.ReservationID,
-				State:          StatePublishPending,
-				UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
-			}
-			if err := m.writeRegistration(entry); err != nil {
-				return fmt.Errorf("persist publish intent: %w", err)
-			}
-			if err := m.writeBackendReservation(reservationForRegistration(entry, StatePublishPending)); err != nil {
-				entry.State = StateUnconfigured
-				entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				_ = m.writeRegistration(entry)
-				return fmt.Errorf("reserve backend port before publication: %w", err)
-			}
-			result, publishErr := m.client.execute(ctx, "serve", "--bg", fmt.Sprintf("--https=%d", request.HTTPSPort), "--set-path=/", entry.Backend)
-			if publishErr != nil {
-				if !result.dispatched {
-					entry.State = StateUnconfigured
-					entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-					if saveErr := m.writeRegistration(entry); saveErr != nil {
-						return fmt.Errorf("publish was not dispatched but journal update failed: %w", saveErr)
-					}
-					return fmt.Errorf("publish invocation was not dispatched; backend reservation remains until the listener is stopped: %w",
-						sanitizeCommandError("serve publish", publishErr))
+				if !sameInspectionIdentity(inspection, current) || current.Identity.NodeID != request.ExpectedNodeID ||
+					!originMatchesIdentity(request.Origin, current.Identity, request.HTTPSPort) {
+					return ErrConflict
 				}
-				entry.State = StatePublishUncertain
-				entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				_ = m.writeRegistration(entry)
-				return fmt.Errorf("%w: publish acknowledgement unavailable", ErrUncertain)
-			}
-			entry.State = StateRegistered
-			entry.ReservationID = ""
-			entry.MutationAcknowledged = true
-			entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			if err := m.writeRegistration(entry); err != nil {
-				// The durable publish-pending record and port reservation remain as recovery evidence.
-				return fmt.Errorf("%w: publish acknowledged but receipt could not be persisted", ErrUncertain)
-			}
-			if err := m.writeBackendReservation(reservationForRegistration(entry, StateRegistered)); err != nil {
-				return fmt.Errorf("%w: publish receipt recorded but backend reservation update failed", ErrUncertain)
-			}
-			readback, err := m.client.Inspect(ctx)
-			if err != nil || !registeredRouteMatches(readback, entry) {
-				// Keep the durable receipt. Do not retry, roll back, or issue `off`.
-				return fmt.Errorf("%w: publish receipt recorded; route readback is not ready", ErrConflict)
-			}
-			return nil
+				if err := m.requireProfileForScope(current, request.Scope); err != nil {
+					return err
+				}
+				record, err := m.readRegistration()
+				if err != nil {
+					return err
+				}
+				if record != nil && record.State == StateRegistered {
+					if !sameRequest(*record, request, current, m.client.binary) {
+						return ErrConflict
+					}
+					if registeredRouteMatches(current, *record) {
+						return m.writeBackendReservation(reservationForRegistration(*record, StateRegistered))
+					}
+					return ErrConflict // drift never triggers automatic repair
+				}
+				if record != nil && record.State != StateRemoved && record.State != StateUnconfigured && record.State != StateReconciledAbsent {
+					return fmt.Errorf("%w: recovery state %s requires explicit reconciliation", ErrUncertain, record.State)
+				}
+				desiredReservation := backendPortReservation{
+					Schema: 1, InstallationID: request.InstallationID, Scope: request.Scope, NodeID: current.Identity.NodeID,
+					HTTPSPort: request.HTTPSPort, BackendPort: request.BackendPort, Origin: request.Origin,
+					ReservationID: request.ReservationID, State: StatePublishPending,
+					UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				}
+				if m.fixtureMutations {
+					if existing, readErr := m.readBackendReservation(request.BackendPort); readErr != nil {
+						return readErr
+					} else if existing == nil {
+						if err := m.writeBackendReservation(desiredReservation); err != nil {
+							return err
+						}
+					}
+				}
+				reserved, err := m.readBackendReservation(request.BackendPort)
+				if err != nil || reserved == nil || reserved.ReservationID != request.ReservationID ||
+					!sameBackendReservation(*reserved, desiredReservation) {
+					return ErrConflict
+				}
+				if !m.fixtureMutations && (request.Scope != "development" ||
+					request.Consent.RouteConfirmation != PublishRouteConfirmation(request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort)) {
+					return errors.New("exact route-bound development confirmation is required")
+				}
+				if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin, request.HTTPSPort, request.BackendPort); err != nil {
+					return err
+				}
+				if routeConflicts(current.Serve, request.HTTPSPort) || backendPortHasRoute(current.Serve, request.BackendPort, nil) {
+					return ErrConflict
+				}
+				publish := func() error {
+					if !m.skipBackendReadiness {
+						if err := verifyBackendReadiness(ctx, request.BackendPort, request.InstallationID, request.Origin); err != nil {
+							return err
+						}
+					}
+					opID, err := newOperationID()
+					if err != nil {
+						return err
+					}
+					entry := registration{
+						Schema:         1,
+						InstallationID: request.InstallationID,
+						Scope:          request.Scope,
+						NodeID:         current.Identity.NodeID,
+						DNSName:        current.Identity.DNSName,
+						Profile:        current.Profile,
+						BinaryPath:     m.client.binary,
+						HTTPSPort:      request.HTTPSPort,
+						BackendPort:    request.BackendPort,
+						Path:           "/",
+						Backend:        fmt.Sprintf("http://127.0.0.1:%d", request.BackendPort),
+						ConsentScope:   publishConsentScope,
+						OperationID:    opID,
+						ReservationID:  request.ReservationID,
+						State:          StatePublishPending,
+						UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+					}
+					if err := m.writeRegistration(entry); err != nil {
+						return fmt.Errorf("persist publish intent: %w", err)
+					}
+					if err := m.writeBackendReservation(reservationForRegistration(entry, StatePublishPending)); err != nil {
+						entry.State = StateUnconfigured
+						entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+						_ = m.writeRegistration(entry)
+						return fmt.Errorf("reserve backend port before publication: %w", err)
+					}
+					result, publishErr := m.client.execute(ctx, "serve", "--bg", fmt.Sprintf("--https=%d", request.HTTPSPort), "--set-path=/", entry.Backend)
+					if publishErr != nil {
+						if !result.dispatched {
+							entry.State = StateUnconfigured
+							entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+							if saveErr := m.writeRegistration(entry); saveErr != nil {
+								return fmt.Errorf("publish was not dispatched but journal update failed: %w", saveErr)
+							}
+							return fmt.Errorf("publish invocation was not dispatched; backend reservation remains until the listener is stopped: %w",
+								sanitizeCommandError("serve publish", publishErr))
+						}
+						entry.State = StatePublishUncertain
+						entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+						_ = m.writeRegistration(entry)
+						return fmt.Errorf("%w: publish acknowledgement unavailable", ErrUncertain)
+					}
+					entry.State = StateRegistered
+					entry.ReservationID = ""
+					entry.MutationAcknowledged = true
+					entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					if err := m.writeRegistration(entry); err != nil {
+						// The durable publish-pending record and port reservation remain as recovery evidence.
+						return fmt.Errorf("%w: publish acknowledged but receipt could not be persisted", ErrUncertain)
+					}
+					if err := m.writeBackendReservation(reservationForRegistration(entry, StateRegistered)); err != nil {
+						return fmt.Errorf("%w: publish receipt recorded but backend reservation update failed", ErrUncertain)
+					}
+					readback, err := m.client.Inspect(ctx)
+					if err != nil || !registeredRouteMatches(readback, entry) {
+						// Keep the durable receipt. Do not retry, roll back, or issue `off`.
+						return fmt.Errorf("%w: publish receipt recorded; route readback is not ready", ErrConflict)
+					}
+					return nil
+				}
+				return publish()
+			})
 		})
-	})
+	}
+	if m.skipBackendReadiness {
+		err = operation()
+	} else {
+		err = request.BackendLease.WithLease(ctx, operation)
+	}
 	return m.publishNotDispatched(err)
 }
 
@@ -1206,20 +1227,12 @@ func registrationOriginMatches(record registration, origin string) bool {
 	return err == nil && origin == derived
 }
 
-func verifyBackendReadiness(ctx context.Context, port int, installationID, origin string, backendBound <-chan struct{}) error {
+func verifyBackendReadiness(ctx context.Context, port int, installationID, origin string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if backendBound == nil {
-		return ErrWorkflowRequired
-	}
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	select {
-	case <-backendBound:
-	case <-checkCtx.Done():
-		return checkCtx.Err()
-	}
 	if port < 1 || port > 65535 || !validLabel(installationID) || !validCanonicalOrigin(origin) {
 		return ErrConflict
 	}

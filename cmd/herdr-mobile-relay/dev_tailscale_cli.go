@@ -264,7 +264,7 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 			InstallationID: cfg.InstanceID, Scope: "development", ExpectedNodeID: preflight.NodeID,
 			Origin: preflight.Origin, HTTPSPort: tailscalecli.DevelopmentHTTPSPort,
 			BackendPort: tailscalecli.DevelopmentBackendPort, ReservationID: reservationID,
-			BackendBound: server.DevelopmentBackendBound(), Consent: consent,
+			BackendLease: server.DevelopmentBackendLease(), Consent: consent,
 		}
 		if err := workflow.Publish(ctx, request); err != nil {
 			stop()

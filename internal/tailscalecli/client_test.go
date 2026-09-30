@@ -42,6 +42,7 @@ type fakeCLI struct {
 	publishErr        error
 	publishDispatched bool
 	publishNoEffect   bool
+	publishHook       func()
 	removeErr         error
 	removeDispatched  bool
 	removeNoEffect    bool
@@ -68,6 +69,9 @@ func (f *fakeCLI) run(_ context.Context, binary string, args ...string) (command
 	case "serve status --json":
 		return commandResult{stdout: []byte(f.serve), dispatched: true}, nil
 	case "serve --bg --https=8443 --set-path=/ http://127.0.0.1:18377":
+		if f.publishHook != nil {
+			f.publishHook()
+		}
 		if f.publishErr != nil {
 			return commandResult{dispatched: f.publishDispatched}, f.publishErr
 		}
@@ -217,9 +221,46 @@ func newPolicyManager(t *testing.T, f *fakeCLI, goos, goarch, stateLeaf string) 
 	return manager
 }
 
+type testBackendLease struct {
+	mu     sync.RWMutex
+	active bool
+	held   atomic.Int32
+}
+
+func newTestBackendLease(active bool) *testBackendLease {
+	return &testBackendLease{active: active}
+}
+
+func (l *testBackendLease) WithLease(ctx context.Context, publish func() error) error {
+	if l == nil || publish == nil {
+		return ErrWorkflowRequired
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if !l.active {
+		return ErrConflict
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	l.held.Add(1)
+	defer l.held.Add(-1)
+	return publish()
+}
+
+func (l *testBackendLease) revoke() {
+	l.mu.Lock()
+	l.active = false
+	l.mu.Unlock()
+}
+
 func fixtureRequest(consent bool) PublishRequest {
-	backendBound := make(chan struct{})
-	close(backendBound)
 	return PublishRequest{
 		InstallationID: "install-fixture",
 		Scope:          "development",
@@ -228,7 +269,7 @@ func fixtureRequest(consent bool) PublishRequest {
 		HTTPSPort:      8443,
 		BackendPort:    18377,
 		ReservationID:  "00000000000000000000000000000001",
-		BackendBound:   backendBound,
+		BackendLease:   newTestBackendLease(true),
 		Consent:        fixtureConsent(consent),
 	}
 }
@@ -940,9 +981,7 @@ func TestBackendReadinessDoesNotFollowRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backendBound := make(chan struct{})
-	close(backendBound)
-	if err := verifyBackendReadiness(context.Background(), port, "install-fixture", "https://herdr.tailnet.ts.net:8443", backendBound); !errors.Is(err, ErrConflict) {
+	if err := verifyBackendReadiness(context.Background(), port, "install-fixture", "https://herdr.tailnet.ts.net:8443"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("readiness accepted a redirect response: %v", err)
 	}
 	if got := redirectedRequests.Load(); got != 0 {
@@ -981,6 +1020,76 @@ func TestPublishRejectsWrongBackendIdentityBeforeJournalOrServeWrite(t *testing.
 	}
 	if _, err := os.Lstat(filepath.Join(manager.stateRoot, journalName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("backend mismatch persisted a publish intent: %v", err)
+	}
+}
+
+func startMatchingDevelopmentBackend(t *testing.T, requests *atomic.Int32) *httptest.Server {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:18377")
+	if err != nil {
+		t.Fatalf("listen on development backend port: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("X-Herdr-Relay-Instance", "install-fixture")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","readiness":"ready","transport":"tailscale-cli","instance":"install-fixture","tailscale_cli_origin":"https://herdr.tailnet.ts.net:8443"}`))
+	}))
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestPublishRejectsForeignResponderAfterBackendLeaseRevoked(t *testing.T) {
+	lease := newTestBackendLease(true)
+	lease.revoke() // the owned process stopped before a foreign listener rebound the backend port
+	var healthRequests atomic.Int32
+	startMatchingDevelopmentBackend(t, &healthRequests)
+	fixture := newFakeCLI(t)
+	manager := newFixtureManager(t, fixture, "foreign responder after backend exit")
+	manager.skipBackendReadiness = false
+	request := fixtureRequest(true)
+	request.BackendLease = lease
+
+	if err := manager.Publish(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("publication with a revoked backend lease = %v, want ownership conflict", err)
+	}
+	if got := healthRequests.Load(); got != 0 {
+		t.Fatalf("revoked lease allowed %d readiness requests to a foreign matching responder", got)
+	}
+	if got := fixture.mutationCalls(); got != 0 {
+		t.Fatalf("revoked lease dispatched %d Serve mutations", got)
+	}
+	if _, err := os.Lstat(filepath.Join(manager.stateRoot, journalName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("revoked lease persisted a publication journal: %v", err)
+	}
+}
+
+func TestPublishHoldsBackendLeaseThroughServeDispatch(t *testing.T) {
+	var healthRequests atomic.Int32
+	startMatchingDevelopmentBackend(t, &healthRequests)
+
+	lease := newTestBackendLease(true)
+	fixture := newFakeCLI(t)
+	fixture.publishHook = func() {
+		if got := lease.held.Load(); got != 1 {
+			t.Errorf("backend lease holders at Serve dispatch = %d, want 1", got)
+		}
+	}
+	manager := newFixtureManager(t, fixture, "lease through Serve dispatch")
+	manager.skipBackendReadiness = false
+	request := fixtureRequest(true)
+	request.BackendLease = lease
+
+	if err := manager.Publish(context.Background(), request); err != nil {
+		t.Fatalf("publish under active backend lease: %v", err)
+	}
+	if got := fixture.mutationCalls(); got != 1 {
+		t.Fatalf("active backend lease dispatched %d Serve mutations, want one", got)
+	}
+	if got := lease.held.Load(); got != 0 {
+		t.Fatalf("backend lease remained held after Publish returned: %d", got)
 	}
 }
 
