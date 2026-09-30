@@ -2190,8 +2190,8 @@ def main() -> int:
             if (refused.returncode != 2 or b"in-process isolated workflow" not in refused.stderr or
                 cli_sentinel.exists()):
                 die("extracted standalone CLI command bypassed the process-local workflow")
-        if cli_state_root.exists() or cli_coordination_root.exists():
-            die("standalone CLI refusal created registration state")
+        if cli_state_root.exists() or any(cli_coordination_root.iterdir()):
+            die("standalone CLI refusal created registration or coordination state")
         case_results[EXPECTED_CASES[11]] = "pass"
         cli_registration_summary["standalone_mutations_refused"] = True
         transitions.append("release-binary:standalone-cli-requires-workflow")
