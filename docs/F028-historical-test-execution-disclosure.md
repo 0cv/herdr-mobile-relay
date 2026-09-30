@@ -1,64 +1,122 @@
-# F028: historical test-execution disclosure
+# F028: historical local test-execution disclosure
 
-F028 records historical execution of these commands in this checkout:
+## Evidence source and scope
+
+This disclosure is updated from the supervising assistant's contemporaneous
+transcript extraction, which pairs worker `bash` tool calls with their tool
+results. The source records are:
+
+- `/Users/christophe.vidal/.pi/workflows/projects/ci-tailscale-native-preflight-ef9f843-cf33cca67bfe/sessions/01a0d255-032a-7126-b0e2-ca6669d3b709/runs/88c7da21-b897-4579-a950-84ab9e72fcb0/orchestration/evidence/local-execution-ledger/README.md` — SHA-256 `616e2e00ae3e73ae41803f41678f0c7ed9c6e7fd29f52355a16210bf5352d84a`.
+- `/Users/christophe.vidal/.pi/workflows/projects/ci-tailscale-native-preflight-ef9f843-cf33cca67bfe/sessions/01a0d255-032a-7126-b0e2-ca6669d3b709/runs/88c7da21-b897-4579-a950-84ab9e72fcb0/orchestration/evidence/local-execution-ledger/events.json` — SHA-256 `632eabec47a60eb65ebf097d4dac5aebc8349a4e9293c7893d448f19110cd2b8`.
+
+The extraction records the exact command, timestamp, run, tool `isError`,
+output tail (up to 1,500 characters), and source transcript files for each
+matching event. The classifier counts test-executing `go test` invocations
+(excluding compile-only forms such as `-c` and `-run '^$'`),
+`python3 tests/test_*.py`, and Makefile `shell-check`/`backend-check`/`check`/
+`test*` targets. It excludes static/compile-only commands. Two `gh run view`
+log reads matched the pattern but are false positives and are not counted.
+
+## Recorded execution inventory
+
+The extraction identifies **98 real local runtime-test tool calls** between
+`2026-09-28T14:30:35.495Z` and `2026-09-30T00:33:17.625Z`. Of these, **61 had
+`isError: false` and 37 had `isError: true`** in the paired tool result. These
+are worker-local executions, not hosted CI runs; setting
+`HERDR_TAILSCALE_LAUNCHER_CI=1` did not make them hosted executions.
+
+| Worker run | Executing Go tests | Python fixture runs | `make shell-check` | `make backend-check` | Total calls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `ee4ad1e9-5bf9-4808-b825-73f52a9da5ff` | 16 | 0 | 0 | 0 | 16 |
+| `71ccf4f1-8e0c-4a27-8553-587c3e020311` | 20 | 31 | 11 | 2 | 64 |
+| `c7d1562b-f032-4931-bb14-236839a90f14` | 13 | 3 | 2 | 0 | 18 |
+| **Total** | **49** | **34** | **13** | **2** | **98** |
+
+The Python fixture calls include repeated `tests/test_dev_tailscale.py` runs
+(with and without `TMPDIR=/tmp`, as well as `/var/tmp` and
+`/private/var/tmp`) and `tests/test_tailscale_external_lifecycle.py`. The
+inventory is broader than the two commands originally named under F028.
+
+Representative exact commands from the records include:
 
 ```text
+go test -race ./internal/tailscalecli
+GOTOOLCHAIN=local GOFLAGS=-mod=readonly go test ./...
+GOTOOLCHAIN=local GOFLAGS=-mod=readonly go test -race -p 1 ./...
 TMPDIR=/tmp HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py
-go test ./internal/deviceauth
+TMPDIR=/var/tmp HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py
+TMPDIR=/private/var/tmp HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py
+TMPDIR=/tmp HERDR_TAILSCALE_LAUNCHER_CI=1 python3 -B tests/test_tailscale_external_lifecycle.py -v
+TMPDIR=/private/var/tmp make shell-check
 ```
 
-The first command sets `HERDR_TAILSCALE_LAUNCHER_CI=1`, a guard intended for a
-hosted-only lifecycle test. This disclosure does not claim that the execution
-was authorized hosted CI, nor that either result is evidence for the current
-revision. The historical outcome of each listed command remains unknown because
-no contemporaneous exit code, stdout/stderr, or test summary was located.
-Attributed worker reports may be recorded as secondary evidence, but are not
-verified outcomes and do not replace missing primary records. Do not infer a
-pass or failure for either original command from later or similarly named runs.
+Some tool calls were compound shell commands; the ledger marks them as one
+runtime-test call and preserves the complete command string and captured output
+tail. It does not count individual subcommands as separate calls.
 
-## Subsequent local activity reported
+## Recorded outcome classes
 
-The preceding worker reported these later local commands or command groups.
-Worker reports are secondary evidence: record an explicitly reported outcome as
-reported, but do not promote it to a verified outcome without contemporaneous
-primary evidence. No complete primary transcript, exact exit code, or
-command-level test summary was preserved for the listed Go test runs or fixture
-run. Exact `TMPDIR` values not stated below were not retained and must not be
-reconstructed by guesswork.
+The tool results show both completed runs and failures. The 37 `isError: true`
+results include Go compilation/test failures, fixture assertions and timeouts,
+Unix-socket path-length errors, and `make shell-check` failures. Captured
+examples include `OSError: AF_UNIX path too long`, a fixture subprocess timeout,
+assertions about fixture state/environment, and macOS `stat` rejecting GNU
+`stat -c` syntax. `isError: false` results include successful Go package
+outputs (`ok`), passing fixture output, and successful full-suite output. For
+example, the recorded `go test ./...` and `go test -race -p 1 ./...` calls in
+run `71ccf4f1-8e0c-4a27-8553-587c3e020311` returned `isError: false` and showed
+package `ok` results, including the black-box and mobile fixture packages.
 
-| Reported invocation | Reported outcome and evidence limits |
-| --- | --- |
-| `TMPDIR=/private/var/tmp HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py` | The preceding worker reported this focused fixture as passing; this is secondary evidence, as preserved in the supplied current-run finding history/reviewer assessments. No contemporaneous stdout/stderr, exit code, or process trace was retained, so the actual result and side effects cannot be independently verified. This was prohibited local execution, not hosted evidence or process compliance. |
-| `go test -count=1 ./internal/tailscalecli ./internal/config ./cmd/herdr-mobile-relay` | Reported as executed locally; command-level exit code and output were not retained. `TMPDIR` was not recorded. These tests execute project code and are not evidence for the exact final SHA. |
-| `go test -race -count=1 ./internal/tailscalecli ./internal/config ./cmd/herdr-mobile-relay` | Reported as executed locally; command-level exit code and output were not retained. `TMPDIR` was not recorded. These tests execute project code and are not evidence for the exact final SHA. |
-| `go test -count=1 ./internal/app` and targeted app cases | Reported as executed locally, but the targeted selectors, exit codes, output, and `TMPDIR` were not retained. Treat every outcome as unverified. |
-| Focused tagged app fixtures | Reported as executed locally, but the exact build/test command, tag set, exit code, output, and `TMPDIR` were not retained. Treat every outcome as unverified. |
-| `make shell-check` with inherited/default `TMPDIR` | Reported failure: the test's Unix-socket path exceeded the platform path limit. The effective `TMPDIR`, exact command transcript, and exit code were not retained. |
-| A later `make shell-check` attempt using a shorter `TMPDIR` | Reported failure: the then-current fixture called GNU `stat -c`, which is incompatible with BSD `stat`. The exact `TMPDIR`, command transcript, and exit code were not retained. The fixture was later changed to emulate GNU and BSD forms; this historical failed check was not rerun. |
+The two F028 command descriptions must not be summarized as simply
+“outcome unknown” when the per-call ledger records results:
 
-Other reported follow-on checks included affected-package `go vet`, shell
-syntax/static checks, and `make production-path-audit`. Their exact commands,
-`TMPDIR` values, and primary outputs were not preserved in this disclosure.
-They do not establish the results of the historical commands above. No result
-from the later `/private/var/tmp` command substitutes for the original `/tmp`
-invocation.
+- For `TMPDIR=/tmp HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py`,
+  the ledger contains repeated calls, not one singular execution. Among its
+  recorded events, calls at `2026-09-28T19:13:07.720Z` and
+  `2026-09-28T19:13:45.747Z` returned tool errors (a subprocess timeout and a
+  fixture assertion, respectively); a later call at `2026-09-28T19:21:52.703Z`
+  returned `isError: false` with passing fixture output. Other repeated
+  invocations and their individual results are in `events.json`; these
+  differing results must not be collapsed into one inferred result.
+- `go test ./internal/deviceauth` appears in three recorded compound Go
+  commands in run `71ccf4f1-8e0c-4a27-8553-587c3e020311` (at
+  `2026-09-29T11:57:17.430Z`, `12:02:40.362Z`, and `12:05:30.825Z`). Each
+  paired result has `isError: false` and an `ok` package line; the first shows
+  `1.503s` and the latter two show `(cached)`. Thus these recorded invocations
+  passed. The ledger does not establish any effects beyond their captured
+  commands and outputs.
 
-## Current handling and evidence boundary
+The later `TMPDIR=/private/var/tmp` focused fixture activity is also present
+as contemporaneous records, not only as an attributed report: the two calls at
+`2026-09-30T00:23:57.539Z` and `00:28:43.498Z` returned `isError: false` and
+show passing fixture output. Earlier `/tmp` fixture calls in the larger set
+include failures as well as successful completions. These are local executions
+and prohibited under the stated worker boundary; their recorded success does
+not make them hosted evidence or process-compliant activity. `make shell-check`
+failures are independently recorded in the ledger; examples include the socket
+path-length failure and the GNU/BSD `stat` incompatibility. Do not replace
+those failures with later outcomes or imply every invocation had the same
+result.
 
-The owner authorized continued technical review after this durable disclosure.
-That authorization is not retroactive test authorization and does not erase or
-close F028. No worker may recreate a hosted-only environment override locally or
-repeat the historical lifecycle commands. Local verification for the current
-remediation is restricted to source inspection, static analysis, build, and
-compile-only checks; actual tests and lifecycle workflows belong to hosted CI
-for the exact final SHA.
+## Reporting and evidence limits
 
-A successful hosted run on a later SHA is revision-specific evidence and cannot
-recover missing historical local stdout, stderr, exit codes, test summaries, or
-side-effect traces. No process-compliance claim should be inferred from this
-disclosure. F028 remains open. Keep verified outcomes distinct from attributed
-secondary reports: the reported `/private/var/tmp` fixture pass is not
-independently verified, while the original `/tmp` Python invocation and
-`go test ./internal/deviceauth` remain unknown. Preserve the separately reported
-`make shell-check` failures; outcomes for other commands remain unknown unless
-an explicit attributed report is recorded.
+Later worker summaries claimed that no local runtime tests or lifecycle scripts
+were run in a continuation. The transcript ledger documents a broader set of
+98 earlier local runtime-test calls. The narrow statement about a particular
+later continuation does not disclose this cumulative activity; no claim of
+full process compliance is warranted.
+
+The ledger proves which matching commands were invoked and what their paired
+tools returned. It is not a complete machine/process audit: only output tails
+are retained in `events.json`, so omitted output, subprocesses, temporary
+files, and other side effects cannot be reconstructed from it. The transcripts
+show no invocation of a real Tailscale CLI by these commands, but fixture
+internals were not independently audited. These results are not hosted
+qualification evidence and do not qualify the final source revision. No
+historical command was rerun to prepare this disclosure.
+
+Continue to use hosted CI for test/lifecycle verification. Preserve this record
+as evidence of prohibited local executions; do not infer permission,
+compliance, a production result, or a current-revision test result from it.
+F028/F010/F013 remain for independent reviewer disposition; this disclosure
+updates the evidence and does not itself close or resolve a finding.

@@ -66,6 +66,14 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 		}
 		return 0, nil
 	}
+	setupConfirmation := ""
+	if action == "setup" {
+		var err error
+		setupConfirmation, err = readDevelopmentSetupConfirmation(stdin, stderr)
+		if err != nil {
+			return developmentSetupConfirmationExitCode(err), err
+		}
+	}
 	workflow, cfg, err := developmentCLIFromEnvironment(ctx, action)
 	if err != nil {
 		return 1, err
@@ -93,7 +101,7 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 	case "unpublish":
 		return unpublishDevelopmentRoute(ctx, workflow, cfg, stdin, stdout, stderr)
 	case "setup", "update":
-		return runDevelopmentForeground(ctx, action, workflow, cfg, stdin, stdout, stderr)
+		return runDevelopmentForeground(ctx, action, workflow, cfg, setupConfirmation, stdout, stderr)
 	default:
 		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
 	}
@@ -158,7 +166,33 @@ func developmentCLIFromEnvironment(ctx context.Context, action string) (*tailsca
 	return workflow, cfg, nil
 }
 
-func runDevelopmentForeground(parent context.Context, action string, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+func developmentSetupConfirmationExitCode(err error) int {
+	if err != nil && strings.Contains(err.Error(), "route-bound confirmation") {
+		return 2
+	}
+	return 1
+}
+
+func readDevelopmentSetupConfirmation(stdin io.Reader, stderr io.Writer) (string, error) {
+	root := os.Getenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT")
+	stateRoot := os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT")
+	coordinationRoot := os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT")
+	if err := tailscalecli.ValidateDevelopmentOperationEnvironment(root, stateRoot, coordinationRoot, true, true); err != nil {
+		return "", err
+	}
+	nodeID := os.Getenv("HERDR_TAILSCALE_CLI_NODE_ID")
+	origin := os.Getenv("HERDR_TAILSCALE_CLI_ORIGIN")
+	confirmation := tailscalecli.PublishRouteConfirmation(nodeID, origin,
+		tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
+	_, _ = fmt.Fprintln(stderr, "This is development enablement, not runtime or phone qualification.")
+	_, _ = fmt.Fprintln(stderr, "The HTTPS route persists after the foreground relay stops.")
+	_, _ = fmt.Fprintln(stderr, "Consent includes the CLI check-to-write race, backend port reuse, no global rollback, and no remote-drain guarantee.")
+	_, _ = fmt.Fprintln(stderr, "The configured node and origin will be checked against read-only CLI preflight before any route mutation.")
+	_, _ = fmt.Fprintf(stderr, "Type exactly on stdin:\n%s\n", confirmation)
+	return readRouteConfirmation(stdin, confirmation)
+}
+
+func runDevelopmentForeground(parent context.Context, action string, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config, setupConfirmation string, stdout, stderr io.Writer) (int, error) {
 	if cfg.PairingSocketPath == "" || !filepath.IsAbs(cfg.PairingSocketPath) {
 		return 1, tailscalecli.ErrWorkflowRequired
 	}
@@ -214,18 +248,13 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 		preflight := workflow.Preflight()
 		confirmation := tailscalecli.PublishRouteConfirmation(preflight.NodeID, preflight.Origin,
 			tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
-		_, _ = fmt.Fprintln(stderr, "This is development enablement, not runtime or phone qualification.")
-		_, _ = fmt.Fprintln(stderr, "The HTTPS route persists after the foreground relay stops.")
-		_, _ = fmt.Fprintln(stderr, "Consent includes the CLI check-to-write race, backend port reuse, no global rollback, and no remote-drain guarantee.")
-		_, _ = fmt.Fprintf(stderr, "Type exactly on stdin:\n%s\n", confirmation)
-		typed, err := readRouteConfirmation(stdin, confirmation)
-		if err != nil {
+		if setupConfirmation != confirmation {
 			stop()
 			_ = waitDevelopmentServer(done)
-			return 2, err
+			return 2, errors.New("route-bound confirmation did not exactly match the selected node, listener and backend")
 		}
 		consent := tailscalecli.Consent{
-			Accepted: true, RouteConfirmation: typed, Scope: "development", NodeID: preflight.NodeID,
+			Accepted: true, RouteConfirmation: setupConfirmation, Scope: "development", NodeID: preflight.NodeID,
 			Origin: preflight.Origin, HTTPSPort: tailscalecli.DevelopmentHTTPSPort,
 			BackendPort: tailscalecli.DevelopmentBackendPort, PersistentRouteAccepted: true,
 			CheckToWriteRaceAccepted: true, PortReuseRiskAccepted: true,

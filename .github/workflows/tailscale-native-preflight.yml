@@ -74,6 +74,13 @@ jobs:
           go test -count=1 ./internal/app -run '^TestCLITailscaleControlStatusFailsClosedOnUnqualifiedRoute$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           go test -count=1 -tags=herdr_tailscale_test ./internal/app -run '^TestTailscaleCLIReadinessArmAndDrift$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'tagged_development_entrypoint_candidate_sha=%s\n' "$GITHUB_SHA" | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          go test -v -count=1 -tags=herdr_tailscale_test,herdr_tailscale_cli_fixture_binary ./cmd/herdr-mobile-relay -run '^TestDevelopmentTailscaleCLICommandEntrypointInventory$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          grep -F -- '--- PASS: TestDevelopmentTailscaleCLICommandEntrypointInventory' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          if grep -F -- '--- SKIP: TestDevelopmentTailscaleCLICommandEntrypointInventory' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"; then
+            echo 'required development CLI command-entrypoint inventory was skipped' >&2
+            exit 1
+          fi
           printf 'tagged_tailscalecli_candidate_sha=%s\n' "$GITHUB_SHA" | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           go test -v -count=1 -tags=herdr_tailscale_test ./internal/tailscalecli 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           grep -F -- '--- PASS: TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"

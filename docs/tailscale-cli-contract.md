@@ -378,21 +378,29 @@ selection or state access.
 | `tailscale-cli activation-check` | No | Production remains disabled; development output points to the profile-checked workflow but grants no server or CLI authority. |
 | `tailscale-cli preflight` and other standalone inspection/manager operations | No | Refuse before executable or state access. |
 | `dev-tailscale-cli preflight` | Read-only only | `PreflightDevelopmentWorkflow` validates the complete private layout, explicit opt-in, exact Darwin/arm64 profile path, and fixed tuple before status/version/Serve inspection; returns no manager and cannot start a server. |
-| `dev-tailscale-cli` setup/update/status/recover/assert-ready/release/unpublish | Yes | `NewDevelopmentWorkflow` validates isolation before CLI preflight and retains the manager only in-process; operations repeat isolation, identity, profile and fixed-tuple checks. |
+| `dev-tailscale-cli setup` | Yes, after consent | Go validates the complete private layout and requires exact typed confirmation against the configured node/origin before CLI contact; read-only preflight then verifies that identity before any route mutation. |
+| `dev-tailscale-cli` update/status/recover/assert-ready/release/unpublish | Yes | `NewDevelopmentWorkflow` validates isolation before CLI preflight and retains the manager only in-process; operations repeat isolation, identity, profile and fixed-tuple checks. |
 | `config.Load` / `serve`, `app.New`, `app.NewOwned` | No | Refuse CLI transport startup without a workflow. `LoadDevelopmentCLI` and `app.NewDevelopmentCLI` require the same bound workflow and exact tuple. |
 | `relay/dev-tailscale-cli.sh` | No direct CLI | May use `resolve-binary` for filesystem selection, then calls only `dev-tailscale-cli preflight` for real-CLI reads; it never calls standalone preflight or a Tailscale executable itself. |
 | Installed CLI service/setup wrappers | No in shipped builds | The production activation check is false; wrappers stop before Tailscale CLI access or relay startup. They are not an alternate development workflow. |
 
-The development workflow validates the exact supplied App Store profile,
-explicit opt-in, production/service coexistence, complete private layout and
-fixed port tuple. This is an accidental-bypass/safety boundary, not proof of
-launcher provenance or a privilege boundary against deliberate same-user
-fabrication. It reserves the backend, starts the app server in-process,
-publishes only after exact stdin consent, then uses the local control API for
-admission and the authorized one-use owner setup link. Status/recovery and
-scoped cleanup use the same workflow boundary and repeat the Go isolation
-checks. The shell launcher supplies isolated build/runtime paths but does not
-create separate relay/manager processes or invoke route mutations itself.
+The development command validates the explicit opt-in, production/service
+separation, complete private layout and fixed port tuple. Setup first requires
+exact typed confirmation bound to the private configuration's node and origin,
+then performs read-only CLI preflight and verifies that identity before any
+route mutation. It retains the manager only in-process, starts the app server,
+and uses the local control API for admission and the authorized one-use owner
+setup link. Status/recovery and scoped cleanup use the same workflow boundary
+and repeat the Go isolation checks. This is an accidental-bypass/safety
+boundary, not proof of launcher provenance or a privilege boundary against
+deliberate same-user fabrication. The shell launcher supplies isolated
+build/runtime paths but does not create separate relay/manager processes or
+invoke route mutations itself.
+
+The hosted command-level inventory is `TestDevelopmentTailscaleCLICommandEntrypointInventory`
+in `cmd/herdr-mobile-relay/dev_tailscale_cli_entrypoint_test.go`; it follows
+this table and covers the shipped `main` dispatcher, refusal cases, and a
+marked synthetic preflight.
 Ordinary config loading and app constructors cannot start CLI-backed service
 mode; `LoadDevelopmentCLI` and `NewDevelopmentCLI` require the in-memory
 workflow handle.
