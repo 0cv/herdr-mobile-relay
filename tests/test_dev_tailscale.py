@@ -174,8 +174,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     receipt.write_bytes(b"synthetic App Store receipt marker")
     app_store_info = app_store_bundle / "Contents" / "Info.plist"
     app_store_info.write_text(
-        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
-        '<key>CFBundleShortVersionString</key><string>1.100.0</string>'
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>\n'
+        '<key>CFBundleShortVersionString</key>\n<string>1.100.0</string>\n'
         '</dict></plist>\n',
         encoding="utf-8",
     )
@@ -210,8 +210,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     if activation_after_menu != activation_before_menu:
         raise AssertionError("unsupported App Store version selection reached the CLI activation fixture")
     app_store_info.write_text(
-        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
-        '<key>CFBundleShortVersionString</key><string>1.102.4</string>'
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>\n'
+        '<key>CFBundleShortVersionString</key>\n<string>1.102.4</string>\n'
         '</dict></plist>\n',
         encoding="utf-8",
     )
