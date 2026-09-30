@@ -72,6 +72,7 @@ tailscale_app_store_version() {
 # identity just as filepath.EvalSymlinks does in the Go resolver.
 MENU_CLI_CANONICAL=""
 MENU_CLI_CANDIDATES=()
+MENU_CLI_CANDIDATE_COUNT=0
 MENU_CLI_UNAVAILABLE_REASON=""
 canonical_menu_cli_candidate() {
     local candidate="$1" link directory base attempt
@@ -102,14 +103,17 @@ append_menu_cli_candidate() {
     local candidate="$1" existing duplicate=0 resolved
     if canonical_menu_cli_candidate "$candidate"; then
         resolved="$MENU_CLI_CANONICAL"
-        for existing in "${MENU_CLI_CANDIDATES[@]}"; do
-            if [ "$existing" = "$resolved" ]; then
-                duplicate=1
-                break
-            fi
-        done
+        if [ "$MENU_CLI_CANDIDATE_COUNT" -gt 0 ]; then
+            for existing in "${MENU_CLI_CANDIDATES[@]}"; do
+                if [ "$existing" = "$resolved" ]; then
+                    duplicate=1
+                    break
+                fi
+            done
+        fi
         if [ "$duplicate" = 0 ]; then
             MENU_CLI_CANDIDATES+=("$resolved")
+            MENU_CLI_CANDIDATE_COUNT=$((MENU_CLI_CANDIDATE_COUNT + 1))
         fi
     fi
     return 0
@@ -119,6 +123,7 @@ resolve_menu_cli_candidate() {
     local goos="$1" selected_override remaining component more
     MENU_CLI_CANONICAL=""
     MENU_CLI_CANDIDATES=()
+    MENU_CLI_CANDIDATE_COUNT=0
     MENU_CLI_UNAVAILABLE_REASON=""
 
     # Match dev-tailscale-cli.sh's override precedence. A nonempty invalid
@@ -137,6 +142,7 @@ resolve_menu_cli_candidate() {
             return 1
         fi
         MENU_CLI_CANDIDATES=("$MENU_CLI_CANONICAL")
+        MENU_CLI_CANDIDATE_COUNT=1
         return 0
     fi
 
@@ -154,7 +160,7 @@ resolve_menu_cli_candidate() {
     if [ "$goos" = Darwin ]; then
         append_menu_cli_candidate /Applications/Tailscale.app/Contents/MacOS/Tailscale
     fi
-    case "${#MENU_CLI_CANDIDATES[@]}" in
+    case "$MENU_CLI_CANDIDATE_COUNT" in
         0)
             MENU_CLI_UNAVAILABLE_REASON="No executable Tailscale CLI candidate was found in absolute PATH entries or the Darwin App Store fallback."
             return 1
