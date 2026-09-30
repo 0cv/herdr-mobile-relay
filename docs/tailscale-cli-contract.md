@@ -92,9 +92,12 @@ preflight identifies the same node and exact listener/mount/backend, and the
 separate cleanup authorization and exact-route consent have been obtained.
 Command qualification must verify both argv forms for each future profile.
 Never call `serve reset`, `set-config`, `set-raw`, `funnel`, `up`, `login`, or a
-privilege change. The workflow handle prevents reconstruction from flags or
-persisted state; it does not make the CLI check-to-write interval atomic against
-external writers.
+privilege change. The standalone command surface cannot request a manager from
+flags or journal data; the supported development entrypoint creates its
+process-local handle only after Go-owned profile/isolation validation. This is
+not protection against a deliberate same-user caller fabricating that complete
+layout. The handle also does not make the CLI check-to-write interval atomic
+against external writers.
 
 ## Private registration and admission contract
 
@@ -102,14 +105,21 @@ The schema-versioned registration journal is operational attribution, not a
 capability. It contains an installation identifier, scope (`production` or
 `development`), node/profile identity, listener and mount, loopback backend,
 consent scope, operation ID, state and acknowledged CLI result. It contains no
-Tailscale authentication token. The only real development-operation capability
-is an unexported manager retained by a process-local `DevelopmentWorkflow`; a
-marker, executable path, command flags, or journal cannot recreate it. Ordinary
-config loading, `serve`, `NewOwned`, and standalone `tailscale-cli` mutation
-commands refuse CLI-backed startup/operations. Create/validate private roots as
-real, non-symlink mode-0700 directories and journal files as mode 0600. Serialize Herdr writers
-for the same user/node with a shared private lock; this does not lock external
-CLI writers or other UIDs. Reserve each loopback backend port durably in that
+Tailscale authentication token. A `DevelopmentWorkflow` holds the manager only
+inside the current Go process, after the Go constructor rechecks explicit opt-in,
+the exact Darwin/arm64 candidate, fixed ports, private roots, the complete
+isolated XDG/release/web/runtime layout, the private relay environment and
+marker, the current user service's environment file, production-root separation,
+and the local Herdr socket binding. The manager repeats the layout checks before
+real operations. These checks do not prove that a shell launcher was used, and
+are not a privilege boundary against a deliberately fabricating process running
+as the same user: that user can construct a matching private layout and
+configuration. Paths, marker contents, and journal data alone do not grant
+operations. Ordinary config loading, `serve`, `NewOwned`, and standalone
+`tailscale-cli` mutation commands still refuse CLI-backed startup/operations.
+Create/validate private roots as real, non-symlink mode-0700 directories and
+journal files as mode 0600. Serialize Herdr writers for the same user/node with
+a shared private lock; this does not lock external CLI writers or other UIDs. Reserve each loopback backend port durably in that
 same shared root before starting a new relay listener; parse backend URLs so
 127/8, `localhost` names and IPv6 loopback aliases conflict by effective port,
 not just exact URL spelling. A `publish-pending` reservation is exclusive and
@@ -236,77 +246,127 @@ runtime qualification or production authorization:
 4. **No remote-drain guarantee.** A successful scoped removal and readback does
    not prove that existing connections have drained or all remote traffic ceased.
 
-### Development runbook
+### Supervised owner development, phone smoke, and cleanup runbook
 
-This is an operational reference, not authorization. The current source/CI
-phase does not permit any live Tailscale CLI operation, route publication or
-removal, phone enrollment, service activation, or production mutation; workers
-must not invoke this runbook. Any later live development-route exercise requires
-its own explicit owner authorization naming the exact action, node/account and
-time window, plus completion of the independent review gates. Do not infer that
-a source change, hosted fixture, or generic development-path authorization
-permits a live mutation. Do not substitute another node, account, profile,
-action or scope. If separately authorized, the only candidate is the owner's
-Mac App Store Tailscale 1.102.4 profile on Darwin/arm64, in isolated foreground
-development, with HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377
-(plugin listener 18378). That authorization does not include unpublishing the
-route. Production, installed-service activation/migration, physical-phone
-enrollment and release qualification are outside this runbook.
+This runbook is for the already-authorized owner-operated development exercise
+on one Darwin/arm64 Mac, the exact supplied App Store Tailscale 1.102.4 profile,
+and the owner's designated phone. It covers one scoped persistent route and a
+phone enrollment/E2EE smoke only. It does not enable production, install or
+activate a service, migrate production, qualify other devices/platforms, or
+change any other Serve route. The implementation worker does not run these live
+steps; the supervising assistant executes them only after exact-final-SHA
+ordinary/native/extracted hosted checks and configured independent reviews are
+complete. Do not substitute a node, account, profile, device, route, or port.
 
-0. Confirm the reviewed checkout/revision and launcher are the ones intended
-   for this run. Confirm the exact candidate SHA has ordinary, native Darwin/Linux
-   and extracted-release hosted results, and independent review gates are
-   complete. Confirm Darwin/arm64 and the exact App Store 1.102.4 profile. Do not
-   run a direct CLI mutation, select another profile/node, or override the fixed
-   development ports.
-1. Start only the isolated foreground development launcher. Its read-only
-   preflight must establish the exact client/daemon identity, version, current
-   node and canonical origin. Stop for an unrecognized/inconsistent profile or
-   architecture, wrong account/node, permission error, logged-out daemon or
-   ambiguity. Do not retry to overcome a refusal.
-2. Before publication, run the selected executable with the read-only argv
-   `serve status --json` and capture a sanitized summary of the complete Serve
-   configuration, including unrelated routes. Keep raw account/status output
-   private and record only the minimum needed to compare before/after. The
-   manager refuses if listener 8443 or backend 18377 is occupied, conflicting,
-   unrecorded, or cannot be parsed completely. Do not free a port, adopt a route,
-   or remove another mapping.
-3. Review the canonical node origin and all four limitations displayed by the
-   launcher. Type the exact node/origin/8443/127.0.0.1:18377 confirmation on
-   stdin. No environment variable can consent; mismatch or EOF cancels before
-   route mutation.
-4. Run only foreground development setup. Verify readback is exactly the
-   selected HTTPS route to 127.0.0.1:18377 and compare the sanitized post-change
-   Serve summary. Confirm unrelated routes remain unchanged. Do not install or
-   start a service, enroll a phone, or print/share a setup link.
-5. Stop the foreground relay and retain the persistent route/journal by default.
-   Do not unpublish under this authorization. Route removal requires a separate
-   explicit authorization before starting cleanup. Then re-inspect the complete
-   Serve document, confirm the journal's exact registered node/listener/backend,
-   stop the relay and prove its backend is free. Use only the scoped
-   `serve --bg --https=8443 --set-path=/ off` operation through the Go workflow;
-   read back the complete document and compare unrelated routes byte-for-byte
-   where the supported schema permits. Never use `serve reset` or remove an
-   unexpected/adjacent route. A removal acknowledgement/readback is not proof
-   that remote connections drained. On timeout, mismatch, unknown fields, CLI
-   error after dispatch or uncertainty, retain evidence and stop without retry.
-6. Record only a development-only outcome with secrets and raw identity data
-   redacted. Physical-phone qualification remains separate; production stays
-   disabled until qualification is recorded and separately enabled.
+Use a private evidence directory outside the checkout with `umask 077`. Do not
+save raw Tailscale account/status output, pairing links, QR payloads, tokens, or
+phone screenshots in Git, CI artifacts, chat, or logs. Record only a redacted
+node/profile label, release/instance identity, route tuple, readiness results,
+and before/after route comparison. Stop and retain the journal and recovery
+state whenever identity, readback, readiness, or a command result is uncertain.
 
-This runbook is not a deployment instruction. PWA enrollment, sleep/wake,
-installed-service migration and release approval are distinct future phases.
+1. **Read-only preflight and coexistence snapshot.** Confirm the current
+   checkout's exact SHA matches the hosted ordinary, native Darwin/Linux, and
+   extracted-release results and independent review is complete. Verify the host
+   is Darwin/arm64 and the selected binary is the exact App Store 1.102.4
+   candidate. Check the Herdr executable and `HERDR_SOCKET_PATH` identify the
+   owner's active Herdr Unix socket (`test -x "$HERDR_BIN"` and
+   `test -S "$HERDR_SOCKET_PATH"`); do not replace HOME with development state.
+   Read installed service status and hash/record only the metadata needed to
+   prove its configuration is unchanged; do not start, stop, edit, or migrate it.
+   Run the read-only CLI sequence `status --json`, `version --json --daemon`,
+   and `serve status --json` with the selected absolute executable. Keep raw
+   status private. Save a private, complete pre-publication Serve snapshot and a
+   sanitized summary of every existing route. Stop for a logged-out daemon,
+   permission failure, profile/version mismatch, wrong node/account, malformed
+   or unknown schema, pending/uncertain journal, or any ambiguity. Do not retry
+   around refusal or clear an existing listener.
+2. **Development preflight and scoped publication.** Start only
+   `make dev-tailscale-cli` interactively. Its Go validator must independently
+   check the explicit opt-in, non-overlapping production/service roots, private
+   isolated roots and config, release/web identity, local Herdr socket, and
+   fixed tuple before CLI inspection or mutation. The only allowed route is
+   HTTPS 8443 -> `http://127.0.0.1:18377`, with the plugin listener on
+   `127.0.0.1:18378`. Review the complete Serve snapshot and the four displayed
+   residual risks. Enter only the exact node/origin/HTTPS/backend phrase shown
+   by Go on stdin. There is no environment-variable consent. Any occupied port,
+   conflicting/unrecorded mapping, identity drift, or incomplete parse cancels
+   without freeing ports, adopting routes, or touching production.
+3. **Readback, HTTPS, bundle, and local readiness.** After Go reports setup
+   ready, read `serve status --json` again and compare the complete supported
+   configuration: exactly the intended HTTPS 8443 `/` proxy to
+   `http://127.0.0.1:18377` may have been added; every unrelated route must match
+   the before snapshot. Confirm the plugin UDP listener is 18378 and the local
+   backend is bound only on `127.0.0.1:18377`. Check
+   `http://127.0.0.1:18377/readyz` and `/healthz` for ready status, the expected
+   transport, instance, control-run ID, relay version/revision, and bundle
+   version/revision/hash. Without `-k`, redirects, or a custom trust bypass,
+   request `https://<canonical-node>:8443/healthz`; require the trusted system
+   TLS/hostname check, matching instance header/body, ready status, and identical
+   release/bundle identity. Verify the configured `HERDR_PHONE_APP_URL` serves
+   the exact release's `version.json`, descriptor, and assets. The Go admission
+   path also rechecks trusted HTTPS and the complete phone-app bundle before the
+   one-use invitation is armed. If any value differs, do not scan the link or
+   attempt a repair.
+4. **Owner phone enrollment and E2EE smoke.** Use only the designated owner
+   phone, signed into the intended tailnet with its normal Tailscale connectivity.
+   Confirm the setup link's HTTPS app origin is the reviewed phone app and the
+   relay origin is the verified node route. The Go foreground process prints the
+   one-use QR/link only after route, HTTPS, bundle, and admission checks pass.
+   Treat it as a secret: show it only to the owner and do not copy it into notes
+   or evidence. Scan/open it in the installed Herdr app, complete the one-use
+   bootstrap enrollment as the owner's intended controller device, and confirm
+   that the phone reaches the relay and completes the normal E2EE enrollment /
+   authenticated WebSocket handshake. Perform only a harmless read-only agent
+   inventory check; do not send prompts, control an agent, upload data, invite a
+   second phone, reset credentials, or characterize this smoke as a platform
+   qualification. Disconnect/reconnect once and confirm the enrolled device
+   credential resumes without re-pairing. If the app reports a trust, identity,
+   E2EE, or readiness problem, stop; do not print a second invitation or clear
+   existing device state.
+5. **Scoped cleanup and before/after comparison.** End the phone session, stop
+   the foreground relay with Ctrl-C, and prove pairing socket removal and that
+   backend TCP 18377 is free (`lsof -nP -iTCP:18377 -sTCP:LISTEN` returns no
+   listener). Capture a new complete private `serve status --json` snapshot and
+   verify the only eligible removal is the journaled node's exact HTTPS 8443
+   path `/` -> `127.0.0.1:18377`; unrelated mappings must still match the
+   pre-publication snapshot. Run
+   `HERDR_DEV_TAILSCALE_CLI_ENABLE=1 relay/dev-tailscale-cli.sh unpublish` and
+   enter only its exact typed node/origin/port/backend confirmation. Go performs
+   fresh identity/schema/route checks and issues only the scoped `serve ... off`
+   operation. Read back the complete Serve configuration and compare: the exact
+   development route is absent, every unrelated route is unchanged, and
+   production service/configuration hashes and liveness match the pre-run
+   snapshot. Keep the `removed` journal and private development state; do not
+   delete roots to make status appear clean. Do not use `serve reset`, stop a
+   production service, or remove a different route.
+6. **Uncertainty and report.** If a CLI write times out, acknowledgement/readback
+   is lost, the complete Serve state changes unexpectedly, the route or node
+   mismatches, a socket/port is occupied, or any step is ambiguous, stop. Retain
+   the exact journal, reservation, and private evidence; run only read-only
+   status/recovery to inspect. Never retry a possibly dispatched mutation,
+   manually edit/erase recovery state, or remove another route. Report the
+   development-only phone-smoke outcome with secrets and raw identity data
+   redacted. This does not qualify production, installed-service behavior, other
+   phones, sleep/wake, migration, or release support.
+
+This is not a production deployment or migration instruction. Production and
+installed-service activation remain compile-time disabled.
 
 ## Source entrypoints and current gate
 
 The standalone `tailscale-cli` command is limited to read-only diagnostics and a
 local transport-switch check; reserve, publish, recovery, and unpublish calls
 refuse unless made through `dev-tailscale-cli`. The Go-owned foreground workflow
-constructs a process-local `DevelopmentWorkflow`, validates the exact supplied
-App Store profile, private roots and authorized port tuple, reserves the backend,
-starts the app server in-process, publishes only after exact stdin consent, then
-uses the local control API for admission. Status/recovery and scoped cleanup use
-the same workflow boundary. The shell launcher supplies isolated build/runtime
+constructs a process-local `DevelopmentWorkflow` only after Go validates the
+exact supplied App Store profile, explicit opt-in, production/service
+coexistence, complete private layout and fixed port tuple. This is an accidental-
+bypass/safety boundary, not proof of launcher provenance or a privilege boundary
+against deliberate same-user fabrication. It reserves the backend, starts the
+app server in-process, publishes only after exact stdin consent, then uses the
+local control API for admission and the authorized one-use owner setup link.
+Status/recovery and scoped cleanup use the same workflow boundary and repeat the
+Go isolation checks. The shell launcher supplies isolated build/runtime
 paths but no longer creates separate relay/manager processes or invokes route
 mutations itself. Ordinary config loading and app constructors cannot start
 CLI-backed service mode; `LoadDevelopmentCLI` and `NewDevelopmentCLI` require
@@ -315,11 +375,13 @@ the in-memory workflow handle.
 The foreground workspace uses `.dev-tailscale-cli/` with separate configuration,
 release, cache, runtime, and registration roots. The supplied profile fixes
 HTTPS Serve 8443 -> loopback relay backend 18377 and plugin listener 18378;
-overrides are refused by the launcher, Go config, workflow and manager operation
-boundaries. The handle binds the private development root and exact
-`registration` child to the coordination root selected for this process. A
-persisted marker and the binary's location are bookkeeping only, never
-authorization. The launcher stages each complete binary/web pair in a versioned
+overrides are refused by the Go environment validator, config, workflow, and
+manager operation boundaries. The manager revalidates the private directories,
+relay environment, marker binding, current release/web layout, installed-service
+environment, production-root non-overlap, and shared coordination root before
+real operations. A marker or binary path is not authorization. A determined
+same-user process can fabricate this complete environment; that residual is
+documented and is not presented as an OS privilege boundary. The launcher stages each complete binary/web pair in a versioned
 release directory and atomically swaps a single `current` symlink, retaining the
 prior coherent release if staging or cutover fails.
 

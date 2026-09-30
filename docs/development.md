@@ -42,10 +42,14 @@ an enrolled port. CLI-backed development uses the same separate port contract, w
 `relay/.dev-tailscale-cli/` and an independently consented persistent route.
 The supported candidate is only the exact App Store macOS/arm64 1.102.4
 profile; its status reports development enablement separately from runtime
-qualification. Real CLI manager commands also require the launcher-marked private
-development root with the exact registration child and recorded coordination
-root; arbitrary caller-supplied roots are refused. The
-persistent route survives stop and Ctrl-C; explicit unpublish is separate. After opt-in, executable `tailscale` and `herdr` binaries
+qualification. Before CLI preflight or mutation, the Go entrypoint independently
+checks explicit opt-in, private root ownership/modes, exact registration and
+coordination bindings, isolated XDG/release/web/runtime paths, the relay
+configuration, installed-service environment and production-root separation,
+and the local Herdr socket. Manager operations repeat these checks. This is not
+proof of launcher provenance or a privilege boundary against a deliberately
+fabricating same-user process. The persistent route survives stop and Ctrl-C;
+scoped unpublish has its own exact typed confirmation. After opt-in, executable `tailscale` and `herdr` binaries
 are located on `PATH` without running them. The Herdr socket is selected from
 `HERDR_SOCKET_PATH` or the same `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`
 default used by the relay and event hook, before development HOME/XDG isolation

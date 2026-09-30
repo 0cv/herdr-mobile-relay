@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,10 +13,37 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
+
+func TestPrintDevelopmentSetupLinkUsesVerifiedOriginsAndSecretFragment(t *testing.T) {
+	cfg := &config.Config{
+		Token:              "0123456789abcdef0123456789abcdef",
+		PhoneAppOrigin:     "https://app.example.test",
+		TailscaleCLIOrigin: "https://relay.tailnet.ts.net:8443",
+	}
+	var output bytes.Buffer
+	if err := printDevelopmentSetupLink(cfg, &output); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg.PhoneAppOrigin + "/#" + setuphelper.SetupFragment(cfg.Token, strings.SplitN(hostNameForTest(t), ".", 2)[0], "wss://relay.tailnet.ts.net:8443/ws")
+	if !strings.Contains(output.String(), want) || !strings.Contains(output.String(), "secret; do not share or log") {
+		t.Fatalf("owner setup link output does not include the expected secret fragment: %q", output.String())
+	}
+}
+
+func hostNameForTest(t *testing.T) string {
+	t.Helper()
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return "relay"
+	}
+	return host
+}
 
 func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
 	root := t.TempDir()

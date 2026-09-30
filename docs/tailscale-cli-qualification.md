@@ -103,16 +103,23 @@ credential, invitation or QR data appears. Required automated cases:
   lifecycle, explicit scoped cleanup, and route-preserving Ctrl-C. Only the exact
   supplied App Store 1.102.4 metadata on Darwin/arm64 enables the real workflow;
   Linux, Darwin/amd64, MacSys, other versions and unrecognized profiles refuse
-  before Serve mutation. A nonserializable `DevelopmentWorkflow` retains the
-  manager; marker files, executable paths, command-line arguments and journal
-  contents do not authorize operations. The manager rechecks the fixed HTTPS
-  8443/backend 18377 tuple, while config/app construction enforces plugin 18378.
-  `serve`, ordinary config loading and standalone `tailscale-cli` mutation
-  commands refuse CLI-backed startup/operations. Setup displays the selected
-  node/origin/ports and requires exact route-bound stdin consent in the Go-owned
-  foreground process. No environment variable can supply consent. This path does
-  not claim live-runtime or phone qualification; it is not an installed service
-  or production migration.
+  before Serve mutation. An in-process `DevelopmentWorkflow` retains the
+  manager after Go validation; it is not an OS privilege boundary. The Go
+  constructor validates explicit opt-in, the exact profile,
+  private isolated config/cache/data/release/runtime/registration roots, relay
+  environment/marker bindings, production and installed-service separation,
+  local Herdr socket identity, and the fixed tuple before CLI preflight; the
+  manager repeats those checks before operations. This is a safety boundary for
+  ordinary bypasses, not launcher provenance or a privilege boundary against
+  deliberate fabrication by the same user. `serve`, ordinary config loading and
+  standalone `tailscale-cli` mutation commands refuse CLI-backed
+  startup/operations. Setup displays the selected node/origin/ports and
+  requires exact route-bound stdin consent in the Go-owned foreground process.
+  No environment variable can supply consent. The designated owner's phone
+  enrollment/E2EE smoke and exact-route cleanup are documented in the
+  [supervised runbook](tailscale-cli-contract.md#supervised-owner-development-phone-smoke-and-cleanup-runbook);
+  this remains development-only and does not qualify other phones, runtime
+  support, services, or production.
 - **Packaging and unchanged paths:** exact release archive uses no end-user Go,
   Bun or Python; existing direct-session and BYO regression suites stay intact.
   Hosted fixtures must exercise the single-process `dev-tailscale-cli` dispatch
@@ -122,16 +129,18 @@ credential, invitation or QR data appears. Required automated cases:
   for the exact final SHA; earlier green revisions do not apply to later code.
   Acceptance evidence must identify the exact SHA for every hosted result.
 
-## Phone testing and qualification (separate future phase)
+## Owner-phone development smoke and broader qualification
 
-The development-only P6 runbook below is not a phone test: do not open or share a
-setup link, scan a QR code, enroll a physical device, or characterize phone
-compatibility under this authorization. A physical-phone phase requires its own
-explicit owner authorization and reviewed plan naming the exact device, OS, app
-build/account, user-visible actions, expected E2EE/admission outcomes, cleanup,
-and evidence-redaction procedure. Do not infer phone qualification from a
-profile preflight, server health, a browser fixture, or a successful development
-route. Production/installed-service enablement remains a separate later change.
+The supervised development runbook includes one owner-authorized enrollment and
+E2EE smoke on the designated owner phone, followed by exact-route cleanup and a
+complete before/after Serve comparison. The source/CI worker does not execute
+that live runbook; the supervising assistant does so only after exact-final-SHA
+hosted checks and independent review. Treat the phone journey as a narrow
+owner-development smoke, not a compatibility matrix, runtime qualification,
+release qualification, or production authorization. Do not infer qualification
+from a profile preflight, server health, browser fixture, successful route, or one
+phone. Production and installed-service enablement remain disabled pending the
+separate qualification record and production enablement change.
 
 ## Service identity, recovery and monitoring
 

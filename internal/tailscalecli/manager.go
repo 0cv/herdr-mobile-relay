@@ -158,7 +158,9 @@ type Manager struct {
 	developmentHTTPSPort   int
 	developmentBackendPort int
 	developmentPluginPort  int
+	developmentIsolation   *developmentIsolation
 	client                 *Client
+	fixtureDevelopment     bool
 	fixtureMutations       bool
 	skipBackendReadiness   bool
 }
@@ -262,6 +264,9 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		return err
 	}
+	if err := m.validateDevelopmentIsolation(true, true); err != nil {
+		return err
+	}
 	reservation := backendPortReservation{
 		Schema: 1, InstallationID: installationID, Scope: scope, NodeID: nodeID,
 		HTTPSPort: httpsPort, BackendPort: backendPort, Origin: origin, ReservationID: reservationID,
@@ -332,6 +337,9 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 	}
 	if !serviceStopped || !validReservationID(reservationID) {
 		return ErrConflict
+	}
+	if err := m.validateDevelopmentIsolation(true, false); err != nil {
+		return err
 	}
 	reservation := backendPortReservation{
 		Schema: 1, InstallationID: installationID, Scope: scope, NodeID: nodeID,
@@ -405,6 +413,9 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 		return m.publishNotDispatched(err)
 	}
 	if err := m.requireDevelopmentTuple(request.Scope, request.HTTPSPort, request.BackendPort); err != nil {
+		return m.publishNotDispatched(err)
+	}
+	if err := m.validateDevelopmentIsolation(false, true); err != nil {
 		return m.publishNotDispatched(err)
 	}
 	if !validReservationID(request.ReservationID) {
@@ -829,6 +840,9 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		return err
 	}
+	if err := m.validateDevelopmentIsolation(true, false); err != nil {
+		return err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -949,6 +963,9 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 		return ErrUncertain
 	}
 	if err := m.requireDevelopmentTuple(record.Scope, record.HTTPSPort, record.BackendPort); err != nil {
+		return err
+	}
+	if err := m.validateDevelopmentIsolation(true, false); err != nil {
 		return err
 	}
 	origin, err := tailscale.Origin(record.DNSName, record.HTTPSPort)
@@ -1082,11 +1099,29 @@ func (m *Manager) requireDevelopmentTuple(scope string, httpsPort, backendPort i
 }
 
 func (m *Manager) requireDevelopmentScope(scope string) error {
-	if (scope == "development" && (m.developmentRoot != "" || m.fixtureMutations)) ||
-		(scope == "production" && m.fixtureMutations) {
+	if m.fixtureMutations {
 		return nil
 	}
-	return fmt.Errorf("%w: real CLI-backed operations are limited to isolated development scope; production activation is disabled", ErrUnsupported)
+	if scope != "development" || m.developmentRoot == "" {
+		return fmt.Errorf("%w: real CLI-backed operations are limited to isolated development scope; production activation is disabled", ErrUnsupported)
+	}
+	if m.fixtureDevelopment {
+		return nil
+	}
+	return m.validateDevelopmentIsolation(false, false)
+}
+
+func (m *Manager) validateDevelopmentIsolation(requireStopped, requireHerdrSocket bool) error {
+	if m.fixtureMutations || m.fixtureDevelopment {
+		return nil
+	}
+	if m.developmentIsolation == nil {
+		return ErrWorkflowRequired
+	}
+	if err := m.developmentIsolation.validate(requireStopped, requireHerdrSocket); err != nil {
+		return fmt.Errorf("development isolation changed; refusing CLI operation: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) requireProfileForScope(inspection Inspection, scope string) error {

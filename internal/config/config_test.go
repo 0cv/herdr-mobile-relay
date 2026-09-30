@@ -155,6 +155,16 @@ func TestLoadAllowedOrigins(t *testing.T) {
 	}
 }
 
+func TestDevelopmentCLIRuntimeRootIsIsolatedFromRegistration(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), "relay.env")
+	t.Setenv("HERDR_RELAY_ENV", envPath)
+	t.Setenv("HERDR_RELAY_TRANSPORT", TransportTailscaleCLI)
+	t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "development")
+	if got, want := resolveRuntimeDir(filepath.Join(t.TempDir(), "config")), filepath.Join(filepath.Dir(envPath), "runtime"); got != want {
+		t.Fatalf("development CLI runtime root = %q, want %q", got, want)
+	}
+}
+
 func TestLoadIsolatesAllXDGPaths(t *testing.T) {
 	isolateLoadEnvironment(t)
 	root := t.TempDir()

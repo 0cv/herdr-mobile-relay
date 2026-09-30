@@ -513,6 +513,10 @@ func safeRunID(value string) bool {
 
 func resolveRuntimeDir(configHome string) string {
 	if env := os.Getenv("HERDR_RELAY_ENV"); env != "" {
+		if os.Getenv("HERDR_RELAY_TRANSPORT") == TransportTailscaleCLI &&
+			os.Getenv("HERDR_TAILSCALE_CLI_SCOPE") == "development" {
+			return filepath.Join(filepath.Dir(env), "runtime")
+		}
 		return filepath.Dir(env)
 	}
 	if dir := os.Getenv("HERDR_PLUGIN_CONFIG_DIR"); dir != "" {

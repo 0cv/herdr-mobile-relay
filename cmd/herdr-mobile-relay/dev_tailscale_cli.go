@@ -10,16 +10,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	osSignal "os/signal"
 	"path/filepath"
-	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/app"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
+	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
@@ -42,10 +45,18 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 	} else if len(args) != 0 {
 		return 2, errors.New("dev-tailscale-cli action accepts no extra arguments")
 	}
+	if action == "stop" {
+		_, err := fmt.Fprintln(stdout, "This relay is foreground-only. Send Ctrl-C; the persistent route is retained.")
+		return status(err)
+	}
+	if action != "status" && action != "recover" && action != "assert-ready" &&
+		action != "release-reservation" && action != "unpublish" && action != "setup" && action != "update" {
+		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	workflow, cfg, err := developmentCLIFromEnvironment(ctx)
+	workflow, cfg, err := developmentCLIFromEnvironment(ctx, action)
 	if err != nil {
 		return 1, err
 	}
@@ -73,15 +84,12 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 		return unpublishDevelopmentRoute(ctx, workflow, cfg, stdin, stdout, stderr)
 	case "setup", "update":
 		return runDevelopmentForeground(ctx, action, workflow, cfg, stdin, stdout, stderr)
-	case "stop":
-		_, err := fmt.Fprintln(stdout, "This relay is foreground-only. Send Ctrl-C; the persistent route is retained.")
-		return status(err)
 	default:
 		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
 	}
 }
 
-func developmentCLIFromEnvironment(ctx context.Context) (*tailscalecli.DevelopmentWorkflow, *config.Config, error) {
+func developmentCLIFromEnvironment(ctx context.Context, action string) (*tailscalecli.DevelopmentWorkflow, *config.Config, error) {
 	for _, name := range []string{
 		"HERDR_DEV_TAILSCALE_CLI_PORT",
 		"HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT",
@@ -94,16 +102,14 @@ func developmentCLIFromEnvironment(ctx context.Context) (*tailscalecli.Developme
 	root := os.Getenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT")
 	stateRoot := os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT")
 	coordinationRoot := os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT")
+	requireStopped := action == "setup" || action == "update" || action == "unpublish" || action == "release-reservation"
+	requireHerdrSocket := action == "setup" || action == "update"
+	if err := tailscalecli.ValidateDevelopmentOperationEnvironment(root, stateRoot, coordinationRoot, requireStopped, requireHerdrSocket); err != nil {
+		return nil, nil, err
+	}
 	binary := os.Getenv("HERDR_TAILSCALE_CLI_BIN")
 	if binary == "" {
-		selected, err := tailscalecli.ResolveBinary(os.Getenv("HERDR_DEV_TAILSCALE_CLI_BIN"), os.Getenv("PATH"), runtime.GOOS)
-		if err != nil {
-			return nil, nil, err
-		}
-		binary = selected
-		if err := os.Setenv("HERDR_TAILSCALE_CLI_BIN", binary); err != nil {
-			return nil, nil, err
-		}
+		return nil, nil, tailscalecli.ErrProfileUnavailable
 	}
 	workflow, report, err := tailscalecli.NewDevelopmentWorkflow(ctx, root, stateRoot, coordinationRoot, binary)
 	if err != nil {
@@ -232,12 +238,59 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 			}
 			return 1, err
 		}
+		if err := printDevelopmentSetupLink(cfg, stdout); err != nil {
+			stop()
+			_ = waitDevelopmentServer(done)
+			return 1, err
+		}
 	}
 	_, _ = fmt.Fprintln(stdout, "Development route is ready. Ctrl-C stops only this foreground relay; the route and journal remain configured.")
 	if err := <-done; err != nil && ctx.Err() == nil {
 		return 1, err
 	}
 	return 0, nil
+}
+
+func printDevelopmentSetupLink(cfg *config.Config, stdout io.Writer) error {
+	if cfg == nil || cfg.Token == "" || cfg.PhoneAppOrigin == "" || cfg.TailscaleCLIOrigin == "" {
+		return errors.New("development phone setup identity is incomplete")
+	}
+	token, err := hex.DecodeString(cfg.Token)
+	if err != nil || len(token) != 16 {
+		return errors.New("development phone setup token is invalid")
+	}
+	phoneOrigin, err := setuphelper.NormalizeExternalHTTPSOrigin(cfg.PhoneAppOrigin)
+	if err != nil || phoneOrigin != cfg.PhoneAppOrigin {
+		return errors.New("development phone app origin is not canonical HTTPS")
+	}
+	relayOrigin, err := setuphelper.NormalizeExternalHTTPSOrigin(cfg.TailscaleCLIOrigin)
+	if err != nil || relayOrigin != cfg.TailscaleCLIOrigin {
+		return errors.New("development relay origin is not canonical HTTPS")
+	}
+	relayURL, err := url.Parse(relayOrigin)
+	if err != nil || relayURL.Port() != strconv.Itoa(tailscalecli.DevelopmentHTTPSPort) {
+		return errors.New("development relay origin does not use HTTPS 8443")
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "relay"
+	}
+	label := strings.SplitN(host, ".", 2)[0]
+	fragment := setuphelper.SetupFragment(cfg.Token, label, "wss://"+strings.TrimPrefix(relayOrigin, "https://")+"/ws")
+	setupURL := phoneOrigin + "/#" + fragment
+	if qr, qrErr := setuphelper.TerminalQR(setupURL, 80); qrErr == nil {
+		if _, err := fmt.Fprintln(stdout, "Scan this one-use, secret setup QR with the authorized owner phone:"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(stdout, qr); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(stdout, "Owner phone setup link (secret; do not share or log):"); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, setupURL)
+	return err
 }
 
 func waitDevelopmentBackend(ctx context.Context, cfg *config.Config) error {

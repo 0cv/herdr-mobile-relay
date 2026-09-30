@@ -5,9 +5,10 @@ import (
 	"path/filepath"
 )
 
-// DevelopmentWorkflow is the process-local capability for the isolated
-// foreground CLI-backed development path. Its state is intentionally private
-// and cannot be reconstructed from persisted configuration or command flags.
+// DevelopmentWorkflow is the in-process operation handle for the foreground
+// CLI-backed development path. A caller can request one only after the Go
+// profile and isolation checks pass; this is not a privilege boundary against a
+// deliberately fabricating process running as the same user.
 type DevelopmentWorkflow struct {
 	manager   *Manager
 	preflight PreflightReport
@@ -24,8 +25,14 @@ func (w *DevelopmentWorkflow) Preflight() PreflightReport {
 // server to the same roots and CLI selected by this workflow and rejects any
 // port tuple other than the profile's authorized values.
 func (w *DevelopmentWorkflow) ValidateRuntimeBinding(root, stateRoot, coordinationRoot, binary, scope, installationID, origin string, httpsPort, backendPort, pluginPort int) error {
-	if w == nil || w.manager == nil {
+	if w == nil || w.manager == nil ||
+		(!w.manager.fixtureMutations && w.manager.developmentIsolation == nil) {
 		return ErrWorkflowRequired
+	}
+	if w.manager.developmentIsolation != nil {
+		if err := w.manager.developmentIsolation.validate(false, false); err != nil {
+			return err
+		}
 	}
 	if filepath.Clean(root) != w.manager.developmentRoot ||
 		filepath.Clean(stateRoot) != w.manager.stateRoot ||

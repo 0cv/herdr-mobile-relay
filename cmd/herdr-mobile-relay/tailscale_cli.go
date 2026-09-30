@@ -17,8 +17,9 @@ import (
 )
 
 // tailscale-cli retains read-only diagnostics and the local-only transport
-// switch check. All real CLI Serve operations require the process-local
-// dev-tailscale-cli workflow handle and cannot be reconstructed from flags.
+// switch check. All real CLI Serve operations use the process-local
+// dev-tailscale-cli workflow after Go-owned profile/isolation validation; this
+// does not claim same-user anti-fabrication or shell-launcher provenance.
 func runTailscaleCLI(args []string, stdout, stderr io.Writer) (int, error) {
 	return runTailscaleCLIWithInput(args, os.Stdin, stdout, stderr)
 }

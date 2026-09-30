@@ -39,7 +39,7 @@ func TestDevelopmentWorkflowRejectsPortEnvironmentOverridesBeforePreflight(t *te
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(name, "18377")
-			workflow, cfg, err := developmentCLIFromEnvironment(context.Background())
+			workflow, cfg, err := developmentCLIFromEnvironment(context.Background(), "setup")
 			if err == nil || !strings.Contains(err.Error(), name) || workflow != nil || cfg != nil {
 				t.Fatalf("port override reached workflow construction: workflow=%v config=%v err=%v", workflow, cfg, err)
 			}
