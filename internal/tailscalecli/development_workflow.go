@@ -82,7 +82,7 @@ func (w *DevelopmentWorkflow) Recover(ctx context.Context, installationID, origi
 }
 
 func (w *DevelopmentWorkflow) Publish(ctx context.Context, request PublishRequest) error {
-	if w == nil || w.manager == nil || request.Scope != "development" ||
+	if w == nil || w.manager == nil || request.Scope != "development" || request.BackendBound == nil ||
 		request.ExpectedNodeID != w.preflight.NodeID || request.Origin != w.preflight.Origin ||
 		request.HTTPSPort != DevelopmentHTTPSPort || request.BackendPort != DevelopmentBackendPort {
 		return ErrWorkflowRequired

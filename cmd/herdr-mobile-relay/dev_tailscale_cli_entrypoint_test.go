@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,6 +241,58 @@ func TestDevelopmentTailscaleCLICommandEntrypointInventory(t *testing.T) {
 				t.Fatalf("occupied plugin port allowed a non-read-only Tailscale CLI call %q", call)
 			}
 		}
+	})
+
+	t.Run("matching foreign backend health cannot mask bind conflict", func(t *testing.T) {
+		fixture := newDevelopmentCommandFixture(t)
+		backend, err := net.Listen("tcp", "127.0.0.1:18377")
+		if err != nil {
+			t.Fatalf("occupy development backend port: %v", err)
+		}
+		var healthRequests atomic.Int32
+		foreign := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			healthRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"ok","readiness":"ready","instance":"fixture-instance","tailscale_cli_origin":"https://herdr.tailnet.ts.net:8443"}`)
+		})}
+		serveDone := make(chan error, 1)
+		go func() { serveDone <- foreign.Serve(backend) }()
+		defer func() {
+			_ = foreign.Close()
+			<-serveDone
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		workflow, cfg, err := developmentCLIFromEnvironment(ctx, "setup")
+		if err != nil {
+			t.Fatalf("construct isolated fixture workflow: %v", err)
+		}
+		confirmation := tailscalecli.PublishRouteConfirmation("node-fixture", "https://herdr.tailnet.ts.net:8443",
+			tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
+		code, err := runDevelopmentForeground(ctx, "setup", workflow, cfg, confirmation, io.Discard, io.Discard)
+		if code == 0 || err == nil || !strings.Contains(err.Error(), "listen 127.0.0.1:18377") {
+			t.Fatalf("foreground setup with occupied backend port = (%d, %v), want owned-listener bind refusal", code, err)
+		}
+		if got := healthRequests.Load(); got != 0 {
+			t.Fatalf("backend readiness contacted a foreign matching responder %d times", got)
+		}
+		calls, err := os.ReadFile(fixture.cliLog)
+		if err != nil {
+			t.Fatalf("read synthetic CLI invocation sentinel: %v", err)
+		}
+		for _, call := range strings.FieldsFunc(string(calls), func(r rune) bool { return r == '\n' }) {
+			switch call {
+			case "status --json", "version --json --daemon", "serve status --json":
+			default:
+				t.Fatalf("occupied backend port allowed a non-read-only Tailscale CLI call %q", call)
+			}
+		}
+		pluginProbe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: tailscalecli.DevelopmentPluginPort})
+		if err != nil {
+			t.Fatalf("failed startup retained its plugin UDP listener: %v", err)
+		}
+		_ = pluginProbe.Close()
 	})
 }
 

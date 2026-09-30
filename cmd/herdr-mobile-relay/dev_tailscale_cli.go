@@ -239,7 +239,7 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- server.Run(ctx) }()
-	if err := waitDevelopmentBackend(ctx, cfg, done); err != nil {
+	if err := waitDevelopmentBackend(ctx, cfg, server.DevelopmentBackendBound(), done); err != nil {
 		stop()
 		_ = waitDevelopmentServer(done)
 		return 1, err
@@ -263,7 +263,8 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 		request := tailscalecli.PublishRequest{
 			InstallationID: cfg.InstanceID, Scope: "development", ExpectedNodeID: preflight.NodeID,
 			Origin: preflight.Origin, HTTPSPort: tailscalecli.DevelopmentHTTPSPort,
-			BackendPort: tailscalecli.DevelopmentBackendPort, ReservationID: reservationID, Consent: consent,
+			BackendPort: tailscalecli.DevelopmentBackendPort, ReservationID: reservationID,
+			BackendBound: server.DevelopmentBackendBound(), Consent: consent,
 		}
 		if err := workflow.Publish(ctx, request); err != nil {
 			stop()
@@ -346,7 +347,10 @@ func printDevelopmentSetupLink(cfg *config.Config, stdout io.Writer) error {
 	return err
 }
 
-func waitDevelopmentBackend(ctx context.Context, cfg *config.Config, serverDone chan error) error {
+func waitDevelopmentBackend(ctx context.Context, cfg *config.Config, backendBound <-chan struct{}, serverDone chan error) error {
+	if backendBound == nil {
+		return tailscalecli.ErrWorkflowRequired
+	}
 	transport := &http.Transport{Proxy: nil}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second}
@@ -354,7 +358,40 @@ func waitDevelopmentBackend(ctx context.Context, cfg *config.Config, serverDone 
 	defer deadline.Stop()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	serverFailure := func() (bool, error) {
+		select {
+		case serverErr := <-serverDone:
+			// Keep the result available to the caller's bounded shutdown wait.
+			serverDone <- serverErr
+			if serverErr == nil {
+				return true, errors.New("development relay exited before its backend became ready")
+			}
+			return true, fmt.Errorf("development relay failed before its backend became ready: %w", serverErr)
+		default:
+			return false, nil
+		}
+	}
+
+	backendOwned := false
+	for !backendOwned {
+		if exited, err := serverFailure(); exited {
+			return err
+		}
+		select {
+		case <-backendBound:
+			backendOwned = true
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("isolated development backend did not bind; no Serve route was published")
+		case <-ticker.C:
+		}
+	}
+
 	for {
+		if exited, err := serverFailure(); exited {
+			return err
+		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/healthz", tailscalecli.DevelopmentBackendPort), nil)
 		if err == nil {
 			response, requestErr := client.Do(request)
@@ -369,18 +406,17 @@ func waitDevelopmentBackend(ctx context.Context, cfg *config.Config, serverDone 
 				_ = response.Body.Close()
 				if response.StatusCode == http.StatusOK && decodeErr == nil && health.Status == "ok" &&
 					health.Readiness == "ready" && health.Instance == cfg.InstanceID && health.Origin == cfg.TailscaleCLIOrigin {
+					if exited, err := serverFailure(); exited {
+						return err
+					}
 					return nil
 				}
 			}
 		}
+		if exited, err := serverFailure(); exited {
+			return err
+		}
 		select {
-		case serverErr := <-serverDone:
-			// Keep the result available to the caller's bounded shutdown wait.
-			serverDone <- serverErr
-			if serverErr == nil {
-				return errors.New("development relay exited before its backend became ready")
-			}
-			return fmt.Errorf("development relay failed before its backend became ready: %w", serverErr)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:

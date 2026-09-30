@@ -78,6 +78,7 @@ type PublishRequest struct {
 	HTTPSPort      int
 	BackendPort    int
 	ReservationID  string
+	BackendBound   <-chan struct{}
 	Consent        Consent
 }
 
@@ -491,7 +492,7 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 				return ErrConflict
 			}
 			if !m.skipBackendReadiness {
-				if err := verifyBackendReadiness(ctx, request.BackendPort, request.InstallationID, request.Origin); err != nil {
+				if err := verifyBackendReadiness(ctx, request.BackendPort, request.InstallationID, request.Origin, request.BackendBound); err != nil {
 					return err
 				}
 			}
@@ -1205,15 +1206,23 @@ func registrationOriginMatches(record registration, origin string) bool {
 	return err == nil && origin == derived
 }
 
-func verifyBackendReadiness(ctx context.Context, port int, installationID, origin string) error {
+func verifyBackendReadiness(ctx context.Context, port int, installationID, origin string, backendBound <-chan struct{}) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if backendBound == nil {
+		return ErrWorkflowRequired
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	select {
+	case <-backendBound:
+	case <-checkCtx.Done():
+		return checkCtx.Err()
 	}
 	if port < 1 || port > 65535 || !validLabel(installationID) || !validCanonicalOrigin(origin) {
 		return ErrConflict
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
 	transport := &http.Transport{Proxy: nil}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{

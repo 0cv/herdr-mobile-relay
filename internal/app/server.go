@@ -126,6 +126,8 @@ type Server struct {
 	tailscaleSession                managedTailscaleAuthority
 	tailscaleCLIRegistration        tailscaleCLIRegistrationVerifier
 	developmentCLIWorkflow          *tailscalecli.DevelopmentWorkflow
+	developmentBackendBound         chan struct{}
+	developmentBackendBoundOnce     sync.Once
 	verifyPublicBundle              func(context.Context, string, string, string, string) error
 	managedRetired                  chan struct{}
 	managedRetireOne                sync.Once
@@ -204,7 +206,18 @@ func NewDevelopmentCLI(cfg *config.Config, version, revision string, logger *slo
 	server := newServerWithSession(cfg, version, revision, logger, nil, nil)
 	server.tailscaleCLIRegistration = workflow
 	server.developmentCLIWorkflow = workflow
+	server.developmentBackendBound = make(chan struct{})
 	return server, nil
+}
+
+// DevelopmentBackendBound closes only after this server process successfully
+// binds its configured listener. Callers must not infer ownership from a
+// separate loopback health response.
+func (s *Server) DevelopmentBackendBound() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.developmentBackendBound
 }
 
 // NewOwned constructs a server for a managed run only after the supplied
@@ -1485,6 +1498,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	ln, err := net.Listen("tcp", s.cfg.Addr())
 	if err != nil {
+		if s.udp != nil {
+			_ = s.udp.Close()
+		}
 		return s.unwindManagedStartup(fmt.Errorf("listen %s: %w", s.cfg.Addr(), err))
 	}
 	serveListener := net.Listener(ln)
@@ -1504,6 +1520,9 @@ func (s *Server) Run(ctx context.Context) error {
 	s.ready = true
 	s.backendBound = true
 	s.mu.Unlock()
+	if s.developmentBackendBound != nil {
+		s.developmentBackendBoundOnce.Do(func() { close(s.developmentBackendBound) })
+	}
 
 	var errCh chan error
 	var serveDone chan struct{}

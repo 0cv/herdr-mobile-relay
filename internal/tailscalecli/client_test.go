@@ -218,6 +218,8 @@ func newPolicyManager(t *testing.T, f *fakeCLI, goos, goarch, stateLeaf string) 
 }
 
 func fixtureRequest(consent bool) PublishRequest {
+	backendBound := make(chan struct{})
+	close(backendBound)
 	return PublishRequest{
 		InstallationID: "install-fixture",
 		Scope:          "development",
@@ -226,6 +228,7 @@ func fixtureRequest(consent bool) PublishRequest {
 		HTTPSPort:      8443,
 		BackendPort:    18377,
 		ReservationID:  "00000000000000000000000000000001",
+		BackendBound:   backendBound,
 		Consent:        fixtureConsent(consent),
 	}
 }
@@ -937,7 +940,9 @@ func TestBackendReadinessDoesNotFollowRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyBackendReadiness(context.Background(), port, "install-fixture", "https://herdr.tailnet.ts.net:8443"); !errors.Is(err, ErrConflict) {
+	backendBound := make(chan struct{})
+	close(backendBound)
+	if err := verifyBackendReadiness(context.Background(), port, "install-fixture", "https://herdr.tailnet.ts.net:8443", backendBound); !errors.Is(err, ErrConflict) {
 		t.Fatalf("readiness accepted a redirect response: %v", err)
 	}
 	if got := redirectedRequests.Load(); got != 0 {

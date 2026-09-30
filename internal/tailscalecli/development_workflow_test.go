@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func developmentWorkflowFixture(t *testing.T, f *fakeCLI, goos, goarch string) (*DevelopmentWorkflow, string, string, string) {
@@ -57,6 +58,28 @@ func TestDevelopmentWorkflowOwnsPositiveRouteOperation(t *testing.T) {
 	}
 	if fixture.mutationCalls() != 1 {
 		t.Fatalf("Serve mutation calls = %d, want one workflow-owned publication", fixture.mutationCalls())
+	}
+}
+
+func TestDevelopmentWorkflowWaitsForOwnedBackendBindBeforePublish(t *testing.T) {
+	fixture := newFakeCLI(t)
+	workflow, _, _, _ := developmentWorkflowFixture(t, fixture, "darwin", "arm64")
+	workflow.manager.skipBackendReadiness = false
+	request := fixtureRequest(true)
+	request.BackendBound = make(chan struct{})
+	if err := workflow.ReserveBackendPort(context.Background(), request.InstallationID, request.ExpectedNodeID,
+		request.Origin, request.ReservationID); err != nil {
+		t.Fatalf("reserve through workflow: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := workflow.Publish(ctx, request)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("publish without an owned backend bind signal = %v, want context deadline", err)
+	}
+	if fixture.mutationCalls() != 0 {
+		t.Fatalf("backend-bind refusal dispatched %d Serve mutations", fixture.mutationCalls())
 	}
 }
 
