@@ -274,6 +274,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .status-warning { background: var(--warning); }
 .status-muted { background: var(--muted); }
 .status-dot.hollow { background: transparent; border: 1.5px solid var(--muted); }
+.status-dot.status-ready { background: transparent; border: 1.5px solid var(--success); }
 
 .empty-state { color: var(--muted); padding: 3rem 1rem; text-align: center; }
 .empty-state h2 { color: var(--foreground); font-size: 1.05rem; }
