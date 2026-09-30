@@ -47,11 +47,19 @@ func TestDevelopmentManagerRequiresProcessLocalWorkflow(t *testing.T) {
 			manager.developmentHTTPSPort, manager.developmentBackendPort, manager.developmentPluginPort)
 	}
 
-	otherState := filepath.Join(t.TempDir(), "registration")
+	otherStateParent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherState := filepath.Join(otherStateParent, "registration")
 	if err := os.Mkdir(otherState, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	otherCoordination := filepath.Join(t.TempDir(), "coordination")
+	otherCoordinationParent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherCoordination := filepath.Join(otherCoordinationParent, "coordination")
 	if err := os.Mkdir(otherCoordination, 0o700); err != nil {
 		t.Fatal(err)
 	}
