@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
-import { currentView, followInitialAgentSession, replaceView } from '$lib/router';
+import { currentView, followInitialAgentSession, navigate, replaceView, stateFromLocation, viewUrl } from '$lib/router';
 import type { Agent } from '$lib/types';
 
 function agent(overrides: Partial<Agent> = {}): Agent {
@@ -17,6 +17,44 @@ afterEach(() => {
   stopFollowing();
   currentView.set({ view: 'agents' });
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe('deferred setup navigation', () => {
+  it.each([
+    { standalone: false, userAgent: 'Mozilla/5.0 (iPhone)', deferred: true },
+    { standalone: true, userAgent: 'Mozilla/5.0 (iPhone)', deferred: false },
+    { standalone: false, userAgent: 'Mozilla/5.0 (X11; Linux x86_64)', deferred: false },
+  ])('retains the link only when pairing is deferred: $standalone / $userAgent', ({ standalone, userAgent, deferred }) => {
+    vi.stubGlobal('navigator', { standalone, userAgent, maxTouchPoints: 0 });
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    const hash = `#setup=${'a'.repeat(32)}&label=Invited&relay=${encodeURIComponent('wss://invited.example')}`;
+    history.replaceState(null, '', `/pair?source=test${hash}`);
+    navigate({ view: 'settings' });
+    expect(get(currentView)).toEqual({ view: 'settings' });
+    expect(location.hash).toBe(deferred ? hash : '#settings');
+    replaceView({ view: 'agents' });
+    expect(location.hash).toBe(deferred ? hash : '');
+    history.replaceState(history.state, '', '/pair?source=test');
+    navigate({ view: 'settings' });
+    expect(location.hash).toBe('#settings');
+  });
+});
+
+describe('notification deep links', () => {
+  it('round-trips a URL-encoded pane and host through the router', () => {
+    const target = { pane_id: 'workspace:tab/pane & 1', host: 'host name/é' };
+    const hash = `#notify=${encodeURIComponent(JSON.stringify(target))}`;
+    const state = stateFromLocation({ hash });
+    expect(state).toEqual({
+      view: 'notification',
+      target: { ...target, action: '', index: null, total: null, notification_id: '' },
+    });
+    expect(viewUrl(state)).toBe(`#notify=${encodeURIComponent(JSON.stringify({
+      ...target, action: '', index: null, total: null, notification_id: '',
+    }))}`);
+    expect(stateFromLocation({ hash: viewUrl(state) })).toEqual(state);
+  });
 });
 
 describe('initial native session discovery navigation', () => {

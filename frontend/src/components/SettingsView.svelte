@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import DeviceSettings from '$components/DeviceSettings.svelte';
   import NotificationSettings from '$components/NotificationSettings.svelte';
+  import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import AppSwitch from '$components/ui/AppSwitch.svelte';
   import Button from '$components/ui/Button.svelte';
@@ -697,6 +698,7 @@
               <small class="warning" role="status">
                 Waiting for the Home Screen app: add Herdr to the Home Screen and open it there to pair this computer.
               </small>
+              <PairDeferredRelay relayId={relay.id} onPair={(id) => relayStore.pairDeferredRelay(id)} />
             {/if}
             {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
               <small class="warning" role="status">

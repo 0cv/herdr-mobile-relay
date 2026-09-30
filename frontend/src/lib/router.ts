@@ -1,5 +1,5 @@
 import { get, writable, type Readable } from 'svelte/store';
-import { shouldRetainSetupFragment } from './config';
+import { shouldDeferPairingConnection, shouldRetainSetupFragment } from './config';
 import { clientPaneId } from './agents';
 import { parseNotificationTarget } from './protocol';
 import { decodeTargetRoute, encodeTargetRoute, targetRefForAgent, targetRefMatchesAgent } from './resource-id';
@@ -26,6 +26,7 @@ export type ViewState =
 type HistoryViewState = ViewState & {
   herdrView?: boolean;
   index?: number;
+  bootstrapPairingFlow?: string;
 };
 
 export const currentView = writable<ViewState>({ view: 'agents' });
@@ -132,14 +133,25 @@ export function viewUrl(state: ViewState): string {
   return location.pathname + location.search;
 }
 
+function navigationUrl(state: ViewState): string {
+  if (shouldDeferPairingConnection(location, navigator.standalone, navigator.userAgent, navigator.maxTouchPoints)) {
+    return location.pathname + location.search + location.hash;
+  }
+  return viewUrl(state);
+}
+
+function historyViewState(state: ViewState): HistoryViewState {
+  return { herdrView: true, index: viewIndex, bootstrapPairingFlow: history.state?.bootstrapPairingFlow, ...state };
+}
+
 export function navigate(state: ViewState): void {
   viewIndex += 1;
-  history.pushState({ herdrView: true, index: viewIndex, ...state }, '', viewUrl(state));
+  history.pushState(historyViewState(state), '', navigationUrl(state));
   showView(state);
 }
 
 export function replaceView(state: ViewState): void {
-  history.replaceState({ herdrView: true, index: viewIndex, ...state }, '', viewUrl(state));
+  history.replaceState(historyViewState(state), '', navigationUrl(state));
   showView(state);
 }
 
@@ -183,7 +195,12 @@ export function initializeRouter(): () => void {
     viewIndex = Number.isInteger(state?.index) ? Number(state?.index) : 0;
     showView(state?.herdrView ? state : { view: 'agents' });
   };
-  const onHashChange = () => showView(stateFromLocation());
+  const onHashChange = () => {
+    const state = history.state as HistoryViewState | null;
+    showView(shouldRetainSetupFragment(location, navigator.standalone) && state?.herdrView
+      ? state
+      : stateFromLocation());
+  };
   window.addEventListener('popstate', onPopState);
   window.addEventListener('hashchange', onHashChange);
   return () => {

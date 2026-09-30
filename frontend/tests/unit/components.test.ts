@@ -45,6 +45,35 @@ const blockedAgent: Agent = {
 };
 
 describe('accessible Svelte interactions', () => {
+  it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
+    const user = userEvent.setup();
+    const relay = { id: 'invited', label: 'Invited', url: 'wss://invited.example', token: '' };
+    const connection = {
+      status: 'disconnected', pairingDeferred: true,
+    } as RelayConnectionView;
+    const pair = vi.spyOn(relayStore, 'pairDeferredRelay').mockReturnValue(true);
+    try {
+      render(AgentList, {
+        agents: [], relays: [relay], connections: new Map([[relay.id, connection]]),
+        responding: new Set<string>(), onopen: vi.fn(),
+      });
+      expect(screen.getByText('Add Herdr to the Home Screen, then open it there to finish pairing.')).toBeInTheDocument();
+      expect(screen.getByText('This browser tab keeps the setup link unused so the installed app can redeem it.')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      expect(pair).not.toHaveBeenCalled();
+      expect(screen.getByRole('alert')).toHaveTextContent(/This browser becomes its own device/);
+      expect(screen.getByRole('alert')).toHaveTextContent(/one-use secret is spent here/);
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(pair).not.toHaveBeenCalled();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      await user.click(screen.getByRole('button', { name: 'Confirm' }));
+      expect(pair).toHaveBeenCalledExactlyOnceWith(relay.id);
+    } finally {
+      pair.mockRestore();
+    }
+  });
+
   it('requires confirmation before deleting all activity', async () => {
     const user = userEvent.setup();
     relayStore.activities.set([{

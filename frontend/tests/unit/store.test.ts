@@ -11,6 +11,7 @@ import {
   setTerminalRefreshInterval,
 } from '$lib/preferences';
 import { paneViewPreferenceKey } from '$lib/agent-view';
+import { closeCurrentView, currentView, initializeRouter, navigate } from '$lib/router';
 import { SLASH_COMMAND_MAX_ENTRIES } from '$lib/slash-command-limits';
 import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
@@ -507,6 +508,238 @@ describe('relay command store', () => {
       id: 'invitation-123456',
     });
     expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  describe('explicit iOS browser pairing', () => {
+    const relayId = makeRelayId('Invited', 'wss://invited.example');
+
+    function deferBrowserPairing(invitation = true) {
+      relayStore.destroy();
+      relayStore.relayConfigs.set([]);
+      localStorage.clear();
+      MockWebSocket.instances = [];
+      vi.stubGlobal('navigator', {
+        standalone: false,
+        userAgent: 'Mozilla/5.0 (iPhone)',
+        maxTouchPoints: 5,
+      });
+      const secret = invitation ? 'A'.repeat(43) : '0123456789abcdef0123456789abcdef';
+      const hash = `#setup=${secret}&label=Invited&relay=${encodeURIComponent('wss://invited.example')}`
+        + (invitation ? `&invite=invitation-browser01&invite_version=1&invite_expires=${Date.now() + 60_000}` : '');
+      history.replaceState({ retained: true }, '', `/pair?source=test${hash}`);
+      relayStore.initialize();
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      return hash;
+    }
+
+    it('saves the invitation, clears the fragment, and dials only after opting in', () => {
+      deferBrowserPairing();
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toMatchObject({
+        kind: 'invitation', id: 'invitation-browser01', secret: 'A'.repeat(43),
+      });
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].protocols).toBe('herdr-e2ee-v2');
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(replace).toHaveBeenCalledWith({ retained: true }, '', '/pair?source=test');
+      expect(location.hash).toBe('');
+      expect(get(relayStore.toast)?.message).toBe('Pairing this browser as its own device.');
+
+      relayStore.initialize();
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(2);
+    });
+
+    it('connects a bootstrap-key link using the imported relay token', async () => {
+      deferBrowserPairing(false);
+      expect(get(relayStore.relayConfigs)[0].token).toBe('0123456789abcdef0123456789abcdef');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      const socket = MockWebSocket.instances[0];
+      expect(socket.protocols).toBe('herdr-e2ee-v2');
+      socket.open();
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+      expect(JSON.parse(socket.sent[0])).toMatchObject({ auth_kind: 'invitation', auth_id: 'bootstrap' });
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(location.hash).toBe('');
+    });
+
+    it.each([
+      { invitation: true, enrolled: false },
+      { invitation: true, enrolled: true },
+      { invitation: false, enrolled: false },
+      { invitation: false, enrolled: true },
+    ])('does not re-defer on Back/hashchange or reload: invitation=$invitation, enrolled=$enrolled', async ({ invitation, enrolled }) => {
+      const hash = deferBrowserPairing(invitation);
+      vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+      const stopRouter = initializeRouter();
+      const importOnHashChange = vi.fn(() => relayStore.importSetupLink());
+      window.addEventListener('hashchange', importOnHashChange);
+      try {
+        navigate({ view: 'activity' });
+        navigate({ view: 'settings' });
+        expect(location.hash).toBe(hash);
+        expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+        const socket = MockWebSocket.instances[0];
+        socket.open();
+        await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+        const credentials = new BrowserDeviceCredentialStore(localStorage);
+        if (enrolled) {
+          credentials.replaceInvitation(relayId, invitation ? 'invitation-browser01' : 'bootstrap', {
+            deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+            credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+          });
+        }
+        const authentication = credentials.get(relayId);
+        const connection = relayStore.connection(relayId);
+        const pairingToast = get(relayStore.toast);
+        expect(pairingToast?.message).toBe('Pairing this browser as its own device.');
+        closeCurrentView();
+        await vi.waitFor(() => expect(importOnHashChange).toHaveBeenCalledOnce());
+        expect(get(currentView)).toMatchObject({ view: 'activity' });
+        expect(get(relayStore.toast)).toBe(pairingToast);
+        closeCurrentView();
+        await vi.waitFor(() => expect(importOnHashChange).toHaveBeenCalledTimes(2));
+        expect(importOnHashChange).toHaveReturnedWith(true);
+        expect(get(currentView)).toMatchObject({ view: 'agents' });
+        expect(relayStore.connection(relayId)).toBe(connection);
+        expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+        expect(socket.readyState).toBe(MockWebSocket.OPEN);
+        expect(MockWebSocket.instances).toHaveLength(1);
+        expect(credentials.get(relayId)).toEqual(authentication);
+        expect(location.hash).toBe('');
+        expect(get(relayStore.toast)).toBe(pairingToast);
+        history.forward();
+        await vi.waitFor(() => expect(get(currentView)).toMatchObject({ view: 'activity' }));
+        expect(get(relayStore.toast)).toBe(pairingToast);
+
+        history.replaceState(history.state, '', `/pair?source=test${hash}`);
+        relayStore.destroy();
+        relayStore.initialize();
+        expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+        expect(MockWebSocket.instances).toHaveLength(2);
+        expect(credentials.get(relayId)).toEqual(authentication);
+        expect(location.hash).toBe('');
+      } finally {
+        window.removeEventListener('hashchange', importOnHashChange);
+        stopRouter();
+        currentView.set({ view: 'agents' });
+      }
+    });
+
+    it.each([
+      { entry: 'fresh', load: 'initialize' },
+      { entry: 'fresh', load: 'import' },
+      { entry: 'new session', load: 'initialize' },
+      { entry: 'new session', load: 'import' },
+    ])('defers a bootstrap link with a refused credential on a $entry entry via $load', ({ entry, load }) => {
+      const hash = deferBrowserPairing(false);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      const credentials = new BrowserDeviceCredentialStore(localStorage);
+      credentials.replaceInvitation(relayId, 'bootstrap', {
+        deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+        credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+      });
+      const authentication = credentials.get(relayId);
+      const acceptedHistoryState = history.state;
+      MockWebSocket.instances[0].serverClose(4401);
+      expect(get(relayStore.connections).get(relayId)?.authRejected).toBe(true);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(sessionStorage.length).toBeGreaterThan(0);
+
+      if (entry === 'new session') sessionStorage.clear();
+      history.replaceState(entry === 'fresh' ? null : acceptedHistoryState, '', `/pair?source=test${hash}`);
+      if (load === 'initialize') {
+        relayStore.destroy();
+        relayStore.initialize();
+      } else {
+        expect(relayStore.importSetupLink()).toBe(true);
+      }
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(location.hash).toBe(hash);
+      expect(get(relayStore.toast)?.message).toContain('Home Screen');
+    });
+
+    it('keeps bootstrap pairing deferred when its session opt-in cannot be saved', () => {
+      const hash = deferBrowserPairing(false);
+      vi.spyOn(sessionStorage, 'setItem').mockImplementation(() => { throw new Error('Session storage unavailable.'); });
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      expect(get(relayStore.toast)).toMatchObject({ message: 'Session storage unavailable.', error: true });
+    });
+
+    it.each([false, true])('still defers a new invitation after accepting an earlier one: enrolled=%s', (enrolled) => {
+      const hash = deferBrowserPairing();
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      const credentials = new BrowserDeviceCredentialStore(localStorage);
+      if (enrolled) {
+        credentials.replaceInvitation(relayId, 'invitation-browser01', {
+          deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+          credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+        });
+      }
+      const authentication = credentials.get(relayId);
+      const nextHash = hash.replace('invitation-browser01', 'invitation-browser02');
+      history.replaceState(history.state, '', `/pair?source=test${nextHash}`);
+      expect(relayStore.importSetupLink()).toBe(true);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].readyState).toBe(MockWebSocket.CLOSED);
+      expect(location.hash).toBe(nextHash);
+    });
+
+    it.each(['missing', 'another relay'])('keeps deferring when the fragment is %s', (fragment) => {
+      const hash = deferBrowserPairing();
+      history.replaceState(history.state, '', fragment === 'missing'
+        ? '/pair?source=test'
+        : `/pair?source=test${hash.replace('invited.example', 'other.example')}`);
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(replace).not.toHaveBeenCalled();
+      expect(get(relayStore.toast)?.message).toBe('Open the invitation link again.');
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+    });
+
+    it('restores deferral and keeps the fragment when saving an invitation fails', () => {
+      const hash = deferBrowserPairing();
+      const save = vi.spyOn(BrowserDeviceCredentialStore.prototype, 'saveInvitation')
+        .mockImplementation(() => { throw new Error('The device invitation has expired.'); });
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(save).toHaveBeenCalledWith(relayId, expect.objectContaining({ id: 'invitation-browser01' }));
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      expect(replace).not.toHaveBeenCalled();
+      expect(get(relayStore.toast)).toMatchObject({ message: 'The device invitation has expired.', error: true });
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      save.mockRestore();
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+    });
+
+    it('does not pair a relay that is not deferred', () => {
+      deferBrowserPairing();
+      expect(relayStore.pairDeferredRelay('another-relay')).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(1);
+    });
   });
 
   it('keeps an enrolled credential when the setup link is imported again', () => {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import AgentLogo, { hasAgentLogo } from '$components/AgentLogo.svelte';
+  import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import Button from '$components/ui/Button.svelte';
   import {
     agentLastActiveAt,
@@ -669,6 +670,11 @@
     <div class="empty-state" role="status">
       <p>Add Herdr to the Home Screen, then open it there to finish pairing.</p>
       <p>This browser tab keeps the setup link unused so the installed app can redeem it.</p>
+      {#each deferredRelays as relay (relay.id)}
+        <div role="group" aria-label={relay.label}>
+          <PairDeferredRelay relayId={relay.id} onPair={(id) => relayStore.pairDeferredRelay(id)} />
+        </div>
+      {/each}
     </div>
   {:else if !agents.length && !unavailableRelays.length}
     <div class="empty-state" role="status">Waiting for relays…</div>

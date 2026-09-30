@@ -107,6 +107,21 @@ mobile browsers often provide no useful console. Copy or photograph its text
 for a bug report, then tap the banner to dismiss it; a later independent error
 will display a new banner.
 
+## Opening links from other apps on iOS
+
+External links open in Safari, not the installed Home Screen app. To use those
+links, pair Safari as its own device: in the Home Screen app, choose
+**Settings → Devices → Invite Device**, open that invitation in Safari, then
+choose **Pair this browser instead** and confirm. Safari is listed and revocable
+separately; its one-use invitation cannot also pair the Home Screen app.
+Safari may clear this site's storage after a week without use; invite it again
+if that happens.
+
+Link to an agent with `https://<app>/#notify=<url-encoded {"pane_id","host"}>`,
+where the fragment value is `encodeURIComponent(JSON.stringify({ pane_id, host }))`.
+Use the agent's pane ID and computer host name. Once Safari is paired, opening
+this link from another app takes you to that agent.
+
 ## Workspace navigation and inspection
 
 The home screen keeps agents that need input visible at the top. By default,
