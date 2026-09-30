@@ -293,9 +293,11 @@ state whenever identity, readback, readiness, or a command result is uncertain.
    HTTPS 8443 -> `http://127.0.0.1:18377`, with the plugin listener on
    `127.0.0.1:18378`. Review the complete Serve snapshot and the four displayed
    residual risks. Enter only the exact node/origin/HTTPS/backend phrase shown
-   by Go on stdin. There is no environment-variable consent. Any occupied port,
-   conflicting/unrecorded mapping, identity drift, or incomplete parse cancels
-   without freeing ports, adopting routes, or touching production.
+   by Go on stdin. There is no environment-variable consent. The fixed plugin
+   UDP listener must bind before the backend can become ready; an occupied
+   `127.0.0.1:18378` aborts startup before any Serve publication. Any occupied
+   port, conflicting/unrecorded mapping, identity drift, or incomplete parse
+   cancels without freeing ports, adopting routes, or touching production.
 3. **Readback, HTTPS, bundle, and local readiness.** After Go reports setup
    ready, read `serve status --json` again and compare the complete supported
    configuration: exactly the intended HTTPS 8443 `/` proxy to

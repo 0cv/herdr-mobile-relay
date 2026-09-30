@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
@@ -203,6 +205,39 @@ func TestDevelopmentTailscaleCLICommandEntrypointInventory(t *testing.T) {
 		}
 		if got, want := string(calls), "status --json\nversion --json --daemon\nserve status --json\n"; got != want {
 			t.Fatalf("synthetic CLI calls = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("occupied plugin port prevents Serve mutation", func(t *testing.T) {
+		fixture := newDevelopmentCommandFixture(t)
+		blocker, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: tailscalecli.DevelopmentPluginPort})
+		if err != nil {
+			t.Fatalf("occupy development plugin port: %v", err)
+		}
+		defer blocker.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		workflow, cfg, err := developmentCLIFromEnvironment(ctx, "setup")
+		if err != nil {
+			t.Fatalf("construct isolated fixture workflow: %v", err)
+		}
+		confirmation := tailscalecli.PublishRouteConfirmation("node-fixture", "https://herdr.tailnet.ts.net:8443",
+			tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
+		code, err := runDevelopmentForeground(ctx, "setup", workflow, cfg, confirmation, io.Discard, io.Discard)
+		if code == 0 || err == nil || !strings.Contains(err.Error(), "managed UDP event listener unavailable on 127.0.0.1:18378") {
+			t.Fatalf("foreground setup with occupied plugin port = (%d, %v), want startup refusal before Serve publication", code, err)
+		}
+		calls, err := os.ReadFile(fixture.cliLog)
+		if err != nil {
+			t.Fatalf("read synthetic CLI invocation sentinel: %v", err)
+		}
+		for _, call := range strings.FieldsFunc(string(calls), func(r rune) bool { return r == '\n' }) {
+			switch call {
+			case "status --json", "version --json --daemon", "serve status --json":
+			default:
+				t.Fatalf("occupied plugin port allowed a non-read-only Tailscale CLI call %q", call)
+			}
 		}
 	})
 }

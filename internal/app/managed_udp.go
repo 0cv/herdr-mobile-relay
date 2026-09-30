@@ -5,18 +5,19 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 )
 
-// startUDPListener binds the managed UDP event listener. For a managed run the
-// plugin UDP port is part of the relay contract, so a bind failure is fatal and
-// must abort Run before readiness. Legacy runs keep the previous degraded
-// behavior: record a safe error, warn, and continue without a listener.
+// startUDPListener binds the managed UDP event listener. For managed runs and
+// isolated CLI development, the plugin UDP port is part of the relay contract,
+// so a bind failure is fatal and must abort Run before readiness. Legacy runs
+// keep the previous degraded behavior: record a safe error, warn, and continue.
 func (s *Server) startUDPListener() error {
 	udpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(s.cfg.PluginPort))
 	udpListener, err := coordinator.NewUDPListener(udpAddr, s.state, s.cfg.SocketPath, s.logger)
 	if err != nil {
-		if s.cfg.ManagedRunID != "" {
+		if s.cfg.ManagedRunID != "" || s.cfg.Transport == config.TransportTailscaleCLI {
 			return fmt.Errorf("managed UDP event listener unavailable on %s: %w", udpAddr, err)
 		}
 		s.recordSafeError("UDP event listener unavailable", err)

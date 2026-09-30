@@ -62,6 +62,28 @@ func TestManagedUDPBindFailureIsFatal(t *testing.T) {
 	}
 }
 
+func TestDevelopmentCLIUDPBindFailureIsFatal(t *testing.T) {
+	blocker, port := occupiedUDPPort(t)
+	defer blocker.Close()
+
+	server := testUDPServer(t, port, "")
+	server.cfg.Transport = config.TransportTailscaleCLI
+	err := server.startUDPListener()
+	if err == nil {
+		t.Fatal("expected fatal error for development CLI UDP bind failure, got nil")
+	}
+	if server.udp != nil {
+		t.Fatal("expected no UDP listener to be assigned on development CLI bind failure")
+	}
+	udpAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if !strings.Contains(err.Error(), udpAddr) {
+		t.Fatalf("error %q does not name bound address %q", err.Error(), udpAddr)
+	}
+	if got := server.recentSafeErrors(); len(got) != 0 {
+		t.Fatalf("expected no safe-error record on development CLI bind failure, got %v", got)
+	}
+}
+
 func TestLegacyUDPBindFailureStillWarns(t *testing.T) {
 	blocker, port := occupiedUDPPort(t)
 	defer blocker.Close()

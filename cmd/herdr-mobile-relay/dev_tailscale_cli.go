@@ -239,7 +239,7 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- server.Run(ctx) }()
-	if err := waitDevelopmentBackend(ctx, cfg); err != nil {
+	if err := waitDevelopmentBackend(ctx, cfg, done); err != nil {
 		stop()
 		_ = waitDevelopmentServer(done)
 		return 1, err
@@ -346,7 +346,7 @@ func printDevelopmentSetupLink(cfg *config.Config, stdout io.Writer) error {
 	return err
 }
 
-func waitDevelopmentBackend(ctx context.Context, cfg *config.Config) error {
+func waitDevelopmentBackend(ctx context.Context, cfg *config.Config, serverDone chan error) error {
 	transport := &http.Transport{Proxy: nil}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second}
@@ -374,6 +374,13 @@ func waitDevelopmentBackend(ctx context.Context, cfg *config.Config) error {
 			}
 		}
 		select {
+		case serverErr := <-serverDone:
+			// Keep the result available to the caller's bounded shutdown wait.
+			serverDone <- serverErr
+			if serverErr == nil {
+				return errors.New("development relay exited before its backend became ready")
+			}
+			return fmt.Errorf("development relay failed before its backend became ready: %w", serverErr)
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
