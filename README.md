@@ -64,7 +64,10 @@ developers using `make dev-tunnel` can choose 1 = temporary Cloudflare URL or
 saved gateway (no Tailscale; QR shown), 2 = CLI-backed persistent Serve for the
 supported App Store app profile, or 3 = the older temporary direct-daemon mode
 (standalone `tailscaled`, not the App Store app). If an App Store receipt is
-found locally, option 3 is marked unavailable. See
+found locally, option 3 is marked unavailable; if its readable bundle version
+is not 1.102.4, option 2 is marked unavailable too. Menu availability checks
+read local files only; selecting option 2 still follows its explicit consent
+and route-confirmation gates. See
 [development](docs/development.md#running-from-a-checkout) for requirements and
 [Transports](docs/transports.md#managed-tailscale-serve) for the separate
 lifecycle and platform limits.

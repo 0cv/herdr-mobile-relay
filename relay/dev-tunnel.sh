@@ -4,14 +4,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+TAILSCALE_APP_STORE_BUNDLE=""
 tailscale_app_store_installed() {
     local home="${HOME:-}" bundle candidate link directory attempt configured_candidate
     local -a candidates=()
+    TAILSCALE_APP_STORE_BUNDLE=""
     bundle="/Applications/Tailscale.app"
-    [ -f "$bundle/Contents/_MASReceipt/receipt" ] && return 0
+    if [ -f "$bundle/Contents/_MASReceipt/receipt" ]; then
+        TAILSCALE_APP_STORE_BUNDLE="$bundle"
+        return 0
+    fi
     if [ -n "$home" ]; then
         bundle="$home/Applications/Tailscale.app"
-        [ -f "$bundle/Contents/_MASReceipt/receipt" ] && return 0
+        if [ -f "$bundle/Contents/_MASReceipt/receipt" ]; then
+            TAILSCALE_APP_STORE_BUNDLE="$bundle"
+            return 0
+        fi
     fi
 
     configured_candidate="${HERDR_DEV_TAILSCALE_CLI_BIN:-${HERDR_TAILSCALE_CLI_BIN:-}}"
@@ -31,7 +39,10 @@ tailscale_app_store_installed() {
             case "$candidate" in
                 */Tailscale.app/*)
                     bundle="${candidate%%/Contents/*}"
-                    [ -f "$bundle/Contents/_MASReceipt/receipt" ] && return 0
+                    if [ -f "$bundle/Contents/_MASReceipt/receipt" ]; then
+                        TAILSCALE_APP_STORE_BUNDLE="$bundle"
+                        return 0
+                    fi
                     ;;
             esac
             [ -L "$candidate" ] || break
@@ -46,6 +57,16 @@ tailscale_app_store_installed() {
     return 1
 }
 
+tailscale_app_store_version() {
+    local bundle="$1" info_plist version
+    info_plist="$bundle/Contents/Info.plist"
+    [ -r "$info_plist" ] || return 1
+    command -v plutil >/dev/null 2>&1 || return 1
+    version="$(plutil -extract CFBundleShortVersionString raw -o - "$info_plist" 2>/dev/null)" || return 1
+    [ -n "$version" ] || return 1
+    printf '%s\n' "$version"
+}
+
 # Choose before building or opening the tunnel: managed Serve has its own
 # private root and consent gate and must never inherit this path's .dev state.
 case "${HERDR_DEV_TRANSPORT:-}" in
@@ -55,13 +76,22 @@ case "${HERDR_DEV_TRANSPORT:-}" in
     *) echo "✗ HERDR_DEV_TRANSPORT must be tunnel, tailscale, or tailscale-cli." >&2; exit 2 ;;
 esac
 if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
+    option2_unavailable_reason=""
     option3_unavailable_reason=""
     if [ "$(uname -s)" = Darwin ] && tailscale_app_store_installed; then
         option3_unavailable_reason="App Store Tailscale was detected; legacy mode requires a standalone tailscaled."
+        app_store_version="$(tailscale_app_store_version "$TAILSCALE_APP_STORE_BUNDLE" || true)"
+        if [ -n "$app_store_version" ] && [ "$app_store_version" != "1.102.4" ]; then
+            option2_unavailable_reason="Only the App Store Tailscale 1.102.4 profile is enabled for CLI-backed development."
+        fi
     fi
     echo "Development transport:"
     echo "  1. Temporary Cloudflare tunnel — quick public URL + QR; no Tailscale needed (or use a saved gateway)."
-    echo "  2. CLI-backed Tailscale Serve — for App Store Tailscale on macOS/arm64; needs the signed-in app's supported CLI and explicit route consent. The HTTPS route persists after stop; runtime/phone qualification is pending."
+    if [ -n "$option2_unavailable_reason" ]; then
+        echo "  2. CLI-backed Tailscale Serve — for the supported App Store Tailscale 1.102.4 profile on macOS/arm64; needs the signed-in app's CLI and route consent. [UNAVAILABLE: $option2_unavailable_reason]"
+    else
+        echo "  2. CLI-backed Tailscale Serve — for the supported App Store Tailscale 1.102.4 profile on macOS/arm64; needs the signed-in app's CLI and explicit route consent. The HTTPS route persists after stop; runtime/phone qualification is pending."
+    fi
     if [ -n "$option3_unavailable_reason" ]; then
         echo "  3. Legacy Tailscale Serve — for advanced users with a supported standalone tailscaled; needs an authenticated Unix daemon. Not for the App Store app. [UNAVAILABLE: $option3_unavailable_reason]"
     else
@@ -70,7 +100,13 @@ if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
     read -r -p "Choice [1]: " choice || { echo "Cancelled; nothing was started." >&2; exit 2; }
     case "$choice" in
         ''|1) ;;
-        2) exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@" ;;
+        2)
+            if [ -n "$option2_unavailable_reason" ]; then
+                echo "✗ Option 2 unavailable: $option2_unavailable_reason" >&2
+                exit 2
+            fi
+            exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@"
+            ;;
         3)
             if [ -n "$option3_unavailable_reason" ]; then
                 echo "✗ Option 3 unavailable: $option3_unavailable_reason" >&2

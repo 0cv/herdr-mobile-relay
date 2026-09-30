@@ -25,6 +25,9 @@ make dev-tunnel
    confirmation. The HTTPS route remains configured after the foreground relay
    stops. Only the supplied macOS/arm64 1.102.4 profile is enabled for this
    isolated development path; runtime and phone qualification remain pending.
+   If the App Store bundle's filesystem-readable `Info.plist` reports another
+   version, option 2 is marked unavailable and refuses before CLI-backed mode.
+   Menu inspection uses `plutil` to read that file only; it never runs Tailscale.
    It uses separate `.dev-tailscale-cli/` relay state and installs no service.
 3. **Legacy Tailscale Serve** — choose this only if you run a supported,
    authenticated standalone `tailscaled` Unix daemon and want the older direct-
@@ -32,7 +35,8 @@ make dev-tunnel
    fallback for option 2, and does not work with the macOS App Store Tailscale app.
    When the filesystem identifies an App Store bundle by its receipt, option 3 is
    marked unavailable and selecting it refuses before starting the legacy mode.
-   Menu selection checks files only and never runs Tailscale.
+   Menu availability checks read files only and never invoke Tailscale; selecting
+   an available option 2 then follows its own opt-in and route-consent gates.
 
 In automation, `make dev-tunnel` retains the tunnel default;
 `HERDR_DEV_TRANSPORT=tailscale-cli` selects option 2 but still requires the

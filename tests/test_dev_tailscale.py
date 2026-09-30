@@ -114,7 +114,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                     b"quick public URL + QR",
                     b"no Tailscale needed",
                     b"2. CLI-backed Tailscale Serve",
-                    b"for App Store Tailscale on macOS/arm64",
+                    b"for the supported App Store Tailscale 1.102.4 profile on macOS/arm64",
                     b"route persists after stop",
                     b"3. Legacy Tailscale Serve",
                     b"supported standalone tailscaled",
@@ -127,6 +127,11 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                 ):
                     if value not in stdout + stderr:
                         raise AssertionError(f"{case}: default not selected: {value!r}")
+            if case == "app_store_supported_version_keeps_cli_option_available":
+                output = stdout + stderr
+                if (b"2. CLI-backed Tailscale Serve" not in output or
+                    b"[UNAVAILABLE: Only the App Store Tailscale 1.102.4 profile" in output):
+                    raise AssertionError(f"{case}: supported profile was incorrectly marked unavailable: {output!r}")
             if sentinel.exists() or (dev / "relay.env").exists() or (base / "unused-tunnel").exists():
                 raise AssertionError(f"{case}: touched a CLI or dev state before consent")
             print(f"PASS dev-tailscale preflight: {case}")
@@ -167,6 +172,13 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     receipt = app_store_bundle / "Contents" / "_MASReceipt" / "receipt"
     receipt.parent.mkdir(mode=0o700, parents=True)
     receipt.write_bytes(b"synthetic App Store receipt marker")
+    app_store_info = app_store_bundle / "Contents" / "Info.plist"
+    app_store_info.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+        '<key>CFBundleShortVersionString</key><string>1.100.0</string>'
+        '</dict></plist>\n',
+        encoding="utf-8",
+    )
     menu_cli_dir = home / "menu-bin"
     menu_cli_dir.mkdir(mode=0o700)
     menu_cli = menu_cli_dir / "tailscale"
@@ -175,9 +187,41 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     menu_uname = menu_cli_dir / "uname"
     menu_uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
     menu_uname.chmod(0o700)
+    menu_plutil = menu_cli_dir / "plutil"
+    menu_plutil.write_text(
+        "#!/bin/sh\n"
+        "test \"$1\" = -extract && test \"$2\" = CFBundleShortVersionString && "
+        "test \"$3\" = raw && test \"$4\" = -o && test \"$5\" = - || exit 2\n"
+        "sed -n '/<key>CFBundleShortVersionString<\\/key>/{n;s/.*<string>\\([^<]*\\)<\\/string>.*/\\1/p;}' \"$6\"\n",
+        encoding="utf-8",
+    )
+    menu_plutil.chmod(0o700)
+    app_store_settings = {
+        "HERDR_DEV_TAILSCALE_CLI_BIN": str(menu_cli),
+        "PATH": f"{menu_cli_dir}:/usr/bin:/bin",
+    }
+    activation_before_menu = activation_record.read_bytes() if activation_record.exists() else None
+    interactive_refused(
+        "app_store_unsupported_version_marks_cli_mode_unavailable", tunnel_script, b"2\n",
+        b"Option 2 unavailable: Only the App Store Tailscale 1.102.4 profile is enabled",
+        **app_store_settings,
+    )
+    activation_after_menu = activation_record.read_bytes() if activation_record.exists() else None
+    if activation_after_menu != activation_before_menu:
+        raise AssertionError("unsupported App Store version selection reached the CLI activation fixture")
+    app_store_info.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+        '<key>CFBundleShortVersionString</key><string>1.102.4</string>'
+        '</dict></plist>\n',
+        encoding="utf-8",
+    )
+    interactive_refused(
+        "app_store_supported_version_keeps_cli_option_available", tunnel_script, b"4\n",
+        b"Choose 1, 2, or 3.", **app_store_settings,
+    )
     interactive_refused("app_store_marks_legacy_mode_unavailable", tunnel_script, b"3\n",
                         b"Option 3 unavailable: App Store Tailscale was detected",
-                        HERDR_DEV_TAILSCALE_CLI_BIN=str(menu_cli), PATH=f"{menu_cli_dir}:/usr/bin:/bin")
+                        **app_store_settings)
     if sentinel.exists():
         raise AssertionError("menu selection executed the real-CLI stand-in instead of using filesystem-only detection")
     delegated = subprocess.run(
