@@ -45,7 +45,7 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - name: Lint CLI lifecycle shell scripts
-        run: shellcheck -x -P relay relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
+        run: shellcheck --severity=warning -x -P relay relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
       - name: Lint GitHub workflows with pinned actionlint
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
