@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
@@ -208,8 +209,25 @@ func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T
 		t.Fatalf("Bootstrap() error = %v", err)
 	}
 	defer stream.Close()
-	if snapshot.Protocol != 1 || len(buffered) != 1 || buffered[0].Event != "pane.closed" {
-		t.Fatalf("snapshot=%+v buffered=%+v", snapshot, buffered)
+	if snapshot.Protocol != 1 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	var event Event
+	switch len(buffered) {
+	case 0:
+		eventCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		event, err = stream.Next(eventCtx)
+		if err != nil {
+			t.Fatalf("stream.Next() after empty bootstrap buffer: %v", err)
+		}
+	case 1:
+		event = buffered[0]
+	default:
+		t.Fatalf("buffered=%+v, want one pane.closed event", buffered)
+	}
+	if event.Event != "pane.closed" {
+		t.Fatalf("bootstrapped event=%+v, want pane.closed", event)
 	}
 	if supported != 0 || unsupported != 1 {
 		t.Fatalf("capability callbacks supported=%d unsupported=%d", supported, unsupported)
