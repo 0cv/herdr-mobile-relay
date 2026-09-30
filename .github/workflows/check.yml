@@ -394,7 +394,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           mkdir -m 700 -p "$RUNNER_TEMP/tailscale-package-browser-evidence"
-          printf '{"schema_version":1,"candidate_sha":"%s","current_stage":"runner_image_build","expected_case_count":14,"executed_case_count":0,"result":"not_run"}\n' "$GITHUB_SHA" > "$RUNNER_TEMP/tailscale-package-browser-evidence/tailscale-extracted-package-browser.json"
+          printf '{"schema_version":1,"candidate_sha":"%s","current_stage":"runner_image_build","expected_case_count":15,"executed_case_count":0,"result":"not_run"}\n' "$GITHUB_SHA" > "$RUNNER_TEMP/tailscale-package-browser-evidence/tailscale-extracted-package-browser.json"
           bun install --frozen-lockfile --cwd frontend
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
           test -n "$version"

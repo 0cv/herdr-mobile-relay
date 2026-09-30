@@ -187,61 +187,122 @@ not runtime qualification or production authorization:
    reset or restored from a snapshot.
 4. There is no guarantee that remote connections drain after route removal.
 
-This is an operational reference, not authorization. The current source/CI
-phase does not permit any live Tailscale CLI operation, route publication or
-removal, phone enrollment, service activation, or production mutation; workers
-must not invoke this runbook. Any later live development-route exercise requires
-its own explicit owner authorization naming the exact action, node/account and
-time window, plus completion of the independent review gates. Do not infer that
-a source change, hosted fixture, or generic development-path authorization
-permits a live mutation. Do not substitute another node, account, profile,
-action or scope. If separately authorized, the only candidate is the owner's
-Mac App Store Tailscale 1.102.4 profile on Darwin/arm64, in isolated foreground
-development, with HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377
-(plugin listener 18378). That authorization does not include unpublishing the
-route. Production, installed-service activation/migration, physical-phone
-enrollment and release qualification are outside this runbook.
+### Authority boundary and exact authorized scope
 
-0. Confirm the reviewed checkout/revision and launcher are the ones intended for
-   this run. Confirm the exact candidate SHA has ordinary, native Darwin/Linux
-   and extracted-release hosted results, and that independent review gates are
-   complete. Confirm the host is Darwin/arm64 and the selected executable/profile
-   is the exact App Store 1.102.4 candidate. Do not run a direct CLI mutation,
-   select another profile or node, or override the fixed development ports.
-1. Start only the isolated foreground development launcher. Its read-only
-   preflight must establish the exact client/daemon identity, version, current
-   node and canonical origin. Stop for any unrecognized/inconsistent profile,
-   architecture, wrong account/node, permission error, logged-out daemon or
-   ambiguity. Do not retry to overcome a refusal.
-2. Before publication, run the selected executable with the read-only argv
-   `serve status --json` to capture a sanitized summary of the complete Serve
-   configuration, including unrelated routes. Do not invoke a Serve mutator for
-   this snapshot. Keep raw account/status output private; record only the minimum
-   needed to compare before/after. Publication
-   must refuse if listener 8443 or backend 18377 is occupied, conflicting,
-   unrecorded, or cannot be parsed completely. Do not free a port, adopt a route,
-   or remove another mapping.
-3. Review the exact canonical node origin and all four limitations displayed by
-   the launcher. Type the exact node/origin/8443/127.0.0.1:18377 confirmation
-   shown by the tool on stdin. No environment variable can consent; a mismatch
-   or EOF cancels before route mutation.
-4. Run only foreground development setup. Verify readback is exactly the
-   selected HTTPS route to 127.0.0.1:18377 and compare the sanitized post-change
-   Serve summary. Confirm unrelated routes remain unchanged. Do not install or
-   start a service, enroll a phone, or print/share a setup link.
-5. Stop the foreground relay and retain the persistent route/journal by default.
-   Do not unpublish under this authorization. Route removal needs separate
-   explicit authorization and the Go workflow's exact-route unpublish consent.
-   First stop the foreground relay and prove backend 18377 is free. Inspect the
-   complete Serve state and exact journal binding before cleanup; remove only
-   HTTPS 8443 path `/`, then read back the complete state and verify unrelated
-   routes were preserved. Never reset Serve. On timeout, mismatch, unknown fields,
-   CLI error after dispatch or any uncertainty, stop, retain evidence and do not
-   retry or remove other routes.
-6. Record only a development-only outcome, with secrets and raw identity data
-   redacted. Physical-phone qualification remains a separate future phase;
-   production stays disabled until that qualification is recorded and separately
-   enabled.
+The implementation worker may perform source, static, build and compile-only
+work and hosted fixtures; the worker must never perform live Tailscale access,
+service access, route changes or physical-phone testing. After exact-revision
+hosted checks and independent approval, the supervising assistant may perform
+the already owner-authorized development-only sequence on this Mac's current
+node/account using the exact App Store Tailscale 1.102.4 candidate on
+Darwin/arm64. This is not a request for another owner grant for the actions
+listed below. Do not substitute another node, account, profile, device, action
+or scope.
 
-This runbook is not a deployment instruction. Development, PWA enrollment,
-sleep/wake, installed-service migration and release approval are distinct cells.
+The only authorized route tuple is HTTPS 8443 -> `127.0.0.1:18377`, with plugin
+listener 18378, in isolated foreground development. Runtime publication and
+cleanup each still require the Go workflow's displayed, exact, typed
+route-bound confirmation; no environment variable supplies consent. This
+sequence does not authorize installed-service activation/migration, production
+access or mutation, a production route, deployment, release, or broader
+qualification. These source/documentation changes establish none of those
+outcomes and do not themselves establish live qualification.
+
+### Supervised sequence
+
+0. **Exact-revision and host.** Confirm the reviewed checkout and current
+   revision have ordinary, native Darwin/Linux and extracted-release hosted
+   results, and independent review is complete. Confirm Darwin/arm64 and the
+   selected executable/profile is the exact App Store 1.102.4 candidate. Confirm
+   the current node/account is the owner-authorized one. Do not run a direct
+   mutation, select another profile/node, or override the fixed ports.
+1. **Read-only identity and coexistence baseline.** Verify the configured Herdr
+   executable and `HERDR_SOCKET_PATH` identify the owner's active local Herdr
+   Unix socket (`test -x "$HERDR_BIN"` and `test -S "$HERDR_SOCKET_PATH"`); do
+   not replace `HOME` with development state. Read installed-service status and
+   record only the metadata/hash/liveness needed to prove the service is
+   unchanged; do not start, stop, edit or migrate it. Run the selected absolute
+   Tailscale executable's read-only `status --json`, `version --json --daemon`
+   and `serve status --json` sequence. Keep raw account/status output private;
+   capture a complete private Serve baseline and a sanitized summary of every
+   existing route. Stop for a logged-out daemon, wrong node/account, permission
+   error, profile/version mismatch, malformed or unknown schema, incomplete
+   observation, pending/uncertain journal or any ambiguity. Do not retry around
+   a refusal, free a port, adopt a route, or remove another mapping.
+2. **Conflict refusal and scoped publication.** Start only the isolated
+   foreground development launcher. Its Go-owned preflight must validate
+   isolation and the exact profile before real CLI access. Publication must
+   refuse if HTTPS 8443, backend 18377 or plugin 18378 is occupied or conflicts,
+   or the selected listener has an unrecorded/unknown mapping. Review the complete
+   Serve baseline and all four accepted limits. Enter only the displayed exact
+   node/origin/8443/`127.0.0.1:18377` typed runtime confirmation. EOF or any
+   mismatch cancels before mutation; never clear a conflicting resource.
+3. **Readback, identity, bundle and readiness.** After setup, compare the
+   complete supported Serve configuration: only the intended HTTPS 8443 path
+   `/` -> `http://127.0.0.1:18377` may have been added; all unrelated mappings
+   must match the baseline. Confirm the plugin listener is 18378 and the local
+   backend binds only to `127.0.0.1:18377`. Check local `/readyz` and `/healthz`
+   for readiness and expected transport, instance, control-run, relay
+   version/revision, and bundle version/revision/hash. Request
+   `https://<canonical-node>:8443/healthz` without `-k`, redirects or trust
+   bypass; require trusted system TLS/hostname verification, matching instance
+   identity and the same release/bundle identity. Verify the configured phone-app
+   origin's `version.json`, descriptor and assets match the exact release. Pairing
+   remains closed until identity, trusted HTTPS, exact bundle and readiness pass.
+   Preserve the pre-run service metadata/hash/liveness for comparison; do not
+   activate or change that service.
+4. **Owner's physical-phone assessment.** Leave the development route available
+   for the already owner-authorized physical-phone assessment. The foreground
+   Go process displays the one-use setup link/QR only after the checks above;
+   show it privately to the designated owner and do not place it in notes,
+   evidence, chat or logs. Use the designated owner phone on the intended
+   tailnet. Complete the original E2EE enrollment and authenticated WebSocket
+   assessment; record the assigned device role and assess controller and reader
+   role behavior as separate cells under the original assessment requirements.
+   Keep reader access read-only and controller-only permissions distinct. Do not
+   send prompts, control agents, upload data, reset credentials or add a device
+   outside the already authorized assessment. Disconnect/reconnect once and
+   verify the enrolled credential resumes without re-pairing. If any role cell
+   cannot be safely assessed within that scope, record it as pending rather than
+   infer it from source or hosted fixtures. Stop on trust, identity, E2EE,
+   readiness or role uncertainty; do not print a second invitation or clear
+   device state.
+5. **Exact scoped cleanup.** After the owner's phone assessment, end the phone
+   session, stop the foreground relay with Ctrl-C, and prove the pairing socket
+   is removed and backend TCP 18377 is free. Capture a complete private Serve
+   snapshot and confirm the only eligible removal is the journaled node's exact
+   HTTPS 8443 path `/` -> `127.0.0.1:18377`; unrelated routes still match the
+   pre-publication baseline. Run the Go-owned development `unpublish` action and
+   enter its displayed exact node/origin/port/backend runtime confirmation. The
+   owner-authorized scope already includes removing this exact development
+   route; fresh exact-route runtime confirmation remains mandatory and is not
+   replaced by blanket consent. Go must repeat identity/schema/route/isolation checks and
+   issue only scoped `serve ... off`. Read back the complete Serve state: the
+   exact development route is absent, unrelated routes are unchanged, and
+   installed-service configuration/hash/liveness still match the baseline. Keep
+   the removed journal and private development state; never run `serve reset`,
+   stop or modify a production service, or remove a different route.
+6. **Uncertainty and cell recording.** If a CLI write times out, acknowledgement
+   or readback is lost, route/node/identity differs, unknown fields appear,
+   service/Serve state changes unexpectedly, a socket/port is occupied, or any
+   result is ambiguous, stop and retain the journal, reservation and private
+   evidence. Use only read-only status/recovery to inspect. Never retry an
+   ambiguous write, erase recovery state, or touch production. Record each
+   assessed cell's exact candidate, host/device/role, checks, outcome and
+   redacted evidence; mark every untested qualification cell **pending**. The
+   following cells are currently pending, not passed:
+
+   | Assessment cell | Status |
+   | --- | --- |
+   | App Store 1.102.4 runtime on this Darwin/arm64 Mac and current node/account | Pending |
+   | Complete pre/post Serve and installed-service noninterference | Pending |
+   | Scoped HTTPS 8443 -> `127.0.0.1:18377` publication and exact `off` readback | Pending |
+   | Trusted HTTPS, exact bundle, identity, local socket and readiness | Pending |
+   | Owner physical-phone E2EE enrollment and controller role | Pending |
+   | Reader role and read-only permission boundary | Pending |
+   | Disconnect/reconnect with existing credential and no re-pairing | Pending |
+   | Other phones/platforms, PWA lifecycle, sleep/wake, service, production and release cells | Pending |
+
+This is a development-only supervised runbook, not a deployment instruction.
+No live qualification, production enablement, deployment or release is
+established by these edits.

@@ -87,10 +87,13 @@ The only proposed route mutation argv are:
 ```
 
 The second form is allowed only from the process-local development workflow,
-after the journal has a durable acknowledged registration, fresh complete
-preflight identifies the same node and exact listener/mount/backend, and the
-separate cleanup authorization and exact-route consent have been obtained.
-Command qualification must verify both argv forms for each future profile.
+after the journal has a durable acknowledged registration and fresh complete
+preflight identifies the same node and exact listener/mount/backend. The action
+must be within the applicable owner-authorized scope (the supervised runbook
+below is already authorized); each execution still requires fresh exact-route
+runtime confirmation. This is not blanket consent or a demand for a further
+owner grant for that scoped cleanup. Command qualification must verify both
+argv forms for each future profile.
 Never call `serve reset`, `set-config`, `set-raw`, `funnel`, `up`, `login`, or a
 privilege change. The standalone command surface cannot request a manager from
 flags or journal data; the supported development entrypoint creates its
@@ -250,10 +253,11 @@ runtime qualification or production authorization:
 
 This runbook is for the already-authorized owner-operated development exercise
 on one Darwin/arm64 Mac, the exact supplied App Store Tailscale 1.102.4 profile,
-and the owner's designated phone. It covers one scoped persistent route and a
-phone enrollment/E2EE smoke only. It does not enable production, install or
-activate a service, migrate production, qualify other devices/platforms, or
-change any other Serve route. The implementation worker does not run these live
+and the owner's designated phone. It covers one scoped persistent route and the
+original physical-phone E2EE assessment, including device-role checks and
+credential reconnect. It does not enable production, install or activate a
+service, migrate production, qualify other devices/platforms, or change any
+other Serve route. The implementation worker does not run these live
 steps; the supervising assistant executes them only after exact-final-SHA
 ordinary/native/extracted hosted checks and configured independent reviews are
 complete. Do not substitute a node, account, profile, device, route, or port.
@@ -318,12 +322,16 @@ state whenever identity, readback, readiness, or a command result is uncertain.
    bootstrap enrollment as the owner's intended controller device, and confirm
    that the phone reaches the relay and completes the normal E2EE enrollment /
    authenticated WebSocket handshake. Perform only a harmless read-only agent
-   inventory check; do not send prompts, control an agent, upload data, invite a
-   second phone, reset credentials, or characterize this smoke as a platform
-   qualification. Disconnect/reconnect once and confirm the enrolled device
-   credential resumes without re-pairing. If the app reports a trust, identity,
-   E2EE, or readiness problem, stop; do not print a second invitation or clear
-   existing device state.
+   inventory check. Record the controller role and assess controller/reader
+   permissions as separate cells using only device(s) already within the
+   owner-authorized phone assessment; reader access remains read-only and
+   controller-only permissions must remain distinct. Do not send prompts,
+   control an agent, upload data, add a device outside that assessment, or reset
+   credentials. If a role cell is not safely exercised, leave it pending rather
+   than infer it from source/CI. Disconnect/reconnect once and confirm the
+   enrolled device credential resumes without re-pairing. If the app reports a
+   trust, identity, E2EE, readiness or role problem, stop; do not print a second
+   invitation or clear existing device state.
 5. **Scoped cleanup and before/after comparison.** End the phone session, stop
    the foreground relay with Ctrl-C, and prove pairing socket removal and that
    backend TCP 18377 is free (`lsof -nP -iTCP:18377 -sTCP:LISTEN` returns no

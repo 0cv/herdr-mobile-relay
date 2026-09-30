@@ -389,7 +389,7 @@ func unpublishDevelopmentRoute(ctx context.Context, workflow *tailscalecli.Devel
 	confirmation := fmt.Sprintf("UNPUBLISH DEVELOPMENT ROUTE node=%s origin=%s https-port=%d backend=127.0.0.1:%d",
 		preflight.NodeID, preflight.Origin, tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
 	_, _ = fmt.Fprintln(stderr, "This removes only the exact journaled route; it does not reset unrelated Serve state.")
-	_, _ = fmt.Fprintln(stderr, "Separate authorization is required. The check-to-write interval is not atomic and remote connections may not drain.")
+	_, _ = fmt.Fprintln(stderr, "After the authorized owner phone test, this exact-route cleanup still requires the displayed runtime confirmation. The check-to-write interval is not atomic and remote connections may not drain.")
 	_, _ = fmt.Fprintf(stderr, "Type exactly on stdin:\n%s\n", confirmation)
 	typed, err := readRouteConfirmation(stdin, confirmation)
 	if err != nil {

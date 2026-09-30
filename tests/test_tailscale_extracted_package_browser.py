@@ -42,7 +42,7 @@ STAGES = {
     "setup_reprint", "browser_reprint", "managed_retirement", "managed_restart",
     "browser_restart", "foreign_route_rejection", "held_pipe_cleanup",
     "ambiguous_localapi_ack", "cli_activation_gate", "cli_standalone_refusal",
-    "cli_config_refusal", "cli_platform_refusal", "complete",
+    "cli_config_refusal", "cli_platform_refusal", "runbook_scope_assertions", "complete",
 }
 FAILURE_CODES = {
     "fixture_assertion", "unexpected_exception", "archive_checksum_io",
@@ -123,6 +123,7 @@ EXPECTED_CASES = [
     "extracted_archive_standalone_mutations_require_workflow",
     "extracted_archive_config_startup_requires_workflow",
     "extracted_development_cli_refuses_unsupported_linux",
+    "development_runbook_and_cleanup_prompt_match_owner_scope",
 ]
 
 
@@ -371,6 +372,79 @@ def managed_launcher_stderr_phase(private_stderr: bytes) -> str:
         if pattern.search(text):
             return phase
     return "stderr_unclassified"
+
+
+def verify_development_runbook_scope(repo_root: Path) -> None:
+    try:
+        qualification = (repo_root / "docs/tailscale-cli-qualification.md").read_text(encoding="utf-8")
+        contract = (repo_root / "docs/tailscale-cli-contract.md").read_text(encoding="utf-8")
+        prompt = (repo_root / "cmd/herdr-mobile-relay/dev_tailscale_cli.go").read_text(encoding="utf-8")
+    except OSError:
+        die("development runbook source files are unavailable")
+    heading = "## Development risk acceptance and live runbook"
+    start = qualification.find(heading)
+    if start < 0:
+        die("development live runbook section is missing")
+    section = qualification[start:]
+    next_heading = section.find("\n## ", len(heading))
+    if next_heading >= 0:
+        section = section[:next_heading]
+    required = (
+        "four limits only for this isolated development route",
+        "CLI check-to-write race is not atomic with respect to external Serve writers.",
+        "persistent route and local backend-port reuse can survive relay stop",
+        "There is no automatic global rollback",
+        "There is no guarantee that remote connections drain after route removal.",
+        "worker may perform source, static, build and compile-only work and hosted fixtures",
+        "must never perform live Tailscale access",
+        "After exact-revision hosted checks and independent approval",
+        "already owner-authorized development-only sequence on this Mac's current",
+        "not a request for another owner grant",
+        "node/account using the exact App Store Tailscale 1.102.4 candidate",
+        "HTTPS 8443 -> `127.0.0.1:18377`",
+        "plugin listener 18378",
+        "HERDR_SOCKET_PATH",
+        "complete private Serve baseline",
+        "installed-service status",
+        "trusted system TLS/hostname verification",
+        "exact bundle and readiness",
+        "Leave the development route available",
+        "controller and reader",
+        "Keep reader access read-only and controller-only permissions distinct.",
+        "Disconnect/reconnect once",
+        "credential resumes without re-pairing.",
+        "exact-route runtime confirmation",
+        "ambiguous write",
+        "mark every untested qualification cell **pending**",
+        "No live qualification, production enablement, deployment or release is",
+    )
+    if any(text not in section for text in required):
+        die("development qualification runbook lost required owner scope or safety checks")
+    stale = (
+        "requires its own explicit owner authorization",
+        "That authorization does not include unpublishing",
+        "Do not unpublish under this authorization",
+        "Route removal needs separate explicit authorization",
+        "Do not install or start a service, enroll a phone, or print/share a setup link",
+        "Physical-phone qualification remains a separate future phase",
+    )
+    if any(text in section for text in stale):
+        die("development qualification runbook contains stale phone or cleanup prohibitions")
+    if (
+        "separate cleanup authorization" in contract
+        or "already authorized" not in contract
+        or "fresh exact-route" not in contract
+        or "not blanket consent" not in contract
+    ):
+        die("generic contract cleanup wording no longer matches scoped owner authorization")
+    if (
+        "After the authorized owner phone test, this exact-route cleanup still requires the displayed runtime confirmation." not in prompt
+        or "The check-to-write interval is not atomic and remote connections may not drain." not in prompt
+        or "Separate authorization is required" in prompt
+        or "This removes only the exact journaled route; it does not reset unrelated Serve state." not in prompt
+        or "RouteRemovalAccepted: true" not in prompt
+    ):
+        die("development cleanup prompt lost exact runtime consent, guards, or risk warnings")
 
 
 def sha256(path: Path) -> str:
@@ -1763,6 +1837,10 @@ def main() -> int:
     os.chmod(temporary_root, 0o700)
     origin = f"https://{HOST}:{os.environ['HERDR_TAILSCALE_HTTPS_PORT']}"
     try:
+        set_stage("runbook_scope_assertions")
+        verify_development_runbook_scope(Path(__file__).resolve().parents[1])
+        case_results[EXPECTED_CASES[14]] = "pass"
+
         set_stage("archive_verify")
         archive_digest, binary = verify_archive(
             archive, checksums, version, source_sha, temporary_root / "release", set_stage,
