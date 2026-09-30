@@ -313,7 +313,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     coordination_relay.write_text(
         "#!/bin/sh\n"
         "case \"$1 $2\" in 'tailscale-cli activation-check') exit 0 ;; esac\n"
-        "printf '%s\\n' \"$*\" > \"$COORDINATION_ARGS\"\n"
+        "printf 'args=%s\\ncoordination=%s\\n' \"$*\" \"${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-}\" > \"$COORDINATION_ARGS\"\n"
         "exit 0\n", encoding="utf-8",
     )
     coordination_relay.chmod(0o700)
@@ -332,11 +332,15 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=5, check=False,
     )
-    if (coordination_result.returncode != 0 or not coordination_record.exists() or
-        f"--coordination-root {custom_coordination_root}" not in coordination_record.read_text(encoding="utf-8")):
+    coordination_observed = (
+        coordination_record.read_text(encoding="utf-8") if coordination_record.exists() else "<missing>"
+    )
+    if (coordination_result.returncode != 0 or
+        f"coordination={custom_coordination_root}" not in coordination_observed):
         raise AssertionError(
             f"development diverged from the installed service coordination root: "
-            f"{coordination_result.stdout + coordination_result.stderr!r}"
+            f"exit={coordination_result.returncode} observed={coordination_observed!r} "
+            f"output={coordination_result.stdout + coordination_result.stderr!r}"
         )
     print("PASS CLI development fixture: coordination lock root matches installed service relay.env")
 

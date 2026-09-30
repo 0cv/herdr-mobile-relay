@@ -228,6 +228,7 @@ if [ "$ACTION" != setup ]; then
             export HERDR_WEB_ROOT="$WEB_ROOT" HERDR_RELEASE_ROOT="$DEV_ROOT/data/herdr-mobile-relay"
             export XDG_CONFIG_HOME="$DEV_ROOT/config" XDG_CACHE_HOME="$DEV_ROOT/cache" XDG_DATA_HOME="$DEV_ROOT/data"
             export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT="$DEV_ROOT"
+            export HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT"
             export HERDR_TAILSCALE_CLI_SCOPE=development HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
             exec "$RELAY_BIN" dev-tailscale-cli "$ACTION"
             ;;
@@ -240,6 +241,7 @@ if [ "$ACTION" != setup ]; then
             export HERDR_WEB_ROOT="$WEB_ROOT" HERDR_RELEASE_ROOT="$DEV_ROOT/data/herdr-mobile-relay"
             export XDG_CONFIG_HOME="$DEV_ROOT/config" XDG_CACHE_HOME="$DEV_ROOT/cache" XDG_DATA_HOME="$DEV_ROOT/data"
             export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT="$DEV_ROOT"
+            export HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT"
             export HERDR_TAILSCALE_CLI_SCOPE=development HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
             "$RELAY_BIN" dev-tailscale-cli assert-ready >/dev/null || {
                 echo "✗ Exact development route is not ready; no build or route mutation was performed." >&2
