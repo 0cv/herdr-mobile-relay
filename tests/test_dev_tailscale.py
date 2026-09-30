@@ -72,6 +72,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     })
     for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "GH_TOKEN",
                  "HERDR_DEV_TAILSCALE_CLI_BIN", "HERDR_TAILSCALE_CLI_BIN",
+                 "HERDR_TEST_UNAME_S", "HERDR_TEST_UNAME_M",
                  "HERDR_DEV_TAILSCALE_CLI_PORT", "HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT",
                  "HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT"):
         env.pop(name, None)
@@ -224,8 +225,6 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         "HERDR_DEV_TAILSCALE_CLI_BIN": str(menu_cli),
         "HERDR_DEV_TAILSCALE_CLI_RELAY_BIN": str(cli_relay),
         "ACTIVATION_CHECK_RECORD": str(activation_record),
-        "HERDR_TEST_UNAME_S": "Darwin",
-        "HERDR_TEST_UNAME_M": "arm64",
         "PATH": f"{menu_tools_dir}:{menu_cli_dir}:/usr/bin:/bin",
     }
 
