@@ -378,6 +378,7 @@ def managed_launcher_stderr_phase(private_stderr: bytes) -> str:
 def verify_development_runbook_scope(repo_root: Path) -> None:
     try:
         qualification = (repo_root / "docs/tailscale-cli-qualification.md").read_text(encoding="utf-8")
+        development = (repo_root / "docs/development.md").read_text(encoding="utf-8")
         contract = (repo_root / "docs/tailscale-cli-contract.md").read_text(encoding="utf-8")
         prompt = (repo_root / "cmd/herdr-mobile-relay/dev_tailscale_cli.go").read_text(encoding="utf-8")
     except OSError:
@@ -401,7 +402,12 @@ def verify_development_runbook_scope(repo_root: Path) -> None:
         "worker may perform source, static, build and compile-only work and hosted fixtures",
         "must never perform live Tailscale access",
         "After exact-revision hosted checks and independent approval",
-        "--operation arm_bootstrap",
+        "development.md#running-from-a-checkout",
+        "HERDR_DEV_TAILSCALE_CLI_DIR",
+        "env_file_value",
+        "invitation_armed: true",
+        "invitation_expires_at",
+        "decoded negative control reply can still exit zero",
         "successful durable arm acknowledgement",
         "already owner-authorized development-only sequence on this Mac's current",
         "not a request for another owner grant",
@@ -425,6 +431,22 @@ def verify_development_runbook_scope(repo_root: Path) -> None:
     )
     if any(text not in section for text in required):
         die("development qualification runbook lost required owner scope or safety checks")
+    development_rearm = development[development.find("Bootstrap setup invitations"):]
+    development_rearm = " ".join(development_rearm.split())
+    required_rearm = (
+        '--operation arm_bootstrap',
+        'RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"',
+        'env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET',
+        'env_file_value "$ENV_FILE" HERDR_RELAY_CONTROL_RUN_ID',
+        'env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID',
+        'json_bool_field "$response" ok "$RELAY_BIN"',
+        'json_bool_field "$response" invitation_armed "$RELAY_BIN"',
+        'json_string_field "$response" run_id "$RELAY_BIN"',
+        'json_string_field "$response" instance "$RELAY_BIN"',
+        'json_string_field "$response" invitation_expires_at "$RELAY_BIN"',
+    )
+    if any(text not in development_rearm for text in required_rearm) or '"$HERDR_RELAY_BIN" pairing-control' in development_rearm:
+        die("companion-terminal bootstrap re-arm command lost private-state or acknowledgement validation")
     stale = (
         "requires its own explicit owner authorization",
         "That authorization does not include unpublishing",
