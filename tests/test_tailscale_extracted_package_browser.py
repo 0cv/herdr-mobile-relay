@@ -389,6 +389,8 @@ def verify_development_runbook_scope(repo_root: Path) -> None:
     next_heading = section.find("\n## ", len(heading))
     if next_heading >= 0:
         section = section[:next_heading]
+    section = " ".join(section.split())
+    contract = " ".join(contract.split())
     required = (
         "four limits only for this isolated development route",
         "CLI check-to-write race is not atomic with respect to external Serve writers.",

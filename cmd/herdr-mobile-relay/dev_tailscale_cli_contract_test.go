@@ -32,6 +32,7 @@ func TestDevelopmentRunbookAndCleanupPromptMatchOwnerScope(t *testing.T) {
 	if next := strings.Index(section[len("## Development risk acceptance and live runbook"):], "\n## "); next >= 0 {
 		section = section[:len("## Development risk acceptance and live runbook")+next]
 	}
+	normalizedSection := strings.Join(strings.Fields(section), " ")
 	for _, want := range []string{
 		"four limits only for this isolated development route",
 		"CLI check-to-write race is not atomic with respect to external Serve writers.",
@@ -61,7 +62,7 @@ func TestDevelopmentRunbookAndCleanupPromptMatchOwnerScope(t *testing.T) {
 		"mark every untested qualification cell **pending**",
 		"No live qualification, production enablement, deployment or release is\nestablished by these edits.",
 	} {
-		if !strings.Contains(section, want) {
+		if !strings.Contains(normalizedSection, strings.Join(strings.Fields(want), " ")) {
 			t.Errorf("qualification runbook is missing required scope text %q", want)
 		}
 	}
@@ -73,15 +74,15 @@ func TestDevelopmentRunbookAndCleanupPromptMatchOwnerScope(t *testing.T) {
 		"Do not install or\n   start a service, enroll a phone, or print/share a setup link",
 		"Physical-phone qualification remains a separate future phase",
 	} {
-		if strings.Contains(section, stale) {
+		if strings.Contains(normalizedSection, strings.Join(strings.Fields(stale), " ")) {
 			t.Errorf("qualification runbook contains stale prohibition %q", stale)
 		}
 	}
 
-	contract := read("docs/tailscale-cli-contract.md")
+	contract := strings.Join(strings.Fields(read("docs/tailscale-cli-contract.md")), " ")
 	if strings.Contains(contract, "separate cleanup authorization") ||
 		!strings.Contains(contract, "already authorized") ||
-		!strings.Contains(contract, "fresh exact-route\nruntime confirmation") ||
+		!strings.Contains(contract, "fresh exact-route runtime confirmation") ||
 		!strings.Contains(contract, "not blanket consent") {
 		t.Error("generic contract cleanup wording is inconsistent with the scoped owner authorization and runtime confirmation")
 	}
