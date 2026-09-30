@@ -113,6 +113,7 @@ EXPECTED_CASES = [
     "managed_and_byo_wrappers_are_extracted_unchanged",
     "fixed_localapi_mask_etag_registration_and_selective_delete",
     "launcher_generated_setup_link_enrolls_real_controller_profile",
+    "dev_setup_link_imports_bare_wss_origin_in_extracted_frontend",
     "controller_reads_fake_inventory_and_sends_harmless_command",
     "second_persistent_profile_enrolls_reader_and_read_only_is_enforced",
     "reprint_and_managed_restart_preserve_enrolled_device_credentials",
@@ -400,6 +401,8 @@ def verify_development_runbook_scope(repo_root: Path) -> None:
         "worker may perform source, static, build and compile-only work and hosted fixtures",
         "must never perform live Tailscale access",
         "After exact-revision hosted checks and independent approval",
+        "--operation arm_bootstrap",
+        "successful durable arm acknowledgement",
         "already owner-authorized development-only sequence on this Mac's current",
         "not a request for another owner grant",
         "node/account using the exact App Store Tailscale 1.102.4 candidate",
@@ -1328,6 +1331,36 @@ def safe_link_from_output(output: bytes, origin: str) -> str | None:
     return None
 
 
+def development_setup_link(binary: Path, managed_link: str, app_origin: str) -> tuple[str, str]:
+    try:
+        parsed = urllib.parse.urlsplit(managed_link)
+        fields = urllib.parse.parse_qs(parsed.fragment, strict_parsing=True)
+        token = fields.get("setup", [""])[0]
+    except (IndexError, ValueError):
+        die("managed fixture did not provide a setup token for the development-link contract")
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        die("managed fixture setup token did not match the bounded test format")
+    relay_origin = f"wss://{HOST}:8443"
+    try:
+        generated = subprocess.run(
+            [str(binary), "setup-fragment", token, "Development relay", relay_origin],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        die("extracted relay could not generate the development setup fragment")
+    if generated.returncode != 0:
+        die("extracted relay rejected the development setup-fragment fixture")
+    try:
+        fragment = generated.stdout.decode("ascii", "strict").strip()
+        fields = urllib.parse.parse_qs(fragment, strict_parsing=True)
+    except (UnicodeError, ValueError):
+        die("extracted relay produced an invalid development setup fragment")
+    if fields.get("relay") != [relay_origin] or fields.get("setup") != [token]:
+        die("extracted relay development fragment did not preserve the bare relay origin")
+    return f"{app_origin}/#{fragment}", relay_origin
+
+
 def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expect_link: bool = True) -> tuple[subprocess.Popen[bytes], str, bytes, bytes, str]:
     try:
         process = subprocess.Popen(
@@ -1841,7 +1874,7 @@ def main() -> int:
     try:
         set_stage("runbook_scope_assertions")
         verify_development_runbook_scope(Path(__file__).resolve().parents[1])
-        case_results[EXPECTED_CASES[14]] = "pass"
+        case_results[EXPECTED_CASES[15]] = "pass"
 
         set_stage("archive_verify")
         archive_digest, binary = verify_archive(
@@ -1954,8 +1987,11 @@ def main() -> int:
                 ))):
             die("exact packaged local health and bundle identity were not ready at route registration", "fixture_registration_health_identity")
         prepare_chromium_nss_trust(ca, temporary_root / "chromium-home")
+        dev_setup_url, dev_relay_origin = development_setup_link(binary, link, origin)
         browser_record = {
-            "setup_url": link, "origin": origin, "profiles": str(temporary_root / "profiles"),
+            "setup_url": link, "dev_setup_url": dev_setup_url,
+            "dev_relay_origin": dev_relay_origin, "origin": origin,
+            "profiles": str(temporary_root / "profiles"),
             "fake_herdr_operations": str(operations),
             "herdr_socket_operations": str(herdr_socket_operations),
         }
@@ -2010,7 +2046,7 @@ def main() -> int:
         restarted = run_playwright(package, browser_record, "restart", evidence_path)
         if restarted.get("result") != "pass" or restarted.get("credentials_preserved") is not True:
             die("controller/reader credentials did not survive actual relay restart")
-        case_results[EXPECTED_CASES[6]] = "pass"
+        case_results[EXPECTED_CASES[7]] = "pass"
         if not stop_launcher(launcher):
             die("restarted packaged launcher did not acknowledge bounded Ctrl-C retirement")
         launcher = None
@@ -2042,7 +2078,7 @@ def main() -> int:
             die("LocalAPI protocol fixture did not exercise numeric watch, conditional registration/deletion, restart, and reprint transitions")
         if json.dumps(state.config.get("Foreground", {}).get(state.foreign_name), sort_keys=True) != foreign_before:
             die("selective cleanup changed the foreign route bytes")
-        case_results[EXPECTED_CASES[7]] = "pass"
+        case_results[EXPECTED_CASES[8]] = "pass"
         case_results[EXPECTED_CASES[2]] = "pass"
 
         # Force a real executable descendant to keep CLI stdout/stderr open on
@@ -2080,7 +2116,7 @@ def main() -> int:
             pass
         if elapsed > 7.0 or inspection.returncode != 0:
             die("held inherited child pipe was not bounded by the production CLI inspection")
-        case_results[EXPECTED_CASES[8]] = "pass"
+        case_results[EXPECTED_CASES[9]] = "pass"
 
         # Isolate the lost-ACK case from both the successful E2EE journey and
         # the foreign route. The fixture commits the exact conditional POST,
@@ -2154,7 +2190,7 @@ def main() -> int:
             os.kill(ambiguous_owner_pid, 0)
         except (KeyError, OSError, ValueError):
             die("ambiguous write did not retain its live foreground owner")
-        case_results[EXPECTED_CASES[9]] = "pass"
+        case_results[EXPECTED_CASES[10]] = "pass"
         transitions.extend(["lost-ack:conditional-post-committed", "lost-ack:no-replay", "lost-ack:private-recovery-retained", "lost-ack:no-setup-link"])
         launcher = None
         # Preserve and assert the lost-ACK owner first, then retire only this
@@ -2205,7 +2241,7 @@ def main() -> int:
             b"pending physical-phone qualification" not in fixture_activation.stderr or
             b"no CLI or service was contacted" not in fixture_activation.stderr):
             die("extracted release binary did not keep CLI profile activation disabled")
-        case_results[EXPECTED_CASES[10]] = "pass"
+        case_results[EXPECTED_CASES[11]] = "pass"
         transitions.append("release-binary:cli-activation-disabled")
 
         cli_root = temporary_root / "cli-denied"
@@ -2272,7 +2308,7 @@ def main() -> int:
                 die("extracted standalone CLI command bypassed the process-local workflow")
         if cli_state_root.exists() or any(cli_coordination_root.iterdir()):
             die("standalone CLI refusal created registration or coordination state")
-        case_results[EXPECTED_CASES[11]] = "pass"
+        case_results[EXPECTED_CASES[12]] = "pass"
         cli_registration_summary["standalone_mutations_refused"] = True
         transitions.append("release-binary:standalone-cli-requires-workflow")
 
@@ -2284,7 +2320,7 @@ def main() -> int:
         if (config_start.returncode == 0 or b"in-process isolated workflow" not in config_start.stderr or
             cli_sentinel.exists() or cli_state_root.exists()):
             die("ordinary extracted serve startup crossed the development workflow gate")
-        case_results[EXPECTED_CASES[12]] = "pass"
+        case_results[EXPECTED_CASES[13]] = "pass"
         cli_registration_summary["ordinary_config_startup_refused"] = True
         cli_app_summary["server_started"] = False
         cli_app_summary["phone_setup_link_enabled"] = False
@@ -2303,7 +2339,7 @@ def main() -> int:
             cli_localapi_event_count_after = len(state.events)
         if cli_localapi_event_count_before != cli_localapi_event_count_after:
             die("extracted CLI refusal unexpectedly reached the LocalAPI fixture")
-        case_results[EXPECTED_CASES[13]] = "pass"
+        case_results[EXPECTED_CASES[14]] = "pass"
         cli_registration_summary["unsupported_linux_refused"] = True
         cli_registration_summary["fake_cli_not_invoked"] = not cli_sentinel.exists()
         cli_app_summary["serve_mutation_attempted"] = False

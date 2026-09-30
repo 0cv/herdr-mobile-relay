@@ -12,34 +12,52 @@ cd herdr-mobile-relay
 make dev-tunnel
 ```
 
-`make dev-tunnel` asks on a terminal whether to use (1) the temporary
-Cloudflare tunnel / saved gateway, (2) the new CLI-backed persistent Tailscale
-transport, or (3) the legacy foreground/session-owned Tailscale Serve transport.
-Option 1 builds the current Go source and frontend, uses isolated ports and state
-under `relay/.dev/`, and never uses the installed production relay. Enter selects
-option 1. Option 2 enables only isolated foreground development for the exact
-recognized macOS App Store Tailscale 1.102.4 profile. It is not runtime-qualified
-or production-enabled. The isolated setup uses Go-owned read-only profile
-preflight, refuses conflicting Serve listeners, and requires exact
-node/origin/listener/backend confirmation on stdin; no environment variable can
-consent. It creates separate `.dev-tailscale-cli/` state and never installs a
-service. Option 3 retains the existing LocalAPI temporary-session
-contract and its own consent/compatibility checks; it is not a fallback for
-option 2. In automation, `make dev-tunnel` retains the tunnel default;
+`make dev-tunnel` asks on a terminal which development connection to use:
+
+1. **Temporary Cloudflare tunnel or saved gateway** — choose this for the quick
+   one-computer trial. It starts this checkout, shows a QR, and needs no Tailscale;
+   the temporary public URL uses Cloudflare, while a saved gateway can replace it.
+   State stays under `relay/.dev/`, separate from the installed relay. Enter still
+   selects this option.
+2. **CLI-backed Tailscale Serve** — choose this if you use the macOS App Store
+   Tailscale app and want the development relay available over your tailnet. It
+   needs the app's supported CLI profile, a signed-in node, and exact route
+   confirmation. The HTTPS route remains configured after the foreground relay
+   stops. Only the supplied macOS/arm64 1.102.4 profile is enabled for this
+   isolated development path; runtime and phone qualification remain pending.
+   It uses separate `.dev-tailscale-cli/` relay state and installs no service.
+3. **Legacy Tailscale Serve** — choose this only if you run a supported,
+   authenticated standalone `tailscaled` Unix daemon and want the older direct-
+   LocalAPI temporary/session-owned route. It is for advanced users, is not a
+   fallback for option 2, and does not work with the macOS App Store Tailscale app.
+   When the filesystem identifies an App Store bundle by its receipt, option 3 is
+   marked unavailable and selecting it refuses before starting the legacy mode.
+   Menu selection checks files only and never runs Tailscale.
+
+In automation, `make dev-tunnel` retains the tunnel default;
 `HERDR_DEV_TRANSPORT=tailscale-cli` selects option 2 but still requires the
 explicit dev opt-in and route phrase on stdin, while
-`HERDR_DEV_TRANSPORT=tailscale` selects legacy option 3. “Tunnel” means the
-Cloudflare/gateway path here; Tailscale Serve is tailnet HTTPS, not Cloudflare
-tunneling. Development roots remain separate.
+`HERDR_DEV_TRANSPORT=tailscale` selects legacy option 3. These explicit
+`HERDR_DEV_TRANSPORT` values and their noninteractive behavior are unchanged.
+“Tunneling” here means the Cloudflare/gateway path; Tailscale Serve is tailnet
+HTTPS. Development roots remain separate.
 
-For an **explicitly selected, already running and authenticated** supported
-Tailscale v1.102.4 Unix daemon, choosing menu option 3 starts legacy managed
-development without asking for paths or ports. The checkout-local state root
+For an **explicitly selected, already running and authenticated standalone**
+supported Tailscale v1.102.4 Unix daemon, choosing menu option 3 starts legacy
+managed development without asking for paths or ports. It does not support the
+macOS App Store Tailscale app. The checkout-local state root
 `relay/.dev-tailscale/` is created with mode 0700 only after input checks.
 The development relay, plugin and HTTPS Serve ports default to 18377, 18378
 and 8443; conflicts are refused rather than adopting a listener or changing
 an enrolled port. CLI-backed development uses the same separate port contract, with state under
-`relay/.dev-tailscale-cli/` and an independently consented persistent route.
+`relay/.dev-tailscale-cli/` and an independently consented persistent route. Its
+pairing-control socket is placed outside the deep checkout in a short private
+runtime directory (`/private/tmp/herdr-cli-<uid>/<sha256-of-checkout>/p.sock` on
+macOS, `/tmp/...` on Linux); Go validates directory ownership/modes and the
+platform AF_UNIX path-length limit before using the socket. The route journal,
+relay config, credentials, and release remain in the private checkout state. If
+existing state records the previous in-root socket path, setup/update refuse
+before rebuilding and retain that state; there is no automatic migration.
 The supported candidate is only the exact App Store macOS/arm64 1.102.4
 profile; profile-specific development eligibility is separate from runtime
 qualification. The launcher uses filesystem-only executable selection, then
@@ -102,6 +120,26 @@ preserve the previous generated version for inspection. The phone setup URL
 requires a trusted certificate, live owner and exact matching web bundle.
 MacSys is unsupported. The App Store profile is development-enabled only; no
 real-runtime or physical-phone qualification is implied by this entrypoint.
+Bootstrap setup invitations expire after ten minutes and remain one-use. If a
+bootstrap link expires or is reported as already used before enrollment, and the
+same foreground relay is still running, re-arm its existing bootstrap token over
+its private local control socket:
+
+```bash
+"$HERDR_RELAY_BIN" pairing-control \
+  --socket "$HERDR_RELAY_PAIRING_SOCKET" \
+  --operation arm_bootstrap \
+  --run-id "$HERDR_RELAY_CONTROL_RUN_ID" \
+  --instance "$HERDR_RELAY_INSTANCE_ID"
+```
+
+Run this only against that running isolated development relay with the values
+from its private environment. Wait for a successful arm acknowledgement, then
+retry the same setup link. This does not extend the ten-minute lifetime, reset
+devices, or change the Tailscale route. A refused already-enrolled device needs
+a fresh device invitation, not bootstrap re-arming. If the relay is stopped or
+acknowledgement is unclear, retain state and follow the qualification runbook
+instead of retrying blindly.
 
 ## Common targets
 

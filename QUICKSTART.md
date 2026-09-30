@@ -135,15 +135,30 @@ availability is not guaranteed by Herdr. This path does not support background
 service installation or phone-managed updates. See
 [Operator-owned Serve](docs/transports.md#operator-owned-https-serve-byo).
 
-A separate CLI-backed foreground development entrypoint is available to
-checkout developers as `make dev-tailscale-cli`; it is not part of setup or an
-installed service. Only the exact supplied macOS/arm64 App Store Tailscale
-1.102.4 profile is enabled for isolated development, and real-runtime and
-physical-phone qualification remain pending. Production and installed-service
-activation are still refused. Do not publish a persistent route based on the
-source/fixture implementation alone; review the current limits and live-run
-boundary in [the CLI qualification guide](docs/tailscale-cli-qualification.md)
-before using this development-only path.
+Checkout developers can also run `make dev-tunnel` and choose a clearly labelled
+transport: 1 is a temporary public Cloudflare URL (or saved gateway), QR shown,
+no Tailscale needed; 2 is CLI-backed Tailscale Serve for the supported macOS
+App Store profile and leaves its HTTPS route configured after stop; 3 is the
+older foreground mode for an authenticated standalone `tailscaled`, not the App
+Store app. Option 3 is shown as unavailable when a local App Store receipt makes
+that incompatibility knowable from files. Enter still picks option 1, and menu
+selection never runs Tailscale.
+
+A separate CLI-backed foreground development entrypoint is available as
+`make dev-tailscale-cli`; it is not part of setup or an installed service. Only
+the exact supplied macOS/arm64 App Store Tailscale 1.102.4 profile is enabled
+for isolated development, and real-runtime and physical-phone qualification
+remain pending. Production and installed-service activation are still refused.
+Do not publish a persistent route based on the source/fixture implementation
+alone; review the current limits and live-run boundary in
+[the CLI qualification guide](docs/tailscale-cli-qualification.md) before using
+this development-only path.
+
+Setup links are one-use; bootstrap setup invitations expire after ten minutes.
+If one expires while the same foreground development relay is still running,
+its private pairing-control socket's `arm_bootstrap` operation re-arms the same
+token for another ten minutes. The exact command and safety boundary are in the
+[development runbook](docs/development.md#running-from-a-checkout).
 
 ## Make It Permanent
 

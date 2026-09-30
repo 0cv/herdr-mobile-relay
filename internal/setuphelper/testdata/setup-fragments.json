@@ -1,0 +1,13 @@
+{
+  "token": "0123456789abcdef0123456789abcdef",
+  "managed": {
+    "label": "Managed relay",
+    "relay": "wss://managed.tailnet.ts.net:8375",
+    "fragment": "label=Managed+relay&relay=wss%3A%2F%2Fmanaged.tailnet.ts.net%3A8375&setup=0123456789abcdef0123456789abcdef"
+  },
+  "development": {
+    "label": "Development relay",
+    "relay": "wss://dev.tailnet.ts.net:8443",
+    "fragment": "label=Development+relay&relay=wss%3A%2F%2Fdev.tailnet.ts.net%3A8443&setup=0123456789abcdef0123456789abcdef"
+  }
+}

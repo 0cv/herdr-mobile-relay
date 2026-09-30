@@ -86,6 +86,43 @@ elif [ "$DEV_ROOT" != "$DEFAULT_DEV_ROOT" ]; then
 fi
 [ "$DEV_ROOT" != / ] && [ "$DEV_ROOT" != "$HOME" ] || { echo "✗ Root or home cannot be a development state directory." >&2; exit 2; }
 
+# Keep the AF_UNIX control socket independent of checkout depth. The complete
+# root hash gives each checkout a stable, isolated directory under a short
+# user-private temporary base; Go independently derives and validates it.
+case "$(uname -s)" in
+    Darwin) SOCKET_TMP_BASE=/private/tmp/herdr-cli-$(id -u) ;;
+    Linux) SOCKET_TMP_BASE=/tmp/herdr-cli-$(id -u) ;;
+    *) echo "✗ Only Linux and macOS development are supported." >&2; exit 2 ;;
+esac
+if command -v sha256sum >/dev/null 2>&1; then
+    DEV_ROOT_HASH="$(printf '%s' "$DEV_ROOT" | sha256sum)"
+elif command -v shasum >/dev/null 2>&1; then
+    DEV_ROOT_HASH="$(printf '%s' "$DEV_ROOT" | shasum -a 256)"
+else
+    echo "✗ sha256sum or shasum is required to isolate the short development control socket." >&2
+    exit 2
+fi
+DEV_ROOT_HASH="${DEV_ROOT_HASH%% *}"
+case "$DEV_ROOT_HASH" in *[!0-9a-f]*|'') echo "✗ Could not derive the private development socket directory." >&2; exit 2 ;; esac
+SOCKET_DIR="$SOCKET_TMP_BASE/$DEV_ROOT_HASH"
+PAIRING_SOCKET="$SOCKET_DIR/p.sock"
+
+ensure_private_socket_directory() {
+    local path mode owner
+    for path in "$SOCKET_TMP_BASE" "$SOCKET_DIR"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -d "$path" ] && [ ! -L "$path" ] || { echo "✗ Development control-socket directory is not a real directory: $path" >&2; return 1; }
+            case "$(uname -s)" in
+                Darwin) mode="$(stat -f '%Lp' "$path")"; owner="$(stat -f '%u' "$path")" ;;
+                Linux) mode="$(stat -c '%a' "$path")"; owner="$(stat -c '%u' "$path")" ;;
+            esac
+            [ "$mode" = 700 ] && [ "$owner" = "$(id -u)" ] || { echo "✗ Existing development control-socket directory has unsafe ownership or permissions: $path" >&2; return 1; }
+        else
+            mkdir -m 700 "$path" || return 1
+        fi
+    done
+}
+
 dev_current_release() {
     local target release_name resolved
     [ -L "$DEV_ROOT/current" ] || return 1
@@ -170,6 +207,13 @@ fi
 
 ENV_FILE="$DEV_ROOT/relay.env"
 MARKER="$DEV_ROOT/.herdr-dev-tailscale-cli"
+if { [ "$ACTION" = setup ] || [ "$ACTION" = update ]; } && [ -f "$ENV_FILE" ]; then
+    configured_pairing_socket="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
+    if [ "$configured_pairing_socket" != "$PAIRING_SOCKET" ]; then
+        echo "✗ Existing development state records a different pairing socket; it was retained without migration. Choose a separate private root or follow a reviewed migration before setup/update." >&2
+        exit 2
+    fi
+fi
 BUILD_DIR=""
 NEXT_POINTER=""
 # shellcheck disable=SC2329 # Invoked through the setup EXIT-trap cleanup function.
@@ -221,7 +265,7 @@ if [ "$ACTION" != setup ]; then
     CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
     case "$ACTION" in
         status|recover|release-reservation|unpublish)
-            if [ "$ACTION" = unpublish ] && [ -S "$DEV_ROOT/config/pairing-control.sock" ]; then
+            if [ "$ACTION" = unpublish ] && [ -S "$PAIRING_SOCKET" ]; then
                 echo "✗ Stop the foreground development relay before scoped route cleanup; the route remains configured." >&2
                 exit 1
             fi
@@ -234,7 +278,7 @@ if [ "$ACTION" != setup ]; then
             exec "$RELAY_BIN" dev-tailscale-cli "$ACTION"
             ;;
         update)
-            [ ! -S "$DEV_ROOT/config/pairing-control.sock" ] || {
+            [ ! -S "$PAIRING_SOCKET" ] || {
                 echo "✗ Stop the foreground development relay before replacing its build; registration was retained." >&2
                 exit 1
             }
@@ -328,7 +372,7 @@ else
     [ -f "$ENV_FILE" ] || { echo "✗ Update requires existing isolated CLI development state." >&2; exit 1; }
 fi
 
-[ ! -S "$DEV_ROOT/config/pairing-control.sock" ] || {
+[ ! -S "$PAIRING_SOCKET" ] || {
     echo "✗ Stop the foreground development relay before replacing its build; registration was retained." >&2
     exit 1
 }
@@ -356,6 +400,9 @@ for leaf in config cache data web bin registration releases; do
         mkdir -m 700 "$path"
     fi
 done
+if [ "$ACTION" = setup ] || [ "$ACTION" = update ]; then
+    ensure_private_socket_directory
+fi
 if [ -e "$DEV_ROOT/current" ] || [ -L "$DEV_ROOT/current" ]; then
     dev_current_release >/dev/null || {
         echo "✗ Current development release pointer is not a complete managed release." >&2
@@ -404,7 +451,7 @@ if [ ! -f "$ENV_FILE" ]; then
     set_env_value_atomic "$initializing_env" HERDR_RELAY_HOST 127.0.0.1
     set_env_value_atomic "$initializing_env" HERDR_RELAY_PORT "$RELAY_PORT"
     set_env_value_atomic "$initializing_env" HERDR_RELAY_PLUGIN_PORT "$PLUGIN_PORT"
-    set_env_value_atomic "$initializing_env" HERDR_RELAY_PAIRING_SOCKET "$DEV_ROOT/config/pairing-control.sock"
+    set_env_value_atomic "$initializing_env" HERDR_RELAY_PAIRING_SOCKET "$PAIRING_SOCKET"
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_ORIGIN "$ORIGIN"
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_SCOPE development
     set_env_value_atomic "$initializing_env" HERDR_TAILSCALE_CLI_BIN "$CLI_BIN"
@@ -493,7 +540,7 @@ export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN" H
 export HERDR_TAILSCALE_CLI_STATE_ROOT="$DEV_ROOT/registration" HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT"
 export HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT="$DEV_ROOT"
 export HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT" HERDR_PHONE_APP_URL="$PHONE_APP"
-export HERDR_RELAY_PAIRING_SOCKET="$DEV_ROOT/config/pairing-control.sock"
+export HERDR_RELAY_PAIRING_SOCKET="$PAIRING_SOCKET"
 export HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
 
 trap cleanup_dev_build_stage EXIT

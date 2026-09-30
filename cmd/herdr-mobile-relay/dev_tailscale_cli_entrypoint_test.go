@@ -312,6 +312,10 @@ func configureCraftedDevelopmentRoot(t *testing.T, fixture *developmentCommandFi
 		"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=" + state + "\n" +
 		"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=" + fixture.coordination + "\n"
 	writeCommandFixtureFile(t, filepath.Join(root, ".herdr-dev-tailscale-cli"), marker, 0o600)
+	pairingSocket, err := tailscalecli.DevelopmentPairingSocketPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for key, value := range map[string]string{
 		"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT": root,
 		"HERDR_TAILSCALE_CLI_STATE_ROOT":       state,
@@ -322,7 +326,7 @@ func configureCraftedDevelopmentRoot(t *testing.T, fixture *developmentCommandFi
 		"HERDR_RELEASE_ROOT":                   filepath.Join(root, "data", "herdr-mobile-relay"),
 		"HERDR_WEB_ROOT":                       filepath.Join(root, "current", "web"),
 		"HERDR_RELAY_BIN":                      filepath.Join(root, "current", "bin", "herdr-mobile-relay"),
-		"HERDR_RELAY_PAIRING_SOCKET":           filepath.Join(root, "config", "pairing-control.sock"),
+		"HERDR_RELAY_PAIRING_SOCKET":           pairingSocket,
 	} {
 		t.Setenv(key, value)
 	}
@@ -369,7 +373,10 @@ func newDevelopmentCommandFixture(t *testing.T) *developmentCommandFixture {
 	fixture.cache = filepath.Join(fixture.root, "cache")
 	fixture.data = filepath.Join(fixture.root, "data")
 	fixture.relayEnv = filepath.Join(fixture.root, "relay.env")
-	fixture.pairingSocket = filepath.Join(fixture.config, "pairing-control.sock")
+	fixture.pairingSocket, err = tailscalecli.DevelopmentPairingSocketPath(fixture.root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture.herdrSocket = filepath.Join(fixture.home, "herdr", "herdr.sock")
 	fixture.herdrBin = filepath.Join(fixture.home, "bin", "herdr")
 	fixture.cli = filepath.Join(fixture.home, "bin", "tailscale")

@@ -541,6 +541,46 @@ describe('relay command store', () => {
     expect(store.get(relayId)).toMatchObject({ kind: 'credential', id: 'credential-issued' });
   });
 
+  it('shows an actionable error instead of deferring an expired invitation in an iOS browser tab', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    vi.stubGlobal('navigator', { standalone: undefined, userAgent: 'Mozilla/5.0 (iPhone)', maxTouchPoints: 5 });
+    const relayUrl = 'wss://expired.example';
+    const expiredLink = {
+      hash: `#setup=${'D'.repeat(43)}&invite=invitation-expired01&invite_version=1`
+        + `&invite_expires=${Date.now() - 1_000}&label=Expired&relay=${encodeURIComponent(relayUrl)}`,
+      protocol: 'https:',
+      host: 'app.example',
+      pathname: '/',
+      search: '',
+    };
+
+    expect(relayStore.importSetupLink(expiredLink, true)).toBe(false);
+    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
+    expect(get(relayStore.toast)?.message).toContain('Ask the relay owner for a new one-use setup link');
+    expect(get(relayStore.relayConfigs)).toEqual([]);
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it('explains why a setup link with an invalid relay path was not imported', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    const invalidLink = {
+      hash: `#setup=${'D'.repeat(32)}&label=Development&relay=${encodeURIComponent('wss://relay.example/ws')}`,
+      protocol: 'https:',
+      host: 'app.example',
+      pathname: '/',
+      search: '',
+    };
+
+    expect(relayStore.importSetupLink(invalidLink, true)).toBe(false);
+    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
+    expect(get(relayStore.relayConfigs)).toEqual([]);
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
   it('saves a first invitation on a cold start and dials with it', () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
@@ -673,7 +713,7 @@ describe('relay command store', () => {
     expect(sent.some((entry) => entry.type === 'device_list')).toBe(false);
 
     expect(store.get(relayId)).toBeNull();
-    expect(get(relayStore.toast)?.message).toContain('Forgotten needs pairing');
+    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
     expect(get(relayStore.connections).get(relayId)?.pairingRequired).toBe(true);
 
     // The bug this guards: a plaintext ladder against an encrypted relay, with
@@ -1866,7 +1906,7 @@ describe('relay command store', () => {
     relayStore.addRelay({ label: 'Truncated', url: 'wss://truncated.example', token: 'short-key' });
 
     expect(MockWebSocket.instances).toHaveLength(0);
-    expect(get(relayStore.toast)?.message).toContain('Truncated needs pairing');
+    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
     const connection = get(relayStore.connections).get(makeRelayId('Truncated', 'wss://truncated.example'));
     expect(connection?.pairingRequired).toBe(true);
     expect(connection?.status).toBe('disconnected');
@@ -1911,7 +1951,7 @@ describe('relay command store', () => {
     const connection = get(relayStore.connections).values().next().value;
     expect(connection?.authRejected).toBe(true);
     expect(connection?.status).toBe('disconnected');
-    expect(get(relayStore.toast)?.message).toContain('refused this device');
+    expect(get(relayStore.toast)?.message).toContain('this device was refused');
     const rejectionToast = get(relayStore.toast);
     relayStore.revalidateConnections();
     relayStore.revalidateConnections();

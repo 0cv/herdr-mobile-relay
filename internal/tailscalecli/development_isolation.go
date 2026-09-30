@@ -2,6 +2,8 @@ package tailscalecli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -19,11 +21,12 @@ import (
 const developmentEnvironmentMaxBytes = 64 * 1024
 
 type developmentIsolation struct {
-	home, root, state, coordination     string
-	relayEnv, configHome, cacheHome     string
-	dataHome, releaseRoot, runtimeRoot  string
-	webRoot, relayBinary, pairingSocket string
-	herdrBinary, herdrSocket            string
+	home, root, state, coordination       string
+	relayEnv, configHome, cacheHome       string
+	dataHome, releaseRoot, runtimeRoot    string
+	webRoot, relayBinary, pairingSocket   string
+	pairingRuntimeBase, pairingRuntimeDir string
+	herdrBinary, herdrSocket              string
 }
 
 // ValidateDevelopmentOperationEnvironment rechecks the complete Go-owned
@@ -38,7 +41,63 @@ func ValidateDevelopmentOperationEnvironment(root, stateRoot, coordinationRoot s
 	return layout.validate(requireStopped, requireHerdrSocket)
 }
 
+func DevelopmentPairingSocketPath(root string) (string, error) {
+	_, _, socket, err := developmentPairingSocketPaths(root)
+	return socket, err
+}
+
+func developmentPairingSocketPaths(root string) (base, directory, socket string, err error) {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return "", "", "", ErrPermissionDenied
+	}
+	tmp := ""
+	switch runtime.GOOS {
+	case "darwin":
+		tmp = "/private/tmp"
+	case "linux":
+		tmp = "/tmp"
+	default:
+		return "", "", "", ErrUnsupported
+	}
+	base = filepath.Join(tmp, "herdr-cli-"+strconv.Itoa(os.Geteuid()))
+	digest := sha256.Sum256([]byte(root))
+	directory = filepath.Join(base, hex.EncodeToString(digest[:]))
+	socket = filepath.Join(directory, "p.sock")
+	if err := validateUnixSocketPathLength(socket, "development pairing socket"); err != nil {
+		return "", "", "", err
+	}
+	return base, directory, socket, nil
+}
+
+func validateUnixSocketPathLength(path, override string) error {
+	return validateUnixSocketPathLengthForOS(path, override, runtime.GOOS)
+}
+
+func validateUnixSocketPathLengthForOS(path, override, goos string) error {
+	if path == "" {
+		return nil
+	}
+	limit, platform := 0, ""
+	switch goos {
+	case "darwin":
+		limit, platform = 104, "macOS"
+	case "linux":
+		limit, platform = 108, "Linux"
+	default:
+		return ErrUnsupported
+	}
+	pathBytes := len([]byte(path))
+	if pathBytes+1 <= limit {
+		return nil
+	}
+	return fmt.Errorf("%s is %d bytes; %s AF_UNIX paths allow at most %d pathname bytes including the terminating NUL. Shorten it using %s", override, pathBytes, platform, limit-1, override)
+}
+
 func developmentIsolationFromEnvironment(root, stateRoot, coordinationRoot string) (*developmentIsolation, error) {
+	runtimeBase, runtimeDir, pairingSocket, err := developmentPairingSocketPaths(root)
+	if err != nil {
+		return nil, err
+	}
 	home := os.Getenv("HOME")
 	if home == "" {
 		var err error
@@ -48,21 +107,23 @@ func developmentIsolationFromEnvironment(root, stateRoot, coordinationRoot strin
 		}
 	}
 	layout := &developmentIsolation{
-		home:          home,
-		root:          root,
-		state:         stateRoot,
-		coordination:  coordinationRoot,
-		relayEnv:      filepath.Join(root, "relay.env"),
-		configHome:    filepath.Join(root, "config"),
-		cacheHome:     filepath.Join(root, "cache"),
-		dataHome:      filepath.Join(root, "data"),
-		releaseRoot:   filepath.Join(root, "data", "herdr-mobile-relay"),
-		runtimeRoot:   filepath.Join(root, "runtime"),
-		webRoot:       filepath.Join(root, "current", "web"),
-		relayBinary:   filepath.Join(root, "current", "bin", "herdr-mobile-relay"),
-		pairingSocket: filepath.Join(root, "config", "pairing-control.sock"),
-		herdrBinary:   os.Getenv("HERDR_BIN"),
-		herdrSocket:   os.Getenv("HERDR_SOCKET_PATH"),
+		home:               home,
+		root:               root,
+		state:              stateRoot,
+		coordination:       coordinationRoot,
+		relayEnv:           filepath.Join(root, "relay.env"),
+		configHome:         filepath.Join(root, "config"),
+		cacheHome:          filepath.Join(root, "cache"),
+		dataHome:           filepath.Join(root, "data"),
+		releaseRoot:        filepath.Join(root, "data", "herdr-mobile-relay"),
+		runtimeRoot:        filepath.Join(root, "runtime"),
+		webRoot:            filepath.Join(root, "current", "web"),
+		relayBinary:        filepath.Join(root, "current", "bin", "herdr-mobile-relay"),
+		pairingSocket:      pairingSocket,
+		pairingRuntimeBase: runtimeBase,
+		pairingRuntimeDir:  runtimeDir,
+		herdrBinary:        os.Getenv("HERDR_BIN"),
+		herdrSocket:        os.Getenv("HERDR_SOCKET_PATH"),
 	}
 	if err := layout.validate(false, false); err != nil {
 		return nil, err
@@ -73,6 +134,17 @@ func developmentIsolationFromEnvironment(root, stateRoot, coordinationRoot strin
 func (d *developmentIsolation) validate(requireStopped, requireHerdrSocket bool) error {
 	if d == nil || runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return ErrUnsupported
+	}
+	if configured := os.Getenv("HERDR_RELAY_PAIRING_SOCKET"); configured != "" {
+		if err := validateUnixSocketPathLength(configured, "HERDR_RELAY_PAIRING_SOCKET"); err != nil {
+			return err
+		}
+	}
+	if err := validateUnixSocketPathLength(d.pairingSocket, "development pairing socket"); err != nil {
+		return err
+	}
+	if err := validateUnixSocketPathLength(d.herdrSocket, "HERDR_DEV_HERDR_SOCKET (HERDR_SOCKET_PATH)"); err != nil {
+		return err
 	}
 	if os.Getenv("HERDR_DEV_TAILSCALE_CLI_ENABLE") != "1" ||
 		os.Getenv("HERDR_TAILSCALE_CLI_SCOPE") != "development" ||
@@ -130,12 +202,13 @@ func (d *developmentIsolation) validate(requireStopped, requireHerdrSocket bool)
 			return fmt.Errorf("%w: isolated development directory is not private", ErrPermissionDenied)
 		}
 	}
-	for _, optional := range []string{d.releaseRoot, d.runtimeRoot} {
+	for _, optional := range []string{d.releaseRoot, d.runtimeRoot, d.pairingRuntimeBase, d.pairingRuntimeDir} {
 		if err := validateOptionalPrivateDirectory(optional); err != nil {
 			return err
 		}
 	}
-	if pathsOverlap(d.root, d.coordination) || pathsOverlap(d.state, d.coordination) {
+	if pathsOverlap(d.root, d.coordination) || pathsOverlap(d.state, d.coordination) ||
+		pathsOverlap(d.pairingRuntimeBase, d.root) || pathsOverlap(d.pairingRuntimeDir, d.coordination) {
 		return ErrPermissionDenied
 	}
 	if err := d.validateCurrentRelease(); err != nil {

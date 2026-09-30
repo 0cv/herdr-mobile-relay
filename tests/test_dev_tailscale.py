@@ -22,6 +22,9 @@ if os.environ.get("HERDR_TAILSCALE_LAUNCHER_CI") != "1":
 root = Path(__file__).resolve().parents[1]
 script = root / "relay" / "dev-tailscale.sh"
 tunnel_script = root / "relay" / "dev-tunnel.sh"
+menu_source = tunnel_script.read_text(encoding="utf-8")
+if 'read -r -p "Choice [1]: "' not in menu_source or "''|1) ;;" not in menu_source:
+    raise AssertionError("pressing Enter must continue to select the temporary-tunnel option 1")
 with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     base = Path(tmp)
     home = base / "home"
@@ -107,6 +110,15 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                 raise AssertionError("menu selection demanded redundant development consent")
             if case == "menu_uses_all_safe_defaults":
                 for value in (
+                    b"1. Temporary Cloudflare tunnel",
+                    b"quick public URL + QR",
+                    b"no Tailscale needed",
+                    b"2. CLI-backed Tailscale Serve",
+                    b"for App Store Tailscale on macOS/arm64",
+                    b"route persists after stop",
+                    b"3. Legacy Tailscale Serve",
+                    b"supported standalone tailscaled",
+                    b"Choice [1]: ",
                     b"Private development state: " + str(root / "relay" / ".dev-tailscale").encode(),
                     f"Tailscale CLI from PATH: {cli}".encode(),
                     f"Herdr executable from PATH: {herdr}".encode(),
@@ -150,6 +162,24 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                         HERDR_DEV_TAILSCALE_PLUGIN_PORT="", HERDR_DEV_TAILSCALE_HTTPS_PORT="",
                         PATH=f"{base}:/usr/bin:/bin")
     check_checkout_root_existence_unchanged()
+
+    app_store_bundle = home / "Applications" / "Tailscale.app"
+    receipt = app_store_bundle / "Contents" / "_MASReceipt" / "receipt"
+    receipt.parent.mkdir(mode=0o700, parents=True)
+    receipt.write_bytes(b"synthetic App Store receipt marker")
+    menu_cli_dir = home / "menu-bin"
+    menu_cli_dir.mkdir(mode=0o700)
+    menu_cli = menu_cli_dir / "tailscale"
+    menu_cli.write_text(f"#!/bin/sh\nprintf invoked >> '{sentinel}'\nexit 97\n", encoding="utf-8")
+    menu_cli.chmod(0o700)
+    menu_uname = menu_cli_dir / "uname"
+    menu_uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+    menu_uname.chmod(0o700)
+    interactive_refused("app_store_marks_legacy_mode_unavailable", tunnel_script, b"3\n",
+                        b"Option 3 unavailable: App Store Tailscale was detected",
+                        HERDR_DEV_TAILSCALE_CLI_BIN=str(menu_cli), PATH=f"{menu_cli_dir}:/usr/bin:/bin")
+    if sentinel.exists():
+        raise AssertionError("menu selection executed the real-CLI stand-in instead of using filesystem-only detection")
     delegated = subprocess.run(
         [str(tunnel_script)], env=dict(without_consent, HERDR_DEV_TRANSPORT="tailscale",
                                         HERDR_DEV_CONFIG_DIR=str(base / "unused-tunnel")),

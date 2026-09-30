@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   importQuickSetup,
@@ -18,6 +19,31 @@ function setupLink(fragment: string): Pick<Location, 'hash' | 'protocol' | 'host
 }
 
 describe('Home Screen setup handoff', () => {
+  it('imports the exact Go-generated managed and development fragment contracts', () => {
+    const fixture = JSON.parse(readFileSync(
+      new URL('../../../internal/setuphelper/testdata/setup-fragments.json', import.meta.url),
+      'utf8',
+    )) as {
+      token: string;
+      managed: { label: string; relay: string; fragment: string };
+      development: { label: string; relay: string; fragment: string };
+    };
+    for (const entry of [fixture.managed, fixture.development]) {
+      expect(quickSetupConfig({
+        hash: `#${entry.fragment}`,
+        protocol: 'https:',
+        host: 'app.example.com',
+      })).toEqual({ label: entry.label, url: entry.relay, token: fixture.token });
+    }
+    const pathful = new URLSearchParams(fixture.development.fragment);
+    pathful.set('relay', `${fixture.development.relay}/ws`);
+    expect(quickSetupConfig({
+      hash: `#${pathful.toString()}`,
+      protocol: 'https:',
+      host: 'app.example.com',
+    })).toBeNull();
+  });
+
   it('retains a valid setup fragment only in an iOS browser tab', () => {
     const locationValue = setupLink('label=Fedora&relay=wss%3A%2F%2Frelay.example.com');
     expect(shouldRetainSetupFragment(locationValue, false)).toBe(true);

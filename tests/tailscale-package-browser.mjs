@@ -473,7 +473,7 @@ function safeExceptionType(error) {
 let resultEmitted = false;
 async function emitBrowserResult(values = {}, error = null) {
   if (resultEmitted) return;
-  const expectedCount = input.mode === 'enroll' ? 3 : 1;
+  const expectedCount = input.mode === 'enroll' ? 4 : 1;
   const passed = cases.length === expectedCount && cases.every((entry) => entry.passed);
   const safeResult = {
     mode: ['enroll', 'reprint', 'restart'].includes(input.mode) ? input.mode : 'other',
@@ -508,7 +508,22 @@ async function initialEnrollment() {
   let reader;
   try {
     await setStage('controller_enrollment');
-    controller = await openProfile('controller', controllerPath, input.setup_url);
+    controller = await openProfile('controller', controllerPath, input.dev_setup_url);
+    await controller.page.waitForFunction(({ key, expected }) => {
+      try {
+        const relays = JSON.parse(localStorage.getItem(key) || '[]');
+        return Array.isArray(relays) && relays.some((relay) => relay?.url === expected && relay?.token?.length === 32);
+      } catch {
+        return false;
+      }
+    }, { key: relaysKey, expected: input.dev_relay_origin }, { timeout: deadline });
+    record('dev_setup_link_imports_bare_wss_origin_in_extracted_frontend', true);
+    await controller.page.evaluate(() => {
+      localStorage.clear();
+      sessionStorage.clear();
+    });
+    await controller.page.goto(input.setup_url, { waitUntil: 'domcontentloaded', timeout: deadline });
+    await recordStorageSnapshot('controller', 'after_navigation', controller.page);
     const controllerCredential = await waitForCredential(controller.page, 'controller', 'controller');
     record('launcher_generated_setup_link_enrolls_real_controller_profile', controllerCredential?.role === 'controller');
 

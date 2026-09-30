@@ -330,7 +330,9 @@ func printDevelopmentSetupLink(cfg *config.Config, stdout io.Writer) error {
 		host = "relay"
 	}
 	label := strings.SplitN(host, ".", 2)[0]
-	fragment := setuphelper.SetupFragment(cfg.Token, label, "wss://"+strings.TrimPrefix(relayOrigin, "https://")+"/ws")
+	// The phone app accepts only a bare wss:// origin for the relay parameter
+	// (any path makes it ignore the link); the relay upgrades WebSockets at /.
+	fragment := setuphelper.SetupFragment(cfg.Token, label, "wss://"+strings.TrimPrefix(relayOrigin, "https://"))
 	setupURL := phoneOrigin + "/#" + fragment
 	if qr, qrErr := setuphelper.TerminalQR(setupURL, 80); qrErr == nil {
 		if _, err := fmt.Fprintln(stdout, "Scan this one-use, secret setup QR with the authorized owner phone:"); err != nil {

@@ -84,6 +84,10 @@ func TestDevelopmentIsolationRequiresGoOwnedOptInAndLayout(t *testing.T) {
 	})
 
 	t.Run("cleanup requires a stopped relay", func(t *testing.T) {
+		if err := os.MkdirAll(filepath.Dir(layout.pairingSocket), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(layout.pairingRuntimeDir) })
 		listener, err := net.Listen("unix", layout.pairingSocket)
 		if err != nil {
 			t.Fatal(err)
@@ -102,6 +106,20 @@ func TestDevelopmentIsolationRequiresGoOwnedOptInAndLayout(t *testing.T) {
 		defer listener.Close()
 		if err := layout.validate(false, true); err != nil {
 			t.Fatalf("private setup with an owner Herdr socket refused: %v", err)
+		}
+	})
+
+	t.Run("pairing runtime directory permissions are enforced", func(t *testing.T) {
+		if err := os.MkdirAll(layout.pairingRuntimeDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(layout.pairingRuntimeDir) })
+		if err := os.Chmod(layout.pairingRuntimeBase, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chmod(layout.pairingRuntimeBase, 0o700) }()
+		if err := layout.validate(false, false); !errors.Is(err, ErrPermissionDenied) {
+			t.Fatalf("world-accessible pairing runtime base = %v", err)
 		}
 	})
 }
@@ -123,6 +141,10 @@ func TestDevelopmentManagerEnforcesActionLocalGuards(t *testing.T) {
 	}
 	manager.developmentIsolation = layout
 
+	if err := os.MkdirAll(filepath.Dir(layout.pairingSocket), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(layout.pairingRuntimeDir) })
 	pairingListener, err := net.Listen("unix", layout.pairingSocket)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +162,50 @@ func TestDevelopmentManagerEnforcesActionLocalGuards(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("action-local refusal executed the CLI %d times", calls)
+	}
+}
+
+func TestDevelopmentPairingSocketPathIsShortAndPerRoot(t *testing.T) {
+	deepRoot := "/" + strings.Repeat("deep-checkout/", 20) + "relay/.dev-tailscale-cli"
+	baseA, directoryA, socketA, err := developmentPairingSocketPaths(deepRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, directoryAgain, socketAgain, err := developmentPairingSocketPaths(deepRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, directoryB, socketB, err := developmentPairingSocketPaths(deepRoot + "-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directoryA != directoryAgain || socketA != socketAgain || directoryA == directoryB || socketA == socketB {
+		t.Fatalf("pairing runtime paths are not deterministic and root-isolated: %q %q %q", socketA, socketAgain, socketB)
+	}
+	if len(socketA)+1 > 104 || !strings.HasPrefix(directoryA, baseA+string(filepath.Separator)) {
+		t.Fatalf("deep checkout produced a non-short/non-contained Darwin socket path %q", socketA)
+	}
+}
+
+func TestDevelopmentUnixSocketPathLengthValidationIsActionable(t *testing.T) {
+	for _, test := range []struct {
+		goos  string
+		limit int
+	}{
+		{goos: "darwin", limit: 104},
+		{goos: "linux", limit: 108},
+	} {
+		if err := validateUnixSocketPathLengthForOS("/tmp/"+strings.Repeat("x", test.limit-5), "HERDR_DEV_HERDR_SOCKET", test.goos); err == nil {
+			t.Errorf("%s socket path beyond %d-byte sockaddr limit was accepted", test.goos, test.limit)
+		} else if !strings.Contains(err.Error(), "HERDR_DEV_HERDR_SOCKET") || !strings.Contains(err.Error(), "AF_UNIX") {
+			t.Errorf("%s long socket error is not actionable: %v", test.goos, err)
+		}
+		if err := validateUnixSocketPathLengthForOS("/tmp/"+strings.Repeat("x", test.limit-6), "HERDR_DEV_HERDR_SOCKET", test.goos); err != nil {
+			t.Errorf("%s path at its maximum pathname length refused: %v", test.goos, err)
+		}
+	}
+	if err := validateUnixSocketPathLengthForOS("/tmp/socket", "HERDR_DEV_HERDR_SOCKET", "windows"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("unsupported socket platform = %v", err)
 	}
 }
 
@@ -218,7 +284,10 @@ func developmentIsolationFixture(t *testing.T) (*developmentIsolation, string, s
 	if err := os.MkdirAll(filepath.Dir(herdrSocket), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	pairingSocket := filepath.Join(root, "config", "pairing-control.sock")
+	pairingRuntimeBase, pairingRuntimeDir, pairingSocket, err := developmentPairingSocketPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	state := filepath.Join(root, "registration")
 	relayEnv := filepath.Join(root, "relay.env")
 	values := map[string]string{
@@ -302,6 +371,7 @@ func developmentIsolationFixture(t *testing.T) (*developmentIsolation, string, s
 		dataHome: filepath.Join(root, "data"), releaseRoot: filepath.Join(root, "data", "herdr-mobile-relay"),
 		runtimeRoot: filepath.Join(root, "runtime"), webRoot: filepath.Join(root, "current", "web"),
 		relayBinary: filepath.Join(root, "current", "bin", "herdr-mobile-relay"), pairingSocket: pairingSocket,
+		pairingRuntimeBase: pairingRuntimeBase, pairingRuntimeDir: pairingRuntimeDir,
 		herdrBinary: herdrBinary, herdrSocket: herdrSocket,
 	}, home, root, coordination
 }

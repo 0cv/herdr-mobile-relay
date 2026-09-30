@@ -118,6 +118,7 @@ import type {
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
+const SETUP_LINK_FAILURE_MESSAGE = 'This setup link has expired or was already used, or this device was refused. Ask the relay owner for a new one-use setup link.';
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
 const BACKGROUND_HEALTH_TIMEOUT_MS = 10_000;
 const FOREGROUND_HEALTH_TIMEOUT_MS = 2_000;
@@ -529,6 +530,10 @@ function normalizePushPolicy(value: unknown): DevicePushPolicy | null {
   return policy;
 }
 
+function hasSetupParameter(locationValue: Pick<Location, 'hash'>): boolean {
+  return new URLSearchParams(String(locationValue.hash || '').replace(/^#/, '')).has('setup');
+}
+
 class RelayStore {
   readonly relayConfigs = writable<RelayConfig[]>([]);
   readonly connections = writable<Map<string, RelayConnection>>(new Map());
@@ -587,7 +592,19 @@ class RelayStore {
     const setup = quickSetupConfig(location);
     const invitation = quickSetupInvitation(location);
     const imported = importQuickSetup(relays, location);
+    if (!imported && hasSetupParameter(location)) {
+      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
+    }
     if (imported) {
+      const setupRelay = setup ? this.relayForSetup(imported, setup) : undefined;
+      if (invitation && invitation.expiresAt <= Date.now() && setupRelay
+        && this.shouldSaveInvitation(setupRelay.id, invitation)) {
+        this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
+        this.relayConfigs.set(relays);
+        history.replaceState(history.state, '', location.pathname + location.search);
+        if (connect) this.connectAll();
+        return;
+      }
       clearChangedRelayPreviews(relays, imported);
       relays = imported;
       const relay = setup ? this.relayForSetup(relays, setup) : undefined;
@@ -599,6 +616,7 @@ class RelayStore {
             this.deviceCredentials.saveInvitation(relay.id, invitation);
           } catch {
             // A malformed or expired link must not remove a working credential.
+            if (invitation.expiresAt <= Date.now()) this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
           }
         }
       }
@@ -664,10 +682,20 @@ class RelayStore {
     const invitation = quickSetupInvitation(locationValue);
     const currentRelays = get(this.relayConfigs);
     const imported = importQuickSetup(currentRelays, locationValue);
-    if (!imported || !setup) return false;
-    clearChangedRelayPreviews(currentRelays, imported);
+    if (!imported || !setup) {
+      if (hasSetupParameter(locationValue)) this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
+      return false;
+    }
     const relay = this.relayForSetup(imported, setup);
-    if (!relay) return false;
+    if (!relay) {
+      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
+      return false;
+    }
+    if (invitation && invitation.expiresAt <= Date.now() && this.shouldSaveInvitation(relay.id, invitation)) {
+      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
+      return false;
+    }
+    clearChangedRelayPreviews(currentRelays, imported);
     // Persist the entry before deciding, so a deferred relay row exists for
     // the connection state and the installed copy finds the same relay id.
     this.relayConfigs.set(imported);
@@ -677,6 +705,7 @@ class RelayStore {
       try {
         this.deviceCredentials.saveInvitation(relay.id, invitation);
       } catch {
+        if (invitation.expiresAt <= Date.now()) this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
         return false;
       }
     }
@@ -836,7 +865,7 @@ class RelayStore {
     connection.pairingRequired = true;
     this.connectionsValue.set(relay.id, connection);
     this.emitConnections();
-    this.showToast(`${relay.label} needs pairing. Import a device invitation link.`, true);
+    this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
   }
 
   private newConnection(relay: RelayConfig): RelayConnection {
@@ -957,7 +986,7 @@ class RelayStore {
       clearTimeout(connection.reconnectTimer ?? undefined);
       connection.reconnectTimer = null;
       this.emitConnections();
-      this.showToast(`${relay.label} refused this device. Import a new invitation link.`, true);
+      this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
       return;
     }
     this.emitConnections();

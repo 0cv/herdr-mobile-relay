@@ -167,6 +167,34 @@ roles/reconnect, exact scoped cleanup, and before/after noninterference. The
 [supervised runbook](tailscale-cli-contract.md#supervised-owner-development-phone-smoke-and-cleanup-runbook)
 remains the authority boundary for those separate steps.
 
+## Owner-authorized live P6 phone continuation findings
+
+Sanitized observations from the current supervised phone assessment:
+
+- On approved source SHA `197685c`, using the explicit development-root override,
+  the read-only baseline and scoped publication/readback, trusted HTTPS, and exact
+  bundle cells were observed passing.
+- Attempt 1 stopped before publication because the checkout-derived local control
+  socket path exceeded the host AF_UNIX pathname limit. No route mutation occurred.
+- During the phone step, the generated setup link carried a WSS path the frontend
+  rejects, so the phone imported no relay and showed an empty relay list without
+  an actionable error. The supervising assistant applied an uncommitted generator
+  correction for the live retest; this task adds a regression test and the
+  correction is included in the implementation. The frontend now explains invalid
+  or expired setup links and relay-rejected devices, and refuses a newly expired
+  invitation before replacing stored relay or credential state.
+- Owner-phone enrollment remains **pending** until the supervising assistant
+  records the retest outcome. No phone qualification is inferred from the other
+  passing cells.
+
+The existing invitation lifetime remains ten minutes. If a bootstrap setup link
+expires or is reported as already used before enrollment while the same isolated
+foreground relay is running, the operator can re-arm its existing bootstrap token
+through the private pairing control socket; this does not reset enrolled devices
+or lengthen invitation lifetime. A refused enrolled device needs a fresh device
+invitation, not bootstrap re-arming. Read [the development runbook](development.md#running-from-a-checkout)
+for the exact command and recovery guidance.
+
 ## Owner-phone development smoke and broader qualification
 
 The supervised development runbook includes one owner-authorized enrollment and
@@ -299,7 +327,27 @@ outcomes and do not themselves establish live qualification.
    infer it from source or hosted fixtures. Stop on trust, identity, E2EE,
    readiness or role uncertainty; do not print a second invitation or clear
    device state.
-5. **Exact scoped cleanup.** After the owner's phone assessment, end the phone
+5. **Expired or already-used bootstrap link.** The invitation remains one-use and
+   expires after ten minutes. If the phone reports that the bootstrap setup link
+   expired or was already used before enrollment, and the same authorized foreground relay is
+   still running, re-arm only its existing bootstrap token through the private
+   local control socket using the values from that relay's private environment:
+
+   ```bash
+   "$HERDR_RELAY_BIN" pairing-control \
+     --socket "$HERDR_RELAY_PAIRING_SOCKET" \
+     --operation arm_bootstrap \
+     --run-id "$HERDR_RELAY_CONTROL_RUN_ID" \
+     --instance "$HERDR_RELAY_INSTANCE_ID"
+   ```
+
+   Require a successful durable arm acknowledgement before asking the phone to
+   retry the same setup link. This is not a token reset, device reset, route
+   mutation, or invitation-lifetime extension. If the foreground relay is
+   stopped or the arm is not acknowledged, stop and use the documented recovery
+   path rather than retrying with guessed state. A refused enrolled device needs
+   a fresh device invitation, not bootstrap re-arming.
+6. **Exact scoped cleanup.** After the owner's phone assessment, end the phone
    session, stop the foreground relay with Ctrl-C, and prove the pairing socket
    is removed and backend TCP 18377 is free. Capture a complete private Serve
    snapshot and confirm the only eligible removal is the journaled node's exact
@@ -314,7 +362,7 @@ outcomes and do not themselves establish live qualification.
    installed-service configuration/hash/liveness still match the baseline. Keep
    the removed journal and private development state; never run `serve reset`,
    stop or modify a production service, or remove a different route.
-6. **Uncertainty and cell recording.** If a CLI write times out, acknowledgement
+7. **Uncertainty and cell recording.** If a CLI write times out, acknowledgement
    or readback is lost, route/node/identity differs, unknown fields appear,
    service/Serve state changes unexpectedly, a socket/port is occupied, or any
    result is ambiguous, stop and retain the journal, reservation and private

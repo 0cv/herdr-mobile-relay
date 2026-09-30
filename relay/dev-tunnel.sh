@@ -4,6 +4,48 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+tailscale_app_store_installed() {
+    local home="${HOME:-}" bundle candidate link directory attempt configured_candidate
+    local -a candidates=()
+    bundle="/Applications/Tailscale.app"
+    [ -f "$bundle/Contents/_MASReceipt/receipt" ] && return 0
+    if [ -n "$home" ]; then
+        bundle="$home/Applications/Tailscale.app"
+        [ -f "$bundle/Contents/_MASReceipt/receipt" ] && return 0
+    fi
+
+    configured_candidate="${HERDR_DEV_TAILSCALE_CLI_BIN:-${HERDR_TAILSCALE_CLI_BIN:-}}"
+    [ -n "$configured_candidate" ] && candidates+=("$configured_candidate")
+    candidate="$(command -v tailscale 2>/dev/null || true)"
+    [ -n "$candidate" ] && candidates+=("$candidate")
+    candidates+=(/usr/local/bin/tailscale /opt/homebrew/bin/tailscale
+        /Applications/Tailscale.app/Contents/MacOS/Tailscale)
+    if [ -n "$home" ]; then
+        candidates+=("$home/Applications/Tailscale.app/Contents/MacOS/Tailscale")
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        attempt=0
+        while [ "$attempt" -lt 8 ]; do
+            attempt=$((attempt + 1))
+            case "$candidate" in
+                */Tailscale.app/*)
+                    bundle="${candidate%%/Contents/*}"
+                    [ -f "$bundle/Contents/_MASReceipt/receipt" ] && return 0
+                    ;;
+            esac
+            [ -L "$candidate" ] || break
+            link="$(readlink "$candidate" 2>/dev/null || true)"
+            [ -n "$link" ] || break
+            case "$link" in
+                /*) candidate="$link" ;;
+                *) directory="${candidate%/*}"; candidate="$directory/$link" ;;
+            esac
+        done
+    done
+    return 1
+}
+
 # Choose before building or opening the tunnel: managed Serve has its own
 # private root and consent gate and must never inherit this path's .dev state.
 case "${HERDR_DEV_TRANSPORT:-}" in
@@ -13,15 +55,29 @@ case "${HERDR_DEV_TRANSPORT:-}" in
     *) echo "✗ HERDR_DEV_TRANSPORT must be tunnel, tailscale, or tailscale-cli." >&2; exit 2 ;;
 esac
 if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
+    option3_unavailable_reason=""
+    if [ "$(uname -s)" = Darwin ] && tailscale_app_store_installed; then
+        option3_unavailable_reason="App Store Tailscale was detected; legacy mode requires a standalone tailscaled."
+    fi
     echo "Development transport:"
-    echo "  1. Temporary Cloudflare tunnel (or saved gateway); relay/.dev state"
-    echo "  2. CLI-backed Tailscale Serve development (App Store 1.102.4 only; runtime qualification pending)"
-    echo "  3. Legacy managed Tailscale Serve (advanced foreground/session-owned mode)"
+    echo "  1. Temporary Cloudflare tunnel — quick public URL + QR; no Tailscale needed (or use a saved gateway)."
+    echo "  2. CLI-backed Tailscale Serve — for App Store Tailscale on macOS/arm64; needs the signed-in app's supported CLI and explicit route consent. The HTTPS route persists after stop; runtime/phone qualification is pending."
+    if [ -n "$option3_unavailable_reason" ]; then
+        echo "  3. Legacy Tailscale Serve — for advanced users with a supported standalone tailscaled; needs an authenticated Unix daemon. Not for the App Store app. [UNAVAILABLE: $option3_unavailable_reason]"
+    else
+        echo "  3. Legacy Tailscale Serve — for advanced users with a supported standalone tailscaled; needs an authenticated Unix daemon. Not for the App Store app; owns a temporary foreground route."
+    fi
     read -r -p "Choice [1]: " choice || { echo "Cancelled; nothing was started." >&2; exit 2; }
     case "$choice" in
         ''|1) ;;
         2) exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@" ;;
-        3) HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
+        3)
+            if [ -n "$option3_unavailable_reason" ]; then
+                echo "✗ Option 3 unavailable: $option3_unavailable_reason" >&2
+                exit 2
+            fi
+            HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@"
+            ;;
         *) echo "✗ Choose 1, 2, or 3." >&2; exit 2 ;;
     esac
 fi

@@ -59,7 +59,13 @@ yours when Herdr stops. Both are foreground-only. A separate CLI-backed
 persistent mode is available only for isolated development on the exact macOS
 App Store Tailscale 1.102.4 profile; it is not runtime-qualified and is not a
 regular setup choice. Production and installed-service activation remain
-refused pending physical-phone qualification and separate enablement. See
+refused pending physical-phone qualification and separate enablement. Checkout
+developers using `make dev-tunnel` can choose 1 = temporary Cloudflare URL or
+saved gateway (no Tailscale; QR shown), 2 = CLI-backed persistent Serve for the
+supported App Store app profile, or 3 = the older temporary direct-daemon mode
+(standalone `tailscaled`, not the App Store app). If an App Store receipt is
+found locally, option 3 is marked unavailable. See
+[development](docs/development.md#running-from-a-checkout) for requirements and
 [Transports](docs/transports.md#managed-tailscale-serve) for the separate
 lifecycle and platform limits.
 

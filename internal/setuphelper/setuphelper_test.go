@@ -1,6 +1,8 @@
 package setuphelper
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -10,6 +12,39 @@ func TestSetupFragment(t *testing.T) {
 	for _, expected := range []string{"setup=a%2Bb%26c", "label=My+Host", "relay=wss%3A%2F%2Fexample.test%2Fws%3Fa%3D1"} {
 		if !strings.Contains(fragment, expected) {
 			t.Fatalf("fragment %q does not contain %q", fragment, expected)
+		}
+	}
+}
+
+func TestSetupFragmentMatchesFrontendContractFixtures(t *testing.T) {
+	var fixture struct {
+		Token   string `json:"token"`
+		Managed struct {
+			Label    string `json:"label"`
+			Relay    string `json:"relay"`
+			Fragment string `json:"fragment"`
+		} `json:"managed"`
+		Development struct {
+			Label    string `json:"label"`
+			Relay    string `json:"relay"`
+			Fragment string `json:"fragment"`
+		} `json:"development"`
+	}
+	data, err := os.ReadFile("testdata/setup-fragments.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	for name, entry := range map[string]struct {
+		label, relay, fragment string
+	}{
+		"managed":     {fixture.Managed.Label, fixture.Managed.Relay, fixture.Managed.Fragment},
+		"development": {fixture.Development.Label, fixture.Development.Relay, fixture.Development.Fragment},
+	} {
+		if got := SetupFragment(fixture.Token, entry.label, entry.relay); got != entry.fragment {
+			t.Errorf("%s setup fragment = %q, fixture = %q", name, got, entry.fragment)
 		}
 	}
 }

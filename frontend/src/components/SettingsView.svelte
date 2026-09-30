@@ -685,12 +685,12 @@
             <small>Push: {pushStatusLabel(connection)}</small>
             {#if connection?.authRejected}
               <small class="error" role="alert">
-                This computer refused this device. Import a new invitation link, or remove and add the relay.
+                This setup link has expired or was already used, or this device was refused. Ask the relay owner for a new one-use setup link, or remove and add the relay.
               </small>
             {/if}
             {#if connection?.pairingRequired}
               <small class="error" role="alert">
-                This computer needs pairing. Import a device invitation link, or remove and add the relay.
+                This setup link may have expired or already been used. Ask the relay owner for a new one-use setup link, or remove and add the relay.
               </small>
             {/if}
             {#if connection?.pairingDeferred}

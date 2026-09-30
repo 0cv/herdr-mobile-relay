@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,11 +18,10 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
-	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
-func TestPrintDevelopmentSetupLinkUsesVerifiedOriginsAndSecretFragment(t *testing.T) {
+func TestPrintDevelopmentSetupLinkUsesBareVerifiedRelayOrigin(t *testing.T) {
 	cfg := &config.Config{
 		Token:              "0123456789abcdef0123456789abcdef",
 		PhoneAppOrigin:     "https://app.example.test",
@@ -31,19 +31,39 @@ func TestPrintDevelopmentSetupLinkUsesVerifiedOriginsAndSecretFragment(t *testin
 	if err := printDevelopmentSetupLink(cfg, &output); err != nil {
 		t.Fatal(err)
 	}
-	want := cfg.PhoneAppOrigin + "/#" + setuphelper.SetupFragment(cfg.Token, strings.SplitN(hostNameForTest(t), ".", 2)[0], "wss://relay.tailnet.ts.net:8443/ws")
-	if !strings.Contains(output.String(), want) || !strings.Contains(output.String(), "secret; do not share or log") {
-		t.Fatalf("owner setup link output does not include the expected secret fragment: %q", output.String())
+	if !strings.Contains(output.String(), "secret; do not share or log") {
+		t.Fatalf("owner setup link output did not include the secret warning: %q", output.String())
 	}
-}
-
-func hostNameForTest(t *testing.T) string {
-	t.Helper()
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		return "relay"
+	var setupURL string
+	for _, line := range strings.Split(output.String(), "\n") {
+		if strings.HasPrefix(line, cfg.PhoneAppOrigin+"/#") {
+			setupURL = line
+			break
+		}
 	}
-	return host
+	parsedSetupURL, err := url.Parse(setupURL)
+	if err != nil || parsedSetupURL.Scheme != "https" || parsedSetupURL.Host != "app.example.test" || parsedSetupURL.Path != "/" {
+		t.Fatalf("printed setup URL = %q, parse error %v", setupURL, err)
+	}
+	fragment, err := url.ParseQuery(parsedSetupURL.Fragment)
+	if err != nil || len(fragment["relay"]) != 1 {
+		t.Fatalf("printed setup fragment has invalid relay fields: %q (%v)", parsedSetupURL.Fragment, err)
+	}
+	gotRelay := fragment.Get("relay")
+	parsedRelay, err := url.Parse(gotRelay)
+	configuredOrigin, originErr := url.Parse(cfg.TailscaleCLIOrigin)
+	if err != nil || originErr != nil {
+		t.Fatalf("parse relay/configured origins: relay error=%v origin error=%v", err, originErr)
+	}
+	wantRelay := (&url.URL{Scheme: "wss", Host: configuredOrigin.Host}).String()
+	if gotRelay != wantRelay || parsedRelay.Scheme != "wss" || parsedRelay.Host != configuredOrigin.Host ||
+		parsedRelay.User != nil || parsedRelay.Path != "" || parsedRelay.RawPath != "" ||
+		parsedRelay.RawQuery != "" || parsedRelay.ForceQuery || parsedRelay.Fragment != "" {
+		t.Fatalf("printed relay %q is not the bare configured WSS origin %q", gotRelay, wantRelay)
+	}
+	if fragment.Get("setup") != cfg.Token {
+		t.Fatal("printed setup fragment does not preserve its setup token")
+	}
 }
 
 func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
