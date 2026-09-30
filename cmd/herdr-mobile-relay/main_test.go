@@ -66,6 +66,45 @@ func TestPrintDevelopmentSetupLinkUsesBareVerifiedRelayOrigin(t *testing.T) {
 	}
 }
 
+func TestDevelopmentSetupLinkPrinterFixture(t *testing.T) {
+	if os.Getenv("HERDR_TEST_DEV_SETUP_LINK_PRINTER") != "1" {
+		t.Skip("hosted extracted-package fixture only")
+	}
+	cfg := &config.Config{
+		Token:              os.Getenv("HERDR_TEST_DEV_SETUP_LINK_TOKEN"),
+		PhoneAppOrigin:     os.Getenv("HERDR_TEST_DEV_SETUP_LINK_PHONE_ORIGIN"),
+		TailscaleCLIOrigin: os.Getenv("HERDR_TEST_DEV_SETUP_LINK_RELAY_ORIGIN"),
+	}
+	outputPath := os.Getenv("HERDR_TEST_DEV_SETUP_LINK_OUTPUT")
+	if !filepath.IsAbs(outputPath) {
+		t.Fatal("fixture output path must be absolute")
+	}
+	var output bytes.Buffer
+	if err := printDevelopmentSetupLink(cfg, &output); err != nil {
+		t.Fatalf("production development setup-link printer failed: %v", err)
+	}
+	var setupURL string
+	for _, line := range strings.Split(output.String(), "\n") {
+		if strings.HasPrefix(line, cfg.PhoneAppOrigin+"/#") {
+			setupURL = line
+		}
+	}
+	if setupURL == "" {
+		t.Fatal("production development setup-link printer emitted no app link")
+	}
+	file, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("create private fixture output: %v", err)
+	}
+	if _, err := io.WriteString(file, setupURL+"\n"); err != nil {
+		_ = file.Close()
+		t.Fatalf("write private fixture output: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close private fixture output: %v", err)
+	}
+}
+
 func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
 	root := t.TempDir()
 	invoked := filepath.Join(root, "cli-invoked")

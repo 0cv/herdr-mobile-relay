@@ -402,6 +402,8 @@ jobs:
           playwright_version="$(node -p "require('./frontend/package.json').devDependencies['@playwright/test']")"
           test "$(grep '^FROM ' tests/tailscale-package-browser.Dockerfile)" = "FROM mcr.microsoft.com/playwright:v${playwright_version}-noble"
           printf 'HERDR_PACKAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+      - name: Compile test-only production dev setup-link printer
+        run: go test -c -o "$RUNNER_TEMP/dev-setup-link-printer.test" ./cmd/herdr-mobile-relay
       - name: Build pinned disposable runner image
         run: cd tests && docker build --pull --tag herdr-tailscale-package-browser --file tailscale-package-browser.Dockerfile .
       - name: Run exact release archive in network-disabled package fixture
@@ -415,6 +417,7 @@ jobs:
             --mount "type=bind,src=$PWD,dst=/workspace,readonly" \
             --mount "type=bind,src=$PWD/dist/release,dst=/artifact,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/fake-herdr,dst=/fixture-bin/fake-herdr,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/dev-setup-link-printer.test,dst=/fixture-bin/dev-setup-link-printer.test,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/tailscale-package-browser-evidence,dst=/evidence" \
             --env HERDR_EXTRACTED_PACKAGE_BROWSER_CI=1 \
             --env HERDR_PACKAGE_VERSION="$HERDR_PACKAGE_VERSION" \

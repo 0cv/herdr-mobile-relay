@@ -1353,7 +1353,7 @@ def safe_link_from_output(output: bytes, origin: str) -> str | None:
     return None
 
 
-def development_setup_link(binary: Path, managed_link: str, app_origin: str) -> tuple[str, str]:
+def development_setup_link(printer_binary: Path, managed_link: str, app_origin: str) -> tuple[str, str]:
     try:
         parsed = urllib.parse.urlsplit(managed_link)
         fields = urllib.parse.parse_qs(parsed.fragment, strict_parsing=True)
@@ -1362,25 +1362,58 @@ def development_setup_link(binary: Path, managed_link: str, app_origin: str) -> 
         die("managed fixture did not provide a setup token for the development-link contract")
     if not re.fullmatch(r"[0-9a-f]{32}", token):
         die("managed fixture setup token did not match the bounded test format")
+    if not printer_binary.is_file() or not os.access(printer_binary, os.X_OK):
+        die("production development setup-link printer fixture is unavailable")
+
+    relay_https_origin = f"https://{HOST}:8443"
+    output_dir = Path(tempfile.mkdtemp(prefix="herdr-dev-link-printer-", dir="/tmp"))
+    os.chmod(output_dir, 0o700)
+    output_path = output_dir / "setup-link.txt"
+    printer_env = {
+        "HERDR_TEST_DEV_SETUP_LINK_PRINTER": "1",
+        "HERDR_TEST_DEV_SETUP_LINK_TOKEN": token,
+        "HERDR_TEST_DEV_SETUP_LINK_PHONE_ORIGIN": app_origin,
+        "HERDR_TEST_DEV_SETUP_LINK_RELAY_ORIGIN": relay_https_origin,
+        "HERDR_TEST_DEV_SETUP_LINK_OUTPUT": str(output_path),
+        "HOME": str(output_dir),
+        "PATH": "/usr/bin:/bin",
+    }
+    try:
+        try:
+            generated = subprocess.run(
+                [str(printer_binary), "-test.run=^TestDevelopmentSetupLinkPrinterFixture$"],
+                env=printer_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            die("production development setup-link printer fixture could not run")
+        if generated.returncode != 0 or not output_path.is_file():
+            die("production development setup-link printer fixture did not produce its private output")
+        if stat.S_IMODE(output_path.stat().st_mode) != 0o600:
+            die("production development setup-link printer fixture output was not private")
+        try:
+            output_lines = output_path.read_text(encoding="ascii").splitlines()
+        except (OSError, UnicodeError):
+            die("production development setup-link printer fixture output was unreadable")
+    finally:
+        output_path.unlink(missing_ok=True)
+        output_dir.rmdir()
+
+    setup_url = next((line for line in output_lines if line.startswith(app_origin + "/#")), "")
+    if not setup_url:
+        die("production development setup-link printer output omitted its app URL")
+    try:
+        parsed_setup = urllib.parse.urlsplit(setup_url)
+        parsed_app = urllib.parse.urlsplit(app_origin)
+        fields = urllib.parse.parse_qs(parsed_setup.fragment, strict_parsing=True)
+    except ValueError:
+        die("production development setup-link printer emitted an invalid app fragment")
     relay_origin = f"wss://{HOST}:8443"
-    try:
-        generated = subprocess.run(
-            [str(binary), "setup-fragment", token, "Development relay", relay_origin],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=5, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        die("extracted relay could not generate the development setup fragment")
-    if generated.returncode != 0:
-        die("extracted relay rejected the development setup-fragment fixture")
-    try:
-        fragment = generated.stdout.decode("ascii", "strict").strip()
-        fields = urllib.parse.parse_qs(fragment, strict_parsing=True)
-    except (UnicodeError, ValueError):
-        die("extracted relay produced an invalid development setup fragment")
-    if fields.get("relay") != [relay_origin] or fields.get("setup") != [token]:
-        die("extracted relay development fragment did not preserve the bare relay origin")
-    return f"{app_origin}/#{fragment}", relay_origin
+    if (parsed_setup.scheme != parsed_app.scheme or parsed_setup.netloc != parsed_app.netloc
+            or parsed_setup.path != "/" or parsed_setup.query
+            or fields.get("relay") != [relay_origin] or fields.get("setup") != [token]):
+        die("production development setup-link printer output did not preserve the bare WSS origin and setup token")
+    return setup_url, relay_origin
 
 
 def launch_managed(package: Path, env: dict[str, str], timeout: float = 90, expect_link: bool = True) -> tuple[subprocess.Popen[bytes], str, bytes, bytes, str]:
@@ -1864,6 +1897,8 @@ def main() -> int:
     binary_path = ""
     browser_evidence: dict = {}
     cli_browser_evidence: dict = {}
+    development_setup_link_printer_used = False
+    development_setup_link_printer_sha256 = ""
     cli_tailscale_events: list[str] = []
     cli_registration_summary: dict[str, bool] = {}
     cli_app_summary: dict[str, int | bool] = {}
@@ -2009,7 +2044,11 @@ def main() -> int:
                 ))):
             die("exact packaged local health and bundle identity were not ready at route registration", "fixture_registration_health_identity")
         prepare_chromium_nss_trust(ca, temporary_root / "chromium-home")
-        dev_setup_url, dev_relay_origin = development_setup_link(binary, link, origin)
+        dev_link_printer = Path("/fixture-bin/dev-setup-link-printer.test")
+        dev_setup_url, dev_relay_origin = development_setup_link(dev_link_printer, link, origin)
+        development_setup_link_printer_used = True
+        development_setup_link_printer_sha256 = sha256(dev_link_printer)
+        transitions.append("development-setup-link:production-printer")
         browser_record = {
             "setup_url": link, "dev_setup_url": dev_setup_url,
             "dev_relay_origin": dev_relay_origin, "origin": origin,
@@ -2415,7 +2454,9 @@ def main() -> int:
             "archive_wrappers": archive_wrappers,
             "tested_binary_sha256": binary_digest,
             "tested_binary_path": binary_path,
-            "separate_cli_fixture_binary_used": False,
+            "separate_tailscale_cli_fixture_binary_used": False,
+            "development_setup_link_printer_used": development_setup_link_printer_used,
+            "development_setup_link_printer_sha256": development_setup_link_printer_sha256,
             "cli_tailscale_operation_counts": {
                 name: cli_tailscale_events.count(name) for name in sorted(set(cli_tailscale_events))
             },
