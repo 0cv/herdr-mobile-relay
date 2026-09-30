@@ -20,8 +20,11 @@ func TestTailscaleCLIConstructionFailsBeforeOpeningResources(t *testing.T) {
 		RuntimeDir:        runtimeDir,
 		TailscaleBin:      filepath.Join(runtimeDir, "must-not-run"),
 	}
-	if _, err := NewOwned(cfg, "1.2.3", strings.Repeat("a", 40), managedTestLogger(), nil); err == nil || !strings.Contains(err.Error(), "disabled") {
-		t.Fatalf("unqualified CLI transport construction was not refused: %v", err)
+	if _, err := NewOwned(cfg, "1.2.3", strings.Repeat("a", 40), managedTestLogger(), nil); !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+		t.Fatalf("standalone CLI transport construction was not refused: %v", err)
+	}
+	if err := New(cfg, "1.2.3", strings.Repeat("a", 40), managedTestLogger()).Run(context.Background()); !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+		t.Fatalf("ordinary app startup bypassed the workflow boundary: %v", err)
 	}
 	for _, path := range []string{
 		filepath.Join(runtimeDir, "device-auth"),

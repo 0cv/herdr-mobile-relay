@@ -86,13 +86,15 @@ The only proposed route mutation argv are:
 <absolute-cli> serve --bg --https=<https-port> --set-path=/ off
 ```
 
-The second form is allowed only after the journal has a durable acknowledged
-registration, fresh complete preflight identifies the same node and exact
-listener/mount/backend, and separate unpublish consent is obtained. Command
-qualification must verify both argv forms for each future profile. Never call
-`serve reset`, `set-config`, `set-raw`, `funnel`, `up`, `login`, or a privilege
-change. The command is a CLI-mediated check-to-write sequence, not an atomic
-Herdr ownership capability.
+The second form is allowed only from the process-local development workflow,
+after the journal has a durable acknowledged registration, fresh complete
+preflight identifies the same node and exact listener/mount/backend, and the
+separate cleanup authorization and exact-route consent have been obtained.
+Command qualification must verify both argv forms for each future profile.
+Never call `serve reset`, `set-config`, `set-raw`, `funnel`, `up`, `login`, or a
+privilege change. The workflow handle prevents reconstruction from flags or
+persisted state; it does not make the CLI check-to-write interval atomic against
+external writers.
 
 ## Private registration and admission contract
 
@@ -100,8 +102,12 @@ The schema-versioned registration journal is operational attribution, not a
 capability. It contains an installation identifier, scope (`production` or
 `development`), node/profile identity, listener and mount, loopback backend,
 consent scope, operation ID, state and acknowledged CLI result. It contains no
-Tailscale authentication token. Create/validate private roots as real, non-symlink
-mode-0700 directories and journal files as mode 0600. Serialize Herdr writers
+Tailscale authentication token. The only real development-operation capability
+is an unexported manager retained by a process-local `DevelopmentWorkflow`; a
+marker, executable path, command flags, or journal cannot recreate it. Ordinary
+config loading, `serve`, `NewOwned`, and standalone `tailscale-cli` mutation
+commands refuse CLI-backed startup/operations. Create/validate private roots as
+real, non-symlink mode-0700 directories and journal files as mode 0600. Serialize Herdr writers
 for the same user/node with a shared private lock; this does not lock external
 CLI writers or other UIDs. Reserve each loopback backend port durably in that
 same shared root before starting a new relay listener; parse backend URLs so
@@ -232,19 +238,27 @@ runtime qualification or production authorization:
 
 ### Development runbook
 
-The supervising assistant executes this runbook only after independent review
-and within the owner's explicit development-route authorization. The only live
-candidate is the current Mac's App Store Tailscale 1.102.4 profile on
-Darwin/arm64, on the owner's current node/account, in isolated foreground
+This is an operational reference, not authorization. The current source/CI
+phase does not permit any live Tailscale CLI operation, route publication or
+removal, phone enrollment, service activation, or production mutation; workers
+must not invoke this runbook. Any later live development-route exercise requires
+its own explicit owner authorization naming the exact action, node/account and
+time window, plus completion of the independent review gates. Do not infer that
+a source change, hosted fixture, or generic development-path authorization
+permits a live mutation. Do not substitute another node, account, profile,
+action or scope. If separately authorized, the only candidate is the owner's
+Mac App Store Tailscale 1.102.4 profile on Darwin/arm64, in isolated foreground
 development, with HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377
-(plugin backend 18378). That authorization does not include unpublishing the
+(plugin listener 18378). That authorization does not include unpublishing the
 route. Production, installed-service activation/migration, physical-phone
 enrollment and release qualification are outside this runbook.
 
 0. Confirm the reviewed checkout/revision and launcher are the ones intended
-   for this run. Confirm Darwin/arm64 and the exact App Store 1.102.4 profile.
-   Do not run a direct CLI mutation, select another profile/node, or override
-   the fixed development ports.
+   for this run. Confirm the exact candidate SHA has ordinary, native Darwin/Linux
+   and extracted-release hosted results, and independent review gates are
+   complete. Confirm Darwin/arm64 and the exact App Store 1.102.4 profile. Do not
+   run a direct CLI mutation, select another profile/node, or override the fixed
+   development ports.
 1. Start only the isolated foreground development launcher. Its read-only
    preflight must establish the exact client/daemon identity, version, current
    node and canonical origin. Stop for an unrecognized/inconsistent profile or
@@ -266,10 +280,16 @@ enrollment and release qualification are outside this runbook.
    Serve summary. Confirm unrelated routes remain unchanged. Do not install or
    start a service, enroll a phone, or print/share a setup link.
 5. Stop the foreground relay and retain the persistent route/journal by default.
-   Do not unpublish under this authorization. Route removal needs separate
-   explicit authorization and the exact-route unpublish consent. On timeout,
-   mismatch, unknown fields, CLI error after dispatch or uncertainty, stop,
-   retain evidence and do not retry, reset Serve or remove other routes.
+   Do not unpublish under this authorization. Route removal requires a separate
+   explicit authorization before starting cleanup. Then re-inspect the complete
+   Serve document, confirm the journal's exact registered node/listener/backend,
+   stop the relay and prove its backend is free. Use only the scoped
+   `serve --bg --https=8443 --set-path=/ off` operation through the Go workflow;
+   read back the complete document and compare unrelated routes byte-for-byte
+   where the supported schema permits. Never use `serve reset` or remove an
+   unexpected/adjacent route. A removal acknowledgement/readback is not proof
+   that remote connections drained. On timeout, mismatch, unknown fields, CLI
+   error after dispatch or uncertainty, retain evidence and stop without retry.
 6. Record only a development-only outcome with secrets and raw identity data
    redacted. Physical-phone qualification remains separate; production stays
    disabled until qualification is recorded and separately enabled.
@@ -279,21 +299,29 @@ installed-service migration and release approval are distinct future phases.
 
 ## Source entrypoints and current gate
 
-The Go `tailscale-cli` subcommand exposes read-only `status`/`recover`, strict
-`assert-ready`, and separately consented `publish`/`unpublish`; its
-`activation-check --scope development` reports development enablement separately
-from runtime qualification, while the default production scope remains hard-gated. The relay shell lifecycle
-routes those actions through the journal manager, installs only a per-user
-service after `assert-ready`, and keeps stop separate from unpublish. The
-foreground development entrypoint uses `.dev-tailscale-cli/` with independent
-configuration, release, cache, runtime, and registration roots. Real development-
-scope manager commands require the marked private root, its exact `registration`
-child and the coordination root recorded in that marker; an unbound `NewManager`
-cannot execute real development operations. Read-only preflight remains separate.
-It stages each
-complete binary/web pair in a versioned release directory and atomically swaps
-a single `current` symlink, retaining the prior coherent release if staging or
-cutover fails.
+The standalone `tailscale-cli` command is limited to read-only diagnostics and a
+local transport-switch check; reserve, publish, recovery, and unpublish calls
+refuse unless made through `dev-tailscale-cli`. The Go-owned foreground workflow
+constructs a process-local `DevelopmentWorkflow`, validates the exact supplied
+App Store profile, private roots and authorized port tuple, reserves the backend,
+starts the app server in-process, publishes only after exact stdin consent, then
+uses the local control API for admission. Status/recovery and scoped cleanup use
+the same workflow boundary. The shell launcher supplies isolated build/runtime
+paths but no longer creates separate relay/manager processes or invokes route
+mutations itself. Ordinary config loading and app constructors cannot start
+CLI-backed service mode; `LoadDevelopmentCLI` and `NewDevelopmentCLI` require
+the in-memory workflow handle.
+
+The foreground workspace uses `.dev-tailscale-cli/` with separate configuration,
+release, cache, runtime, and registration roots. The supplied profile fixes
+HTTPS Serve 8443 -> loopback relay backend 18377 and plugin listener 18378;
+overrides are refused by the launcher, Go config, workflow and manager operation
+boundaries. The handle binds the private development root and exact
+`registration` child to the coordination root selected for this process. A
+persisted marker and the binary's location are bookkeeping only, never
+authorization. The launcher stages each complete binary/web pair in a versioned
+release directory and atomically swaps a single `current` symlink, retaining the
+prior coherent release if staging or cutover fails.
 
 `TailscaleCLIProfilesEnabled` remains false in ordinary and fixture builds.
 The exact App Store candidate has a separate development-qualification bit; it is

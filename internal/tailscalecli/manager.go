@@ -152,12 +152,15 @@ type RecoveryReport struct {
 }
 
 type Manager struct {
-	stateRoot            string
-	coordinationRoot     string
-	developmentRoot      string
-	client               *Client
-	fixtureMutations     bool
-	skipBackendReadiness bool
+	stateRoot              string
+	coordinationRoot       string
+	developmentRoot        string
+	developmentHTTPSPort   int
+	developmentBackendPort int
+	developmentPluginPort  int
+	client                 *Client
+	fixtureMutations       bool
+	skipBackendReadiness   bool
 }
 
 // NewManager opens an adapter manager over existing private roots. It performs
@@ -256,7 +259,7 @@ func optionalPrivateDirectory(path string) (string, bool, error) {
 // root until the exact route is explicitly unpublished or setup proves no
 // route was published and releases its own reservation.
 func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int, reservationID string) error {
-	if err := m.requireDevelopmentScope(scope); err != nil {
+	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		return err
 	}
 	reservation := backendPortReservation{
@@ -324,7 +327,7 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 // ReleaseBackendPort removes only the caller's reservation after read-only CLI
 // inspection proves no Serve route still targets the selected backend port.
 func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int, reservationID string, serviceStopped bool) error {
-	if err := m.requireDevelopmentScope(scope); err != nil {
+	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		return err
 	}
 	if !serviceStopped || !validReservationID(reservationID) {
@@ -401,7 +404,7 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) error {
 	if err := validateRequest(request); err != nil {
 		return m.publishNotDispatched(err)
 	}
-	if err := m.requireDevelopmentScope(request.Scope); err != nil {
+	if err := m.requireDevelopmentTuple(request.Scope, request.HTTPSPort, request.BackendPort); err != nil {
 		return m.publishNotDispatched(err)
 	}
 	if !validReservationID(request.ReservationID) {
@@ -569,7 +572,7 @@ func (m *Manager) publishNotDispatched(err error) error {
 // valid journal is never adopted, and this method never repairs a route.
 func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int) (RouteStatus, error) {
 	status := RouteStatus{JournalState: StateUnconfigured, Readiness: ReadinessWaiting}
-	if err := m.requireDevelopmentScope(scope); err != nil {
+	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		status.Readiness = ReadinessUnqualified
 		return status, err
 	}
@@ -649,7 +652,7 @@ func (m *Manager) VerifyRegisteredRoute(ctx context.Context, scope, installation
 // change an acknowledged registration.
 func (m *Manager) Recover(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int) (RecoveryReport, error) {
 	report := RecoveryReport{Route: RouteStatus{JournalState: StateUnconfigured, Readiness: ReadinessWaiting}}
-	if err := m.requireDevelopmentScope(scope); err != nil {
+	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		report.Route.Readiness = ReadinessUnqualified
 		report.RequiresOperatorAction = true
 		return report, err
@@ -823,7 +826,7 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 // confirms the exact operation ID and one read-only Serve observation. It never
 // invokes a Serve mutator or adopts a route without a matching pending intent.
 func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int, consent Consent) error {
-	if err := m.requireDevelopmentScope(scope); err != nil {
+	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		return err
 	}
 	if ctx == nil {
@@ -945,7 +948,7 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 		(record.State == StateReconciledPresent && !record.MutationAcknowledged)) {
 		return ErrUncertain
 	}
-	if err := m.requireDevelopmentScope(record.Scope); err != nil {
+	if err := m.requireDevelopmentTuple(record.Scope, record.HTTPSPort, record.BackendPort); err != nil {
 		return err
 	}
 	origin, err := tailscale.Origin(record.DNSName, record.HTTPSPort)
@@ -994,6 +997,13 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 			}
 			if !registeredRouteMatches(current, *record) {
 				return ErrConflict
+			}
+			if !m.skipBackendReadiness {
+				listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(record.BackendPort)))
+				if err != nil {
+					return fmt.Errorf("%w: backend listener is not stopped", ErrConflict)
+				}
+				_ = listener.Close()
 			}
 			opID, err := newOperationID()
 			if err != nil {
@@ -1053,6 +1063,22 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 			return nil
 		})
 	})
+}
+
+func (m *Manager) requireDevelopmentTuple(scope string, httpsPort, backendPort int) error {
+	if err := m.requireDevelopmentScope(scope); err != nil {
+		return err
+	}
+	if m.fixtureMutations {
+		return nil
+	}
+	if m.developmentRoot == "" || m.developmentHTTPSPort != DevelopmentHTTPSPort ||
+		m.developmentBackendPort != DevelopmentBackendPort || m.developmentPluginPort != DevelopmentPluginPort ||
+		scope != "development" || httpsPort != m.developmentHTTPSPort || backendPort != m.developmentBackendPort {
+		return fmt.Errorf("%w: development operations require HTTPS %d, backend %d and plugin %d",
+			ErrUnsupported, DevelopmentHTTPSPort, DevelopmentBackendPort, DevelopmentPluginPort)
+	}
+	return nil
 }
 
 func (m *Manager) requireDevelopmentScope(scope string) error {

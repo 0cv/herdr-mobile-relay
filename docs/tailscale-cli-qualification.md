@@ -87,46 +87,51 @@ credential, invitation or QR data appears. Required automated cases:
   Production and installed-service activation remain disabled pending physical-
   phone qualification and separate enablement. Status distinguishes
   `development_qualification_enabled` from `runtime_qualified`; pairing remains
-  closed until trusted HTTPS, exact bundle, current identity and app readiness;
-  service stop preserves route; service restart performs no route write; bounded
-  waiting does not mutate or restart-storm. `TestCLITailscaleControlStatusFailsClosedOnUnqualifiedRoute`
-  covers unqualified-route refusal. Tagged `TestTailscaleCLIReadinessArmAndDrift`
-  now exercises exact local/public HTTPS, the real public-bundle verifier over
-  fixture TLS, pre-arm HTTP 503, complete E2EE enrollment, durable invitation
-  state, and route-drift quarantine that preserves the enrolled credential.
-  Normal and race runs of the required tagged app/control matrix passed. Named
-  fake-only Linux systemd and macOS launchd fixtures passed install/health/stop;
-  repeated service-wrapper starts did not publish, and uninstall preserved the
-  persistent route plus out-of-tree registration journal after explicit consent.
-  These are fixture results only, not real-service qualification. A reconstructed
-  app process reopens durable device credentials, requires a fresh exact-route
-  admission arm, and closes admission on drift; a reopened registration manager
-  performs read-only recovery. Explicit shell unpublish tests decline and exact
-  route-removal consent. An interactive operator-managed package update now
-  checks the route before/after service restart and rolls back on drift using
-  fake-only manager, service, installer, and health fixtures. Phone-managed
-  updates remain refused; real profile coexistence and live qualification remain
-  outstanding.
+  closed until trusted HTTPS, exact bundle, current identity and app readiness.
+  The ordinary app/config constructors now refuse CLI-backed startup; only the
+  process-local Go development workflow may provide the registration verifier.
+  The previous tagged admission/service fixture results describe an earlier
+  separate-process architecture and are not evidence for this revision. The
+  current candidate adds positive/negative tests at the command, config,
+  app-constructor and workflow-operation boundaries; compile-only checks are not
+  passes, so the tests require exact-SHA hosted execution. No physical phone,
+  service, or live Tailscale qualification is implied.
 - **Development:** `.dev-tailscale-cli/` is a separate foreground workspace with
-  default ports 18377/18378/8443, separate registration/coordination roots,
-  read-only status/recovery, explicit unpublish, and route-preserving Ctrl-C.
-  Only the exact supplied App Store 1.102.4 metadata on Darwin/arm64 enables
-  this path; Linux, Darwin/amd64, MacSys, other versions and unrecognized
-  profiles refuse before Serve mutation. Real development-scope manager calls
-  require the launcher's private root marker, exact `registration` child, and
-  coordination root recorded in that marker; arbitrary roots are refused.
-  Setup displays the selected node, canonical origin, HTTPS listener and backend,
-  then requires the exact route-bound phrase on stdin. No environment variable
-  can supply consent. This path does not claim live-runtime or phone qualification;
-  it is not an installed service or production migration. Current-revision hosted
-  fixture verification is still required.
+  fixed HTTPS 8443 -> loopback relay backend 18377 and plugin listener 18378;
+  port overrides are refused before mutation. It has separate registration and
+  coordination roots, read-only status/recovery, a single-process app/manager
+  lifecycle, explicit scoped cleanup, and route-preserving Ctrl-C. Only the exact
+  supplied App Store 1.102.4 metadata on Darwin/arm64 enables the real workflow;
+  Linux, Darwin/amd64, MacSys, other versions and unrecognized profiles refuse
+  before Serve mutation. A nonserializable `DevelopmentWorkflow` retains the
+  manager; marker files, executable paths, command-line arguments and journal
+  contents do not authorize operations. The manager rechecks the fixed HTTPS
+  8443/backend 18377 tuple, while config/app construction enforces plugin 18378.
+  `serve`, ordinary config loading and standalone `tailscale-cli` mutation
+  commands refuse CLI-backed startup/operations. Setup displays the selected
+  node/origin/ports and requires exact route-bound stdin consent in the Go-owned
+  foreground process. No environment variable can supply consent. This path does
+  not claim live-runtime or phone qualification; it is not an installed service
+  or production migration.
 - **Packaging and unchanged paths:** exact release archive uses no end-user Go,
   Bun or Python; existing direct-session and BYO regression suites stay intact.
-  `test_dev_tailscale.py` and the extracted-package checker use an inert relay
-  binary and no service-manager/CLI fallback for CLI wrapper dispatch. Require
-  exact-final-revision ordinary, native Darwin/Linux and extracted-package
-  fixtures and two independent cumulative reviews. Earlier green revisions do
-  not apply to a later SHA.
+  Hosted fixtures must exercise the single-process `dev-tailscale-cli` dispatch
+  with inert synthetic binaries; no test may override a hosted-only guard on the
+  worker machine. The extracted-package job must verify the exact release
+  archive. Require ordinary, native Darwin/Linux and extracted-package results
+  for the exact final SHA; earlier green revisions do not apply to later code.
+  Acceptance evidence must identify the exact SHA for every hosted result.
+
+## Phone testing and qualification (separate future phase)
+
+The development-only P6 runbook below is not a phone test: do not open or share a
+setup link, scan a QR code, enroll a physical device, or characterize phone
+compatibility under this authorization. A physical-phone phase requires its own
+explicit owner authorization and reviewed plan naming the exact device, OS, app
+build/account, user-visible actions, expected E2EE/admission outcomes, cleanup,
+and evidence-redaction procedure. Do not infer phone qualification from a
+profile preflight, server health, a browser fixture, or a successful development
+route. Production/installed-service enablement remains a separate later change.
 
 ## Service identity, recovery and monitoring
 
@@ -167,18 +172,25 @@ not runtime qualification or production authorization:
    reset or restored from a snapshot.
 4. There is no guarantee that remote connections drain after route removal.
 
-The supervising assistant executes this runbook only after the independent
-review gates and within the owner's explicit development-route authorization.
-Do not substitute another node, account, profile, action or scope. The only live
-candidate is the current Mac's App Store Tailscale 1.102.4 profile on Darwin/arm64,
-on the owner's current node/account, in isolated foreground development, with
-HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377 (plugin backend
-18378). That authorization does not include unpublishing the route. Production,
-installed-service activation/migration, physical-phone enrollment and release
-qualification are outside this runbook.
+This is an operational reference, not authorization. The current source/CI
+phase does not permit any live Tailscale CLI operation, route publication or
+removal, phone enrollment, service activation, or production mutation; workers
+must not invoke this runbook. Any later live development-route exercise requires
+its own explicit owner authorization naming the exact action, node/account and
+time window, plus completion of the independent review gates. Do not infer that
+a source change, hosted fixture, or generic development-path authorization
+permits a live mutation. Do not substitute another node, account, profile,
+action or scope. If separately authorized, the only candidate is the owner's
+Mac App Store Tailscale 1.102.4 profile on Darwin/arm64, in isolated foreground
+development, with HTTPS Serve port 8443 and loopback backend 127.0.0.1:18377
+(plugin listener 18378). That authorization does not include unpublishing the
+route. Production, installed-service activation/migration, physical-phone
+enrollment and release qualification are outside this runbook.
 
 0. Confirm the reviewed checkout/revision and launcher are the ones intended for
-   this run. Confirm the host is Darwin/arm64 and the selected executable/profile
+   this run. Confirm the exact candidate SHA has ordinary, native Darwin/Linux
+   and extracted-release hosted results, and that independent review gates are
+   complete. Confirm the host is Darwin/arm64 and the selected executable/profile
    is the exact App Store 1.102.4 candidate. Do not run a direct CLI mutation,
    select another profile or node, or override the fixed development ports.
 1. Start only the isolated foreground development launcher. Its read-only
@@ -204,9 +216,13 @@ qualification are outside this runbook.
    start a service, enroll a phone, or print/share a setup link.
 5. Stop the foreground relay and retain the persistent route/journal by default.
    Do not unpublish under this authorization. Route removal needs separate
-   explicit authorization and the launcher's exact-route unpublish consent. On
-   timeout, mismatch, unknown fields, CLI error after dispatch or any uncertainty,
-   stop, retain evidence and do not retry, reset Serve or remove other routes.
+   explicit authorization and the Go workflow's exact-route unpublish consent.
+   First stop the foreground relay and prove backend 18377 is free. Inspect the
+   complete Serve state and exact journal binding before cleanup; remove only
+   HTTPS 8443 path `/`, then read back the complete state and verify unrelated
+   routes were preserved. Never reset Serve. On timeout, mismatch, unknown fields,
+   CLI error after dispatch or any uncertainty, stop, retain evidence and do not
+   retry or remove other routes.
 6. Record only a development-only outcome, with secrets and raw identity data
    redacted. Physical-phone qualification remains a separate future phase;
    production stays disabled until that qualification is recorded and separately

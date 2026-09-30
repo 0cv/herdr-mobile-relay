@@ -111,6 +111,7 @@ go-check:
 backend-check: go-check shell-check production-path-audit
 
 shell-check:
+	shellcheck -x relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
 	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done

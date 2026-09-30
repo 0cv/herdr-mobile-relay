@@ -47,6 +47,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/support"
+	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
 	"github.com/0cv/herdr-mobile-relay/internal/upload"
@@ -124,6 +125,7 @@ type Server struct {
 	managedOwner                    *ManagedOwner
 	tailscaleSession                managedTailscaleAuthority
 	tailscaleCLIRegistration        tailscaleCLIRegistrationVerifier
+	developmentCLIWorkflow          *tailscalecli.DevelopmentWorkflow
 	verifyPublicBundle              func(context.Context, string, string, string, string) error
 	managedRetired                  chan struct{}
 	managedRetireOne                sync.Once
@@ -175,7 +177,34 @@ type Server struct {
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
+	if cfg != nil && cfg.Transport == config.TransportTailscaleCLI {
+		return &Server{cfg: cfg, initErr: tailscalecli.ErrWorkflowRequired}
+	}
 	return newServer(cfg, version, revision, logger)
+}
+
+// NewDevelopmentCLI is the only constructor that admits the CLI-backed
+// development transport. The workflow handle is process-local and provides the
+// registration verifier used by readiness checks.
+func NewDevelopmentCLI(cfg *config.Config, version, revision string, logger *slog.Logger, workflow *tailscalecli.DevelopmentWorkflow) (*Server, error) {
+	if cfg == nil || workflow == nil {
+		return nil, tailscalecli.ErrWorkflowRequired
+	}
+	if err := workflow.ValidateRuntimeBinding(
+		cfg.TailscaleCLIDevelopmentRoot, cfg.TailscaleCLIStateRoot, cfg.TailscaleCLICoordinationRoot,
+		cfg.TailscaleCLIBin, cfg.TailscaleCLIScope, cfg.InstanceID, cfg.TailscaleCLIOrigin,
+		tailscalecli.DevelopmentHTTPSPort, cfg.Port, cfg.PluginPort,
+	); err != nil {
+		return nil, err
+	}
+	if cfg.Transport != config.TransportTailscaleCLI || cfg.Host != "127.0.0.1" ||
+		cfg.Port != tailscalecli.DevelopmentBackendPort || cfg.PluginPort != tailscalecli.DevelopmentPluginPort {
+		return nil, tailscalecli.ErrWorkflowRequired
+	}
+	server := newServerWithSession(cfg, version, revision, logger, nil, nil)
+	server.tailscaleCLIRegistration = workflow
+	server.developmentCLIWorkflow = workflow
+	return server, nil
 }
 
 // NewOwned constructs a server for a managed run only after the supplied
@@ -185,25 +214,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 // directories. Legacy (non-managed) configurations must not supply an owner.
 func NewOwned(cfg *config.Config, version, revision string, logger *slog.Logger, owner *ManagedOwner) (*Server, error) {
 	if cfg.Transport == config.TransportTailscaleCLI {
-		switch cfg.TailscaleCLIScope {
-		case "development":
-			if !config.TailscaleCLIDevelopmentQualificationEnabled() {
-				return nil, errors.New("CLI-backed development qualification is not enabled")
-			}
-		case "production":
-			if !config.TailscaleCLIProfilesEnabled() {
-				return nil, errors.New("production CLI-backed startup remains disabled pending physical-phone qualification and separate enablement")
-			}
-		default:
-			return nil, errors.New("CLI-backed startup requires explicit development or production scope")
-		}
-		registration, err := prepareTailscaleCLIRegistration(cfg)
-		if err != nil {
-			return nil, err
-		}
-		server := newServerWithSession(cfg, version, revision, logger, nil, nil)
-		server.tailscaleCLIRegistration = registration
-		return server, nil
+		return nil, tailscalecli.ErrWorkflowRequired
 	}
 	if cfg.Transport == config.TransportTailscaleExternal {
 		if owner != nil || cfg.ManagedRunID != "" {
@@ -734,6 +745,9 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if s.cfg != nil && s.cfg.Transport == config.TransportTailscaleCLI && s.developmentCLIWorkflow == nil {
+		return tailscalecli.ErrWorkflowRequired
+	}
 	if s.initErr != nil {
 		startupErr := s.unwindManagedStartup(s.initErr)
 		if s.conversationB != nil {

@@ -208,9 +208,8 @@ func newPolicyManager(t *testing.T, f *fakeCLI, goos, goarch, stateLeaf string) 
 			t.Fatal(err)
 		}
 	}
-	writeDevelopmentRootMarkerForTest(t, developmentRoot, stateRoot, coordinationRoot)
 	client := newTestClientForPlatform("/fixture path/tailscale", f.run, goos, goarch)
-	manager, err := NewDevelopmentManager(developmentRoot, stateRoot, coordinationRoot, client)
+	manager, err := newDevelopmentManager(developmentRoot, stateRoot, coordinationRoot, client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1108,6 +1107,20 @@ func TestUnpublishRequiresAcknowledgedExactRouteAndPersistsRemoval(t *testing.T)
 	if fixture.mutationCalls() != 1 {
 		t.Fatal("missing race consent dispatched an unpublish")
 	}
+	backend, err := net.Listen("tcp", "127.0.0.1:18377")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	manager.skipBackendReadiness = false
+	if err := manager.Unpublish(context.Background(), fixtureConsent(true)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unpublish with an active backend was not refused: %v", err)
+	}
+	if fixture.mutationCalls() != 1 {
+		t.Fatal("active backend check dispatched an unpublish")
+	}
+	_ = backend.Close()
+	manager.skipBackendReadiness = true
 	if err := manager.Unpublish(context.Background(), fixtureConsent(true)); err != nil {
 		t.Fatal(err)
 	}

@@ -125,12 +125,16 @@ def run_setup(
         "sys.exit(97)\n",
     )
     write_executable(fakebin / "uname", f"#!/bin/sh\nprintf '{platform}\\n'\n")
-    if platform == "Darwin":
-        uid = os.getuid()
-        write_executable(
-            fakebin / "stat",
-            f"#!/bin/sh\ncase \"$2\" in %Lp) printf '700\\n' ;; %u) printf '{uid}\\n' ;; *) exit 2 ;; esac\n",
-        )
+    uid = os.getuid()
+    write_executable(
+        fakebin / "stat",
+        f"#!/bin/sh\n"
+        "case \"$1:$2\" in\n"
+        f"  -f:%Lp|-c:%a) printf '700\\n' ;;\n"
+        f"  -f:%u|-c:%u) printf '{uid}\\n' ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n",
+    )
     write_executable(
         relay / "service.sh",
         "#!/bin/bash\nset -euo pipefail\n"

@@ -1,12 +1,15 @@
 package config
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -263,20 +266,32 @@ func TestTailscaleCLITransportIsRecognizedButActivationDisabled(t *testing.T) {
 	}
 }
 
-func TestTailscaleCLIDevelopmentScopeIsConfigEnabled(t *testing.T) {
+func TestTailscaleCLIRejectsHTTPSPortEnvironmentOverride(t *testing.T) {
+	for _, port := range []string{"8444", "443"} {
+		t.Run(port, func(t *testing.T) {
+			isolateLoadEnvironment(t)
+			t.Setenv("HERDR_TAILSCALE_CLI_HTTPS_PORT", port)
+			if err := (&Config{}).validateTailscaleCLI(nil); err == nil || !strings.Contains(err.Error(), "HERDR_TAILSCALE_CLI_HTTPS_PORT") {
+				t.Fatalf("HTTPS port override was not refused: %v", err)
+			}
+		})
+	}
+}
+
+func TestTailscaleCLIDevelopmentScopeRequiresInProcessWorkflow(t *testing.T) {
 	isolateLoadEnvironment(t)
 	configureTailscaleCLIEnvironment(t)
-	developmentRoot := t.TempDir()
+	developmentRoot := filepath.Join(t.TempDir(), "development")
 	t.Setenv("HERDR_TAILSCALE_CLI_SCOPE", "development")
 	t.Setenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT", developmentRoot)
 	t.Setenv("HERDR_TAILSCALE_CLI_STATE_ROOT", filepath.Join(developmentRoot, "registration"))
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("development CLI config was refused: %v", err)
+	if cfg != nil || !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+		t.Fatalf("ordinary config startup admitted CLI development: config=%#v err=%v", cfg, err)
 	}
-	if cfg.TailscaleCLIScope != "development" || cfg.TailscaleCLIDevelopmentRoot != developmentRoot {
-		t.Fatalf("CLI scope/root = %q/%q, want development/%q", cfg.TailscaleCLIScope, cfg.TailscaleCLIDevelopmentRoot, developmentRoot)
+	if _, err := LoadDevelopmentCLI(nil); !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+		t.Fatalf("nil workflow config load = %v", err)
 	}
 	if TailscaleCLIProfilesEnabled() {
 		t.Fatal("development scope must not enable production CLI profiles")
@@ -317,9 +332,9 @@ func TestTailscaleCLIConfigRejectsInvalidStateAndOriginsBeforeActivationGate(t *
 			want:      "requires HERDR_RELAY_HOST=127.0.0.1",
 		},
 		{
-			name:      "port collision",
+			name:      "wrong fixed HTTPS port",
 			overrides: map[string]string{"HERDR_TAILSCALE_CLI_ORIGIN": "https://relay.tailnet.ts.net:8375"},
-			want:      "listener must differ",
+			want:      "requires HTTPS 8443, backend 18377 and plugin 18378",
 		},
 		{
 			name:      "overlapping registration root",
@@ -604,11 +619,11 @@ func TestValidateTailscaleRejectsParsedRearm(t *testing.T) {
 				InstanceID: "instance-1", ManagedRunID: "run-1",
 				PairingSocketPath: filepath.Join(t.TempDir(), "control.sock"),
 			}
-			if err := cfg.validate(); err != nil {
+			if err := cfg.validate(nil); err != nil {
 				t.Fatalf("valid control refused: %v", err)
 			}
 			cfg.RearmBootstrap = true
-			if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "REARM_BOOTSTRAP") {
+			if err := cfg.validate(nil); err == nil || !strings.Contains(err.Error(), "REARM_BOOTSTRAP") {
 				t.Fatalf("parsed rearm accepted: %v", err)
 			}
 		})

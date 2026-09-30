@@ -82,15 +82,18 @@ That profile is development-enabled, not runtime-qualified. `make dev-tailscale-
 requires explicit development opt-in, read-only profile and node preflight, and
 an exact route-bound confirmation on stdin for the selected node, HTTPS origin,
 listener and loopback backend. An environment variable cannot consent. The
-persistent route survives relay stop and Ctrl-C; removal is a separate explicit
-operation. Real manager calls are bound to the launcher's marked private root,
-exact registration child and recorded coordination root. The launcher uses
-isolated development state and does not install a
-service. Production and installed-service activation remain refused until
-physical-phone qualification is recorded and separately enabled. Linux, MacSys,
-other versions and unrecognized profiles remain unsupported. This is not a
-fallback for the legacy foreground LocalAPI-owned transport or operator-owned
-BYO mode.
+persistent route survives relay stop and Ctrl-C; removal is a separate
+explicitly authorized cleanup operation. Only the Go-owned in-process
+`DevelopmentWorkflow` carries the real-operation manager. Markers, executable
+paths, command-line flags and persisted journals do not authorize operations;
+ordinary config loading, `serve`, `NewOwned`, and standalone `tailscale-cli`
+mutation commands refuse the CLI transport. The shell launcher prepares
+isolated development paths but does not start a separate relay process or invoke
+Serve mutations. This workflow does not install a service or qualify physical
+phone behavior. Production and installed-service activation remain refused.
+Linux, MacSys, other versions and unrecognized profiles remain unsupported.
+This is not a fallback for the legacy foreground LocalAPI-owned transport or
+operator-owned BYO mode.
 
 ## Operator-owned HTTPS Serve (BYO)
 

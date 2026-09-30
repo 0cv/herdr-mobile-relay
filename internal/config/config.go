@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
+	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
 // Accepted relay transport values.
@@ -87,6 +88,19 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	return load(nil)
+}
+
+// LoadDevelopmentCLI is reserved for the process-local isolated development
+// workflow. Ordinary service/config startup cannot enable this transport.
+func LoadDevelopmentCLI(workflow *tailscalecli.DevelopmentWorkflow) (*Config, error) {
+	if workflow == nil {
+		return nil, tailscalecli.ErrWorkflowRequired
+	}
+	return load(workflow)
+}
+
+func load(workflow *tailscalecli.DevelopmentWorkflow) (*Config, error) {
 	transport, err := resolveTransport(os.Getenv("HERDR_RELAY_TRANSPORT"), os.Getenv("HERDR_GATEWAY_URL"))
 	if err != nil {
 		return nil, err
@@ -173,7 +187,7 @@ func Load() (*Config, error) {
 		cfg.HerdrBin = findHerdrBin()
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(workflow); err != nil {
 		return nil, err
 	}
 
@@ -194,7 +208,7 @@ func (c *Config) Addr() string {
 	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 }
 
-func (c *Config) validate() error {
+func (c *Config) validate(workflow *tailscalecli.DevelopmentWorkflow) error {
 	if c.Transport == "" {
 		c.Transport = inferredTransport(c.GatewayURLs)
 	}
@@ -230,7 +244,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("gateway url requires a relay key: the gateway path derives its credentials from it")
 	}
 	if c.Transport == TransportTailscaleCLI {
-		return c.validateTailscaleCLI()
+		return c.validateTailscaleCLI(workflow)
 	}
 	if c.Transport == TransportTailscaleExternal {
 		return c.validateExternalTailscale()
@@ -273,7 +287,10 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func (c *Config) validateTailscaleCLI() error {
+func (c *Config) validateTailscaleCLI(workflow *tailscalecli.DevelopmentWorkflow) error {
+	if httpsPort := os.Getenv("HERDR_TAILSCALE_CLI_HTTPS_PORT"); httpsPort != "" && httpsPort != strconv.Itoa(tailscalecli.DevelopmentHTTPSPort) {
+		return errors.New("HERDR_TAILSCALE_CLI_HTTPS_PORT must remain fixed at 8443")
+	}
 	if c.Token == "" {
 		return errors.New("tailscale-cli requires a relay key of exactly 32 bytes")
 	}
@@ -314,8 +331,9 @@ func (c *Config) validateTailscaleCLI() error {
 			return errors.New("HERDR_TAILSCALE_CLI_ORIGIN has an invalid port")
 		}
 	}
-	if originPort == c.Port || originPort == c.PluginPort {
-		return errors.New("tailscale-cli HTTPS listener must differ from relay and plugin backend ports")
+	if originPort != tailscalecli.DevelopmentHTTPSPort || c.Port != tailscalecli.DevelopmentBackendPort ||
+		c.PluginPort != tailscalecli.DevelopmentPluginPort {
+		return errors.New("tailscale-cli development requires HTTPS 8443, backend 18377 and plugin 18378")
 	}
 	if c.InstanceID == "" || !safeRunID(c.InstanceID) {
 		return errors.New("tailscale-cli requires a valid relay instance ID")
@@ -354,6 +372,16 @@ func (c *Config) validateTailscaleCLI() error {
 		if !filepath.IsAbs(c.TailscaleCLIDevelopmentRoot) ||
 			filepath.Clean(c.TailscaleCLIStateRoot) != filepath.Join(filepath.Clean(c.TailscaleCLIDevelopmentRoot), "registration") {
 			return errors.New("development CLI state must be bound to its absolute private launcher root")
+		}
+		if workflow == nil {
+			return tailscalecli.ErrWorkflowRequired
+		}
+		if err := workflow.ValidateRuntimeBinding(
+			c.TailscaleCLIDevelopmentRoot, c.TailscaleCLIStateRoot, c.TailscaleCLICoordinationRoot,
+			c.TailscaleCLIBin, c.TailscaleCLIScope, c.InstanceID, c.TailscaleCLIOrigin,
+			originPort, c.Port, c.PluginPort,
+		); err != nil {
+			return err
 		}
 	case "production":
 		if !tailscaleCLIProfilesEnabled {

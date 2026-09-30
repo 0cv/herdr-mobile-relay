@@ -14,6 +14,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
 func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
@@ -31,8 +32,8 @@ func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
 		"--scope", "production", "--installation-id", "fixture-installation",
 		"--https-port", "8443", "--backend-port", "18377",
 	})
-	if code != 2 || err == nil || !strings.Contains(err.Error(), "limited to isolated development scope") {
-		t.Fatalf("unqualified CLI management command = (%d, %v), want fail-closed refusal", code, err)
+	if code != 2 || !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+		t.Fatalf("standalone CLI management command = (%d, %v), want workflow-required refusal", code, err)
 	}
 	for _, path := range []string{invoked, stateRoot, coordinationRoot} {
 		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {

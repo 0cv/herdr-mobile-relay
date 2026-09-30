@@ -42,6 +42,10 @@ jobs:
           cache: true
       - name: Format
         run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      - name: Lint CLI lifecycle shell scripts
+        run: shellcheck -x relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
       - name: Lint GitHub workflows with pinned actionlint
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12

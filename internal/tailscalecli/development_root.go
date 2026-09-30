@@ -1,20 +1,18 @@
 package tailscalecli
 
 import (
-	"bytes"
-	"fmt"
-	"io"
-	"os"
+	"context"
 	"path/filepath"
 )
 
-const developmentRootMarker = ".herdr-dev-tailscale-cli"
+// NewDevelopmentManager is deliberately disabled: a manager is an operational
+// capability and may only be created by a process-local DevelopmentWorkflow.
+// Callers must not turn private paths or persisted markers into authorization.
+func NewDevelopmentManager(string, string, string, *Client) (*Manager, error) {
+	return nil, ErrWorkflowRequired
+}
 
-// NewDevelopmentManager binds real development-scope operations to the
-// launcher's marked, private root. NewManager remains available for other
-// scopes and fixture-only package tests; an unbound manager cannot use the real
-// development scope.
-func NewDevelopmentManager(developmentRoot, stateRoot, coordinationRoot string, client *Client) (*Manager, error) {
+func newDevelopmentManager(developmentRoot, stateRoot, coordinationRoot string, client *Client) (*Manager, error) {
 	root, err := validatePrivateDirectory(developmentRoot)
 	if err != nil || filepath.Clean(developmentRoot) != root {
 		return nil, ErrPermissionDenied
@@ -27,43 +25,46 @@ func NewDevelopmentManager(developmentRoot, stateRoot, coordinationRoot string, 
 	if err != nil || filepath.Clean(coordinationRoot) != coordination || pathsOverlap(root, coordination) {
 		return nil, ErrPermissionDenied
 	}
-	if err := validateDevelopmentRootMarker(root, state, coordination); err != nil {
-		return nil, err
-	}
 	manager, err := NewManager(state, coordination, client)
 	if err != nil {
 		return nil, err
 	}
 	manager.developmentRoot = root
+	manager.developmentHTTPSPort = DevelopmentHTTPSPort
+	manager.developmentBackendPort = DevelopmentBackendPort
+	manager.developmentPluginPort = DevelopmentPluginPort
 	return manager, nil
 }
 
-func validateDevelopmentRootMarker(root, state, coordination string) error {
-	path := filepath.Join(root, developmentRootMarker)
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !ownedByCurrentUser(info) {
-		return ErrPermissionDenied
-	}
-	file, err := os.Open(path)
+// NewDevelopmentWorkflow performs a fresh read-only profile preflight and then
+// binds the real-operation manager to this process-local, non-serializable
+// handle. The fixed tuple is enforced again by every manager operation.
+func NewDevelopmentWorkflow(ctx context.Context, developmentRoot, stateRoot, coordinationRoot, binary string) (*DevelopmentWorkflow, PreflightReport, error) {
+	client, err := NewClient(binary)
 	if err != nil {
-		return ErrPermissionDenied
+		return nil, PreflightReport{}, err
 	}
-	openedInfo, statErr := file.Stat()
-	if statErr != nil || !os.SameFile(info, openedInfo) {
-		_ = file.Close()
-		return ErrPermissionDenied
+	return newDevelopmentWorkflow(ctx, developmentRoot, stateRoot, coordinationRoot, client)
+}
+
+func newDevelopmentWorkflow(ctx context.Context, developmentRoot, stateRoot, coordinationRoot string, client *Client) (*DevelopmentWorkflow, PreflightReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	data, readErr := io.ReadAll(io.LimitReader(file, 4097))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil || len(data) > 4096 {
-		return ErrPermissionDenied
+	if client == nil || client.profileOS != "darwin" || client.profileArch != "arm64" {
+		return nil, PreflightReport{}, ErrUnsupported
 	}
-	expected := []byte(fmt.Sprintf(
-		"HERDR_DEV_TAILSCALE_CLI_ROOT=1\nHERDR_DEV_TAILSCALE_CLI_STATE_ROOT=%s\nHERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=%s\n",
-		state, coordination,
-	))
-	if !bytes.Equal(data, expected) {
-		return ErrPermissionDenied
+	preflight, err := client.Preflight(ctx, DevelopmentHTTPSPort)
+	if err != nil {
+		return nil, PreflightReport{}, err
 	}
-	return nil
+	if preflight.Profile != ProfileAppStoreSupplied || !preflight.DevelopmentQualificationEnabled ||
+		preflight.HTTPSPort != DevelopmentHTTPSPort {
+		return nil, preflight, ErrUnsupported
+	}
+	manager, err := newDevelopmentManager(developmentRoot, stateRoot, coordinationRoot, client)
+	if err != nil {
+		return nil, preflight, err
+	}
+	return &DevelopmentWorkflow{manager: manager, preflight: preflight}, preflight, nil
 }

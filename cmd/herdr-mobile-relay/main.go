@@ -262,6 +262,8 @@ func run(args []string) (int, error) {
 		return status(relayupdate.PruneOldReleases(args[0], args[1:]...))
 	case "json-field":
 		return runJSONField(args, os.Stdin, os.Stdout)
+	case "dev-tailscale-cli":
+		return runDevelopmentTailscaleCLI(args, os.Stdin, os.Stdout, os.Stderr)
 	case "tailscale-cli":
 		return runTailscaleCLI(args, os.Stdout, os.Stderr)
 	case "tailscale", "tailscale-inspect":

@@ -8,9 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -37,26 +35,6 @@ type managedTailscaleAuthority interface {
 	Invalidation() <-chan struct{}
 	Status() tailscale.AuthorityStatus
 	Origin() (string, bool)
-}
-
-// prepareTailscaleCLIRegistration opens private, pre-created registration roots
-// and resolves the explicit CLI override or an unambiguous service PATH candidate.
-// The activation gate in NewOwned prevents this production path before P6.
-func prepareTailscaleCLIRegistration(cfg *config.Config) (*tailscalecli.Manager, error) {
-	binary, err := tailscalecli.ResolveBinary(cfg.TailscaleCLIBin, os.Getenv("PATH"), runtime.GOOS)
-	if err != nil {
-		return nil, err
-	}
-	client, err := tailscalecli.NewClient(binary)
-	if err != nil {
-		return nil, err
-	}
-	if cfg.TailscaleCLIScope == "development" {
-		return tailscalecli.NewDevelopmentManager(
-			cfg.TailscaleCLIDevelopmentRoot, cfg.TailscaleCLIStateRoot, cfg.TailscaleCLICoordinationRoot, client,
-		)
-	}
-	return tailscalecli.NewManager(cfg.TailscaleCLIStateRoot, cfg.TailscaleCLICoordinationRoot, client)
 }
 
 // prepareManagedTailscale constructs the real in-process LocalAPI owner only

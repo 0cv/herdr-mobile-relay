@@ -43,6 +43,13 @@ var (
 	ErrInvalidJSON          = errors.New("Tailscale CLI returned invalid JSON")
 	ErrCommandFailed        = errors.New("Tailscale CLI command failed with an unclassified outcome")
 	ErrUnclassified         = errors.New("Tailscale CLI failure is unclassified")
+	ErrWorkflowRequired     = errors.New("Tailscale CLI development operations require an in-process isolated workflow")
+)
+
+const (
+	DevelopmentHTTPSPort   = 8443
+	DevelopmentBackendPort = 18377
+	DevelopmentPluginPort  = 18378
 )
 
 // CommandFailureError records only that a started CLI process exited

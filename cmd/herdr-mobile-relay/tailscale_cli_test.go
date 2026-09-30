@@ -31,6 +31,22 @@ func TestNonzeroCLIProcessExitIsNotMappedToRetryStatus(t *testing.T) {
 	}
 }
 
+func TestDevelopmentWorkflowRejectsPortEnvironmentOverridesBeforePreflight(t *testing.T) {
+	for _, name := range []string{
+		"HERDR_DEV_TAILSCALE_CLI_PORT",
+		"HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT",
+		"HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "18377")
+			workflow, cfg, err := developmentCLIFromEnvironment(context.Background())
+			if err == nil || !strings.Contains(err.Error(), name) || workflow != nil || cfg != nil {
+				t.Fatalf("port override reached workflow construction: workflow=%v config=%v err=%v", workflow, cfg, err)
+			}
+		})
+	}
+}
+
 func TestActivationScopeKeepsProductionDisabledAndDevelopmentExplicit(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code, err := runTailscaleCLIWithInput([]string{"activation-check"}, strings.NewReader(""), &stdout, &stderr)
@@ -48,36 +64,31 @@ func TestActivationScopeKeepsProductionDisabledAndDevelopmentExplicit(t *testing
 	stderr.Reset()
 	code, err = runTailscaleCLIWithInput([]string{"status", "--scope", "production", "--binary", "/not-a-real-cli"},
 		strings.NewReader(""), &stdout, &stderr)
-	if code != 2 || err == nil || !strings.Contains(err.Error(), "limited to isolated development scope") {
-		t.Fatalf("production status was not refused before CLI selection: code %d err=%v", code, err)
+	if code != 2 || !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+		t.Fatalf("standalone status was not refused before CLI selection: code %d err=%v", code, err)
 	}
 }
 
-func TestDevelopmentManagerCommandRequiresLauncherBoundRootBeforeCLIUse(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the synthetic CLI fixture uses a POSIX executable")
-	}
-	root := t.TempDir()
-	sentinel := filepath.Join(root, "cli-invoked")
-	binary := filepath.Join(root, "fake-tailscale")
-	contents := "#!/bin/sh\n# HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1\nprintf invoked > \"" + sentinel + "\"\nexit 97\n"
+func TestStandaloneManagerOperationsRequireWorkflowBeforeCLIUse(t *testing.T) {
+	base := t.TempDir()
+	sentinel := filepath.Join(base, "cli-invoked")
+	binary := filepath.Join(base, "fake-tailscale")
+	contents := "#!/bin/sh\nprintf invoked > \"" + sentinel + "\"\nexit 97\n"
 	if err := os.WriteFile(binary, []byte(contents), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(binary, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	code, err := runTailscaleCLIWithInput([]string{
-		"status", "--scope", "development", "--binary", binary,
-		"--state-root", filepath.Join(root, "registration"),
-		"--coordination-root", filepath.Join(root, "coordination"),
-	}, strings.NewReader(""), &stdout, &stderr)
-	if code != 1 || !errors.Is(err, tailscalecli.ErrPermissionDenied) {
-		t.Fatalf("unbound development manager command = code %d err=%v", code, err)
+	for _, operation := range []string{"status", "recover", "assert-ready", "publish", "unpublish", "reserve-backend-port", "release-backend-port", "reconcile"} {
+		t.Run(operation, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, err := runTailscaleCLIWithInput([]string{operation, "--binary", binary},
+				strings.NewReader(""), &stdout, &stderr)
+			if code != 2 || !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+				t.Fatalf("standalone %s = code %d err=%v, want workflow refusal", operation, code, err)
+			}
+		})
 	}
 	if _, err := os.Lstat(sentinel); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unbound development command executed the CLI: %v", err)
+		t.Fatalf("standalone manager operations invoked the CLI: %v", err)
 	}
 }
 

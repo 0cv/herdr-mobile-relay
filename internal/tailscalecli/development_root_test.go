@@ -8,20 +8,6 @@ import (
 	"testing"
 )
 
-func writeDevelopmentRootMarkerForTest(t *testing.T, root, state, coordination string) {
-	t.Helper()
-	marker := []byte("HERDR_DEV_TAILSCALE_CLI_ROOT=1\n" +
-		"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=" + state + "\n" +
-		"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=" + coordination + "\n")
-	path := filepath.Join(root, developmentRootMarker)
-	if err := os.WriteFile(path, marker, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func developmentManagerFixturePaths(t *testing.T) (root, state, coordination string) {
 	t.Helper()
 	base, err := filepath.EvalSymlinks(t.TempDir())
@@ -36,7 +22,6 @@ func developmentManagerFixturePaths(t *testing.T) (root, state, coordination str
 			t.Fatal(err)
 		}
 	}
-	writeDevelopmentRootMarkerForTest(t, root, state, coordination)
 	return root, state, coordination
 }
 
@@ -46,14 +31,20 @@ func developmentManagerFixtureClient() *Client {
 	}, "darwin", "arm64")
 }
 
-func TestNewDevelopmentManagerRequiresExactMarkedPrivateRoots(t *testing.T) {
+func TestDevelopmentManagerRequiresProcessLocalWorkflow(t *testing.T) {
 	root, state, coordination := developmentManagerFixturePaths(t)
-	manager, err := NewDevelopmentManager(root, state, coordination, developmentManagerFixtureClient())
+	client := developmentManagerFixtureClient()
+	if _, err := NewDevelopmentManager(root, state, coordination, client); !errors.Is(err, ErrWorkflowRequired) {
+		t.Fatalf("standalone manager constructor returned an operation capability: %v", err)
+	}
+	manager, err := newDevelopmentManager(root, state, coordination, client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manager.developmentRoot != root {
-		t.Fatalf("development root binding = %q, want %q", manager.developmentRoot, root)
+	if manager.developmentRoot != root || manager.developmentHTTPSPort != DevelopmentHTTPSPort ||
+		manager.developmentBackendPort != DevelopmentBackendPort || manager.developmentPluginPort != DevelopmentPluginPort {
+		t.Fatalf("workflow manager tuple = root %q, HTTPS %d, backend %d, plugin %d", manager.developmentRoot,
+			manager.developmentHTTPSPort, manager.developmentBackendPort, manager.developmentPluginPort)
 	}
 
 	otherState := filepath.Join(t.TempDir(), "registration")
@@ -69,8 +60,8 @@ func TestNewDevelopmentManagerRequiresExactMarkedPrivateRoots(t *testing.T) {
 		{root, state, otherCoordination},
 		{root, state, root},
 	} {
-		if _, err := NewDevelopmentManager(paths[0], paths[1], paths[2], developmentManagerFixtureClient()); !errors.Is(err, ErrPermissionDenied) {
-			t.Errorf("unbound development roots accepted (%q, %q, %q): %v", paths[0], paths[1], paths[2], err)
+		if _, err := newDevelopmentManager(paths[0], paths[1], paths[2], client); !errors.Is(err, ErrPermissionDenied) {
+			t.Errorf("unsafe development roots accepted (%q, %q, %q): %v", paths[0], paths[1], paths[2], err)
 		}
 	}
 }

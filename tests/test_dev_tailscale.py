@@ -68,7 +68,9 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         "HERDR_DEV_TAILSCALE_PLUGIN_PORT": "18378",
         "HERDR_DEV_TAILSCALE_HTTPS_PORT": "18443",
     })
-    for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "GH_TOKEN"):
+    for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "GH_TOKEN",
+                 "HERDR_DEV_TAILSCALE_CLI_PORT", "HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT",
+                 "HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT"):
         env.pop(name, None)
 
     def refused(case: str, settings: dict[str, str], state_root: Path = dev) -> None:
@@ -192,6 +194,40 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         list(private_cli_dev.iterdir()) or sentinel.exists()):
         raise AssertionError("development qualification skipped profile selection or touched private state")
     print("PASS dev-tailscale-cli isolation: development qualification remains profile-gated and production state untouched")
+
+    # The supplied App Store route is fixed to HTTPS 8443 -> backend 18377,
+    # with plugin listener 18378. Port overrides must fail before even the
+    # named activation fixture is contacted or private state is changed.
+    for variable, value, expected in (
+        ("HERDR_DEV_TAILSCALE_CLI_PORT", "18577", b"fixed at 18377"),
+        ("HERDR_DEV_TAILSCALE_CLI_PORT", "18377", b"fixed at 18377"),
+        ("HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT", "18578", b"fixed at 18378"),
+        ("HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT", "18378", b"fixed at 18378"),
+        ("HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT", "9443", b"fixed at 8443"),
+        ("HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT", "8443", b"fixed at 8443"),
+    ):
+        port_root = base / ("port-override-" + variable.lower().replace("_", "-") + "-" + value)
+        port_root.mkdir(mode=0o700)
+        activation_before = activation_record.read_bytes()
+        port_env = dict(without_consent, HERDR_DEV_TAILSCALE_CLI_ENABLE="1",
+                        HERDR_DEV_TAILSCALE_CLI_DIR=str(port_root),
+                        HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(cli_relay),
+                        HERDR_DEV_HERDR_BIN=str(herdr), HERDR_DEV_HERDR_SOCKET=str(base / "herdr.sock"),
+                        ACTIVATION_CHECK_RECORD=str(activation_record))
+        port_env[variable] = value
+        port_result = subprocess.run(
+            [str(root / "relay" / "dev-tailscale-cli.sh")],
+            env=port_env,
+            cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=5, check=False,
+        )
+        if (port_result.returncode == 0 or expected not in port_result.stdout + port_result.stderr or
+            list(port_root.iterdir()) or sentinel.exists() or activation_record.read_bytes() != activation_before):
+            raise AssertionError(
+                f"development CLI port override {variable}={value} was not rejected before mutation: "
+                f"status={port_result.returncode} output={port_result.stdout + port_result.stderr!r}"
+            )
+    print("PASS dev-tailscale-cli ports: non-profile relay/plugin/HTTPS overrides fail before CLI access or state mutation")
 
     cli_lifecycle_env = base / "cli-lifecycle.env"
     cli_registration = base / "cli-registration"
@@ -968,22 +1004,47 @@ if [ "$1" = normalize-external-origin ]; then
     printf '%s\\n' "$2"
     exit 0
 fi
-if [ "$1" = serve ]; then
-    printf 'runtime|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' \\
-        "$HERDR_RELAY_TRANSPORT" "$HERDR_RELAY_HOST" "$HERDR_RELAY_PORT" \\
-        "$HERDR_TAILSCALE_CLI_SCOPE" "$HERDR_TAILSCALE_CLI_STATE_ROOT" \\
-        "$HERDR_TAILSCALE_CLI_COORDINATION_ROOT" "$XDG_CONFIG_HOME" \\
-        "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "${GH_TOKEN:-}" >> "$DEV_FIXTURE_LOG"
+if [ "$1" = tailscale-cli ] && [ "$2" = activation-check ]; then
+    printf 'manager|tailscale-cli activation-check\\n' >> "$DEV_FIXTURE_LOG"
     exit 0
 fi
-if [ "$1" = pairing-control ]; then
-    printf 'control|%s\\n' "$*" >> "$DEV_FIXTURE_LOG"
-    printf '%s\\n' '{"ready":true,"persistent_route_ready":true,"invitation_armed":true}'
-    exit 0
-fi
-if [ "$1" = tailscale-cli ]; then
-    printf 'manager|%s\\n' "$*" >> "$DEV_FIXTURE_LOG"
-    exit 0
+if [ "$1" = dev-tailscale-cli ]; then
+    case "$2" in
+        assert-ready)
+            printf 'manager|workflow assert-ready --development-root %s\\n' "$HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT" >> "$DEV_FIXTURE_LOG"
+            printf '%s\\n' '{"journal_state":"registered","readiness":"ready","development_qualification_enabled":true,"runtime_qualified":false}'
+            exit 0 ;;
+        foreground)
+            action=setup
+            shift 2
+            while [ $# -gt 0 ]; do
+                if [ "$1" = --action ]; then action=$2; shift 2; else shift; fi
+            done
+            if [ "$action" = setup ]; then
+                IFS= read -r answer || exit 2
+                expected="PUBLISH DEVELOPMENT ROUTE node=$HERDR_TAILSCALE_CLI_NODE_ID origin=$HERDR_TAILSCALE_CLI_ORIGIN https-port=8443 backend=127.0.0.1:18377"
+                [ "$answer" = "$expected" ] || exit 2
+                printf 'manager|workflow reserve --development-root %s --scope development\\n' "$HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT" >> "$DEV_FIXTURE_LOG"
+                printf 'runtime|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' \\
+                    "$HERDR_RELAY_TRANSPORT" "$HERDR_RELAY_HOST" "$HERDR_RELAY_PORT" \\
+                    "$HERDR_TAILSCALE_CLI_SCOPE" "$HERDR_TAILSCALE_CLI_STATE_ROOT" \\
+                    "$HERDR_TAILSCALE_CLI_COORDINATION_ROOT" "$XDG_CONFIG_HOME" \\
+                    "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "${GH_TOKEN:-}" >> "$DEV_FIXTURE_LOG"
+                printf 'manager|workflow publish --development-root %s --scope development --node-id %s --origin %s\\n' \\
+                    "$HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT" "$HERDR_TAILSCALE_CLI_NODE_ID" "$HERDR_TAILSCALE_CLI_ORIGIN" >> "$DEV_FIXTURE_LOG"
+                printf 'control|localcontrol admit\\n' >> "$DEV_FIXTURE_LOG"
+                printf 'control|localcontrol arm_bootstrap\\n' >> "$DEV_FIXTURE_LOG"
+            else
+                printf 'manager|workflow assert-ready --development-root %s\\n' "$HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT" >> "$DEV_FIXTURE_LOG"
+                printf 'runtime|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' \\
+                    "$HERDR_RELAY_TRANSPORT" "$HERDR_RELAY_HOST" "$HERDR_RELAY_PORT" \\
+                    "$HERDR_TAILSCALE_CLI_SCOPE" "$HERDR_TAILSCALE_CLI_STATE_ROOT" \\
+                    "$HERDR_TAILSCALE_CLI_COORDINATION_ROOT" "$XDG_CONFIG_HOME" \\
+                    "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "${GH_TOKEN:-}" >> "$DEV_FIXTURE_LOG"
+                printf 'control|localcontrol admit\\n' >> "$DEV_FIXTURE_LOG"
+            fi
+            exit 0 ;;
+    esac
 fi
 exit 97
 APP
@@ -1060,9 +1121,6 @@ exit 0
         "HERDR_DEV_HERDR_BIN": str(fake_herdr),
         "HERDR_DEV_HERDR_SOCKET": str(cli_dev_fixture / "herdr.sock"),
         "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(home / ".local" / "state" / "herdr-mobile-relay" / "tailscale-cli-coordination"),
-        "HERDR_DEV_TAILSCALE_CLI_PORT": "18377",
-        "HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT": "18378",
-        "HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT": "8443",
         "HERDR_DEV_TAILSCALE_CLI_FIXTURE_LOG": str(fixture_log),
         "DEV_FIXTURE_LOG": str(fixture_log), "GH_TOKEN": "fixture-only-secret",
         "PATH": f"{fixture_bin}:/usr/bin:/bin",
@@ -1075,9 +1133,16 @@ exit 0
         cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=10, check=False,
     )
-    if (bypass_cli.returncode == 0 or (cli_dev_root / "relay.env").exists() or
-        (cli_dev_root / "registration").exists()):
+    bypass_events = fixture_log.read_text(encoding="utf-8").splitlines() if fixture_log.exists() else []
+    if (bypass_cli.returncode == 0 or
+        any(event.startswith("manager|workflow publish") for event in bypass_events)):
         raise AssertionError("blanket environment-variable consent bypassed exact route confirmation")
+    phone_link = subprocess.run(
+        [str(root / "relay" / "dev-tailscale-cli.sh"), "setup-link"], env=positive_env,
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
+    )
+    if phone_link.returncode == 0 or b"Lifecycle:" not in phone_link.stderr:
+        raise AssertionError("development phone setup-link action was not refused")
     setup_cli = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh")], env=positive_env,
         cwd=root, input=(b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
@@ -1089,14 +1154,13 @@ exit 0
     all_events = fixture_log.read_text(encoding="utf-8").splitlines()
     manager_events = [event for event in all_events if event.startswith("manager|")]
     runtime_events = [event for event in all_events if event.startswith("runtime|")]
-    arm_event = next((event for event in all_events if event.startswith("control|pairing-control") and "--operation admit" in event), "")
-    bootstrap_event = next((event for event in all_events if event.startswith("control|pairing-control") and "--operation arm_bootstrap" in event), "")
-    if (len(manager_events) != 2 or not manager_events[0].startswith("manager|tailscale-cli reserve-backend-port ") or
-        not manager_events[1].startswith("manager|tailscale-cli publish ") or
+    arm_event = next((event for event in all_events if event.startswith("control|localcontrol admit")), "")
+    bootstrap_event = next((event for event in all_events if event.startswith("control|localcontrol arm_bootstrap")), "")
+    if (len(manager_events) != 2 or not manager_events[0].startswith("manager|workflow reserve ") or
+        not manager_events[1].startswith("manager|workflow publish ") or
         any("--development-root " + str(cli_dev_root) not in event for event in manager_events) or
         "--scope development" not in manager_events[1] or "--node-id dev-node-fixture" not in manager_events[1] or
-        "--origin https://relay.fixture.invalid:8443" not in manager_events[1] or
-        "--accept-persistent-route" not in manager_events[1] or len(runtime_events) != 1 or
+        "--origin https://relay.fixture.invalid:8443" not in manager_events[1] or len(runtime_events) != 1 or
         not runtime_events[0].startswith("runtime|tailscale-cli|127.0.0.1|18377|development|") or
         str(cli_dev_root / "registration") not in runtime_events[0] or
         str(home / ".local" / "state" / "herdr-mobile-relay" / "tailscale-cli-coordination") not in runtime_events[0] or
@@ -1122,7 +1186,7 @@ exit 0
     update_managers = [event for event in update_events if event.startswith("manager|")]
     if (len(update_managers) != 3 or
         not update_managers[0].startswith("manager|tailscale-cli activation-check") or
-        any(not event.startswith("manager|tailscale-cli assert-ready ") or
+        any(not event.startswith("manager|workflow assert-ready ") or
             "--development-root " + str(cli_dev_root) not in event for event in update_managers[1:]) or
         any("publish" in event or "unpublish" in event for event in update_managers[1:]) or
         sum("--operation arm_bootstrap" in event for event in updated_events) != setup_bootstrap_count or
