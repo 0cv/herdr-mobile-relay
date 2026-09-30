@@ -124,6 +124,7 @@ CLI_FIXTURE_HOME="$WORK_DIR/cli-service-home"
 CLI_FIXTURE_ENV="$WORK_DIR/cli-service.env"
 CLI_FIXTURE_RECORD="$WORK_DIR/cli-service.record"
 CLI_FIXTURE_RELAY="$WORK_DIR/cli-fake-relay"
+CLI_FIXTURE_SENTINEL="$WORK_DIR/cli-invoked"
 mkdir -p "$CLI_FIXTURE_ROOT/relay" "$CLI_FIXTURE_HOME"
 for WRAPPER in common.sh herdr-mobile-relay-service.sh tailscale-cli-service.sh; do
     cp "$RELEASE_DIR/relay/$WRAPPER" "$CLI_FIXTURE_ROOT/relay/$WRAPPER"
@@ -131,81 +132,37 @@ done
 cat > "$CLI_FIXTURE_ENV" <<'EOF'
 HERDR_RELAY_TRANSPORT='tailscale-cli'
 HERDR_RELAY_INSTANCE_ID='release-fixture-instance'
-HERDR_RELAY_CONTROL_RUN_ID='release-fixture-control'
 HERDR_RELAY_PORT='18377'
 HERDR_TAILSCALE_CLI_SCOPE='development'
-HERDR_TAILSCALE_CLI_NODE_ID='release-fixture-node'
-HERDR_TAILSCALE_CLI_ORIGIN='https://relay.fixture.invalid:9443'
-HERDR_TAILSCALE_CLI_HTTPS_PORT='9443'
-HERDR_TAILSCALE_CLI_BIN=''
 EOF
 CLI_FIXTURE_CLI="$WORK_DIR/fake-tailscale"
-CLI_FIXTURE_BOUND="$WORK_DIR/relay-bound"
-printf '#!/bin/sh\nexit 97\n' > "$CLI_FIXTURE_CLI"
+printf '#!/bin/sh\n: > "$HERDR_CLI_SENTINEL"\nexit 97\n' > "$CLI_FIXTURE_CLI"
 chmod 700 "$CLI_FIXTURE_CLI"
 cat > "$CLI_FIXTURE_RELAY" <<'EOF'
 #!/bin/sh
-if [ "$1" = json-field ]; then
-    case "$3" in
-        status) printf 'ok\n' ;;
-        readiness) printf 'ready\n' ;;
-        transport) printf 'tailscale-cli\n' ;;
-        instance) printf '%s\n' "$HERDR_RELAY_INSTANCE_ID" ;;
-        node_id) printf '%s\n' release-fixture-node ;;
-        origin|tailscale_cli_origin) printf '%s\n' "$HERDR_TAILSCALE_CLI_ORIGIN" ;;
-        *) exit 1 ;;
-    esac
-    exit 0
-fi
-case "$1" in
-    tailscale-cli)
-        case "$2" in
-            activation-check) printf 'activation-check\n' >> "$HERDR_CLI_SERVICE_RECORD" ;;
-            resolve-binary) printf 'resolve-binary\n' >> "$HERDR_CLI_SERVICE_RECORD"; printf '%s\n' "$HERDR_TEST_TAILSCALE" ;;
-            preflight)
-                printf 'preflight\n' >> "$HERDR_CLI_SERVICE_RECORD"
-                printf '%s\n' '{"node_id":"release-fixture-node","origin":"https://relay.fixture.invalid:9443"}' ;;
-            *) exit 97 ;;
-        esac
-        ;;
-    serve)
-        printf 'serve\n' >> "$HERDR_CLI_SERVICE_RECORD"
-        : > "$HERDR_CLI_SERVICE_BOUND"
-        ;;
-    *) exit 97 ;;
-esac
+printf '%s\n' "$*" >> "$HERDR_CLI_SERVICE_RECORD"
+case "$*" in 'tailscale-cli activation-check') exit 0 ;; esac
+echo unexpected service relay command >&2
+exit 97
 EOF
 chmod 700 "$CLI_FIXTURE_RELAY"
-mkdir -p "$CLI_FIXTURE_HOME/.local/bin"
-cat > "$CLI_FIXTURE_HOME/.local/bin/curl" <<'EOF'
-#!/bin/sh
-attempt=0
-while [ ! -f "$HERDR_CLI_SERVICE_BOUND" ] && [ "$attempt" -lt 100 ]; do
-    attempt=$((attempt + 1))
-    sleep 0.01
-done
-[ -f "$HERDR_CLI_SERVICE_BOUND" ] || exit 1
-printf '{"status":"ok","readiness":"ready","transport":"tailscale-cli","instance":"%s","tailscale_cli_origin":"%s"}\n' \
-    "$HERDR_RELAY_INSTANCE_ID" "$HERDR_TAILSCALE_CLI_ORIGIN"
-EOF
-chmod 700 "$CLI_FIXTURE_HOME/.local/bin/curl"
 HOME="$CLI_FIXTURE_HOME" \
-PATH="$CLI_FIXTURE_HOME/.local/bin:/usr/bin:/bin" \
+PATH="/usr/bin:/bin" \
 HERDR_RELAY_ENV="$CLI_FIXTURE_ENV" \
 HERDR_RELAY_BIN="$CLI_FIXTURE_RELAY" \
-HERDR_TEST_TAILSCALE="$CLI_FIXTURE_CLI" \
 HERDR_CLI_SERVICE_RECORD="$CLI_FIXTURE_RECORD" \
-HERDR_CLI_SERVICE_BOUND="$CLI_FIXTURE_BOUND" \
+HERDR_CLI_SENTINEL="$CLI_FIXTURE_SENTINEL" \
+HERDR_TAILSCALE_CLI_BIN="$CLI_FIXTURE_CLI" \
 "$CLI_FIXTURE_ROOT/relay/herdr-mobile-relay-service.sh" >"$WORK_DIR/cli-service.log" 2>&1 || {
     echo "extracted CLI service dispatch failed" >&2
     sed -n '1,80p' "$WORK_DIR/cli-service.log" >&2
     exit 1
 }
-[ "$(sed -n '1p' "$CLI_FIXTURE_RECORD")" = activation-check ] &&
-    [ "$(sed -n '2p' "$CLI_FIXTURE_RECORD")" = resolve-binary ] &&
-    [ "$(sed -n '3p' "$CLI_FIXTURE_RECORD")" = preflight ] &&
-    [ "$(sed -n '4p' "$CLI_FIXTURE_RECORD")" = serve ] || {
-    echo "extracted CLI service did not resolve/preflight before binding the relay" >&2
+[ "$(sed -n '1p' "$CLI_FIXTURE_RECORD")" = 'tailscale-cli activation-check' ] &&
+    [ "$(wc -l < "$CLI_FIXTURE_RECORD" | tr -d ' ')" = 1 ] &&
+    [ ! -e "$CLI_FIXTURE_SENTINEL" ] &&
+    grep -Fq 'Installed-service CLI startup is disabled' "$WORK_DIR/cli-service.log" || {
+    echo "extracted CLI service did not remain disabled before CLI execution" >&2
     exit 1
 }
 

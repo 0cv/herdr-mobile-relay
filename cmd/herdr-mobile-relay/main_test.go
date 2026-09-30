@@ -160,8 +160,9 @@ func TestTailscaleCLIExecutionAndServerStartEntrypointInventory(t *testing.T) {
 			call: func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				code, err := runTailscaleCLIWithInput([]string{"resolve-binary", "--binary", binary}, strings.NewReader(""), &stdout, &stderr)
-				if code != 0 || err != nil || strings.TrimSpace(stdout.String()) != binary {
-					t.Fatalf("binary resolution = (%d, %v, %q)", code, err, stdout.String())
+				resolved, resolveErr := filepath.EvalSymlinks(binary)
+				if code != 0 || err != nil || resolveErr != nil || strings.TrimSpace(stdout.String()) != resolved {
+					t.Fatalf("binary resolution = (%d, %v, %q), canonical=%q resolveErr=%v", code, err, stdout.String(), resolved, resolveErr)
 				}
 			},
 		},

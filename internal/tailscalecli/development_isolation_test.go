@@ -308,6 +308,9 @@ func developmentIsolationFixture(t *testing.T) (*developmentIsolation, string, s
 
 func writeDevelopmentFixtureFile(t *testing.T, path, contents string, mode os.FileMode) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
 		t.Fatal(err)
 	}

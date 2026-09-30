@@ -1038,10 +1038,11 @@ exit 0
     updated_events = fixture_log.read_text(encoding="utf-8").splitlines()
     update_events = updated_events[len(all_events):]
     update_managers = [event for event in update_events if event.startswith("manager|")]
-    if (len(update_managers) != 2 or
+    if (len(update_managers) != 3 or
+        not update_managers[0].startswith("manager|tailscale-cli activation-check") or
         any(not event.startswith("manager|workflow assert-ready ") or
-            "--development-root " + str(cli_dev_root) not in event for event in update_managers) or
-        any("publish" in event or "unpublish" in event for event in update_managers) or
+            "--development-root " + str(cli_dev_root) not in event for event in update_managers[1:]) or
+        any("publish" in event or "unpublish" in event for event in update_managers[1:]) or
         sum("--operation arm_bootstrap" in event for event in updated_events) != setup_bootstrap_count or
         production_env.read_bytes() != production_snapshot or sentinel.exists() or tool_sentinel.exists()):
         raise AssertionError(f"positive CLI update mutated route or production state: {updated_events!r}")
