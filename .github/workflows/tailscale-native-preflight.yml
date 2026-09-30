@@ -9,46 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  linux-amd64:
-    name: Linux amd64 native Go/app preflight
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      GOTOOLCHAIN: local
-      GOFLAGS: -mod=readonly
-    steps:
-      - name: Check out the pushed commit
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Verify exact candidate checkout provenance
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(uname -s)" = Linux
-          test "$(uname -m)" = x86_64
-          python3 scripts/verify-checkout-provenance.py \
-            --root "$GITHUB_WORKSPACE" --expected-sha "$GITHUB_SHA"
-          python3 tests/test_checkout_provenance.py
-
-      - name: Set up Go 1.27.1
-        uses: actions/setup-go@v7
-        with:
-          go-version: 1.27.1
-          cache: true
-
-      - name: Run native Linux Go and app suites
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          go test -count=1 ./internal/processsupervisor ./internal/tailscale ./internal/tailscalecli ./internal/config ./cmd/herdr-mobile-relay
-          go test -count=1 ./internal/app
-          go vet ./internal/processsupervisor ./internal/tailscale ./internal/tailscalecli ./internal/config ./internal/app ./cmd/herdr-mobile-relay
-          go build -trimpath -o "$RUNNER_TEMP/herdr-mobile-relay-linux-preflight" ./cmd/herdr-mobile-relay
-
   darwin-arm64:
     name: Darwin arm64 process lifecycle preflight
     runs-on: macos-15

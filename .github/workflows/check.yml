@@ -45,7 +45,7 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - name: Lint CLI lifecycle shell scripts
-        run: shellcheck -x relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
+        run: shellcheck -x -P relay relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
       - name: Lint GitHub workflows with pinned actionlint
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
@@ -388,7 +388,7 @@ jobs:
         with:
           name: release-bundles
           path: dist/release
-      - name: Install locked browser tooling and build hosted CLI fixtures
+      - name: Install locked browser tooling and prepare fake Herdr fixture
         shell: bash
         run: |
           set -euo pipefail
@@ -399,9 +399,6 @@ jobs:
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
           test -n "$version"
           go build -trimpath -o "$RUNNER_TEMP/fake-herdr" ./cmd/fake-herdr
-          CGO_ENABLED=0 go build -tags=herdr_tailscale_test,herdr_tailscale_cli_fixture_binary -trimpath \
-            -ldflags "-s -w -X main.version=$version -X main.revision=$GITHUB_SHA" \
-            -o "$RUNNER_TEMP/herdr-cli-fixture" ./cmd/herdr-mobile-relay
           playwright_version="$(node -p "require('./frontend/package.json').devDependencies['@playwright/test']")"
           test "$(grep '^FROM ' tests/tailscale-package-browser.Dockerfile)" = "FROM mcr.microsoft.com/playwright:v${playwright_version}-noble"
           printf 'HERDR_PACKAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
@@ -418,7 +415,6 @@ jobs:
             --mount "type=bind,src=$PWD,dst=/workspace,readonly" \
             --mount "type=bind,src=$PWD/dist/release,dst=/artifact,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/fake-herdr,dst=/fixture-bin/fake-herdr,readonly" \
-            --mount "type=bind,src=$RUNNER_TEMP/herdr-cli-fixture,dst=/fixture-bin/herdr-cli-fixture,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/tailscale-package-browser-evidence,dst=/evidence" \
             --env HERDR_EXTRACTED_PACKAGE_BROWSER_CI=1 \
             --env HERDR_PACKAGE_VERSION="$HERDR_PACKAGE_VERSION" \

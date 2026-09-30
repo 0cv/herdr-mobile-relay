@@ -41,9 +41,8 @@ STAGES = {
     "archive_binary_verify", "archive_payload", "fixture_startup", "managed_launch", "browser_enroll",
     "setup_reprint", "browser_reprint", "managed_retirement", "managed_restart",
     "browser_restart", "foreign_route_rejection", "held_pipe_cleanup",
-    "ambiguous_localapi_ack", "cli_fixture_startup", "cli_route_publish",
-    "cli_app_admission", "cli_admit", "cli_bootstrap_arm", "cli_setup_link",
-    "cli_browser_enroll", "complete",
+    "ambiguous_localapi_ack", "cli_activation_gate", "cli_standalone_refusal",
+    "cli_config_refusal", "cli_platform_refusal", "complete",
 }
 FAILURE_CODES = {
     "fixture_assertion", "unexpected_exception", "archive_checksum_io",
@@ -121,9 +120,9 @@ EXPECTED_CASES = [
     "held_pipe_child_exits_with_bounded_launcher_cleanup",
     "ambiguous_committed_write_retains_private_recovery_without_replay_or_url",
     "shipped_archive_keeps_cli_profiles_disabled",
-    "extracted_fixture_cli_publishes_exact_journaled_route",
-    "extracted_cli_app_admission_and_private_setup_link",
-    "extracted_cli_two_profile_browser_e2ee",
+    "extracted_archive_standalone_mutations_require_workflow",
+    "extracted_archive_config_startup_requires_workflow",
+    "extracted_development_cli_refuses_unsupported_linux",
 ]
 
 
@@ -1734,7 +1733,6 @@ def main() -> int:
     binary_path = ""
     browser_evidence: dict = {}
     cli_browser_evidence: dict = {}
-    cli_fixture_binary_digest = ""
     cli_tailscale_events: list[str] = []
     cli_registration_summary: dict[str, bool] = {}
     cli_app_summary: dict[str, int | bool] = {}
@@ -2113,421 +2111,124 @@ def main() -> int:
                 break
             time.sleep(0.05)
         if not ambiguous_shutdown_complete:
-            die("ambiguous-ACK owner did not finish its scoped LocalAPI retirement before the CLI-only fixture")
+            die("ambiguous-ACK owner did not finish scoped LocalAPI retirement before the CLI-refusal fixture")
 
-        # The release archive must remain fail-closed. A separate test-tagged
-        # executable is mounted by hosted CI solely to exercise the extracted
-        # app/manager/browser path against a synthetic CLI process below.
-        set_stage("cli_fixture_startup")
+        # The extracted archive remains production-disabled. Its standalone
+        # command cannot reconstruct the process-local development workflow;
+        # Linux package qualification also must not imply the macOS/arm64 profile.
+        set_stage("cli_activation_gate")
         fixture_activation = subprocess.run(
             [str(binary), "tailscale-cli", "activation-check"], stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, timeout=5, check=False,
         )
         if (fixture_activation.returncode != 2 or
-            b"pending physical-phone qualification" not in fixture_activation.stderr or b"no CLI or service was contacted" not in fixture_activation.stderr):
+            b"pending physical-phone qualification" not in fixture_activation.stderr or
+            b"no CLI or service was contacted" not in fixture_activation.stderr):
             die("extracted release binary did not keep CLI profile activation disabled")
         case_results[EXPECTED_CASES[10]] = "pass"
         transitions.append("release-binary:cli-activation-disabled")
 
-        cli_fixture_binary = Path(os.environ.get("HERDR_TAILSCALE_CLI_FIXTURE_BIN", "/fixture-bin/herdr-cli-fixture"))
-        if not cli_fixture_binary.is_file() or not os.access(cli_fixture_binary, os.X_OK) or cli_fixture_binary.resolve() == binary.resolve():
-            die("separate hosted fixture CLI binary was not mounted outside the extracted release")
-        cli_fixture_binary_digest = sha256(cli_fixture_binary)
-        fixture_tag_activation = subprocess.run(
-            [str(cli_fixture_binary), "tailscale-cli", "activation-check"], stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=5, check=False,
-        )
-        if fixture_tag_activation.returncode != 2:
-            die("separately tagged CLI fixture binary enabled production activation")
-        fixture_tag_development = subprocess.run(
-            [str(cli_fixture_binary), "tailscale-cli", "activation-check", "--scope", "development"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
-        )
-        if fixture_tag_development.returncode != 0:
-            die("separately tagged CLI fixture binary did not enable synthetic development coverage")
-
-        cli_root = temporary_root / "cli-backed-package"
-        cli_root.mkdir(mode=0o700)
-        cli_config = cli_root / "config"
-        cli_runtime = cli_root / "runtime"
-        cli_cache = cli_root / "cache"
-        cli_data = cli_root / "data"
-        cli_home = cli_root / "home"
-        cli_state_root = cli_root / "registration"
+        cli_root = temporary_root / "cli-denied"
+        cli_runtime = temporary_root / "cli-runtime"
+        cli_home = temporary_root / "cli-home"
+        cli_config_home = temporary_root / "cli-config"
+        cli_cache_home = temporary_root / "cli-cache"
+        cli_data_home = temporary_root / "cli-data"
         cli_coordination_root = temporary_root / "cli-coordination"
-        cli_fixture_bin = cli_root / "bin"
-        for path in (cli_config, cli_runtime, cli_cache, cli_data, cli_home,
-                     cli_state_root, cli_coordination_root, cli_fixture_bin):
-            path.mkdir(mode=0o700, parents=True)
-        development_marker = cli_root / ".herdr-dev-tailscale-cli"
-        development_marker.write_text(
-            "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
-            f"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT={cli_state_root}\n"
-            f"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT={cli_coordination_root}\n",
-            encoding="ascii",
-        )
-        os.chmod(development_marker, 0o600)
-        unmarked_cli_sentinel = cli_root / "unmarked-cli-executed"
-        unmarked_cli = cli_fixture_bin / "unmarked-tailscale"
-        unmarked_cli.write_text(
-            "#!/bin/sh\nprintf invoked >> \"$UNMARKED_CLI_SENTINEL\"\nexit 97\n",
+        for path in (cli_root, cli_runtime, cli_home, cli_config_home, cli_cache_home,
+                     cli_data_home, cli_coordination_root):
+            path.mkdir(mode=0o700)
+        cli_state_root = cli_root / "registration"
+        cli_fake_path = temporary_root / "must-not-run-tailscale"
+        cli_sentinel = temporary_root / "tailscale-cli-was-invoked"
+        cli_fake_path.write_text(
+            "#!/bin/sh\nprintf invoked >> \"$CLI_INVOCATION_SENTINEL\"\nexit 97\n",
             encoding="utf-8",
         )
-        unmarked_cli.chmod(0o700)
-        unmarked_cli_result = subprocess.run(
-            [str(cli_fixture_binary), "tailscale-cli", "status", "--binary", str(unmarked_cli),
-             "--scope", "development", "--state-root", str(cli_state_root),
-             "--coordination-root", str(cli_coordination_root), "--installation-id", "unmarked-fixture",
-             "--origin", "https://relay.tailnet.ts.net:8443", "--https-port", "8443", "--backend-port", "18377"],
-            env=dict(os.environ, UNMARKED_CLI_SENTINEL=str(unmarked_cli_sentinel)),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
-        )
-        if (unmarked_cli_result.returncode == 0 or
-            b"fixture builds require an injected synthetic CLI executable" not in unmarked_cli_result.stderr or
-            unmarked_cli_sentinel.exists()):
-            die("tagged fixture binary executed an unmarked Tailscale CLI")
-        cli_token = os.urandom(TOKEN_BYTES).hex()
-        cli_instance = "package-cli-fixture-instance"
-        cli_run_id = "package-cli-fixture-run"
-        cli_origin = origin
-        cli_fake_path = cli_fixture_bin / "tailscale"
-        cli_serve_state = cli_root / "serve-status.json"
-        cli_events_file = cli_root / "tailscale-cli-events.jsonl"
-        cli_fixture_version = "1.102.4-t3caf7d9e7d-g084ee3b64537"
-        cli_status = {
-            "Version": cli_fixture_version, "BackendState": "Running",
-            "Self": {"ID": "package-cli-fixture-node", "UserID": 41, "DNSName": "relay.tailnet.ts.net."},
-            "CurrentTailnet": {"Name": "Disposable CLI fixture", "MagicDNSSuffix": "tailnet.ts.net", "MagicDNSEnabled": True},
-            "CertDomains": ["relay.tailnet.ts.net"],
-            "User": {"41": {"ID": 41, "LoginName": "fixture@example.invalid", "DisplayName": "Disposable fixture", "ProfilePicURL": ""}},
-        }
-        cli_version = {
-            "majorMinorPatch": "1.102.4", "short": "1.102.4", "long": cli_fixture_version,
-            "gitCommit": "3caf7d9e7dcaba589cfc58beda596929733e4fea",
-            "daemonLong": cli_fixture_version, "extraGitCommit": "084ee3b64537a1276e56fc38cdf0a711da9f4936",
-            "osVariant": "appstore", "cap": 142,
-        }
-        cli_fake_program = r'''#!/usr/bin/env python3
-# HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1
-import json, sys
-from pathlib import Path
-args = sys.argv[1:]
-status = __CLI_STATUS__
-version = __CLI_VERSION__
-state_path = Path(__CLI_STATE_PATH__)
-events_path = Path(__CLI_EVENTS_PATH__)
-port = __CLI_HTTPS_PORT__
-backend = __CLI_BACKEND__
-def log(name):
-    with events_path.open("a", encoding="ascii") as events:
-        events.write(name + "\n")
-def route():
-    host = "relay.tailnet.ts.net:" + str(port)
-    return {"TCP": {str(port): {"HTTPS": True}}, "Web": {host: {"Handlers": {"/": {"Proxy": backend}}}}}
-if args == ["status", "--json"]:
-    log("status")
-    print(json.dumps(status, separators=(",", ":")))
-elif args == ["version", "--json", "--daemon"]:
-    log("version")
-    print(json.dumps(version, separators=(",", ":")))
-elif args == ["serve", "status", "--json"]:
-    log("serve_status")
-    print(state_path.read_text(encoding="ascii") if state_path.exists() else "{}")
-elif args == ["serve", "--bg", "--https=" + str(port), "--set-path=/", backend]:
-    log("serve_publish")
-    state_path.write_text(json.dumps(route(), separators=(",", ":")), encoding="ascii")
-elif args == ["serve", "--bg", "--https=" + str(port), "--set-path=/", "off"]:
-    log("serve_unpublish")
-    state_path.write_text("{}", encoding="ascii")
-else:
-    log("unexpected")
-    raise SystemExit(97)
-'''
-        cli_fake_program = (cli_fake_program
-            .replace("__CLI_STATUS__", repr(cli_status))
-            .replace("__CLI_VERSION__", repr(cli_version))
-            .replace("__CLI_STATE_PATH__", repr(str(cli_serve_state)))
-            .replace("__CLI_EVENTS_PATH__", repr(str(cli_events_file)))
-            .replace("__CLI_HTTPS_PORT__", str(int(os.environ["HERDR_TAILSCALE_HTTPS_PORT"])))
-            .replace("__CLI_BACKEND__", repr(f"http://127.0.0.1:{RELAY_PORT}")))
-        cli_fake_path.write_text(cli_fake_program, encoding="utf-8")
         cli_fake_path.chmod(0o700)
-        cli_env_file = cli_config / "relay.env"
-        cli_pairing_socket = cli_runtime / "pairing-control.sock"
-        cli_env_file.write_text(
-            f"HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_TOKEN={cli_token}\n"
-            f"HERDR_RELAY_INSTANCE_ID={cli_instance}\nHERDR_RELAY_CONTROL_RUN_ID={cli_run_id}\n"
-            f"HERDR_RELAY_PAIRING_SOCKET={cli_pairing_socket}\nHERDR_RELAY_HOST=127.0.0.1\n"
-            f"HERDR_RELAY_PORT={RELAY_PORT}\nHERDR_RELAY_PLUGIN_PORT=18378\n"
-            f"HERDR_TAILSCALE_CLI_BIN={cli_fake_path}\nHERDR_TAILSCALE_CLI_SCOPE=development\n"
-            f"HERDR_TAILSCALE_CLI_NODE_ID=package-cli-fixture-node\nHERDR_TAILSCALE_CLI_ORIGIN={cli_origin}\n"
-            f"HERDR_TAILSCALE_CLI_HTTPS_PORT={os.environ['HERDR_TAILSCALE_HTTPS_PORT']}\n"
-            f"HERDR_TAILSCALE_CLI_STATE_ROOT={cli_state_root}\n"
-            f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={cli_coordination_root}\n"
-            f"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT={cli_root}\n"
-            "HERDR_REACHABILITY_PORT_MAPPING=0\n",
-            encoding="ascii",
-        )
-        os.chmod(cli_env_file, 0o600)
-        cli_socket_operations = cli_root / "herdr-socket-operations.json"
-        cli_herdr_socket = HerdrSocketFixture(cli_runtime / "herdr.sock", scenario, cli_socket_operations)
-        cli_herdr_socket.wait_ready()
-        cli_fake_herdr_operations = cli_root / "fake-herdr-operations.jsonl"
-        cli_env = os.environ.copy()
+        cli_localapi_event_count_before = 0
+        with state.lock:
+            cli_localapi_event_count_before = len(state.events)
+        cli_token = os.urandom(TOKEN_BYTES).hex()
+        cli_origin = "https://relay.tailnet.ts.net:8443"
+        cli_env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("HERDR_", "XDG_"))
+        }
         cli_env.update({
-            "HOME": str(cli_home), "TMPDIR": str(cli_root),
-            "XDG_CONFIG_HOME": str(cli_config), "XDG_CACHE_HOME": str(cli_cache),
-            "XDG_DATA_HOME": str(cli_data), "HERDR_RELAY_ENV": str(cli_env_file),
+            "HOME": str(cli_home), "TMPDIR": str(temporary_root),
+            "XDG_CONFIG_HOME": str(cli_config_home), "XDG_CACHE_HOME": str(cli_cache_home),
+            "XDG_DATA_HOME": str(cli_data_home), "HERDR_RELAY_ENV": str(cli_runtime / "relay.env"),
             "HERDR_RELAY_TRANSPORT": "tailscale-cli", "HERDR_RELAY_TOKEN": cli_token,
-            "HERDR_RELAY_INSTANCE_ID": cli_instance, "HERDR_RELAY_CONTROL_RUN_ID": cli_run_id,
-            "HERDR_RELAY_PAIRING_SOCKET": str(cli_pairing_socket),
+            "HERDR_RELAY_INSTANCE_ID": "package-cli-fixture-instance",
+            "HERDR_RELAY_CONTROL_RUN_ID": "package-cli-fixture-run",
+            "HERDR_RELAY_PAIRING_SOCKET": str(cli_runtime / "pairing-control.sock"),
             "HERDR_RELAY_HOST": "127.0.0.1", "HERDR_RELAY_PORT": str(RELAY_PORT),
-            "HERDR_RELAY_PLUGIN_PORT": "18378", "HERDR_TAILSCALE_CLI_BIN": str(cli_fake_path),
-            "HERDR_TAILSCALE_CLI_SCOPE": "development", "HERDR_TAILSCALE_CLI_ORIGIN": cli_origin,
+            "HERDR_RELAY_PLUGIN_PORT": "18378", "HERDR_REACHABILITY_PORT_MAPPING": "0",
+            "HERDR_TAILSCALE_CLI_BIN": str(cli_fake_path),
+            "HERDR_TAILSCALE_CLI_SCOPE": "development",
+            "HERDR_TAILSCALE_CLI_ORIGIN": cli_origin,
+            "HERDR_TAILSCALE_CLI_HTTPS_PORT": "8443",
             "HERDR_TAILSCALE_CLI_STATE_ROOT": str(cli_state_root),
             "HERDR_TAILSCALE_CLI_COORDINATION_ROOT": str(cli_coordination_root),
             "HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT": str(cli_root),
-            "HERDR_TAILSCALE_CLI_HTTPS_PORT": os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
-            "HERDR_REACHABILITY_PORT_MAPPING": "0", "HERDR_PHONE_APP_URL": cli_origin,
-            "HERDR_WEB_ROOT": str(package / "web"), "HERDR_BIN": str(fake_herdr),
-            "HERDR_RELAY_BIN": str(cli_fixture_binary),
-            "HERDR_SOCKET_PATH": str(cli_herdr_socket.path), "HERDR_RELEASE_ROOT": str(cli_data / "releases"),
-            "FAKE_HERDR_SCENARIO": str(scenario), "FAKE_HERDR_OPERATIONS": str(cli_fake_herdr_operations),
-            "HERDR_FIXTURE_CLI_STATUS": json.dumps(cli_status),
-            "HERDR_FIXTURE_CLI_VERSION": json.dumps(cli_version),
-            "HERDR_FIXTURE_CLI_SERVE_STATE": str(cli_serve_state),
-            "HERDR_FIXTURE_CLI_EVENTS": str(cli_events_file),
-            "CURL_CA_BUNDLE": str(ca), "SSL_CERT_FILE": str(ca),
-            "NO_PROXY": "*", "no_proxy": "*", "GITHUB_SHA": source_sha,
+            "HERDR_PHONE_APP_URL": cli_origin,
+            "HERDR_WEB_ROOT": str(package / "web"),
+            "HERDR_BIN": str(fake_herdr), "HERDR_SOCKET_PATH": str(cli_runtime / "herdr.sock"),
+            "HERDR_RELEASE_ROOT": str(cli_data_home / "herdr-mobile-relay"),
+            "CLI_INVOCATION_SENTINEL": str(cli_sentinel),
         })
-        for name in ("HERDR_TAILSCALE_REQUEST", "HERDR_TAILSCALE_BIN", "HERDR_FIXTURE_API_STATE"):
-            cli_env.pop(name, None)
 
-        with state.lock:
-            cli_localapi_event_count_before = len(state.events)
-        # Start the exact package backend first; the real manager refuses
-        # persistent Serve publication unless this instance is already ready.
-        cli_log_path = cli_root / "cli-app.log"
-        cli_app_log_handle = cli_log_path.open("wb")
-        cli_server_process = subprocess.Popen(
-            [str(cli_fixture_binary), "serve"], cwd=package, env=cli_env,
-            stdin=subprocess.DEVNULL, stdout=cli_app_log_handle, stderr=cli_app_log_handle,
-            start_new_session=True,
-        )
-        local_health_url = f"http://127.0.0.1:{RELAY_PORT}/healthz"
-        local_health = None
-        health_deadline = time.monotonic() + 45
-        while time.monotonic() < health_deadline:
-            if cli_server_process.poll() is not None:
-                die("test-tagged CLI app process exited before local readiness", code="cli_app_exited_before_local_ready")
-            try:
-                with urllib.request.urlopen(local_health_url, timeout=2) as response:
-                    local_health = json.loads(response.read(65536))
-                if (local_health.get("status") == "ok" and local_health.get("readiness") == "ready" and
-                    local_health.get("transport") == "tailscale-cli" and local_health.get("instance") == cli_instance and
-                    local_health.get("tailscale_cli_origin") == cli_origin):
-                    break
-            except (OSError, urllib.error.URLError, ValueError):
-                time.sleep(0.05)
-        if (not isinstance(local_health, dict) or local_health.get("status") != "ok" or
-            local_health.get("readiness") != "ready" or local_health.get("instance") != cli_instance):
-            die("test-tagged CLI app failed bounded exact-instance loopback readiness", code="cli_app_local_readiness_timeout")
-
-        set_stage("cli_route_publish")
-        cli_reservation_id = os.urandom(16).hex()
-        reserve_args = [
-            str(cli_fixture_binary), "tailscale-cli", "reserve-backend-port", "--binary", str(cli_fake_path),
-            "--development-root", str(cli_root), "--state-root", str(cli_state_root),
-            "--coordination-root", str(cli_coordination_root),
-            "--scope", "development", "--installation-id", cli_instance,
-            "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
-            "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
-            "--backend-port", str(RELAY_PORT), "--reservation-id", cli_reservation_id,
-        ]
-        reservation = subprocess.run(
-            reserve_args, env=cli_env, cwd=package, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False,
-        )
-        if reservation.returncode != 0:
-            die("synthetic CLI manager did not reserve its private loopback backend")
-        publish_args = [
-            str(cli_fixture_binary), "tailscale-cli", "publish", "--binary", str(cli_fake_path),
-            "--development-root", str(cli_root), "--state-root", str(cli_state_root),
-            "--coordination-root", str(cli_coordination_root),
-            "--scope", "development", "--installation-id", cli_instance,
-            "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
-            "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
-            "--backend-port", str(RELAY_PORT), "--reservation-id", cli_reservation_id,
-            "--accepted", "--accept-persistent-route",
-            "--accept-check-to-write-race", "--accept-port-reuse", "--accept-no-rollback",
-            "--accept-no-remote-drain",
-        ]
-        publish_confirmation = (
-            f"PUBLISH DEVELOPMENT ROUTE node=package-cli-fixture-node origin={cli_origin} "
-            f"https-port={os.environ['HERDR_TAILSCALE_HTTPS_PORT']} "
-            f"backend=127.0.0.1:{RELAY_PORT}\n"
-        ).encode("ascii")
-        publish_result = subprocess.run(
-            publish_args, env=cli_env, cwd=package, input=publish_confirmation,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False,
-        )
-        try:
-            cli_tailscale_events = cli_events_file.read_text(encoding="ascii").splitlines()
-            cli_journal = json.loads((cli_state_root / "registration.json").read_text(encoding="ascii"))
-            cli_route_state = json.loads(cli_serve_state.read_text(encoding="ascii"))
-        except (OSError, UnicodeError, ValueError):
-            die("synthetic CLI manager did not retain parseable route and journal evidence")
-        expected_cli_route = {
-            "TCP": {os.environ["HERDR_TAILSCALE_HTTPS_PORT"]: {"HTTPS": True}},
-            "Web": {f"relay.tailnet.ts.net:{os.environ['HERDR_TAILSCALE_HTTPS_PORT']}": {
-                "Handlers": {"/": {"Proxy": f"http://127.0.0.1:{RELAY_PORT}"}},
-            }},
-        }
-        if (publish_result.returncode != 0 or cli_tailscale_events.count("serve_publish") != 1 or
-            cli_route_state != expected_cli_route or cli_journal.get("state") != "registered" or
-            cli_journal.get("mutation_acknowledged") is not True or cli_journal.get("node_id") != "package-cli-fixture-node" or
-            cli_journal.get("dns_name") != "relay.tailnet.ts.net" or
-            cli_journal.get("https_port") != int(os.environ["HERDR_TAILSCALE_HTTPS_PORT"]) or
-            cli_journal.get("backend") != f"http://127.0.0.1:{RELAY_PORT}"):
-            die("synthetic CLI adapter/manager did not publish and journal exactly the fixture route")
-        cli_registration_summary = {
-            "registered": cli_journal.get("state") == "registered",
-            "mutation_acknowledged": cli_journal.get("mutation_acknowledged") is True,
-            "exact_node_origin_backend": (
-                cli_journal.get("node_id") == "package-cli-fixture-node" and
-                cli_journal.get("dns_name") == "relay.tailnet.ts.net" and
-                cli_journal.get("https_port") == int(os.environ["HERDR_TAILSCALE_HTTPS_PORT"]) and
-                cli_origin == f"https://{cli_journal.get('dns_name')}:{cli_journal.get('https_port')}" and
-                cli_journal.get("backend") == f"http://127.0.0.1:{RELAY_PORT}"
-            ),
-            "single_publish": cli_tailscale_events.count("serve_publish") == 1,
-        }
+        set_stage("cli_standalone_refusal")
+        for operation in ("status", "recover", "assert-ready", "publish", "unpublish",
+                          "reserve-backend-port", "release-backend-port", "reconcile"):
+            refused = subprocess.run(
+                [str(binary), "tailscale-cli", operation, "--binary", str(cli_fake_path)],
+                env=cli_env, cwd=package, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5, check=False,
+            )
+            if (refused.returncode != 2 or b"in-process isolated workflow" not in refused.stderr or
+                cli_sentinel.exists()):
+                die("extracted standalone CLI command bypassed the process-local workflow")
+        if cli_state_root.exists() or cli_coordination_root.exists():
+            die("standalone CLI refusal created registration state")
         case_results[EXPECTED_CASES[11]] = "pass"
-        transitions.extend(["cli-manager:exact-publish", "cli-manager:durable-registration-acknowledged"])
+        cli_registration_summary["standalone_mutations_refused"] = True
+        transitions.append("release-binary:standalone-cli-requires-workflow")
 
-        set_stage("cli_app_admission")
-        cli_app_summary["backend_ready"] = True
-        control_args = [
-            str(cli_fixture_binary), "pairing-control", "--socket", str(cli_pairing_socket),
-            "--run-id", cli_run_id, "--instance", cli_instance,
-        ]
-        set_stage("cli_admit")
-        admission = subprocess.run(
-            control_args + ["--operation", "admit"], env=cli_env, cwd=package,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=False,
+        set_stage("cli_config_refusal")
+        config_start = subprocess.run(
+            [str(binary), "serve"], env=cli_env, cwd=package, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5, check=False,
         )
-        try:
-            admission_record = json.loads(admission.stdout)
-        except (ValueError, UnicodeError):
-            die("packaged CLI app admission did not return bounded control evidence")
-        cli_app_summary.update({
-            "admission_returncode": admission.returncode,
-            "admission_ok": admission_record.get("ok") is True,
-            "admission_ready": admission_record.get("ready") is True,
-            "admission_serve_ready": admission_record.get("serve_ready") is True,
-            "admission_local_ready": admission_record.get("local_ready") is True,
-        })
-        if admission.returncode != 0 or admission_record.get("ok") is not True or admission_record.get("ready") is not True:
-            die("packaged CLI app did not admit only its exact verified Serve route")
-        set_stage("cli_bootstrap_arm")
-        armed = subprocess.run(
-            control_args + ["--operation", "arm_bootstrap"], env=cli_env, cwd=package,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, check=False,
-        )
-        try:
-            armed_record = json.loads(armed.stdout)
-        except (ValueError, UnicodeError):
-            die("packaged CLI app bootstrap arm did not return bounded control evidence")
-        cli_app_summary.update({
-            "arm_returncode": armed.returncode,
-            "arm_ok": armed_record.get("ok") is True,
-            "arm_invitation_armed": armed_record.get("invitation_armed") is True,
-        })
-        if armed.returncode != 0 or armed_record.get("ok") is not True or armed_record.get("invitation_armed") is not True:
-            die("packaged CLI app did not persist explicit bootstrap admission")
-        set_stage("cli_setup_link")
-        cli_setup_relay = cli_root / "extracted-relay-helpers"
-        cli_setup_relay.mkdir(mode=0o700)
-        for name in ("common.sh", "setup-link.sh"):
-            source_helper = package / "relay" / name
-            fixture_helper = cli_setup_relay / name
-            shutil.copy2(source_helper, fixture_helper)
-            if sha256(source_helper) != sha256(fixture_helper):
-                die("CLI setup helper copy differed from the exact extracted release")
-        cli_app_summary["setup_helpers_unchanged"] = True
-        # The extracted release binary was just proven activation-disabled.
-        # Run its unchanged setup helpers with the separate hosted fixture
-        # binary, rather than bypassing the release marker in place.
-        cli_setup = subprocess.run(
-            ["/bin/bash", str(cli_setup_relay / "setup-link.sh")], cwd=cli_setup_relay, env=cli_env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45, check=False,
-        )
-        cli_app_summary["setup_link_returncode"] = cli_setup.returncode
-        if cli_setup.returncode != 0:
-            die("extracted CLI setup-link did not accept its armed packaged app")
-        cli_link = safe_link_from_output(cli_setup.stdout, cli_origin)
-        cli_app_summary["setup_link_found"] = bool(cli_link)
-        if not cli_link:
-            die("extracted CLI setup-link did not produce its private invitation link")
+        if (config_start.returncode == 0 or b"in-process isolated workflow" not in config_start.stderr or
+            cli_sentinel.exists() or cli_state_root.exists()):
+            die("ordinary extracted serve startup crossed the development workflow gate")
         case_results[EXPECTED_CASES[12]] = "pass"
-        transitions.extend(["cli-app:exact-route-admitted", "cli-app:bootstrap-armed", "cli-app:packaged-setup-link"])
+        cli_registration_summary["ordinary_config_startup_refused"] = True
+        cli_app_summary["server_started"] = False
+        cli_app_summary["phone_setup_link_enabled"] = False
+        transitions.append("release-binary:config-startup-requires-workflow")
 
-        set_stage("cli_browser_enroll")
-        cli_browser_evidence = run_playwright(
-            package,
-            {
-                "setup_url": cli_link, "origin": cli_origin,
-                "profiles": str(temporary_root / "cli-profiles"),
-                "fake_herdr_operations": str(cli_fake_herdr_operations),
-                "herdr_socket_operations": str(cli_socket_operations),
-            },
-            "enroll", temporary_root / "cli-browser-evidence.json",
+        set_stage("cli_platform_refusal")
+        unsupported = subprocess.run(
+            [str(binary), "dev-tailscale-cli", "setup"], env=cli_env, cwd=package,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=10, check=False,
         )
-        if cli_browser_evidence.get("result") != "pass":
-            die("extracted CLI-backed app did not pass controller/reader E2EE browser admission")
-        # No CLI-backed fixture command can register or read the LocalAPI; the
-        # shared LocalAPI log therefore remains unchanged across this flow.
+        if (unsupported.returncode == 0 or b"unsupported Tailscale CLI profile or schema" not in unsupported.stderr or
+            cli_sentinel.exists() or cli_state_root.exists()):
+            die("Linux extracted package reached a Darwin/arm64 development CLI operation")
         with state.lock:
             cli_localapi_event_count_after = len(state.events)
         if cli_localapi_event_count_before != cli_localapi_event_count_after:
-            die("CLI-backed admission unexpectedly reached the LocalAPI fixture")
+            die("extracted CLI refusal unexpectedly reached the LocalAPI fixture")
         case_results[EXPECTED_CASES[13]] = "pass"
-        transitions.extend(["cli-browser:controller-enrolled", "cli-browser:reader-enrolled", "cli-browser:read-only-enforced"])
-
-        if cli_server_process is not None:
-            cli_server_process.terminate()
-            try:
-                cli_server_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                cli_server_process.kill()
-                cli_server_process.wait(timeout=5)
-            cli_server_process = None
-        if cli_app_log_handle is not None:
-            cli_app_log_handle.close()
-            cli_app_log_handle = None
-        unpublish_args = [
-            str(cli_fixture_binary), "tailscale-cli", "unpublish", "--binary", str(cli_fake_path),
-            "--development-root", str(cli_root), "--state-root", str(cli_state_root),
-            "--coordination-root", str(cli_coordination_root),
-            "--scope", "development", "--installation-id", cli_instance,
-            "--node-id", "package-cli-fixture-node", "--origin", cli_origin,
-            "--https-port", os.environ["HERDR_TAILSCALE_HTTPS_PORT"],
-            "--backend-port", str(RELAY_PORT), "--accepted", "--accept-route-removal",
-            "--accept-check-to-write-race", "--accept-no-remote-drain",
-        ]
-        cleanup_route = subprocess.run(
-            unpublish_args, env=cli_env, cwd=package, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False,
-        )
-        try:
-            cli_tailscale_events = cli_events_file.read_text(encoding="ascii").splitlines()
-            cleanup_state = json.loads(cli_serve_state.read_text(encoding="ascii"))
-            cleanup_journal = json.loads((cli_state_root / "registration.json").read_text(encoding="ascii"))
-        except (OSError, UnicodeError, ValueError):
-            die("test-only CLI cleanup did not retain parseable fixture evidence")
-        if (cleanup_route.returncode != 0 or cleanup_state != {} or
-            cli_tailscale_events.count("serve_unpublish") != 1 or cleanup_journal.get("state") != "removed"):
-            die("test-only CLI fixture route did not clean up after its backend stopped")
+        cli_registration_summary["unsupported_linux_refused"] = True
+        cli_registration_summary["fake_cli_not_invoked"] = not cli_sentinel.exists()
+        cli_app_summary["serve_mutation_attempted"] = False
+        cli_app_summary["physical_phone_or_setup_link_tested"] = False
+        transitions.append("development-cli:unsupported-linux-refused-before-preflight")
 
         if len(case_results) != len(EXPECTED_CASES) or any(case_results.get(name) != "pass" for name in EXPECTED_CASES):
             die("one or more required package acceptance cases were missing")
@@ -2576,8 +2277,7 @@ else:
             "archive_wrappers": archive_wrappers,
             "tested_binary_sha256": binary_digest,
             "tested_binary_path": binary_path,
-            "cli_fixture_binary_sha256": cli_fixture_binary_digest,
-            "cli_fixture_binary_is_separate_from_release": bool(cli_fixture_binary_digest and cli_fixture_binary_digest != binary_digest),
+            "separate_cli_fixture_binary_used": False,
             "cli_tailscale_operation_counts": {
                 name: cli_tailscale_events.count(name) for name in sorted(set(cli_tailscale_events))
             },

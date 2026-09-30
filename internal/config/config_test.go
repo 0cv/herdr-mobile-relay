@@ -691,6 +691,8 @@ func configureTailscaleCLIEnvironment(t *testing.T) {
 	t.Setenv("HERDR_RELAY_TRANSPORT", TransportTailscaleCLI)
 	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
 	t.Setenv("HERDR_RELAY_INSTANCE_ID", "cli-instance")
+	t.Setenv("HERDR_RELAY_PORT", "18377")
+	t.Setenv("HERDR_RELAY_PLUGIN_PORT", "18378")
 	t.Setenv("HERDR_RELAY_CONTROL_RUN_ID", "cli-control-run")
 	t.Setenv("HERDR_RELAY_PAIRING_SOCKET", filepath.Join(root, "control.sock"))
 	t.Setenv("HERDR_REACHABILITY_PORT_MAPPING", "0")

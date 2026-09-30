@@ -57,12 +57,15 @@ func TestDevelopmentManagerRequiresProcessLocalWorkflow(t *testing.T) {
 	}
 	for _, paths := range [][3]string{
 		{root, otherState, coordination},
-		{root, state, otherCoordination},
 		{root, state, root},
 	} {
 		if _, err := newDevelopmentManager(paths[0], paths[1], paths[2], client); !errors.Is(err, ErrPermissionDenied) {
 			t.Errorf("unsafe development roots accepted (%q, %q, %q): %v", paths[0], paths[1], paths[2], err)
 		}
+	}
+	alternate, err := newDevelopmentManager(root, state, otherCoordination, client)
+	if err != nil || alternate.coordinationRoot != otherCoordination {
+		t.Fatalf("workflow did not bind its selected private coordination root: manager=%+v err=%v", alternate, err)
 	}
 }
 

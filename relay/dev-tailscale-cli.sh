@@ -483,8 +483,6 @@ current_release="$(dev_current_release)" || { echo "✗ Atomic cutover did not s
 [ "$current_release" = "$RELEASE_DIR" ] || { echo "✗ Current release pointer did not select the staged build." >&2; exit 1; }
 RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"
 GATE_RELAY_BIN="$RELAY_BIN"
-if [ "$ACTION" = setup ]; then
-fi
 export HERDR_RELAY_ENV="$ENV_FILE" HERDR_RELAY_BIN="$RELAY_BIN" HERDR_WEB_ROOT="$DEV_ROOT/current/web"
 export HERDR_RELEASE_ROOT="$DEV_ROOT/data/herdr-mobile-relay"
 export XDG_CONFIG_HOME="$DEV_ROOT/config" XDG_CACHE_HOME="$DEV_ROOT/cache" XDG_DATA_HOME="$DEV_ROOT/data"
