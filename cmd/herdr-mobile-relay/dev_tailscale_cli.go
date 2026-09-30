@@ -49,13 +49,23 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 		_, err := fmt.Fprintln(stdout, "This relay is foreground-only. Send Ctrl-C; the persistent route is retained.")
 		return status(err)
 	}
-	if action != "status" && action != "recover" && action != "assert-ready" &&
+	if action != "preflight" && action != "status" && action != "recover" && action != "assert-ready" &&
 		action != "release-reservation" && action != "unpublish" && action != "setup" && action != "update" {
-		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
+		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if action == "preflight" {
+		report, err := developmentCLIPreflightFromEnvironment(ctx)
+		if err != nil {
+			return tailscalePreflightExitCode(err), err
+		}
+		if err := json.NewEncoder(stdout).Encode(report); err != nil {
+			return 1, err
+		}
+		return 0, nil
+	}
 	workflow, cfg, err := developmentCLIFromEnvironment(ctx, action)
 	if err != nil {
 		return 1, err
@@ -85,8 +95,22 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 	case "setup", "update":
 		return runDevelopmentForeground(ctx, action, workflow, cfg, stdin, stdout, stderr)
 	default:
-		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
+		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
 	}
+}
+
+func developmentCLIPreflightFromEnvironment(ctx context.Context) (tailscalecli.PreflightReport, error) {
+	root := os.Getenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT")
+	stateRoot := os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT")
+	coordinationRoot := os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT")
+	if err := tailscalecli.ValidateDevelopmentOperationEnvironment(root, stateRoot, coordinationRoot, false, false); err != nil {
+		return tailscalecli.PreflightReport{}, err
+	}
+	binary := os.Getenv("HERDR_TAILSCALE_CLI_BIN")
+	if binary == "" {
+		return tailscalecli.PreflightReport{}, tailscalecli.ErrProfileUnavailable
+	}
+	return tailscalecli.PreflightDevelopmentWorkflow(ctx, root, stateRoot, coordinationRoot, binary)
 }
 
 func developmentCLIFromEnvironment(ctx context.Context, action string) (*tailscalecli.DevelopmentWorkflow, *config.Config, error) {

@@ -73,6 +73,14 @@ jobs:
           go test -count=1 ./internal/processsupervisor ./internal/tailscale ./internal/tailscalecli ./cmd/herdr-mobile-relay 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           go test -count=1 ./internal/app -run '^TestCLITailscaleControlStatusFailsClosedOnUnqualifiedRoute$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           go test -count=1 -tags=herdr_tailscale_test ./internal/app -run '^TestTailscaleCLIReadinessArmAndDrift$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'tagged_tailscalecli_candidate_sha=%s\n' "$GITHUB_SHA" | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          go test -v -count=1 -tags=herdr_tailscale_test ./internal/tailscalecli 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          grep -F -- '--- PASS: TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          if grep -F -- '--- SKIP: TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"; then
+            echo 'required tagged Tailscale CLI fixture test was skipped' >&2
+            exit 1
+          fi
 
       - name: Run Go vet
         id: go_vet

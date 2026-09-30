@@ -199,11 +199,6 @@ func load(workflow *tailscalecli.DevelopmentWorkflow) (*Config, error) {
 // qualification is recorded and production enablement receives its own change.
 func TailscaleCLIProfilesEnabled() bool { return tailscaleCLIProfilesEnabled }
 
-// TailscaleCLIDevelopmentQualificationEnabled enables only the isolated
-// development qualification path. The adapter still accepts exactly the
-// recognized App Store 1.102.4 profile; this does not mean runtime-qualified.
-func TailscaleCLIDevelopmentQualificationEnabled() bool { return true }
-
 func (c *Config) Addr() string {
 	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 }
@@ -366,9 +361,6 @@ func (c *Config) validateTailscaleCLI(workflow *tailscalecli.DevelopmentWorkflow
 	}
 	switch c.TailscaleCLIScope {
 	case "development":
-		if !TailscaleCLIDevelopmentQualificationEnabled() {
-			return errors.New("tailscale-cli development scope is disabled pending separate development qualification")
-		}
 		if !filepath.IsAbs(c.TailscaleCLIDevelopmentRoot) ||
 			filepath.Clean(c.TailscaleCLIStateRoot) != filepath.Join(filepath.Clean(c.TailscaleCLIDevelopmentRoot), "registration") {
 			return errors.New("development CLI state must be bound to its absolute private launcher root")

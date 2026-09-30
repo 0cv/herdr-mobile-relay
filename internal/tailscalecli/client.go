@@ -190,8 +190,10 @@ func verifiedExecutable(path string) (string, error) {
 	return filepath.Clean(resolved), nil
 }
 
-// NewClient requires a selected absolute executable and does not execute it.
-func NewClient(binary string) (*Client, error) {
+// newClient is package-private so production CLI execution can only be reached
+// through the validated development workflow constructors. Test helpers may
+// still inject synthetic command runners inside this package.
+func newClient(binary string) (*Client, error) {
 	if !filepath.IsAbs(binary) {
 		return nil, ErrProfileUnavailable
 	}

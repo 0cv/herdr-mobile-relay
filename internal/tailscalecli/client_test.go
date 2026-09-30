@@ -116,7 +116,7 @@ func TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution(t *testing.T) {
 	if err := os.WriteFile(ordinary, []byte("#!/bin/sh\ntouch \""+marker+"\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewClient(ordinary); !errors.Is(err, ErrProfileUnavailable) {
+	if _, err := newClient(ordinary); !errors.Is(err, ErrProfileUnavailable) {
 		t.Fatalf("fixture build accepted ordinary executable: %v", err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -127,7 +127,7 @@ func TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution(t *testing.T) {
 	if err := os.WriteFile(synthetic, []byte("#!/bin/sh\n# "+syntheticFixtureCLIMarker+"\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewClient(synthetic); err != nil {
+	if _, err := newClient(synthetic); err != nil {
 		t.Fatalf("tagged fixture rejected its marked synthetic CLI: %v", err)
 	}
 }

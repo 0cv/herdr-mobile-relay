@@ -6,30 +6,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
-
-func TestNonzeroCLIProcessExitIsNotMappedToRetryStatus(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the hosted fake-process fixture uses a POSIX executable")
-	}
-	binary := filepath.Join(t.TempDir(), "fake-tailscale")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 75\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	client, err := tailscalecli.NewClient(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Preflight(context.Background(), 8443); err == nil ||
-		!errors.Is(err, tailscalecli.ErrCommandFailed) || tailscalePreflightExitCode(err) != 78 {
-		t.Fatalf("unsuccessful CLI process was treated as transient: err=%v code=%d", err, tailscalePreflightExitCode(err))
-	}
-}
 
 func TestDevelopmentWorkflowRejectsPortEnvironmentOverridesBeforePreflight(t *testing.T) {
 	for _, name := range []string{
@@ -56,7 +37,7 @@ func TestActivationScopeKeepsProductionDisabledAndDevelopmentExplicit(t *testing
 	stdout.Reset()
 	stderr.Reset()
 	code, err = runTailscaleCLIWithInput([]string{"activation-check", "--scope", "development"}, strings.NewReader(""), &stdout, &stderr)
-	if code != 0 || err != nil || !strings.Contains(stdout.String(), "development-qualification-enabled") ||
+	if code != 0 || err != nil || !strings.Contains(stdout.String(), "profile-checked isolated dev-tailscale-cli workflow") ||
 		!strings.Contains(stdout.String(), "runtime qualification remains pending") {
 		t.Fatalf("development activation-check conflated qualification states: code %d err=%v stdout=%q", code, err, stdout.String())
 	}
@@ -77,7 +58,7 @@ func TestStandaloneManagerOperationsRequireWorkflowBeforeCLIUse(t *testing.T) {
 	if err := os.WriteFile(binary, []byte(contents), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"status", "recover", "assert-ready", "publish", "unpublish", "reserve-backend-port", "release-backend-port", "reconcile"} {
+	for _, operation := range []string{"preflight", "status", "recover", "assert-ready", "publish", "unpublish", "reserve-backend-port", "release-backend-port", "reconcile"} {
 		t.Run(operation, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code, err := runTailscaleCLIWithInput([]string{operation, "--binary", binary},

@@ -31,7 +31,7 @@ func TestRunCommandNonzeroExitIsTypedRedactedAndNonRetryable(t *testing.T) {
 	for _, exitCode := range []int{1, 75, 97} {
 		t.Run(strconv.Itoa(exitCode), func(t *testing.T) {
 			binary := filepath.Join(t.TempDir(), "fake-tailscale")
-			script := "#!/bin/sh\nprintf '%s\\n' 'private@example.invalid secret-token' >&2\nprintf '%s\\n' 'private stdout token'\nexit " + strconv.Itoa(exitCode) + "\n"
+			script := "#!/bin/sh\n# " + syntheticFixtureCLIMarker + "\nprintf '%s\\n' 'private@example.invalid secret-token' >&2\nprintf '%s\\n' 'private stdout token'\nexit " + strconv.Itoa(exitCode) + "\n"
 			if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -39,7 +39,7 @@ func TestRunCommandNonzeroExitIsTypedRedactedAndNonRetryable(t *testing.T) {
 			if !errors.Is(commandErr, ErrCommandFailed) || !result.dispatched || len(result.stdout) != 0 {
 				t.Fatalf("nonzero subprocess retained output or lost dispatch evidence: result=%+v err=%v", result, commandErr)
 			}
-			client, err := NewClient(binary)
+			client, err := newClient(binary)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -102,6 +102,7 @@ func TestRealCLICommandFailureDoesNotReplayAmbiguousPublish(t *testing.T) {
 	}
 	binary := filepath.Join(root, "fake-tailscale")
 	script := `#!/bin/sh
+# HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1
 STATE="${0%/*}/serve.json"
 EVENTS="${0}.events"
 case "$*" in
@@ -118,7 +119,7 @@ esac
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	client, err := NewClient(binary)
+	client, err := newClient(binary)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestRealCLICommandFailureRetainsAmbiguousUnpublishEvidence(t *testing.T) {
 	binary := filepath.Join(root, "fake-tailscale")
 	route := strings.ReplaceAll(fixtureRoute, "18377", strconv.Itoa(backendPort))
 	publishCommand := fmt.Sprintf("serve --bg --https=8443 --set-path=/ http://127.0.0.1:%d", backendPort)
-	script := "#!/bin/sh\n" +
+	script := "#!/bin/sh\n# " + syntheticFixtureCLIMarker + "\n" +
 		"STATE=\"${0%/*}/serve.json\"\nEVENTS=\"${0}.events\"\n" +
 		"case \"$*\" in\n" +
 		"  'status --json') printf '%s\\n' '" + fixtureStatus + "' ;;\n" +
@@ -186,7 +187,7 @@ func TestRealCLICommandFailureRetainsAmbiguousUnpublishEvidence(t *testing.T) {
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	client, err := NewClient(binary)
+	client, err := newClient(binary)
 	if err != nil {
 		t.Fatal(err)
 	}

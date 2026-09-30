@@ -39,6 +39,35 @@ func newDevelopmentManager(developmentRoot, stateRoot, coordinationRoot string, 
 	return manager, nil
 }
 
+// PreflightDevelopmentWorkflow is the read-only CLI entrypoint for the
+// development launcher. It validates the complete Go-owned isolated layout,
+// exact fixed tuple, and executable profile before contacting the CLI. It does
+// not return a manager or authorize route operations.
+func PreflightDevelopmentWorkflow(ctx context.Context, developmentRoot, stateRoot, coordinationRoot, binary string) (PreflightReport, error) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		return PreflightReport{}, ErrUnsupported
+	}
+	if _, err := developmentIsolationFromEnvironment(developmentRoot, stateRoot, coordinationRoot); err != nil {
+		return PreflightReport{}, err
+	}
+	client, err := newClient(binary)
+	if err != nil {
+		return PreflightReport{}, err
+	}
+	if client.binary != os.Getenv("HERDR_TAILSCALE_CLI_BIN") {
+		return PreflightReport{}, ErrWorkflowRequired
+	}
+	preflight, err := client.Preflight(ctx, DevelopmentHTTPSPort)
+	if err != nil {
+		return PreflightReport{}, err
+	}
+	if preflight.Profile != ProfileAppStoreSupplied || !preflight.DevelopmentQualificationEnabled ||
+		preflight.HTTPSPort != DevelopmentHTTPSPort {
+		return preflight, ErrUnsupported
+	}
+	return preflight, nil
+}
+
 // NewDevelopmentWorkflow validates the Go-owned isolated development layout
 // before read-only CLI preflight, then retains the manager in this process. The
 // manager repeats the layout and fixed-tuple checks before real operations. This
@@ -51,7 +80,7 @@ func NewDevelopmentWorkflow(ctx context.Context, developmentRoot, stateRoot, coo
 	if err != nil {
 		return nil, PreflightReport{}, err
 	}
-	client, err := NewClient(binary)
+	client, err := newClient(binary)
 	if err != nil {
 		return nil, PreflightReport{}, err
 	}

@@ -289,35 +289,30 @@ CONFIGURED_ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-${HERDR_TAILSCALE_CLI_ORIGI
 PHONE_APP="${HERDR_DEV_PHONE_APP_URL:-${HERDR_PHONE_APP_URL:-}}"
 CONFIGURED_NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-${HERDR_TAILSCALE_CLI_NODE_ID:-}}"
 [ -n "$PHONE_APP" ] || { echo "✗ Set the exact verified phone-app origin." >&2; exit 2; }
+NEEDS_PREFLIGHT=0
+BOOTSTRAP_ORIGIN="https://preflight.invalid:8443"
+BOOTSTRAP_NODE_ID="node-preflight-pending"
 if [ "$ACTION" = setup ]; then
     CLI_BIN="$(cli_relay_call tailscale-cli resolve-binary --binary "$CLI_BIN")" || {
         echo "✗ No unambiguous absolute Tailscale CLI candidate was selected." >&2
         exit 2
     }
-    PREFLIGHT="$(cli_relay_call tailscale-cli preflight --scope development --binary "$CLI_BIN" --https-port "$HTTPS_PORT")" || {
-        echo "✗ Read-only Tailscale node/origin preflight failed; no route or state was changed." >&2
-        exit 1
-    }
-    NODE_ID="$(json_string_field "$PREFLIGHT" node_id "$RELAY_BIN")"
-    ORIGIN="$(json_string_field "$PREFLIGHT" origin "$RELAY_BIN")"
-    DNS_NAME="$(json_string_field "$PREFLIGHT" dns_name "$RELAY_BIN")"
-    [ -n "$NODE_ID" ] && [ -n "$ORIGIN" ] && [ -n "$DNS_NAME" ] || {
-        echo "✗ Read-only preflight did not establish a complete node identity and origin." >&2
-        exit 1
-    }
-    [ -z "$CONFIGURED_NODE_ID" ] || [ "$CONFIGURED_NODE_ID" = "$NODE_ID" ] || {
-        echo "✗ Configured node ID does not match the live read-only preflight." >&2
-        exit 1
-    }
-    [ -z "$CONFIGURED_ORIGIN" ] || [ "$CONFIGURED_ORIGIN" = "$ORIGIN" ] || {
-        echo "✗ Configured HTTPS origin does not match the live node's canonical origin." >&2
-        exit 1
-    }
-    if [ -n "${HERDR_DEV_TAILSCALE_CLI_RELAY_BIN:-}" ]; then
-        [ "$("$RELAY_BIN" normalize-external-origin "$ORIGIN" 2>/dev/null || true)" = "$ORIGIN" ] || {
-            echo "✗ Development HTTPS origin is not canonical." >&2
-            exit 2
-        }
+    if [ -f "$ENV_FILE" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_ORIGIN)" = "$BOOTSTRAP_ORIGIN" ] &&
+        [ "$(env_file_value "$ENV_FILE" HERDR_TAILSCALE_CLI_NODE_ID)" = "$BOOTSTRAP_NODE_ID" ]; then
+        NEEDS_PREFLIGHT=1
+        CONFIGURED_ORIGIN="${HERDR_DEV_TAILSCALE_CLI_ORIGIN:-}"
+        CONFIGURED_NODE_ID="${HERDR_DEV_TAILSCALE_CLI_NODE_ID:-}"
+    elif [ ! -f "$ENV_FILE" ]; then
+        NEEDS_PREFLIGHT=1
+    fi
+    if [ "$NEEDS_PREFLIGHT" = 1 ]; then
+        ORIGIN="${CONFIGURED_ORIGIN:-$BOOTSTRAP_ORIGIN}"
+        NODE_ID="${CONFIGURED_NODE_ID:-$BOOTSTRAP_NODE_ID}"
+    else
+        ORIGIN="$CONFIGURED_ORIGIN"
+        NODE_ID="$CONFIGURED_NODE_ID"
+        [ -n "$ORIGIN" ] && [ -n "$NODE_ID" ] || { echo "✗ Existing CLI development identity is incomplete." >&2; exit 2; }
     fi
 else
     ORIGIN="$CONFIGURED_ORIGIN"
@@ -493,7 +488,7 @@ export HERDR_RELAY_HOST=127.0.0.1 HERDR_RELAY_TRANSPORT=tailscale-cli HERDR_RELA
 unset HERDR_PLUGIN_CONFIG_DIR HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION HERDR_TAILSCALE_ORIGIN HERDR_EXTERNAL_HTTPS_ORIGIN HERDR_RELAY_RUN_ID
 unset GH_TOKEN CURL_CA_BUNDLE SSL_CERT_FILE NODE_EXTRA_CA_CERTS
 export HERDR_BIN="$HERDR_DEV_HERDR_BIN" HERDR_SOCKET_PATH="$HERDR_DEV_HERDR_SOCKET"
-export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN" HERDR_TAILSCALE_CLI_SCOPE=development
+export HERDR_TAILSCALE_CLI_BIN="$CLI_BIN" HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN" HERDR_TAILSCALE_CLI_NODE_ID="$NODE_ID" HERDR_TAILSCALE_CLI_SCOPE=development
 export HERDR_TAILSCALE_CLI_STATE_ROOT="$DEV_ROOT/registration" HERDR_TAILSCALE_CLI_COORDINATION_ROOT="$COORDINATION_ROOT"
 export HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT="$DEV_ROOT"
 export HERDR_TAILSCALE_CLI_HTTPS_PORT="$HTTPS_PORT" HERDR_PHONE_APP_URL="$PHONE_APP"
@@ -503,4 +498,31 @@ export HERDR_RELAY_PORT="$RELAY_PORT" HERDR_RELAY_PLUGIN_PORT="$PLUGIN_PORT"
 trap cleanup_dev_build_stage EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [ "$NEEDS_PREFLIGHT" = 1 ]; then
+    PREFLIGHT="$("$RELAY_BIN" dev-tailscale-cli preflight)" || {
+        echo "✗ Go-owned isolated development preflight failed; no Serve route was changed." >&2
+        exit 1
+    }
+    LIVE_NODE_ID="$(json_string_field "$PREFLIGHT" node_id "$RELAY_BIN")"
+    LIVE_ORIGIN="$(json_string_field "$PREFLIGHT" origin "$RELAY_BIN")"
+    LIVE_DNS_NAME="$(json_string_field "$PREFLIGHT" dns_name "$RELAY_BIN")"
+    [ -n "$LIVE_NODE_ID" ] && [ -n "$LIVE_ORIGIN" ] && [ -n "$LIVE_DNS_NAME" ] || {
+        echo "✗ Go-owned preflight did not establish a complete node identity and origin." >&2
+        exit 1
+    }
+    [ -z "$CONFIGURED_NODE_ID" ] || [ "$CONFIGURED_NODE_ID" = "$LIVE_NODE_ID" ] || {
+        echo "✗ Configured node ID does not match the Go-owned read-only preflight." >&2
+        exit 1
+    }
+    [ -z "$CONFIGURED_ORIGIN" ] || [ "$CONFIGURED_ORIGIN" = "$LIVE_ORIGIN" ] || {
+        echo "✗ Configured HTTPS origin does not match the Go-owned read-only preflight." >&2
+        exit 1
+    }
+    set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_ORIGIN "$LIVE_ORIGIN"
+    set_env_value_atomic "$ENV_FILE" HERDR_TAILSCALE_CLI_NODE_ID "$LIVE_NODE_ID"
+    ORIGIN="$LIVE_ORIGIN"
+    NODE_ID="$LIVE_NODE_ID"
+    export HERDR_TAILSCALE_CLI_ORIGIN="$ORIGIN" HERDR_TAILSCALE_CLI_NODE_ID="$NODE_ID"
+    echo "Go-owned read-only preflight selected node $NODE_ID ($LIVE_DNS_NAME), profile $(json_string_field "$PREFLIGHT" profile "$RELAY_BIN"), HTTPS origin $ORIGIN."
+fi
 exec "$RELAY_BIN" dev-tailscale-cli foreground --action "$ACTION"

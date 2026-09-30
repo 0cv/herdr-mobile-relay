@@ -108,13 +108,16 @@ credential, invitation or QR data appears. Required automated cases:
   constructor validates explicit opt-in, the exact profile,
   private isolated config/cache/data/release/runtime/registration roots, relay
   environment/marker bindings, production and installed-service separation,
-  local Herdr socket identity, and the fixed tuple before CLI preflight; the
-  manager repeats those checks before operations. This is a safety boundary for
-  ordinary bypasses, not launcher provenance or a privilege boundary against
-  deliberate fabrication by the same user. `serve`, ordinary config loading and
-  standalone `tailscale-cli` mutation commands refuse CLI-backed
-  startup/operations. Setup displays the selected node/origin/ports and
-  requires exact route-bound stdin consent in the Go-owned foreground process.
+  local Herdr socket identity, and the fixed tuple before CLI access; the
+  manager repeats those checks before operations. The shell uses only
+  filesystem-only binary selection and the Go `dev-tailscale-cli preflight`
+  entrypoint; standalone `tailscale-cli preflight` refuses before executable
+  selection. This is a safety boundary for ordinary bypasses, not launcher
+  provenance or a privilege boundary against deliberate fabrication by the
+  same user. `serve`, ordinary config loading and standalone `tailscale-cli`
+  inspection/mutation commands refuse CLI-backed startup/operations. Setup
+  displays the selected node/origin/ports and requires exact route-bound stdin
+  consent in the Go-owned foreground process.
   No environment variable can supply consent. The designated owner's phone
   enrollment/E2EE smoke and exact-route cleanup are documented in the
   [supervised runbook](tailscale-cli-contract.md#supervised-owner-development-phone-smoke-and-cleanup-runbook);
@@ -123,11 +126,14 @@ credential, invitation or QR data appears. Required automated cases:
 - **Packaging and unchanged paths:** exact release archive uses no end-user Go,
   Bun or Python; existing direct-session and BYO regression suites stay intact.
   Hosted fixtures must exercise the single-process `dev-tailscale-cli` dispatch
-  with inert synthetic binaries; no test may override a hosted-only guard on the
-  worker machine. The extracted-package job must verify the exact release
-  archive. Require ordinary, native Darwin/Linux and extracted-package results
-  for the exact final SHA; earlier green revisions do not apply to later code.
-  Acceptance evidence must identify the exact SHA for every hosted result.
+  with inert synthetic binaries; the native workflow also runs
+  `go test -tags=herdr_tailscale_test ./internal/tailscalecli` and must show
+  `TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution` as PASS, not SKIP.
+  No test may override a hosted-only guard on the worker machine. The
+  extracted-package job must verify the exact release archive. Require ordinary,
+  native Darwin/Linux and extracted-package results for the exact final SHA;
+  earlier green revisions do not apply to later code. Acceptance evidence must
+  identify the exact SHA for every hosted result.
 
 ## Owner-phone development smoke and broader qualification
 

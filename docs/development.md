@@ -19,11 +19,11 @@ Option 1 builds the current Go source and frontend, uses isolated ports and stat
 under `relay/.dev/`, and never uses the installed production relay. Enter selects
 option 1. Option 2 enables only isolated foreground development for the exact
 recognized macOS App Store Tailscale 1.102.4 profile. It is not runtime-qualified
-or production-enabled. Setup performs read-only CLI profile/preflight checks,
-refuses conflicting Serve listeners, and requires exact node/origin/listener/
-backend confirmation on stdin; no environment variable can consent. It creates
-separate `.dev-tailscale-cli/` state only after checks and consent and never
-installs a service. Option 3 retains the existing LocalAPI temporary-session
+or production-enabled. The isolated setup uses Go-owned read-only profile
+preflight, refuses conflicting Serve listeners, and requires exact
+node/origin/listener/backend confirmation on stdin; no environment variable can
+consent. It creates separate `.dev-tailscale-cli/` state and never installs a
+service. Option 3 retains the existing LocalAPI temporary-session
 contract and its own consent/compatibility checks; it is not a fallback for
 option 2. In automation, `make dev-tunnel` retains the tunnel default;
 `HERDR_DEV_TRANSPORT=tailscale-cli` selects option 2 but still requires the
@@ -41,14 +41,17 @@ and 8443; conflicts are refused rather than adopting a listener or changing
 an enrolled port. CLI-backed development uses the same separate port contract, with state under
 `relay/.dev-tailscale-cli/` and an independently consented persistent route.
 The supported candidate is only the exact App Store macOS/arm64 1.102.4
-profile; its status reports development enablement separately from runtime
-qualification. Before CLI preflight or mutation, the Go entrypoint independently
-checks explicit opt-in, private root ownership/modes, exact registration and
+profile; profile-specific development eligibility is separate from runtime
+qualification. The launcher uses filesystem-only executable selection, then
+calls `dev-tailscale-cli preflight`; the standalone `tailscale-cli preflight`
+path is refused. Before any real CLI read or mutation, the Go entrypoint checks
+explicit opt-in, private root ownership/modes, exact registration and
 coordination bindings, isolated XDG/release/web/runtime paths, the relay
 configuration, installed-service environment and production-root separation,
-and the local Herdr socket. Manager operations repeat these checks. This is not
-proof of launcher provenance or a privilege boundary against a deliberately
-fabricating same-user process. The persistent route survives stop and Ctrl-C;
+and the fixed HTTPS/backend/plugin tuple. Operation-level checks bind the
+selected executable and local Herdr socket. This is not proof of launcher
+provenance or a privilege boundary against a deliberately fabricating
+same-user process. The persistent route survives stop and Ctrl-C;
 scoped unpublish has its own exact typed confirmation. After opt-in, executable `tailscale` and `herdr` binaries
 are located on `PATH` without running them. The Herdr socket is selected from
 `HERDR_SOCKET_PATH` or the same `${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock`

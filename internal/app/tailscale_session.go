@@ -545,7 +545,7 @@ func (s *Server) tailscaleCLIControlStatus(ctx context.Context) localcontrol.Sta
 func tailscaleCLIRouteEnabledForScope(scope string, route tailscalecli.RouteStatus) bool {
 	switch scope {
 	case "development":
-		return config.TailscaleCLIDevelopmentQualificationEnabled() && route.DevelopmentQualificationEnabled
+		return route.DevelopmentQualificationEnabled
 	case "production":
 		return config.TailscaleCLIProfilesEnabled() && route.RuntimeQualified
 	default:

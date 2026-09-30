@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0cv/herdr-mobile-relay/internal/app"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
@@ -67,6 +68,142 @@ func TestTailscaleCLICommandRefusesBeforeExecutableOrStateAccess(t *testing.T) {
 		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
 			t.Errorf("refused CLI command touched %q: %v", path, statErr)
 		}
+	}
+}
+
+func TestTailscaleCLIExecutionAndServerStartEntrypointInventory(t *testing.T) {
+	base := t.TempDir()
+	invoked := filepath.Join(base, "cli-invoked")
+	binary := filepath.Join(base, "fake-tailscale")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf invoked > '"+invoked+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries := []struct {
+		name string
+		call func(*testing.T)
+	}{
+		{
+			name: "standalone preflight refuses before executable contact",
+			call: func(t *testing.T) {
+				code, err := runTailscaleCLIWithInput([]string{"preflight", "--scope", "development", "--binary", binary}, strings.NewReader(""), io.Discard, io.Discard)
+				if code != 2 || !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+					t.Fatalf("standalone preflight = (%d, %v), want workflow-required refusal", code, err)
+				}
+			},
+		},
+		{
+			name: "development preflight requires validated isolation",
+			call: func(t *testing.T) {
+				t.Setenv("HERDR_TAILSCALE_CLI_BIN", binary)
+				code, err := runDevelopmentTailscaleCLI([]string{"preflight"}, strings.NewReader(""), io.Discard, io.Discard)
+				if code == 0 || err == nil {
+					t.Fatalf("development preflight admitted an unbound environment: (%d, %v)", code, err)
+				}
+			},
+		},
+		{
+			name: "development status requires validated isolation",
+			call: func(t *testing.T) {
+				t.Setenv("HERDR_TAILSCALE_CLI_BIN", binary)
+				code, err := runDevelopmentTailscaleCLI([]string{"status"}, strings.NewReader(""), io.Discard, io.Discard)
+				if code == 0 || err == nil {
+					t.Fatalf("development status admitted an unbound environment: (%d, %v)", code, err)
+				}
+			},
+		},
+		{
+			name: "ordinary config load cannot start CLI transport",
+			call: func(t *testing.T) {
+				configureUnboundDevelopmentCLIConfig(t, base, binary)
+				if _, err := config.Load(); !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+					t.Fatalf("ordinary config load = %v, want workflow-required refusal", err)
+				}
+			},
+		},
+		{
+			name: "ordinary serve entrypoint cannot start CLI transport",
+			call: func(t *testing.T) {
+				configureUnboundDevelopmentCLIConfig(t, base, binary)
+				code, err := runServe()
+				if code == 0 || !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+					t.Fatalf("serve entrypoint = (%d, %v), want workflow-required refusal", code, err)
+				}
+			},
+		},
+		{
+			name: "app New refuses CLI server start without workflow",
+			call: func(t *testing.T) {
+				server := app.New(&config.Config{Transport: config.TransportTailscaleCLI}, "test", "test", nil)
+				if err := server.Run(context.Background()); !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+					t.Fatalf("app.New server start = %v, want workflow-required refusal", err)
+				}
+			},
+		},
+		{
+			name: "app NewOwned refuses CLI server start",
+			call: func(t *testing.T) {
+				if _, err := app.NewOwned(&config.Config{Transport: config.TransportTailscaleCLI}, "test", "test", nil, nil); !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+					t.Fatalf("app.NewOwned = %v, want workflow-required refusal", err)
+				}
+			},
+		},
+		{
+			name: "app development constructor requires workflow",
+			call: func(t *testing.T) {
+				if _, err := app.NewDevelopmentCLI(&config.Config{Transport: config.TransportTailscaleCLI}, "test", "test", nil, nil); !errors.Is(err, tailscalecli.ErrWorkflowRequired) {
+					t.Fatalf("app.NewDevelopmentCLI = %v, want workflow-required refusal", err)
+				}
+			},
+		},
+		{
+			name: "binary resolution is filesystem-only",
+			call: func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				code, err := runTailscaleCLIWithInput([]string{"resolve-binary", "--binary", binary}, strings.NewReader(""), &stdout, &stderr)
+				if code != 0 || err != nil || strings.TrimSpace(stdout.String()) != binary {
+					t.Fatalf("binary resolution = (%d, %v, %q)", code, err, stdout.String())
+				}
+			},
+		},
+	}
+
+	for _, entry := range entries {
+		t.Run(entry.name, func(t *testing.T) {
+			entry.call(t)
+			if _, err := os.Lstat(invoked); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("entrypoint contacted the Tailscale executable: %v", err)
+			}
+		})
+	}
+}
+
+func configureUnboundDevelopmentCLIConfig(t *testing.T, base, binary string) {
+	t.Helper()
+	for name, value := range map[string]string{
+		"HERDR_RELAY_TRANSPORT":                 "tailscale-cli",
+		"HERDR_RELAY_TOKEN":                     "0123456789abcdef0123456789abcdef",
+		"HERDR_RELAY_HOST":                      "127.0.0.1",
+		"HERDR_RELAY_PORT":                      "18377",
+		"HERDR_RELAY_PLUGIN_PORT":               "18378",
+		"HERDR_RELAY_INSTANCE_ID":               "fixture-installation",
+		"HERDR_RELAY_CONTROL_RUN_ID":            "fixture-control-run",
+		"HERDR_RELAY_PAIRING_SOCKET":            filepath.Join(base, "pairing.sock"),
+		"HERDR_TAILSCALE_CLI_ORIGIN":            "https://relay.fixture.invalid:8443",
+		"HERDR_TAILSCALE_CLI_SCOPE":             "development",
+		"HERDR_TAILSCALE_CLI_BIN":               binary,
+		"HERDR_TAILSCALE_CLI_STATE_ROOT":        filepath.Join(base, "development", "registration"),
+		"HERDR_TAILSCALE_CLI_COORDINATION_ROOT": filepath.Join(base, "coordination"),
+		"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT":  filepath.Join(base, "development"),
+		"HERDR_TAILSCALE_CLI_HTTPS_PORT":        "8443",
+		"HERDR_PHONE_APP_URL":                   "https://app.fixture.invalid",
+		"HERDR_REACHABILITY_PORT_MAPPING":       "0",
+		"HERDR_RELAY_REARM_BOOTSTRAP":           "0",
+		"HERDR_RELAY_ENV":                       filepath.Join(base, "relay.env"),
+		"XDG_CONFIG_HOME":                       filepath.Join(base, "config"),
+		"XDG_CACHE_HOME":                        filepath.Join(base, "cache"),
+		"XDG_DATA_HOME":                         filepath.Join(base, "data"),
+	} {
+		t.Setenv(name, value)
 	}
 }
 

@@ -8,8 +8,6 @@ import pty
 import shutil
 import subprocess
 import tempfile
-import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 if os.environ.get("HERDR_TAILSCALE_LAUNCHER_CI") != "1":
@@ -300,69 +298,19 @@ def installer_refusal(platform: str, definition_kind: str) -> tuple[int, str, st
 
 
 def main() -> None:
-    status, output, events, unit_contents, reservation = run_setup(prior_definition=False)
-    if status != 3 or unit_contents is not None or reservation is not None:
-        raise AssertionError(f"new-service pre-dispatch failure was not rolled back ({status}): {output} {events}")
-    required_order = ["reserve-backend-port", "service:install", "publish", "service:rollback-cli-setup", "release-backend-port"]
-    positions = [events.index(event) if event in events else -1 for event in required_order]
-    if positions != sorted(positions) or any(position < 0 for position in positions):
-        raise AssertionError(f"service rollback and reservation release order was unsafe: {events}")
-
-    with tempfile.TemporaryDirectory(prefix="herdr-cli-concurrent-setup-") as temporary:
-        root = Path(temporary)
-        reservation = root / "shared-reservation.json"
-        ready = root / "first-reservation-ready"
-        release = root / "allow-first-setup-to-continue"
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            first_attempt = executor.submit(
-                run_setup,
-                False,
-                shared_reservation=reservation,
-                reserve_ready=ready,
-                reserve_release=release,
-            )
-            deadline = time.monotonic() + 15
-            while not ready.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            if not ready.exists():
-                release.touch()
-                raise AssertionError("first concurrent setup did not reach its held reservation")
-            try:
-                second_status, second_output, second_events, _, second_reservation = run_setup(
-                    False, shared_reservation=reservation
-                )
-                if second_status == 0 or second_events != ["reserve-conflict"] or not second_reservation:
-                    raise AssertionError(
-                        f"second setup did not fail without releasing the first reservation: "
-                        f"{second_output} {second_events} {second_reservation}"
-                    )
-            finally:
-                release.touch()
-            first_status, first_output, first_events, first_unit, first_reservation = first_attempt.result(timeout=30)
-            if first_status != 3 or first_unit is not None or first_reservation is not None:
-                raise AssertionError(
-                    f"winning concurrent setup lost its reservation or rollback: {first_output} {first_events}"
-                )
-
     for platform in ("Linux", "Darwin"):
-        for prior_definition in ("current", "legacy"):
+        for prior_definition in (False, "current", "legacy"):
             status, output, events, definition_contents, reservation = run_setup(
                 prior_definition=prior_definition, platform=platform
             )
-            if status == 0 or definition_contents != "preexisting service definition\n" or reservation is not None:
+            expected_contents = "preexisting service definition\n" if prior_definition else None
+            if status == 0 or "installed-service cli setup is disabled" not in output.lower():
+                raise AssertionError(f"{platform} installed CLI setup was not refused: {status} {output} {events}")
+            if events or definition_contents != expected_contents or reservation is not None:
                 raise AssertionError(
-                    f"{platform} {prior_definition} service definition was changed ({status}): {output} {events}"
+                    f"{platform} disabled CLI setup touched service or reservation state: "
+                    f"{events} {definition_contents!r} {reservation!r}"
                 )
-            if "service definition already exists" not in output.lower() or events:
-                raise AssertionError(f"{platform} existing service setup was not refused before mutation: {output} {events}")
-
-        status, output, events, definition_contents, reservation = run_setup(
-            prior_definition=False, platform=platform, appear_after_reserve="legacy"
-        )
-        if status == 0 or definition_contents != "installed by concurrent setup\n" or not reservation:
-            raise AssertionError(f"{platform} legacy-service race changed ownership unsafely: {output} {events}")
-        if events != ["reserve-backend-port"] or "reservation retained" not in output.lower():
-            raise AssertionError(f"{platform} legacy-service race released another setup's reservation: {output} {events}")
 
         for definition_kind in ("current", "legacy"):
             status, output, contents, current_exists, calls = installer_refusal(platform, definition_kind)
@@ -380,7 +328,7 @@ def main() -> None:
         expected = "systemctl --user disable --now herdr-mobile-relay.service" if platform == "Linux" else "launchctl bootout"
         if not any(expected in call for call in calls):
             raise AssertionError(f"{platform} rollback did not disable/unload its service: {calls}")
-    print("PASS CLI setup failure fixture: non-dispatched publish rolls back new service before safe reservation release")
+    print("PASS CLI setup fixture: installed-service CLI activation is disabled before service or route access")
 
 
 if __name__ == "__main__":
