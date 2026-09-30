@@ -30,7 +30,13 @@ make dev-tunnel
    to 1.102.4. Missing/unreadable bundle metadata, another version, or an
    unsupported platform is refused before CLI-backed mode. Menu inspection reads
    local files and `uname` platform metadata only; it never runs Tailscale. It
-   uses separate `.dev-tailscale-cli/` relay state and installs no service.
+   mirrors the CLI resolver's absolute-PATH and Darwin fallback candidate set,
+   canonicalizing symlinks and deduplicating identical targets. Multiple distinct
+   executable candidates (including wrapper files) mark option 2 unavailable;
+   an explicit absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or
+   `HERDR_TAILSCALE_CLI_BIN` override takes precedence, while an invalid
+   override fails closed. It uses separate `.dev-tailscale-cli/` relay state
+   and installs no service.
 3. **Legacy Tailscale Serve** — choose this only if you run a supported,
    authenticated standalone `tailscaled` Unix daemon and want the older direct-
    LocalAPI temporary/session-owned route. It is for advanced users, is not a

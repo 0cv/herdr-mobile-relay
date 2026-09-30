@@ -67,6 +67,109 @@ tailscale_app_store_version() {
     printf '%s\n' "$version"
 }
 
+# Keep menu availability aligned with ResolveBinary without executing any
+# candidate. Canonical paths, not wrapper contents or command behavior, define
+# identity just as filepath.EvalSymlinks does in the Go resolver.
+MENU_CLI_CANONICAL=""
+MENU_CLI_CANDIDATES=()
+MENU_CLI_UNAVAILABLE_REASON=""
+canonical_menu_cli_candidate() {
+    local candidate="$1" link directory base attempt
+    case "$candidate" in /*) ;; *) return 1 ;; esac
+    attempt=0
+    while [ -L "$candidate" ]; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -le 64 ] || return 1
+        link="$(readlink "$candidate" 2>/dev/null || true)"
+        [ -n "$link" ] || return 1
+        case "$link" in
+            /*) candidate="$link" ;;
+            *) directory="${candidate%/*}"; candidate="$directory/$link" ;;
+        esac
+    done
+    [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+    directory="$(cd -P "$(dirname "$candidate")" 2>/dev/null && pwd -P)" || return 1
+    base="$(basename "$candidate")"
+    if [ "$directory" = / ]; then
+        MENU_CLI_CANONICAL="/$base"
+    else
+        MENU_CLI_CANONICAL="$directory/$base"
+    fi
+    [ -f "$MENU_CLI_CANONICAL" ] && [ -x "$MENU_CLI_CANONICAL" ]
+}
+
+append_menu_cli_candidate() {
+    local candidate="$1" existing duplicate=0 resolved
+    if canonical_menu_cli_candidate "$candidate"; then
+        resolved="$MENU_CLI_CANONICAL"
+        for existing in "${MENU_CLI_CANDIDATES[@]}"; do
+            if [ "$existing" = "$resolved" ]; then
+                duplicate=1
+                break
+            fi
+        done
+        if [ "$duplicate" = 0 ]; then
+            MENU_CLI_CANDIDATES+=("$resolved")
+        fi
+    fi
+    return 0
+}
+
+resolve_menu_cli_candidate() {
+    local goos="$1" selected_override remaining component more
+    MENU_CLI_CANONICAL=""
+    MENU_CLI_CANDIDATES=()
+    MENU_CLI_UNAVAILABLE_REASON=""
+
+    # Match dev-tailscale-cli.sh's override precedence. A nonempty invalid
+    # override fails closed instead of falling through to PATH or the other var.
+    selected_override="${HERDR_DEV_TAILSCALE_CLI_BIN:-${HERDR_TAILSCALE_CLI_BIN:-}}"
+    if [ -n "$selected_override" ]; then
+        case "$selected_override" in
+            /*) ;;
+            *)
+                MENU_CLI_UNAVAILABLE_REASON="The selected Tailscale CLI override must be an absolute executable regular file."
+                return 1
+                ;;
+        esac
+        if ! canonical_menu_cli_candidate "$selected_override"; then
+            MENU_CLI_UNAVAILABLE_REASON="The selected Tailscale CLI override must be an absolute executable regular file."
+            return 1
+        fi
+        MENU_CLI_CANDIDATES=("$MENU_CLI_CANONICAL")
+        return 0
+    fi
+
+    remaining="${PATH:-}"
+    while :; do
+        case "$remaining" in
+            *:*) component="${remaining%%:*}"; remaining="${remaining#*:}"; more=true ;;
+            *) component="$remaining"; more=false ;;
+        esac
+        # filepath.SplitList candidates are accepted only from absolute PATH
+        # directories; empty and relative entries do not resolve a binary.
+        case "$component" in /*) append_menu_cli_candidate "$component/tailscale" ;; esac
+        [ "$more" = true ] || break
+    done
+    if [ "$goos" = Darwin ]; then
+        append_menu_cli_candidate /Applications/Tailscale.app/Contents/MacOS/Tailscale
+    fi
+    case "${#MENU_CLI_CANDIDATES[@]}" in
+        0)
+            MENU_CLI_UNAVAILABLE_REASON="No executable Tailscale CLI candidate was found in absolute PATH entries or the Darwin App Store fallback."
+            return 1
+            ;;
+        1)
+            MENU_CLI_CANONICAL="${MENU_CLI_CANDIDATES[0]}"
+            return 0
+            ;;
+        *)
+            MENU_CLI_UNAVAILABLE_REASON="Multiple distinct executable CLI candidates were found; set an absolute HERDR_DEV_TAILSCALE_CLI_BIN or HERDR_TAILSCALE_CLI_BIN override."
+            return 1
+            ;;
+    esac
+}
+
 # Choose before building or opening the tunnel: managed Serve has its own
 # private root and consent gate and must never inherit this path's .dev state.
 case "${HERDR_DEV_TRANSPORT:-}" in
@@ -96,6 +199,9 @@ if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
                 option2_unavailable_reason="Could not read the App Store bundle version; CLI-backed development requires the supported 1.102.4 profile."
             fi
         fi
+    fi
+    if [ -z "$option2_unavailable_reason" ] && ! resolve_menu_cli_candidate "$menu_os"; then
+        option2_unavailable_reason="$MENU_CLI_UNAVAILABLE_REASON"
     fi
     echo "Development transport:"
     echo "  1. Temporary Cloudflare tunnel — quick public URL + QR; no Tailscale needed (or use a saved gateway)."

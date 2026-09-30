@@ -145,8 +145,13 @@ that incompatibility knowable from files. Option 2 is available only on
 macOS/arm64 with a locally detected App Store bundle whose readable version is
 1.102.4; a missing or unreadable bundle, another version, or an unsupported
 platform marks it unavailable. Enter still picks option 1. Menu checks read
-local files and platform metadata only; they never run Tailscale. Choosing
-option 2 still requires its explicit opt-in and route-consent gates.
+local files and platform metadata only; they never run Tailscale. Option 2 is
+also unavailable when filesystem-only CLI resolution finds no executable or
+multiple distinct canonical candidates. Duplicate symlinks are deduplicated;
+distinct executables, including wrappers, remain ambiguous unless an explicit
+absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or `HERDR_TAILSCALE_CLI_BIN` override is
+provided. Invalid overrides fail closed. Choosing option 2 still requires its
+explicit opt-in and route-consent gates.
 
 A separate CLI-backed foreground development entrypoint is available as
 `make dev-tailscale-cli`; it is not part of setup or an installed service. Only

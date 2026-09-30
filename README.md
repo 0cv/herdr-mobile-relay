@@ -68,8 +68,13 @@ found locally, option 3 is marked unavailable. Option 2 is available only on
 macOS/arm64 when a local App Store bundle with a readable 1.102.4 version is
 detected; missing, unreadable, or different-version bundles and unsupported
 platforms mark it unavailable. Menu checks read local files and platform
-metadata only; they never run Tailscale. Selecting option 2 still follows its
-explicit consent and route-confirmation gates. See
+metadata only; they never run Tailscale. Option 2 is also unavailable when
+filesystem-only CLI resolution finds no executable or multiple distinct
+canonical candidates; duplicate symlinks are deduplicated, while distinct
+executables (including wrappers) remain ambiguous. An explicit absolute
+`HERDR_DEV_TAILSCALE_CLI_BIN` or `HERDR_TAILSCALE_CLI_BIN` override selects one
+candidate, and an invalid override fails closed. Selecting option 2 still
+follows its explicit consent and route-confirmation gates. See
 [development](docs/development.md#running-from-a-checkout) for requirements and
 [Transports](docs/transports.md#managed-tailscale-serve) for the separate
 lifecycle and platform limits.

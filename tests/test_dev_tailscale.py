@@ -71,6 +71,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         "HERDR_DEV_TAILSCALE_HTTPS_PORT": "18443",
     })
     for name in ("HERDR_RELAY_ENV", "HERDR_PLUGIN_CONFIG_DIR", "GH_TOKEN",
+                 "HERDR_DEV_TAILSCALE_CLI_BIN", "HERDR_TAILSCALE_CLI_BIN",
                  "HERDR_DEV_TAILSCALE_CLI_PORT", "HERDR_DEV_TAILSCALE_CLI_PLUGIN_PORT",
                  "HERDR_DEV_TAILSCALE_CLI_HTTPS_PORT"):
         env.pop(name, None)
@@ -127,11 +128,16 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                 ):
                     if value not in stdout + stderr:
                         raise AssertionError(f"{case}: default not selected: {value!r}")
-            if case == "app_store_supported_version_keeps_cli_option_available":
+            if case in {
+                "app_store_supported_version_keeps_cli_option_available",
+                "duplicate_symlinks_to_one_cli_candidate_are_deduplicated",
+                "development_override_precedes_legacy_and_path_candidates",
+                "legacy_override_is_used_when_development_override_is_empty",
+            }:
                 output = stdout + stderr
-                if (b"2. CLI-backed Tailscale Serve" not in output or
-                    b"[UNAVAILABLE: Only the App Store Tailscale 1.102.4 profile" in output):
-                    raise AssertionError(f"{case}: supported profile was incorrectly marked unavailable: {output!r}")
+                option2_lines = [line for line in output.splitlines() if b"2. CLI-backed Tailscale Serve" in line]
+                if len(option2_lines) != 1 or b"[UNAVAILABLE:" in option2_lines[0]:
+                    raise AssertionError(f"{case}: option 2 was incorrectly marked unavailable: {output!r}")
             if sentinel.exists() or (dev / "relay.env").exists() or (base / "unused-tunnel").exists():
                 raise AssertionError(f"{case}: touched a CLI or dev state before consent")
             print(f"PASS dev-tailscale preflight: {case}")
@@ -185,7 +191,9 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     menu_cli = menu_cli_dir / "tailscale"
     menu_cli.write_text(f"#!/bin/sh\nprintf invoked >> '{sentinel}'\nexit 97\n", encoding="utf-8")
     menu_cli.chmod(0o700)
-    menu_uname = menu_cli_dir / "uname"
+    menu_tools_dir = home / "menu-tools"
+    menu_tools_dir.mkdir(mode=0o700)
+    menu_uname = menu_tools_dir / "uname"
     menu_uname.write_text(
         "#!/bin/sh\n"
         "case \"$1\" in\n"
@@ -196,7 +204,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         encoding="utf-8",
     )
     menu_uname.chmod(0o700)
-    menu_plutil = menu_cli_dir / "plutil"
+    menu_plutil = menu_tools_dir / "plutil"
     menu_plutil.write_text(
         "#!/bin/sh\n"
         "test \"$1\" = -extract && test \"$2\" = CFBundleShortVersionString && "
@@ -205,13 +213,29 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         encoding="utf-8",
     )
     menu_plutil.chmod(0o700)
+    for utility in ("readlink", "dirname", "basename", "sed"):
+        (menu_tools_dir / utility).symlink_to(f"/usr/bin/{utility}")
+    app_store_cli = app_store_bundle / "Contents" / "MacOS" / "Tailscale"
+    app_store_cli.parent.mkdir(mode=0o700, parents=True)
+    app_store_cli.write_text(f"#!/bin/sh\nprintf invoked >> '{sentinel}'\nexit 97\n", encoding="utf-8")
+    app_store_cli.chmod(0o700)
     receipt.unlink()
     app_store_settings = {
         "HERDR_DEV_TAILSCALE_CLI_BIN": str(menu_cli),
         "HERDR_DEV_TAILSCALE_CLI_RELAY_BIN": str(cli_relay),
         "ACTIVATION_CHECK_RECORD": str(activation_record),
-        "PATH": f"{menu_cli_dir}:/usr/bin:/bin",
+        "HERDR_TEST_UNAME_S": "Darwin",
+        "HERDR_TEST_UNAME_M": "arm64",
+        "PATH": f"{menu_tools_dir}:{menu_cli_dir}:/usr/bin:/bin",
     }
+
+    def menu_settings_for_path(path: str, **overrides: str) -> dict[str, str]:
+        settings = dict(app_store_settings)
+        settings.pop("HERDR_DEV_TAILSCALE_CLI_BIN", None)
+        settings["HERDR_TAILSCALE_CLI_BIN"] = ""
+        settings["PATH"] = path
+        settings.update(overrides)
+        return settings
     interactive_refused(
         "app_store_missing_marks_cli_mode_unavailable", tunnel_script, b"2\n",
         b"No App Store Tailscale bundle was detected", **app_store_settings,
@@ -250,6 +274,102 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         '</dict></plist>\n',
         encoding="utf-8",
     )
+    def write_menu_cli(path: Path) -> None:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/sh\nprintf invoked >> '{sentinel}'\nexit 97\n", encoding="utf-8")
+        path.chmod(0o700)
+
+    app_store_path_dir = home / "app-store-cli-path"
+    app_store_path_dir.mkdir(mode=0o700)
+    (app_store_path_dir / "tailscale").symlink_to(app_store_cli)
+    # The executable text stand-in is a distinct resolver candidate, not a
+    # symlink whose contents the menu could inspect or execute.
+    distinct_path_dir = home / "distinct-cli-path"
+    distinct_path_cli = distinct_path_dir / "tailscale"
+    write_menu_cli(distinct_path_cli)
+    two_path_a_dir = home / "two-path-a"
+    two_path_b_dir = home / "two-path-b"
+    two_path_a = two_path_a_dir / "tailscale"
+    two_path_b = two_path_b_dir / "tailscale"
+    write_menu_cli(two_path_a)
+    write_menu_cli(two_path_b)
+    shared_path_cli = home / "shared-cli" / "tailscale"
+    write_menu_cli(shared_path_cli)
+    duplicate_a_dir = home / "duplicate-path-a"
+    duplicate_b_dir = home / "duplicate-path-b"
+    duplicate_a_dir.mkdir(mode=0o700)
+    duplicate_b_dir.mkdir(mode=0o700)
+    (duplicate_a_dir / "tailscale").symlink_to(shared_path_cli)
+    (duplicate_b_dir / "tailscale").symlink_to(shared_path_cli)
+    relative_path_dir = base / "relative-path-cli"
+    relative_path_cli = relative_path_dir / "tailscale"
+    write_menu_cli(relative_path_cli)
+    relative_path_entry = os.path.relpath(relative_path_dir, root)
+    noexec_cli = home / "noexec-cli"
+    noexec_cli.write_text("not executable\n", encoding="utf-8")
+    noexec_cli.chmod(0o600)
+    menu_system_path = str(menu_tools_dir)
+    two_candidate_path = f"{two_path_a_dir}:{two_path_b_dir}:{menu_system_path}"
+    activation_before_candidate_menu = activation_record.read_bytes() if activation_record.exists() else None
+    interactive_refused(
+        "supported_bundle_plus_distinct_path_cli_marks_option2_unavailable", tunnel_script, b"2\n",
+        b"Option 2 unavailable: Multiple distinct executable CLI candidates",
+        **menu_settings_for_path(f"{app_store_path_dir}:{distinct_path_dir}:{menu_system_path}"),
+    )
+    interactive_refused(
+        "two_distinct_path_candidates_mark_option2_unavailable", tunnel_script, b"2\n",
+        b"Option 2 unavailable: Multiple distinct executable CLI candidates",
+        **menu_settings_for_path(two_candidate_path),
+    )
+    interactive_refused(
+        "duplicate_symlinks_to_one_cli_candidate_are_deduplicated", tunnel_script, b"4\n",
+        b"Choose 1, 2, or 3.",
+        **menu_settings_for_path(f"{duplicate_a_dir}:{duplicate_b_dir}:{menu_system_path}"),
+    )
+    interactive_refused(
+        "relative_path_candidate_is_ignored", tunnel_script, b"2\n",
+        b"Option 2 unavailable: No executable Tailscale CLI candidate",
+        **menu_settings_for_path(f"{relative_path_entry}:{menu_system_path}"),
+    )
+    interactive_refused(
+        "development_override_precedes_legacy_and_path_candidates", tunnel_script, b"4\n",
+        b"Choose 1, 2, or 3.",
+        **menu_settings_for_path(
+            two_candidate_path,
+            HERDR_DEV_TAILSCALE_CLI_BIN=str(two_path_a),
+            HERDR_TAILSCALE_CLI_BIN=str(two_path_b),
+        ),
+    )
+    interactive_refused(
+        "legacy_override_is_used_when_development_override_is_empty", tunnel_script, b"4\n",
+        b"Choose 1, 2, or 3.",
+        **menu_settings_for_path(
+            two_candidate_path,
+            HERDR_DEV_TAILSCALE_CLI_BIN="",
+            HERDR_TAILSCALE_CLI_BIN=str(two_path_b),
+        ),
+    )
+    interactive_refused(
+        "invalid_development_override_does_not_fall_back", tunnel_script, b"2\n",
+        b"Option 2 unavailable: The selected Tailscale CLI override must be an absolute executable regular file",
+        **menu_settings_for_path(
+            two_candidate_path,
+            HERDR_DEV_TAILSCALE_CLI_BIN="relative/tailscale",
+            HERDR_TAILSCALE_CLI_BIN=str(two_path_a),
+        ),
+    )
+    interactive_refused(
+        "invalid_legacy_override_does_not_fall_back_to_path", tunnel_script, b"2\n",
+        b"Option 2 unavailable: The selected Tailscale CLI override must be an absolute executable regular file",
+        **menu_settings_for_path(
+            f"{distinct_path_dir}:{menu_system_path}",
+            HERDR_DEV_TAILSCALE_CLI_BIN="",
+            HERDR_TAILSCALE_CLI_BIN=str(noexec_cli),
+        ),
+    )
+    activation_after_candidate_menu = activation_record.read_bytes() if activation_record.exists() else None
+    if activation_after_candidate_menu != activation_before_candidate_menu:
+        raise AssertionError("menu candidate detection dispatched CLI activation checks")
     interactive_refused(
         "app_store_supported_version_still_requires_explicit_opt_in", tunnel_script, b"2\nn\n",
         b"Cancelled; nothing was started.", **app_store_settings,
