@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Name the exact failed assertion; bare checks otherwise fail without output.
+trap 'echo "test_plugin_build.sh: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../relay/common.sh
@@ -508,12 +510,10 @@ exit 97
 EOF
 cat > "$CLI_UPDATE_MANAGER" <<'EOF'
 #!/bin/sh
-if [ "${1:-}" = json-field ]; then
-    [ "${2:-}" = string ] || exit 1
-    case "${3:-}" in status|release_version|revision|bundle_hash) ;; *) exit 1 ;; esac
-    sed -n "s/.*\"${3}\":\"\\([^\"]*\\)\".*/\\1/p"
-    exit 0
-fi
+# Strict JSON parsing and exact readiness verification use the compiled relay.
+case "${1:-}" in
+    json-field|verify-readiness) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
+esac
 printf '%s\n' "$*" >> "$CLI_UPDATE_MANAGER_RECORD"
 case "$*" in
     'tailscale-cli activation-check') exit 0 ;;

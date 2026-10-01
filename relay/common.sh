@@ -2029,7 +2029,12 @@ report_inventory_failure() {
 
 verify_public_readiness() {
     local env_file="$1" health="$2"
-    local config hostname public attempt binary
+    local config hostname public attempt binary transport
+    # Only the Cloudflare transport publishes through CLOUDFLARED_CONFIG. A
+    # retained tunnel config must not gate another transport; CLI-backed Serve
+    # callers verify their exact journaled route separately.
+    transport="$(relay_transport_mode "$env_file")" || return 1
+    [ "$transport" = cloudflare ] || return 0
     [ -z "$(gateway_urls "$env_file")" ] || return 0
     config="$(env_file_value "$env_file" CLOUDFLARED_CONFIG)"
     [ -n "$config" ] || return 0
