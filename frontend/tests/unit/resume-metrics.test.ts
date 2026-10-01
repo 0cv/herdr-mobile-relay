@@ -438,6 +438,30 @@ describe('local resume metrics', () => {
     expect(summary.groups[0]).toMatchObject({ valid_attempts: 0, abandoned: 1 });
   });
 
+  it('cancels a removed relay sample and drops every callback after clearing', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    metrics.phase('relay-a', generation, 'dial', 'websocket');
+    metrics.removed('relay-a');
+    expect(only(metrics)).toMatchObject({ outcome: 'removed', doneAt: null });
+    // A removed relay's late callbacks are ignored.
+    metrics.phase('relay-a', generation, 'open', 'websocket');
+    metrics.inventory('relay-a', generation, true);
+    time.renderFrames();
+    expect(only(metrics).phases).toEqual({ dial: 0 });
+    expect(summarizeResume(metrics.snapshot()).groups[0]).toMatchObject({ valid_attempts: 0, abandoned: 1 });
+
+    const next = metrics.attempt('relay-b', false);
+    metrics.clear();
+    metrics.phase('relay-b', next, 'dial', 'websocket');
+    metrics.inventory('relay-b', next, true);
+    time.renderFrames();
+    expect(metrics.snapshot()).toHaveLength(0);
+    expect(summarizeResume([])).toMatchObject({ epochs: 0, samples: 0, groups: [] });
+  });
+
   it('marks a discarded page and never reports unobservable phases as measured', () => {
     const time = fakeClock({ discarded: true });
     const metrics = new ResumeMetrics(time.clock, true);

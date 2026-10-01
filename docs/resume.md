@@ -74,7 +74,10 @@ Device unlock is recorded separately (`requestedAt`, `unlockedAt`,
 `failedAt`), so the export reports unlock-inclusive time and
 transport-eligible time (from the unlock) apart. Network events are hints
 (`navigator.onLine` at the wake, first `online`/`offline`/`change` offsets);
-none of them gates anything.
+none of them gates anything. Time to observed reachability is the `open` of
+the attempt that served the sample (phases restart with each path dial, so
+failed dials cannot contribute one), or `probe-answer` on a reused
+connection.
 
 The **direct WebRTC upgrade** has its own timeline per sample (`dial`,
 `offer`, `answer`, `ice-connected`, `open`, the E2EE phases, `promotedAt`,
@@ -291,9 +294,66 @@ p95 criterion without first reducing its non-completions.
 
 ## Pilot baseline results
 
-Pending the first hosted pilot run on this branch. The results will be
-recorded here with the run ID, SHA and measured web build, and labelled as a
-pilot: variance and workload estimates, not p95 acceptance.
+**Pilot only: variance and workload estimates under scripted synthetic
+conditions. This is not p95 acceptance and supports no performance claim.**
+
+Source: `check` run 36940357170, job *Resume benchmark pilot*, on commit
+`005065acaafcebfd86be7c8e2024625cdb6cc9b3`, measuring the shipped `web/`
+build `bc5f856f0c96e0c9007ec2f701cfefe00d5d53eb998a09b58dfdf0467a95afb5`
+(later commits that change only documentation or tests ship the same build,
+and each hosted run repeats the pilot on its own commit). Preregistration
+SHA-256 `9d9b1dc4be9920869ca9ef946ccb2cb2cf8cb4009216986fa5d3495f3154cbe0`;
+Chromium 151.0.7922.34 and WebKit 26.5 under Node v22.23.3 on a hosted Linux
+runner; 10.7 minutes. 480 attempted epochs (16 strata × 30), all valid, no
+harness exclusions or replacements; no hidden-time dials or bytes in any
+stratum. All 24 negative-control trials (4 controls × 3 trials × 2 browsers)
+were safe.
+
+| Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 20 (18–22) | 29 (26–30) | 0 / 0 | 1,170 | 0.27 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 67 (54–79) | 98 (87–103) | 1 / 1 | 3,398 | 0.32 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,042 (2,074–3,072) | 5,104 (5,034–5,105) | 1 / 1 | 3,398 | 0.35 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 139 (125–141) | 191 (161–227) | 1 / 1 | 3,539 | 0.20 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 21 (16–26) | 32 (30–36) | 0 / 0 | 771 | 0.35 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 103 (84–117) | 149 (135–153) | 1 / 1 | 2,533 | 0.36 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,056 (2,097–3,148) | 5,125 (5,097–5,145) | 1 / 1 | 2,676 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 143 (134–161) | 198 (181–229) | 1 / 1 | 2,795 | 0.22 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 34 (31–37) | 50 (43–210) | 0 / 0 | 1,170 | 0.37 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 100 (86–103) | 131 (116–131) | 1 / 1 | 3,503 | 0.21 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,069 (2,099–3,110) | 5,117 (5,076–5,130) | 1 / 1 | 3,782 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 185 (168–201) | 249 (216–266) | 1 / 1 | 3,388 | 0.17 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (33–39) | 49 (46–52) | 0 / 0 | 771 | 0.19 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 116 (101–131) | 148 (147–164) | 1 / 1 | 2,561 | 0.23 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,084 (2,147–3,112) | 5,120 (5,084–5,129) | 1 / 1 | 2,860 | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 198 (183–201) | 247 (231–248) | 1 / 1 | 2,742 | 0.14 |
+
+Reading it as a pilot:
+
+- Under these scripts every attempted epoch completed in time, but 30
+  attempts without a failure only bound the failure rate below about 11.4%
+  (two-sided Wilson). Planning a reliability comparison at that pessimistic
+  rate needs about 15,800 pairs for one target; at an assumed 0% it is
+  precision-limited to at least 381 pairs (family of two) or 498 (four). A
+  confirmatory design must state which assumption it uses, or first run a
+  larger pilot.
+- A nearest-rank p95 of 30 values is essentially the second-largest value, so
+  the p95 intervals are coarse; the log-time SDs (0.14–0.40) are the variance
+  inputs for planning latency precision.
+- `blackhole-restore` is dominated by the scripted conditions: the 2-second
+  foreground probe timeout, then a dial that waits for restoration and the
+  1/3 s SYN retransmission steps. `hidden-5m` redials at once because five
+  minutes of silence exceed the keepalive freshness bound, so it skips the
+  probe. `warm-short` reuses the connection with no dial or handshake.
+- Synthetic fixture latency, emulated suspension and headless browsers make
+  these figures unsuitable for comparison with phones or real networks.
+
+An earlier run (36938672837 on `da19f2591c0f90a1c102833004acdc1ef0cf139d`)
+exposed two harness defects, both fixed before the run above and recorded here
+so its numbers are not reused: every `discard` epoch was a harness error
+because the reload landed on the bootstrap redirect, and killing sockets after
+advancing the frozen clock let an in-flight reply mark a dead path as recently
+active, which put a 2-second probe timeout into some `hidden-5m` epochs.
 
 ## Limits of this evidence
 
