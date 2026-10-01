@@ -602,6 +602,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         f"HERDR_TAILSCALE_CLI_STATE_ROOT={custom_dev_state}\n",
         encoding="utf-8",
     )
+    (custom_dev_root / "relay.env").chmod(0o600)
     custom_marker = custom_dev_root / ".herdr-dev-tailscale-cli"
     custom_marker.write_text(
         "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
