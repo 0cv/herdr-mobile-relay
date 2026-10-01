@@ -110,6 +110,13 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     --revision "$EXPECTED_REVISION" \
     "$RELEASE_DIR" >/dev/null
 
+for WRAPPER in install-service.sh install-systemd-user-service.sh native-install-transaction.sh; do
+    [ -r "$RELEASE_DIR/relay/$WRAPPER" ] || {
+        echo "release is missing service installation file: relay/$WRAPPER" >&2
+        exit 1
+    }
+done
+
 bash "$RELEASE_DIR/relay/pi-commands.sh" install "$WORK_DIR/pi-agent" >/dev/null
 cmp "$RELEASE_DIR/relay/pi-command-bridge/bridge.mjs" \
     "$WORK_DIR/pi-agent/extensions/herdr-mobile-relay-commands/bridge.mjs"
