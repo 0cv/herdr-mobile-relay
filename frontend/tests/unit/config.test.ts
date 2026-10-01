@@ -346,10 +346,12 @@ describe('ordered gateway lists', () => {
   // HERDR_GATEWAY_URL="wss://primary.example, wss://backup.example/". The two
   // sides encode and split the list independently, so this pins the seam.
   it('parses the fragment the relay actually emits', () => {
-    const setup = quickSetupConfig(setupLink(
-      'label=cv&setup=2435028f051dfa73447b2e2b185c3ca4'
-      + '&gateways=wss%3A%2F%2Fprimary.example,wss%3A%2F%2Fbackup.example',
-    ));
+    const setup = quickSetupConfig({
+      hash: '#label=cv&setup=2435028f051dfa73447b2e2b185c3ca4'
+        + '&gateways=wss%3A%2F%2Fprimary.example,wss%3A%2F%2Fbackup.example',
+      protocol: 'https:',
+      host: 'app.example.com',
+    });
     expect(setup?.transport).toBe('hybrid');
     expect(setup?.gatewayUrl).toBe('wss://primary.example');
     expect(setup?.gatewayUrls).toEqual(['wss://primary.example', 'wss://backup.example']);
