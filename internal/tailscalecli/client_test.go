@@ -2,6 +2,7 @@ package tailscalecli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net"
@@ -821,6 +822,82 @@ func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *tes
 	}
 }
 
+func TestPresentReconciliationRecoversAfterSplitJournalWrite(t *testing.T) {
+	fixture := newFakeCLI(t)
+	fixture.publishErr = errors.New("publication acknowledgement lost")
+	fixture.publishDispatched = true
+	manager := newFixtureManager(t, fixture, "reconcile interrupted present journal")
+	if err := manager.Publish(context.Background(), fixtureRequest(true)); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("ambiguous publish = %v", err)
+	}
+	record, err := manager.readRegistration()
+	if err != nil || record == nil || record.State != StatePublishUncertain {
+		t.Fatalf("pending record = %+v, %v", record, err)
+	}
+	fixture.serve = fixtureRoute
+	report, err := manager.Recover(context.Background(), "development", "install-fixture",
+		"https://herdr.tailnet.ts.net:8443", 8443, 18377)
+	if !errors.Is(err, ErrUncertain) || report.OperationID != record.OperationID {
+		t.Fatalf("present route recovery = %+v, %v", report, err)
+	}
+	consent := fixtureConsent(true)
+	consent.OperationID = report.OperationID
+	consent.ReservationID = report.ReservationAttemptID
+	consent.RecoveryObservation = "present"
+	consent.RecoveryAccepted = true
+	interrupted := errors.New("simulated interruption after reservation journal update")
+	manager.reconcileWriteHook = func() error { return interrupted }
+	if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+		"https://herdr.tailnet.ts.net:8443", 8443, 18377, consent); !errors.Is(err, interrupted) {
+		t.Fatalf("fault injection result = %v", err)
+	}
+	partialRecord, err := manager.readRegistration()
+	if err != nil || partialRecord == nil || partialRecord.State != StatePublishUncertain {
+		t.Fatalf("registration journal after interruption = %+v, %v", partialRecord, err)
+	}
+	partialReservation, err := manager.readBackendReservation(18377)
+	if err != nil || partialReservation == nil || partialReservation.State != StateReconciledPresent || partialReservation.ReservationID != "" {
+		t.Fatalf("reservation journal after interruption = %+v, %v", partialReservation, err)
+	}
+	partialReport, err := manager.Recover(context.Background(), "development", "install-fixture",
+		"https://herdr.tailnet.ts.net:8443", 8443, 18377)
+	if !errors.Is(err, ErrUncertain) || partialReport.OperationID != record.OperationID ||
+		partialReport.ReservationAttemptID != record.ReservationID {
+		t.Fatalf("split-journal recovery report = %+v, %v", partialReport, err)
+	}
+	consent.OperationID = partialReport.OperationID
+	consent.ReservationID = partialReport.ReservationAttemptID
+
+	manager.reconcileWriteHook = nil
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt == 1 {
+			resolvedReport, recoverErr := manager.Recover(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377)
+			if recoverErr == nil || resolvedReport.OperationID != record.OperationID ||
+				resolvedReport.ReservationAttemptID != record.ReservationID {
+				t.Fatalf("completed present reconciliation report = %+v, %v", resolvedReport, recoverErr)
+			}
+			consent.OperationID = resolvedReport.OperationID
+			consent.ReservationID = resolvedReport.ReservationAttemptID
+		}
+		if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+			"https://herdr.tailnet.ts.net:8443", 8443, 18377, consent); err != nil {
+			t.Fatalf("idempotent present reconciliation attempt %d: %v", attempt+1, err)
+		}
+	}
+	resolved, err := manager.readRegistration()
+	if err != nil || resolved == nil || resolved.State != StateReconciledPresent || resolved.MutationAcknowledged {
+		t.Fatalf("resolved registration journal = %+v, %v", resolved, err)
+	}
+	reservation, err := manager.readBackendReservation(18377)
+	if err != nil || reservation == nil || reservation.State != StateReconciledPresent || reservation.ReservationID != "" {
+		t.Fatalf("resolved reservation journal = %+v, %v", reservation, err)
+	}
+	if fixture.mutationCalls() != 1 {
+		t.Fatalf("journal recovery retried Serve mutation: %d calls", fixture.mutationCalls())
+	}
+}
+
 func TestRegisteredMissingRouteRequiresBoundedExplicitRepair(t *testing.T) {
 	fixture := newFakeCLI(t)
 	manager := newFixtureManager(t, fixture, "repair missing route")
@@ -1628,6 +1705,78 @@ func TestTransportSwitchRequiresExactRouteDisposition(t *testing.T) {
 	}
 }
 
+func TestTransportSwitchCommitSerializesWithBackendReservation(t *testing.T) {
+	fixture := newFakeCLI(t)
+	manager := newFixtureManager(t, fixture, "transport switch reservation race")
+	request := fixtureRequest(true)
+	selectionPath := filepath.Join(manager.stateRoot, "transport-selection.env")
+	selectionBefore := []byte("HERDR_RELAY_TRANSPORT=tailscale-cli\n")
+	if err := os.WriteFile(selectionPath, selectionBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager.transportSelectionPath = selectionPath
+	manager.transportSelectionExists = true
+	manager.transportSelectionDigest = sha256.Sum256(selectionBefore)
+	manager.transportSelectionPinned = true
+	switchCallbackEntered := make(chan struct{})
+	commitSwitch := make(chan struct{})
+	switchCommitted := make(chan struct{})
+	switchDone := make(chan error, 1)
+	go func() {
+		switchDone <- WithTransportSwitchLock(manager.stateRoot, manager.coordinationRoot,
+			request.InstallationID, request.BackendPort, func() error {
+				close(switchCallbackEntered)
+				<-commitSwitch
+				if err := writeAtomic(filepath.Dir(selectionPath), filepath.Base(selectionPath),
+					[]byte("HERDR_RELAY_TRANSPORT=cloudflare\n")); err != nil {
+					return err
+				}
+				close(switchCommitted)
+				return nil
+			})
+	}()
+	<-switchCallbackEntered
+
+	reservationBlocked := make(chan struct{})
+	var blockedOnce sync.Once
+	manager.fixtureLockWaitHook = func(name string) {
+		if name == "backend-reservations.lock" {
+			blockedOnce.Do(func() { close(reservationBlocked) })
+		}
+	}
+	reservationDone := make(chan error, 1)
+	go func() {
+		reservationDone <- manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
+			request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID)
+	}()
+	<-reservationBlocked
+	select {
+	case err := <-reservationDone:
+		t.Fatalf("backend reservation completed before transport commit released the shared lock: %v", err)
+	default:
+	}
+	close(commitSwitch)
+	if err := <-switchDone; err != nil {
+		t.Fatalf("transport switch commit: %v", err)
+	}
+	if err := <-reservationDone; !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale setup committed a reservation after transport selection changed: %v", err)
+	}
+	select {
+	case <-switchCommitted:
+	default:
+		t.Fatal("setup observed the new transport before its commit completed")
+	}
+	reservation, err := manager.readBackendReservation(request.BackendPort)
+	if err != nil || reservation != nil {
+		t.Fatalf("stale setup left a backend reservation after transport change: %+v, %v", reservation, err)
+	}
+	if err := CheckTransportSwitch(manager.stateRoot, manager.coordinationRoot,
+		request.InstallationID, request.BackendPort); err != nil {
+		t.Fatalf("transport switch was blocked by a setup that did not commit: %v", err)
+	}
+}
+
 func TestPendingBackendReservationIsReportedAndReleasedOnlyByStoppedAttempt(t *testing.T) {
 	fixture := newFakeCLI(t)
 	manager := newFixtureManager(t, fixture, "stale backend reservation")
@@ -1638,6 +1787,11 @@ func TestPendingBackendReservationIsReportedAndReleasedOnlyByStoppedAttempt(t *t
 	}
 	if err := CheckTransportSwitch(manager.stateRoot, manager.coordinationRoot, request.InstallationID, request.BackendPort); !errors.Is(err, ErrUncertain) {
 		t.Fatalf("transport switch ignored a pending backend claim: %v", err)
+	}
+	commitCalled := false
+	if err := WithTransportSwitchLock(manager.stateRoot, manager.coordinationRoot, request.InstallationID,
+		request.BackendPort, func() error { commitCalled = true; return nil }); !errors.Is(err, ErrUncertain) || commitCalled {
+		t.Fatalf("switch committed with an earlier backend reservation: called=%t err=%v", commitCalled, err)
 	}
 	report, recoverErr := manager.Recover(context.Background(), request.Scope, request.InstallationID,
 		request.Origin, request.HTTPSPort, request.BackendPort)

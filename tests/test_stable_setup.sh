@@ -746,7 +746,33 @@ EOF
     pass "direct stable setup refuses CLI transport before Cloudflare provisioning"
 }
 
-echo "1..18"
+test_teardown_preserves_cli_route_environment() {
+    new_case
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup before CLI teardown guard"; }
+    CONFIG="$("$TEST_RELAY_BIN" stable-state get "$HERDR_STABLE_STATE_FILE" config_path)"
+    [ -f "$CONFIG" ] || fail "wizard-created Cloudflare config is missing before teardown"
+    (
+        # shellcheck source=../relay/common.sh
+        . "$ROOT/relay/common.sh"
+        set_env_value_atomic "$HERDR_RELAY_ENV" HERDR_RELAY_TRANSPORT tailscale-cli
+    )
+    set +e
+    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    STATUS=$?
+    set -e
+    [ "$STATUS" -ne 0 ] || fail "stable teardown must refuse to erase a selected CLI route environment"
+    assert_contains "$OUTPUT" 'Stable Cloudflare teardown is unavailable while Tailscale Serve is selected.'
+    assert_contains "$HERDR_RELAY_ENV" 'HERDR_RELAY_TRANSPORT='
+    [ "$(. "$ROOT/relay/common.sh"; env_file_value "$HERDR_RELAY_ENV" HERDR_RELAY_TRANSPORT)" = tailscale-cli ] ||
+        fail "teardown changed the selected CLI transport"
+    [ -f "$HERDR_RELAY_ENV" ] || fail "teardown erased the CLI route environment"
+    [ -f "$CONFIG" ] || fail "teardown removed the retained recovery config"
+    assert_not_contains "$STUB_LOG" 'cloudflared tunnel delete'
+    pass "stable teardown refuses CLI mode before deleting wizard-created route configuration"
+}
+
+echo "1..19"
 test_success_and_alternate_port
 test_existing_phone_app_origin
 test_deployed_phone_app_origin
@@ -765,3 +791,4 @@ test_separate_readiness_timeouts
 test_teardown_ownership_and_dns_retention
 test_teardown_recovers_uuid_config_by_tunnel_name
 test_cli_transport_refuses_direct_stable_setup
+test_teardown_preserves_cli_route_environment

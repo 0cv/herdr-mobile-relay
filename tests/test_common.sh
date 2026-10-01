@@ -968,9 +968,22 @@ CLI_SWITCH_RELAY="$WORK_DIR/bin/cli-switch-relay"
 mkdir -p "$(dirname "$CLI_SWITCH_RELAY")"
 cat > "$CLI_SWITCH_RELAY" <<'EOF'
 #!/bin/sh
-[ "$1" = tailscale-cli ] && [ "$2" = check-transport-switch ] || exit 97
-printf '%s\n' "$*" >> "$CLI_SWITCH_LOG"
-[ "${CLI_SWITCH_ALLOWED:-}" = 1 ]
+[ "$1" = tailscale-cli ] || exit 97
+case "$2" in
+    check-transport-switch)
+        printf '%s\n' "$*" >> "$CLI_SWITCH_LOG"
+        [ "${CLI_SWITCH_ALLOWED:-}" = 1 ]
+        ;;
+    with-transport-switch-lock)
+        printf '%s\n' "$*" >> "$CLI_SWITCH_LOG"
+        [ "${CLI_SWITCH_ALLOWED:-}" = 1 ] || exit 1
+        while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+        [ "$1" = -- ] || exit 96
+        shift
+        exec "$@"
+        ;;
+    *) exit 97 ;;
+esac
 EOF
 chmod 700 "$CLI_SWITCH_RELAY"
 CLI_SWITCH_BEFORE="$(cat "$CLI_SWITCH_ENV")"
@@ -993,7 +1006,7 @@ if grep -qE '^HERDR_GATEWAY_URL=' "$CLI_SWITCH_ENV"; then
     echo "transport switch left the prior gateway URL behind" >&2
     exit 1
 fi
-grep -q 'tailscale-cli check-transport-switch' "$WORK_DIR/cli-switch.log"
+grep -q 'tailscale-cli with-transport-switch-lock' "$WORK_DIR/cli-switch.log"
 
 # The public BYO-Serve chooser and its direct entrypoint both run the local-only
 # CLI route guard before dispatch, prompt, session creation, or relay config edits.

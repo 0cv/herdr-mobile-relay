@@ -25,6 +25,7 @@ func testRelease(t *testing.T) string {
 		"relay/stable-setup.sh":               "#!/bin/sh\n",
 		"relay/stable-teardown.sh":            "#!/bin/sh\n",
 		"relay/start.sh":                      "#!/bin/sh\n",
+		"relay/transport-switch-locked.sh":    "#!/bin/sh\n",
 	} {
 		path := filepath.Join(root, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

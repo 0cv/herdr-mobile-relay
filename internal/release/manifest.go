@@ -144,6 +144,7 @@ func Verify(root, expectedTarget string) (Manifest, error) {
 		"relay/stable-setup.sh",
 		"relay/stable-teardown.sh",
 		"relay/start.sh",
+		"relay/transport-switch-locked.sh",
 	} {
 		if !listed[required] {
 			return Manifest{}, fmt.Errorf("release manifest is missing %s", required)

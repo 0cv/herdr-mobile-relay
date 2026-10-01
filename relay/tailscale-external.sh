@@ -234,18 +234,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+# The exclusive foreground record blocks competing transport changes. Bind its
+# run ID to this one transport commit; when leaving CLI mode, set_relay_transport
+# holds the shared reservation lock through its route check and config write.
 write_external_session starting || {
-    echo "✗ Another operator-owned HTTPS Serve action acquired the foreground session; no settings were changed." >&2
+    echo "✗ Another operator-owned HTTPS Serve action acquired the foreground session; no relay was started." >&2
     exit 1
 }
-# Persist only the explicit transport/origin choice. Pairing credentials and
-# phone-app origin are untouched. Invitation creation remains deferred in the
-# relay until trusted public HTTPS and the exact release bundle have passed.
-clear_tailscale_selection "$ENV_FILE"
-remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_URL
-remove_env_value_atomic "$ENV_FILE" HERDR_GATEWAY_SELECTION
-unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
-set_env_value_atomic "$ENV_FILE" HERDR_RELAY_TRANSPORT tailscale-external
+export HERDR_CLI_TRANSPORT_SWITCH_SESSION_RUN_ID="$RUN_ID"
+set_relay_transport "$ENV_FILE" tailscale-external || exit 1
+unset HERDR_CLI_TRANSPORT_SWITCH_SESSION_RUN_ID
 set_env_value_atomic "$ENV_FILE" HERDR_EXTERNAL_HTTPS_ORIGIN "$ORIGIN"
 export HERDR_RELAY_ENV="$ENV_FILE"
 export HERDR_RELAY_TRANSPORT=tailscale-external

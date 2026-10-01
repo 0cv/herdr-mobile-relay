@@ -88,6 +88,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         tailscale-external.sh \
         tailscale-cli.sh \
         tailscale-cli-service.sh \
+        transport-switch-locked.sh \
         uninstall.sh \
         uninstall-service.sh \
         uninstall-systemd-user-service.sh; do

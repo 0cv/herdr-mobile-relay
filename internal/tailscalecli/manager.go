@@ -162,17 +162,23 @@ type RecoveryReport struct {
 }
 
 type Manager struct {
-	stateRoot              string
-	coordinationRoot       string
-	developmentRoot        string
-	developmentHTTPSPort   int
-	developmentBackendPort int
-	developmentPluginPort  int
-	developmentIsolation   *developmentIsolation
-	client                 *Client
-	fixtureDevelopment     bool
-	fixtureMutations       bool
-	skipBackendReadiness   bool
+	stateRoot                string
+	coordinationRoot         string
+	developmentRoot          string
+	developmentHTTPSPort     int
+	developmentBackendPort   int
+	developmentPluginPort    int
+	developmentIsolation     *developmentIsolation
+	client                   *Client
+	fixtureDevelopment       bool
+	fixtureMutations         bool
+	skipBackendReadiness     bool
+	fixtureLockWaitHook      func(string)
+	reconcileWriteHook       func() error
+	transportSelectionPath   string
+	transportSelectionExists bool
+	transportSelectionDigest [sha256.Size]byte
+	transportSelectionPinned bool
 }
 
 // NewManager opens an adapter manager over existing private roots. It performs
@@ -199,6 +205,44 @@ func NewManager(stateRoot, coordinationRoot string, client *Client) (*Manager, e
 // backend while a registration or backend reservation can still own it; it
 // never resolves or contacts a Tailscale executable.
 func CheckTransportSwitch(stateRoot, coordinationRoot, installationID string, backendPort int) error {
+	coordinationPath, coordinationExists, err := optionalPrivateDirectory(coordinationRoot)
+	if err != nil {
+		return err
+	}
+	if !coordinationExists {
+		return checkTransportSwitchUnlocked(stateRoot, coordinationRoot, installationID, backendPort)
+	}
+	manager := &Manager{coordinationRoot: coordinationPath}
+	return manager.withBackendReservationLock(context.Background(), func() error {
+		return checkTransportSwitchUnlocked(stateRoot, coordinationPath, installationID, backendPort)
+	})
+}
+
+// WithTransportSwitchLock runs the local switch check and its configuration
+// commit under the same shared lock used by CLI backend reservation creation.
+// The callback must complete the persistent transport selection before it
+// returns; it must not invoke another operation that takes this lock.
+func WithTransportSwitchLock(stateRoot, coordinationRoot, installationID string, backendPort int, commit func() error) error {
+	if !validLabel(installationID) || backendPort < 1 || backendPort > 65535 || commit == nil {
+		return ErrConflict
+	}
+	coordinationPath, coordinationExists, err := optionalPrivateDirectory(coordinationRoot)
+	if err != nil {
+		return err
+	}
+	if !coordinationExists {
+		return ErrUncertain
+	}
+	manager := &Manager{coordinationRoot: coordinationPath}
+	return manager.withBackendReservationLock(context.Background(), func() error {
+		if err := checkTransportSwitchUnlocked(stateRoot, coordinationPath, installationID, backendPort); err != nil {
+			return err
+		}
+		return commit()
+	})
+}
+
+func checkTransportSwitchUnlocked(stateRoot, coordinationRoot, installationID string, backendPort int) error {
 	if !validLabel(installationID) || backendPort < 1 || backendPort > 65535 {
 		return ErrConflict
 	}
@@ -248,6 +292,26 @@ func CheckTransportSwitch(stateRoot, coordinationRoot, installationID string, ba
 	return nil
 }
 
+func privateFileDigest(path string) (bool, [sha256.Size]byte, error) {
+	var empty [sha256.Size]byte
+	if path == "" {
+		return false, empty, nil
+	}
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return false, empty, nil
+	} else if err != nil {
+		return false, empty, ErrPermissionDenied
+	}
+	if err := requirePrivateFile(path, 0o600); err != nil {
+		return false, empty, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) > developmentEnvironmentMaxBytes {
+		return false, empty, ErrPermissionDenied
+	}
+	return true, sha256.Sum256(data), nil
+}
+
 func optionalPrivateDirectory(path string) (string, bool, error) {
 	if !filepath.IsAbs(path) {
 		return "", false, ErrPermissionDenied
@@ -269,7 +333,8 @@ func optionalPrivateDirectory(path string) (string, bool, error) {
 // ReserveBackendPort durably claims a local backend port before setup starts
 // the relay listener. Reservations live in the shared per-user coordination
 // root until the exact route is explicitly unpublished or setup proves no
-// route was published and releases its own reservation.
+// route was published and releases its own reservation. A pinned production
+// environment snapshot prevents stale setup from following a transport switch.
 func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope, nodeID, origin string, httpsPort, backendPort int, reservationID string) error {
 	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		return err
@@ -296,6 +361,15 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 		return err
 	}
 	return m.withBackendReservationLock(ctx, func() error {
+		if m.transportSelectionPinned {
+			exists, digest, err := privateFileDigest(m.transportSelectionPath)
+			if err != nil {
+				return err
+			}
+			if exists != m.transportSelectionExists || digest != m.transportSelectionDigest {
+				return fmt.Errorf("%w: relay transport selection changed during CLI setup", ErrConflict)
+			}
+		}
 		record, err := m.readRegistration()
 		if err != nil {
 			return err
@@ -731,6 +805,9 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		report.ReservationAttemptID = reservation.ReservationID
 		report.ReservationState = reservation.State
 		report.ReservationBackendPort = reservation.BackendPort
+		if reservation.State == StateReconciledPresent && reservation.ReservationID == "" && record != nil {
+			report.ReservationAttemptID = record.ReservationID
+		}
 	}
 	inspection, err := m.client.Inspect(ctx)
 	if err != nil {
@@ -815,6 +892,7 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 	listenerPresent := hasRouteAtPort(inspection.Serve, record.HTTPSPort)
 	if record.State == StatePublishPending || record.State == StatePublishUncertain ||
 		record.State == StateRemovePending || record.State == StateRemoveUncertain ||
+		record.State == StateReconciledPresent ||
 		(record.State == StateRegistered && !matching && !listenerPresent) || record.State == StateReconciledAbsent {
 		report.OperationID = record.OperationID
 	}
@@ -895,7 +973,8 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 		return err
 	}
 	if record == nil || (record.State != StatePublishPending && record.State != StatePublishUncertain &&
-		record.State != StateRemovePending && record.State != StateRemoveUncertain) {
+		record.State != StateRemovePending && record.State != StateRemoveUncertain &&
+		!(record.State == StateReconciledPresent && consent.RecoveryObservation == "present")) {
 		return ErrUncertain
 	}
 	if record.Scope != scope || record.InstallationID != installationID || record.HTTPSPort != httpsPort ||
@@ -904,6 +983,10 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 	}
 	if err := validateRecoveryConsent(consent, *record, origin); err != nil {
 		return err
+	}
+	if (record.State == StatePublishPending || record.State == StatePublishUncertain || record.State == StateReconciledPresent) &&
+		consent.ReservationID != record.ReservationID {
+		return ErrConflict
 	}
 	if !m.skipBackendReadiness {
 		if err := requireBackendListenerStopped(record.BackendPort); err != nil {
@@ -956,20 +1039,33 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 			}
 			reservation, err := m.readBackendReservation(record.BackendPort)
 			if err != nil || reservation == nil || !sameBackendReservation(*reservation,
-				reservationForRegistration(*record, record.State)) || reservation.ReservationID != consent.ReservationID {
+				reservationForRegistration(*record, record.State)) {
 				return ErrUncertain
 			}
-			switch record.State {
-			case StatePublishPending, StatePublishUncertain:
-				if reservation.State != StatePublishPending {
+			if record.State == StateReconciledPresent {
+				if consent.RecoveryObservation != "present" || reservation.State != StateReconciledPresent || reservation.ReservationID != "" {
 					return ErrUncertain
 				}
-			case StateRemovePending, StateRemoveUncertain:
-				if reservation.State != StateRegistered {
+			} else {
+				expectedReservationState := StatePublishPending
+				switch record.State {
+				case StatePublishPending, StatePublishUncertain:
+					expectedReservationState = StatePublishPending
+				case StateRemovePending, StateRemoveUncertain:
+					expectedReservationState = StateRegistered
+				default:
 					return ErrUncertain
 				}
-			default:
-				return ErrUncertain
+				sourceStateMatches := reservation.State == expectedReservationState &&
+					reservation.ReservationID == consent.ReservationID
+				// Reconcile writes the shared reservation before the registration
+				// journal. If interrupted between those writes, permit an exact,
+				// operation-bound retry to finish the same present observation.
+				splitPresentWrite := consent.RecoveryObservation == "present" &&
+					reservation.State == StateReconciledPresent && reservation.ReservationID == ""
+				if !sourceStateMatches && !splitPresentWrite {
+					return ErrUncertain
+				}
 			}
 			resolved := *record
 			resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -980,6 +1076,11 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 				resolved.MutationAcknowledged = false
 				if err := m.writeBackendReservation(reservationForRegistration(resolved, StateReconciledPresent)); err != nil {
 					return err
+				}
+				if m.fixtureMutations && m.reconcileWriteHook != nil {
+					if err := m.reconcileWriteHook(); err != nil {
+						return err
+					}
 				}
 			case "absent":
 				resolved.State = StateReconciledAbsent
@@ -1731,6 +1832,9 @@ func (m *Manager) withCoordinationLock(ctx context.Context, name string, operati
 		}
 		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN && err != syscall.EINTR {
 			return ErrPermissionDenied
+		}
+		if m.fixtureMutations && m.fixtureLockWaitHook != nil {
+			m.fixtureLockWaitHook(name)
 		}
 		if !time.Now().Before(deadline) {
 			return ErrUncertain

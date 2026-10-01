@@ -220,7 +220,14 @@ silently choose. Route removal delegates to the existing explicit consent and
 exact-route procedure, and failed removal leaves the service installed. The
 installed unit/plist environment path is inspected read-only so the prompt binds
 to the correct relay configuration. A retained route and its journal remain in
-place. An unresolved previous route blocks repurposing its backend.
+place. An unresolved previous route blocks repurposing its backend. The local
+transport-switch check and relay-environment commit share the same private
+`backend-reservations.lock` used for setup's backend claim: a prior reservation
+blocks the switch, and a concurrent reservation cannot be written between the
+check and the transport commit. A setup workflow pins the private production
+relay-environment snapshot; if the switch wins the lock first, that stale setup
+refuses its later reservation instead of continuing under the new selection.
+This coordination is filesystem-only and does not contact Tailscale.
 
 Start the app backend loopback-only and keep application/WebSocket admission and
 pairing closed until the verified HTTPS origin, current instance/run/transport/

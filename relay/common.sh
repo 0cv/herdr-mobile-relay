@@ -1239,6 +1239,26 @@ tailscale_cli_transport_switch_safe() {
     }
 }
 
+tailscale_cli_transport_switch_with_commit() {
+    local env_file="$1"
+    local mode="$2"
+    local binary state_root coordination_root installation_id backend_port state_home helper_dir
+
+    binary="$(relay_binary)" || return 1
+    state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+    state_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_STATE_ROOT)"
+    coordination_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_COORDINATION_ROOT)"
+    installation_id="$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)"
+    backend_port="$(env_file_value "$env_file" HERDR_RELAY_PORT)"
+    state_root="${state_root:-$state_home/herdr-mobile-relay/tailscale-cli-registration}"
+    coordination_root="${coordination_root:-$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination}"
+    case "$backend_port" in ''|*[!0-9]*) echo "✗ Cannot change transport without a valid CLI backend port." >&2; return 1 ;; esac
+    helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+    "$binary" tailscale-cli with-transport-switch-lock --state-root "$state_root" \
+        --coordination-root "$coordination_root" --installation-id "$installation_id" \
+        --backend-port "$backend_port" -- "${BASH:-bash}" "$helper_dir/transport-switch-locked.sh" "$env_file" "$mode"
+}
+
 set_relay_transport() {
     local env_file="$1"
     local mode="$2"
@@ -1249,8 +1269,21 @@ set_relay_transport() {
         *) echo "✗ Invalid relay transport: $mode" >&2; return 1 ;;
     esac
     current_mode="$( (unset HERDR_TAILSCALE_REQUEST; relay_transport_mode "$env_file") )"
-    if [ "$current_mode" = tailscale-cli ] && [ "$mode" != tailscale-cli ]; then
-        tailscale_cli_transport_switch_safe "$env_file" || return 1
+    if [ "$current_mode" = tailscale-cli ] && [ "$mode" != tailscale-cli ] &&
+        [ "${HERDR_CLI_TRANSPORT_SWITCH_LOCKED:-}" != 1 ]; then
+        if ! tailscale_cli_transport_switch_with_commit "$env_file" "$mode"; then
+            echo "✗ The CLI Serve route or backend reservation changed during transport selection; no transport switch was committed." >&2
+            return 1
+        fi
+        if [ "$mode" != tailscale ]; then
+            unset HERDR_TAILSCALE_ORIGIN HERDR_RELAY_PAIRING_SOCKET HERDR_RELAY_RUN_ID
+            unset HERDR_TAILSCALE_HTTPS_PORT HERDR_EXTERNAL_HTTPS_ORIGIN HERDR_RELAY_CONTROL_RUN_ID
+        fi
+        if [ "$mode" = cloudflare ] || [ "$mode" = tailscale-external ]; then
+            unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
+        fi
+        export HERDR_RELAY_TRANSPORT="$mode"
+        return 0
     fi
     if [ "$mode" != tailscale ] && [ -e "$(tailscale_session_file "$env_file")" ]; then
         echo "✗ Cannot change transport while a foreground Tailscale session is recorded." >&2
@@ -1258,9 +1291,15 @@ set_relay_transport() {
         return 1
     fi
     if [ -e "$(tailscale_external_session_file "$env_file")" ]; then
-        echo "✗ Cannot change transport while an operator-owned HTTPS Serve relay is running." >&2
-        echo "  Stop that foreground pane before changing transport." >&2
-        return 1
+        local external_session="$(tailscale_external_session_file "$env_file")"
+        local switch_session_run_id="${HERDR_CLI_TRANSPORT_SWITCH_SESSION_RUN_ID:-}"
+        if [ "$mode" != tailscale-external ] || [ -z "$switch_session_run_id" ] ||
+            [ ! -f "$external_session" ] || [ -L "$external_session" ] ||
+            [ "$(env_file_value "$external_session" HERDR_RELAY_CONTROL_RUN_ID)" != "$switch_session_run_id" ]; then
+            echo "✗ Cannot change transport while an operator-owned HTTPS Serve relay is running." >&2
+            echo "  Stop that foreground pane before changing transport." >&2
+            return 1
+        fi
     fi
     if [ "$mode" != tailscale ]; then
         clear_tailscale_selection "$env_file"

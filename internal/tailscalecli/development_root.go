@@ -70,7 +70,9 @@ func PreflightDevelopmentWorkflow(ctx context.Context, developmentRoot, stateRoo
 
 // NewDevelopmentWorkflow validates the Go-owned isolated development layout
 // before read-only CLI preflight, then retains the manager in this process. The
-// manager repeats the layout and fixed-tuple checks before real operations. This
+// manager pins the production relay-environment snapshot so a transport switch
+// during setup invalidates a stale backend reservation attempt. It also repeats
+// the layout and fixed-tuple checks before real operations. This
 // is not a privilege boundary against deliberate same-user fabrication.
 func NewDevelopmentWorkflow(ctx context.Context, developmentRoot, stateRoot, coordinationRoot, binary string) (*DevelopmentWorkflow, PreflightReport, error) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
@@ -115,6 +117,9 @@ func newDevelopmentWorkflowWithIsolation(ctx context.Context, developmentRoot, s
 		if isolation == nil {
 			return nil, PreflightReport{}, ErrWorkflowRequired
 		}
+		if err := isolation.captureProductionEnvironmentSnapshot(); err != nil {
+			return nil, PreflightReport{}, err
+		}
 		if err := isolation.validate(false, false); err != nil {
 			return nil, PreflightReport{}, err
 		}
@@ -132,6 +137,12 @@ func newDevelopmentWorkflowWithIsolation(ctx context.Context, developmentRoot, s
 		return nil, preflight, err
 	}
 	manager.developmentIsolation = isolation
+	if isolation != nil && isolation.productionEnvSnapshotSet {
+		manager.transportSelectionPath = isolation.productionEnvFile
+		manager.transportSelectionExists = isolation.productionEnvSnapshotExists
+		manager.transportSelectionDigest = isolation.productionEnvSnapshotDigest
+		manager.transportSelectionPinned = true
+	}
 	manager.fixtureMutations = fixture
 	return &DevelopmentWorkflow{manager: manager, preflight: preflight}, preflight, nil
 }

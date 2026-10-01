@@ -50,6 +50,49 @@ func TestActivationScopeKeepsProductionDisabledAndDevelopmentExplicit(t *testing
 	}
 }
 
+func TestTransportSwitchLockRunsConfigCommitOnlyAfterLocalGuard(t *testing.T) {
+	base := t.TempDir()
+	stateRoot := filepath.Join(base, "registration")
+	coordinationRoot := filepath.Join(base, "coordination")
+	for _, root := range []string{stateRoot, coordinationRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(base, "transport-committed")
+	commit := filepath.Join(base, "commit.sh")
+	if err := os.WriteFile(commit, []byte("#!/bin/sh\nprintf committed > \"$TRANSPORT_COMMIT_MARKER\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TRANSPORT_COMMIT_MARKER", marker)
+	args := []string{
+		"with-transport-switch-lock", "--state-root", stateRoot,
+		"--coordination-root", coordinationRoot, "--installation-id", "install-fixture",
+		"--backend-port", "18377", "--", commit,
+	}
+	var stdout, stderr bytes.Buffer
+	code, err := runTailscaleCLIWithInput(args, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 || err != nil {
+		t.Fatalf("guarded transport commit = code %d err=%v stderr=%q", code, err, stderr.String())
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "committed" {
+		t.Fatalf("successful local guard did not run commit callback: %q, %v", data, err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateRoot, "registration.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, err = runTailscaleCLIWithInput(args, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 || err == nil {
+		t.Fatal("transport commit ignored a malformed local registration journal")
+	}
+	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("commit callback ran after local guard refusal: %v", err)
+	}
+}
+
 func TestStandaloneManagerOperationsRequireWorkflowBeforeCLIUse(t *testing.T) {
 	base := t.TempDir()
 	sentinel := filepath.Join(base, "cli-invoked")

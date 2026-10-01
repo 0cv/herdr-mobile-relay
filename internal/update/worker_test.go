@@ -458,6 +458,7 @@ func writeWorkerTestRelease(t *testing.T, root, version, revision string) {
 		"relay/stable-setup.sh",
 		"relay/stable-teardown.sh",
 		"relay/start.sh",
+		"relay/transport-switch-locked.sh",
 	}
 	for _, name := range files {
 		filename := filepath.Join(root, filepath.FromSlash(name))

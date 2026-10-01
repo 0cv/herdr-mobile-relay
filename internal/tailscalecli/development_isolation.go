@@ -2,6 +2,7 @@ package tailscalecli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
@@ -27,6 +28,10 @@ type developmentIsolation struct {
 	webRoot, relayBinary, pairingSocket   string
 	pairingRuntimeBase, pairingRuntimeDir string
 	herdrBinary, herdrSocket              string
+	productionEnvFile                     string
+	productionEnvSnapshotExists           bool
+	productionEnvSnapshotDigest           [sha256.Size]byte
+	productionEnvSnapshotSet              bool
 }
 
 // ValidateDevelopmentOperationEnvironment rechecks the complete Go-owned
@@ -418,6 +423,7 @@ func (d *developmentIsolation) validateProductionSeparation() error {
 		}
 	}
 
+	d.productionEnvFile = productionEnv
 	productionValues := map[string]string{}
 	if productionEnv != "" {
 		if sameAbsolutePath(productionEnv, d.relayEnv) || pathsOverlap(canonicalMaybeMissing(productionEnv), d.root) {
@@ -500,6 +506,28 @@ func (d *developmentIsolation) validateProductionSeparation() error {
 		return ErrPermissionDenied
 	}
 	return nil
+}
+
+func (d *developmentIsolation) captureProductionEnvironmentSnapshot() error {
+	capture := func() error {
+		exists, digest, err := privateFileDigest(d.productionEnvFile)
+		if err != nil {
+			return err
+		}
+		d.productionEnvSnapshotExists = exists
+		d.productionEnvSnapshotDigest = digest
+		d.productionEnvSnapshotSet = true
+		return nil
+	}
+	coordination, exists, err := optionalPrivateDirectory(d.coordination)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return capture()
+	}
+	manager := &Manager{coordinationRoot: coordination}
+	return manager.withBackendReservationLock(context.Background(), capture)
 }
 
 func productionEnvironmentPath(home string) (envPath, servicePath string, err error) {
