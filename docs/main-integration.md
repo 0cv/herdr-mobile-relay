@@ -151,6 +151,11 @@ fixture that had not yet run on the merged tree. Corrections:
   unrepaired. `systemd_quoted` and `require_user_service_context` (also on
   the launchd rollback path) now return explicit statuses, with a shell
   regression that calls both from a failing `EXIT` trap.
+- Main's installer hint for an inventory protocol mismatch read `error_code`
+  with a lenient text accessor, but the relay nests it under `inventory`, so
+  the branch's strict top-level accessor dropped the "Run: herdr server
+  live-handoff" guidance. The advisory now confirms a strict relay health
+  document and then matches the exact nested code token; it changes no state.
 - Main's Cloudflare public `/readyz` gate ran for any transport that kept a
   `CLOUDFLARED_CONFIG`, including CLI-backed Serve, whose exact route is
   verified separately. It now applies only to the Cloudflare transport.
@@ -197,8 +202,9 @@ every other run), `36918051269`, `36919194468`, `36920097604` and
 identified the trap-status cause) and `36922541123` (plugin build passed; the
 development menu fixture's controlled PATH lacked Bash for main's portable
 `#!/usr/bin/env bash` entrypoints, so the fixture now links the resolved Bash
-beside its tool stand-ins). Review readiness requires both workflows green on
-the exact submitted SHA.
+beside its tool stand-ins) and `36923446618` (every shell fixture through the
+speech wrapper passed; stable setup lost the nested live-handoff hint). Review
+readiness requires both workflows green on the exact submitted SHA.
 
 Mobile harness/device jobs remain intentionally disabled; this checkpoint
 makes no real-daemon, physical-phone or production qualification claim.
