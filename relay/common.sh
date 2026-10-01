@@ -1291,7 +1291,8 @@ set_relay_transport() {
         return 1
     fi
     if [ -e "$(tailscale_external_session_file "$env_file")" ]; then
-        local external_session="$(tailscale_external_session_file "$env_file")"
+        local external_session
+        external_session="$(tailscale_external_session_file "$env_file")"
         local switch_session_run_id="${HERDR_CLI_TRANSPORT_SWITCH_SESSION_RUN_ID:-}"
         if [ "$mode" != tailscale-external ] || [ -z "$switch_session_run_id" ] ||
             [ ! -f "$external_session" ] || [ -L "$external_session" ] ||
