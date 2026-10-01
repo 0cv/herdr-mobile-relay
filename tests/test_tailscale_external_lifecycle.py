@@ -863,7 +863,14 @@ sleep() {
             PHASE = "first_foreground_start"
             first, first_output = start_launcher(root, env, active)
             PHASE = "first_setup_output_contract"
-            if b"operator-owned HTTPS Serve" not in first_output or b"This link pairs one phone" not in first_output:
+            corrected_expiry_notice = (
+                b"Expired bootstrap links renew on retry before first pairing; "
+                b"additional-device invitations expire 10 minutes after issue."
+            )
+            if (
+                b"operator-owned HTTPS Serve" not in first_output
+                or corrected_expiry_notice not in first_output
+            ):
                 fail("candidate did not print its operator-owned verified setup link")
             PHASE = "first_tailscale_cli_refusal"
             if sentinel.exists():
