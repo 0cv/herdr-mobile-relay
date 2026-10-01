@@ -1645,7 +1645,7 @@ if [ "$1" = managed-state ] && [ "$2" = hold ] && [ "$3" = --dir ] &&
 fi
 case "$1" in
     version) printf '%s\n' '{"version":"9.9.9","revision":"test-revision"}'; exit 0 ;;
-    verify-readiness) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
+    verify-readiness|json-field) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
 esac
 printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1

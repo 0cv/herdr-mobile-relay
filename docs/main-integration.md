@@ -136,6 +136,13 @@ main's Pi bridge test starts Node subprocesses, but the branch's closed PATH
 omitted the hosted Node directory. The follow-up keeps the closed environment
 and adds that explicitly resolved tool directory. This historical run remains
 failed; only fresh exact-fix-SHA hosted evidence can verify the repair.
+Run `36914151602` verified the Pi/install/credential shell cases progressed,
+then exposed a composed start fixture missing the branch's `json-field`
+dispatch: main's readiness helper could not parse the fixture manifest through
+that selected relay. Start/plugin relay fixtures now delegate both scalar
+parsing and readiness verification to the compiled merged relay helper. No
+readiness assertions or behavioral cases were removed. This run also remains
+historically failed pending fresh exact-SHA verification.
 
 Mobile harness/device jobs remain intentionally disabled; this checkpoint
 makes no real-daemon, physical-phone or production qualification claim.
