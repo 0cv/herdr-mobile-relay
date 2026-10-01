@@ -600,11 +600,17 @@ func reconcileDevelopmentRoute(ctx context.Context, workflow *tailscalecli.Devel
 	case "selected-listener-absent":
 		observation = "absent"
 	}
+	publishOperation := report.Route.JournalState == tailscalecli.StatePublishPending ||
+		report.Route.JournalState == tailscalecli.StatePublishUncertain
+	removeOperation := report.Route.JournalState == tailscalecli.StateRemovePending ||
+		report.Route.JournalState == tailscalecli.StateRemoveUncertain
+	splitPresentWrite := observation == "present" && report.ReservationState == tailscalecli.StateReconciledPresent &&
+		((publishOperation && report.ReservationAttemptID != "") || (removeOperation && report.ReservationAttemptID == ""))
 	reservationMatches := false
-	if report.Route.JournalState == tailscalecli.StatePublishPending || report.Route.JournalState == tailscalecli.StatePublishUncertain {
-		reservationMatches = report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != ""
-	} else {
-		reservationMatches = report.ReservationState == tailscalecli.StateRegistered && report.ReservationAttemptID == ""
+	if publishOperation {
+		reservationMatches = (report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != "") || splitPresentWrite
+	} else if removeOperation {
+		reservationMatches = (report.ReservationState == tailscalecli.StateRegistered && report.ReservationAttemptID == "") || splitPresentWrite
 	}
 	if !pending || !reservationMatches || report.OperationID == "" || observation == "" {
 		return 1, errors.New("reconciliation requires one unambiguous route observation and its exact backend reservation")

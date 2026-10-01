@@ -73,6 +73,31 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		}
 	})
 
+	for _, journalState := range []tailscalecli.RegistrationState{
+		tailscalecli.StatePublishUncertain,
+		tailscalecli.StateRemoveUncertain,
+	} {
+		journalState := journalState
+		t.Run("reconcile-present-split-"+string(journalState), func(t *testing.T) {
+			fixture := newDevelopmentCommandFixture(t)
+			seedDevelopmentRouteJournal(t, fixture, journalState, true)
+			markReservationReconciledPresent(t, fixture)
+			reservationID := ""
+			if journalState == tailscalecli.StatePublishUncertain {
+				reservationID = reviewReservationID
+			}
+			confirmation := fmt.Sprintf("RECONCILE DEVELOPMENT ROUTE operation=%s reservation=%s observed=present node=node-fixture origin=%s https-port=8443 backend=127.0.0.1:18377",
+				reviewOperationID, reservationID, reviewOrigin)
+			code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "reconcile"}, confirmation+"\n")
+			if err != nil || code != 0 {
+				t.Fatalf("public reconciliation after split present write returned code=%d err=%v\nstderr=%s", code, err, stderr)
+			}
+			assertReconciledState(t, fixture, tailscalecli.StateReconciledPresent, true)
+			assertReservationState(t, fixture, tailscalecli.StateReconciledPresent, "")
+			assertNoRouteMutationCalls(t, fixture)
+		})
+	}
+
 	t.Run("reconcile-absent-lost-remove-ack", func(t *testing.T) {
 		fixture := newDevelopmentCommandFixture(t)
 		seedDevelopmentRouteJournal(t, fixture, tailscalecli.StateRemoveUncertain, false)
@@ -825,6 +850,26 @@ func seedDevelopmentRouteJournal(t *testing.T, fixture *developmentCommandFixtur
 		t.Fatal(err)
 	}
 	writeCommandFixtureFile(t, filepath.Join(fixture.coordination, "backend-port-18377.json"), string(reservationData)+"\n", 0o600)
+}
+
+func markReservationReconciledPresent(t *testing.T, fixture *developmentCommandFixture) {
+	t.Helper()
+	path := filepath.Join(fixture.coordination, "backend-port-18377.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pending backend reservation: %v", err)
+	}
+	var reservation map[string]any
+	if err := json.Unmarshal(data, &reservation); err != nil {
+		t.Fatalf("decode pending backend reservation: %v", err)
+	}
+	reservation["state"] = tailscalecli.StateReconciledPresent
+	delete(reservation, "reservation_id")
+	data, err = json.Marshal(reservation)
+	if err != nil {
+		t.Fatalf("encode split backend reservation: %v", err)
+	}
+	writeCommandFixtureFile(t, path, string(data)+"\n", 0o600)
 }
 
 func developmentJournalOperationID(t *testing.T, fixture *developmentCommandFixture) string {

@@ -183,10 +183,14 @@ absent may be followed only by a fresh consented publication. A disappeared
 registered route is degraded and is not automatically recreated. The public
 `dev-tailscale-cli reconcile` action records only an operation-ID-bound,
 unambiguous exact-present or listener-absent observation for a pending/uncertain
-journal; it never dispatches a Serve command. `repair-missing` is a separate
-foreground action for an acknowledged or previously reconciled-absent
-registration, requires a complete fresh absence check and an exact typed
-confirmation bound to both the route tuple and prior operation, then performs
+journal; it never dispatches a Serve command. If a crash leaves the shared
+reservation at `reconciled-present` while the registration remains pending or
+uncertain, the public action can resume only an operation-bound present
+observation after fresh readback; it never retries a Serve mutation.
+`repair-missing` is a separate foreground action for an acknowledged or
+previously reconciled-absent registration. It requires a complete fresh absence
+check and an exact typed confirmation bound to both the route tuple and prior
+operation, then performs
 one fresh publication and readback. `abandon-missing` requires the foreground
 relay stopped, the backend listener stopped, and fresh proof that neither the
 selected listener nor any route to the backend exists; it records
