@@ -575,7 +575,18 @@ func TestBrowserPreparationReportsQuotaFailureAndSupportsExplicitRetry(t *testin
 	// may complete before ReadPage returns, so accept either preparing or the
 	// already-ready result and then require the final ready page.
 	browser.options.SnapshotQuota = 1024 * 1024
-	retry, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1, Retry: true})
+	// The failed worker publishes its failure before it releases the job, so an
+	// explicit retry in that window still reports the failure. Reissue only the
+	// explicit retry until the released job accepts it.
+	var retry BrowsePage
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		retry, err = browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1, Retry: true})
+		if err != nil || retry.State != BrowseFailed || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if err != nil || (retry.State != BrowsePreparing && retry.State != BrowseReady) {
 		t.Fatalf("explicit retry page = %#v, err = %v", retry, err)
 	}

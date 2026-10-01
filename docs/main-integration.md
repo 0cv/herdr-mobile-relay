@@ -156,6 +156,11 @@ fixture that had not yet run on the merged tree. Corrections:
   the branch's strict top-level accessor dropped the "Run: herdr server
   live-handoff" guidance. The advisory now confirms a strict relay health
   document and then matches the exact nested code token; it changes no state.
+- The conversation browser publishes a failed preparation before its worker
+  releases the job, so an explicit retry in that window still reports the
+  failure. Main's quota-retry test, already adapted on the branch, flaked under
+  `-race` in that window; it now reissues only the explicit retry until the
+  released job accepts it, then still requires a successful ready page.
 - Main's Cloudflare public `/readyz` gate ran for any transport that kept a
   `CLOUDFLARED_CONFIG`, including CLI-backed Serve, whose exact route is
   verified separately. It now applies only to the Cloudflare transport.
@@ -203,8 +208,11 @@ identified the trap-status cause) and `36922541123` (plugin build passed; the
 development menu fixture's controlled PATH lacked Bash for main's portable
 `#!/usr/bin/env bash` entrypoints, so the fixture now links the resolved Bash
 beside its tool stand-ins) and `36923446618` (every shell fixture through the
-speech wrapper passed; stable setup lost the nested live-handoff hint). Review
-readiness requires both workflows green on the exact submitted SHA.
+speech wrapper passed; stable setup lost the nested live-handoff hint).
+Ordinary run `36924614243` and native run `36924613528` were then green on
+`ffa128f9`. The documentation-only successor `a5f04183` failed only its race
+job (`36924668070`) in the conversation retry window above. Review readiness
+requires both workflows green on the exact submitted SHA.
 
 Mobile harness/device jobs remain intentionally disabled; this checkpoint
 makes no real-daemon, physical-phone or production qualification claim.
