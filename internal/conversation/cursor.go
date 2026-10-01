@@ -47,9 +47,8 @@ func findCursorSession(roots []string, project ProjectContext, sessionID string)
 	rels := cursorTranscriptRels(sessionID)
 	candidates := projectDirectoriesForContext(project)
 
-	// Try direct folder-name lookup first (fastest path).
-	seenSlug := make(map[string]bool)
 	for _, root := range roots {
+		seenSlug := make(map[string]bool)
 		for _, cwd := range candidates {
 			slug := cursorProjectSlug(cwd)
 			if slug == "" || seenSlug[slug] {
@@ -60,19 +59,13 @@ func findCursorSession(roots []string, project ProjectContext, sessionID string)
 				return location
 			}
 		}
-	}
 
-	// Fall back to .workspace-trusted discovery if folder name didn't match.
-	for _, root := range roots {
 		for _, cwd := range candidates {
 			if location := findCursorByWorkspaceTrusted(root, cwd, rels); location.Path != "" {
 				return location
 			}
 		}
-	}
 
-	// Final fallback: scan all projects by UUID.
-	for _, root := range roots {
 		for _, rel := range rels {
 			if location := scanCursorSession(root, rel); location.Path != "" {
 				return location
@@ -244,7 +237,6 @@ func normalizeCursorTimestamp(raw string) string {
 		return ""
 	}
 
-	// Extract timezone offset from parentheses at end: (UTC) or (UTC+2) or (UTC-5:30)
 	offsetStr := ""
 	if idx := strings.LastIndex(raw, "("); idx >= 0 {
 		if end := strings.Index(raw[idx:], ")"); end >= 0 {
@@ -253,57 +245,42 @@ func normalizeCursorTimestamp(raw string) string {
 		}
 	}
 
-	// Parse offset: "UTC", "UTC+2", "UTC-5:30", etc.
-	offsetMinutes := 0
-	if offsetStr != "" && strings.HasPrefix(offsetStr, "UTC") {
-		offset := strings.TrimPrefix(offsetStr, "UTC")
-		if offset != "" {
-			sign := 1
-			if strings.HasPrefix(offset, "-") {
-				sign = -1
-				offset = offset[1:]
-			} else if strings.HasPrefix(offset, "+") {
-				offset = offset[1:]
-			}
-
-			parts := strings.Split(offset, ":")
-			if len(parts) > 0 {
-				if hours, err := strconv.Atoi(parts[0]); err == nil {
-					offsetMinutes = sign * hours * 60
-					if len(parts) > 1 {
-						if mins, err := strconv.Atoi(parts[1]); err == nil {
-							offsetMinutes += sign * mins
-						}
-					}
-				}
-			}
-		}
+	if offsetStr == "" || !strings.HasPrefix(offsetStr, "UTC") {
+		return ""
 	}
 
-	// Parse the date/time portion. Try common layouts.
-	// Example: "Tuesday, Sep 22, 2026, 2:35 PM"
-	layouts := []string{
-		"Monday, Jan 2, 2006, 3:04 PM",
-		"Monday, Jan 02, 2006, 3:04 PM",
-		"Monday, Jan 2, 2006, 15:04",
-		"Monday, Jan 02, 2006, 15:04",
+	offset := strings.TrimPrefix(offsetStr, "UTC")
+	offsetMinutes := 0
+	if offset != "" {
+		sign := 1
+		if strings.HasPrefix(offset, "-") {
+			sign = -1
+			offset = offset[1:]
+		} else if strings.HasPrefix(offset, "+") {
+			offset = offset[1:]
+		}
+
+		parts := strings.Split(offset, ":")
+		hours, errH := strconv.Atoi(parts[0])
+		if errH != nil {
+			return ""
+		}
+		offsetMinutes = sign * hours * 60
+		if len(parts) > 1 {
+			mins, errM := strconv.Atoi(parts[1])
+			if errM != nil {
+				return ""
+			}
+			offsetMinutes += sign * mins
+		}
 	}
 
 	var t time.Time
 	var err error
-	for _, layout := range layouts {
-		if t, err = time.Parse(layout, raw); err == nil {
-			break
-		}
-	}
-
-	if err != nil {
+	if t, err = time.Parse("Monday, Jan 2, 2006, 3:04 PM", raw); err != nil {
 		return ""
 	}
 
-	// Apply the offset by subtracting it (to get UTC)
 	t = t.Add(-time.Duration(offsetMinutes) * time.Minute)
-
-	// Return as RFC 3339 in UTC
 	return t.UTC().Format(time.RFC3339)
 }

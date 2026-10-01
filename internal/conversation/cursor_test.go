@@ -328,3 +328,51 @@ func TestCursorTimestampOnlyFromUserRecords(t *testing.T) {
 		t.Errorf("assistant timestamp: got %q, want empty", page.Entries[1].Timestamp)
 	}
 }
+
+func TestCursorTimestampRejectsUnrecognizedLabels(t *testing.T) {
+	reader, home := testReader(t)
+	t.Setenv(agentroots.CursorListEnv, "")
+	cwd := filepath.Join(home, "unrecognized", "app")
+	slug := cursorProjectSlug(cwd)
+	path := filepath.Join(home, ".cursor", "projects", slug, "agent-transcripts", testSessionID, testSessionID+".jsonl")
+	writeRows(t, path,
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Tuesday, Sep 22, 2026, 2:35 PM (CEST)</timestamp>\n<user_query>cest label</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Wednesday, Oct 15, 2026, 10:30 AM (GMT+2)</timestamp>\n<user_query>gmt label</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Thursday, Nov 5, 2026, 8:15 PM</timestamp>\n<user_query>no suffix</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Friday, Dec 12, 2026, 3:00 PM (UTC+x)</timestamp>\n<user_query>invalid offset</user_query>",
+			},
+		},
+	)
+
+	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Available || page.Total != 4 {
+		t.Fatalf("page = %#v", page)
+	}
+
+	for i, label := range []string{"CEST", "GMT+2", "no suffix", "UTC+x"} {
+		if page.Entries[i].Timestamp != "" {
+			t.Errorf("%s: got %q, want empty", label, page.Entries[i].Timestamp)
+		}
+	}
+}
