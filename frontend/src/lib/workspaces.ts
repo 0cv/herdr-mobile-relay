@@ -261,11 +261,13 @@ export function workspaceGroupTrees(groups: WorkspaceGroup[]): WorkspaceGroupTre
 
 /**
  * The most notable session state in a mixed workspace card, by the
- * done > working > idle precedence.
+ * done > working > ready (idle) precedence. `muted` remains for workspaces
+ * whose sessions report no known state.
  */
-export function workspaceStateTone(group: WorkspaceGroup): 'success' | 'warning' | 'muted' {
+export function workspaceStateTone(group: WorkspaceGroup): 'success' | 'warning' | 'ready' | 'muted' {
   if (group.doneCount) return 'success';
   if (group.workingCount) return 'warning';
+  if (group.readyCount) return 'ready';
   return 'muted';
 }
 

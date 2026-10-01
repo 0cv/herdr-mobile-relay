@@ -483,7 +483,7 @@
         >
           <span class="agent-identity">
             <AgentLogo agent={agent.agent} />
-            <span class={`status-dot status-${tone}`} class:hollow={group === 'ready'} aria-hidden="true"></span>
+            <span class={`status-dot status-${tone}`} aria-hidden="true"></span>
           </span>
           <span class="agent-copy">
             <span class="agent-title-row">
@@ -587,7 +587,9 @@
               role="img"
               aria-label={stateTone === 'success'
                 ? 'Has a done session'
-                : stateTone === 'warning' ? 'Has a working session' : 'All sessions idle'}
+                : stateTone === 'warning'
+                  ? 'Has a working session'
+                  : stateTone === 'ready' ? 'All sessions idle and ready for input' : 'No session state reported'}
             ></span>
           {/if}
           <span class="workspace-card-copy">
@@ -716,7 +718,7 @@
   {#if idleWorkspaces.length}
     <section class="agent-section workspace-section" aria-labelledby="workspace-section-title">
       <h2 id="workspace-section-title" class="section-heading">
-        <span class="status-dot hollow"></span>Idle
+        <span class="status-dot status-ready"></span>Idle
         <span class="section-count" aria-hidden="true">{idleWorkspaces.length}</span>
       </h2>
       {@render workspaceGrid(idleWorkspaces, idleWorkspaces.length === 1, 'idle')}

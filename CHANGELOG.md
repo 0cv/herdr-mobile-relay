@@ -5,12 +5,19 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.4] - 2026-10-01
+
 ### Added
 
-- Read Cursor Agent Conversation History from
-  `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`, locating by
-  pane cwd slug with a UUID scan fallback, and unwrapping Cursor `<user_query>`
-  envelopes for the phone transcript view.
+- Read Cursor Agent conversation history from nested and flat
+  `~/.cursor/projects/<slug>/agent-transcripts` layouts, locating transcripts
+  from the pane workspace and showing user and assistant turns in History.
+
+### Fixed
+
+- Show an idle agent that is ready for input with a green ring instead of the
+  grey reserved for unknown states. A filled green dot still marks a finished
+  turn you have not opened yet.
 
 ## [0.22.3] - 2026-09-30
 
@@ -1602,7 +1609,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...HEAD
+[0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4
 [0.22.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.0...v0.22.1

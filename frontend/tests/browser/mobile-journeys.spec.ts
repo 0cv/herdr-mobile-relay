@@ -804,7 +804,11 @@ test('defaults to the mixed workspace layout and separates state sections on dem
   const card = (project: string) => page.locator('.workspace-card').filter({ hasText: project });
   await expect(card('alpha').getByRole('img', { name: 'Has a done session' })).toBeVisible();
   await expect(card('beta').getByRole('img', { name: 'Has a working session' })).toBeVisible();
-  await expect(card('delta').getByRole('img', { name: 'All sessions idle' })).toBeVisible();
+  await expect(card('delta').getByRole('img', { name: 'All sessions idle and ready for input' })).toBeVisible();
+  // Idle-and-ready reads as a green ring, distinct from the filled unread-done
+  // dot and from the grey used only for unknown states.
+  await expect(card('delta').locator('.workspace-state-dot')).toHaveClass(/status-ready/);
+  await expect(card('alpha').locator('.workspace-state-dot')).toHaveClass(/status-success/);
   await expect(page.locator('.workspace-card summary strong')).toHaveText(['alpha', 'beta', 'delta']);
   // Active workspaces start expanded; idle-only cards stay collapsed.
   await expect(card('alpha')).toHaveAttribute('open', '');
