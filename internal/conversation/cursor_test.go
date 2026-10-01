@@ -25,7 +25,7 @@ func TestCursorConversationReadsAgentTranscripts(t *testing.T) {
 			"message": map[string]any{
 				"content": []any{map[string]any{
 					"type": "text",
-					"text": "<timestamp>Monday</timestamp>\n<user_query>\nship it\n</user_query>",
+					"text": "<timestamp>Tuesday, Sep 22, 2026, 2:35 PM (UTC)</timestamp>\n<user_query>\nship it\n</user_query>",
 				}},
 			},
 		},
@@ -47,7 +47,7 @@ func TestCursorConversationReadsAgentTranscripts(t *testing.T) {
 	if !page.Available || page.Total != 2 || len(page.Entries) != 2 {
 		t.Fatalf("page = %#v", page)
 	}
-	if page.Entries[0].Role != "user" || page.Entries[0].Text != "ship it" || page.Entries[0].Timestamp != "Monday" {
+	if page.Entries[0].Role != "user" || page.Entries[0].Text != "ship it" || page.Entries[0].Timestamp != "2026-09-22T14:35:00Z" {
 		t.Fatalf("user entry = %#v", page.Entries[0])
 	}
 	if page.Entries[1].Role != "assistant" || page.Entries[1].Text != "working" {
@@ -213,5 +213,118 @@ func TestBrowserReadPageIncludesCursorTextTurns(t *testing.T) {
 	}
 	if page.Entries[2].Role != "assistant" || page.Entries[2].Text != "" || len(page.Entries[2].Tools) != 1 {
 		t.Fatalf("entry2 = %#v", page.Entries[2])
+	}
+}
+
+func TestCursorTimestampNormalization(t *testing.T) {
+	reader, home := testReader(t)
+	t.Setenv(agentroots.CursorListEnv, "")
+	cwd := filepath.Join(home, "timestamps", "app")
+	slug := cursorProjectSlug(cwd)
+	path := filepath.Join(home, ".cursor", "projects", slug, "agent-transcripts", testSessionID, testSessionID+".jsonl")
+	writeRows(t, path,
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Tuesday, Sep 22, 2026, 2:35 PM (UTC)</timestamp>\n<user_query>utc</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Wednesday, Oct 15, 2026, 10:30 AM (UTC+5:30)</timestamp>\n<user_query>positive offset</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Thursday, Nov 5, 2026, 8:15 PM (UTC-8)</timestamp>\n<user_query>negative offset</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>not a valid date</timestamp>\n<user_query>malformed</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<user_query>no timestamp</user_query>",
+			},
+		},
+	)
+
+	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Available || page.Total != 5 {
+		t.Fatalf("page = %#v", page)
+	}
+	
+	// UTC timestamp should be preserved as-is
+	if page.Entries[0].Timestamp != "2026-09-22T14:35:00Z" {
+		t.Errorf("UTC: got %q, want %q", page.Entries[0].Timestamp, "2026-09-22T14:35:00Z")
+	}
+	
+	// UTC+5:30 → subtract offset to get UTC
+	if page.Entries[1].Timestamp != "2026-10-15T05:00:00Z" {
+		t.Errorf("UTC+5:30: got %q, want %q", page.Entries[1].Timestamp, "2026-10-15T05:00:00Z")
+	}
+	
+	// UTC-8 → add 8 hours to get UTC
+	if page.Entries[2].Timestamp != "2026-11-06T04:15:00Z" {
+		t.Errorf("UTC-8: got %q, want %q", page.Entries[2].Timestamp, "2026-11-06T04:15:00Z")
+	}
+	
+	// Malformed timestamp should be empty
+	if page.Entries[3].Timestamp != "" {
+		t.Errorf("malformed: got %q, want empty", page.Entries[3].Timestamp)
+	}
+	
+	// No timestamp envelope should be empty
+	if page.Entries[4].Timestamp != "" {
+		t.Errorf("no timestamp: got %q, want empty", page.Entries[4].Timestamp)
+	}
+}
+
+func TestCursorTimestampOnlyFromUserRecords(t *testing.T) {
+	reader, home := testReader(t)
+	t.Setenv(agentroots.CursorListEnv, "")
+	cwd := filepath.Join(home, "timestamp-role", "app")
+	slug := cursorProjectSlug(cwd)
+	path := filepath.Join(home, ".cursor", "projects", slug, "agent-transcripts", testSessionID, testSessionID+".jsonl")
+	writeRows(t, path,
+		map[string]any{
+			"role": "user",
+			"message": map[string]any{
+				"content": "<timestamp>Tuesday, Sep 22, 2026, 2:35 PM (UTC)</timestamp>\n<user_query>user message</user_query>",
+			},
+		},
+		map[string]any{
+			"role": "assistant",
+			"message": map[string]any{
+				"content": "Use <timestamp>Wednesday, Oct 15, 2026, 10:30 AM (UTC)</timestamp> as the deadline.",
+			},
+		},
+	)
+
+	page, err := reader.ReadFor("cursor", cwd, testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Available || page.Total != 2 {
+		t.Fatalf("page = %#v", page)
+	}
+	
+	// User message should have timestamp
+	if page.Entries[0].Timestamp != "2026-09-22T14:35:00Z" {
+		t.Errorf("user timestamp: got %q, want %q", page.Entries[0].Timestamp, "2026-09-22T14:35:00Z")
+	}
+	
+	// Assistant message should NOT extract timestamp from content
+	if page.Entries[1].Timestamp != "" {
+		t.Errorf("assistant timestamp: got %q, want empty", page.Entries[1].Timestamp)
 	}
 }
