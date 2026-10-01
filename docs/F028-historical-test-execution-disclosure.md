@@ -120,3 +120,37 @@ as evidence of prohibited local executions; do not infer permission,
 compliance, a production result, or a current-revision test result from it.
 F028/F010/F013 remain for independent reviewer disposition; this disclosure
 updates the evidence and does not itself close or resolve a finding.
+
+## Additional event disclosure — 2026-10-01
+
+The supervising assistant's transcript extraction records three further local
+runtime-test attempts in the earlier worker run:
+
+| Time (UTC) | Command / test copy | Outcome |
+| --- | --- | --- |
+| `12:52:38Z` | `bash tests/test_common.sh` | Exit status 1. |
+| `12:53:08Z` | `bash -x tests/test_common.sh > /tmp/herdr-test-common-xtrace.log` | Exit status 1. |
+| `12:54:50Z` | Modified copy `tests/.test_common_debug.sh` | Status 1; the copy was deleted afterwards. |
+
+These were prohibited local test executions. The xtrace shows that the test put
+a fake `launchctl` first on `PATH`, so its launchctl calls went to that fake.
+The installed relay service process was observed to have been running since
+`08:58:52Z`, before these attempts, and was not restarted by them. The
+`assert_service_env_matches` path read the real installed-service configuration
+path; the traced operation was read-only. These observations narrow what the
+available evidence supports; they do not establish complete machine-level
+noninterference or make the attempts compliant. No trace contents are copied
+into this repository. The xtrace and debug output were moved to private evidence
+at `/Users/christophe.vidal/.local/state/herdr-review/evidence-r01-r05-local-tests/`;
+the supplied SHA-256 values are `6fb11c117677b6eba4d2afa3fde04b3c772d088b38c1644630083bacf8be161a`
+for the xtrace and `d66cce10e0fe663142d7c40daec6639b41d5d128463786ce6175cab7f7b191a0`
+for the debug output. The available evidence does not include a complete audit
+of subprocesses or all possible side effects.
+
+The same worker run also executed these local frontend static/build commands:
+`bun run check`, `bun run lint`, `bun scripts/bump-assets.mjs`, `bun run build`,
+`bun frontend/scripts/release.mjs`, and `make web-bundle-check`. They regenerated
+the committed `web/` bundle. Under the current task's command allowlist these
+are explicitly permitted frontend static/build steps, not test executions; this
+classification does not alter the disclosure of the three prohibited tests
+above.
