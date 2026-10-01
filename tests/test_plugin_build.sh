@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Name the exact failed assertion; bare checks otherwise fail without output.
-trap 'echo "test_plugin_build.sh: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+# Include the newest fixture-only build output and unit for hosted diagnosis.
+report_failed_assertion() {
+    local newest
+    echo "test_plugin_build.sh: failed at line $1: $2" >&2
+    newest="$(find "${WORK_DIR:-/nonexistent}" -maxdepth 1 -type f \( -name '*output*' -o -name 'cli-update-*' \) \
+        -newer "${WORK_DIR:-/nonexistent}/readiness-helper" -printf '%T@ %p\n' 2>/dev/null |
+        sort -n | tail -n 1 | cut -d' ' -f2-)" || true
+    if [ -n "$newest" ]; then
+        echo "--- newest plugin build output: ${newest##*/}" >&2
+        tail -n 80 "$newest" >&2 || true
+    fi
+    if [ -f "${UNIT_FILE:-}" ]; then
+        echo "--- current fixture unit" >&2
+        cat "$UNIT_FILE" >&2 || true
+    fi
+}
+trap 'report_failed_assertion "$LINENO" "$BASH_COMMAND"' ERR
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../relay/common.sh
