@@ -81,7 +81,8 @@ MENU_APP_STORE_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 # script stays a distinct candidate. The launcher is compared, never run.
 menu_cli_is_app_store_wrapper() {
     # shellcheck disable=SC2016 # The literal "$@" is part of the compared launcher bytes.
-    [ -f "$1" ] && cmp -s "$1" <(printf '#!/bin/sh\n%s "$@"\n' "$MENU_APP_STORE_CLI")
+    [ -f "$1" ] && command -v cmp >/dev/null 2>&1 &&
+        cmp -s "$1" <(printf '#!/bin/sh\n%s "$@"\n' "$MENU_APP_STORE_CLI")
 }
 canonical_menu_cli_candidate() {
     local candidate="$1" link directory base attempt

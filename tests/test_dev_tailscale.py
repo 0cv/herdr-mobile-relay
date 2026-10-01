@@ -337,7 +337,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     exact_wrapper_dir.mkdir(mode=0o700)
     exact_wrapper.write_text(f'#!/bin/sh\n{app_store_cli} "$@"\n', encoding="utf-8")
     exact_wrapper.chmod(0o700)
-    exact_wrapper_path = f"{exact_wrapper_dir}:{menu_system_path}"
+    exact_wrapper_path = f"{exact_wrapper_dir}:{menu_system_path}:/usr/bin:/bin"
     interactive_refused(
         "exact_app_store_install_wrapper_aliases_bundle_in_menu", menu_fixture_script, b"3\n",
         b"Choose 1 or 2.", **menu_settings_for_path(exact_wrapper_path),
