@@ -628,11 +628,14 @@ func reconcileDevelopmentRoute(ctx context.Context, workflow *tailscalecli.Devel
 			(report.ReservationState == tailscalecli.StatePublishPending ||
 				report.ReservationState == tailscalecli.StateReconciledPresent)
 	} else if removeOperation {
-		// Unpublish leaves the source registration's route-holding reservation
-		// (registered, or reconciled-present after a reconciled publication).
-		reservationMatches = report.ReservationAttemptID == "" &&
+		// Current unpublish leaves a route-holding reservation. An older
+		// version could leave the publication's unpromoted pending reservation;
+		// recovering that retained pair also binds the displayed current attempt.
+		routeHolding := report.ReservationAttemptID == "" &&
 			(report.ReservationState == tailscalecli.StateRegistered ||
 				report.ReservationState == tailscalecli.StateReconciledPresent)
+		retainedPendingAttempt := report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != ""
+		reservationMatches = routeHolding || retainedPendingAttempt
 	}
 	if !pending || !reservationMatches || report.OperationID == "" || observation == "" {
 		return 1, errors.New("reconciliation requires one unambiguous route observation and its exact backend reservation")

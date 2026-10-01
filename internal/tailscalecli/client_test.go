@@ -990,6 +990,188 @@ func TestReconciledPresentRemovalUncertaintyIsReconcilable(t *testing.T) {
 	}
 }
 
+func TestRetainedRemovalWithUnpromotedReservationIsReconcilable(t *testing.T) {
+	for _, state := range []RegistrationState{StateRemovePending, StateRemoveUncertain} {
+		for _, tc := range []struct {
+			name        string
+			observation string
+			split       bool
+		}{
+			{name: "absent", observation: "absent"},
+			{name: "present", observation: "present"},
+			{name: "interrupted-present-then-present", observation: "present", split: true},
+			{name: "interrupted-present-then-absent", observation: "absent", split: true},
+		} {
+			t.Run(string(state)+"/"+tc.name, func(t *testing.T) {
+				fixture := newFakeCLI(t)
+				fixture.serve = unrelatedRoute
+				manager := newFixtureManager(t, fixture, "retained removal")
+				request := fixtureRequest(true)
+				if err := manager.Publish(context.Background(), request); err != nil {
+					t.Fatal(err)
+				}
+				record, err := manager.readRegistration()
+				if err != nil || record == nil {
+					t.Fatalf("acknowledged publication = %+v, %v", record, err)
+				}
+				// Model the retained schema-1 pair from an earlier binary: an
+				// acknowledged publication's unpromoted attempt beside a removal
+				// intent, without dispatching any removal in this regression.
+				record.OperationID = "11111111111111111111111111111111"
+				record.State = state
+				record.ConsentScope = removeConsentScope
+				record.MutationAcknowledged = false
+				if err := manager.writeRegistration(*record); err != nil {
+					t.Fatal(err)
+				}
+				reservation := reservationForRegistration(*record, StatePublishPending)
+				reservation.ReservationID = request.ReservationID
+				if err := manager.writeBackendReservation(reservation); err != nil {
+					t.Fatal(err)
+				}
+				if tc.observation == "absent" && !tc.split {
+					fixture.serve = unrelatedRoute
+				}
+				report, recoverErr := manager.Recover(context.Background(), request.Scope, request.InstallationID,
+					request.Origin, request.HTTPSPort, request.BackendPort)
+				if !errors.Is(recoverErr, ErrUncertain) || report.OperationID != record.OperationID ||
+					report.ReservationAttemptID != request.ReservationID || report.ReservationState != StatePublishPending || report.ReservationReleasable {
+					t.Fatalf("retained removal recovery report = %+v, %v", report, recoverErr)
+				}
+				consent := fixtureConsent(true)
+				consent.RecoveryAccepted = true
+				consent.RecoveryObservation = tc.observation
+				consent.OperationID = record.OperationID
+				consent.ReservationID = request.ReservationID
+				reconcile := func(c Consent) error {
+					return manager.Reconcile(context.Background(), request.Scope, request.InstallationID,
+						request.Origin, request.HTTPSPort, request.BackendPort, c)
+				}
+				rejectUnchanged := func(c Consent) {
+					t.Helper()
+					beforeRecord, recordErr := manager.readRegistration()
+					beforeReservation, reservationErr := manager.readBackendReservation(request.BackendPort)
+					if recordErr != nil || reservationErr != nil || beforeRecord == nil || beforeReservation == nil {
+						t.Fatalf("read before refusal: record=%+v err=%v reservation=%+v err=%v", beforeRecord, recordErr, beforeReservation, reservationErr)
+					}
+					if err := reconcile(c); err == nil {
+						t.Fatalf("retained removal accepted unsafe consent/pair: %+v", c)
+					}
+					afterRecord, recordErr := manager.readRegistration()
+					afterReservation, reservationErr := manager.readBackendReservation(request.BackendPort)
+					if recordErr != nil || reservationErr != nil || afterRecord == nil || afterReservation == nil ||
+						*afterRecord != *beforeRecord || *afterReservation != *beforeReservation {
+						t.Fatal("refused recovery changed a retained journal or reservation")
+					}
+				}
+				for _, change := range []func(*Consent){
+					func(c *Consent) { c.RecoveryAccepted = false },
+					func(c *Consent) { c.OperationID = "33333333333333333333333333333333" },
+					func(c *Consent) { c.ReservationID = "33333333333333333333333333333333" },
+					func(c *Consent) { c.ReservationID = "" },
+					func(c *Consent) { c.BackendPort++ },
+				} {
+					wrong := consent
+					change(&wrong)
+					rejectUnchanged(wrong)
+				}
+				for _, change := range []func(*backendPortReservation){
+					func(r *backendPortReservation) { r.InstallationID = "other-installation" },
+					func(r *backendPortReservation) { r.ReservationID = "" },
+					func(r *backendPortReservation) { r.State = StatePublishUncertain },
+				} {
+					wrong := reservation
+					change(&wrong)
+					// Direct atomic fixture seeding permits a conflicting tuple that
+					// the normal reservation writer correctly refuses to overwrite.
+					data, err := json.Marshal(wrong)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := writeAtomic(manager.coordinationRoot, "backend-port-18377.json", data); err != nil {
+						t.Fatal(err)
+					}
+					rejectUnchanged(consent)
+				}
+				data, err := json.Marshal(reservation)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := writeAtomic(manager.coordinationRoot, "backend-port-18377.json", data); err != nil {
+					t.Fatal(err)
+				}
+				conflictingRecord := *record
+				conflictingRecord.ReservationID = "33333333333333333333333333333333"
+				if err := manager.writeRegistration(conflictingRecord); err != nil {
+					t.Fatal(err)
+				}
+				rejectUnchanged(consent)
+				if err := manager.writeRegistration(*record); err != nil {
+					t.Fatal(err)
+				}
+				observedServe := fixture.serve
+				// An absent selected listener is insufficient if any other route
+				// still targets the backend; incomplete exposure also refuses.
+				for _, unsafeServe := range []string{
+					strings.Replace(unrelatedRoute, ":8080", ":18377", 1),
+					`{"UnknownExposure":true}`,
+				} {
+					fixture.serve = unsafeServe
+					rejectUnchanged(consent)
+				}
+				fixture.serve = observedServe
+				if tc.split {
+					present := consent
+					present.RecoveryObservation = "present"
+					interrupted := errors.New("interrupted retained-removal present reconciliation")
+					manager.reconcileWriteHook = func() error { return interrupted }
+					if err := reconcile(present); !errors.Is(err, interrupted) {
+						t.Fatalf("retained removal fault injection = %v", err)
+					}
+					manager.reconcileWriteHook = nil
+					if tc.observation == "absent" {
+						fixture.serve = unrelatedRoute
+					}
+					report, recoverErr = manager.Recover(context.Background(), request.Scope, request.InstallationID,
+						request.Origin, request.HTTPSPort, request.BackendPort)
+					if !errors.Is(recoverErr, ErrUncertain) || report.OperationID != record.OperationID ||
+						report.ReservationAttemptID != "" || report.ReservationState != StateReconciledPresent {
+						t.Fatalf("split retained-removal recovery report = %+v, %v", report, recoverErr)
+					}
+					// The current reservation no longer has a pending attempt; the
+					// superseded confirmation must not authorize the next write.
+					rejectUnchanged(consent)
+					consent.ReservationID = report.ReservationAttemptID
+				}
+				if err := reconcile(consent); err != nil {
+					t.Fatalf("exact retained removal reconciliation: %v", err)
+				}
+				resolved, err := manager.readRegistration()
+				wantState := StateReconciledAbsent
+				if tc.observation == "present" {
+					wantState = StateReconciledPresent
+				}
+				if err != nil || resolved == nil || resolved.State != wantState || resolved.OperationID != record.OperationID ||
+					resolved.MutationAcknowledged || resolved.ReservationID != "" {
+					t.Fatalf("retained removal resolved journal = %+v, %v", resolved, err)
+				}
+				currentReservation, err := manager.readBackendReservation(request.BackendPort)
+				if tc.observation == "absent" {
+					if err != nil || currentReservation != nil || fixture.serve != unrelatedRoute {
+						t.Fatalf("absent recovery retained reservation or changed Serve: %+v, %v, %s", currentReservation, err, fixture.serve)
+					}
+				} else if err != nil || currentReservation == nil || currentReservation.State != StateReconciledPresent ||
+					currentReservation.ReservationID != "" || fixture.serve != unrelatedAndFixtureRoutes {
+					t.Fatalf("present recovery fabricated acknowledgement or changed Serve: %+v, %v, %s", currentReservation, err, fixture.serve)
+				}
+				if fixture.mutationCalls() != 1 {
+					t.Fatalf("retained removal recovery replayed Serve: %d mutations", fixture.mutationCalls())
+				}
+			})
+		}
+	}
+}
+
 func TestClearedUnconfiguredJournalAllowsLaterAttemptRelease(t *testing.T) {
 	fixture := newFakeCLI(t)
 	fixture.publishErr = ErrProfileUnavailable

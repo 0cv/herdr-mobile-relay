@@ -156,7 +156,12 @@ readback. Do not use repair for a pending/uncertain mutation; reconcile it first
 A lost unpublish acknowledgement is reconciled the same way, including after a
 reconciled-present publication: unpublish keeps the shared reservation's
 pre-removal state, so the fresh present or absent observation of the new
-removal operation can be recorded without replaying `off`.
+removal operation can be recorded without replaying `off`. A removal already
+left beside an unpromoted `publish-pending` reservation by an earlier version
+is also recoverable through `reconcile`: confirm both the removal operation and
+the displayed current reservation attempt, not an empty or superseded attempt.
+Fresh identity, tuple, stopped-listener and route checks still apply; the result
+is an unacknowledged observation, never a replayed Serve mutation.
 `abandon-missing` is the stopped-service alternative when the route should not
 be recreated: it requires a free backend listener and complete absence checks,
 then records `reconciled-absent` for a registered or reconciled-present journal

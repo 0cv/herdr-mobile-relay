@@ -192,13 +192,22 @@ Unpublish leaves the shared reservation in its pre-removal route-holding state
 (`registered` after an acknowledged publication, `reconciled-present` after a
 reconciled one) and records the removal as a new operation that is not bound to
 any earlier publication attempt ID. That reservation state is the pre-removal
-attribution: a pending/uncertain removal reconciles only beside a matching
+attribution: a pending/uncertain removal normally reconciles beside a matching
 route-holding reservation, its fresh present observation stays
 `reconciled-present` and unacknowledged, and its fresh absent observation
 records `reconciled-absent` and releases the reservation. If a publication
 receipt was committed but promoting its pending reservation failed, unpublish
 first completes that promotion from the acknowledged receipt (not from the
-observation) under the same locks before dispatching `off`.
+observation) under the same locks before dispatching `off`. Earlier versions
+could already have left a pending/uncertain removal beside the publication's
+unpromoted `publish-pending` reservation. Explicit reconciliation also recovers
+that retained schema-1 pair, binding the removal operation, the exact current
+reservation attempt and route tuple after fresh identity, stopped-listener and
+complete route checks. It records only the confirmed present/absent observation,
+never promotes that reservation to `registered`, fabricates acknowledgement or
+replays Serve. A conflicting journal attempt binding refuses recovery. If present
+reconciliation is interrupted between its two writes, a fresh confirmation binds
+the same removal operation and the now-reconciled reservation (empty attempt ID).
 `repair-missing` is a separate foreground action for an acknowledged or
 previously reconciled-absent registration. It requires a complete fresh absence
 check and an exact typed confirmation bound to both the route tuple and prior

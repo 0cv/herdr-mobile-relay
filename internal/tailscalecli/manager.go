@@ -1123,11 +1123,14 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 					return ErrUncertain
 				}
 			case StateRemovePending, StateRemoveUncertain:
-				// Unpublish leaves the source registration's route-holding
-				// reservation unchanged: registered after an acknowledged
-				// publication or reconciled-present after a reconciled one. That
-				// state is the pre-removal attribution and is never promoted.
-				if !routeHoldingReservation(*reservation) {
+				// Current Unpublish leaves a route-holding reservation. Earlier
+				// versions could remove an acknowledged publication before its
+				// pending reservation was promoted. Recover that retained pair
+				// only with the exact current attempt confirmed above; never infer
+				// an acknowledgement or promote it to registered from observation.
+				retainedPendingAttempt := reservation.State == StatePublishPending && validReservationID(reservation.ReservationID) &&
+					(record.ReservationID == "" || record.ReservationID == reservation.ReservationID)
+				if !routeHoldingReservation(*reservation) && !retainedPendingAttempt {
 					return ErrUncertain
 				}
 			default:

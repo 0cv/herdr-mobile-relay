@@ -451,6 +451,109 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		assertServeMutationCounts(t, fixture, 0, 1)
 	})
 
+	for _, journalState := range []tailscalecli.RegistrationState{tailscalecli.StateRemovePending, tailscalecli.StateRemoveUncertain} {
+		for _, observation := range []string{"absent", "present"} {
+			t.Run("retained-"+string(journalState)+"-with-unpromoted-reservation-reconciles-"+observation, func(t *testing.T) {
+				requireDevelopmentFixturePorts(t)
+				fixture := newDevelopmentCommandFixture(t)
+				serve := reviewUnrelatedRoute
+				if observation == "present" {
+					serve = reviewRouteWithUnrelated
+				}
+				// An earlier binary removed an acknowledged publication before
+				// its pending reservation was promoted, then lost the removal ack.
+				seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+					journal: journalState, reservation: tailscalecli.StatePublishPending,
+					reservationID: reviewReservationID, serve: serve,
+				})
+				code, report := dispatchDevelopmentStatus(t)
+				if code == 0 || report.Route.JournalState != journalState || report.OperationID != reviewOperationID ||
+					report.ReservationAttemptID != reviewReservationID || report.ReservationState != tailscalecli.StatePublishPending ||
+					!report.RequiresOperatorAction || report.ReservationReleasable {
+					t.Fatalf("status for retained removal/pending pair = code %d report %+v", code, report)
+				}
+				journalPath := filepath.Join(fixture.state, "registration.json")
+				reservationPath := filepath.Join(fixture.coordination, "backend-port-18377.json")
+				beforeJournal, err := os.ReadFile(journalPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeReservation, err := os.ReadFile(reservationPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				confirmation := reviewReconcileConfirmation(reviewOperationID, reviewReservationID, observation)
+				for _, wrong := range []string{
+					reviewReconcileConfirmation("33333333333333333333333333333333", reviewReservationID, observation),
+					reviewReconcileConfirmation(reviewOperationID, "33333333333333333333333333333333", observation),
+					reviewReconcileConfirmation(reviewOperationID, "", observation),
+					strings.Replace(confirmation, "observed="+observation, "observed=other", 1),
+					strings.Replace(confirmation, "backend=127.0.0.1:18377", "backend=127.0.0.1:18378", 1),
+				} {
+					code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "reconcile"}, wrong+"\n")
+					if code != 2 || err == nil || !strings.Contains(err.Error(), "route-bound confirmation") {
+						t.Fatalf("wrong retained-pair confirmation returned code=%d err=%v\nstderr=%s", code, err, stderr)
+					}
+					if after, err := os.ReadFile(journalPath); err != nil || string(after) != string(beforeJournal) {
+						t.Fatalf("wrong confirmation changed the removal journal: %v", err)
+					}
+					if after, err := os.ReadFile(reservationPath); err != nil || string(after) != string(beforeReservation) {
+						t.Fatalf("wrong confirmation changed the pending reservation: %v", err)
+					}
+					assertServeFixture(t, fixture, serve)
+					assertNoRouteMutationCalls(t, fixture)
+				}
+				listener, err := net.Listen("tcp", "127.0.0.1:18377")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+				code, _, _, dispatchErr := dispatchMainCommand(t, []string{"dev-tailscale-cli", "reconcile"}, confirmation+"\n")
+				if err := listener.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if code == 0 || dispatchErr == nil {
+					t.Fatal("retained removal reconciled while its backend listener was active")
+				}
+				if after, err := os.ReadFile(journalPath); err != nil || string(after) != string(beforeJournal) {
+					t.Fatalf("active-listener refusal changed the journal: %v", err)
+				}
+				if after, err := os.ReadFile(reservationPath); err != nil || string(after) != string(beforeReservation) {
+					t.Fatalf("active-listener refusal changed the reservation: %v", err)
+				}
+				assertServeFixture(t, fixture, serve)
+				assertNoRouteMutationCalls(t, fixture)
+
+				mustDispatchDevelopmentCommand(t, "reconcile", confirmation)
+				if observation == "present" {
+					assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledPresent, reviewOperationID, "", false)
+					assertReservationState(t, fixture, tailscalecli.StateReconciledPresent, "")
+					assertServeFixture(t, fixture, serve)
+					// An observation does not make the route ready or acknowledged.
+					if code, report := dispatchDevelopmentStatus(t); code == 0 || !report.RequiresOperatorAction ||
+						report.Route.JournalState != tailscalecli.StateReconciledPresent || report.OperationID != reviewOperationID {
+						t.Fatalf("status after present removal reconciliation = code %d report %+v", code, report)
+					}
+					writeCommandFixtureFile(t, fixture.serveFile, reviewUnrelatedRoute+"\n", 0o600)
+					mustDispatchDevelopmentCommand(t, "abandon-missing", reviewAbandonConfirmation(reviewOperationID, ""))
+				}
+				assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledAbsent, reviewOperationID, "", false)
+				assertReservationAbsent(t, fixture)
+				assertServeFixture(t, fixture, reviewUnrelatedRoute)
+				assertNoRouteMutationCalls(t, fixture)
+				if code, report := dispatchDevelopmentStatus(t); code != 0 || report.RequiresOperatorAction || report.ReservationState != "" {
+					t.Fatalf("status after retained-pair absence recovery = code %d report %+v", code, report)
+				}
+				code, _, stderr, err := dispatchMainCommand(t, []string{"tailscale-cli", "check-transport-switch",
+					"--state-root", fixture.state, "--coordination-root", fixture.coordination,
+					"--installation-id", "fixture-instance", "--backend-port", "18377"}, "")
+				if code != 0 || err != nil {
+					t.Fatalf("transport switch still blocked after retained-pair recovery: code=%d err=%v stderr=%s", code, err, stderr)
+				}
+			})
+		}
+	}
+
 	t.Run("cleared-unconfigured-journal-releases-later-setup-reservation", func(t *testing.T) {
 		requireDevelopmentFixturePorts(t)
 		fixture := newDevelopmentCommandFixture(t)
