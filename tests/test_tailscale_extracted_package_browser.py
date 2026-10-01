@@ -404,11 +404,10 @@ def verify_development_runbook_scope(repo_root: Path) -> None:
         "After exact-revision hosted checks and independent approval",
         "development.md#running-from-a-checkout",
         "HERDR_DEV_TAILSCALE_CLI_DIR",
-        "env_file_value",
-        "invitation_armed: true",
-        "invitation_expires_at",
-        "decoded negative control reply can still exit zero",
-        "successful durable arm acknowledgement",
+        "Bootstrap setup links are one-use, but their ten-minute window refreshes when presented while no device has enrolled",
+        "retry the same link against the same still-running foreground relay",
+        "Ordinary device invitations expire after ten minutes",
+        "No manual re-arm is needed",
         "already owner-authorized development-only sequence on this Mac's current",
         "not a request for another owner grant",
         "node/account using the exact App Store Tailscale 1.102.4 candidate",
@@ -431,22 +430,16 @@ def verify_development_runbook_scope(repo_root: Path) -> None:
     )
     if any(text not in section for text in required):
         die("development qualification runbook lost required owner scope or safety checks")
-    development_rearm = development[development.find("Bootstrap setup invitations"):]
-    development_rearm = " ".join(development_rearm.split())
-    required_rearm = (
-        '--operation arm_bootstrap',
-        'RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"',
-        'env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET',
-        'env_file_value "$ENV_FILE" HERDR_RELAY_CONTROL_RUN_ID',
-        'env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID',
-        'json_bool_field "$response" ok "$RELAY_BIN"',
-        'json_bool_field "$response" invitation_armed "$RELAY_BIN"',
-        'json_string_field "$response" run_id "$RELAY_BIN"',
-        'json_string_field "$response" instance "$RELAY_BIN"',
-        'json_string_field "$response" invitation_expires_at "$RELAY_BIN"',
+    development = " ".join(development.split())
+    required_bootstrap = (
+        "A bootstrap setup link remains one-use, but its ten-minute window refreshes",
+        "retry the same link while that same foreground relay is running",
+        "no manual arm command is needed",
+        "additional devices are separate one-use invitations with a fixed ten-minute lifetime",
+        "a paired owner must create a fresh invitation",
     )
-    if any(text not in development_rearm for text in required_rearm) or '"$HERDR_RELAY_BIN" pairing-control' in development_rearm:
-        die("companion-terminal bootstrap re-arm command lost private-state or acknowledgement validation")
+    if any(text not in development for text in required_bootstrap):
+        die("development runbook lost bootstrap refresh or ordinary invitation expiry guidance")
     stale = (
         "requires its own explicit owner authorization",
         "That authorization does not include unpublishing",

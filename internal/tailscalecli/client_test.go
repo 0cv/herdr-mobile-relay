@@ -804,6 +804,7 @@ func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *tes
 				t.Fatalf("local journal reconciliation retried Serve mutation: %d calls", fixture.mutationCalls())
 			}
 			if tc.wantState == StateReconciledAbsent {
+				fixture.publishErr = nil
 				repair := fixtureRequest(true)
 				repair.ReservationID = "00000000000000000000000000000002"
 				repair.Consent.RecoveryAccepted = true
