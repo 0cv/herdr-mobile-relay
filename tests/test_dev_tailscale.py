@@ -153,6 +153,12 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                 option2_lines = [line for line in output.splitlines() if b"2. Tailscale Serve" in line]
                 if len(option2_lines) != 1 or b"[UNAVAILABLE:" not in option2_lines[0]:
                     raise AssertionError(f"{case}: non-exact wrapper did not keep the option unavailable: {output!r}")
+            if case == "unsupported_os_marks_tailscale_unavailable":
+                output = stdout + stderr
+                option2_lines = [line for line in output.splitlines() if b"2. Tailscale Serve" in line]
+                if (len(option2_lines) != 1 or b"[UNAVAILABLE:" not in option2_lines[0] or
+                    b"Tailscale Serve unavailable:" not in output):
+                    raise AssertionError(f"{case}: unsupported OS was offered or dispatched to legacy mode: {output!r}")
             if case in {
                 "linux_without_app_store_uses_legacy_mode",
                 "darwin_without_app_store_uses_legacy_mode",
@@ -292,6 +298,14 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             HERDR_TEST_UNAME_S=system, HERDR_TEST_UNAME_M=arch,
             HERDR_DEV_TAILSCALE_PORT="8375", **app_store_settings,
         )
+    unsupported_os_settings = dict(
+        menu_linux_settings, HERDR_TEST_UNAME_S="FreeBSD", HERDR_TEST_UNAME_M="amd64",
+    )
+    interactive_refused(
+        "unsupported_os_marks_tailscale_unavailable", tunnel_script, b"2\n",
+        b"Tailscale Serve unavailable: Tailscale development is supported only on Linux and macOS",
+        HERDR_DEV_TAILSCALE_PORT="8375", **unsupported_os_settings,
+    )
     receipt.write_bytes(b"synthetic App Store receipt marker")
     activation_before_menu = activation_record.read_bytes() if activation_record.exists() else None
     interactive_refused(
