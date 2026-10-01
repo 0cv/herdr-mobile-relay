@@ -590,7 +590,8 @@ echo ""
 echo "✓ Tailscale relay ready at $ORIGIN"
 echo "  Go owns the foreground Serve route, watcher, relay, and authenticated retirement."
 echo "  This pane must remain open; ingress is removed only after retirement is acknowledged."
-echo "  The setup link is private and pairs one device within 10 minutes."
+echo "  Keep the setup link private. Expired bootstrap links renew on retry before first pairing;" \
+    "additional-device invitations expire 10 minutes after issue."
 
 while child_job_active "$RELAY_JOB" "$RELAY_PID"; do
     CURRENT_STATUS="$(tailscale_control_request "$CONTROL_SOCKET" status "$RUN_ID" "$HERDR_RELAY_INSTANCE_ID" 2>/dev/null || true)"

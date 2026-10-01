@@ -1917,7 +1917,7 @@ if arm_setup_link "$ARM_ENV"; then
     exit 1
 fi
 case "$(print_setup_link_arming 0)" in
-    *"pairs one phone within 10 minutes"*) ;;
+    *"Expired bootstrap links renew on retry before first pairing; additional-device invitations expire 10 minutes after issue"*) ;;
     *) echo "the armed link hint is missing" >&2; exit 1 ;;
 esac
 case "$(print_setup_link_arming 1)" in

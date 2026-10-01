@@ -2828,7 +2828,8 @@ arm_setup_link() {
 
 print_setup_link_arming() {
     if [ "$1" -eq 0 ]; then
-        echo "  This link pairs one phone within 10 minutes. Print it again for another."
+        echo "  Keep the setup link private. Expired bootstrap links renew on retry before first pairing;" \
+            "additional-device invitations expire 10 minutes after issue. Print it again for another."
     else
         echo "  The relay is not running here; start it, then print the link again."
     fi

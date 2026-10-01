@@ -461,7 +461,8 @@ def read_until_setup_link(
             output.extend(chunk)
             lines = bytes(output).splitlines()
             if any(
-                b"This link pairs one phone within 10 minutes" in line
+                b"Expired bootstrap links renew on retry before first pairing; "
+                b"additional-device invitations expire 10 minutes after issue." in line
                 and re.match(rb"\++TRACE:", line) is None
                 for line in lines
             ):
@@ -1005,7 +1006,10 @@ sleep() {
 
             PHASE = "successful_reprint_after_adverse_cases"
             status, output = run_setup_link(root, env)
-            if status != 0 or b"This link pairs one phone within 10 minutes" not in output:
+            if status != 0 or (
+                b"Expired bootstrap links renew on retry before first pairing; "
+                b"additional-device invitations expire 10 minutes after issue."
+            ) not in output:
                 fail("valid HTTPS/control reprint did not recover after adverse-case refusals")
             rearmed, rearmed_ids = read_setup_state(config_dir)
             if rearmed_ids != first_ids or rearmed == first_store:
@@ -1039,7 +1043,10 @@ sleep() {
 
             PHASE = "restart_credential_persistence"
             second, second_output = start_launcher(root, env, active)
-            if b"This link pairs one phone within 10 minutes" not in second_output:
+            if (
+                b"Expired bootstrap links renew on retry before first pairing; "
+                b"additional-device invitations expire 10 minutes after issue."
+            ) not in second_output:
                 fail("foreground restart did not verify and re-arm the existing instance")
             restarted_store, restarted_ids = read_setup_state(config_dir)
             if len(restarted_ids) != 2 or set(restarted_ids) != set(second_ids):
