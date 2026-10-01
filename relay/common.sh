@@ -2024,9 +2024,17 @@ report_inventory_failure() {
     local health
     echo "Herdr agent inventory is unavailable or the installed relay identity does not match." >&2
     health="$(curl -fsS --max-time 2 "http://127.0.0.1:$1/healthz" 2>/dev/null)" || return 0
-    if [ "$(json_string_field "$health" error_code)" = protocol_mismatch ]; then
-        echo "Run: herdr server live-handoff" >&2
-    fi
+    # The relay reports inventory.error_code nested, which the strict top-level
+    # accessor cannot read. This advisory hint changes nothing, so after the
+    # strict decoder confirms a relay health document it matches the exact
+    # nested code token instead.
+    [ "$(json_string_field "$health" status)" = ok ] || return 0
+    case "$health" in
+        *'"error_code":"protocol_mismatch"'*|*'"error_code": "protocol_mismatch"'*)
+            echo "Run: herdr server live-handoff" >&2
+            ;;
+    esac
+    return 0
 }
 
 verify_public_readiness() {
