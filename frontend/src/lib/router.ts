@@ -1,9 +1,9 @@
-import { get, writable } from 'svelte/store';
-import { shouldRetainSetupFragment } from './config';
+import { get, writable, type Readable } from 'svelte/store';
+import { shouldDeferPairingConnection, shouldRetainSetupFragment } from './config';
 import { clientPaneId } from './agents';
 import { parseNotificationTarget } from './protocol';
-import { decodeTargetRoute, encodeTargetRoute } from './resource-id';
-import type { FrontendTargetRef, NotificationTarget } from './types';
+import { decodeTargetRoute, encodeTargetRoute, targetRefForAgent, targetRefMatchesAgent } from './resource-id';
+import type { Agent, FrontendTargetRef, NotificationTarget } from './types';
 
 export type ViewState =
   | { view: 'agents' }
@@ -26,6 +26,7 @@ export type ViewState =
 type HistoryViewState = ViewState & {
   herdrView?: boolean;
   index?: number;
+  bootstrapPairingFlow?: string;
 };
 
 export const currentView = writable<ViewState>({ view: 'agents' });
@@ -132,15 +133,46 @@ export function viewUrl(state: ViewState): string {
   return location.pathname + location.search;
 }
 
+function navigationUrl(state: ViewState): string {
+  if (shouldDeferPairingConnection(location, navigator.standalone, navigator.userAgent, navigator.maxTouchPoints)) {
+    return location.pathname + location.search + location.hash;
+  }
+  return viewUrl(state);
+}
+
+function historyViewState(state: ViewState): HistoryViewState {
+  return { herdrView: true, index: viewIndex, bootstrapPairingFlow: history.state?.bootstrapPairingFlow, ...state };
+}
+
 export function navigate(state: ViewState): void {
   viewIndex += 1;
-  history.pushState({ herdrView: true, index: viewIndex, ...state }, '', viewUrl(state));
+  history.pushState(historyViewState(state), '', navigationUrl(state));
   showView(state);
 }
 
 export function replaceView(state: ViewState): void {
-  history.replaceState({ herdrView: true, index: viewIndex, ...state }, '', viewUrl(state));
+  history.replaceState(historyViewState(state), '', navigationUrl(state));
   showView(state);
+}
+
+export function followInitialAgentSession(agents: Readable<Agent[]>): () => void {
+  let previous = new Map<string, Agent>();
+  return agents.subscribe((incoming) => {
+    const view = get(currentView);
+    const before = view.view === 'terminal' || view.view === 'history' ? previous.get(view.paneId) : undefined;
+    previous = new Map(incoming.map((agent) => [agent.pane_id, agent]));
+    if ((view.view !== 'terminal' && view.view !== 'history') || !view.target || !before) return;
+    const after = previous.get(view.paneId);
+    if (!after || before.agent_session_id || !after.agent_session_id || before.agent !== after.agent
+      || !targetRefMatchesAgent(view.target, before)
+      || after.generation !== view.target.generation + 1) return;
+    const target = targetRefForAgent(after);
+    if (!target || target.relay_id !== view.target.relay_id
+      || target.server_session_id !== view.target.server_session_id
+      || target.pane_id !== view.target.pane_id
+      || target.terminal_id !== view.target.terminal_id) return;
+    replaceView({ ...view, target });
+  });
 }
 
 export function closeCurrentView(): void {
@@ -163,7 +195,12 @@ export function initializeRouter(): () => void {
     viewIndex = Number.isInteger(state?.index) ? Number(state?.index) : 0;
     showView(state?.herdrView ? state : { view: 'agents' });
   };
-  const onHashChange = () => showView(stateFromLocation());
+  const onHashChange = () => {
+    const state = history.state as HistoryViewState | null;
+    showView(shouldRetainSetupFragment(location, navigator.standalone) && state?.herdrView
+      ? state
+      : stateFromLocation());
+  };
   window.addEventListener('popstate', onPopState);
   window.addEventListener('hashchange', onHashChange);
   return () => {

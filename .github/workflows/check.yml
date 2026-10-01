@@ -235,6 +235,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
       - uses: actions/setup-go@v7
         with:
           go-version: 1.27.1
@@ -247,15 +250,16 @@ jobs:
           set -euo pipefail
           test ! -e .env
           go_bin_dir="$(dirname "$(command -v go)")"
+          bun_bin_dir="$(dirname "$(command -v bun)")"
           evidence="$RUNNER_TEMP/tailscale-external-evidence.json"
           env -i \
-            HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$go_bin_dir:/usr/bin:/bin" \
+            HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$go_bin_dir:$bun_bin_dir:/usr/bin:/bin" \
             GOTOOLCHAIN=local GITHUB_SHA="$GITHUB_SHA" \
             HERDR_TAILSCALE_LAUNCHER_CI=1 \
             HERDR_EXTERNAL_FIXTURE_EVIDENCE="$evidence" \
             BASH_ENV=/dev/null ENV=/dev/null \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-            /usr/bin/make PATH="$go_bin_dir:/usr/bin:/bin" \
+            /usr/bin/make PATH="$go_bin_dir:$bun_bin_dir:/usr/bin:/bin" \
               --eval='assert-shell-tools: ; @test "$$(command -v bash)" = /usr/bin/bash && test "$$(command -v sed)" = /usr/bin/sed' \
               assert-shell-tools shell-check production-path-audit
       - name: Upload sanitized operator-owned Serve behavioral evidence

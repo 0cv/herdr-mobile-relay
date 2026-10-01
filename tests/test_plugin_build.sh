@@ -1,14 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
-unit_exec_line() { printf 'ExecStart=%s' "$(systemd_quote_exec "$1")"; }
-unit_work_line() { printf 'WorkingDirectory=%s' "$(systemd_quote_value "$1")"; }
-unit_env_line() { printf 'Environment=HERDR_RELAY_ENV=%s' "$(systemd_quote_value "$1")"; }
+unit_exec_line() { printf 'ExecStart=%s' "$(systemd_quoted "$1" exec)"; }
+unit_work_line() { printf 'WorkingDirectory=%s' "$(systemd_quoted "$1")"; }
+unit_env_line() { printf 'Environment=%s' "$(systemd_quoted "HERDR_RELAY_ENV=$1")"; }
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-build-test.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
+export HERDR_TEST_READINESS_BIN="$WORK_DIR/readiness-helper"
+go build -o "$HERDR_TEST_READINESS_BIN" "$REPO_DIR/cmd/herdr-mobile-relay"
 
 TEST_HOME="$WORK_DIR/home"
 RELEASE_ROOT="$TEST_HOME/releases"
@@ -48,7 +50,7 @@ printf 'source-update\n' > "$SOURCE_CONFIG/update-state.json"
 printf 'source-app-deploy\n' > "$SOURCE_CONFIG/app-deploy-state.json"
 printf '{"owner":"herdr-mobile-relay-stable-setup-v1","env_file":"%s/.env","config_path":"%s/cloudflared/config.yml"}\n' \
     "$SOURCE_CONFIG" "$SOURCE_CONFIG" > "$SOURCE_CONFIG/stable-setup.json"
-printf 'credentials-file: %s/cloudflared/tunnel-credentials.json\n' \
+printf 'hostname: relay.example.test\ncredentials-file: %s/cloudflared/tunnel-credentials.json\n' \
     "$SOURCE_CONFIG" > "$SOURCE_CONFIG/cloudflared/config.yml"
 printf "HERDR_RELAY_TOKEN='target-token'\nHERDR_GITHUB_TOKEN_FILE='%s/github-token'\n" \
     "$TARGET_CONFIG" > "$TARGET_CONFIG/relay.env"
@@ -72,6 +74,7 @@ case "$1" in
         case "${3:-}" in status|release_version|revision|bundle_hash) ;; *) exit 1 ;; esac
         sed -n "s/.*\"${3}\":\"\\([^\"]*\\)\".*/\\1/p"
         ;;
+    verify-readiness) exec "$HERDR_TEST_READINESS_BIN" "$@" ;;
     verify-release) exit 0 ;;
     activate-release)
         root=$2
@@ -142,9 +145,9 @@ case " $* " in
         printf 'restart\n' >> "$RESTART_LOG"
         if grep -Fx "ExecStart=$SOURCE_CONFIG/herdr-mobile-relay-service.sh" "$UNIT_FILE" 2>/dev/null >/dev/null ||
            [ "$(readlink -f "$RELEASE_ROOT/current" 2>/dev/null || true)" = "$OLD_RELEASE" ]; then
-            printf '{"status":"ok","instance":"test","version":"0.8.6","protocol":2,"release_version":"0.8.6","revision":"old-revision","bundle_hash":"old-web"}\n' > "$HEALTH_FILE"
+            printf '{"status":"ready","inventory":{"state":"ready"},"instance":"source-instance","version":"0.8.6","protocol":3,"release_version":"0.8.6","revision":"old-revision","bundle_hash":"old-web"}\n' > "$HEALTH_FILE"
         else
-            printf '{"status":"ok","instance":"test","version":"%s","protocol":2,"release_version":"%s","revision":"%s","bundle_hash":"new-web"}\n' \
+            printf '{"status":"ready","inventory":{"state":"ready"},"instance":"source-instance","version":"%s","protocol":3,"release_version":"%s","revision":"%s","bundle_hash":"new-web"}\n' \
                 "$TEST_VERSION" "$TEST_VERSION" "${REPLACEMENT_REVISION:-wrong-revision}" > "$HEALTH_FILE"
         fi
         exit 0
@@ -237,7 +240,7 @@ if HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
     HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
-    bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/output" 2>&1; then
+    bash -x "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/output" 2>&1; then
     echo "plugin migration unexpectedly accepted the wrong replacement identity" >&2
     cat "$WORK_DIR/output" >&2
     exit 1
@@ -249,6 +252,10 @@ grep -Fx "WorkingDirectory=$TEST_HOME/source-checkout" "$UNIT_FILE" >/dev/null
 grep -Fx "Environment=HERDR_RELAY_ENV=$SOURCE_ENV" "$UNIT_FILE" >/dev/null
 test "$(cat "$CONFIG_RECORD")" = "$TARGET_CONFIG"
 test "$(cat "$TOKEN_RECORD")" = "persisted-private-token"
+if grep -F 'persisted-private-token' "$WORK_DIR/output" >/dev/null; then
+    echo "plugin tracing exposed the persisted credential" >&2
+    exit 1
+fi
 diff -qr "$WORK_DIR/target-before" "$TARGET_CONFIG" >/dev/null
 grep -F "previous service recovered successfully" "$WORK_DIR/output" >/dev/null || {
     echo "previous service did not recover after replacement identity refusal" >&2
@@ -420,7 +427,7 @@ run_fresh_build() {
         GH_TOKEN='' \
         GITHUB_TOKEN='' \
         "$@" \
-        bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/fresh-output" 2>&1
+        bash -x "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/fresh-output" 2>&1
 }
 
 # An SSH-only private checkout has no credential for GitHub's HTTPS release API.
@@ -440,6 +447,10 @@ grep -Fq 'gh auth login --hostname github.com --git-protocol ssh' \
 
 if ! run_fresh_build env HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay-dev; then
     cat "$WORK_DIR/fresh-output" >&2
+    exit 1
+fi
+if grep -F 'private-clone-api-token' "$WORK_DIR/fresh-output" >/dev/null; then
+    echo "plugin tracing exposed the CLI credential" >&2
     exit 1
 fi
 test "$(cat "$FRESH_TOKEN_RECORD")" = "private-clone-api-token" ||

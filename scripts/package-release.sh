@@ -71,12 +71,15 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
     cp "$REPO_DIR/LICENSE" "$STAGE/LICENSE"
     cp "$REPO_DIR/README.md" "$STAGE/README.md"
     cp "$REPO_DIR/.env.example" "$STAGE/.env.example"
+    cp -R "$REPO_DIR/relay/pi-command-bridge" "$STAGE/relay/pi-command-bridge"
     for WRAPPER in \
         common.sh \
+        native-install-transaction.sh \
         herdr-mobile-relay-service.sh \
         install-service.sh \
         install-systemd-user-service.sh \
         plugin-on-event.sh \
+        pi-commands.sh \
         service.sh \
         setup-link.sh \
         setup.sh \

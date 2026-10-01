@@ -183,12 +183,22 @@ export interface SlashCommand {
   command: string;
   description: string;
   argument_hint?: string;
-  source: 'builtin' | 'personal' | 'project';
+  source: 'builtin' | 'personal' | 'project' | 'temporary';
+  kind?: 'builtin' | 'extension' | 'prompt' | 'skill';
+  provenance?: {
+    path: string;
+    source: string;
+    scope: 'user' | 'project' | 'temporary';
+    origin: 'package' | 'top-level';
+    base_dir?: string;
+  };
 }
 
 export interface SlashCommandCatalog {
   commands: SlashCommand[];
   truncated: boolean;
+  status?: 'loading' | 'available' | 'unavailable' | 'partial';
+  revision?: string;
 }
 
 export interface WorkspaceTreeEntry {

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 LABEL="com.herdr-mobile-relay.service"
@@ -10,12 +10,14 @@ LOG_DIR="$HOME/Library/Logs/herdr-mobile-relay"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+. "$SCRIPT_DIR/native-install-transaction.sh"
 
 require_user_service_context
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
 if [ "$TRANSPORT" = tailscale-cli ] && installed_legacy_relay_service_definition_present; then
     echo "✗ CLI setup refuses a legacy relay service definition; it will not stop or remove it. Preserve it and resolve its route before migrating." >&2
@@ -46,6 +48,7 @@ if [ "$TRANSPORT" = tailscale-cli ]; then
             exit 1
         }
     fi
+    native_install_begin launchd "$PLIST" "$LEGACY_PLIST" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
     ensure_relay_env "$ENV_FILE"
 else
     if [ ! -r "$CLOUDFLARED_CONFIG" ]; then
@@ -53,6 +56,7 @@ else
         echo "Create it first, or set CLOUDFLARED_CONFIG before running this installer."
         exit 1
     fi
+    native_install_begin launchd "$PLIST" "$LEGACY_PLIST" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
     ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 fi
 chmod +x "$SCRIPT_DIR/herdr-mobile-relay-service.sh"
@@ -72,7 +76,8 @@ WORK_DIR_XML="$(xml_escape_text "$WORK_DIR")" || { echo "✗ Service work path c
 ENV_FILE_XML="$(xml_escape_text "$ENV_FILE")" || { echo "✗ Service environment path contains unsupported XML characters." >&2; exit 1; }
 LOG_DIR_XML="$(xml_escape_text "$LOG_DIR")" || { echo "✗ Service log path contains unsupported XML characters." >&2; exit 1; }
 
-cat > "$PLIST" <<EOF
+STAGED_PLIST="$native_recovery/new.plist"
+cat > "$STAGED_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -109,9 +114,15 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-if [ "$TRANSPORT" != tailscale-cli ]; then
-    launchctl bootout "gui/$UID" "$LEGACY_PLIST" >/dev/null 2>&1 || true
-    rm -f "$LEGACY_PLIST"
+chmod 600 "$STAGED_PLIST"
+plutil -lint "$STAGED_PLIST"
+native_changed=true
+native_stage="$(mktemp "$(dirname "$PLIST")/.herdr-service.XXXXXX")"
+cp "$STAGED_PLIST" "$native_stage"
+chmod 600 "$native_stage"
+mv -f "$native_stage" "$PLIST"
+if [ "$TRANSPORT" != tailscale-cli ] && [ "$native_legacy_active" = true ]; then
+    launchctl bootout "gui/$UID" "$LEGACY_PLIST"
 fi
 reload_launchd_service_definition "$PLIST" "$LABEL"
 
@@ -120,13 +131,20 @@ echo "Plist: $PLIST"
 echo "Env:   $ENV_FILE"
 echo "Logs:  $LOG_DIR/service.log and $LOG_DIR/service.err"
 
-PORT="${HERDR_RELAY_PORT:-8375}"
+# ensure_relay_env generates the token and instance identity into the file
+# only, so read both back before the readiness gate compares identities.
+PORT="$(env_file_value "$ENV_FILE" HERDR_RELAY_PORT)"
+PORT="${PORT:-${HERDR_RELAY_PORT:-8375}}"
+INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
 echo "Waiting for relay health on 127.0.0.1:$PORT..."
-if ! HEALTH="$(wait_for_relay_health "$PORT")"; then
-    echo "Relay service was installed, but it did not become healthy."
+if ! HEALTH="$(wait_for_relay_health "$PORT" 15 1 "$INSTANCE")"; then
+    report_inventory_failure "$PORT"
+    echo "Replacement service did not become ready; restoring the previous installation."
     echo "Inspect it with:"
     echo "  launchctl print gui/$(id -u)/$LABEL"
     echo "  tail -n 80 '$LOG_DIR/service.log' '$LOG_DIR/service.err'"
     exit 1
 fi
-echo "Relay health: $HEALTH"
+verify_public_readiness "$ENV_FILE" "$HEALTH"
+native_install_commit
+echo "Relay readiness: $HEALTH"

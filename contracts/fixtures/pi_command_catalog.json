@@ -1,0 +1,15 @@
+{
+  "commands": [
+    {"command": "/orchestrate", "description": "Choose an orchestration workflow", "source": "personal"},
+    {"command": "/review:2", "description": "Review from a CLI extension", "source": "temporary"},
+    {"command": "/summary", "description": "Summarize changes", "source": "project"}
+  ],
+  "metadata": {
+    "/orchestrate": {"kind": "extension", "provenance": {"path": "/fixture/orchestration/index.ts", "source": "npm:orchestration", "scope": "user", "origin": "package"}},
+    "/review:2": {"kind": "extension", "provenance": {"path": "/fixture/cli.ts", "source": "cli", "scope": "temporary", "origin": "top-level"}},
+    "/summary": {"kind": "prompt", "provenance": {"path": "/fixture/project/summary.md", "source": "local", "scope": "project", "origin": "top-level"}}
+  },
+  "status": "available",
+  "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "truncated": false
+}

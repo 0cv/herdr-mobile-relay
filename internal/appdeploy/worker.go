@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/andybalholm/brotli"
@@ -154,7 +155,7 @@ func Run(ctx context.Context, jobPath string) error {
 	}
 	command := exec.Command(job.NPXPath, wranglerDeployArgs(job)...)
 	command.Dir = workDir
-	environment, credentialErr := commandEnvironmentWithCloudflareCredentials(job.NodeDir, os.Environ())
+	environment, credentialErr := commandEnvironmentWithCloudflareCredentials(job.NodeDir, childenv.WithoutReleaseCredentials(os.Environ()))
 	environment = replaceEnvironmentValue(environment, "NO_COLOR", "1")
 	if credentialErr != nil {
 		deployErr := fmt.Errorf("read Cloudflare credentials: %w", credentialErr)

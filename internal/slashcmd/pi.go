@@ -12,11 +12,13 @@ type piProvider struct{}
 
 func (p *piProvider) ID() string { return "pi" }
 
-// piBuiltins mirrors the primary interactive commands in Pi 0.82.1. Keep this
+// piBuiltins mirrors the primary interactive commands in Pi 0.87.0. Keep this
 // list version-aware if a future Pi release removes or renames a command.
 var piBuiltins = []Command{
 	{"/settings", "Open settings menu", "builtin", ""},
 	{"/model", "Select the active model", "builtin", "<provider/model>"},
+	{"/thinking", "Set thinking level", "builtin", "<level>"},
+	{"/bug", "Report a bug to the Pi developers", "builtin", "<description>"},
 	{"/scoped-models", "Choose models for keyboard cycling", "builtin", ""},
 	{"/export", "Export the current session", "builtin", "[file]"},
 	{"/import", "Import and resume a JSONL session", "builtin", "<file>"},

@@ -39,7 +39,7 @@
   } from '$lib/speech';
   import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
-  import { targetRefForAgent } from '$lib/resource-id';
+  import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
   import {
@@ -51,7 +51,7 @@
     terminalResizeLayoutEngaged,
     terminalScreenColumns,
   } from '$lib/terminal';
-  import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
+  import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type {
     Agent,
@@ -165,7 +165,9 @@
   let altArmed = $state(false);
   let keyFeedback = $state('');
   let keyFeedbackError = $state(false);
-  let keySending = $state(false);
+  let keyRequestSending = $state(false);
+  let sendingFilter = $state(false);
+  const keySending = $derived(keyRequestSending || sendingFilter);
   let uploadStatus = $state('');
   let uploadError = $state(false);
   let uploadingAttachment = $state(false);
@@ -179,6 +181,12 @@
   let slashCatalog = $state<SlashCommandCatalog>({ commands: [], truncated: false });
   let slashCatalogLoading = $state(true);
   let slashCatalogUnavailable = $state(false);
+  let slashCatalogRequest = 0;
+  let slashCatalogTarget = '';
+  const slashCatalogIdentity = $derived(JSON.stringify([
+    agent.relay_id, agent.server_session_id, agent.raw_pane_id,
+    agent.terminal_id, agent.generation, agent.agent_session_id, agent.agent, agent.cwd,
+  ]));
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
   let dismissedMenuSignature = $state('');
@@ -234,7 +242,6 @@
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
   const inspectionMode = $derived(agentNeedsInspection(agent));
-  const inputLocked = $derived(readOnly || responsePending || inspectionMode);
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(!readOnly && responsePending && attentionKind(agent) === 'question' && interaction));
   const resizeSessionActive = $derived(
@@ -268,16 +275,21 @@
   const effectiveSlashIndex = $derived(filteredSlashCommands.length
     ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
     : -1);
-  const slashMenuOpen = $derived(!inputLocked
-    && !questionMode
-    && slashQuery !== null
-    && dismissedSlashQuery !== composer);
   const terminalPlainText = $derived(
     stripAnsi(displayed)
       .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
-  const terminalTextMode = $derived(inspectionMode && terminalTextInputActive(terminalPlainText));
+  const terminalTextMode = $derived.by(() => {
+    const mode = terminalTextInputMode(terminalPlainText);
+    if (mode === 'filter' || inspectionMode) return mode;
+    return null;
+  });
+  const inputLocked = $derived(readOnly || responsePending || inspectionMode || terminalTextMode === 'filter');
   const composerLocked = $derived(readOnly || responsePending || (inspectionMode && !terminalTextMode));
+  const slashMenuOpen = $derived(!inputLocked
+    && !questionMode
+    && slashQuery !== null
+    && dismissedSlashQuery !== composer);
   // The relay recognizes the prompt; that recognition is what opens the masked
   // input, even while the generic composer stays locked for inspection.
   const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
@@ -598,19 +610,48 @@
     });
   });
 
+  async function refreshSlashCommands() {
+    const request = ++slashCatalogRequest;
+    const identity = slashCatalogIdentity;
+    const target = { ...agent };
+    slashCatalogLoading = true;
+    slashCatalogUnavailable = false;
+    try {
+      const catalog = await relayStore.loadSlashCommands(target, true);
+      if (request !== slashCatalogRequest || identity !== slashCatalogIdentity) return;
+      slashCatalog = catalog;
+    } catch {
+      if (request !== slashCatalogRequest || identity !== slashCatalogIdentity) return;
+      slashCatalogUnavailable = true;
+    } finally {
+      if (request === slashCatalogRequest && identity === slashCatalogIdentity) slashCatalogLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const identity = slashCatalogIdentity;
+    const status = $connections.get(agent.relay_id)?.status;
+    const open = slashMenuOpen;
+    untrack(() => {
+      ++slashCatalogRequest;
+      if (slashCatalogTarget !== identity) {
+        slashCatalog = { commands: [], truncated: false };
+        slashCatalogTarget = identity;
+      }
+      if (!open) return;
+      if (status && status !== 'connected') {
+        slashCatalogLoading = false;
+        slashCatalogUnavailable = true;
+        return;
+      }
+      void refreshSlashCommands();
+    });
+    return () => { ++slashCatalogRequest; };
+  });
+
   onMount(() => {
-    let mounted = true;
     componentMounted = true;
     const stopWakeLock = mountTerminalWakeLock();
-    void relayStore.loadSlashCommands(agent).then((catalog) => {
-      if (!mounted) return;
-      slashCatalog = catalog;
-      slashCatalogUnavailable = false;
-    }).catch(() => {
-      if (mounted) slashCatalogUnavailable = true;
-    }).finally(() => {
-      if (mounted) slashCatalogLoading = false;
-    });
     const measurePane = () => requestPaneSizeLease(false);
     const realtimeDeltaEnabled = () => Boolean(
       $connections.get(agent.relay_id)?.capabilities.includes('pane_realtime_delta'),
@@ -666,7 +707,6 @@
     );
     void tick().then(measurePane);
     return () => {
-      mounted = false;
       componentMounted = false;
       window.removeEventListener('resize', measurePane);
       window.visualViewport?.removeEventListener('resize', measurePane);
@@ -1187,24 +1227,35 @@
 
   async function sendPrompt() {
     const submittedDraft = composer;
-    const text = submittedDraft.replace(/[\r\n]+$/g, '');
-    if (!text || composerLocked || sendingPrompt) return;
     const terminalText = terminalTextMode;
+    const text = terminalText === 'filter' ? submittedDraft : submittedDraft.replace(/[\r\n]+$/g, '');
+    if (!text || composerLocked || sendingPrompt) return;
+    if (terminalText === 'filter') {
+      if (keySending || keyQueue.length) return;
+      if (!/^[a-zA-Z0-9 ._/:+()[\]-]{1,32}$/.test(text) || text.endsWith(' ')) {
+        relayStore.showToast('Use 1–32 letters, digits, spaces or .-_/+:()[]; no trailing space.', true);
+        return;
+      }
+    }
+    const target = agent;
+    const targetIdentity = targetRefForAgent(target);
+    sendingFilter = terminalText === 'filter';
     sendingPrompt = true;
     composer = '';
-    clearPromptDraft(agent);
+    clearPromptDraft(target);
     try {
-      if (terminalText) {
-        await relayStore.sendToAgent(agent, {
-          type: 'send_input',
-          text,
-          keys: ['Enter'],
-          activity_label: 'Submitted terminal text',
+      if (terminalText === 'filter') {
+        await relayStore.sendToAgent(target, {
+          type: 'send_filter_text', text, activity_label: 'Sent filter text',
+        }, 15_000);
+      } else if (terminalText === 'submit') {
+        await relayStore.sendToAgent(target, {
+          type: 'send_input', text, keys: ['Enter'], activity_label: 'Submitted terminal text',
         });
       } else {
-        await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
+        await relayStore.sendToAgent(target, { type: 'submit_prompt', text });
       }
-      relayStore.showToast(terminalText ? 'Terminal text submitted.' : 'Prompt sent.');
+      relayStore.showToast(terminalText === 'filter' ? 'Filter text sent. Select separately using terminal controls.' : terminalText ? 'Terminal text submitted.' : 'Prompt sent.');
     } catch (error) {
       const dispatchedUnknown = typeof error === 'object'
         && error !== null
@@ -1213,14 +1264,19 @@
         && error.data !== null
         && 'dispatched_unknown' in error.data
         && error.data.dispatched_unknown === true;
-      if (!composer && !dispatchedUnknown) composer = submittedDraft;
+      const notStarted = typeof error === 'object' && error !== null && 'data' in error
+        && typeof error.data === 'object' && error.data !== null
+        && 'not_started' in error.data && error.data.not_started === true;
+      if (targetIdentity && targetRefMatchesAgent(targetIdentity, agent)
+        && !composer && !dispatchedUnknown && (terminalText !== 'filter' || notStarted)) composer = submittedDraft;
       const detail = error instanceof Error
         ? error.message
-        : terminalText ? 'Terminal text could not be submitted.' : 'Prompt could not be sent.';
+        : terminalText === 'filter' ? 'Filter text could not be sent.' : terminalText ? 'Terminal text could not be submitted.' : 'Prompt could not be sent.';
       relayStore.showToast(dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail, true);
     } finally {
       sendingPrompt = false;
-      setTimeout(() => relayStore.readPane(agent), 500);
+      sendingFilter = false;
+      setTimeout(() => relayStore.readPane(target), 500);
     }
   }
 
@@ -1310,7 +1366,7 @@
   }
 
   function sendKeys(keys: string[], activityLabel = ''): Promise<boolean> {
-    if (readOnly) return Promise.resolve(false);
+    if (readOnly || sendingFilter) return Promise.resolve(false);
     return new Promise((resolve) => {
       keyQueue.push({ keys, label: activityLabel || keys.join(', '), resolve });
       void drainKeyQueue();
@@ -1319,7 +1375,7 @@
 
   async function drainKeyQueue() {
     if (keySending) return;
-    keySending = true;
+    keyRequestSending = true;
     while (keyQueue.length) {
       const command = keyQueue.shift()!;
       showKeyFeedback(`Sending ${command.label}…`);
@@ -1343,7 +1399,7 @@
         for (const queued of keyQueue.splice(0)) queued.resolve(false);
       }
     }
-    keySending = false;
+    keyRequestSending = false;
   }
 
   function showKeyFeedback(message: string, error = false) {
@@ -1862,7 +1918,7 @@
 
   async function filesSelected(files: FileList | File[]) {
     const selected = [...files];
-    if (readOnly || !selected.length || uploadingAttachment) return;
+    if (inputLocked || !selected.length || uploadingAttachment) return;
     uploadingAttachment = true;
     uploadStatus = `Uploading ${selected.length} attachment${selected.length === 1 ? '' : 's'}…`;
     uploadError = false;
@@ -1900,7 +1956,7 @@
   }
   async function restartAttachmentUpload(): Promise<void> {
     const controller = attachmentController;
-    if (!controller || uploadingAttachment) return;
+    if (inputLocked || !controller || uploadingAttachment) return;
     uploadingAttachment = true;
     uploadStatus = 'Restarting interrupted files from the beginning…';
     uploadError = false;
@@ -2201,7 +2257,7 @@
   <div class="terminal-bottom" onfocusin={focusComposer} onfocusout={blurComposer}>
     {#if slashMenuOpen}
       <section class="slash-command-popover" aria-label="Command suggestions">
-        <header class="slash-command-header" aria-hidden="true">
+        <header class="slash-command-header">
           <strong>Commands</strong>
           {#if !slashCatalogLoading && !slashCatalogUnavailable}
             <span>{filteredSlashCommands.length}{slashMatchesHidden ? '+' : ''} matching</span>
@@ -2209,8 +2265,18 @@
             <span>Type to filter</span>
           {/if}
         </header>
+        {#if slashCatalog.status === 'partial'}
+          <p class="slash-command-status" role="status">Runtime command discovery is incomplete. Loaded extensions and prompts may be missing; you can still send a command manually.</p>
+        {:else if slashCatalog.status === 'loading'}
+          <p class="slash-command-status" role="status">Pi is loading command resources. Refresh when loading finishes.</p>
+        {:else if slashCatalog.status === 'unavailable'}
+          <p class="slash-command-status" role="status">Runtime command discovery is unavailable. You can still send a command manually.</p>
+        {/if}
+        <button type="button" onclick={() => void refreshSlashCommands()} disabled={slashCatalogLoading}>
+          Refresh commands
+        </button>
         {#if slashCatalogLoading}
-          <p class="slash-command-status" role="status">Loading commands…</p>
+          <p class="slash-command-status" role="status">{slashCatalog.commands.length ? 'Refreshing commands…' : 'Loading commands…'}</p>
         {:else if slashCatalogUnavailable}
           <p class="slash-command-status" role="status">Suggestions unavailable — you can still send this command.</p>
         {:else if !filteredSlashCommands.length}
@@ -2310,11 +2376,11 @@
           disabled={composerLocked}
           placeholder={approvalMode
             ? 'Approval pending — use buttons'
-            : inspectionMode
-              ? terminalTextMode
-                ? 'Type terminal input…'
-                : 'Needs inspection — use terminal controls'
-              : 'Type a reply…'}
+            : terminalTextMode
+              ? terminalTextMode === 'filter' ? 'Type filter text…' : 'Type terminal input…'
+              : inspectionMode
+                ? 'Needs inspection — use terminal controls'
+                : 'Type a reply…'}
           role="combobox"
           aria-label="Prompt"
           aria-autocomplete="list"
@@ -2333,12 +2399,12 @@
         ></textarea>
         {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
-      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt || uploadingAttachment} aria-label={sendingPrompt ? 'Submitting input' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
+      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt || uploadingAttachment} aria-label={sendingPrompt ? 'Submitting input' : terminalTextMode === 'filter' ? 'Send filter text' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
       <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
       <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
     {#if attachmentSnapshot?.items.length}
-      <AttachmentProgress snapshot={attachmentSnapshot} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
+      <AttachmentProgress snapshot={attachmentSnapshot} restartDisabled={inputLocked} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
     {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
@@ -2392,7 +2458,7 @@
           id="modifier-key-input"
           class="modifier-key-input"
           bind:this={modifierInputElement}
-          disabled={readOnly}
+          disabled={readOnly || sendingFilter}
           aria-label="Modifier shortcut character"
           autocomplete="off"
           autocapitalize="none"

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Manage the neural voices the relay reads responses with. The pinned catalog
 # and every download live in the relay binary, which the phone drives too, so
 # this script only translates its flags into that subcommand. Voices land in

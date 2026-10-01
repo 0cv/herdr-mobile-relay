@@ -1,5 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set +x
 set -euo pipefail
+RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-}
+export -n RELAY_UPDATER_TOKEN_FILE
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -14,6 +18,8 @@ if [ -f "$ENV_FILE" ]; then
     . "$ENV_FILE"
     set +a
 fi
+RELAY_UPDATER_TOKEN_FILE=${HERDR_GITHUB_TOKEN_FILE:-$RELAY_UPDATER_TOKEN_FILE}
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 TRANSPORT="$(relay_transport_mode "$ENV_FILE")"
 if [ "$TRANSPORT" = tailscale-cli ]; then
     exec "$SCRIPT_DIR/tailscale-cli-service.sh"
@@ -26,7 +32,7 @@ if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
     exit 78
 fi
 
-PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 # Agents often install their CLI into a per-tool bin directory that the service
 # PATH does not include (e.g. ~/.opencode/bin). Append any that exist so the
 # relay can detect them; base entries keep precedence.
@@ -86,11 +92,11 @@ stop_child() {
 }
 
 echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
-"$RELAY_BIN" serve &
+HERDR_GITHUB_TOKEN_FILE="$RELAY_UPDATER_TOKEN_FILE" "$RELAY_BIN" serve &
 RELAY_PID=$!
 
 echo "Starting cloudflared with $CLOUDFLARED_CONFIG"
-"$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run &
+(unset HERDR_GITHUB_TOKEN_FILE; exec "$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run) &
 TUNNEL_PID=$!
 
 while true; do

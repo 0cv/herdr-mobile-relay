@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const (
@@ -53,8 +55,9 @@ func (e *OutcomeError) Error() string {
 
 // CLIError is a machine-readable failure returned by the Herdr CLI.
 type CLIError struct {
-	Code    string
-	Message string
+	Code               string
+	Message            string
+	refusedBeforeInput bool
 }
 
 func (e *CLIError) Error() string {
@@ -101,7 +104,7 @@ func refusalCode(err error) (string, bool) {
 		return "", false
 	}
 	_, refused := refusalCodes[cliErr.Code]
-	return cliErr.Code, refused
+	return cliErr.Code, refused || cliErr.refusedBeforeInput
 }
 
 func IsRefused(err error) bool {
@@ -129,6 +132,8 @@ func RefusalMessage(code string) string {
 		return "Herdr server is not running"
 	case "agent_pane_busy":
 		return "Agent pane is still starting"
+	case "agent_not_ready":
+		return "Agent is not ready to receive prompts; review the pane before retrying"
 	case "protocol_mismatch":
 		return "Herdr server protocol is incompatible with this relay"
 	case "workspace_group_close_required":
@@ -723,6 +728,10 @@ func (c *Client) SendText(ctx context.Context, paneID, text string) error {
 
 func (c *Client) Prompt(ctx context.Context, paneID, text string) error {
 	_, err := c.runCommand(ctx, "agent", "prompt", paneID, text)
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == "agent_not_ready" {
+		cliErr.refusedBeforeInput = true
+	}
 	return err
 }
 
@@ -749,13 +758,13 @@ func (c *Client) StartAgent(ctx context.Context, name, kind, paneID string, time
 		"--pane", paneID,
 		"--timeout", strconv.Itoa(timeoutMs),
 	); err != nil {
-		return "", fmt.Errorf("herdr agent start: %w", err)
+		return "", fmt.Errorf("herdr agent start: %w", dispatchedAfterSuccess(err))
 	}
 	if result.PaneID == "" {
 		result.PaneID = paneID
 	}
 	if result.PaneID == "" {
-		return "", errors.New("herdr agent start: response has no pane_id")
+		return "", dispatchedAfterSuccess(errors.New("herdr agent start: response has no pane_id"))
 	}
 	return result.PaneID, nil
 }
@@ -792,6 +801,27 @@ func (c *Client) run(parent context.Context, timeout time.Duration, args ...stri
 	return c.runCommand(ctx, args...)
 }
 
+type dispatchCheckKey struct{}
+
+func WithDispatchCheck(ctx context.Context, check func() error) context.Context {
+	prior, _ := ctx.Value(dispatchCheckKey{}).(func() error)
+	return context.WithValue(ctx, dispatchCheckKey{}, func() error {
+		if prior != nil {
+			if err := prior(); err != nil {
+				return err
+			}
+		}
+		return check()
+	})
+}
+
+func CheckDispatch(ctx context.Context) error {
+	if check, ok := ctx.Value(dispatchCheckKey{}).(func() error); ok {
+		return check()
+	}
+	return nil
+}
+
 func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, error) {
 	ctx := parent
 	cancel := func() {}
@@ -811,8 +841,22 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 		return nil, &OutcomeError{Started: false, Err: ctx.Err()}
 	}
 
-	cmd := exec.Command(c.bin, args...)
-	cmd.Env = append(cmd.Environ(), "HERDR_SOCKET_PATH="+c.socketPath)
+	if err := ctx.Err(); err != nil {
+		return nil, &OutcomeError{Started: false, Err: err}
+	}
+	if err := CheckDispatch(ctx); err != nil {
+		return nil, &OutcomeError{Started: false, Err: err}
+	}
+
+	cmd := childenv.Command(c.bin, args...)
+	environment := cmd.Env[:0]
+	for _, variable := range cmd.Env {
+		key, _, _ := strings.Cut(variable, "=")
+		if key != "HERDR_SOCKET_PATH" {
+			environment = append(environment, variable)
+		}
+	}
+	cmd.Env = append(environment, "HERDR_SOCKET_PATH="+c.socketPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Process-group termination owns cancellation. WaitDelay is the final
 	// backstop for inherited stdout/stderr descriptors held by a descendant

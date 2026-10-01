@@ -207,7 +207,12 @@ func TestPollerTopologyStaleCommitDoesNotBackOff(t *testing.T) {
 }
 
 func TestEventTopologyRecoveryDoesNotResetPollRetryStreak(t *testing.T) {
-	poller := NewPoller(nil, testState(), time.Second, testLogger())
+	socket := startPollerTestSocket(t, func(method string) (any, string) {
+		return pollerSuccessResult(method), ""
+	})
+	client := herdr.NewClient("unused", socket)
+	t.Cleanup(func() { _ = client.Close() })
+	poller := NewPoller(client, testState(), time.Second, testLogger())
 	poller.pollRetryFailures = 3
 	poller.consecutiveFailures.Store(3)
 

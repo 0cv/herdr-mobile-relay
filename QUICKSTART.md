@@ -45,11 +45,14 @@ Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
 the one-use bootstrap invitation in the URL fragment, which is never sent in
 the HTTP request. The installed app removes it after enrollment. iOS browser
 tabs retain it without redeeming it and direct you to the installed app, which
-prevents a disposable Safari tab from consuming the invitation. If no phone has
-paired yet, retry the same bootstrap link while the relay is running; its
-ten-minute window renews when presented. After the first phone pairs, use a
-separate owner-issued invitation for each additional device; those invitations
-expire ten minutes after issue and cannot be reused.
+prevents a disposable Safari tab from consuming the invitation. To use the tab
+itself as a device, choose **Pair this browser instead** in Settings and confirm
+that it spends this one-use invitation; pairing the Home Screen app afterward
+requires another invitation. If no phone has paired yet, retry the same bootstrap
+link while the relay is running; its ten-minute window renews when presented.
+After the first phone pairs, use a separate owner-issued invitation for each
+additional device; those invitations expire ten minutes after issue and cannot
+be reused.
 
 Keep the Quick Start pane open. Ctrl-C stops the relay, and on the tunnel path
 the next run creates a new hostname and setup link.

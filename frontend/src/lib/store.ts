@@ -117,6 +117,8 @@ import type {
   WorktreeListing,
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
+const BOOTSTRAP_PAIRING_SESSION_PREFIX = 'herdr_browser_pairing:';
+const AGENT_START_TIMEOUT_MS = 60_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
 const SETUP_LINK_FAILURE_MESSAGE = 'This setup link has expired or was already used, or this device was refused. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.';
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
@@ -171,6 +173,7 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   send_keys: true,
   send_text: true,
   send_input: true,
+  send_filter_text: true,
   send_secret: true,
   agent_start: true,
   agent_rename: true,
@@ -608,6 +611,7 @@ class RelayStore {
       clearChangedRelayPreviews(relays, imported);
       relays = imported;
       const relay = setup ? this.relayForSetup(relays, setup) : undefined;
+      const pairingAccepted = relay && this.setupPairingAccepted(relay, location);
       if (relay) {
         if (this.deferPairing(relay, location)) {
           this.showToast(PAIRING_DEFERRED_MESSAGE);
@@ -621,7 +625,7 @@ class RelayStore {
         }
       }
       saveRelayConfigs(relays);
-      if (!shouldRetainSetupFragment(location, navigator.standalone)) {
+      if (pairingAccepted || !shouldRetainSetupFragment(location, navigator.standalone)) {
         history.replaceState(history.state, '', location.pathname + location.search);
       }
     }
@@ -634,13 +638,18 @@ class RelayStore {
    * installed Home Screen copy to redeem.
    */
   private deferPairing(relay: RelayConfig, locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>): boolean {
-    const deferred = shouldDeferPairingConnection(
+    const deferred = !this.setupPairingAccepted(relay, locationValue) && shouldDeferPairingConnection(
       locationValue,
       navigator.standalone,
       navigator.userAgent,
       navigator.maxTouchPoints,
     );
     if (deferred) {
+      if (!quickSetupInvitation(locationValue) && locationValue.hash === location.hash
+        && typeof history.state?.bootstrapPairingFlow !== 'string') {
+        history.replaceState({ ...history.state, bootstrapPairingFlow: commandRequestId() }, '',
+          location.pathname + location.search + location.hash);
+      }
       this.deferredPairingRelays.add(relay.id);
       this.markPairingDeferred(relay);
     } else {
@@ -677,6 +686,47 @@ class RelayStore {
     return stored.invitationId !== invitation.id && invitation.expiresAt > stored.issuedAt;
   }
 
+  private setupPairingAccepted(relay: RelayConfig, locationValue: Pick<Location, 'hash'>): boolean {
+    const invitation = quickSetupInvitation(locationValue);
+    if (invitation) return !this.shouldSaveInvitation(relay.id, invitation);
+    if (locationValue.hash !== location.hash || !this.deviceCredentials.get(relay.id)) return false;
+    const flow = history.state?.bootstrapPairingFlow;
+    if (typeof flow !== 'string') return false;
+    try {
+      return sessionStorage.getItem(BOOTSTRAP_PAIRING_SESSION_PREFIX + flow) === relay.id;
+    } catch {
+      return false;
+    }
+  }
+
+  pairDeferredRelay(relayId: string): boolean {
+    const setup = quickSetupConfig(location);
+    const relay = setup ? this.relayForSetup(get(this.relayConfigs), setup) : undefined;
+    if (!this.deferredPairingRelays.has(relayId) || relay?.id !== relayId) {
+      this.showToast('Open the invitation link again.', true);
+      return false;
+    }
+    this.deferredPairingRelays.delete(relayId);
+    const invitation = quickSetupInvitation(location);
+    try {
+      if (invitation && this.shouldSaveInvitation(relayId, invitation)) {
+        this.deviceCredentials.saveInvitation(relayId, invitation);
+      } else if (!invitation) {
+        const flow = history.state?.bootstrapPairingFlow;
+        if (typeof flow !== 'string') throw new Error('Open the invitation link again.');
+        sessionStorage.setItem(BOOTSTRAP_PAIRING_SESSION_PREFIX + flow, relayId);
+      }
+    } catch (error) {
+      this.deferredPairingRelays.add(relayId);
+      this.showToast(error instanceof Error ? error.message : 'Could not save browser pairing.', true);
+      return false;
+    }
+    history.replaceState(history.state, '', location.pathname + location.search);
+    this.connectRelay(relay);
+    this.showToast('Pairing this browser as its own device.');
+    return true;
+  }
+
   importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
     const setup = quickSetupConfig(locationValue);
     const invitation = quickSetupInvitation(locationValue);
@@ -695,6 +745,10 @@ class RelayStore {
       this.showToast(SETUP_LINK_FAILURE_MESSAGE, true);
       return false;
     }
+    const pairingAccepted = this.setupPairingAccepted(relay, locationValue);
+    const connection = this.connectionsValue.get(relay.id);
+    const preserveConnection = pairingAccepted && connection && !connection.closed
+      && !relayConnectionIdentityChanged(connection.relay, relay);
     clearChangedRelayPreviews(currentRelays, imported);
     // Persist the entry before deciding, so a deferred relay row exists for
     // the connection state and the installed copy finds the same relay id.
@@ -709,13 +763,15 @@ class RelayStore {
         return false;
       }
     }
-    if (!shouldRetainSetupFragment(locationValue, navigator.standalone)) {
+    if (pairingAccepted || !shouldRetainSetupFragment(locationValue, navigator.standalone)) {
       history.replaceState(history.state, '', locationValue.pathname + locationValue.search);
     }
-    if (connect) this.connectAll(true);
-    this.showToast(deferred
-      ? PAIRING_DEFERRED_MESSAGE
-      : invitation ? 'Device invitation imported.' : 'Relay added from the setup link.');
+    if (connect && !preserveConnection) this.connectAll(true);
+    if (!preserveConnection) {
+      this.showToast(deferred
+        ? PAIRING_DEFERRED_MESSAGE
+        : invitation ? 'Device invitation imported.' : 'Relay added from the setup link.');
+    }
     return true;
   }
 
@@ -1780,7 +1836,7 @@ class RelayStore {
   sendCommand(
     relayId: string,
     payload: Record<string, any>,
-    timeoutMs = COMMAND_TIMEOUT_MS,
+    timeoutMs = payload.type === 'agent_start' ? AGENT_START_TIMEOUT_MS : COMMAND_TIMEOUT_MS,
     allowProtocolMismatch = false,
     signal?: AbortSignal,
   ): Promise<CommandResult> {
@@ -2305,6 +2361,7 @@ class RelayStore {
     const error = new CommandError(detail || receipt.error?.code || 'Command failed');
     error.data = {
       phase: receipt.phase,
+      ...(receipt.phase === 'failed_before_dispatch' ? { not_started: true } : {}),
       ...(receipt.error ? { api_error: receipt.error } : {}),
       ...(receipt.phase === 'dispatched_unknown' ? { dispatched_unknown: true } : {}),
     };
@@ -2348,7 +2405,7 @@ class RelayStore {
     if (result.ok) pending.resolve(result);
     else {
       const error = new CommandError(result.error || 'Command failed');
-      error.data = result.data;
+      error.data = { ...(result.data || {}), ...(result.phase === 'not_started' ? { not_started: true } : {}) };
       if (result.phase === 'dispatched_unknown') {
         error.data = { ...(result.data || {}), dispatched_unknown: true };
       }
@@ -2878,23 +2935,44 @@ class RelayStore {
     return data;
   }
 
-  async loadSlashCommands(agent: Agent): Promise<SlashCommandCatalog> {
+  async loadSlashCommands(agent: Agent, refresh = false): Promise<SlashCommandCatalog> {
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('slash_commands')) {
       throw new CommandError('This relay does not provide slash-command suggestions.');
     }
-    const identity = `${String(agent.agent || '')}\u0000${String(agent.cwd || '')}`;
-    const cached = this.slashCommandCache.get(agent.pane_id);
-    if (cached?.identity === identity) return cached.catalog;
+    const identity = JSON.stringify([
+      agent.relay_id, agent.server_session_id, agent.raw_pane_id,
+      agent.terminal_id, agent.generation, agent.agent_session_id,
+      agent.agent, agent.cwd,
+    ]);
     const pending = this.pendingSlashCommands.get(agent.pane_id);
-    if (pending?.identity === identity) return pending.promise;
+    if (!refresh && pending?.identity === identity) return pending.promise;
+    const cached = this.slashCommandCache.get(agent.pane_id);
+    if (!refresh && cached?.identity === identity) return cached.catalog;
+    this.slashCommandCache.delete(agent.pane_id);
 
     const promise = this.sendToAgent(agent, { type: 'list_slash_commands' }, 10_000)
       .then((result) => {
         const data = result.data && typeof result.data === 'object' ? result.data : {};
         const rawCommands = data.commands;
         const commandsList = Array.isArray(rawCommands) ? rawCommands : [];
-        const sources = new Set(['builtin', 'personal', 'project']);
+        const sources = new Set(['builtin', 'personal', 'project', 'temporary']);
+        const metadata = data.metadata && typeof data.metadata === 'object'
+          ? data.metadata as Record<string, Record<string, unknown>> : {};
+        const commandMetadata = (name: string): Pick<SlashCommand, 'kind' | 'provenance'> => {
+          const value = metadata[name];
+          if (!value || !['builtin', 'extension', 'prompt', 'skill'].includes(String(value.kind))) return {};
+          const kind = value.kind as SlashCommand['kind'];
+          const p = value.provenance as Record<string, unknown> | undefined;
+          if (!p || !['user', 'project', 'temporary'].includes(String(p.scope))
+            || !['package', 'top-level'].includes(String(p.origin))) return { kind };
+          return { kind, provenance: {
+            path: String(p.path || '').slice(0, 1024), source: String(p.source || '').slice(0, 256),
+            scope: p.scope as NonNullable<SlashCommand['provenance']>['scope'],
+            origin: p.origin as NonNullable<SlashCommand['provenance']>['origin'],
+            ...(p.base_dir ? { base_dir: String(p.base_dir).slice(0, 1024) } : {}),
+          } };
+        };
         const validCommands = commandsList
           .filter((entry: Record<string, unknown>) => typeof entry?.command === 'string'
             && /^\/[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(entry.command));
@@ -2906,12 +2984,17 @@ class RelayStore {
             ...(entry.argument_hint ? { argument_hint: String(entry.argument_hint).slice(0, 120) } : {}),
             source: sources.has(String(entry.source))
               ? entry.source as SlashCommand['source']
-              : 'builtin',
+              : 'temporary',
+            ...commandMetadata(String(entry.command)),
           }))
           .sort((left, right) => left.command.localeCompare(right.command, undefined, { sensitivity: 'base' }));
-        const catalog = {
+        const catalog: SlashCommandCatalog = {
           commands,
           truncated: Boolean(data.truncated) || validCommands.length > SLASH_COMMAND_MAX_ENTRIES,
+          ...(['loading', 'available', 'unavailable', 'partial'].includes(String(data.status))
+            ? { status: data.status as SlashCommandCatalog['status'] } : {}),
+          ...(typeof data.revision === 'string' && /^[a-f0-9]{64}$/.test(data.revision)
+            ? { revision: data.revision } : {}),
         };
         if (this.pendingSlashCommands.get(agent.pane_id)?.promise === promise) {
           this.slashCommandCache.set(agent.pane_id, { identity, catalog });

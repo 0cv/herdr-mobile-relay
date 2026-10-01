@@ -10,14 +10,14 @@ import (
 
 func TestPiBuiltinCatalog(t *testing.T) {
 	isolateAgentEnv(t)
-	catalog := CatalogForProfile("pi", "pi", t.TempDir(), "/nonexistent", nil, "", "0.82.1", "")
+	catalog := CatalogForProfile("pi", "pi", t.TempDir(), "/nonexistent", nil, "", "0.87.0", "")
 	if catalog.Truncated {
 		t.Fatal("builtins-only catalog is truncated")
 	}
-	if len(catalog.Commands) != 22 {
-		t.Fatalf("Pi builtins = %d, want 22", len(catalog.Commands))
+	if len(catalog.Commands) != 24 {
+		t.Fatalf("Pi builtins = %d, want 24", len(catalog.Commands))
 	}
-	for _, name := range []string{"/settings", "/model", "/resume", "/compact", "/quit"} {
+	for _, name := range []string{"/settings", "/model", "/thinking", "/bug", "/resume", "/compact", "/quit"} {
 		if !hasCommand(catalog, name) {
 			t.Errorf("Pi catalog missing %s", name)
 		}

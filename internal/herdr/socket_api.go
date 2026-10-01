@@ -102,6 +102,9 @@ func (c *socketAPIClient) requestUnary(
 		return nil, false, fmt.Errorf("encode Herdr socket API request: %w", err)
 	}
 	payload = append(payload, '\n')
+	if err := CheckDispatch(requestCtx); err != nil {
+		return nil, false, errors.Join(ErrNotStarted, err)
+	}
 	written, err := conn.Write(payload)
 	if err != nil {
 		return nil, written > 0, fmt.Errorf("write Herdr socket API request: %w", err)
@@ -219,6 +222,9 @@ func (c *socketAPIClient) readPane(
 			}, nil
 		}
 		lastErr = err
+		if errors.Is(err, ErrNotStarted) {
+			break
+		}
 		_ = c.closeLocked()
 	}
 	return PaneRead{}, lastErr
@@ -265,6 +271,9 @@ func (c *socketAPIClient) requestConnected(
 		return response, false, fmt.Errorf("encode Herdr socket API request: %w", err)
 	}
 	payload = append(payload, '\n')
+	if err := CheckDispatch(ctx); err != nil {
+		return response, false, errors.Join(ErrNotStarted, err)
+	}
 	if written, err := c.conn.Write(payload); err != nil {
 		return response, written > 0, fmt.Errorf("write Herdr socket API request: %w", err)
 	}
@@ -332,6 +341,9 @@ func (c *socketAPIClient) moveRequest(
 			return err
 		}
 		lastErr = err
+		if errors.Is(err, ErrNotStarted) {
+			break
+		}
 		_ = c.closeLocked()
 	}
 	if dispatched {

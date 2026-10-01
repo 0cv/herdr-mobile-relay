@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,6 +63,7 @@ func publishInventoryForTest(t *testing.T, server *Server) {
 }
 func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 	mutation := protocol.ActionMetadata{Operation: "send_input", Class: protocol.ActionMutating}
+	filter := protocol.ActionMetadata{Operation: "send_filter_text", Class: protocol.ActionMutating}
 	read := protocol.ActionMetadata{Operation: "read_pane", Class: protocol.ActionReadOnly}
 
 	for _, test := range []struct {
@@ -74,6 +76,8 @@ func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 	}{
 		{name: "reader mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: mutation, wantDenied: true},
 		{name: "reader read", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: read},
+		{name: "reader filter denied", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: filter, wantDenied: true},
+		{name: "controller filter allowed", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleController)}, authenticated: true, action: filter},
 		{name: "reader self revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-current"},
 		{name: "reader other revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-other", wantDenied: true},
 		{name: "controller mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleController)}, authenticated: true, action: mutation},
@@ -1311,6 +1315,13 @@ func TestCommittedInventoryPublicationRepairsZeroListenerRefreshAndReconnect(t *
 	reconnected.CloseNow()
 }
 
+// Cancelling the server drops in-flight socket connections, so the fixture sees
+// ordinary teardown errors that say nothing about the behaviour under test.
+func fixtureConnectionTornDown(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
 func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
@@ -1338,6 +1349,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	var inventoryCalls atomic.Int32
 	// The poller may close a request while this fake server is replying during teardown.
 	var shuttingDown atomic.Bool
+	var failNextInventory atomic.Bool
 	serverDone := make(chan error, 1)
 	go func() {
 		var serveErr error
@@ -1371,8 +1383,8 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 				encoder := json.NewEncoder(conn)
 				switch request.Method {
 				case "agent.list":
-					call := inventoryCalls.Add(1)
-					if call == 2 {
+					inventoryCalls.Add(1)
+					if failNextInventory.CompareAndSwap(true, false) {
 						close(pollFailed)
 						writeResponse(encoder, map[string]any{
 							"id":    request.ID,
@@ -1548,6 +1560,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	// The event operation has started and is paused before its commit. A real
 	// poll failure now races that in-flight event recovery through the installed
 	// production publisher; the later ready commit must not be lost.
+	failNextInventory.Store(true)
 	server.poller.Wake()
 	select {
 	case <-pollFailed:
@@ -1641,7 +1654,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 }
@@ -1868,7 +1881,7 @@ func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if serveErr := <-serverDone; serveErr != nil {
+	if serveErr := <-serverDone; serveErr != nil && !fixtureConnectionTornDown(serveErr) {
 		t.Fatal(serveErr)
 	}
 }
@@ -2573,7 +2586,6 @@ func TestCopyAgentResponseValidatesPaneState(t *testing.T) {
 			paneID: "pane-1",
 			setup: func(s *Server) {
 				s.state.CommitInventory([]*coordinator.AgentState{{PaneID: "pane-1", Agent: "unknown", Status: "idle"}}, s.state.RevisionCounter())
-				s.profiles.Remember("pane-1", "unknown")
 				s.clipboardRead = func(context.Context) ([]byte, error) { return nil, nil }
 				s.clipboardWrite = func(context.Context, []byte) error { return nil }
 			},
@@ -2610,7 +2622,6 @@ func TestCopyAgentResponseRejectsReplacedPane(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{
 		{PaneID: paneID, Agent: "claude", Status: "idle", PaneRevision: 4},
 	}, s.state.RevisionCounter())
-	s.profiles.Remember(paneID, "claude")
 	s.clipboardRead = func(context.Context) ([]byte, error) { return []byte("before"), nil }
 	s.clipboardWrite = func(context.Context, []byte) error { return nil }
 	s.copyRunner = func(
@@ -2638,7 +2649,6 @@ func TestCopyAgentResponseReturnsCopiedData(t *testing.T) {
 	s.state.CommitInventory([]*coordinator.AgentState{
 		{PaneID: paneID, Agent: "claude", Status: "idle", PaneRevision: 4},
 	}, s.state.RevisionCounter())
-	s.profiles.Remember(paneID, "claude")
 	s.clipboardRead = func(context.Context) ([]byte, error) { return []byte("before"), nil }
 	s.clipboardWrite = func(context.Context, []byte) error { return nil }
 	s.copyRunner = func(
@@ -2700,6 +2710,24 @@ func TestHealthz(t *testing.T) {
 	}
 	if resp["gateway_available_version"] != "0.9.0" {
 		t.Errorf("gateway_available_version = %v, want 0.9.0", resp["gateway_available_version"])
+	}
+}
+
+func TestReadyzIncludesReleaseIdentityForEmptyInventory(t *testing.T) {
+	s := testServer()
+	s.ready = true
+	s.state.CommitInventory(nil, 0)
+	w := httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest("GET", "/readyz", nil))
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || response["status"] != "ready" || response["instance"] != "test-instance" || response["release_version"] != "0.9.0" || response["revision"] != "abc123" {
+		t.Fatalf("readiness response: %d %+v", w.Code, response)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("readiness may be cached")
 	}
 }
 

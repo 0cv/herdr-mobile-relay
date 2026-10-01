@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const (
@@ -279,7 +281,7 @@ func (b *boundedBuffer) Write(value []byte) (int, error) {
 
 func gitEnvironment() []string {
 	environment := make([]string, 0, len(os.Environ())+8)
-	for _, value := range os.Environ() {
+	for _, value := range childenv.WithoutReleaseCredentials(os.Environ()) {
 		key, _, _ := strings.Cut(value, "=")
 		if strings.HasPrefix(key, "GIT_") {
 			continue

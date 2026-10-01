@@ -24,6 +24,7 @@ func testReader(t *testing.T) (*Reader, string) {
 	t.Setenv(agentroots.PiListEnv, "")
 	t.Setenv(agentroots.OMPListEnv, "")
 	t.Setenv(agentroots.HermesListEnv, "")
+	t.Setenv(agentroots.CursorListEnv, "")
 	home := t.TempDir()
 	return NewReader(home), home
 }

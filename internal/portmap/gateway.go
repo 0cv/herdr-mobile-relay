@@ -8,10 +8,11 @@ import (
 	"io"
 	"net/netip"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const (
@@ -35,7 +36,7 @@ func defaultGateways(ctx context.Context) ([]netip.Addr, error) {
 		defer file.Close()
 		return parseProcNetRoute(file), nil
 	case "darwin":
-		out, err := exec.CommandContext(ctx, "route", "-n", "get", "default").Output()
+		out, err := childenv.CommandContext(ctx, "route", "-n", "get", "default").Output()
 		if err != nil {
 			return nil, fmt.Errorf("route -n get default: %w", err)
 		}

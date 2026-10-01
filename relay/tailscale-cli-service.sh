@@ -13,6 +13,7 @@ ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
     exit 0
 }
 load_relay_env "$ENV_FILE"
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 [ "$(relay_transport_mode "$ENV_FILE")" = tailscale-cli ] || {
     echo "Tailscale CLI service requires HERDR_RELAY_TRANSPORT=tailscale-cli; service startup remains disabled." >&2
     exit 0

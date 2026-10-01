@@ -64,7 +64,7 @@ func busyLifecycle(t *testing.T, dir, bin string) (*Lifecycle, string) {
 	writeScript(t, pathDir, "codex", "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	socketPath := filepath.Join(dir, "herdr.sock")
-	startInventorySocket(t, socketPath, nil)
+	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
 	return &Lifecycle{
 		herdr:    herdr.NewClient(bin, socketPath),
 		profiles: profiles.NewResolver(filepath.Join(dir, "config"), nil),
@@ -85,6 +85,16 @@ func startInvocations(t *testing.T, record string) []string {
 		}
 	}
 	return starts
+}
+
+func stopAfterRefusals(lifecycle *Lifecycle, count int) {
+	lifecycle.waitForRetry = func(ctx context.Context, _ time.Duration) bool {
+		count--
+		if count == 0 {
+			return false
+		}
+		return ctx.Err() == nil
+	}
 }
 
 func TestAgentStartRetriesWhileHerdrRefusesTheNewPane(t *testing.T) {
@@ -165,8 +175,9 @@ func TestAgentStartKeepsTheTargetWhenHerdrKeepsRefusing(t *testing.T) {
 	record := filepath.Join(dir, "invocations.log")
 	lifecycle, cwd := busyLifecycle(t, dir, busyHerdr(t, dir, record, -1))
 
-	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	stopAfterRefusals(lifecycle, 2)
 	result, err := lifecycle.Start(ctx, profiles.Profile{ID: "codex", Kind: "codex"}, StartRequest{
 		ProfileID: "codex",
 		Name:      "project-codex",
@@ -211,10 +222,9 @@ func TestAgentStartFailureSurfacesTheKeptPane(t *testing.T) {
 	d.lifecycle = lifecycle
 	before := state.TopologyGeneration()
 
-	// The caller's deadline shortens the 40s command deadline, so the retry
-	// window closes as soon as the startup reserve is exhausted.
-	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	stopAfterRefusals(lifecycle, 2)
 	result := d.handleAgentStart(ctx, time.Now(), "request-1", map[string]any{
 		"profile_id": "codex",
 		"name":       "project-codex",

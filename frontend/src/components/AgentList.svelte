@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import AgentLogo, { hasAgentLogo } from '$components/AgentLogo.svelte';
+  import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import Button from '$components/ui/Button.svelte';
   import {
     agentLastActiveAt,
@@ -482,7 +483,7 @@
         >
           <span class="agent-identity">
             <AgentLogo agent={agent.agent} />
-            <span class={`status-dot status-${tone}`} class:hollow={group === 'ready'} aria-hidden="true"></span>
+            <span class={`status-dot status-${tone}`} aria-hidden="true"></span>
           </span>
           <span class="agent-copy">
             <span class="agent-title-row">
@@ -586,7 +587,9 @@
               role="img"
               aria-label={stateTone === 'success'
                 ? 'Has a done session'
-                : stateTone === 'warning' ? 'Has a working session' : 'All sessions idle'}
+                : stateTone === 'warning'
+                  ? 'Has a working session'
+                  : stateTone === 'ready' ? 'All sessions idle and ready for input' : 'No session state reported'}
             ></span>
           {/if}
           <span class="workspace-card-copy">
@@ -669,6 +672,11 @@
     <div class="empty-state" role="status">
       <p>Add Herdr to the Home Screen, then open it there to finish pairing.</p>
       <p>This browser tab keeps the setup link unused so the installed app can redeem it.</p>
+      {#each deferredRelays as relay (relay.id)}
+        <div role="group" aria-label={relay.label}>
+          <PairDeferredRelay relayId={relay.id} onPair={(id) => relayStore.pairDeferredRelay(id)} />
+        </div>
+      {/each}
     </div>
   {:else if !agents.length && !unavailableRelays.length}
     <div class="empty-state" role="status">Waiting for relays…</div>
@@ -710,7 +718,7 @@
   {#if idleWorkspaces.length}
     <section class="agent-section workspace-section" aria-labelledby="workspace-section-title">
       <h2 id="workspace-section-title" class="section-heading">
-        <span class="status-dot hollow"></span>Idle
+        <span class="status-dot status-ready"></span>Idle
         <span class="section-count" aria-hidden="true">{idleWorkspaces.length}</span>
       </h2>
       {@render workspaceGrid(idleWorkspaces, idleWorkspaces.length === 1, 'idle')}

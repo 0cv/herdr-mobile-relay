@@ -1,35 +1,32 @@
 package conversation
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/sqliteexec"
 )
 
 const (
-	openCodeQueryTimeout = 3 * time.Second
+	openCodeQueryTimeout = 10 * time.Second
 	maxOpenCodeOutput    = 8 * 1024 * 1024
 	maxOpenCodeCache     = 128
 )
 
-var errOpenCodeOutputLimit = errors.New("opencode query output limit exceeded")
-
 type openCodeReader struct {
-	home   string
-	binary string
-	mu     sync.Mutex
-	cache  map[string]openCodeCacheEntry
+	home     string
+	binary   string
+	executor sqliteexec.Executor
+	mu       sync.Mutex
+	cache    map[string]openCodeCacheEntry
 }
 
 type openCodeFileStamp struct {
@@ -61,31 +58,16 @@ type openCodeRow struct {
 	Database    string `json:"-"`
 }
 
-type boundedBuffer struct {
-	bytes.Buffer
-	remaining int
-	overflow  bool
-}
-
-func (b *boundedBuffer) Write(data []byte) (int, error) {
-	if len(data) > b.remaining {
-		if b.remaining > 0 {
-			_, _ = b.Buffer.Write(data[:b.remaining])
-			b.remaining = 0
-		}
-		b.overflow = true
-		return 0, errOpenCodeOutputLimit
-	}
-	b.remaining -= len(data)
-	return b.Buffer.Write(data)
-}
-
 func newOpenCodeReader(home string) *openCodeReader {
-	return &openCodeReader{home: home, binary: "sqlite3", cache: make(map[string]openCodeCacheEntry)}
+	return &openCodeReader{home: home, binary: "sqlite3", executor: sqliteexec.MustFromEnv(), cache: make(map[string]openCodeCacheEntry)}
+}
+
+func (r *openCodeReader) queryExec() sqliteexec.Executor {
+	return resolveQueryExecutor(r.executor, r.binary)
 }
 
 func (r *openCodeReader) databases() ([]string, string) {
-	if _, err := exec.LookPath(r.binary); err != nil {
+	if exec := r.queryExec(); exec == nil || !exec.Ready() {
 		return nil, "source_unavailable"
 	}
 	roots := agentroots.OpenCodeData(r.home)
@@ -224,20 +206,12 @@ func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, 
 	)
 	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	command := exec.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
-	stdout := &boundedBuffer{remaining: maxOpenCodeOutput}
-	var stderr boundedBuffer
-	stderr.remaining = 4096
-	command.Stdout = stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		if stdout.overflow || errors.Is(err, errOpenCodeOutputLimit) {
-			return nil, false, "output_limit"
-		}
-		return nil, false, "query_failed"
+	raw, code := runSQLiteJSON(queryCtx, r.queryExec(), database, query, maxOpenCodeOutput)
+	if code != "" {
+		return nil, false, code
 	}
 	var rows []openCodeRow
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, false, "source_corrupt"
 	}
 	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {

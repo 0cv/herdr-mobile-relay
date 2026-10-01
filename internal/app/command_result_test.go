@@ -30,8 +30,12 @@ func TestSlashCommandCatalogFitsOutboundHubBudget(t *testing.T) {
 			Source:       "personal",
 		}
 	}
+	metadata := make(map[string]slashcmd.Metadata)
+	for _, command := range commands {
+		metadata[command.Command] = slashcmd.Metadata{Kind: "extension", Provenance: &slashcmd.Provenance{Path: strings.Repeat("&", 1024), Source: "local", Scope: "user", Origin: "top-level"}}
+	}
 	catalog := fitSlashCommandCatalog(
-		slashcmd.Catalog{Commands: commands},
+		slashcmd.Catalog{Commands: commands, Metadata: metadata, Status: "partial"},
 		"req-large-catalog", "list_slash_commands", "pane-large-catalog",
 	)
 	message := commandResultMessage(&coordinator.CommandResult{
@@ -51,6 +55,9 @@ func TestSlashCommandCatalogFitsOutboundHubBudget(t *testing.T) {
 	}
 	if !catalog.Truncated || len(catalog.Commands) >= len(commands) {
 		t.Fatalf("large catalog = %d commands, truncated %v; want byte-clipped response", len(catalog.Commands), catalog.Truncated)
+	}
+	if catalog.Status != "partial" || len(catalog.Metadata) != len(catalog.Commands) || catalog.Revision != slashcmd.Revise(catalog).Revision {
+		t.Fatal("byte guard lost runtime status, metadata, or revision")
 	}
 	t.Logf("byte-bounded slash catalog: %d commands, %d serialized bytes (limit %d)", len(catalog.Commands), len(encoded), transport.MaxOutboundMessageBytes)
 

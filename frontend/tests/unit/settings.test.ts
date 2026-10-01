@@ -1,3 +1,4 @@
+import { get } from 'svelte/store';
 import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +10,7 @@ import {
   TERMINAL_HISTORY_KEY,
   TERMINAL_REFRESH_KEY,
 } from '$lib/config';
+import { currentView, navigate } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
@@ -91,6 +93,43 @@ describe('settings relay status', () => {
     vi.unstubAllGlobals();
     if (serviceWorkerDescriptor) Object.defineProperty(navigator, 'serviceWorker', serviceWorkerDescriptor);
     else Reflect.deleteProperty(navigator, 'serviceWorker');
+  });
+
+  it('requires confirmation to pair a deferred browser and leaves Cancel harmless', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal('navigator', {
+      standalone: false, userAgent: 'Mozilla/5.0 (iPhone)', maxTouchPoints: 5,
+    });
+    const hash = `#setup=${'A'.repeat(43)}&invite=invitation-settings01&invite_version=1`
+      + `&invite_expires=${Date.now() + 60_000}&label=Invited&relay=${encodeURIComponent('wss://invited.example')}`;
+    history.replaceState(null, '', `/pair${hash}`);
+    relayStore.importSetupLink();
+    navigate({ view: 'settings' });
+    expect(location.hash).toBe(hash);
+    const pair = vi.spyOn(relayStore, 'pairDeferredRelay');
+    try {
+      render(SettingsView);
+      expect(screen.getByText(/Waiting for the Home Screen app/)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      expect(pair).not.toHaveBeenCalled();
+      expect(screen.getByText(/This browser becomes its own device/)).toHaveAttribute('role', 'alert');
+      expect(screen.getByText(/This browser becomes its own device/)).toHaveTextContent(/Safari may clear this site's storage/);
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(pair).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Pair this browser instead' })).toHaveFocus();
+      expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Pair this browser instead' }));
+      await user.click(screen.getByRole('button', { name: 'Confirm' }));
+      expect(pair).toHaveBeenCalledExactlyOnceWith('invited-wss-invited-example');
+      expect(pair).toHaveReturnedWith(true);
+      expect(location.hash).toBe('');
+      expect(get(relayStore.connections).get('invited-wss-invited-example')?.pairingDeferred).toBe(false);
+      await waitFor(() => expect(screen.queryByText(/Waiting for the Home Screen app/)).not.toBeInTheDocument());
+    } finally {
+      pair.mockRestore();
+      currentView.set({ view: 'agents' });
+    }
   });
 
   it('updates connection and push state without remounting settings', async () => {

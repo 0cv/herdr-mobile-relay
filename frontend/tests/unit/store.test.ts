@@ -1,4 +1,5 @@
 import { get } from 'svelte/store';
+import piCatalogFixture from '../../../contracts/fixtures/pi_command_catalog.json';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
 import { BrowserDeviceCredentialStore } from '$lib/device-auth';
@@ -10,6 +11,7 @@ import {
   setTerminalRefreshInterval,
 } from '$lib/preferences';
 import { paneViewPreferenceKey } from '$lib/agent-view';
+import { closeCurrentView, currentView, initializeRouter, navigate } from '$lib/router';
 import { SLASH_COMMAND_MAX_ENTRIES } from '$lib/slash-command-limits';
 import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
@@ -128,6 +130,23 @@ describe('relay command store', () => {
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
+  });
+
+  it.each(['completed', 'completed_with_warning'])('retains a launch until delayed %s', async (phase) => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'claude', name: 'project', cwd: '/tmp' });
+    const command = JSON.parse(socket.sent.at(-1)!);
+    const settled = vi.fn();
+    void pending.then(settled, settled);
+    await vi.advanceTimersByTimeAsync(52_000);
+    expect(settled).not.toHaveBeenCalled();
+    const data = phase === 'completed_with_warning' ? { warning: 'Initial prompt was not confirmed' } : {};
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase, data });
+    await expect(pending).resolves.toMatchObject({ ok: true, phase, data });
   });
 
   it('bounds conversation history payloads and requires a usable preparation cursor', async () => {
@@ -489,6 +508,273 @@ describe('relay command store', () => {
       id: 'invitation-123456',
     });
     expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  describe('explicit iOS browser pairing', () => {
+    const relayId = makeRelayId('Invited', 'wss://invited.example');
+
+    function deferBrowserPairing(invitation = true) {
+      relayStore.destroy();
+      relayStore.relayConfigs.set([]);
+      localStorage.clear();
+      MockWebSocket.instances = [];
+      vi.stubGlobal('navigator', {
+        standalone: false,
+        userAgent: 'Mozilla/5.0 (iPhone)',
+        maxTouchPoints: 5,
+      });
+      const secret = invitation ? 'A'.repeat(43) : '0123456789abcdef0123456789abcdef';
+      const hash = `#setup=${secret}&label=Invited&relay=${encodeURIComponent('wss://invited.example')}`
+        + (invitation ? `&invite=invitation-browser01&invite_version=1&invite_expires=${Date.now() + 60_000}` : '');
+      history.replaceState({ retained: true }, '', `/pair?source=test${hash}`);
+      relayStore.initialize();
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      return hash;
+    }
+
+    it('saves the invitation, clears the fragment, and dials only after opting in', () => {
+      deferBrowserPairing();
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toMatchObject({
+        kind: 'invitation', id: 'invitation-browser01', secret: 'A'.repeat(43),
+      });
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].protocols).toBe('herdr-e2ee-v2');
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(replace).toHaveBeenCalledWith({ retained: true }, '', '/pair?source=test');
+      expect(location.hash).toBe('');
+      expect(get(relayStore.toast)?.message).toBe('Pairing this browser as its own device.');
+
+      relayStore.initialize();
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(2);
+    });
+
+    it('connects a bootstrap-key link using the imported relay token', async () => {
+      deferBrowserPairing(false);
+      expect(get(relayStore.relayConfigs)[0].token).toBe('0123456789abcdef0123456789abcdef');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      const socket = MockWebSocket.instances[0];
+      expect(socket.protocols).toBe('herdr-e2ee-v2');
+      socket.open();
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+      expect(JSON.parse(socket.sent[0])).toMatchObject({ auth_kind: 'invitation', auth_id: 'bootstrap' });
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+      expect(location.hash).toBe('');
+    });
+
+    it.each([
+      { invitation: true, enrolled: false },
+      { invitation: true, enrolled: true },
+      { invitation: false, enrolled: false },
+      { invitation: false, enrolled: true },
+    ])('does not re-defer on Back/hashchange or reload: invitation=$invitation, enrolled=$enrolled', async ({ invitation, enrolled }) => {
+      const hash = deferBrowserPairing(invitation);
+      vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+      const stopRouter = initializeRouter();
+      const importOnHashChange = vi.fn(() => relayStore.importSetupLink());
+      window.addEventListener('hashchange', importOnHashChange);
+      try {
+        navigate({ view: 'activity' });
+        navigate({ view: 'settings' });
+        expect(location.hash).toBe(hash);
+        expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+        const socket = MockWebSocket.instances[0];
+        socket.open();
+        await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+        const credentials = new BrowserDeviceCredentialStore(localStorage);
+        if (enrolled) {
+          credentials.replaceInvitation(relayId, invitation ? 'invitation-browser01' : 'bootstrap', {
+            deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+            credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+          });
+        }
+        const authentication = credentials.get(relayId);
+        const connection = relayStore.connection(relayId);
+        const pairingToast = get(relayStore.toast);
+        expect(pairingToast?.message).toBe('Pairing this browser as its own device.');
+        closeCurrentView();
+        await vi.waitFor(() => expect(importOnHashChange).toHaveBeenCalledOnce());
+        expect(get(currentView)).toMatchObject({ view: 'activity' });
+        expect(get(relayStore.toast)).toBe(pairingToast);
+        closeCurrentView();
+        await vi.waitFor(() => expect(importOnHashChange).toHaveBeenCalledTimes(2));
+        expect(importOnHashChange).toHaveReturnedWith(true);
+        expect(get(currentView)).toMatchObject({ view: 'agents' });
+        expect(relayStore.connection(relayId)).toBe(connection);
+        expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+        expect(socket.readyState).toBe(MockWebSocket.OPEN);
+        expect(MockWebSocket.instances).toHaveLength(1);
+        expect(credentials.get(relayId)).toEqual(authentication);
+        expect(location.hash).toBe('');
+        expect(get(relayStore.toast)).toBe(pairingToast);
+        history.forward();
+        await vi.waitFor(() => expect(get(currentView)).toMatchObject({ view: 'activity' }));
+        expect(get(relayStore.toast)).toBe(pairingToast);
+
+        history.replaceState(history.state, '', `/pair?source=test${hash}`);
+        relayStore.destroy();
+        relayStore.initialize();
+        expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(false);
+        expect(MockWebSocket.instances).toHaveLength(2);
+        expect(credentials.get(relayId)).toEqual(authentication);
+        expect(location.hash).toBe('');
+      } finally {
+        window.removeEventListener('hashchange', importOnHashChange);
+        stopRouter();
+        currentView.set({ view: 'agents' });
+      }
+    });
+
+    it.each([
+      { entry: 'fresh', load: 'initialize' },
+      { entry: 'fresh', load: 'import' },
+      { entry: 'new session', load: 'initialize' },
+      { entry: 'new session', load: 'import' },
+    ])('defers a bootstrap link with a refused credential on a $entry entry via $load', ({ entry, load }) => {
+      const hash = deferBrowserPairing(false);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      const credentials = new BrowserDeviceCredentialStore(localStorage);
+      credentials.replaceInvitation(relayId, 'bootstrap', {
+        deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+        credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+      });
+      const authentication = credentials.get(relayId);
+      const acceptedHistoryState = history.state;
+      MockWebSocket.instances[0].serverClose(4401);
+      expect(get(relayStore.connections).get(relayId)?.authRejected).toBe(true);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(sessionStorage.length).toBeGreaterThan(0);
+
+      if (entry === 'new session') sessionStorage.clear();
+      history.replaceState(entry === 'fresh' ? null : acceptedHistoryState, '', `/pair?source=test${hash}`);
+      if (load === 'initialize') {
+        relayStore.destroy();
+        relayStore.initialize();
+      } else {
+        expect(relayStore.importSetupLink()).toBe(true);
+      }
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(location.hash).toBe(hash);
+      expect(get(relayStore.toast)?.message).toContain('Home Screen');
+    });
+
+    it('keeps bootstrap pairing deferred when its session opt-in cannot be saved', () => {
+      const hash = deferBrowserPairing(false);
+      vi.spyOn(sessionStorage, 'setItem').mockImplementation(() => { throw new Error('Session storage unavailable.'); });
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      expect(get(relayStore.toast)).toMatchObject({ message: 'Session storage unavailable.', error: true });
+    });
+
+    it.each([false, true])('still defers a new invitation after accepting an earlier one: enrolled=%s', (enrolled) => {
+      const hash = deferBrowserPairing();
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      const credentials = new BrowserDeviceCredentialStore(localStorage);
+      if (enrolled) {
+        credentials.replaceInvitation(relayId, 'invitation-browser01', {
+          deviceId: 'device-browser01', credentialId: 'credential-browser01', credentialVersion: 1,
+          credentialSecret: 'B'.repeat(43), role: 'controller', locale: 'en',
+        });
+      }
+      const authentication = credentials.get(relayId);
+      const nextHash = hash.replace('invitation-browser01', 'invitation-browser02');
+      history.replaceState(history.state, '', `/pair?source=test${nextHash}`);
+      expect(relayStore.importSetupLink()).toBe(true);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(MockWebSocket.instances[0].readyState).toBe(MockWebSocket.CLOSED);
+      expect(location.hash).toBe(nextHash);
+    });
+
+    it.each(['missing', 'another relay'])('keeps deferring when the fragment is %s', (fragment) => {
+      const hash = deferBrowserPairing();
+      history.replaceState(history.state, '', fragment === 'missing'
+        ? '/pair?source=test'
+        : `/pair?source=test${hash.replace('invited.example', 'other.example')}`);
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(replace).not.toHaveBeenCalled();
+      expect(get(relayStore.toast)?.message).toBe('Open the invitation link again.');
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+    });
+
+    it('restores deferral and keeps the fragment when saving an invitation fails', () => {
+      const hash = deferBrowserPairing();
+      const save = vi.spyOn(BrowserDeviceCredentialStore.prototype, 'saveInvitation')
+        .mockImplementation(() => { throw new Error('The device invitation has expired.'); });
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(save).toHaveBeenCalledWith(relayId, expect.objectContaining({ id: 'invitation-browser01' }));
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      expect(replace).not.toHaveBeenCalled();
+      expect(get(relayStore.toast)).toMatchObject({ message: 'The device invitation has expired.', error: true });
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      save.mockRestore();
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+    });
+
+    it.each([
+      '&invite=', '&invite=bad', '&invite_version=2', '&invite_expires=not-a-time',
+      '&setup=duplicate', '&relay_id=duplicate&relay_id=duplicate',
+    ])('rejects invalid metadata atomically during explicit pairing: %s', (suffix) => {
+      const hash = deferBrowserPairing();
+      const credentials = new BrowserDeviceCredentialStore(localStorage);
+      // A working enrolled credential must survive a damaged link even when
+      // the user has already opened the explicit browser-pairing flow.
+      localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+        version: 1,
+        relays: {
+          [relayId]: {
+            kind: 'credential', id: 'credential-live', version: 1, secret: 'B'.repeat(43),
+            deviceId: 'device-live', role: 'controller', locale: 'en',
+            issuedAt: Date.now(), invitationId: 'invitation-previous01',
+          },
+        },
+      }));
+      const authentication = credentials.get(relayId);
+      const savedRelays = localStorage.getItem('herdr_relays');
+      const savedCredentials = localStorage.getItem('herdr_device_auth_v1');
+      const invalidHash = hash + suffix;
+      history.replaceState(history.state, '', `/pair?source=test${invalidHash}`);
+      expect(relayStore.importSetupLink()).toBe(false);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(localStorage.getItem('herdr_relays')).toBe(savedRelays);
+      expect(localStorage.getItem('herdr_device_auth_v1')).toBe(savedCredentials);
+      expect(credentials.get(relayId)).toEqual(authentication);
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(location.hash).toBe(invalidHash);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+    });
+
+    it('does not pair a relay that is not deferred', () => {
+      deferBrowserPairing();
+      expect(relayStore.pairDeferredRelay('another-relay')).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(MockWebSocket.instances).toHaveLength(1);
+    });
   });
 
   it('keeps an enrolled credential when the setup link is imported again', () => {
@@ -2599,6 +2885,82 @@ describe('relay command store', () => {
     });
     await expect(changed).resolves.toEqual({ commands: [], truncated: false });
   });
+  it.each([
+    { server_session_id: 'replacement-server' },
+    { terminal_id: 'replacement-terminal' },
+    { generation: 99 },
+    { agent_session_id: 'replacement-agent-session' },
+  ])('invalidates slash commands when target identity changes: %j', async (replacement) => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
+    };
+    const older = relayStore.loadSlashCommands(agent);
+    const olderRequest = JSON.parse(socket.sent.at(-1)!);
+    const currentAgent = { ...agent, ...replacement };
+    const current = relayStore.loadSlashCommands(currentAgent);
+    const currentRequest = JSON.parse(socket.sent.at(-1)!);
+    expect(currentRequest.request_id).not.toBe(olderRequest.request_id);
+    socket.message({
+      type: 'command_result', request_id: currentRequest.request_id, ok: true,
+      data: { commands: [{ command: '/current', source: 'builtin' }], truncated: false },
+    });
+    await current;
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true,
+      data: { commands: [{ command: '/old', source: 'builtin' }], truncated: false },
+    });
+    await older;
+    await expect(relayStore.loadSlashCommands(currentAgent)).resolves.toMatchObject({
+      commands: [{ command: '/current' }],
+    });
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(2);
+  });
+
+  it('refreshes slash commands and prevents superseded requests from repopulating the cache', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
+    };
+    const initial = relayStore.loadSlashCommands(agent);
+    const initialRequest = JSON.parse(socket.sent.at(-1)!);
+    socket.message({
+      type: 'command_result', request_id: initialRequest.request_id, ok: true,
+      data: { commands: [{ command: '/initial', source: 'builtin' }], truncated: false },
+    });
+    await initial;
+    const older = relayStore.loadSlashCommands(agent, true);
+    const olderRequest = JSON.parse(socket.sent.at(-1)!);
+    const current = relayStore.loadSlashCommands(agent, true);
+    const currentRequest = JSON.parse(socket.sent.at(-1)!);
+    const duplicate = relayStore.loadSlashCommands(agent);
+    socket.message({
+      type: 'command_result', request_id: currentRequest.request_id, ok: true,
+      data: { commands: [{ command: '/reloaded', source: 'builtin' }], truncated: false },
+    });
+    await expect(current).resolves.toMatchObject({ commands: [{ command: '/reloaded' }] });
+    await expect(duplicate).resolves.toMatchObject({ commands: [{ command: '/reloaded' }] });
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true,
+      data: { commands: [{ command: '/stale', source: 'builtin' }], truncated: false },
+    });
+    await older;
+    await expect(relayStore.loadSlashCommands(agent)).resolves.toMatchObject({
+      commands: [{ command: '/reloaded' }],
+    });
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(3);
+  });
+
   it('retains the frontend cap warning and late entries after normalization', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -2636,6 +2998,28 @@ describe('relay command store', () => {
     expect(cached.commands.some((entry) => entry.command === '/late-command')).toBe(true);
     expect(socket.sent.map((payload) => JSON.parse(payload))
       .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1);
+  });
+
+  it('preserves runtime catalog status, revision, kind, and canonical provenance', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'pi', cwd: '/fixture/project', ...exactAgentFields(),
+    };
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: request.request_id, ok: true, data: piCatalogFixture });
+    const catalog = await pending;
+    expect(catalog.status).toBe('available');
+    expect(catalog.revision).toBe(piCatalogFixture.revision);
+    expect(catalog.commands.find(command => command.command === '/review:2')).toMatchObject({
+      source: 'temporary', kind: 'extension', provenance: { source: 'cli', scope: 'temporary', origin: 'top-level' },
+    });
+    expect(catalog.commands.find(command => command.command === '/summary')?.kind).toBe('prompt');
+    expect(catalog.truncated).toBe(false);
   });
 
   it('normalizes slash command results without data', async () => {

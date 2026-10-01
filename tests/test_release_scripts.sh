@@ -7,7 +7,7 @@ if [ "$SCRIPT_DIR" = "$0" ]; then
 fi
 REPO_DIR=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/herdr-release-script-test.XXXXXX")
-trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT INT TERM
 
 case $(uname -s) in
     Linux) HOST_OS=linux; WRONG_OS=darwin ;;
@@ -97,6 +97,9 @@ for WRAPPER in \
     esac
     chmod 755 "$RELEASE_DIR/relay/$WRAPPER"
 done
+
+cp "$REPO_DIR/relay/pi-commands.sh" "$RELEASE_DIR/relay/pi-commands.sh"
+cp -R "$REPO_DIR/relay/pi-command-bridge" "$RELEASE_DIR/relay/pi-command-bridge"
 
 "$RELEASE_DIR/herdr-mobile-relay" release-manifest \
     "$RELEASE_DIR" "$MANIFEST_VERSION" "$REVISION" "$HOST_TARGET" >/dev/null

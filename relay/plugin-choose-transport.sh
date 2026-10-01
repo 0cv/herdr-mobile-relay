@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Guided chooser for how the phone reaches this computer. Every option ends by
 # writing (or clearing) the transport selection in the relay environment. The
 # gateway candidate list and selection policy remain separate from the foreground

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 )
 
@@ -52,17 +53,21 @@ type IntegrationStatuser interface {
 }
 
 type Resolver struct {
-	mu         sync.Mutex
-	cached     []Profile
-	expires    time.Time
-	configHome string
-	herdr      IntegrationStatuser
-	remembered map[string]string
-	aliases    map[string]string
-	skillDirs  map[string][]string
-	formats    map[string]string
-	warned     map[string]bool
-	versions   map[string]cachedVersion
+	mu                   sync.Mutex
+	cached               []Profile
+	expires              time.Time
+	configHome           string
+	herdr                IntegrationStatuser
+	ownership            map[string]profileOwnership
+	observed             map[string]PaneIdentity
+	unobserved           map[string]bool
+	ownershipPath        string
+	ownershipUnavailable bool
+	aliases              map[string]string
+	skillDirs            map[string][]string
+	formats              map[string]string
+	warned               map[string]bool
+	versions             map[string]cachedVersion
 }
 
 type cachedVersion struct {
@@ -76,7 +81,9 @@ func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 	return &Resolver{
 		configHome: configHome,
 		herdr:      herdr,
-		remembered: make(map[string]string),
+		ownership:  make(map[string]profileOwnership),
+		observed:   make(map[string]PaneIdentity),
+		unobserved: make(map[string]bool),
 		aliases:    cloneAliases(defaultAliases),
 		skillDirs:  cloneStringSlices(defaultSkillDirs),
 		formats:    cloneStrings(defaultCommandFormats),
@@ -299,26 +306,52 @@ func (r *Resolver) Profile(id string) (Profile, bool) {
 	return Profile{}, false
 }
 
-func (r *Resolver) Remember(paneID, profileID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.remembered[strings.ToLower(strings.TrimSpace(paneID))] = profileID
-}
-
 func (r *Resolver) Forget(paneID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.remembered, strings.ToLower(strings.TrimSpace(paneID)))
+	if r.ownershipUnavailable {
+		return
+	}
+	delete(r.ownership, ownershipKey(paneID))
+	delete(r.unobserved, ownershipKey(paneID))
+	if err := r.persistOwnershipLocked(); err != nil {
+		r.ownershipUnavailable = true
+		slog.Warn("profile ownership cleanup failed", "error", err)
+	}
 }
 
+// ResolveOwnedPane answers only with a verified association, so a relaunch
+// never guesses which executable owns a pane.
+func (r *Resolver) ResolveOwnedPane(paneID string) string {
+	return r.verifiedProfile(paneID)
+}
+
+// ResolvePane answers read-only questions such as slash-command discovery and
+// version display. A verified association wins; otherwise the agent Herdr
+// reports is enough, because nothing here starts a process.
 func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
-	r.mu.Lock()
-	if id := r.remembered[strings.ToLower(strings.TrimSpace(paneID))]; id != "" {
-		r.mu.Unlock()
-		return id
+	if profileID := r.verifiedProfile(paneID); profileID != "" {
+		return profileID
 	}
-	r.mu.Unlock()
 	return r.ProfileIDForAgent(reportedAgent)
+}
+
+func (r *Resolver) verifiedProfile(paneID string) string {
+	r.mu.Lock()
+	record, remembered := r.ownership[ownershipKey(paneID)]
+	observed, seen := r.observed[ownershipKey(paneID)]
+	unavailable := r.ownershipUnavailable
+	r.mu.Unlock()
+	if unavailable || !remembered {
+		return ""
+	}
+	if record.Pending || !seen || !record.Target.valid() || observed != record.Target {
+		return ""
+	}
+	if _, exists := r.Profile(record.ProfileID); !exists {
+		return ""
+	}
+	return record.ProfileID
 }
 
 func (r *Resolver) Reload() {
@@ -347,7 +380,8 @@ func (r *Resolver) AgentVersion(profileID string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, profile.Argv[0], "--version").CombinedOutput()
+	cmd := childenv.CommandContext(ctx, profile.Argv[0], "--version")
+	output, err := cmd.CombinedOutput()
 	version := ""
 	if err == nil {
 		version = semanticVersionPattern.FindString(string(output))

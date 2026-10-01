@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Covers relay/gateway-deploy.sh: the bundle it writes and the SSH deployment it
 # drives. Every remote step runs against stub ssh/curl binaries, so the test
 # never touches a network or a real server.
@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-gateway-deploy-test.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 
 STUB_DIR="$WORK_DIR/bin"
 mkdir -p "$STUB_DIR"
@@ -14,7 +14,7 @@ mkdir -p "$STUB_DIR"
 SSH_LOG="$WORK_DIR/ssh.log"
 export SSH_LOG
 cat > "$STUB_DIR/ssh" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 # Records the remote command and answers the handful of probes the deployment
 # makes. The tar step must drain stdin or the local tar reports a broken pipe.
 set -uo pipefail
@@ -171,10 +171,10 @@ grep -Fq 'context: ${HERDR_GATEWAY_BUILD_CONTEXT:-./gateway-source}' \
     "$BUNDLE_DIR/docker-compose.yml" || fail "compose file lost the bundled build context"
 grep -Fq 'HERDR_GATEWAY_BUILD_CONTEXT="./gateway-source"' "$BUNDLE_DIR/.env" ||
     fail ".env lost the bundled build context"
-grep -Fq 'HERDR_GATEWAY_VERSION: ${HERDR_GATEWAY_VERSION:-0.21.3}' \
+GATEWAY_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_DIR/herdr-plugin.toml")"
+grep -Fq "HERDR_GATEWAY_VERSION: \${HERDR_GATEWAY_VERSION:-$GATEWAY_VERSION}" \
     "$BUNDLE_DIR/docker-compose.yml" || fail "compose file does not pass the gateway release to the build"
-grep -Fq 'HERDR_GATEWAY_VERSION=0.21.3' "$BUNDLE_DIR/.env" ||
-
+grep -Fq "HERDR_GATEWAY_VERSION=$GATEWAY_VERSION" "$BUNDLE_DIR/.env" ||
     fail ".env does not record the deployed gateway release"
 grep -Eq '^HERDR_GATEWAY_REVISION=[0-9a-f]{40}$' "$BUNDLE_DIR/.env" ||
     fail ".env does not record the deployed gateway revision"

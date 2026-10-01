@@ -12,13 +12,34 @@ profile — one per herdr setup — the pane keeps whatever title herdr itself
 reports, but the relay-resolved session name and the transcript both come up
 empty, and the conversation view shows "No conversation log is available for
 this session." For Pi and Oh My Pi the same lists below also decide where that
-profile's slash commands and skills are discovered, so a profile whose commands
-are missing from the palette has the same root cause. Claude Code and Qoder
+profile's filesystem slash commands and skills are discovered. Pi's live
+extension/prompt catalog instead comes from its running session when the
+relay-owned command integration is installed in that profile (see below). Claude Code and Qoder
 resolve their personal commands and skills from `~/.claude` and `~/.qoder`
 directly, so those lists do not move command discovery for them.
 Native palette discovery follows the verified loader behavior of specific agent
 versions on a best-effort basis; newer agent releases can change edge-case
 discovery semantics before the relay catches up.
+
+## Pi live command metadata
+
+Install the bundled integration explicitly for each Pi profile:
+
+```bash
+bash relay/setup.sh --pi-install /absolute/path/to/profile/agent
+```
+
+Without the directory argument this uses `PI_CODING_AGENT_DIR`, then
+`~/.pi/agent`. Run `/reload` or restart the affected Pi panes. Runtime commands
+come from the exact running Pi session, not from a search across these config
+roots. The `HERDR_PI_CONFIG_DIRS` list is still needed for transcript lookup and
+filesystem fallback in relocated profiles. Installing in one profile does not
+activate the integration in other profiles.
+
+Remove only the relay-owned integration with `--pi-remove` and the same agent
+directory, then reload Pi. Herdr's own extension and settings remain untouched.
+See [slash-command discovery](slash-command-discovery.md#pi-runtime-commands)
+for lifecycle, refresh, identity checks, and partial-catalog troubleshooting.
 
 Standalone Kimi Code palettes follow its native roots: project
 `.kimi-code/skills` and `.agents/skills`, user

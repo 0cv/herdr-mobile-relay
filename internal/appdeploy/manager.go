@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 )
@@ -311,7 +311,7 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 	}
 	label := fmt.Sprintf("herdr-mobile-relay-app-deploy-%d", time.Now().Unix())
 	launch := appDeployWorkerLaunch(runtime.GOOS, label, executable, jobPath, os.LookupEnv)
-	command := exec.CommandContext(ctx, launch.application, launch.args...)
+	command := childenv.CommandContext(ctx, launch.application, launch.args...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schedule app deployment worker: %s: %s", err, compact(string(output), 300))

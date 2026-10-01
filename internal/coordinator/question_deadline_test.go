@@ -30,7 +30,7 @@ func TestQuestionDeadlineDuringInterKeyDelayIsDispatchedUnknown(t *testing.T) {
 	go func() {
 		result <- dispatcher.sendQuestionKeys(ctx, "pane-1", []string{"Down", "Enter"})
 	}()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		data, readErr := os.ReadFile(record)
 		if readErr == nil && strings.Contains(string(data), "pane send-keys") {

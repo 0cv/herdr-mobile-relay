@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Full uninstall: remove the relay binary, releases, config, cache, and service.
 set -euo pipefail
 
@@ -96,7 +96,7 @@ verify_removal_target() {
     # deletion target. Generic relay-looking filenames never authorize removal.
     if [ -d "$canonical" ]; then
         sentinel="$canonical/.herdr-mobile-relay-installation"
-        if [ ! -f "$sentinel" ] ||
+        if ! private_owned_file "$sentinel" ||
            ! grep -Fx 'product=herdr-mobile-relay' "$sentinel" >/dev/null ||
            ! grep -Fx "root=$canonical" "$sentinel" >/dev/null; then
             echo "  REFUSING to remove $label: $canonical" >&2

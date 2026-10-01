@@ -19,9 +19,9 @@ setup and want to know what every screen and control is for.
 - Inspect the current agent's workspace files, images, Git status, upstream
   ahead/behind counts, and unified diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, OpenCode,
-  Qoder, Pi, Oh My Pi, and Oh My OpenCode in focused conversation or
-  full-history form; validated Oh My OpenCode plans appear with their current
-  task states.
+  Qoder, Pi, Oh My Pi, Oh My OpenCode, Hermes, and Cursor Agent in focused
+  conversation or full-history form; validated Oh My OpenCode plans appear with
+  their current task states.
 - Configure durable notification categories, settle delay, cooldown, snooze,
   and a neutral delivery test separately for each paired relay and device.
 - Pair named controller or reader devices. Reader devices can inspect agents,
@@ -70,6 +70,25 @@ setup and want to know what every screen and control is for.
 | --- | --- |
 | <img src="../images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="392"> | <img src="../images/speech.jpeg" alt="Speech settings with the language choice and the relay's cached voices" width="392"> |
 
+### Cursor picker filters
+
+**Send filter text** appends to an open Cursor model picker without pressing
+Enter or selecting a model. It supports up to 32 ASCII letters, digits, spaces,
+and `.-_/+:()[]`. Trailing spaces, multiline text, and other characters are
+rejected without trimming. Other picker layouts may be refused.
+
+The relay sends separate characters at least 150 ms apart and checks the live
+filter after visible characters. Interior spaces are verified with the next
+visible character. Terminal readback hides trailing spaces already in the
+picker: if the first visible character reveals an unexpected prefix, delivery
+stops and is reported as uncertain. Inspect the picker before sending more;
+the full draft is not restored after uncertain or partial delivery.
+
+Terminal controls are locked while sending. Select separately afterward, or
+press Escape to close the model picker. Relay commands are serialized per pane,
+but desktop typing is not locked: avoid typing there during delivery. Fresh
+reads detect observed interference, not an atomic guarantee against it.
+
 ## Paired devices
 
 A controller opens **Settings → Devices → Invite Device** to create a ten-minute,
@@ -87,6 +106,21 @@ An uncaught phone-side error appears in a bottom **App error** banner because
 mobile browsers often provide no useful console. Copy or photograph its text
 for a bug report, then tap the banner to dismiss it; a later independent error
 will display a new banner.
+
+## Opening links from other apps on iOS
+
+External links open in Safari, not the installed Home Screen app. To use those
+links, pair Safari as its own device: in the Home Screen app, choose
+**Settings → Devices → Invite Device**, open that invitation in Safari, then
+choose **Pair this browser instead** and confirm. Safari is listed and revocable
+separately; its one-use invitation cannot also pair the Home Screen app.
+Safari may clear this site's storage after a week without use; invite it again
+if that happens.
+
+Link to an agent with `https://<app>/#notify=<url-encoded {"pane_id","host"}>`,
+where the fragment value is `encodeURIComponent(JSON.stringify({ pane_id, host }))`.
+Use the agent's pane ID and computer host name. Once Safari is paired, opening
+this link from another app takes you to that agent.
 
 ## Workspace navigation and inspection
 

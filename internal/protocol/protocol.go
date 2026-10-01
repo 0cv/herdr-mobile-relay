@@ -143,6 +143,7 @@ var actionCatalog = map[string]ActionMetadata{
 	"respond":                  mutateAction("respond", true, true),
 	"send_keys":                mutateAction("send_keys", true, true),
 	"send_input":               mutateAction("send_input", true, true),
+	"send_filter_text":         mutateAction("send_filter_text", true, true),
 	"send_secret":              mutateAction("send_secret", true, true),
 	"reset_devices":            mutateAction("reset_devices", false, true),
 	"revoke_device":            mutateAction("revoke_device", false, true),

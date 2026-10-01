@@ -469,6 +469,10 @@ func extractFirstLine(path string) string {
 	if err != nil || len(data) > maxMetadataSize {
 		return ""
 	}
+	return extractFirstLineBytes(data)
+}
+
+func extractFirstLineBytes(data []byte) string {
 	lines := strings.SplitN(string(data), "\n", 10)
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)

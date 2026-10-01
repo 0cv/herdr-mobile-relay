@@ -112,15 +112,21 @@ backend-check: go-check shell-check production-path-audit
 
 shell-check:
 	shellcheck --severity=warning -x -P relay relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
+	bun test tests/pi-command-bridge.test.mjs
+	bash tests/test_pi_commands.sh
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
 	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done
 	sh tests/test_install.sh
+	sh tests/test_download_credentials.sh
+	bash tests/test_service_credentials.sh
 	bash tests/test_common.sh
 	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
 	bash tests/test_tailscale.sh
 	HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py
+	sh tests/test_plugin_recovery.sh
+	bash tests/test_native_install.sh
 	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
 	python3 tests/test_service_uninstall_cli.py

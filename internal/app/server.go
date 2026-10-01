@@ -387,6 +387,11 @@ func newServerWithSession(
 		hostname = hostname[:idx]
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
+	if cfg.RuntimeDir != "" {
+		if err := profResolver.SetOwnershipPath(filepath.Join(cfg.RuntimeDir, "profile-ownership.json")); err != nil {
+			logger.Warn("profile ownership requires recovery; relaunch is disabled", "error", err)
+		}
+	}
 	conversationReader := conversation.NewReader(home)
 	var conversationBrowser *conversation.Browser
 	cacheRoot := ""
@@ -982,7 +987,15 @@ func (s *Server) Run(ctx context.Context) error {
 			admitted()
 		}
 
-		commandCtx := ctx
+		commandCtx := herdr.WithDispatchCheck(ctx, func() error {
+			if s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID) != nil {
+				return errors.New("device is no longer authorized")
+			}
+			if validateExactPaneTarget(s.state, inbound, authenticated) != nil {
+				return coordinator.ErrPaneReplaced
+			}
+			return nil
+		})
 		switch action {
 		case "check_update":
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
@@ -1272,7 +1285,6 @@ func (s *Server) Run(ctx context.Context) error {
 				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent pane not found", paneID, nil)
 				break
 			}
-			generation := s.state.Generation(paneID)
 			agent, cwd := activeAgent.Agent, activeAgent.Cwd
 			project := projectContextForAgent(activeAgent)
 			home, _ := os.UserHomeDir()
@@ -1284,7 +1296,18 @@ func (s *Server) Run(ctx context.Context) error {
 			catalog := slashcmd.CatalogForProfileWithSuppression(
 				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
 			)
-			if s.state.Generation(paneID) != generation {
+			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
+				catalog.Status = "partial"
+				if runtime, err := runtimePiCatalog(client.Context(), s.herdrC, s.cfg.SocketPath, paneID, activeAgent.SessionID); err == nil {
+					if runtime.Status == "available" || runtime.Status == "partial" {
+						catalog = runtime
+					} else {
+						catalog.Status = runtime.Status
+					}
+				}
+			}
+			currentAgent, currentExists := s.state.Agent(paneID)
+			if !currentExists || !sameSlashTarget(activeAgent, currentAgent) {
 				s.sendCommandResult(
 					client,
 					requestID,
@@ -1297,7 +1320,7 @@ func (s *Server) Run(ctx context.Context) error {
 				)
 				break
 			}
-			catalog = fitSlashCommandCatalog(catalog, requestID, "list_slash_commands", paneID)
+			catalog = fitSlashCommandCatalog(slashcmd.Revise(catalog), requestID, "list_slash_commands", paneID)
 			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
 		case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
 			requestID := inbound.RequestID
@@ -3048,23 +3071,33 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ready := s.ready
 	s.mu.RUnlock()
 
-	inventoryOK := s.state.InventoryReady()
+	inventory := s.state.InventoryStatus()
+	delete(inventory, "message")
 
 	status := "unavailable"
 	code := http.StatusServiceUnavailable
-	if ready && inventoryOK {
+	if ready && inventory["state"] == "ready" {
 		status = "ready"
 		code = http.StatusOK
 	}
 
-	inventory := s.state.InventoryStatus()
-	delete(inventory, "message")
-
 	resp := map[string]any{
-		"status":    status,
-		"inventory": inventory,
+		"status":          status,
+		"inventory":       inventory,
+		"instance":        s.cfg.InstanceID,
+		"version":         s.version,
+		"release_version": s.version,
+		"revision":        s.revision,
+		"protocol":        protocol.Version,
+	}
+	if s.webH != nil {
+		resp["bundle_hash"] = s.webH.BundleHash()
+		resp["bundle_version"] = s.webH.BundleVersion()
+		resp["bundle_revision"] = s.webH.BundleRevision()
+		resp["bundle_build"] = s.webH.BundleBuild()
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(resp)
@@ -3725,14 +3758,27 @@ func fitSlashCommandCatalog(catalog slashcmd.Catalog, requestID, action, paneID 
 	low, high := 0, len(commands)
 	for low < high {
 		mid := low + (high-low+1)/2
-		candidate := slashcmd.Catalog{Commands: commands[:mid], Truncated: true}
+		candidate := trimSlashCatalog(catalog, mid)
 		if slashCommandResultFits(candidate, requestID, action, paneID) {
 			low = mid
 		} else {
 			high = mid - 1
 		}
 	}
-	return slashcmd.Catalog{Commands: commands[:low], Truncated: true}
+	return trimSlashCatalog(catalog, low)
+}
+
+func trimSlashCatalog(catalog slashcmd.Catalog, count int) slashcmd.Catalog {
+	catalog.Commands = catalog.Commands[:count]
+	catalog.Truncated = true
+	metadata := make(map[string]slashcmd.Metadata)
+	for _, command := range catalog.Commands {
+		if value, ok := catalog.Metadata[command.Command]; ok {
+			metadata[command.Command] = value
+		}
+	}
+	catalog.Metadata = metadata
+	return slashcmd.Revise(catalog)
 }
 
 func slashCommandResultFits(catalog slashcmd.Catalog, requestID, action, paneID string) bool {

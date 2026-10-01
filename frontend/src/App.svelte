@@ -42,6 +42,7 @@
   import {
     closeCurrentView,
     currentView,
+    followInitialAgentSession,
     initializeRouter,
     navigate,
     replaceView,
@@ -164,23 +165,19 @@
   const headerIndicator = $derived.by(() => {
     if (!activeAgent) return {
       tone: inventoryUnavailable || inventoryLoading ? 'warning' : connected ? 'success' : connecting ? 'warning' : 'danger',
-      hollow: false,
       label: `${connected}/${$relays.length} relays connected${inventoryUnavailable ? `; ${inventoryUnavailable} agent inventory unavailable` : inventoryLoading ? `; ${inventoryLoading} agent inventory loading` : ''}`,
     };
     if (activeConnection?.status !== 'connected') return {
       tone: 'warning' as const,
-      hollow: false,
       label: 'Relay reconnecting',
     };
     if (activeConnection.inventory.state !== 'ready') return {
       tone: 'warning' as const,
-      hollow: false,
       label: activeConnection.inventory.state === 'error' ? 'Agent inventory unavailable' : 'Agent inventory loading',
     };
     const group = agentStatusGroup(activeAgent);
     return {
       tone: agentStatusTone(activeAgent),
-      hollow: group === 'ready',
       label: `Agent ${group === 'ready'
         ? 'idle'
         : group === 'attention'
@@ -411,6 +408,7 @@
     const stopUpdates = initializeAppUpdates();
     const stopSecurity = initializeDeviceSecurity();
     const stopRouter = initializeRouter();
+    const stopAgentRoute = followInitialAgentSession(agents);
     const setupLinkNavigation = () => {
       relayStore.importSetupLink(location, !$securityState.locked);
     };
@@ -426,6 +424,7 @@
     window.addEventListener('hashchange', setupLinkNavigation);
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
     return () => {
+      stopAgentRoute();
       stopRouter();
       releaseSpeech();
       stopSecurity();
@@ -579,7 +578,6 @@
     {/if}
     <span
       class={`status-dot status-${headerIndicator.tone}`}
-      class:hollow={headerIndicator.hollow}
       role="img"
       aria-label={headerIndicator.label}
     ></span>

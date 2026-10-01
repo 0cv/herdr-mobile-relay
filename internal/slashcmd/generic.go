@@ -36,7 +36,7 @@ func discoverGenericSkills(dirs []string, commandFormat string) ([]Command, bool
 				truncated = true
 				break
 			}
-			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			if !entryIsDir(entry, filepath.Join(dir, entry.Name())) || strings.HasPrefix(entry.Name(), ".") {
 				continue
 			}
 			path := filepath.Join(dir, entry.Name(), "SKILL.md")

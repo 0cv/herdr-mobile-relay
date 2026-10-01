@@ -5,6 +5,99 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.4] - 2026-10-01
+
+### Added
+
+- Read Cursor Agent conversation history from nested and flat
+  `~/.cursor/projects/<slug>/agent-transcripts` layouts, locating transcripts
+  from the pane workspace and showing user and assistant turns in History.
+
+### Fixed
+
+- Show an idle agent that is ready for input with a green ring instead of the
+  grey reserved for unknown states. A filled green dot still marks a finished
+  turn you have not opened yet.
+
+## [0.22.3] - 2026-09-30
+
+### Added
+
+- Pair an iOS browser tab as its own device with **Pair this browser instead**,
+  so links opened from other apps, such as push notifications, work in Safari.
+  Home Screen pairing stays the default. The `#notify=` agent deep link is now
+  documented. ([#54](https://github.com/0cv/herdr-mobile-relay/issues/54))
+
+## [0.22.2] - 2026-09-30
+
+### Fixed
+
+- Load conversation history whenever the relay connection is live, even when
+  the phone's browser reports itself offline. Previously the Conversation view
+  stayed blank, with no loading status or error, while the terminal kept
+  working.
+
+### Changed
+
+- Read Hermes and OpenCode conversation history through an in-process SQLite
+  backend by default (`HERDR_SQLITE_BACKEND=auto|native|cli`), so History works
+  without a system `sqlite3` CLI. The CLI path remains available as a fallback.
+  Native queries stream JSON with early size limits, encode DB paths safely for
+  spaces/special characters, and share one error-mapping helper in conversation
+  readers. Query timeouts are 10s; an overridden `sqlite3` binary path still
+  prefers the CLI (test and escape-hatch compatibility).
+
+## [0.22.1] - 2026-09-26
+
+### Fixed
+
+- Read the expected web bundle identity from the release manifest during
+  readiness checks, so stable service setup accepts healthy production releases
+  with the real frontend descriptor shape. (Issue #51.)
+
+## [0.22.0] - 2026-09-24
+
+### Added
+
+- Discover Cursor's built-in commands, Markdown commands, and project and
+  personal skills in the phone's slash-command palette, respecting Cursor's
+  naming, precedence, visibility, and discovery limits.
+- Discover live Pi extension commands, skills, and prompt templates from the
+  running session when the optional Pi integration is installed. Show partial
+  or unavailable discovery clearly while keeping manual command entry usable;
+  redact credentials from displayed command provenance.
+- Send filter text to an open Cursor model picker without selecting a model,
+  with paced keystrokes, live verification, and explicit partial-delivery
+  warnings when the picker cannot be confirmed.
+
+### Changed
+
+- Keep verified agent-profile ownership tied to the terminal across relay
+  restarts; refuse an unsafe relaunch if the profile or terminal cannot be
+  verified instead of guessing an executable from the pane.
+- Stage and verify native background-service upgrades before replacing the
+  previous service, and retain recovery state when rollback cannot be
+  confirmed.
+
+### Fixed
+
+- Deliver prompts to unnamed agents through the pane when Herdr refuses the
+  named-agent prompt, without retrying ambiguous or already-dispatched writes.
+- Keep launch results and initial prompts bound to the created terminal and
+  request ID, including across session discovery and refreshes; report
+  uncertain starts and initial-prompt failures without offering unsafe retries.
+- Recheck authorization and target identity immediately before Herdr writes,
+  so a replaced pane or revoked device cannot receive a stale action.
+- Keep release-download credentials out of process arguments, shell traces,
+  and unrelated child processes, including version probes and app deployment.
+- Use portable shell entrypoints and preserve the inherited PATH for systems
+  such as NixOS and Guix.
+- Follow symlinked skill directories in generic slash-command discovery,
+  and keep Cursor picker controls available through pane status changes while
+  rejecting stale picker footers and unsafe attachment uploads.
+- Preserve the newly launched agent's identity on the phone when its native
+  session appears, instead of dropping the terminal or conversation view.
+
 ## [0.21.3] - 2026-09-15
 
 ### Fixed
@@ -1516,7 +1609,12 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...HEAD
+[0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4
+[0.22.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...v0.22.3
+[0.22.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.1...v0.22.2
+[0.22.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.0...v0.22.1
+[0.22.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.3...v0.22.0
 [0.21.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...v0.21.3
 [0.21.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...v0.21.1

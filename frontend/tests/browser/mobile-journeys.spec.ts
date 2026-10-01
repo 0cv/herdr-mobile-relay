@@ -804,7 +804,11 @@ test('defaults to the mixed workspace layout and separates state sections on dem
   const card = (project: string) => page.locator('.workspace-card').filter({ hasText: project });
   await expect(card('alpha').getByRole('img', { name: 'Has a done session' })).toBeVisible();
   await expect(card('beta').getByRole('img', { name: 'Has a working session' })).toBeVisible();
-  await expect(card('delta').getByRole('img', { name: 'All sessions idle' })).toBeVisible();
+  await expect(card('delta').getByRole('img', { name: 'All sessions idle and ready for input' })).toBeVisible();
+  // Idle-and-ready reads as a green ring, distinct from the filled unread-done
+  // dot and from the grey used only for unknown states.
+  await expect(card('delta').locator('.workspace-state-dot')).toHaveClass(/status-ready/);
+  await expect(card('alpha').locator('.workspace-state-dot')).toHaveClass(/status-success/);
   await expect(page.locator('.workspace-card summary strong')).toHaveText(['alpha', 'beta', 'delta']);
   // Active workspaces start expanded; idle-only cards stay collapsed.
   await expect(card('alpha')).toHaveAttribute('open', '');
@@ -995,6 +999,62 @@ test('keeps an iOS setup link unredeemed for Home Screen installation', async ({
   await page.waitForTimeout(500);
   expect(await socketCount(page)).toBe(0);
 });
+
+test('iOS browser pairing spends a valid invitation only after explicit confirmation', async ({ page }) => {
+  const hash = `#setup=${'A'.repeat(43)}&invite=invitation-browser01&invite_version=1&invite_expires=${Date.now() + 600_000}&label=Invited&relay=wss%3A%2F%2Finvited.example`;
+  await boot(page, [], `/${hash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Pair this browser instead' }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'This browser becomes its own device' })).toBeVisible();
+  expect(await socketCount(page)).toBe(0);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(new URL(page.url()).hash).toBe(hash);
+  expect(await socketCount(page)).toBe(0);
+  expect(await page.evaluate(() => localStorage.getItem('herdr_device_auth_v1'))).toBeNull();
+  await page.getByRole('button', { name: 'Pair this browser instead' }).click();
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect.poll(() => socketCount(page)).toBe(1);
+  expect(new URL(page.url()).hash).toBe('');
+  expect(await page.evaluate(() => {
+    const relay = JSON.parse(localStorage.getItem('herdr_relays')!)[0];
+    return JSON.parse(localStorage.getItem('herdr_device_auth_v1')!).relays[relay.id].id;
+  })).toBe('invitation-browser01');
+});
+
+for (const failure of ['invalid invitation', 'duplicate selector', 'storage unavailable']) {
+  test(`explicit iOS browser pairing preserves a saved credential on ${failure}`, async ({ page }) => {
+    const hash = `#setup=${'A'.repeat(43)}&invite=invitation-browser01&invite_version=1&invite_expires=${Date.now() + 600_000}&label=Invited&relay=wss%3A%2F%2Finvited.example`;
+    await boot(page, [], `/${hash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: 'Pair this browser instead' }).click();
+    const before = await page.evaluate((failureMode) => {
+      const relay = JSON.parse(localStorage.getItem('herdr_relays')!)[0];
+      localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: {
+        [relay.id]: { kind: 'credential', id: 'credential-live', version: 1, secret: 'B'.repeat(43),
+          deviceId: 'device-live', role: 'controller', locale: 'en', issuedAt: Date.now(),
+          invitationId: 'invitation-previous01' },
+      } }));
+      if (failureMode === 'invalid invitation') {
+        history.replaceState(history.state, '', location.hash.replace('invite=invitation-browser01', 'invite=bad'));
+      } else if (failureMode === 'duplicate selector') {
+        history.replaceState(history.state, '', location.hash + '&invite_version=2');
+      } else {
+        const save = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (key, value) {
+          if (key === 'herdr_device_auth_v1') throw new Error('Storage unavailable.');
+          save.call(this, key, value);
+        };
+      }
+      return { hash: location.hash, relays: localStorage.getItem('herdr_relays'), credentials: localStorage.getItem('herdr_device_auth_v1') };
+    }, failure);
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
+    expect(await socketCount(page)).toBe(0);
+    expect(await page.evaluate(() => ({ hash: location.hash, relays: localStorage.getItem('herdr_relays'), credentials: localStorage.getItem('herdr_device_auth_v1') }))).toEqual(before);
+    await page.getByRole('button', { name: 'Reconnect All' }).click();
+    expect(await socketCount(page)).toBe(0);
+  });
+}
 
 test('an iOS browser tab without pairing material still connects', async ({ page }) => {
   await boot(page, [fedora], '/', { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
@@ -1211,6 +1271,68 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
 
   await page.evaluate(() => (window as any).__relayClose(0));
   await expect.poll(() => socketCount(page)).toBe(2);
+});
+
+test('keeps Cursor filtering text-only across status updates and restores prompts after selecting', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
+  });
+  await page.getByRole('button', { name: 'Open Cursor picker on Fedora' }).click();
+  const footer = 'Type to filter • Enter to select • Tab to edit';
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: `Available models\n${footer}`,
+  });
+  const input = page.getByPlaceholder('Type filter text…');
+  const mutations = async () => (await commands(page)).filter((command) =>
+    ['send_filter_text', 'send_input', 'send_text', 'send_keys', 'submit_prompt'].includes(String(command.type)));
+  await input.fill('grok');
+  expect(await mutations()).toEqual([]);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'done', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
+  });
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue('grok');
+  await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Send filter text' }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
+  ]);
+  expect((await mutations())[0]).not.toHaveProperty('keys');
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue('');
+  await page.getByRole('button', { name: 'Arrow keys' }).click();
+  await page.getByRole('button', { name: 'Down', exact: true }).click();
+  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
+  ]);
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
+    content: `${footer}\nSelected model: Grok Fast\n>`,
+  });
+  await expect(page.getByPlaceholder('Needs inspection — use terminal controls')).toBeDisabled();
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'done', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
+  });
+  const prompt = page.getByPlaceholder('Type a reply…');
+  await expect(prompt).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Attach files' })).toBeEnabled();
+  await prompt.fill('Continue');
+  await page.getByRole('button', { name: 'Send prompt', exact: true }).click();
+  await expect.poll(mutations).toEqual([
+    expect.objectContaining({ type: 'send_filter_text', text: 'grok' }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Down'] }),
+    expect.objectContaining({ type: 'send_keys', keys: ['Enter'] }),
+    expect.objectContaining({ type: 'submit_prompt', text: 'Continue' }),
+  ]);
 });
 
 test('centers plan keys and enables text only for the terminal editor', async ({ page }) => {
@@ -2821,8 +2943,8 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
   const copyButton = page.getByRole('button', { name: 'Copy', exact: true });
   const responseTranscript = page.getByRole('textbox', { name: 'Latest final response' });
   await expect(responseTranscript).toHaveValue('Parsed terminal response.');
-  await expect.poll(async () => (await commandsForSocket(page, 0))
-    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(1);
+  expect((await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(0);
   await setAutoCommands(page, false);
 
   await copyButton.click();
@@ -2920,8 +3042,9 @@ test('speak reports the relay copy failure when no parser can read the pane', as
     format: 'plain',
     content: ' Completed omp response.\n\n────────────────────\n\n────────────────────',
   });
-  await expect.poll(async () => (await commandsForSocket(page, 0))
-    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(1);
+  await expect(page.getByRole('button', { name: 'Read latest response aloud' })).toBeVisible();
+  expect((await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(0);
   await setAutoCommands(page, false);
 
   await page.getByRole('button', { name: 'Read latest response aloud' }).click();
@@ -4118,6 +4241,34 @@ test('default agent view: Conversation opens directly and persists across reload
   });
   await page.getByRole('button', { name: 'Open Default conversation on Fedora' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+});
+
+test('conversation loads while the browser reports offline over a live relay', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, 'onLine', { configurable: true, get: () => false });
+    localStorage.setItem('herdr_default_agent_view', 'conversation');
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Offline flag conversation',
+      agent: 'pi',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  await setConversationFixture(page, {
+    entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'Answer despite offline flag' }],
+    total: 1,
+  });
+  await page.getByRole('button', { name: 'Open Offline flag conversation on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('Answer despite offline flag')).toBeVisible();
 });
 
 test('pane view override: both directions, inheritance, and explicit equal values', async ({ page }) => {
@@ -6272,6 +6423,38 @@ test('waits for a dotted directory selection before launching', async ({ page })
   expect((await commands(page)).find((command) => command.type === 'agent_start')).toMatchObject({
     profile_id: 'claude', cwd: '/home/cv/Development/test.com', name: 'test-com-claude',
   });
+});
+
+test('keeps a newly launched agent open when its native session is discovered', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { agent_profiles: [{ id: 'pi', label: 'Pi' }] });
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'list_directories')).toBe(true);
+  const listing = (await commands(page)).find((command) => command.type === 'list_directories')!;
+  await server(page, 0, {
+    type: 'command_result', request_id: listing.request_id, ok: true, phase: 'completed',
+    data: { current: { path: '/home/test/project', label: '~/project' }, parent: '/home/test', directories: [] },
+  });
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Start Agent', exact: true }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_start')).toBe(true);
+  const launch = (await commands(page)).find((command) => command.type === 'agent_start')!;
+  const launched = {
+    pane_id: 'w1:p2', terminal_id: 'terminal-new', generation: 1, agent_session_id: '',
+    status: 'idle', project: 'project', cwd: '/home/test/project', name: 'project-pi', agent: 'pi',
+  };
+  await server(page, 0, { type: 'agents', agents: [launched] });
+  await server(page, 0, {
+    type: 'command_result', request_id: launch.request_id, ok: true, phase: 'completed',
+    data: { pane_id: launched.pane_id, name: launched.name, cwd: launched.cwd },
+  });
+  await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
+  await server(page, 0, { type: 'agents', agents: [{ ...launched, generation: 2, agent_session_id: 'native-session' }] });
+  await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
+  await expect.poll(async () => (await commands(page)).findLast((command) => command.type === 'read_pane')?.target)
+    .toMatchObject({ terminal_id: 'terminal-new', generation: 2, agent_session_id: 'native-session' });
+  await expect(page.getByText('This agent is not available yet.')).toBeHidden();
 });
 
 test('launches and manages agent lifecycle commands', async ({ page }) => {

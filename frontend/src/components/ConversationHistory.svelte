@@ -170,8 +170,7 @@
       putPreview: (preview) => putConversationPreview(preview),
       isActive: () => mounted
         && document.visibilityState !== 'hidden'
-        && !$securityState.locked
-        && navigator.onLine !== false,
+        && !$securityState.locked,
     });
     controllerReady = true;
     historyController.start();

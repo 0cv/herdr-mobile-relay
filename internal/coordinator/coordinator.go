@@ -63,6 +63,7 @@ type scheduledOperation struct {
 	index      int
 	cancel     context.CancelFunc
 	dispatched bool
+	finalize   func(*CommandResult, error) *CommandResult
 }
 
 type scheduleWaiter struct {
@@ -508,7 +509,7 @@ func (s *Scheduler) run() {
 				return
 			}
 			stale := slot.InFlight.Generation != slot.Generation
-			if !stale && s.generationCurrent != nil {
+			if !stale && !op.options.AllowAbsent && s.generationCurrent != nil {
 				stale = !s.generationCurrent(op.options.PaneID, slot.InFlight.Generation)
 			}
 			if event.result.BumpGeneration && !stale {
@@ -543,16 +544,48 @@ func (s *Scheduler) run() {
 		if op.index >= 0 {
 			heap.Remove(&deadlines, op.index)
 		}
-		if key := op.options.LedgerKey; key != "" {
-			entry := ledger[key]
-			if entry != nil {
-				if event.result.Result == nil || event.result.Result.Phase == "not_started" {
-					delete(ledger, key)
-				} else {
-					entry.result = cloneResult(event.result.Result)
-					entry.operation = nil
+		if next := event.result.Continuation; next != nil {
+			op.finalize = next.Finalize
+			op.options.RelayLevel = false
+			op.options.PaneID = next.PaneID
+			op.options.AllowAbsent = next.AllowAbsent
+			op.options.Deadline = minDeadline(op.options.Deadline, next.Deadline)
+			op.generation = next.Generation
+			op.runner = next.Runner
+			op.dispatched = false
+			slot := slots[next.PaneID]
+			if slot == nil {
+				slot = &PaneSlot{Generation: next.Generation}
+				slots[next.PaneID] = slot
+			}
+			if next.Generation > slot.Generation && s.generationCurrent != nil && s.generationCurrent(next.PaneID, next.Generation) {
+				slot.Generation = next.Generation
+				if slot.InFlight != nil && slot.InFlight.cancel != nil {
+					slot.InFlight.cancel()
+				}
+				for _, queued := range slot.Queue {
+					if queued.index >= 0 {
+						heap.Remove(&deadlines, queued.index)
+					}
+					s.replyStale(queued, ledger)
+				}
+				slot.Queue = nil
+				for key, entry := range ledger {
+					if key != op.options.LedgerKey && entry.paneID == next.PaneID && entry.generation < slot.Generation {
+						delete(ledger, key)
+					}
 				}
 			}
+			if stopping {
+				s.finish(op, nil, ErrClosed, ledger)
+			} else if slot.Generation != next.Generation {
+				s.replyStale(op, ledger)
+			} else {
+				heap.Push(&deadlines, op)
+				slot.Queue = insertBySequence(slot.Queue, op)
+			}
+			dispatch()
+			return
 		}
 		s.metricsMu.Lock()
 		s.metrics.Completed++
@@ -567,7 +600,7 @@ func (s *Scheduler) run() {
 		}
 		s.metricsMu.Unlock()
 		s.setOwnerMetrics(inUse, len(slots))
-		s.reply(op, event.result.Result, nil)
+		s.finish(op, event.result.Result, nil, ledger)
 		dispatch()
 	}
 
@@ -889,17 +922,18 @@ func (s *Scheduler) removeQueued(op *scheduledOperation, slots map[string]*PaneS
 }
 
 func (s *Scheduler) expire(op *scheduledOperation, ledger map[string]*ledgerEntry) {
-	if op.options.LedgerKey != "" {
-		delete(ledger, op.options.LedgerKey)
-	}
 	s.metricsMu.Lock()
 	s.metrics.ExpiredQueued++
 	s.metricsMu.Unlock()
-	s.replyNotStarted(op)
+	s.finish(op, notStartedResult(op), nil, ledger)
 }
 
 func (s *Scheduler) replyNotStarted(op *scheduledOperation) {
-	result := &CommandResult{
+	s.reply(op, notStartedResult(op), nil)
+}
+
+func notStartedResult(op *scheduledOperation) *CommandResult {
+	return &CommandResult{
 		RequestID: op.options.RequestID,
 		Action:    string(op.options.Kind),
 		OK:        false,
@@ -907,11 +941,10 @@ func (s *Scheduler) replyNotStarted(op *scheduledOperation) {
 		Error:     "command was not sent; retry is safe",
 		PaneID:    op.options.PaneID,
 	}
-	s.reply(op, result, nil)
 }
 
 func (s *Scheduler) replyStale(op *scheduledOperation, ledger map[string]*ledgerEntry) {
-	if op.options.LedgerKey != "" {
+	if op.finalize == nil && op.options.LedgerKey != "" {
 		delete(ledger, op.options.LedgerKey)
 	}
 	phase := "failed"
@@ -928,10 +961,39 @@ func (s *Scheduler) replyStale(op *scheduledOperation, ledger map[string]*ledger
 		Error:     publicError,
 		PaneID:    op.options.PaneID,
 	}
-	s.reply(op, result, nil)
+	s.finish(op, result, nil, ledger)
+}
+
+func minDeadline(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+func (s *Scheduler) finish(op *scheduledOperation, result *CommandResult, err error, ledger map[string]*ledgerEntry) {
+	if op.finalize != nil {
+		result = op.finalize(result, err)
+		op.finalize = nil
+		err = nil
+	}
+	if entry := ledger[op.options.LedgerKey]; entry != nil {
+		if result == nil || result.Phase == "not_started" {
+			delete(ledger, op.options.LedgerKey)
+		} else {
+			entry.result = cloneResult(result)
+			entry.operation = nil
+		}
+	}
+	s.reply(op, result, err)
 }
 
 func (s *Scheduler) reply(op *scheduledOperation, result *CommandResult, err error) {
+	if op.finalize != nil {
+		result = op.finalize(result, err)
+		op.finalize = nil
+		err = nil
+	}
 	s.replyWithReplay(op, result, err, false)
 }
 

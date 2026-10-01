@@ -1,4 +1,53 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set +x
+
+private_owned_file() {
+    local file_identity
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    file_identity=$(stat -c '%u:%a:%h' "$1" 2>/dev/null) ||
+        file_identity=$(stat -f '%u:%Lp:%l' "$1" 2>/dev/null) || return 1
+    [ "$file_identity" = "$(id -u):600:1" ]
+}
+
+systemd_quoted() {
+    local value="$1"
+    case "$value" in *[!a-zA-Z0-9_./:=+-]*) ;; *) printf '%s' "$value"; return ;; esac
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//%/%%}
+    if [ "${2:-}" = exec ]; then value=${value//\$/\$\$}; fi
+    case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    printf '"%s"' "$value"
+}
+
+systemd_field() {
+    local file="$1" key="$2" line value
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in "$key="*) ;; *) continue ;; esac
+        value=${line#*=}
+        case "$value" in
+            \"*\") value=${value#\"}; value=${value%\"} ;;
+            \"*) return 1 ;;
+        esac
+        value=${value//\\\"/\"}
+        value=${value//\\\\/\\}
+        value=${value//%%/%}
+        if [ "$key" = ExecStart ]; then value=${value//\$\$/\$}; fi
+        if [ "$key" = Environment ]; then
+            case "$value" in HERDR_RELAY_ENV=*) value=${value#HERDR_RELAY_ENV=} ;; *) continue ;; esac
+            # Accept the branch's older value-quoted assignment as well as
+            # main's complete-assignment quoting; both must round-trip.
+            case "$value" in
+                \"*\") value=${value#\"}; value=${value%\"} ;;
+                \"*) return 1 ;;
+            esac
+        fi
+        printf '%s\n' "$value"
+        return 0
+    done < "$file"
+    return 1
+}
 
 # Keep only terminal generations already validated by jobs -l and passed to
 # wait; a later stop may accept their completion after Bash prunes its record.
@@ -776,9 +825,7 @@ installed_service_env_file() {
         Linux)
             service_file="$HOME/.config/systemd/user/herdr-mobile-relay.service"
             if [ -r "$service_file" ]; then
-                local environment_value
-                environment_value="$(sed -n 's/^Environment=HERDR_RELAY_ENV=//p' "$service_file" | tail -1)"
-                systemd_unquote_value "$environment_value"
+                systemd_field "$service_file" Environment
             fi
             ;;
         Darwin)
@@ -1086,7 +1133,7 @@ env_file_value() {
         # shellcheck source=/dev/null
         . "$env_file"
         set +a
-        printenv "$key" 2>/dev/null || true
+        printf '%s\n' "${!key-}"
     )
 }
 
@@ -1490,7 +1537,7 @@ remove_env_value_if_equals_atomic() {
         # shellcheck source=/dev/null
         . "$env_file"
         set +a
-        printenv "$key" 2>/dev/null || true
+        printf '%s\n' "${!key-}"
     )"
     if [ "$current" != "$expected" ]; then
         return 0
@@ -1523,13 +1570,14 @@ persist_github_token() {
     local env_file="$1"
     local token_file
     local temp_file
+    local release_token="${2:-${GH_TOKEN:-}}"
 
-    if [ -z "${GH_TOKEN:-}" ]; then
+    if [ -z "$release_token" ]; then
         return 0
     fi
     token_file="$(dirname "$env_file")/github-token"
     temp_file="$(mktemp "$(dirname "$env_file")/.github-token.XXXXXX")"
-    printf '%s\n' "$GH_TOKEN" > "$temp_file"
+    printf '%s\n' "$release_token" > "$temp_file"
     chmod 600 "$temp_file"
     mv "$temp_file" "$token_file"
     set_env_value_atomic "$env_file" HERDR_GITHUB_TOKEN_FILE "$token_file"
@@ -1549,6 +1597,10 @@ append_env_default() {
 ensure_relay_env() {
     local env_file="$1"
     local cloudflared_config="${2:-}"
+    local release_token="${3:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+    # The raw release token lives only in the private token file from here on,
+    # so no child of this shell (npx, wrangler, node, cloudflared) inherits it.
+    unset GH_TOKEN GITHUB_TOKEN
 
     if [ ! -f "$env_file" ]; then
         umask 077
@@ -1566,7 +1618,7 @@ ensure_relay_env() {
     if [ -n "$cloudflared_config" ]; then
         append_env_default "$env_file" CLOUDFLARED_CONFIG "$cloudflared_config"
     fi
-    persist_github_token "$env_file"
+    persist_github_token "$env_file" "$release_token"
     # Migrate older installs that exposed the token to the complete service
     # process tree. Only the credential-file path remains in relay.env.
     remove_env_value_atomic "$env_file" GH_TOKEN
@@ -1704,6 +1756,36 @@ wait_for_relay_health() {
     local delay="${3:-1}"
     local health
     local attempt
+    local expected_instance="${4:-${HERDR_RELAY_INSTANCE_ID:-}}"
+    local expected_version="${5:-}"
+    local expected_revision="${6:-}"
+    local expected_web_hash="${7:-}"
+    local binary identity manifest manifest_json
+    binary="$(relay_binary)" || return 1
+    if [ -z "$expected_version" ] || [ -z "$expected_revision" ]; then
+        identity="$("$binary" version --json)" || return 1
+        expected_version="$(json_string_field "$identity" version)"
+        expected_revision="$(json_string_field "$identity" revision)"
+    fi
+    if [ -z "$expected_web_hash" ]; then
+        manifest="$(dirname "$binary")/release-manifest.json"
+        if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
+            echo "✗ Relay release identity manifest is missing or unreadable: $manifest" >&2
+            echo "  Reinstall the verified relay release before checking readiness." >&2
+            return 1
+        fi
+        if ! manifest_json="$(cat "$manifest" 2>/dev/null)"; then
+            echo "✗ Relay release identity manifest is unreadable: $manifest" >&2
+            return 1
+        fi
+        expected_web_hash="$(json_string_field "$manifest_json" web_hash)"
+        if [ -z "$expected_web_hash" ]; then
+            echo "✗ Relay release identity manifest has no non-empty web_hash: $manifest" >&2
+            echo "  Reinstall the verified relay release before checking readiness." >&2
+            return 1
+        fi
+    fi
+    [ -n "$expected_instance" ] && [ -n "$expected_version" ] && [ -n "$expected_revision" ] && [ -n "$expected_web_hash" ] || return 1
 
     if ! command -v curl >/dev/null 2>&1; then
         echo "curl is required to verify relay health." >&2
@@ -1718,15 +1800,10 @@ wait_for_relay_health() {
     esac
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
-        if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null)"; then
-            case "$health" in
-                *'"status": "ok"'*|*'"status":"ok"'*)
-                    if [[ "$health" == *'"instance":'* && "$health" == *'"version":'* && "$health" == *'"protocol":'* ]]; then
-                        printf '%s\n' "$health"
-                        return 0
-                    fi
-                    ;;
-            esac
+        if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/readyz" 2>/dev/null)" &&
+           printf '%s\n' "$health" | "$binary" verify-readiness "$expected_instance" "$expected_version" "$expected_revision" "$expected_web_hash" 2>/dev/null; then
+            printf '%s\n' "$health"
+            return 0
         fi
         if [ "$attempt" -lt "$attempts" ]; then
             sleep "$delay"
@@ -1897,10 +1974,10 @@ verify_relay_release_health() {
     local expected_revision="$3"
     local expected_web_hash="$4"
 
-    [ "$(json_string_field "$health" status)" = "ok" ] &&
-        [ "$(json_string_field "$health" release_version)" = "$expected_version" ] &&
-        [ "$(json_string_field "$health" revision)" = "$expected_revision" ] &&
-        [ "$(json_string_field "$health" bundle_hash)" = "$expected_web_hash" ]
+    local expected_instance="${5:-${HERDR_RELAY_INSTANCE_ID:-}}"
+    local binary
+    binary="$(relay_binary)" || return 1
+    printf '%s\n' "$health" | "$binary" verify-readiness "$expected_instance" "$expected_version" "$expected_revision" "$expected_web_hash"
 }
 
 wait_for_relay_release_health() {
@@ -1910,6 +1987,7 @@ wait_for_relay_release_health() {
     local expected_version="$4"
     local expected_revision="$5"
     local expected_web_hash="$6"
+    local expected_instance="${7:-${HERDR_RELAY_INSTANCE_ID:-}}"
     local health
     local attempt
 
@@ -1928,9 +2006,7 @@ wait_for_relay_release_health() {
     esac
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
-        if health="$(wait_for_relay_health "$port" 1 0)" &&
-           verify_relay_release_health \
-               "$health" "$expected_version" "$expected_revision" "$expected_web_hash"; then
+        if health="$(wait_for_relay_health "$port" 1 0 "$expected_instance" "$expected_version" "$expected_revision" "$expected_web_hash")"; then
             printf '%s\n' "$health"
             return 0
         fi
@@ -1939,6 +2015,38 @@ wait_for_relay_release_health() {
         fi
     done
 
+    return 1
+}
+
+report_inventory_failure() {
+    local health
+    echo "Herdr agent inventory is unavailable or the installed relay identity does not match." >&2
+    health="$(curl -fsS --max-time 2 "http://127.0.0.1:$1/healthz" 2>/dev/null)" || return 0
+    if [ "$(json_string_field "$health" error_code)" = protocol_mismatch ]; then
+        echo "Run: herdr server live-handoff" >&2
+    fi
+}
+
+verify_public_readiness() {
+    local env_file="$1" health="$2"
+    local config hostname public attempt binary
+    [ -z "$(gateway_urls "$env_file")" ] || return 0
+    config="$(env_file_value "$env_file" CLOUDFLARED_CONFIG)"
+    [ -n "$config" ] || return 0
+    [ -f "$config" ] || return 1
+    hostname="$(yaml_scalar hostname "$config")"
+    valid_hostname "$hostname" || return 1
+    binary="$(relay_binary)" || return 1
+    for ((attempt = 1; attempt <= 15; attempt++)); do
+        if public="$(curl -fsS --proto '=https' --max-time 5 "https://$hostname/readyz" 2>/dev/null)" &&
+           printf '%s\n' "$public" | "$binary" verify-readiness \
+               "$(json_string_field "$health" instance)" "$(json_string_field "$health" release_version)" \
+               "$(json_string_field "$health" revision)" "$(json_string_field "$health" bundle_hash)"; then
+            return 0
+        fi
+        [ "$attempt" -eq 15 ] || sleep 1
+    done
+    echo "Public health identity did not match the intended relay, or the public endpoint is unavailable; local service readiness is separate." >&2
     return 1
 }
 

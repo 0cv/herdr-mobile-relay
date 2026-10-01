@@ -1,0 +1,223 @@
+{
+  "cursor_version": "2026.09.18-9a7762b",
+  "herdr_version": "0.9.1",
+  "baseline_commit": "22d107353e6ebbd4885ebf25afe119b35e610e38",
+  "character_interval_ms": 150,
+  "notes": [
+    "Cropped live captures, not synthetic picker frames.",
+    "Literal space is rejected; Space is accepted but trailing spaces are absent from text and ANSI readback.",
+    "The space probes use literal space in results.jsonl and the Space key name in the other probes.",
+    "Bulk text and a batched key array leave the filter unchanged.",
+    "Supplementary Unicode is ignored by the picker.",
+    "Narrow no-match headers can truncate or split Models matching across physical rows."
+  ],
+  "frames": [
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "bulk",
+      "stage": "before",
+      "character": null,
+      "error": null,
+      "screen": " Available models                                                                              Max mode: OFF\n\n Filter:\n\n →  Auto\n    Grok 4.7                 256K High Fast\n    Grok 4.6                 High Fast\n    Composer 2.5             Fast\n    Claude Opus 5            300K High\n    Claude Opus 4.8          300K High\n    GPT-5.6 Sol              272K Medium\n    GPT-5.5                  272K Medium\n    Claude Fable 5.1         300K High\n    Claude Fable 5           300K High\n\n 1-10 of 38\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "bulk",
+      "stage": "batch",
+      "character": null,
+      "error": null,
+      "screen": " Available models                                                                              Max mode: OFF\n\n Filter:\n\n →  Auto\n    Grok 4.7                 256K High Fast\n    Grok 4.6                 High Fast\n    Composer 2.5             Fast\n    Claude Opus 5            300K High\n    Claude Opus 4.8          300K High\n    GPT-5.6 Sol              272K Medium\n    GPT-5.5                  272K Medium\n    Claude Fable 5.1         300K High\n    Claude Fable 5           300K High\n\n 1-10 of 38\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "mixed",
+      "stage": "character",
+      "character": "k",
+      "error": null,
+      "screen": " Models matching \"GrOk\"                                                                        Max mode: OFF\n\n Filter: GrOk\n\n →  Grok 4.7                 256K High Fast (Tab to modify)\n    Grok 4.6                 High Fast\n    Grok 4.5                 High Fast\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "mixed",
+      "stage": "character",
+      "character": "/",
+      "error": null,
+      "screen": " Models matching \"GrOk22.-_/\" (no matches)                                                     Max mode: OFF\n\n Filter: GrOk22.-_/\n\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": "g",
+      "error": null,
+      "screen": " Models matching \"g\"                                                                           Max mode: OFF\n\n Filter: g\n\n →  Grok 4.7                 256K High Fast (Tab to modify)\n    Grok 4.6                 High Fast\n    GPT-5.6 Sol              272K Medium\n    GPT-5.5                  272K Medium\n    Grok 4.5                 High Fast\n    Gemini 3.8 Flash         High\n    Gemini 3.7 Flash         High\n    GPT-5.6 Terra            272K Medium\n    Codex 5.3                Medium\n    GPT-5.4                  272K Medium\n\n 1-10 of 21\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": " ",
+      "error": "Error: {\"code\":\"invalid_key\",\"message\":\"unsupported key  \"}",
+      "screen": " Models matching \"g\"                                                                           Max mode: OFF\n\n Filter: g\n\n →  Grok 4.7                 256K High Fast (Tab to modify)\n    Grok 4.6                 High Fast\n    GPT-5.6 Sol              272K Medium\n    GPT-5.5                  272K Medium\n    Grok 4.5                 High Fast\n    Gemini 3.8 Flash         High\n    Gemini 3.7 Flash         High\n    GPT-5.6 Terra            272K Medium\n    Codex 5.3                Medium\n    GPT-5.4                  272K Medium\n\n 1-10 of 21\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": "r",
+      "error": null,
+      "screen": " Models matching \"gr\"                                                                          Max mode: OFF\n\n Filter: gr\n\n →  Grok 4.7                 256K High Fast (Tab to modify)\n    Grok 4.6                 High Fast\n    Grok 4.5                 High Fast\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": " ",
+      "error": "Error: {\"code\":\"invalid_key\",\"message\":\"unsupported key  \"}",
+      "screen": " Models matching \"grok\"                                                                        Max mode: OFF\n\n Filter: grok\n\n →  Grok 4.7                 256K High Fast (Tab to modify)\n    Grok 4.6                 High Fast\n    Grok 4.5                 High Fast\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "results.jsonl",
+      "case": "unicode",
+      "stage": "character",
+      "character": "😀",
+      "error": null,
+      "screen": " Models matching \"é中\" (no matches)                                                            Max mode: OFF\n\n Filter: é中\n\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "ansi-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": "g",
+      "error": null,
+      "screen": " Models matching \"g\"                                                                           Max mode: OFF\n\n Filter: g\n\n →  Grok 4.7                 256K High Fast (Tab to modify)\n    Grok 4.6                 High Fast\n    GPT-5.6 Sol              272K Medium\n    GPT-5.5                  272K Medium\n    Grok 4.5                 High Fast\n    Gemini 3.8 Flash         High\n    Gemini 3.7 Flash         High\n    GPT-5.6 Terra            272K Medium\n    Codex 5.3                Medium\n    GPT-5.4                  272K Medium\n\n 1-10 of 21\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "ansi-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": " ",
+      "error": null,
+      "screen": " Models matching \"g\"                                                                           Max mode: OFF\n\n Filter: g\n\n →  Grok 4.7                 256K High Fast (Tab to modify)\n    Grok 4.6                 High Fast\n    GPT-5.6 Sol              272K Medium\n    GPT-5.5                  272K Medium\n    Grok 4.5                 High Fast\n    Gemini 3.8 Flash         High\n    Gemini 3.7 Flash         High\n    GPT-5.6 Terra            272K Medium\n    Codex 5.3                Medium\n    GPT-5.4                  272K Medium\n\n 1-10 of 21\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "ansi-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": "r",
+      "error": null,
+      "screen": " Models matching \"g r\" (no matches)                                                            Max mode: OFF\n\n Filter: g r\n\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 110,
+      "probe": "ansi-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": " ",
+      "error": null,
+      "screen": " Models matching \"g rok\" (no matches)                                                          Max mode: OFF\n\n Filter: g rok\n\n\n Type to filter • Enter to select • Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "bulk",
+      "stage": "before",
+      "character": null,
+      "error": null,
+      "screen": " Available models        Max mode: OFF\n\n Filter:\n\n →  Auto\n   Grok 4.7                 256K High\n                            Fast\n    Grok 4.6                 High Fast\n    Composer 2.5             Fast\n    Claude Opus 5            300K High\n    Claude Opus 4.8          300K High\n    GPT-5.6 Sol             272K\n                            Medium\n    GPT-5.5                 272K\n                            Medium\n    Claude Fable 5.1         300K High\n    Claude Fable 5           300K High\n\n 1-10 of 38\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "bulk",
+      "stage": "send-input",
+      "character": null,
+      "error": null,
+      "screen": " Available models        Max mode: OFF\n\n Filter:\n\n →  Auto\n   Grok 4.7                 256K High\n                            Fast\n    Grok 4.6                 High Fast\n    Composer 2.5             Fast\n    Claude Opus 5            300K High\n    Claude Opus 4.8          300K High\n    GPT-5.6 Sol             272K\n                            Medium\n    GPT-5.5                 272K\n                            Medium\n    Claude Fable 5.1         300K High\n    Claude Fable 5           300K High\n\n 1-10 of 38\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "bulk",
+      "stage": "batch",
+      "character": null,
+      "error": null,
+      "screen": " Available models        Max mode: OFF\n\n Filter:\n\n →  Auto\n   Grok 4.7                 256K High\n                            Fast\n    Grok 4.6                 High Fast\n    Composer 2.5             Fast\n    Claude Opus 5            300K High\n    Claude Opus 4.8          300K High\n    GPT-5.6 Sol             272K\n                            Medium\n    GPT-5.5                 272K\n                            Medium\n    Claude Fable 5.1         300K High\n    Claude Fable 5           300K High\n\n 1-10 of 38\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "mixed",
+      "stage": "character",
+      "character": "k",
+      "error": null,
+      "screen": " Models matching \"GrOk\"  Max mode: OFF\n\n Filter: GrOk\n\n → Grok 4.7                256K  (Tab\n                           High  to mo\n                           Fast  dify)\n\n    Grok 4.6                 High Fast\n    Grok 4.5                 High Fast\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "mixed",
+      "stage": "character",
+      "character": "/",
+      "error": null,
+      "screen": " Models        (no       Max mode: OFF\n matching     matches)\n \"GrOk22.-_/\"\n\n Filter: GrOk22.-_/\n\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": "g",
+      "error": null,
+      "screen": " Models matching \"g\"     Max mode: OFF\n\n Filter: g\n\n → Grok 4.7                256K  (Tab\n                           High  to mo\n                           Fast  dify)\n\n    Grok 4.6                 High Fast\n    GPT-5.6 Sol             272K\n                            Medium\n    GPT-5.5                 272K\n                            Medium\n    Grok 4.5                 High Fast\n    Gemini 3.8 Flash         High\n    Gemini 3.7 Flash         High\n    GPT-5.6 Terra           272K\n                            Medium\n    Codex 5.3                Medium\n    GPT-5.4                 272K\n                            Medium\n\n 1-10 of 21\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": " ",
+      "error": null,
+      "screen": " Models matching \"g\"     Max mode: OFF\n\n Filter: g\n\n → Grok 4.7                256K  (Tab\n                           High  to mo\n                           Fast  dify)\n\n    Grok 4.6                 High Fast\n    GPT-5.6 Sol             272K\n                            Medium\n    GPT-5.5                 272K\n                            Medium\n    Grok 4.5                 High Fast\n    Gemini 3.8 Flash         High\n    Gemini 3.7 Flash         High\n    GPT-5.6 Terra           272K\n                            Medium\n    Codex 5.3                Medium\n    GPT-5.4                 272K\n                            Medium\n\n 1-10 of 21\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": "r",
+      "error": null,
+      "screen": " Models matchin (no      Max mode: OFF\n \"g r\"         matches)\n\n Filter: g r\n\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "space",
+      "stage": "character",
+      "character": " ",
+      "error": null,
+      "screen": " Models matching (no     Max mode: OFF\n \"g rok\"        matches)\n\n Filter: g rok\n\n\n Type to filter • Enter to select •\n Tab to edit"
+    },
+    {
+      "columns": 40,
+      "probe": "narrow-results.jsonl",
+      "case": "unicode",
+      "stage": "character",
+      "character": "😀",
+      "error": null,
+      "screen": " Models matchin (no      Max mode: OFF\n \"é中\"         matches)\n\n Filter: é中\n\n\n Type to filter • Enter to select •\n Tab to edit"
+    }
+  ]
+}

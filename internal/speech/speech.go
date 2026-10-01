@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 // MaxTextRunes bounds one synthesis request. The phone splits responses into
@@ -190,7 +192,7 @@ var (
 
 func sayVoices() map[string]string {
 	sayVoiceOnce.Do(func() {
-		listing, err := exec.Command("say", "-v", "?").Output()
+		listing, err := childenv.Command("say", "-v", "?").Output()
 		if err != nil {
 			sayVoiceNames = map[string]string{}
 			return
@@ -306,7 +308,7 @@ func Synthesize(ctx context.Context, text, language string) ([]byte, error) {
 	if selected.engine.textArg {
 		args = append(args, "-t", trimmed)
 	}
-	cmd := exec.CommandContext(ctx, selected.binary, args...)
+	cmd := childenv.CommandContext(ctx, selected.binary, args...)
 	if !selected.engine.textArg {
 		cmd.Stdin = strings.NewReader(trimmed)
 	}
