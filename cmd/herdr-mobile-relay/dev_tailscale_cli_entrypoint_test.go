@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	commandFixtureMarker  = "HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1"
-	commandFixtureLong    = "1.102.4-t3caf7d9e7d-g084ee3b64537"
-	commandFixtureStatus  = `{"Version":"` + commandFixtureLong + `","BackendState":"Running","Self":{"ID":"node-fixture","UserID":123,"DNSName":"herdr.tailnet.ts.net."},"CurrentTailnet":{"Name":"fixture-account","MagicDNSSuffix":"tailnet.ts.net","MagicDNSEnabled":true},"CertDomains":["herdr.tailnet.ts.net"],"User":{"123":{"ID":123,"LoginName":"fixture@example.invalid","DisplayName":"Fixture","ProfilePicURL":""}}}`
-	commandFixtureVersion = `{"majorMinorPatch":"1.102.4","short":"1.102.4","long":"` + commandFixtureLong + `","gitCommit":"3caf7d9e7dcaba589cfc58beda596929733e4fea","daemonLong":"` + commandFixtureLong + `","extraGitCommit":"084ee3b64537a1276e56fc38cdf0a711da9f4936","osVariant":"appstore","cap":142}`
-	commandFixtureRoute   = `{"TCP":{"8443":{"HTTPS":true}},"Web":{"herdr.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18377"}}}}}`
+	commandFixtureMarker             = "HERDR_SYNTHETIC_TAILSCALE_CLI_FIXTURE_V1"
+	commandFixtureLong               = "1.102.4-t3caf7d9e7d-g084ee3b64537"
+	commandFixtureStatus             = `{"Version":"` + commandFixtureLong + `","BackendState":"Running","Self":{"ID":"node-fixture","UserID":123,"DNSName":"herdr.tailnet.ts.net."},"CurrentTailnet":{"Name":"fixture-account","MagicDNSSuffix":"tailnet.ts.net","MagicDNSEnabled":true},"CertDomains":["herdr.tailnet.ts.net"],"User":{"123":{"ID":123,"LoginName":"fixture@example.invalid","DisplayName":"Fixture","ProfilePicURL":""}}}`
+	commandFixtureVersion            = `{"majorMinorPatch":"1.102.4","short":"1.102.4","long":"` + commandFixtureLong + `","gitCommit":"3caf7d9e7dcaba589cfc58beda596929733e4fea","daemonLong":"` + commandFixtureLong + `","extraGitCommit":"084ee3b64537a1276e56fc38cdf0a711da9f4936","osVariant":"appstore","cap":142}`
+	commandFixtureRoute              = `{"TCP":{"8443":{"HTTPS":true}},"Web":{"herdr.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18377"}}}}}`
+	commandFixtureRouteWithUnrelated = `{"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"other.tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}},"herdr.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18377"}}}}}`
 )
 
 type developmentCommandFixture struct {
@@ -411,13 +412,15 @@ func (commandFixtureLease) WithLease(_ context.Context, publish func() error) er
 }
 
 type commandFixtureForegroundServer struct {
-	cfg          *config.Config
-	workflow     *tailscalecli.DevelopmentWorkflow
-	bound        chan struct{}
-	armed        chan struct{}
-	admitCalls   atomic.Int32
-	armCalls     atomic.Int32
-	armedInOrder atomic.Bool
+	cfg                    *config.Config
+	workflow               *tailscalecli.DevelopmentWorkflow
+	bound                  chan struct{}
+	armed                  chan struct{}
+	stopAfterAdmission     chan struct{}
+	stopAfterAdmissionOnce sync.Once
+	admitCalls             atomic.Int32
+	armCalls               atomic.Int32
+	armedInOrder           atomic.Bool
 }
 
 func (s *commandFixtureForegroundServer) DevelopmentBackendBound() <-chan struct{} { return s.bound }
@@ -453,6 +456,11 @@ func (s *commandFixtureForegroundServer) Run(ctx context.Context) error {
 				return observed, errors.New("fixture admission requires an exact registered route")
 			}
 			s.admitCalls.Add(1)
+			if s.stopAfterAdmission != nil {
+				s.stopAfterAdmissionOnce.Do(func() {
+					time.AfterFunc(100*time.Millisecond, func() { close(s.stopAfterAdmission) })
+				})
+			}
 			observed.Ready = true
 			return observed, nil
 		},
@@ -490,7 +498,14 @@ func (s *commandFixtureForegroundServer) Run(ctx context.Context) error {
 	httpDone := make(chan error, 1)
 	go func() { httpDone <- httpServer.Serve(backend) }()
 	close(s.bound)
-	<-ctx.Done()
+	if s.stopAfterAdmission == nil {
+		<-ctx.Done()
+	} else {
+		select {
+		case <-ctx.Done():
+		case <-s.stopAfterAdmission:
+		}
+	}
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelShutdown()
 	_ = httpServer.Shutdown(shutdownCtx)
@@ -641,7 +656,9 @@ func newDevelopmentCommandFixture(t *testing.T) *developmentCommandFixture {
 		"  'status --json') printf '%s\\n' '" + commandFixtureStatus + "' ;;\n" +
 		"  'version --json --daemon') printf '%s\\n' '" + commandFixtureVersion + "' ;;\n" +
 		"  'serve status --json') if [ -f " + shellQuoteCommandFixture(fixture.serveFile) + " ]; then /bin/cat " + shellQuoteCommandFixture(fixture.serveFile) + "; else printf '%s\\n' '{}'; fi ;;\n" +
-		"  'serve --bg --https=8443 --set-path=/ http://127.0.0.1:18377') printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + " ;;\n" +
+		"  'serve --bg --https=8443 --set-path=/ http://127.0.0.1:18377')\n" +
+		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile+".lose-ack") + " ]; then printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; exit 91; fi\n" +
+		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile) + " ] && /usr/bin/grep -q 'other.tailnet.ts.net:443' " + shellQuoteCommandFixture(fixture.serveFile) + "; then printf '%s\\n' '" + commandFixtureRouteWithUnrelated + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; else printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; fi ;;\n" +
 		"  'serve --bg --https=8443 --set-path=/ off') /bin/rm -f " + shellQuoteCommandFixture(fixture.serveFile) + " ;;\n" +
 		"  *) exit 91 ;;\n" +
 		"esac\n"

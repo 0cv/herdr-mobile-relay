@@ -130,6 +130,8 @@ type Server struct {
 	developmentBackendBoundOnce     sync.Once
 	developmentBackendMu            sync.RWMutex
 	developmentBackendActive        bool
+	developmentCLIHealthClient      func(time.Duration) *http.Client
+	developmentCLIControlObserver   func(string)
 	verifyPublicBundle              func(context.Context, string, string, string, string) error
 	managedRetired                  chan struct{}
 	managedRetireOne                sync.Once
@@ -1607,6 +1609,20 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if s.cfg.Transport == config.TransportTailscaleCLI {
 			callbacks.Admit = s.admitTailscaleCLI
+		}
+		if s.developmentCLIControlObserver != nil {
+			if callbacks.Admit != nil {
+				admit := callbacks.Admit
+				callbacks.Admit = func(ctx context.Context) (localcontrol.Status, error) {
+					s.developmentCLIControlObserver("admit")
+					return admit(ctx)
+				}
+			}
+			arm := callbacks.Arm
+			callbacks.Arm = func(ctx context.Context) (localcontrol.Status, error) {
+				s.developmentCLIControlObserver("arm_bootstrap")
+				return arm(ctx)
+			}
 		}
 		if s.tailscaleSession != nil {
 			callbacks.Retired = s.CompleteManagedTailscaleRetirement

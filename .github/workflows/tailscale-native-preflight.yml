@@ -81,6 +81,13 @@ jobs:
             echo 'required development CLI command-entrypoint inventory was skipped' >&2
             exit 1
           fi
+          go test -v -count=1 -tags=herdr_tailscale_test,herdr_tailscale_cli_fixture_binary ./cmd/herdr-mobile-relay -run '^(TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint|TestDevelopmentCLIForegroundSetupIntegration)$' 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          grep -F -- '--- PASS: TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          grep -F -- '--- PASS: TestDevelopmentCLIForegroundSetupIntegration' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
+          if grep -E -- '--- SKIP: TestDevelopmentCLI(RecoveryCommandsThroughPublicEntrypoint|ForegroundSetupIntegration)' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"; then
+            echo 'required public recovery or foreground setup command fixture was skipped' >&2
+            exit 1
+          fi
           printf 'tagged_tailscalecli_candidate_sha=%s\n' "$GITHUB_SHA" | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           go test -v -count=1 -tags=herdr_tailscale_test ./internal/tailscalecli 2>&1 | tee -a "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"
           grep -F -- '--- PASS: TestFixtureBuildRejectsOrdinaryExecutableBeforeExecution' "$RUNNER_TEMP/tailscale-native-preflight/go-test.log"

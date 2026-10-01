@@ -1569,6 +1569,47 @@ func TestUnpublishNoWriteWhenRegisteredRouteWasReplaced(t *testing.T) {
 	}
 }
 
+func TestTransportSwitchBlocksAllUnresolvedJournalStates(t *testing.T) {
+	states := []RegistrationState{StatePublishPending, StatePublishUncertain, StateRemovePending, StateRemoveUncertain}
+	for _, state := range states {
+		t.Run(string(state), func(t *testing.T) {
+			fixture := newFakeCLI(t)
+			manager := newFixtureManager(t, fixture, "transport switch "+string(state))
+			request := fixtureRequest(true)
+			operationID := "11111111111111111111111111111111"
+			consentScope := publishConsentScope
+			reservationState := StatePublishPending
+			reservationID := request.ReservationID
+			if state == StateRemovePending || state == StateRemoveUncertain {
+				consentScope = removeConsentScope
+				reservationState = StateRegistered
+				reservationID = ""
+			}
+			record := registration{
+				Schema: 1, InstallationID: request.InstallationID, Scope: request.Scope,
+				NodeID: request.ExpectedNodeID, DNSName: "herdr.tailnet.ts.net", Profile: ProfileAppStoreSupplied,
+				BinaryPath: manager.client.binary, HTTPSPort: request.HTTPSPort, BackendPort: request.BackendPort,
+				Path: "/", Backend: "http://127.0.0.1:18377", ConsentScope: consentScope,
+				OperationID: operationID, ReservationID: reservationID, State: state,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			}
+			if err := manager.writeRegistration(record); err != nil {
+				t.Fatalf("seed %s journal: %v", state, err)
+			}
+			reservation := reservationForRegistration(record, reservationState)
+			if err := manager.writeBackendReservation(reservation); err != nil {
+				t.Fatalf("seed %s reservation: %v", state, err)
+			}
+			if err := CheckTransportSwitch(manager.stateRoot, manager.coordinationRoot, request.InstallationID, request.BackendPort); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("transport switch accepted %s journal: %v", state, err)
+			}
+			if len(fixture.calls) != 0 {
+				t.Fatalf("local transport switch guard invoked the CLI: %v", fixture.calls)
+			}
+		})
+	}
+}
+
 func TestTransportSwitchRequiresExactRouteDisposition(t *testing.T) {
 	fixture := newFakeCLI(t)
 	manager := newFixtureManager(t, fixture, "transport switch journal")

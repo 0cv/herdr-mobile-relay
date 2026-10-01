@@ -26,6 +26,10 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
 
+var developmentCLICommandContext = func() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
+
 func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	action := "setup"
 	if len(args) > 0 {
@@ -55,7 +59,7 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|repair-missing|update|status|recover|reconcile|assert-ready|release-reservation|abandon-missing|unpublish|stop|foreground}")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := developmentCLICommandContext()
 	defer cancel()
 	if action == "preflight" {
 		report, err := developmentCLIPreflightFromEnvironment(ctx)
@@ -205,12 +209,18 @@ type developmentForegroundServer interface {
 	DevelopmentBackendLease() tailscalecli.BackendLease
 }
 
+var newDevelopmentForegroundServer = func(cfg *config.Config, workflow *tailscalecli.DevelopmentWorkflow, stderr io.Writer) (developmentForegroundServer, error) {
+	return app.NewDevelopmentCLI(cfg, version, revision,
+		newRelayLogger(stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr)), workflow)
+}
+
+var developmentReservationIDGenerator = newDevelopmentReservationID
+
 func runDevelopmentForeground(parent context.Context, action string, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config,
 	setupConfirmation string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	return runDevelopmentForegroundWithFactory(parent, action, workflow, cfg, setupConfirmation, stdin, stdout, stderr,
 		func() (developmentForegroundServer, error) {
-			return app.NewDevelopmentCLI(cfg, version, revision,
-				newRelayLogger(stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr)), workflow)
+			return newDevelopmentForegroundServer(cfg, workflow, stderr)
 		})
 }
 
@@ -236,7 +246,7 @@ func runDevelopmentForegroundWithFactory(parent context.Context, action string, 
 	routeCommitted := false
 	if action == "setup" {
 		var err error
-		reservationID, err = newDevelopmentReservationID()
+		reservationID, err = developmentReservationIDGenerator()
 		if err != nil {
 			return 1, err
 		}
@@ -354,7 +364,7 @@ func repairMissingDevelopmentRoute(ctx context.Context, workflow *tailscalecli.D
 	reservationID := report.ReservationAttemptID
 	if report.ReservationState != tailscalecli.StatePublishPending {
 		var err error
-		reservationID, err = newDevelopmentReservationID()
+		reservationID, err = developmentReservationIDGenerator()
 		if err != nil {
 			return err
 		}

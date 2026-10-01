@@ -1038,6 +1038,76 @@ test ! -e "$(tailscale_external_session_file "$EXTERNAL_SWITCH_ENV")"
 grep -q 'The CLI Serve route or backend reservation is unresolved' "$WORK_DIR/external-chooser.stderr"
 [ "$(grep -c 'tailscale-cli check-transport-switch' "$WORK_DIR/external-switch-cli.log")" = 2 ]
 
+# Exercise each unresolved journal state through the public BYO chooser. The
+# fixture relay admits only the local route-check subcommand; a separate
+# sentinel catches any accidental Tailscale CLI invocation.
+MATRIX_SWITCH_DIR="$WORK_DIR/chooser-route-matrix"
+MATRIX_SWITCH_ENV="$MATRIX_SWITCH_DIR/relay.env"
+MATRIX_SWITCH_BIN="$MATRIX_SWITCH_DIR/bin/herdr-mobile-relay"
+MATRIX_SWITCH_JOURNAL="$MATRIX_SWITCH_DIR/registration/registration.json"
+MATRIX_SWITCH_CALLS="$MATRIX_SWITCH_DIR/calls.log"
+MATRIX_SWITCH_DISPATCHED="$MATRIX_SWITCH_DIR/transport-dispatched"
+MATRIX_SWITCH_TAILSCALE="$MATRIX_SWITCH_DIR/tailscale-contacted"
+mkdir -p "$MATRIX_SWITCH_DIR/registration" "$MATRIX_SWITCH_DIR/bin"
+cat > "$MATRIX_SWITCH_ENV" <<EOF
+HERDR_RELAY_TRANSPORT=tailscale-cli
+HERDR_RELAY_INSTANCE_ID=fixture-installation
+HERDR_RELAY_PORT=18377
+HERDR_TAILSCALE_CLI_SCOPE=development
+HERDR_TAILSCALE_CLI_STATE_ROOT=$MATRIX_SWITCH_DIR/registration
+HERDR_TAILSCALE_CLI_COORDINATION_ROOT=$MATRIX_SWITCH_DIR/coordination
+HERDR_GATEWAY_URL=wss://previous.example.test
+EOF
+cat > "$MATRIX_SWITCH_BIN" <<'EOF'
+#!/bin/sh
+[ "$1" = tailscale-cli ] && [ "$2" = check-transport-switch ] && [ "$#" -eq 10 ] || exit 97
+[ "$3" = --state-root ] && [ "$4" = "$MATRIX_SWITCH_ROOT/registration" ] || exit 96
+[ "$5" = --coordination-root ] && [ "$6" = "$MATRIX_SWITCH_ROOT/coordination" ] || exit 95
+[ "$7" = --installation-id ] && [ "$8" = fixture-installation ] || exit 94
+[ "$9" = --backend-port ] && [ "${10}" = 18377 ] || exit 93
+printf '%s\n' "$1 $2" >> "$MATRIX_SWITCH_CALLS"
+state="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$MATRIX_SWITCH_JOURNAL")"
+case "$state" in
+    publish-pending|publish-uncertain|remove-pending|remove-uncertain) exit 1 ;;
+    *) exit 0 ;;
+esac
+EOF
+cat > "$MATRIX_SWITCH_DIR/bin/tailscale" <<'EOF'
+#!/bin/sh
+: > "$MATRIX_SWITCH_TAILSCALE"
+exit 98
+EOF
+cat > "$MATRIX_SWITCH_DIR/tailscale-external.sh" <<'EOF'
+#!/bin/sh
+: > "$MATRIX_SWITCH_DISPATCHED"
+EOF
+chmod 700 "$MATRIX_SWITCH_BIN" "$MATRIX_SWITCH_DIR/bin/tailscale" "$MATRIX_SWITCH_DIR/tailscale-external.sh"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-choose-transport.sh" "$MATRIX_SWITCH_DIR/"
+for unresolved_state in publish-pending publish-uncertain remove-pending remove-uncertain; do
+    printf '{"state":"%s"}\n' "$unresolved_state" > "$MATRIX_SWITCH_JOURNAL"
+    MATRIX_SWITCH_BEFORE="$(cat "$MATRIX_SWITCH_ENV")"
+    if MATRIX_SWITCH_CALLS="$MATRIX_SWITCH_CALLS" MATRIX_SWITCH_JOURNAL="$MATRIX_SWITCH_JOURNAL" MATRIX_SWITCH_ROOT="$MATRIX_SWITCH_DIR" \
+        MATRIX_SWITCH_DISPATCHED="$MATRIX_SWITCH_DISPATCHED" MATRIX_SWITCH_TAILSCALE="$MATRIX_SWITCH_TAILSCALE" \
+        HERDR_RELAY_BIN="$MATRIX_SWITCH_BIN" HERDR_RELAY_ENV="$MATRIX_SWITCH_ENV" \
+        PATH="$MATRIX_SWITCH_DIR/bin:$PATH" bash "$MATRIX_SWITCH_DIR/plugin-choose-transport.sh" tailscale-external \
+        </dev/null >"$MATRIX_SWITCH_DIR/chooser.stdout" 2>"$MATRIX_SWITCH_DIR/chooser.stderr"; then
+        echo "public BYO chooser accepted unresolved journal state $unresolved_state" >&2
+        exit 1
+    fi
+    test "$(cat "$MATRIX_SWITCH_ENV")" = "$MATRIX_SWITCH_BEFORE"
+    test ! -s "$MATRIX_SWITCH_DIR/chooser.stdout"
+    test ! -e "$(tailscale_external_session_file "$MATRIX_SWITCH_ENV")"
+    test ! -e "$MATRIX_SWITCH_DISPATCHED"
+    test ! -e "$MATRIX_SWITCH_TAILSCALE"
+    grep -q 'CLI Serve route or backend reservation is unresolved' "$MATRIX_SWITCH_DIR/chooser.stderr"
+done
+[ "$(wc -l < "$MATRIX_SWITCH_CALLS" | tr -d ' ')" = 4 ]
+[ "$(sort "$MATRIX_SWITCH_CALLS" | uniq -c | awk '{sum += $1} END {print sum}')" = 4 ]
+if grep -vFx 'tailscale-cli check-transport-switch' "$MATRIX_SWITCH_CALLS" >/dev/null; then
+    echo "public chooser invoked an unexpected relay subcommand" >&2
+    exit 1
+fi
+
 # The operator-owned foreground session serializes every cooperating transport
 # choice until the local backend stops; a refusal leaves the saved BYO origin
 # byte-for-byte intact.

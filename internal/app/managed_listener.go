@@ -7,9 +7,12 @@ import (
 	"time"
 )
 
-// Release builds and the separately tagged hosted CLI fixture app use the
-// fixed system-trust, proxy-free client. The lifecycle test binary substitutes
-// its isolated fixture-CA variant; no runtime client injection is shipped.
-func managedHealthClientForServer(_ *Server, timeout time.Duration) *http.Client {
+// Release builds use the fixed system-trust, proxy-free client. Only the
+// explicitly tagged foreground-command fixture constructor can attach an
+// isolated test client to one server instance.
+func managedHealthClientForServer(server *Server, timeout time.Duration) *http.Client {
+	if server != nil && server.developmentCLIHealthClient != nil {
+		return server.developmentCLIHealthClient(timeout)
+	}
 	return managedHealthClient(timeout)
 }
