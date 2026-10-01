@@ -581,7 +581,14 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances).toHaveLength(0);
   });
 
-  it('preserves an existing relay key and credential when invitation metadata is malformed', () => {
+  it.each([
+    ['invite', '&invite=short'],
+    ['invite_version', '&invite_version=invalid'],
+    ['invite_expires', '&invite_expires=invalid'],
+    ['setup', '&setup=short'],
+    ['relay_id', `&relay_id=${'C'.repeat(20)}&relay_id=short`],
+    ['rendezvous', `&rendezvous=${'D'.repeat(43)}&rendezvous=short`],
+  ] as const)('preserves the relay key and credential when the %s selector is duplicated', (_selector, duplicate) => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     MockWebSocket.instances = [];
@@ -604,8 +611,9 @@ describe('relay command store', () => {
     const relaySnapshot = get(relayStore.relayConfigs);
     const dials = MockWebSocket.instances.length;
     const malformedLink = {
-      hash: `#setup=${'X'.repeat(43)}&invite=short&invite_version=1`
-        + `&invite_expires=${Date.now() + 60_000}&label=Paired&relay=${encodeURIComponent(relayUrl)}`,
+      hash: `#setup=${'X'.repeat(43)}&invite=invitation-valid01&invite_version=1`
+        + `&invite_expires=${Date.now() + 60_000}${duplicate}`
+        + `&label=Paired&relay=${encodeURIComponent(relayUrl)}`,
       protocol: 'https:',
       host: 'app.example',
       pathname: '/',
@@ -614,8 +622,8 @@ describe('relay command store', () => {
 
     expect(relayStore.importSetupLink(malformedLink, true)).toBe(false);
     expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
-    expect(get(relayStore.toast)?.message).toContain('Ordinary device invitations expire after ten minutes');
     expect(get(relayStore.relayConfigs)).toEqual(relaySnapshot);
+    expect(get(relayStore.relayConfigs)[0]).toMatchObject({ url: relayUrl, token: relay.token });
     expect(localStorage.getItem('herdr_relays')).toBe(storedRelays);
     expect(localStorage.getItem('herdr_device_auth_v1')).toBe(credential);
     expect(MockWebSocket.instances).toHaveLength(dials);

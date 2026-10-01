@@ -130,6 +130,26 @@ describe('device invitation setup', () => {
   });
 
   it.each([
+    ['invite', '&invite=short'],
+    ['invite_version', '&invite_version=invalid'],
+    ['invite_expires', '&invite_expires=invalid'],
+    ['setup', '&setup=short'],
+    ['relay_id', `&relay_id=${'C'.repeat(20)}&relay_id=short`],
+    ['rendezvous', `&rendezvous=${'D'.repeat(43)}&rendezvous=short`],
+  ] as const)('rejects duplicate %s selectors before importing setup', (_selector, duplicate) => {
+    const locationValue = {
+      hash: `#setup=${'A'.repeat(43)}&invite=${'B'.repeat(24)}&invite_version=1`
+        + `&invite_expires=2000000000000${duplicate}&label=Phone&relay=wss%3A%2F%2Frelay.example.com`,
+      protocol: 'https:',
+      host: 'app.example.com',
+    };
+
+    expect(quickSetupInvitation(locationValue)).toBeNull();
+    expect(quickSetupConfig(locationValue)).toBeNull();
+    expect(importQuickSetup([], locationValue)).toBeNull();
+  });
+
+  it.each([
     ['invalid invitation id', `invite=short&invite_version=1&invite_expires=2000000000000`],
     ['missing invitation version', `invite=${'B'.repeat(24)}&invite_expires=2000000000000`],
     ['partial invitation metadata', 'invite_version=1'],
