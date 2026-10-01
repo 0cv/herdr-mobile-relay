@@ -134,7 +134,7 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		if strings.Contains(stdout, "https://") || strings.Contains(stdout, "setup link") {
 			t.Fatalf("route repair emitted bootstrap material: %s", stdout)
 		}
-		assertJournalState(t, fixture, tailscalecli.StateRegistered, true)
+		assertFreshJournalState(t, fixture, tailscalecli.StateRegistered, true, "")
 		route, err := os.ReadFile(fixture.serveFile)
 		if err != nil || strings.TrimSpace(string(route)) != reviewRouteWithUnrelated {
 			t.Fatalf("repair did not preserve unrelated route: err=%v route=%s", err, route)
@@ -345,6 +345,10 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 				cancel()
 				t.Fatal("successful readiness and arm did not persist the local bootstrap/device store")
 			}
+			if err := verifyTrustedExactPublishedBundle(context.Background(), server.client(), webRoot, reviewOrigin, version, revision); err != nil {
+				cancel()
+				t.Fatalf("fixture did not retain trusted exact public release before shutdown: %v", err)
+			}
 			cancel()
 			select {
 			case done := <-result:
@@ -364,9 +368,6 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 			assertFreshJournalState(t, fixture, tailscalecli.StateRegistered, true, "")
 			assertReservationState(t, fixture, tailscalecli.StateRegistered, "")
 			assertSingleRoutePublish(t, fixture)
-			if err := verifyTrustedExactPublishedBundle(context.Background(), server.client(), webRoot, reviewOrigin, version, revision); err != nil {
-				t.Fatalf("fixture did not retain trusted exact public release: %v", err)
-			}
 		})
 	}
 }
