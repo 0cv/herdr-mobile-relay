@@ -479,7 +479,23 @@ type PushConfig struct {
 	// connected over the legacy WSS URL, so the bridge window needs no QR
 	// re-scan. Omitted entirely when the relay has no gateway configured.
 	Hybrid map[string]any `json:"hybrid,omitempty"`
+	// Ingress names the relay's configured ingress mode. It is additive and
+	// optional: it travels inside the authenticated session so the phone can
+	// label its local resume timings without guessing from a hostname, and an
+	// app that predates it simply ignores it. It is a coarse operating mode,
+	// never a hostname, address or account identifier.
+	Ingress string `json:"ingress,omitempty"`
 }
+
+// Ingress descriptors carried by PushConfig.Ingress. They describe the mode
+// the relay was configured with, not proof of the route bytes actually took.
+const (
+	IngressCloudflare        = "cloudflare"
+	IngressGateway           = "gateway"
+	IngressTailscaleManaged  = "tailscale-managed"
+	IngressTailscaleExternal = "tailscale-byo"
+	IngressTailscaleCLI      = "tailscale-cli"
+)
 
 const AgentResponseCopyCapability = "agent_response_copy"
 

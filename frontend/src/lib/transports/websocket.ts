@@ -1,11 +1,13 @@
 import { E2EE_SUBPROTOCOL, type E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
 import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
-import type {
-  FrameChannel,
-  FrameChannelHandlers,
-  RelayTransport,
-  TransportHandlers,
+import {
+  observePhase,
+  type FrameChannel,
+  type FrameChannelHandlers,
+  type RelayTransport,
+  type TransportHandlers,
+  type TransportObserver,
 } from './types';
 
 /**
@@ -35,6 +37,7 @@ export function createWebSocketTransport(
       relay,
       channelHandlers,
       encrypted,
+      authentication.observe,
     ),
   });
 }
@@ -43,6 +46,7 @@ function createWebSocketChannel(
   relay: RelayConfig,
   handlers: FrameChannelHandlers,
   encrypted: boolean,
+  observe?: TransportObserver,
 ): FrameChannel {
   let socket: WebSocket | null = null;
   let closed = false;
@@ -59,6 +63,7 @@ function createWebSocketChannel(
     codec: 'json',
     open(): void {
       if (closed || socket) return;
+      observePhase(observe, 'dial', 'websocket');
       try {
         socket = encrypted
           ? new WebSocket(relay.url, E2EE_SUBPROTOCOL)
@@ -77,6 +82,7 @@ function createWebSocketChannel(
           fail('Relay did not negotiate encrypted transport');
           return;
         }
+        observePhase(observe, 'open', 'websocket');
         handlers.onOpen();
       };
       socket.onmessage = (event) => {

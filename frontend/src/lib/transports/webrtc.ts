@@ -4,10 +4,12 @@ import type { RelayConfig } from '../types';
 import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking';
 import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
 import {
+  observePhase,
   type FrameChannel,
   type FrameChannelHandlers,
   type RelayTransport,
   type TransportHandlers,
+  type TransportObserver,
 } from './types';
 
 /** DataChannel label negotiated with the relay. */
@@ -50,6 +52,7 @@ export function createWebRTCChannel(
   signal: SignalingChannel,
   handlers: FrameChannelHandlers,
   iceServers: RTCIceServer[] = [],
+  observe?: TransportObserver,
 ): FrameChannel {
   const requestId = base64UrlEncode(crypto.getRandomValues(new Uint8Array(new ArrayBuffer(12))));
   const pendingCandidates: RTCIceCandidateInit[] = [];
@@ -103,7 +106,10 @@ export function createWebRTCChannel(
     if (closed || connection !== peer) return;
     offered = true;
     const sdp = peer.localDescription?.sdp || offer.sdp || '';
-    if (signal.send({ type: 'webrtc_offer', request_id: requestId, sdp })) return;
+    if (signal.send({ type: 'webrtc_offer', request_id: requestId, sdp })) {
+      observePhase(observe, 'offer', 'webrtc');
+      return;
+    }
     fail('The relayed connection dropped before the direct connection was set up.', { notifyPeer: false });
   }
 
@@ -112,6 +118,7 @@ export function createWebRTCChannel(
     if (!peer) return;
     await peer.setRemoteDescription({ type: 'answer', sdp });
     if (closed || connection !== peer) return;
+    observePhase(observe, 'answer', 'webrtc');
     while (pendingCandidates.length > 0) await peer.addIceCandidate(pendingCandidates.shift()!);
   }
 
@@ -157,6 +164,7 @@ export function createWebRTCChannel(
     if (peer.connectionState === 'connected') {
       clearTimeout(restartTimer ?? undefined);
       restartTimer = null;
+      observePhase(observe, 'ice-connected', 'webrtc');
       return;
     }
     if (peer.connectionState === 'closed') {
@@ -173,6 +181,7 @@ export function createWebRTCChannel(
     restarted = true;
     peer.restartIce();
     restartTimer = setTimeout(() => {
+      observePhase(observe, 'timeout', 'webrtc');
       fail('The direct connection could not be re-established.');
     }, ICE_RESTART_GRACE_MS);
     negotiate(true).catch(() => {
@@ -191,6 +200,7 @@ export function createWebRTCChannel(
       }
       reassembler = new Reassembler({ onStall: (reason) => fail(reason) });
       unsubscribe = signal.onMessage(handleSignal);
+      observePhase(observe, 'dial', 'webrtc');
       connection = new RTCPeerConnection({ iceServers });
       connection.onicecandidate = (event) => {
         if (!event.candidate || closed) return;
@@ -210,6 +220,7 @@ export function createWebRTCChannel(
       channel.onopen = () => {
         if (closed || opened) return;
         opened = true;
+        observePhase(observe, 'open', 'webrtc');
         handlers.onOpen();
       };
       channel.onclose = () => fail('The direct connection closed.', { notifyPeer: false });
@@ -263,6 +274,11 @@ export function createWebRTCTransport(
     codec: 'binary',
     ...authentication,
     handlers,
-    createChannel: (channelHandlers) => createWebRTCChannel(signal, channelHandlers, options.iceServers),
+    createChannel: (channelHandlers) => createWebRTCChannel(
+      signal,
+      channelHandlers,
+      options.iceServers,
+      authentication.observe,
+    ),
   });
 }

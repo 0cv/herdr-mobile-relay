@@ -303,6 +303,53 @@ jobs:
       - run: make frontend-check
       - run: make web-release-check
 
+  # Statistical evidence is kept apart from functional tests so that neither
+  # is mistaken for the other. This bounded pilot measures the shipped web/
+  # bundle of this exact commit against the in-page synthetic relay, keeps
+  # every attempted epoch, and plans a later confirmatory experiment. It is
+  # not p95 acceptance and supports no performance claim.
+  resume-benchmark-pilot:
+    needs: provenance
+    name: Resume benchmark pilot (synthetic, hosted; not a functional test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile --cwd frontend
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+      - run: cd frontend && bun x playwright install --with-deps chromium webkit
+      - name: Run the preregistered pilot on the exact checkout and analyze every attempted epoch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          evidence="$RUNNER_TEMP/resume-benchmark"
+          make resume-benchmark-pilot RESUME_BENCHMARK_SHA="$GITHUB_SHA" RESUME_BENCHMARK_DIR="$evidence"
+          cat "$evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload sanitized pilot evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: resume-benchmark-pilot-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/resume-benchmark/preregistration.json
+            ${{ runner.temp }}/resume-benchmark/evidence.json
+            ${{ runner.temp }}/resume-benchmark/analysis.json
+            ${{ runner.temp }}/resume-benchmark/summary.md
+          if-no-files-found: warn
+          retention-days: 1
+
   # Bundles are one of the things this workflow checks, not something it
   # publishes, so they no longer wait behind the test jobs: a red run fails on
   # its own job and a green run stops paying for the serial hop.

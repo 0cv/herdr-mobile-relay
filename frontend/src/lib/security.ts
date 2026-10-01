@@ -2,6 +2,7 @@ import { get, writable } from 'svelte/store';
 import { base64UrlDecode, base64UrlEncode } from './base64url';
 import { clearConversationPreviews } from './conversation-cache-control';
 import { DEVICE_CREDENTIAL_KEY, DEVICE_LOCK_KEY } from './config';
+import { resumeMetrics } from './resume-metrics';
 import { relayStore } from './store';
 
 
@@ -45,6 +46,10 @@ export function initializeDeviceSecurity(): () => void {
     relayStore.setHidden(document.visibilityState === 'hidden');
   };
   syncVisibility();
+  // Local resume timing only observes these lifecycle events; it never
+  // changes when or how the app reconnects.
+  if (document.visibilityState === 'visible') resumeMetrics.wake('cold-start');
+  else resumeMetrics.hidden();
   relayStore.initialize(false);
   if (deviceVerificationEnabled()) {
     clearConversationPreviews();
@@ -64,9 +69,11 @@ export function initializeDeviceSecurity(): () => void {
   const onVisibility = () => {
     syncVisibility();
     if (document.visibilityState === 'hidden') {
+      resumeMetrics.hidden();
       if (deviceVerificationEnabled()) lockForDevice('resume');
       return;
     }
+    resumeMetrics.wake('visible');
     if (deviceVerificationEnabled()) {
       unlockAfterResume();
       return;
@@ -76,6 +83,7 @@ export function initializeDeviceSecurity(): () => void {
   const onPageShow = (event: PageTransitionEvent) => {
     syncVisibility();
     if (!event.persisted) return;
+    resumeMetrics.wake('pageshow');
     if (deviceVerificationEnabled()) {
       lockForDevice('resume');
       setTimeout(unlockAfterResume, 150);
@@ -86,6 +94,7 @@ export function initializeDeviceSecurity(): () => void {
   const onFocus = () => {
     syncVisibility();
     if (document.visibilityState !== 'visible') return;
+    resumeMetrics.wake('focus');
     if (deviceVerificationEnabled()) {
       setTimeout(unlockAfterResume, 150);
       return;
@@ -94,14 +103,22 @@ export function initializeDeviceSecurity(): () => void {
   };
   const onOnline = () => {
     if (document.visibilityState !== 'visible') return;
+    resumeMetrics.network('online');
     if (deviceVerificationEnabled() && get(securityState).locked) {
       unlockAfterResume();
       return;
     }
     revalidateAfterResume();
   };
+  const onOffline = () => {
+    if (document.visibilityState === 'visible') resumeMetrics.network('offline');
+  };
+  const onPageHide = () => {
+    resumeMetrics.hidden();
+  };
   const onNetworkChange = () => {
     if (document.visibilityState !== 'visible') return;
+    resumeMetrics.network('change');
     if (deviceVerificationEnabled() && get(securityState).locked) return;
     // Wi-Fi/cellular handoffs often stay "online", so the window event never
     // fires. Probe the current application path before deciding to replace it:
@@ -111,11 +128,13 @@ export function initializeDeviceSecurity(): () => void {
     relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
   };
   const onFreeze = () => {
+    resumeMetrics.hidden();
     if (deviceVerificationEnabled()) lockForDevice('resume');
   };
   const onResume = () => {
     syncVisibility();
     if (document.visibilityState !== 'visible') return;
+    resumeMetrics.wake('resume');
     if (deviceVerificationEnabled()) {
       if (get(securityState).locked) setTimeout(unlockAfterResume, 150);
       return;
@@ -128,6 +147,8 @@ export function initializeDeviceSecurity(): () => void {
   window.addEventListener('pageshow', onPageShow);
   window.addEventListener('focus', onFocus);
   window.addEventListener('online', onOnline);
+  window.addEventListener('offline', onOffline);
+  window.addEventListener('pagehide', onPageHide);
   networkConnection?.addEventListener('change', onNetworkChange);
   return () => {
     document.removeEventListener('visibilitychange', onVisibility);
@@ -136,7 +157,10 @@ export function initializeDeviceSecurity(): () => void {
     window.removeEventListener('pageshow', onPageShow);
     window.removeEventListener('focus', onFocus);
     window.removeEventListener('online', onOnline);
+    window.removeEventListener('offline', onOffline);
+    window.removeEventListener('pagehide', onPageHide);
     networkConnection?.removeEventListener('change', onNetworkChange);
+    resumeMetrics.clear();
   };
 }
 
@@ -258,6 +282,7 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
   }
   unlockInProgress = true;
   securityState.update((state) => ({ ...state, locked: true, busy: true, reason, status: 'Waiting for device verification...' }));
+  resumeMetrics.unlock('request');
   try {
     const assertion = await navigator.credentials.get({
       publicKey: {
@@ -268,10 +293,12 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
       },
     });
     if (!assertion) throw new Error('No assertion returned');
+    resumeMetrics.unlock('success');
     securityState.update((state) => ({ ...state, locked: false, busy: false, status: '' }));
     resumeAfterUnlock(reason);
     return true;
   } catch {
+    resumeMetrics.unlock('failure');
     securityState.update((state) => ({
       ...state,
       locked: true,

@@ -182,6 +182,17 @@
 
   onMount(refreshPushPreferences);
 
+  // Resume timing is local diagnostics; its summary code loads on demand so it
+  // never weighs on the app's startup payload.
+  let ResumeTimingSettings = $state<typeof import('$components/ResumeTimingSettings.svelte')['default'] | null>(null);
+  onMount(() => {
+    let active = true;
+    void import('$components/ResumeTimingSettings.svelte')
+      .then((module) => { if (active) ResumeTimingSettings = module.default; })
+      .catch(() => {});
+    return () => { active = false; };
+  });
+
   let relayLabel = $state('');
   let relayUrl = $state('');
   let relayToken = $state('');
@@ -938,6 +949,10 @@
     <AppSwitch checked={deviceLock} disabled={$securityState.busy} label="Require Fingerprint / Device Unlock" onchange={changeDeviceLock} />
     <p class="hint">{deviceVerificationSupported() ? $securityState.hint : 'Device verification needs HTTPS and WebAuthn support.'}</p>
   </Card>
+
+  {#if ResumeTimingSettings}
+    <ResumeTimingSettings />
+  {/if}
 
   <Card>
     <h3>Status</h3>

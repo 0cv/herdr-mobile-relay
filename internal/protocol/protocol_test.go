@@ -104,6 +104,56 @@ func TestPushConfigFixtureHasRequiredCutoverFields(t *testing.T) {
 	}
 }
 
+func TestPushConfigIngressDescriptorIsAdditive(t *testing.T) {
+	// A relay that predates the descriptor, or one without a recognised mode,
+	// omits the field entirely so old and new apps parse the same bytes.
+	legacy, err := json.Marshal(PushConfig{Type: "push_config", Protocol: Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(legacy), "ingress") {
+		t.Fatalf("empty ingress descriptor was serialized: %s", legacy)
+	}
+
+	for _, ingress := range []string{
+		IngressCloudflare,
+		IngressGateway,
+		IngressTailscaleManaged,
+		IngressTailscaleExternal,
+		IngressTailscaleCLI,
+	} {
+		encoded, err := json.Marshal(PushConfig{Type: "push_config", Protocol: Version, Ingress: ingress})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded["ingress"] != ingress {
+			t.Fatalf("ingress %q serialized as %#v", ingress, decoded["ingress"])
+		}
+		// The descriptor is a coarse mode label, never an address or identity.
+		if strings.ContainsAny(ingress, "./:@ ") {
+			t.Fatalf("ingress descriptor %q looks like an address", ingress)
+		}
+	}
+
+	// The existing cutover fixture has no descriptor and still decodes, so an
+	// older relay's snapshot remains a valid PushConfig for new code.
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "push_config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture PushConfig
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.Ingress != "" {
+		t.Fatalf("legacy fixture unexpectedly carries ingress %q", fixture.Ingress)
+	}
+}
+
 func TestDecodeFailureUsesStableError(t *testing.T) {
 	response := DecodeFailureResponse(map[string]any{
 		"type": "command", "action": "agent_start", "request_id": "r1",

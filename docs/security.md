@@ -138,6 +138,27 @@ an attacker anything. Because that session stays live, the unlock screen covers
 the page rather than dimming it, and the open terminal stops streaming and
 stops leasing the computer's pane width until verification succeeds.
 
+## Local resume timing
+
+The app measures how long each wake takes to show fresh agents, entirely on
+the phone: a bounded in-memory ring (at most 100 wakes, 24-hour logical
+retention) holding only the connection-path class, phase durations and
+outcomes. Nothing is uploaded, written to storage, sent to a relay or done by
+the service worker, and no extra request is made for timing. Hostnames, URLs,
+addresses, SDP or ICE candidates, relay/device/pane identifiers, prompts,
+output, credentials, invitation fragments and raw errors are never recorded.
+The ring is cleared when the app is torn down, on **Clear Resume Timings**, and
+when the user turns measurement off; the only persisted value is that opt-out
+choice. The explicit export contains redacted aggregates and sample counts.
+
+To label Cloudflare versus Tailscale WSS without guessing from a hostname, the
+relay adds an optional `ingress` field to the encrypted `push_config` snapshot
+(`cloudflare`, `gateway`, `tailscale-managed`, `tailscale-byo` or
+`tailscale-cli`). It names the relay's configured mode, not the route bytes
+actually took, grants nothing, and is shown only to already-authenticated
+devices; older apps ignore it and older relays omit it, which leaves the label
+`wss/ingress-unknown`. Details are in [resume.md](resume.md).
+
 ## Health endpoints
 
 - `GET /health` — process liveness; returns `ok`.

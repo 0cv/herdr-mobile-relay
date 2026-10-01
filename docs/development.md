@@ -187,6 +187,7 @@ make dev-tailscale     # guided legacy foreground Serve; explicit private root/d
 make dev-tailscale-cli # isolated App Store 1.102.4 development; runtime qualification pending
 make web-release       # replace committed web/ with a verified frontend build
 make web-release-check # compare and browser-test the shipped web/ bundle
+make resume-benchmark-pilot RESUME_BENCHMARK_SHA=<sha>  # hosted synthetic resume pilot; see docs/resume.md
 make relay-plugin      # link this checkout as a Herdr plugin
 make stable-setup      # run the stable tunnel wizard with the installed relay
 ```

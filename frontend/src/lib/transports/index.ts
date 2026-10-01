@@ -11,6 +11,8 @@ export type {
   RelayTransport,
   TransportHandlers,
   TransportKind,
+  TransportObserver,
+  TransportPhase,
   TransportStatus,
   TransportStatusDetail,
 } from './types';

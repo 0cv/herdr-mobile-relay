@@ -3427,6 +3427,7 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		Inventory:       inventory,
 		AgentProfiles:   s.profiles.Profiles(),
 		Hybrid:          s.hybridDescriptor(),
+		Ingress:         s.ingressDescriptor(),
 	})
 	s.hub.Send(client, map[string]any{
 		"type":   "agents",
@@ -3441,6 +3442,35 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		"activities": s.recentActivities(500),
 	})
 	s.hub.Send(client, inventoryStatusMessage(inventory))
+}
+
+// ingressDescriptor reports the configured ingress mode inside the
+// authenticated connection snapshot. The phone uses it only to label local,
+// in-memory resume timings; it grants nothing and changes no behaviour.
+func (s *Server) ingressDescriptor() string {
+	if s.cfg == nil {
+		return ""
+	}
+	return ingressForTransport(s.cfg.Transport)
+}
+
+// ingressForTransport maps a resolved relay transport to its public ingress
+// descriptor. Unknown or empty transports are omitted rather than guessed.
+func ingressForTransport(transport string) string {
+	switch transport {
+	case config.TransportCloudflare:
+		return protocol.IngressCloudflare
+	case config.TransportGateway:
+		return protocol.IngressGateway
+	case config.TransportTailscale:
+		return protocol.IngressTailscaleManaged
+	case config.TransportTailscaleExternal:
+		return protocol.IngressTailscaleExternal
+	case config.TransportTailscaleCLI:
+		return protocol.IngressTailscaleCLI
+	default:
+		return ""
+	}
 }
 
 func (s *Server) requestAgentRefresh(client *transport.ClientConn) {

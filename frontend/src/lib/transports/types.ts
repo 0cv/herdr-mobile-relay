@@ -84,5 +84,47 @@ export interface FrameChannelHandlers {
   onClose(detail?: TransportStatusDetail): void;
 }
 
+/**
+ * Observable handshake milestones, reported only for local resume timing.
+ * Channels report the raw dial/open and gateway steps; the encrypted session
+ * reports the E2EE steps; the path manager reports direct-upgrade promotion.
+ * DNS, TCP and TLS happen inside the browser's WebSocket and are not
+ * observable, so they have no phase here.
+ */
+export type TransportPhase =
+  | 'dial'
+  | 'open'
+  | 'gateway-hello'
+  | 'gateway-proof'
+  | 'gateway-ready'
+  | 'e2ee-hello'
+  | 'e2ee-server-hello'
+  | 'e2ee-confirm'
+  | 'authenticated'
+  | 'offer'
+  | 'answer'
+  | 'ice-connected'
+  | 'promoted'
+  | 'timeout'
+  | 'failed';
+
+export type TransportObserver = (phase: TransportPhase, path: TransportKind) => void;
+
+/**
+ * Reports a phase without ever letting measurement affect the connection: an
+ * observer that throws is ignored.
+ */
+export function observePhase(
+  observe: TransportObserver | undefined,
+  phase: TransportPhase,
+  path: TransportKind,
+): void {
+  try {
+    observe?.(phase, path);
+  } catch {
+    // Measurement is best effort and must not change transport behaviour.
+  }
+}
+
 /** Factory shape used by the path manager to build a channel on demand. */
 export type FrameChannelFactory = (handlers: FrameChannelHandlers, encrypted: boolean) => FrameChannel;

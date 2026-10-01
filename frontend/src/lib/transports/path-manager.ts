@@ -5,6 +5,7 @@ import { createWebRTCTransport, type DirectTransportOptions, type SignalingChann
 import type { TransportAuthentication } from './encrypted';
 import {
   DEVICE_UNAUTHORIZED_CODE,
+  observePhase,
   type RelayTransport,
   type TransportHandlers,
   type TransportStatusDetail,
@@ -54,6 +55,7 @@ export type DirectFactory = (
   signal: SignalingChannel,
   handlers: TransportHandlers,
   options: DirectTransportOptions,
+  authentication?: TransportAuthentication,
 ) => RelayTransport;
 
 /**
@@ -93,9 +95,9 @@ function gatewayTargets(relay: RelayConfig): string[] {
 
 /** Seams for tests; production uses the real gateway and WebRTC transports. */
 export interface HybridTransportOverrides {
-  createGateway?(relay: RelayConfig, handlers: TransportHandlers): RelayTransport;
+  createGateway?(relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication): RelayTransport;
   createDirect?: DirectFactory;
-  createLegacy?(relay: RelayConfig, handlers: TransportHandlers): RelayTransport;
+  createLegacy?(relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication): RelayTransport;
 }
 
 function forcedRelay(): boolean {
@@ -122,11 +124,23 @@ export function createHybridTransport(
   authentication: TransportAuthentication = {},
 ): RelayTransport {
   const makeGateway = overrides.createGateway
-    ?? ((target, targetHandlers) => createGatewayTransport(target, targetHandlers, authentication));
+    ?? ((target, targetHandlers, scoped) => createGatewayTransport(target, targetHandlers, scoped));
   const makeDirect = overrides.createDirect
-    ?? ((target, signal, targetHandlers, options) => createWebRTCTransport(target, signal, targetHandlers, options, authentication));
+    ?? ((target, signal, targetHandlers, options, scoped) => createWebRTCTransport(target, signal, targetHandlers, options, scoped));
   const makeLegacy = overrides.createLegacy
-    ?? ((target, targetHandlers) => createWebSocketTransport(target, targetHandlers, authentication));
+    ?? ((target, targetHandlers, scoped) => createWebSocketTransport(target, targetHandlers, scoped));
+  /**
+   * Each path attempt reports resume-timing milestones only while it is the
+   * live attempt, so a replaced gateway or direct dial can never write into
+   * the sample of the one that superseded it.
+   */
+  const scopedAuthentication = (current: () => boolean): TransportAuthentication => ({
+    ...authentication,
+    observe: (phase, path) => {
+      if (!closed && current()) authentication.observe?.(phase, path);
+    },
+  });
+  let gatewayAttempt = 0;
   const forceRelay = forcedRelay();
   const signalHandlers = new Set<(message: Record<string, any>) => void>();
 
@@ -213,7 +227,7 @@ export function createHybridTransport(
     }, DIRECT_ATTEMPT_TIMEOUT_MS);
     direct = makeDirect(dialed, signal, directHandlers(attempt), {
       iceServers: stunServers(String(dialed.gatewayUrl || ''), stunPort),
-    });
+    }, scopedAuthentication(() => attempt === directAttempt));
     direct.connect();
   }
 
@@ -242,6 +256,7 @@ export function createHybridTransport(
   }
 
   function promoteDirect(): void {
+    observePhase(authentication.observe, 'promoted', 'webrtc');
     active = 'direct';
     directFailures = 0;
     clearTimeout(attemptTimer ?? undefined);
@@ -257,6 +272,7 @@ export function createHybridTransport(
 
   function failDirect(detail?: TransportStatusDetail): void {
     if (closed || !direct) return;
+    observePhase(authentication.observe, 'failed', 'webrtc');
     const wasActive = active === 'direct';
     clearTimeout(attemptTimer ?? undefined);
     attemptTimer = null;
@@ -279,6 +295,7 @@ export function createHybridTransport(
   function openGateway(): void {
     gatewaysTried += 1;
     dialed = targets.length ? { ...relay, gatewayUrl: targets[gatewayIndex] } : relay;
+    const attempt = ++gatewayAttempt;
     gateway = makeGateway(dialed, {
       onMessage(message: Record<string, any>): void {
         if (closed) return;
@@ -338,7 +355,7 @@ export function createHybridTransport(
         );
         if (status === 'connected') startDirect();
       },
-    });
+    }, scopedAuthentication(() => attempt === gatewayAttempt));
     gateway.connect();
   }
 
@@ -367,7 +384,7 @@ export function createHybridTransport(
         }
         handlers.onStatus(status, legacyDetail);
       },
-    });
+    }, scopedAuthentication(() => active === 'legacy'));
     legacy.connect();
     return true;
   }

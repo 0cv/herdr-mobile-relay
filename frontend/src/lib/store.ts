@@ -62,6 +62,7 @@ import {
   targetRefMatchesAgent,
   targetStoreKey,
 } from './resource-id';
+import { resumeMetrics } from './resume-metrics';
 import { adoptRelaySpeech, isSpeechLanguage, type SpeechRequest } from './speech';
 import {
   PUSH_CATEGORIES,
@@ -460,6 +461,8 @@ interface RelayConnection extends RelayConnectionView {
    */
   lastMessageAt: number;
   directoryGeneration: number;
+  /** Scopes local resume-timing callbacks to this connection attempt. */
+  metricsGeneration: number;
 }
 
 interface PendingOperation {
@@ -807,6 +810,7 @@ class RelayStore {
     clearConversationPreviews();
     this.watchedPanes.clear();
     this.paneWatchesStarted.clear();
+    resumeMetrics.clear();
   }
 
   setPushConfigHandler(handler: ((relayId: string) => void) | null): void {
@@ -836,6 +840,7 @@ class RelayStore {
   }
 
   removeRelay(id: string): void {
+    resumeMetrics.removed(id);
     this.disconnectRelay(id);
     this.reconnectAttempts.delete(id);
     this.deferredPairingRelays.delete(id);
@@ -953,6 +958,7 @@ class RelayStore {
       closed: false,
       connectingSince: Date.now(),
       lastMessageAt: 0,
+      metricsGeneration: 0,
       agentProfiles: [],
       capabilities: [],
       speechLanguages: [],
@@ -989,11 +995,13 @@ class RelayStore {
     }
     this.disconnectRelay(relay.id);
     const connection = this.newConnection(relay);
+    connection.metricsGeneration = resumeMetrics.attempt(relay.id, relay.transport === 'hybrid');
     this.connectionsValue.set(relay.id, connection);
     this.emitConnections();
     connection.transport = createRelayTransport(relay, {
       onMessage: (message) => {
         if (!this.isCurrentConnection(relay.id, connection)) return;
+        resumeMetrics.frame(relay.id, connection.metricsGeneration);
         connection.lastMessageAt = Date.now();
         this.clearHealthTimer(connection);
         this.reconnectAttempts.delete(relay.id);
@@ -1007,6 +1015,11 @@ class RelayStore {
       onAuthenticated: (presented, enrollment) => {
         commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
         this.markRelayPaired(relay.id);
+      },
+      observe: (phase, path) => {
+        if (this.isCurrentConnection(relay.id, connection)) {
+          resumeMetrics.phase(relay.id, connection.metricsGeneration, phase, path);
+        }
       },
     });
     connection.transport.connect();
@@ -1025,6 +1038,7 @@ class RelayStore {
       // Which candidate answered matters with a list: the app names it rather
       // than the configured head, which may be a gateway that was skipped.
       connection.activeGatewayUrl = connection.path === 'websocket' ? '' : detail?.gatewayUrl || '';
+      resumeMetrics.connected(relay.id, connection.metricsGeneration, connection.path);
       this.markConnectionReady(relay.id, connection);
       if (!previousPath) {
         // First ready of a fresh session: the relay dropped its watches with
@@ -1048,6 +1062,11 @@ class RelayStore {
     }
     this.clearHealthTimer(connection);
     connection.status = 'disconnected';
+    resumeMetrics.end(
+      relay.id,
+      connection.metricsGeneration,
+      detail?.code === 'device_unauthorized' ? 'auth-rejected' : 'failed',
+    );
     this.rejectPendingOperations(relay.id, detail?.reason || 'Relay disconnected');
     // The relay refuses this device's credential. Keep it until a confirmed,
     // newer invitation replaces it: gateway close reasons are not authenticated.
@@ -1202,8 +1221,10 @@ class RelayStore {
       connection.healthTimer = setTimeout(() => {
         if (!this.isCurrentConnection(relay.id, connection)) return;
         connection.healthTimer = null;
+        resumeMetrics.end(relay.id, connection.metricsGeneration, 'timeout');
         this.connectRelay(relay);
       }, timeoutMs);
+      resumeMetrics.probe(relay.id, connection.metricsGeneration);
       if (!this.sendRaw(relay.id, { type: 'refresh_agents' })) {
         this.clearHealthTimer(connection);
         this.connectRelay(relay);
@@ -1385,6 +1406,7 @@ class RelayStore {
         .filter(isSpeechLanguage);
       adoptRelaySpeech(connection.speechLanguages);
       this.adoptHybridDescriptor(connection, message.hybrid);
+      resumeMetrics.ingress(relayId, connection.metricsGeneration, message.ingress);
       const attentionCapable = connection.capabilities.includes('attention_classification');
       this.agentsValue = this.agentsValue.map((agent) =>
         agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
@@ -1564,6 +1586,13 @@ class RelayStore {
       );
       this.reconcileResponding();
       this.publishAgents('agents snapshot');
+      if (connection) {
+        resumeMetrics.inventory(
+          relayId,
+          connection.metricsGeneration,
+          connection.inventory.state === 'ready' && !connection.inventory.stale,
+        );
+      }
       return;
     }
     if (message.type === 'blocked') {

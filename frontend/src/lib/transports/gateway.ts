@@ -6,10 +6,12 @@ import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking
 import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
 import {
   DEVICE_UNAUTHORIZED_CODE,
+  observePhase,
   type FrameChannel,
   type FrameChannelHandlers,
   type RelayTransport,
   type TransportHandlers,
+  type TransportObserver,
 } from './types';
 
 /** Gateway protocol version carried in every hello message. */
@@ -63,6 +65,8 @@ export interface GatewayChannelOptions {
    * itself, so a gateway cannot point this phone at a third-party server.
    */
   onStunPort?(port: number): void;
+  /** Receives raw dial and gateway handshake milestones for resume timing. */
+  observe?: TransportObserver;
 }
 
 /**
@@ -102,6 +106,7 @@ export function createGatewayChannel(
   async function answerChallenge(hello: Record<string, unknown>): Promise<void> {
     if (hello.type !== 'gateway_hello') throw new Error('The gateway sent an unexpected greeting.');
     if (Number(hello.proto) !== GATEWAY_PROTO) throw new Error('The gateway speaks an unsupported protocol version.');
+    observePhase(options.observe, 'gateway-hello', 'gateway');
     const stunPort = advertisedStunPort(hello);
     if (stunPort > 0) options.onStunPort?.(stunPort);
     const { relayId, rendezvousKey } = await gatewayRendezvous(relay);
@@ -114,6 +119,7 @@ export function createGatewayChannel(
       relay_id: relayId,
       proof: base64UrlEncode(proof),
     }));
+    observePhase(options.observe, 'gateway-proof', 'gateway');
   }
 
   function handleText(raw: string): void {
@@ -139,6 +145,7 @@ export function createGatewayChannel(
     }
     clearHandshakeTimer();
     phase = 'open';
+    observePhase(options.observe, 'gateway-ready', 'gateway');
     handlers.onOpen();
   }
 
@@ -156,6 +163,7 @@ export function createGatewayChannel(
         return;
       }
       phase = 'hello';
+      observePhase(options.observe, 'dial', 'gateway');
       try {
         socket = new WebSocket(`${base}/connect`);
       } catch {
@@ -163,6 +171,9 @@ export function createGatewayChannel(
         return;
       }
       socket.binaryType = 'arraybuffer';
+      socket.onopen = () => {
+        if (phase !== 'closed') observePhase(options.observe, 'open', 'gateway');
+      };
       socket.onmessage = (event: MessageEvent) => {
         if (phase === 'closed') return;
         if (typeof event.data === 'string') {
@@ -195,6 +206,7 @@ export function createGatewayChannel(
         fail('The gateway connection failed.');
       };
       handshakeTimer = window.setTimeout(() => {
+        observePhase(options.observe, 'timeout', 'gateway');
         fail('The gateway handshake took too long.');
       }, GATEWAY_HANDSHAKE_TIMEOUT_MS);
     },
@@ -246,6 +258,7 @@ export function createGatewayTransport(
     },
     createChannel: (channelHandlers) => createGatewayChannel(relay, channelHandlers, {
       onStunPort: (port) => { stunPort = port; },
+      observe: authentication.observe,
     }),
   });
 }

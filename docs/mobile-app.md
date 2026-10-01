@@ -102,6 +102,19 @@ computer: every print arms the relay's bootstrap for one more phone.
 | --- | --- |
 | <img src="../images/devices-invite.jpeg" alt="Invite Device dialog choosing a name and the reader role" width="392"> | <img src="../images/devices.jpeg" alt="Paired devices with rename, revoke, forget, and reset controls" width="392"> |
 
+**Settings → Resume Timing** shows how long the app took to display fresh
+agents after each recent wake, grouped by connection path (Cloudflare WSS,
+Tailscale WSS, gateway relayed or direct) and by kind of wake (warm, reconnect,
+back/forward cache, discarded page or cold launch). The timings stay in this
+tab's memory only — at most 100 wakes from the last 24 hours — and are never
+uploaded or sent to a relay. Turn **Measure Resume Timing** off to stop and
+clear them, or use **Clear Resume Timings**. **Export Redacted Summary** shows
+and offers to download aggregates and sample counts only, with no computer
+names, addresses, identifiers or content. A web app cannot see the phone's
+wake-up before its code runs, or DNS, TCP and TLS inside a connection; those
+are reported as unavailable. See [resume.md](resume.md) for exactly what is
+measured.
+
 An uncaught phone-side error appears in a bottom **App error** banner because
 mobile browsers often provide no useful console. Copy or photograph its text
 for a bug report, then tap the banner to dismiss it; a later independent error

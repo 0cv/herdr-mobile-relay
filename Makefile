@@ -16,7 +16,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel dev-tailscale dev-tailscale-cli stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel dev-tailscale dev-tailscale-cli stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release resume-benchmark-pilot relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
@@ -44,6 +44,7 @@ help:
 	@echo "  make mobile-ci-run MOBILE_ARGS=...  Run a configured device scenario"
 	@echo "  make mobile-android MOBILE_ARGS=... Run the installed Android suite"
 	@echo "  make mobile-ios MOBILE_ARGS=...    Run the installed iOS suite"
+	@echo "  make resume-benchmark-pilot RESUME_BENCHMARK_SHA=...  Hosted synthetic resume pilot (no performance claim)"
 	@echo "  make gateway                    Build the self-hostable blind gateway binary"
 	@echo "  make check                      Run backend and frontend checks"
 
@@ -185,6 +186,20 @@ frontend-browser-release:
 
 frontend-browser-attention-release:
 	HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention
+
+# Hosted, synthetic resume benchmark pilot. It is deliberately outside `check`
+# and is not a functional test: it records every attempted wake epoch of the
+# shipped web/ bundle against the in-page synthetic relay, for variance and
+# workload planning only. It makes no performance claim and is never p95
+# acceptance; a confirmatory experiment needs its own preregistered paired run
+# (frontend/scripts/run-resume-benchmarks.mjs --design paired, >= 400 pairs).
+RESUME_BENCHMARK_DIR ?= resume-benchmark
+resume-benchmark-pilot:
+	@test -n "$(RESUME_BENCHMARK_SHA)" || (echo 'RESUME_BENCHMARK_SHA must name the exact candidate commit' >&2; exit 2)
+	node frontend/scripts/run-resume-benchmarks.mjs --design pilot --web-root web \
+		--out-dir "$(RESUME_BENCHMARK_DIR)" --candidate-sha "$(RESUME_BENCHMARK_SHA)"
+	node frontend/scripts/analyze-resume-benchmarks.mjs "$(RESUME_BENCHMARK_DIR)/evidence.json" \
+		--out "$(RESUME_BENCHMARK_DIR)/analysis.json" --markdown "$(RESUME_BENCHMARK_DIR)/summary.md"
 
 relay-plugin:
 	herdr plugin link .
