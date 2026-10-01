@@ -1457,20 +1457,30 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
         encoding="utf-8",
     )
     legacy_env_values = relay_env_values(cli_dev_env_file)
-    migration_update = subprocess.run(
-        [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=update_env,
-        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=30, check=False,
+    setup_events_before_migration = fixture_log.read_text(encoding="utf-8").splitlines()
+    migration_setup_env = dict(
+        update_env, HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(positive_gate),
+    )
+    migration_setup = subprocess.run(
+        [str(root / "relay" / "dev-tailscale-cli.sh"), "setup"], env=migration_setup_env,
+        cwd=root,
+        input=(b"PUBLISH DEVELOPMENT ROUTE node=dev-node-fixture "
+               b"origin=https://relay.fixture.invalid:8443 https-port=8443 backend=127.0.0.1:18377\n"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
     )
     migrated_values = relay_env_values(cli_dev_env_file)
-    if (migration_update.returncode != 0 or
-        b"Moved this root's stopped pairing-control socket" not in migration_update.stdout or
+    setup_events = fixture_log.read_text(encoding="utf-8").splitlines()[len(setup_events_before_migration):]
+    if (migration_setup.returncode != 0 or
+        b"Moved this root's stopped pairing-control socket" not in migration_setup.stdout or
         migrated_values.get("HERDR_RELAY_PAIRING_SOCKET") != migrated_socket or
         {key: value for key, value in migrated_values.items() if key != "HERDR_RELAY_PAIRING_SOCKET"} !=
-        {key: value for key, value in legacy_env_values.items() if key != "HERDR_RELAY_PAIRING_SOCKET"}):
+        {key: value for key, value in legacy_env_values.items() if key != "HERDR_RELAY_PAIRING_SOCKET"} or
+        not any(event.startswith("manager|workflow reserve ") for event in setup_events) or
+        not any(event.startswith("manager|workflow publish ") for event in setup_events)):
         raise AssertionError(
-            "marked stopped legacy root did not migrate only the pairing socket and complete update: "
-            f"status={migration_update.returncode} output={migration_update.stdout + migration_update.stderr!r}"
+            "marked stopped legacy root did not migrate only the pairing socket and continue setup: "
+            f"status={migration_setup.returncode} output={migration_setup.stdout + migration_setup.stderr!r} "
+            f"events={setup_events!r}"
         )
     second_migration_update = subprocess.run(
         [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=update_env,
@@ -1490,6 +1500,8 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
         config_dir.mkdir(mode=0o700)
         migration_env_file = migration_root / "relay.env"
         socket_setting = f"HERDR_RELAY_PAIRING_SOCKET='{configured_socket}'\n"
+        if old_path_kind == "hostile":
+            socket_setting += 'touch "$MIGRATION_EXECUTION_SENTINEL"\n'
         migration_env_file.write_text(
             socket_setting * (2 if old_path_kind == "duplicate" else 1), encoding="utf-8",
         )
@@ -1519,7 +1531,7 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
         ("legacy_socket_present_is_refused", "ls", str(base / "ls" / "config" / "pairing-control.sock"), True, "socket"),
         ("legacy_symlink_present_is_refused", "ly", str(base / "ly" / "config" / "pairing-control.sock"), True, "symlink"),
         ("different_nonlegacy_socket_is_refused", "dn", legacy_mismatch, True, "absent"),
-        ("unmarked_legacy_root_is_refused", "um", str(base / "um" / "config" / "pairing-control.sock"), False, "absent"),
+        ("unmarked_hostile_legacy_state_is_rejected_without_execution", "um", str(base / "um" / "config" / "pairing-control.sock"), False, "hostile"),
         ("duplicate_legacy_socket_settings_are_refused", "dp", str(base / "dp" / "config" / "pairing-control.sock"), True, "duplicate"),
     )
     for name, root_name, configured_socket, marked, old_path_kind in blocked_migrations:
@@ -1529,22 +1541,30 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
         env_snapshot = migration_env_file.read_bytes()
         marker_path = migration_root / ".herdr-dev-tailscale-cli"
         marker_snapshot = marker_path.read_bytes() if marker_path.exists() else None
-        mismatch_env = dict(update_env, HERDR_DEV_TAILSCALE_CLI_DIR=str(migration_root))
+        migration_sentinel = base / "migration-env-executed"
+        mismatch_env = dict(
+            update_env, HERDR_DEV_TAILSCALE_CLI_DIR=str(migration_root),
+            MIGRATION_EXECUTION_SENTINEL=str(migration_sentinel),
+        )
         mismatch_result = subprocess.run(
             [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=mismatch_env,
             cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=5, check=False,
         )
         marker_after = marker_path.read_bytes() if marker_path.exists() else None
+        expected_refusal = (
+            b"not a marked private CLI root" if old_path_kind == "hostile" else
+            b"Existing development state records a different pairing socket"
+        )
         if (mismatch_result.returncode == 0 or
-            b"Existing development state records a different pairing socket" not in
-            mismatch_result.stdout + mismatch_result.stderr or
+            expected_refusal not in mismatch_result.stdout + mismatch_result.stderr or
             migration_env_file.read_bytes() != env_snapshot or marker_after != marker_snapshot or
+            migration_sentinel.exists() or
             (old_path_kind == "socket" and not old_path.is_socket()) or
             (old_path_kind == "symlink" and not old_path.is_symlink())):
             raise AssertionError(f"{name}: unsafe migration or non-fail-closed outcome")
     positive_socket.close()
-    print("PASS CLI development lifecycle fixture: isolated setup/update, one-time legacy socket migration, refusal preservation, production state preserved")
+    print("PASS CLI development lifecycle fixture: isolated setup/update, setup migration, one-time rewrite, refusal preservation, production state preserved")
 
     enabled = dict(env, HERDR_DEV_TAILSCALE_ENABLE="1")
     discovered = subprocess.run(

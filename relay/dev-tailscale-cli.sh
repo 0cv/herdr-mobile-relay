@@ -157,6 +157,13 @@ else
     PRODUCTION_ENV_FILE="$SCRIPT_DIR/.env"
 fi
 export HERDR_DEV_TAILSCALE_CLI_PRODUCTION_ENV_FILE="$PRODUCTION_ENV_FILE"
+# Do not source a production-path alias of the development relay.env before
+# validating migration state. This also catches a symlink alias of the file.
+if { [ -e "$PRODUCTION_ENV_FILE" ] || [ -L "$PRODUCTION_ENV_FILE" ]; } &&
+    [ -e "$DEV_ENV_FILE" ] && [ "$PRODUCTION_ENV_FILE" -ef "$DEV_ENV_FILE" ]; then
+    echo "✗ Production and development relay environments resolve to the same file; refusing before reading it." >&2
+    exit 2
+fi
 PRODUCTION_COORDINATION_ROOT=""
 if [ -e "$PRODUCTION_ENV_FILE" ] || [ -L "$PRODUCTION_ENV_FILE" ]; then
     [ -f "$PRODUCTION_ENV_FILE" ] && [ ! -L "$PRODUCTION_ENV_FILE" ] || {
@@ -251,25 +258,31 @@ dev_legacy_socket_parent_is_safe() {
     [ ! -e "$DEV_ROOT/config" ] && [ ! -L "$DEV_ROOT/config" ] ||
         dev_owned_private_directory "$DEV_ROOT/config"
 }
-if { [ "$ACTION" = setup ] || [ "$ACTION" = update ]; } && [ -f "$ENV_FILE" ]; then
-    configured_pairing_socket="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
-    # Roots created before the short socket directory recorded this exact
-    # in-root default. Move only that value, only for a marked root, and only
-    # while no socket exists there (no relay can be using it). Every other
-    # mismatch is still retained and refused.
+dev_socket_setting_matches() {
+    local value="$1" assignment_count plain_count expected
+    assignment_count="$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?HERDR_RELAY_PAIRING_SOCKET=' "$ENV_FILE" || true)"
+    plain_count="$(grep -c '^HERDR_RELAY_PAIRING_SOCKET=' "$ENV_FILE" || true)"
+    [ "$assignment_count" = 1 ] && [ "$plain_count" = 1 ] || return 1
+    expected="HERDR_RELAY_PAIRING_SOCKET=$(shell_quote_value "$value")"
+    grep -Fqx "$expected" "$ENV_FILE"
+}
+if { [ "$ACTION" = setup ] || [ "$ACTION" = update ]; } &&
+    { [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; }; then
+    # Validate the root, environment file and binding marker before inspecting
+    # relay.env. Never source legacy state to decide whether it may be migrated.
+    if ! dev_owned_private_directory "$DEV_ROOT" || ! dev_owned_private_file "$ENV_FILE" ||
+        ! dev_root_marker_matches; then
+        echo "✗ Existing development state is not a marked private CLI root; refused before reading relay.env." >&2
+        exit 1
+    fi
     legacy_pairing_socket="$DEV_ROOT/config/pairing-control.sock"
-    if [ "$configured_pairing_socket" = "$legacy_pairing_socket" ] &&
-        [ "$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?HERDR_RELAY_PAIRING_SOCKET=' "$ENV_FILE" || true)" = 1 ] &&
-        [ "$(grep -c '^HERDR_RELAY_PAIRING_SOCKET=' "$ENV_FILE" || true)" = 1 ] &&
-        dev_owned_private_directory "$DEV_ROOT" && dev_owned_private_file "$ENV_FILE" &&
+    if dev_socket_setting_matches "$legacy_pairing_socket" &&
         dev_legacy_socket_parent_is_safe &&
-        [ ! -e "$legacy_pairing_socket" ] && [ ! -L "$legacy_pairing_socket" ] &&
-        dev_root_marker_matches; then
+        [ ! -e "$legacy_pairing_socket" ] && [ ! -L "$legacy_pairing_socket" ]; then
         set_env_value_atomic "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET "$PAIRING_SOCKET"
         echo "▸ Moved this root's stopped pairing-control socket to the short private socket directory."
-        configured_pairing_socket="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
     fi
-    if [ "$configured_pairing_socket" != "$PAIRING_SOCKET" ]; then
+    if ! dev_socket_setting_matches "$PAIRING_SOCKET"; then
         echo "✗ Existing development state records a different pairing socket; it was retained without migration. Choose a separate private root or follow a reviewed migration before setup/update." >&2
         exit 2
     fi
@@ -283,7 +296,8 @@ assert_fixed_development_ports() {
     fi
 }
 if [ "$ACTION" != setup ]; then
-    if [ ! -d "$DEV_ROOT" ] || [ ! -f "$ENV_FILE" ] || ! dev_root_marker_matches; then
+    if ! dev_owned_private_directory "$DEV_ROOT" || ! dev_owned_private_file "$ENV_FILE" ||
+        ! dev_root_marker_matches; then
         echo "✗ No marked CLI development state exists; nothing was inspected or removed." >&2
         exit 1
     fi

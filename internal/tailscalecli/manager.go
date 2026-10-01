@@ -312,8 +312,12 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 			}
 		}
 		routeAlreadyOurs := record != nil && record.State == StateRegistered && registeredRouteMatches(inspection, *record)
+		currentReservation, err := m.readBackendReservation(backendPort)
+		if err != nil {
+			return err
+		}
 		if routeConflicts(inspection.Serve, httpsPort) && !routeAlreadyOurs {
-			return developmentServeConflictError(httpsPort, backendPort)
+			return developmentServeConflictError(httpsPort, backendPort, currentReservation)
 		}
 		var allowedRoute *registration
 		if routeAlreadyOurs {
@@ -321,10 +325,6 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 		}
 		if backendPortHasRoute(inspection.Serve, backendPort, allowedRoute) {
 			return ErrConflict
-		}
-		currentReservation, err := m.readBackendReservation(backendPort)
-		if err != nil {
-			return err
 		}
 		if currentReservation != nil {
 			if routeAlreadyOurs && sameBackendReservation(*currentReservation, reservation) {
@@ -1283,8 +1283,12 @@ func sameProfile(inspection Inspection, record registration) bool {
 	return inspection.ProfileKnown && inspection.Profile == record.Profile
 }
 
-func developmentServeConflictError(httpsPort, backendPort int) error {
-	return fmt.Errorf("%w: existing Serve state conflicts with development HTTPS %d -> 127.0.0.1:%d, and this root has no matching registration for it. If another CLI development root registered the route, select that original root with HERDR_DEV_TAILSCALE_CLI_DIR or stop it and run its scoped unpublish first. Otherwise resolve the conflict with its owner; Herdr will not adopt or change an unregistered route", ErrConflict, httpsPort, backendPort)
+func developmentServeConflictError(httpsPort, backendPort int, owner *backendPortReservation) error {
+	ownerHint := "No shared backend reservation identifies a candidate installation. The private root path is not available from Tailscale Serve; find candidate roots by locating .herdr-dev-tailscale-cli markers under $HOME, then use HERDR_DEV_TAILSCALE_CLI_DIR=/path/to/root relay/dev-tailscale-cli.sh status to verify the original root."
+	if owner != nil {
+		ownerHint = fmt.Sprintf("The shared backend reservation points to installation %q in %s scope; the private root path is not stored in Tailscale Serve. Find candidate roots by locating .herdr-dev-tailscale-cli markers under $HOME, match the literal HERDR_RELAY_INSTANCE_ID in each relay.env to %q, then verify with HERDR_DEV_TAILSCALE_CLI_DIR=/path/to/root relay/dev-tailscale-cli.sh status.", owner.InstallationID, owner.Scope, owner.InstallationID)
+	}
+	return fmt.Errorf("%w: existing Serve state conflicts with development HTTPS %d -> 127.0.0.1:%d, and the selected root has no matching registration. %s To remove the route, stop that root's relay and run its scoped unpublish first. Resolve the owner before acting; Herdr will not adopt or change an unregistered route", ErrConflict, httpsPort, backendPort, ownerHint)
 }
 
 func routeConflicts(serve tailscale.ServeStatus, port int) bool {

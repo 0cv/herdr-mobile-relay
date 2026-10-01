@@ -914,10 +914,22 @@ func TestDevelopmentRouteConflictGivesSafeRootRecoveryGuidance(t *testing.T) {
 	fixture := newFakeCLI(t)
 	fixture.serve = fixtureRoute
 	manager := newFixtureManager(t, fixture, "development root conflict")
+	owner := backendPortReservation{
+		Schema: 1, InstallationID: "install-known-owner", Scope: "development", NodeID: "node-fixture",
+		HTTPSPort: 8443, BackendPort: 18377, Origin: "https://herdr.tailnet.ts.net:8443",
+		ReservationID: "00000000000000000000000000000002", State: StateRegistered,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := manager.writeBackendReservation(owner); err != nil {
+		t.Fatalf("write candidate owner's shared reservation: %v", err)
+	}
 
 	err := manager.ReserveBackendPort(context.Background(), "install-new-root", "development", "node-fixture",
 		"https://herdr.tailnet.ts.net:8443", 8443, 18377, "00000000000000000000000000000001")
 	if !errors.Is(err, ErrConflict) ||
+		!strings.Contains(err.Error(), "install-known-owner") ||
+		!strings.Contains(err.Error(), "HERDR_RELAY_INSTANCE_ID") ||
+		!strings.Contains(err.Error(), ".herdr-dev-tailscale-cli") ||
 		!strings.Contains(err.Error(), "HERDR_DEV_TAILSCALE_CLI_DIR") ||
 		!strings.Contains(err.Error(), "scoped unpublish first") ||
 		!strings.Contains(err.Error(), "will not adopt or change an unregistered route") {
