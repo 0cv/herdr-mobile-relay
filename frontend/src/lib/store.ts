@@ -118,7 +118,7 @@ import type {
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
-const SETUP_LINK_FAILURE_MESSAGE = 'This setup link has expired or was already used, or this device was refused. Ask the relay owner for a new one-use setup link.';
+const SETUP_LINK_FAILURE_MESSAGE = 'This setup link has expired or was already used, or this device was refused. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.';
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
 const BACKGROUND_HEALTH_TIMEOUT_MS = 10_000;
 const FOREGROUND_HEALTH_TIMEOUT_MS = 2_000;

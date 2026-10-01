@@ -129,6 +129,27 @@ describe('device invitation setup', () => {
     })).toBeNull();
   });
 
+  it.each([
+    ['invalid invitation id', `invite=short&invite_version=1&invite_expires=2000000000000`],
+    ['missing invitation version', `invite=${'B'.repeat(24)}&invite_expires=2000000000000`],
+    ['partial invitation metadata', 'invite_version=1'],
+    ['orphaned gateway invitation metadata', `relay_id=${'C'.repeat(20)}&rendezvous=${'D'.repeat(43)}`],
+  ])('rejects setup imports with %s instead of treating their secret as a relay key', (_name, metadata) => {
+    const locationValue = {
+      hash: `#setup=${'A'.repeat(43)}&label=Phone&relay=wss%3A%2F%2Frelay.example.com&${metadata}`,
+      protocol: 'https:',
+      host: 'app.example.com',
+    };
+    const existing = normalizeRelayConfig({
+      label: 'Phone',
+      url: 'wss://relay.example.com',
+      token: TOKEN,
+    });
+
+    expect(quickSetupConfig(locationValue)).toBeNull();
+    expect(importQuickSetup([existing], locationValue)).toBeNull();
+  });
+
   it('imports a gateway invitation with the rendezvous it needs to connect', () => {
     const relayId = 'Ccy3nT9AULlAceTEnhTvoQ';
     const rendezvous = 'xvT5VptkJHebIfy8b9PSGTJMkdRb-J_P2SXrtNRoLyA';

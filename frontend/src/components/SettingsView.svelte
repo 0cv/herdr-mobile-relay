@@ -685,12 +685,12 @@
             <small>Push: {pushStatusLabel(connection)}</small>
             {#if connection?.authRejected}
               <small class="error" role="alert">
-                This setup link has expired or was already used, or this device was refused. Ask the relay owner for a new one-use setup link, or remove and add the relay.
+                This setup link has expired or was already used, or this device was refused. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.
               </small>
             {/if}
             {#if connection?.pairingRequired}
               <small class="error" role="alert">
-                This setup link may have expired or already been used. Ask the relay owner for a new one-use setup link, or remove and add the relay.
+                This setup link may have expired or already been used. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.
               </small>
             {/if}
             {#if connection?.pairingDeferred}

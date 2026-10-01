@@ -131,58 +131,37 @@ preserve the previous generated version for inspection. The phone setup URL
 requires a trusted certificate, live owner and exact matching web bundle.
 MacSys is unsupported. The App Store profile is development-enabled only; no
 real-runtime or physical-phone qualification is implied by this entrypoint.
-Bootstrap setup invitations expire after ten minutes and remain one-use. If a
-bootstrap link expires or is reported as already used before enrollment, and the
-same foreground relay is still running, re-arm its existing bootstrap token over
-its private local control socket. Open a second terminal in the same checkout;
-the foreground launcher's exported variables are not available there. The
-private root defaults to `relay/.dev-tailscale-cli/`; if setup used a custom
-`HERDR_DEV_TAILSCALE_CLI_DIR`, set that same absolute path in this terminal.
-This command reads only the required values from the generated private
-`relay.env` in a subshell (do not source the whole file, which contains the
-relay token) and derives the built relay binary from that root:
+A bootstrap setup link remains one-use, but its ten-minute window refreshes
+when it is presented while no phone has enrolled yet. The window is not a hard
+deadline measured from when the QR/link was printed. If the first phone reports
+an expired or refused bootstrap link, retry the same link while that same
+foreground relay is running; no manual arm command is needed. After a phone has
+enrolled, the bootstrap invitation is consumed. Invitations created for
+additional devices are separate one-use invitations with a fixed ten-minute
+lifetime; a paired owner must create a fresh invitation if one expires or is
+used. Re-arming does not extend ordinary device invitations, reset devices, or
+change the Tailscale route. If the original relay is stopped or the refusal
+remains unclear, retain state and follow the qualification runbook rather than
+guessing or clearing credentials.
 
-```bash
-set -euo pipefail
-REPO_ROOT="$(pwd -P)"
-DEV_ROOT="${HERDR_DEV_TAILSCALE_CLI_DIR:-$REPO_ROOT/relay/.dev-tailscale-cli}"
-ENV_FILE="$DEV_ROOT/relay.env"
-RELAY_BIN="$DEV_ROOT/current/bin/herdr-mobile-relay"
-[ -d "$DEV_ROOT" ] && [ ! -L "$DEV_ROOT" ] && [ "$(stat -f '%Lp' "$DEV_ROOT")" = 700 ]
-[ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] && [ "$(stat -f '%Lp' "$ENV_FILE")" = 600 ]
-[ -x "$RELAY_BIN" ] || { echo "Private development relay files are unavailable." >&2; exit 1; }
-. "$REPO_ROOT/relay/common.sh"
-PAIRING_SOCKET="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
-CONTROL_RUN_ID="$(env_file_value "$ENV_FILE" HERDR_RELAY_CONTROL_RUN_ID)"
-INSTANCE_ID="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
-[ -n "$PAIRING_SOCKET" ] && [ -n "$CONTROL_RUN_ID" ] && [ -n "$INSTANCE_ID" ] || {
-  echo "Required identity values are absent from this private relay state." >&2; exit 1;
-}
-response="$("$RELAY_BIN" pairing-control \
-  --socket "$PAIRING_SOCKET" --operation arm_bootstrap \
-  --run-id "$CONTROL_RUN_ID" --instance "$INSTANCE_ID")" || {
-  echo "Pairing-control transport/decode failed; do not retry blindly." >&2; exit 1;
-}
-if [ "$(json_bool_field "$response" ok "$RELAY_BIN")" != true ] ||
-   [ "$(json_bool_field "$response" invitation_armed "$RELAY_BIN")" != true ] ||
-   [ "$(json_string_field "$response" run_id "$RELAY_BIN")" != "$CONTROL_RUN_ID" ] ||
-   [ "$(json_string_field "$response" instance "$RELAY_BIN")" != "$INSTANCE_ID" ] ||
-   [ -z "$(json_string_field "$response" invitation_expires_at "$RELAY_BIN")" ]; then
-  echo "No matching successful arm acknowledgement; retain state and stop." >&2
-  exit 1
-fi
-echo "Bootstrap invitation re-armed; acknowledgement identity matched."
-```
-
-Run this only against that same still-running isolated development relay. The
-checks require JSON `ok` and `invitation_armed` to be true, matching run and
-instance identities, and a nonempty expiry; a decoded negative reply may still
-have exit status zero. Only after this acknowledgement should you retry the
-same setup link. Re-arming does not extend its ten-minute lifetime, reset
-devices, or change the Tailscale route. A refused already-enrolled device needs
-a fresh device invitation, not bootstrap re-arming. If the relay is stopped or
-acknowledgement is unclear, retain state and follow the qualification runbook
-instead of retrying blindly.
+For CLI Serve state, `status` and `recover` are read-only. A pending or uncertain
+publish/removal may be reconciled only by `reconcile`, after the read-only report
+shows one unambiguous exact-present or listener-absent result and the operator
+types the displayed operation-bound confirmation; reconciliation records that
+observation and never replays a Serve command. If an acknowledged registration's
+route has disappeared, `repair-missing` starts the isolated foreground relay,
+rechecks the complete route absence and journal identity, and requires an exact
+confirmation bound to the prior operation and route before one fresh publish and
+readback. Do not use repair for a pending/uncertain mutation; reconcile it first.
+`abandon-missing` is the stopped-service alternative when the route should not
+be recreated: it requires a free backend listener and complete absence checks,
+then records `reconciled-absent` and releases only the matching local
+reservation without changing Serve. Conflicting/incomplete state, an occupied
+listener, or a mismatched operation ID stops these commands without clearing or
+adopting route state. Invoke these actions through
+`HERDR_DEV_TAILSCALE_CLI_ENABLE=1 relay/dev-tailscale-cli.sh <action>` only in
+the isolated development profile; they do not qualify production or permit
+live-system recovery outside owner authorization.
 
 ## Common targets
 

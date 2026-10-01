@@ -58,12 +58,12 @@ usage() {
     echo "Route publication still requires an exact node/origin/listener/backend confirmation on stdin; no environment variable can consent." >&2
     echo "Optional: HERDR_DEV_TAILSCALE_CLI_DIR, HERDR_DEV_TAILSCALE_CLI_BIN," >&2
     echo "  HERDR_DEV_TAILSCALE_CLI_ORIGIN, HERDR_DEV_TAILSCALE_CLI_NODE_ID, HERDR_DEV_HERDR_BIN." >&2
-    echo "Lifecycle: setup, status, recover, release-reservation, update, unpublish, and stop (Ctrl-C)." >&2
+    echo "Lifecycle: setup, repair-missing, status, recover, reconcile, abandon-missing, release-reservation, update, unpublish, and stop (Ctrl-C)." >&2
 }
 
 ACTION="${1:-setup}"
 [ "$#" -eq 0 ] || shift
-case "$ACTION" in setup|status|recover|release-reservation|unpublish|update|stop) ;; *) usage; exit 2 ;; esac
+case "$ACTION" in setup|repair-missing|status|recover|reconcile|abandon-missing|release-reservation|unpublish|update|stop) ;; *) usage; exit 2 ;; esac
 
 case "${HERDR_DEV_TAILSCALE_CLI_ENABLE:-}" in
     1) ;;
@@ -318,8 +318,8 @@ if [ "$ACTION" != setup ]; then
     fi
     CLI_BIN="${HERDR_TAILSCALE_CLI_BIN:-}"
     case "$ACTION" in
-        status|recover|release-reservation|unpublish)
-            if [ "$ACTION" = unpublish ] && [ -S "$PAIRING_SOCKET" ]; then
+        status|recover|reconcile|release-reservation|unpublish|abandon-missing)
+            if { [ "$ACTION" = unpublish ] || [ "$ACTION" = abandon-missing ] || [ "$ACTION" = reconcile ]; } && [ -S "$PAIRING_SOCKET" ]; then
                 echo "✗ Stop the foreground development relay before scoped route cleanup; the route remains configured." >&2
                 exit 1
             fi

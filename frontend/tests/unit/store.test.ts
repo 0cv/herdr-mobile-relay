@@ -558,7 +558,7 @@ describe('relay command store', () => {
 
     expect(relayStore.importSetupLink(expiredLink, true)).toBe(false);
     expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
-    expect(get(relayStore.toast)?.message).toContain('Ask the relay owner for a new one-use setup link');
+    expect(get(relayStore.toast)?.message).toContain('retry the original bootstrap link while the same relay is running');
     expect(get(relayStore.relayConfigs)).toEqual([]);
     expect(MockWebSocket.instances).toHaveLength(0);
   });
@@ -579,6 +579,46 @@ describe('relay command store', () => {
     expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
     expect(get(relayStore.relayConfigs)).toEqual([]);
     expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it('preserves an existing relay key and credential when invitation metadata is malformed', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    const relayUrl = 'wss://paired.example';
+    const relay = { label: 'Paired', url: relayUrl, token: '0123456789abcdef0123456789abcdef' };
+    const relayId = makeRelayId(relay.label, relayUrl);
+    relayStore.addRelay(relay);
+    const credential = JSON.stringify({
+      version: 1,
+      relays: {
+        [relayId]: {
+          kind: 'credential', id: 'credential-live', version: 1, secret: 'C'.repeat(43),
+          deviceId: 'device-live', role: 'controller', locale: 'en',
+          issuedAt: Date.now(), invitationId: 'invitation-spent',
+        },
+      },
+    });
+    localStorage.setItem('herdr_device_auth_v1', credential);
+    const storedRelays = localStorage.getItem('herdr_relays');
+    const relaySnapshot = get(relayStore.relayConfigs);
+    const dials = MockWebSocket.instances.length;
+    const malformedLink = {
+      hash: `#setup=${'X'.repeat(43)}&invite=short&invite_version=1`
+        + `&invite_expires=${Date.now() + 60_000}&label=Paired&relay=${encodeURIComponent(relayUrl)}`,
+      protocol: 'https:',
+      host: 'app.example',
+      pathname: '/',
+      search: '',
+    };
+
+    expect(relayStore.importSetupLink(malformedLink, true)).toBe(false);
+    expect(get(relayStore.toast)?.message).toContain('This setup link has expired or was already used');
+    expect(get(relayStore.toast)?.message).toContain('Ordinary device invitations expire after ten minutes');
+    expect(get(relayStore.relayConfigs)).toEqual(relaySnapshot);
+    expect(localStorage.getItem('herdr_relays')).toBe(storedRelays);
+    expect(localStorage.getItem('herdr_device_auth_v1')).toBe(credential);
+    expect(MockWebSocket.instances).toHaveLength(dials);
   });
 
   it('saves a first invitation on a cold start and dials with it', () => {

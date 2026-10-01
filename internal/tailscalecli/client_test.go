@@ -777,6 +777,7 @@ func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *tes
 			}
 			consent := fixtureConsent(true)
 			consent.OperationID = record.OperationID
+			consent.ReservationID = report.ReservationAttemptID
 			consent.RecoveryObservation = tc.observation
 			consent.RecoveryAccepted = true
 			wrongOperation := consent
@@ -784,6 +785,12 @@ func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *tes
 			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
 				"https://herdr.tailnet.ts.net:8443", 8443, 18377, wrongOperation); err == nil {
 				t.Fatal("reconciliation accepted consent for a different pending operation")
+			}
+			wrongReservation := consent
+			wrongReservation.ReservationID = "00000000000000000000000000000000"
+			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377, wrongReservation); err == nil {
+				t.Fatal("reconciliation accepted consent for a different backend reservation")
 			}
 			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
 				"https://herdr.tailnet.ts.net:8443", 8443, 18377, consent); err != nil {
@@ -796,7 +803,134 @@ func TestPendingPublishReconciliationRequiresExactOperationAndObservation(t *tes
 			if fixture.mutationCalls() != 1 {
 				t.Fatalf("local journal reconciliation retried Serve mutation: %d calls", fixture.mutationCalls())
 			}
+			if tc.wantState == StateReconciledAbsent {
+				repair := fixtureRequest(true)
+				repair.ReservationID = "00000000000000000000000000000002"
+				repair.Consent.RecoveryAccepted = true
+				repair.Consent.RecoveryObservation = "absent"
+				repair.Consent.OperationID = resolved.OperationID
+				if err := manager.RepairMissing(context.Background(), repair); err != nil {
+					t.Fatalf("repair after explicit absent reconciliation: %v", err)
+				}
+				if fixture.mutationCalls() != 2 {
+					t.Fatalf("reconciled-absent repair issued %d total Serve mutations, want two", fixture.mutationCalls())
+				}
+			}
 		})
+	}
+}
+
+func TestRegisteredMissingRouteRequiresBoundedExplicitRepair(t *testing.T) {
+	fixture := newFakeCLI(t)
+	manager := newFixtureManager(t, fixture, "repair missing route")
+	request := fixtureRequest(true)
+	if err := manager.Publish(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	fixture.serve = unrelatedRoute
+	report, recoverErr := manager.Recover(context.Background(), request.Scope, request.InstallationID, request.Origin,
+		request.HTTPSPort, request.BackendPort)
+	if !errors.Is(recoverErr, ErrConflict) || report.Observation != "selected-listener-absent" ||
+		report.Route.JournalState != StateRegistered || report.OperationID == "" || !report.RequiresOperatorAction {
+		t.Fatalf("missing-route recovery = %+v, %v", report, recoverErr)
+	}
+	callsBeforeRepair := fixture.mutationCalls()
+	request.Consent.RecoveryAccepted = true
+	request.Consent.RecoveryObservation = "absent"
+	request.Consent.OperationID = "00000000000000000000000000000000"
+	if err := manager.RepairMissing(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("repair accepted consent for a different journal operation: %v", err)
+	}
+	if got := fixture.mutationCalls(); got != callsBeforeRepair {
+		t.Fatalf("misbound repair consent dispatched a route mutation: %d", got-callsBeforeRepair)
+	}
+	request.Consent.OperationID = report.OperationID
+	if err := manager.RepairMissing(context.Background(), request); err != nil {
+		t.Fatalf("explicit repair of exact missing route: %v", err)
+	}
+	if got := fixture.mutationCalls(); got != callsBeforeRepair+1 {
+		t.Fatalf("repair issued %d Serve mutations, want one", got-callsBeforeRepair)
+	}
+	if fixture.serve != unrelatedAndFixtureRoutes {
+		t.Fatalf("repair failed to preserve unrelated Serve state: %s", fixture.serve)
+	}
+	resolved, err := manager.readRegistration()
+	if err != nil || resolved == nil || resolved.State != StateRegistered || !resolved.MutationAcknowledged {
+		t.Fatalf("repaired registration = %+v, %v", resolved, err)
+	}
+}
+
+func TestMissingRouteRepairRejectsConflictingOrUncertainServeState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		route string
+	}{
+		{name: "selected listener conflicts", route: `{"TCP":{"8443":{"HTTPS":true}},"Web":{"herdr.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18378"}}}}}`},
+		{name: "backend already targeted", route: `{"TCP":{"443":{"HTTPS":true}},"Web":{"herdr.tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18377"}}}}}`},
+		{name: "incomplete Serve observation", route: `{"TCP":{"8443":`},
+		{name: "exact route present", route: fixtureRoute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newFakeCLI(t)
+			manager := newFixtureManager(t, fixture, "repair refusal "+tc.name)
+			request := fixtureRequest(true)
+			if err := manager.Publish(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			fixture.serve = tc.route
+			record, recordErr := manager.readRegistration()
+			if recordErr != nil || record == nil {
+				t.Fatalf("read registration before refusal: record=%+v err=%v", record, recordErr)
+			}
+			request.Consent.RecoveryAccepted = true
+			request.Consent.RecoveryObservation = "absent"
+			request.Consent.OperationID = record.OperationID
+			if err := manager.RepairMissing(context.Background(), request); err == nil {
+				t.Fatal("repair accepted conflicting, incomplete, or already-present Serve state")
+			}
+			if got := fixture.mutationCalls(); got != 1 {
+				t.Fatalf("refused repair changed Serve; mutation count=%d", got)
+			}
+		})
+	}
+}
+
+func TestAbandonMissingRegisteredRouteRequiresOperationConsent(t *testing.T) {
+	fixture := newFakeCLI(t)
+	manager := newFixtureManager(t, fixture, "abandon missing route")
+	request := fixtureRequest(true)
+	if err := manager.Publish(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	fixture.serve = `{}`
+	report, recoverErr := manager.Recover(context.Background(), request.Scope, request.InstallationID, request.Origin,
+		request.HTTPSPort, request.BackendPort)
+	if !errors.Is(recoverErr, ErrConflict) || report.OperationID == "" || report.Observation != "selected-listener-absent" {
+		t.Fatalf("missing route recovery = %+v, %v", report, recoverErr)
+	}
+	consent := fixtureConsent(true)
+	consent.RecoveryAccepted = true
+	consent.RecoveryObservation = "absent"
+	consent.OperationID = "00000000000000000000000000000000"
+	if err := manager.AbandonMissing(context.Background(), request.Scope, request.InstallationID, request.Origin,
+		request.HTTPSPort, request.BackendPort, consent); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abandon accepted consent for a different operation: %v", err)
+	}
+	consent.OperationID = report.OperationID
+	if err := manager.AbandonMissing(context.Background(), request.Scope, request.InstallationID, request.Origin,
+		request.HTTPSPort, request.BackendPort, consent); err != nil {
+		t.Fatalf("explicitly abandon absent registered route: %v", err)
+	}
+	resolved, err := manager.readRegistration()
+	if err != nil || resolved == nil || resolved.State != StateReconciledAbsent || resolved.MutationAcknowledged {
+		t.Fatalf("abandonment journal = %+v, %v", resolved, err)
+	}
+	reservation, err := manager.readBackendReservation(request.BackendPort)
+	if err != nil || reservation != nil {
+		t.Fatalf("abandoned route retained its backend reservation: %+v, %v", reservation, err)
+	}
+	if got := fixture.mutationCalls(); got != 1 {
+		t.Fatalf("abandonment changed the Serve mutation count: %d", got)
 	}
 }
 

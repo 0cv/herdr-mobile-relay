@@ -45,8 +45,11 @@ Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
 the one-use bootstrap invitation in the URL fragment, which is never sent in
 the HTTP request. The installed app removes it after enrollment. iOS browser
 tabs retain it without redeeming it and direct you to the installed app, which
-prevents a disposable Safari tab from consuming the invitation. Each printed
-link pairs one phone within ten minutes; print it again for the next phone.
+prevents a disposable Safari tab from consuming the invitation. If no phone has
+paired yet, retry the same bootstrap link while the relay is running; its
+ten-minute window renews when presented. After the first phone pairs, use a
+separate owner-issued invitation for each additional device; those invitations
+expire ten minutes after issue and cannot be reused.
 
 Keep the Quick Start pane open. Ctrl-C stops the relay, and on the tunnel path
 the next run creates a new hostname and setup link.
@@ -161,11 +164,12 @@ alone; review the current limits and live-run boundary in
 [the CLI qualification guide](docs/tailscale-cli-qualification.md) before using
 this development-only path.
 
-Setup links are one-use; bootstrap setup invitations expire after ten minutes.
-If one expires while the same foreground development relay is still running,
-its private pairing-control socket's `arm_bootstrap` operation re-arms the same
-token for another ten minutes. The exact command and safety boundary are in the
-[development runbook](docs/development.md#running-from-a-checkout).
+Bootstrap setup links are one-use, but the ten-minute expiry refreshes when
+the link is presented while no phone has enrolled; it is not measured from
+printing. Retry the same link while that same foreground relay is running. Once
+a phone has enrolled, the bootstrap link is consumed; ordinary invitations for
+additional devices expire ten minutes after issue and require a fresh
+invitation from a paired owner. See the [development runbook](docs/development.md#running-from-a-checkout).
 
 ## Make It Permanent
 

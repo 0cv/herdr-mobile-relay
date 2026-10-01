@@ -180,9 +180,21 @@ it never clears uncertainty or treats an observed matching/absent route as
 proof that a dispatched mutation was acknowledged. Reconciled-present remains
 unready and unacknowledged until an explicit exact-route unpublish; reconciled-
 absent may be followed only by a fresh consented publication. A disappeared
-registered route is degraded and is not automatically recreated. Explicit repair
-and explicit unpublish require fresh preflight and consent. Transport-selection
-helpers run a local-only journal/reservation guard before changing away from
+registered route is degraded and is not automatically recreated. The public
+`dev-tailscale-cli reconcile` action records only an operation-ID-bound,
+unambiguous exact-present or listener-absent observation for a pending/uncertain
+journal; it never dispatches a Serve command. `repair-missing` is a separate
+foreground action for an acknowledged or previously reconciled-absent
+registration, requires a complete fresh absence check and an exact typed
+confirmation bound to both the route tuple and prior operation, then performs
+one fresh publication and readback. `abandon-missing` requires the foreground
+relay stopped, the backend listener stopped, and fresh proof that neither the
+selected listener nor any route to the backend exists; it records
+`reconciled-absent` and releases only that registration's reservation without a
+Serve mutation. Conflicting or incomplete observations refuse all three paths;
+none adopts an observed route. Explicit repair and explicit unpublish require
+fresh preflight and consent. Transport-selection helpers run a local-only
+journal/reservation guard before changing away from
 `tailscale-cli`; active, uncertain, or pending state blocks the change until the
 exact route is explicitly unpublished and any owned pending reservation is
 safely released. Routine service
@@ -403,7 +415,7 @@ selection or state access.
 | `tailscale-cli preflight` and other standalone inspection/manager operations | No | Refuse before executable or state access. |
 | `dev-tailscale-cli preflight` | Read-only only | `PreflightDevelopmentWorkflow` validates the complete private layout, explicit opt-in, exact Darwin/arm64 profile path, and fixed tuple before status/version/Serve inspection; returns no manager and cannot start a server. |
 | `dev-tailscale-cli setup` | Yes, after consent | Go validates the complete private layout and requires exact typed confirmation against the configured node/origin before CLI contact; read-only preflight then verifies that identity before any route mutation. |
-| `dev-tailscale-cli` update/status/recover/assert-ready/release/unpublish | Yes | `NewDevelopmentWorkflow` validates isolation before CLI preflight and retains the manager only in-process; operations repeat isolation, identity, profile and fixed-tuple checks. |
+| `dev-tailscale-cli` update/status/recover/reconcile/assert-ready/release/repair-missing/abandon-missing/unpublish | Yes | `NewDevelopmentWorkflow` validates isolation before CLI preflight and retains the manager only in-process; operations repeat isolation, identity, profile and fixed-tuple checks. Reconcile and missing-route recovery require exact operation-bound operator input and never infer ownership from observed Serve state. |
 | `config.Load` / `serve`, `app.New`, `app.NewOwned` | No | Refuse CLI transport startup without a workflow. `LoadDevelopmentCLI` and `app.NewDevelopmentCLI` require the same bound workflow and exact tuple. |
 | `relay/dev-tailscale-cli.sh` | No direct CLI | May use `resolve-binary` for filesystem selection, then calls only `dev-tailscale-cli preflight` for real-CLI reads; it never calls standalone preflight or a Tailscale executable itself. |
 | Installed CLI service/setup wrappers | No in shipped builds | The production activation check is false; wrappers stop before Tailscale CLI access or relay startup. They are not an alternate development workflow. |

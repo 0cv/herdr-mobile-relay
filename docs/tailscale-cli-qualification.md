@@ -171,7 +171,13 @@ remains the authority boundary for those separate steps.
 
 ## Owner-authorized live P6 phone continuation findings
 
-Sanitized observations from the current supervised phone assessment:
+Sanitized historical observations from the supervised phone assessment:
+
+A supervising-assistant report says the installed relay-service baseline later
+changed to `0.22.3-f0f41c2` outside this task. This worker did not inspect or
+change that live service. Treat prior service noninterference comparisons as
+stale: any later P6 comparison must first capture a fresh read-only service
+version, file hash and liveness baseline in the supervising phase.
 
 - On approved source SHA `197685c`, using the explicit development-root override,
   the read-only baseline and scoped publication/readback, trusted HTTPS, and exact
@@ -186,12 +192,13 @@ Sanitized observations from the current supervised phone assessment:
   or expired setup links and relay-rejected devices, and refuses a newly expired
   invitation before replacing stored relay or credential state.
 - On the designated Android phone in Chrome, the owner reported that pairing
-  now works. The phone redeemed the setup invitation, was issued its device
+  worked: the phone redeemed the setup invitation, was issued its device
   credential, and established one connection through the Tailscale extension;
-  relay status still showed `invitation_pending=true`. Credential-based reconnect
-  has not been observed, and the assigned device role is not confirmed. iOS was
-  not tested. This records a successful Android first-pairing/connection cell
-  only, not broader phone, role, or runtime qualification.
+  relay status still showed `invitation_pending=true`. This is a historical
+  owner-reported first connection, not independently reproduced or reverified
+  by this implementation phase. Credential-based reconnect has not been
+  observed, and the assigned device role is not confirmed. iOS was not tested.
+  This records no broader phone, role, or runtime qualification.
 - Starting the CLI workflow with its default development root while the existing
   `$HOME/.herdr-p6-dev` root owned the 18377 registration was refused as an
   installation mismatch; the route and registration were not taken over. Reuse
@@ -201,13 +208,16 @@ Sanitized observations from the current supervised phone assessment:
 - Credential-based reconnect, role confirmation, and iOS assessment remain
   **pending**.
 
-The existing invitation lifetime remains ten minutes. If a bootstrap setup link
-expires or is reported as already used before enrollment while the same isolated
-foreground relay is running, the operator can re-arm its existing bootstrap token
-through the private pairing control socket; this does not reset enrolled devices
-or lengthen invitation lifetime. A refused enrolled device needs a fresh device
-invitation, not bootstrap re-arming. Read [the development runbook](development.md#running-from-a-checkout)
-for the exact command and recovery guidance.
+Bootstrap setup links are one-use, but their ten-minute window refreshes when
+presented while no phone has enrolled; expiry is not a hard deadline from print
+time. If the first phone reports an expired or refused bootstrap link, retry the
+same link against the same still-running foreground relay. No manual re-arm is
+needed. After enrollment, the bootstrap invitation is consumed. Separate
+invitations for additional devices remain one-use with a fixed ten-minute
+lifetime; a paired owner must issue a fresh invitation if one expires or was
+used. These paths do not reset devices or alter the Tailscale route. Read [the
+development runbook](development.md#running-from-a-checkout) for the recovery
+boundary.
 
 ## Owner-phone development smoke and broader qualification
 
@@ -236,12 +246,16 @@ Transient readiness checks use bounded backoff and read-only operations. Route
 or identity drift closes admission; it never starts a Serve mutation loop.
 
 Persist `publish-pending` or `remove-pending` before mutation; a crash or ambiguous
-post-dispatch outcome becomes the corresponding `*-uncertain` record. Recovery
-commands inspect and report evidence but do not auto-adopt or replay a mutation.
-Only an explicit operator action with fresh consent can resolve a supported,
-acknowledged registration. A normal stop or Ctrl-C is **stop relay, leave the
-persistent route**. `unpublish` is a separate consented operation. Keep state if
-unpublish is unconfirmed; do not delete the root to clear uncertainty.
+post-dispatch outcome becomes the corresponding `*-uncertain` record. `recover`
+only inspects evidence. Explicit operation-ID-bound `reconcile` may record one
+unambiguous present/absent observation for a pending mutation but never replays
+Serve or claims acknowledgement. For an acknowledged registration whose route
+has disappeared, `repair-missing` and `abandon-missing` are separate consented
+choices; both recheck identity, complete Serve state, route absence and backend
+ownership, and neither adopts an observed route. A normal stop or Ctrl-C is
+**stop relay, leave the persistent route**. `unpublish` is a separate consented
+operation. Keep state if any mutation or cleanup is unconfirmed; do not delete
+the root to clear uncertainty.
 
 Monitor on a bounded interval (initial design target: 5 seconds) with bounded
 per-call timeouts and jittered backoff when the daemon is unavailable. This
@@ -341,28 +355,17 @@ outcomes and do not themselves establish live qualification.
    infer it from source or hosted fixtures. Stop on trust, identity, E2EE,
    readiness or role uncertainty; do not print a second invitation or clear
    device state.
-5. **Expired or already-used bootstrap link.** The invitation remains one-use and
-   expires after ten minutes. If the phone reports that the bootstrap setup link
-   expired or was already used before enrollment, and the same authorized foreground relay is
-   still running, re-arm only its existing bootstrap token through the private
-   local control socket. Use a second terminal at the same checkout because the
-   foreground launcher's exported variables do not exist in that shell. The
-   self-contained command in [the development runbook](development.md#running-from-a-checkout)
-   derives `RELAY_BIN` from the private root (default `relay/.dev-tailscale-cli/`,
-   or set the same absolute `HERDR_DEV_TAILSCALE_CLI_DIR` used at setup) and
-   reads only the pairing socket, control-run ID, and instance ID from that
-   root's generated `relay.env` using `env_file_value` in a subshell. Do not
-   source the whole environment file; it contains the relay token. The command
-   requires response JSON `ok: true`, `invitation_armed: true`, matching
-   `run_id` and `instance`, and a nonempty `invitation_expires_at`. This matters
-   because a decoded negative control reply can still exit zero.
-
-   Require this successful durable arm acknowledgement before asking the phone
-   to retry the same setup link. This is not a token reset, device reset, route
-   mutation, or invitation-lifetime extension. If the foreground relay is
-   stopped or the arm is not acknowledged, stop and use the documented recovery
-   path rather than retrying with guessed state. A refused enrolled device needs
-   a fresh device invitation, not bootstrap re-arming.
+5. **Expired or refused setup link.** A bootstrap link remains one-use, but its
+   ten-minute window refreshes when presented while no phone has enrolled; it is
+   not a deadline measured from printing. If the first phone reports expiry or
+   refusal, retry the same bootstrap link while that same authorized foreground
+   relay is running. Do not manually re-arm it. After a phone has enrolled the
+   bootstrap is consumed; an ordinary device invitation is also one-use, has a
+   fixed ten-minute lifetime, and cannot be refreshed by bootstrap policy. Ask
+   a paired owner to issue a fresh device invitation if that invitation expires
+   or was used. Neither path resets devices or changes the route. If the relay is
+   stopped or the refusal remains unclear, retain state and follow the documented
+   recovery path rather than guessing or clearing credentials.
 6. **Exact scoped cleanup.** After the owner's phone assessment, end the phone
    session, stop the foreground relay with Ctrl-C, and prove the pairing socket
    is removed and backend TCP 18377 is free. Capture a complete private Serve
@@ -391,7 +394,7 @@ outcomes and do not themselves establish live qualification.
    | Assessment cell | Status |
    | --- | --- |
    | App Store 1.102.4 runtime on this Darwin/arm64 Mac and current node/account | Pending broader qualification |
-   | Complete pre/post Serve and installed-service noninterference | Pending |
+   | Complete pre/post Serve and installed-service noninterference | Pending; the installed-service baseline changed outside this task; capture fresh version/hash/liveness before comparison |
    | Scoped HTTPS 8443 -> `127.0.0.1:18377` publication and exact `off` readback | Pending |
    | Trusted HTTPS, exact bundle, identity, local socket and readiness | Observed passing in the supervised run |
    | Android Chrome invitation redemption and first connection | Observed once; not qualification |

@@ -17,6 +17,10 @@ load_relay_env "$ENV_FILE"
 require_supported_platform
 
 RELAY_BIN="$(relay_binary)"
+# Direct invocation must preserve the same local-only route ownership guard as
+# the public chooser. This runs before prompting, session creation, or config
+# mutation and never contacts Tailscale.
+tailscale_cli_transport_switch_safe "$ENV_FILE" || exit 1
 ORIGIN="${HERDR_EXTERNAL_HTTPS_ORIGIN:-}"
 case "${1:-}" in
     --origin)

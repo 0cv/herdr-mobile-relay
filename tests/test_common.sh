@@ -995,6 +995,49 @@ if grep -qE '^HERDR_GATEWAY_URL=' "$CLI_SWITCH_ENV"; then
 fi
 grep -q 'tailscale-cli check-transport-switch' "$WORK_DIR/cli-switch.log"
 
+# The public BYO-Serve chooser and its direct entrypoint both run the local-only
+# CLI route guard before dispatch, prompt, session creation, or relay config edits.
+EXTERNAL_SWITCH_DIR="$WORK_DIR/external-switch-scripts"
+EXTERNAL_SWITCH_ENV="$WORK_DIR/config/external-switch.env"
+EXTERNAL_SWITCH_DISPATCHED="$WORK_DIR/external-switch-dispatched"
+mkdir -p "$EXTERNAL_SWITCH_DIR"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/tailscale-external.sh" \
+    "$REPO_DIR/relay/plugin-choose-transport.sh" "$EXTERNAL_SWITCH_DIR/"
+cat > "$EXTERNAL_SWITCH_ENV" <<EOF
+HERDR_RELAY_TRANSPORT=tailscale-cli
+HERDR_RELAY_INSTANCE_ID=fixture-installation
+HERDR_RELAY_PORT=18377
+HERDR_TAILSCALE_CLI_STATE_ROOT=$WORK_DIR/cli-registration
+HERDR_TAILSCALE_CLI_COORDINATION_ROOT=$WORK_DIR/cli-coordination
+EOF
+EXTERNAL_SWITCH_BEFORE="$(cat "$EXTERNAL_SWITCH_ENV")"
+if CLI_SWITCH_LOG="$WORK_DIR/external-switch-cli.log" HERDR_RELAY_BIN="$CLI_SWITCH_RELAY" \
+    HERDR_RELAY_ENV="$EXTERNAL_SWITCH_ENV" bash "$EXTERNAL_SWITCH_DIR/tailscale-external.sh" </dev/null \
+    >"$WORK_DIR/external-direct.stdout" 2>"$WORK_DIR/external-direct.stderr"; then
+    echo "direct BYO-Serve entrypoint ignored unresolved CLI route state" >&2
+    exit 1
+fi
+test "$(cat "$EXTERNAL_SWITCH_ENV")" = "$EXTERNAL_SWITCH_BEFORE"
+test ! -e "$(tailscale_external_session_file "$EXTERNAL_SWITCH_ENV")"
+test ! -s "$WORK_DIR/external-direct.stdout"
+grep -q 'The CLI Serve route or backend reservation is unresolved' "$WORK_DIR/external-direct.stderr"
+cat > "$EXTERNAL_SWITCH_DIR/tailscale-external.sh" <<EOF
+#!/bin/sh
+: > "$EXTERNAL_SWITCH_DISPATCHED"
+EOF
+chmod 700 "$EXTERNAL_SWITCH_DIR/tailscale-external.sh"
+if CLI_SWITCH_LOG="$WORK_DIR/external-switch-cli.log" HERDR_RELAY_BIN="$CLI_SWITCH_RELAY" \
+    HERDR_RELAY_ENV="$EXTERNAL_SWITCH_ENV" bash "$EXTERNAL_SWITCH_DIR/plugin-choose-transport.sh" tailscale-external \
+    </dev/null >"$WORK_DIR/external-chooser.stdout" 2>"$WORK_DIR/external-chooser.stderr"; then
+    echo "BYO-Serve chooser dispatched while CLI route state was unresolved" >&2
+    exit 1
+fi
+test "$(cat "$EXTERNAL_SWITCH_ENV")" = "$EXTERNAL_SWITCH_BEFORE"
+test ! -e "$EXTERNAL_SWITCH_DISPATCHED"
+test ! -e "$(tailscale_external_session_file "$EXTERNAL_SWITCH_ENV")"
+grep -q 'The CLI Serve route or backend reservation is unresolved' "$WORK_DIR/external-chooser.stderr"
+[ "$(grep -c 'tailscale-cli check-transport-switch' "$WORK_DIR/external-switch-cli.log")" = 2 ]
+
 # The operator-owned foreground session serializes every cooperating transport
 # choice until the local backend stops; a refusal leaves the saved BYO origin
 # byte-for-byte intact.

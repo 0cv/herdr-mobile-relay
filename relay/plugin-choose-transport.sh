@@ -26,6 +26,12 @@ if [ "$MODE" = tailscale ]; then
     shift
     HERDR_TAILSCALE_REQUEST=1 HERDR_RELAY_TRANSPORT=tailscale exec "$SCRIPT_DIR/tailscale.sh" "$@"
 elif [ "$MODE" = tailscale-external ]; then
+    ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
+    [ -f "$ENV_FILE" ] || {
+        echo "✗ Relay configuration is missing. Run setup before choosing operator-owned HTTPS Serve." >&2
+        exit 1
+    }
+    tailscale_cli_transport_switch_safe "$ENV_FILE" || exit 1
     shift
     exec "$SCRIPT_DIR/tailscale-external.sh" "$@"
 fi

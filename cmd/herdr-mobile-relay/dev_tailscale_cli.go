@@ -34,12 +34,12 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 	if action == "foreground" {
 		flags := flag.NewFlagSet("dev-tailscale-cli foreground", flag.ContinueOnError)
 		flags.SetOutput(stderr)
-		selected := flags.String("action", "setup", "setup or update")
+		selected := flags.String("action", "setup", "setup, repair-missing, or update")
 		if err := flags.Parse(args); err != nil {
 			return 2, err
 		}
-		if flags.NArg() != 0 || (*selected != "setup" && *selected != "update") {
-			return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli foreground --action {setup|update}")
+		if flags.NArg() != 0 || (*selected != "setup" && *selected != "repair-missing" && *selected != "update") {
+			return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli foreground --action {setup|repair-missing|update}")
 		}
 		action = *selected
 	} else if len(args) != 0 {
@@ -50,8 +50,9 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 		return status(err)
 	}
 	if action != "preflight" && action != "status" && action != "recover" && action != "assert-ready" &&
-		action != "release-reservation" && action != "unpublish" && action != "setup" && action != "update" {
-		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
+		action != "release-reservation" && action != "unpublish" && action != "abandon-missing" && action != "reconcile" &&
+		action != "setup" && action != "repair-missing" && action != "update" {
+		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|repair-missing|update|status|recover|reconcile|assert-ready|release-reservation|abandon-missing|unpublish|stop|foreground}")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,12 +99,16 @@ func runDevelopmentTailscaleCLI(args []string, stdin io.Reader, stdout, stderr i
 		return status(err)
 	case "release-reservation":
 		return releaseDevelopmentReservation(ctx, workflow, cfg, stdin, stdout, stderr)
+	case "abandon-missing":
+		return abandonMissingDevelopmentRoute(ctx, workflow, cfg, stdin, stdout, stderr)
+	case "reconcile":
+		return reconcileDevelopmentRoute(ctx, workflow, cfg, stdin, stdout, stderr)
 	case "unpublish":
 		return unpublishDevelopmentRoute(ctx, workflow, cfg, stdin, stdout, stderr)
-	case "setup", "update":
-		return runDevelopmentForeground(ctx, action, workflow, cfg, setupConfirmation, stdout, stderr)
+	case "setup", "repair-missing", "update":
+		return runDevelopmentForeground(ctx, action, workflow, cfg, setupConfirmation, stdin, stdout, stderr)
 	default:
-		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|update|status|recover|assert-ready|release-reservation|unpublish|stop|foreground}")
+		return 2, errors.New("usage: herdr-mobile-relay dev-tailscale-cli {preflight|setup|repair-missing|update|status|recover|reconcile|assert-ready|release-reservation|abandon-missing|unpublish|stop|foreground}")
 	}
 }
 
@@ -134,8 +139,9 @@ func developmentCLIFromEnvironment(ctx context.Context, action string) (*tailsca
 	root := os.Getenv("HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT")
 	stateRoot := os.Getenv("HERDR_TAILSCALE_CLI_STATE_ROOT")
 	coordinationRoot := os.Getenv("HERDR_TAILSCALE_CLI_COORDINATION_ROOT")
-	requireStopped := action == "setup" || action == "update" || action == "unpublish" || action == "release-reservation"
-	requireHerdrSocket := action == "setup" || action == "update"
+	requireStopped := action == "setup" || action == "repair-missing" || action == "update" ||
+		action == "unpublish" || action == "release-reservation" || action == "abandon-missing" || action == "reconcile"
+	requireHerdrSocket := action == "setup" || action == "repair-missing" || action == "update"
 	if err := tailscalecli.ValidateDevelopmentOperationEnvironment(root, stateRoot, coordinationRoot, requireStopped, requireHerdrSocket); err != nil {
 		return nil, nil, err
 	}
@@ -188,11 +194,29 @@ func readDevelopmentSetupConfirmation(stdin io.Reader, stderr io.Writer) (string
 	_, _ = fmt.Fprintln(stderr, "The HTTPS route persists after the foreground relay stops.")
 	_, _ = fmt.Fprintln(stderr, "Consent includes the CLI check-to-write race, backend port reuse, no global rollback, and no remote-drain guarantee.")
 	_, _ = fmt.Fprintln(stderr, "The configured node and origin will be checked against read-only CLI preflight before any route mutation.")
+	_, _ = fmt.Fprintln(stderr, "Missing-route repair requires a separate operation-bound confirmation after complete absence is reverified.")
 	_, _ = fmt.Fprintf(stderr, "Type exactly on stdin:\n%s\n", confirmation)
 	return readRouteConfirmation(stdin, confirmation)
 }
 
-func runDevelopmentForeground(parent context.Context, action string, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config, setupConfirmation string, stdout, stderr io.Writer) (int, error) {
+type developmentForegroundServer interface {
+	Run(context.Context) error
+	DevelopmentBackendBound() <-chan struct{}
+	DevelopmentBackendLease() tailscalecli.BackendLease
+}
+
+func runDevelopmentForeground(parent context.Context, action string, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config,
+	setupConfirmation string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	return runDevelopmentForegroundWithFactory(parent, action, workflow, cfg, setupConfirmation, stdin, stdout, stderr,
+		func() (developmentForegroundServer, error) {
+			return app.NewDevelopmentCLI(cfg, version, revision,
+				newRelayLogger(stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr)), workflow)
+		})
+}
+
+func runDevelopmentForegroundWithFactory(parent context.Context, action string, workflow *tailscalecli.DevelopmentWorkflow,
+	cfg *config.Config, setupConfirmation string, stdin io.Reader, stdout, stderr io.Writer,
+	newServer func() (developmentForegroundServer, error)) (int, error) {
 	if cfg.PairingSocketPath == "" || !filepath.IsAbs(cfg.PairingSocketPath) {
 		return 1, tailscalecli.ErrWorkflowRequired
 	}
@@ -231,7 +255,7 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 			}
 		}()
 	}
-	server, err := app.NewDevelopmentCLI(cfg, version, revision, newRelayLogger(stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr)), workflow)
+	server, err := newServer()
 	if err != nil {
 		return 1, err
 	}
@@ -272,6 +296,13 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 			return 1, err
 		}
 		routeCommitted = true
+	} else if action == "repair-missing" {
+		if err := repairMissingDevelopmentRoute(ctx, workflow, cfg, server.DevelopmentBackendLease(), stdin, stderr); err != nil {
+			stop()
+			_ = waitDevelopmentServer(done)
+			return developmentSetupConfirmationExitCode(err), err
+		}
+		routeCommitted = true
 	}
 	admitted, err := localcontrol.Request(ctx, cfg.PairingSocketPath, "admit", cfg.ControlRunID, cfg.InstanceID)
 	if err != nil || !admitted.OK || !admitted.Ready || !admitted.PersistentRouteReady {
@@ -303,6 +334,54 @@ func runDevelopmentForeground(parent context.Context, action string, workflow *t
 		return 1, err
 	}
 	return 0, nil
+}
+
+func repairMissingDevelopmentRoute(ctx context.Context, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config,
+	lease tailscalecli.BackendLease, stdin io.Reader, stderr io.Writer) error {
+	preflight := workflow.Preflight()
+	report, recoverErr := workflow.Recover(ctx, cfg.InstanceID, cfg.TailscaleCLIOrigin)
+	if recoverErr != nil && !errors.Is(recoverErr, tailscalecli.ErrConflict) && !errors.Is(recoverErr, tailscalecli.ErrUncertain) {
+		return recoverErr
+	}
+	if (report.Route.JournalState != tailscalecli.StateRegistered && report.Route.JournalState != tailscalecli.StateReconciledAbsent) ||
+		(report.Observation != "selected-listener-absent" && report.Observation != "pending-backend-reservation-awaiting-stopped-service-release") ||
+		report.OperationID == "" ||
+		(report.ReservationState == tailscalecli.StatePublishPending && !report.ReservationReleasable) {
+		return errors.New("repair requires an acknowledged or previously reconciled-absent registration and fresh proof that its exact listener and backend route are absent")
+	}
+	routeConfirmation := tailscalecli.PublishRouteConfirmation(preflight.NodeID, preflight.Origin,
+		tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
+	reservationID := report.ReservationAttemptID
+	if report.ReservationState != tailscalecli.StatePublishPending {
+		var err error
+		reservationID, err = newDevelopmentReservationID()
+		if err != nil {
+			return err
+		}
+	}
+	confirmation := fmt.Sprintf("REPAIR MISSING DEVELOPMENT ROUTE operation=%s reservation=%s node=%s origin=%s https-port=%d backend=127.0.0.1:%d",
+		report.OperationID, reservationID, preflight.NodeID, preflight.Origin,
+		tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
+	_, _ = fmt.Fprintf(stderr, "This will republish only the route bound to the displayed acknowledged operation %s after read-only absence checks. Type exactly on stdin:\n%s\n",
+		report.OperationID, confirmation)
+	if _, err := readRouteConfirmation(stdin, confirmation); err != nil {
+		return err
+	}
+	consent := tailscalecli.Consent{
+		Accepted: true, RouteConfirmation: routeConfirmation, Scope: "development", NodeID: preflight.NodeID,
+		Origin: preflight.Origin, HTTPSPort: tailscalecli.DevelopmentHTTPSPort,
+		BackendPort: tailscalecli.DevelopmentBackendPort, PersistentRouteAccepted: true,
+		CheckToWriteRaceAccepted: true, PortReuseRiskAccepted: true,
+		NoRollbackAccepted: true, NoRemoteDrainAccepted: true,
+		RecoveryAccepted: true, RecoveryObservation: "absent", OperationID: report.OperationID,
+	}
+	request := tailscalecli.PublishRequest{
+		InstallationID: cfg.InstanceID, Scope: "development", ExpectedNodeID: preflight.NodeID,
+		Origin: preflight.Origin, HTTPSPort: tailscalecli.DevelopmentHTTPSPort,
+		BackendPort: tailscalecli.DevelopmentBackendPort, ReservationID: reservationID,
+		BackendLease: lease, Consent: consent,
+	}
+	return workflow.RepairMissing(ctx, request)
 }
 
 func printDevelopmentSetupLink(cfg *config.Config, stdout io.Writer) error {
@@ -456,6 +535,86 @@ func releaseDevelopmentReservation(ctx context.Context, workflow *tailscalecli.D
 	}
 	return status(workflow.ReleaseBackendPort(ctx, cfg.InstanceID, workflow.Preflight().NodeID,
 		cfg.TailscaleCLIOrigin, report.ReservationAttemptID, true))
+}
+
+func abandonMissingDevelopmentRoute(ctx context.Context, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config,
+	stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	report, recoverErr := workflow.Recover(ctx, cfg.InstanceID, cfg.TailscaleCLIOrigin)
+	if recoverErr != nil && !errors.Is(recoverErr, tailscalecli.ErrConflict) && !errors.Is(recoverErr, tailscalecli.ErrUncertain) {
+		return status(recoverErr)
+	}
+	reservationSafe := (report.ReservationState == "" && report.ReservationAttemptID == "" &&
+		report.Route.JournalState == tailscalecli.StateReconciledAbsent) ||
+		(report.ReservationState == tailscalecli.StateRegistered && report.ReservationAttemptID == "") ||
+		(report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != "" && report.ReservationReleasable)
+	if (report.Route.JournalState != tailscalecli.StateRegistered && report.Route.JournalState != tailscalecli.StateReconciledAbsent) ||
+		(report.Observation != "selected-listener-absent" && report.Observation != "pending-backend-reservation-awaiting-stopped-service-release") ||
+		report.OperationID == "" || !reservationSafe {
+		return 1, errors.New("abandonment requires an acknowledged registration and fresh proof that its exact listener and backend route are absent")
+	}
+	preflight := workflow.Preflight()
+	_, _ = fmt.Fprintf(stderr, "Read-only observation: journal=%s route=%s operation=%s reservation-state=%s reservation-id=%s.\n",
+		report.Route.JournalState, report.Observation, report.OperationID, report.ReservationState, report.ReservationAttemptID)
+	confirmation := fmt.Sprintf("ABANDON MISSING DEVELOPMENT ROUTE operation=%s reservation=%s node=%s origin=%s https-port=%d backend=127.0.0.1:%d",
+		report.OperationID, report.ReservationAttemptID, preflight.NodeID, preflight.Origin,
+		tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
+	_, _ = fmt.Fprintf(stderr, "This changes only the local journal and releases only its matching backend reservation; it does not change Serve. Type exactly on stdin:\n%s\n", confirmation)
+	if _, err := readRouteConfirmation(stdin, confirmation); err != nil {
+		return 2, err
+	}
+	consent := tailscalecli.Consent{
+		Accepted: true, Scope: "development", NodeID: preflight.NodeID, Origin: preflight.Origin,
+		HTTPSPort: tailscalecli.DevelopmentHTTPSPort, BackendPort: tailscalecli.DevelopmentBackendPort,
+		RecoveryAccepted: true, RecoveryObservation: "absent", OperationID: report.OperationID,
+		ReservationID: report.ReservationAttemptID,
+	}
+	return status(workflow.AbandonMissing(ctx, cfg.InstanceID, cfg.TailscaleCLIOrigin, consent))
+}
+
+func reconcileDevelopmentRoute(ctx context.Context, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config,
+	stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	report, recoverErr := workflow.Recover(ctx, cfg.InstanceID, cfg.TailscaleCLIOrigin)
+	if !errors.Is(recoverErr, tailscalecli.ErrUncertain) {
+		if recoverErr != nil {
+			return status(recoverErr)
+		}
+		return 1, errors.New("reconciliation requires a pending or uncertain journal operation")
+	}
+	pending := report.Route.JournalState == tailscalecli.StatePublishPending ||
+		report.Route.JournalState == tailscalecli.StatePublishUncertain ||
+		report.Route.JournalState == tailscalecli.StateRemovePending || report.Route.JournalState == tailscalecli.StateRemoveUncertain
+	observation := ""
+	switch report.Observation {
+	case "exact-registered-route-present":
+		observation = "present"
+	case "selected-listener-absent":
+		observation = "absent"
+	}
+	reservationMatches := false
+	if report.Route.JournalState == tailscalecli.StatePublishPending || report.Route.JournalState == tailscalecli.StatePublishUncertain {
+		reservationMatches = report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != ""
+	} else {
+		reservationMatches = report.ReservationState == tailscalecli.StateRegistered && report.ReservationAttemptID == ""
+	}
+	if !pending || !reservationMatches || report.OperationID == "" || observation == "" {
+		return 1, errors.New("reconciliation requires one unambiguous route observation and its exact backend reservation")
+	}
+	preflight := workflow.Preflight()
+	confirmation := fmt.Sprintf("RECONCILE DEVELOPMENT ROUTE operation=%s reservation=%s observed=%s node=%s origin=%s https-port=%d backend=127.0.0.1:%d",
+		report.OperationID, report.ReservationAttemptID, observation, preflight.NodeID, preflight.Origin,
+		tailscalecli.DevelopmentHTTPSPort, tailscalecli.DevelopmentBackendPort)
+	_, _ = fmt.Fprintf(stderr, "Read-only observation: journal=%s route=%s operation=%s reservation=%s. Type exactly to record this observation; no Serve command will be issued:\n%s\n",
+		report.Route.JournalState, report.Observation, report.OperationID, report.ReservationAttemptID, confirmation)
+	if _, err := readRouteConfirmation(stdin, confirmation); err != nil {
+		return 2, err
+	}
+	consent := tailscalecli.Consent{
+		Accepted: true, Scope: "development", NodeID: preflight.NodeID, Origin: preflight.Origin,
+		HTTPSPort: tailscalecli.DevelopmentHTTPSPort, BackendPort: tailscalecli.DevelopmentBackendPort,
+		RecoveryAccepted: true, RecoveryObservation: observation, OperationID: report.OperationID,
+		ReservationID: report.ReservationAttemptID,
+	}
+	return status(workflow.Reconcile(ctx, cfg.InstanceID, cfg.TailscaleCLIOrigin, consent))
 }
 
 func unpublishDevelopmentRoute(ctx context.Context, workflow *tailscalecli.DevelopmentWorkflow, cfg *config.Config, stdin io.Reader, stdout, stderr io.Writer) (int, error) {

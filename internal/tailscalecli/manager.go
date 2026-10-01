@@ -66,6 +66,7 @@ type Consent struct {
 	NoRemoteDrainAccepted    bool
 	Origin                   string
 	OperationID              string
+	ReservationID            string
 	RecoveryObservation      string
 	RecoveryAccepted         bool
 }
@@ -800,6 +801,9 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 	}
 	if reservation != nil && reservation.ReservationID != "" &&
 		(record.State == StateUnconfigured || record.State == StateRemoved || record.State == StateReconciledAbsent) {
+		if record.State == StateReconciledAbsent {
+			report.OperationID = record.OperationID
+		}
 		report.Observation = "pending-backend-reservation-awaiting-stopped-service-release"
 		report.Route.Readiness = ReadinessUncertain
 		report.ReservationReleasable = reservation.State == StatePublishPending && validReservationID(reservation.ReservationID) &&
@@ -810,7 +814,8 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 	matching := registeredRouteMatches(inspection, *record)
 	listenerPresent := hasRouteAtPort(inspection.Serve, record.HTTPSPort)
 	if record.State == StatePublishPending || record.State == StatePublishUncertain ||
-		record.State == StateRemovePending || record.State == StateRemoveUncertain {
+		record.State == StateRemovePending || record.State == StateRemoveUncertain ||
+		(record.State == StateRegistered && !matching && !listenerPresent) || record.State == StateReconciledAbsent {
 		report.OperationID = record.OperationID
 	}
 	switch {
@@ -818,6 +823,8 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		report.Observation = "exact-registered-route-present"
 	case listenerPresent:
 		report.Observation = "selected-listener-conflicts-with-registration"
+	case backendPortHasRoute(inspection.Serve, record.BackendPort, nil):
+		report.Observation = "backend-target-conflicts-with-registration"
 	default:
 		report.Observation = "selected-listener-absent"
 	}
@@ -844,6 +851,21 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		report.Route.Readiness = ReadinessConflicted
 		report.RequiresOperatorAction = true
 		return report, ErrConflict
+	case StateReconciledAbsent:
+		if listenerPresent || backendPortHasRoute(inspection.Serve, record.BackendPort, nil) {
+			report.Route.Readiness = ReadinessConflicted
+			report.RequiresOperatorAction = true
+			return report, ErrConflict
+		}
+		report.Observation = "selected-listener-absent"
+		if reservation != nil {
+			report.Observation = "pending-backend-reservation-awaiting-stopped-service-release"
+			report.Route.Readiness = ReadinessUncertain
+			report.ReservationReleasable = reservation.State == StatePublishPending && validReservationID(reservation.ReservationID)
+			report.RequiresOperatorAction = true
+			return report, ErrUncertain
+		}
+		return report, nil
 	case StatePublishPending, StatePublishUncertain, StateRemovePending, StateRemoveUncertain:
 		report.Route.Readiness = ReadinessUncertain
 		report.RequiresOperatorAction = true
@@ -883,6 +905,11 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 	if err := validateRecoveryConsent(consent, *record, origin); err != nil {
 		return err
 	}
+	if !m.skipBackendReadiness {
+		if err := requireBackendListenerStopped(record.BackendPort); err != nil {
+			return err
+		}
+	}
 	initial, err := m.client.Inspect(ctx)
 	if err != nil {
 		return err
@@ -915,11 +942,34 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 			}
 			matching := registeredRouteMatches(current, *record)
 			listenerPresent := hasRouteAtPort(current.Serve, record.HTTPSPort)
+			if !m.skipBackendReadiness {
+				if err := requireBackendListenerStopped(record.BackendPort); err != nil {
+					return err
+				}
+			}
 			if consent.RecoveryObservation == "present" && !matching {
 				return ErrConflict
 			}
-			if consent.RecoveryObservation == "absent" && listenerPresent {
+			if consent.RecoveryObservation == "absent" &&
+				(listenerPresent || backendPortHasRoute(current.Serve, record.BackendPort, nil)) {
 				return ErrConflict
+			}
+			reservation, err := m.readBackendReservation(record.BackendPort)
+			if err != nil || reservation == nil || !sameBackendReservation(*reservation,
+				reservationForRegistration(*record, record.State)) || reservation.ReservationID != consent.ReservationID {
+				return ErrUncertain
+			}
+			switch record.State {
+			case StatePublishPending, StatePublishUncertain:
+				if reservation.State != StatePublishPending {
+					return ErrUncertain
+				}
+			case StateRemovePending, StateRemoveUncertain:
+				if reservation.State != StateRegistered {
+					return ErrUncertain
+				}
+			default:
+				return ErrUncertain
 			}
 			resolved := *record
 			resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -947,6 +997,258 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 			return nil
 		})
 	})
+}
+
+// AbandonMissing explicitly closes a registration whose acknowledged route has
+// disappeared. It never issues Serve commands and releases only the matching
+// backend reservation after fresh identity, route, and stopped-listener checks.
+func (m *Manager) AbandonMissing(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int, consent Consent) error {
+	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
+		return err
+	}
+	if err := m.validateDevelopmentIsolation(true, false); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	record, err := m.readRegistration()
+	if err != nil {
+		return err
+	}
+	if record == nil || !((record.State == StateRegistered && record.MutationAcknowledged) ||
+		(record.State == StateReconciledAbsent && !record.MutationAcknowledged)) {
+		return ErrUncertain
+	}
+	if record.Scope != scope || record.InstallationID != installationID || record.HTTPSPort != httpsPort ||
+		record.BackendPort != backendPort || !registrationOriginMatches(*record, origin) ||
+		!consent.RecoveryAccepted || consent.RecoveryObservation != "absent" || consent.OperationID != record.OperationID {
+		return ErrConflict
+	}
+	if err := validateConsentBinding(consent, record.NodeID, scope, origin, httpsPort, backendPort); err != nil {
+		return err
+	}
+	if !m.skipBackendReadiness {
+		if err := requireBackendListenerStopped(backendPort); err != nil {
+			return err
+		}
+	}
+	initial, err := m.client.Inspect(ctx)
+	if err != nil {
+		return err
+	}
+	if initial.Identity.NodeID != record.NodeID || initial.Identity.DNSName != record.DNSName ||
+		!originMatchesIdentity(origin, initial.Identity, httpsPort) || !sameProfile(initial, *record) ||
+		m.client.binary != record.BinaryPath {
+		return ErrConflict
+	}
+	if err := m.requireProfileForScope(initial, scope); err != nil {
+		return err
+	}
+	if hasRouteAtPort(initial.Serve, httpsPort) || backendPortHasRoute(initial.Serve, backendPort, nil) {
+		return ErrConflict
+	}
+	return m.withNodeLock(ctx, record.NodeID, func() error {
+		return m.withBackendReservationLock(ctx, func() error {
+			currentRecord, err := m.readRegistration()
+			if err != nil {
+				return err
+			}
+			if currentRecord == nil || *currentRecord != *record {
+				return ErrUncertain
+			}
+			if !m.skipBackendReadiness {
+				if err := requireBackendListenerStopped(backendPort); err != nil {
+					return err
+				}
+			}
+			current, err := m.client.Inspect(ctx)
+			if err != nil {
+				return err
+			}
+			if current.Identity.NodeID != record.NodeID || current.Identity.DNSName != record.DNSName ||
+				!originMatchesIdentity(origin, current.Identity, httpsPort) || !sameProfile(current, *record) ||
+				m.client.binary != record.BinaryPath {
+				return ErrConflict
+			}
+			if err := m.requireProfileForScope(current, scope); err != nil {
+				return err
+			}
+			if hasRouteAtPort(current.Serve, httpsPort) || backendPortHasRoute(current.Serve, backendPort, nil) {
+				return ErrConflict
+			}
+			reservation, err := m.readBackendReservation(backendPort)
+			if err != nil {
+				return err
+			}
+			if reservation == nil && consent.ReservationID != "" {
+				return ErrConflict
+			}
+			if reservation != nil && reservation.ReservationID != consent.ReservationID {
+				return ErrConflict
+			}
+			if record.State == StateRegistered {
+				if reservation == nil || reservation.State != StateRegistered ||
+					!sameBackendReservation(*reservation, reservationForRegistration(*record, StateRegistered)) {
+					return ErrUncertain
+				}
+			} else if reservation != nil {
+				if !sameBackendReservation(*reservation, reservationForRegistration(*record, StateRegistered)) {
+					return ErrUncertain
+				}
+				switch reservation.State {
+				case StateRegistered:
+				case StatePublishPending:
+					if !validReservationID(reservation.ReservationID) {
+						return ErrUncertain
+					}
+				default:
+					return ErrUncertain
+				}
+			}
+			if record.State == StateRegistered {
+				resolved := *record
+				resolved.State = StateReconciledAbsent
+				resolved.ConsentScope = reconcileConsentScope
+				resolved.MutationAcknowledged = false
+				resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				if err := m.writeRegistration(resolved); err != nil {
+					return err
+				}
+			}
+			if reservation == nil {
+				return nil
+			}
+			if err := m.removeBackendReservation(reservationForRegistration(*record, StateRegistered)); err != nil {
+				return fmt.Errorf("%w: missing route is recorded but its backend reservation remains", ErrUncertain)
+			}
+			return nil
+		})
+	})
+}
+
+// RepairMissing makes a fresh, consented publication only for an acknowledged
+// registration proven absent. It first retains a reconciled-absent journal and
+// a new reservation, then delegates the single mutation/readback to Publish.
+func (m *Manager) RepairMissing(ctx context.Context, request PublishRequest) error {
+	if err := validateRequest(request); err != nil {
+		return err
+	}
+	if err := m.requireDevelopmentTuple(request.Scope, request.HTTPSPort, request.BackendPort); err != nil {
+		return err
+	}
+	if err := m.validateDevelopmentIsolation(false, true); err != nil {
+		return err
+	}
+	if !validReservationID(request.ReservationID) || request.BackendLease == nil {
+		return ErrWorkflowRequired
+	}
+	if request.Scope != "development" || request.Consent.RouteConfirmation !=
+		PublishRouteConfirmation(request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort) {
+		return ErrConflict
+	}
+	if err := validatePublishConsent(request.Consent, request.ExpectedNodeID, request.Scope, request.Origin,
+		request.HTTPSPort, request.BackendPort); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	record, err := m.readRegistration()
+	if err != nil {
+		return err
+	}
+	if record == nil || !((record.State == StateRegistered && record.MutationAcknowledged) ||
+		(record.State == StateReconciledAbsent && !record.MutationAcknowledged)) {
+		return ErrUncertain
+	}
+	if !request.Consent.RecoveryAccepted || request.Consent.RecoveryObservation != "absent" ||
+		request.Consent.OperationID != record.OperationID {
+		return ErrConflict
+	}
+	initial, err := m.client.Inspect(ctx)
+	if err != nil {
+		return err
+	}
+	if initial.Identity.NodeID != record.NodeID || initial.Identity.DNSName != record.DNSName ||
+		!originMatchesIdentity(request.Origin, initial.Identity, request.HTTPSPort) || !sameProfile(initial, *record) ||
+		m.client.binary != record.BinaryPath || !sameRequest(*record, request, initial, m.client.binary) {
+		return ErrConflict
+	}
+	if err := m.requireProfileForScope(initial, request.Scope); err != nil {
+		return err
+	}
+	if hasRouteAtPort(initial.Serve, request.HTTPSPort) || backendPortHasRoute(initial.Serve, request.BackendPort, nil) {
+		return ErrConflict
+	}
+	if err := m.withNodeLock(ctx, record.NodeID, func() error {
+		return m.withBackendReservationLock(ctx, func() error {
+			currentRecord, err := m.readRegistration()
+			if err != nil {
+				return err
+			}
+			if currentRecord == nil || *currentRecord != *record {
+				return ErrUncertain
+			}
+			current, err := m.client.Inspect(ctx)
+			if err != nil {
+				return err
+			}
+			if current.Identity.NodeID != record.NodeID || current.Identity.DNSName != record.DNSName ||
+				!originMatchesIdentity(request.Origin, current.Identity, request.HTTPSPort) || !sameProfile(current, *record) ||
+				m.client.binary != record.BinaryPath {
+				return ErrConflict
+			}
+			if err := m.requireProfileForScope(current, request.Scope); err != nil {
+				return err
+			}
+			if hasRouteAtPort(current.Serve, request.HTTPSPort) || backendPortHasRoute(current.Serve, request.BackendPort, nil) {
+				return ErrConflict
+			}
+			reservation, err := m.readBackendReservation(request.BackendPort)
+			if err != nil {
+				return err
+			}
+			if record.State == StateRegistered && (reservation == nil || reservation.State != StateRegistered ||
+				!sameBackendReservation(*reservation, reservationForRegistration(*record, StateRegistered))) {
+				return ErrUncertain
+			}
+			if reservation != nil && !sameBackendReservation(*reservation, reservationForRegistration(*record, StateRegistered)) {
+				return ErrConflict
+			}
+			if reservation != nil {
+				switch reservation.State {
+				case StateRegistered:
+				case StatePublishPending:
+					if reservation.ReservationID != request.ReservationID {
+						return ErrConflict
+					}
+				default:
+					return ErrUncertain
+				}
+			}
+			if record.State == StateRegistered {
+				resolved := *record
+				resolved.State = StateReconciledAbsent
+				resolved.ConsentScope = reconcileConsentScope
+				resolved.MutationAcknowledged = false
+				resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				if err := m.writeRegistration(resolved); err != nil {
+					return err
+				}
+			}
+			pending := backendPortReservation{
+				Schema: 1, InstallationID: request.InstallationID, Scope: request.Scope, NodeID: request.ExpectedNodeID,
+				HTTPSPort: request.HTTPSPort, BackendPort: request.BackendPort, Origin: request.Origin,
+				ReservationID: request.ReservationID, State: StatePublishPending,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			}
+			return m.writeBackendReservation(pending)
+		})
+	}); err != nil {
+		return err
+	}
+	return m.Publish(ctx, request)
 }
 
 func validateRecoveryConsent(consent Consent, record registration, origin string) error {
@@ -1321,6 +1623,15 @@ func registeredRouteMatches(inspection Inspection, record registration) bool {
 		matching++
 	}
 	return matching == 1 && !backendPortHasRoute(inspection.Serve, record.BackendPort, &record)
+}
+
+func requireBackendListenerStopped(backendPort int) error {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(backendPort)))
+	if err != nil {
+		return fmt.Errorf("%w: backend listener is not stopped", ErrConflict)
+	}
+	_ = listener.Close()
+	return nil
 }
 
 func backendPortHasRoute(serve tailscale.ServeStatus, backendPort int, allowed *registration) bool {

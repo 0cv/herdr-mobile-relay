@@ -105,6 +105,23 @@ func (w *DevelopmentWorkflow) Reconcile(ctx context.Context, installationID, ori
 		DevelopmentHTTPSPort, DevelopmentBackendPort, consent)
 }
 
+func (w *DevelopmentWorkflow) AbandonMissing(ctx context.Context, installationID, origin string, consent Consent) error {
+	if err := w.requireBoundIdentity(installationID, w.preflight.NodeID, origin); err != nil {
+		return err
+	}
+	return w.manager.AbandonMissing(ctx, "development", installationID, origin,
+		DevelopmentHTTPSPort, DevelopmentBackendPort, consent)
+}
+
+func (w *DevelopmentWorkflow) RepairMissing(ctx context.Context, request PublishRequest) error {
+	if w == nil || w.manager == nil || request.Scope != "development" || request.BackendLease == nil ||
+		request.ExpectedNodeID != w.preflight.NodeID || request.Origin != w.preflight.Origin ||
+		request.HTTPSPort != DevelopmentHTTPSPort || request.BackendPort != DevelopmentBackendPort {
+		return ErrWorkflowRequired
+	}
+	return w.manager.RepairMissing(ctx, request)
+}
+
 func (w *DevelopmentWorkflow) requireBoundIdentity(installationID, nodeID, origin string) error {
 	if w == nil || w.manager == nil || installationID == "" ||
 		nodeID != w.preflight.NodeID || origin != w.preflight.Origin {

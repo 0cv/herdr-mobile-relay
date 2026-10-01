@@ -251,6 +251,11 @@ export function canInviteFrom(relay: RelayConfig): boolean {
   return relay.transport === 'hybrid' && canRendezvous(relay);
 }
 
+function hasQuickSetupInvitationMetadata(params: URLSearchParams): boolean {
+  return ['invite', 'invite_version', 'invite_expires', 'relay_id', 'rendezvous']
+    .some((key) => params.has(key));
+}
+
 export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): QuickSetupInvitation | null {
   const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
   const id = params.get('invite') || '';
@@ -273,6 +278,7 @@ export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): Qui
 export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>): Omit<RelayConfig, 'id'> | null {
   const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
   const invitation = quickSetupInvitation(locationValue);
+  if (hasQuickSetupInvitationMetadata(params) && !invitation) return null;
   const token = params.get('setup') || '';
   if (token.length < 16 || token.length > 512) return null;
   if (!['http:', 'https:'].includes(locationValue.protocol)) return null;

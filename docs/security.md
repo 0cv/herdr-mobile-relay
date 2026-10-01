@@ -94,11 +94,13 @@ The bootstrap invitation is one-use on stable installs. Its ten-minute window
 is measured from each presentation while no device has enrolled yet — a relay
 with no paired phone would otherwise be unpairable ten minutes after start,
 with no way in — so the first successful enrolment, not the clock, is what
-consumes it. Printing the setup link again arms one more: ordinary foreground
-relay starts signal the running relay (`SIGUSR1`, found through `relay.pid` beside
-`relay.env`) before drawing the QR, and the relay mints a fresh ten-minute
-bootstrap invitation without touching the devices already enrolled. Foreground
-Tailscale Serve instead uses its private local-control socket and verifies the
+consumes it. Invitations for additional devices are separate one-use links with
+a fixed ten-minute lifetime from issue; a paired owner must create a fresh one
+if it expires or is used. Printing the setup link again arms one more: ordinary
+foreground relay starts signal the running relay (`SIGUSR1`, found through
+`relay.pid` beside `relay.env`) before drawing the QR, and the relay mints a
+fresh ten-minute bootstrap invitation without touching the devices already
+enrolled. Foreground Tailscale Serve instead uses its private local-control socket and verifies the
 active run before arming; it never resets enrolled devices or runs as a
 background service. Only a local process can send either request, which is the
 same trust the printed key already carries. The quick tunnel is the exception:
