@@ -8,10 +8,21 @@
   merge base: `ef9f84351b5f257f1e8e0156057198fe8e644dd3`.
 - Normal two-parent merge, `--no-commit --no-ff`, autostash explicitly disabled.
   No rebase, squash, reset, stash, force push, main push, release or deployment.
-- Implementation provenance observed at 2026-10-01T19:06:08Z:
-  `PI_PROVIDER=openai-codex`, `PI_MODEL=gpt-6.1-sol`, reasoning `xhigh`.
-  Sol implementation authority ends at 2026-10-01T19:30:58Z; unfinished work
-  must retain artifacts for the owner-authorized Opus 5.5 continuation.
+- Implementation provenance, per the owner's timed model instruction (Sol
+  until 2026-10-01T19:30:58Z, then Opus 5.5):
+  - Sol (`openai-codex` / `gpt-6.1-sol` / `xhigh`, observed 19:06:08Z) wrote
+    the merge `d740cdd4` (19:22:28Z) and follow-ups `0cdd529b` (19:25:10Z)
+    and `1f47d543` (19:27:43Z), all committed and pushed before the cutoff,
+    in workflow run `d452ea12-4153-4724-83df-8ea3b091ed97`.
+  - The supervising assistant stopped that run at 19:31:47Z because its first
+    worker turn was still running after the cutoff. It returned no handoff,
+    was cancelled and unreviewed, and is not an approval.
+  - Every later commit, starting with `9e77faef`, is by Opus
+    (`anthropic` / `claude-opus-5-5` / `xhigh`, verified 19:32:47Z), after an
+    independent audit of the merge, both parents, the conflict resolutions,
+    clean auto-merges and the Sol follow-ups.
+- `origin/main` has since moved beyond the pinned target; this checkpoint does
+  not chase it. Corrections are forward commits on the task branch only.
 - Unrelated working-tree documentation, plans, npm lockfiles and Python cache
   are excluded from staging and must remain untouched.
 
@@ -122,6 +133,39 @@ web/version.json.br
   settings/store boundaries. Branch manager/public-command recovery source and
   activation constant have no changes versus the branch parent; late repairs
   `e4f4ffd8`, `1510b99c`, `6707b3bd` survive through branch ancestry and bytes.
+- `internal/herdr/events_test.go` is byte-identical to main: main's
+  `collectBootstrapTestEvents` subsumes the branch's tolerance for an event that
+  arrives just after the bootstrap buffer closes and additionally requires a
+  clean end of stream, so no branch assertion is lost.
+
+## Opus audit corrections (forward commits after the Sol follow-ups)
+
+The audit re-read the combined merge diff, every conflict resolution, the
+clean auto-merged callers of changed shell helpers and every hosted shell
+fixture that had not yet run on the merged tree. Corrections:
+
+- Root cause of the merged plugin rollback failure: Bash gives a bare
+  `return` inside a trap handler the status from before the trap. The merged
+  unit rewrite checks `systemd_quoted`'s status, so rollback of a recovered
+  broken service (run from the `EXIT` trap) failed and left the old unit
+  unrepaired. `systemd_quoted` and `require_user_service_context` (also on
+  the launchd rollback path) now return explicit statuses, with a shell
+  regression that calls both from a failing `EXIT` trap.
+- Main's Cloudflare public `/readyz` gate ran for any transport that kept a
+  `CLOUDFLARED_CONFIG`, including CLI-backed Serve, whose exact route is
+  verified separately. It now applies only to the Cloudflare transport.
+- Foreground managed and operator-owned Serve launchers start the relay
+  directly, so they now drop raw `GH_TOKEN`/`GITHUB_TOKEN` after loading
+  `relay.env`. This matches main's quick-start and service boundaries; the
+  relay keeps only the private token-file path.
+- Fixture composition only, with no assertion removed: main's native-installer
+  fixture and the operator-managed CLI update fixture delegate strict JSON
+  fields and readiness to the compiled relay. The branch CLI installer,
+  refusal and uninstall fixtures now include the packaged native transaction
+  helper, an exact readiness identity, hermetic `systemd-analyze`/`plutil`
+  stand-ins, a reachable launchd user domain, private removal sentinels and
+  main's complete-assignment `Environment=` quoting. Failed plugin-build
+  assertions now report the newest fixture output and unit.
 
 ## Verification boundary
 
@@ -143,6 +187,18 @@ that selected relay. Start/plugin relay fixtures now delegate both scalar
 parsing and readiness verification to the compiled merged relay helper. No
 readiness assertions or behavioral cases were removed. This run also remains
 historically failed pending fresh exact-SHA verification.
+Ordinary run `36914460251` on `1f47d543` (native `36914459781` green) still
+failed only in the shell job, silently inside the plugin build fixture. The
+Opus corrections above were driven by these later failing shell jobs, each
+historically failed and superseded only by fresh exact-SHA evidence:
+`36916456422` (an intermittent Pi bridge Node fixture timeout that passed in
+every other run), `36918051269`, `36919194468`, `36920097604` and
+`36921473292` (plugin rollback; the last replayed the unit rewrite and
+identified the trap-status cause) and `36922541123` (plugin build passed; the
+development menu fixture's controlled PATH lacked Bash for main's portable
+`#!/usr/bin/env bash` entrypoints, so the fixture now links the resolved Bash
+beside its tool stand-ins). Review readiness requires both workflows green on
+the exact submitted SHA.
 
 Mobile harness/device jobs remain intentionally disabled; this checkpoint
 makes no real-daemon, physical-phone or production qualification claim.

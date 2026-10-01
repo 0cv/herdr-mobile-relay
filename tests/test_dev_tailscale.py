@@ -264,6 +264,9 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     menu_plutil.chmod(0o700)
     for utility in ("readlink", "dirname", "basename", "sed"):
         (menu_tools_dir / utility).symlink_to(f"/usr/bin/{utility}")
+    # Main's portable `#!/usr/bin/env bash` entrypoints resolve Bash from the
+    # same controlled PATH used to enumerate Tailscale CLI candidates.
+    (menu_tools_dir / "bash").symlink_to(shutil.which("bash") or "/bin/bash")
     app_store_cli = app_store_bundle / "Contents" / "MacOS" / "Tailscale"
     app_store_cli.parent.mkdir(mode=0o700, parents=True)
     app_store_cli.write_text(f"#!/bin/sh\nprintf invoked >> '{sentinel}'\nexit 97\n", encoding="utf-8")
