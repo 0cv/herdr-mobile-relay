@@ -262,27 +262,27 @@ func TestCursorTimestampNormalization(t *testing.T) {
 	if !page.Available || page.Total != 5 {
 		t.Fatalf("page = %#v", page)
 	}
-	
+
 	// UTC timestamp should be preserved as-is
 	if page.Entries[0].Timestamp != "2026-09-22T14:35:00Z" {
 		t.Errorf("UTC: got %q, want %q", page.Entries[0].Timestamp, "2026-09-22T14:35:00Z")
 	}
-	
+
 	// UTC+5:30 → subtract offset to get UTC
 	if page.Entries[1].Timestamp != "2026-10-15T05:00:00Z" {
 		t.Errorf("UTC+5:30: got %q, want %q", page.Entries[1].Timestamp, "2026-10-15T05:00:00Z")
 	}
-	
+
 	// UTC-8 → add 8 hours to get UTC
 	if page.Entries[2].Timestamp != "2026-11-06T04:15:00Z" {
 		t.Errorf("UTC-8: got %q, want %q", page.Entries[2].Timestamp, "2026-11-06T04:15:00Z")
 	}
-	
+
 	// Malformed timestamp should be empty
 	if page.Entries[3].Timestamp != "" {
 		t.Errorf("malformed: got %q, want empty", page.Entries[3].Timestamp)
 	}
-	
+
 	// No timestamp envelope should be empty
 	if page.Entries[4].Timestamp != "" {
 		t.Errorf("no timestamp: got %q, want empty", page.Entries[4].Timestamp)
@@ -317,12 +317,12 @@ func TestCursorTimestampOnlyFromUserRecords(t *testing.T) {
 	if !page.Available || page.Total != 2 {
 		t.Fatalf("page = %#v", page)
 	}
-	
+
 	// User message should have timestamp
 	if page.Entries[0].Timestamp != "2026-09-22T14:35:00Z" {
 		t.Errorf("user timestamp: got %q, want %q", page.Entries[0].Timestamp, "2026-09-22T14:35:00Z")
 	}
-	
+
 	// Assistant message should NOT extract timestamp from content
 	if page.Entries[1].Timestamp != "" {
 		t.Errorf("assistant timestamp: got %q, want empty", page.Entries[1].Timestamp)

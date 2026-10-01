@@ -46,7 +46,7 @@ func findCursorSession(roots []string, project ProjectContext, sessionID string)
 	}
 	rels := cursorTranscriptRels(sessionID)
 	candidates := projectDirectoriesForContext(project)
-	
+
 	// Try direct folder-name lookup first (fastest path).
 	seenSlug := make(map[string]bool)
 	for _, root := range roots {
@@ -61,7 +61,7 @@ func findCursorSession(roots []string, project ProjectContext, sessionID string)
 			}
 		}
 	}
-	
+
 	// Fall back to .workspace-trusted discovery if folder name didn't match.
 	for _, root := range roots {
 		for _, cwd := range candidates {
@@ -70,7 +70,7 @@ func findCursorSession(roots []string, project ProjectContext, sessionID string)
 			}
 		}
 	}
-	
+
 	// Final fallback: scan all projects by UUID.
 	for _, root := range roots {
 		for _, rel := range rels {
@@ -87,10 +87,10 @@ func findCursorByWorkspaceTrusted(root, cwd string, rels []string) Location {
 	if cwd == "" {
 		return Location{}
 	}
-	
+
 	// Resolve symlinks once for the target path.
 	resolvedCWD, errCWD := filepath.EvalSymlinks(cwd)
-	
+
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return Location{}
@@ -118,14 +118,14 @@ func findCursorByWorkspaceTrusted(root, cwd string, rels []string) Location {
 		if recorded == "" {
 			continue
 		}
-		
+
 		// Compare paths: direct match or resolved match.
 		match := (cwd == recorded)
 		if !match && errCWD == nil {
 			resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
 			match = (errRecorded == nil && resolvedCWD == resolvedRecorded)
 		}
-		
+
 		if !match {
 			continue
 		}
@@ -243,7 +243,7 @@ func normalizeCursorTimestamp(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	
+
 	// Extract timezone offset from parentheses at end: (UTC) or (UTC+2) or (UTC-5:30)
 	offsetStr := ""
 	if idx := strings.LastIndex(raw, "("); idx >= 0 {
@@ -252,7 +252,7 @@ func normalizeCursorTimestamp(raw string) string {
 			raw = strings.TrimSpace(raw[:idx])
 		}
 	}
-	
+
 	// Parse offset: "UTC", "UTC+2", "UTC-5:30", etc.
 	offsetMinutes := 0
 	if offsetStr != "" && strings.HasPrefix(offsetStr, "UTC") {
@@ -265,7 +265,7 @@ func normalizeCursorTimestamp(raw string) string {
 			} else if strings.HasPrefix(offset, "+") {
 				offset = offset[1:]
 			}
-			
+
 			parts := strings.Split(offset, ":")
 			if len(parts) > 0 {
 				if hours, err := strconv.Atoi(parts[0]); err == nil {
@@ -279,7 +279,7 @@ func normalizeCursorTimestamp(raw string) string {
 			}
 		}
 	}
-	
+
 	// Parse the date/time portion. Try common layouts.
 	// Example: "Tuesday, Sep 22, 2026, 2:35 PM"
 	layouts := []string{
@@ -288,7 +288,7 @@ func normalizeCursorTimestamp(raw string) string {
 		"Monday, Jan 2, 2006, 15:04",
 		"Monday, Jan 02, 2006, 15:04",
 	}
-	
+
 	var t time.Time
 	var err error
 	for _, layout := range layouts {
@@ -296,14 +296,14 @@ func normalizeCursorTimestamp(raw string) string {
 			break
 		}
 	}
-	
+
 	if err != nil {
 		return ""
 	}
-	
+
 	// Apply the offset by subtracting it (to get UTC)
 	t = t.Add(-time.Duration(offsetMinutes) * time.Minute)
-	
+
 	// Return as RFC 3339 in UTC
 	return t.UTC().Format(time.RFC3339)
 }
