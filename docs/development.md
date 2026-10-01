@@ -153,12 +153,18 @@ route has disappeared, `repair-missing` starts the isolated foreground relay,
 rechecks the complete route absence and journal identity, and requires an exact
 confirmation bound to the prior operation and route before one fresh publish and
 readback. Do not use repair for a pending/uncertain mutation; reconcile it first.
+A lost unpublish acknowledgement is reconciled the same way, including after a
+reconciled-present publication: unpublish keeps the shared reservation's
+pre-removal state, so the fresh present or absent observation of the new
+removal operation can be recorded without replaying `off`.
 `abandon-missing` is the stopped-service alternative when the route should not
 be recreated: it requires a free backend listener and complete absence checks,
-then records `reconciled-absent` and releases only the matching local
-reservation without changing Serve. Conflicting/incomplete state, an occupied
-listener, or a mismatched operation ID stops these commands without clearing or
-adopting route state. Invoke these actions through
+then records `reconciled-absent` for a registered or reconciled-present journal
+and releases only the matching local reservation without changing Serve. It also
+releases an exact reservation left beside a reconciled-absent or removed journal
+after an interrupted final write, without rewriting that journal.
+Conflicting/incomplete state, an occupied listener, or a mismatched operation
+ID stops these commands without clearing or adopting route state. Invoke these actions through
 `HERDR_DEV_TAILSCALE_CLI_ENABLE=1 relay/dev-tailscale-cli.sh <action>` only in
 the isolated development profile; they do not qualify production or permit
 live-system recovery outside owner authorization.

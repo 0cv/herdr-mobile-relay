@@ -261,11 +261,238 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		assertReservationAbsent(t, fixture)
 		assertNoRouteMutationCalls(t, fixture)
 	})
+
+	// Composed lifecycle: lost publish acknowledgement -> reconcile present ->
+	// unpublish whose scoped off had no effect and lost its acknowledgement ->
+	// reconcile present -> successful exact unpublish.
+	t.Run("reconciled-present-lost-unpublish-ack-reconciles-present", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StatePublishUncertain, journalReservationID: reviewReservationID,
+			reservation: tailscalecli.StatePublishPending, reservationID: reviewReservationID,
+			serve: reviewRouteWithUnrelated,
+		})
+		mustDispatchDevelopmentCommand(t, "reconcile", reviewReconcileConfirmation(reviewOperationID, reviewReservationID, "present"))
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledPresent, reviewOperationID, reviewReservationID, false)
+		assertReservationState(t, fixture, tailscalecli.StateReconciledPresent, "")
+
+		writeCommandFixtureFile(t, fixture.serveFile+".remove-no-effect", "fixture\n", 0o600)
+		writeCommandFixtureFile(t, fixture.serveFile+".lose-remove-ack", "fixture\n", 0o600)
+		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "unpublish"}, reviewUnpublishConfirmation+"\n")
+		if err == nil || code == 0 {
+			t.Fatalf("unpublish with lost acknowledgement returned code=%d err=%v\nstderr=%s", code, err, stderr)
+		}
+		removalOperation := assertFreshRemovalJournal(t, fixture, reviewOperationID)
+		assertReservationState(t, fixture, tailscalecli.StateReconciledPresent, "")
+		assertServeFixture(t, fixture, reviewRouteWithUnrelated)
+
+		mustDispatchDevelopmentCommand(t, "reconcile", reviewReconcileConfirmation(removalOperation, "", "present"))
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledPresent, removalOperation, "", false)
+		assertReservationState(t, fixture, tailscalecli.StateReconciledPresent, "")
+		assertServeMutationCounts(t, fixture, 0, 1)
+
+		for _, flag := range []string{".remove-no-effect", ".lose-remove-ack"} {
+			if err := os.Remove(fixture.serveFile + flag); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mustDispatchDevelopmentCommand(t, "unpublish", reviewUnpublishConfirmation)
+		if record := readDevelopmentJournal(t, fixture); record.State != tailscalecli.StateRemoved || !record.MutationAcknowledged {
+			t.Fatalf("exact unpublish after reconciliation = %+v", record)
+		}
+		assertReservationAbsent(t, fixture)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertServeMutationCounts(t, fixture, 0, 2)
+	})
+
+	t.Run("reconciled-present-route-disappeared-is-abandonable", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StatePublishUncertain, journalReservationID: reviewReservationID,
+			reservation: tailscalecli.StatePublishPending, reservationID: reviewReservationID,
+			serve: reviewRouteWithUnrelated,
+		})
+		mustDispatchDevelopmentCommand(t, "reconcile", reviewReconcileConfirmation(reviewOperationID, reviewReservationID, "present"))
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledPresent, reviewOperationID, reviewReservationID, false)
+		// The operator removes the route outside Herdr; unrelated Serve state remains.
+		writeCommandFixtureFile(t, fixture.serveFile, reviewUnrelatedRoute+"\n", 0o600)
+		code, report := dispatchDevelopmentStatus(t)
+		if code == 0 || report.Route.JournalState != tailscalecli.StateReconciledPresent ||
+			report.Observation != "selected-listener-absent" || report.OperationID != reviewOperationID ||
+			report.ReservationState != tailscalecli.StateReconciledPresent || report.ReservationAttemptID != reviewReservationID ||
+			!report.RequiresOperatorAction {
+			t.Fatalf("status after reconciled-present route disappeared = code %d report %+v", code, report)
+		}
+		mustDispatchDevelopmentCommand(t, "abandon-missing", reviewAbandonConfirmation(reviewOperationID, reviewReservationID))
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledAbsent, reviewOperationID, reviewReservationID, false)
+		assertReservationAbsent(t, fixture)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertNoRouteMutationCalls(t, fixture)
+	})
+
+	for _, reservationState := range []tailscalecli.RegistrationState{
+		tailscalecli.StateRegistered,
+		tailscalecli.StateReconciledPresent,
+	} {
+		reservationState := reservationState
+		t.Run("removed-journal-retained-"+string(reservationState)+"-reservation-is-abandonable", func(t *testing.T) {
+			requireDevelopmentFixturePorts(t)
+			fixture := newDevelopmentCommandFixture(t)
+			// Unpublish verified the removal and journaled it, but releasing the
+			// shared reservation failed afterwards.
+			seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+				journal: tailscalecli.StateRemoved, reservation: reservationState, serve: reviewUnrelatedRoute,
+			})
+			code, report := dispatchDevelopmentStatus(t)
+			if code == 0 || report.Route.JournalState != tailscalecli.StateRemoved ||
+				report.Observation != "selected-listener-absent" || report.OperationID != reviewOperationID ||
+				report.ReservationState != reservationState || report.ReservationAttemptID != "" || !report.RequiresOperatorAction {
+				t.Fatalf("status for removed journal with retained reservation = code %d report %+v", code, report)
+			}
+			before, err := os.ReadFile(filepath.Join(fixture.state, "registration.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustDispatchDevelopmentCommand(t, "abandon-missing", reviewAbandonConfirmation(reviewOperationID, ""))
+			if after, err := os.ReadFile(filepath.Join(fixture.state, "registration.json")); err != nil || string(after) != string(before) {
+				t.Fatalf("releasing the retained reservation rewrote the removal receipt: err=%v", err)
+			}
+			assertReservationAbsent(t, fixture)
+			assertServeFixture(t, fixture, reviewUnrelatedRoute)
+			assertNoRouteMutationCalls(t, fixture)
+		})
+	}
+
+	t.Run("reconciled-absent-retained-reconciled-present-reservation-is-abandonable", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		// An absent reconciliation journaled its result before the reconciled-
+		// present reservation of its source registration could be released.
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StateReconciledAbsent, journalReservationID: reviewReservationID,
+			reservation: tailscalecli.StateReconciledPresent, serve: reviewUnrelatedRoute,
+		})
+		before, err := os.ReadFile(filepath.Join(fixture.state, "registration.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustDispatchDevelopmentCommand(t, "abandon-missing", reviewAbandonConfirmation(reviewOperationID, ""))
+		if after, err := os.ReadFile(filepath.Join(fixture.state, "registration.json")); err != nil || string(after) != string(before) {
+			t.Fatalf("releasing the retained reservation rewrote the reconciled-absent journal: err=%v", err)
+		}
+		assertReservationAbsent(t, fixture)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertNoRouteMutationCalls(t, fixture)
+	})
+
+	for _, journalState := range []tailscalecli.RegistrationState{
+		tailscalecli.StatePublishUncertain,
+		tailscalecli.StateRemoveUncertain,
+	} {
+		journalState := journalState
+		t.Run("reconcile-absent-after-split-present-write-"+string(journalState), func(t *testing.T) {
+			requireDevelopmentFixturePorts(t)
+			fixture := newDevelopmentCommandFixture(t)
+			seedDevelopmentRouteJournal(t, fixture, journalState, false)
+			markReservationReconciledPresent(t, fixture)
+			// The route disappeared before the interrupted present reconciliation
+			// could be completed.
+			writeCommandFixtureFile(t, fixture.serveFile, reviewUnrelatedRoute+"\n", 0o600)
+			reservationID := ""
+			if journalState == tailscalecli.StatePublishUncertain {
+				reservationID = reviewReservationID
+			}
+			mustDispatchDevelopmentCommand(t, "reconcile", reviewReconcileConfirmation(reviewOperationID, reservationID, "absent"))
+			assertReconciledState(t, fixture, tailscalecli.StateReconciledAbsent, false)
+			assertReservationAbsent(t, fixture)
+			assertServeFixture(t, fixture, reviewUnrelatedRoute)
+			assertNoRouteMutationCalls(t, fixture)
+		})
+	}
+
+	t.Run("registered-receipt-with-unpromoted-reservation-is-abandonable", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		// Publish committed its acknowledged receipt, but promoting the pending
+		// reservation failed; the route later disappeared.
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StateRegistered, reservation: tailscalecli.StatePublishPending,
+			reservationID: reviewReservationID, serve: reviewUnrelatedRoute,
+		})
+		mustDispatchDevelopmentCommand(t, "abandon-missing", reviewAbandonConfirmation(reviewOperationID, reviewReservationID))
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledAbsent, reviewOperationID, "", false)
+		assertReservationAbsent(t, fixture)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertNoRouteMutationCalls(t, fixture)
+	})
+
+	t.Run("registered-receipt-with-unpromoted-reservation-recovers-lost-unpublish-ack", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StateRegistered, reservation: tailscalecli.StatePublishPending,
+			reservationID: reviewReservationID, serve: reviewRouteWithUnrelated,
+		})
+		writeCommandFixtureFile(t, fixture.serveFile+".lose-remove-ack", "fixture\n", 0o600)
+		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "unpublish"}, reviewUnpublishConfirmation+"\n")
+		if err == nil || code == 0 {
+			t.Fatalf("unpublish with lost acknowledgement returned code=%d err=%v\nstderr=%s", code, err, stderr)
+		}
+		removalOperation := assertFreshRemovalJournal(t, fixture, reviewOperationID)
+		// The acknowledged receipt's reservation was promoted before dispatch.
+		assertReservationState(t, fixture, tailscalecli.StateRegistered, "")
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		mustDispatchDevelopmentCommand(t, "reconcile", reviewReconcileConfirmation(removalOperation, "", "absent"))
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledAbsent, removalOperation, "", false)
+		assertReservationAbsent(t, fixture)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertServeMutationCounts(t, fixture, 0, 1)
+	})
+
+	t.Run("cleared-unconfigured-journal-releases-later-setup-reservation", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		// A non-dispatched publication left its attempt-bound unconfigured
+		// journal and pending reservation.
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StateUnconfigured, journalReservationID: reviewReservationID,
+			reservation: tailscalecli.StatePublishPending, reservationID: reviewReservationID,
+		})
+		mustDispatchDevelopmentCommand(t, "release-reservation", "RELEASE BACKEND RESERVATION "+reviewReservationID)
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateUnconfigured, reviewOperationID, "", false)
+		assertReservationAbsent(t, fixture)
+
+		const laterReservationID = "44444444444444444444444444444444"
+		oldFactory := newDevelopmentForegroundServer
+		oldReservationID := developmentReservationIDGenerator
+		t.Cleanup(func() {
+			newDevelopmentForegroundServer = oldFactory
+			developmentReservationIDGenerator = oldReservationID
+		})
+		developmentReservationIDGenerator = func() (string, error) { return laterReservationID, nil }
+		constructionFailure := errors.New("fixture relay construction failed before publication")
+		newDevelopmentForegroundServer = func(*config.Config, *tailscalecli.DevelopmentWorkflow, io.Writer) (developmentForegroundServer, error) {
+			return nil, constructionFailure
+		}
+		setupConfirmation := tailscalecli.PublishRouteConfirmation("node-fixture", reviewOrigin, 8443, 18377)
+		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "setup"}, setupConfirmation+"\n")
+		if code == 0 || !errors.Is(err, constructionFailure) {
+			t.Fatalf("setup with failing relay construction returned code=%d err=%v\nstderr=%s", code, err, stderr)
+		}
+		if strings.Contains(stderr, "Backend reservation retained") {
+			t.Fatalf("setup could not release its own unpublished reservation: %s", stderr)
+		}
+		assertReservationAbsent(t, fixture)
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateUnconfigured, reviewOperationID, "", false)
+		assertNoRouteMutationCalls(t, fixture)
+	})
 }
 
 func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 	requireNativeDevelopmentFixture(t)
-	for _, name := range []string{"success", "consent-cancellation", "ambiguous-publication"} {
+	for _, name := range []string{"success", "consent-cancellation", "ambiguous-publication", "lost-publish-and-unpublish-acknowledgements"} {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			fixture := newDevelopmentCommandFixture(t)
@@ -296,7 +523,11 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 				return
 			}
 
-			if name == "ambiguous-publication" {
+			if name == "ambiguous-publication" || name == "lost-publish-and-unpublish-acknowledgements" {
+				composed := name == "lost-publish-and-unpublish-acknowledgements"
+				if composed {
+					writeCommandFixtureFile(t, fixture.serveFile, reviewUnrelatedRoute+"\n", 0o600)
+				}
 				writeCommandFixtureFile(t, fixture.serveFile+".lose-ack", "fixture\n", 0o600)
 				var callbackCount atomic.Int32
 				installFixtureAppFactory(t, nil, nil, func(string) { callbackCount.Add(1) })
@@ -331,6 +562,41 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 				assertServeMutationCounts(t, fixture, 1, 0)
 				if strings.Contains(recoveryStdout, "setup link") || strings.Contains(recoveryStdout, "https://") {
 					t.Fatalf("reconciliation emitted setup material: %s", recoveryStdout)
+				}
+				if !composed {
+					return
+				}
+
+				// The reconciled-present route is then unpublished: the scoped off
+				// takes effect but its acknowledgement is lost.
+				assertServeFixture(t, fixture, reviewRouteWithUnrelated)
+				writeCommandFixtureFile(t, fixture.serveFile+".lose-remove-ack", "fixture\n", 0o600)
+				code, _, unpublishStderr, unpublishErr := dispatchMainCommand(t, []string{"dev-tailscale-cli", "unpublish"}, reviewUnpublishConfirmation+"\n")
+				if unpublishErr == nil || code == 0 {
+					t.Fatalf("unpublish with lost acknowledgement returned code=%d err=%v\nstderr=%s", code, unpublishErr, unpublishStderr)
+				}
+				removalOperation := assertFreshRemovalJournal(t, fixture, operationID)
+				// The shared reservation keeps its pre-removal reconciled-present
+				// attribution; the removal is not bound to the publication attempt.
+				assertReservationState(t, fixture, tailscalecli.StateReconciledPresent, "")
+				assertServeFixture(t, fixture, reviewUnrelatedRoute)
+				statusCode, report := dispatchDevelopmentStatus(t)
+				if statusCode == 0 || report.Route.JournalState != tailscalecli.StateRemoveUncertain ||
+					report.Observation != "selected-listener-absent" || report.OperationID != removalOperation ||
+					report.ReservationState != tailscalecli.StateReconciledPresent || report.ReservationAttemptID != "" ||
+					!report.RequiresOperatorAction {
+					t.Fatalf("status after lost removal acknowledgement = code %d report %+v", statusCode, report)
+				}
+				mustDispatchDevelopmentCommand(t, "reconcile", reviewReconcileConfirmation(removalOperation, "", "absent"))
+				assertDevelopmentJournal(t, fixture, tailscalecli.StateReconciledAbsent, removalOperation, "", false)
+				assertReservationAbsent(t, fixture)
+				assertServeFixture(t, fixture, reviewUnrelatedRoute)
+				// Neither reconciliation replayed a Serve mutation.
+				assertServeMutationCounts(t, fixture, 1, 1)
+				statusCode, report = dispatchDevelopmentStatus(t)
+				if statusCode != 0 || report.Route.JournalState != tailscalecli.StateReconciledAbsent ||
+					report.ReservationState != "" || report.RequiresOperatorAction {
+					t.Fatalf("status after absent removal reconciliation = code %d report %+v", statusCode, report)
 				}
 				return
 			}
@@ -1022,4 +1288,150 @@ func assertNoRouteMutationCalls(t *testing.T, fixture *developmentCommandFixture
 func fileExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+const reviewUnpublishConfirmation = "UNPUBLISH DEVELOPMENT ROUTE node=node-fixture origin=" + reviewOrigin + " https-port=8443 backend=127.0.0.1:18377"
+
+func reviewReconcileConfirmation(operationID, reservationID, observed string) string {
+	return fmt.Sprintf("RECONCILE DEVELOPMENT ROUTE operation=%s reservation=%s observed=%s node=node-fixture origin=%s https-port=8443 backend=127.0.0.1:18377",
+		operationID, reservationID, observed, reviewOrigin)
+}
+
+func reviewAbandonConfirmation(operationID, reservationID string) string {
+	return fmt.Sprintf("ABANDON MISSING DEVELOPMENT ROUTE operation=%s reservation=%s node=node-fixture origin=%s https-port=8443 backend=127.0.0.1:18377",
+		operationID, reservationID, reviewOrigin)
+}
+
+// developmentLifecycleSeed writes one journal/reservation pair that the
+// manager can reach through an interrupted write between two lifecycle steps.
+type developmentLifecycleSeed struct {
+	journal              tailscalecli.RegistrationState
+	journalReservationID string
+	reservation          tailscalecli.RegistrationState // empty: no shared reservation
+	reservationID        string
+	serve                string // empty: no synthetic Serve configuration
+}
+
+func seedDevelopmentLifecycle(t *testing.T, fixture *developmentCommandFixture, seed developmentLifecycleSeed) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	consentScope := "persistent-route-and-four-risks-v1"
+	switch seed.journal {
+	case tailscalecli.StateRemovePending, tailscalecli.StateRemoveUncertain, tailscalecli.StateRemoved:
+		consentScope = "explicit-route-removal-and-no-remote-drain-v1"
+	case tailscalecli.StateReconciledPresent, tailscalecli.StateReconciledAbsent:
+		consentScope = "explicit-journal-reconciliation-v1"
+	}
+	record := map[string]any{
+		"schema": 1, "installation_id": "fixture-instance", "scope": "development",
+		"node_id": "node-fixture", "dns_name": "herdr.tailnet.ts.net",
+		"profile":     string(tailscalecli.ProfileAppStoreSupplied),
+		"binary_path": fixture.cli, "https_port": 8443, "backend_port": 18377, "path": "/",
+		"backend": "http://127.0.0.1:18377", "consent_scope": consentScope,
+		"operation_id": reviewOperationID, "state": seed.journal, "updated_at": now,
+		"mutation_acknowledged": seed.journal == tailscalecli.StateRegistered || seed.journal == tailscalecli.StateRemoved,
+	}
+	if seed.journalReservationID != "" {
+		record["reservation_id"] = seed.journalReservationID
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCommandFixtureFile(t, filepath.Join(fixture.state, "registration.json"), string(data)+"\n", 0o600)
+	if seed.reservation != "" {
+		reservation := map[string]any{
+			"schema": 1, "installation_id": "fixture-instance", "scope": "development", "node_id": "node-fixture",
+			"https_port": 8443, "backend_port": 18377, "origin": reviewOrigin,
+			"state": seed.reservation, "updated_at": now,
+		}
+		if seed.reservationID != "" {
+			reservation["reservation_id"] = seed.reservationID
+		}
+		reservationData, err := json.Marshal(reservation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeCommandFixtureFile(t, filepath.Join(fixture.coordination, "backend-port-18377.json"), string(reservationData)+"\n", 0o600)
+	}
+	if seed.serve != "" {
+		writeCommandFixtureFile(t, fixture.serveFile, seed.serve+"\n", 0o600)
+	}
+}
+
+type developmentJournalSnapshot struct {
+	State                tailscalecli.RegistrationState `json:"state"`
+	OperationID          string                         `json:"operation_id"`
+	ReservationID        string                         `json:"reservation_id"`
+	MutationAcknowledged bool                           `json:"mutation_acknowledged"`
+}
+
+func readDevelopmentJournal(t *testing.T, fixture *developmentCommandFixture) developmentJournalSnapshot {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fixture.state, "registration.json"))
+	if err != nil {
+		t.Fatalf("read registration: %v", err)
+	}
+	var record developmentJournalSnapshot
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("decode registration: %v", err)
+	}
+	return record
+}
+
+func assertDevelopmentJournal(t *testing.T, fixture *developmentCommandFixture, state tailscalecli.RegistrationState,
+	operationID, reservationID string, acknowledged bool) {
+	t.Helper()
+	record := readDevelopmentJournal(t, fixture)
+	if record.State != state || record.OperationID != operationID || record.ReservationID != reservationID ||
+		record.MutationAcknowledged != acknowledged {
+		t.Fatalf("journal = %+v; want state=%s operation=%s reservation=%s ack=%t", record, state, operationID, reservationID, acknowledged)
+	}
+}
+
+// assertFreshRemovalJournal checks that unpublish recorded a new removal
+// operation, unbound from any earlier publication attempt, without fabricating
+// an acknowledgement.
+func assertFreshRemovalJournal(t *testing.T, fixture *developmentCommandFixture, previousOperationID string) string {
+	t.Helper()
+	record := readDevelopmentJournal(t, fixture)
+	operationID, err := hex.DecodeString(record.OperationID)
+	if record.State != tailscalecli.StateRemoveUncertain || record.MutationAcknowledged || record.ReservationID != "" ||
+		err != nil || len(operationID) != 16 || record.OperationID == previousOperationID {
+		t.Fatalf("removal journal = %+v; want a fresh unacknowledged remove-uncertain operation without a publication attempt (previous operation %s, decode err=%v)",
+			record, previousOperationID, err)
+	}
+	return record.OperationID
+}
+
+func assertServeFixture(t *testing.T, fixture *developmentCommandFixture, want string) {
+	t.Helper()
+	data, err := os.ReadFile(fixture.serveFile)
+	if want == "" {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("synthetic Serve configuration = %q err=%v; want absent", data, err)
+		}
+		return
+	}
+	if err != nil || strings.TrimSpace(string(data)) != want {
+		t.Fatalf("synthetic Serve configuration = %q err=%v; want %s", data, err, want)
+	}
+}
+
+func mustDispatchDevelopmentCommand(t *testing.T, action, input string) {
+	t.Helper()
+	code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", action}, input+"\n")
+	if err != nil || code != 0 {
+		t.Fatalf("public %s returned code=%d err=%v\nstderr=%s", action, code, err, stderr)
+	}
+}
+
+func dispatchDevelopmentStatus(t *testing.T) (int, tailscalecli.RecoveryReport) {
+	t.Helper()
+	code, stdout, stderr, _ := dispatchMainCommand(t, []string{"dev-tailscale-cli", "status"}, "")
+	var report tailscalecli.RecoveryReport
+	if err := json.NewDecoder(strings.NewReader(stdout)).Decode(&report); err != nil {
+		t.Fatalf("decode public status report: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	return code, report
 }

@@ -31,6 +31,7 @@ const (
 	commandFixtureVersion            = `{"majorMinorPatch":"1.102.4","short":"1.102.4","long":"` + commandFixtureLong + `","gitCommit":"3caf7d9e7dcaba589cfc58beda596929733e4fea","daemonLong":"` + commandFixtureLong + `","extraGitCommit":"084ee3b64537a1276e56fc38cdf0a711da9f4936","osVariant":"appstore","cap":142}`
 	commandFixtureRoute              = `{"TCP":{"8443":{"HTTPS":true}},"Web":{"herdr.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18377"}}}}}`
 	commandFixtureRouteWithUnrelated = `{"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"other.tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}},"herdr.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18377"}}}}}`
+	commandFixtureUnrelatedRoute     = `{"TCP":{"443":{"HTTPS":true}},"Web":{"other.tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}}}}`
 )
 
 type developmentCommandFixture struct {
@@ -658,9 +659,13 @@ func newDevelopmentCommandFixture(t *testing.T) *developmentCommandFixture {
 		"  'version --json --daemon') printf '%s\\n' '" + commandFixtureVersion + "' ;;\n" +
 		"  'serve status --json') if [ -f " + shellQuoteCommandFixture(fixture.serveFile) + " ]; then /bin/cat " + shellQuoteCommandFixture(fixture.serveFile) + "; else printf '%s\\n' '{}'; fi ;;\n" +
 		"  'serve --bg --https=8443 --set-path=/ http://127.0.0.1:18377')\n" +
-		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile+".lose-ack") + " ]; then printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; exit 91; fi\n" +
-		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile) + " ] && /usr/bin/grep -q 'other.tailnet.ts.net:443' " + shellQuoteCommandFixture(fixture.serveFile) + "; then printf '%s\\n' '" + commandFixtureRouteWithUnrelated + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; else printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; fi ;;\n" +
-		"  'serve --bg --https=8443 --set-path=/ off') /bin/rm -f " + shellQuoteCommandFixture(fixture.serveFile) + "; if [ -f " + shellQuoteCommandFixture(fixture.serveFile+".lose-remove-ack") + " ]; then exit 91; fi ;;\n" +
+		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile) + " ] && /usr/bin/grep -q 'other.tailnet.ts.net:443' " + shellQuoteCommandFixture(fixture.serveFile) + "; then printf '%s\\n' '" + commandFixtureRouteWithUnrelated + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; else printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; fi\n" +
+		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile+".lose-ack") + " ]; then exit 91; fi ;;\n" +
+		"  'serve --bg --https=8443 --set-path=/ off')\n" +
+		"    if [ ! -f " + shellQuoteCommandFixture(fixture.serveFile+".remove-no-effect") + " ]; then\n" +
+		"      if [ -f " + shellQuoteCommandFixture(fixture.serveFile) + " ] && /usr/bin/grep -q 'other.tailnet.ts.net:443' " + shellQuoteCommandFixture(fixture.serveFile) + "; then printf '%s\\n' '" + commandFixtureUnrelatedRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; else /bin/rm -f " + shellQuoteCommandFixture(fixture.serveFile) + "; fi\n" +
+		"    fi\n" +
+		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile+".lose-remove-ack") + " ]; then exit 91; fi ;;\n" +
 		"  *) exit 91 ;;\n" +
 		"esac\n"
 	writeCommandFixtureFile(t, fixture.cli, cliScript, 0o700)

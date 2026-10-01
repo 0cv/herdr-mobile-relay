@@ -553,14 +553,29 @@ func abandonMissingDevelopmentRoute(ctx context.Context, workflow *tailscalecli.
 	if recoverErr != nil && !errors.Is(recoverErr, tailscalecli.ErrConflict) && !errors.Is(recoverErr, tailscalecli.ErrUncertain) {
 		return status(recoverErr)
 	}
-	reservationSafe := (report.ReservationState == "" && report.ReservationAttemptID == "" &&
-		report.Route.JournalState == tailscalecli.StateReconciledAbsent) ||
-		(report.ReservationState == tailscalecli.StateRegistered && report.ReservationAttemptID == "") ||
-		(report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != "" && report.ReservationReleasable)
-	if (report.Route.JournalState != tailscalecli.StateRegistered && report.Route.JournalState != tailscalecli.StateReconciledAbsent) ||
-		(report.Observation != "selected-listener-absent" && report.Observation != "pending-backend-reservation-awaiting-stopped-service-release") ||
+	routeHolding := report.ReservationAttemptID == "" &&
+		(report.ReservationState == tailscalecli.StateRegistered || report.ReservationState == tailscalecli.StateReconciledPresent)
+	pendingAttempt := report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != ""
+	reservationSafe := false
+	switch report.Route.JournalState {
+	case tailscalecli.StateRegistered:
+		// A publication receipt can be committed before its pending reservation
+		// is promoted; the listener-absent observation proves no route remains.
+		reservationSafe = (report.ReservationState == tailscalecli.StateRegistered && report.ReservationAttemptID == "") ||
+			(pendingAttempt && report.Observation == "selected-listener-absent")
+	case tailscalecli.StateReconciledPresent:
+		// The confirmation binds the publication attempt that was reconciled.
+		reservationSafe = report.ReservationState == tailscalecli.StateReconciledPresent
+	case tailscalecli.StateRemoved:
+		// Verified removal was journaled before its reservation was released.
+		reservationSafe = routeHolding
+	case tailscalecli.StateReconciledAbsent:
+		reservationSafe = (report.ReservationState == "" && report.ReservationAttemptID == "") || routeHolding ||
+			(pendingAttempt && report.ReservationReleasable)
+	}
+	if (report.Observation != "selected-listener-absent" && report.Observation != "pending-backend-reservation-awaiting-stopped-service-release") ||
 		report.OperationID == "" || !reservationSafe {
-		return 1, errors.New("abandonment requires an acknowledged registration and fresh proof that its exact listener and backend route are absent")
+		return 1, errors.New("abandonment requires an acknowledged, reconciled or removed registration, its exact retained backend reservation, and fresh proof that its exact listener and backend route are absent")
 	}
 	preflight := workflow.Preflight()
 	_, _ = fmt.Fprintf(stderr, "Read-only observation: journal=%s route=%s operation=%s reservation-state=%s reservation-id=%s.\n",
@@ -604,13 +619,20 @@ func reconcileDevelopmentRoute(ctx context.Context, workflow *tailscalecli.Devel
 		report.Route.JournalState == tailscalecli.StatePublishUncertain
 	removeOperation := report.Route.JournalState == tailscalecli.StateRemovePending ||
 		report.Route.JournalState == tailscalecli.StateRemoveUncertain
-	splitPresentWrite := observation == "present" && report.ReservationState == tailscalecli.StateReconciledPresent &&
-		((publishOperation && report.ReservationAttemptID != "") || (removeOperation && report.ReservationAttemptID == ""))
 	reservationMatches := false
 	if publishOperation {
-		reservationMatches = (report.ReservationState == tailscalecli.StatePublishPending && report.ReservationAttemptID != "") || splitPresentWrite
+		// The publication attempt's pending reservation, or one already marked
+		// reconciled-present by an interrupted reconciliation; the displayed
+		// attempt ID remains the publication attempt in both cases.
+		reservationMatches = report.ReservationAttemptID != "" &&
+			(report.ReservationState == tailscalecli.StatePublishPending ||
+				report.ReservationState == tailscalecli.StateReconciledPresent)
 	} else if removeOperation {
-		reservationMatches = (report.ReservationState == tailscalecli.StateRegistered && report.ReservationAttemptID == "") || splitPresentWrite
+		// Unpublish leaves the source registration's route-holding reservation
+		// (registered, or reconciled-present after a reconciled publication).
+		reservationMatches = report.ReservationAttemptID == "" &&
+			(report.ReservationState == tailscalecli.StateRegistered ||
+				report.ReservationState == tailscalecli.StateReconciledPresent)
 	}
 	if !pending || !reservationMatches || report.OperationID == "" || observation == "" {
 		return 1, errors.New("reconciliation requires one unambiguous route observation and its exact backend reservation")

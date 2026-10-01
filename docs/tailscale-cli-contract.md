@@ -178,26 +178,49 @@ can be reused without another Serve write after fresh node/config validation.
 The read-only `Recover` operation reports only redacted journal/readback state;
 it never clears uncertainty or treats an observed matching/absent route as
 proof that a dispatched mutation was acknowledged. Reconciled-present remains
-unready and unacknowledged until an explicit exact-route unpublish; reconciled-
-absent may be followed only by a fresh consented publication. A disappeared
+unready and unacknowledged until an explicit exact-route unpublish or, after its
+route disappears, an explicit `abandon-missing`; reconciled-absent may be
+followed only by a fresh consented publication. A disappeared
 registered route is degraded and is not automatically recreated. The public
 `dev-tailscale-cli reconcile` action records only an operation-ID-bound,
 unambiguous exact-present or listener-absent observation for a pending/uncertain
 journal; it never dispatches a Serve command. If a crash leaves the shared
 reservation at `reconciled-present` while the registration remains pending or
-uncertain, the public action can resume only an operation-bound present
-observation after fresh readback; it never retries a Serve mutation.
+uncertain, the public action resumes that same operation with a fresh exact
+present or listener-absent observation; it never retries a Serve mutation.
+Unpublish leaves the shared reservation in its pre-removal route-holding state
+(`registered` after an acknowledged publication, `reconciled-present` after a
+reconciled one) and records the removal as a new operation that is not bound to
+any earlier publication attempt ID. That reservation state is the pre-removal
+attribution: a pending/uncertain removal reconciles only beside a matching
+route-holding reservation, its fresh present observation stays
+`reconciled-present` and unacknowledged, and its fresh absent observation
+records `reconciled-absent` and releases the reservation. If a publication
+receipt was committed but promoting its pending reservation failed, unpublish
+first completes that promotion from the acknowledged receipt (not from the
+observation) under the same locks before dispatching `off`.
 `repair-missing` is a separate foreground action for an acknowledged or
 previously reconciled-absent registration. It requires a complete fresh absence
 check and an exact typed confirmation bound to both the route tuple and prior
 operation, then performs
 one fresh publication and readback. `abandon-missing` requires the foreground
 relay stopped, the backend listener stopped, and fresh proof that neither the
-selected listener nor any route to the backend exists; it records
-`reconciled-absent` and releases only that registration's reservation without a
-Serve mutation. Conflicting or incomplete observations refuse all three paths;
-none adopts an observed route. Explicit repair and explicit unpublish require
-fresh preflight and consent. Transport-selection helpers run a local-only
+selected listener nor any route to the backend exists; it never changes Serve.
+For a `registered` or `reconciled-present` journal whose route disappeared it
+records `reconciled-absent` and releases that registration's reservation. For a
+`reconciled-absent` or verified `removed` journal that still has its exact
+retained reservation (because the final release write was interrupted) it
+releases only that reservation and leaves the journal unchanged. Its typed
+confirmation binds the journal's operation ID and the displayed reservation
+attempt (the original publication attempt for a reconciled-present journal),
+and it accepts only the tuple-matching reservation states that the lifecycle
+can leave beside that journal. A verified `removed` journal with a retained
+reservation is reported as requiring operator action rather than ready.
+Conflicting or incomplete observations refuse all three paths; none adopts an
+observed route. An unconfigured journal keeps a non-dispatched publication's
+attempt ID until that exact reservation is released; afterwards a later setup
+attempt's own pending reservation remains releasable by that attempt. Explicit
+repair and explicit unpublish require fresh preflight and consent. Transport-selection helpers run a local-only
 journal/reservation guard before changing away from
 `tailscale-cli`; active, uncertain, or pending state blocks the change until the
 exact route is explicitly unpublished and any owned pending reservation is

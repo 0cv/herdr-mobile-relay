@@ -898,6 +898,137 @@ func TestPresentReconciliationRecoversAfterSplitJournalWrite(t *testing.T) {
 	}
 }
 
+func TestReconciledPresentRemovalUncertaintyIsReconcilable(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		offApplied  bool
+		observation string
+		wantState   RegistrationState
+	}{
+		{name: "absent", offApplied: true, observation: "absent", wantState: StateReconciledAbsent},
+		{name: "present", offApplied: false, observation: "present", wantState: StateReconciledPresent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newFakeCLI(t)
+			fixture.serve = unrelatedRoute
+			fixture.publishErr = errors.New("publication acknowledgement lost")
+			fixture.publishDispatched = true
+			manager := newFixtureManager(t, fixture, "reconciled-present removal "+tc.name)
+			request := fixtureRequest(true)
+			if err := manager.Publish(context.Background(), request); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("ambiguous publish = %v", err)
+			}
+			fixture.serve = unrelatedAndFixtureRoutes // the unacknowledged publication took effect
+			publication, err := manager.readRegistration()
+			if err != nil || publication == nil || publication.State != StatePublishUncertain || publication.ReservationID == "" {
+				t.Fatalf("uncertain publication journal = %+v, %v", publication, err)
+			}
+			present := fixtureConsent(true)
+			present.RecoveryAccepted = true
+			present.RecoveryObservation = "present"
+			present.OperationID = publication.OperationID
+			present.ReservationID = publication.ReservationID
+			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377, present); err != nil {
+				t.Fatalf("reconcile present publication: %v", err)
+			}
+
+			fixture.removeErr = errors.New("removal acknowledgement lost")
+			fixture.removeDispatched = true
+			if err := manager.Unpublish(context.Background(), fixtureConsent(true)); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("ambiguous unpublish = %v", err)
+			}
+			removal, err := manager.readRegistration()
+			if err != nil || removal == nil || removal.State != StateRemoveUncertain || removal.MutationAcknowledged ||
+				removal.ReservationID != "" || removal.OperationID == publication.OperationID {
+				t.Fatalf("removal journal = %+v, %v", removal, err)
+			}
+			if tc.offApplied {
+				fixture.serve = unrelatedRoute
+			}
+			report, recoverErr := manager.Recover(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377)
+			if !errors.Is(recoverErr, ErrUncertain) || report.OperationID != removal.OperationID ||
+				report.ReservationState != StateReconciledPresent || report.ReservationAttemptID != "" {
+				t.Fatalf("removal recovery report = %+v, %v", report, recoverErr)
+			}
+			consent := fixtureConsent(true)
+			consent.RecoveryAccepted = true
+			consent.RecoveryObservation = tc.observation
+			consent.OperationID = report.OperationID
+			consent.ReservationID = report.ReservationAttemptID
+			superseded := consent
+			superseded.ReservationID = publication.ReservationID
+			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377, superseded); err == nil {
+				t.Fatal("removal reconciliation accepted the superseded publication attempt")
+			}
+			if err := manager.Reconcile(context.Background(), "development", "install-fixture",
+				"https://herdr.tailnet.ts.net:8443", 8443, 18377, consent); err != nil {
+				t.Fatalf("reconcile removal observation: %v", err)
+			}
+			resolved, err := manager.readRegistration()
+			if err != nil || resolved == nil || resolved.State != tc.wantState || resolved.MutationAcknowledged ||
+				resolved.OperationID != removal.OperationID {
+				t.Fatalf("reconciled removal journal = %+v, %v", resolved, err)
+			}
+			reservation, err := manager.readBackendReservation(18377)
+			if tc.wantState == StateReconciledAbsent && (err != nil || reservation != nil) {
+				t.Fatalf("absent removal reconciliation retained reservation: %+v, %v", reservation, err)
+			}
+			if tc.wantState == StateReconciledPresent && (err != nil || reservation == nil ||
+				reservation.State != StateReconciledPresent || reservation.ReservationID != "") {
+				t.Fatalf("present removal reconciliation reservation = %+v, %v", reservation, err)
+			}
+			if fixture.mutationCalls() != 2 {
+				t.Fatalf("reconciliation replayed a Serve mutation: %d calls", fixture.mutationCalls())
+			}
+			if tc.offApplied && fixture.serve != unrelatedRoute {
+				t.Fatalf("unrelated route was not preserved: %s", fixture.serve)
+			}
+		})
+	}
+}
+
+func TestClearedUnconfiguredJournalAllowsLaterAttemptRelease(t *testing.T) {
+	fixture := newFakeCLI(t)
+	fixture.publishErr = ErrProfileUnavailable
+	fixture.publishDispatched = false
+	manager := newFixtureManager(t, fixture, "cleared unconfigured release")
+	request := fixtureRequest(true)
+	if err := manager.Publish(context.Background(), request); !errors.Is(err, ErrPublishNotDispatched) {
+		t.Fatalf("pre-dispatch failure classification = %v", err)
+	}
+	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, request.ReservationID, true); err != nil {
+		t.Fatalf("release non-dispatched attempt: %v", err)
+	}
+	cleared, err := manager.readRegistration()
+	if err != nil || cleared == nil || cleared.State != StateUnconfigured || cleared.ReservationID != "" {
+		t.Fatalf("released unconfigured journal = %+v, %v", cleared, err)
+	}
+	later := "00000000000000000000000000000002"
+	if err := manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, later); err != nil {
+		t.Fatalf("later setup reservation: %v", err)
+	}
+	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort,
+		"00000000000000000000000000000003", true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a different attempt released the later reservation: %v", err)
+	}
+	if err := manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+		request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, later, true); err != nil {
+		t.Fatalf("later setup could not release its own unpublished reservation: %v", err)
+	}
+	if reservation, err := manager.readBackendReservation(request.BackendPort); err != nil || reservation != nil {
+		t.Fatalf("later reservation remained after release: %+v, %v", reservation, err)
+	}
+	if fixture.mutationCalls() != 1 {
+		t.Fatalf("release path dispatched Serve mutations: %d", fixture.mutationCalls())
+	}
+}
+
 func TestRegisteredMissingRouteRequiresBoundedExplicitRepair(t *testing.T) {
 	fixture := newFakeCLI(t)
 	manager := newFixtureManager(t, fixture, "repair missing route")

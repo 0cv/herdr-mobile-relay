@@ -447,8 +447,11 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 				currentReservation.State != StatePublishPending || !sameBackendReservation(*currentReservation, reservation) {
 				return ErrConflict
 			}
+			// A non-dispatched publication keeps its attempt ID until that exact
+			// reservation is released; afterwards the cleared journal binds no
+			// attempt, so a later setup's own pending reservation stays releasable.
 			if record != nil && record.InstallationID == installationID && record.State == StateUnconfigured &&
-				record.ReservationID != reservationID {
+				record.ReservationID != "" && record.ReservationID != reservationID {
 				return ErrConflict
 			}
 			if !m.skipBackendReadiness {
@@ -802,12 +805,9 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		reservation = &copy
 	}
 	if reservation != nil {
-		report.ReservationAttemptID = reservation.ReservationID
+		report.ReservationAttemptID = confirmedReservationAttempt(record, *reservation)
 		report.ReservationState = reservation.State
 		report.ReservationBackendPort = reservation.BackendPort
-		if reservation.State == StateReconciledPresent && reservation.ReservationID == "" && record != nil {
-			report.ReservationAttemptID = record.ReservationID
-		}
 	}
 	inspection, err := m.client.Inspect(ctx)
 	if err != nil {
@@ -916,12 +916,21 @@ func (m *Manager) Recover(ctx context.Context, scope, installationID, origin str
 		report.RequiresOperatorAction = true
 		return report, ErrConflict
 	case StateRemoved:
-		if !listenerPresent {
-			return report, nil
+		if listenerPresent {
+			report.Route.Readiness = ReadinessConflicted
+			report.RequiresOperatorAction = true
+			return report, ErrConflict
 		}
-		report.Route.Readiness = ReadinessConflicted
-		report.RequiresOperatorAction = true
-		return report, ErrConflict
+		if reservation != nil {
+			// The verified removal was journaled before its route-holding
+			// reservation could be released. Only an explicit, operation-bound
+			// abandon-missing after fresh absence checks releases it.
+			report.OperationID = record.OperationID
+			report.Route.Readiness = ReadinessUncertain
+			report.RequiresOperatorAction = true
+			return report, ErrUncertain
+		}
+		return report, nil
 	case StateUnconfigured:
 		if !listenerPresent {
 			return report, nil
@@ -1039,33 +1048,36 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 			}
 			reservation, err := m.readBackendReservation(record.BackendPort)
 			if err != nil || reservation == nil || !sameBackendReservation(*reservation,
-				reservationForRegistration(*record, record.State)) {
+				reservationForRegistration(*record, record.State)) ||
+				confirmedReservationAttempt(record, *reservation) != consent.ReservationID {
 				return ErrUncertain
 			}
-			if record.State == StateReconciledPresent {
-				if consent.RecoveryObservation != "present" || reservation.State != StateReconciledPresent || reservation.ReservationID != "" {
+			// Reconcile writes the shared reservation before the registration
+			// journal. If interrupted between those writes, the reservation is
+			// already reconciled-present; a fresh exact-operation-bound present or
+			// absent observation may still resolve the same pending journal.
+			splitPresentWrite := reservation.State == StateReconciledPresent && reservation.ReservationID == ""
+			switch record.State {
+			case StateReconciledPresent:
+				if consent.RecoveryObservation != "present" || !splitPresentWrite {
 					return ErrUncertain
 				}
-			} else {
-				expectedReservationState := StatePublishPending
-				switch record.State {
-				case StatePublishPending, StatePublishUncertain:
-					expectedReservationState = StatePublishPending
-				case StateRemovePending, StateRemoveUncertain:
-					expectedReservationState = StateRegistered
-				default:
+			case StatePublishPending, StatePublishUncertain:
+				pendingAttempt := reservation.State == StatePublishPending &&
+					reservation.ReservationID == record.ReservationID
+				if !pendingAttempt && !splitPresentWrite {
 					return ErrUncertain
 				}
-				sourceStateMatches := reservation.State == expectedReservationState &&
-					reservation.ReservationID == consent.ReservationID
-				// Reconcile writes the shared reservation before the registration
-				// journal. If interrupted between those writes, permit an exact,
-				// operation-bound retry to finish the same present observation.
-				splitPresentWrite := consent.RecoveryObservation == "present" &&
-					reservation.State == StateReconciledPresent && reservation.ReservationID == ""
-				if !sourceStateMatches && !splitPresentWrite {
+			case StateRemovePending, StateRemoveUncertain:
+				// Unpublish leaves the source registration's route-holding
+				// reservation unchanged: registered after an acknowledged
+				// publication or reconciled-present after a reconciled one. That
+				// state is the pre-removal attribution and is never promoted.
+				if !routeHoldingReservation(*reservation) {
 					return ErrUncertain
 				}
+			default:
+				return ErrUncertain
 			}
 			resolved := *record
 			resolved.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -1100,9 +1112,11 @@ func (m *Manager) Reconcile(ctx context.Context, scope, installationID, origin s
 	})
 }
 
-// AbandonMissing explicitly closes a registration whose acknowledged route has
-// disappeared. It never issues Serve commands and releases only the matching
-// backend reservation after fresh identity, route, and stopped-listener checks.
+// AbandonMissing explicitly closes a registration whose acknowledged or
+// reconciled-present route has disappeared, or releases the reservation left
+// beside a reconciled-absent or verified-removed journal. It never issues Serve
+// commands and releases only the matching backend reservation after fresh
+// identity, route, and stopped-listener checks.
 func (m *Manager) AbandonMissing(ctx context.Context, scope, installationID, origin string, httpsPort, backendPort int, consent Consent) error {
 	if err := m.requireDevelopmentTuple(scope, httpsPort, backendPort); err != nil {
 		return err
@@ -1117,8 +1131,7 @@ func (m *Manager) AbandonMissing(ctx context.Context, scope, installationID, ori
 	if err != nil {
 		return err
 	}
-	if record == nil || !((record.State == StateRegistered && record.MutationAcknowledged) ||
-		(record.State == StateReconciledAbsent && !record.MutationAcknowledged)) {
+	if record == nil || !abandonableRegistration(*record) {
 		return ErrUncertain
 	}
 	if record.Scope != scope || record.InstallationID != installationID || record.HTTPSPort != httpsPort ||
@@ -1182,32 +1195,23 @@ func (m *Manager) AbandonMissing(ctx context.Context, scope, installationID, ori
 			if err != nil {
 				return err
 			}
-			if reservation == nil && consent.ReservationID != "" {
-				return ErrConflict
-			}
-			if reservation != nil && reservation.ReservationID != consent.ReservationID {
-				return ErrConflict
-			}
-			if record.State == StateRegistered {
-				if reservation == nil || reservation.State != StateRegistered ||
-					!sameBackendReservation(*reservation, reservationForRegistration(*record, StateRegistered)) {
+			if reservation == nil {
+				if consent.ReservationID != "" {
+					return ErrConflict
+				}
+				if record.State != StateReconciledAbsent {
 					return ErrUncertain
 				}
-			} else if reservation != nil {
-				if !sameBackendReservation(*reservation, reservationForRegistration(*record, StateRegistered)) {
-					return ErrUncertain
+			} else {
+				if confirmedReservationAttempt(record, *reservation) != consent.ReservationID {
+					return ErrConflict
 				}
-				switch reservation.State {
-				case StateRegistered:
-				case StatePublishPending:
-					if !validReservationID(reservation.ReservationID) {
-						return ErrUncertain
-					}
-				default:
+				if !sameBackendReservation(*reservation, reservationForRegistration(*record, StateRegistered)) ||
+					!abandonableReservation(*record, *reservation) {
 					return ErrUncertain
 				}
 			}
-			if record.State == StateRegistered {
+			if record.State == StateRegistered || record.State == StateReconciledPresent {
 				resolved := *record
 				resolved.State = StateReconciledAbsent
 				resolved.ConsentScope = reconcileConsentScope
@@ -1373,8 +1377,11 @@ func readinessForError(err error) RouteReadiness {
 	}
 }
 
-// Unpublish removes only the exact route from an acknowledged journal. It does
-// not infer ownership from an observed route, and it never calls serve reset.
+// Unpublish removes only the exact route from an acknowledged or
+// reconciled-present journal. It does not infer ownership from an observed
+// route, and it never calls serve reset. The shared reservation keeps its
+// pre-removal route-holding state (registered or reconciled-present) as the
+// attribution that removal reconciliation later validates.
 func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1426,6 +1433,19 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 			if err != nil || reservation == nil || !sameBackendReservation(*reservation, reservationForRegistration(*record, record.State)) {
 				return ErrUncertain
 			}
+			// Publish commits its acknowledged receipt before promoting the
+			// publication attempt's reservation. If that promotion failed, finish
+			// it from the receipt (never from observation) before dispatch so the
+			// removal journal always sits beside a route-holding reservation.
+			promoteReceiptReservation := false
+			switch {
+			case record.State == StateRegistered && reservation.State == StateRegistered && reservation.ReservationID == "":
+			case record.State == StateReconciledPresent && reservation.State == StateReconciledPresent && reservation.ReservationID == "":
+			case record.State == StateRegistered && reservation.State == StatePublishPending && validReservationID(reservation.ReservationID):
+				promoteReceiptReservation = true
+			default:
+				return ErrUncertain
+			}
 			current, err := m.client.Inspect(ctx)
 			if err != nil {
 				return err
@@ -1447,12 +1467,20 @@ func (m *Manager) Unpublish(ctx context.Context, consent Consent) error {
 				}
 				_ = listener.Close()
 			}
+			if promoteReceiptReservation {
+				if err := m.writeBackendReservation(reservationForRegistration(*record, StateRegistered)); err != nil {
+					return fmt.Errorf("promote acknowledged publication reservation before removal: %w", err)
+				}
+			}
 			opID, err := newOperationID()
 			if err != nil {
 				return err
 			}
 			pending := *record
 			pending.OperationID = opID
+			// The removal is a new operation; it is not bound to any earlier
+			// publication attempt ID retained by a reconciled-present journal.
+			pending.ReservationID = ""
 			pending.ConsentScope = removeConsentScope
 			pending.State = StateRemovePending
 			pending.MutationAcknowledged = false
@@ -1878,6 +1906,60 @@ func reservationForRegistration(record registration, state RegistrationState) ba
 		Schema: 1, InstallationID: record.InstallationID, Scope: record.Scope, NodeID: record.NodeID,
 		HTTPSPort: record.HTTPSPort, BackendPort: record.BackendPort, Origin: origin,
 		ReservationID: reservationID, State: state, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// routeHoldingReservation reports whether a shared reservation mirrors a route
+// that was acknowledged (registered) or operator-observed (reconciled-present)
+// rather than an in-flight publication attempt.
+func routeHoldingReservation(reservation backendPortReservation) bool {
+	return reservation.ReservationID == "" &&
+		(reservation.State == StateRegistered || reservation.State == StateReconciledPresent)
+}
+
+// confirmedReservationAttempt is the reservation attempt ID an operator must
+// confirm for a journal/reservation pair. A reconciled-present reservation has
+// no attempt ID; only a publication journal, or the reconciled-present journal
+// that resolved one, remains bound to its original publication attempt.
+// Removal and terminal journals use the shared reservation's own value.
+func confirmedReservationAttempt(record *registration, reservation backendPortReservation) string {
+	if record != nil && reservation.State == StateReconciledPresent && reservation.ReservationID == "" &&
+		(record.State == StatePublishPending || record.State == StatePublishUncertain ||
+			record.State == StateReconciledPresent) {
+		return record.ReservationID
+	}
+	return reservation.ReservationID
+}
+
+func abandonableRegistration(record registration) bool {
+	switch record.State {
+	case StateRegistered, StateRemoved:
+		return record.MutationAcknowledged
+	case StateReconciledPresent, StateReconciledAbsent:
+		return !record.MutationAcknowledged
+	default:
+		return false
+	}
+}
+
+// abandonableReservation lists the tuple-matching reservations that can remain
+// beside each abandonable journal after a completed or interrupted lifecycle
+// write. AbandonMissing releases any of them only after fresh absence proof.
+func abandonableReservation(record registration, reservation backendPortReservation) bool {
+	pendingAttempt := reservation.State == StatePublishPending && validReservationID(reservation.ReservationID)
+	switch record.State {
+	case StateRegistered:
+		// Publish commits the receipt before promoting its pending reservation.
+		return (reservation.State == StateRegistered && reservation.ReservationID == "") || pendingAttempt
+	case StateReconciledPresent:
+		return reservation.State == StateReconciledPresent && reservation.ReservationID == ""
+	case StateRemoved:
+		// Unpublish journals verified removal before releasing the reservation.
+		return routeHoldingReservation(reservation)
+	case StateReconciledAbsent:
+		return routeHoldingReservation(reservation) || pendingAttempt
+	default:
+		return false
 	}
 }
 

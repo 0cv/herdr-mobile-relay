@@ -250,10 +250,14 @@ Persist `publish-pending` or `remove-pending` before mutation; a crash or ambigu
 post-dispatch outcome becomes the corresponding `*-uncertain` record. `recover`
 only inspects evidence. Explicit operation-ID-bound `reconcile` may record one
 unambiguous present/absent observation for a pending mutation but never replays
-Serve or claims acknowledgement. For an acknowledged registration whose route
-has disappeared, `repair-missing` and `abandon-missing` are separate consented
-choices; both recheck identity, complete Serve state, route absence and backend
-ownership, and neither adopts an observed route. A normal stop or Ctrl-C is
+Serve or claims acknowledgement; this includes a removal of a reconciled-present
+route, whose shared reservation keeps its pre-removal state. For an acknowledged
+registration whose route has disappeared, `repair-missing` and
+`abandon-missing` are separate consented choices; `abandon-missing` also closes
+a disappeared reconciled-present route and releases an exact reservation left
+beside a reconciled-absent or removed journal. Both recheck identity, complete
+Serve state, route absence and backend ownership, and neither adopts an
+observed route. A normal stop or Ctrl-C is
 **stop relay, leave the persistent route**. `unpublish` is a separate consented
 operation. Keep state if any mutation or cleanup is unconfirmed; do not delete
 the root to clear uncertainty.
