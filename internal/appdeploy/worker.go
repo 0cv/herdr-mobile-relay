@@ -140,7 +140,7 @@ func Run(ctx context.Context, jobPath string) error {
 		write("failed", err)
 		return err
 	}
-	// launchctl submit (macOS) and systemd-run (Linux) hand the worker an
+	// launchd (macOS) and systemd-run (Linux) hand the worker an
 	// inherited working directory the deploy does not own: on macOS that is the
 	// read-only filesystem root. Wrangler resolves its account config cache at
 	// $PWD/.wrangler/cache and aborts the whole deployment when that mkdir

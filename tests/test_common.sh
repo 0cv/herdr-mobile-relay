@@ -1448,7 +1448,16 @@ case "$1 $2" in
 esac
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$MOVE_BIN/service.sh"
-chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl" "$MOVE_BIN/relay-stub" "$MOVE_BIN/service.sh"
+# change-hostname.sh reinstalls the service with the repository's service.sh,
+# so report it as not loaded instead of letting that reach this machine's relay.
+cat > "$MOVE_BIN/launchctl" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+    "print gui/"*/*) exit 1 ;;
+esac
+EOF
+chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl" "$MOVE_BIN/relay-stub" "$MOVE_BIN/service.sh" \
+    "$MOVE_BIN/launchctl"
 MOVE_STATE_RECORD="$WORK_DIR/state-hostname"
 export MOVE_STATE_RECORD
 reset_move_config() {

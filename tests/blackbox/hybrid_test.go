@@ -119,6 +119,7 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(tmpDir, "config")),
 		fmt.Sprintf("XDG_CACHE_HOME=%s", filepath.Join(tmpDir, "cache")),
 		fmt.Sprintf("HERDR_SOCKET_PATH=%s", socketPath),
+		stubLaunchctlPath(t),
 	)
 	relay.Stdout = os.Stdout
 	relay.Stderr = os.Stderr

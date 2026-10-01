@@ -133,8 +133,22 @@ else
 fi
 printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
 
+# The checked relay runs on this machine, so it must not reach its launchd jobs.
+HOST_LAUNCHCTL_LOG="$WORK_DIR/host-launchctl.log"
+mkdir "$WORK_DIR/host-bin"
+cat > "$WORK_DIR/host-bin/launchctl" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$HOST_LAUNCHCTL_LOG"
+EOF
+chmod 700 "$WORK_DIR/host-bin/launchctl"
+
 mkdir "$WORK_DIR/physical-tmp"
 ln -s "$WORK_DIR/physical-tmp" "$WORK_DIR/logical-tmp"
-TMPDIR="$WORK_DIR/logical-tmp" \
+TMPDIR="$WORK_DIR/logical-tmp" PATH="$WORK_DIR/host-bin:$PATH" \
     "$REPO_DIR/scripts/check-installed-release.sh" \
     "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET"
+if [ -e "$HOST_LAUNCHCTL_LOG" ]; then
+    echo "installed-release check ran launchctl on this machine:" >&2
+    cat "$HOST_LAUNCHCTL_LOG" >&2
+    exit 1
+fi

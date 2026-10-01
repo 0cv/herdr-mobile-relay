@@ -97,6 +97,7 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 		fmt.Sprintf("XDG_CACHE_HOME=%s", filepath.Join(tmpDir, "cache")),
 		fmt.Sprintf("XDG_DATA_HOME=%s", filepath.Join(tmpDir, "data")),
 		fmt.Sprintf("HERDR_SOCKET_PATH=%s", env.socketPath),
+		stubLaunchctlPath(t),
 	)
 	env.relayCmd.Stdout = os.Stdout
 	env.relayCmd.Stderr = os.Stderr
@@ -274,6 +275,17 @@ func freePort(t *testing.T) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 	return port
+}
+
+// stubLaunchctlPath shadows launchctl so a relay started on macOS cannot remove
+// launchd jobs belonging to the machine running the tests.
+func stubLaunchctlPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "launchctl"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return "PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")
 }
 
 func repoRoot(t *testing.T) string {

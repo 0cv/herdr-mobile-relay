@@ -5,6 +5,18 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Run each macOS update and app deployment worker exactly once. launchd used to
+  restart finished workers forever, so a failed update re-ran in full, app
+  deployment included, over and over and blocked later updates. The relay
+  now removes finished workers, including the endlessly restarting ones left
+  by earlier releases, when it starts, before each update or deployment, and
+  on every update check. Failed updates no longer leave their job file behind.
+  ([#57](https://github.com/0cv/herdr-mobile-relay/issues/57))
+- Show Pi's live commands on the phone when Pi runs on Bun on macOS. The Pi
+  integration could not identify Herdr's socket there, so none were listed.
+
 ## [0.22.4] - 2026-10-01
 
 ### Added
