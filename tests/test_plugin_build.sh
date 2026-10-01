@@ -15,6 +15,14 @@ report_failed_assertion() {
     if [ -f "${UNIT_FILE:-}" ]; then
         echo "--- current fixture unit" >&2
         cat "$UNIT_FILE" >&2 || true
+        ls -la "$(dirname "$UNIT_FILE")" >&2 || true
+    fi
+    if [ -n "${RELEASE_ROOT:-}" ]; then
+        echo "--- fixture release root" >&2
+        ls -la "$RELEASE_ROOT" "$RELEASE_ROOT/current/" "$RELEASE_ROOT/current/relay/" >&2 || true
+    fi
+    if [ -f "${RESTART_LOG:-}" ]; then
+        echo "--- fake service restarts: $(wc -l < "$RESTART_LOG")" >&2
     fi
 }
 trap 'report_failed_assertion "$LINENO" "$BASH_COMMAND"' ERR
