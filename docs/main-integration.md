@@ -80,7 +80,8 @@ web/version.json.br
 - Dispatch imports/commands and Makefile/CI checks are unions. Main readiness,
   Pi bridge, native installer/recovery checks coexist with managed, BYO and CLI
   lifecycle checks. The closed shell job includes the pinned Bun binary directory
-  for main's Pi tests without reopening caller-controlled runtime adapters.
+  and the hosted runner's Node binary directory for main's Pi subprocess tests
+  without reopening caller-controlled runtime adapters.
   Go 1.27.1, Bun 1.4.0 and actionlint 1.7.12 remain pinned.
 - Dependencies retain both parents' feature dependencies (including native
   modernc SQLite and Tailscale), with branch bbolt 1.4.2 and Go 1.27.1.
@@ -130,6 +131,12 @@ normal/race/tagged Go, shell/service/release fixtures, browser tests, four-targe
 native package smoke, extracted HTTPS/WSS/E2EE acceptance and native lifecycle
 qualification run in disposable hosted CI on the submitted SHA. Ordinary and
 native workflows must both be green before review readiness is claimed.
+The first merged ordinary run `36913821785` exposed an early shell-job failure:
+main's Pi bridge test starts Node subprocesses, but the branch's closed PATH
+omitted the hosted Node directory. The follow-up keeps the closed environment
+and adds that explicitly resolved tool directory. This historical run remains
+failed; only fresh exact-fix-SHA hosted evidence can verify the repair.
+
 Mobile harness/device jobs remain intentionally disabled; this checkpoint
 makes no real-daemon, physical-phone or production qualification claim.
 
