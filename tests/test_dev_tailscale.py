@@ -1516,15 +1516,15 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
 
     legacy_mismatch = str(base / "unrelated-old-pairing.sock")
     blocked_migrations = (
-        ("legacy_socket_present_is_refused", str(base / "legacy-socket" / "config" / "pairing-control.sock"), True, "socket"),
-        ("legacy_symlink_present_is_refused", str(base / "legacy-symlink" / "config" / "pairing-control.sock"), True, "symlink"),
-        ("different_nonlegacy_socket_is_refused", legacy_mismatch, True, "absent"),
-        ("unmarked_legacy_root_is_refused", str(base / "unmarked-legacy" / "config" / "pairing-control.sock"), False, "absent"),
-        ("duplicate_legacy_socket_settings_are_refused", str(base / "duplicate-legacy" / "config" / "pairing-control.sock"), True, "duplicate"),
+        ("legacy_socket_present_is_refused", "ls", str(base / "ls" / "config" / "pairing-control.sock"), True, "socket"),
+        ("legacy_symlink_present_is_refused", "ly", str(base / "ly" / "config" / "pairing-control.sock"), True, "symlink"),
+        ("different_nonlegacy_socket_is_refused", "dn", legacy_mismatch, True, "absent"),
+        ("unmarked_legacy_root_is_refused", "um", str(base / "um" / "config" / "pairing-control.sock"), False, "absent"),
+        ("duplicate_legacy_socket_settings_are_refused", "dp", str(base / "dp" / "config" / "pairing-control.sock"), True, "duplicate"),
     )
-    for name, configured_socket, marked, old_path_kind in blocked_migrations:
+    for name, root_name, configured_socket, marked, old_path_kind in blocked_migrations:
         migration_root, migration_env_file, old_path = make_legacy_migration_root(
-            name, configured_socket, marked, old_path_kind,
+            root_name, configured_socket, marked, old_path_kind,
         )
         env_snapshot = migration_env_file.read_bytes()
         marker_path = migration_root / ".herdr-dev-tailscale-cli"
