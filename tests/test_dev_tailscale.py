@@ -138,12 +138,15 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                 "development_override_precedes_legacy_and_path_candidates",
                 "legacy_override_is_used_when_development_override_is_empty",
                 "exact_app_store_install_wrapper_aliases_bundle_in_menu",
+                "app_store_supported_version_still_requires_explicit_opt_in",
             }:
                 output = stdout + stderr
                 option2_lines = [line for line in output.splitlines() if b"2. Tailscale Serve" in line]
                 if len(option2_lines) != 1 or b"[UNAVAILABLE:" in option2_lines[0]:
                     raise AssertionError(f"{case}: option 2 was incorrectly marked unavailable: {output!r}")
-                if case == "exact_app_store_install_wrapper_aliases_bundle_in_menu" and b"Tailscale app's CLI" not in option2_lines[0]:
+                if (case in {"exact_app_store_install_wrapper_aliases_bundle_in_menu",
+                             "app_store_supported_version_still_requires_explicit_opt_in"} and
+                    b"Tailscale app's CLI" not in option2_lines[0]):
                     raise AssertionError(f"{case}: menu did not select CLI-backed mode: {output!r}")
             if case == "non_exact_app_store_wrapper_keeps_ambiguity_in_menu":
                 output = stdout + stderr
@@ -448,8 +451,6 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         "app_store_supported_version_keeps_cli_option_available", tunnel_script, b"3\n",
         b"Choose 1 or 2.", **app_store_settings,
     )
-    interactive_refused("app_store_selects_cli_mode_not_legacy", tunnel_script, b"2\nn\n",
-                        b"Cancelled; nothing was started.", **app_store_settings)
     if sentinel.exists():
         raise AssertionError("menu selection executed the real-CLI stand-in instead of using filesystem-only detection")
     delegated = subprocess.run(
