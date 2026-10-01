@@ -483,7 +483,7 @@
         >
           <span class="agent-identity">
             <AgentLogo agent={agent.agent} />
-            <span class={`status-dot status-${tone}`} class:hollow={group === 'ready'} aria-hidden="true"></span>
+            <span class={`status-dot status-${tone}`} aria-hidden="true"></span>
           </span>
           <span class="agent-copy">
             <span class="agent-title-row">

@@ -5,6 +5,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Show an idle agent that is ready for input with a green ring instead of the
+  grey reserved for unknown states. A filled green dot still marks a finished
+  turn you have not opened yet.
+
 ## [0.22.3] - 2026-09-30
 
 ### Added
