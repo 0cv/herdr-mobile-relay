@@ -4,6 +4,8 @@ import {
   digest,
   epochSchedule,
   epochSeed,
+  harnessErrorClass,
+  IDLE_BEFORE_HIDE_MS,
   pairOrder,
   parseArguments,
   PILOT_MIN_EPOCHS,
@@ -33,7 +35,9 @@ describe('resume benchmark runner preregistration', () => {
       sample_size_per_stratum: 30,
       sample_unit: 'attempted wake epoch',
       replacement_limit: 2,
+      idle_before_hide_ms: IDLE_BEFORE_HIDE_MS,
     });
+    expect(plan.hide_sequence).toMatch(/kill the socket .* then advance the frozen wall clock/);
     expect(plan.strata).toHaveLength(16);
     expect(plan.strata.every((stratum) => stratum.role === 'pilot')).toBe(true);
     expect(plan.strata.map((stratum) => stratum.id)).toContain('webkit/gateway-relayed/blackhole-restore');
@@ -109,6 +113,15 @@ describe('resume benchmark matched conditions', () => {
       expect([...order].sort()).toEqual(['baseline', 'candidate']);
       expect(pairOrder(epochSeed(1, 'stratum', index))).toEqual(order);
     }
+  });
+
+  it('records harness exceptions only as fixed classes', () => {
+    expect(harnessErrorClass(new Error('page.evaluate: Execution context was destroyed, most likely because of a navigation')))
+      .toBe('context-destroyed');
+    expect(harnessErrorClass(new Error('page.waitForFunction: Timeout 60000ms exceeded.'))).toBe('timeout');
+    expect(harnessErrorClass(new Error('Target page, context or browser has been closed'))).toBe('target-closed');
+    expect(harnessErrorClass(new Error('wss://relay.example/ws failed'))).toBe('other');
+    expect(harnessErrorClass('not an error')).toBe('other');
   });
 
   it('parses runner arguments with the pilot defaults', () => {

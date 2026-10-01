@@ -41,6 +41,8 @@ async function boot(page: Page, config: FixtureConfig): Promise<Booted> {
   page.on('pageerror', (error) => logs.push(String(error)));
   await page.addInitScript(resumeFixtureInit, config);
   await page.goto('/');
+  // The stable bootstrap document redirects to the build entry first.
+  await page.waitForFunction(() => Boolean((window as any).__resumeFixture?.ready()));
   return { page, logs, markers: resumeSensitiveMarkers(config.relays) };
 }
 

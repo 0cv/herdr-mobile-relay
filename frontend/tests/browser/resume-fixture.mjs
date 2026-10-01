@@ -133,8 +133,11 @@ export function resumeFixtureInit(config) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const latencyRange = config.latencyMs || [8, 30];
-  /** @type {{ epoch: number; dateOffset: number; discarded: boolean }} */
-  let persisted = { epoch: 1, dateOffset: 0, discarded: false };
+  // The stable bootstrap document only redirects to the build entry; it must
+  // not consume the state an emulated discard leaves for the app document.
+  const appDocument = location.pathname.startsWith('/builds/');
+  /** @type {{ epoch: number; dateOffset: number; discarded: boolean; wakeAbsolute: number | null }} */
+  let persisted = { epoch: 1, dateOffset: 0, discarded: false, wakeAbsolute: null };
   try {
     const saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
     if (saved && typeof saved === 'object') persisted = { ...persisted, ...saved };
@@ -178,18 +181,26 @@ export function resumeFixtureInit(config) {
   };
   let visibility = 'visible';
 
-  /** @param {boolean} discarded */
-  function persist(discarded) {
+  /** @param {boolean} discarded @param {number | null} [wakeAbsolute] */
+  function persist(discarded, wakeAbsolute = null) {
     try {
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify({ epoch: state.epoch, dateOffset: state.dateOffset, discarded }));
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+        epoch: state.epoch,
+        dateOffset: state.dateOffset,
+        discarded,
+        wakeAbsolute,
+      }));
     } catch {
       // The harness only needs persistence across an emulated discard.
     }
   }
-  if (persisted.discarded) {
+  if (appDocument && persisted.discarded) {
     Object.defineProperty(document, 'wasDiscarded', { configurable: true, value: true });
+    // The wake of a discarded page is the reload itself, before the bootstrap
+    // redirect: express it on this document's monotonic clock (it is negative).
+    if (typeof persisted.wakeAbsolute === 'number') state.wakeAt = persisted.wakeAbsolute - performance.timeOrigin;
   }
-  persist(false);
+  if (appDocument) persist(false);
 
   const realDateNow = Date.now.bind(Date);
   Date.now = () => realDateNow() + state.dateOffset;
@@ -949,11 +960,18 @@ export function resumeFixtureInit(config) {
       if (online) window.dispatchEvent(new Event('online'));
       return restoredAt;
     },
-    /** Arms the next load as a discarded page with a new inventory epoch. */
+    /**
+     * Arms the next load as a discarded page with a new inventory epoch, and
+     * records the reload start as its wake on the shared absolute clock.
+     */
     prepareDiscard() {
       state.epoch += 1;
-      persist(true);
+      persist(true, performance.timeOrigin + performance.now());
       return state.epoch;
+    },
+    /** True once the app document (not the bootstrap redirect) is running. */
+    ready() {
+      return appDocument && Boolean(document.getElementById('app'));
     },
     /** @param {{ delayMs: number; cancel: boolean }} next */
     setUnlock(next) {

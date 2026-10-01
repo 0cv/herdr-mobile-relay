@@ -36,6 +36,8 @@ export const DEADLINE_MS = 60_000;
 export const PILOT_MIN_EPOCHS = 30;
 export const CONFIRMATORY_MIN_PAIRS = 400;
 const WARMUP_TIMEOUT_MS = 30_000;
+/** Idle time after the cold warm-up so no reply is still in flight at the wake. */
+export const IDLE_BEFORE_HIDE_MS = 500;
 const DEVICES = /** @type {const} */ ({ chromium: 'Pixel 7', webkit: 'iPhone 15' });
 
 export const SCENARIOS = Object.freeze({
@@ -210,6 +212,8 @@ export function buildPreregistration(options) {
     seeds: { base_seed: options.baseSeed, derivation: 'fnv1a32(base_seed:stratum:index) for each epoch or pair' },
     order: options.design === 'paired' ? 'seeded independent random order per pair' : 'single variant',
     state_reset: 'fresh browser context, storage and synthetic relay for every run',
+    idle_before_hide_ms: IDLE_BEFORE_HIDE_MS,
+    hide_sequence: 'hide, then kill the socket (and blackhole new dials), then advance the frozen wall clock, then wait the real hidden time',
     scenarios: SCENARIOS,
     transports: TRANSPORTS,
     network_restoration_schedule: {
@@ -291,6 +295,35 @@ function call(page, action, argument) {
 }
 
 /**
+ * Waits until the app document (not the stable bootstrap redirect in front of
+ * it) is running the fixture. Waiting survives that redirect.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {number} timeout
+ */
+function appDocument(page, timeout) {
+  return page.waitForFunction(
+    () => Boolean(/** @type {any} */ (window).__resumeFixture?.ready()),
+    null,
+    { timeout },
+  );
+}
+
+/**
+ * Maps a harness exception to a fixed vocabulary, so evidence never carries
+ * raw error text.
+ *
+ * @param {unknown} error
+ */
+export function harnessErrorClass(error) {
+  const message = error instanceof Error ? error.message : '';
+  if (/Timeout/i.test(message)) return 'timeout';
+  if (/Execution context was destroyed|navigat/i.test(message)) return 'context-destroyed';
+  if (/closed|detached/i.test(message)) return 'target-closed';
+  return 'other';
+}
+
+/**
  * @param {import('@playwright/test').Page} page
  * @param {number} deadline
  */
@@ -354,24 +387,30 @@ async function runEpoch(browser, devices, run) {
       record.harness_invalid = crashed ? 'browser-crash' : 'bundle-load-failed';
       return record;
     }
-    const warm = await page.evaluate(
-      (timeout) => /** @type {any} */ (window).__resumeFixture.awaitFresh([1], timeout),
-      WARMUP_TIMEOUT_MS,
-    );
+    const warm = await appDocument(page, WARMUP_TIMEOUT_MS)
+      .then(() => page.evaluate(
+        (timeout) => /** @type {any} */ (window).__resumeFixture.awaitFresh([1], timeout),
+        WARMUP_TIMEOUT_MS,
+      ))
+      .catch(() => null);
     if (!warm || !('renderedAt' in warm)) {
-      record.harness_invalid = 'warmup-timeout';
+      record.harness_invalid = crashed ? 'browser-crash' : 'warmup-timeout';
       return record;
     }
+    await page.waitForTimeout(IDLE_BEFORE_HIDE_MS);
     const before = /** @type {Record<string, number>} */ (await call(page, 'stats'));
     await call(page, 'hide');
-    if (schedule.frozenMs) await call(page, 'freeze', schedule.frozenMs);
+    // The socket dies first, then time passes: nothing can arrive after the
+    // frozen interval begins and make a dead path look recently active.
     if (stratum.scenario !== 'warm-short') await call(page, 'killConnections');
     if (stratum.scenario === 'blackhole-restore') await call(page, 'blackhole');
+    if (schedule.frozenMs) await call(page, 'freeze', schedule.frozenMs);
     await page.waitForTimeout(schedule.hiddenMs);
     let baseline = before;
     if (stratum.scenario === 'discard') {
       await call(page, 'prepareDiscard');
       await page.reload({ waitUntil: 'commit', timeout: WARMUP_TIMEOUT_MS });
+      await appDocument(page, DEADLINE_MS);
       baseline = { dials: 0, handshakes: 0, refreshes: 0, bytes: 0, hiddenDials: 0, hiddenBytes: 0 };
     } else {
       await call(page, 'show');
@@ -389,10 +428,13 @@ async function runEpoch(browser, devices, run) {
     } else {
       record.outcome = 'deadline';
     }
-  } catch {
+  } catch (error) {
     if (crashed || !browser.isConnected()) record.harness_invalid = 'browser-crash';
-    // Any other harness exception inside the measured epoch is a failure.
-    else record.outcome = 'harness-error';
+    else {
+      // Any other harness exception inside the measured epoch is a failure.
+      record.outcome = 'harness-error';
+      record.harness_error = harnessErrorClass(error);
+    }
   } finally {
     await context.close().catch(() => {});
   }
@@ -416,6 +458,7 @@ async function runNegativeControl(browser, devices, origin, name, control, trial
       result.expected = 'refusal without fresh inventory or redial loop';
       await page.addInitScript(resumeFixtureInit, { relays: [fixtureRelay(1, 'wss', { revoked: true })], seed: trial + 1 });
       await page.goto('/');
+      await appDocument(page, WARMUP_TIMEOUT_MS);
       await page.waitForTimeout(5_000);
       const stats = /** @type {Record<string, number>} */ (await call(page, 'stats'));
       const rendered = await call(page, 'hasRendered', 1);
@@ -430,6 +473,7 @@ async function runNegativeControl(browser, devices, origin, name, control, trial
         seed: trial + 1,
       });
       await page.goto('/');
+      await appDocument(page, WARMUP_TIMEOUT_MS);
       await page.waitForTimeout(3_000);
       const stats = /** @type {Record<string, number>} */ (await call(page, 'stats'));
       const rendered = await call(page, 'hasRendered', 1);
@@ -444,6 +488,7 @@ async function runNegativeControl(browser, devices, origin, name, control, trial
         seed: trial + 1,
       });
       await page.goto('/');
+      await appDocument(page, WARMUP_TIMEOUT_MS);
       await page.waitForTimeout(15_000);
       const stats = /** @type {Record<string, number>} */ (await call(page, 'stats'));
       const rendered = await call(page, 'hasRendered', 1);
@@ -453,6 +498,7 @@ async function runNegativeControl(browser, devices, origin, name, control, trial
       result.expected = 'deferred to the Home Screen app with no dial';
       await page.addInitScript(resumeFixtureInit, { relays: [], iosTab: true, seed: trial + 1 });
       await page.goto('/#setup=0123456789abcdef0123456789abcdef&label=Fixture&relay=wss%3A%2F%2Frelay-deferred-private.example');
+      await appDocument(page, WARMUP_TIMEOUT_MS);
       await page.waitForTimeout(2_000);
       const stats = /** @type {Record<string, number>} */ (await call(page, 'stats'));
       const deferred = await page.getByText('Add Herdr to the iPhone or iPad Home Screen').count();
