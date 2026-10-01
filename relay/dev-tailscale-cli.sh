@@ -207,13 +207,6 @@ fi
 
 ENV_FILE="$DEV_ROOT/relay.env"
 MARKER="$DEV_ROOT/.herdr-dev-tailscale-cli"
-if { [ "$ACTION" = setup ] || [ "$ACTION" = update ]; } && [ -f "$ENV_FILE" ]; then
-    configured_pairing_socket="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
-    if [ "$configured_pairing_socket" != "$PAIRING_SOCKET" ]; then
-        echo "✗ Existing development state records a different pairing socket; it was retained without migration. Choose a separate private root or follow a reviewed migration before setup/update." >&2
-        exit 2
-    fi
-fi
 BUILD_DIR=""
 NEXT_POINTER=""
 # shellcheck disable=SC2329 # Invoked through the setup EXIT-trap cleanup function.
@@ -225,15 +218,62 @@ cleanup_dev_build_stage() {
 cleanup_dev_setup() {
     cleanup_dev_build_stage
 }
+dev_owned_private_directory() {
+    local path="$1" mode owner
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    case "$(uname -s)" in
+        Darwin) mode="$(stat -f '%Lp' "$path")"; owner="$(stat -f '%u' "$path")" ;;
+        Linux) mode="$(stat -c '%a' "$path")"; owner="$(stat -c '%u' "$path")" ;;
+        *) return 1 ;;
+    esac
+    [ "$mode" = 700 ] && [ "$owner" = "$(id -u)" ]
+}
+dev_owned_private_file() {
+    local path="$1" mode owner
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    case "$(uname -s)" in
+        Darwin) mode="$(stat -f '%Lp' "$path")"; owner="$(stat -f '%u' "$path")" ;;
+        Linux) mode="$(stat -c '%a' "$path")"; owner="$(stat -c '%u' "$path")" ;;
+        *) return 1 ;;
+    esac
+    [ "$mode" = 600 ] && [ "$owner" = "$(id -u)" ]
+}
 dev_root_marker_matches() {
     local expected_marker actual_marker
-    [ -f "$MARKER" ] && [ ! -L "$MARKER" ] || return 1
+    dev_owned_private_file "$MARKER" || return 1
     expected_marker="$(printf '%s\n' 'HERDR_DEV_TAILSCALE_CLI_ROOT=1' \
         "HERDR_DEV_TAILSCALE_CLI_STATE_ROOT=$DEV_ROOT/registration" \
         "HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT=$COORDINATION_ROOT")"
     actual_marker="$(<"$MARKER")" || return 1
     [ "$actual_marker" = "$expected_marker" ]
 }
+dev_legacy_socket_parent_is_safe() {
+    [ ! -e "$DEV_ROOT/config" ] && [ ! -L "$DEV_ROOT/config" ] ||
+        dev_owned_private_directory "$DEV_ROOT/config"
+}
+if { [ "$ACTION" = setup ] || [ "$ACTION" = update ]; } && [ -f "$ENV_FILE" ]; then
+    configured_pairing_socket="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
+    # Roots created before the short socket directory recorded this exact
+    # in-root default. Move only that value, only for a marked root, and only
+    # while no socket exists there (no relay can be using it). Every other
+    # mismatch is still retained and refused.
+    legacy_pairing_socket="$DEV_ROOT/config/pairing-control.sock"
+    if [ "$configured_pairing_socket" = "$legacy_pairing_socket" ] &&
+        [ "$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?HERDR_RELAY_PAIRING_SOCKET=' "$ENV_FILE" || true)" = 1 ] &&
+        [ "$(grep -c '^HERDR_RELAY_PAIRING_SOCKET=' "$ENV_FILE" || true)" = 1 ] &&
+        dev_owned_private_directory "$DEV_ROOT" && dev_owned_private_file "$ENV_FILE" &&
+        dev_legacy_socket_parent_is_safe &&
+        [ ! -e "$legacy_pairing_socket" ] && [ ! -L "$legacy_pairing_socket" ] &&
+        dev_root_marker_matches; then
+        set_env_value_atomic "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET "$PAIRING_SOCKET"
+        echo "▸ Moved this root's stopped pairing-control socket to the short private socket directory."
+        configured_pairing_socket="$(env_file_value "$ENV_FILE" HERDR_RELAY_PAIRING_SOCKET)"
+    fi
+    if [ "$configured_pairing_socket" != "$PAIRING_SOCKET" ]; then
+        echo "✗ Existing development state records a different pairing socket; it was retained without migration. Choose a separate private root or follow a reviewed migration before setup/update." >&2
+        exit 2
+    fi
+fi
 assert_fixed_development_ports() {
     if [ "${HERDR_RELAY_PORT:-}" != "$RELAY_PORT" ] ||
         [ "${HERDR_RELAY_PLUGIN_PORT:-}" != "$PLUGIN_PORT" ] ||

@@ -161,9 +161,11 @@ The GUI-mode result is empirical for the exact supplied App Store build only. It
 not evidence for other App Store versions, MacSys builds, Linux distributions, or
 future updates, and it does not qualify route publication or production use.
 
-The following physical/live cells remain pending: scoped publication, trusted
-HTTPS, exact bundle/readiness verification, phone enrollment and E2EE, device
-roles/reconnect, exact scoped cleanup, and before/after noninterference. The
+The supervised continuation later recorded scoped publication, trusted HTTPS,
+exact bundle/readiness, and one Android invitation redemption/connection as
+observed cells. This remains a narrow development smoke, not a runtime or phone
+qualification. Credential-based reconnect, role confirmation, iOS, exact scoped
+cleanup, and complete before/after noninterference remain pending. The
 [supervised runbook](tailscale-cli-contract.md#supervised-owner-development-phone-smoke-and-cleanup-runbook)
 remains the authority boundary for those separate steps.
 
@@ -183,9 +185,21 @@ Sanitized observations from the current supervised phone assessment:
   correction is included in the implementation. The frontend now explains invalid
   or expired setup links and relay-rejected devices, and refuses a newly expired
   invitation before replacing stored relay or credential state.
-- Owner-phone enrollment remains **pending** until the supervising assistant
-  records the retest outcome. No phone qualification is inferred from the other
-  passing cells.
+- On the designated Android phone in Chrome, the owner reported that pairing
+  now works. The phone redeemed the setup invitation, was issued its device
+  credential, and established one connection through the Tailscale extension;
+  relay status still showed `invitation_pending=true`. Credential-based reconnect
+  has not been observed, and the assigned device role is not confirmed. iOS was
+  not tested. This records a successful Android first-pairing/connection cell
+  only, not broader phone, role, or runtime qualification.
+- Starting the CLI workflow with its default development root while the existing
+  `$HOME/.herdr-p6-dev` root owned the 18377 registration was refused as an
+  installation mismatch; the route and registration were not taken over. Reuse
+  that root with `HERDR_DEV_TAILSCALE_CLI_DIR=$HOME/.herdr-p6-dev`, or stop its
+  relay and perform its explicit scoped unpublish before choosing a different
+  root. The refusal now explains this recovery without weakening route ownership.
+- Credential-based reconnect, role confirmation, and iOS assessment remain
+  **pending**.
 
 The existing invitation lifetime remains ten minutes. If a bootstrap setup link
 expires or is reported as already used before enrollment while the same isolated
@@ -372,17 +386,18 @@ outcomes and do not themselves establish live qualification.
    ambiguous write, erase recovery state, or touch production. Record each
    assessed cell's exact candidate, host/device/role, checks, outcome and
    redacted evidence; mark every untested qualification cell **pending**. The
-   following cells are currently pending, not passed:
+   following cells are pending unless noted:
 
    | Assessment cell | Status |
    | --- | --- |
-   | App Store 1.102.4 runtime on this Darwin/arm64 Mac and current node/account | Pending |
+   | App Store 1.102.4 runtime on this Darwin/arm64 Mac and current node/account | Pending broader qualification |
    | Complete pre/post Serve and installed-service noninterference | Pending |
    | Scoped HTTPS 8443 -> `127.0.0.1:18377` publication and exact `off` readback | Pending |
-   | Trusted HTTPS, exact bundle, identity, local socket and readiness | Pending |
-   | Owner physical-phone E2EE enrollment and controller role | Pending |
-   | Reader role and read-only permission boundary | Pending |
-   | Disconnect/reconnect with existing credential and no re-pairing | Pending |
+   | Trusted HTTPS, exact bundle, identity, local socket and readiness | Observed passing in the supervised run |
+   | Android Chrome invitation redemption and first connection | Observed once; not qualification |
+   | Android device role and controller/reader permission boundary | Pending |
+   | Credential-based disconnect/reconnect without re-pairing | Pending |
+   | iOS | Not tested |
    | Other phones/platforms, PWA lifecycle, sleep/wake, service, production and release cells | Pending |
 
 This is a development-only supervised runbook, not a deployment instruction.

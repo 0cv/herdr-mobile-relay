@@ -74,6 +74,15 @@ MENU_CLI_CANONICAL=""
 MENU_CLI_CANDIDATES=()
 MENU_CLI_CANDIDATE_COUNT=0
 MENU_CLI_UNAVAILABLE_REASON=""
+MENU_APP_STORE_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+# The App Store app's "Install CLI" action installs this exact two-line
+# launcher, which only forwards to the bundle executable. Like ResolveBinary,
+# treat exactly these bytes as an alias of the bundle candidate; any other
+# script stays a distinct candidate. The launcher is compared, never run.
+menu_cli_is_app_store_wrapper() {
+    # shellcheck disable=SC2016 # The literal "$@" is part of the compared launcher bytes.
+    [ -f "$1" ] && cmp -s "$1" <(printf '#!/bin/sh\n%s "$@"\n' "$MENU_APP_STORE_CLI")
+}
 canonical_menu_cli_candidate() {
     local candidate="$1" link directory base attempt
     case "$candidate" in /*) ;; *) return 1 ;; esac
@@ -100,9 +109,13 @@ canonical_menu_cli_candidate() {
 }
 
 append_menu_cli_candidate() {
-    local candidate="$1" existing duplicate=0 resolved
+    local candidate="$1" goos="${2:-}" existing duplicate=0 resolved
     if canonical_menu_cli_candidate "$candidate"; then
         resolved="$MENU_CLI_CANONICAL"
+        if [ "$goos" = Darwin ] && menu_cli_is_app_store_wrapper "$resolved" &&
+            canonical_menu_cli_candidate "$MENU_APP_STORE_CLI"; then
+            resolved="$MENU_CLI_CANONICAL"
+        fi
         if [ "$MENU_CLI_CANDIDATE_COUNT" -gt 0 ]; then
             for existing in "${MENU_CLI_CANDIDATES[@]}"; do
                 if [ "$existing" = "$resolved" ]; then
@@ -154,11 +167,11 @@ resolve_menu_cli_candidate() {
         esac
         # filepath.SplitList candidates are accepted only from absolute PATH
         # directories; empty and relative entries do not resolve a binary.
-        case "$component" in /*) append_menu_cli_candidate "$component/tailscale" ;; esac
+        case "$component" in /*) append_menu_cli_candidate "$component/tailscale" "$goos" ;; esac
         [ "$more" = true ] || break
     done
     if [ "$goos" = Darwin ]; then
-        append_menu_cli_candidate /Applications/Tailscale.app/Contents/MacOS/Tailscale
+        append_menu_cli_candidate "$MENU_APP_STORE_CLI" "$goos"
     fi
     case "$MENU_CLI_CANDIDATE_COUNT" in
         0)
@@ -209,37 +222,41 @@ if [ -z "${HERDR_DEV_TRANSPORT:-}" ] && [ -t 0 ]; then
     if [ -z "$option2_unavailable_reason" ] && ! resolve_menu_cli_candidate "$menu_os"; then
         option2_unavailable_reason="$MENU_CLI_UNAVAILABLE_REASON"
     fi
-    echo "Development transport:"
-    echo "  1. Temporary Cloudflare tunnel — quick public URL + QR; no Tailscale needed (or use a saved gateway)."
-    option2_description="CLI-backed Tailscale Serve — for the supported App Store Tailscale 1.102.4 profile on macOS/arm64; needs the signed-in app's CLI and explicit route consent. The HTTPS route persists after stop; runtime/phone qualification is pending."
-    if [ -n "$option2_unavailable_reason" ]; then
-        echo "  2. $option2_description [UNAVAILABLE: $option2_unavailable_reason]"
+    # One Tailscale entry: use the App Store CLI mode when its profile checks
+    # out; otherwise the standalone-tailscaled mode, unless the App Store app
+    # is present (which that mode cannot use). HERDR_DEV_TRANSPORT still
+    # selects either mode explicitly.
+    tailscale_mode=""
+    tailscale_unavailable_reason=""
+    if [ -z "$option2_unavailable_reason" ]; then
+        tailscale_mode=cli
+        tailscale_description="Tailscale Serve — private tailnet HTTPS + QR via the Tailscale app's CLI; route stays published after stop."
+    elif [ -z "$option3_unavailable_reason" ]; then
+        tailscale_mode=legacy
+        tailscale_description="Tailscale Serve — private tailnet HTTPS + QR via standalone Tailscale; route ends when the relay stops."
     else
-        echo "  2. $option2_description"
+        tailscale_unavailable_reason="$option2_unavailable_reason"
+        tailscale_description="Tailscale Serve — private tailnet HTTPS + QR."
     fi
-    if [ -n "$option3_unavailable_reason" ]; then
-        echo "  3. Legacy Tailscale Serve — for advanced users with a supported standalone tailscaled; needs an authenticated Unix daemon. Not for the App Store app. [UNAVAILABLE: $option3_unavailable_reason]"
+    echo "Development transport:"
+    echo "  1. Cloudflare tunnel — temporary public URL + QR; no Tailscale needed (or use a saved gateway)."
+    if [ -n "$tailscale_unavailable_reason" ]; then
+        echo "  2. $tailscale_description [UNAVAILABLE: $tailscale_unavailable_reason]"
     else
-        echo "  3. Legacy Tailscale Serve — for advanced users with a supported standalone tailscaled; needs an authenticated Unix daemon. Not for the App Store app; owns a temporary foreground route."
+        echo "  2. $tailscale_description"
     fi
     read -r -p "Choice [1]: " choice || { echo "Cancelled; nothing was started." >&2; exit 2; }
     case "$choice" in
         ''|1) ;;
         2)
-            if [ -n "$option2_unavailable_reason" ]; then
-                echo "✗ Option 2 unavailable: $option2_unavailable_reason" >&2
-                exit 2
-            fi
-            exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@"
+            case "$tailscale_mode" in
+                cli) exec "$SCRIPT_DIR/dev-tailscale-cli.sh" "$@" ;;
+                legacy) HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@" ;;
+            esac
+            echo "✗ Tailscale Serve unavailable: $tailscale_unavailable_reason" >&2
+            exit 2
             ;;
-        3)
-            if [ -n "$option3_unavailable_reason" ]; then
-                echo "✗ Option 3 unavailable: $option3_unavailable_reason" >&2
-                exit 2
-            fi
-            HERDR_DEV_TAILSCALE_ENABLE=1 exec "$SCRIPT_DIR/dev-tailscale.sh" "$@"
-            ;;
-        *) echo "✗ Choose 1, 2, or 3." >&2; exit 2 ;;
+        *) echo "✗ Choose 1 or 2." >&2; exit 2 ;;
     esac
 fi
 DEV_DIR="${HERDR_DEV_CONFIG_DIR:-$SCRIPT_DIR/.dev}"

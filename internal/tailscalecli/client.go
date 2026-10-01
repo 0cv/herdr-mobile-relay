@@ -145,20 +145,28 @@ func resolveBinary(override, pathValue, goos, appStoreCLI string) (string, error
 		return verifiedExecutable(override)
 	}
 
+	appStore := ""
+	if goos == "darwin" {
+		if candidate, err := verifiedExecutable(appStoreCLI); err == nil {
+			appStore = candidate
+		}
+	}
 	candidates := make([]string, 0, 8)
 	for _, directory := range filepath.SplitList(pathValue) {
 		if directory == "" || !filepath.IsAbs(directory) {
 			continue
 		}
 		candidate, err := verifiedExecutable(filepath.Join(directory, "tailscale"))
-		if err == nil {
-			candidates = append(candidates, candidate)
+		if err != nil {
+			continue
 		}
+		if appStore != "" && isAppStoreCLIWrapper(candidate, appStoreCLI) {
+			candidate = appStore
+		}
+		candidates = append(candidates, candidate)
 	}
-	if goos == "darwin" {
-		if candidate, err := verifiedExecutable(appStoreCLI); err == nil {
-			candidates = append(candidates, candidate)
-		}
+	if appStore != "" {
+		candidates = append(candidates, appStore)
 	}
 	unique := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
@@ -174,6 +182,26 @@ func resolveBinary(override, pathValue, goos, appStoreCLI string) (string, error
 		return candidate, nil
 	}
 	return "", ErrProfileUnavailable
+}
+
+// appStoreCLIWrapper is the exact launcher installed by the App Store Tailscale
+// app's "Install CLI" action. It only forwards to the bundle executable.
+func appStoreCLIWrapper(appStoreCLI string) []byte {
+	return []byte("#!/bin/sh\n" + appStoreCLI + " \"$@\"\n")
+}
+
+// isAppStoreCLIWrapper reports whether path holds exactly that launcher, making
+// it an alias of the bundle candidate. The file is compared, never executed;
+// any other content, even an equivalent script, stays a distinct candidate.
+func isAppStoreCLIWrapper(path, appStoreCLI string) bool {
+	expected := appStoreCLIWrapper(appStoreCLI)
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = file.Close() }()
+	content, err := io.ReadAll(io.LimitReader(file, int64(len(expected))+1))
+	return err == nil && bytes.Equal(content, expected)
 }
 
 func verifiedExecutable(path string) (string, error) {

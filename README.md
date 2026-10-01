@@ -61,20 +61,19 @@ App Store Tailscale 1.102.4 profile; it is not runtime-qualified and is not a
 regular setup choice. Production and installed-service activation remain
 refused pending physical-phone qualification and separate enablement. Checkout
 developers using `make dev-tunnel` can choose 1 = temporary Cloudflare URL or
-saved gateway (no Tailscale; QR shown), 2 = CLI-backed persistent Serve for the
-supported App Store app profile, or 3 = the older temporary direct-daemon mode
-(standalone `tailscaled`, not the App Store app). If an App Store receipt is
-found locally, option 3 is marked unavailable. Option 2 is available only on
-macOS/arm64 when a local App Store bundle with a readable 1.102.4 version is
-detected; missing, unreadable, or different-version bundles and unsupported
-platforms mark it unavailable. Menu checks read local files and platform
-metadata only; they never run Tailscale. Option 2 is also unavailable when
-filesystem-only CLI resolution finds no executable or multiple distinct
-canonical candidates; duplicate symlinks are deduplicated, while distinct
-executables (including wrappers) remain ambiguous. An explicit absolute
-`HERDR_DEV_TAILSCALE_CLI_BIN` or `HERDR_TAILSCALE_CLI_BIN` override selects one
-candidate, and an invalid override fails closed. Selecting option 2 still
-follows its explicit consent and route-confirmation gates. See
+saved gateway (no Tailscale; QR shown), or 2 = Tailscale Serve. Option 2 selects
+the CLI-backed persistent mode only for the supported App Store 1.102.4
+macOS/arm64 profile and an unambiguous CLI; without an App Store app it uses the
+legacy standalone-daemon mode instead. If an App Store app is detected but CLI
+checks fail, option 2 is unavailable rather than falling back. Its description
+says which mode is selected and whether the route survives stopping the relay.
+Menu checks read local files and platform metadata only; they never run
+Tailscale. The App Store Install CLI's exact forwarding wrapper is treated as an
+alias of its bundle executable; all other distinct executables or wrappers stay
+ambiguous. Explicit absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or
+`HERDR_TAILSCALE_CLI_BIN` overrides still take precedence, and invalid overrides
+fail closed. Selection still follows the existing consent and route-confirmation
+gates. See
 [development](docs/development.md#running-from-a-checkout) for requirements and
 [Transports](docs/transports.md#managed-tailscale-serve) for the separate
 lifecycle and platform limits.

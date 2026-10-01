@@ -135,23 +135,21 @@ availability is not guaranteed by Herdr. This path does not support background
 service installation or phone-managed updates. See
 [Operator-owned Serve](docs/transports.md#operator-owned-https-serve-byo).
 
-Checkout developers can also run `make dev-tunnel` and choose a clearly labelled
-transport: 1 is a temporary public Cloudflare URL (or saved gateway), QR shown,
-no Tailscale needed; 2 is CLI-backed Tailscale Serve for the supported macOS
-App Store profile and leaves its HTTPS route configured after stop; 3 is the
-older foreground mode for an authenticated standalone `tailscaled`, not the App
-Store app. Option 3 is shown as unavailable when a local App Store receipt makes
-that incompatibility knowable from files. Option 2 is available only on
-macOS/arm64 with a locally detected App Store bundle whose readable version is
-1.102.4; a missing or unreadable bundle, another version, or an unsupported
-platform marks it unavailable. Enter still picks option 1. Menu checks read
-local files and platform metadata only; they never run Tailscale. Option 2 is
-also unavailable when filesystem-only CLI resolution finds no executable or
-multiple distinct canonical candidates. Duplicate symlinks are deduplicated;
-distinct executables, including wrappers, remain ambiguous unless an explicit
-absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or `HERDR_TAILSCALE_CLI_BIN` override is
-provided. Invalid overrides fail closed. Choosing option 2 still requires its
-explicit opt-in and route-consent gates.
+Checkout developers can also run `make dev-tunnel`: 1 is a temporary public
+Cloudflare URL (or saved gateway), with a QR and no Tailscale required; 2 is the
+single Tailscale Serve choice. It selects CLI-backed persistent Serve only when
+the supported macOS/arm64 App Store 1.102.4 profile and an unambiguous CLI are
+found. Without an App Store app, it selects the older foreground mode for an
+authenticated standalone `tailscaled`; when an App Store app is detected but the
+CLI profile is unavailable, option 2 is marked unavailable instead. The menu
+says which mode it will use and whether the route remains after stop. Enter
+still selects option 1. Menu checks read local files and platform metadata
+only; they never run Tailscale. The exact App Store Install CLI forwarding
+wrapper aliases the bundle executable; other distinct candidates, including
+wrappers, remain ambiguous. Duplicate symlinks are deduplicated. Absolute
+`HERDR_DEV_TAILSCALE_CLI_BIN` or `HERDR_TAILSCALE_CLI_BIN` overrides still take
+precedence; invalid overrides fail closed. Selection keeps the existing explicit
+consent and route-confirmation gates.
 
 A separate CLI-backed foreground development entrypoint is available as
 `make dev-tailscale-cli`; it is not part of setup or an installed service. Only

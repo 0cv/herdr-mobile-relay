@@ -313,7 +313,7 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 		}
 		routeAlreadyOurs := record != nil && record.State == StateRegistered && registeredRouteMatches(inspection, *record)
 		if routeConflicts(inspection.Serve, httpsPort) && !routeAlreadyOurs {
-			return ErrConflict
+			return developmentServeConflictError(httpsPort, backendPort)
 		}
 		var allowedRoute *registration
 		if routeAlreadyOurs {
@@ -1281,6 +1281,10 @@ func sameInspectionIdentity(left, right Inspection) bool {
 
 func sameProfile(inspection Inspection, record registration) bool {
 	return inspection.ProfileKnown && inspection.Profile == record.Profile
+}
+
+func developmentServeConflictError(httpsPort, backendPort int) error {
+	return fmt.Errorf("%w: existing Serve state conflicts with development HTTPS %d -> 127.0.0.1:%d, and this root has no matching registration for it. If another CLI development root registered the route, select that original root with HERDR_DEV_TAILSCALE_CLI_DIR or stop it and run its scoped unpublish first. Otherwise resolve the conflict with its owner; Herdr will not adopt or change an unregistered route", ErrConflict, httpsPort, backendPort)
 }
 
 func routeConflicts(serve tailscale.ServeStatus, port int) bool {

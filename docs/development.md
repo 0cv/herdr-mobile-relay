@@ -14,49 +14,45 @@ make dev-tunnel
 
 `make dev-tunnel` asks on a terminal which development connection to use:
 
-1. **Temporary Cloudflare tunnel or saved gateway** — choose this for the quick
-   one-computer trial. It starts this checkout, shows a QR, and needs no Tailscale;
-   the temporary public URL uses Cloudflare, while a saved gateway can replace it.
-   State stays under `relay/.dev/`, separate from the installed relay. Enter still
-   selects this option.
-2. **CLI-backed Tailscale Serve** — choose this if you use the macOS App Store
-   Tailscale app and want the development relay available over your tailnet. It
-   needs the app's supported CLI profile, a signed-in node, and exact route
-   confirmation. The HTTPS route remains configured after the foreground relay
-   stops. Only the supplied macOS/arm64 1.102.4 profile is enabled for this
-   isolated development path; runtime and phone qualification remain pending.
-   Option 2 is marked unavailable unless the menu confirms Darwin/arm64 and finds
-   a local App Store receipt with a readable `Info.plist` version exactly equal
-   to 1.102.4. Missing/unreadable bundle metadata, another version, or an
-   unsupported platform is refused before CLI-backed mode. Menu inspection reads
-   local files and `uname` platform metadata only; it never runs Tailscale. It
-   mirrors the CLI resolver's absolute-PATH and Darwin fallback candidate set,
-   canonicalizing symlinks and deduplicating identical targets. Multiple distinct
-   executable candidates (including wrapper files) mark option 2 unavailable;
-   an explicit absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or
-   `HERDR_TAILSCALE_CLI_BIN` override takes precedence, while an invalid
-   override fails closed. It uses separate `.dev-tailscale-cli/` relay state
-   and installs no service.
-3. **Legacy Tailscale Serve** — choose this only if you run a supported,
-   authenticated standalone `tailscaled` Unix daemon and want the older direct-
-   LocalAPI temporary/session-owned route. It is for advanced users, is not a
-   fallback for option 2, and does not work with the macOS App Store Tailscale app.
-   When the filesystem identifies an App Store bundle by its receipt, option 3 is
-   marked unavailable and selecting it refuses before starting the legacy mode.
-   Menu availability checks read files only and never invoke Tailscale; selecting
-   an available option 2 then follows its own opt-in and route-consent gates.
+1. **Cloudflare tunnel** — a temporary public URL and QR, or a saved gateway;
+   no Tailscale is needed. State stays under `relay/.dev/`, separate from the
+   installed relay. Enter still selects this option.
+2. **Tailscale Serve** — the menu offers one Tailscale choice and selects the
+   usable mode from local filesystem/platform checks:
+   - On macOS/arm64, the CLI-backed mode is selected only when an App Store
+     receipt and readable `Info.plist` version `1.102.4` are found and filesystem-
+     only executable resolution yields one unambiguous CLI. Its HTTPS route stays
+     published after the foreground relay stops. Only this supplied profile is
+     development-enabled; runtime and phone qualification remain pending.
+   - If no App Store app is detected, the menu selects the legacy mode for an
+     authenticated standalone `tailscaled` daemon. Its temporary session-owned
+     route ends when the relay stops.
+   - If an App Store app is detected but its profile or CLI candidate is
+     unavailable, the single Tailscale option is marked unavailable. It never
+     falls back to the incompatible standalone-daemon mode.
 
-In automation, `make dev-tunnel` retains the tunnel default;
-`HERDR_DEV_TRANSPORT=tailscale-cli` selects option 2 but still requires the
-explicit dev opt-in and route phrase on stdin, while
-`HERDR_DEV_TRANSPORT=tailscale` selects legacy option 3. These explicit
-`HERDR_DEV_TRANSPORT` values and their noninteractive behavior are unchanged.
+   The menu description identifies the selected mode and whether its route
+   persists. Availability checks read files and platform metadata only; they
+   never run Tailscale. The exact App Store Install CLI forwarding wrapper is
+   treated as an alias of the bundle executable; other distinct candidates,
+   including non-exact wrappers, remain ambiguous. Duplicate symlinks are
+   deduplicated. Absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or
+   `HERDR_TAILSCALE_CLI_BIN` overrides take precedence and invalid overrides
+   fail closed. CLI-backed mode uses separate `.dev-tailscale-cli/` state and
+   requires its existing opt-in and exact route-consent gates; neither mode
+   installs a service.
+
+Automation behavior is unchanged: `make dev-tunnel` defaults to the tunnel,
+`HERDR_DEV_TRANSPORT=tailscale-cli` selects the CLI-backed mode, and
+`HERDR_DEV_TRANSPORT=tailscale` selects legacy direct-LocalAPI mode. Both explicit
+Tailscale transports retain their noninteractive consent requirements.
 “Tunneling” here means the Cloudflare/gateway path; Tailscale Serve is tailnet
 HTTPS. Development roots remain separate.
 
 For an **explicitly selected, already running and authenticated standalone**
-supported Tailscale v1.102.4 Unix daemon, choosing menu option 3 starts legacy
-managed development without asking for paths or ports. It does not support the
+supported Tailscale v1.102.4 Unix daemon, `make dev-tailscale` starts legacy
+managed development without asking for paths or ports. The menu also selects
+this mode as option 2 when no App Store app is detected. It does not support the
 macOS App Store Tailscale app. The checkout-local state root
 `relay/.dev-tailscale/` is created with mode 0700 only after input checks.
 The development relay, plugin and HTTPS Serve ports default to 18377, 18378
@@ -67,9 +63,12 @@ pairing-control socket is placed outside the deep checkout in a short private
 runtime directory (`/private/tmp/herdr-cli-<uid>/<sha256-of-checkout>/p.sock` on
 macOS, `/tmp/...` on Linux); Go validates directory ownership/modes and the
 platform AF_UNIX path-length limit before using the socket. The route journal,
-relay config, credentials, and release remain in the private checkout state. If
-existing state records the previous in-root socket path, setup/update refuse
-before rebuilding and retain that state; there is no automatic migration.
+relay config, credentials, and release remain in the private checkout state.
+On setup/update, a marked root migrates the exact previous in-root socket value
+only when that old path is absent (neither a socket nor a symlink). The migration
+atomically rewrites only `HERDR_RELAY_PAIRING_SOCKET` and runs once; an existing
+old-path object, unmarked root, or any other mismatch is refused unchanged. Go
+then validates the new short socket path against the persisted relay environment.
 The supported candidate is only the exact App Store macOS/arm64 1.102.4
 profile; profile-specific development eligibility is separate from runtime
 qualification. The launcher uses filesystem-only executable selection, then

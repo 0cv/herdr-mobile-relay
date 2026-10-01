@@ -21,6 +21,16 @@ func TestDevelopmentIsolationRequiresGoOwnedOptInAndLayout(t *testing.T) {
 	if err := layout.validate(false, false); err != nil {
 		t.Fatalf("valid isolated layout refused: %v", err)
 	}
+	t.Run("accepts migrated short pairing socket", func(t *testing.T) {
+		values, err := readShellEnvironment(layout.relayEnv)
+		if err != nil || values["HERDR_RELAY_PAIRING_SOCKET"] != layout.pairingSocket ||
+			layout.pairingSocket == filepath.Join(root, "config", "pairing-control.sock") {
+			t.Fatalf("migrated socket binding = %q, want %q; err=%v", values["HERDR_RELAY_PAIRING_SOCKET"], layout.pairingSocket, err)
+		}
+		if err := layout.validate(false, false); err != nil {
+			t.Fatalf("Go isolation rejected the migrated socket binding: %v", err)
+		}
+	})
 
 	t.Run("opt-in is required", func(t *testing.T) {
 		t.Setenv("HERDR_DEV_TAILSCALE_CLI_ENABLE", "")

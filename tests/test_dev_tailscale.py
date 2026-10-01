@@ -108,18 +108,19 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             stdout, stderr = process.communicate(timeout=5)
             if process.returncode == 0 or expected not in stdout + stderr:
                 raise AssertionError(f"{case}: unsafe interactive outcome: {stdout + stderr!r}")
-            if entrypoint == tunnel_script and b"Set up isolated managed Tailscale" in stdout + stderr:
+            if (entrypoint == tunnel_script and case not in {
+                    "linux_without_app_store_uses_legacy_mode", "darwin_without_app_store_uses_legacy_mode",
+                    "app_store_missing_maps_to_legacy_mode"} and
+                    b"Set up isolated managed Tailscale" in stdout + stderr):
                 raise AssertionError("menu selection demanded redundant development consent")
             if case == "menu_uses_all_safe_defaults":
+                output = stdout + stderr
                 for value in (
-                    b"1. Temporary Cloudflare tunnel",
-                    b"quick public URL + QR",
+                    b"1. Cloudflare tunnel",
+                    b"temporary public URL + QR",
                     b"no Tailscale needed",
-                    b"2. CLI-backed Tailscale Serve",
-                    b"for the supported App Store Tailscale 1.102.4 profile on macOS/arm64",
-                    b"route persists after stop",
-                    b"3. Legacy Tailscale Serve",
-                    b"supported standalone tailscaled",
+                    b"2. Tailscale Serve",
+                    b"private tailnet HTTPS + QR",
                     b"Choice [1]: ",
                     b"Private development state: " + str(root / "relay" / ".dev-tailscale").encode(),
                     f"Tailscale CLI from PATH: {cli}".encode(),
@@ -127,32 +128,69 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
                     f"Herdr socket path: {default_socket_dir / 'herdr.sock'}".encode(),
                     b"Development ports: relay 8375, plugin 18378, HTTPS Serve 8443",
                 ):
-                    if value not in stdout + stderr:
+                    if value not in output:
                         raise AssertionError(f"{case}: default not selected: {value!r}")
+                if sum(b". Tailscale Serve" in line for line in output.splitlines()) != 1:
+                    raise AssertionError(f"{case}: expected exactly one Tailscale option: {output!r}")
             if case in {
                 "app_store_supported_version_keeps_cli_option_available",
                 "duplicate_symlinks_to_one_cli_candidate_are_deduplicated",
                 "development_override_precedes_legacy_and_path_candidates",
                 "legacy_override_is_used_when_development_override_is_empty",
+                "exact_app_store_install_wrapper_aliases_bundle_in_menu",
             }:
                 output = stdout + stderr
-                option2_lines = [line for line in output.splitlines() if b"2. CLI-backed Tailscale Serve" in line]
+                option2_lines = [line for line in output.splitlines() if b"2. Tailscale Serve" in line]
                 if len(option2_lines) != 1 or b"[UNAVAILABLE:" in option2_lines[0]:
                     raise AssertionError(f"{case}: option 2 was incorrectly marked unavailable: {output!r}")
+                if case == "exact_app_store_install_wrapper_aliases_bundle_in_menu" and b"Tailscale app's CLI" not in option2_lines[0]:
+                    raise AssertionError(f"{case}: menu did not select CLI-backed mode: {output!r}")
+            if case == "non_exact_app_store_wrapper_keeps_ambiguity_in_menu":
+                output = stdout + stderr
+                option2_lines = [line for line in output.splitlines() if b"2. Tailscale Serve" in line]
+                if len(option2_lines) != 1 or b"[UNAVAILABLE:" not in option2_lines[0]:
+                    raise AssertionError(f"{case}: non-exact wrapper did not keep the option unavailable: {output!r}")
+            if case in {
+                "linux_without_app_store_uses_legacy_mode",
+                "darwin_without_app_store_uses_legacy_mode",
+                "app_store_missing_maps_to_legacy_mode",
+            }:
+                output = stdout + stderr
+                option2_lines = [line for line in output.splitlines() if b"2. Tailscale Serve" in line]
+                if (len(option2_lines) != 1 or b"[UNAVAILABLE:" in option2_lines[0] or
+                    b"standalone Tailscale" not in option2_lines[0] or
+                    b"route ends when the relay stops" not in option2_lines[0]):
+                    raise AssertionError(f"{case}: option 2 did not select legacy mode: {output!r}")
             if sentinel.exists() or (dev / "relay.env").exists() or (base / "unused-tunnel").exists():
                 raise AssertionError(f"{case}: touched a CLI or dev state before consent")
             print(f"PASS dev-tailscale preflight: {case}")
         finally:
             os.close(master)
 
+    default_menu_tools = base / "default-menu-tools"
+    default_menu_tools.mkdir(mode=0o700)
+    default_menu_uname = default_menu_tools / "uname"
+    default_menu_uname.write_text(
+        "#!/bin/sh\ncase \"$1\" in\n"
+        "  -s) printf '%s\\n' \"${HERDR_TEST_UNAME_S:-Linux}\" ;;\n"
+        "  -m) printf '%s\\n' \"${HERDR_TEST_UNAME_M:-x86_64}\" ;;\n"
+        "  *) exit 2 ;;\nesac\n",
+        encoding="utf-8",
+    )
+    default_menu_uname.chmod(0o700)
+    menu_linux_settings = {
+        "HERDR_TEST_UNAME_S": "Linux",
+        "HERDR_TEST_UNAME_M": "x86_64",
+        "PATH": f"{default_menu_tools}:{base}:/usr/bin:/bin",
+    }
     interactive_refused("direct_interactive_decline", script, b"n\n", b"Cancelled; nothing was started.")
     interactive_refused("explicit_cli_transport_requires_opt_in", tunnel_script, b"n\n", b"Cancelled; nothing was started.",
                         HERDR_DEV_TRANSPORT="tailscale-cli",
                         HERDR_DEV_TAILSCALE_CLI_RELAY_BIN=str(cli_relay),
                         ACTIVATION_CHECK_RECORD=str(activation_record))
-    interactive_refused("dev_tunnel_rejects_relative_state", tunnel_script, b"3\n",
+    interactive_refused("dev_tunnel_rejects_relative_state", tunnel_script, b"2\n",
                         b"Choose an absolute private state directory, or unset HERDR_DEV_TAILSCALE_DIR",
-                        HERDR_DEV_TAILSCALE_DIR="relative")
+                        HERDR_DEV_TAILSCALE_DIR="relative", **menu_linux_settings)
     interactive_refused("consent_does_not_create_custom_root", script, b"y\n",
                         b"Create a custom private state directory first",
                         HERDR_DEV_TAILSCALE_DIR=str(base / "missing"))
@@ -164,16 +202,17 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
             raise AssertionError("development preflight changed checkout-local state existence")
 
     check_checkout_root_existence_unchanged()
-    interactive_refused("invalid_cli_does_not_create_default", tunnel_script, b"3\n",
+    interactive_refused("invalid_cli_does_not_create_default", tunnel_script, b"2\n",
                         b"Not an executable file:",
-                        HERDR_DEV_TAILSCALE_DIR="", HERDR_DEV_TAILSCALE_BIN=str(base / "missing-cli"))
-    interactive_refused("menu_uses_all_safe_defaults", tunnel_script, b"3\n",
+                        HERDR_DEV_TAILSCALE_DIR="", HERDR_DEV_TAILSCALE_BIN=str(base / "missing-cli"),
+                        **menu_linux_settings)
+    interactive_refused("menu_uses_all_safe_defaults", tunnel_script, b"2\n",
                         b"Production and dev-tunnel ports are reserved",
                         HERDR_DEV_TAILSCALE_DIR="", HERDR_DEV_TAILSCALE_BIN="",
                         HERDR_DEV_HERDR_BIN="", HERDR_DEV_HERDR_SOCKET="",
                         HERDR_SOCKET_PATH="", HERDR_DEV_TAILSCALE_PORT="8375",
                         HERDR_DEV_TAILSCALE_PLUGIN_PORT="", HERDR_DEV_TAILSCALE_HTTPS_PORT="",
-                        PATH=f"{base}:/usr/bin:/bin")
+                        **menu_linux_settings)
     check_checkout_root_existence_unchanged()
 
     app_store_bundle = home / "Applications" / "Tailscale.app"
@@ -236,24 +275,25 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         settings.update(overrides)
         return settings
     interactive_refused(
-        "app_store_missing_marks_cli_mode_unavailable", tunnel_script, b"2\n",
-        b"No App Store Tailscale bundle was detected", **app_store_settings,
+        "app_store_missing_maps_to_legacy_mode", tunnel_script, b"2\n",
+        b"Production and dev-tunnel ports are reserved",
+        HERDR_DEV_TAILSCALE_PORT="8375", **app_store_settings,
     )
     for system, arch, case in (
-        ("Linux", "x86_64", "linux_marks_cli_mode_unavailable"),
-        ("Darwin", "x86_64", "macos_amd64_marks_cli_mode_unavailable"),
+        ("Linux", "x86_64", "linux_without_app_store_uses_legacy_mode"),
+        ("Darwin", "x86_64", "darwin_without_app_store_uses_legacy_mode"),
     ):
         interactive_refused(
             case, tunnel_script, b"2\n",
-            b"CLI-backed development requires macOS/arm64",
+            b"Production and dev-tunnel ports are reserved",
             HERDR_TEST_UNAME_S=system, HERDR_TEST_UNAME_M=arch,
-            **app_store_settings,
+            HERDR_DEV_TAILSCALE_PORT="8375", **app_store_settings,
         )
     receipt.write_bytes(b"synthetic App Store receipt marker")
     activation_before_menu = activation_record.read_bytes() if activation_record.exists() else None
     interactive_refused(
         "app_store_unsupported_version_marks_cli_mode_unavailable", tunnel_script, b"2\n",
-        b"Option 2 unavailable: Only the App Store Tailscale 1.102.4 profile is enabled",
+        b"Tailscale Serve unavailable: Only the App Store Tailscale 1.102.4 profile is enabled",
         **app_store_settings,
     )
     activation_after_menu = activation_record.read_bytes() if activation_record.exists() else None
@@ -265,7 +305,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     )
     interactive_refused(
         "app_store_unreadable_version_marks_cli_mode_unavailable", tunnel_script, b"2\n",
-        b"Could not read the App Store bundle version", **app_store_settings,
+        b"Tailscale Serve unavailable: Could not read the App Store bundle version", **app_store_settings,
     )
     app_store_info.write_text(
         '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>\n'
@@ -277,6 +317,38 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.write_text(f"#!/bin/sh\nprintf invoked >> '{sentinel}'\nexit 97\n", encoding="utf-8")
         path.chmod(0o700)
+
+    menu_system_path = str(menu_tools_dir)
+    menu_fixture_dir = home / "menu-script-fixture"
+    menu_fixture_dir.mkdir(mode=0o700)
+    menu_fixture_script = menu_fixture_dir / "dev-tunnel.sh"
+    menu_source = tunnel_script.read_text(encoding="utf-8")
+    app_store_cli_literal = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    if menu_source.count("MENU_APP_STORE_CLI=" + app_store_cli_literal) != 1:
+        raise AssertionError("menu fixture could not identify the fixed App Store fallback")
+    menu_fixture_script.write_text(
+        menu_source.replace("MENU_APP_STORE_CLI=" + app_store_cli_literal,
+                            "MENU_APP_STORE_CLI=" + str(app_store_cli)),
+        encoding="utf-8",
+    )
+    menu_fixture_script.chmod(0o700)
+    exact_wrapper_dir = home / "exact-app-store-wrapper"
+    exact_wrapper = exact_wrapper_dir / "tailscale"
+    exact_wrapper_dir.mkdir(mode=0o700)
+    exact_wrapper.write_text(f'#!/bin/sh\n{app_store_cli} "$@"\n', encoding="utf-8")
+    exact_wrapper.chmod(0o700)
+    exact_wrapper_path = f"{exact_wrapper_dir}:{menu_system_path}"
+    interactive_refused(
+        "exact_app_store_install_wrapper_aliases_bundle_in_menu", menu_fixture_script, b"3\n",
+        b"Choose 1 or 2.", **menu_settings_for_path(exact_wrapper_path),
+    )
+    exact_wrapper.write_text(f'#!/bin/sh\n{app_store_cli} "$@"\n# extra bytes\n', encoding="utf-8")
+    interactive_refused(
+        "non_exact_app_store_wrapper_keeps_ambiguity_in_menu", menu_fixture_script, b"2\n",
+        b"Tailscale Serve unavailable: Multiple distinct executable CLI candidates",
+        **menu_settings_for_path(exact_wrapper_path),
+    )
+    exact_wrapper.write_text(f'#!/bin/sh\n{app_store_cli} "$@"\n', encoding="utf-8")
 
     app_store_path_dir = home / "app-store-cli-path"
     app_store_path_dir.mkdir(mode=0o700)
@@ -307,32 +379,31 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     noexec_cli = home / "noexec-cli"
     noexec_cli.write_text("not executable\n", encoding="utf-8")
     noexec_cli.chmod(0o600)
-    menu_system_path = str(menu_tools_dir)
     two_candidate_path = f"{two_path_a_dir}:{two_path_b_dir}:{menu_system_path}"
     activation_before_candidate_menu = activation_record.read_bytes() if activation_record.exists() else None
     interactive_refused(
         "supported_bundle_plus_distinct_path_cli_marks_option2_unavailable", tunnel_script, b"2\n",
-        b"Option 2 unavailable: Multiple distinct executable CLI candidates",
+        b"Tailscale Serve unavailable: Multiple distinct executable CLI candidates",
         **menu_settings_for_path(f"{app_store_path_dir}:{distinct_path_dir}:{menu_system_path}"),
     )
     interactive_refused(
         "two_distinct_path_candidates_mark_option2_unavailable", tunnel_script, b"2\n",
-        b"Option 2 unavailable: Multiple distinct executable CLI candidates",
+        b"Tailscale Serve unavailable: Multiple distinct executable CLI candidates",
         **menu_settings_for_path(two_candidate_path),
     )
     interactive_refused(
-        "duplicate_symlinks_to_one_cli_candidate_are_deduplicated", tunnel_script, b"4\n",
-        b"Choose 1, 2, or 3.",
+        "duplicate_symlinks_to_one_cli_candidate_are_deduplicated", tunnel_script, b"3\n",
+        b"Choose 1 or 2.",
         **menu_settings_for_path(f"{duplicate_a_dir}:{duplicate_b_dir}:{menu_system_path}"),
     )
     interactive_refused(
         "relative_path_candidate_is_ignored", tunnel_script, b"2\n",
-        b"Option 2 unavailable: No executable Tailscale CLI candidate",
+        b"Tailscale Serve unavailable: No executable Tailscale CLI candidate was found",
         **menu_settings_for_path(f"{relative_path_entry}:{menu_system_path}"),
     )
     interactive_refused(
-        "development_override_precedes_legacy_and_path_candidates", tunnel_script, b"4\n",
-        b"Choose 1, 2, or 3.",
+        "development_override_precedes_legacy_and_path_candidates", tunnel_script, b"3\n",
+        b"Choose 1 or 2.",
         **menu_settings_for_path(
             two_candidate_path,
             HERDR_DEV_TAILSCALE_CLI_BIN=str(two_path_a),
@@ -340,8 +411,8 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         ),
     )
     interactive_refused(
-        "legacy_override_is_used_when_development_override_is_empty", tunnel_script, b"4\n",
-        b"Choose 1, 2, or 3.",
+        "legacy_override_is_used_when_development_override_is_empty", tunnel_script, b"3\n",
+        b"Choose 1 or 2.",
         **menu_settings_for_path(
             two_candidate_path,
             HERDR_DEV_TAILSCALE_CLI_BIN="",
@@ -350,7 +421,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     )
     interactive_refused(
         "invalid_development_override_does_not_fall_back", tunnel_script, b"2\n",
-        b"Option 2 unavailable: The selected Tailscale CLI override must be an absolute executable regular file",
+        b"Tailscale Serve unavailable: The selected Tailscale CLI override must be an absolute executable regular file.",
         **menu_settings_for_path(
             two_candidate_path,
             HERDR_DEV_TAILSCALE_CLI_BIN="relative/tailscale",
@@ -359,7 +430,7 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     )
     interactive_refused(
         "invalid_legacy_override_does_not_fall_back_to_path", tunnel_script, b"2\n",
-        b"Option 2 unavailable: The selected Tailscale CLI override must be an absolute executable regular file",
+        b"Tailscale Serve unavailable: The selected Tailscale CLI override must be an absolute executable regular file.",
         **menu_settings_for_path(
             f"{distinct_path_dir}:{menu_system_path}",
             HERDR_DEV_TAILSCALE_CLI_BIN="",
@@ -374,12 +445,11 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         b"Cancelled; nothing was started.", **app_store_settings,
     )
     interactive_refused(
-        "app_store_supported_version_keeps_cli_option_available", tunnel_script, b"4\n",
-        b"Choose 1, 2, or 3.", **app_store_settings,
+        "app_store_supported_version_keeps_cli_option_available", tunnel_script, b"3\n",
+        b"Choose 1 or 2.", **app_store_settings,
     )
-    interactive_refused("app_store_marks_legacy_mode_unavailable", tunnel_script, b"3\n",
-                        b"Option 3 unavailable: App Store Tailscale was detected",
-                        **app_store_settings)
+    interactive_refused("app_store_selects_cli_mode_not_legacy", tunnel_script, b"2\nn\n",
+                        b"Cancelled; nothing was started.", **app_store_settings)
     if sentinel.exists():
         raise AssertionError("menu selection executed the real-CLI stand-in instead of using filesystem-only detection")
     delegated = subprocess.run(
@@ -1358,8 +1428,122 @@ exec "$DEV_FIXTURE_REAL_MV" "$@"
                 f"{cutover_mode} release cutover did not preserve the prior coherent release: "
                 f"{cutover_result.stdout + cutover_result.stderr!r}"
             )
+
+    def relay_env_values(path: Path) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, separator, raw_value = line.partition("=")
+            if separator:
+                parsed = shlex.split(raw_value)
+                if len(parsed) != 1:
+                    raise AssertionError(f"invalid fixture environment value for {key}")
+                values[key] = parsed[0]
+        return values
+
+    cli_dev_env_file = cli_dev_root / "relay.env"
+    env_before_migration = relay_env_values(cli_dev_env_file)
+    migrated_socket = env_before_migration["HERDR_RELAY_PAIRING_SOCKET"]
+    legacy_socket = cli_dev_root / "config" / "pairing-control.sock"
+    if legacy_socket.exists() or legacy_socket.is_symlink():
+        raise AssertionError("positive fixture unexpectedly has an old pairing socket")
+    original_lines = cli_dev_env_file.read_text(encoding="utf-8").splitlines()
+    old_socket_value = f"HERDR_RELAY_PAIRING_SOCKET='{legacy_socket}'"
+    if sum(line.startswith("HERDR_RELAY_PAIRING_SOCKET=") for line in original_lines) != 1:
+        raise AssertionError("positive fixture has no unique pairing socket setting")
+    cli_dev_env_file.write_text(
+        "\n".join(old_socket_value if line.startswith("HERDR_RELAY_PAIRING_SOCKET=") else line
+                  for line in original_lines) + "\n",
+        encoding="utf-8",
+    )
+    legacy_env_values = relay_env_values(cli_dev_env_file)
+    migration_update = subprocess.run(
+        [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=update_env,
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=30, check=False,
+    )
+    migrated_values = relay_env_values(cli_dev_env_file)
+    if (migration_update.returncode != 0 or
+        b"Moved this root's stopped pairing-control socket" not in migration_update.stdout or
+        migrated_values.get("HERDR_RELAY_PAIRING_SOCKET") != migrated_socket or
+        {key: value for key, value in migrated_values.items() if key != "HERDR_RELAY_PAIRING_SOCKET"} !=
+        {key: value for key, value in legacy_env_values.items() if key != "HERDR_RELAY_PAIRING_SOCKET"}):
+        raise AssertionError(
+            "marked stopped legacy root did not migrate only the pairing socket and complete update: "
+            f"status={migration_update.returncode} output={migration_update.stdout + migration_update.stderr!r}"
+        )
+    second_migration_update = subprocess.run(
+        [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=update_env,
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=30, check=False,
+    )
+    if (second_migration_update.returncode != 0 or
+        b"Moved this root's stopped pairing-control socket" in second_migration_update.stdout or
+        relay_env_values(cli_dev_env_file).get("HERDR_RELAY_PAIRING_SOCKET") != migrated_socket):
+        raise AssertionError("pairing socket migration was not one-time and idempotent")
+
+    def make_legacy_migration_root(name: str, configured_socket: str, marked: bool,
+                                   old_path_kind: str = "absent") -> tuple[Path, Path, Path]:
+        migration_root = base / name
+        migration_root.mkdir(mode=0o700)
+        config_dir = migration_root / "config"
+        config_dir.mkdir(mode=0o700)
+        migration_env_file = migration_root / "relay.env"
+        socket_setting = f"HERDR_RELAY_PAIRING_SOCKET='{configured_socket}'\n"
+        migration_env_file.write_text(
+            socket_setting * (2 if old_path_kind == "duplicate" else 1), encoding="utf-8",
+        )
+        migration_env_file.chmod(0o600)
+        marker = migration_root / ".herdr-dev-tailscale-cli"
+        expected_marker = (
+            "HERDR_DEV_TAILSCALE_CLI_ROOT=1\n"
+            f"HERDR_DEV_TAILSCALE_CLI_STATE_ROOT={migration_root}/registration\n"
+            f"HERDR_DEV_TAILSCALE_CLI_COORDINATION_ROOT={home}/.local/state/herdr-mobile-relay/tailscale-cli-coordination\n"
+        )
+        if marked:
+            marker.write_text(expected_marker, encoding="utf-8")
+            marker.chmod(0o600)
+        old_path = config_dir / "pairing-control.sock"
+        if old_path_kind == "socket":
+            old_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            old_listener.bind(str(old_path))
+            old_listener.close()
+        elif old_path_kind == "symlink":
+            old_target = migration_root / "old-socket-target"
+            old_target.write_text("not a socket\n", encoding="utf-8")
+            old_path.symlink_to(old_target)
+        return migration_root, migration_env_file, old_path
+
+    legacy_mismatch = str(base / "unrelated-old-pairing.sock")
+    blocked_migrations = (
+        ("legacy_socket_present_is_refused", str(base / "legacy-socket" / "config" / "pairing-control.sock"), True, "socket"),
+        ("legacy_symlink_present_is_refused", str(base / "legacy-symlink" / "config" / "pairing-control.sock"), True, "symlink"),
+        ("different_nonlegacy_socket_is_refused", legacy_mismatch, True, "absent"),
+        ("unmarked_legacy_root_is_refused", str(base / "unmarked-legacy" / "config" / "pairing-control.sock"), False, "absent"),
+        ("duplicate_legacy_socket_settings_are_refused", str(base / "duplicate-legacy" / "config" / "pairing-control.sock"), True, "duplicate"),
+    )
+    for name, configured_socket, marked, old_path_kind in blocked_migrations:
+        migration_root, migration_env_file, old_path = make_legacy_migration_root(
+            name, configured_socket, marked, old_path_kind,
+        )
+        env_snapshot = migration_env_file.read_bytes()
+        marker_path = migration_root / ".herdr-dev-tailscale-cli"
+        marker_snapshot = marker_path.read_bytes() if marker_path.exists() else None
+        mismatch_env = dict(update_env, HERDR_DEV_TAILSCALE_CLI_DIR=str(migration_root))
+        mismatch_result = subprocess.run(
+            [str(root / "relay" / "dev-tailscale-cli.sh"), "update"], env=mismatch_env,
+            cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=5, check=False,
+        )
+        marker_after = marker_path.read_bytes() if marker_path.exists() else None
+        if (mismatch_result.returncode == 0 or
+            b"Existing development state records a different pairing socket" not in
+            mismatch_result.stdout + mismatch_result.stderr or
+            migration_env_file.read_bytes() != env_snapshot or marker_after != marker_snapshot or
+            (old_path_kind == "socket" and not old_path.is_socket()) or
+            (old_path_kind == "symlink" and not old_path.is_symlink())):
+            raise AssertionError(f"{name}: unsafe migration or non-fail-closed outcome")
     positive_socket.close()
-    print("PASS CLI development lifecycle fixture: isolated positive setup/update, development scope, exact-route recheck, production state preserved")
+    print("PASS CLI development lifecycle fixture: isolated setup/update, one-time legacy socket migration, refusal preservation, production state preserved")
 
     enabled = dict(env, HERDR_DEV_TAILSCALE_ENABLE="1")
     discovered = subprocess.run(

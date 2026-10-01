@@ -366,6 +366,62 @@ func TestResolveAppStoreBundleCandidateFromPrivateFixture(t *testing.T) {
 	}
 }
 
+func TestResolveBinaryTreatsExactAppStoreInstallCLIWrapperAsBundleAlias(t *testing.T) {
+	base := t.TempDir()
+	bundleCLI := filepath.Join(base, "Tailscale.app", "Contents", "MacOS", "Tailscale")
+	if err := os.MkdirAll(filepath.Dir(bundleCLI), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundleCLI, []byte("fixture executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := filepath.EvalSymlinks(bundleCLI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := filepath.Join(base, "usr-local-bin")
+	if err := os.Mkdir(wrapperDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(wrapperDir, "tailscale")
+	exact := "#!/bin/sh\n" + bundleCLI + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(exact), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveBinary("", wrapperDir, "darwin", bundleCLI)
+	if err != nil || got != expected {
+		t.Fatalf("exact Install CLI wrapper = %q, %v; want bundle alias %q", got, err, expected)
+	}
+
+	// Anything but the exact launcher bytes remains a distinct candidate.
+	for name, content := range map[string]string{
+		"extra argument":   "#!/bin/sh\n" + bundleCLI + " --socket=/tmp/x \"$@\"\n",
+		"no newline":       "#!/bin/sh\n" + bundleCLI + " \"$@\"",
+		"trailing command": exact + "echo pwned\n",
+		"different target": "#!/bin/sh\n/opt/homebrew/bin/tailscale \"$@\"\n",
+		"different shell":  "#!/bin/bash\n" + bundleCLI + " \"$@\"\n",
+	} {
+		if err := os.WriteFile(wrapper, []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := resolveBinary("", wrapperDir, "darwin", bundleCLI); got != "" || !errors.Is(err, ErrProfileUnavailable) {
+			t.Fatalf("%s: non-exact wrapper = %q, %v; want ambiguous-candidate refusal", name, got, err)
+		}
+	}
+
+	// Off Darwin there is no bundle candidate, so the wrapper is just itself.
+	if err := os.WriteFile(wrapper, []byte(exact), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wantWrapper, err := filepath.EvalSymlinks(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveBinary("", wrapperDir, "linux", bundleCLI); err != nil || got != wantWrapper {
+		t.Fatalf("linux wrapper candidate = %q, %v; want %q", got, err, wantWrapper)
+	}
+}
+
 func TestCLIEnvironmentUsesConstrainedPathAndDropsTailscaleOverrides(t *testing.T) {
 	t.Setenv("HOME", "/Users/fixture home")
 	t.Setenv("PATH", "/fixture/bin")
@@ -851,6 +907,24 @@ func TestNodeMutationLockIsReleasedAfterProcessCrash(t *testing.T) {
 	info, err := entries[0].Info()
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("persistent private lock file = %v, %v", info, err)
+	}
+}
+
+func TestDevelopmentRouteConflictGivesSafeRootRecoveryGuidance(t *testing.T) {
+	fixture := newFakeCLI(t)
+	fixture.serve = fixtureRoute
+	manager := newFixtureManager(t, fixture, "development root conflict")
+
+	err := manager.ReserveBackendPort(context.Background(), "install-new-root", "development", "node-fixture",
+		"https://herdr.tailnet.ts.net:8443", 8443, 18377, "00000000000000000000000000000001")
+	if !errors.Is(err, ErrConflict) ||
+		!strings.Contains(err.Error(), "HERDR_DEV_TAILSCALE_CLI_DIR") ||
+		!strings.Contains(err.Error(), "scoped unpublish first") ||
+		!strings.Contains(err.Error(), "will not adopt or change an unregistered route") {
+		t.Fatalf("route conflict guidance = %v", err)
+	}
+	if fixture.mutationCalls() != 0 {
+		t.Fatalf("conflict recovery guidance dispatched a Serve mutation: %d", fixture.mutationCalls())
 	}
 }
 
