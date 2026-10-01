@@ -163,6 +163,10 @@ then records `reconciled-absent` for a registered or reconciled-present journal
 and releases only the matching local reservation without changing Serve. It also
 releases an exact reservation left beside a reconciled-absent or removed journal
 after an interrupted final write, without rewriting that journal.
+`release-reservation` likewise finishes an interrupted release of a
+non-dispatched setup attempt, and a later setup finalizes a stale attempt
+binding whose reservation is already gone, so its own reservation stays
+releasable; neither changes Serve.
 Conflicting/incomplete state, an occupied listener, or a mismatched operation
 ID stops these commands without clearing or adopting route state. Invoke these actions through
 `HERDR_DEV_TAILSCALE_CLI_ENABLE=1 relay/dev-tailscale-cli.sh <action>` only in

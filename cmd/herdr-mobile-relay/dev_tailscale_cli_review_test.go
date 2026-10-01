@@ -488,6 +488,87 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		assertDevelopmentJournal(t, fixture, tailscalecli.StateUnconfigured, reviewOperationID, "", false)
 		assertNoRouteMutationCalls(t, fixture)
 	})
+
+	t.Run("interrupted-unconfigured-release-then-failed-setup-releases-new-attempt", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		// An earlier release deleted attempt A's reservation but was interrupted
+		// before it cleared the unconfigured journal's attempt binding.
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StateUnconfigured, journalReservationID: reviewReservationID,
+			serve: reviewUnrelatedRoute,
+		})
+		const laterReservationID = "44444444444444444444444444444444"
+		oldFactory := newDevelopmentForegroundServer
+		oldReservationID := developmentReservationIDGenerator
+		t.Cleanup(func() {
+			newDevelopmentForegroundServer = oldFactory
+			developmentReservationIDGenerator = oldReservationID
+		})
+		developmentReservationIDGenerator = func() (string, error) { return laterReservationID, nil }
+		constructionFailure := errors.New("fixture relay construction failed before publication")
+		newDevelopmentForegroundServer = func(*config.Config, *tailscalecli.DevelopmentWorkflow, io.Writer) (developmentForegroundServer, error) {
+			// Setup B holds its own pending reservation; the stale binding was
+			// finalized under the shared lock before B was claimed.
+			assertDevelopmentJournal(t, fixture, tailscalecli.StateUnconfigured, reviewOperationID, "", false)
+			assertReservationState(t, fixture, tailscalecli.StatePublishPending, laterReservationID)
+			return nil, constructionFailure
+		}
+		setupConfirmation := tailscalecli.PublishRouteConfirmation("node-fixture", reviewOrigin, 8443, 18377)
+		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "setup"}, setupConfirmation+"\n")
+		if code == 0 || !errors.Is(err, constructionFailure) {
+			t.Fatalf("setup with failing relay construction returned code=%d err=%v\nstderr=%s", code, err, stderr)
+		}
+		if strings.Contains(stderr, "Backend reservation retained") {
+			t.Fatalf("setup could not release its own unpublished reservation: %s", stderr)
+		}
+		assertReservationAbsent(t, fixture)
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateUnconfigured, reviewOperationID, "", false)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertNoRouteMutationCalls(t, fixture)
+		if statusCode, report := dispatchDevelopmentStatus(t); statusCode != 0 || report.ReservationState != "" || report.RequiresOperatorAction {
+			t.Fatalf("status after releasing the later attempt = code %d report %+v", statusCode, report)
+		}
+	})
+
+	t.Run("stale-unconfigured-attempt-beside-later-reservation-is-releasable", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		// The stranded pair an earlier binary could leave: journal bound to
+		// released attempt A beside later setup B's pending reservation.
+		const laterReservationID = "44444444444444444444444444444444"
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal: tailscalecli.StateUnconfigured, journalReservationID: reviewReservationID,
+			reservation: tailscalecli.StatePublishPending, reservationID: laterReservationID,
+			serve: reviewUnrelatedRoute,
+		})
+		code, report := dispatchDevelopmentStatus(t)
+		if code == 0 || report.ReservationState != tailscalecli.StatePublishPending ||
+			report.ReservationAttemptID != laterReservationID || !report.ReservationReleasable {
+			t.Fatalf("status for stale binding beside later reservation = code %d report %+v", code, report)
+		}
+		mustDispatchDevelopmentCommand(t, "release-reservation", "RELEASE BACKEND RESERVATION "+laterReservationID)
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateUnconfigured, reviewOperationID, "", false)
+		assertReservationAbsent(t, fixture)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertNoRouteMutationCalls(t, fixture)
+	})
+
+	t.Run("release-interrupted-after-journal-cleanup-is-retryable", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		// Release clears the journal binding before deleting the reservation.
+		seedDevelopmentLifecycle(t, fixture, developmentLifecycleSeed{
+			journal:     tailscalecli.StateUnconfigured,
+			reservation: tailscalecli.StatePublishPending, reservationID: reviewReservationID,
+			serve: reviewUnrelatedRoute,
+		})
+		mustDispatchDevelopmentCommand(t, "release-reservation", "RELEASE BACKEND RESERVATION "+reviewReservationID)
+		assertDevelopmentJournal(t, fixture, tailscalecli.StateUnconfigured, reviewOperationID, "", false)
+		assertReservationAbsent(t, fixture)
+		assertServeFixture(t, fixture, reviewUnrelatedRoute)
+		assertNoRouteMutationCalls(t, fixture)
+	})
 }
 
 func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {

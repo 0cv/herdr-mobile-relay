@@ -1029,6 +1029,130 @@ func TestClearedUnconfiguredJournalAllowsLaterAttemptRelease(t *testing.T) {
 	}
 }
 
+func TestInterruptedUnconfiguredReleaseIsRecoverable(t *testing.T) {
+	fixture := newFakeCLI(t)
+	fixture.serve = unrelatedRoute
+	fixture.publishErr = ErrProfileUnavailable
+	fixture.publishDispatched = false
+	manager := newFixtureManager(t, fixture, "interrupted unconfigured release")
+	request := fixtureRequest(true)
+	attemptA := request.ReservationID
+	attemptB := "00000000000000000000000000000002"
+	release := func(reservationID string) error {
+		return manager.ReleaseBackendPort(context.Background(), request.InstallationID, request.Scope,
+			request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, reservationID, true)
+	}
+	reserve := func(reservationID string) error {
+		return manager.ReserveBackendPort(context.Background(), request.InstallationID, request.Scope,
+			request.ExpectedNodeID, request.Origin, request.HTTPSPort, request.BackendPort, reservationID)
+	}
+	requireJournalAttempt := func(want string) {
+		t.Helper()
+		record, err := manager.readRegistration()
+		if err != nil || record == nil || record.State != StateUnconfigured || record.ReservationID != want {
+			t.Fatalf("unconfigured journal = %+v, %v; want attempt %q", record, err, want)
+		}
+	}
+	requireReservation := func(want string) {
+		t.Helper()
+		reservation, err := manager.readBackendReservation(request.BackendPort)
+		if want == "" {
+			if err != nil || reservation != nil {
+				t.Fatalf("backend reservation = %+v, %v; want none", reservation, err)
+			}
+			return
+		}
+		if err != nil || reservation == nil || reservation.State != StatePublishPending || reservation.ReservationID != want {
+			t.Fatalf("backend reservation = %+v, %v; want pending %q", reservation, err, want)
+		}
+	}
+
+	if err := manager.Publish(context.Background(), request); !errors.Is(err, ErrPublishNotDispatched) {
+		t.Fatalf("pre-dispatch failure classification = %v", err)
+	}
+	bound, err := manager.readRegistration()
+	if err != nil || bound == nil || bound.State != StateUnconfigured || bound.ReservationID != attemptA {
+		t.Fatalf("non-dispatched journal = %+v, %v", bound, err)
+	}
+
+	// The release clears the journal binding first; an interruption before the
+	// reservation is deleted leaves a state the same exact release finishes.
+	interrupted := errors.New("simulated interruption after journal cleanup")
+	manager.releaseWriteHook = func() error { return interrupted }
+	if err := release(attemptA); !errors.Is(err, interrupted) {
+		t.Fatalf("fault injection result = %v", err)
+	}
+	manager.releaseWriteHook = nil
+	requireJournalAttempt("")
+	requireReservation(attemptA)
+	report, recoverErr := manager.Recover(context.Background(), request.Scope, request.InstallationID,
+		request.Origin, request.HTTPSPort, request.BackendPort)
+	if !errors.Is(recoverErr, ErrUncertain) || report.ReservationAttemptID != attemptA || !report.ReservationReleasable {
+		t.Fatalf("interrupted release recovery report = %+v, %v", report, recoverErr)
+	}
+	if err := release(attemptA); err != nil {
+		t.Fatalf("retry exact interrupted release: %v", err)
+	}
+	requireReservation("")
+
+	// An earlier binary deleted the reservation before clearing the journal.
+	// A later setup finalizes that proven-stale binding under the shared lock.
+	if err := manager.writeRegistration(*bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := reserve(attemptB); err != nil {
+		t.Fatalf("later setup reservation beside stale binding: %v", err)
+	}
+	requireJournalAttempt("")
+	requireReservation(attemptB)
+	if err := release(attemptB); err != nil {
+		t.Fatalf("later setup could not release its own reservation: %v", err)
+	}
+	requireReservation("")
+
+	pendingReservation := func(reservationID string) backendPortReservation {
+		return backendPortReservation{
+			Schema: 1, InstallationID: request.InstallationID, Scope: request.Scope, NodeID: request.ExpectedNodeID,
+			HTTPSPort: request.HTTPSPort, BackendPort: request.BackendPort, Origin: request.Origin,
+			ReservationID: reservationID, State: StatePublishPending, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	}
+	// The stranded pair an earlier binary could already have written.
+	if err := manager.writeRegistration(*bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.writeBackendReservation(pendingReservation(attemptB)); err != nil {
+		t.Fatal(err)
+	}
+	if err := release(attemptA); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale attempt released another attempt's reservation: %v", err)
+	}
+	if err := release(attemptB); err != nil {
+		t.Fatalf("stranded later reservation could not be released: %v", err)
+	}
+	requireJournalAttempt("")
+	requireReservation("")
+
+	// A binding whose reservation is still live is never finalized or bypassed.
+	if err := manager.writeRegistration(*bound); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.writeBackendReservation(pendingReservation(attemptA)); err != nil {
+		t.Fatal(err)
+	}
+	if err := reserve(attemptB); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second setup claimed a live pending reservation: %v", err)
+	}
+	if err := release(attemptB); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different attempt released a live reservation: %v", err)
+	}
+	requireJournalAttempt(attemptA)
+	requireReservation(attemptA)
+	if fixture.mutationCalls() != 1 || fixture.serve != unrelatedRoute {
+		t.Fatalf("release recovery changed Serve: writes=%d serve=%s", fixture.mutationCalls(), fixture.serve)
+	}
+}
+
 func TestRegisteredMissingRouteRequiresBoundedExplicitRepair(t *testing.T) {
 	fixture := newFakeCLI(t)
 	manager := newFixtureManager(t, fixture, "repair missing route")

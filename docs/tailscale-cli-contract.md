@@ -218,8 +218,15 @@ can leave beside that journal. A verified `removed` journal with a retained
 reservation is reported as requiring operator action rather than ready.
 Conflicting or incomplete observations refuse all three paths; none adopts an
 observed route. An unconfigured journal keeps a non-dispatched publication's
-attempt ID until that exact reservation is released; afterwards a later setup
-attempt's own pending reservation remains releasable by that attempt. Explicit
+attempt ID until that exact reservation is released. Release clears that
+journal binding before deleting the reservation, so an interruption leaves an
+unbound journal beside the still-pending reservation that the same exact,
+stopped-listener, absence-checked release can finish. A binding whose
+reservation is already gone (from an interrupted earlier release) is stale:
+a later setup finalizes it under the shared reservation lock before claiming its
+own attempt, and release of a later attempt beside such a stale binding also
+finalizes it. A binding whose reservation still exists is never finalized or
+bypassed, and none of these paths changes Serve. Explicit
 repair and explicit unpublish require fresh preflight and consent. Transport-selection helpers run a local-only
 journal/reservation guard before changing away from
 `tailscale-cli`; active, uncertain, or pending state blocks the change until the

@@ -175,6 +175,7 @@ type Manager struct {
 	skipBackendReadiness     bool
 	fixtureLockWaitHook      func(string)
 	reconcileWriteHook       func() error
+	releaseWriteHook         func() error
 	transportSelectionPath   string
 	transportSelectionExists bool
 	transportSelectionDigest [sha256.Size]byte
@@ -409,6 +410,22 @@ func (m *Manager) ReserveBackendPort(ctx context.Context, installationID, scope,
 			// idempotent lease. A second setup must not take ownership of it.
 			return ErrConflict
 		}
+		if record != nil && record.State == StateUnconfigured && record.InstallationID == installationID &&
+			record.ReservationID != "" {
+			// An earlier release may have deleted its reservation before clearing
+			// this journal's attempt binding. Finalize only that proven-stale
+			// binding before claiming a new attempt; never rebind a live one.
+			stale, err := m.staleUnconfiguredAttempt(*record)
+			if err != nil {
+				return err
+			}
+			if !stale {
+				return fmt.Errorf("%w: release the journal's pending backend reservation before a new setup attempt", ErrUncertain)
+			}
+			if err := m.clearUnconfiguredAttempt(*record); err != nil {
+				return fmt.Errorf("%w: stale unconfigured attempt could not be finalized; no reservation was written", ErrUncertain)
+			}
+		}
 		return m.writeBackendReservation(reservation)
 	})
 }
@@ -448,11 +465,20 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 				return ErrConflict
 			}
 			// A non-dispatched publication keeps its attempt ID until that exact
-			// reservation is released; afterwards the cleared journal binds no
-			// attempt, so a later setup's own pending reservation stays releasable.
+			// reservation is released. A binding to a different attempt is
+			// accepted only when that attempt's reservation is proven gone (an
+			// interrupted earlier release); it is then finalized as well.
+			clearAttempt := record != nil && record.State == StateUnconfigured && record.ReservationID == reservationID
 			if record != nil && record.InstallationID == installationID && record.State == StateUnconfigured &&
 				record.ReservationID != "" && record.ReservationID != reservationID {
-				return ErrConflict
+				stale, err := m.staleUnconfiguredAttempt(*record)
+				if err != nil {
+					return err
+				}
+				if !stale {
+					return ErrConflict
+				}
+				clearAttempt = true
 			}
 			if !m.skipBackendReadiness {
 				listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(backendPort)))
@@ -474,19 +500,47 @@ func (m *Manager) ReleaseBackendPort(ctx context.Context, installationID, scope,
 			if backendPortHasRoute(inspection.Serve, backendPort, nil) {
 				return ErrConflict
 			}
-			if err := m.removeBackendReservation(reservation); err != nil {
-				return err
-			}
-			if record != nil && record.State == StateUnconfigured && record.ReservationID == reservationID {
-				record.ReservationID = ""
-				record.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				if err := m.writeRegistration(*record); err != nil {
-					return fmt.Errorf("%w: reservation released but local journal cleanup failed", ErrUncertain)
+			// Clear the journal binding before deleting the reservation. An
+			// interruption between the two writes leaves an unbound unconfigured
+			// journal beside this still-pending reservation, which the same exact
+			// release can finish after repeating every check above.
+			if clearAttempt {
+				if err := m.clearUnconfiguredAttempt(*record); err != nil {
+					return fmt.Errorf("%w: local journal cleanup failed; backend reservation retained", ErrUncertain)
 				}
 			}
-			return nil
+			if m.fixtureMutations && m.releaseWriteHook != nil {
+				if err := m.releaseWriteHook(); err != nil {
+					return err
+				}
+			}
+			return m.removeBackendReservation(reservation)
 		})
 	})
+}
+
+// staleUnconfiguredAttempt reports whether an unconfigured journal names a
+// non-dispatched publication attempt whose shared reservation no longer
+// exists. Publish wrote that reservation at the journal's own backend port, and
+// each port holds at most one reservation file, so absence there is proof.
+func (m *Manager) staleUnconfiguredAttempt(record registration) (bool, error) {
+	if record.State != StateUnconfigured || record.ReservationID == "" {
+		return false, nil
+	}
+	reservation, err := m.readBackendReservation(record.BackendPort)
+	if err != nil {
+		return false, err
+	}
+	return reservation == nil || reservation.ReservationID != record.ReservationID, nil
+}
+
+func (m *Manager) clearUnconfiguredAttempt(record registration) error {
+	if record.State != StateUnconfigured {
+		return ErrUncertain
+	}
+	record.ReservationID = ""
+	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return m.writeRegistration(record)
 }
 
 // Publish creates exactly one persistent background HTTPS proxy route. Real
