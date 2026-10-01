@@ -80,6 +80,10 @@ require_text "$REPRINT" 'tailscale-external'
 require_text "$EXTERNAL_LAUNCHER" 'verify_phone_app_bundle "$PHONE_APP_BASE"'
 require_text "$EXTERNAL_LAUNCHER" 'HERDR_PHONE_APP_URL="$PHONE_APP_BASE"'
 require_text "$EXTERNAL_LAUNCHER" 'HERDR_REACHABILITY_PORT_MAPPING=0'
+# Foreground launchers start the relay directly, so they keep main's release
+# credential boundary: only the private token-file path reaches the relay.
+require_text "$LAUNCHER" 'unset GH_TOKEN GITHUB_TOKEN'
+require_text "$EXTERNAL_LAUNCHER" 'unset GH_TOKEN GITHUB_TOKEN'
 require_text "$ROOT/internal/config/config.go" 'TransportTailscaleExternal'
 require_text "$ROOT/internal/app/tailscale_session.go" 'armExternalTailscale'
 require_text "$ROOT/internal/app/tailscale_session.go" 'checkExternalTailscaleReadiness'

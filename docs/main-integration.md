@@ -163,7 +163,9 @@ fixture that had not yet run on the merged tree. Corrections:
   released job accepts it, then still requires a successful ready page.
 - Main's Cloudflare public `/readyz` gate ran for any transport that kept a
   `CLOUDFLARED_CONFIG`, including CLI-backed Serve, whose exact route is
-  verified separately. It now applies only to the Cloudflare transport.
+  verified separately. It now applies only to the Cloudflare transport. Shell
+  regressions cover this scope and the compact nested live-handoff hint, and
+  the Tailscale source contract requires the foreground credential scrub.
 - Foreground managed and operator-owned Serve launchers start the relay
   directly, so they now drop raw `GH_TOKEN`/`GITHUB_TOKEN` after loading
   `relay.env`. This matches main's quick-start and service boundaries; the

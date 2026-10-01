@@ -907,6 +907,30 @@ test "$(HERDR_RELAY_BIN="$JSON_FIELD_BIN" json_string_field "$EXACT_HEALTH" rele
 test "$(cat "$HEALTH_ATTEMPTS")" = "2"
 unset HERDR_RELAY_BIN HERDR_RELAY_INSTANCE_ID
 
+# The relay nests inventory.error_code; its compact encoding must still yield
+# main's live-handoff hint. Main's Cloudflare public gate applies only to the
+# Cloudflare transport, so a retained tunnel config cannot gate CLI Serve.
+(
+    unset HERDR_TAILSCALE_REQUEST HERDR_RELAY_TRANSPORT HERDR_GATEWAY_URL
+    export HERDR_RELAY_BIN="$WORK_DIR/readiness-helper"
+    curl() {
+        printf '%s\n' '{"status":"ok","readiness":"degraded","inventory":{"state":"error","error_code":"protocol_mismatch"},"instance":"test","protocol":3}'
+    }
+    case "$(report_inventory_failure 8375 2>&1)" in
+        *'Run: herdr server live-handoff'*) ;;
+        *) echo "nested inventory protocol mismatch lost the live-handoff hint" >&2; exit 1 ;;
+    esac
+    gate_env="$WORK_DIR/public-gate.env"
+    printf "HERDR_RELAY_TRANSPORT='tailscale-cli'\nCLOUDFLARED_CONFIG='%s'\n" "$WORK_DIR/missing-tunnel.yml" > "$gate_env"
+    verify_public_readiness "$gate_env" '{}' ||
+        { echo "CLI-backed Serve was gated on a retained Cloudflare tunnel config" >&2; exit 1; }
+    printf "HERDR_RELAY_TRANSPORT='cloudflare'\nCLOUDFLARED_CONFIG='%s'\n" "$WORK_DIR/missing-tunnel.yml" > "$gate_env"
+    if verify_public_readiness "$gate_env" '{}' 2>/dev/null; then
+        echo "Cloudflare public readiness accepted a missing tunnel config" >&2
+        exit 1
+    fi
+)
+
 GATEWAY_HEALTH='{"status":"ok","gateway":{"enabled":true,"registered":true,"relay_id":"AAAA","clients":1}}'
 test "$(gateway_registration_state "$GATEWAY_HEALTH")" = "true"
 test "$(gateway_registration_state '{"gateway": {"enabled": true, "registered": false}}')" = "false"
