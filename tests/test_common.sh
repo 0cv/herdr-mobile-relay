@@ -519,6 +519,18 @@ test ! -e "$SHELL_INJECTION_MARKER"
 test "$(systemd_quote_value '/tmp/path with spaces%')" = '"/tmp/path with spaces%%"'
 test "$(systemd_unquote_value '"/tmp/path with spaces%%"')" = '/tmp/path with spaces%'
 test "$(xml_escape_text 'a&b<c>')" = 'a&amp;b&lt;c&gt;'
+# Plugin and launchd rollback run these helpers from an EXIT trap after a
+# failure; Bash would give a bare return that failure status.
+if ! bash -c '
+    . "$1/relay/common.sh"
+    trap '\''if safe="$(systemd_quoted /safe/path exec)" && [ "$safe" = /safe/path ] &&
+        quoted="$(systemd_quoted "/path with space")" && [ "$quoted" = "\"/path with space\"" ] &&
+        require_user_service_context; then exit 0; fi; exit 9'\'' EXIT
+    false
+' _ "$REPO_DIR"; then
+    echo "service quoting or user-context helpers failed inside rollback EXIT traps" >&2
+    exit 1
+fi
 
 FAKE_PLUTIL="$WORK_DIR/plutil"
 PLIST_LOG="$WORK_DIR/plist.log"

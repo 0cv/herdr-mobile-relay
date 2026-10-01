@@ -10,9 +10,11 @@ private_owned_file() {
     [ "$file_identity" = "$(id -u):600:1" ]
 }
 
+# Rollback calls these helpers from EXIT traps, where Bash gives a bare
+# `return` the status from before the trap; return explicit statuses.
 systemd_quoted() {
     local value="$1"
-    case "$value" in *[!a-zA-Z0-9_./:=+-]*) ;; *) printf '%s' "$value"; return ;; esac
+    case "$value" in *[!a-zA-Z0-9_./:=+-]*) ;; *) printf '%s' "$value"; return $? ;; esac
     value=${value//\\/\\\\}
     value=${value//\"/\\\"}
     value=${value//%/%%}
@@ -872,7 +874,7 @@ update_launchd_release_paths() {
 
 require_user_service_context() {
     if [ "$(id -u)" -ne 0 ]; then
-        return
+        return 0
     fi
 
     echo "Refusing to manage the Herdr Mobile Relay user service as root." >&2

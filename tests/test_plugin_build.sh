@@ -15,50 +15,7 @@ report_failed_assertion() {
     if [ -f "${UNIT_FILE:-}" ]; then
         echo "--- current fixture unit" >&2
         cat "$UNIT_FILE" >&2 || true
-        ls -la "$(dirname "$UNIT_FILE")" >&2 || true
     fi
-    if [ -n "${RELEASE_ROOT:-}" ]; then
-        echo "--- fixture release root" >&2
-        ls -la "$RELEASE_ROOT" "$RELEASE_ROOT/current/" "$RELEASE_ROOT/current/relay/" >&2 || true
-    fi
-    if [ -f "${RESTART_LOG:-}" ]; then
-        echo "--- fake service restarts: $(wc -l < "$RESTART_LOG")" >&2
-    fi
-    replay_service_rewrite || true
-}
-
-# Diagnostic only: replay the plugin's unit rewrite against a copy of the
-# current fixture unit, directly and from an errexit EXIT trap like rollback.
-replay_service_rewrite() {
-    [ -f "${UNIT_FILE:-}" ] && [ -n "${RELEASE_ROOT:-}" ] && [ -n "${TARGET_CONFIG:-}" ] || return 0
-    local functions="$WORK_DIR/rewrite-replay-functions.sh" mode
-    awk '/^rewrite_service_release_paths\(\)/ { copying=1 } copying { print } copying && /^}/ { copying=0 }' \
-        "$REPO_DIR/relay/plugin-build.sh" > "$functions" || return 0
-    for mode in direct exit-trap; do
-        cp "$UNIT_FILE" "$WORK_DIR/rewrite-replay.service" || return 0
-        echo "--- isolated unit rewrite replay ($mode)" >&2
-        PATH="$FAKE_BIN:$PATH" bash -c '
-            set -eu
-            . "$1/relay/common.sh"
-            . "$2"
-            PLATFORM=Linux
-            replay() {
-                set -x
-                if rewrite_service_release_paths "$3" "$4/current/relay/herdr-mobile-relay-service.sh" "$4/current" "$5"; then
-                    set +x; echo "replay status=0"
-                else
-                    status=$?; set +x; echo "replay status=$status"
-                fi
-                cat "$3"
-            }
-            if [ "$6" = exit-trap ]; then
-                trap "trap - EXIT; replay \"\$@\"" EXIT
-                false
-            fi
-            replay "$@"
-        ' _ "$REPO_DIR" "$functions" "$WORK_DIR/rewrite-replay.service" "$RELEASE_ROOT" \
-            "$TARGET_CONFIG/relay.env" "$mode" >&2 2>&1 || true
-    done
 }
 trap 'report_failed_assertion "$LINENO" "$BASH_COMMAND"' ERR
 
