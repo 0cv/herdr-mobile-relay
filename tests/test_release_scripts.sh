@@ -79,9 +79,6 @@ printf '%s\n' readme > "$RELEASE_DIR/README.md"
 for WRAPPER in \
     common.sh \
     herdr-mobile-relay-service.sh \
-    install-service.sh \
-    install-systemd-user-service.sh \
-    native-install-transaction.sh \
     plugin-on-event.sh \
     setup-link.sh \
     stable-setup.sh \
@@ -155,22 +152,3 @@ if [ -e "$HOST_LAUNCHCTL_LOG" ]; then
     cat "$HOST_LAUNCHCTL_LOG" >&2
     exit 1
 fi
-
-rm "$RELEASE_DIR/relay/native-install-transaction.sh"
-"$RELEASE_DIR/herdr-mobile-relay" release-manifest \
-    "$RELEASE_DIR" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" >/dev/null
-tar -C "$RELEASE_DIR" -czf "$ARCHIVE" .
-if command -v sha256sum >/dev/null 2>&1; then
-    HASH=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-else
-    HASH=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
-fi
-printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
-if OUTPUT=$(
-    "$REPO_DIR/scripts/check-installed-release.sh" \
-        "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" 2>&1
-); then
-    echo "installed-release check accepted a missing service installation helper" >&2
-    exit 1
-fi
-printf '%s\n' "$OUTPUT" | grep -q "release is missing service installation file: relay/native-install-transaction.sh"
