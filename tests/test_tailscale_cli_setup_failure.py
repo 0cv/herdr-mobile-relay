@@ -261,7 +261,10 @@ def installer_refusal(platform: str, definition_kind: str) -> tuple[int, str, st
         home.mkdir()
         shutil.copy2(REPO / "relay" / "common.sh", relay / "common.sh")
         installer_name = "install-systemd-user-service.sh" if platform == "Linux" else "install-service.sh"
-        shutil.copy2(REPO / "relay" / installer_name, relay / installer_name)
+        # Installers source the packaged native transaction helper before any
+        # refusal; the guard must still precede every service-manager call.
+        for name in (installer_name, "native-install-transaction.sh"):
+            shutil.copy2(REPO / "relay" / name, relay / name)
         current, legacy = service_paths(home, platform)
         selected = current if definition_kind == "current" else legacy
         selected.parent.mkdir(parents=True)

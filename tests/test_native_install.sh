@@ -51,7 +51,8 @@ for platform in systemd launchd; do
 #!/bin/sh
 case "$1" in
 version) printf '{"version":"version","revision":"revision"}\n' ;;
-verify-readiness) exec "$NATIVE_HELPER" "$@" ;;
+# Shell JSON fields use the compiled strict decoder, as packaged releases do.
+json-field|verify-readiness) exec "$NATIVE_HELPER" "$@" ;;
 *) exit 1 ;;
 esac
 EOF

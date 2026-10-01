@@ -14,6 +14,9 @@ ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
 }
 assert_service_env_matches "$ENV_FILE"
 load_relay_env "$ENV_FILE"
+# As in the quick-start and service wrappers, the relay receives only the
+# private token-file path; a legacy raw release token is never inherited.
+unset GH_TOKEN GITHUB_TOKEN
 require_supported_platform
 
 RELAY_BIN="$(relay_binary)"

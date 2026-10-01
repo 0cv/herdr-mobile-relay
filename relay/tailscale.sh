@@ -28,6 +28,9 @@ PERSISTED_REARM="$(env_file_value "$ENV_FILE" HERDR_RELAY_REARM_BOOTSTRAP || tru
 PERSISTED_TOKEN="$(env_file_value "$ENV_FILE" HERDR_RELAY_TOKEN || true)"
 PERSISTED_INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID || true)"
 load_relay_env "$ENV_FILE"
+# As in the quick-start and service wrappers, the relay receives only the
+# private token-file path; a legacy raw release token is never inherited.
+unset GH_TOKEN GITHUB_TOKEN
 [ -n "$PERSISTED_TOKEN" ] && [ "$PERSISTED_TOKEN" = "${HERDR_RELAY_TOKEN:-}" ] &&
     [ -n "$PERSISTED_INSTANCE" ] && [ "$PERSISTED_INSTANCE" = "${HERDR_RELAY_INSTANCE_ID:-}" ] || {
     echo "✗ Relay credentials are not configured; run setup before Tailscale Serve." >&2

@@ -797,16 +797,39 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
 
     # A named user-service fixture admits only a fake exact-route verifier and
     # fake systemctl/curl. It never reaches the host service manager, Tailscale,
-    # Cloudflare, or a listening relay.
+    # Cloudflare, or a listening relay. Installers keep main's staged native
+    # transaction and exact readiness gate, so the fake relay delegates strict
+    # JSON fields and readiness verification to the compiled relay helper.
+    readiness_helper = base / "readiness-helper"
+    subprocess.run(
+        ["go", "build", "-o", str(readiness_helper), str(root / "cmd" / "herdr-mobile-relay")],
+        cwd=root, stdin=subprocess.DEVNULL, timeout=900, check=True,
+    )
+    fixture_identity = '{"version":"0.9.0","revision":"fixture-revision"}'
+    fixture_manifest = '{"version":"0.9.0","revision":"fixture-revision","web_hash":"fixture-web"}\n'
+
+    def fixture_readiness(instance: str) -> str:
+        return (
+            '{"status":"ready","inventory":{"state":"ready"},"instance":"' + instance +
+            '","release_version":"0.9.0","revision":"fixture-revision","bundle_hash":"fixture-web","protocol":3}'
+        )
+
+    def fixture_relay_preamble() -> str:
+        return (
+            "case \"$1\" in json-field|verify-readiness) exec " + shlex.quote(str(readiness_helper)) + " \"$@\" ;; esac\n"
+            "if [ \"$*\" = 'version --json' ]; then printf '%s\\n' '" + fixture_identity + "'; exit 0; fi\n"
+        )
+
     cli_install_root = base / "cli install & 'quoted' fixture"
     cli_install_home = cli_install_root / "home"
     cli_install_home.mkdir(mode=0o700, parents=True)
     cli_install_root.chmod(0o700)
     cli_install_scripts = cli_install_root / "relay"
     cli_install_scripts.mkdir(mode=0o700)
-    for name in ("common.sh", "install-systemd-user-service.sh", "herdr-mobile-relay-service.sh",
-                 "tailscale-cli-service.sh", "service.sh"):
+    for name in ("common.sh", "native-install-transaction.sh", "install-systemd-user-service.sh",
+                 "herdr-mobile-relay-service.sh", "tailscale-cli-service.sh", "service.sh"):
         shutil.copy2(root / "relay" / name, cli_install_scripts / name)
+    (cli_install_root / "release-manifest.json").write_text(fixture_manifest, encoding="utf-8")
     cli_install_bin = cli_install_root / "fake-bin"
     cli_install_bin.mkdir(mode=0o700)
     manager_record = cli_install_root / "manager-record"
@@ -824,17 +847,21 @@ printf 'Linux'
     )
     (cli_install_bin / "uname").chmod(0o700)
     (cli_install_bin / "curl").write_text(
-        "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"ok\",\"instance\":\"fixture-installation\",\"version\":\"0.9.0\",\"protocol\":1}'\n",
+        "#!/bin/sh\nprintf '%s\\n' '" + fixture_readiness("fixture-installation") + "'\n",
         encoding="utf-8",
     )
     (cli_install_bin / "curl").chmod(0o700)
+    # The installer's systemd-analyze verification must not reach the host.
+    (cli_install_bin / "systemd-analyze").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (cli_install_bin / "systemd-analyze").chmod(0o700)
     cli_install_user_bin = cli_install_home / ".local" / "bin"
     cli_install_user_bin.mkdir(mode=0o700, parents=True)
-    for name in ("systemctl", "curl", "uname"):
+    for name in ("systemctl", "curl", "uname", "systemd-analyze"):
         shutil.copy2(cli_install_bin / name, cli_install_user_bin / name)
     manager_relay = cli_install_root / "fake-manager-relay"
     manager_relay.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MANAGER_RECORD\"\n"
+        "#!/bin/sh\n" + fixture_relay_preamble() +
+        "printf '%s\\n' \"$*\" >> \"$MANAGER_RECORD\"\n"
         "case \"$*\" in 'tailscale-cli activation-check') exit 0 ;; esac\n"
         "case \"$*\" in 'tailscale-cli assert-ready'*) printf '%s\\n' '{\"route\":{\"journal_state\":\"registered\",\"readiness\":\"ready\",\"runtime_qualified\":true}}'; exit 0 ;; esac\n"
         "echo unexpected relay command >&2; exit 97\n",
@@ -908,7 +935,7 @@ printf 'Linux'
     expected_unit_lines = {
         "ExecStart=" + systemd_quote(str(cli_install_scripts / "herdr-mobile-relay-service.sh")),
         "WorkingDirectory=" + systemd_quote(os.path.realpath(cli_install_root)),
-        "Environment=HERDR_RELAY_ENV=" + systemd_quote(str(cli_install_env)),
+        "Environment=" + systemd_quote("HERDR_RELAY_ENV=" + str(cli_install_env)),
         "Restart=on-failure",
         "RestartSec=10",
     }
@@ -939,9 +966,10 @@ printf 'Linux'
     mac_fixture.chmod(0o700)
     mac_scripts = mac_fixture / "relay"
     mac_scripts.mkdir(mode=0o700)
-    for name in ("common.sh", "install-service.sh", "herdr-mobile-relay-service.sh",
-                 "tailscale-cli-service.sh", "service.sh"):
+    for name in ("common.sh", "native-install-transaction.sh", "install-service.sh",
+                 "herdr-mobile-relay-service.sh", "tailscale-cli-service.sh", "service.sh"):
         shutil.copy2(root / "relay" / name, mac_scripts / name)
+    (mac_fixture / "release-manifest.json").write_text(fixture_manifest, encoding="utf-8")
     mac_bin = mac_fixture / "bin"
     mac_bin.mkdir(mode=0o700)
     launchctl_record = mac_fixture / "launchctl-record"
@@ -956,21 +984,28 @@ printf 'Linux'
         encoding="utf-8",
     )
     (mac_bin / "systemctl").chmod(0o700)
+    # The user domain is available for the native transaction snapshot; the
+    # relay job itself is initially unloaded.
     (mac_bin / "launchctl").write_text(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LAUNCHCTL_RECORD\"\n"
-        "case \"$1\" in print) exit 1 ;; bootout|bootstrap|enable|kickstart) exit 0 ;; esac\n"
+        "case \"$1\" in print) case \"$2\" in gui/*/*) exit 1 ;; gui/*) exit 0 ;; esac; exit 1 ;; "
+        "bootout|bootstrap|enable|kickstart) exit 0 ;; esac\n"
         "exit 97\n",
         encoding="utf-8",
     )
     (mac_bin / "launchctl").chmod(0o700)
+    # Hosted Linux has no plutil; the stand-in still rejects an empty plist.
+    (mac_bin / "plutil").write_text("#!/bin/sh\n[ \"$1\" = -lint ] && [ -s \"$2\" ]\n", encoding="utf-8")
+    (mac_bin / "plutil").chmod(0o700)
     (mac_bin / "curl").write_text(
-        "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"ok\",\"instance\":\"mac-fixture-instance\",\"version\":\"0.9.0\",\"protocol\":1}'\n",
+        "#!/bin/sh\nprintf '%s\\n' '" + fixture_readiness("mac-fixture-instance") + "'\n",
         encoding="utf-8",
     )
     (mac_bin / "curl").chmod(0o700)
     mac_manager = mac_fixture / "fake-manager-relay"
     mac_manager.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MAC_MANAGER_RECORD\"\n"
+        "#!/bin/sh\n" + fixture_relay_preamble() +
+        "printf '%s\\n' \"$*\" >> \"$MAC_MANAGER_RECORD\"\n"
         "case \"$*\" in 'tailscale-cli assert-ready'*) printf '%s\\n' '{\"route\":{\"journal_state\":\"registered\",\"readiness\":\"ready\",\"runtime_qualified\":true}}'; exit 0 ;; esac\n"
         "exit 97\n",
         encoding="utf-8",
@@ -1084,6 +1119,8 @@ printf 'Linux'
         (path / ".herdr-mobile-relay-installation").write_text(
             f"product=herdr-mobile-relay\nroot={canonical}\n", encoding="utf-8",
         )
+        # Removal authority requires a private, singly linked sentinel.
+        (path / ".herdr-mobile-relay-installation").chmod(0o600)
     uninstall_env = uninstall_config / "relay.env"
     uninstall_env.write_text(
         "HERDR_RELAY_TRANSPORT=tailscale-cli\n"
