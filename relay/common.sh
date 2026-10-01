@@ -525,23 +525,14 @@ service_environment_file() {
     local script_dir="$1"
     local unit_file="$HOME/.config/systemd/user/herdr-mobile-relay.service"
     local plist_file="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
-    local line decoded configured=""
+    local configured=""
 
     case "$(uname -s)" in
         Linux)
             if [ -f "$unit_file" ]; then
-                while IFS= read -r line; do
-                    case "$line" in
-                        Environment=*)
-                            decoded="$(systemd_unquote_value "${line#Environment=}")" || return 1
-                            case "$decoded" in
-                                HERDR_RELAY_ENV=*)
-                                    configured="$(systemd_unquote_value "${decoded#*=}")" || return 1
-                                    ;;
-                            esac
-                            ;;
-                    esac
-                done < "$unit_file"
+                # Decode once, exactly as the installers serialize: main's
+                # complete-assignment quoting or the earlier value quoting.
+                configured="$(systemd_field "$unit_file" Environment)" || configured=""
                 [ -n "$configured" ] && [ -r "$configured" ] || {
                     echo "Cannot read the installed HERDR_RELAY_ENV; refusing silent CLI route retention." >&2
                     return 1

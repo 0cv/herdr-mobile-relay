@@ -676,6 +676,42 @@ describe('relay command store', () => {
       expect(get(relayStore.toast)).toMatchObject({ message: 'Session storage unavailable.', error: true });
     });
 
+    it('keeps bootstrap pairing deferred when its bootstrap credential cannot be saved', async () => {
+      const hash = deferBrowserPairing(false);
+      const bootstrapOptIns = () => Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
+        .filter((key) => key?.startsWith('herdr_browser_pairing:'));
+      const nativeSetItem = localStorage.setItem.bind(localStorage);
+      const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+        if (key === 'herdr_device_auth_v1') throw new Error('Browser storage is full.');
+        nativeSetItem(key, value);
+      });
+      const replace = vi.spyOn(history, 'replaceState');
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(false);
+      expect(setItem).toHaveBeenCalledWith('herdr_device_auth_v1', expect.any(String));
+      expect(get(relayStore.connections).get(relayId)?.pairingDeferred).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toBeNull();
+      expect(bootstrapOptIns()).toEqual([]);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(location.hash).toBe(hash);
+      expect(replace).not.toHaveBeenCalled();
+      expect(get(relayStore.toast)).toMatchObject({ message: 'Browser storage is full.', error: true });
+      relayStore.connectAll();
+      expect(MockWebSocket.instances).toHaveLength(0);
+
+      // Once storage recovers, the same explicit opt-in presents the bootstrap key.
+      setItem.mockRestore();
+      replace.mockRestore();
+      expect(relayStore.pairDeferredRelay(relayId)).toBe(true);
+      expect(new BrowserDeviceCredentialStore(localStorage).get(relayId)).toMatchObject({ kind: 'invitation', id: 'bootstrap' });
+      expect(bootstrapOptIns()).toHaveLength(1);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+      expect(JSON.parse(socket.sent[0])).toMatchObject({ auth_kind: 'invitation', auth_id: 'bootstrap' });
+      expect(location.hash).toBe('');
+    });
+
     it.each([false, true])('still defers a new invitation after accepting an earlier one: enrolled=%s', (enrolled) => {
       const hash = deferBrowserPairing();
       expect(relayStore.pairDeferredRelay(relayId)).toBe(true);

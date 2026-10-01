@@ -1056,6 +1056,31 @@ for (const failure of ['invalid invitation', 'duplicate selector', 'storage unav
   });
 }
 
+test('explicit iOS bootstrap-key pairing keeps its deferral when the credential cannot be saved', async ({ page }) => {
+  const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
+  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Pair this browser instead' }).click();
+  await page.evaluate(() => {
+    const save = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'herdr_device_auth_v1') throw new Error('Storage unavailable.');
+      save.call(this, key, value);
+    };
+  });
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
+  expect(await page.evaluate(() => ({
+    hash: location.hash,
+    credentials: localStorage.getItem('herdr_device_auth_v1'),
+    optIns: Object.keys(sessionStorage).filter((key) => key.startsWith('herdr_browser_pairing:')),
+  }))).toEqual({ hash: setupHash, credentials: null, optIns: [] });
+  expect(await socketCount(page)).toBe(0);
+  await page.getByRole('button', { name: 'Reconnect All' }).click();
+  await page.waitForTimeout(500);
+  expect(await socketCount(page)).toBe(0);
+});
+
 test('an iOS browser tab without pairing material still connects', async ({ page }) => {
   await boot(page, [fedora], '/', { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
   await expect.poll(() => socketCount(page)).toBe(1);

@@ -124,7 +124,9 @@ web/version.json.br
   with damaged metadata, duplicate selectors, cancel/storage failure and saved
   credentials; no invitation/socket is created on failure.
 - Source was resolved before regenerating a single 0.22.4 asset version 396,
-  greater than parent asset versions 385 and 395. `build-versions.json` has no
+  greater than parent asset versions 385 and 395. After the review correction
+  to bootstrap pairing below, the bundle was regenerated once more as asset
+  version 397 from the settled source. `build-versions.json` has no
   history list; service worker 8 and notification icons 4 agree on both parents.
   Existing release policy replaces the web directory from one complete build,
   so no stale parent hash or mismatched compressed output is retained.
@@ -178,6 +180,25 @@ fixture that had not yet run on the merged tree. Corrections:
   stand-ins, a reachable launchd user domain, private removal sentinels and
   main's complete-assignment `Environment=` quoting. Failed plugin-build
   assertions now report the newest fixture output and unit.
+
+## Review round 1 corrections
+
+- F001: explicit iOS pairing of a bootstrap-key link saved only its session
+  opt-in inside the guarded transaction. The one-use bootstrap credential was
+  written later, during `connectRelay`, after the fragment and deferral had been
+  cleared, so a failed localStorage write threw past the error path. This
+  came from main's #54 flow. `pairDeferredRelay` now persists the
+  authentication the dial will present inside the transaction. On failure it
+  restores the prior session opt-in and the deferral, keeps the fragment and
+  opens no socket. Unit and hosted Chromium/WebKit regressions cover the
+  bootstrap-key case and a later successful retry.
+- F002: the service-only uninstall reader decoded the installed unit's
+  `HERDR_RELAY_ENV` twice, so paths with backslashes or consecutive percent
+  signs did not round-trip. It now uses the same single-decode `systemd_field`
+  reader as the plugin updater, for main's complete-assignment quoting and the
+  earlier value quoting. The public uninstall fixture serializes an escaped
+  path with both shipped quoting helpers, places a decoy at the double-decoded
+  name, and requires keep/remove dispositions to use the real environment.
 
 ## Verification boundary
 

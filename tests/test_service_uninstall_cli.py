@@ -15,8 +15,34 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 
+# A literal backslash and consecutive percent signs exercise every systemd
+# escape the installers apply. Decoding the unit twice turns this name into
+# DOUBLE_DECODED_ENV_NAME, so a decoy there detects a second decode.
+ESCAPED_ENV_NAME = "relay\\x%%.env"
+DOUBLE_DECODED_ENV_NAME = "relayx%.env"
+
+
+def serialized_environment(env_file: Path, quoting: str) -> str:
+    """Serialize HERDR_RELAY_ENV with the shipped installer quoting helpers."""
+    commands = {
+        # Main's installer and plugin rewrite quote the complete assignment.
+        "current": 'printf "Environment=%s" "$(systemd_quoted "HERDR_RELAY_ENV=$2")"',
+        # Earlier branch installs quoted only the value.
+        "legacy": 'printf "Environment=HERDR_RELAY_ENV=%s" "$(systemd_quote_value "$2")"',
+    }
+    result = subprocess.run(
+        ["bash", "-c", '. "$1" && ' + commands[quoting], "_", str(REPO / "relay" / "common.sh"), str(env_file)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True,
+    )
+    line = result.stdout
+    if "\\\\x" not in line or "%%%%" not in line:
+        raise AssertionError(f"{quoting} serializer did not escape the fixture path: {line!r}")
+    return line
+
+
 def fixture(
-    disposition: bytes | None, unpublish_status: int = 0, platform: str = "Linux"
+    disposition: bytes | None, unpublish_status: int = 0, platform: str = "Linux",
+    env_name: str = "relay.env", quoting: str | None = None, decoy: str | None = None,
 ) -> tuple[int, bytes, str]:
     with tempfile.TemporaryDirectory(prefix="herdr-cli-uninstall-") as temporary:
         root = Path(temporary)
@@ -28,12 +54,19 @@ def fixture(
         home.mkdir()
         for name in ("common.sh", "service.sh", "uninstall-systemd-user-service.sh", "uninstall-service.sh"):
             shutil.copy2(REPO / "relay" / name, relay / name)
-        env_file = root / "relay.env"
+        env_file = root / env_name
         env_file.write_text("HERDR_RELAY_TRANSPORT=tailscale-cli\n", encoding="utf-8")
+        if decoy is not None:
+            # A misdecoded path must not silently select another environment.
+            (root / decoy).write_text("HERDR_RELAY_TRANSPORT=cloudflare\n", encoding="utf-8")
         if platform == "Linux":
             unit = home / ".config" / "systemd" / "user" / "herdr-mobile-relay.service"
             unit.parent.mkdir(parents=True)
-            unit.write_text(f'[Service]\nEnvironment=HERDR_RELAY_ENV="{env_file}"\n', encoding="utf-8")
+            environment = (
+                f'Environment=HERDR_RELAY_ENV="{env_file}"' if quoting is None
+                else serialized_environment(env_file, quoting)
+            )
+            unit.write_text(f"[Service]\n{environment}\n", encoding="utf-8")
         else:
             plist = home / "Library" / "LaunchAgents" / "com.herdr-mobile-relay.service.plist"
             plist.parent.mkdir(parents=True)
@@ -54,6 +87,7 @@ def fixture(
         )
         (relay / "tailscale-cli.sh").write_text(
             "#!/bin/sh\nprintf 'tailscale-cli %s\\n' \"$*\" >> \"$SERVICE_CALLS\"\n"
+            "printf 'route-env=%s\\n' \"$HERDR_RELAY_ENV\" >> \"$SERVICE_CALLS\"\n"
             f"exit {unpublish_status}\n",
             encoding="utf-8",
         )
@@ -155,7 +189,19 @@ def main() -> None:
     status, output, calls = fixture(None)
     if status == 0 or calls or "interactive route disposition is required" not in output.decode(errors="replace").lower():
         raise AssertionError(f"noninteractive service removal lacked explicit route disposition: {output.decode(errors='replace')} {calls}")
+    for quoting in ("current", "legacy"):
+        for decoy in (None, DOUBLE_DECODED_ENV_NAME):
+            status, output, calls = fixture(b"k", env_name=ESCAPED_ENV_NAME, quoting=quoting, decoy=decoy)
+            text = output.decode(errors="replace")
+            if (status != 0 or "route will remain" not in text.lower() or
+                    "systemctl --user disable --now herdr-mobile-relay.service" not in calls):
+                raise AssertionError(f"{quoting} escaped environment path did not round-trip (decoy={decoy}): {text} {calls}")
+        status, output, calls = fixture(b"r", env_name=ESCAPED_ENV_NAME, quoting=quoting, decoy=DOUBLE_DECODED_ENV_NAME)
+        route_envs = [line[len("route-env="):] for line in calls.splitlines() if line.startswith("route-env=")]
+        if status != 0 or len(route_envs) != 1 or not route_envs[0].endswith("/" + ESCAPED_ENV_NAME):
+            raise AssertionError(f"{quoting} route removal used the wrong environment: {output.decode(errors='replace')} {calls}")
     print("PASS service-uninstall fixture: persistent CLI Serve route receives explicit remove/keep/cancel disposition")
+    print("PASS service-uninstall fixture: escaped installed environment paths decode once in current and legacy quoting")
 
 
 if __name__ == "__main__":

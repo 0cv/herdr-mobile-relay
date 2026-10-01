@@ -708,15 +708,31 @@ class RelayStore {
     }
     this.deferredPairingRelays.delete(relayId);
     const invitation = quickSetupInvitation(location);
+    let bootstrapOptIn = '';
+    let previousBootstrapOptIn: string | null = null;
     try {
       if (invitation && this.shouldSaveInvitation(relayId, invitation)) {
         this.deviceCredentials.saveInvitation(relayId, invitation);
       } else if (!invitation) {
         const flow = history.state?.bootstrapPairingFlow;
         if (typeof flow !== 'string') throw new Error('Open the invitation link again.');
-        sessionStorage.setItem(BOOTSTRAP_PAIRING_SESSION_PREFIX + flow, relayId);
+        bootstrapOptIn = BOOTSTRAP_PAIRING_SESSION_PREFIX + flow;
+        previousBootstrapOptIn = sessionStorage.getItem(bootstrapOptIn);
+        sessionStorage.setItem(bootstrapOptIn, relayId);
       }
+      // Persist the authentication this dial presents inside the guarded
+      // transaction. A bootstrap key otherwise saves its one-use invitation
+      // during connectRelay, after the fragment and deferral are gone.
+      this.relayAuthentication(relay);
     } catch (error) {
+      if (bootstrapOptIn) {
+        try {
+          if (previousBootstrapOptIn === null) sessionStorage.removeItem(bootstrapOptIn);
+          else sessionStorage.setItem(bootstrapOptIn, previousBootstrapOptIn);
+        } catch {
+          // A leftover opt-in cannot accept pairing: that also requires the stored credential this failure did not save.
+        }
+      }
       this.deferredPairingRelays.add(relayId);
       this.showToast(error instanceof Error ? error.message : 'Could not save browser pairing.', true);
       return false;
