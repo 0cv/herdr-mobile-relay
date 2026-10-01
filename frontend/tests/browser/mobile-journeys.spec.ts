@@ -543,14 +543,14 @@ test('guides an unpairable relay without ever dialing it', async ({ page }) => {
   // nothing can be presented, so the app must not spend a dial finding out.
   await boot(page, [{ ...fedora, token: 'truncated-key' }]);
 
-  await expect(page.getByText('This setup link has expired or was already used, or this device was refused. Ask the relay owner for a new one-use setup link.')).toBeVisible();
+  await expect(page.getByText('This setup link has expired or was already used, or this device was refused. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.')).toBeVisible();
   expect(await socketCount(page)).toBe(0);
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.waitForTimeout(80);
   expect(await socketCount(page)).toBe(0);
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByText('This setup link may have expired or already been used. Ask the relay owner for a new one-use setup link, or remove and add the relay.')).toBeVisible();
+  await expect(page.getByText('This setup link may have expired or already been used. If no phone has paired yet, retry the original bootstrap link while the same relay is running; it renews on presentation. Ordinary device invitations expire after ten minutes and need a fresh invitation from a paired owner.')).toBeVisible();
 });
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
