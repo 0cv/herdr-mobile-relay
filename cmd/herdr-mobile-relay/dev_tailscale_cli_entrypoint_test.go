@@ -492,7 +492,8 @@ func (s *commandFixtureForegroundServer) Run(ctx context.Context) error {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"status":"ok","readiness":"ready","instance":%q,"tailscale_cli_origin":%q}`,
+		w.Header().Set("X-Herdr-Relay-Instance", s.cfg.InstanceID)
+		_, _ = fmt.Fprintf(w, `{"status":"ok","readiness":"ready","transport":"tailscale-cli","instance":%q,"tailscale_cli_origin":%q}`,
 			s.cfg.InstanceID, s.cfg.TailscaleCLIOrigin)
 	})}
 	httpDone := make(chan error, 1)

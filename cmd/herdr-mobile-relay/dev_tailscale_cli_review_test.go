@@ -233,7 +233,7 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 				if err == nil || code == 0 {
 					t.Fatalf("ambiguous publication returned code=%d err=%v stderr=%s", code, err, stderr)
 				}
-				assertJournalState(t, fixture, tailscalecli.StatePublishUncertain, false)
+				assertFreshJournalState(t, fixture, tailscalecli.StatePublishUncertain, false, reviewReservationID)
 				assertReservationState(t, fixture, tailscalecli.StatePublishPending, reviewReservationID)
 				assertSingleRoutePublish(t, fixture)
 				if callbackCount.Load() != 0 || strings.Contains(stdout, "https://") || strings.Contains(stdout, "setup link") {
@@ -361,7 +361,7 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 			if len(finalEvents) < 2 || finalEvents[0] != "admit" || finalEvents[1] != "arm_bootstrap" {
 				t.Fatalf("foreground control order = %v", finalEvents)
 			}
-			assertJournalState(t, fixture, tailscalecli.StateRegistered, true)
+			assertFreshJournalState(t, fixture, tailscalecli.StateRegistered, true, "")
 			assertReservationState(t, fixture, tailscalecli.StateRegistered, "")
 			assertSingleRoutePublish(t, fixture)
 			if err := verifyTrustedExactPublishedBundle(context.Background(), server.client(), webRoot, reviewOrigin, version, revision); err != nil {
@@ -544,7 +544,7 @@ func installFixtureAppFactory(t *testing.T, health func(time.Duration) *http.Cli
 	newDevelopmentForegroundServer = func(cfg *config.Config, workflow *tailscalecli.DevelopmentWorkflow, _ io.Writer) (developmentForegroundServer, error) {
 		return app.NewDevelopmentCLIWithFixtureHooks(cfg, version, revision,
 			slog.New(slog.NewTextHandler(io.Discard, nil)), workflow,
-			app.DevelopmentCLIFixtureHooks{HealthClient: health, VerifyPublicBundle: verify, ControlCallbackObserver: observer})
+			app.DevelopmentCLIFixtureHooks{HealthClient: health, VerifyPublicBundle: verify, ControlCallbackObserver: observer, MarkInventoryReady: true})
 	}
 	t.Cleanup(func() { newDevelopmentForegroundServer = oldFactory })
 }
@@ -759,6 +759,28 @@ func seedDevelopmentRouteJournal(t *testing.T, fixture *developmentCommandFixtur
 		t.Fatal(err)
 	}
 	writeCommandFixtureFile(t, filepath.Join(fixture.coordination, "backend-port-18377.json"), string(reservationData)+"\n", 0o600)
+}
+
+func assertFreshJournalState(t *testing.T, fixture *developmentCommandFixture, want tailscalecli.RegistrationState, acknowledged bool, reservationID string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fixture.state, "registration.json"))
+	if err != nil {
+		t.Fatalf("read registration: %v", err)
+	}
+	var record struct {
+		State                tailscalecli.RegistrationState `json:"state"`
+		OperationID          string                         `json:"operation_id"`
+		ReservationID        string                         `json:"reservation_id"`
+		MutationAcknowledged bool                           `json:"mutation_acknowledged"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	operationID, decodeErr := hex.DecodeString(record.OperationID)
+	if record.State != want || decodeErr != nil || len(operationID) != 16 ||
+		record.ReservationID != reservationID || record.MutationAcknowledged != acknowledged {
+		t.Fatalf("new journal after command = %+v; want state=%s reservation=%s ack=%t and a fresh operation ID: decode err=%v", record, want, reservationID, acknowledged, decodeErr)
+	}
 }
 
 func assertJournalState(t *testing.T, fixture *developmentCommandFixture, want tailscalecli.RegistrationState, acknowledged bool) {
