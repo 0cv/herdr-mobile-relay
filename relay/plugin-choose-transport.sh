@@ -23,6 +23,8 @@ esac
 # credentials; the foreground launcher checks prerequisites without setup/install
 # or config migration. Forward only arguments supplied by this caller.
 if [ "$MODE" = tailscale ]; then
+    ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
+    tailscale_cli_transport_switch_safe "$ENV_FILE" || exit 1
     shift
     HERDR_TAILSCALE_REQUEST=1 HERDR_RELAY_TRANSPORT=tailscale exec "$SCRIPT_DIR/tailscale.sh" "$@"
 elif [ "$MODE" = tailscale-external ]; then

@@ -1068,7 +1068,7 @@ cat > "$MATRIX_SWITCH_BIN" <<'EOF'
 printf '%s\n' "$1 $2" >> "$MATRIX_SWITCH_CALLS"
 state="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$MATRIX_SWITCH_JOURNAL")"
 case "$state" in
-    publish-pending|publish-uncertain|remove-pending|remove-uncertain) exit 1 ;;
+    publish-pending|publish-uncertain|remove-pending|remove-uncertain|registered) exit 1 ;;
     *) exit 0 ;;
 esac
 EOF
@@ -1083,7 +1083,7 @@ cat > "$MATRIX_SWITCH_DIR/tailscale-external.sh" <<'EOF'
 EOF
 chmod 700 "$MATRIX_SWITCH_BIN" "$MATRIX_SWITCH_DIR/bin/tailscale" "$MATRIX_SWITCH_DIR/tailscale-external.sh"
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-choose-transport.sh" "$MATRIX_SWITCH_DIR/"
-for unresolved_state in publish-pending publish-uncertain remove-pending remove-uncertain; do
+for unresolved_state in publish-pending publish-uncertain remove-pending remove-uncertain registered; do
     printf '{"state":"%s"}\n' "$unresolved_state" > "$MATRIX_SWITCH_JOURNAL"
     MATRIX_SWITCH_BEFORE="$(cat "$MATRIX_SWITCH_ENV")"
     if MATRIX_SWITCH_CALLS="$MATRIX_SWITCH_CALLS" MATRIX_SWITCH_JOURNAL="$MATRIX_SWITCH_JOURNAL" MATRIX_SWITCH_ROOT="$MATRIX_SWITCH_DIR" \
@@ -1101,12 +1101,41 @@ for unresolved_state in publish-pending publish-uncertain remove-pending remove-
     test ! -e "$MATRIX_SWITCH_TAILSCALE"
     grep -q 'CLI Serve route or backend reservation is unresolved' "$MATRIX_SWITCH_DIR/chooser.stderr"
 done
-[ "$(wc -l < "$MATRIX_SWITCH_CALLS" | tr -d ' ')" = 4 ]
-[ "$(sort "$MATRIX_SWITCH_CALLS" | uniq -c | awk '{sum += $1} END {print sum}')" = 4 ]
+[ "$(wc -l < "$MATRIX_SWITCH_CALLS" | tr -d ' ')" = 5 ]
+[ "$(sort "$MATRIX_SWITCH_CALLS" | uniq -c | awk '{sum += $1} END {print sum}')" = 5 ]
 if grep -vFx 'tailscale-cli check-transport-switch' "$MATRIX_SWITCH_CALLS" >/dev/null; then
     echo "public chooser invoked an unexpected relay subcommand" >&2
     exit 1
 fi
+
+# The native chooser must guard the persisted CLI journal before its request
+# override can dispatch to managed Tailscale startup or touch Serve.
+cat > "$MATRIX_SWITCH_DIR/tailscale.sh" <<'EOF'
+#!/bin/sh
+: > "$MATRIX_SWITCH_DISPATCHED"
+exit 0
+EOF
+chmod 700 "$MATRIX_SWITCH_DIR/tailscale.sh"
+for unresolved_state in publish-pending publish-uncertain remove-pending remove-uncertain registered; do
+    printf '{"state":"%s"}\n' "$unresolved_state" > "$MATRIX_SWITCH_JOURNAL"
+    MATRIX_SWITCH_BEFORE="$(cat "$MATRIX_SWITCH_ENV")"
+    if MATRIX_SWITCH_CALLS="$MATRIX_SWITCH_CALLS" MATRIX_SWITCH_JOURNAL="$MATRIX_SWITCH_JOURNAL" MATRIX_SWITCH_ROOT="$MATRIX_SWITCH_DIR" \
+        MATRIX_SWITCH_DISPATCHED="$MATRIX_SWITCH_DISPATCHED" MATRIX_SWITCH_TAILSCALE="$MATRIX_SWITCH_TAILSCALE" \
+        HERDR_RELAY_BIN="$MATRIX_SWITCH_BIN" HERDR_RELAY_ENV="$MATRIX_SWITCH_ENV" HERDR_TAILSCALE_REQUEST=1 HERDR_RELAY_TRANSPORT=tailscale \
+        PATH="$MATRIX_SWITCH_DIR/bin:$PATH" bash "$MATRIX_SWITCH_DIR/plugin-choose-transport.sh" tailscale \
+        </dev/null >"$MATRIX_SWITCH_DIR/native.stdout" 2>"$MATRIX_SWITCH_DIR/native.stderr"; then
+        echo "public native chooser accepted persisted CLI journal state $unresolved_state" >&2
+        exit 1
+    fi
+    test "$(cat "$MATRIX_SWITCH_ENV")" = "$MATRIX_SWITCH_BEFORE"
+    test ! -s "$MATRIX_SWITCH_DIR/native.stdout"
+    test ! -e "$(tailscale_session_file "$MATRIX_SWITCH_ENV")"
+    test ! -e "$MATRIX_SWITCH_DISPATCHED"
+    test ! -e "$MATRIX_SWITCH_TAILSCALE"
+    grep -q 'CLI Serve route or backend reservation is unresolved' "$MATRIX_SWITCH_DIR/native.stderr"
+done
+[ "$(wc -l < "$MATRIX_SWITCH_CALLS" | tr -d ' ')" = 10 ]
+[ "$(sort "$MATRIX_SWITCH_CALLS" | uniq -c | awk '{sum += $1} END {print sum}')" = 10 ]
 
 # The operator-owned foreground session serializes every cooperating transport
 # choice until the local backend stops; a refusal leaves the saved BYO origin

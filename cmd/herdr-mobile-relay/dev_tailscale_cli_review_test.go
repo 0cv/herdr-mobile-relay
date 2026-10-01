@@ -87,6 +87,35 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		assertNoRouteMutationCalls(t, fixture)
 	})
 
+	t.Run("public-unpublish-lost-ack-then-reconcile", func(t *testing.T) {
+		requireDevelopmentFixturePorts(t)
+		fixture := newDevelopmentCommandFixture(t)
+		seedDevelopmentRouteJournal(t, fixture, tailscalecli.StateRegistered, true)
+		writeCommandFixtureFile(t, fixture.serveFile+".lose-remove-ack", "fixture\n", 0o600)
+		unpublishConfirmation := "UNPUBLISH DEVELOPMENT ROUTE node=node-fixture origin=" + reviewOrigin + " https-port=8443 backend=127.0.0.1:18377"
+		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "unpublish"}, unpublishConfirmation+"\n")
+		if err == nil || code == 0 {
+			t.Fatalf("public unpublish with lost acknowledgement returned code=%d err=%v\nstderr=%s", code, err, stderr)
+		}
+		assertFreshJournalState(t, fixture, tailscalecli.StateRemoveUncertain, false, "")
+		assertReservationState(t, fixture, tailscalecli.StateRegistered, "")
+		operationID := developmentJournalOperationID(t, fixture)
+		if fixtureHasPublishedRoute(fixture) {
+			t.Fatal("synthetic Serve removal did not take effect before its acknowledgement was lost")
+		}
+		reconcileConfirmation := fmt.Sprintf("RECONCILE DEVELOPMENT ROUTE operation=%s reservation= observed=absent node=node-fixture origin=%s https-port=8443 backend=127.0.0.1:18377", operationID, reviewOrigin)
+		code, _, stderr, err = dispatchMainCommand(t, []string{"dev-tailscale-cli", "reconcile"}, reconcileConfirmation+"\n")
+		if err != nil || code != 0 {
+			t.Fatalf("public reconciliation after lost removal acknowledgement returned code=%d err=%v\nstderr=%s", code, err, stderr)
+		}
+		assertFreshJournalState(t, fixture, tailscalecli.StateReconciledAbsent, false, "")
+		if developmentJournalOperationID(t, fixture) != operationID {
+			t.Fatal("reconciliation did not resolve the exact unpublish operation")
+		}
+		assertReservationAbsent(t, fixture)
+		assertServeMutationCounts(t, fixture, 0, 1)
+	})
+
 	t.Run("repair-missing-is-operation-bound-and-preserves-unrelated-route", func(t *testing.T) {
 		requireDevelopmentFixturePorts(t)
 		fixture := newDevelopmentCommandFixture(t)
@@ -150,16 +179,34 @@ func TestDevelopmentCLIRecoveryCommandsThroughPublicEntrypoint(t *testing.T) {
 		conflicting := `{"TCP":{"8443":{"HTTPS":true}},"Web":{"other.tailnet.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18377"}}}}}`
 		writeCommandFixtureFile(t, fixture.serveFile, conflicting+"\n", 0o600)
 		oldFactory := newDevelopmentForegroundServer
+		oldReservationID := developmentReservationIDGenerator
 		newDevelopmentForegroundServer = func(cfg *config.Config, workflow *tailscalecli.DevelopmentWorkflow, _ io.Writer) (developmentForegroundServer, error) {
 			return &commandFixtureForegroundServer{cfg: cfg, workflow: workflow, bound: make(chan struct{}), armed: make(chan struct{})}, nil
 		}
-		t.Cleanup(func() { newDevelopmentForegroundServer = oldFactory })
-		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "repair-missing"}, "not-confirmed\n")
-		if err == nil || code == 0 {
-			t.Fatalf("drifted repair returned code=%d err=%v stderr=%s", code, err, stderr)
+		developmentReservationIDGenerator = func() (string, error) { return reviewReservationID, nil }
+		t.Cleanup(func() {
+			newDevelopmentForegroundServer = oldFactory
+			developmentReservationIDGenerator = oldReservationID
+		})
+		before, err := os.ReadFile(filepath.Join(fixture.state, "registration.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		confirmation := fmt.Sprintf("REPAIR MISSING DEVELOPMENT ROUTE operation=%s reservation=%s node=node-fixture origin=%s https-port=8443 backend=127.0.0.1:18377", reviewOperationID, reviewReservationID, reviewOrigin)
+		code, _, stderr, err := dispatchMainCommand(t, []string{"dev-tailscale-cli", "repair-missing"}, confirmation+"\n")
+		const driftRefusal = "repair requires an acknowledged or previously reconciled-absent registration and fresh proof that its exact listener and backend route are absent"
+		if err == nil || code == 0 || !strings.Contains(err.Error(), driftRefusal) {
+			t.Fatalf("valid operation-bound repair confirmation did not receive the drift-specific refusal: code=%d err=%v stderr=%s", code, err, stderr)
+		}
+		if after, readErr := os.ReadFile(filepath.Join(fixture.state, "registration.json")); readErr != nil || string(after) != string(before) {
+			t.Fatalf("drift refusal changed the journal: err=%v before=%s after=%s", readErr, before, after)
 		}
 		assertNoRouteMutationCalls(t, fixture)
 		assertJournalState(t, fixture, tailscalecli.StateRegistered, true)
+		routeAfter, routeErr := os.ReadFile(fixture.serveFile)
+		if routeErr != nil || strings.TrimSpace(string(routeAfter)) != conflicting {
+			t.Fatalf("drift refusal changed the conflicting Serve configuration: err=%v route=%s", routeErr, routeAfter)
+		}
 		assertReservationState(t, fixture, tailscalecli.StateRegistered, "")
 	})
 
@@ -241,6 +288,24 @@ func TestDevelopmentCLIForegroundSetupIntegration(t *testing.T) {
 				}
 				if fileExists(filepath.Join(fixture.root, "runtime", "device-auth")) {
 					t.Fatal("ambiguous publication created a device/bootstrap store without readiness")
+				}
+				operationID := developmentJournalOperationID(t, fixture)
+				if !fixtureHasPublishedRoute(fixture) {
+					t.Fatal("lost publish acknowledgement did not leave the synthetic exact route present")
+				}
+				reconcileConfirmation := fmt.Sprintf("RECONCILE DEVELOPMENT ROUTE operation=%s reservation=%s observed=present node=node-fixture origin=%s https-port=8443 backend=127.0.0.1:18377", operationID, reviewReservationID, reviewOrigin)
+				code, recoveryStdout, recoveryStderr, recoveryErr := dispatchMainCommand(t, []string{"dev-tailscale-cli", "reconcile"}, reconcileConfirmation+"\n")
+				if recoveryErr != nil || code != 0 {
+					t.Fatalf("public reconciliation after lost publish acknowledgement returned code=%d err=%v\nstderr=%s", code, recoveryErr, recoveryStderr)
+				}
+				assertFreshJournalState(t, fixture, tailscalecli.StateReconciledPresent, false, reviewReservationID)
+				if developmentJournalOperationID(t, fixture) != operationID {
+					t.Fatal("reconciliation did not resolve the exact setup operation")
+				}
+				assertReservationState(t, fixture, tailscalecli.StateReconciledPresent, "")
+				assertServeMutationCounts(t, fixture, 1, 0)
+				if strings.Contains(recoveryStdout, "setup link") || strings.Contains(recoveryStdout, "https://") {
+					t.Fatalf("reconciliation emitted setup material: %s", recoveryStdout)
 				}
 				return
 			}
@@ -762,6 +827,21 @@ func seedDevelopmentRouteJournal(t *testing.T, fixture *developmentCommandFixtur
 	writeCommandFixtureFile(t, filepath.Join(fixture.coordination, "backend-port-18377.json"), string(reservationData)+"\n", 0o600)
 }
 
+func developmentJournalOperationID(t *testing.T, fixture *developmentCommandFixture) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fixture.state, "registration.json"))
+	if err != nil {
+		t.Fatalf("read registration operation: %v", err)
+	}
+	var record struct {
+		OperationID string `json:"operation_id"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil || record.OperationID == "" {
+		t.Fatalf("decode registration operation ID: operation=%q err=%v", record.OperationID, err)
+	}
+	return record.OperationID
+}
+
 func assertFreshJournalState(t *testing.T, fixture *developmentCommandFixture, want tailscalecli.RegistrationState, acknowledged bool, reservationID string) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(fixture.state, "registration.json"))
@@ -865,6 +945,19 @@ func assertSingleRoutePublish(t *testing.T, fixture *developmentCommandFixture) 
 	}
 	if count != 1 {
 		t.Fatalf("public command dispatched %d Serve writes; CLI log=%s", count, data)
+	}
+}
+
+func assertServeMutationCounts(t *testing.T, fixture *developmentCommandFixture, publishes, removals int) {
+	t.Helper()
+	data, err := os.ReadFile(fixture.cliLog)
+	if err != nil {
+		t.Fatalf("read public-command CLI log: %v", err)
+	}
+	publishCount := strings.Count(string(data), "serve --bg --https=8443 --set-path=/ http://127.0.0.1:18377")
+	removeCount := strings.Count(string(data), "serve --bg --https=8443 --set-path=/ off")
+	if publishCount != publishes || removeCount != removals {
+		t.Fatalf("public command Serve writes = publish:%d remove:%d; want publish:%d remove:%d; CLI log=%s", publishCount, removeCount, publishes, removals, data)
 	}
 }
 

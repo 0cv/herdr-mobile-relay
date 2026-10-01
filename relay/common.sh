@@ -1215,9 +1215,13 @@ clear_tailscale_selection() {
 
 tailscale_cli_transport_switch_safe() {
     local env_file="$1"
-    local binary state_root coordination_root installation_id backend_port state_home
+    local binary state_root coordination_root installation_id backend_port state_home current_mode
 
-    [ "$(relay_transport_mode "$env_file")" = tailscale-cli ] || return 0
+    # HERDR_TAILSCALE_REQUEST intentionally overrides transport selection for
+    # the native launcher. It must not hide a persisted CLI registration from
+    # this pre-dispatch ownership check.
+    current_mode="$( (unset HERDR_TAILSCALE_REQUEST; relay_transport_mode "$env_file") )" || return 1
+    [ "$current_mode" = tailscale-cli ] || return 0
     binary="$(relay_binary)" || return 1
     state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
     state_root="$(env_file_value "$env_file" HERDR_TAILSCALE_CLI_STATE_ROOT)"
@@ -1244,7 +1248,7 @@ set_relay_transport() {
         cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) ;;
         *) echo "✗ Invalid relay transport: $mode" >&2; return 1 ;;
     esac
-    current_mode="$(relay_transport_mode "$env_file")"
+    current_mode="$( (unset HERDR_TAILSCALE_REQUEST; relay_transport_mode "$env_file") )"
     if [ "$current_mode" = tailscale-cli ] && [ "$mode" != tailscale-cli ]; then
         tailscale_cli_transport_switch_safe "$env_file" || return 1
     fi

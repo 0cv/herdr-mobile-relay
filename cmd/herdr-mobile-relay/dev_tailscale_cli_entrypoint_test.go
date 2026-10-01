@@ -660,7 +660,7 @@ func newDevelopmentCommandFixture(t *testing.T) *developmentCommandFixture {
 		"  'serve --bg --https=8443 --set-path=/ http://127.0.0.1:18377')\n" +
 		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile+".lose-ack") + " ]; then printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; exit 91; fi\n" +
 		"    if [ -f " + shellQuoteCommandFixture(fixture.serveFile) + " ] && /usr/bin/grep -q 'other.tailnet.ts.net:443' " + shellQuoteCommandFixture(fixture.serveFile) + "; then printf '%s\\n' '" + commandFixtureRouteWithUnrelated + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; else printf '%s\\n' '" + commandFixtureRoute + "' > " + shellQuoteCommandFixture(fixture.serveFile) + "; fi ;;\n" +
-		"  'serve --bg --https=8443 --set-path=/ off') /bin/rm -f " + shellQuoteCommandFixture(fixture.serveFile) + " ;;\n" +
+		"  'serve --bg --https=8443 --set-path=/ off') /bin/rm -f " + shellQuoteCommandFixture(fixture.serveFile) + "; if [ -f " + shellQuoteCommandFixture(fixture.serveFile+".lose-remove-ack") + " ]; then exit 91; fi ;;\n" +
 		"  *) exit 91 ;;\n" +
 		"esac\n"
 	writeCommandFixtureFile(t, fixture.cli, cliScript, 0o700)

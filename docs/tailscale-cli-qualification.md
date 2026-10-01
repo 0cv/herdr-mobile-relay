@@ -173,11 +173,12 @@ remains the authority boundary for those separate steps.
 
 Sanitized historical observations from the supervised phone assessment:
 
-A supervising-assistant report says the installed relay-service baseline later
-changed to `0.22.3-f0f41c2` outside this task. This worker did not inspect or
-change that live service. Treat prior service noninterference comparisons as
-stale: any later P6 comparison must first capture a fresh read-only service
-version, file hash and liveness baseline in the supervising phase.
+An earlier supervising-assistant report identified the installed relay-service
+baseline as `0.22.1`; a later report says it changed to `0.22.3-f0f41c2` outside
+this task. This worker did not inspect or change that live service. Treat prior
+service noninterference comparisons as stale: any later P6 comparison must
+first capture a fresh read-only service version, file hash and liveness baseline
+in the supervising phase.
 
 - On approved source SHA `197685c`, using the explicit development-root override,
   the read-only baseline and scoped publication/readback, trusted HTTPS, and exact

@@ -19,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common.sh"
 
 ENV_FILE="$(relay_env_file_read_only "$SCRIPT_DIR")"
+# Protect direct invocations as well as the guided chooser. The persisted CLI
+# mode is checked before this launcher can inspect or mutate Tailscale Serve.
+tailscale_cli_transport_switch_safe "$ENV_FILE" || exit 1
 export HERDR_RELAY_ENV="$ENV_FILE"
 require_supported_platform
 PERSISTED_REARM="$(env_file_value "$ENV_FILE" HERDR_RELAY_REARM_BOOTSTRAP || true)"
