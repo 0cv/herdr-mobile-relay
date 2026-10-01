@@ -518,7 +518,11 @@ describe('agent state and sorting', () => {
       status: 'blocked', attention_kind: 'chat', attention_capable: true,
     }))).toBe('ready');
     expect(agentStatusTone(agent({ status: 'done' }))).toBe('success');
-    expect(agentStatusTone(agent({ status: 'idle' }))).toBe('muted');
+    // An idle agent the phone has already opened is still ready for input, so
+    // it keeps the ready (green ring) tone rather than the unknown-state grey.
+    expect(agentStatusTone(agent({ status: 'idle' }))).toBe('ready');
+    expect(agentStatusTone(agent({ status: 'ready' }))).toBe('ready');
+    expect(agentStatusTone(agent({ status: 'exited' }))).toBe('muted');
   });
 
   it('resolves the tab name from the Herdr tab label over the pane name', () => {
