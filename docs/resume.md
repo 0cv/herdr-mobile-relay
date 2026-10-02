@@ -236,9 +236,13 @@ relay records each one's epoch, freshness and session, so the page can check
 the rendered card against the relay's truth. A card from a stale snapshot, a
 workspace-only refresh, or a session the relay is abandoning does not count;
 if the session is retired before the frame paints, the render does not count
-either. The page records the paint itself, so a render that beats the harness
-call still counts from when it happened. Hosted browser tests exercise each of
-these traps (`workspaceOnly`, `stale` and `abandonFirst` fixture faults).
+either. The frame re-reads what it actually paints, so a newer fresh snapshot
+that replaced the first one before the paint (a reconnect's initial snapshot
+followed by the answer to the app's own refresh) counts at that frame. The
+page records the paint itself, so a render that beats the harness call still
+counts from when it happened. Hosted browser tests exercise each of these
+traps (`workspaceOnly`, `stale` and `abandonFirst` fixture faults) and the
+replacement case (`burst`).
 Everything else is a non-completion with its reason (`deadline`, `late`,
 `load-failed`, `warmup-failed`, `page-crash`, `browser-disconnected`,
 `harness-error`), right-censored at 60 s.

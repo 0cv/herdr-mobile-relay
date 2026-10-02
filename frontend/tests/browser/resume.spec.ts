@@ -274,6 +274,23 @@ test('does not count stale post-wake agents as fresh', async ({ page }) => {
   await expectNoSensitiveMarkers(booted, card, text);
 });
 
+test('counts a fresh snapshot that replaces another before it paints', async ({ page }) => {
+  // A reconnect delivers its initial snapshot and, moments later, the answer
+  // to the app's own refresh; the second can replace the first before the
+  // frame paints. The endpoint must count what the frame actually shows.
+  await boot(page, {
+    relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })],
+    faults: { burst: true },
+    seed: 21,
+  });
+  await awaitFresh(page, [1]);
+  await fixture(page, 'hide');
+  await fixture(page, 'show');
+  await awaitFresh(page, [1], 5_000);
+  const counted = (await renderLog(page)).filter((entry) => entry.epoch === 2 && entry.verdict === 'counted');
+  expect(counted).toHaveLength(1);
+});
+
 test('does not count agents delivered on a path the relay is abandoning', async ({ page }) => {
   await boot(page, {
     relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })],

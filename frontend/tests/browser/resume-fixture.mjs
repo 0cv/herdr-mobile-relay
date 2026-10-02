@@ -46,12 +46,15 @@
  *   workspaceOnly?: boolean;
  *   stale?: boolean;
  *   abandonFirst?: boolean;
+ *   burst?: boolean;
  * }} FixtureFaults
- *   Negative conditions applied to snapshots sent after the first wake:
+ *   Conditions applied to snapshots sent after the first wake:
  *   `workspaceOnly` answers a refresh without an agents snapshot, `stale`
  *   marks the post-wake inventory stale, and `abandonFirst` sends the first
  *   post-wake snapshot on a session the relay is abandoning (closed shortly
- *   after). None of them may count as a fresh resume.
+ *   after); none of them may count as a fresh resume. `burst` sends two
+ *   fresh agents snapshots back to back, so the second replaces the first
+ *   before it paints; that must still count.
  */
 
 /**
@@ -638,6 +641,11 @@ export function resumeFixtureInit(config) {
       }
       await this.send({ type: 'inventory_status', ...inventory });
       if (withAgents) await this.send({ type: 'agents', agents });
+      if (withAgents && faults.burst === true) {
+        const next = markerFor(this.relay.slot, state.epoch, ++state.snapshotSeq);
+        state.snapshots.set(next, { slot: this.relay.slot, epoch: state.epoch, authoritative: !stale, session: this });
+        await this.send({ type: 'agents', agents: agentsFor(this.relay, next) });
+      }
       await this.send({ type: 'workspaces', workspaces });
       if (abandon) this.terminate();
     }
@@ -956,6 +964,20 @@ export function resumeFixtureInit(config) {
     return markers;
   }
   /**
+   * Why a rendered agent card does not show fresh agents, or null when it
+   * does: its snapshot must be ready and non-stale, its card not marked
+   * stale, and the session that carried it still the live authenticated path.
+   *
+   * @param {{ authoritative: boolean; session: RelaySession }} record
+   * @param {Element} card
+   */
+  function rejection(record, card) {
+    if (!record.authoritative) return 'not-authoritative';
+    if (card.classList.contains('stale')) return 'stale-card';
+    if (!record.session.active()) return 'inactive-path';
+    return null;
+  }
+  /**
    * The success endpoint. An agent card (not a workspace label) must name the
    * current epoch's agents from a snapshot the relay sent with ready,
    * non-stale inventory, on a session that is still the live authenticated
@@ -971,32 +993,45 @@ export function resumeFixtureInit(config) {
       if (!record || record.epoch !== epoch) continue;
       const key = renderKey(record.slot, epoch);
       if (rendered.has(key)) continue;
-      if (!record.authoritative) {
-        log(marker, match, 'not-authoritative');
-        continue;
-      }
-      if (card.classList.contains('stale')) {
-        log(marker, match, 'stale-card');
-        continue;
-      }
-      if (!record.session.active()) {
-        log(marker, match, 'inactive-path');
+      const reason = rejection(record, card);
+      if (reason) {
+        log(marker, match, reason);
         continue;
       }
       rendered.set(key, -1);
-      requestAnimationFrame(() => {
-        // The frame painted only if the card and its live path survived it.
-        if (!renderedAgentMarkers().has(marker) || !record.session.active()
-          || document.getElementById('unlock-dialog')) {
-          rendered.delete(key);
-          log(marker, match, 'retired-before-paint');
-          return;
-        }
-        rendered.set(key, performance.now());
-        log(marker, match, 'counted');
-        for (const waiter of [...waiters]) waiter();
-      });
+      requestAnimationFrame(() => paint(record.slot, epoch, key));
     }
+  }
+  /**
+   * The frame scheduled by a qualifying render. It re-reads what this frame
+   * actually paints for the relay: a newer fresh snapshot that replaced the
+   * first one before the paint counts here, while a card that lost its live
+   * path, became stale or is covered by the unlock dialog does not.
+   *
+   * @param {number} slot @param {number} epoch @param {string} key
+   */
+  function paint(slot, epoch, key) {
+    const covered = Boolean(document.getElementById('unlock-dialog'));
+    let painted = null;
+    for (const [marker, card] of renderedAgentMarkers()) {
+      const record = state.snapshots.get(marker);
+      if (!record || record.slot !== slot || record.epoch !== epoch || rejection(record, card)) continue;
+      painted = marker;
+      break;
+    }
+    if (covered || !painted) {
+      rendered.delete(key);
+      if (!logged.has(`${key}:retired`)) {
+        logged.add(`${key}:retired`);
+        renderLog.push({ slot, epoch, seq: -1, verdict: 'retired-before-paint' });
+      }
+      // Whatever replaced it gets its own chance at the next frame.
+      scan();
+      return;
+    }
+    rendered.set(key, performance.now());
+    log(painted, /** @type {RegExpExecArray} */ (MARKER_PATTERN.exec(painted)), 'counted');
+    for (const waiter of [...waiters]) waiter();
   }
   new MutationObserver(scan).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
 
