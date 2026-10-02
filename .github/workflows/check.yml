@@ -300,6 +300,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
       - run: cd frontend && bun x playwright install --with-deps chromium webkit
+      - name: Preflight supported resume paint composition (both engines)
+        run: >-
+          cd frontend && HERDR_WEB_ROOT="$GITHUB_WORKSPACE/web"
+          bun x playwright test tests/browser/resume.spec.ts
+          --grep '^paint composition preflight$' --retries=0 --workers=1
       - run: make frontend-check
       - run: make web-release-check
 
@@ -329,6 +334,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
       - run: cd frontend && bun x playwright install --with-deps chromium webkit
+      - name: Preflight supported resume paint composition (not pilot epochs)
+        run: >-
+          cd frontend && HERDR_WEB_ROOT="$GITHUB_WORKSPACE/web"
+          bun x playwright test tests/browser/resume.spec.ts
+          --grep '^paint composition preflight$' --retries=0 --workers=1
       - name: Run the preregistered pilot on the exact checkout and analyze every attempted epoch
         shell: bash
         run: |

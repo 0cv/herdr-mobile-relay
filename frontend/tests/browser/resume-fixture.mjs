@@ -1159,6 +1159,13 @@ export function resumeFixtureInit(config) {
     return a.left - spread < b.right && a.right + spread > b.left
       && a.top - spread < b.bottom && a.bottom + spread > b.top;
   }
+  // Diagnostic codes are fixed vocabulary, never DOM labels/styles or URLs.
+  let compositionFailure = 'none';
+  /** @param {string} reason */
+  function refuseComposition(reason) {
+    compositionFailure = reason;
+    return false;
+  }
   /**
    * Only the shipped, in-flow disclosure glyph is supported generated content.
    * Its host must be disjoint from inventory, with no positioning, overflow
@@ -1169,33 +1176,38 @@ export function resumeFixtureInit(config) {
    * @param {CSSStyleDeclaration} style @param {DOMRect[]} rects
    */
   function supportedDisclosure(element, pseudo, style, rects) {
-    if (pseudo !== '::before' || !element.matches('.workspace-card > summary')
-      || style.content !== '"›"' || style.position !== 'static' || style.zIndex !== 'auto'
-      || style.pointerEvents === 'none' || style.flexGrow !== '0' || style.flexShrink !== '0'
-      || style.flexBasis !== 'auto' || style.filter !== 'none' || style.mixBlendMode !== 'normal'
-      || style.backgroundImage !== 'none' || !transparentColor(style.backgroundColor)
-      || style.boxShadow !== 'none' || style.textShadow !== 'none' || style.outlineStyle !== 'none'
-      || style.clipPath !== 'none' || [style.maskImage, style.getPropertyValue('-webkit-mask-image')]
-        .some((mask) => Boolean(mask) && mask !== 'none')) return false;
+    const shape = {
+      host: pseudo === '::before' && element.matches('.workspace-card > summary'),
+      content: style.content === '"›"', position: style.position === 'static', index: style.zIndex === 'auto',
+      pointer: style.pointerEvents !== 'none', flex: style.flexGrow === '0' && style.flexShrink === '0' && style.flexBasis === 'auto',
+      effect: style.filter === 'none' && style.mixBlendMode === 'normal',
+      background: style.backgroundImage === 'none' && transparentColor(style.backgroundColor),
+      shadow: style.boxShadow === 'none' && style.textShadow === 'none', outline: style.outlineStyle === 'none',
+      clip: style.clipPath === 'none', mask: [style.maskImage, style.getPropertyValue('-webkit-mask-image')]
+        .every((mask) => !mask || mask === 'none'),
+    };
+    const failed = Object.entries(shape).find(([, supported]) => !supported);
+    if (failed) return refuseComposition(`generated:${failed[0]}`);
     const font = Number.parseFloat(style.fontSize);
-    if (!(font > 0 && font <= 32)) return false;
+    if (!(font > 0 && font <= 32)) return refuseComposition('generated:font');
     for (const value of [style.width, style.height]) {
-      if (value !== 'auto' && !(Number.parseFloat(value) >= 0 && Number.parseFloat(value) <= 32)) return false;
+      if (value !== 'auto' && !(Number.parseFloat(value) >= 0 && Number.parseFloat(value) <= 32)) return refuseComposition('generated:size');
     }
     for (const value of [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft,
       style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft,
       style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth]) {
-      if (value !== '0px') return false;
+      if (value !== '0px') return refuseComposition('generated:spacing');
     }
     if (![style.getPropertyValue('translate'), style.getPropertyValue('rotate'), style.getPropertyValue('scale')]
-      .every((value) => !value || value === 'none')) return false;
+      .every((value) => !value || value === 'none')) return refuseComposition('generated:individual-transform');
     // The shipped arrow rotates 0/90 degrees about its center, never translates.
-    if (!['none', 'matrix(1, 0, 0, 1, 0, 0)', 'matrix(0, 1, -1, 0, 0, 0)'].includes(style.transform)) return false;
+    if (!['none', 'matrix(1, 0, 0, 1, 0, 0)', 'matrix(0, 1, -1, 0, 0, 0)'].includes(style.transform)) return refuseComposition('generated:rotation');
     const host = getComputedStyle(element);
     const bounds = element.getBoundingClientRect();
-    return host.display === 'flex' && host.alignItems === 'center' && bounds.height >= font * 2
-      && Number.parseFloat(host.paddingLeft) >= font / 2 && Number.parseFloat(host.paddingRight) >= font / 2
-      && rects.every((rect) => !overlaps(bounds, rect));
+    if (host.display !== 'flex' || host.alignItems !== 'center' || bounds.height < font * 2
+      || Number.parseFloat(host.paddingLeft) < font / 2 || Number.parseFloat(host.paddingRight) < font / 2
+      || rects.some((rect) => overlaps(bounds, rect))) return refuseComposition('generated:host-bounds');
+    return true;
   }
   /** @param {Element} element @param {CSSStyleDeclaration} style @param {DOMRect[]} rects */
   function supportedShadow(element, style, rects) {
@@ -1219,18 +1231,21 @@ export function resumeFixtureInit(config) {
    * @param {DOMRect[]} rects
    */
   function supportedComposition(rects) {
+    compositionFailure = 'none';
     if (document.querySelector('dialog[open]') || (CSS.supports('selector(:popover-open)')
-      && document.querySelector(':popover-open'))) return false;
+      && document.querySelector(':popover-open'))) return refuseComposition('composition:top-layer');
     for (const element of document.querySelectorAll('*')) {
       if (!paintTreeVisible(element)) continue;
       const style = getComputedStyle(element);
-      if (element.shadowRoot || element.localName.includes('-') || ['iframe', 'object', 'embed'].includes(element.localName)) return false;
+      if (element.shadowRoot || element.localName.includes('-') || ['iframe', 'object', 'embed'].includes(element.localName)) return refuseComposition('composition:boundary');
       if (style.visibility === 'visible') {
-        if (style.pointerEvents === 'none' || style.textShadow !== 'none' || !supportedShadow(element, style, rects)
-          || style.outlineStyle !== 'none' || style.mixBlendMode !== 'normal') return false;
+        if (style.pointerEvents === 'none') return refuseComposition('composition:pointer-transparent');
+        if (style.textShadow !== 'none' || !supportedShadow(element, style, rects)) return refuseComposition('composition:shadow');
+        if (style.outlineStyle !== 'none') return refuseComposition('composition:outline');
+        if (style.mixBlendMode !== 'normal') return refuseComposition('composition:blend');
         // Known button-only color effects cannot extend ink beyond their box;
         // any inventory ancestor filter is independently refused by unpainted().
-        if (!['none', 'brightness(1.08)', 'grayscale(0.35)'].includes(style.filter)) return false;
+        if (!['none', 'brightness(1.08)', 'grayscale(0.35)'].includes(style.filter)) return refuseComposition('composition:filter');
       }
       for (const pseudo of ['::before', '::after']) {
         const generated = getComputedStyle(element, pseudo);
@@ -1567,6 +1582,7 @@ export function resumeFixtureInit(config) {
         kept_direct: current?.closed ? current.kept.get(slot) === true : null,
       };
     },
+    presentationFailure() { return compositionFailure; },
     pendingPaints() { return heldPaints.size; },
     releasePaint() {
       state.faults.holdPaint = false;

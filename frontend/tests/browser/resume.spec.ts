@@ -105,6 +105,13 @@ function group(summary: ExportedSummary, path: string, lifecycle: string): Expor
   return found!;
 }
 
+test('paint composition preflight', async ({ page }) => {
+  await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 45 });
+  const result = await page.evaluate(() => (window as any).__resumeFixture.awaitFresh([1], 5_000));
+  const reason = await fixture(page, 'presentationFailure');
+  expect(result, `baseline composition refused: ${reason}`).toHaveProperty('renderedAt');
+});
+
 test('measures a Cloudflare-labelled WSS cold launch and warm resume', async ({ page }) => {
   const booted = await boot(page, { relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })], seed: 11 });
   await awaitFresh(page, [1]);
