@@ -19,6 +19,9 @@ const credential: RelayDeviceCredential = {
   secret: base64UrlEncode(new Uint8Array(32).fill(7)), issuedAt: 1,
   role: 'controller', locale: 'en',
 };
+// Coordination tests do not exercise wall-clock drift. Keep cryptographic
+// timestamps deterministic; rollback/expiry are covered by cache tests.
+const NOW = Date.UTC(2026, 0, 1);
 const notifications: unknown[] = [];
 const cleanup: Array<() => void> = [];
 let locksDescriptor: PropertyDescriptor | undefined;
@@ -26,13 +29,13 @@ let locksDescriptor: PropertyDescriptor | undefined;
 function tab(shared: Storage, options: Partial<ConstructorParameters<typeof LastKnownSessionCache>[0]> = {}) {
   const session = new MemoryStorage();
   const cache: LastKnownSessionCache = new LastKnownSessionCache({ storage: session, origin: 'https://app.example',
-    credential: () => credential, epoch: () => control.epoch(), ...options });
+    credential: () => credential, epoch: () => control.epoch(), now: () => NOW, ...options });
   const control: LastKnownControl = new LastKnownControl(shared, cache);
   cleanup.push(control.initialize());
   cache.setLocked(false);
   return { session, control, cache };
 }
-const snapshot = () => projectLastKnown('local-relay', [{ name: 'sensitive-label-canary', agent: 'codex', status: 'idle' }], [], Date.now());
+const snapshot = () => projectLastKnown('local-relay', [{ name: 'sensitive-label-canary', agent: 'codex', status: 'idle' }], [], NOW);
 
 beforeEach(() => {
   notifications.length = 0;

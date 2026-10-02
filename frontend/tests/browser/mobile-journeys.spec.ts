@@ -85,6 +85,10 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
       onerror: (() => void) | null = null;
       onmessage: ((event: MessageEvent) => void) | null = null;
       readonly index: number;
+      private inventoryAgents: Record<string, unknown>[] = [];
+      private inventoryWorkspaces: unknown[] = [];
+      private inventoryStatus: Record<string, unknown> = { state: 'ready', stale: false };
+      private snapshotNonce: string | null = null;
       constructor(readonly url: string) {
         this.index = sockets.length;
         sockets.push(this);
@@ -98,6 +102,18 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         const message = JSON.parse(serialized) as Record<string, unknown>;
         commands.push(message);
         socketCommands[this.index].push(message);
+        if (message.type === 'refresh_agents' && typeof message.snapshot_request_id === 'string') {
+          // Synthetic upgraded relay: admission precedes a new coherent poll.
+          // Unrelated frames never mint or guess a client correlation nonce.
+          const nonce = this.snapshotNonce = message.snapshot_request_id;
+          queueMicrotask(() => {
+            if (this.snapshotNonce !== nonce || this.readyState !== MockSocket.OPEN) return;
+            this.snapshotNonce = null;
+            this.server({ type: 'inventory_snapshot', snapshot_request_id: nonce,
+              inventory: this.inventoryStatus, agents: this.inventoryAgents, workspaces: this.inventoryWorkspaces });
+          });
+          return;
+        }
         if (['e2ee_client_hello', 'read_pane', 'watch_pane', 'unwatch_pane', 'pane_applied', 'get_activity', 'list_directories', 'refresh_agents'].includes(String(message.type))) return;
         if (!autoCommands) return;
         if (message.type === 'upload_begin') {
@@ -421,11 +437,24 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           ...agent,
         });
         let payload = message as Record<string, unknown>;
-        if (payload?.type === 'agents' && Array.isArray(payload.agents)) {
-          payload = { ...payload, agents: (payload.agents as Record<string, unknown>[]).map(withExactIdentity) };
-        } else if ((payload?.type === 'blocked' || payload?.type === 'agent_update') && payload.pane_id) {
-          payload = withExactIdentity(payload);
+        if (payload?.type === 'push_config') {
+          this.inventoryStatus = { state: 'ready', stale: false, ...((payload.inventory || {}) as object) };
+          payload = { ...payload, inventory: this.inventoryStatus,
+            capabilities: [...new Set([...(payload.capabilities as string[] || []), 'inventory_snapshot_v1'])] };
         }
+        if (payload?.type === 'inventory_status') this.inventoryStatus = { stale: false, ...payload };
+        if (payload?.type === 'agents' && Array.isArray(payload.agents)) {
+          this.inventoryAgents = (payload.agents as Record<string, unknown>[]).map(withExactIdentity);
+          payload = { ...payload, agents: this.inventoryAgents };
+        } else if ((payload?.type === 'blocked' || payload?.type === 'agent_update') && payload.pane_id) {
+          const index = this.inventoryAgents.findIndex((agent) => agent.pane_id === payload.pane_id);
+          payload = withExactIdentity({ ...(index < 0 ? {} : this.inventoryAgents[index]), ...payload });
+          const agent = { ...payload, status: payload.type === 'blocked' ? 'blocked' : payload.status };
+          if (index < 0) this.inventoryAgents.push(agent);
+          else if (typeof agent.pane_revision !== 'number' || typeof this.inventoryAgents[index].pane_revision !== 'number'
+            || agent.pane_revision >= (this.inventoryAgents[index].pane_revision as number)) this.inventoryAgents[index] = agent;
+        }
+        if (payload?.type === 'workspaces' && Array.isArray(payload.workspaces)) this.inventoryWorkspaces = payload.workspaces;
         this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
       }
       serverClose() { this.readyState = MockSocket.CLOSED; this.onclose?.(); }
