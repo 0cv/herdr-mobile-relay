@@ -1013,10 +1013,15 @@ test.describe('in-app freshness needs a visible inventory view', () => {
     await fixture(page, 'show');
     // The window narrows before the fresh snapshot arrives and paints.
     await page.setViewportSize({ width: 412, height: 839 });
-    await expect(rail).toBeHidden();
-    expect(await railListeners(page)).toBe(1);
+    // B2 removes the operational terminal/rail while authority is withdrawn.
+    await expect(rail).toHaveCount(0);
+    expect(await railListeners(page)).toBe(0);
     await expect.poll(() => refreshes(page)).toBeGreaterThan(asked);
     await page.waitForTimeout(1_700);
+    // Revalidation remounts it at phone width, but cannot qualify a hidden rail.
+    await expect(rail).toHaveCount(1);
+    await expect(rail).toBeHidden();
+    expect(await railListeners(page)).toBe(1);
     const pending = await exportSummary(await openResumeTiming(page));
     expect(group(pending.summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 1, fresh_on_time: 0 });
 
