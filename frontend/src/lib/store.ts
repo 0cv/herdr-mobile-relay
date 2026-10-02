@@ -608,7 +608,7 @@ class RelayStore {
     storage: browserStorage(() => sessionStorage), origin: location.origin,
     epoch: () => this.lastKnownControl.epoch(), credential: (id) => this.deviceCredential(id),
     association: (id) => {
-      const relay = this.configForRelay(id);
+      const relay = get(this.relayConfigs).find((relay) => relay.id === id);
       if (!relay) throw new Error('Last-known cache is unavailable.');
       return JSON.stringify([relay.id, relay.url, relay.gatewayRelayId ?? '']);
     },
