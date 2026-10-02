@@ -34,7 +34,10 @@ export function deferredModule<T>(load: () => Promise<T>) {
       }
       if (!surface || nextContext === observedContext) return;
       observedContext = nextContext;
-      if (status === 'ready' && nextContext !== null) { context = nextContext; return; }
+      // Once loaded, normal revalidation must not destroy mounted UI state.
+      // Mount/dispatch guards remain the authority; only pending imports need
+      // a new explicit intent after their context changes.
+      if (status === 'ready') { context = nextContext; return; }
       context = null; status = 'changed'; publish();
     },
     retry(nextContext: string | null) {

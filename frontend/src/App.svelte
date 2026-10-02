@@ -367,7 +367,8 @@
   });
   $effect(() => {
     for (const [relayId, connection] of $connections) {
-      if (connection.status !== 'connected' || !connection.capabilities.includes('self_update')) continue;
+      if (connection.status !== 'connected' || !connection.capabilities.includes('self_update')
+        || !relayStore.relayActionsFresh(relayId)) continue;
       const identity = `${relayId}:${connection.releaseVersion}:${connection.revision}:${APP_VERSION}`;
       if (automaticUpdateChecks.has(identity)) continue;
       automaticUpdateChecks.add(identity);

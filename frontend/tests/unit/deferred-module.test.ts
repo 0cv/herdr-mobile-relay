@@ -26,6 +26,16 @@ describe('on-demand workspace module loading', () => {
     expect(get(tools).status).toBe('ready');
     expect(load).toHaveBeenCalledOnce();
   });
+  it('keeps an already loaded surface mounted across ordinary inventory revalidation', async () => {
+    const tools = deferredModule(async () => ({ component: 'loaded' }));
+    tools.select('launch', 'scope-a'); await settle();
+    tools.select('launch', null);
+    expect(get(tools).status).toBe('ready');
+    tools.select('launch', 'scope-b');
+    expect(get(tools).status).toBe('ready');
+    tools.select(null, null);
+    expect(get(tools).status).toBe('idle');
+  });
   it('reports failure without automatic retries or queued commands, and retries only on request', async () => {
     const gate = pending(); const load = vi.fn(() => gate.promise);
     const tools = deferredModule(load);
