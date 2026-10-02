@@ -41,6 +41,10 @@ jobs:
           fi
       - name: Install hosted browser engines
         run: cd frontend && bun x playwright install --with-deps chromium webkit
+      - name: Focused packaged B2 and deferred-surface regressions
+        # Stop this diagnostic subset promptly on failure; acceptance still
+        # requires the complete, unchanged suite in the next step.
+        run: cd frontend && HERDR_WEB_ROOT=../web bun x playwright test tests/browser/last-known.spec.ts tests/browser/resume.spec.ts tests/browser/workspace-tools.spec.ts --max-failures=1
       - name: Functional packaged browser regressions
         run: make frontend-browser-release
       - name: Record source and artifact binding

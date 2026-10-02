@@ -449,7 +449,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         } else if ((payload?.type === 'blocked' || payload?.type === 'agent_update') && payload.pane_id) {
           const index = this.inventoryAgents.findIndex((agent) => agent.pane_id === payload.pane_id);
           payload = withExactIdentity({ ...(index < 0 ? {} : this.inventoryAgents[index]), ...payload });
-          const agent = { ...payload, status: payload.type === 'blocked' ? 'blocked' : payload.status };
+          const agent: Record<string, unknown> = { ...payload, status: payload.type === 'blocked' ? 'blocked' : payload.status };
           if (index < 0) this.inventoryAgents.push(agent);
           else if (typeof agent.pane_revision !== 'number' || typeof this.inventoryAgents[index].pane_revision !== 'number'
             || agent.pane_revision >= (this.inventoryAgents[index].pane_revision as number)) this.inventoryAgents[index] = agent;
