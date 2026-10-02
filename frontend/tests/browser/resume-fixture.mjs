@@ -1140,15 +1140,106 @@ export function resumeFixtureInit(config) {
   function unpainted(style) {
     if (style.display === 'none' || style.visibility !== 'visible'
       || Number(style.opacity) === 0 || style.contentVisibility === 'hidden') return true;
-    // Computed opacity filters normalize percentages/calc(); inspect every
-    // function, including one within a longer filter chain. Unknown SVG
-    // filters and masks are conservatively ineligible, never guessed visible.
-    if (/url\(/i.test(style.filter)) return true;
-    for (const match of style.filter.matchAll(/opacity\(\s*([^)]*)\)/gi)) {
-      if (Number.parseFloat(match[1]) === 0) return true;
-    }
+    // Compositor effects are not a DOM visibility oracle. Conservatively
+    // refuse filtered/blended inventory rather than infer its painted pixels.
+    if (style.filter !== 'none' || style.mixBlendMode !== 'normal') return true;
     return [style.maskImage, style.getPropertyValue('-webkit-mask-image')]
       .some((mask) => Boolean(mask) && mask !== 'none');
+  }
+  /** @param {Element} element */
+  function paintTreeVisible(element) {
+    for (let node = /** @type {Element | null} */ (element); node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.contentVisibility === 'hidden' || style.opacity === '0') return false;
+    }
+    return true;
+  }
+  /** @param {DOMRect} a @param {DOMRect} b @param {number} [spread] */
+  function overlaps(a, b, spread = 0) {
+    return a.left - spread < b.right && a.right + spread > b.left
+      && a.top - spread < b.bottom && a.bottom + spread > b.top;
+  }
+  /**
+   * Only the shipped, in-flow disclosure glyph is supported generated content.
+   * Its host must be disjoint from inventory, with no positioning, overflow
+   * paint or compositing effects that could move/extend its ink over the text.
+   * All other generated boxes are unknown, even if they ignore pointer events.
+   *
+   * @param {Element} element @param {string} pseudo
+   * @param {CSSStyleDeclaration} style @param {DOMRect[]} rects
+   */
+  function supportedDisclosure(element, pseudo, style, rects) {
+    if (pseudo !== '::before' || !element.matches('.workspace-card > summary')
+      || style.content !== '"›"' || style.position !== 'static' || style.zIndex !== 'auto'
+      || style.pointerEvents === 'none' || style.flexGrow !== '0' || style.flexShrink !== '0'
+      || style.flexBasis !== 'auto' || style.filter !== 'none' || style.mixBlendMode !== 'normal'
+      || style.backgroundImage !== 'none' || !transparentColor(style.backgroundColor)
+      || style.boxShadow !== 'none' || style.textShadow !== 'none' || style.outlineStyle !== 'none'
+      || style.clipPath !== 'none' || [style.maskImage, style.getPropertyValue('-webkit-mask-image')]
+        .some((mask) => Boolean(mask) && mask !== 'none')) return false;
+    const font = Number.parseFloat(style.fontSize);
+    if (!(font > 0 && font <= 32)) return false;
+    for (const value of [style.width, style.height]) {
+      if (value !== 'auto' && !(Number.parseFloat(value) >= 0 && Number.parseFloat(value) <= 32)) return false;
+    }
+    for (const value of [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft,
+      style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft,
+      style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth]) {
+      if (value !== '0px') return false;
+    }
+    if (![style.getPropertyValue('translate'), style.getPropertyValue('rotate'), style.getPropertyValue('scale')]
+      .every((value) => !value || value === 'none')) return false;
+    // The shipped arrow rotates 0/90 degrees about its center, never translates.
+    if (!['none', 'matrix(1, 0, 0, 1, 0, 0)', 'matrix(0, 1, -1, 0, 0, 0)'].includes(style.transform)) return false;
+    const host = getComputedStyle(element);
+    const bounds = element.getBoundingClientRect();
+    return host.display === 'flex' && host.alignItems === 'center' && bounds.height >= font * 2
+      && Number.parseFloat(host.paddingLeft) >= font / 2 && Number.parseFloat(host.paddingRight) >= font / 2
+      && rects.every((rect) => !overlaps(bounds, rect));
+  }
+  /** @param {Element} element @param {CSSStyleDeclaration} style @param {DOMRect[]} rects */
+  function supportedShadow(element, style, rects) {
+    if (style.boxShadow === 'none') return true;
+    // The shipped status-dot ring is bounded, not a viewport-sized shadow.
+    if (!element.matches('.agent-identity > .status-dot')
+      || !/^rgba?\([^)]*\) 0px 0px 0px 2px$/.test(style.boxShadow)) return false;
+    for (let node = /** @type {Element | null} */ (element); node; node = node.parentElement) {
+      if (getComputedStyle(node).transform !== 'none') return false;
+    }
+    const bounds = element.getBoundingClientRect();
+    return rects.every((rect) => !overlaps(bounds, rect, 2));
+  }
+  /**
+   * Pointer hit-testing intentionally ignores pointer-transparent paint and
+   * shadows. It can only be an additional check, never our occlusion proof.
+   * Reject unsupported compositions independently, without changing pointer
+   * styles, inserting probes or altering the page being measured. Conservative
+   * refusals remain attempted non-completions, not harness exclusions.
+   *
+   * @param {DOMRect[]} rects
+   */
+  function supportedComposition(rects) {
+    if (document.querySelector('dialog[open]') || (CSS.supports('selector(:popover-open)')
+      && document.querySelector(':popover-open'))) return false;
+    for (const element of document.querySelectorAll('*')) {
+      if (!paintTreeVisible(element)) continue;
+      const style = getComputedStyle(element);
+      if (element.shadowRoot || element.localName.includes('-') || ['iframe', 'object', 'embed'].includes(element.localName)) return false;
+      if (style.visibility === 'visible') {
+        if (style.pointerEvents === 'none' || style.textShadow !== 'none' || !supportedShadow(element, style, rects)
+          || style.outlineStyle !== 'none' || style.mixBlendMode !== 'normal') return false;
+        // Known button-only color effects cannot extend ink beyond their box;
+        // any inventory ancestor filter is independently refused by unpainted().
+        if (!['none', 'brightness(1.08)', 'grayscale(0.35)'].includes(style.filter)) return false;
+      }
+      for (const pseudo of ['::before', '::after']) {
+        const generated = getComputedStyle(element, pseudo);
+        if (['none', 'normal', ''].includes(generated.content) || generated.display === 'none'
+          || generated.visibility !== 'visible' || generated.opacity === '0') continue;
+        if (!supportedDisclosure(element, pseudo, generated, rects)) return false;
+      }
+    }
+    return true;
   }
   /**
    * A range of the actual snapshot-identifying text must paint. A visible
@@ -1170,7 +1261,7 @@ export function resumeFixtureInit(config) {
     range.setStart(text, start);
     range.setEnd(text, start + marker.length);
     const rects = [...range.getClientRects()];
-    if (!rects.length) return false;
+    if (!rects.length || !supportedComposition(rects)) return false;
     for (const rect of rects) {
       if (!(rect.width > 0 && rect.height > 0)) return false;
       let left = Math.max(0, rect.left);

@@ -72,6 +72,7 @@ describe('resume benchmark runner preregistration', () => {
     expect(plan.endpoints.primary).toMatch(/agent card .*not a workspace label.*ready, non-stale.*live authenticated path/);
     expect(plan.endpoints.primary).toContain('actual marker-bearing inventory text visible');
     expect(plan.endpoints.primary).toContain('not just an accessible name, background or logo');
+    expect(plan.endpoints.primary).toContain('supported composition without unobservable occluding paint layers');
     expect(plan.bounds).toMatchObject({ reliability_margin: 0.01, target_p95_ratio: 0.8, regression_ratio: 1.1, min_pairs: 400 });
     expect(plan.endpoints.not_measured).toEqual(expect.arrayContaining(['OS wake-to-JS, DNS, TCP, TLS']));
     expect(plan.endpoints.not_measured.join(' ')).not.toMatch(/direct WebRTC upgrade/);

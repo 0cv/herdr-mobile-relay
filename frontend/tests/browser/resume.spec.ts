@@ -318,6 +318,14 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     'masked marker-bearing button': 'article.agent-card .agent-open { mask-image: linear-gradient(transparent, transparent) !important; -webkit-mask-image: linear-gradient(transparent, transparent) !important; }',
     'clipped inventory descendant': 'article.agent-card .agent-copy { clip-path: inset(100%) !important; }',
   };
+  const unsupportedPaintStyles = {
+    'pointer-transparent after overlay': 'body::after { content: ""; position: fixed; inset: 0; background: black; z-index: 2147483647; pointer-events: none; }',
+    'pointer-transparent before overlay': 'body::before { content: ""; position: fixed; inset: 0; background: black; z-index: 2147483647; pointer-events: none; }',
+    'pointer-transparent inventory pseudo-overlay': '.agent-open::after { content: ""; position: fixed; inset: 0; background: black; z-index: 2147483647; pointer-events: none; }',
+    'pointer-transparent sibling overlay': '.workspace-tab-header { position: fixed !important; inset: 0 !important; background: black !important; z-index: 2147483647 !important; pointer-events: none !important; }',
+    'repositioned disclosure pseudo-overlay': '.workspace-card > summary::before { position: fixed !important; inset: 0 !important; background: black !important; z-index: 2147483647 !important; pointer-events: none !important; }',
+    'unbounded shadow overlay': '.workspace-tab-header { position: fixed !important; width: 1px !important; height: 1px !important; top: 0 !important; left: 0 !important; box-shadow: 0 0 0 200vw black !important; z-index: 2147483647 !important; }',
+  };
   const hiddenStyles = {
     'display-none card': 'article.agent-card { display: none !important; }',
     'visibility-hidden card': 'article.agent-card { visibility: hidden !important; }',
@@ -331,6 +339,7 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     'clipped ancestor': 'main.agent-list { height: 0 !important; min-height: 0 !important; padding: 0 !important; overflow: hidden !important; }',
     'opaque overlay': 'body::after { content: ""; position: fixed; inset: 0; background: black; z-index: 2147483647; }',
     ...invisibleInventoryStyles,
+    ...unsupportedPaintStyles,
   };
 
   for (const [name, css] of Object.entries(hiddenStyles)) {
@@ -339,6 +348,23 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
       await awaitFresh(page, [1]);
       await quiesce(page);
       const style = await presentationStyle(page, css);
+      if (name === 'pointer-transparent after overlay') {
+        // Establish the reviewer's counterexample: ordinary pointer targeting
+        // still reaches marker text under the full-cover painted pseudo-box.
+        expect(await page.evaluate(() => {
+          const text = document.querySelector('.agent-path > span')?.firstChild;
+          if (!text || !text.parentElement) return false;
+          const marker = /resume-\d+-\d+-\d+-ok/.exec(text.textContent || '');
+          if (!marker) return false;
+          const range = document.createRange();
+          range.setStart(text, marker.index);
+          range.setEnd(text, marker.index + marker[0].length);
+          const rect = range.getBoundingClientRect();
+          const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+          return Boolean(hit && text.parentElement.contains(hit)
+            && getComputedStyle(document.body, '::after').pointerEvents === 'none');
+        })).toBe(true);
+      }
       await fixture(page, 'hide');
       const wakeAt = await fixture(page, 'show');
       await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'not-presented')).toBe(true);
@@ -355,7 +381,7 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
 
   for (const [mode, css] of Object.entries({
     card: hiddenStyles['display-none card'], ancestor: hiddenStyles['transparent ancestor'], page: null,
-    ...invisibleInventoryStyles,
+    'opaque overlay': hiddenStyles['opaque overlay'], ...invisibleInventoryStyles, ...unsupportedPaintStyles,
   })) {
     test(`rechecks ${mode} presentation between scheduling and paint`, async ({ page }) => {
       await boot(page, { relays: [fixtureRelay(1, 'wss')], faults: { holdPaint: true }, seed: 42 });
@@ -391,7 +417,8 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
   }
 
   for (const name of ['display-none card', 'hidden marker-bearing button', 'filtered-transparent card',
-    'filtered-transparent ancestor', 'transparent inventory glyphs', 'clipped inventory descendant'] as const) {
+    'filtered-transparent ancestor', 'transparent inventory glyphs', 'clipped inventory descendant',
+    ...Object.keys(unsupportedPaintStyles)] as Array<keyof typeof hiddenStyles>) {
     test(`a ${name} reveal after the original 60-second deadline remains a censored non-completion`, async ({ page }) => {
       await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 43 });
       await awaitFresh(page, [1]);
