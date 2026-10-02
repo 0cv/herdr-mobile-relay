@@ -267,8 +267,12 @@ test('does not count a workspace-only refresh as fresh agents', async ({ page })
   await quiesce(page);
   await fixture(page, 'hide');
   await fixture(page, 'show');
-  // The refresh renders a new workspace label, but no post-wake agents.
-  await expect(page.getByText('fixture-ws-1-2').first()).toBeVisible();
+  // B2 withdraws operational selectors until a coherent correlated snapshot;
+  // the workspace-only poll must arrive without rendering any live inventory.
+  await expect.poll(() => page.evaluate(() => (window as any).__resumeFixture.pollLog()
+    .some((entry: any) => entry.epoch === 2 && !entry.agents))).toBe(true);
+  await expect(page.locator('article.agent-card')).toHaveCount(0);
+  await expect(page.getByText('fixture-ws-1-2').first()).toHaveCount(0);
   await awaitTimeout(page, 3_000);
   expect((await renderLog(page)).filter((entry) => entry.epoch === 2)).toEqual([]);
 
@@ -288,8 +292,10 @@ test('does not count stale post-wake agents as fresh', async ({ page }) => {
   await quiesce(page);
   await fixture(page, 'hide');
   await fixture(page, 'show');
-  // The stale agents do render; the endpoint rejects them.
-  await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'not-authoritative')).toBe(true);
+  // B2 rejects the stale correlated poll before operational presentation.
+  await expect.poll(() => page.evaluate(() => (window as any).__resumeFixture.pollLog()
+    .some((entry: any) => entry.epoch === 2 && entry.agents && entry.stale && entry.correlated))).toBe(true);
+  await expect(page.locator('article.agent-card')).toHaveCount(0);
   await awaitTimeout(page, 3_000);
   expect((await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'counted')).toBe(false);
 

@@ -224,6 +224,8 @@ export function resumeFixtureInit(config) {
     selections: [],
     /** @type {string[]} */
     toolCommands: [],
+    /** @type {Array<{ epoch: number; agents: boolean; stale: boolean; correlated: boolean }>} */
+    pollLog: [],
     /**
      * Relay-side direct-upgrade events: peer connection created, offer
      * received, offer refused, answer sent, DataChannel open, direct session
@@ -795,6 +797,7 @@ export function resumeFixtureInit(config) {
       await this.send({ type: 'inventory_status', ...inventory });
       if (withAgents && nonce) await this.send({ type: 'inventory_snapshot', snapshot_request_id: nonce, inventory, agents, workspaces });
       if (withAgents) await this.send({ type: 'agents', agents });
+      state.pollLog.push({ epoch: state.epoch, agents: withAgents, stale, correlated: Boolean(nonce) });
       if (withAgents && faults.burst === true) {
         const next = markerFor(this.relay.slot, state.epoch, ++state.snapshotSeq);
         state.snapshots.set(next, { slot: this.relay.slot, epoch: state.epoch, authoritative: !stale, session: this });
@@ -1641,6 +1644,7 @@ export function resumeFixtureInit(config) {
       return renderLog.map((entry) => ({ ...entry }));
     },
     toolCommands() { return [...state.toolCommands]; },
+    pollLog() { return state.pollLog.map((entry) => ({ ...entry })); },
     stats() {
       return {
         dials: state.dials,
