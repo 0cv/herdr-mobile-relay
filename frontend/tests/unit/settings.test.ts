@@ -16,6 +16,7 @@ import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatu
 import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
 import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
+import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -45,14 +46,16 @@ class MockWebSocket {
     MockWebSocket.instances.push(this);
   }
 
-  send(payload: string) { this.sent.push(payload); }
+  private inventory = new CorrelatedInventoryFixture((message) => this.onmessage?.({ data: JSON.stringify(message) }));
+  send(payload: string) { this.sent.push(payload); this.inventory.client(payload); }
   close() { this.readyState = 3; }
   open() {
     this.readyState = MockWebSocket.OPEN;
     this.onopen?.();
   }
   server(message: unknown) {
-    this.onmessage?.({ data: JSON.stringify(message) });
+    this.onmessage?.({ data: JSON.stringify(this.inventory.server(message)) });
+    this.inventory.flush();
   }
 }
 

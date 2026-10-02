@@ -15,6 +15,8 @@ import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
 import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
 
+import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
+
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
 
 class SlashCommandWebSocket {
@@ -31,10 +33,14 @@ class SlashCommandWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   constructor(readonly url: string) { SlashCommandWebSocket.instances.push(this); }
-  send(payload: string) { this.sent.push(payload); }
+  private inventory = new CorrelatedInventoryFixture((message) => this.onmessage?.({ data: JSON.stringify(message) }));
+  send(payload: string) { this.sent.push(payload); this.inventory.client(payload); }
   close() { this.readyState = SlashCommandWebSocket.CLOSED; }
   open() { this.readyState = SlashCommandWebSocket.OPEN; this.onopen?.(); }
-  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
+  message(payload: unknown) {
+    this.onmessage?.({ data: JSON.stringify(this.inventory.server(payload)) });
+    this.inventory.flush();
+  }
 }
 
 const blockedAgent: Agent = {
@@ -220,6 +226,7 @@ describe('accessible Svelte interactions', () => {
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
       server_session_id: 'primary', terminal_id: 'terminal-w1:late', generation: 1, agent_session_id: '',
     };
+    socket.message({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     const first = render(TerminalView, {
       agent,
@@ -801,7 +808,7 @@ describe('accessible Svelte interactions', () => {
   it('distinguishes successful empty inventory from loading inventory', () => {
     const relay = { id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' };
     const readyConnections = new Map([['fedora', {
-      status: 'connected', inventory: { state: 'ready' },
+      status: 'connected', actionsFresh: true, inventory: { state: 'ready' },
     } as any]]);
     const { unmount } = render(AgentList, {
       agents: [], relays: [relay], connections: readyConnections,

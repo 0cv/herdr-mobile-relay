@@ -15,6 +15,17 @@ import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportPhase } from '$lib/transports';
 import { createHybridTransport } from '$lib/transports/path-manager';
 import type { RelayConfig } from '$lib/types';
+import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
+
+function upgradedPeer(handlers: TransportHandlers): CorrelatedInventoryFixture {
+  const receive = handlers.onMessage;
+  const peer = new CorrelatedInventoryFixture(receive);
+  handlers.onMessage = (message) => {
+    receive(peer.server(message) as Record<string, any>);
+    peer.flush();
+  };
+  return peer;
+}
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
 const transportHijack = vi.hoisted(() => ({ current: null as TransportFactory | null }));
@@ -1347,7 +1358,9 @@ describe('store resume-metric wiring', () => {
     let live: TransportHandlers | null = null;
     transportHijack.current = (_relay, handlers) => {
       live = handlers;
-      return { kind: 'websocket', connect: () => { handlers.onStatus('connecting'); }, send: () => true, close: () => {} };
+      const peer = upgradedPeer(handlers);
+      return { kind: 'websocket', connect: () => { handlers.onStatus('connecting'); },
+        send: (payload) => { peer.client(JSON.stringify(payload)); return true; }, close: () => {} };
     };
     relayStore.destroy();
     resumeMetrics.setEnabled(true);
@@ -1396,11 +1409,13 @@ describe('store resume-metric wiring', () => {
     let handlers: TransportHandlers | null = null;
     transportHijack.current = (_relay, transportHandlers) => {
       handlers = transportHandlers;
+      const peer = upgradedPeer(transportHandlers);
       return {
         kind: 'websocket',
         connect: () => { transportHandlers.onStatus('connecting'); },
         send: (payload) => {
           sent.push(payload);
+          peer.client(JSON.stringify(payload));
           return true;
         },
         close: () => {},
@@ -1437,7 +1452,7 @@ describe('store resume-metric wiring', () => {
       resumeMetrics.wake('visible');
       sent.length = 0;
       relayStore.revalidateConnections(2_000);
-      expect(sent).toContainEqual({ type: 'refresh_agents' });
+      expect(sent).toContainEqual(expect.objectContaining({ type: 'refresh_agents', snapshot_request_id: expect.any(String) }));
       live!.onMessage({ type: 'inventory_status', state: 'ready', stale: false });
       live!.onMessage({ type: 'agents', agents });
       await vi.waitFor(() => {
@@ -1452,10 +1467,11 @@ describe('store resume-metric wiring', () => {
     transportHijack.current = (_relay, handlers, authentication) => {
       const entry = { handlers, authentication, closed: false };
       transports.push(entry);
+      const peer = upgradedPeer(handlers);
       return {
         kind: 'websocket',
         connect: () => { handlers.onStatus('connecting'); },
-        send: () => !entry.closed,
+        send: (payload) => { if (entry.closed) return false; peer.client(JSON.stringify(payload)); return true; },
         close: () => { entry.closed = true; },
       };
     };

@@ -17,6 +17,7 @@ import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
+import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
 
@@ -48,10 +49,15 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
-  send(payload: string) { this.sent.push(payload); }
+  private inventory = new CorrelatedInventoryFixture((message) => this.onmessage?.({ data: JSON.stringify(message) }));
+  send(payload: string) { this.sent.push(payload); this.inventory.client(payload); }
   close() { this.readyState = MockWebSocket.CLOSED; }
   open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
-  message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
+  message(payload: unknown) {
+    this.onmessage?.({ data: JSON.stringify(this.inventory.server(payload)) });
+    if (payload && typeof payload === 'object' && 'type' in payload
+      && ['push_config', 'agents', 'workspaces', 'inventory_status', 'blocked', 'agent_update'].includes(String(payload.type))) this.inventory.flush();
+  }
   serverClose(code?: number) {
     this.readyState = MockWebSocket.CLOSED;
     this.onclose?.(code === undefined ? undefined : { code });
@@ -92,6 +98,14 @@ function exactWireScope(paneId: string, relayId: string) {
   };
 }
 
+function seedUploadAgent(socket: MockWebSocket): void {
+  socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 }] });
+}
+
+function seedAgent(socket: MockWebSocket, agent: Agent): void {
+  socket.message({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
+}
+
 describe('relay command store', () => {
   beforeEach(() => {
     transportHijack.current = null;
@@ -124,7 +138,8 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const pending = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: '123' });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', agent: 'codex' }] });
+    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_rename', name: '123' });
     const command = JSON.parse(socket.sent.at(-1)!);
     expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 3 });
     expect(command.client_id).toBeTruthy();
@@ -199,6 +214,7 @@ describe('relay command store', () => {
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const controller = new AbortController();
     const relayId = get(relayStore.relayConfigs)[0].id;
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', agent: 'codex', agent_session_id: 'session-1' }] });
     const current = preferenceAgent(relayId, 'w1:p1', 'terminal-w1:p1');
     const pending = relayStore.getConversationHistory(current, { signal: controller.signal });
     expect(socket.sent.some((payload) => JSON.parse(payload).type === 'get_conversation_history')).toBe(true);
@@ -1351,7 +1367,7 @@ describe('relay command store', () => {
     await expect(relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' })).rejects.toThrow(/protocol v1/);
   });
 
-  it('retains agents, blocks mutations, and recovers when inventory becomes ready', async () => {
+  it('withholds stale targets, blocks mutations, and recovers when inventory becomes ready', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -1382,7 +1398,7 @@ describe('relay command store', () => {
       relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' }),
     ).rejects.toThrow(/live-handoff/);
     expect(socket.sent).toHaveLength(before);
-    expect(get(relayStore.agents)).toHaveLength(1);
+    expect(get(relayStore.agents)).toHaveLength(0);
     expect(get(relayStore.connections).get(relayId)?.inventory).toMatchObject({
       state: 'error',
       errorCode: 'protocol_mismatch',
@@ -1399,7 +1415,7 @@ describe('relay command store', () => {
       stale: false,
     });
     socket.message({ type: 'agents', agents: [] });
-    expect(get(relayStore.agents)).toHaveLength(1);
+    expect(get(relayStore.agents)).toHaveLength(0);
 
     socket.message({
       type: 'inventory_status',
@@ -1412,7 +1428,8 @@ describe('relay command store', () => {
     });
     socket.message({ type: 'agents', agents: [] });
     expect(get(relayStore.agents)).toHaveLength(0);
-    const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
+    await expect(relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' })).rejects.toThrow('Waiting for current');
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_start', profile_id: 'codex' });
     const command = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true });
     await expect(pending).resolves.toMatchObject({ ok: true });
@@ -1634,6 +1651,8 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
+    socket.message({ type: 'push_config', protocol: 3 });
+    seedAgent(socket, agent);
 
     relayStore.readPane(agent);
     expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
@@ -1675,6 +1694,7 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
+    seedAgent(socket, agent);
     relayStore.watchPane(agent);
     socket.message({
       type: 'pane_content',
@@ -1961,6 +1981,7 @@ describe('relay command store', () => {
 
     socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: ['secret_input'], agent_profiles: [] });
     await expect(relayStore.sendSecret(agent, '')).rejects.toThrow(/Enter the password/);
+    seedAgent(socket, agent);
 
     const pending = relayStore.sendSecret(agent, 'hunter2');
     const command = JSON.parse(socket.sent.at(-1)!);
@@ -1981,7 +2002,7 @@ describe('relay command store', () => {
     currentSocket.open();
     currentSocket.message({ type: 'push_config', protocol: 3, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
     currentSocket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Current agent', ...exactAgentFields() }] });
-    const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
+    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_stop' });
     const command = JSON.parse(currentSocket.sent.at(-1)!);
 
     oldSocket.message({ type: 'agents', agents: [] });
@@ -1992,7 +2013,7 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true });
   });
 
-  it('keeps the last agent snapshot until a reconnected relay sends a fresh one', async () => {
+  it('withholds retained live targets on disconnect and accepts authoritative empty after reconnect', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -2000,13 +2021,13 @@ describe('relay command store', () => {
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume safely', ...exactAgentFields() }] });
 
     socket.serverClose();
-    expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
+    expect(get(relayStore.agents)).toEqual([]);
 
     await vi.advanceTimersByTimeAsync(3_000);
     const replacement = MockWebSocket.instances.at(-1)!;
     replacement.open();
     replacement.message({ type: 'push_config', protocol: 3, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
-    expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
+    expect(get(relayStore.agents)).toEqual([]);
 
     replacement.message({ type: 'agents', agents: [] });
     expect(get(relayStore.agents)).toEqual([]);
@@ -2477,6 +2498,7 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
+    seedAgent(socket, agent);
     relayStore.watchPane(agent as never);
     socket.message({
       type: 'pane_content',
@@ -2495,6 +2517,8 @@ describe('relay command store', () => {
     const replacement = MockWebSocket.instances.at(-1)!;
     expect(replacement).not.toBe(socket);
     replacement.open();
+    replacement.message({ type: 'push_config', protocol: 3, capabilities: ['pane_realtime_delta'] });
+    seedAgent(replacement, agent);
     const sent = replacement.sent.map((payload) => JSON.parse(payload) as Record<string, unknown>);
     expect(sent.some((message) => message.type === 'read_pane' && message.pane_id === 'w1:p1')).toBe(true);
   });
@@ -2680,6 +2704,7 @@ describe('relay command store', () => {
       terminal_id: 'terminal-1',
       generation: 1,
     }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    seedUploadAgent(socket);
     await vi.waitFor(() => expect(socket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
 
     socket.serverClose();
@@ -2701,6 +2726,7 @@ describe('relay command store', () => {
       terminal_id: 'terminal-1',
       generation: 1,
     }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    seedUploadAgent(socket);
 
     const rejection = expect(upload).rejects.toMatchObject({ code: 'attachment_upload_failed' });
     await vi.advanceTimersByTimeAsync(60_000);
@@ -2724,6 +2750,7 @@ describe('relay command store', () => {
       terminal_id: 'terminal-1',
       generation: 1,
     }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    seedUploadAgent(fedoraSocket);
     await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
     const begin = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_begin');
     macSocket.message({
@@ -2886,6 +2913,7 @@ describe('relay command store', () => {
       agent: 'codex', cwd: '/home/test/project',
       ...exactAgentFields(),
     };
+    seedAgent(socket, agent);
 
     const first = relayStore.loadSlashCommands(agent);
     const duplicate = relayStore.loadSlashCommands(agent);
@@ -2935,9 +2963,11 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
     };
+    seedAgent(socket, agent);
     const older = relayStore.loadSlashCommands(agent);
     const olderRequest = JSON.parse(socket.sent.at(-1)!);
     const currentAgent = { ...agent, ...replacement };
+    seedAgent(socket, currentAgent);
     const current = relayStore.loadSlashCommands(currentAgent);
     const currentRequest = JSON.parse(socket.sent.at(-1)!);
     expect(currentRequest.request_id).not.toBe(olderRequest.request_id);
@@ -2967,6 +2997,7 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'pi', cwd: '/home/test/project', ...exactAgentFields(),
     };
+    seedAgent(socket, agent);
     const initial = relayStore.loadSlashCommands(agent);
     const initialRequest = JSON.parse(socket.sent.at(-1)!);
     socket.message({
@@ -3010,6 +3041,7 @@ describe('relay command store', () => {
       agent: 'codex', cwd: '/home/test/project',
       ...exactAgentFields(),
     };
+    seedAgent(socket, agent);
     const rawCommands = Array.from({ length: SLASH_COMMAND_MAX_ENTRIES + 1 }, (_, index) => ({
       command: `/bulk-${String(index).padStart(4, '0')}`,
       description: `Bulk command ${index}`,
@@ -3045,6 +3077,7 @@ describe('relay command store', () => {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'pi', cwd: '/fixture/project', ...exactAgentFields(),
     };
+    seedAgent(socket, agent);
     const pending = relayStore.loadSlashCommands(agent);
     const request = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: request.request_id, ok: true, data: piCatalogFixture });
@@ -3071,6 +3104,7 @@ describe('relay command store', () => {
       agent: 'codex', cwd: '/home/test/project',
       ...exactAgentFields(),
     };
+    seedAgent(socket, agent);
 
     const pending = relayStore.loadSlashCommands(agent);
     const request = JSON.parse(socket.sent.at(-1)!);
@@ -3090,6 +3124,7 @@ describe('relay command store', () => {
       ...exactAgentFields(),
     };
     await expect(relayStore.loadSlashCommands(agent)).rejects.toThrow(/does not provide/);
+    seedAgent(socket, agent);
 
     socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
     const pending = relayStore.loadSlashCommands(agent);
@@ -3104,6 +3139,7 @@ describe('relay command store', () => {
     const replacement = MockWebSocket.instances.at(-1)!;
     replacement.open();
     replacement.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
+    seedAgent(replacement, agent);
     const refreshed = relayStore.loadSlashCommands(agent);
     const refreshedRequest = JSON.parse(replacement.sent.at(-1)!);
     expect(refreshedRequest.type).toBe('list_slash_commands');
@@ -3128,6 +3164,7 @@ describe('relay command store', () => {
       ...exactAgentFields(),
     };
     const agentNew = { ...agentOld, cwd: '/home/test/new' };
+    seedAgent(socket, agentOld);
 
     const olderPromise = relayStore.loadSlashCommands(agentOld);
     const olderRequest = socket.sent.map((p) => JSON.parse(p)).at(-1)!;
@@ -3175,7 +3212,8 @@ describe('relay command store', () => {
       inventory: { state: 'ready' },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const pending = relayStore.sendCommand(relayId, { type: 'submit_prompt', pane_id: 'w1:p1', text: 'ship it' });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
+    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'submit_prompt', text: 'ship it' });
     expect(JSON.parse(socket.sent.at(-1)!).type).toBe('submit_prompt');
 
     socket.serverClose();
@@ -3193,7 +3231,8 @@ describe('relay command store', () => {
       inventory: { state: 'ready' },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const pending = relayStore.sendCommand(relayId, { type: 'submit_prompt', pane_id: 'w1:p1', text: 'ship it' });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
+    const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'submit_prompt', text: 'ship it' });
     const command = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'accepted' });
     const outcome = pending.then(() => null, (caught) => caught as CommandError);
@@ -3213,7 +3252,8 @@ describe('relay command store', () => {
       inventory: { state: 'ready' },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const outcome = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: 'renamed' })
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
+    const outcome = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_rename', name: 'renamed' })
       .then(() => null, (caught) => caught as CommandError);
 
     await vi.advanceTimersByTimeAsync(15_000);

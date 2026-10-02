@@ -90,6 +90,7 @@ export class LastKnownControl {
           epoch: base64UrlEncode(crypto.getRandomValues(new Uint8Array(32))),
         };
         this.storage!.setItem(LAST_KNOWN_CONTROL_KEY, JSON.stringify(current));
+        if (this.read()?.epoch !== current.epoch) throw new Error('Invalidation storage unavailable');
         this.control = current;
         this.cache.setEnabled(current.enabled);
         this.blocked = false;

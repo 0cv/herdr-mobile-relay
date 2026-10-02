@@ -1075,6 +1075,7 @@ class RelayStore {
     }, {
       getAuthentication: () => this.relayAuthentication(relay),
       onAuthenticated: (presented, enrollment) => {
+        if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
         if (presented.kind !== 'credential' || presented.id !== enrollment.credentialId
           || presented.version !== enrollment.credentialVersion) void this.lastKnownControl.forget();
         commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
@@ -1106,15 +1107,8 @@ class RelayStore {
       connection.activeGatewayUrl = connection.path === 'websocket' ? '' : detail?.gatewayUrl || '';
       resumeMetrics.connected(relay.id, connection.metricsGeneration, connection.path);
       this.markConnectionReady(relay.id, connection);
-      if (!previousPath) {
-        // First ready of a fresh session: the relay dropped its watches with
-        // the old one, and reads sent while the transport was down were lost
-        // silently. Re-read every watched pane so an open terminal streams
-        // again within one round trip, not at the next resync interval.
-        for (const watched of this.watchedPanes.values()) {
-          if (watched.relay_id === relay.id) this.readPane(watched);
-        }
-      }
+      // Existing watches resume only after correlated inventory revalidates
+      // their complete target identity, never merely on handshake completion.
       // A path switch changes the relayed-fidelity budget, so panes have to be
       // rewatched at the interval the new path can afford.
       if (previousPath && previousPath !== connection.path) this.restartPaneWatches();
@@ -1123,6 +1117,7 @@ class RelayStore {
     if (status === 'connecting') {
       resumeMetrics.connecting(relay.id, connection.metricsGeneration);
       if (connection.status === 'connecting') return;
+      this.invalidateFreshness(relay.id, connection);
       connection.status = 'connecting';
       this.emitConnections();
       return;
@@ -1264,11 +1259,12 @@ class RelayStore {
   revalidateConnections(timeoutMs = healthTimeoutMs()): void {
     this.lastKnownControl.sync();
     this.lastKnownCache.revalidate();
+    for (const [relayId, connection] of this.connectionsValue) this.invalidateFreshness(relayId, connection);
+    this.emitConnections();
     if (!this.reconnectEnabled || this.actionLocked) return;
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
-      if (connection) this.invalidateFreshness(relay.id, connection);
       if (connection?.authRejected || connection?.pairingRequired) continue;
       if (connection?.status === 'connecting') {
         // Replace a dial that predates the event this revalidation reacts to:
@@ -1459,7 +1455,8 @@ class RelayStore {
       connection.actionsFresh = true;
       connection.workspacesFresh = fresh.workspaces !== null;
       connection.inventory = normalizeAgentInventory(message.inventory);
-      this.agentsValue = [...this.agentsValue.filter((agent) => agent.relay_id !== relayId), ...fresh.agents];
+      this.agentsValue = mergeAgentList(this.agentsValue, relayId, [...fresh.agents], this.blockedSnapshotMisses, this.respondingValue);
+      this.reconcileResponding();
       if (fresh.workspaces) this.workspacesValue = [...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId), ...fresh.workspaces];
       // Persist only this validated correlated frame, never the presentation merge.
       if (fresh.workspaces && connection.summaryGeneration === this.lastKnownControl.generation) {
@@ -1469,12 +1466,20 @@ class RelayStore {
       this.publishWorkspaces();
       this.emitConnections();
       resumeMetrics.inventory(relayId, connection.metricsGeneration, true);
+      for (const watched of this.watchedPanes.values()) {
+        const target = targetRefForAgent(watched);
+        if (watched.relay_id === relayId && target && fresh.agents.some((agent) => targetRefMatchesAgent(target, agent))) {
+          this.readPane(watched);
+          this.startPaneWatch(watched.pane_id);
+        }
+      }
       this.pushConfigHandler?.(relayId);
       if (connection.capabilities.includes('device_management')) void this.refreshDevices(relayId);
       return;
     }
     if (message.type === 'push_config') {
       if (!connection) return;
+      this.invalidateFreshness(relayId, connection);
       // Pane revisions are monotonic only for one relay process. A new socket
       // handshake may follow a relay restart, so discard the retained
       // process-local baseline before its fresh snapshot arrives.
@@ -1547,6 +1552,7 @@ class RelayStore {
       connection.herdrStatus = status;
       if (Array.isArray(message.capabilities)) {
         connection.capabilities = message.capabilities.filter(Boolean);
+        if (!connection.capabilities.includes(INVENTORY_SNAPSHOT_CAPABILITY)) this.invalidateFreshness(relayId, connection);
       }
       this.emitConnections();
       return;
@@ -1711,7 +1717,7 @@ class RelayStore {
         resumeMetrics.inventory(
           relayId,
           connection.metricsGeneration,
-          connection.actionsFresh === true && connection.inventory.state === 'ready' && !connection.inventory.stale,
+          this.relayActionsFresh(relayId),
         );
       }
       return;
@@ -1736,6 +1742,7 @@ class RelayStore {
       } else this.agentsValue = [...this.agentsValue, next];
       this.respondingValue.delete(next.pane_id);
       this.responding.set(new Set(this.respondingValue));
+      if (connection) this.revalidateNewTarget(relayId, connection, next);
       this.publishAgents('blocked event');
       return;
     }
@@ -1758,6 +1765,7 @@ class RelayStore {
         this.agentsValue = copy;
       } else this.agentsValue = [...this.agentsValue, stabilized];
       this.reconcileResponding();
+      if (connection) this.revalidateNewTarget(relayId, connection, next);
       this.publishAgents('agent update');
       return;
     }
@@ -2039,6 +2047,7 @@ class RelayStore {
 
   private invalidateFreshness(relayId: string, connection: RelayConnection): void {
     connection.freshness.invalidate();
+    resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
     connection.wakeGeneration++;
     connection.actionsFresh = false;
     connection.workspacesFresh = false;
@@ -2052,11 +2061,19 @@ class RelayStore {
 
   private requestFreshSnapshot(relayId: string, connection: RelayConnection): boolean {
     if (this.actionLocked || connection.status !== 'connected') return false;
-    const request = connection.freshness.request(this.inventoryBinding(connection),
-      connection.capabilities.includes(INVENTORY_SNAPSHOT_CAPABILITY));
-    if (!request) return this.sendRaw(relayId, { type: 'refresh_agents' });
     connection.actionsFresh = false;
     connection.workspacesFresh = false;
+    connection.snapshotPending = false;
+    connection.snapshotNonce = '';
+    resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
+    if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
+    connection.snapshotTimer = null;
+    const request = connection.freshness.request(this.inventoryBinding(connection),
+      connection.capabilities.includes(INVENTORY_SNAPSHOT_CAPABILITY));
+    if (!request) {
+      this.emitConnections();
+      return this.sendRaw(relayId, { type: 'refresh_agents' });
+    }
     connection.snapshotPending = true;
     connection.snapshotNonce = String(request.snapshot_request_id);
     connection.summaryGeneration = this.lastKnownControl.generation;
@@ -2069,6 +2086,15 @@ class RelayStore {
     this.emitConnections();
     if (!this.actionLocked) void this.lastKnownCache.restore(relayId);
     return this.sendRaw(relayId, request);
+  }
+
+  private revalidateNewTarget(relayId: string, connection: RelayConnection, agent: Agent): void {
+    if (!connection.actionsFresh || connection.snapshotPending) return;
+    const target = targetRefForAgent(agent);
+    const fresh = connection.freshness.current(this.inventoryBinding(connection));
+    if (target && !fresh?.agents.some((old) => targetRefMatchesAgent(target, old))) {
+      this.requestFreshSnapshot(relayId, connection);
+    }
   }
 
   private parseFreshAgents(relay: RelayConfig, value: unknown): Agent[] | null {
@@ -2195,10 +2221,10 @@ class RelayStore {
     if (!connection || connection.status !== 'connected') {
       return Promise.reject(new CommandError('Relay is not connected'));
     }
-    if (!this.canDispatch(relayId, payload)) return Promise.reject(new CommandError('Waiting for current authenticated inventory; actions are unavailable.'));
+    const cleanup = CLEANUP_FOR.has(String(payload.type));
     const protocolError = relayProtocolError(connection);
     if (protocolError && !allowProtocolMismatch) return Promise.reject(new CommandError(protocolError));
-    if (INVENTORY_REQUIRED_COMMANDS[String(payload.type)] && connection.inventory.state !== 'ready') {
+    if (INVENTORY_REQUIRED_COMMANDS[String(payload.type)] && !cleanup && connection.inventory.state !== 'ready') {
       return Promise.reject(new CommandError(
         connection.inventory.message || 'Herdr agent inventory is not ready on this computer',
       ));
@@ -2208,6 +2234,7 @@ class RelayStore {
       error.code = 'request_cancelled';
       return Promise.reject(error);
     }
+    if (!this.canDispatch(relayId, payload)) return Promise.reject(new CommandError('Waiting for current authenticated inventory; actions are unavailable.'));
     const requestId = commandRequestId();
     return new Promise((resolve, reject) => {
       const abort = () => {
@@ -2936,7 +2963,7 @@ class RelayStore {
   requestAgents(forceFresh = false): void {
     for (const relayId of this.connectionsValue.keys()) {
       const connection = this.connectionsValue.get(relayId)!;
-      if (forceFresh || (!connection.actionsFresh && !connection.snapshotPending)) {
+      if (forceFresh || (!this.relayActionsFresh(relayId) && !connection.snapshotPending)) {
         this.invalidateFreshness(relayId, connection);
         this.requestFreshSnapshot(relayId, connection);
       } else this.sendRaw(relayId, { type: 'refresh_agents' });
@@ -3514,7 +3541,10 @@ class RelayStore {
     this.publishAgents('freshness lifecycle');
     this.publishWorkspaces();
     this.connections.set(new Map(
-      [...this.connectionsValue].map(([relayId, connection]) => [relayId, { ...connection }]),
+      [...this.connectionsValue].map(([relayId, connection]) => [relayId, {
+        ...connection, actionsFresh: this.relayActionsFresh(relayId),
+        workspacesFresh: this.relayActionsFresh(relayId) && connection.workspacesFresh,
+      }]),
     ));
     // Every status change funnels through here, so this is the one place the
     // keepalive has to be told that a relay came up or went away.

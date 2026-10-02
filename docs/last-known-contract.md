@@ -27,8 +27,8 @@ Expired responses are dropped. No command/action is queued for later replay.
 
 The frontend freshness primitive binds its single outstanding nonce to an
 opaque connection/session identity, active path identity and wake generation.
-Application integration must invalidate it on replacement, wake, lock, unready
-inventory and disconnection; those lifecycle calls are not yet wired.
+Application integration invalidates it on replacement, wake, lock, unready
+inventory, descriptor/capability replacement and disconnection.
 Only a matching ready/non-stale response grants freshness, including a valid
 empty inventory. Workspace validation is independent of agent validation.
 Re-resolution against current authoritative targets is still required at
@@ -38,10 +38,9 @@ Compatibility is intentionally asymmetric:
 
 - Old client + new relay: unchanged legacy request/status/agents/workspaces
   behavior; no correlated message unless the new field is supplied.
-- New client + old relay: uncorrelated replies may be displayed as legacy live
-  information but must never satisfy this stronger freshness assertion or
-  enable actions protected by it. The UI must explain that a relay upgrade is
-  needed. There is no timing-based fallback.
+- New client + old relay: uncorrelated replies never enter operational live
+  target surfaces, satisfy this stronger freshness assertion or enable actions
+  protected by it. The UI explains that a relay upgrade is needed. There is no timing-based fallback.
 - A new client must learn the capability through the authenticated channel,
   not from an unauthenticated gateway descriptor.
 
@@ -78,24 +77,25 @@ Encryption protects a standalone blob, not XSS or extraction of all origin
 storage: credentials already live in localStorage. WebAuthn is an interface
 gate, not a hardware-backed cache key. JavaScript heap erasure is not promised.
 
-The cache class starts disabled and locked. Its lock, Forget and explicit
-invalidation methods fence pending asynchronous work before clearing memory;
-credential/removal lifecycle callers are not yet wired. Its epoch
-provider is mandatory and must read persisted opaque invalidation state; tests
-inject it, but the application provider does not yet exist. A caller must rotate
-the persisted epoch before Forget/opt-out/removal. Content-free cross-tab
-invalidation and that persisted provider must be integrated before enablement.
+The cache class starts disabled and locked. Lock, Forget and explicit invalidation
+fence pending asynchronous work before clearing current memory and summary DOM.
+Credential/removal/refusal lifecycle callers invalidate all scopes conservatively.
+`LastKnownControl` supplies mandatory persisted opaque epochs, Web Locks serialization
+and content-free storage/BroadcastChannel/resume notifications. No tab notification
+contains a relay ID, label, credential or ciphertext. A restored tab must validate
+its session envelope against the persisted epoch before displaying it. Snapshot
+requests capture control generation so a pre-Forget response cannot repopulate it.
 SessionStorage storage events alone do not clear other tabs. Storage-denied deletion must
 report uncertainty rather than promise durable erasure. Offline remote
 revocation is unknowable until observed; expiry bounds remaining visibility.
 
 ## Outstanding delivery work
 
-The foundations in this change are not a finished B2 feature. Application
-integration, fail-closed raw/command dispatch, every alternate caller, lifecycle
-and cross-tab invalidation, consent, read-only presentation, component/browser
-journeys, B1 regressions, security/mobile/resume user documentation and generated
-assets remain mandatory current B2 work. Hosted execution is mandatory; local
+The integration is not an accepted B2 feature. Fail-closed dispatch and alternate
+caller/lifecycle coverage, cross-tab restoration, component/browser journeys and B1
+regressions must pass on the final revision. Hosted-generated assets must then be
+retrieved and bound to the release source. Security/mobile/resume documentation
+now describes the candidate, not qualification. Hosted execution is mandatory; local
 build/test scripts are prohibited by the supplied plan.
 
 ### Current source and verification status
@@ -104,15 +104,24 @@ build/test scripts are prohibited by the supplied plan.
   `internal/coordinator/poller.go`, `internal/protocol/protocol.go`.
 - Frontend foundations: `frontend/src/lib/inventory-freshness.ts`,
   `last-known-types.ts`, `last-known-crypto.ts`, `last-known.ts`.
-- Added tests: `internal/app/inventory_snapshot_test.go`,
-  `frontend/tests/unit/inventory-freshness.test.ts`, `last-known.test.ts`,
-  `last-known-crypto.test.ts`. These are authored cases, **not executed passes**.
+- Tests include Go poll/barrier cases and frontend freshness, summary/crypto,
+  coordination, read-only component, store dispatch and browser journeys.
+- Hosted foundations at `4bbe93098ffe9d38c6db43c8a8d3a5cf453b7013` passed runs
+  `37044147190` (source/release pipeline) and `37044147180` (native preflight).
+  Those are not integration acceptance.
+- Integration `e9ed8c3…` failed type checking. `ed07b0e…` passed lint/type checking
+  and focused Go race tests, but failed 61/709 frontend cases (648 passed),
+  including legacy fixture assumptions and one wake-guard regression. Release
+  generation/browser acceptance were consequently skipped. Fixes and stronger
+  correlation fixtures are being developed; final-revision passes remain required.
 - Source formatting only: `gofmt -w internal/coordinator/poller.go
   internal/app/server.go internal/app/inventory_snapshot.go
   internal/app/inventory_snapshot_test.go internal/protocol/protocol.go`
   completed with exit 0. No local project lint/type/build/test command ran.
-- No commit, push, workflow dispatch, generated bundle change or deployment
-  has been performed. There is no final-SHA evidence for these uncommitted edits.
+- B2-only revisions have been committed and non-force pushed under the explicit
+  hosted-verification authorization. No local executable project check, deployment,
+  application installation or production mutation has been performed. Generated
+  assets for the integrated final candidate have not yet been retrieved.
 
 The earlier missing hosted-path authorization is resolved by explicit human
 guidance permitting B2-only commits/non-force pushes to the existing CI branch

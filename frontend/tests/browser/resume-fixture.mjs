@@ -160,7 +160,7 @@ export function resumeFixtureInit(config) {
   // The stable bootstrap document only redirects to the build entry; it must
   // not consume the state an emulated discard leaves for the app document.
   const appDocument = location.pathname.startsWith('/builds/');
-  /** @type {{ epoch: number; dateOffset: number; discarded: boolean; wakeAbsolute: number | null }} */
+  /** @type {{ epoch: number; dateOffset: number; discarded: boolean; wakeAbsolute: number | null; lock?: { delayMs: number; cancel: boolean } | null }} */
   let persisted = { epoch: 1, dateOffset: 0, discarded: false, wakeAbsolute: null };
   try {
     const saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
@@ -193,7 +193,7 @@ export function resumeFixtureInit(config) {
     channels: [],
     /** @type {FixtureRelay | null} */
     directRelay: null,
-    lock: config.lock || null,
+    lock: persisted.lock === undefined ? (config.lock || null) : persisted.lock,
     dials: 0,
     hiddenDials: 0,
     handshakes: 0,
@@ -305,6 +305,7 @@ export function resumeFixtureInit(config) {
         dateOffset: state.dateOffset,
         discarded,
         wakeAbsolute,
+        lock: state.lock,
       }));
     } catch {
       // The harness only needs persistence across an emulated discard.

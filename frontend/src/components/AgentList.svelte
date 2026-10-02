@@ -18,7 +18,7 @@
     tabName,
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
-  import { resumeMetrics, shownOnScreen } from '$lib/resume-metrics';
+  import { resumeMetrics, shownOnScreen, shownRelayRows } from '$lib/resume-metrics';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
@@ -58,7 +58,7 @@
   }));
   const readyRelays = $derived(relays.filter((relay) => {
     const connection = connections.get(relay.id);
-    return connection?.status === 'connected' && connection.inventory.state === 'ready';
+    return connection?.status === 'connected' && connection.actionsFresh === true && connection.inventory.state === 'ready';
   }));
   const deferredRelays = $derived(relays.filter((relay) => connections.get(relay.id)?.pairingDeferred));
 
@@ -451,7 +451,12 @@
     const timer = setInterval(() => { relativeNow = Date.now(); }, 60_000);
     // Local resume timing counts fresh inventory only in a frame that shows
     // this list on screen; an empty inventory counts as shown too.
-    const hide = resumeMetrics.presentInventory(() => shownOnScreen(listRoot));
+    const hide = resumeMetrics.presentInventory((relayId) => !locked
+      && connections.get(relayId)?.actionsFresh === true
+      && (shownRelayRows(listRoot, relayId)
+        || (!agents.some((agent) => agent.relay_id === relayId)
+          && readyRelays.some((relay) => relay.id === relayId)
+          && shownOnScreen(listRoot?.querySelector('[data-live-empty]')))));
     return () => {
       clearInterval(timer);
       hide();
@@ -484,7 +489,7 @@
       {@const age = relativeAge(agent)}
       {@const agentPath = compact ? relayPath(agent.relay_id, String(agent.cwd || '')) : ''}
       {@const inventoryReady = !connections.has(agent.relay_id) || connections.get(agent.relay_id)?.inventory.state === 'ready'}
-      <article class:blocked class:compact-agent-card={compact} class:stale={!inventoryReady} class="agent-card">
+      <article class:blocked class:compact-agent-card={compact} class:stale={!inventoryReady} class="agent-card" data-live-relay={agent.relay_id}>
         <button
           class="agent-open"
           aria-label={`Open ${displayName(agent)} on ${hostLabel(agent)}`}
@@ -665,7 +670,7 @@
   {/each}
   {#each relays.filter((relay) => connections.get(relay.id)?.status === 'connected' && !connections.get(relay.id)?.actionsFresh) as relay (relay.id)}
     <p role="status">{relay.label}: awaiting current authenticated inventory; remote actions are unavailable.
-      {#if !connections.get(relay.id)?.capabilities.includes('inventory_snapshot_v1')}Upgrade this relay to enable correlated freshness.{/if}
+      {#if !connections.get(relay.id)?.capabilities?.includes('inventory_snapshot_v1')}Upgrade this relay to enable correlated freshness.{/if}
     </p>
   {/each}
   {#each unavailableRelays as relay (relay.id)}
@@ -691,7 +696,7 @@
   {:else if !agents.length && startingRelays.length}
     <div class="empty-state" role="status">Loading agents…</div>
   {:else if !agents.length && readyRelays.length}
-    <div class="empty-state" role="status">No chat agents are running.</div>
+    <div class="empty-state" role="status" data-live-empty>No chat agents are running.</div>
   {:else if !agents.length && deferredRelays.length === relays.length}
     <div class="empty-state" role="status">
       <p>Add Herdr to the Home Screen, then open it there to finish pairing.</p>

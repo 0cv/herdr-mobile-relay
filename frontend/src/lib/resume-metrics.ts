@@ -144,6 +144,7 @@ export interface ResumeParticipant {
  * internal bookkeeping and never part of a sample or the export.
  */
 interface PendingSnapshot {
+  relayId: string;
   epoch: ResumeEpoch;
   sample: ResumeSample;
   generation: number;
@@ -195,6 +196,13 @@ export function shownOnScreen(element?: Element | null): boolean {
   return width > 0 && height > 0 && getComputedStyle(element).visibility === 'visible';
 }
 
+/** Cached summary rows never carry this live-only presentation selector. */
+export function shownRelayRows(root: Element | null | undefined, relayId: string): boolean {
+  if (!shownOnScreen(root)) return false;
+  return [...root!.querySelectorAll('[data-live-relay]')]
+    .some((row) => row.getAttribute('data-live-relay') === relayId && shownOnScreen(row));
+}
+
 const INGRESS_PATHS = new Map<string, ResumePath>([
   ['cloudflare', 'wss/cloudflare'],
   ['tailscale-managed', 'wss/tailscale-managed'],
@@ -242,7 +250,7 @@ export class ResumeMetrics {
   private coldPending = true;
   private locked = false;
   /** Visibility checks of the mounted views that render the agent inventory. */
-  private views = new Set<() => boolean>();
+  private views = new Set<(relayId: string) => boolean>();
   private revisionValue = 0;
 
   constructor(clock: ResumeClock = browserClock(), enabled = storedEnabled()) {
@@ -351,8 +359,8 @@ export class ResumeMetrics {
    * terminal hides the rail completes at the first frame after a visible view
    * is registered. Returns the unregister function.
    */
-  presentInventory(visible: () => boolean = () => true): () => void {
-    const view = () => visible();
+  presentInventory(visible: (relayId: string) => boolean = () => true): () => void {
+    const view = (relayId: string) => visible(relayId);
     this.views.add(view);
     this.release();
     return () => {
@@ -370,10 +378,10 @@ export class ResumeMetrics {
     }
   }
 
-  private visibleView(): boolean {
+  private visibleView(relayId: string): boolean {
     for (const view of this.views) {
       try {
-        if (view()) return true;
+        if (view(relayId)) return true;
       } catch {
         // A view whose check fails is not shown.
       }
@@ -569,7 +577,7 @@ export class ResumeMetrics {
     if (!sample.attempts && !track.carried && sample.phases.probe === undefined) return;
     this.withdrawPending(track);
     const pending: PendingSnapshot = {
-      epoch, sample, generation, validity: track.validity, path: track.path, waiting: false,
+      relayId, epoch, sample, generation, validity: track.validity, path: track.path, waiting: false,
     };
     track.pending = pending;
     sample.phases.inventory = this.at(epoch);
@@ -799,7 +807,7 @@ export class ResumeMetrics {
       return;
     }
     const at = this.at(epoch);
-    const visible = this.visibleView();
+    const visible = this.visibleView(pending.relayId);
     if (visible && !sample.outcome) sample.phases.rendered ??= at;
     if (!visible || this.locked) {
       pending.waiting = true;

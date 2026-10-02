@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import AgentLogo from '$components/AgentLogo.svelte';
   import { agentStatusTone, displayName, hostLabel, tabName } from '$lib/agents';
-  import { resumeMetrics, shownOnScreen } from '$lib/resume-metrics';
+  import { resumeMetrics, shownRelayRows } from '$lib/resume-metrics';
   import type { Agent } from '$lib/types';
   import { workspaceGroups } from '$lib/workspaces';
 
@@ -28,7 +28,7 @@
     let hide: (() => void) | null = null;
     const sync = () => {
       hide?.();
-      hide = !wide || wide.matches ? resumeMetrics.presentInventory(() => shownOnScreen(railRoot)) : null;
+      hide = !wide || wide.matches ? resumeMetrics.presentInventory((relayId) => shownRelayRows(railRoot, relayId)) : null;
     };
     sync();
     wide?.addEventListener('change', sync);
@@ -49,7 +49,7 @@
       <section aria-label={`${group.label} workspace on ${group.host}`}>
         <h2 title={group.cwd}>{group.label}<small>@{group.host}</small></h2>
         {#each group.agents as agent (agent.pane_id)}
-          <button class:active={agent.pane_id === active.pane_id} type="button" aria-current={agent.pane_id === active.pane_id ? 'page' : undefined} onclick={() => onopen(agent)}>
+          <button data-live-relay={agent.relay_id} class:active={agent.pane_id === active.pane_id} type="button" aria-current={agent.pane_id === active.pane_id ? 'page' : undefined} onclick={() => onopen(agent)}>
             <span class="agent-identity">
               <AgentLogo agent={agent.agent} />
               <span class={`status-dot status-${agentStatusTone(agent)}`} aria-hidden="true"></span>
