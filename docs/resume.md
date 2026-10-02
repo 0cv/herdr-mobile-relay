@@ -505,16 +505,16 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-Source: `check` run 36979888303, job *Resume benchmark pilot*, on commit
-`e19c79f95e2bf8f1b01420edd12003e1a9516ff3`, measuring the shipped `web/`
+Source: `check` run 36985761267, job *Resume benchmark pilot*, on commit
+`8a721261c68f2e71220d0b49755c71e7d5ecacae`, measuring the shipped `web/`
 build `a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`
 with the current-path endpoint, exclusion rules, contract checks and evidence
 validation described above (later commits that change only documentation ship
 the same build, and each hosted run repeats the pilot on its own commit).
 Preregistration SHA-256 (as bound into the evidence)
-`61839b49a015747a5ae64dc5b0994d2dd82d462793639ff8638a9d77c212c613`, no
+`5723fc06f3ccb2b86c5d866e0681f030ce9ebb13b8b99e570a415af24c3be68c`, no
 contract violations; Chromium 151.0.7922.34 and WebKit 26.5 under Node
-v22.23.3 on a hosted Linux runner; 10.8 minutes. The default pilot samples
+v22.23.3 on a hosted Linux runner; 10.7 minutes. The default pilot samples
 no `gateway-direct` stratum, so it has no direct-upgrade summary. 480 attempted epochs (the
 bounded default of 16 strata × 30), all valid, no harness exclusions or
 replacements; no hidden-time dials or bytes in any stratum. All 24
@@ -529,22 +529,22 @@ sampled by this pilot.
 
 | Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
 | --- | --- | --- | --- | --- | --- | --- |
-| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 21 (19–23) | 31 (27–32) | 0 / 0 | 1,176 | 0.25 |
-| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 70 (57–78) | 97 (88–110) | 1 / 1 | 3,584 | 0.26 |
-| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,050 (2,082–3,077) | 5,101 (5,044–5,110) | 1 / 1 | 3,620 | 0.34 |
-| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 143 (135–159) | 174 (165–202) | 1 / 1 | 3,620 | 0.21 |
-| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 22 (16–27) | 34 (33–38) | 0 / 0 | 776 | 0.38 |
-| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 105 (87–129) | 156 (143–160) | 1 / 1 | 2,803 | 0.36 |
-| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,044 (2,097–3,141) | 5,132 (5,090–5,136) | 1 / 1 | 2,516 | 0.40 |
-| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 157 (136–171) | 208 (188–233) | 1 / 1 | 2,923 | 0.19 |
-| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 35 (33–38) | 49 (45–221) | 0 / 0 | 1,176 | 0.37 |
-| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 99 (84–104) | 132 (116–133) | 1 / 1 | 3,432 | 0.22 |
-| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,078 (2,111–3,113) | 5,125 (5,076–5,131) | 1 / 1 | 3,771 | 0.34 |
-| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 199 (184–204) | 238 (219–251) | 1 / 1 | 3,226 | 0.15 |
-| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (34–39) | 52 (45–52) | 0 / 0 | 776 | 0.19 |
-| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 117 (115–133) | 149 (148–164) | 1 / 1 | 2,657 | 0.21 |
-| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,086 (2,151–3,113) | 5,122 (5,085–5,130) | 1 / 1 | 2,879 | 0.34 |
-| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 201 (186–214) | 248 (231–264) | 1 / 1 | 2,705 | 0.13 |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 21 (19–23) | 29 (27–31) | 0 / 0 | 1,176 | 0.25 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 64 (57–77) | 101 (89–101) | 1 / 1 | 3,372 | 0.28 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,050 (2,080–3,075) | 5,102 (5,034–5,105) | 1 / 1 | 3,478 | 0.34 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 136 (127–143) | 194 (165–221) | 1 / 1 | 3,549 | 0.22 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 21 (17–27) | 33 (32–35) | 0 / 0 | 776 | 0.35 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 98 (82–125) | 151 (143–157) | 1 / 1 | 2,636 | 0.35 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,050 (2,096–3,142) | 5,127 (5,094–5,142) | 1 / 1 | 2,683 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 150 (135–169) | 215 (182–320) | 1 / 1 | 2,779 | 0.24 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 35 (34–38) | 48 (42–49) | 0 / 0 | 1,176 | 0.16 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 100 (86–101) | 133 (116–134) | 1 / 1 | 3,574 | 0.23 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,070 (2,100–3,111) | 5,117 (5,076–5,128) | 1 / 1 | 3,748 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 195 (171–216) | 239 (232–255) | 1 / 1 | 3,291 | 0.15 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (32–39) | 48 (45–50) | 0 / 0 | 776 | 0.17 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 116 (100–132) | 148 (148–166) | 1 / 1 | 2,581 | 0.24 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,085 (2,148–3,112) | 5,122 (5,085–5,131) | 1 / 1 | 2,868 | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 185 (183–202) | 265 (232–425) | 1 / 1 | 2,633 | 0.19 |
 
 Reading it as a pilot:
 
@@ -556,7 +556,7 @@ Reading it as a pilot:
   confirmatory design must state which assumption it uses, or first run a
   larger pilot.
 - A nearest-rank p95 of 30 values is essentially the second-largest value, so
-  the p95 intervals are coarse; the log-time SDs (0.13–0.40) are the variance
+  the p95 intervals are coarse; the log-time SDs (0.15–0.40) are the variance
   inputs for planning latency precision.
 - `blackhole-restore` is dominated by the scripted conditions: the 2-second
   foreground probe timeout, then a dial that waits for restoration and the
@@ -604,6 +604,13 @@ not reused:
   direct-upgrade record. The pilot's endpoint is the harness's own painted
   agent card, so these numbers are close, but they belong to an older build
   and are not reused.
+- 36979888303 on `e19c79f95e2bf8f1b01420edd12003e1a9516ff3` (previously
+  documented here) and its docs-only repeat 36981336600 on
+  `36b6e1e702d7ef68cdbfda810ecdfb78b5f78d20`: the same build and 480/480 on
+  time with no violations, but registered before the direct-upgrade record
+  was bounded to its own window and before the analyzer's reliability bound
+  moved to Tango's score interval, so their preregistrations differ from the
+  current one. Superseded by the run above and not reused.
 
 ## Limits of this evidence
 
