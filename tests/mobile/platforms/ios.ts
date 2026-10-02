@@ -55,10 +55,11 @@ const IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS = 12_000;
 const IOS_CONFIRMATION_ROUND_MS = 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 const IOS_CONFIRMATION_COMPLETION_MS = 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
+const IOS_NATIVE_GESTURE_COMMAND_MS = 8_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
 const IOS_NATIVE_LIST_READINESS_MS = 15_000;
-const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_SCROLL_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
+const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_GESTURE_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
 
 type SafariDiscoveryResult = 'no-context' | 'native-only' | 'safari-context' | 'expected-origin-context' | 'unrelated-context' | 'inspection-truncated';
 type SafariNavigationFailureKind = 'discovery' | 'observation' | 'reserve';
@@ -1695,6 +1696,11 @@ export class IOSPlatform implements MobilePlatform {
     return [...new Set(matches)];
   }
 
+  private nativeGestureRequestPolicy(phase: PhaseBudget): WebDriverRequestPolicy {
+    const gestureBudget = phase.phaseView('ios-share-gesture', phase.remainingMs, IOS_NATIVE_HIERARCHY_COMMAND_MS);
+    return this.driver.nativeRequestPolicy(gestureBudget);
+  }
+
   private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
     if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
@@ -1781,14 +1787,15 @@ export class IOSPlatform implements MobilePlatform {
         targetBounds: targetRow.bounds,
         actionRows: actionList.rows,
       } });
-      const gestureTimeout = IOS_NATIVE_SCROLL_COMMAND_MS;
-      if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+      const gestureTimeout = IOS_NATIVE_GESTURE_COMMAND_MS;
+      if (phase.remainingMs < IOS_NATIVE_GESTURE_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
         lastError = `${description}: insufficient time to complete native scroll and hierarchy verification`;
         break;
       }
       let scrolled = false;
       try {
-        await this.driver.mobile('scroll', { element: container.element, direction, distance: 0.75 }, gestureTimeout);
+        await this.driver.mobile('scroll', { element: container.element, direction, distance: 0.75 }, gestureTimeout,
+          this.nativeGestureRequestPolicy(phase));
         scrolled = true;
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
@@ -1807,13 +1814,14 @@ export class IOSPlatform implements MobilePlatform {
           break;
         }
         const fallbackDirection = iosNativeSwipeDirection(direction);
-        const fallbackTimeout = IOS_NATIVE_SCROLL_COMMAND_MS;
-        if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+        const fallbackTimeout = IOS_NATIVE_GESTURE_COMMAND_MS;
+        if (phase.remainingMs < IOS_NATIVE_GESTURE_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
           lastError = `${description}: insufficient time to complete fallback swipe and hierarchy verification`;
           break;
         }
         try {
-          await this.driver.mobile('swipe', { element: fallbackContainer.element, direction: fallbackDirection }, fallbackTimeout);
+          await this.driver.mobile('swipe', { element: fallbackContainer.element, direction: fallbackDirection }, fallbackTimeout,
+            this.nativeGestureRequestPolicy(phase));
           scrolled = true;
         } catch (fallbackError) {
           if (isFatalDriverError(fallbackError)) throw fallbackError;

@@ -9,6 +9,7 @@ import { join, dirname, isAbsolute } from 'node:path';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import type { Readable, Writable } from 'node:stream';
 import { managedWdaCapabilities } from '../support/ios-xctest';
+import { monotonicNowNs, spawnOwnedProcess, type OwnedProcess, type SpawnBinding } from '../support/owned-process';
 import { IOSPlatform } from '../platforms/ios';
 
 const credentialBinaryPlistBase64 = 'YnBsaXN0MDDUAQIDBAUGBwhYUEFTU1dPUkRbUFJJVkFURV9VUkxcQVBJX1BBU1NXT1JEXxASQ0ZCdW5kbGVJZGVudGlmaWVyXxAWYmFyZS1wYXNzd29yZC1zZW50aW5lbF8QN2h0dHBzOi8vcHJpdmF0ZS5leGFtcGxlL2luc3RhbGxlZD9yZWY9cHJpdmF0ZS1yZWZlcmVuY2VecGxhaW4tcGFzc3dvcmRfECtjb20uZmFjZWJvb2suV2ViRHJpdmVyQWdlbnRSdW5uZXIueGN0cnVubmVyCBEaJjNIYZuqAAAAAAAAAQEAAAAAAAAACQAAAAAAAAAAAAAAAAAAANg=';
@@ -1716,6 +1717,7 @@ process.stdin.on('data', bytes => {
 setTimeout(revoke, remaining);
 report('A');
 `;
+const terminalNoEnvEnvironment = (environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ ...environment, BUN_OPTIONS: '--no-env-file' });
 const terminalGroupBootstrap = String.raw`(
   trap '' TERM
   "$1" -e "$2" "$3" <&3 3<&- >/dev/null 2>/dev/null
@@ -1727,7 +1729,7 @@ exec 3<&- 4>&-
 exec "$@"
 `;
 const terminalSpawn = (executable: string, args: string[], options: {cwd?: string; env: NodeJS.ProcessEnv; stdio: ['ignore', 'ignore' | 'pipe', 'ignore' | 'pipe']}, ownerDeadline: number): ChildProcess =>
-  spawn('/bin/sh', ['-c', terminalGroupBootstrap, 'terminal-group', process.execPath, terminalGroupOwner, String(ownerDeadline), executable, ...args], {...options, detached: true, stdio: [...options.stdio, 'pipe', 'pipe']});
+  spawn('/bin/sh', ['-c', terminalGroupBootstrap, 'terminal-group', process.execPath, terminalGroupOwner, String(ownerDeadline), executable, ...args], {...options, env: terminalNoEnvEnvironment(options.env), detached: true, stdio: [...options.stdio, 'pipe', 'pipe']});
 type TerminalResult = {code: number | null; signal: NodeJS.Signals | null; error: boolean};
 type TerminalSettlement = {
   closed: Promise<TerminalResult>; joined: Promise<TerminalResult>; failed: Promise<Error>; error?: Error; result?: TerminalResult;
@@ -1887,11 +1889,15 @@ const terminalOwnedClose = async (owned: TerminalSettlement[], deadline: number)
 };
 type TerminalBuild = {root: string; binary: string; binaryHash: string; sources: string; env: NodeJS.ProcessEnv};
 let terminalBuildPromise: Promise<TerminalBuild> | undefined;
-const terminalBuild = (): Promise<TerminalBuild> => terminalBuildPromise ??= (async () => {
+const terminalBuild = (hardDeadlineNs?: bigint): Promise<TerminalBuild> => {
+  const build = async (): Promise<TerminalBuild> => {
   assert.ok(process.platform === 'linux' || process.platform === 'darwin', 'terminal observer host');
   assert.ok(process.arch === 'arm64' || process.arch === 'x64', 'terminal observer architecture');
   const root = await mkdtemp(join(tmpdir(), 'herdr-terminal-build-'));
-  const deadline = Date.now() + 15_000;
+  const deadline = hardDeadlineNs === undefined ? Date.now() + 15_000
+    : Date.now() + Number((hardDeadlineNs - process.hrtime.bigint()) / 1_000_000n) - 5_000;
+  const hardDeadline = hardDeadlineNs === undefined ? deadline + 15_000
+    : Date.now() + Number((hardDeadlineNs - process.hrtime.bigint()) / 1_000_000n);
   let active: ChildProcess | undefined;
   let settled: TerminalSettlement | undefined;
   let stage = 'setup';
@@ -1915,14 +1921,14 @@ const terminalBuild = (): Promise<TerminalBuild> => terminalBuildPromise ??= (as
   assert.match(await readFile(join(import.meta.dirname, '../../../go.mod'), 'utf8'), /^go 1\.27\.1$/mu);
   const goos = process.platform;
   const goarch = process.arch === 'x64' ? 'amd64' : 'arm64';
-  const env: NodeJS.ProcessEnv = {
+  const env = terminalNoEnvEnvironment({
     PATH: `${dirname(go)}:/usr/bin:/bin`, HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'),
     GOCACHE: join(root, 'cache'), GOMODCACHE: join(root, 'modcache'), GOPATH: join(root, 'gopath'),
     XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'xdg-cache'),
     GO111MODULE: 'off', GOENV: 'off', GOTOOLCHAIN: 'local', GOWORK: 'off', CGO_ENABLED: '0',
     GOPROXY: 'off', GOSUMDB: 'off', GOTELEMETRY: 'off', GOROOT: goroot, GOOS: goos, GOARCH: goarch,
     LANG: 'C', LC_ALL: 'C',
-  };
+  });
   if (process.env.__CF_USER_TEXT_ENCODING !== undefined) env.__CF_USER_TEXT_ENCODING = process.env.__CF_USER_TEXT_ENCODING;
   for (const name of ['HOME', 'TMPDIR', 'GOCACHE', 'GOMODCACHE', 'GOPATH', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME']) await mkdir(env[name]!);
   const tools: Record<string, {sha256: string; mode: number}> = {};
@@ -1934,8 +1940,9 @@ const terminalBuild = (): Promise<TerminalBuild> => terminalBuildPromise ??= (as
   let oversized = false;
     stage = 'metadata';
     assert.ok(Date.now() < deadline, 'terminal build deadline');
-    active = terminalSpawn(go, ['env', 'GOVERSION', 'GOROOT', 'GOOS', 'GOARCH'], {cwd: sourceRoot, env, stdio: ['ignore', 'pipe', 'ignore']}, deadline + 15_000);
-    settled = terminalSettlement(active, deadline + 15_000);
+    const metadataOwnerDeadline = Math.min(hardDeadline, Date.now() + 39_000);
+    active = terminalSpawn(go, ['env', 'GOVERSION', 'GOROOT', 'GOOS', 'GOARCH'], {cwd: sourceRoot, env, stdio: ['ignore', 'pipe', 'ignore']}, metadataOwnerDeadline);
+    settled = terminalSettlement(active, metadataOwnerDeadline);
     active.stdout!.on('data', chunk => { if (Buffer.byteLength(output) + chunk.length > 4096) oversized = true; else output += chunk.toString(); });
     const metadata = await terminalResult(settled, deadline);
     assert.deepEqual(metadata, {code: 0, signal: null, error: false});
@@ -1944,8 +1951,9 @@ const terminalBuild = (): Promise<TerminalBuild> => terminalBuildPromise ??= (as
     assert.deepEqual(output.trim().split('\n'), ['go1.27.1', goroot, goos, goarch]);
     stage = 'compile';
     assert.ok(Date.now() < deadline, 'terminal build deadline');
-    active = terminalSpawn(go, argv, {cwd: sourceRoot, env, stdio: ['ignore', 'ignore', 'ignore']}, deadline + 15_000);
-    settled = terminalSettlement(active, deadline + 15_000);
+    const compileOwnerDeadline = Math.min(hardDeadline, Date.now() + 39_000);
+    active = terminalSpawn(go, argv, {cwd: sourceRoot, env, stdio: ['ignore', 'ignore', 'ignore']}, compileOwnerDeadline);
+    settled = terminalSettlement(active, compileOwnerDeadline);
     const result = await terminalResult(settled, deadline);
     assert.deepEqual(result, {code: 0, signal: null, error: false});
     await terminalOwnedClose([settled], deadline);
@@ -1957,7 +1965,7 @@ const terminalBuild = (): Promise<TerminalBuild> => terminalBuildPromise ??= (as
     let cleanupFailed = false;
     if (settled) {
       terminalSignalGroup(settled, 'SIGKILL');
-      try { await terminalOwnedClose([settled], Date.now() + 15_000); }
+      try { await terminalOwnedClose([settled], hardDeadline); }
       catch { cleanupFailed = true; }
     }
     const directSettlement = settled?.result ?? null;
@@ -1966,7 +1974,9 @@ const terminalBuild = (): Promise<TerminalBuild> => terminalBuildPromise ??= (as
     catch { process.stderr.write('terminal-witness ERROR build receipt\n'); }
     throw error;
   }
-})();
+  };
+  return hardDeadlineNs === undefined ? terminalBuildPromise ??= build() : build();
+};
 
 type TerminalRecord = { Schema: 1; Phase: string; Nonce: string; TargetPID: number; Previous: string; Data: Record<string, unknown> };
 const terminalHash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
@@ -2089,11 +2099,16 @@ const terminalPublicSpawn = (root: string): {pid: number; id: number; event: str
   assert.equal(event.detail.phase, 'startup');
   return {pid, id: terminalPid(event.id), event: 'child-spawned', phase: 'startup'};
 };
-const terminalStart = async (root: string, nonce: string, parentPID: number, deadline: number, build: TerminalBuild, directPID?: number, fault = false): Promise<TerminalSession> => {
+const terminalStart = async (root: string, nonce: string, parentPID: number, deadline: number, build: TerminalBuild, directPID?: number, fault = false, ownedBinding?: SpawnBinding, helperDeadline = deadline + 30_000): Promise<TerminalSession> => {
   assert.ok(!fault || directPID, 'registration fault is control-only');
   const heldBytes = await terminalWait(root, 'held.json', deadline, ['armed.json', 'terminal.json', 'complete.json']);
-  let binding: {pid: number; id: number | null; event: string; phase: string} | undefined;
-  if (directPID) binding = {pid: directPID, id: null, event: 'fixture-parent-spawn', phase: 'fixture'};
+  let binding: {pid: number; id: number | null; event: string; phase: string; groupID?: number; anchorPID?: number; callback?: string} | undefined;
+  if (ownedBinding) {
+    assert.equal(directPID, undefined);
+    assert.equal(ownedBinding.spawnParentPID, parentPID);
+    assert.equal(ownedBinding.targetPID, Number(readFileSync(join(root, 'xcode.pid'), 'utf8')));
+    binding = {pid: terminalPid(ownedBinding.targetPID), id: null, event: 'spawn', phase: 'owned-process', groupID: terminalPid(ownedBinding.groupID), anchorPID: terminalPid(ownedBinding.anchorPID), callback: 'spawn'};
+  } else if (directPID) binding = {pid: directPID, id: null, event: 'fixture-parent-spawn', phase: 'fixture'};
   while (!binding) {
     terminalCheck(root, deadline);
     binding = terminalPublicSpawn(root);
@@ -2118,19 +2133,20 @@ const terminalStart = async (root: string, nonce: string, parentPID: number, dea
   terminalWrite(root, 'observer-input.json', {Root: root, Nonce: nonce, TargetPID: pid, Binding: bindingHash, Deadline: deadline, Fault: fault, Binary: build.binaryHash, Sources: build.sources});
   assert.equal(terminalHash(await readFile(build.binary)), build.binaryHash, 'observer pre-launch binary');
   terminalCheck(root, deadline);
-  const observer = terminalSpawn(build.binary, [join(root, 'observer-input.json')], {cwd: root, env: build.env, stdio: ['ignore', 'ignore', 'pipe']}, deadline + 30_000);
+  const observerOwnerDeadline = ownedBinding ? Math.min(helperDeadline, Date.now() + 39_000) : helperDeadline;
+  const observer = terminalSpawn(build.binary, [join(root, 'observer-input.json')], {cwd: root, env: build.env, stdio: ['ignore', 'ignore', 'pipe']}, observerOwnerDeadline);
   observer.stderr!.on('data', () => {
     process.stderr.write('terminal-witness ERROR helper-stderr\n');
     terminalFailure(root);
   });
-  const settled = terminalSettlement(observer, deadline + 30_000, () => terminalFailure(root));
+  const settled = terminalSettlement(observer, observerOwnerDeadline, () => terminalFailure(root));
   if (!fault) void settled.closed.then(result => {
     if (result.error || result.code !== 0 || result.signal !== null || !existsSync(join(root, 'complete.json'))) terminalFailure(root);
   });
   const session = {root, nonce, pid, parentPID, endpointPID, deadline, observer, settled, build};
   return session;
 };
-const terminalArm = async (session: TerminalSession): Promise<void> => {
+const terminalArm = async (session: TerminalSession, shellParentPID = session.parentPID): Promise<void> => {
   const {root, nonce, pid, parentPID, endpointPID, deadline, observer} = session;
   const bindingHash = terminalHash(terminalRead(root, 'binding.json'));
   const armedBytes = await terminalWait(root, 'armed.json', deadline, ['live.json', 'ps-blocked.json', 'terminal.json', 'complete.json']);
@@ -2149,7 +2165,7 @@ const terminalArm = async (session: TerminalSession): Promise<void> => {
   terminalKeys(live.Data, ['pid', 'parentPID', 'endpointPID', 'registration']);
   assert.deepEqual(live.Data, {pid, parentPID, endpointPID, registration: armedHash});
   session.liveHash = terminalHash(liveBytes);
-  for (const [name, value] of Object.entries({'witness-target': pid, 'witness-parent': parentPID, 'witness-live-hash': session.liveHash})) writeFileSync(join(root, name), String(value), {flag: 'wx', mode: 0o600});
+  for (const [name, value] of Object.entries({'witness-target': pid, 'witness-parent': parentPID, 'witness-shell-parent': terminalPid(shellParentPID), 'witness-live-hash': session.liveHash})) writeFileSync(join(root, name), String(value), {flag: 'wx', mode: 0o600});
 };
 const terminalEndpoint = async (session: TerminalSession, port: number, deadline: number): Promise<void> => {
   terminalCheck(session.root, deadline);
@@ -2169,14 +2185,15 @@ const terminalEndpoint = async (session: TerminalSession, port: number, deadline
   assert.deepEqual(JSON.parse(bytes.toString()), {nonce: session.nonce, pid: session.endpointPID, parentPID: session.pid});
   terminalCheck(session.root, deadline);
 };
-const terminalRelease = async (session: TerminalSession, port: number, production: boolean): Promise<void> => {
+const terminalRelease = async (session: TerminalSession, port: number, production: boolean, shellBinding?: {pid: number; parentPID: number}): Promise<void> => {
   const {root, nonce, pid, parentPID, deadline, armed, armedHash, liveHash} = session;
   assert.ok(armed && armedHash && liveHash);
   const blockedBytes = await terminalWait(root, 'ps-blocked.json', deadline, ['continue.json', 'terminal.json', 'complete.json']);
   const blocked = terminalParse(blockedBytes, 'ps-blocked', nonce, pid, liveHash);
   terminalKeys(blocked.Data, ['shellPID', 'parentPID', 'startedAt']);
   terminalPid(blocked.Data.shellPID);
-  assert.equal(blocked.Data.parentPID, parentPID);
+  assert.equal(blocked.Data.parentPID, shellBinding?.parentPID ?? parentPID);
+  if (shellBinding) assert.equal(blocked.Data.shellPID, terminalPid(shellBinding.pid));
   assert.ok(Number.isSafeInteger(blocked.Data.startedAt) && Number(blocked.Data.startedAt) <= Date.now());
   const commandDeadline = Math.min(deadline, Number(blocked.Data.startedAt) + 2000);
   terminalCheck(root, commandDeadline);
@@ -2249,8 +2266,8 @@ const terminalTeardown = async (root: string, session: TerminalSession | undefin
 };
 const terminalExportSafe = (bytes: Buffer, root: string, buildRoot: string): boolean => {
   if (bytes.length === 0 || bytes.length > 8192) return false;
-  const keys = new Set('Schema Phase Nonce TargetPID Previous Data pid parentPID endpointPID spawn id event events method phase binary sources observerPID queue fd pad requested result error ident filter flags fflags data requestedFlags requestedFflags count held registration shellPID startedAt code cleanup observerResult signal errno errnoKnown callResult callResultKind category stage release settled groupsStopped groupUncertain processError cleanupFailed endpointStopped publicationFailed targetError forced capabilityProbeReap descendantEvidence dispatcher server buildRoot binding closeBeforeProof operation heldBeforeCleanup shellCode Root Binding Deadline Fault Binary Sources'.split(' '));
-  const literals = new Set(['', 'endpoint', 'held', 'binding', 'armed', 'challenge', 'live', 'ps-blocked', 'intent', 'continue', 'terminal', 'complete', 'release', 'failure-held', 'SUCCESS', 'ERROR', 'fixture-failure', 'fixture-parent-spawn', 'child-spawned', 'startup', 'fixture', 'linux-pidfd-epoll', 'darwin-kqueue', 'registration', 'input', 'handle', 'queue', 'wait', 'cleanup', 'completion', 'EBADF', 'EPERM', 'EACCES', 'ESRCH', 'EINTR', 'syscall', 'handle-unavailable', 'process-done-api', 'protocol-or-deadline', 'unavailable', 'error-only', 'number', 'stdlib-normal-path-only', 'owned-groups-empty-and-stdio-close', 'unproved', 'SIGTERM', 'SIGKILL']);
+  const keys = new Set('Schema Phase Nonce TargetPID Previous Data pid parentPID endpointPID spawn id event events method phase binary sources observerPID queue fd pad requested result error ident filter flags fflags data requestedFlags requestedFflags count held registration shellPID startedAt code cleanup observerResult signal errno errnoKnown callResult callResultKind category stage release settled groupsStopped groupUncertain processError cleanupFailed endpointStopped publicationFailed targetError forced capabilityProbeReap descendantEvidence dispatcher server buildRoot binding closeBeforeProof operation heldBeforeCleanup shellCode Root Binding Deadline Fault Binary Sources targetPID spawnParentPID groupID anchorPID supervisorPID managerPID callback shellParentPID closeBeforeEndpointStop targetExitObserved targetCloseObserved anchorExitObserved anchorCloseObserved groupAbsent inputClosedObserved stdoutNaturalEnd stdoutCloseObserved stderrNaturalEnd stderrCloseObserved targetStdoutNaturalEnd targetStdoutCloseObserved targetStderrNaturalEnd targetStderrCloseObserved managerStdoutNaturalEnd managerStdoutCloseObserved managerStderrNaturalEnd managerStderrCloseObserved supervisorStdoutFinished supervisorStdoutCloseObserved supervisorStderrFinished supervisorStderrCloseObserved callerStdoutNaturalEnd callerStdoutCloseObserved callerStderrNaturalEnd callerStderrCloseObserved managerProcessCreated targetDispatchRequested targetProcessCreated targetNoChildObserved targetPIDObserved targetExecConfirmed targetUnconfirmedCloseObserved targetOutputRelayHealthy supervisorExitObserved supervisorCloseObserved supervisorExitCode supervisorSignal stopReason ownerReady ownerRetired ownerEnded ownerClosed controlClosed groupComplete'.split(' '));
+  const literals = new Set(['', 'endpoint', 'held', 'binding', 'armed', 'challenge', 'live', 'ps-blocked', 'intent', 'continue', 'terminal', 'complete', 'release', 'failure-held', 'SUCCESS', 'ERROR', 'fixture-failure', 'fixture-parent-spawn', 'owned-process', 'spawn', 'positive-terminal-witness-complete', 'child-spawned', 'startup', 'fixture', 'linux-pidfd-epoll', 'darwin-kqueue', 'registration', 'input', 'handle', 'queue', 'wait', 'cleanup', 'completion', 'EBADF', 'EPERM', 'EACCES', 'ESRCH', 'EINTR', 'syscall', 'handle-unavailable', 'process-done-api', 'protocol-or-deadline', 'unavailable', 'error-only', 'number', 'stdlib-normal-path-only', 'owned-groups-empty-and-stdio-close', 'unproved', 'SIGTERM', 'SIGKILL']);
   const safe = (value: unknown, depth = 0): boolean => {
     if (depth > 8) return false;
     if (value === null || typeof value === 'boolean') return true;
@@ -2266,7 +2283,7 @@ const terminalExport = async (root: string, mode: string, build: TerminalBuild):
   if (!base) return;
   await mkdir(base, {recursive: true});
   const destination = await mkdtemp(join(base, `${mode}-`));
-  for (const name of ['endpoint.json', 'held.json', 'binding.json', 'observer-input.json', 'armed.json', 'challenge.json', 'live.json', 'ps-blocked.json', 'intent.json', 'continue.json', 'terminal.json', 'complete.json', 'observer-result.json', 'child-exit-observed', 'observer-error.json', 'child-exit-probe-error', 'cancel', 'teardown.json', 'source-binding.json', 'callback.json', 'control-result.json', 'failure-held.json']) {
+  for (const name of ['endpoint.json', 'held.json', 'binding.json', 'observer-input.json', 'armed.json', 'challenge.json', 'live.json', 'ps-blocked.json', 'intent.json', 'continue.json', 'terminal.json', 'complete.json', 'observer-result.json', 'child-exit-observed', 'observer-error.json', 'child-exit-probe-error', 'cancel', 'teardown.json', 'source-binding.json', 'callback.json', 'control-result.json', 'failure-held.json', 'start-binding.json', 'target-exit.json', 'target-close.json', 'owned-retirement.json', 'observer-settlement.json', 'shell-settlement.json']) {
     if (!existsSync(join(root, name))) continue;
     const bytes = terminalRead(root, name);
     const valid = terminalExportSafe(bytes, root, build.root);
@@ -2311,7 +2328,7 @@ const terminalShim = (): string => {
     '        terminal_wait "$root/pending-candidate-continue" || exit 2');
   replaceOnce('      touch "$root/exit-child-requested"\n      if ! wait_for_fixture_file "$root/child-exit-observed" "$root/child-exit-probe-error"; then', String.raw`      terminal_check || exit 2
       [ "$pid" = "$(cat "$root/witness-target")" ] || exit 2
-      [ "$PPID" = "$(cat "$root/witness-parent")" ] || exit 2
+      [ "$PPID" = "$(cat "$root/witness-shell-parent")" ] || exit 2
       witness_nonce=$(cat "$root/witness-nonce") || exit 2
       witness_live=$(cat "$root/witness-live-hash") || exit 2
       printf '{"Schema":1,"Phase":"ps-blocked","Nonce":"%s","TargetPID":%s,"Previous":"%s","Data":{"shellPID":%s,"parentPID":%s,"startedAt":%s}}\n' "$witness_nonce" "$pid" "$witness_live" "$$" "$PPID" "$terminal_now" > "$root/ps-blocked.json.next" || exit 2
@@ -2480,6 +2497,71 @@ const initialRaceStages: Record<string, string> = {
 
 const revocationModes = ['listener-exit-after-ready', 'listener-exit-after-ready-private-write-failure', 'listener-exit-after-ready-public-write-failure', 'listener-exit-after-ready-first-failure'];
 export const xctestOwnerTests: Array<[string, () => Promise<void>]> = [];
+xctestOwnerTests.push(['Native startup pending pin diagnostic reports the wait exit, first failure and supervisor timeline', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-pin-diagnostic-'));
+  try {
+    const wait = {exit: 'first-failure', elapsedMs: 9_812, startupRemainingMs: 188};
+    const absent = JSON.parse(pendingPinSnapshot(root, 'listener-pending-disappear', {exitCode: null, signalCode: null}, wait, ''));
+    assert.equal(absent.ownerRead, 'read-error');
+    assert.equal(absent.firstFailure, null);
+    assert.equal(absent.pinned, false);
+    assert.equal(absent.observations, 'absent');
+    assert.equal(absent.wdaInspections, 'absent');
+    await mkdir(join(root, 'state'));
+    const timedOut = {id: 7, phase: 'initial', operation: 'inspect-listener', endpoint: 'mjpeg', status: null, signal: 'SIGTERM', timeoutMs: 2_000,
+      monotonicStartMs: 7_301.25, durationMs: 2_004.5, stdout: {bytes: 0}, stderr: {bytes: 0}, error: {category: 'timeout', code: 'ETIMEDOUT', message: `${root}/bin/lsof`}};
+    await writeFile(join(root, 'state/owner.json'), JSON.stringify({
+      ready: false, exitCode: null, signal: null,
+      firstFailure: {phase: 'initial', stage: 'mjpeg-listener-command', category: 'listener-command-error', monotonicMs: 9_305.5, inspectionId: 2,
+        message: `XCTEST: ${root}`, causalCommands: [timedOut]},
+      diagnostics: {
+        lifecycle: [
+          {id: 1, event: 'supervisor-start', monotonicMs: 0.5, detail: {phase: 'startup', pid: 4242}},
+          {id: 2, event: 'Child Spawned!', monotonicMs: 120, detail: {phase: `${root}/state`}},
+          {id: 3, event: 'failure-observed', monotonicMs: 9_305.5, detail: {phase: 'initial', stage: 'mjpeg-listener-command', category: 'listener-command-error'}},
+        ],
+        inspections: [{id: 2, phase: 'initial', monotonicStartMs: 7_000, durationMs: 2_305, error: 'XCTEST: startup deadline'}],
+        commands: [timedOut],
+      },
+    }));
+    await writeFile(join(root, 'pending-observations'), `1/0\n${root}\n`);
+    await writeFile(join(root, 'pending-wda-count'), '2');
+    await writeFile(join(root, 'runner.pid'), '4243');
+    const stderr = `XCTEST: unknown WDA listener at ${root}/state/owner.json\n`;
+    const text = pendingPinSnapshot(root, 'listener-pending-disappear', {exitCode: 1, signalCode: null}, wait, stderr);
+    assert.equal(text.includes(root), false);
+    const snapshot = JSON.parse(text);
+    assert.deepEqual(snapshot.wait, wait);
+    assert.equal(snapshot.ownerRead, 'read');
+    assert.deepEqual(snapshot.supervisor, {exitCode: 1, signal: null, stderrBytes: Buffer.byteLength(stderr), stderr: 'XCTEST: unknown WDA listener at <root>/state/owner.json\n'});
+    assert.deepEqual(snapshot.firstFailure, {phase: 'initial', stage: 'mjpeg-listener-command', category: 'listener-command-error', monotonicMs: 9_305.5, inspectionId: 2,
+      causalCommands: [{id: 7, phase: 'initial', operation: 'inspect-listener', endpoint: 'mjpeg', status: null, signal: 'SIGTERM', timeoutMs: 2_000, startMs: 7_301.25,
+        durationMs: 2_004.5, stdoutBytes: 0, stderrBytes: 0, error: {category: 'timeout', code: 'ETIMEDOUT'}}]});
+    assert.equal(snapshot.pinned, false);
+    assert.deepEqual(snapshot.lifecycle.map((entry: {event: string; phase: string | null}) => [entry.event, entry.phase]),
+      [['supervisor-start', 'startup'], ['other', 'other'], ['failure-observed', 'initial']]);
+    assert.equal(snapshot.lifecycle[2].stage, 'mjpeg-listener-command');
+    assert.deepEqual(snapshot.inspections, [{id: 2, phase: 'initial', startMs: 7_000, durationMs: 2_305, failed: true}]);
+    assert.deepEqual(snapshot.observations, ['1/0', 'other']);
+    assert.equal(snapshot.wdaInspections, 2);
+    assert.equal(snapshot.mjpegInspections, 'absent');
+    assert.equal(snapshot.markers['runner.pid'], true);
+    assert.equal(snapshot.markers['pending-candidate-boundary'], false);
+    const flood = Array.from({length: 2_000}, (_, index) => ({id: index + 1, event: 'runner-candidate-revalidated', monotonicMs: index,
+      detail: {phase: 'initial', stage: 'pending-runner-identity', category: 'runner-identity-mismatch'}}));
+    const floodCommands = Array.from({length: 200}, (_, index) => ({...timedOut, id: index + 1}));
+    await writeFile(join(root, 'state/owner.json'), JSON.stringify({diagnostics: {lifecycle: flood, commands: floodCommands},
+      firstFailure: {stage: 'startup-deadline', category: 'startup-deadline', causalCommands: floodCommands}}));
+    const bounded = pendingPinSnapshot(root, 'listener-pending-disappear', {exitCode: null, signalCode: 'SIGKILL'}, wait, 'x'.repeat(100_000));
+    assert.ok(Buffer.byteLength(bounded) <= 8192, String(Buffer.byteLength(bounded)));
+    assert.equal(JSON.parse(bounded).firstFailure.stage, 'startup-deadline');
+    assert.equal(JSON.parse(bounded).supervisor.signal, 'SIGKILL');
+    await writeFile(join(root, 'state/owner.json'), Buffer.alloc(1_048_577, 32));
+    assert.equal(JSON.parse(pendingPinSnapshot(root, 'listener-pending-disappear', {exitCode: null, signalCode: null}, wait, '')).ownerRead, 'read-error');
+  } finally {
+    await rm(root, {recursive: true, force: true});
+  }
+}]);
 xctestOwnerTests.push(['Native startup XCTest exit witness classification', async () => {
   const success = {status: 0, signal: null, stdout: 'S\n', stderr: ''};
   const live = encodeXctestExitProbe(success);
@@ -2722,6 +2804,65 @@ function pendingInvalidSnapshot(root: string, mode: string, child: ChildProcess,
   const text = JSON.stringify(snapshot);
   if (Buffer.byteLength(text) > 8192) throw new Error('snapshot size limit');
   return text;
+}
+
+function pendingPinSnapshot(root: string, mode: string, supervisor: {exitCode: number | null; signalCode: NodeJS.Signals | null},
+  wait: {exit: string; elapsedMs: number; startupRemainingMs: number}, supervisorErrors: string): string {
+  const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
+  const name = (value: unknown) => typeof value === 'string' && /^[a-z][a-z0-9-]{0,79}$/u.test(value) ? value : 'other';
+  const signal = (value: unknown) => value === null || value === undefined ? null : typeof value === 'string' && /^SIG[A-Z0-9]{1,10}$/u.test(value) ? value : 'other';
+  const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000) / 1000 : null;
+  const read = (relative: string, limit: number) => {
+    if (statSync(join(root, relative)).size > limit) throw new Error('snapshot size limit');
+    return readFileSync(join(root, relative), 'utf8');
+  };
+  let owner: Record<string, unknown> = {};
+  let ownerRead = 'unavailable';
+  try { owner = record(JSON.parse(read('state/owner.json', 1_048_576))); ownerRead = 'read'; } catch { ownerRead = 'read-error'; }
+  const counter = (relative: string) => {
+    try { const text = read(relative, 16).trim(); return /^\d{1,6}$/u.test(text) ? Number(text) : 'other'; } catch { return 'absent'; }
+  };
+  let observations: string[] | string;
+  try { observations = read('pending-observations', 4096).trim().split(/\r?\n/u).slice(0, 8).map(value => /^\d{1,3}\/(?:0|1|2|invalid)$/u.test(value) ? value : 'other'); }
+  catch { observations = 'absent'; }
+  const command = (value: unknown) => {
+    const entry = record(value), error = record(entry.error);
+    return {id: number(entry.id), phase: name(entry.phase), operation: name(entry.operation), endpoint: entry.endpoint === undefined ? null : name(entry.endpoint),
+      status: entry.status === null ? null : number(entry.status), signal: signal(entry.signal), timeoutMs: number(entry.timeoutMs),
+      startMs: number(entry.monotonicStartMs), durationMs: number(entry.durationMs), stdoutBytes: number(record(entry.stdout).bytes),
+      stderrBytes: number(record(entry.stderr).bytes), error: entry.error === undefined ? null : {category: name(error.category), code: typeof error.code === 'string' && /^E[A-Z0-9]{1,15}$/u.test(error.code) ? error.code : null}};
+  };
+  const failure = record(owner.firstFailure);
+  const diagnostics = record(owner.diagnostics);
+  const lifecycle = list(diagnostics.lifecycle).map(record);
+  const build = (events: number, commands: number, stderrChars: number) => ({
+    mode, wait, ownerRead,
+    supervisor: {exitCode: supervisor.exitCode, signal: signal(supervisor.signalCode), stderrBytes: Buffer.byteLength(supervisorErrors),
+      stderr: supervisorErrors.split(root).join('<root>').slice(0, stderrChars)},
+    owner: {ready: typeof owner.ready === 'boolean' ? owner.ready : null, ended: Object.hasOwn(owner, 'endedAt'), exitCode: number(owner.exitCode), signal: signal(owner.signal)},
+    firstFailure: owner.firstFailure === undefined ? null : {phase: name(failure.phase), stage: name(failure.stage), category: name(failure.category),
+      monotonicMs: number(failure.monotonicMs), inspectionId: number(failure.inspectionId), causalCommands: list(failure.causalCommands).slice(-commands).map(command)},
+    pinned: lifecycle.some(entry => entry.event === 'runner-candidate-pinned'),
+    lifecycle: lifecycle.slice(-events).map(entry => {
+      const detail = record(entry.detail);
+      return {id: number(entry.id), event: name(entry.event), monotonicMs: number(entry.monotonicMs), phase: detail.phase === undefined ? null : name(detail.phase),
+        ...(detail.stage === undefined ? {} : {stage: name(detail.stage), category: name(detail.category)})};
+    }),
+    inspections: list(diagnostics.inspections).slice(-4).map(value => {
+      const entry = record(value);
+      return {id: number(entry.id), phase: name(entry.phase), startMs: number(entry.monotonicStartMs), durationMs: number(entry.durationMs), failed: entry.error !== undefined};
+    }),
+    commands: list(diagnostics.commands).slice(-commands).map(command),
+    observations, wdaInspections: counter('pending-wda-count'), mjpegInspections: counter('pending-mjpeg-count'), receiptQueries: counter('receipt-queries'),
+    markers: Object.fromEntries(['runner.pid', 'xcode.pid', 'launches', 'pending-candidate-boundary', 'pending-candidate-continue', 'stop', 'state/stop']
+      .map(marker => [marker, existsSync(join(root, marker))])),
+  });
+  for (const [events, commands, stderrChars] of [[24, 8, 600], [12, 4, 200], [6, 2, 0]]) {
+    const text = JSON.stringify(build(events, commands, stderrChars));
+    if (Buffer.byteLength(text) <= 8192) return text;
+  }
+  throw new Error('snapshot size limit');
 }
 
 const listenerCaptureControls = [
@@ -3311,15 +3452,18 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
           checkControlBudget();
           writeFileSync(join(root, invalidPidControl === 'held-start' ? 'pending-invalid-release' : 'pending-invalid-withheld'), 'test decision');
         }
+        let pendingWaitExit: string | undefined;
         while (!done && Date.now() < pendingDeadline) {
           if (witness) terminalCheck(root, deadline);
           if (existsSync(join(state, 'owner.json'))) {
             const current = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
             const lifecycle = current.diagnostics?.lifecycle || [];
-            if (current.firstFailure || lifecycle.some((event: {event: string}) => event.event === 'runner-candidate-pinned')) break;
+            if (lifecycle.some((event: {event: string}) => event.event === 'runner-candidate-pinned')) { pendingWaitExit = 'pinned'; break; }
+            if (current.firstFailure) { pendingWaitExit = 'first-failure'; break; }
           }
           await pause();
         }
+        const pendingWait = {exit: pendingWaitExit ?? (done ? 'supervisor-closed' : 'wait-deadline'), elapsedMs: Date.now() - supervisorStarted, startupRemainingMs: deadline - Date.now()};
         const pendingOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
         if (mode === 'listener-pending-invalid-pid') {
           await writeFile(join(root, 'pending-candidate-continue'), 'invalid response observation complete');
@@ -3374,11 +3518,11 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         if (mode === 'listener-pending-ambiguous' || mode === 'listener-pending-command-error' || mode === 'listener-pending-invalid-pid') {
           assert.equal(pinned, undefined);
         } else {
-          if (!pinned && mode === 'listener-pending-stop') {
+          if (!pinned) {
             let diagnostic: string;
-            try { diagnostic = pendingInvalidSnapshot(root, testMode, child, done); }
+            try { diagnostic = pendingPinSnapshot(root, testMode, child, pendingWait, errors); }
             catch { diagnostic = '{"collection":"unavailable"}'; }
-            assert.fail(`listener-pending-stop pin not observed: ${diagnostic}`);
+            assert.fail(`${mode} pin not observed: ${diagnostic}`);
           }
           assert.ok(pinned);
           assert.match(String(pinned.detail?.pid), /^[1-9]\d{0,9}$/u);
@@ -4825,7 +4969,249 @@ xctestOwnerTests.push(['Native startup XCTest terminal witness receipt validatio
   }
 }]);
 
+const terminalControlOwned = async (): Promise<void> => {
+  const configuredDeadline = process.env.XCTEST_POSITIVE_HARD_DEADLINE_NS;
+  assert.ok(configuredDeadline && /^\d{1,24}$/u.test(configuredDeadline), 'pre-import positive terminal fixture deadline required');
+  const hardDeadlineNs = BigInt(configuredDeadline);
+  const remainingNs = hardDeadlineNs - process.hrtime.bigint();
+  assert.ok(remainingNs > 5_000_000_000n && remainingNs <= 70_000_000_000n, 'positive terminal fixture hard deadline');
+  const hardDeadline = Date.now() + Number(remainingNs / 1_000_000n);
+  const workDeadline = hardDeadline - 5_000;
+  const within = <T>(operation: () => Promise<T>): Promise<T> => {
+    assert.ok(Date.now() < workDeadline, 'positive terminal fixture work deadline');
+    return terminalBound(operation(), workDeadline);
+  };
+  const build = await within(() => terminalBuild(hardDeadlineNs));
+  const root = await within(() => mkdtemp(join(tmpdir(), 'herdr-terminal-owned-')));
+  let owned: OwnedProcess | undefined;
+  let session: TerminalSession | undefined;
+  let shell: ChildProcess | undefined;
+  let shellSettled: TerminalSettlement | undefined;
+  let ownedRetirement: Awaited<ReturnType<OwnedProcess['retire']>> | undefined;
+  let targetExit: {code: number | null; signal: NodeJS.Signals | null} | undefined;
+  let targetClose: {code: number | null; signal: NodeJS.Signals | null} | undefined;
+  let primary: unknown;
+  let cleanupFailure: Error | undefined;
+  let endpointStopped = false;
+  const reserve = createNetServer();
+  try {
+    await within(() => mkdir(join(root, 'state')));
+    await within(() => mkdir(join(root, 'home')));
+    await within(() => mkdir(join(root, 'tmp')));
+    const nonce = randomBytes(16).toString('hex');
+    await within(() => writeFile(join(root, 'witness-nonce'), nonce, {flag: 'wx', mode: 0o600}));
+    const server = join(root, 'target.ts');
+    await within(() => writeFile(server, terminalServer, {flag: 'wx', mode: 0o600}));
+    const ps = join(root, 'ps');
+    await within(() => writeFile(ps, terminalShim(), {flag: 'wx', mode: 0o700}));
+    await within(() => new Promise<void>((resolve, reject) => {
+      reserve.once('error', reject);
+      reserve.listen(0, '127.0.0.1', resolve);
+    }));
+    const port = (reserve.address() as AddressInfo).port;
+    await within(() => new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve())));
+    const witnessDeadline = Math.min(workDeadline, Date.now() + 10_000);
+    writeFileSync(join(root, 'state/deadline'), String(witnessDeadline), {flag: 'wx', mode: 0o600});
+    const targetEnv: Record<string, string> = {
+      PATH: '/usr/bin:/bin', HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'),
+      BUN_OPTIONS: '--no-env-file', LANG: 'C', LC_ALL: 'C',
+      STARTUP_TEST_ROOT: root, IOS_WDA_PORT: String(port),
+    };
+    if (build.env.__CF_USER_TEXT_ENCODING !== undefined) targetEnv.__CF_USER_TEXT_ENCODING = build.env.__CF_USER_TEXT_ENCODING;
+    const psEnv: NodeJS.ProcessEnv = terminalNoEnvEnvironment({
+      PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: targetEnv.HOME, TMPDIR: targetEnv.TMPDIR,
+      LANG: 'C', LC_ALL: 'C', STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: 'listener-concurrent-exit-before-close',
+      IOS_WDA_PORT: String(port),
+    });
+    terminalWrite(root, 'source-binding.json', {
+      dispatcher: terminalHash(await within(() => readFile(ps))), server: terminalHash(await within(() => readFile(server))),
+      binary: build.binaryHash, sources: build.sources, buildRoot: build.root, binding: 'owned-process',
+    });
+    owned = spawnOwnedProcess(process.execPath, ['--no-env-file', server, 'xcodebuild'], {
+      hardDeadlineNs, cleanupReservationMs: 5_000, terminalTransport: true,
+      terminalTarget: {cwd: root, env: targetEnv},
+    });
+    owned.stdout.on('data', () => undefined);
+    owned.stderr.on('data', () => undefined);
+    await within(() => owned!.ready);
+    const transport = owned.terminalTransport;
+    assert.ok(transport, 'terminal authority transport required');
+    assert.notEqual(transport.authorityControl, owned.stdin, 'target authority is separate from fixture lease stdin');
+    assert.notEqual(transport.authorityOutput, owned.stdout, 'target authority output is separate from fixture stdout');
+    owned.start();
+    const started = await within(() => owned!.started);
+    assert.ok(started, 'real target start receipt required');
+    const callback = await within(() => transport.targetCallback);
+    assert.deepEqual(callback, {...started, callback: 'spawn'});
+    assert.equal(owned.targetPID, started.targetPID);
+    assert.equal(owned.spawnParentPID, started.spawnParentPID);
+    assert.equal(owned.groupID, started.groupID);
+    assert.ok(owned.supervisor?.pid);
+    const supervisorPID = terminalPid(owned.supervisor.pid);
+    assert.notEqual(started.spawnParentPID, supervisorPID);
+    assert.equal(started.groupID, started.anchorPID);
+    assert.notEqual(started.targetPID, started.spawnParentPID);
+    assert.notEqual(started.anchorPID, started.targetPID);
+    process.kill(-started.groupID, 0);
+    terminalWrite(root, 'start-binding.json', {
+      targetPID: started.targetPID, spawnParentPID: started.spawnParentPID, groupID: started.groupID,
+      anchorPID: started.anchorPID, supervisorPID, callback: callback.callback,
+    });
+    session = await terminalStart(root, nonce, started.spawnParentPID, witnessDeadline, build, undefined, false, started, hardDeadline);
+    await terminalArm(session, process.pid);
+    writeFileSync(join(root, 'status-queries'), '1', {flag: 'wx', mode: 0o600});
+    let shellOutput = '';
+    const shellOwnerDeadline = Math.min(hardDeadline, Date.now() + 39_000);
+    shell = terminalSpawn(ps, ['-p', String(started.targetPID), '-o', 'stat='], {env: psEnv, stdio: ['ignore', 'pipe', 'ignore']}, shellOwnerDeadline);
+    shellSettled = terminalSettlement(shell, shellOwnerDeadline, () => terminalFailure(root));
+    shell.stdout!.on('data', chunk => { shellOutput += chunk.toString(); });
+    await terminalRelease(session, port, false, {pid: terminalPid(shell.pid), parentPID: process.pid});
+    assert.deepEqual(await terminalResult(shellSettled, workDeadline), {code: 0, signal: null, error: false});
+    assert.equal(shellOutput, 'S\n');
+    await terminalOwnedClose([shellSettled], workDeadline);
+    assert.equal(shellSettled.groupComplete, true);
+    assert.equal(shellSettled.groupUncertain, false);
+    assert.equal(shellSettled.forced, false);
+    targetExit = await within(() => owned!.targetExit.then(value => {
+      assert.ok(value);
+      return value;
+    }));
+    assert.deepEqual(targetExit, {code: 46, signal: null});
+    const heldEndpointPID = terminalPid(Number(readFileSync(join(root, 'endpoint.pid'), 'utf8')));
+    process.kill(heldEndpointPID, 0);
+    const closeWhileEndpointHeld = await Promise.race([
+      owned.targetClose.then(value => ({settled: true as const, value})),
+      new Promise<{settled: false}>(resolve => setTimeout(() => resolve({settled: false}), 25)),
+    ]);
+    assert.deepEqual(closeWhileEndpointHeld, {settled: false});
+    writeFileSync(join(root, 'endpoint-stop'), 'physical endpoint cleanup', {flag: 'wx', mode: 0o600});
+    await within(async () => {
+      while (!existsSync(join(root, 'endpoint-stopped'))) {
+        assert.ok(Date.now() < hardDeadline, 'endpoint cleanup deadline');
+        await new Promise(resolve => setTimeout(resolve, 1));
+      }
+    });
+    endpointStopped = true;
+    targetClose = await terminalBound(owned.targetClose.then(value => {
+      assert.ok(value);
+      return value;
+    }), hardDeadline);
+    assert.deepEqual(targetClose, {code: 46, signal: null});
+    ownedRetirement = await terminalBound(owned.retire('positive-terminal-witness-complete'), hardDeadline);
+    terminalWrite(root, 'target-exit.json', targetExit);
+    terminalWrite(root, 'target-close.json', targetClose);
+    terminalWrite(root, 'owned-retirement.json', {
+      targetPID: started.targetPID, managerPID: started.spawnParentPID, supervisorPID,
+      groupID: started.groupID, anchorPID: started.anchorPID, ...ownedRetirement,
+    });
+    terminalWrite(root, 'observer-settlement.json', {
+      pid: session.observer.pid, code: session.settled.result?.code, signal: session.settled.result?.signal,
+      ownerReady: session.settled.ownerReady, ownerRetired: session.settled.ownerRetired,
+      ownerEnded: session.settled.ownerEnded, ownerClosed: session.settled.ownerClosed,
+      controlClosed: session.settled.controlClosed, groupComplete: session.settled.groupComplete,
+      groupUncertain: session.settled.groupUncertain, forced: session.settled.forced,
+    });
+    terminalWrite(root, 'shell-settlement.json', {
+      pid: shell.pid, code: shellSettled.result?.code, signal: shellSettled.result?.signal,
+      ownerReady: shellSettled.ownerReady, ownerRetired: shellSettled.ownerRetired,
+      ownerEnded: shellSettled.ownerEnded, ownerClosed: shellSettled.ownerClosed,
+      controlClosed: shellSettled.controlClosed, groupComplete: shellSettled.groupComplete,
+      groupUncertain: shellSettled.groupUncertain, forced: shellSettled.forced,
+    });
+    terminalWrite(root, 'callback.json', {
+      binding: 'owned-process', targetPID: started.targetPID, spawnParentPID: started.spawnParentPID,
+      groupID: started.groupID, anchorPID: started.anchorPID, supervisorPID, callback: callback.callback,
+      shellPID: shell.pid, shellParentPID: process.pid, closeBeforeEndpointStop: false,
+    });
+    const retirementFlags = [
+      'targetExitObserved', 'targetCloseObserved', 'anchorExitObserved', 'anchorCloseObserved', 'groupAbsent', 'inputClosedObserved',
+      'stdoutNaturalEnd', 'stdoutCloseObserved', 'stderrNaturalEnd', 'stderrCloseObserved',
+      'targetStdoutNaturalEnd', 'targetStdoutCloseObserved', 'targetStderrNaturalEnd', 'targetStderrCloseObserved',
+      'managerStdoutNaturalEnd', 'managerStdoutCloseObserved', 'managerStderrNaturalEnd', 'managerStderrCloseObserved',
+      'supervisorStdoutFinished', 'supervisorStdoutCloseObserved', 'supervisorStderrFinished', 'supervisorStderrCloseObserved',
+      'callerStdoutNaturalEnd', 'callerStdoutCloseObserved', 'callerStderrNaturalEnd', 'callerStderrCloseObserved',
+      'managerProcessCreated', 'targetDispatchRequested', 'targetProcessCreated', 'targetNoChildObserved',
+      'targetPIDObserved', 'targetExecConfirmed', 'targetUnconfirmedCloseObserved', 'targetOutputRelayHealthy',
+      'supervisorExitObserved', 'supervisorCloseObserved',
+    ] as const;
+    for (const key of retirementFlags) assert.equal(ownedRetirement[key], key === 'targetUnconfirmedCloseObserved' || key === 'targetNoChildObserved' ? false : true, key);
+    assert.equal(ownedRetirement.supervisorExitCode, 0);
+    assert.equal(ownedRetirement.supervisorSignal, null);
+    assert.deepEqual({
+      code: session.settled.result?.code, signal: session.settled.result?.signal, ownerReady: session.settled.ownerReady,
+      ownerRetired: session.settled.ownerRetired, ownerEnded: session.settled.ownerEnded, ownerClosed: session.settled.ownerClosed,
+      controlClosed: session.settled.controlClosed, groupComplete: session.settled.groupComplete,
+      groupUncertain: session.settled.groupUncertain, forced: session.settled.forced,
+    }, {code: 0, signal: null, ownerReady: true, ownerRetired: true, ownerEnded: true, ownerClosed: true, controlClosed: true, groupComplete: true, groupUncertain: false, forced: false});
+    assert.deepEqual({
+      code: shellSettled.result?.code, signal: shellSettled.result?.signal, ownerReady: shellSettled.ownerReady,
+      ownerRetired: shellSettled.ownerRetired, ownerEnded: shellSettled.ownerEnded, ownerClosed: shellSettled.ownerClosed,
+      controlClosed: shellSettled.controlClosed, groupComplete: shellSettled.groupComplete,
+      groupUncertain: shellSettled.groupUncertain, forced: shellSettled.forced,
+    }, {code: 0, signal: null, ownerReady: true, ownerRetired: true, ownerEnded: true, ownerClosed: true, controlClosed: true, groupComplete: true, groupUncertain: false, forced: false});
+  } catch (error) {
+    primary = error;
+    terminalFailure(root);
+  } finally {
+    if (primary) {
+      try { writeFileSync(join(root, 'endpoint-stop'), 'failed fixture cleanup'); } catch (error) { cleanupFailure ??= error instanceof Error ? error : new Error('endpoint cleanup publication failed'); }
+      try { writeFileSync(join(root, 'state/stop'), 'failed fixture cleanup'); } catch (error) { cleanupFailure ??= error instanceof Error ? error : new Error('target cleanup publication failed'); }
+      owned?.stop('positive-terminal-witness-failed');
+      for (const helper of [session?.settled, shellSettled]) if (helper && !helper.groupComplete && !helper.groupUncertain) terminalSignalGroup(helper, 'SIGTERM');
+    }
+    if (owned && !ownedRetirement) {
+      try { ownedRetirement = await terminalBound(owned.retire(primary ? 'positive-terminal-witness-cleanup' : 'positive-terminal-witness-complete'), hardDeadline); }
+      catch (error) { cleanupFailure ??= error instanceof Error ? error : new Error('owned target retirement failed'); }
+    }
+    for (const helper of [session?.settled, shellSettled]) {
+      if (!helper || helper.groupComplete) continue;
+      try { await terminalOwnedClose([helper], hardDeadline); }
+      catch (error) { cleanupFailure ??= error instanceof Error ? error : new Error('terminal helper retirement failed'); }
+    }
+    if (root) {
+      try {
+        const retirement = ownedRetirement;
+        const helperSettled = [session?.settled, shellSettled].every(helper => !helper || (terminalSettled(helper) && helper.groupComplete));
+        const teardown = {
+          settled: Boolean(retirement?.targetExitObserved && retirement.targetCloseObserved && helperSettled),
+          groupsStopped: Boolean(retirement?.groupAbsent && helperSettled), groupUncertain: Boolean(!retirement?.groupAbsent),
+          processError: Boolean(session?.settled.error || shellSettled?.error), cleanupFailed: Boolean(cleanupFailure), cleanup: cleanupFailure ? 'ERROR' : null,
+          endpointStopped: endpointStopped || existsSync(join(root, 'endpoint-stopped')),
+          publicationFailed: false, targetError: existsSync(join(root, 'target-error')),
+          forced: Boolean(session?.settled.forced || shellSettled?.forced),
+          capabilityProbeReap: 'stdlib-normal-path-only',
+          descendantEvidence: retirement?.groupAbsent && helperSettled ? 'owned-groups-empty-and-stdio-close' : 'unproved',
+          targetExitObserved: retirement?.targetExitObserved ?? false, targetCloseObserved: retirement?.targetCloseObserved ?? false,
+          targetStdoutNaturalEnd: retirement?.targetStdoutNaturalEnd ?? false, targetStdoutCloseObserved: retirement?.targetStdoutCloseObserved ?? false,
+          targetStderrNaturalEnd: retirement?.targetStderrNaturalEnd ?? false, targetStderrCloseObserved: retirement?.targetStderrCloseObserved ?? false,
+          managerStdoutNaturalEnd: retirement?.managerStdoutNaturalEnd ?? false, managerStdoutCloseObserved: retirement?.managerStdoutCloseObserved ?? false,
+          managerStderrNaturalEnd: retirement?.managerStderrNaturalEnd ?? false, managerStderrCloseObserved: retirement?.managerStderrCloseObserved ?? false,
+          supervisorStdoutFinished: retirement?.supervisorStdoutFinished ?? false, supervisorStdoutCloseObserved: retirement?.supervisorStdoutCloseObserved ?? false,
+          supervisorStderrFinished: retirement?.supervisorStderrFinished ?? false, supervisorStderrCloseObserved: retirement?.supervisorStderrCloseObserved ?? false,
+          callerStdoutNaturalEnd: retirement?.callerStdoutNaturalEnd ?? false, callerStdoutCloseObserved: retirement?.callerStdoutCloseObserved ?? false,
+          callerStderrNaturalEnd: retirement?.callerStderrNaturalEnd ?? false, callerStderrCloseObserved: retirement?.callerStderrCloseObserved ?? false,
+          anchorExitObserved: retirement?.anchorExitObserved ?? false, anchorCloseObserved: retirement?.anchorCloseObserved ?? false,
+          managerProcessCreated: retirement?.managerProcessCreated ?? false,
+          supervisorExitObserved: retirement?.supervisorExitObserved ?? false, supervisorCloseObserved: retirement?.supervisorCloseObserved ?? false,
+          supervisorExitCode: retirement?.supervisorExitCode ?? null, supervisorSignal: retirement?.supervisorSignal ?? null,
+        };
+        if (!existsSync(join(root, 'teardown.json'))) terminalWrite(root, 'teardown.json', teardown);
+        await terminalExport(root, 'owned-terminal-witness', build);
+        assert.ok(teardown.settled && teardown.groupsStopped && teardown.endpointStopped && !teardown.processError && !teardown.cleanupFailed && !teardown.targetError && !teardown.forced, 'positive terminal witness teardown incomplete');
+        await terminalBound(rm(root, {recursive: true, force: true}), hardDeadline);
+      } catch (error) { cleanupFailure ??= error instanceof Error ? error : new Error('positive terminal fixture finalization failed'); }
+    }
+    if ((!owned || ownedRetirement?.groupAbsent) && [session?.settled, shellSettled].every(helper => !helper || (terminalSettled(helper) && helper.groupComplete))) {
+      try { await terminalBound(rm(build.root, {recursive: true, force: true}), hardDeadline); }
+      catch (error) { cleanupFailure ??= error instanceof Error ? error : new Error('positive observer build cleanup failed'); }
+    }
+  }
+  if (primary) throw primary;
+  if (cleanupFailure) throw cleanupFailure;
+};
+
 const terminalControl = async (fault: boolean): Promise<void> => {
+  if (!fault) return terminalControlOwned();
   const build = await terminalBuild();
   const root = await mkdtemp(join(tmpdir(), 'herdr-terminal-control-'));
   await mkdir(join(root, 'state'));
@@ -4841,7 +5227,7 @@ const terminalControl = async (fault: boolean): Promise<void> => {
   await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
   const deadline = Date.now() + 10_000;
   writeFileSync(join(root, 'state/deadline'), String(deadline), {flag: 'wx'});
-  const env: NodeJS.ProcessEnv = {PATH: process.env.PATH, HOME: build.env.HOME, TMPDIR: build.env.TMPDIR, LANG: 'C', LC_ALL: 'C', STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: 'listener-concurrent-exit-before-close', IOS_WDA_PORT: String(port)};
+  const env = terminalNoEnvEnvironment({PATH: process.env.PATH, HOME: build.env.HOME, TMPDIR: build.env.TMPDIR, LANG: 'C', LC_ALL: 'C', STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: 'listener-concurrent-exit-before-close', IOS_WDA_PORT: String(port)});
   if (build.env.__CF_USER_TEXT_ENCODING !== undefined) env.__CF_USER_TEXT_ENCODING = build.env.__CF_USER_TEXT_ENCODING;
   terminalWrite(root, 'source-binding.json', {dispatcher: terminalHash(await readFile(ps)), server: terminalHash(await readFile(server)), binary: build.binaryHash, sources: build.sources, buildRoot: build.root, binding: 'fixture-parent-spawn'});
   const target = terminalSpawn(process.execPath, [server, 'xcodebuild'], {env, stdio: ['ignore', 'pipe', 'pipe']}, deadline + 30_000);
@@ -4917,8 +5303,316 @@ const terminalControl = async (fault: boolean): Promise<void> => {
   }
   if (primary) throw primary;
 };
+xctestOwnerTests.push(['Native startup XCTest HOST no-env terminal factory', async () => {
+  const deadline = Date.now() + 20_000;
+  const within = <T>(operation: () => Promise<T>): Promise<T> => {
+    assert.ok(Date.now() < deadline, 'terminal operation deadline');
+    return terminalBound(operation(), deadline);
+  };
+  const root = await within(() => mkdtemp(join(tmpdir(), 'sm63-xctest-no-env-')));
+  let owned: TerminalSettlement | undefined;
+  let primaryFailed = false;
+  let primary: unknown;
+  let cleanupFailure: Error | undefined;
+  try {
+    for (const name of ['home', 'tmp', 'bun-cache']) await within(() => mkdir(join(root, name), {recursive: true, mode: 0o700}));
+    const canaryName = 'SMOKE63_HOST_NO_ENV_CANARY';
+    const canaryValue = 'public-synthetic-dotenv-canary';
+    await within(() => writeFile(join(root, '.env'), `${canaryName}=${canaryValue}\n`, {flag: 'wx', mode: 0o600}));
+    const inputEnvironment: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH, HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'), BUN_INSTALL_CACHE_DIR: join(root, 'bun-cache'),
+      LANG: 'C', LC_ALL: 'C', BUN_OPTIONS: `--env-file=${join(root, '.env')}`,
+    };
+    const environment = terminalNoEnvEnvironment(inputEnvironment);
+    assert.deepEqual(Object.keys(environment).sort(), ['BUN_INSTALL_CACHE_DIR', 'BUN_OPTIONS', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR']);
+    assert.equal(environment.BUN_OPTIONS, '--no-env-file');
+    assert.equal(environment.NODE_OPTIONS, undefined);
+
+    const unprotectedEnvironment = { ...inputEnvironment };
+    delete unprotectedEnvironment.BUN_OPTIONS;
+    assert.ok(Date.now() < deadline, 'terminal operation deadline');
+    const negative = spawnSync(process.execPath, ['-e', `process.stdout.write(JSON.stringify({runtimeKind: process.versions?.bun ? 'bun' : 'other', canary: process.env.${canaryName} ?? null}))`], {
+      cwd: root, env: unprotectedEnvironment, encoding: 'utf8', timeout: Math.min(10_000, deadline - Date.now()), maxBuffer: 64 * 1024,
+    });
+    assert.ok(Date.now() < deadline, 'terminal operation deadline');
+    assert.equal(negative.error, undefined, 'synthetic dotenv negative control spawn');
+    assert.equal(negative.status, 0, 'synthetic dotenv negative control status');
+    assert.equal(negative.signal, null, 'synthetic dotenv negative control signal');
+    assert.equal(negative.stderr, '', 'synthetic dotenv negative control stderr');
+    assert.deepEqual(JSON.parse(negative.stdout), {runtimeKind: 'bun', canary: canaryValue});
+
+    const descendantSource = `process.stdout.write(JSON.stringify({runtimeKind: process.versions?.bun ? 'bun' : 'other', canary: process.env.${canaryName} ?? null, bunOptions: process.env.BUN_OPTIONS ?? null}));`;
+    const targetSource = `
+      import { spawn } from 'node:child_process';
+      const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantSource)}], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      descendant.stdout.on('data', chunk => { stdout += chunk.toString(); });
+      descendant.stderr.on('data', chunk => { stderr += chunk.toString(); });
+      descendant.once('error', () => { process.exitCode = 1; });
+      descendant.once('close', (code, signal) => {
+        let value;
+        try { value = JSON.parse(stdout); } catch { process.exitCode = 1; }
+        process.stdout.write(JSON.stringify({
+          runtimeKind: process.versions?.bun ? 'bun' : 'other',
+          canary: process.env.${canaryName} ?? null,
+          bunOptions: process.env.BUN_OPTIONS ?? null,
+          descendant: { code, signal, stderr, value },
+        }));
+        if (code !== 0 || signal !== null || stderr !== '' || process.env.BUN_OPTIONS !== '--no-env-file'
+          || process.env.${canaryName} !== undefined || value?.runtimeKind !== 'bun'
+          || value?.canary !== null || value?.bunOptions !== '--no-env-file') process.exitCode = 1;
+      });
+    `;
+    const target = terminalSpawn(process.execPath, ['-e', targetSource], {cwd: root, env: environment, stdio: ['ignore', 'pipe', 'pipe']}, deadline);
+    owned = terminalSettlement(target, deadline);
+    let stdout = '', stderr = '';
+    target.stdout!.on('data', chunk => { stdout += chunk.toString(); });
+    target.stderr!.on('data', chunk => { stderr += chunk.toString(); });
+    assert.deepEqual(await terminalResult(owned, deadline), {code: 0, signal: null, error: false});
+    await terminalOwnedClose([owned], deadline);
+    assert.equal(stderr, '');
+    assert.equal(target.stdout!.destroyed, true);
+    assert.equal(target.stderr!.destroyed, true);
+    assert.equal(owned.ownerReady, true);
+    assert.equal(owned.ownerRetired, true);
+    assert.equal(owned.ownerEnded, true);
+    assert.equal(owned.ownerClosed, true);
+    assert.equal(owned.controlClosed, true);
+    assert.equal(owned.groupComplete, true);
+    assert.equal(owned.groupUncertain, false);
+    assert.equal(owned.forced, false);
+    assert.deepEqual(JSON.parse(stdout), {
+      runtimeKind: 'bun', canary: null, bunOptions: '--no-env-file',
+      descendant: {code: 0, signal: null, stderr: '', value: {runtimeKind: 'bun', canary: null, bunOptions: '--no-env-file'}},
+    });
+  } catch (error) {
+    primaryFailed = true;
+    primary = error;
+  } finally {
+    if (owned && !owned.groupComplete && !owned.groupUncertain) {
+      try {
+        terminalSignalGroup(owned, 'SIGTERM');
+        await terminalOwnedClose([owned], deadline);
+      } catch {
+        if (!owned.ownerRetiring && !owned.forced && !owned.groupUncertain) {
+          try { terminalSignalGroup(owned, 'SIGKILL'); }
+          catch (error) { cleanupFailure = error instanceof Error ? error : new Error('terminal no-env fixture kill request failed'); }
+        }
+      }
+    }
+    if (owned && !owned.groupComplete) cleanupFailure ??= new Error('terminal no-env fixture retirement unproved');
+    else {
+      try { await within(() => rm(root, {recursive: true, force: true})); }
+      catch (error) { cleanupFailure = error instanceof Error ? error : new Error('terminal no-env fixture cleanup failed'); }
+    }
+  }
+  if (primaryFailed) throw primary;
+  if (cleanupFailure) throw cleanupFailure;
+}]);
+xctestOwnerTests.push(['Native startup XCTest terminal target uses isolated environment and cwd', async () => {
+  const deadline = Date.now() + 40_000;
+  const root = await terminalBound(mkdtemp(join(tmpdir(), 'sm63-terminal-target-')), deadline);
+  let positive: ReturnType<typeof spawnOwnedProcess> | undefined;
+  let negative: ReturnType<typeof spawnOwnedProcess> | undefined;
+  let primary: unknown;
+  try {
+    for (const name of ['home', 'tmp', 'cache']) await terminalBound(mkdir(join(root, name)), deadline);
+    const canonicalRoot = await terminalBound(realpath(root), deadline);
+    const canary = 'SMOKE63_TERMINAL_TARGET_CANARY';
+    const sentinel = `SMOKE63_TERMINAL_TARGET_ONLY_${randomBytes(8).toString('hex').toUpperCase()}`;
+    const sentinelValue = 'public-terminal-target-only';
+    assert.equal(process.env[sentinel], undefined);
+    await terminalBound(writeFile(join(root, '.env'), `${canary}=public-synthetic-value\n`, {flag: 'wx', mode: 0o600}), deadline);
+    const env = {
+      PATH: '/usr/bin:/bin', HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'),
+      BUN_INSTALL_CACHE_DIR: join(root, 'cache'), BUN_OPTIONS: '--no-env-file', LANG: 'C', LC_ALL: 'C',
+      [sentinel]: sentinelValue,
+    };
+    const unprotected = {...env, BUN_OPTIONS: ''};
+    const baseline = spawnSync(process.execPath, ['-e', `process.stdout.write(JSON.stringify({bun: !!process.versions.bun, canary: process.env[${JSON.stringify(canary)}] ?? null}))`], {
+      cwd: root, env: unprotected, encoding: 'utf8', timeout: Math.min(5_000, deadline - Date.now()), maxBuffer: 4096,
+    });
+    assert.equal(baseline.error, undefined);
+    assert.equal(baseline.status, 0);
+    assert.equal(baseline.signal, null);
+    assert.deepEqual(JSON.parse(baseline.stdout), {bun: true, canary: 'public-synthetic-value'});
+    const descendant = `process.stdout.write(JSON.stringify({cwd: process.cwd(), bun: !!process.versions.bun, canary: process.env[${JSON.stringify(canary)}] ?? null, options: process.env.BUN_OPTIONS ?? null, sentinel: process.env[${JSON.stringify(sentinel)}] ?? null}))`;
+    const source = `
+      const {spawn} = require('node:child_process');
+      const child = spawn(process.execPath, ['--no-env-file', '-e', ${JSON.stringify(descendant)}], {stdio: ['ignore', 'pipe', 'pipe']});
+      let output = '', errors = '';
+      child.stdout.on('data', chunk => { output += chunk.toString(); });
+      child.stderr.on('data', chunk => { errors += chunk.toString(); });
+      child.on('error', error => { errors += error.message; });
+      child.on('close', (code, signal) => {
+        process.stdout.write(JSON.stringify({cwd: process.cwd(), bun: !!process.versions.bun,
+          canary: process.env[${JSON.stringify(canary)}] ?? null, options: process.env.BUN_OPTIONS ?? null,
+          sentinel: process.env[${JSON.stringify(sentinel)}] ?? null,
+          parentPID: process.ppid, child: {code, signal, output, errors}}));
+        if (code !== 0 || signal !== null || errors) process.exitCode = 1;
+      });
+    `;
+    positive = spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', source], {
+      timeoutMs: 35_000, cleanupReservationMs: 5_000, terminalTransport: true,
+      terminalTarget: {cwd: root, env},
+    });
+    let output = '';
+    positive.stdout.on('data', bytes => { output += String(bytes); });
+    positive.stderr.resume();
+    await terminalBound(positive.ready, deadline);
+    positive.start();
+    const binding = await terminalBound(positive.started, deadline);
+    assert.ok(binding);
+    assert.deepEqual(await terminalBound(positive.terminalTransport!.targetCallback, deadline), {...binding, callback: 'spawn'});
+    assert.deepEqual(await terminalBound(positive.targetExit, deadline), {code: 0, signal: null});
+    assert.deepEqual(await terminalBound(positive.targetClose, deadline), {code: 0, signal: null});
+    const observed = JSON.parse(output);
+    assert.equal(observed.cwd, canonicalRoot);
+    assert.equal(observed.bun, true);
+    assert.equal(observed.canary, null);
+    assert.equal(observed.options, '--no-env-file');
+    assert.equal(observed.sentinel, sentinelValue);
+    assert.equal(observed.parentPID, binding.spawnParentPID);
+    assert.equal(observed.child.code, 0);
+    assert.equal(observed.child.signal, null);
+    assert.equal(observed.child.errors, '');
+    assert.deepEqual(JSON.parse(observed.child.output), {cwd: canonicalRoot, bun: true, canary: null, options: '--no-env-file', sentinel: sentinelValue});
+    assert.equal(process.env[sentinel], undefined);
+    const positiveRetirement = await terminalBound(positive.retire('terminal-target-positive-complete'), deadline);
+    assert.equal(positiveRetirement.targetExitObserved, true);
+    assert.equal(positiveRetirement.targetCloseObserved, true);
+    assert.equal(positiveRetirement.groupAbsent, true);
+    assert.equal(positiveRetirement.supervisorExitObserved, true);
+    assert.equal(positiveRetirement.supervisorCloseObserved, true);
+    positive = undefined;
+
+    negative = spawnOwnedProcess(join(root, 'missing-target'), [], {
+      timeoutMs: 35_000, cleanupReservationMs: 5_000, terminalTransport: true,
+      terminalTarget: {cwd: root, env},
+    });
+    negative.stdout.resume();
+    negative.stderr.resume();
+    await terminalBound(negative.ready, deadline);
+    negative.start();
+    assert.equal(await terminalBound(negative.started, deadline), undefined);
+    assert.equal(await terminalBound(negative.terminalTransport!.targetCallback, deadline), undefined);
+    const launchFailure = await terminalBound(negative.targetExit, deadline);
+    assert.ok(launchFailure?.launchError);
+    assert.equal(launchFailure.code, null);
+    assert.equal(launchFailure.signal, null);
+    const negativeRetirement = await terminalBound(negative.retire('terminal-target-launch-failed'), deadline);
+    assert.equal(negativeRetirement.targetExitObserved, false);
+    assert.equal(negativeRetirement.targetPIDObserved, false);
+    assert.equal(negativeRetirement.groupAbsent, true);
+    assert.equal(negativeRetirement.supervisorExitObserved, true);
+    assert.equal(negativeRetirement.supervisorCloseObserved, true);
+    negative = undefined;
+  } catch (error) {
+    primary = error;
+  } finally {
+    for (const owned of [positive, negative]) {
+      if (!owned) continue;
+      owned.stop('terminal-target-test-cleanup');
+      try { await terminalBound(owned.retire('terminal-target-test-cleanup'), deadline); }
+      catch (error) { primary ??= error; }
+    }
+    if (!positive && !negative) {
+      try { await terminalBound(rm(root, {recursive: true, force: true}), deadline); }
+      catch (error) { primary ??= error; }
+    }
+  }
+  if (primary) throw primary;
+}]);
 xctestOwnerTests.push(['Native startup XCTest terminal witness registration failure', async () => { await terminalControl(true); }]);
-xctestOwnerTests.push(['Native startup XCTest owned terminal witness', async () => { await terminalControl(false); }]);
+const terminalPositiveFromUnitRunner = async (): Promise<void> => {
+  const localStartNs = process.hrtime.bigint();
+  const globalStartNs = monotonicNowNs();
+  const localAfterNs = process.hrtime.bigint();
+  const hardDeadlineNs = localStartNs + 70_000_000_000n;
+  const globalDeadlineNs = globalStartNs + 70_000_000_000n - (localAfterNs - localStartNs);
+  const hardDeadline = Date.now() + Number((hardDeadlineNs - localAfterNs) / 1_000_000n);
+  const root = await terminalBound(mkdtemp(join(tmpdir(), 'herdr-terminal-unit-runner-')), hardDeadline);
+  let child: OwnedProcess | undefined;
+  let retired = false;
+  let primary: unknown;
+  try {
+    for (const name of ['home', 'tmp', 'cache']) await terminalBound(mkdir(join(root, name)), hardDeadline);
+    const env: Record<string, string> = {
+      PATH: process.env.PATH || '/usr/bin:/bin', HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'),
+      BUN_INSTALL_CACHE_DIR: join(root, 'cache'), BUN_OPTIONS: '--no-env-file', GOTOOLCHAIN: 'local',
+      MOBILE_UNIT_FILTER: '^Native startup XCTest owned terminal witness$',
+      XCTEST_POSITIVE_GLOBAL_DEADLINE_NS: globalDeadlineNs.toString(), XCTEST_POSITIVE_CHILD: '1',
+      LANG: 'C', LC_ALL: 'C',
+    };
+    if (process.env.__CF_USER_TEXT_ENCODING !== undefined) env.__CF_USER_TEXT_ENCODING = process.env.__CF_USER_TEXT_ENCODING;
+    if (process.env.XCTEST_DIAGNOSTIC_ROOT !== undefined) env.XCTEST_DIAGNOSTIC_ROOT = process.env.XCTEST_DIAGNOSTIC_ROOT;
+    assert.ok(hardDeadlineNs - process.hrtime.bigint() >= 15_000_000_000n, 'positive owned unit cleanup reservation');
+    const bootstrap = `
+      const c0 = process.hrtime.bigint();
+      const {monotonicNowNs} = await import('./tests/mobile/support/owned-process.ts');
+      const globalNow = monotonicNowNs();
+      const c1 = process.hrtime.bigint();
+      const configured = process.env.XCTEST_POSITIVE_GLOBAL_DEADLINE_NS;
+      if (!configured || !/^\\d{1,24}$/.test(configured)) throw Error('positive unit global deadline missing');
+      const localDeadline = c0 + BigInt(configured) - globalNow;
+      if (localDeadline - c1 <= 5_000_000_000n || localDeadline - c1 > 70_000_000_000n) throw Error('positive unit global deadline expired');
+      process.env.XCTEST_POSITIVE_HARD_DEADLINE_NS = localDeadline.toString();
+      await import('./tests/mobile/unit/run.ts');
+    `;
+    child = spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', bootstrap], {
+      hardDeadlineNs, cleanupReservationMs: 5_000, terminalTransport: true,
+      terminalTarget: {cwd: join(import.meta.dirname, '../../..'), env},
+    });
+    let stdout = '';
+    let stderr = '';
+    let overflow = false;
+    child.stdout.on('data', bytes => {
+      if (Buffer.byteLength(stdout) + bytes.length > 4096) overflow = true;
+      else stdout += String(bytes);
+    });
+    child.stderr.on('data', bytes => {
+      if (Buffer.byteLength(stderr) + bytes.length > 8192) overflow = true;
+      else stderr += String(bytes);
+    });
+    await terminalBound(child.ready, hardDeadline);
+    child.start();
+    const binding = await terminalBound(child.started, hardDeadline);
+    assert.ok(binding);
+    assert.deepEqual(await terminalBound(child.terminalTransport!.targetCallback, hardDeadline), {...binding, callback: 'spawn'});
+    const childExit = await terminalBound(child.targetExit, hardDeadline);
+    if (!childExit || childExit.code !== 0 || childExit.signal !== null) {
+      const category = ['pre-import positive terminal fixture deadline required', 'positive terminal fixture hard deadline', 'positive terminal fixture work deadline', 'terminal build deadline', 'terminal group owner failed', 'terminal export rejected a non-protocol record', 'terminal operation deadline'].find(value => stderr.includes(value)) ?? 'other';
+      throw new Error(`positive owned unit child failed: ${category}; stderr-sha256=${terminalHash(stderr)}`);
+    }
+    assert.deepEqual(await terminalBound(child.targetClose, hardDeadline), {code: 0, signal: null});
+    const retirement = await terminalBound(child.retire('positive-unit-runner-complete'), hardDeadline);
+    retired = true;
+    assert.equal(overflow, false, 'positive child output bounded');
+    assert.equal(stdout, 'ok - Native startup XCTest owned terminal witness\n');
+    assert.equal(stderr, '');
+    for (const field of ['targetExitObserved', 'targetCloseObserved', 'targetPIDObserved', 'anchorExitObserved', 'anchorCloseObserved', 'groupAbsent', 'inputClosedObserved', 'targetStdoutNaturalEnd', 'targetStdoutCloseObserved', 'targetStderrNaturalEnd', 'targetStderrCloseObserved', 'managerStdoutNaturalEnd', 'managerStdoutCloseObserved', 'managerStderrNaturalEnd', 'managerStderrCloseObserved', 'callerStdoutNaturalEnd', 'callerStdoutCloseObserved', 'callerStderrNaturalEnd', 'callerStderrCloseObserved', 'supervisorExitObserved', 'supervisorCloseObserved'] as const) assert.equal(retirement[field], true, field);
+    assert.equal(retirement.supervisorExitCode, 0);
+    assert.equal(retirement.supervisorSignal, null);
+  } catch (error) {
+    primary = error;
+  } finally {
+    if (child && !retired) {
+      child.stop('positive-unit-runner-failed');
+      try { await terminalBound(child.retire('positive-unit-runner-cleanup'), hardDeadline); retired = true; }
+      catch (error) { primary ??= error; }
+    }
+    if (!child || retired) {
+      try { await terminalBound(rm(root, {recursive: true, force: true}), hardDeadline); }
+      catch (error) { primary ??= error; }
+    }
+  }
+  if (primary) throw primary;
+};
+xctestOwnerTests.push(['Native startup XCTest owned terminal witness', async () => {
+  if (process.env.XCTEST_POSITIVE_CHILD === '1' || process.env.XCTEST_POSITIVE_HARD_DEADLINE_NS !== undefined) return terminalControl(false);
+  return terminalPositiveFromUnitRunner();
+}]);
 
 xctestOwnerTests.push(['Native startup status publication ordering is deterministic against the legacy source', async () => {
   const sourcePath = join(import.meta.dirname, '../support/ios-xctest.ts');
@@ -5144,5 +5838,258 @@ xctestOwnerTests.push(['Native startup stop CLI propagates recorded cleanup erro
     assert.equal(clean.code, 0, clean.stderr);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+}]);
+
+xctestOwnerTests.push(['Native startup XCTest owned process terminal authority transport preserves fixture lifetime', async () => {
+  const hardDeadline = Date.now() + 10_000;
+  const operationDeadline = Date.now() + 8_000;
+  const targetSource = `
+    const fs = require('node:fs');
+    const authority = fs.createReadStream('', {fd: 3, autoClose: false});
+    const output = fs.createWriteStream('', {fd: 4, autoClose: false});
+    const emit = event => output.write(JSON.stringify({event, pid: process.pid, parentPID: process.ppid}) + '\\n');
+    let pending = '';
+    emit('ready');
+    process.stdin.resume();
+    process.stdin.once('end', () => emit('stdin-ended'));
+    authority.on('data', chunk => {
+      pending += chunk.toString();
+      for (;;) {
+        const end = pending.indexOf('\\n');
+        if (end < 0) break;
+        const line = pending.slice(0, end);
+        pending = pending.slice(end + 1);
+        if (line === 'probe') emit('authority-received');
+      }
+    });
+    authority.once('end', () => emit('authority-eof'));
+    setInterval(() => {}, 1000);
+  `;
+  const owned = spawnOwnedProcess(process.execPath, ['-e', targetSource], {
+    timeoutMs: 10_000, cleanupReservationMs: 2_000, terminalTransport: true,
+  });
+  let retired = false;
+  let relayedStdout = '';
+  const ownerReceiver = owned as unknown as {receive(record: {type?: string; [key: string]: unknown}): void};
+  const receiveControl = ownerReceiver.receive.bind(owned);
+  let resolveCapturedStart!: (record: Record<string, unknown>) => void;
+  const capturedStart = new Promise<Record<string, unknown>>(resolve => { resolveCapturedStart = resolve; });
+  let callbackSettled = false;
+  let startedSettled = false;
+  let startDelivered = false;
+  let capturedStartRecord: Record<string, unknown> | undefined;
+  ownerReceiver.receive = record => {
+    if (record.type === 'target-started') {
+      capturedStartRecord = record;
+      resolveCapturedStart(record);
+      return;
+    }
+    receiveControl(record);
+  };
+  owned.started.then(() => { startedSettled = true; });
+  owned.terminalTransport!.targetCallback.then(() => { callbackSettled = true; });
+  const waitForEvent = (() => {
+    const events: Array<Record<string, unknown>> = [];
+    const waiters: Array<{event: string; resolve(value: Record<string, unknown>): void; reject(error: Error): void}> = [];
+    let pending = '';
+    let outputFailure: Error | undefined;
+    const transport = owned.terminalTransport!;
+    transport.authorityOutput.on('data', chunk => {
+      pending += String(chunk);
+      for (;;) {
+        const end = pending.indexOf('\n');
+        if (end < 0) break;
+        const line = pending.slice(0, end);
+        pending = pending.slice(end + 1);
+        try {
+          const value = JSON.parse(line) as Record<string, unknown>;
+          const index = waiters.findIndex(waiter => waiter.event === value.event);
+          if (index < 0) events.push(value);
+          else waiters.splice(index, 1)[0]!.resolve(value);
+        } catch (error) {
+          outputFailure = error instanceof Error ? error : new Error('terminal authority output was invalid');
+          for (const waiter of waiters.splice(0)) waiter.reject(outputFailure);
+        }
+      }
+    });
+    transport.authorityOutput.on('error', error => {
+      outputFailure = error instanceof Error ? error : new Error('terminal authority output failed');
+      for (const waiter of waiters.splice(0)) waiter.reject(outputFailure);
+    });
+    return (event: string) => {
+      const existing = events.find(value => value.event === event);
+      if (existing) return terminalBound(Promise.resolve(existing), operationDeadline);
+      if (outputFailure) return terminalBound(Promise.reject(outputFailure), operationDeadline);
+      return terminalBound(new Promise<Record<string, unknown>>((resolve, reject) => waiters.push({event, resolve, reject})), operationDeadline);
+    };
+  })();
+  let primary: unknown;
+  try {
+    const transport = owned.terminalTransport!;
+    assert.ok(transport, 'terminal-specific streams are available only when requested');
+    owned.stdout.on('data', chunk => { relayedStdout += String(chunk); });
+    await terminalBound(owned.ready, operationDeadline);
+    owned.start();
+    const startRecord = await terminalBound(capturedStart, operationDeadline);
+    assert.equal(startRecord.type, 'target-started');
+    assert.equal(startRecord.callback, 'spawn');
+    const expectedBinding = {
+      targetPID: Number(startRecord.targetPID), spawnParentPID: Number(startRecord.spawnParentPID),
+      groupID: Number(startRecord.groupID), anchorPID: Number(startRecord.anchorPID),
+    };
+    const ready = await waitForEvent('ready');
+    const stdinEnded = await waitForEvent('stdin-ended');
+    for (const event of [ready, stdinEnded]) {
+      assert.equal(event.pid, expectedBinding.targetPID);
+      assert.equal(event.parentPID, expectedBinding.spawnParentPID);
+    }
+    assert.notEqual(expectedBinding.spawnParentPID, owned.supervisor.pid);
+    assert.equal(transport.authorityControl.write('probe\n'), true);
+    const response = await waitForEvent('authority-received');
+    assert.equal(response.pid, expectedBinding.targetPID);
+    assert.equal(response.parentPID, expectedBinding.spawnParentPID);
+    transport.authorityControl.end();
+    const revoked = await waitForEvent('authority-eof');
+    assert.equal(revoked.pid, expectedBinding.targetPID);
+    assert.equal(revoked.parentPID, expectedBinding.spawnParentPID);
+    assert.equal(callbackSettled, false);
+    assert.equal(startedSettled, false);
+    owned.stop('split-terminal-callback-stop-race');
+    await Promise.resolve();
+    assert.equal(callbackSettled, false);
+    assert.equal(startedSettled, false);
+    receiveControl(startRecord);
+    startDelivered = true;
+    const binding = await terminalBound(owned.started, operationDeadline);
+    assert.deepEqual(binding, expectedBinding);
+    const callback = await terminalBound(transport.targetCallback, operationDeadline);
+    assert.deepEqual(callback, {...binding, callback: 'spawn'});
+    const stoppedExit = await terminalBound(owned.targetExit, hardDeadline);
+    assert.deepEqual(stoppedExit, {code: null, signal: 'SIGTERM'});
+    const stoppedClose = await terminalBound(owned.targetClose, hardDeadline);
+    assert.deepEqual(stoppedClose, stoppedExit);
+    const stoppedRetirement = await terminalBound(owned.retirement, hardDeadline);
+    assert.equal(stoppedRetirement.targetExitObserved, true);
+    assert.equal(stoppedRetirement.targetCloseObserved, true);
+    assert.equal(stoppedRetirement.targetPIDObserved, true);
+    assert.equal(stoppedRetirement.groupAbsent, true);
+    owned.stop('fixture-lifetime-expiry');
+    const exit = await terminalBound(owned.targetExit, hardDeadline);
+    assert.deepEqual(exit, {code: null, signal: 'SIGTERM'});
+    const close = await terminalBound(owned.targetClose, hardDeadline);
+    assert.deepEqual(close, exit);
+    const evidence = await terminalBound(owned.retire('terminal-transport-control-complete'), hardDeadline);
+    retired = true;
+    assert.equal(evidence.targetExitObserved, true);
+    assert.equal(evidence.targetCloseObserved, true);
+    assert.equal(evidence.targetPIDObserved, true);
+    assert.equal(evidence.groupAbsent, true);
+    assert.equal(evidence.supervisorExitObserved, true);
+    assert.equal(evidence.supervisorCloseObserved, true);
+    assert.equal(relayedStdout, '');
+
+    const errorHardDeadline = Date.now() + 10_000;
+    const errorOwned = spawnOwnedProcess(process.execPath, ['-e', `
+      const fs = require('node:fs');
+      fs.createReadStream('', {fd: 3, autoClose: false}).resume();
+      fs.createWriteStream('', {fd: 4, autoClose: false});
+      setInterval(() => {}, 1000);
+    `], {timeoutMs: 10_000, cleanupReservationMs: 2_000, terminalTransport: true});
+    let errorRetired = false;
+    try {
+      await terminalBound(errorOwned.ready, errorHardDeadline);
+      errorOwned.start();
+      const errorBinding = await terminalBound(errorOwned.started, errorHardDeadline);
+      const errorCallback = await terminalBound(errorOwned.terminalTransport!.targetCallback, errorHardDeadline);
+      assert.ok(errorBinding);
+      assert.deepEqual(errorCallback, {...errorBinding, callback: 'spawn'});
+      errorOwned.terminalTransport!.authorityOutput.destroy(new Error('fixture terminal output read failed'));
+      const failure = await terminalBound(errorOwned.failure, errorHardDeadline);
+      assert.equal(failure.message, 'fixture terminal output read failed');
+      assert.equal(await terminalBound(errorOwned.stopCause, Date.now() + 1_000), 'terminal-transport-failed');
+      const errorExit = await terminalBound(errorOwned.targetExit, errorHardDeadline);
+      assert.deepEqual(errorExit, {code: null, signal: 'SIGTERM'});
+      const errorClose = await terminalBound(errorOwned.targetClose, errorHardDeadline);
+      assert.deepEqual(errorClose, errorExit);
+      const errorEvidence = await terminalBound(errorOwned.retire('terminal-output-error-complete'), errorHardDeadline);
+      errorRetired = true;
+      assert.equal(errorEvidence.targetExitObserved, true);
+      assert.equal(errorEvidence.groupAbsent, true);
+      assert.equal(errorEvidence.supervisorExitObserved, true);
+      assert.equal(errorEvidence.supervisorCloseObserved, true);
+    } finally {
+      if (!errorRetired) {
+        errorOwned.stop('terminal-output-error-test-cleanup');
+        await terminalBound(errorOwned.retire('terminal-output-error-test-cleanup'), errorHardDeadline);
+      }
+    }
+  } catch (error) {
+    primary = error;
+  } finally {
+    if (capturedStartRecord && !startDelivered) receiveControl(capturedStartRecord);
+    if (!retired) {
+      owned.stop('terminal-transport-test-cleanup');
+      try {
+        await terminalBound(owned.retire('terminal-transport-test-cleanup'), hardDeadline);
+      } catch (error) {
+        if (!primary) primary = error;
+      }
+    }
+  }
+  if (primary) throw primary;
+}]);
+
+xctestOwnerTests.push(['Native startup XCTest owned process terminal transport rejects absent and closed descriptors', async () => {
+  const runtime = join(import.meta.dirname, '../support/owned-process-runtime.ts');
+  for (const closedDescriptor of [false, true]) {
+    const hardDeadline = Date.now() + 4_000;
+    const controlArgs = [
+      'process.argv = [process.execPath, ' + JSON.stringify(runtime) + ', "--anchor-manager", ' + JSON.stringify(String(hardDeadline))
+        + ', ' + JSON.stringify(String(process.pid)) + ', "--terminal-transport"];',
+      'void import(' + JSON.stringify(runtime) + ');',
+    ];
+    const driver = `const fs = require('node:fs'); ${closedDescriptor ? 'fs.closeSync(7);' : ''} ${controlArgs.join(' ')}`;
+    const stdio: ('ignore' | 'pipe')[] = closedDescriptor
+      ? ['ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe']
+      : ['ignore', 'ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'];
+    const child = spawn(process.execPath, ['--no-env-file', '-e', driver], {detached: true, stdio}) as ChildProcess;
+    assert.ok(child.pid);
+    const records: Array<Record<string, unknown>> = [];
+    let pending = '';
+    child.stderr?.on('data', () => undefined);
+    const control = child.stdio[3] as Readable;
+    control.setEncoding('utf8');
+    control.on('data', chunk => {
+      pending += String(chunk);
+      for (;;) {
+        const end = pending.indexOf('\n');
+        if (end < 0) break;
+        const line = pending.slice(0, end);
+        pending = pending.slice(end + 1);
+        records.push(JSON.parse(line) as Record<string, unknown>);
+      }
+    });
+    const closed = new Promise<{code: number | null; signal: NodeJS.Signals | null}>(resolve => {
+      child.once('close', (code, signal) => resolve({code, signal}));
+    });
+    let cleanupFailure: unknown;
+    try {
+      const result = await terminalBound(closed, hardDeadline);
+      assert.deepEqual(result, {code: 1, signal: null});
+      assert.deepEqual(records.map(record => record.type), ['terminal-transport-unavailable']);
+      assert.equal(records[0]?.reason, 'descriptor-unavailable');
+      assert.equal(records.some(record => record.type === 'terminal-target-callback' || record.type === 'target-started'), false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') cleanupFailure = error;
+        }
+        if (!cleanupFailure) {
+          try { await terminalBound(closed, hardDeadline); } catch (error) { cleanupFailure = error; }
+        }
+      }
+    }
+    if (cleanupFailure) throw cleanupFailure;
   }
 }]);

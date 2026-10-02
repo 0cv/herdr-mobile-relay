@@ -11,7 +11,9 @@ import { redactText, writeSanitizedJson } from './support/diagnostics';
 const ANDROID_PACKAGES = ['com.google.android.gms', 'com.google.android.trichromelibrary', 'com.android.chrome'] as const;
 const PLAY_STORE_PACKAGE = 'com.android.vending';
 const PACKAGE_DUMP_LIMIT = 2_000_000;
+const PACKAGE_DUMP_LINE_LIMIT = 65_536;
 export const ANDROID_LOG_LIMIT = 104_857_600;
+const ANDROID_GMS_OBSERVATION_FILE = 'android-environment-gms-observations.json';
 const ACQUISITION_COMMAND_LIMIT = 64;
 const ACQUISITION_PREVIEW_LIMIT = 4_000;
 const DEFAULT_ADB_TIMEOUT_MS = 30_000;
@@ -116,7 +118,9 @@ export interface EnvironmentFinding {
 export interface AndroidEnvironmentCheck {
   schema: 3;
   identity: MeasurementIdentity;
-  inputs: Record<'before' | 'after' | 'log' | 'operations' | 'collector', { bytes: number; sha256: string }>;
+  inputs: Record<'before' | 'after' | 'log' | 'operations' | 'collector', { bytes: number; sha256: string }> & {
+    gmsObservations?: { bytes: number; sha256: string };
+  };
   status: EnvironmentStatus;
   collection: { status: 'PASS' | 'UNKNOWN'; issues: string[] };
   findings: EnvironmentFinding[];
@@ -503,14 +507,28 @@ function boundedLines(source: string, label: string): string[] {
 
 function completePackageLines(dump: string): string[] {
   const lines = boundedLines(dump, 'package dump');
+  if (lines.length > PACKAGE_DUMP_LINE_LIMIT) throw new Error('ANDROID_ENVIRONMENT: package dump exceeds line limit');
   const footer = lines.findIndex((line) => line.trim() === 'Compiler stats:');
   if (footer < 0 || !lines.slice(footer + 1).some((line) => line.trim())) throw new Error('ANDROID_ENVIRONMENT: package dump is truncated before its compiler footer');
-  for (let index = 1; index < lines.length; index++) {
-    if (!/^ optional:(?:true|false)$/u.test(lines[index])) continue;
-    lines[index - 1] += lines[index];
-    lines.splice(index--, 1);
+  const complete: string[] = [];
+  let priorLine = -1;
+  let continuations: string[] = [];
+  const flush = () => {
+    if (priorLine >= 0 && continuations.length) complete[priorLine] += continuations.join('');
+    continuations = [];
+  };
+  for (const line of lines) {
+    if (/^ optional:(?:true|false)$/u.test(line)) {
+      if (priorLine < 0) throw new Error('ANDROID_ENVIRONMENT: package dump has an orphaned library continuation');
+      continuations.push(line);
+      continue;
+    }
+    flush();
+    complete.push(line);
+    priorLine = complete.length - 1;
   }
-  return lines;
+  flush();
+  return complete;
 }
 
 function activePackageRecord(dump: string, name: string): string {
@@ -522,6 +540,10 @@ function activePackageRecord(dump: string, name: string): string {
   for (const line of lines) {
     if (!line.trim()) continue;
     const indent = line.length - line.trimStart().length;
+    const isComponentHeading = ['enabledComponents', 'disabledComponents'].some(name => line.trimStart().startsWith(name));
+    if (name === 'com.google.android.gms' && record >= 0 && indent <= record && isComponentHeading) {
+      throw new Error('ANDROID_ENVIRONMENT: GMS component section is malformed or outside its package record');
+    }
     if (section >= 0 && indent <= section) section = -1;
     if (record >= 0 && indent <= record) record = -1;
     if (line.trim() === 'Packages:' && indent === rootIndent) {
@@ -555,8 +577,10 @@ function namedSections(lines: string[], names: string[]): Record<string, string[
   const seen = new Set<string>();
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    const name = line.trim().replace(/:$/u, '');
-    if (!names.includes(name) || !line.endsWith(':')) continue;
+    const trimmed = line.trim();
+    const name = names.find((candidate) => trimmed.startsWith(candidate));
+    if (!name) continue;
+    if (trimmed !== `${name}:`) throw new Error(`ANDROID_ENVIRONMENT: malformed ${name} section heading`);
     if (seen.has(name)) throw new Error(`ANDROID_ENVIRONMENT: ambiguous ${name} section`);
     seen.add(name);
     const indent = line.length - line.trimStart().length;
@@ -583,6 +607,10 @@ function packageIdentity(packageName: string, record: string, paths: string): An
   let end = userIndex + 1;
   while (end < lines.length && lines[end].length - lines[end].trimStart().length > indent) end++;
   const user = lines.slice(userIndex + 1, end);
+  const componentHeading = (line: string) => ['enabledComponents', 'disabledComponents'].some(name => line.trimStart().startsWith(name));
+  if (lines.some((line, index) => (index <= userIndex || index >= end) && componentHeading(line))) {
+    throw new Error(`ANDROID_ENVIRONMENT: ${packageName} component section is outside User 0`);
+  }
   const dependencyConfig: Record<string, string[]> = {
     ...namedSections(lines.slice(1, lines.findIndex((line) => /^User \d+:/u.test(line.trim()))), [
       'dynamic libraries', 'static library', 'SDK library', 'usesLibraries', 'usesStaticLibraries', 'usesSdkLibraries',
@@ -603,8 +631,16 @@ function packageIdentity(packageName: string, record: string, paths: string): An
         : name === 'static library' ? /^name:\S+ version:\d+$/u
           : name === 'SDK library' ? /^name:\S+ versionMajor:\d+$/u
             : name === 'usesLibraryFiles' ? /^\/[^\s\p{Cc}]+$/u
-              : /^(?:uses|dynamic libraries|enabledComponents|disabledComponents)/u.test(name) ? /^[A-Za-z0-9_.$+-]+$/u : undefined;
+              : /^(?:uses|dynamic libraries)/u.test(name) ? /^[A-Za-z0-9_.$+-]+$/u : undefined;
     if (grammar && values.some((value) => !grammar.test(value))) throw new Error(`ANDROID_ENVIRONMENT: malformed ${name} values`);
+    if ((name === 'enabledComponents' || name === 'disabledComponents')
+      && values.some((value) => !/^(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*(?:\$[A-Za-z0-9_$]+)*$/u.test(value))) {
+      throw new Error(`ANDROID_ENVIRONMENT: malformed ${name} component names`);
+    }
+  }
+  const enabledComponents = new Set(dependencyConfig.enabledComponents);
+  if (dependencyConfig.disabledComponents.some((component) => enabledComponents.has(component))) {
+    throw new Error('ANDROID_ENVIRONMENT: enabled and disabled component sections contradict each other');
   }
   const staticLibrary = staticLibraryMetadata(record);
   const apkPaths = paths === '' ? [] : boundedLines(paths, 'APK paths').slice(0, -1);
@@ -637,6 +673,45 @@ function packageIdentity(packageName: string, record: string, paths: string): An
     dependencyConfigSha256: sha256(JSON.stringify(dependencyConfig)),
   };
   return { ...identity, dumpSha256: sha256(record), identitySha256: sha256(JSON.stringify(identity)) };
+}
+
+export interface AndroidGmsComponentState {
+  packageName: 'com.google.android.gms';
+  versionName: string;
+  versionCode: string;
+  enabled: string;
+  installed: boolean;
+  enabledComponents: string[];
+  disabledComponents: string[];
+  componentStateSha256: string;
+  packageIdentitySha256: string;
+  dumpSha256: string;
+}
+
+export function parseAndroidGmsComponentState(dump: string): AndroidGmsComponentState {
+  if (Buffer.byteLength(dump) > PACKAGE_DUMP_LIMIT) throw new Error('ANDROID_ENVIRONMENT: GMS package dump exceeds parsing limit');
+  const record = activePackageRecord(dump, 'com.google.android.gms');
+  const identity = packageIdentity('com.google.android.gms', record, '');
+  const enabledComponents = identity.dependencyConfig.enabledComponents;
+  const disabledComponents = identity.dependencyConfig.disabledComponents;
+  if (identity.packageRecordName !== 'com.google.android.gms' || !identity.versionName || !/^\d+$/u.test(identity.versionCode)
+    || !identity.installed || !['0', '1'].includes(identity.enabled)
+    || enabledComponents.length > 4096 || disabledComponents.length > 4096
+    || [...enabledComponents, ...disabledComponents].some(value => Buffer.byteLength(value) > 256)) {
+    throw new Error('ANDROID_ENVIRONMENT: GMS component observation is incomplete or exceeds its normalized limit');
+  }
+  return {
+    packageName: 'com.google.android.gms',
+    versionName: identity.versionName,
+    versionCode: identity.versionCode,
+    enabled: identity.enabled,
+    installed: identity.installed,
+    enabledComponents,
+    disabledComponents,
+    componentStateSha256: sha256(JSON.stringify({ enabledComponents, disabledComponents })),
+    packageIdentitySha256: identity.identitySha256,
+    dumpSha256: sha256(dump),
+  };
 }
 
 function packageVersionMatches(identity: AndroidPackageIdentity, packageName: string, declared: string): boolean {
@@ -1089,6 +1164,7 @@ export interface EnvironmentInputBytes {
   log: string;
   operations: string;
   collector: string;
+  gmsObservations?: string;
 }
 export const environmentLeaves = {
   before: 'android-environment-before.json', after: 'android-environment-after.json', log: 'android-qualification-logcat.log',
@@ -1110,6 +1186,24 @@ export async function readEnvironmentInputs(directory: string): Promise<Environm
     } catch {
       values[name as keyof EnvironmentInputBytes] = '';
     }
+  }
+  try {
+    const collector = JSON.parse(values.collector || 'null');
+    if (collector && Object.hasOwn(collector, 'gmsObservations')) {
+      const path = join(directory, ANDROID_GMS_OBSERVATION_FILE);
+      try {
+        const metadata = await lstat(path);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || !metadata.size || metadata.size > 8_000_000) throw new Error('invalid GMS observation');
+        const bytes = await readFile(path);
+        if (bytes.length !== metadata.size || bytes.length > 8_000_000) throw new Error('changed GMS observation');
+        const text = bytes.toString('utf8');
+        values.gmsObservations = Buffer.from(text, 'utf8').equals(bytes) ? text : '';
+      } catch {
+        values.gmsObservations = '';
+      }
+    }
+  } catch {
+    values.gmsObservations = '';
   }
   return values as EnvironmentInputBytes;
 }
@@ -1147,6 +1241,32 @@ function processBoundaryProof(log: string, before: AndroidEnvironmentSnapshot | 
     births: records.flatMap(record => { const birth = record.tag === 'ActivityManager' && record.message.match(/^Start proc (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)? for /u); return birth ? [{ pid: birth[1], name: birth[2], ...point(record) }] : []; }),
     events: events.flatMap((event, index) => { const matches = records.filter(record => record.text === event); return matches.length === 1 ? [{ eventOrdinal: index + 1, ...point(matches[0]) }] : []; }),
   };
+}
+
+function validGmsTerminalEvidence(collector: Record<string, any>, source: string | undefined): boolean {
+  const receipt = collector.gmsObservations;
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || typeof source !== 'string') return false;
+  if (receipt.file !== ANDROID_GMS_OBSERVATION_FILE || receipt.finalized !== true || receipt.terminalConfirmation !== 'confirmed'
+    || !/^[a-f0-9]{64}$/u.test(receipt.observationSha256 || '') || receipt.observationSha256 !== sha256(source)
+    || receipt.errors !== 0 || receipt.persistenceRetirement !== 'retired' || receipt.temporaryEvidenceCleanup !== 'not-needed') return false;
+  let observations: Record<string, any>;
+  try { observations = JSON.parse(source) as Record<string, any>; } catch { return false; }
+  const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'];
+  if (observations.schema !== 1 || observations.packageName !== 'com.google.android.gms' || observations.finalized !== true
+    || observations.terminalPublication !== 'awaiting-collector-confirmation' || !Array.isArray(observations.errors) || observations.errors.length !== 0 || !Array.isArray(observations.stages)
+    || observations.stages.length !== stages.length || !observations.stages.every((entry: any, index: number) =>
+      entry?.stage === stages[index] && entry.outcome === 'collected' && entry.state && typeof entry.state === 'object')
+    || observations.persistenceRetirement !== 'retired' || observations.temporaryEvidenceCleanup !== 'not-needed') return false;
+  const stageReceipt = observations.stages.map(({ stage, outcome }: { stage: string; outcome: string }) => ({ stage, outcome }));
+  const persistedTotal = observations.priorPersistenceAttemptMs;
+  const finalTotal = receipt.persistenceAttemptMsThroughFinalization;
+  return isDeepStrictEqual(receipt.stages, stageReceipt)
+    && receipt.totalCommandOutputBytes === observations.totalCommandOutputBytes
+    && receipt.totalRetainedCommandOutputBytes === observations.totalRetainedCommandOutputBytes
+    && receipt.totalCollectionMs === observations.totalCollectionMs
+    && Number.isSafeInteger(persistedTotal) && persistedTotal >= 0
+    && Number.isSafeInteger(finalTotal) && finalTotal >= persistedTotal
+    && finalTotal <= observations.limits.totalPersistenceLimitMs;
 }
 
 export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity: MeasurementIdentity): AndroidEnvironmentCheck {
@@ -1217,6 +1337,9 @@ export function assessAndroidEnvironment(input: EnvironmentInputBytes, identity:
   try {
     const collector = JSON.parse(input.collector);
     if (collector.failure != null || collector.transportObservationFailure != null || !Number.isSafeInteger(collector.bytes) || collector.bytes <= 0 || collector.bytes > ANDROID_LOG_LIMIT || collector.bytes !== Buffer.byteLength(input.log)) collectionIssues.push('collector unavailable or failed');
+    if (Object.hasOwn(collector, 'gmsObservations') && !validGmsTerminalEvidence(collector, input.gmsObservations)) {
+      collectionIssues.push('GMS terminal observation confirmation is unavailable or invalid');
+    }
   } catch { collectionIssues.push('collector receipt invalid'); }
   if (fatalEvents.length) issues.push('native process death, dependency configuration change or package replacement was observed');
   if (collectionIssues.length) findings.push({ category: 'EVIDENCE_INVALID' });

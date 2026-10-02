@@ -220,6 +220,22 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const fork = forks[0];
     const exit = exits[0];
     const child = children[0];
+    const service = processName.match(/SandboxedProcessService0:(\d+)$/u)?.[1];
+    const startupMessages = [
+      { priority: 'I', message: 'Using CollectorTypeCMC GC.' },
+      { priority: 'W', message: 'Unexpected CPU variant for x86: x86_64.' },
+      { priority: 'W', message: 'Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default' },
+    ];
+    const startup = records.filter((record) => record.pid === pid && record.lineNumber < fork.lineNumber);
+    if (startup.length > 0 && (!service || startup.length !== startupMessages.length || startup.some((record, index) => {
+      const expected = startupMessages[index];
+      return record.tid !== pid || record.priority !== expected.priority || record.tag !== 'cessService0'
+        || record.message !== `${service}: ${expected.message}` || record.lineNumber !== fork.lineNumber - startupMessages.length + index
+        || record.time < fork.time - 2 || record.time > fork.time || !bounded(record)
+        || (index > 0 && record.time < startup[index - 1].time);
+    }))) continue;
+    const startupLines = new Set(startup.map((record) => record.lineNumber));
+    const lifetimeStart = startup[0] || fork;
     if (exit.message !== `Process ${pid} exited cleanly (0)` || fork.pid !== exit.pid
       || processes[fork.pid] !== 'com.android.chrome_zygote'
       || !(fork.time <= birth.time && birth.time < child.time && child.time <= exit.time)
@@ -246,8 +262,8 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const auditLines = new Set(auditSubjects.map((subject) => subject.lineNumber));
     if (records.some((record) => (record.tag === 'ActivityManager'
       && [fork.pid, birth.pid].some((producerPid) => record.message.startsWith(`Start proc ${producerPid}:`)))
-      || (record.pid === pid && (record.time < fork.time || record.time > exit.time
-        || record.lineNumber < fork.lineNumber
+      || (record.pid === pid && ((record.time < fork.time || record.lineNumber < fork.lineNumber) && !startupLines.has(record.lineNumber)
+        || record.time > exit.time
         || (record.lineNumber > exit.lineNumber && !auditLines.has(record.lineNumber)))))) continue;
     const deaths = events.filter((line) => androidEventDetails(line).pid === pid);
     if (deaths.length !== 1) continue;
@@ -274,7 +290,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const ended = Math.max(exit.time, ...deathRecords.map((record) => record!.time));
     const endedLine = Math.max(exit.lineNumber, ...deathRecords.map((record) => record!.lineNumber));
     const adverse = records.some((record) => {
-      const possiblyDuringLifetime = (record.time >= fork.time || record.lineNumber >= fork.lineNumber)
+      const possiblyDuringLifetime = (record.time >= lifetimeStart.time || record.lineNumber >= lifetimeStart.lineNumber)
         && (record.time <= ended || record.lineNumber <= endedLine);
       if (possiblyDuringLifetime && record.tag === 'ActivityManager' && /^Force stopping com\.android\.chrome(?:\s|$)/u.test(record.message)
         && !/^Force stopping com\.android\.chrome appid=\d+ user=[1-9]\d*: \S.*$/u.test(record.message)) return true;
@@ -290,7 +306,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     });
     if (adverse) continue;
     result.push({ pid, processName, packageName: 'com.android.chrome', uid: Number(isolated) + 90000, auditSubjects,
-      proof: [fork, birth, child, exit, ...deathRecords as LogRecord[]].sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
+      proof: [...startup, fork, birth, child, exit, ...deathRecords as LogRecord[]].sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
   }
   return result;
 }

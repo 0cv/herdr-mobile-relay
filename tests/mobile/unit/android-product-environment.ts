@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { EventEmitter } from 'node:events';
-import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process';
+import { PassThrough } from 'node:stream';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile, rm, truncate, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,9 @@ import { join, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assessAndroidEnvironment, environmentLeaves, readEnvironmentInputs, type AndroidEnvironmentSnapshot, type AndroidPackageIdentity, type AndroidPlannedTermination, type EnvironmentInputBytes } from '../android-environment';
 import { AndroidEnvironmentMeasurement, type AndroidMeasurementIO } from '../android-measurement';
+import { boundedCommand as runBoundedCommand } from '../support/bounded-process';
+import { PhaseBudget } from '../support/budget';
+import type { OwnedProcess, RetirementEvidence } from '../support/owned-process';
 import { AndroidProductRecorder, androidProductImpact, publicMobileSummary, validateProductObservations, type ProductObservations } from '../support/android-product';
 import { FailureLedger, qualified, requiredExecutionPassed, type MeasurementIdentity, type MobileResultContract } from '../support/mobile-result';
 import { validateAndroidProducer, validateMobileEvidence, type EvidenceValidationOptions } from '../support/evidence';
@@ -17,6 +20,11 @@ import { redactText, writeSanitizedJson } from '../support/diagnostics';
 import { repositoryPath } from '../support/paths';
 
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
+const androidAllowlistedChildEnvironment = (directory: string): NodeJS.ProcessEnv => ({
+  PATH: join(directory, 'public-path-sentinel'), HOME: join(directory, 'home'), TMPDIR: join(directory, 'tmp'),
+  BUN_INSTALL_CACHE_DIR: join(directory, 'bun-cache'), BUN_OPTIONS: '--no-env-file', LANG: 'C', LC_ALL: 'C',
+  PUBLIC_NON_PATH_SENTINEL: 'SM59_PUBLIC_NON_PATH', PUBLIC_DYNAMIC_SENTINEL: 'SM59_PUBLIC_DYNAMIC',
+});
 export const sm59HistoricalCase = { run: '35556703407', childPid: '5820', product: 'INDETERMINATE', environment: 'FAIL', relation: 'UNPROVEN' } as const;
 export function measurementIdentity(overrides: Partial<MeasurementIdentity> = {}): MeasurementIdentity {
   return { runId: '35556703407', attempt: '2', suite: 'smoke', platform: 'android', baseline: '0.20.10', scenario: 'historical',
@@ -109,7 +117,7 @@ export function checkCLI(fixture: { root: string; environment?: NodeJS.ProcessEn
   })();
   const identity = measurementIdentity({ measurementId });
   const assessment = assessAndroidEnvironment(input, identity);
-  for (const [key, leaf] of Object.entries(environmentLeaves)) writeFileSync(join(directory, leaf), input[key as keyof EnvironmentInputBytes]);
+  for (const [key, leaf] of Object.entries(environmentLeaves)) writeFileSync(join(directory, leaf), input[key as keyof EnvironmentInputBytes] ?? '');
   writeFileSync(join(directory, 'android-environment-check.json'), JSON.stringify(assessment));
   writeFileSync(files.output, JSON.stringify(assessment));
   writeFileSync(join(directory, 'android-environment-session.json'), JSON.stringify({ id: identity.measurementId }));
@@ -117,7 +125,7 @@ export function checkCLI(fixture: { root: string; environment?: NodeJS.ProcessEn
   writeFileSync(join(directory, 'bundle-set.json'), JSON.stringify({ candidate: { provenance: { sourceCommit: identity.sourceCommit }, identity: { webHash: identity.candidateWebHash, build: identity.candidateBuild } } }));
   const args = ['check', '--contract', contract, '--directory', directory, '--identity', join(directory, 'identity.json'), '--bundle-set', join(directory, 'bundle-set.json'), '--run-id', identity.runId, '--attempt', identity.attempt, '--suite', identity.suite, '--baseline', identity.baseline, '--scenario', identity.scenario, '--source-run-head-sha', identity.sourceRunHeadSha];
   let passed = true, stderr = '';
-  try { execFileSync(process.execPath, [process.env.ANDROID_ENVIRONMENT_SOURCE || repositoryPath('tests/mobile/android-environment.ts'), ...args], { env: fixture.environment || process.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
+  try { execFileSync(process.execPath, [process.env.ANDROID_ENVIRONMENT_SOURCE || repositoryPath('tests/mobile/android-environment.ts'), ...args], { env: { ...(fixture.environment || process.env), BUN_OPTIONS: '--no-env-file' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
   catch (error) { passed = false; stderr = String((error as { stderr?: string }).stderr || error); }
   assert.equal(readFileSync(join(directory, 'android-environment-check.json'), 'utf8'), JSON.stringify(assessment));
   return { passed, stderr, issues: assessment.issues, args, directory };
@@ -140,7 +148,7 @@ export async function producerFixture(): Promise<Record<string, any>> {
   return data;
 }
 export async function persistAndroidProof(directory: string, identity: MeasurementIdentity, input = environmentFixture(identity.measurementId)): Promise<{ environment_qualification: MobileResultContract['environment_qualification']; evidence: Record<string, unknown> }> {
-  for (const [key, leaf] of Object.entries(environmentLeaves)) await writeFile(join(directory, leaf), input[key as keyof EnvironmentInputBytes]);
+  for (const [key, leaf] of Object.entries(environmentLeaves)) await writeFile(join(directory, leaf), input[key as keyof EnvironmentInputBytes] ?? '');
   const assessment = assessAndroidEnvironment(input, identity);
   await writeSanitizedJson(join(directory, 'android-environment-check.json'), assessment);
   const assessmentSha256 = hash(await readFile(join(directory, 'android-environment-check.json')));
@@ -251,7 +259,7 @@ async function evidenceCLI(fixture: Awaited<ReturnType<typeof evidenceFixture>>,
     '--matrix': JSON.stringify(options.matrix), '--candidate-commit': options.candidateCommit, '--source-run-head-sha': options.sourceRunHeadSha,
     '--candidate-web-hash': options.candidateWebHash, '--candidate-identity': JSON.stringify(options.candidateIdentity), '--baseline-identities': JSON.stringify(options.baselineIdentities) };
   const child = spawnSync(process.execPath, [repositoryPath(`tests/mobile/validate-${report ? 'environment' : 'evidence'}.ts`), ...Object.entries(values).flat(), ...(report ? ['--output', output] : [])],
-    { encoding: 'utf8', timeout: 10_000, env: { ...process.env, GITHUB_STEP_SUMMARY: summary, GITHUB_OUTPUT: stepOutput } });
+    { encoding: 'utf8', timeout: 10_000, env: { ...process.env, BUN_OPTIONS: '--no-env-file', GITHUB_STEP_SUMMARY: summary, GITHUB_OUTPUT: stepOutput } });
   assert.equal(child.error, undefined);
   return { status: child.status, surfaces: [child.stdout, child.stderr, ...await Promise.all([output, summary, stepOutput].map(path => readFile(path, 'utf8')))], stdout: child.stdout };
 }
@@ -262,9 +270,33 @@ async function environmentCheckCLI(fixture: Awaited<ReturnType<typeof evidenceFi
   await writeFile(bundle, JSON.stringify({ candidate: { provenance: { sourceCommit: identity.sourceCommit }, identity: fixture.options.candidateIdentity } }));
   const child = spawnSync(process.execPath, [repositoryPath('tests/mobile/android-environment.ts'), 'check', '--contract', 'report', '--directory', fixture.directory,
     '--identity', join(fixture.directory, 'android-environment-identity.json'), '--bundle-set', bundle, '--run-id', identity.runId, '--attempt', identity.attempt,
-    '--suite', identity.suite, '--baseline', identity.baseline, '--scenario', identity.scenario, '--source-run-head-sha', identity.sourceRunHeadSha], { encoding: 'utf8', timeout: 10_000 });
+    '--suite', identity.suite, '--baseline', identity.baseline, '--scenario', identity.scenario, '--source-run-head-sha', identity.sourceRunHeadSha], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, BUN_OPTIONS: '--no-env-file' } });
   assert.equal(child.error, undefined);
   return child;
+}
+
+class MeasurementCollectorMock implements OwnedProcess {
+  supervisor = undefined;
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  stdin = new PassThrough();
+  inputClosed = Promise.resolve();
+  ready = Promise.resolve();
+  started = Promise.resolve(undefined);
+  targetExit = Promise.resolve(undefined);
+  targetClose = Promise.resolve(undefined);
+  failure = new Promise<Error>(() => undefined);
+  stopCause = new Promise<string>(() => undefined);
+  retirement = Promise.resolve<RetirementEvidence>({
+    targetExitObserved: true, targetCloseObserved: true, anchorExitObserved: true, anchorCloseObserved: true,
+    groupAbsent: true, inputClosedObserved: true, stdoutNaturalEnd: true, stdoutCloseObserved: true,
+    stderrNaturalEnd: true, stderrCloseObserved: true, supervisorExitObserved: true, supervisorCloseObserved: true,
+    supervisorExitCode: 0, supervisorSignal: null,
+  });
+  start(): void {}
+  stop(_reason: string): void {}
+  release(): void {}
+  retire(_reason: string): Promise<RetirementEvidence> { return this.retirement; }
 }
 
 export const measurementFailureCases = ['none', 'begin-snapshot', 'begin-marker', 'close', 'transport', 'log', 'collector', 'identity', 'check', 'completion', 'end-snapshot'] as const;
@@ -272,10 +304,31 @@ export async function measurementControl(failure: typeof measurementFailureCases
   const directory = await mkdtemp(join(tmpdir(), 'sm59-measurement-'));
   const trace: string[] = [];
   const original = new Error(`injected-${failure}`), cleanup = new Error('injected-cleanup');
-  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true }) as unknown as ChildProcess;
+  const child = new MeasurementCollectorMock();
   const failBegin = failure.startsWith('begin-');
   const io: Partial<AndroidMeasurementIO> = {
-    requireOwnedDevice: async () => undefined,
+    boundedCommand: async (binary, args, timeout, options) => {
+      if (args.includes('snapshot')) {
+        const boundary = args[args.indexOf('--boundary') + 1];
+        trace.push(`snapshot:${boundary}`);
+        if ((failure === 'begin-snapshot' && boundary === 'start') || (failure === 'end-snapshot' && boundary === 'end')) throw original;
+        const input = environmentFixture(measurement.id);
+        await writeFile(args[args.indexOf('--output') + 1], boundary === 'start' ? input.before : input.after);
+        if (failure === 'begin-marker' && boundary === 'start') child.stderr!.emit('data', Buffer.from('failed marker transport'));
+        else child.stdout!.emit('data', Buffer.from(marker(boundary === 'start' ? 0 : 9, boundary === 'start' ? 'START' : 'END', measurement.id)
+          + (failure === 'none' && boundary === 'start' ? '1789100401.000 2000 2000 I PublicFixture: https://fixture.test/?token=PRIVATE_SENTINEL\n' : '')));
+        return { stdout: '', stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
+          childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: 0, stderrBytes: 0,
+          stdoutRetainedBytes: 0, stderrRetainedBytes: 0, stdoutSha256: hash(''), stderrSha256: hash('') };
+      }
+      if (args.includes('--android-measurement-owner')) {
+        const stdout = 'BEGIN_OK\n';
+        return { stdout, stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
+          childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0,
+          stdoutRetainedBytes: Buffer.byteLength(stdout), stderrRetainedBytes: 0, stdoutSha256: hash(stdout), stderrSha256: hash('') };
+      }
+      return runBoundedCommand(binary, args, timeout, options);
+    },
     spawnCollector: () => child,
     command: async (_file, args) => {
       const boundary = args[args.indexOf('--boundary') + 1];
@@ -287,12 +340,13 @@ export async function measurementControl(failure: typeof measurementFailureCases
       else child.stdout!.emit('data', Buffer.from(marker(boundary === 'start' ? 0 : 9, boundary === 'start' ? 'START' : 'END', measurement.id) + (failure === 'none' && boundary === 'start' ? '1789100401.000 2000 2000 I PublicFixture: https://fixture.test/?token=PRIVATE_SENTINEL\n' : '')));
       return { stdout: '', stderr: '' } as Awaited<ReturnType<AndroidMeasurementIO['command']>>;
     },
-    stopProcess: async () => { trace.push('close'); if (failure === 'close') throw original; if (failBegin) throw cleanup; },
+    stopProcess: async () => { trace.push('close'); if (failure === 'close') throw original; if (failBegin) throw cleanup; return child.retire('measurement-finished').then(evidence => evidence); },
     transport: { observe: () => undefined, finish: async () => { trace.push('transport'); if (failure === 'transport') throw original; }, failure: undefined },
     writeFile: (async (path: any, data: any, options: any) => { trace.push(String(path).endsWith('.log') ? 'log' : 'session'); if (failure === 'log' && String(path).endsWith('.log')) throw original; return writeFile(path, data, options); }) as typeof writeFile,
     writeJson: async (path, data) => { const name = path.match(/android-environment-(\w+)\.json$/u)![1]; trace.push(name); if (name === failure) throw original; if (failBegin && name === 'completion') throw new Error('injected-receipt'); await writeSanitizedJson(path, data); },
   };
-  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', directory, 'unused-public-toolchains', io);
+  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', directory, 'unused-public-toolchains', io,
+    new PhaseBudget('product-measurement-control', { timeoutMs: 600_000 }));
   measurement.bind(measurementIdentity({ measurementId: measurement.id }));
   if (failBegin) {
     let caught: unknown;
@@ -320,6 +374,69 @@ export async function measurementControl(failure: typeof measurementFailureCases
 }
 
 export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]> = [
+  ['Android product/environment HOST no-env launch factories', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'sm63-android-no-env-'));
+    try {
+    const canaryName = 'SMOKE63_HOST_NO_ENV_CANARY';
+    const canaryValue = 'public-synthetic-dotenv-canary';
+    for (const name of ['public-path-sentinel', 'home', 'tmp', 'bun-cache']) mkdirSync(join(directory, name), { recursive: true, mode: 0o700 });
+    await writeFile(join(directory, '.env'), `${canaryName}=${canaryValue}\n`, { flag: 'wx', mode: 0o600 });
+    const environment = androidAllowlistedChildEnvironment(directory);
+    assert.deepEqual(Object.keys(environment).sort(), [
+      'BUN_INSTALL_CACHE_DIR', 'BUN_OPTIONS', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'PUBLIC_DYNAMIC_SENTINEL', 'PUBLIC_NON_PATH_SENTINEL', 'TMPDIR',
+    ]);
+    assert.equal(environment.BUN_OPTIONS, '--no-env-file');
+    assert.equal(environment.NODE_OPTIONS, undefined);
+
+    const unprotectedEnvironment = { ...environment };
+    delete unprotectedEnvironment.BUN_OPTIONS;
+    const negative = spawnSync(process.execPath, ['-e', `process.stdout.write(JSON.stringify({runtimeKind: process.versions?.bun ? 'bun' : 'other', canary: process.env.${canaryName} ?? null}))`], {
+      cwd: directory, env: unprotectedEnvironment, encoding: 'utf8', timeout: 10_000, maxBuffer: 64 * 1024,
+    });
+    assert.equal(negative.error, undefined, 'synthetic dotenv negative control spawn');
+    assert.equal(negative.status, 0, 'synthetic dotenv negative control status');
+    assert.equal(negative.signal, null, 'synthetic dotenv negative control signal');
+    assert.equal(negative.stderr, '', 'synthetic dotenv negative control stderr');
+    assert.deepEqual(JSON.parse(negative.stdout), { runtimeKind: 'bun', canary: canaryValue });
+
+    const childWitness = `process.stdout.write(JSON.stringify({runtimeKind: process.versions?.bun ? 'bun' : 'other', canary: process.env.${canaryName} ?? null, bunOptions: process.env.BUN_OPTIONS ?? null}));`;
+    const parentWitness = `
+      import { spawn } from 'node:child_process';
+      const child = spawn(process.execPath, ['-e', ${JSON.stringify(childWitness)}], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+      child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+      child.once('error', () => { process.exitCode = 1; });
+      child.once('close', (code, signal) => {
+        let childValue;
+        try { childValue = JSON.parse(stdout); } catch { process.exitCode = 1; }
+        process.stdout.write(JSON.stringify({
+          runtimeKind: process.versions?.bun ? 'bun' : 'other',
+          canary: process.env.${canaryName} ?? null,
+          bunOptions: process.env.BUN_OPTIONS ?? null,
+          child: { code, signal, stderr, value: childValue },
+        }));
+        if (code !== 0 || signal !== null || stderr !== '' || process.env.BUN_OPTIONS !== '--no-env-file'
+          || process.env.${canaryName} !== undefined || childValue?.runtimeKind !== 'bun'
+          || childValue?.canary !== null || childValue?.bunOptions !== '--no-env-file') process.exitCode = 1;
+      });
+    `;
+    const positive = spawnSync(process.execPath, ['-e', parentWitness], {
+      cwd: directory, env: environment, encoding: 'utf8', timeout: 10_000, maxBuffer: 64 * 1024,
+    });
+    assert.equal(positive.error, undefined, 'allowlisted Bun child spawn');
+    assert.equal(positive.status, 0, 'allowlisted Bun child status');
+    assert.equal(positive.signal, null, 'allowlisted Bun child signal');
+    assert.equal(positive.stderr, '', 'allowlisted Bun child stderr');
+    assert.deepEqual(JSON.parse(positive.stdout), {
+      runtimeKind: 'bun', canary: null, bunOptions: '--no-env-file',
+      child: { code: 0, signal: null, stderr: '', value: { runtimeKind: 'bun', canary: null, bunOptions: '--no-env-file' } },
+    });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }],
   ['Android product/environment SM59 01 component-only decision', async () => {
     for (const mode of ['stable', 'dump-noise', 'enabled', 'disabled', 'equal-count-members']) {
       const input = environmentFixture();
@@ -517,11 +634,7 @@ export const androidProductEnvironmentTests: Array<[string, () => Promise<void>]
       }[control];
       return `globalThis.__sm59GuardState.moduleBodyWitness += 1;\nglobalThis.__sm59GuardState.operationAttempt += 1;\n${operation}\nexport const sm59Fixture = 'SM59_FILE_MODULE';\n`;
     };
-    const childEnvironment = (directory: string): NodeJS.ProcessEnv => ({
-      PATH: join(directory, 'public-path-sentinel'), HOME: join(directory, 'home'), TMPDIR: join(directory, 'tmp'),
-      BUN_INSTALL_CACHE_DIR: join(directory, 'bun-cache'), LANG: 'C', LC_ALL: 'C',
-      PUBLIC_NON_PATH_SENTINEL: 'SM59_PUBLIC_NON_PATH', PUBLIC_DYNAMIC_SENTINEL: 'SM59_PUBLIC_DYNAMIC',
-    });
+    const childEnvironment = androidAllowlistedChildEnvironment;
     const negativeChildSource = (control: GuardControl, caseId: string, moduleURL: string): string => {
       const install = control.startsWith('env')
         ? "Object.defineProperty(process, 'env', { configurable: true, get: refuse });"
@@ -774,7 +887,7 @@ if (state.runtimeKind !== 'bun' || state.setup !== 'installed' || state.wrapperS
       assert.equal(qualified(withAdverse), false, mode);
     }
     const directory = await mkdtemp(join(tmpdir(), 'sm59-input-bounds-')), valid = environmentFixture();
-    for (const [key, leaf] of Object.entries(environmentLeaves)) await writeFile(join(directory, leaf), valid[key as keyof EnvironmentInputBytes]);
+    for (const [key, leaf] of Object.entries(environmentLeaves)) await writeFile(join(directory, leaf), valid[key as keyof EnvironmentInputBytes] ?? '');
     for (const key of ['before', 'after', 'log', 'operations', 'collector'] as const) {
       const path = join(directory, environmentLeaves[key]);
       await truncate(path, (key === 'log' ? 104_857_600 : key === 'operations' ? 64_000 : 8_000_000) + 1);

@@ -53,6 +53,12 @@ export class AndroidPlatform {
   activateProductRecorder(identity) { this.template = structuredClone(identity.suite === 'release' ? releaseObservations : observations); this.template.identity = identity; this.proof = structuredClone(this.template); this.proof.records = this.proof.records.slice(0,1); trace('recorder:activate'); }
   productCheckpoint(name) { this.proof.records = structuredClone(this.template.records.slice(0,this.template.records.findIndex(record=>record.kind==='checkpoint'&&record.name===name)+1)); }
   async startFreshDevice() { trace('fresh:begin'); if (mode.includes('fresh-failure')) throw new Error('FRESH_FAILED: original'); trace('fresh:end'); }
+  async observeGmsStage(stage) {
+    if (!this.environmentMeasurement) throw new Error('ANDROID_ENVIRONMENT: GMS measurement is missing');
+    if (mode === 'gms-out-of-order' && stage === 'after-device-start') stage = 'after-setup-url';
+    if (mode === 'gms-missing-post-begin' && stage === 'after-initial-installed-app-launch') return;
+    await this.environmentMeasurement.observeGmsStage(stage);
+  }
   async openSetupURL() { trace('invitation'); if (mode === 'sticky-driver-failure') { this.driver.firstFatal={code:'APPIUM_TIMEOUT',operation:'first-inspection',later200:true}; this.driver.unusable=true; } if (mode.includes('scenario-failure')) throw new Error('STANDALONE_ORIGINAL: invitation failure'); if (mode.includes('fatal-failure')) { this.driver.firstFatal={code:'APPIUM_TIMEOUT'}; this.driver.unusable=true; const error = new Error('APPIUM_TIMEOUT: original'); error.code='APPIUM_TIMEOUT'; throw error; } }
   async installFromBrowser() { trace('install'); }
   async launchInstalledApp() { trace('launch'); }
@@ -79,7 +85,7 @@ export class AndroidPlatform {
   async stopOwnedResources() { trace('cleanup:platform'); if (mode === 'late-driver-failure') { this.driver.firstFatal={code:'APPIUM_TIMEOUT',operation:'teardown'}; this.driver.unusable=true; } this.selected=false; if(this.proof) this.proof.records.length=0; if (mode.includes('cleanup-failure')) throw new Error('CLEANUP_FAILED'); }
 }
 `;
-export const runnerProtocolCases = ['success', 'component-drift', 'unknown-relation', 'fresh-failure', 'baseline-failure', 'baseline-failure-cleanup-failure', 'scenario-failure', 'fatal-failure', 'post-failure', 'scenario-failure-post-failure', 'recovery-failure-post-failure', 'scenario-failure-post-failure-cleanup-failure', 'cleanup-failure', 'shutdown-failure', 'fixture-stop-failure', 'reverse-acquire-failure', 'reverse-remove-failure', 'fixture-log-failure', 'private-failure', 'event-write-failure', 'result-write-failure', 'sticky-driver-failure', 'late-driver-failure'] as const;
+export const runnerProtocolCases = ['success', 'component-drift', 'unknown-relation', 'gms-out-of-order', 'gms-missing-post-begin', 'fresh-failure', 'baseline-failure', 'baseline-failure-cleanup-failure', 'scenario-failure', 'fatal-failure', 'post-failure', 'scenario-failure-post-failure', 'recovery-failure-post-failure', 'scenario-failure-post-failure-cleanup-failure', 'cleanup-failure', 'shutdown-failure', 'fixture-stop-failure', 'reverse-acquire-failure', 'reverse-remove-failure', 'fixture-log-failure', 'private-failure', 'event-write-failure', 'result-write-failure', 'sticky-driver-failure', 'late-driver-failure'] as const;
 
 async function replay(mode: string, platform: string, suite: string): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'herdr-scenario-protocol-'));
@@ -101,16 +107,64 @@ export const stopProcess = async () => { trace('cleanup:fixture'); if(mode.inclu
   await writeFile(join(root, 'android-measurement.ts'), `
 import { trace, mode, assessment } from './fixture-protocol';
 export class AndroidEnvironmentMeasurement {
-  id='android-test'; operations=[]; errors=[];
+  id='android-test'; operations=[]; errors=[]; gmsErrors=[]; required=false; stages=[]; begun=false; finalized=false; finished=false; stageFailed=false;
+  expectedStages=['after-device-start','before-measurement-begin','after-setup-url','after-browser-install','after-initial-installed-app-launch'];
   bind(identity) { this.identity=identity; }
   failureOutcome() { return { errors:this.errors }; }
   plannedOperations() { return structuredClone(this.operations); }
-  async begin() { trace('measurement:begin'); if (mode.includes('baseline-failure')) { const error=new Error('ANDROID_ENVIRONMENT: baseline failure'); this.errors.push(error,new Error('COLLECTOR_CLOSE_FAILED')); throw error; } }
-  async finish() { trace('measurement:finish'); const result=structuredClone(assessment); result.identity=this.identity; result.plannedOperations=this.plannedOperations();
+  requireGmsObservations() {
+    if (this.required || this.begun || this.finalized) throw new Error('ANDROID_ENVIRONMENT: GMS requirement must be set once before begin');
+    this.required=true; trace('measurement:gms:required');
+  }
+  async observeGmsStage(stage) {
+    const index=this.stages.length;
+    if (!this.required || this.finalized || this.stageFailed || index>=this.expectedStages.length || this.expectedStages[index]!==stage || (index<2 && this.begun) || (index>=2 && !this.begun)) {
+      this.stageFailed=true; this.gmsErrors.push('GMS stage order or measurement phase is invalid');
+      trace('measurement:gms:rejected:' + stage); return;
+    }
+    this.stages.push(stage); trace('measurement:gms:' + stage);
+  }
+  startGmsFinalization() {
+    if (this.finalized) return;
+    this.finalized=true; trace('measurement:gms:finalize');
+    if (!this.required || !this.begun || this.stageFailed || this.stages.length!==this.expectedStages.length) {
+      this.gmsErrors.push('GMS diagnostic stage sequence is incomplete');
+    }
+    if (this.gmsErrors.length) this.errors.push(new Error('ANDROID_ENVIRONMENT: ' + this.gmsErrors.length + ' GMS diagnostic observation error(s)'));
+  }
+  async finalizeGmsObservations() {
+    this.startGmsFinalization();
+    if (!this.begun) return;
+    if (!this.terminalOutcome) this.terminalOutcome=new Promise(resolve=>{this.confirmTerminal=resolve;});
+    const outcome=await this.terminalOutcome;
+    if (outcome.errors.length || outcome.assessment?.collection.status!=='PASS') throw new Error('ANDROID_ENVIRONMENT: terminal collector confirmation failed');
+  }
+  async begin() {
+    trace('measurement:begin');
+    if (!this.required || this.stageFailed || this.stages.length!==2) {
+      const error=new Error('ANDROID_ENVIRONMENT: begin requires both ordered pre-measurement GMS stage attempts');
+      this.errors.push(error); throw error;
+    }
+    if (mode.includes('baseline-failure')) { const error=new Error('ANDROID_ENVIRONMENT: baseline failure'); this.errors.push(error,new Error('COLLECTOR_CLOSE_FAILED')); throw error; }
+    this.begun=true;
+  }
+  async finish() {
+    if (this.finished) throw new Error('ANDROID_ENVIRONMENT: measurement already finalized');
+    this.finished=true;
+    this.startGmsFinalization();
+    trace('measurement:finish'); const result=structuredClone(assessment); result.identity=this.identity; result.plannedOperations=this.plannedOperations();
     if(mode.includes('component-drift')) { result.status='FAIL'; result.findings=[{category:'GMS_COMPONENT_DRIFT'}]; }
     if(mode.includes('unknown-relation')) { result.status='FAIL'; result.findings=[{category:'ADVERSE_DEATH',eventIndex:0}]; result.nativeEvents=[{kind:'process-death',pid:'5820',line:'SIG: 9'}]; }
     if(mode.includes('post-failure')) { result.collection.status='UNKNOWN'; result.status='UNKNOWN'; result.findings=[{category:'EVIDENCE_INVALID'}]; }
-    return { assessment:result,assessmentSha256:'a'.repeat(64), errors:mode.includes('post-failure')?[new Error('ANDROID_ENVIRONMENT: original postcheck failure')]:[] };
+    if(this.gmsErrors.length) {
+      result.collection.status='UNKNOWN';
+      result.collection.issues=[...result.collection.issues,'GMS terminal observation confirmation is unavailable or invalid'];
+      result.status='UNKNOWN'; result.findings=[...result.findings,{category:'EVIDENCE_INVALID'}];
+    }
+    if(result.collection.status!=='PASS') this.errors.push(new Error('ANDROID_ENVIRONMENT: collection guarantee failed'));
+    const outcome={assessment:result,assessmentSha256:'a'.repeat(64), errors:[...this.errors,...(mode.includes('post-failure')?[new Error('ANDROID_ENVIRONMENT: original postcheck failure')]:[])]};
+    this.terminalOutcome=Promise.resolve(outcome); this.confirmTerminal?.(outcome);
+    return outcome;
   }
   async terminate(packageName, pid) { trace('measurement:terminate:' + packageName + ':' + pid); this.operations.push({id:'cold-1',measurementId:this.id,packageName,pid,processes:{[pid]:packageName},command:['shell','am','force-stop','--user','0',packageName],succeeded:true}); }
 }
@@ -138,15 +192,39 @@ mock.module('node:fs/promises',()=>({...original,
   const before = (first: string, last: string) => assert.ok(events.includes(first) && events.includes(last) && events.indexOf(first) < events.indexOf(last), `${mode}: ${first} before ${last}: ${events}`);
   const resultMissing = mode === 'result-write-failure';
   const result = resultMissing ? undefined : JSON.parse(await readFile(join(root, 'output/mobile-result.json'), 'utf8'));
-  const failed = mode.includes('failure') || mode === 'unknown-relation';
+  const failed = mode.includes('failure') || mode === 'unknown-relation' || mode.startsWith('gms-');
   assert.equal(child.status, failed ? 1 : 0, JSON.stringify({ result, stderr:child.stderr, events }));
   before('cleanup:fixture', 'write:fixture.log'); before('write:fixture.log', 'remove:private'); before('remove:private', 'write:scenario-events.json'); before('write:scenario-events.json', 'write:mobile-result.json');
   if (resultMissing) { await assert.rejects(readFile(join(root, 'output/mobile-result.json'))); return; }
   assert.equal(result.schema, 2);
-  const measured = platform === 'android' && !/fresh-failure|baseline-failure|reverse-acquire-failure/u.test(mode);
+  const measured = platform === 'android' && !/fresh-failure|baseline-failure|reverse-acquire-failure|gms-out-of-order/u.test(mode);
   assert.equal(events.filter(event => event === 'measurement:finish').length, measured ? 1 : 0);
   if (measured) { before('fresh:end','measurement:begin'); before('measurement:begin','invitation'); before('measurement:finish','cleanup:platform'); }
-  if (/fresh-failure|baseline-failure|reverse-acquire-failure/u.test(mode)) assert.ok(!events.includes('invitation'));
+  if (/fresh-failure|baseline-failure|reverse-acquire-failure|gms-out-of-order/u.test(mode)) assert.ok(!events.includes('invitation'));
+  if (mode === 'gms-out-of-order') {
+    assert.match(result.primary_failure.message, /begin requires both ordered pre-measurement GMS stage attempts/u);
+    assert.ok(result.additional_failures.some((failure:any) => /3 GMS diagnostic observation error\(s\)/u.test(failure.message)));
+    assert.equal(events.includes('measurement:gms:before-measurement-begin'), false);
+    before('measurement:gms:rejected:after-setup-url', 'measurement:gms:finalize');
+  }
+  if (mode === 'gms-missing-post-begin') {
+    assert.equal(result.finalization.status, 'FAIL');
+    assert.ok(result.finalization.failures.some((failure:any) => /1 GMS diagnostic observation error\(s\)/u.test(failure.message)));
+    assert.ok(result.finalization.failures.some((failure:any) => /collection guarantee failed/u.test(failure.message)));
+    assert.equal(result.environment_qualification.status, 'UNKNOWN');
+    assert.equal(result.environment_qualification.collection, 'UNKNOWN');
+    assert.equal(result.product.status, 'FAIL');
+    assert.ok(result.product.categories.includes('EVIDENCE_INVALID'));
+    assert.equal(events.includes('measurement:gms:after-initial-installed-app-launch'), false);
+    before('measurement:gms:after-browser-install', 'measurement:gms:finalize');
+  }
+  if (mode === 'success' && platform === 'android') {
+    const stages = ['after-device-start','before-measurement-begin','after-setup-url','after-browser-install','after-initial-installed-app-launch'];
+    for (let index = 1; index < stages.length; index++) before('measurement:gms:' + stages[index - 1], 'measurement:gms:' + stages[index]);
+    before('measurement:gms:before-measurement-begin', 'measurement:begin');
+    before('measurement:gms:after-initial-installed-app-launch', 'measurement:gms:finalize');
+    before('measurement:gms:finalize', 'measurement:finish');
+  }
   if (mode === 'component-drift') { assert.equal(result.product.status,'PASS'); assert.equal(result.environment_qualification.status,'FAIL'); }
   if (mode === 'unknown-relation') assert.equal(result.product.status,'INDETERMINATE');
   if (/scenario-failure|recovery-failure/u.test(mode)) { assert.equal(result.primary_failure.message, mode.includes('recovery-failure') ? 'ORIGIN_ORIGINAL: recovery failure' : 'STANDALONE_ORIGINAL: invitation failure'); assert.equal(result.qualification_failure.code, mode.includes('recovery-failure') ? 'ORIGIN_ORIGINAL' : 'STANDALONE_ORIGINAL'); }

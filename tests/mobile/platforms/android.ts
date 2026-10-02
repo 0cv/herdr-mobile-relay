@@ -19,7 +19,7 @@ import { DiagnosticRecorder, redactText, writeBoundedText, writeSanitizedJson } 
 import { PhaseBudget, PhaseBudgetError } from '../support/budget';
 import { CommandError, command, commandOutput, type CommandResult } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
-import type { AndroidEnvironmentMeasurement } from '../android-measurement';
+import type { AndroidEnvironmentMeasurement, AndroidGmsObservationStage } from '../android-measurement';
 import { isAndroidTerminationPackage } from '../android-events';
 import {
   accessibility,
@@ -322,6 +322,10 @@ export class AndroidPlatform implements MobilePlatform {
     await this.closeOwnedSession();
     await this.createChromeSession(false);
     await this.verifyFixtureEndpoint();
+  }
+
+  async observeGmsStage(stage: AndroidGmsObservationStage): Promise<void> {
+    await this.environmentMeasurement?.observeGmsStage(stage, this.budget);
   }
 
   async openSetupURL(url: string): Promise<void> {

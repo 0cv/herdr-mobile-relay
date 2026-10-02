@@ -75,11 +75,13 @@ export function assertNoKnownSecret(text: string, secrets: readonly string[]): v
   }
 }
 
-export async function writeSanitizedJson(filename: string, value: unknown): Promise<void> {
+export async function writeSanitizedJson(filename: string, value: unknown, signal?: AbortSignal): Promise<void> {
   const content = `${JSON.stringify(sanitizeValue(value), null, 2)}\n`;
   if (Buffer.byteLength(content) > MAX_DIAGNOSTIC_BYTES) throw new Error('DIAGNOSTIC_LIMIT: JSON evidence exceeds the limit');
+  if (signal?.aborted) throw signal.reason || new Error('diagnostic write was aborted');
   await mkdir(dirname(filename), { recursive: true });
-  await writeFile(filename, content, { mode: 0o600 });
+  if (signal?.aborted) throw signal.reason || new Error('diagnostic write was aborted');
+  await writeFile(filename, content, { mode: 0o600, signal });
 }
 
 export async function writeBoundedText(filename: string, value: string, maximum = MAX_DIAGNOSTIC_BYTES): Promise<void> {

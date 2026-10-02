@@ -91,8 +91,80 @@ function validateNativePath(steps: any[], dimension: 'inputs' | 'matrix'): void 
   assert.ok(steps.indexOf(upload) > steps.indexOf(summary));
   for (const step of steps) assert.equal(step['continue-on-error'], undefined);
 }
-function audit(workflow: any, action: any, release: any, check: any): void {
+function auditUnitShardWorkflow(check: any, source: string): void {
+  const jobs = check.jobs;
+  const preparation = jobs['mobile-unit-prepare'];
+  const shards = jobs['mobile-unit-shards'];
+  const aggregate = jobs['mobile-unit-aggregate'];
+  assert.ok(preparation && shards && aggregate);
+  assert.deepEqual(shards.needs, 'mobile-unit-prepare');
+  assert.equal(shards.if, "needs.mobile-unit-prepare.result == 'success'");
+  assert.equal(condition(shards.if, { needs: { 'mobile-unit-prepare': { result: 'failure' } }, success: true }), false);
+  assert.equal(shards.strategy['fail-fast'], false);
+  assert.equal(shards.strategy['max-parallel'], 12);
+  assert.equal(shards.strategy.matrix, '${{ fromJSON(needs.mobile-unit-prepare.outputs.matrix) }}');
+  assert.equal(preparation.outputs.matrix, '${{ steps.prepare.outputs.matrix }}');
+  assert.equal(aggregate.if, 'always()');
+  assert.deepEqual(aggregate.needs, ['mobile-unit-prepare', 'mobile-unit-shards']);
+  for (const job of [preparation, shards]) {
+    const cache = job.steps.find((step: any) => step.id === 'mobile-unit-cache');
+    assert.ok(cache?.uses?.startsWith('actions/cache@'));
+    assert.equal(cache.with.path, 'frontend/node_modules\ntests/mobile/node_modules\n');
+    assert.equal(cache.with.key, "mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}");
+    const install = job.steps.find((step: any) => step.id === 'install-test-dependencies');
+    assert.equal(install.if, "steps.mobile-unit-cache.outputs.cache-hit != 'true'");
+    assert.ok(install.run.includes('bun install --frozen-lockfile --cwd frontend'));
+    assert.ok(install.run.includes('bun install --frozen-lockfile --cwd tests/mobile'));
+  }
+  for (const [name, job] of Object.entries({ preparation, shards, aggregate }) as Array<[string, any]>) {
+    assert.equal(job['timeout-minutes'], 20);
+    assert.equal(job.env.BUN_OPTIONS, '--no-env-file');
+    assert.equal(job.env.GOTOOLCHAIN, 'local');
+    const checkout = job.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+    assert.equal(checkout.with.ref, '${{ github.sha }}', `${name} must use the event merge/source SHA`);
+    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('actions/setup-node@') && step.with['node-version'] === '24.21.0'));
+    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('oven-sh/setup-bun@') && step.with['bun-version'] === '1.4.2'));
+    assert.ok(job.steps.some((step: any) => step.uses?.startsWith('actions/setup-go@') && step.with['go-version'] === '1.27.1'));
+    assert.ok(job.steps.some((step: any) => step.run?.includes('go env GOTOOLCHAIN') && step.run.includes('tar --version') && step.run.includes('xmllint --version')));
+    assert.ok(job.steps.some((step: any) => step.run?.includes('git rev-parse HEAD') && step.run.includes('$GITHUB_SHA')));
+    assert.equal(job['continue-on-error'], undefined);
+    for (const step of job.steps) assert.equal(step['continue-on-error'], undefined);
+  }
+  const prepare = preparation.steps.find((step: any) => step.id === 'prepare');
+  assert.match(prepare.run, /bun --no-env-file tests\/mobile\/unit\/test-shard-ci\.ts prepare/u);
+  assert.equal(prepare.run.includes('GITHUB_RUN_ID'), true);
+  const execute = shards.steps.find((step: any) => step.run?.includes('test-shard-ci.ts execute'));
+  assert.ok(execute);
+  for (const value of ['--prepared-dir', '--group-id', '--receipt-dir', '--source-sha', '--run-id', '--attempt']) assert.ok(execute.run.includes(value));
+  assert.match(source, /--select-tests/u);
+  assert.match(source, /unitShardCommandArgs\(shard\.selection\)/u);
+  const uploadSteps = [preparation, shards].map((job: any) => job.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@')));
+  for (const upload of uploadSteps) {
+    assert.equal(upload.if, 'always()');
+    assert.equal(upload.with['if-no-files-found'], 'error');
+    assert.equal(upload.with['retention-days'], 1);
+    assert.match(upload.with.name, /github.run_attempt/u);
+  }
+  const downloads = aggregate.steps.filter((step: any) => step.uses?.startsWith('actions/download-artifact@'));
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].if, 'always()');
+  assert.match(downloads[0].with.pattern, /github.run_attempt/u);
+  assert.equal(downloads[0].with['merge-multiple'], false);
+  const aggregation = aggregate.steps.find((step: any) => step.run?.includes('test-shard-ci.ts aggregate'));
+  assert.ok(aggregation);
+  assert.equal(aggregation.if, 'always()');
+  assert.match(aggregation.run, /UNIT_PREPARATION_RESULT/u);
+  assert.match(aggregation.run, /UNIT_GROUPS_RESULT/u);
+  assert.match(source, /export function validateUnitCiAggregate/u);
+  assert.match(source, /input\.preparationResult !== 'success'/u);
+  assert.match(source, /input\.groupsResult !== 'success'/u);
+  assert.match(source, /attemptedShardIds/u);
+  assert.match(source, /receiptDigests/u);
+}
+
+function audit(workflow: any, action: any, release: any, check: any, shardSource: string): void {
   const jobs = workflow.jobs;
+  auditUnitShardWorkflow(check, shardSource);
   for (const name of needed) assert.ok(jobs[name], name);
   validateNativePath(action.runs.steps, 'inputs'); validateNativePath(jobs.device.steps, 'matrix');
   for (const name of ['smoke', 'device']) assert.equal(jobs[name].strategy['fail-fast'], false);
@@ -137,7 +209,11 @@ function audit(workflow: any, action: any, release: any, check: any): void {
   assert.equal(fullValidator.if, "needs.device.result == 'success'");
   assert.ok(jobs.gate.steps.indexOf(fullValidator) < jobs.gate.steps.findIndex((step: any) => step.id === 'qualification'));
   assert.equal(jobs.gate.steps.find((step: any) => step.id === 'qualification').if, undefined);
-  assert.deepEqual(check.jobs.mobile.needs, ['release', 'mobile-host-check', 'mobile-inspection-check', 'mobile-unit-check-am', 'mobile-unit-check-nz']);
+  assert.deepEqual(check.jobs.mobile.needs, ['release', 'mobile-host-check', 'mobile-inspection-check', 'mobile-unit-aggregate']);
+  for (const status of ['failure', 'cancelled', 'skipped'] as const) {
+    const dependencies = Object.fromEntries(check.jobs.mobile.needs.map((name: string) => [name, { result: name === 'mobile-unit-aggregate' ? status : 'success', outputs: {} }]));
+    assert.equal(condition(check.jobs.mobile.if, { needs: dependencies, success: false, github: { ref: 'refs/heads/main', event_name: 'push' } }), false);
+  }
   assert.equal(check.jobs.mobile.uses, './.github/workflows/mobile-ci.yml');
   assert.equal(check.jobs.mobile.with.platform, 'all');
   for (const ref of ['dev', 'main', 'ci-mobile']) {
@@ -199,14 +275,15 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
   }
   return completed;
 }
-export const workflowMutationNames = ['strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge'] as const;
+export const workflowMutationNames = ['strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always'] as const;
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
   ['mobile workflow SM59 10 ordinary and strict aggregation', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
     assert.ok(runtime?.YAML);
     const parse = async (path: string) => runtime.YAML.parse(await readFile(repositoryPath(path), 'utf8')) as any;
     const workflow = await parse('.github/workflows/mobile-ci.yml'), action = await parse('.github/actions/mobile-device-run/action.yml'), release = await parse('.github/workflows/release.yml'), check = await parse('.github/workflows/check.yml');
-    audit(workflow, action, release, check);
+    const shardSource = await readFile(repositoryPath('tests/mobile/unit/test-shard-ci.ts'), 'utf8');
+    audit(workflow, action, release, check, shardSource);
     const stages = (rows: Row[]): StageRows => ({ smoke: rows, release: rows, full: rows });
     const healthy: Row[] = [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }];
     for (const suite of ['smoke', 'release']) for (const environment of ['PASS', 'FAIL', 'UNKNOWN'] as const) {
@@ -265,7 +342,8 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
     assert.equal(publication(release, {}), true);
     for (const status of ['', 'FAIL', 'UNKNOWN', 'NOT_REQUESTED']) assert.equal(publication(release, {}, status), false);
     for (const mutation of workflowMutationNames) {
-      const w = structuredClone(workflow), a = structuredClone(action), r = structuredClone(release);
+      const w = structuredClone(workflow), a = structuredClone(action), r = structuredClone(release), k = structuredClone(check);
+      let source = shardSource;
       if (mutation === 'strict-edge') w.jobs.device.needs = w.jobs.device.needs.filter((name: string) => name !== 'smoke_qualification');
       if (mutation === 'qualified-flag') { const step = w.jobs.gate.steps.find((step: any) => step.run?.includes('validate-evidence.ts')); step.run = step.run.replace('--contract qualified', '--contract product'); }
       if (mutation === 'native-continue') a.runs.steps.find((step: any) => step.name === 'Run installed-PWA upgrade scenarios')['continue-on-error'] = true;
@@ -287,7 +365,21 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
         r.jobs.publish.needs = r.jobs.publish.needs.filter((name: string) => name !== 'native-smoke');
         assert.equal(publication(r, { 'native-smoke': 'failure' }), true);
       }
-      assert.throws(() => audit(w, a, r, check), mutation);
+      if (mutation === 'unit-aggregate-edge') k.jobs.mobile.needs = k.jobs.mobile.needs.filter((name: string) => name !== 'mobile-unit-aggregate');
+      if (mutation === 'unit-aggregate-always') k.jobs['mobile-unit-aggregate'].if = 'success()';
+      if (mutation === 'unit-aggregate-dependency') k.jobs['mobile-unit-aggregate'].needs = ['mobile-unit-prepare'];
+      if (mutation === 'unit-shards-unconditional') delete k.jobs['mobile-unit-shards'].if;
+      if (mutation === 'unit-test-dependencies') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.id === 'install-test-dependencies').run = 'true';
+      if (mutation === 'unit-fail-fast') k.jobs['mobile-unit-shards'].strategy['fail-fast'] = true;
+      if (mutation === 'unit-continue') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.run?.includes('test-shard-ci.ts execute'))['continue-on-error'] = true;
+      if (mutation === 'unit-selector') source = source.replace('--select-tests', '--selected-tests');
+      if (mutation === 'unit-runtime') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('oven-sh/setup-bun@')).with['bun-version'] = '1.4.3';
+      if (mutation === 'unit-node-runtime') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('actions/setup-node@')).with['node-version'] = '24.20.0';
+      if (mutation === 'unit-go-runtime') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('actions/setup-go@')).with['go-version'] = '1.26.0';
+      if (mutation === 'unit-source-ref') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('actions/checkout@')).with.ref = 'main';
+      if (mutation === 'unit-weak-aggregate') k.jobs['mobile-unit-aggregate'].steps.find((step: any) => step.run?.includes('test-shard-ci.ts aggregate')).run = 'echo accepted';
+      if (mutation === 'unit-admission-always') k.jobs.mobile.if = 'always()';
+      assert.throws(() => audit(w, a, r, k, source), mutation);
     }
     for (const unsupported of ['contains(inputs.suite, \'release\')', 'needs.*.result', 'inputs.suite + 1', 'failure()']) assert.throws(() => expression(unsupported, { needs: {}, inputs: { suite: 'release' } }));
   }],

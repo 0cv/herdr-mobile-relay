@@ -97,6 +97,7 @@ else if (/^shell pm list packages (?:(?:-d|-e) )?--user 0 com.android.vending$/u
   const name = packages[args[5]];
   if (args.slice(2, 5).join(' ') === 'shell dumpsys package' && name) {
     if (name === 'chrome' && state === 'adb-timeout') await sleep();
+    if (name === 'gms' && vending.gmsTimeout) await sleep();
     if (name === 'trichrome' && state === 'adb-failure') fail('Failure [static package unavailable]\n');
     output(read(`${name}.dump`));
   } else if (args.slice(2, 5).join(' ') === 'shell pm path' && name && name !== 'trichrome') output(read(`${name}.path`));

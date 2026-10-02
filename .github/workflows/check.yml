@@ -206,55 +206,205 @@ jobs:
           cache: true
       - run: make PATH="$PATH" mobile-ci-common-check
 
-  mobile-unit-check-am:
-    name: Mobile unit checks (A-M and non-letters)
+  mobile-unit-prepare:
+    name: Prepare source-bound mobile unit shards
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      BUN_OPTIONS: --no-env-file
+      GOTOOLCHAIN: local
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.21.0
-      - name: Assert shell Node runtime
-        run: |
-          set -euo pipefail
-          test "$(node --version)" = v24.21.0
-          test "$(command -v node)" = "$(node -p 'process.execPath')"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
-      - name: Install required XML test tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxml2-utils
-      - run: make PATH="$PATH" mobile-unit-check MOBILE_UNIT_FILTER='^(?:[A-Ma-m]|[^A-Za-z]|$)'
-
-  mobile-unit-check-nz:
-    name: Mobile unit checks (N-Z)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.21.0
-      - name: Assert shell Node runtime
-        run: |
-          set -euo pipefail
-          test "$(node --version)" = v24.21.0
-          test "$(command -v node)" = "$(node -p 'process.execPath')"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.2
-      - name: Install required XML test tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxml2-utils
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.27.1
           cache: true
-      - run: make PATH="$PATH" mobile-unit-check MOBILE_UNIT_FILTER='^[N-Zn-z]'
+      - name: Install XML test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils
+      - name: Assert pinned runtimes and system prerequisites
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+          test "$(bun --version)" = 1.4.2
+          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(go env GOTOOLCHAIN)" = local
+          tar --version | grep -q '^tar (GNU tar)'
+          xmllint --version >/dev/null 2>&1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: mobile-unit-cache
+        with:
+          path: |
+            frontend/node_modules
+            tests/mobile/node_modules
+          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+      - name: Install mobile unit dependencies
+        id: install-test-dependencies
+        if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
+        run: |
+          bun install --frozen-lockfile --cwd frontend
+          bun install --frozen-lockfile --cwd tests/mobile
+      - name: Generate and validate authoritative inventory and execution matrix
+        id: prepare
+        run: >-
+          bun --no-env-file tests/mobile/unit/test-shard-ci.ts prepare
+          --artifact-dir "$RUNNER_TEMP/unit-ci-prepared"
+          --source-sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --attempt "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: unit-ci-plan-try-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unit-ci-prepared/
+          if-no-files-found: error
+          retention-days: 1
+
+  mobile-unit-shards:
+    name: Mobile unit shard group (${{ matrix.group_id }})
+    if: needs.mobile-unit-prepare.result == 'success'
+    needs: mobile-unit-prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BUN_OPTIONS: --no-env-file
+      GOTOOLCHAIN: local
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.mobile-unit-prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.1
+          cache: true
+      - name: Install XML test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils
+      - name: Assert pinned runtimes and system prerequisites
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+          test "$(bun --version)" = 1.4.2
+          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(go env GOTOOLCHAIN)" = local
+          tar --version | grep -q '^tar (GNU tar)'
+          xmllint --version >/dev/null 2>&1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: mobile-unit-cache
+        with:
+          path: |
+            frontend/node_modules
+            tests/mobile/node_modules
+          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+      - name: Install mobile unit dependencies
+        id: install-test-dependencies
+        if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
+        run: |
+          bun install --frozen-lockfile --cwd frontend
+          bun install --frozen-lockfile --cwd tests/mobile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unit-ci-plan-try-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unit-ci-prepared
+      - name: Execute every selected P02 shard in this bounded group
+        run: >-
+          bun --no-env-file tests/mobile/unit/test-shard-ci.ts execute
+          --prepared-dir "$RUNNER_TEMP/unit-ci-prepared"
+          --group-id "${{ matrix.group_id }}"
+          --receipt-dir "$RUNNER_TEMP/unit-ci-${{ matrix.group_id }}"
+          --source-sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --attempt "$GITHUB_RUN_ATTEMPT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: unit-ci-${{ matrix.group_id }}-try-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unit-ci-${{ matrix.group_id }}/
+          if-no-files-found: error
+          retention-days: 1
+
+  mobile-unit-aggregate:
+    name: Complete mobile unit shard gate
+    if: always()
+    needs: [mobile-unit-prepare, mobile-unit-shards]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BUN_OPTIONS: --no-env-file
+      GOTOOLCHAIN: local
+      UNIT_PREPARATION_RESULT: ${{ needs.mobile-unit-prepare.result }}
+      UNIT_GROUPS_RESULT: ${{ needs.mobile-unit-shards.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.1
+          cache: true
+      - name: Install XML test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils
+      - name: Assert pinned runtimes and system prerequisites
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+          test "$(bun --version)" = 1.4.2
+          test "$(go version | awk '{print $3}')" = go1.27.1
+          test "$(go env GOTOOLCHAIN)" = local
+          tar --version | grep -q '^tar (GNU tar)'
+          xmllint --version >/dev/null 2>&1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: always()
+        with:
+          pattern: unit-ci-*-try-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unit-ci-artifacts
+          merge-multiple: false
+      - name: Verify exact unit shard and leaf completion
+        if: always()
+        run: >-
+          bun --no-env-file tests/mobile/unit/test-shard-ci.ts aggregate
+          --artifact-dir "$RUNNER_TEMP/unit-ci-artifacts"
+          --source-sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID"
+          --attempt "$GITHUB_RUN_ATTEMPT"
+          --prepare-result "$UNIT_PREPARATION_RESULT"
+          --groups-result "$UNIT_GROUPS_RESULT"
 
   mobile-inspection-check:
     name: Android installed inspection controls
@@ -283,7 +433,7 @@ jobs:
       (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' ||
         (github.event.pull_request.base.ref == 'dev' && github.event.pull_request.head.ref == 'ci-mobile' &&
           github.event.pull_request.head.repo.full_name == github.repository)))
-    needs: [release, mobile-host-check, mobile-inspection-check, mobile-unit-check-am, mobile-unit-check-nz]
+    needs: [release, mobile-host-check, mobile-inspection-check, mobile-unit-aggregate]
     uses: ./.github/workflows/mobile-ci.yml
     with:
       artifact_run_id: ${{ github.run_id }}

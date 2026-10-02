@@ -440,10 +440,14 @@ async function runUpgradeScenario(
   const initialIdentity: RuntimeIdentity = await (async () => {
     setStage('device');
     await platform.startFreshDevice();
+    if (platform instanceof AndroidPlatform) await platform.observeGmsStage('after-device-start');
     await afterDevicePreparation();
     await platform.openSetupURL(info.setup_urls[0]);
+    if (platform instanceof AndroidPlatform) await platform.observeGmsStage('after-setup-url');
     await platform.installFromBrowser();
+    if (platform instanceof AndroidPlatform) await platform.observeGmsStage('after-browser-install');
     await platform.launchInstalledApp();
+    if (platform instanceof AndroidPlatform) await platform.observeGmsStage('after-initial-installed-app-launch');
     await platform.clickWebText('Settings');
     return platform.assertStandalone(info.app_url);
   })();
@@ -720,25 +724,35 @@ async function main(): Promise<void> {
     platform = platformFor(platformOptions);
     const android = platform instanceof AndroidPlatform ? platform : undefined;
     if (android) {
-      measurement = new AndroidEnvironmentMeasurement(platformOptions.deviceId || '', outputDir, repositoryPath('tests/mobile/toolchains.json'));
+      measurement = new AndroidEnvironmentMeasurement(platformOptions.deviceId || '', outputDir, repositoryPath('tests/mobile/toolchains.json'), {}, budget);
       identity = { ...identity, measurementId: measurement.id };
       measurement.bind(identity);
+      measurement.requireGmsObservations();
+      android.environmentMeasurement = measurement;
     }
     result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; }, budget, async () => {
       if (!android || !measurement) return;
+      await android.observeGmsStage('before-measurement-begin');
       await measurement.begin();
       measurementStarted = true;
-      android.environmentMeasurement = measurement;
       android.activateProductRecorder(identity);
     });
     android?.productCheckpoint('scenario-complete');
     result.evidence = freezeEvidence(platform);
     result.budget = budget.snapshot();
   } catch (error) {
-    if (measurement && !measurementStarted) measured = measurement.failureOutcome();
-    const primaryError = measured?.errors[0] ?? error;
-    failures.retain(primaryError, stage, measured?.errors.length ? 'COLLECTION' : 'PRODUCT');
-    if (measured) for (const additional of measured.errors) failures.retain(additional, 'measurement-begin', 'COLLECTION');
+    let finalizationError: unknown;
+    let finalizationRejected = false;
+    if (measurement && !measurementStarted) {
+      try { await measurement.finalizeGmsObservations(); }
+      catch (caught) { finalizationError = caught; finalizationRejected = true; }
+      measured = measurement.failureOutcome();
+    }
+    const category = measured?.errors.some(observed => observed === error
+      || (isQualificationFatal(error) && observed === error.cause)) ? 'COLLECTION' : 'PRODUCT';
+    failures.retain(error, stage, category);
+    if (finalizationRejected) failures.retain(finalizationError, 'measurement-begin', 'COLLECTION');
+    if (measured) for (const additional of measured.errors) if (additional !== error) failures.retain(additional, 'measurement-begin', 'COLLECTION');
     diagnostics.record({ phase: stage, operation: 'scenario-failure', detail: error instanceof Error ? error.message : String(error) });
     await attempt('failure-capture', async () => platform?.captureSanitizedEvidence('failure'));
     const message = error instanceof Error ? error.message : String(error);

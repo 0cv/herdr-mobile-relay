@@ -13,6 +13,26 @@ const death = line(4, 559, 'ActivityManager', `Killing 200:${processName}/u0a145
 const exit = line(5, 100, 'Zygote', 'Process 200 exited cleanly (0)');
 const body = fork + birth + child + death + exit;
 const uid = line(2, 200, 'CompatChangeReporter', 'Compat change id reported: 242716250; UID 90002; state: ENABLED');
+const recordedProcessName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22';
+const recordedLine = (value: string) => `${value}\n`;
+const recordedStart = recordedLine('         1790252388.000 2000 2000 I HerdrMeasure: recorded START');
+const recordedEnd = recordedLine('         1790252390.000 2000 2000 I HerdrMeasure: recorded END');
+const recordedStartup = recordedLine('         1790252389.327 9917 9917 I cessService0:22: Using CollectorTypeCMC GC.')
+  + recordedLine('         1790252389.328 9917 9917 W cessService0:22: Unexpected CPU variant for x86: x86_64.')
+  + recordedLine('         1790252389.328 9917 9917 W cessService0:22: Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default');
+const recordedFork = recordedLine('         1790252389.328 5253 5253 D Zygote  : Forked child process 9917');
+const recordedBirth = recordedLine(`         1790252389.334 553 1773 I ActivityManager: Start proc 9917:${recordedProcessName}/u0ai22 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:22}`);
+const recordedUid = recordedLine('         1790252389.337 9917 9917 D CompatChangeReporter: Compat change id reported: 242716250; UID 90022; state: ENABLED');
+const recordedSplit = recordedLine(`         1790252389.358 9917 9917 I cr_SplitCompatApp: version=131.0.6778.200 (677820038) minSdkVersion=29 isBundle=true processName=${recordedProcessName} isIsolatedProcess=true`);
+const recordedAudit = recordedLine('         1790252389.408 9917 9917 W ThreadPoolForeg: type=1400 audit(0.0:277): avc:  denied  { setattr } for  name="real_time_url_checks_allowlist.pb" dev="dm-46" ino=385623 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0');
+const recordedChild = recordedLine('         1790252389.432 9917 9930 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.');
+const recordedDeath = recordedLine(`         1790252389.435 553 1783 I ActivityManager: Killing 9917:${recordedProcessName}/u0a145i-8978 (adj 0): isolated not needed`);
+const recordedExit = recordedLine('         1790252389.452 5253 5253 I Zygote  : Process 9917 exited cleanly (0)');
+const recordedBody = recordedStartup + recordedFork + recordedBirth + recordedUid + recordedSplit + recordedAudit + recordedChild + recordedDeath + recordedExit;
+const recordedSnapshot = (boundary: 'start' | 'end', processes: Record<string, string> = { '5253': 'com.android.chrome_zygote', '553': 'system_server', '6538': 'com.android.chrome' }) => ({
+  measurement: { id: 'recorded', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const measureRecorded = (log: string, before = recordedSnapshot('start'), after = recordedSnapshot('end')) => measuredAndroidEvents(log, before, after, []);
 const audit = line(3, 200, 'ThreadPoolForeg', 'type=1400 audit(0.0:238): avc:  denied  { setattr } for  name="arbitrary.txt" dev="dm-46" ino=65621 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0').replace(' I ', ' W ');
 const auditBody = body.replace(birth, birth + uid);
 const snapshot = (boundary: 'start' | 'end', processes: Record<string, string> = { '100': 'com.android.chrome_zygote', '559': 'system_server' }) => ({
@@ -21,6 +41,24 @@ const snapshot = (boundary: 'start' | 'end', processes: Record<string, string> =
 const measure = (log: string, before = snapshot('start'), after = snapshot('end')) => measuredAndroidEvents(log, before, after, []);
 
 export const androidEventTests: [string, () => Promise<void>][] = [
+  ['recorded isolated-child startup receipt order is preserved and admitted only as bounded Zygote log skew', async () => {
+    const log = recordedStart + recordedBody + recordedEnd;
+    const result = measureRecorded(log);
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.normalRetirements.length, 1);
+    assert.deepEqual(result.fatalEvents, []);
+    assert.equal(result.events.length, 1);
+    const retirement = result.normalRetirements[0];
+    assert.equal(retirement.pid, '9917');
+    assert.equal(retirement.uid, 90022);
+    assert.equal(retirement.auditSubjects.length, 1);
+    assert.deepEqual(retirement.proof.slice(0, 3).map((proof) => proof.line), recordedStartup.trimEnd().split('\n'));
+    assert.deepEqual(retirement.proof.map((proof) => log.split('\n')[proof.lineNumber - 1]), retirement.proof.map((proof) => proof.line));
+    assert.ok(retirement.proof.some((proof) => proof.line === recordedFork.trimEnd()));
+    assert.ok(retirement.proof.some((proof) => proof.line === recordedBirth.trimEnd()));
+    assert.ok(retirement.proof.some((proof) => proof.line === recordedExit.trimEnd()));
+    assert.deepEqual(log.split('\n').filter(Boolean).length, 13);
+  }],
   ['synthetic normal helper has complete traceable proof, distinct from fatal events', async () => {
     const result = measure(start + body + end);
     assert.deepEqual(result.issues, []);
@@ -38,6 +76,66 @@ export const androidEventTests: [string, () => Promise<void>][] = [
       assert.equal(measure(start + body + postProof + end).normalRetirements.length, 1);
     }
     assert.equal(measure(start + body.replace(child, child + unrelated.replace('6370', '6373').replace('user=0', 'user=1')) + end).normalRetirements.length, 1);
+  }],
+  ['recorded startup skew admits the exact two-millisecond boundary and covers pre-fork adverse events', async () => {
+    const log = recordedStart + recordedBody + recordedEnd;
+    const exactBoundary = log.replace('1790252389.327 9917', '1790252389.326 9917');
+    const accepted = measureRecorded(exactBoundary);
+    assert.equal(accepted.normalRetirements.length, 1);
+    assert.deepEqual(accepted.fatalEvents, []);
+    assert.equal(accepted.normalRetirements[0].proof[0].line, recordedStartup.split('\n')[0].replace('1790252389.327', '1790252389.326'));
+    const outside = measureRecorded(log.replace('1790252389.327 9917', '1790252389.325 9917'));
+    assert.equal(outside.normalRetirements.length, 0);
+    assert.ok(outside.fatalEvents.includes(recordedDeath.trimEnd()));
+    const forceStop = recordedLine('         1790252389.327 553 1783 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 50');
+    const packageChange = recordedLine('         1790252389.327 553 1783 I PackageManager: Replacing package com.android.chrome');
+    for (const adverse of [forceStop, packageChange]) {
+      for (const candidate of [
+        recordedStart + adverse + recordedBody + recordedEnd,
+        log.replace(recordedFork, recordedFork + adverse.replace('1790252389.327', '1790252389.326')),
+      ]) {
+        const result = measureRecorded(candidate);
+        assert.equal(result.normalRetirements.length, 0, adverse);
+        assert.ok(result.fatalEvents.length > 0 || result.issues.length > 0, adverse);
+      }
+    }
+  }],
+  ['recorded child startup allowance rejects foreign history, identities, producers and adverse outcomes', async () => {
+    const log = recordedStart + recordedBody + recordedEnd;
+    const rejected = (candidate: string, before = recordedSnapshot('start'), after = recordedSnapshot('end')) => {
+      const result = measureRecorded(candidate, before, after);
+      assert.equal(result.normalRetirements.length, 0, candidate);
+      assert.ok(result.fatalEvents.length > 0 || result.issues.length > 0, candidate);
+    };
+    const startupToFork = recordedStartup + recordedFork;
+    const firstStartup = recordedStartup.split('\n')[0];
+    for (const candidate of [
+      log.replace(firstStartup, firstStartup.replace('9917 9917 I', '9918 9918 I')),
+      log.replace(firstStartup, firstStartup.replace('cessService0:22', 'foreignTag')),
+      log.replace(firstStartup, firstStartup.replace('Using CollectorTypeCMC GC.', 'Using unexpected collector.')),
+      log.replace(firstStartup, firstStartup.replace('cessService0:22:', 'cessService0:22')),
+      log.replace(startupToFork, recordedLine('         1790252389.326 9917 9917 I Other: earlier incompatible child history') + startupToFork),
+      log.replace(recordedStartup, recordedStartup.replace(firstStartup + '\n', '')),
+      log.replace(recordedStartup, recordedStartup + recordedLine('         1790252389.328 9917 9917 I cessService0:22: Using CollectorTypeCMC GC.')),
+      log.replace(recordedFork, recordedFork + recordedFork),
+      log.replace(recordedBirth, recordedBirth + recordedBirth),
+      log.replace(recordedFork, recordedFork.replace('5253 5253', '5254 5254')),
+      log.replace(recordedBirth, recordedBirth.replace('553 1773', '554 1773')),
+      log.replace(recordedDeath, recordedDeath.replace('i-8978', 'i-8977')),
+      log.replace(recordedStartup, recordedStartup.replaceAll('cessService0:22', 'cessService0:23')),
+      log.replace(recordedChild, recordedLine('         1790252389.430 9917 9917 E AndroidRuntime: FATAL EXCEPTION: main') + recordedChild),
+      log.replace(recordedChild, recordedChild + recordedLine('         1790252389.433 553 1783 I Process: Sending signal. PID: 9917 SIG: 9')),
+      log.replace(recordedExit, recordedExit.replace('cleanly (0)', 'cleanly (1)')),
+      log.replace(recordedAudit, recordedAudit.replace('scontext=u:r:isolated_app:', 'scontext=u:r:untrusted_app:')),
+      log.replace(firstStartup, firstStartup.replace('1790252389.327', '1790252387.999')),
+      log.replace(recordedStartup, recordedStartup.split('\n').slice(1).join('\n') + '\n' + firstStartup + '\n'),
+    ]) rejected(candidate);
+    for (const candidate of [log.replace(recordedFork, ''), log.replace(recordedFork, recordedFork.replace('5253', '5254'))]) rejected(candidate);
+    const mainDeath = recordedLine('         1790252389.460 553 1783 I ActivityManager: Process com.android.chrome (pid 6538) has died: fg TOP');
+    const mixed = measureRecorded(recordedStart + recordedBody + mainDeath + recordedEnd,
+      recordedSnapshot('start'), recordedSnapshot('end', { '5253': 'com.android.chrome_zygote', '553': 'system_server' }));
+    assert.equal(mixed.normalRetirements.length, 1);
+    assert.ok(mixed.fatalEvents.includes(mainDeath.trimEnd()), 'main-process death remains fatal');
   }],
 ];
 

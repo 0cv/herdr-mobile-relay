@@ -16,6 +16,8 @@ export interface CommandOptions {
   env?: NodeJS.ProcessEnv;
   budget?: PhaseBudget;
   label?: string;
+  maxBuffer?: number;
+  signal?: AbortSignal;
 }
 
 export class CommandError extends Error {
@@ -74,9 +76,10 @@ export function command(
     const startedAt = Date.now();
     const child = execFile(binary, args, {
       timeout: requestTimeoutMs,
-      maxBuffer: 8 * 1024 * 1024,
+      maxBuffer: options.maxBuffer || 8 * 1024 * 1024,
       cwd: options.cwd,
       env: options.env,
+      signal: options.signal,
     }, (error, stdout, stderr) => {
       const errno = error as NodeJS.ErrnoException | null;
       const code = errno && typeof errno.code === 'number' ? Number(errno.code) : errno ? 1 : 0;
@@ -125,4 +128,44 @@ export async function stopProcess(child: ChildProcess, timeoutMs = 5_000, budget
   child.kill('SIGTERM');
   await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, Math.max(1, limit)))]);
   if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function processStreamsClosed(child: ChildProcess): boolean {
+  return [child.stdin, child.stdout, child.stderr].every(stream => !stream || stream.closed);
+}
+
+export async function stopProcessTree(child: ChildProcess, timeoutMs = 5_000, budget?: PhaseBudget): Promise<void> {
+  const limit = Math.min(timeoutMs, budget?.remainingMs ?? timeoutMs);
+  const deadline = performance.now() + limit;
+  const pid = child.pid;
+  const hasGroup = process.platform !== 'win32' && pid !== undefined && processGroupExists(pid);
+  const isRetired = () => (child.exitCode !== null || child.signalCode !== null)
+    && processStreamsClosed(child) && (!hasGroup || !processGroupExists(pid!));
+  const signalTree = (signal: NodeJS.Signals) => {
+    if (hasGroup) {
+      try { process.kill(-pid!, signal); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill(signal);
+      }
+    } else if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  };
+  const waitForRetirement = async (until: number) => {
+    while (!isRetired() && performance.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+  };
+  if (isRetired()) return;
+  signalTree('SIGTERM');
+  const termGrace = Math.min(250, Math.max(20, Math.floor(limit / 3)));
+  const termDeadline = Math.min(deadline, performance.now() + termGrace);
+  await waitForRetirement(termDeadline);
+  if (!isRetired()) signalTree('SIGKILL');
+  await waitForRetirement(deadline);
+  if (!isRetired()) throw new Error('ANDROID_ENVIRONMENT: owned log collector process tree did not retire');
 }

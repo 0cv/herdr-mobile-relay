@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFileSync, type ChildProcess } from 'node:child_process';
+import { closeSync, createWriteStream, openSync, readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { readFile, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { spawnOwnedProcess } from '../support/owned-process';
 import { setTimeout as wait } from 'node:timers/promises';
 import { IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
-import { AppiumClient, isRetryableElementLookupError, type WebDriverSnapshot } from '../support/webdriver';
+import { AppiumClient, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
 import { PhaseBudget } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
@@ -16,33 +18,79 @@ import { CommandError, command } from '../support/process';
 import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
+import { stableTestIdentities } from './test-registry';
 
 const origin = 'https://localhost:52101';
 const fixtureDir = fileURLToPath(new URL('./fixtures/ios/', import.meta.url));
 const outputRoot = process.env.IOS_TEST_OUTPUT || join(tmpdir(), 'herdr-mobile-ci-ios-unit');
+const XML_CHECK_TIMEOUT_MS = 5_000;
 const value = (data: unknown) => Response.json({ value: data });
 const element = (id: string) => ({ 'element-6066-11e4-a52e-4f735466cecf': id });
 const missing = () => Response.json({ value: { error: 'no such element', message: 'No such element' } }, { status: 404 });
 const installed = recorded.contexts.find((context) => context.bundleId === 'com.apple.SafariViewService')!;
 const published = { ...installed, url: recorded.publishedPages[0].url, title: recorded.publishedPages[0].title };
-type Request = { path: string; body: any; method: string; signal?: AbortSignal | null };
+type Request = { path: string; body: any; method: string; signal?: AbortSignal | null; dispatchedOrdinal: number };
 type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
 const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([name, body]);
 
-async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, nativeDefaults = true) {
+async function within<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${description} exceeded ${timeoutMs}ms fixture watchdog`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw signal.reason || new Error('fixture aborted');
+  let abort!: () => void;
+  const stopped = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(signal.reason || new Error('fixture aborted'));
+    signal.addEventListener('abort', abort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, stopped]);
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
+}
+
+async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, nativeDefaults = true,
+  enforcementClock?: RequestEnforcementClock, onRequest?: (request: Request) => void, fixtureSignal?: AbortSignal,
+  beforeNativeDispatch?: (phase: PhaseBudget) => void) {
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
   const budget = new PhaseBudget(name, { timeoutMs: 120_000, recoveryLimit: 0, now });
   const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
   const requests: Request[] = [];
+  const nativeAdmissions: Array<{ phase: string; phaseRemainingMs: number; rootRemainingMs: number }> = [];
+  let dispatchedOrdinal = 0;
   let inFlight = 0;
   let settings: Record<string, unknown> = { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 };
   const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
+    if (fixtureSignal?.aborted) throw fixtureSignal.reason || new Error('fixture aborted');
     assert.equal(++inFlight, 1, 'Appium requests must not overlap');
     try {
-      const request = { path: new URL(String(input)).pathname, body: init?.body ? JSON.parse(String(init.body)) : {}, method: init?.method || 'GET', signal: init?.signal };
+      const requestSignal = fixtureSignal
+        ? init?.signal ? AbortSignal.any([init.signal, fixtureSignal]) : fixtureSignal
+        : init?.signal;
+      const request: Request = {
+        path: new URL(String(input)).pathname,
+        body: init?.body ? JSON.parse(String(init.body)) : {},
+        method: init?.method || 'GET',
+        signal: requestSignal,
+        dispatchedOrdinal: ++dispatchedOrdinal,
+      };
       requests.push(request);
+      onRequest?.(request);
       if (request.path === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
       if (nativeDefaults) {
         if (request.path.endsWith('/appium/settings')) {
@@ -54,17 +102,41 @@ async function adapter(name: string, handler: (request: Request) => Response | P
         if (request.path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert', message: 'No alert is open' } }, { status: 404 });
         if (request.path.endsWith('/element/springboard-root/elements')) return value([element('springboard-root')]);
       }
-      return await handler(request);
+      return await abortable(Promise.resolve().then(() => handler(request)), fixtureSignal);
     } finally {
       inFlight -= 1;
     }
-  }, undefined, now ? { now, timer: (callback, ms) => setTimeout(callback, ms), clear: timer => clearTimeout(timer) } : undefined);
+  }, now, enforcementClock || (now ? { now, timer: (callback, ms) => setTimeout(callback, ms), clear: timer => clearTimeout(timer) } : undefined));
+  const nativeRequestPolicy = driver.nativeRequestPolicy.bind(driver);
+  driver.nativeRequestPolicy = (phase) => {
+    const policy = nativeRequestPolicy(phase);
+    return Object.freeze({
+      ...policy,
+      beforeDispatch: () => {
+        policy.beforeDispatch();
+        beforeNativeDispatch?.(phase);
+        nativeAdmissions.push({ phase: phase.phase, phaseRemainingMs: phase.remainingMs, rootRemainingMs: budget.remainingMs });
+      },
+    });
+  };
   await driver.create({ capabilities: {} });
   driver.setBudget(budget);
   (platform as any).driver = driver;
   (platform as any).installedBundleId = 'com.apple.webapp';
   (platform as any).springBoardRoot = 'springboard-root';
-  return { platform, driver, requests, budget, outputDir };
+  return { platform, driver, requests, budget, outputDir, nativeAdmissions };
+}
+
+function commandForRequest(driver: AppiumClient, requests: Request[], matchesRequest: (request: Request) => boolean) {
+  const matchingRequests = requests.filter(matchesRequest);
+  assert.equal(matchingRequests.length, 1, 'the expected Appium request must have one transport receipt');
+  const request = matchingRequests[0]!;
+  const command = driver.snapshot().commands.find((entry) => entry.timing?.dispatchedOrdinal === request.dispatchedOrdinal);
+  assert.ok(command, `no command receipt for dispatched request ${request.dispatchedOrdinal}`);
+  assert.equal(command.path, request.path);
+  assert.equal(command.method, request.method);
+  assert.equal(command.timing?.operation, 'execute');
+  return command;
 }
 
 async function attachment(name: string, overrides: {
@@ -694,17 +766,21 @@ test('a page already inspected during initial binding cannot regain the blank-pu
   assert.equal(discoveries, 2);
 });
 
-const before = await readFile(join(fixtureDir, 'ios-share-0-hierarchy.xml'), 'utf8');
-const after = await readFile(join(fixtureDir, 'ios-share-1-hierarchy.xml'), 'utf8');
-const browser = await readFile(join(fixtureDir, 'ios-before-share-hierarchy.xml'), 'utf8');
-const hypotheticalConfirmation = await readFile(join(fixtureDir, 'ios-confirmation-hypothetical.xml'), 'utf8');
+async function shareFixtures() {
+  const [before, after, browser, hypotheticalConfirmation] = await Promise.all([
+    'ios-share-0-hierarchy.xml', 'ios-share-1-hierarchy.xml', 'ios-before-share-hierarchy.xml', 'ios-confirmation-hypothetical.xml',
+  ].map((file) => readFile(join(fixtureDir, file), 'utf8')));
+  return { before, after, browser, hypotheticalConfirmation };
+}
 
 function xpathCount(source: string, xpath: string): number {
-  return Number(execFileSync('xmllint', ['--xpath', `count(${xpath})`, '-'], { input: source, encoding: 'utf8' }).trim());
+  return Number(execFileSync('xmllint', ['--xpath', `count(${xpath})`, '-'], {
+    input: source, encoding: 'utf8', timeout: XML_CHECK_TIMEOUT_MS, killSignal: 'SIGKILL',
+  }).trim());
 }
 
 function requireXmlLint(): undefined {
-  try { execFileSync('xmllint', ['--version'], { stdio: 'pipe' }); }
+  try { execFileSync('xmllint', ['--version'], { stdio: 'pipe', timeout: XML_CHECK_TIMEOUT_MS, killSignal: 'SIGKILL' }); }
   catch (cause) {
     throw new Error('xmllint is required for XML XPath protocol checks; install libxml2-utils on Ubuntu before running the mobile tests', { cause });
   }
@@ -721,6 +797,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
   test(`recorded Share sheet protocol ${mode} keeps scoped controls and bounded gestures`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
+    const { before, after, browser, hypotheticalConfirmation } = await shareFixtures();
     let sheet = mode === 'limit' || mode === 'eighth';
     let scrolls = 0;
     let reads = 0;
@@ -861,6 +938,7 @@ async function confirmationReplay(name: string, options: {
   latency?: Partial<Record<ConfirmationBoundary, number>>;
 } = {}) {
   const fixture = options.recorded;
+  const { before, after, browser, hypotheticalConfirmation } = await shareFixtures();
   const shareSources = fixture ? await Promise.all(Object.values(fixture.sources).map((path) => readFile(join(fixtureDir, path), 'utf8'))) : [browser, before, after];
   let now = 0;
   let confirmationStart = 0;
@@ -1715,6 +1793,7 @@ test('recorded openurl timeout preserves signal and duration without inventing a
 
 for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeout', 'diagnostic-failure', 'discovery-interrupted', 'pre-diagnostic-timeout', 'post-simulator-timeout'] as const) {
   test(`openurl ${mode} records bounded serial diagnostics without reissuing navigation`, async () => {
+    const { browser } = await shareFixtures();
     let processActive = false;
     const { platform, requests, outputDir } = await adapter(`navigation-${mode}`, ({ path, body, signal }) => {
       assert.equal(processActive, false, 'no Appium request while a process is unsettled');
@@ -2250,8 +2329,14 @@ for (const fault of ['wrong-launch', 'springboard-overlay', 'home-failed']) {
   });
 }
 
-async function hierarchyReplay(mode: string) {
-  const sources = await Promise.all(['ios-34488020101-before-share-hierarchy.xml', 'ios-34488020101-share-0-hierarchy.xml', 'ios-34488014724-share-1-hierarchy.xml'].map((file) => readFile(join(fixtureDir, file), 'utf8')));
+async function hierarchyReplay(mode: string, fixture: AbortController) {
+  const fixtureSignal = fixture.signal;
+  const [sources, hypotheticalConfirmation] = await within(Promise.all([
+    Promise.all(['ios-34488020101-before-share-hierarchy.xml', 'ios-34488020101-share-0-hierarchy.xml', 'ios-34488014724-share-1-hierarchy.xml']
+      .map((file) => readFile(join(fixtureDir, file), { encoding: 'utf8', signal: fixtureSignal }))),
+    readFile(join(fixtureDir, 'ios-confirmation-hypothetical.xml'), { encoding: 'utf8', signal: fixtureSignal }),
+  ]), 'hierarchy XML fixture reads');
+  if (fixtureSignal.aborted) throw fixtureSignal.reason || new Error('fixture aborted');
   let source = sources[0];
   let now = 0;
   let sheet = false;
@@ -2264,13 +2349,24 @@ async function hierarchyReplay(mode: string) {
   let identities = 0;
   const clicks: string[] = [];
   const pending: Promise<unknown>[] = [];
-  const timed = mode === 'recorded-latency' || mode.startsWith('slow-');
-  const waitFor = async (ms: number) => {
-    const promise = wait(ms);
+  const requestClock = mode === 'hung-gesture' || mode === 'late-gesture' ? new ReceiptClock() : undefined;
+  let releaseGesture: ((response: Response) => void) | undefined;
+  let rejectGesture: ((error: Error) => void) | undefined;
+  let reportGestureDispatch!: (request: Request) => void;
+  let gesturePolicyAttempts = 0;
+  const gestureDispatch = new Promise<Request>((resolve) => { reportGestureDispatch = resolve; });
+  const cleanupGesture = () => {
+    rejectGesture?.(new Error('fixture canceled'));
+    releaseGesture?.(value(null));
+  };
+  fixtureSignal.addEventListener('abort', cleanupGesture, { once: true });
+  const timed = mode === 'recorded-latency' || (mode.startsWith('slow-') && !mode.endsWith('-gesture'));
+  const waitFor = async (ms: number, signal?: AbortSignal | null) => {
+    const promise = wait(ms, undefined, { signal: signal || fixtureSignal });
     pending.push(promise);
     await promise;
   };
-  const a = await adapter(`hierarchy-${mode}`, async ({ path, body, signal }) => {
+  const a = await within(adapter(`hierarchy-${mode}`, async ({ path, body, signal }) => {
     if (path.endsWith('/context')) {
       if (mode === 'parent-initial') now = 112_001;
       return value(null);
@@ -2282,12 +2378,10 @@ async function hierarchyReplay(mode: string) {
       source = !sheet ? sources[0] : scrolls ? sources[2] : sources[1];
       if (mode === 'recorded-latency' && sheet && sheetReads < 3) source = sources[0];
       if (mode === 'publication-tail' && sheetReads === 1) { source = sources[0]; now += 7_001; }
-      if (mode === 'search-tail' && sheetReads === 1) now += 52_001;
-      if (mode === 'fallback-tail' && scrolls === 1) now = 52_001;
-      if (mode === 'fallback-reserve' && scrolls === 1) now = 47_001;
+      if (mode === 'search-tail' && sheetReads === 1) now += 76_001;
       if (mode === 'malformed-source' && scrolls === 1) return value(source.slice(0, -100));
       if (mode === 'hung-source' && scrolls === 1) return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
-      if (mode === 'late-source' && scrolls === 1) await waitFor(8_200);
+      if (mode === 'late-source' && scrolls === 1) await waitFor(8_200, signal);
       if (mode.startsWith('interrupted-') && scrolls === 1) {
         const error = mode === 'interrupted-reset' ? new TypeError('hypothetical source connection reset')
           : new DOMException('interrupted source body', mode === 'interrupted-abort' ? 'AbortError' : 'TimeoutError');
@@ -2298,38 +2392,58 @@ async function hierarchyReplay(mode: string) {
         return new Response(new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode(payload.slice(0, 50_000)));
-            const completion = wait(mode === 'slow-body' ? 5_764 : 8_200).then(() => {
+            const completion = wait(mode === 'slow-body' ? 5_764 : 8_200, undefined, { signal: signal! }).then(() => {
               controller.enqueue(new TextEncoder().encode(payload.slice(50_000)));
               controller.close();
-            });
+            }, (error: unknown) => controller.error(error));
             pending.push(completion);
           },
         }));
       }
       if ((mode === 'slow-initial' && !sheet) || (mode === 'slow-publication' && sheetReads === 1)
         || (mode === 'slow-search' && sheetReads === 2) || (mode === 'slow-fallback' && sheetReads === 3)) {
-        await waitFor(recordedIteration13.share.sourceBackendMs);
+        await waitFor(recordedIteration13.share.sourceBackendMs, signal);
       }
-      if (mode === 'recorded-latency') await waitFor(!sheet ? recordedIteration13.share.initialSourceMs : scrolls ? recordedIteration13.share.sourceBackendMs : recordedIteration13.share.sourceMs[sheetReads - 1] || 0);
+      if (mode === 'recorded-latency') await waitFor(!sheet ? recordedIteration13.share.initialSourceMs : scrolls ? recordedIteration13.share.sourceBackendMs : recordedIteration13.share.sourceMs[sheetReads - 1] || 0, signal);
       return value(source);
     }
     if (path.endsWith('/screenshot')) return value('');
     if (body.script === 'mobile: scroll') {
       assert.deepEqual(body.args, { element: `container-${scrolls}`, direction: 'down', distance: 0.75 });
       scrolls++;
-      if (mode === 'recorded-latency') await waitFor(recordedIteration13.share.scrollClientMs);
-      if (mode === 'fallback-source-admission') now = 52_001;
-      if (mode.startsWith('fallback') || mode === 'slow-fallback') return Response.json({ value: { error: 'unknown error', message: 'completed scroll failure' } }, { status: 500 });
-      if (mode === 'post-source-admission') now = 112_001;
+      if (mode === 'recorded-latency') await waitFor(recordedIteration13.share.scrollClientMs, signal);
+      if (mode === 'slow-gesture') now += 5_250;
+      if (mode === 'hung-gesture') return new Promise<Response>((_resolve, reject) => {
+        rejectGesture = reject;
+        if (signal?.aborted) reject(signal.reason || new Error('fixture canceled'));
+        else signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
+      });
+      if (mode === 'late-gesture') return new Promise<Response>((resolve) => {
+        releaseGesture = resolve;
+        if (fixtureSignal.aborted) resolve(value(null));
+      });
+      if (mode === 'fallback-tail') now += 7_999;
+      if (mode === 'fallback-reserve') now += 3_501;
+      if (mode === 'fallback-source-admission') now += 7_999;
+      if (mode === 'post-source-admission') now += 7_999;
+      if (mode === 'overdue-gesture') now += 8_001;
+      if (mode.startsWith('fallback') || mode === 'slow-fallback' || mode === 'slow-fallback-gesture') {
+        if (mode === 'slow-fallback-gesture') now += 5_250;
+        return Response.json({ value: { error: 'unknown error', message: 'completed scroll failure' } }, { status: 500 });
+      }
       return value(null);
     }
-    if (body.script === 'mobile: swipe') { swipes++; return value(null); }
+    if (body.script === 'mobile: swipe') {
+      swipes++;
+      if (mode === 'slow-fallback-gesture') now += 5_250;
+      return value(null);
+    }
     if (path.endsWith('/elements')) {
       const xml = confirming ? hypotheticalConfirmation : source;
       assert.ok(xpathCount(xml, body.value) > 0);
       if (confirming) {
         identities++;
-        if (mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.identityMs[identities - 1]);
+        if (mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.identityMs[identities - 1], signal);
         return value([element('add')]);
       }
       return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
@@ -2339,7 +2453,7 @@ async function hierarchyReplay(mode: string) {
       assert.equal(body.value, 'Add');
       lookups++;
       if (mode === 'recorded-latency') {
-        await waitFor(recordedIteration13.confirmation.lookupMs[lookups - 1]);
+        await waitFor(recordedIteration13.confirmation.lookupMs[lookups - 1], signal);
         if (lookups === 1) return missing();
       }
       return value(element('add'));
@@ -2352,12 +2466,15 @@ async function hierarchyReplay(mode: string) {
     if (path.includes('/attribute/')) {
       if (mode === 'recorded-latency' && path.includes('/add/')) {
         const attribute = path.split('/attribute/')[1] as keyof typeof recordedIteration13.confirmation.attributeMs;
-        await waitFor(recordedIteration13.confirmation.attributeMs[attribute]);
+        await waitFor(recordedIteration13.confirmation.attributeMs[attribute], signal);
       }
       if (path.includes('/container-') && path.endsWith('/visible')) {
-        if (mode === 'parent-gesture') now = 107_001;
-        if (mode === 'child-gesture') now = 47_001;
-        if (mode === 'near-gesture') now = 46_500;
+        if (mode === 'parent-gesture') now = 104_001;
+        if (mode === 'child-gesture') now = 68_001;
+        if (mode === 'near-gesture') now = 67_500;
+        if (scrolls === 0 && mode === 'fallback-tail') now = 67_999;
+        if (scrolls === 0 && (mode === 'fallback-reserve' || mode === 'fallback-source-admission')) now = 67_500;
+        if (mode === 'post-source-admission') now = 104_000;
       }
       return value(path.includes('/target-') && /\/(visible|hittable)$/u.test(path) ? String(scrolls > 0) : 'true');
     }
@@ -2366,71 +2483,246 @@ async function hierarchyReplay(mode: string) {
       clicks.push(id);
       if (id === 'share') sheet = true;
       if (id.startsWith('target')) confirming = true;
-      if (id === 'add' && mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.clickMs);
+      if (id === 'add' && mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.clickMs, signal);
       return value(null);
     }
     throw new Error(`unexpected hierarchy request ${path} ${JSON.stringify(body)}`);
-  }, timed || /^(?:hung|late|interrupted)-/u.test(mode) ? undefined : () => now);
+  }, timed || /^(?:hung|late|interrupted)-/u.test(mode) ? undefined : () => now,
+  true, requestClock, (request) => {
+    if (request.body.script === 'mobile: scroll') reportGestureDispatch(request);
+  }, fixtureSignal, (phase) => {
+    if (phase.phase !== 'ios-share-gesture') return;
+    gesturePolicyAttempts++;
+    if (mode === 'dispatch-reserve-race' && gesturePolicyAttempts === 1) now = 68_001;
+    if (mode === 'fallback-dispatch-reserve-race' && gesturePolicyAttempts === 2) now = 68_001;
+  }), `hierarchy adapter setup ${mode}`);
+  let settledScrollReceipt: ReturnType<typeof commandForRequest> | undefined;
+  if (mode === 'fallback-source-admission' || mode === 'post-source-admission') {
+    const mobile = a.driver.mobile.bind(a.driver);
+    a.driver.mobile = async (...args: Parameters<typeof a.driver.mobile>) => {
+      if (args[0] !== 'scroll') return mobile(...args);
+      try {
+        return await mobile(...args);
+      } finally {
+        const request = a.requests.find((entry) => entry.body.script === 'mobile: scroll');
+        const receipt = a.driver.snapshot().commands.find((entry) => entry.timing?.dispatchedOrdinal === request?.dispatchedOrdinal);
+        if (receipt && !receipt.timedOut && receipt.timing?.admitted && receipt.timing.sent && receipt.timing.completed) {
+          settledScrollReceipt = receipt;
+          now += mode === 'fallback-source-admission' ? 502 : 2;
+        }
+      }
+    };
+  }
+  let searchBudget: PhaseBudget | undefined;
+  const createPhaseView = a.budget.phaseView.bind(a.budget);
+  a.budget.phaseView = (name, timeoutMs, reserveParentMs = 0) => {
+    if ((mode === 'parent-gesture' || mode === 'post-source-admission') && name === 'ios-share-search') now = 36_001;
+    const phase = createPhaseView(name, timeoutMs, reserveParentMs);
+    if (name === 'ios-share-search') searchBudget = phase;
+    return phase;
+  };
   let error: unknown;
-  try { await a.platform.installFromBrowser(); } catch (caught) { error = caught; }
+  let operation: Promise<unknown> | undefined;
+  try {
+    if (mode === 'hung-gesture' || mode === 'late-gesture') {
+      operation = a.platform.installFromBrowser();
+      const completion = operation.then(() => {}, (caught) => { error = caught; });
+      const dispatched = await within(Promise.race([
+        gestureDispatch,
+        completion.then(() => { throw new Error(`install settled before gesture dispatch: ${String(error || 'success')}`); }),
+      ]), 'native gesture dispatch');
+      assert.equal(dispatched.body.script, 'mobile: scroll');
+      assert.ok(dispatched.path.endsWith('/execute/sync'));
+      assert.ok(dispatched.signal);
+      assert.equal(dispatched.signal?.aborted, false);
+      await within(new Promise<void>((resolve) => setImmediate(resolve)), 'gesture timer arm');
+      const armedTimers = [...requestClock!.timers.values()].filter((timer) => timer.at - requestClock!.elapsed === 8_000);
+      if (armedTimers.length !== 1) {
+        if (mode === 'late-gesture') releaseGesture?.(value(null));
+        else rejectGesture?.(new Error('fixture cleanup: gesture deadline timer was not armed'));
+        await within(completion, 'gesture fixture cleanup');
+        assert.fail(`expected one armed 8000ms gesture deadline, received ${armedTimers.length}`);
+      }
+      requestClock!.advance(8_000);
+      await within(completion, 'timed-out gesture completion');
+      if (mode === 'late-gesture') {
+        const saved = a.driver.snapshot();
+        const stopped = a.requests.length;
+        const firstFatal = saved.firstFatal;
+        releaseGesture!(value(null));
+        await within(new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve))), 'late gesture transport cleanup');
+        assert.deepEqual(a.driver.snapshot(), saved, 'a late gesture response cannot restore the timed-out session');
+        assert.equal(a.requests.length, stopped, 'a late gesture response cannot trigger product work');
+        assert.deepEqual(a.driver.snapshot().firstFatal, firstFatal, 'the first timeout remains sticky after a late response');
+      }
+    } else {
+      operation = a.platform.installFromBrowser();
+      try {
+        await within(operation, `hierarchy install ${mode}`, 60_000);
+      } catch (caught) {
+        if (caught instanceof Error && /fixture watchdog/u.test(caught.message)) throw caught;
+        error = caught;
+      }
+    }
+  } catch (caught) {
+    if (!fixtureSignal.aborted) fixture.abort(caught);
+    cleanupGesture();
+    if (operation) await within(operation.then(() => undefined, () => undefined), `hierarchy install cleanup ${mode}`, 5_000);
+    await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 5_000);
+    assert.equal(requestClock?.timers.size || 0, 0, 'fixture failure retires every fake-clock request timer');
+    fixtureSignal.removeEventListener('abort', cleanupGesture);
+    throw caught;
+  }
   const stopped = a.requests.length;
   const first = a.driver.snapshot().firstFatal;
-  if (/^(?:hung|late|interrupted)-/u.test(mode)) {
+  if (/^(?:hung|late|interrupted)-/u.test(mode) || mode === 'overdue-gesture') {
     assert.match(String(error), /APPIUM_(?:TIMEOUT|INTERRUPTED)/u);
     await assert.rejects(() => a.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
-    await Promise.allSettled(pending);
+    await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 10_000);
     await assert.rejects(() => a.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
     assert.equal(a.requests.length, stopped);
     assert.deepEqual(a.driver.snapshot().firstFatal, first);
-  } else await Promise.allSettled(pending);
-  await writeSanitizedJson(join(a.outputDir, 'ios-hierarchy-result.json'), {
+  } else await within(Promise.allSettled(pending), `hierarchy pending cleanup ${mode}`, 10_000);
+  assert.equal(requestClock?.timers.size || 0, 0, 'settled gesture fixtures leave no fake-clock request timer');
+  await within(writeSanitizedJson(join(a.outputDir, 'ios-hierarchy-result.json'), {
     proofKind: 'Actual-client protocol replay. PR pre-scroll XML and latencies recorded; completing post-scroll XML from push, confirmation XML hypothetical. Budget, body and hung controls hypothetical. No native acceptance.',
     error: String(error || ''), clicks, reads, sheetReads, scrolls, swipes, lookups, evidence: a.platform.evidenceSnapshot(),
-  });
-  return { ...a, error, clicks, reads, sheetReads, scrolls, swipes, lookups };
+  }), `hierarchy result persistence ${mode}`, 5_000);
+  fixtureSignal.removeEventListener('abort', cleanupGesture);
+  return { ...a, error, clicks, reads, sheetReads, scrolls, swipes, lookups, searchBudget: searchBudget?.snapshot(), settledScrollReceipt };
 }
 
-for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'slow-search', 'slow-fallback', 'fallback-success']) {
+async function boundedHierarchyReplay(mode: string) {
+  const fixture = new AbortController();
+  const replay = hierarchyReplay(mode, fixture);
+  try {
+    return await within(replay, `hierarchy ${mode} fixture`, 70_000);
+  } catch (error) {
+    fixture.abort(error);
+    await within(replay.then(() => undefined, () => undefined), `hierarchy ${mode} fixture cleanup`, 5_000);
+    throw error;
+  }
+}
+
+for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'slow-search', 'slow-fallback', 'slow-gesture', 'slow-fallback-gesture', 'fallback-success']) {
   test(`Plan13 hierarchy full install ${mode} completes with full source allowances and one final Add`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
-    const a = await hierarchyReplay(mode);
+    const a = await boundedHierarchyReplay(mode);
     assert.equal(a.error, undefined);
     assert.deepEqual(a.clicks, ['share', 'target-1', 'add']);
     assert.equal(a.scrolls, 1);
     assert.equal(a.swipes, mode.includes('fallback') ? 1 : 0);
     assert.equal(a.driver.snapshot().unusable, false);
     assert.ok(a.driver.snapshot().commands.filter((r) => r.path.endsWith('/source')).every((r) => r.timeoutMs === 8_000));
+    if (mode === 'slow-gesture' || mode === 'slow-fallback-gesture') {
+      const script = mode === 'slow-gesture' ? 'mobile: scroll' : 'mobile: swipe';
+      const command = commandForRequest(a.driver, a.requests, (request) => request.body.script === script);
+      assert.equal(command.timeoutMs, 8_000);
+      assert.equal(command.timedOut, false);
+      assert.ok(command.timing?.admitted && command.timing.sent && command.timing.completed);
+      assert.ok(a.driver.snapshot().commands
+        .filter((entry) => /\/element\/(?:share|target-[^/]+)\/click$/u.test(entry.path))
+        .every((entry) => entry.timeoutMs === 5_000), 'Share and Add-to-Home-Screen clicks retain their 5s bound');
+      const elapsed = command.timing!.settlementMs! - command.timing!.dispatchMs!;
+      assert.ok(elapsed > 5_000 && elapsed < 8_000, `gesture receipt elapsed ${elapsed}ms outside the 5s-8s bounds`);
+      const admissions = a.nativeAdmissions.filter((receipt) => receipt.phase === 'ios-share-gesture');
+      assert.equal(admissions.length, mode === 'slow-fallback-gesture' ? 2 : 1);
+      assert.ok(admissions.every((receipt) => receipt.phaseRemainingMs >= 8_000 && receipt.rootRemainingMs >= 16_000),
+        'dispatch must retain an 8s gesture allowance plus an 8s hierarchy reserve');
+    }
   });
 }
 
-for (const mode of ['parent-initial', 'publication-tail', 'search-tail', 'parent-gesture', 'child-gesture', 'fallback-tail', 'fallback-reserve', 'fallback-source-admission', 'post-source-admission', 'malformed-source', 'near-gesture']) {
+for (const mode of ['parent-initial', 'publication-tail', 'search-tail', 'parent-gesture', 'child-gesture', 'fallback-tail', 'fallback-reserve', 'fallback-source-admission', 'post-source-admission', 'dispatch-reserve-race', 'fallback-dispatch-reserve-race', 'malformed-source', 'near-gesture']) {
   test(`Plan13 hierarchy full install ${mode} never dispatches a short source or an unverifiable gesture`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
-    const a = await hierarchyReplay(mode);
+    const a = await boundedHierarchyReplay(mode);
     assert.ok(a.error);
     assert.ok(a.clicks.length <= 1);
     assert.equal(a.scrolls, /fallback|post-source|malformed|near-gesture/u.test(mode) ? 1 : 0);
     assert.equal(a.swipes, 0);
     if (mode === 'parent-initial') assert.equal(a.reads, 0);
     if (mode === 'publication-tail' || mode === 'search-tail') assert.equal(a.sheetReads, 1);
-    if (mode === 'fallback-source-admission' || mode === 'post-source-admission') assert.equal(a.sheetReads, 2);
+    if (mode === 'fallback-source-admission' || mode === 'post-source-admission') {
+      assert.equal(a.reads, 3, 'only the initial and two pre-scroll hierarchy sources may be requested');
+      assert.equal(a.sheetReads, 2, 'no hierarchy source may be requested after the completed gesture');
+      assert.equal(a.requests.filter((request) => request.path.endsWith('/source')).length, 3);
+      assert.equal(a.driver.snapshot().commands.filter((command) => command.path.endsWith('/source')).length, 3);
+    }
+    if (mode === 'near-gesture') {
+      const admissions = a.nativeAdmissions.filter((receipt) => receipt.phase === 'ios-share-gesture');
+      assert.equal(admissions.length, 1);
+      assert.ok(admissions[0]!.phaseRemainingMs >= 8_000 && admissions[0]!.phaseRemainingMs < 9_000);
+      assert.ok(admissions[0]!.rootRemainingMs >= 16_000);
+    }
+    if (mode === 'parent-gesture') {
+      assert.equal(a.budget.remainingMs, 15_999);
+      assert.equal(a.searchBudget?.remainingMs, 15_999);
+      assert.equal(a.searchBudget?.deadline, a.budget.snapshot().deadline, 'the global install deadline caps the local search phase');
+    }
+    if (mode === 'child-gesture') {
+      assert.equal(a.budget.remainingMs, 51_999);
+      assert.equal(a.searchBudget?.remainingMs, 15_999);
+      assert.notEqual(a.searchBudget?.deadline, a.budget.snapshot().deadline, 'the local search deadline caps its child gesture budget');
+    }
+    if (mode === 'dispatch-reserve-race' || mode === 'fallback-dispatch-reserve-race') {
+      const admissions = a.nativeAdmissions.filter((receipt) => receipt.phase === 'ios-share-gesture');
+      assert.equal(admissions.length, mode === 'dispatch-reserve-race' ? 1 : 2);
+      assert.equal(admissions.at(-1)?.phaseRemainingMs, 7_999);
+      assert.ok((admissions.at(-1)?.rootRemainingMs || 0) > 16_000);
+      assert.equal(a.driver.snapshot().commands.filter((command) => command.timing?.outcome === 'not-admitted').length, 1);
+      assert.equal(a.requests.some((request) => request.body.script === 'mobile: swipe'), false);
+    }
+    if (mode === 'fallback-source-admission') {
+      const scroll = commandForRequest(a.driver, a.requests, (request) => request.body.script === 'mobile: scroll');
+      assert.equal(scroll.timedOut, false);
+      assert.equal(scroll.timing?.outcome, 'command-error');
+      assert.equal(scroll.timing!.settlementMs! - scroll.timing!.dispatchMs!, 7_999);
+      assert.deepEqual(a.settledScrollReceipt, scroll, 'the admission clock changes only after the actual scroll receipt settles');
+      assert.equal(a.searchBudget?.remainingMs, 7_999);
+      assert.match(String(a.error), /completed scroll failure/u);
+      assert.equal(a.swipes, 0);
+    }
+    if (mode === 'post-source-admission') {
+      const scroll = commandForRequest(a.driver, a.requests, (request) => request.body.script === 'mobile: scroll');
+      assert.equal(scroll.timedOut, false);
+      assert.equal(scroll.timing?.outcome, 'success');
+      assert.equal(scroll.timing!.settlementMs! - scroll.timing!.dispatchMs!, 7_999);
+      const lastSource = a.requests.filter((request) => request.path.endsWith('/source')).at(-1)!;
+      const sourceReceipt = a.driver.snapshot().commands.find((command) => command.timing?.dispatchedOrdinal === lastSource.dispatchedOrdinal)!;
+      assert.equal(sourceReceipt.timeoutMs, 8_000);
+      assert.equal(sourceReceipt.timedOut, false);
+      assert.equal(a.settledScrollReceipt?.timing?.settlementMs, scroll.timing?.settlementMs,
+        'the admission clock changes only after the actual scroll receipt settles');
+      assert.match(String(a.error), /insufficient time to complete native hierarchy observation/u);
+      assert.equal(a.budget.remainingMs, 7_999, 'the global 120s deadline prevents a post-scroll hierarchy request');
+      assert.equal(a.searchBudget?.deadline, a.budget.snapshot().deadline);
+      assert.deepEqual(a.clicks, ['share']);
+      assert.equal(a.lookups, 0);
+    }
     assert.ok(a.driver.snapshot().commands.filter((r) => r.path.endsWith('/source')).every((r) => r.timeoutMs === 8_000 && !r.timedOut));
     assert.equal(a.driver.snapshot().unusable, false);
   });
 }
 
-for (const mode of ['hung-source', 'late-source', 'late-body', 'interrupted-body', 'interrupted-reset', 'interrupted-abort']) {
+for (const mode of ['hung-source', 'late-source', 'late-body', 'hung-gesture', 'late-gesture', 'overdue-gesture', 'interrupted-body', 'interrupted-reset', 'interrupted-abort']) {
   test(`Plan13 hierarchy full install ${mode} preserves quarantine first failure and no late work`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
-    const a = await hierarchyReplay(mode);
+    const a = await boundedHierarchyReplay(mode);
     assert.deepEqual(a.clicks, ['share']);
     assert.equal(a.scrolls, 1);
     assert.equal(a.swipes, 0);
     assert.equal(a.lookups, 0);
     assert.equal(a.driver.snapshot().firstFatal?.code, /interrupted-(?:reset|abort)/u.test(mode) ? 'APPIUM_INTERRUPTED' : 'APPIUM_TIMEOUT');
+    if (mode.endsWith('-gesture')) {
+      const command = commandForRequest(a.driver, a.requests, (request) => request.body.script === 'mobile: scroll');
+      assert.equal(command.timeoutMs, 8_000);
+      assert.equal(command.timedOut, true);
+      assert.equal(command.timing?.outcome, 'timeout');
+    }
   });
 }
 
@@ -2441,6 +2733,7 @@ class ReceiptClock implements IOSReceiptClock {
   readonly timers = new Map<number, { at: number; callback: () => void }>();
   wall = () => this.epoch + this.elapsed;
   mono = () => this.elapsed;
+  now = () => this.elapsed;
   timer = (callback: () => void, ms: number) => {
     const id = ++this.next;
     this.timers.set(id, { at: this.elapsed + ms, callback });
@@ -3325,19 +3618,132 @@ test('SM55 receipt original 99 state pairs 753 context 742 unsent and ordering',
   }
 });
 
-export async function runIOSRegressions(): Promise<void> {
-  let failures = 0;
-  for (const [name, body] of tests) {
-    if (process.env.IOS_TEST_FILTER && !new RegExp(process.env.IOS_TEST_FILTER, 'u').test(name)) continue;
+async function runIsolatedHierarchyCase(name: string): Promise<void> {
+  const observerDirectory = await mkdtemp(join(tmpdir(), 'herdr-ios-hierarchy-'));
+  const observerPath = join(observerDirectory, 'supervisor.jsonl');
+  const observerFD = openSync(observerPath, 'wx', 0o600);
+  const observerSupervisor = createWriteStream('', { fd: observerFD, autoClose: false });
+  const runStartedAt = performance.now();
+  const boundaries: Array<{ phase: string; startedAtMs: number; durationMs?: number; outcome?: string }> = [];
+  const timeBoundary = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = performance.now();
+    const boundary: { phase: string; startedAtMs: number; durationMs?: number; outcome?: string } = {
+      phase, startedAtMs: Math.floor(startedAt - runStartedAt),
+    };
+    boundaries.push(boundary);
     try {
-      const outcome = await body();
+      const value = await operation();
+      boundary.durationMs = Math.floor(performance.now() - startedAt);
+      boundary.outcome = 'completed';
+      return value;
+    } catch (error) {
+      boundary.durationMs = Math.floor(performance.now() - startedAt);
+      boundary.outcome = 'failed';
+      throw error;
+    }
+  };
+  let owned: ReturnType<typeof spawnOwnedProcess> | undefined;
+  let output = '';
+  let diagnostic = '';
+  let binding: Awaited<ReturnType<typeof spawnOwnedProcess>['started']> | undefined;
+  let exit: Awaited<ReturnType<typeof spawnOwnedProcess>['targetExit']> | undefined;
+  let close: Awaited<ReturnType<typeof spawnOwnedProcess>['targetClose']> | undefined;
+  let retirement: Awaited<ReturnType<typeof spawnOwnedProcess>['retirement']> | undefined;
+  let lifecycleFailure: unknown;
+  let retirementFailure: unknown;
+  try {
+    owned = spawnOwnedProcess(process.execPath, ['--no-env-file', fileURLToPath(import.meta.url), '--case', name], {
+      timeoutMs: 70_000, cleanupReservationMs: 5_000, observerSupervisor,
+    });
+    owned.stdout.on('data', (chunk: Buffer) => { output = (output + chunk.toString('utf8')).slice(-8_000); });
+    owned.stderr.on('data', (chunk: Buffer) => { diagnostic = (diagnostic + chunk.toString('utf8')).slice(-8_000); });
+    await timeBoundary('ready', () => owned!.ready);
+    binding = await timeBoundary('started', async () => { owned!.start(); return owned!.started; });
+    exit = await timeBoundary('targetExit', () => owned!.targetExit);
+    close = await timeBoundary('targetClose', () => owned!.targetClose);
+  } catch (error) {
+    lifecycleFailure = error;
+  }
+  if (owned) {
+    try {
+      retirement = await timeBoundary('retire', () => owned!.retire('ios-hierarchy-fixture-complete'));
+    } catch (error) {
+      retirementFailure = error;
+      lifecycleFailure ||= error;
+    }
+  }
+  try {
+    await new Promise<void>(resolve => observerSupervisor.end(resolve));
+  } finally {
+    closeSync(observerFD);
+  }
+  const observerRecords = readFileSync(observerPath, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
+  });
+  const evidenceFields = ['targetExitObserved', 'targetCloseObserved', 'anchorExitObserved', 'anchorCloseObserved',
+    'groupAbsent', 'inputClosedObserved', 'stdoutNaturalEnd', 'stdoutCloseObserved', 'stderrNaturalEnd', 'stderrCloseObserved',
+    'targetStdoutNaturalEnd', 'targetStdoutCloseObserved', 'targetStderrNaturalEnd', 'targetStderrCloseObserved',
+    'managerStdoutNaturalEnd', 'managerStdoutCloseObserved', 'managerStderrNaturalEnd', 'managerStderrCloseObserved',
+    'supervisorStdoutFinished', 'supervisorStdoutCloseObserved', 'supervisorStderrFinished', 'supervisorStderrCloseObserved',
+    'targetDispatchRequested', 'targetProcessCreated', 'targetNoChildObserved', 'targetExecConfirmed',
+    'targetUnconfirmedCloseObserved', 'stopReason', 'firstFailure'];
+  const supervisorSummary = observerRecords.filter(record => ['supervisor-stopping', 'supervisor-retirement-ready',
+    'supervisor-retirement-unproved', 'supervisor-hard-deadline'].includes(String(record.type))).map(record => {
+    const evidence = record.evidence && typeof record.evidence === 'object' ? record.evidence as Record<string, unknown> : undefined;
+    return {
+      type: record.type,
+      reason: record.reason,
+      evidence: evidence && Object.fromEntries(evidenceFields.filter(key => key in evidence).map(key => [key, evidence[key]])),
+    };
+  });
+  const failureDetails = { name, failure: lifecycleFailure instanceof Error ? lifecycleFailure.message : String(lifecycleFailure || ''),
+    retirementFailure: retirementFailure instanceof Error ? retirementFailure.message : undefined,
+    boundaries, binding, exit, close, retirement, output, diagnostic, supervisor: supervisorSummary };
+  await rm(observerDirectory, { recursive: true, force: true });
+  if (lifecycleFailure) throw new Error(`iOS hierarchy fixture lifecycle failed: ${JSON.stringify(failureDetails)}`);
+  if (!owned || !retirement || !binding || exit?.code !== 0 || exit.signal || close?.code !== 0 || close.signal
+    || !retirement.targetExitObserved || !retirement.targetCloseObserved || !retirement.targetStdoutNaturalEnd
+    || !retirement.targetStderrNaturalEnd || !retirement.stdoutNaturalEnd || !retirement.stderrNaturalEnd
+    || !retirement.groupAbsent || !retirement.supervisorExitObserved || !retirement.supervisorCloseObserved
+    || retirement.supervisorExitCode !== 0 || retirement.supervisorSignal !== null || output || diagnostic) {
+    throw new Error(`iOS hierarchy fixture did not complete and retire: ${JSON.stringify(failureDetails)}`);
+  }
+}
+
+export const iosRegressionCases = stableTestIdentities('ios-inner', tests.map(([name]) => `iOS ${name}`));
+
+export async function runIOSRegressions(selectedIds?: readonly string[], honorEnvironmentFilter = true): Promise<void> {
+  let failures = 0;
+  let executedTests = 0;
+  const selected = selectedIds === undefined ? undefined : new Set(selectedIds);
+  const filter = honorEnvironmentFilter && process.env.IOS_TEST_FILTER
+    ? new RegExp(process.env.IOS_TEST_FILTER, 'u') : undefined;
+  for (const [index, [name, body]] of tests.entries()) {
+    if (selected && !selected.has(iosRegressionCases[index]!.id)) continue;
+    if (filter && !filter.test(name)) continue;
+    executedTests++;
+    try {
+      const outcome = name.startsWith('Plan13 hierarchy full install ')
+        ? await runIsolatedHierarchyCase(name) : await body();
       process.stdout.write(outcome ? `ok - iOS ${name} # SKIP ${outcome}\n` : `ok - iOS ${name}\n`);
     } catch (error) {
       failures += 1;
       process.stderr.write(`not ok - iOS ${name}: ${error instanceof Error ? error.stack : String(error)}\n`);
     }
   }
+  if (!executedTests) {
+    const reason = selected ? 'explicit iOS selection' : honorEnvironmentFilter && process.env.IOS_TEST_FILTER ? 'IOS_TEST_FILTER' : 'registered cases';
+    throw new Error(`iOS regressions: no cases matched ${reason}`);
+  }
   if (failures) throw new Error(`iOS regressions: ${failures} failures`);
 }
 
-if (import.meta.main) await runIOSRegressions();
+if (import.meta.main) {
+  if (process.argv[2] === '--case') {
+    const name = process.argv[3];
+    const selected = tests.find(([candidate]) => candidate === name && candidate.startsWith('Plan13 hierarchy full install '));
+    if (!selected) throw new Error(`unknown iOS hierarchy case: ${String(name)}`);
+    const outcome = await selected[1]();
+    if (outcome) throw new Error(`iOS hierarchy fixture skipped: ${outcome}`);
+  } else await runIOSRegressions();
+}
