@@ -312,8 +312,9 @@ there is no real radio, VPN, carrier, Cloudflare or Tailscale network. Results
 describe the app's own scheduling and protocol phases under these scripts,
 nothing more.
 
-**Endpoint.** Success is the first animation frame that paints an agent card
-(its accessible name, never a workspace label) naming the active epoch's
+**Endpoint.** Success is the first animation frame that paints an agent card's
+actual marker-bearing inventory text (not merely its accessible name,
+background or logo, and never a workspace label) naming the active epoch's
 agents from a snapshot that the synthetic relay sent with `ready`, non-stale
 inventory, on a session that is still the live authenticated path and the one
 the app is currently using, with no unlock dialog covering it, within 60 s of
@@ -338,12 +339,20 @@ replacement case (`burst`), and a direct promotion landing between render and
 paint (`holdPaintUntilDirect`, a test-only widening of that window that holds
 the paint check until a direct session is selected): the gateway's card is
 rejected as `not-current-path` and only the direct path's snapshot counts.
-Presentation is checked both before scheduling and at the completion frame:
-connected, non-zero layout, a visible page, and no `display:none`, hidden
-visibility, zero opacity or `content-visibility:hidden` on the card or its
-ancestors. The visible rectangle must intersect the viewport and clipping
-ancestors, with an exposed hit-tested portion of the card (not an opaque
-overlay). DOM presence and an accessible name alone are not a paint.
+Presentation is checked both before scheduling and at the completion frame.
+The accessible name binds the relay record, but the same marker must also
+occur in actual text inside `.agent-open`. The synthetic snapshot puts it
+first in `cwd`, which compact phone cards visibly show, retaining the private
+path canary. A text range scopes layout, viewport/clipping checks and exposed
+hit-tested area to the complete marker, not the article rectangle. It needs
+non-zero font/layout, a visible page and painted glyph color/text fill.
+Effective styles from the text parent through the card to the root must not
+hide it with `display:none`, hidden visibility, zero opacity,
+`content-visibility:hidden` or an `opacity(0)` filter (including percentage
+values and combined filter chains). Unknown SVG filters and masks are
+conservatively ineligible. Hidden descendants, clipping and opaque overlays
+cannot substitute a card background or logo for that text. DOM presence and
+an accessible name alone are not a paint.
 Mutation, visibility, resize, scroll and completed CSS-transition/animation
 changes retry eligibility; a permanently hidden card creates no frame retry
 loop. A reveal counts only its later qualifying frame, retaining the original
@@ -519,7 +528,66 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-The current presentation-checked pilot is `check` run **36997055130**, attempt
+The current marker-text-checked pilot is `check` run **37002392165**, attempt
+1, job *Resume benchmark pilot*, on
+`5d6bd88a258564681d4961ce74f72764e1d55b26`. It measures the unchanged shipped
+`web/` build
+`a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`;
+only the harness/tests/preregistration changed, not shipping frontend bytes.
+The fixture now includes its marker in the visible inventory path; these
+workload estimates are not pooled or compared with older harness pilots.
+Preregistration SHA-256 (compact JSON, as bound into evidence):
+`6c754671f72781d58ff1350be60603bea1249f91e1e2c395eef863dc7a0bd744`.
+Chromium 151.0.7922.34 and WebKit 26.5, Node v22.23.3, hosted Linux;
+10.6 minutes. All **480 attempted epochs** (16 selected strata × 30) are
+retained: 480 on time, no non-completions, exclusions, replacements, missing
+outcomes or contract/evidence violations. No hidden-time dials or bytes.
+All 24/24 negative-control trials were safe, with none missing or duplicated.
+The default pilot has no direct-upgrade strata; those and the other selectable
+workloads remain separately exercised by the browser suite, not pooled here.
+
+| Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 22 (20–24) | 32 (27–33) | 0 / 0 | 1,198 | 0.25 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 72 (56–80) | 99 (90–100) | 1 / 1 | 3,477 | 0.29 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,050 (2,080–3,083) | 5,105 (5,039–5,106) | 1 / 1 | 3,513 | 0.34 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 135 (120–139) | 169 (152–205) | 1 / 1 | 3,694 | 0.20 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 23 (16–27) | 34 (31–34) | 0 / 0 | 792 | 0.36 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 109 (88–122) | 148 (142–158) | 1 / 1 | 2,561 | 0.37 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,052 (2,097–3,145) | 5,130 (5,096–5,140) | 1 / 1 | 2,659 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 150 (124–158) | 197 (179–197) | 1 / 1 | 2,880 | 0.21 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 36 (32–38) | 48 (42–49) | 0 / 0 | 1,198 | 0.17 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 100 (84–108) | 133 (117–138) | 1 / 1 | 3,418 | 0.23 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,081 (2,102–3,112) | 5,117 (5,079–5,128) | 1 / 1 | 3,871 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 189 (182–199) | 217 (211–217) | 1 / 1 | 3,339 | 0.13 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (33–40) | 48 (45–50) | 0 / 0 | 792 | 0.18 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 117 (101–132) | 149 (148–165) | 1 / 1 | 2,632 | 0.24 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,085 (2,148–3,111) | 5,121 (5,084–5,129) | 1 / 1 | 2,928 | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 186 (183–199) | 248 (231–264) | 1 / 1 | 2,732 | 0.14 |
+
+Thirty successes still bound failure only below about 11.4% (two-sided
+Wilson); the coarse p95 and log-time SD are planning inputs, not acceptance.
+The preregistered ≥400-pair, adequately powered B3 experiment remains future.
+The same run passed 649 unit tests, 418 Chromium/WebKit browser tests
+(including 98 presentation regressions, 66 added for successor F001), and
+4 attention tests, without browser retries. Native preflight run 37002391842
+attempt 1 also passed on that SHA. Mobile harness/device jobs were skipped;
+no physical qualification. Final documentation revisions require their own
+exact-SHA hosted evidence, retained privately rather than recursively
+changing this pilot citation.
+
+### Historical successor pilots — void for endpoint acceptance
+
+Successor review 1 on `794bf1ab` left original `807dcb5c:F022` open (F001):
+a visible article could qualify with hidden `.agent-open` content or a fully
+transparent filter. Pilots 36996036157, 36997055130 and the documentation-only
+repeat 36998546535 are **void for B1 endpoint acceptance**, despite their
+480 on-time epochs and the later green 32-case presentation regressions.
+Their artifacts remain retained; neither green workflows nor a pilot prove
+presentation outside the tested contract. The following former baseline
+numbers are retained only as history, never reused as current evidence.
+
+The former article-checked pilot was `check` run **36997055130**, attempt
 1, job *Resume benchmark pilot*, on
 `6579a4ba774c37d62f6a8481f4b6c238762baf31`. It measures the unchanged shipped
 `web/` build
