@@ -159,8 +159,9 @@ type Server struct {
 	workspaceView []herdr.Workspace
 	inventoryView map[string]any
 
-	refreshMu      sync.Mutex
-	refreshClients map[string]bool
+	refreshMu        sync.Mutex
+	refreshClients   map[string]bool
+	snapshotRequests map[string]inventorySnapshotRequest
 	// Optional deterministic publication observer; installed before serving.
 	inventoryPublicationObserver func(string)
 	// Optional test hook between history loading and tuple revalidation.
@@ -908,6 +909,9 @@ func (s *Server) Run(ctx context.Context) error {
 	s.hub.SetOnConnect(s.sendConnectionSnapshot)
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
+		s.refreshMu.Lock()
+		delete(s.snapshotRequests, client.ID())
+		s.refreshMu.Unlock()
 		s.stopPaneWatch(client.ID(), "")
 		if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
 			s.pushM.SetViewedPane(identity.DeviceID, nil)
@@ -1501,7 +1505,11 @@ func (s *Server) Run(ctx context.Context) error {
 				s.logger.Warn("phone app origin was not stored", "error", err)
 			}
 		case "refresh_agents":
-			s.requestAgentRefresh(client)
+			if inbound.SnapshotRequestID != "" {
+				s.requestInventorySnapshot(client, inbound.SnapshotRequestID)
+			} else {
+				s.requestAgentRefresh(client)
+			}
 		case "webrtc_offer", "webrtc_ice", "webrtc_close":
 			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
 		default:
@@ -4311,6 +4319,7 @@ func (s *Server) setInventoryPublisher(ctx context.Context) {
 	s.poller.SetOnInventoryChange(func() error {
 		return s.publishCurrentInventory(ctx)
 	})
+	s.poller.SetOnPollStart(s.beginRequestedInventorySnapshots)
 }
 
 func (s *Server) publishCurrentInventory(ctx context.Context) error {

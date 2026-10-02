@@ -181,6 +181,7 @@ type Inbound struct {
 	Type                 string          `json:"type"`
 	Protocol             int             `json:"protocol"`
 	RequestID            string          `json:"request_id,omitempty"`
+	SnapshotRequestID    string          `json:"snapshot_request_id,omitempty"`
 	Target               *TargetRef      `json:"target,omitempty"`
 	ActionID             string          `json:"action_id,omitempty"`
 	ServerSessionID      string          `json:"server_session_id,omitempty"`
@@ -502,7 +503,11 @@ const AgentResponseCopyCapability = "agent_response_copy"
 const SpeechSynthesisCapability = "speech_synthesis"
 const SpeechVoiceManagementCapability = "speech_voice_management"
 
+// InventorySnapshotCapability binds one atomic snapshot to a post-request poll.
+const InventorySnapshotCapability = "inventory_snapshot_v1"
+
 var Capabilities = []string{
+	InventorySnapshotCapability,
 	"attention_classification",
 	"clear_activities",
 	"directory_browser",

@@ -1,0 +1,54 @@
+name: B2 source verification and generated assets
+
+on:
+  push:
+    branches: [ci/tailscale-native-preflight-ef9f843]
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Verify exact source provenance
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - name: Focused Go tests including inventory barriers
+        run: go test -race ./internal/app ./internal/coordinator ./internal/protocol
+      - run: bun install --frozen-lockfile --cwd frontend
+      - name: Generate assets using the existing release pipeline
+        run: make web-release
+      - name: Install hosted browser engines
+        run: cd frontend && bun x playwright install --with-deps chromium webkit
+      - name: Functional packaged browser regressions
+        run: make frontend-browser-release
+      - name: Record source and artifact binding
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > b2-source-sha.txt
+          find web -type f -print0 | sort -z | xargs -0 sha256sum > b2-assets.sha256
+          sha256sum frontend/build-versions.json >> b2-assets.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: b2-generated-assets-${{ github.sha }}
+          path: |
+            web/
+            frontend/build-versions.json
+            b2-source-sha.txt
+            b2-assets.sha256
+          if-no-files-found: error
+          retention-days: 1
