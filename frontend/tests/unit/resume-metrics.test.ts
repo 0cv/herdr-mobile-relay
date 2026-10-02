@@ -48,8 +48,33 @@ function fakeClock(options: { discarded?: boolean; onLine?: boolean | null } = {
     freeze(ms: number) { wall += ms; },
     setWall(value: number) { wall = value; },
     renderFrames() { for (const callback of frames.splice(0)) callback(); },
+    /** Runs queued frame callbacks newest first. */
+    renderFramesReverse() { for (const callback of frames.splice(0).reverse()) callback(); },
+    /** Runs one queued frame callback (oldest is 0), leaving the rest queued. */
+    runFrame(index: number) { frames.splice(index, 1)[0]?.(); },
     pendingFrames: () => frames.length,
   };
+}
+
+type FrameOrder = 'in order' | 'obsolete first' | 'reverse';
+const FRAME_ORDERS: FrameOrder[] = ['in order', 'obsolete first', 'reverse'];
+
+/**
+ * Flushes the two frame callbacks queued by an obsolete and a current
+ * snapshot. In 'obsolete first' the obsolete callback runs alone first and
+ * must leave the current snapshot pending and the sample unfinished.
+ */
+function flushTwoFrames(time: ReturnType<typeof fakeClock>, metrics: ResumeMetrics, order: FrameOrder, inventoryAt: number) {
+  expect(time.pendingFrames()).toBe(2);
+  if (order === 'in order') time.renderFrames();
+  else if (order === 'reverse') time.renderFramesReverse();
+  else {
+    time.runFrame(0);
+    expect(only(metrics)).toMatchObject({ outcome: null, phases: { inventory: inventoryAt } });
+    expect(only(metrics).phases).not.toHaveProperty('rendered');
+    time.runFrame(0);
+  }
+  expect(time.pendingFrames()).toBe(0);
 }
 
 /** Metrics with an agent list on screen, as when the app shows its home view. */
@@ -208,6 +233,52 @@ describe('local resume metrics', () => {
     });
     const [group] = summarizeResume(metrics.snapshot()).groups;
     expect(group).toMatchObject({ path: 'gateway/relayed', direct: { attempted: 1, promoted: 1, failures: 0 } });
+  });
+
+  it('classifies a back/forward cache restore even when pageshow joins an earlier wake signal', () => {
+    const orders: Array<{ first: 'resume' | 'visible'; redial: boolean }> = [
+      { first: 'resume', redial: false },
+      { first: 'visible', redial: false },
+      { first: 'visible', redial: true },
+    ];
+    for (const { first, redial } of orders) {
+      const label = `${first}${redial ? ' with redial' : ''}`;
+      const time = fakeClock();
+      const metrics = shown(new ResumeMetrics(time.clock, true));
+      metrics.setParticipants(() => [{ id: 'relay-a', hybrid: false }]);
+      metrics.wake('cold-start');
+      let generation = metrics.attempt('relay-a', false);
+      dialWss(metrics, time, 'relay-a', generation);
+      metrics.inventory('relay-a', generation, true);
+      time.renderFrames();
+      metrics.hidden();
+      time.freeze(60_000);
+      time.advance(10);
+
+      metrics.wake(first);
+      if (redial) generation = metrics.attempt('relay-a', false);
+      expect(only(metrics).lifecycle, label).toBe(redial ? 'reconnect' : 'warm');
+      time.advance(3);
+      // security.ts reports pageshow only when it is persisted.
+      metrics.wake('pageshow');
+      if (first === 'resume') {
+        time.advance(2);
+        metrics.wake('visible');
+      }
+      if (redial) dialWss(metrics, time, 'relay-a', generation);
+      else metrics.probe('relay-a', generation);
+      time.advance(20);
+      metrics.frame('relay-a', generation);
+      metrics.inventory('relay-a', generation, true);
+      time.advance(16);
+      time.renderFrames();
+
+      const epoch = metrics.snapshot().at(-1)!;
+      // The original start and deadline are kept; only the category changes.
+      expect(epoch, label).toMatchObject({ trigger: first, lifecycle: 'bfcache', hiddenMs: 60_010 });
+      expect(epoch.signals, label).toMatchObject({ [first]: 0, pageshow: 3 });
+      expect(epoch.samples[0], label).toMatchObject({ lifecycle: 'bfcache', outcome: 'fresh' });
+    }
   });
 
   it('coalesces a wake burst into one epoch without suppressing a later network change', () => {
@@ -561,7 +632,13 @@ function dialGateway(metrics: ResumeMetrics, time: ReturnType<typeof fakeClock>,
   metrics.connected(relayId, generation, 'gateway');
 }
 
-interface InternalTrack { epoch: unknown; sample: unknown; record: unknown; awaiting: unknown; generation: number }
+interface InternalTrack {
+  epoch: unknown;
+  sample: unknown;
+  record: unknown;
+  pending: { sample: { outcome: string | null; phases: Record<string, number> } } | null;
+  generation: number;
+}
 
 function internalTracks(metrics: ResumeMetrics): Map<string, InternalTrack> {
   return (metrics as unknown as { tracks: Map<string, InternalTrack> }).tracks;
@@ -706,6 +783,198 @@ describe('resume metric completion and retirement', () => {
     expect(sample).toMatchObject({ outcome: null, failures: 1 });
     expect(sample.phases).toEqual({ dial: 0, open: 30 });
     expect(sample.paths).toEqual([{ path: 'websocket', dialAt: 0, reached: 'open', end: 'failed', endedAt: 30 }]);
+  });
+
+  it('lets only the current snapshot complete when a direct promotion replaces it before any frame', () => {
+    for (const order of FRAME_ORDERS) {
+      const time = fakeClock();
+      const metrics = shown(new ResumeMetrics(time.clock, true));
+      metrics.wake('cold-start');
+      const generation = metrics.attempt('relay-g', true);
+      dialGateway(metrics, time, 'relay-g', generation);
+      metrics.inventory('relay-g', generation, true);
+      time.advance(20);
+      metrics.phase('relay-g', generation, 'promoted', 'webrtc');
+      metrics.connected('relay-g', generation, 'webrtc');
+      // Withdrawn at once, not by its stale frame later.
+      expect(only(metrics).phases, order).not.toHaveProperty('inventory');
+      time.advance(10);
+      metrics.inventory('relay-g', generation, true);
+      time.advance(16);
+      flushTwoFrames(time, metrics, order, 120);
+      expect(only(metrics), order).toMatchObject({
+        outcome: 'fresh',
+        path: 'gateway/direct',
+        doneAt: 136,
+        phases: { authenticated: 90, inventory: 120, rendered: 136 },
+        direct: { promotedAt: 110 },
+      });
+    }
+  });
+
+  it('lets only the current snapshot complete when inventory turns stale and fresh again before any frame', () => {
+    for (const order of FRAME_ORDERS) {
+      const time = fakeClock();
+      const metrics = shown(new ResumeMetrics(time.clock, true));
+      metrics.wake('cold-start');
+      const generation = metrics.attempt('relay-a', false);
+      dialWss(metrics, time, 'relay-a', generation);
+      metrics.inventory('relay-a', generation, true);
+      time.advance(5);
+      metrics.inventory('relay-a', generation, false);
+      expect(only(metrics).phases, order).not.toHaveProperty('inventory');
+      time.advance(5);
+      metrics.inventory('relay-a', generation, true);
+      time.advance(16);
+      flushTwoFrames(time, metrics, order, 100);
+      expect(only(metrics), order).toMatchObject({ outcome: 'fresh', doneAt: 116, phases: { dial: 5, inventory: 100, rendered: 116 } });
+    }
+  });
+
+  it('lets only the replacement connection complete when it delivers before the old frame', () => {
+    for (const order of FRAME_ORDERS) {
+      const time = fakeClock();
+      const metrics = shown(new ResumeMetrics(time.clock, true));
+      metrics.wake('cold-start');
+      const first = metrics.attempt('relay-a', false);
+      dialWss(metrics, time, 'relay-a', first);
+      metrics.inventory('relay-a', first, true);
+      time.advance(5);
+      const second = metrics.attempt('relay-a', false);
+      expect(only(metrics).phases, order).not.toHaveProperty('inventory');
+      dialWss(metrics, time, 'relay-a', second);
+      metrics.inventory('relay-a', second, true);
+      time.advance(16);
+      flushTwoFrames(time, metrics, order, 185);
+      expect(only(metrics), order).toMatchObject({
+        outcome: 'fresh',
+        doneAt: 201,
+        attempts: 2,
+        superseded: 1,
+        phases: { dial: 100, authenticated: 185, inventory: 185, rendered: 201 },
+      });
+    }
+  });
+
+  it('lets only the new gateway path complete when the old one fell back before its frame', () => {
+    for (const order of FRAME_ORDERS) {
+      const time = fakeClock();
+      const metrics = shown(new ResumeMetrics(time.clock, true));
+      metrics.wake('cold-start');
+      const generation = metrics.attempt('relay-g', true);
+      dialGateway(metrics, time, 'relay-g', generation);
+      metrics.inventory('relay-g', generation, true);
+      time.advance(5);
+      metrics.phase('relay-g', generation, 'failed', 'gateway');
+      metrics.connecting('relay-g', generation);
+      expect(only(metrics).phases, order).not.toHaveProperty('inventory');
+      dialGateway(metrics, time, 'relay-g', generation);
+      metrics.inventory('relay-g', generation, true);
+      time.advance(16);
+      flushTwoFrames(time, metrics, order, 185);
+      expect(only(metrics), order).toMatchObject({
+        outcome: 'fresh',
+        path: 'gateway/relayed',
+        doneAt: 201,
+        pathAttempts: 2,
+        phases: { dial: 105, inventory: 185, rendered: 201 },
+      });
+      expect(only(metrics).paths.map((record) => record.end ?? 'open'), order).toEqual(['failed', 'open']);
+    }
+  });
+
+  it('never lets an obsolete frame erase or alter a completed sample', () => {
+    const time = fakeClock();
+    const metrics = shown(new ResumeMetrics(time.clock, true));
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    // A second valid snapshot replaces the first before the paint: the frame
+    // shows the newer one, so it owns the completion.
+    time.advance(4);
+    metrics.inventory('relay-a', generation, true);
+    time.advance(12);
+    time.runFrame(1);
+    const completed = only(metrics);
+    expect(completed).toMatchObject({ outcome: 'fresh', doneAt: 106, phases: { inventory: 94, rendered: 106 } });
+    time.advance(30);
+    time.runFrame(0);
+    // Later invalidations do not reach a finished sample either.
+    metrics.inventory('relay-a', generation, false);
+    metrics.connecting('relay-a', generation);
+    metrics.end('relay-a', generation, 'failed');
+    expect(only(metrics)).toEqual(completed);
+  });
+
+  it('requires a visible inventory view at the frame, not only a mounted one', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    let railShown = false;
+    // Registered while mounted, but hidden (a phone-width terminal rail).
+    const hideRail = metrics.presentInventory(() => railShown);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: null, phases: { inventory: 90 } });
+    expect(only(metrics).phases).not.toHaveProperty('rendered');
+
+    // A view that is visible when registered but hidden by a resize before
+    // the frame does not count either.
+    railShown = true;
+    const hideList = metrics.presentInventory(() => railShown);
+    railShown = false;
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics).outcome).toBeNull();
+    hideList();
+    hideRail();
+
+    // A failing visibility check counts as not visible.
+    const hideBroken = metrics.presentInventory(() => {
+      throw new Error('detached');
+    });
+    time.renderFrames();
+    expect(only(metrics).outcome).toBeNull();
+    hideBroken();
+
+    // The waiting snapshot is retried, unchanged, once a visible view appears.
+    time.advance(500);
+    metrics.presentInventory(() => true);
+    expect(time.pendingFrames()).toBe(1);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh', doneAt: 638, phases: { inventory: 90, rendered: 638 } });
+  });
+
+  it('retries the same waiting snapshot and never a withdrawn one', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    time.renderFrames();
+    // A view appears and queues a retry, but the inventory turns stale first.
+    metrics.presentInventory();
+    metrics.inventory('relay-a', generation, false);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: null });
+    expect(only(metrics).phases).not.toHaveProperty('inventory');
+    // Repeated releases while one retry is queued schedule it once.
+    metrics.setLocked(true);
+    metrics.inventory('relay-a', generation, true);
+    time.renderFrames();
+    metrics.setLocked(false);
+    metrics.presentInventory();
+    expect(time.pendingFrames()).toBe(1);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh', doneAt: 122, phases: { inventory: 106, rendered: 106 } });
   });
 
   it('counts inventory painted behind the device lock only once it can be seen', () => {
@@ -874,9 +1143,66 @@ describe('resume metric completion and retirement', () => {
     expect(metrics.snapshot()).toHaveLength(RESUME_MAX_EPOCHS);
     expect(internalTracks(metrics).get('relay-b')).toMatchObject({ epoch: null, sample: null, record: null });
     metrics.clear();
-    for (const track of internalTracks(metrics).values()) expect(track).toMatchObject({ epoch: null, sample: null, awaiting: null });
+    for (const track of internalTracks(metrics).values()) expect(track).toMatchObject({ epoch: null, sample: null, pending: null });
     metrics.reset();
     expect(internalTracks(metrics).size).toBe(0);
+  });
+
+  it('detaches a pending snapshot on epoch replacement, pruning, Clear and opt-out without touching old samples', () => {
+    const time = fakeClock();
+    // No visible view: each snapshot stays pending.
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    time.renderFrames();
+    expect(internalTracks(metrics).get('relay-a')?.pending).toEqual(expect.any(Object));
+    // A new wake replaces the epoch: the old snapshot is detached, and the old
+    // sample keeps the arrival it recorded.
+    time.advance(RESUME_DEADLINE_MS);
+    metrics.wake('visible');
+    expect(internalTracks(metrics).get('relay-a')?.pending).toBeNull();
+    expect(metrics.snapshot()[0].samples[0]).toMatchObject({ outcome: 'deadline', phases: { inventory: 90 } });
+    metrics.presentInventory();
+    time.renderFrames();
+    expect(metrics.snapshot()[0].samples[0]).not.toHaveProperty('lateFreshAt');
+
+    for (const detach of [() => metrics.clear(), () => metrics.setEnabled(false), () => {
+      time.advance(RESUME_RETENTION_MS + 1);
+      metrics.snapshot();
+    }]) {
+      metrics.setEnabled(true);
+      metrics.hidden();
+      metrics.wake('visible');
+      metrics.probe('relay-a', generation);
+      metrics.setLocked(true);
+      metrics.inventory('relay-a', generation, true);
+      time.renderFrames();
+      expect(internalTracks(metrics).get('relay-a')?.pending).toEqual(expect.any(Object));
+      detach();
+      expect(internalTracks(metrics).get('relay-a')?.pending).toBeNull();
+      metrics.setLocked(false);
+      time.renderFrames();
+      expect(time.pendingFrames()).toBe(0);
+    }
+
+    // Teardown detaches a snapshot whose frame is still queued: the obsolete
+    // frame finishes nothing in the dropped epoch.
+    metrics.setEnabled(true);
+    metrics.hidden();
+    metrics.wake('visible');
+    metrics.probe('relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    const track = internalTracks(metrics).get('relay-a');
+    const dropped = track?.pending?.sample;
+    expect(dropped).toEqual(expect.any(Object));
+    metrics.reset();
+    expect(track?.pending).toBeNull();
+    time.renderFrames();
+    expect(dropped?.outcome).toBeNull();
+    expect(dropped?.phases).not.toHaveProperty('rendered');
+    expect(metrics.snapshot()).toEqual([]);
   });
 
   it('keeps failed gateway and legacy dials in the sample when a later path succeeds', () => {

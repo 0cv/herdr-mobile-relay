@@ -25,8 +25,12 @@
  * one-sided, multiplicity-adjusted bounds:
  *   - reliability: Newcombe's hybrid-score interval for the paired difference
  *     in non-completion rates (method 10, Statistics in Medicine 1998);
- *   - latency: a paired (block) percentile bootstrap of the all-attempt
- *     quantile ratio candidate/baseline.
+ *   - latency: a paired percentile bootstrap of the all-attempt quantile
+ *     ratio candidate/baseline, resampling matched pairs.
+ * The matched pair is the only independent unit: every pair runs in fresh
+ * browser contexts with its own preregistered seed. Clustered evidence
+ * (block or cluster labels on records, or a clustered registration) is
+ * refused as invalid rather than analysed as if its pairs were independent.
  * Family-wise error is controlled with Bonferroni over every preregistered
  * acceptance comparison; the adjusted level, method and counts are retained.
  * A bound inside its threshold passes; a lower bound beyond it demonstrates a
@@ -202,9 +206,9 @@ export function bootstrapQuantileInterval(values, q, level, resamples, seed) {
 }
 
 /**
- * One-sided bounds for the paired quantile ratio candidate/baseline. Blocks
- * (independent pairs, or pairs sharing a declared block) are resampled with
- * replacement. Censoring is handled so it can only widen the interval:
+ * One-sided bounds for the paired quantile ratio candidate/baseline. Matched
+ * pairs, the independent unit, are resampled with replacement. Censoring is
+ * handled so it can only widen the interval:
  *   - a censored candidate quantile is only known to be at least the
  *     deadline, so the upper bound is +∞ and the lower bound uses the
  *     deadline as the candidate quantile;
@@ -214,7 +218,7 @@ export function bootstrapQuantileInterval(values, q, level, resamples, seed) {
  * identifiable and can never pass; it can still be rejected when even the
  * censoring-aware lower bound exceeds the threshold.
  *
- * @param {{ baseline: number; candidate: number; block?: string }[]} pairs
+ * @param {{ baseline: number; candidate: number }[]} pairs
  * @param {number} q
  * @param {number} alpha one-sided level after multiplicity adjustment
  * @param {number} resamples
@@ -243,15 +247,6 @@ export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed, deadl
     return { estimate: Number.NaN, lower: 0, upper: Number.POSITIVE_INFINITY, identifiable: false };
   }
   const estimate = ratio(quantiles(pairs.map((pair) => pair.candidate), pairs.map((pair) => pair.baseline)), Number.NaN);
-  /** @type {Map<string, { baseline: number; candidate: number }[]>} */
-  const grouped = new Map();
-  pairs.forEach((pair, index) => {
-    const key = pair.block ?? `pair-${index}`;
-    const members = grouped.get(key) ?? [];
-    members.push(pair);
-    grouped.set(key, members);
-  });
-  const blocks = [...grouped.values()];
   const random = seededRandom(seed);
   const uppers = new Float64Array(resamples);
   const lowers = new Float64Array(resamples);
@@ -260,11 +255,10 @@ export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed, deadl
     const candidate = [];
     /** @type {number[]} */
     const baseline = [];
-    for (let draw = 0; draw < blocks.length; draw += 1) {
-      for (const pair of blocks[Math.floor(random() * blocks.length)]) {
-        candidate.push(pair.candidate);
-        baseline.push(pair.baseline);
-      }
+    for (let draw = 0; draw < pairs.length; draw += 1) {
+      const pair = pairs[Math.floor(random() * pairs.length)];
+      candidate.push(pair.candidate);
+      baseline.push(pair.baseline);
     }
     const value = quantiles(candidate, baseline);
     uppers[replicate] = ratio(value, Number.POSITIVE_INFINITY);
@@ -308,7 +302,8 @@ function round6(value) {
  *   stratum: string;
  *   variant?: 'baseline' | 'candidate';
  *   pair?: number;
- *   block?: string;
+ *   block?: unknown;
+ *   cluster?: unknown;
  *   seed?: number;
  *   order?: string;
  *   replacement?: number;
@@ -320,6 +315,7 @@ function round6(value) {
  *   bytes?: number;
  *   hidden_dials?: number;
  *   hidden_bytes?: number;
+ *   direct_upgrade?: Record<string, any>;
  * }} AttemptRecord
  * @typedef {{ excluded: string | null; completed: boolean; time: number; reason: string | null }} Classification
  * @typedef {{
@@ -466,6 +462,11 @@ export function contractViolations(registration, design) {
   if (design !== 'paired' && !(Number(registration.sample_size_per_stratum) >= PILOT_MIN_EPOCHS)) {
     violations.push('pilot-sample-below-30');
   }
+  // Only independent matched pairs are analysed; a clustered design would
+  // need cluster-level inference and cluster counts for its precision.
+  if (registration.blocks !== undefined || registration.clusters !== undefined || registration.clustering !== undefined) {
+    violations.push('clustered-design-unsupported');
+  }
   return violations;
 }
 
@@ -548,6 +549,12 @@ export function indexAttempts(attempts, config, variants) {
       violate(stratum, 'unknown-variant');
       continue;
     }
+    // Pairs are the independent unit; clustered evidence needs a
+    // cluster-valid analysis this analyzer does not provide.
+    if (record.block !== undefined || record.cluster !== undefined) {
+      violate(stratum, 'clustered-evidence-unsupported');
+      continue;
+    }
     const pair = record.pair;
     if (typeof pair !== 'number' || !Number.isSafeInteger(pair) || pair < 0 || pair >= config.planned) {
       violate(stratum, 'pair-outside-preregistered-sample');
@@ -586,7 +593,7 @@ export function indexAttempts(attempts, config, variants) {
  * @param {Map<number, Partial<Record<'baseline' | 'candidate', AttemptRecord>>> | undefined} rounds
  * @param {ReturnType<typeof settings>} config
  * @param {Array<'baseline' | 'candidate'>} variants
- * @returns {{ status: 'missing' | 'exhausted' | 'valid'; round?: Record<string, Classification>; block?: string; exclusions: string[]; violation: boolean }}
+ * @returns {{ status: 'missing' | 'exhausted' | 'valid'; round?: Record<string, Classification>; records?: Partial<Record<'baseline' | 'candidate', AttemptRecord>>; exclusions: string[]; violation: boolean }}
  */
 function resolvePair(rounds, config, variants) {
   /** @type {string[]} */
@@ -606,9 +613,8 @@ function resolvePair(rounds, config, variants) {
       exclusions.push(excluded);
       continue;
     }
-    const block = variants.map((variant) => records[variant]?.block).find((value) => value !== undefined);
     // Rounds after an admissible one are unjustified replacements.
-    return { status: 'valid', round: classified, block, exclusions, violation: position !== order.length - 1 };
+    return { status: 'valid', round: classified, records, exclusions, violation: position !== order.length - 1 };
   }
   return { status: 'exhausted', exclusions, violation: false };
 }
@@ -669,6 +675,46 @@ export function negativeControlSummary(controls, config, variants) {
     complete,
     all_safe: complete && failed === 0,
     results,
+  };
+}
+
+/**
+ * Descriptive summary of the separately observed direct WebRTC upgrade
+ * (gateway-direct strata): outcome counts, and promotion time from the wake
+ * among promoted epochs. It is supplementary, bounded by its own window, and
+ * never part of an acceptance decision or the primary time-to-fresh. Null
+ * when no record observed an upgrade.
+ *
+ * @param {AttemptRecord[]} records
+ */
+export function directUpgradeSummary(records) {
+  const observed = records
+    .map((record) => record.direct_upgrade)
+    .filter((upgrade) => upgrade && typeof upgrade === 'object' && typeof upgrade.outcome === 'string'
+      && upgrade.outcome !== 'not-applicable');
+  if (!observed.length) return null;
+  /** @type {Record<string, number>} */
+  const outcomes = {};
+  for (const upgrade of observed) tally(outcomes, String(upgrade?.outcome));
+  const window = Number(observed[0]?.window_ms) || null;
+  const promoted = observed
+    .map((upgrade) => upgrade?.promoted_ms)
+    .filter((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0
+      && (window === null || value <= window));
+  /** @param {number} q */
+  const quantile = (q) => (promoted.length ? Math.round(nearestRankQuantile(promoted, q)) : null);
+  const counts = (/** @type {string} */ key) => observed
+    .map((upgrade) => Number(upgrade?.[key]))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  return {
+    supplementary: true,
+    separate_from_primary: true,
+    window_ms: window,
+    observed: observed.length,
+    outcomes,
+    promoted_ms: { n: promoted.length, p50: quantile(0.5), p95: quantile(0.95) },
+    attempts_mean: round6(mean(counts('attempts')) ?? Number.NaN),
+    refused_total: counts('refused').reduce((total, value) => total + value, 0),
   };
 }
 
@@ -757,6 +803,7 @@ export function analyzePilot(evidence) {
         p95: reportable(nearestRankQuantile(successes, 0.95), config.deadline),
       },
       log_time_sd: round6(sampleSd(logs) ?? Number.NaN),
+      direct_upgrade: directUpgradeSummary(used),
       workload: {
         dials_mean: round6(mean(numeric('dials')) ?? Number.NaN),
         handshakes_mean: round6(mean(numeric('handshakes')) ?? Number.NaN),
@@ -823,8 +870,10 @@ export function analyzePaired(evidence) {
     const pairs = index.get(plan.id) ?? new Map();
     /** @type {Record<string, number>} */
     const exclusions = {};
-    /** @type {Array<{ baseline: Classification; candidate: Classification; block?: string }>} */
+    /** @type {Array<{ baseline: Classification; candidate: Classification }>} */
     const valid = [];
+    /** @type {{ baseline: AttemptRecord[]; candidate: AttemptRecord[] }} */
+    const used = { baseline: [], candidate: [] };
     let missing = 0;
     let exhausted = 0;
     let unjustified = 0;
@@ -835,7 +884,9 @@ export function analyzePaired(evidence) {
       if (resolved.status === 'missing') missing += 1;
       if (resolved.status === 'exhausted') exhausted += 1;
       if (resolved.status === 'valid' && resolved.round) {
-        valid.push({ baseline: resolved.round.baseline, candidate: resolved.round.candidate, block: resolved.block });
+        valid.push({ baseline: resolved.round.baseline, candidate: resolved.round.candidate });
+        if (resolved.records?.baseline) used.baseline.push(resolved.records.baseline);
+        if (resolved.records?.candidate) used.candidate.push(resolved.records.candidate);
       }
     }
     const ownViolations = { ...(stratumViolations.get(plan.id) ?? {}) };
@@ -872,7 +923,7 @@ export function analyzePaired(evidence) {
     });
     if (enough && reliabilityVerdict === 'not-accepted') reasons.push('reliability-loss-exceeds-margin');
     if (enough && reliabilityVerdict === 'inconclusive') reasons.push('reliability-bound-too-wide');
-    const latencyPairs = valid.map((pair) => ({ baseline: pair.baseline.time, candidate: pair.candidate.time, block: pair.block }));
+    const latencyPairs = valid.map((pair) => ({ baseline: pair.baseline.time, candidate: pair.candidate.time }));
     const seed = config.seed + position * 101;
     /** @param {number} q @param {number} threshold @param {string} name @param {number} offset */
     const latencyComparison = (q, threshold, name, offset) => {
@@ -946,6 +997,10 @@ export function analyzePaired(evidence) {
         pairs: successful.length,
         p95_ratio: round6(nearestRankQuantile(candidateSuccess, 0.95) / nearestRankQuantile(baselineSuccess, 0.95)),
       },
+      direct_upgrade: {
+        baseline: directUpgradeSummary(used.baseline),
+        candidate: directUpgradeSummary(used.candidate),
+      },
       verdict,
       reasons,
     };
@@ -980,7 +1035,7 @@ export function analyzePaired(evidence) {
       adjusted_alpha: round6(adjustedAlpha),
       critical_z: round6(z),
     },
-    bootstrap: { resamples: config.resamples, seed: config.seed, unit: 'pair or declared block' },
+    bootstrap: { resamples: config.resamples, seed: config.seed, unit: 'matched pair (clustered evidence is refused)' },
     replacement_limit: config.replacementLimit,
     contract_violations: config.contract,
     violations,
@@ -1018,6 +1073,16 @@ export function renderMarkdown(analysis) {
     lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
     for (const stratum of pilot.strata) {
       lines.push(`| ${stratum.stratum} | ${stratum.attempted} | ${stratum.valid_attempts}/${stratum.planned} | ${stratum.completed_on_time} | ${cell(stratum.completion_rate)} (${cell(stratum.completion_rate_ci95)}) | ${cell(stratum.time_to_fresh_ms.p50)} (${cell(stratum.time_to_fresh_ms.p50_ci95)}) | ${cell(stratum.time_to_fresh_ms.p95)} (${cell(stratum.time_to_fresh_ms.p95_ci95)}) | ${cell(JSON.stringify(stratum.non_completions))} |`);
+    }
+    const upgrades = pilot.strata.filter((stratum) => stratum.direct_upgrade);
+    if (upgrades.length) {
+      lines.push('', '### Direct WebRTC upgrade (supplementary, separate from the primary endpoint)', '');
+      lines.push('| Stratum | Observed | Outcomes | Promoted p50 ms | Promoted p95 ms | Refused offers |');
+      lines.push('| --- | --- | --- | --- | --- | --- |');
+      for (const stratum of upgrades) {
+        const upgrade = /** @type {NonNullable<ReturnType<typeof directUpgradeSummary>>} */ (stratum.direct_upgrade);
+        lines.push(`| ${stratum.stratum} | ${upgrade.observed} | ${cell(JSON.stringify(upgrade.outcomes))} | ${cell(upgrade.promoted_ms.p50)} | ${cell(upgrade.promoted_ms.p95)} | ${upgrade.refused_total} |`);
+      }
     }
     if (pilot.contract_violations.length) {
       lines.push('', `**The registration departs from the approved contract (${pilot.contract_violations.join(', ')}).**`);

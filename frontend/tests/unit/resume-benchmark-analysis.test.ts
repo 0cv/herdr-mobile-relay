@@ -6,6 +6,7 @@ import {
   bootstrapQuantileInterval,
   boundVerdict,
   classifyAttempt,
+  directUpgradeSummary,
   epochSeed,
   EVIDENCE_SCHEMA,
   nearestRankQuantile,
@@ -400,6 +401,103 @@ describe('resume benchmark paired acceptance', () => {
     expect(stratum.valid_pairs).toBe(400);
     expect(stratum.violations).toEqual({});
     expect(stratum.non_completions.candidate).toEqual({ 'disallowed-exclusion:slow-network': 1, 'page-crash': 1 });
+  });
+
+  it('refuses clustered evidence instead of treating clustered pairs as independent', () => {
+    // Every pair in one block: a block bootstrap would see a single unit and
+    // report [0.7, 0.7], while the pair-level reliability bound would pass.
+    const oneBlock = pairs(target[0].id, 400, () => [1_000, 700]).map((record) => ({ ...record, block: 'one' }));
+    const single = paired(target, oneBlock);
+    expect(single.strata[0]).toMatchObject({
+      verdict: 'invalid',
+      valid_pairs: 0,
+      violations: { 'clustered-evidence-unsupported': 800 },
+    });
+    expect(single).toMatchObject({ verdict: 'invalid', accepted: false });
+    expect(single.bootstrap.unit).toMatch(/^matched pair/);
+
+    // Ten correlated blocks of forty pairs each are refused just the same.
+    const correlated = pairs(target[0].id, 400, () => [1_000, 700])
+      .map((record) => ({ ...record, block: `block-${Math.floor(Number(record.pair) / 40)}` }));
+    expect(paired(target, correlated)).toMatchObject({ verdict: 'invalid', accepted: false });
+
+    // One labelled record taints its stratum.
+    const tainted = pairs(target[0].id, 400, () => [1_000, 700]);
+    tainted[7] = { ...tainted[7], cluster: 'browser-process-1' };
+    const taintedResult = paired(target, tainted);
+    expect(taintedResult.strata[0].violations).toEqual({ 'clustered-evidence-unsupported': 1 });
+    expect(taintedResult.accepted).toBe(false);
+
+    // A clustered registration is refused before any statistic.
+    const registration = analyzePaired({
+      preregistration: { ...preregistration(target), blocks: [{ id: 'block-0', pairs: [0, 1] }] },
+      attempts: pairs(target[0].id, 400, () => [1_000, 700]),
+      negative_controls: safeControls(['baseline', 'candidate']),
+    });
+    expect(registration).toMatchObject({
+      verdict: 'invalid',
+      accepted: false,
+      contract_violations: ['clustered-design-unsupported'],
+    });
+
+    // A pilot with clustered records does not meet its sample.
+    const pilot = analyzePilot({
+      preregistration: preregistration([{ id: 'chromium/wss/warm' }], 30),
+      attempts: Array.from({ length: 30 }, (_, index) => ({ ...attempt('chromium/wss/warm', 'baseline', index, 900), block: 'one' })),
+      negative_controls: safeControls(['baseline']),
+    });
+    expect(pilot).toMatchObject({ sample_requirement_met: false, violations: { 'clustered-evidence-unsupported': 30 } });
+  });
+
+  it('summarises the separate direct upgrade without touching the primary endpoint', () => {
+    const upgrade = (outcome: string, promoted: number | null, extra: Record<string, number> = {}) => ({
+      outcome, window_ms: 30_000, attempts: 1, refused: 0, promoted_ms: promoted, ...extra,
+    });
+    const stratum = 'chromium/gateway-direct/hidden-5m';
+    const records: Attempt[] = Array.from({ length: 30 }, (_, index) => ({
+      ...attempt(stratum, 'baseline', index, 150),
+      direct_upgrade: index < 20
+        ? upgrade('promoted', 300 + index * 10)
+        : index < 25 ? upgrade('not-promoted', null, { attempts: 4, refused: 4 }) : upgrade('stayed-direct', null, { attempts: 0 }),
+    }));
+    const analysis = analyzePilot({
+      preregistration: preregistration([{ id: stratum }], 30),
+      attempts: records,
+      negative_controls: safeControls(['baseline']),
+    });
+    const [summary] = analysis.strata;
+    // The primary endpoint is untouched by the upgrade outcomes.
+    expect(summary).toMatchObject({ valid_attempts: 30, completed_on_time: 30, time_to_fresh_ms: { p50: 150, p95: 150 } });
+    expect(summary.direct_upgrade).toEqual({
+      supplementary: true,
+      separate_from_primary: true,
+      window_ms: 30_000,
+      observed: 30,
+      outcomes: { promoted: 20, 'not-promoted': 5, 'stayed-direct': 5 },
+      promoted_ms: { n: 20, p50: 390, p95: 480 },
+      attempts_mean: 1.333333,
+      refused_total: 20,
+    });
+    expect(renderMarkdown(analysis)).toContain('Direct WebRTC upgrade (supplementary, separate from the primary endpoint)');
+
+    // Strata without a direct path report nothing; malformed timings are ignored.
+    expect(directUpgradeSummary([{ stratum, direct_upgrade: { outcome: 'not-applicable' } }])).toBeNull();
+    expect(directUpgradeSummary([{ stratum }])).toBeNull();
+    expect(directUpgradeSummary([
+      { stratum, direct_upgrade: upgrade('promoted', 40_000) },
+      { stratum, direct_upgrade: { outcome: 'promoted', window_ms: 30_000, promoted_ms: '12' } },
+    ])?.promoted_ms).toEqual({ n: 0, p50: null, p95: null });
+
+    // Paired evidence reports it per variant, outside every verdict.
+    const directTarget = [{ id: stratum, role: 'acceptance-target' }];
+    const pairedRecords = pairs(stratum, 400, () => [1_000, 700]).map((record) => ({
+      ...record,
+      direct_upgrade: record.variant === 'candidate' ? upgrade('not-promoted', null) : upgrade('promoted', 500),
+    }));
+    const result = paired(directTarget, pairedRecords);
+    expect(result.strata[0].direct_upgrade.baseline).toMatchObject({ observed: 400, outcomes: { promoted: 400 } });
+    expect(result.strata[0].direct_upgrade.candidate).toMatchObject({ observed: 400, outcomes: { 'not-promoted': 400 } });
+    expect(result).toMatchObject({ verdict: 'pass', accepted: true });
   });
 
   it('refuses evidence collected beyond the preregistered sample or replacements', () => {

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import AgentLogo from '$components/AgentLogo.svelte';
   import { agentStatusTone, displayName, hostLabel, tabName } from '$lib/agents';
-  import { resumeMetrics } from '$lib/resume-metrics';
+  import { resumeMetrics, shownOnScreen } from '$lib/resume-metrics';
   import type { Agent } from '$lib/types';
   import { workspaceGroups } from '$lib/workspaces';
 
@@ -19,11 +19,27 @@
   } = $props();
 
   const groups = $derived(workspaceGroups(agents));
-  // Beside a terminal the rail is the visible agent inventory.
-  onMount(() => resumeMetrics.presentInventory());
+  let railRoot = $state<HTMLElement>();
+  // Beside a terminal the rail is the visible agent inventory, but only on
+  // wide screens (app.css hides it below 900px). It counts for local resume
+  // timing only while shown, and is checked again at the frame itself.
+  onMount(() => {
+    const wide = typeof window.matchMedia === 'function' ? window.matchMedia('(min-width: 900px)') : null;
+    let hide: (() => void) | null = null;
+    const sync = () => {
+      hide?.();
+      hide = !wide || wide.matches ? resumeMetrics.presentInventory(() => shownOnScreen(railRoot)) : null;
+    };
+    sync();
+    wide?.addEventListener('change', sync);
+    return () => {
+      wide?.removeEventListener('change', sync);
+      hide?.();
+    };
+  });
 </script>
 
-<aside class="agent-rail" aria-label="Agent navigation">
+<aside bind:this={railRoot} class="agent-rail" aria-label="Agent navigation">
   <header>
     <strong>Agents</strong>
     <button type="button" onclick={onjump} aria-label="Search all agents" title="Search all agents">⌕</button>

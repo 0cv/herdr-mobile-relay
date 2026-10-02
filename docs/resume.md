@@ -55,17 +55,41 @@ A sample **succeeds** only when an `agents` snapshot arrives on the current
 connection generation and live path while the relay reports inventory
 `ready` and not `stale`, that snapshot was requested after the wake (by a dial
 inside the epoch, or by the post-wake probe on a reused connection), and its
-animation frame paints with an inventory view on screen (the agent list, or
-the agent rail beside a terminal) while the app is unlocked, all within
-**60 seconds** of the epoch start. A pending snapshot stops counting if,
-before that frame, the connection closes, the transport falls back to
-connecting, a new path is dialled, the transport reports a different path (a
-direct WebRTC promotion, or a fallback to the gateway), or the relay reports
-its inventory not ready or stale; a later fresh snapshot on the current path
-is then needed. Fresh inventory published while no inventory view is mounted
-(for example with Settings open) completes at the first frame after one
-mounts, and inventory painted behind the device lock completes at the first
-frame after unlocking. Callbacks that arrive after their connection ended,
+animation frame shows a **visible** inventory view (the agent list, or the
+agent rail beside a terminal) while the app is unlocked, all within
+**60 seconds** of the epoch start.
+
+Each fresh snapshot is its own pending object, which its frame callback (and
+any later retry) holds. A callback acts only if its object is still the
+relay's current pending snapshot; otherwise it returns without changing
+anything, so an obsolete frame can never complete, alter or erase a newer
+snapshot or a finished sample. The pending snapshot is withdrawn at once,
+together with its `inventory` and `rendered` offsets (never other phases,
+and never from a finished sample), when the connection is replaced or ends,
+a new path is dialled, the transport falls back to connecting, it reports a
+different path (a direct WebRTC promotion, or a fallback to the gateway), or
+the relay reports its inventory not ready or stale. A later fresh snapshot
+on the current path is then accepted at once, even while the obsolete frame
+is still queued. A newer fresh snapshot that arrives before the frame
+replaces the pending one, because that frame shows the newer one; the
+`inventory` offset is the arrival of the snapshot actually shown. Pending
+snapshots are detached when a new wake replaces the epoch, when retention
+prunes it, and on Clear, opt-out and teardown; the replaced wake keeps what
+it had recorded.
+
+A view counts only if it is shown: the agent list and the rail each
+register a check that their root element is connected, laid out with a
+non-zero size, CSS-visible and on a visible page, evaluated at the frame
+itself, after Svelte has committed the DOM. An empty authoritative inventory
+still counts, since the list is shown. The rail is hidden by CSS below 900 px
+(a phone terminal), so it registers only while `(min-width: 900px)` matches,
+follows that media query's change events, and is still checked at the frame,
+so a resize just before the frame cannot pass. Fresh inventory published
+while no visible view exists (Settings open, or a phone terminal) waits, and
+the same snapshot is retried at the first frame after a visible view
+registers, if it is still current; inventory painted behind the device lock
+completes at the first frame after unlocking. No polling or timer is
+involved. Callbacks that arrive after their connection ended,
 such as a handshake promise that settles after the socket closed, are
 ignored; the encrypted transport also neither sends nor reports a client
 hello once its attempt has closed. A fresh snapshot after the deadline is
@@ -76,7 +100,10 @@ Other outcomes are `auth-rejected`, `unlock-cancelled`, `hidden` and
 **Lifecycle category** per sample: `cold-launch` or `discarded`
 (`document.wasDiscarded`) for a cold start, `bfcache` for a persisted
 `pageshow`, otherwise `reconnect` when a dial happened (or was needed) in the
-epoch and `warm` when the existing connection answered the probe.
+epoch and `warm` when the existing connection answered the probe. A
+persisted `pageshow` that joins an epoch opened by `resume` or `visible`
+(restores can report them in either order) turns that epoch and its samples
+into `bfcache`, keeping the original start and deadline.
 
 ### Phases
 
@@ -201,7 +228,7 @@ shows the card; nothing runs in the background otherwise.
 | `frontend/src/lib/resume-summary.ts` | new (not in the plan): redacted aggregates and labels, loaded only with the Settings card |
 | `frontend/src/components/ResumeTimingSettings.svelte` | new (not in the plan): the Settings card, a lazy chunk |
 | `frontend/src/components/SettingsView.svelte` | lazily loads the card |
-| `frontend/src/components/AgentList.svelte`, `AgentRail.svelte` | not in the plan: register that an inventory view is mounted, so a sample completes only in a frame that renders inventory |
+| `frontend/src/components/AgentList.svelte`, `AgentRail.svelte` | not in the plan: register a visibility check of the inventory view's root (the rail only while `(min-width: 900px)` matches), so a sample completes only in a frame that shows inventory |
 | `frontend/tests/unit/resume-timing-settings.test.ts` | addition: the card's export and deadline/retention refresh with an advanced clock |
 | `frontend/src/lib/security.ts`, `store.ts` | passive hooks only (wake, lock state, enrolment, attempt, phase, connecting, retirement and inventory observations); control flow and every existing call are unchanged |
 | `frontend/src/lib/transports/types.ts`, `encrypted.ts`, `websocket.ts`, `gateway.ts`, `webrtc.ts`, `path-manager.ts`, `index.ts` | an optional `observe` callback in the existing `TransportAuthentication` options, including a `failed` observation when a gateway or legacy path closes; observer exceptions are swallowed |
@@ -250,7 +277,20 @@ Paths (`--transports`): `wss-cloudflare` and `wss-tailscale` (direct WSS
 whose authenticated descriptor says Cloudflare or managed Tailscale Serve),
 `gateway-relayed` (direct upgrade disabled) and `gateway-direct` (the measured
 wake starts once the direct WebRTC path has been promoted; a run that never
-promotes is a `warmup-failed` attempt). Every workload and path can be
+promotes is a `warmup-failed` attempt). For `gateway-direct` epochs the runner
+also keeps the **direct upgrade** as a separate, bounded observation: after
+the primary outcome is recorded it waits until the direct path is promoted,
+or 30 s after the same wake, and stores `direct_upgrade` with the outcome
+(`promoted`, `stayed-direct` when the earlier direct session survived the
+wake, `not-promoted`, `not-attempted`, or `unobserved` if the page could no
+longer be read), the number of direct attempts and
+refused offers, and the relay-side offsets from the wake of the first offer,
+answer, DataChannel open, direct E2EE authentication and promotion. The
+primary 60-second deadline and outcome are unaffected, and the analyzer
+reports these as supplementary descriptive counts and promotion times only.
+Other paths record `not-applicable`. The synthetic DataChannel exercises the
+app's signalling, E2EE and promotion, not real ICE, NAT or radio behaviour.
+Every workload and path can be
 selected for a preregistered design with `--scenarios` and `--transports`.
 The default pilot stays bounded to `warm-short`, `hidden-5m`,
 `blackhole-restore` and `discard` on `wss-cloudflare` and `gateway-relayed`
@@ -357,7 +397,11 @@ stratum has `n` measured, non-excluded epochs.
 - **Paired** (confirmatory): reliability uses Newcombe's hybrid score
   interval for the paired difference in non-completion rates (method 10);
   latency uses a paired percentile bootstrap of the all-attempt quantile ratio
-  candidate/baseline, resampling independent pairs or declared blocks. A
+  candidate/baseline, resampling matched pairs. The matched pair is the only
+  independent unit (each pair runs in fresh browser contexts with its own
+  preregistered seed); evidence that labels records with a `block` or
+  `cluster`, or a registration that declares blocks or clusters, is
+  `invalid`, because neither interval would be valid for clustered data. A
   censored candidate quantile is only known to be at least the 60-second
   deadline: +∞ for the upper bound, and the deadline itself for the lower
   bound. A censored baseline quantile is unknown (+∞ for the upper bound, 0
@@ -365,10 +409,11 @@ stratum has `n` measured, non-excluded epochs.
   comparison is never identifiable and never passes, and it is rejected only
   when even the censoring-aware lower bound exceeds the threshold (for
   example a candidate p95 of at least 60 s against a 1 s baseline, but not
-  against a 59 s baseline, where a true 61 s would still be a ratio of 1.03). Every bound is one-sided at
-  95% with Bonferroni family-wise control over every preregistered acceptance
-  comparison (2 per targeted stratum, 3 per regression control), and the
-  adjusted level, method and counts are retained in the output.
+  against a 59 s baseline, where a true 61 s would still be a ratio of 1.03).
+  Every bound is one-sided at 95% with Bonferroni family-wise control over
+  every preregistered acceptance comparison (2 per targeted stratum, 3 per
+  regression control), and the adjusted level, method and counts are
+  retained in the output.
 
 B3 decision rules, applied per stratum: the upper bound for
 `candidate − baseline` non-completion must be at most +1 percentage point;

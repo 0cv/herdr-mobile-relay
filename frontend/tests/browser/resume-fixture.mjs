@@ -51,6 +51,9 @@
  *   abandonFirst?: boolean;
  *   burst?: boolean;
  *   holdPaintUntilDirect?: boolean;
+ *   delayRefreshMs?: number;
+ *   directRefuse?: boolean;
+ *   directDelayMs?: number;
  * }} FixtureFaults
  *   Conditions applied after the first wake: `workspaceOnly` answers a
  *   refresh without an agents snapshot, `stale` marks the post-wake
@@ -62,6 +65,10 @@
  *   render-to-paint window: the endpoint's paint check for a qualifying card
  *   waits until a direct WebRTC session has been selected (at most 10 s),
  *   so a direct promotion deterministically lands between render and paint.
+ *   `delayRefreshMs` answers each post-wake refresh that much later (keep it
+ *   under the app's 2 s probe timeout). `directRefuse` closes every post-wake
+ *   direct offer (a failed upgrade); `directDelayMs` connects post-wake
+ *   direct attempts that much later (a delayed upgrade).
  */
 
 /**
@@ -208,14 +215,27 @@ export function resumeFixtureInit(config) {
      * @type {RelaySession[]}
      */
     selections: [],
+    /**
+     * Relay-side direct-upgrade events: peer connection created, offer
+     * received, offer refused, answer sent, DataChannel open, direct session
+     * authenticated, and direct session first used (promoted).
+     *
+     * @type {Array<{ kind: string; at: number; epoch: number }>}
+     */
+    directEvents: [],
   };
   let visibility = 'visible';
+  /** @param {string} kind */
+  function noteDirect(kind) {
+    state.directEvents.push({ kind, at: performance.now(), epoch: state.epoch });
+  }
   /** @type {Set<() => void>} */
   const selectionWaiters = new Set();
   /** @param {RelaySession} session */
   function select(session) {
     state.selections = state.selections.filter((entry) => entry !== session && entry.active());
     state.selections.push(session);
+    if (session.path === 'webrtc') noteDirect('promoted');
     for (const waiter of [...selectionWaiters]) waiter();
   }
   /**
@@ -529,19 +549,30 @@ export function resumeFixtureInit(config) {
           locale: 'en',
         });
         this.ready = true;
-        if (this.path === 'webrtc') state.directHandshakes += 1;
-        else state.handshakes += 1;
+        if (this.path === 'webrtc') {
+          state.directHandshakes += 1;
+          noteDirect('authenticated');
+        } else state.handshakes += 1;
         await this.snapshot(true);
         return;
       }
       if (message.type === 'refresh_agents') {
         state.refreshes += 1;
+        const hold = state.epoch > 1 ? Number(state.faults.delayRefreshMs) || 0 : 0;
+        if (hold > 0) await new Promise((resolve) => setTimeout(resolve, hold));
         await this.snapshot(false);
         return;
       }
       if (message.type === 'webrtc_offer' && this.path === 'gateway' && config.direct) {
+        noteDirect('offer');
+        if (state.epoch > 1 && state.faults.directRefuse) {
+          noteDirect('refused');
+          await this.send({ type: 'webrtc_closed', request_id: message.request_id, reason: 'refused by the fixture' });
+          return;
+        }
         state.directRelay = this.relay;
         await this.send({ type: 'webrtc_answer', request_id: message.request_id, sdp: 'v=0 fixture-answer' });
+        noteDirect('answer');
       }
     }
 
@@ -894,6 +925,7 @@ export function resumeFixtureInit(config) {
           this.onclose?.(new Event('close'));
         }, 300),
       );
+      noteDirect('open');
       this.onopen?.(new Event('open'));
     }
 
@@ -942,6 +974,7 @@ export function resumeFixtureInit(config) {
       /** @type {FixtureDataChannel[]} */
       this.channels = [];
       this.delay = latency();
+      noteDirect('peer');
     }
 
     createDataChannel() {
@@ -963,12 +996,13 @@ export function resumeFixtureInit(config) {
     async setRemoteDescription(description) {
       this.remoteDescription = description;
       const relay = state.directRelay;
+      const extra = state.epoch > 1 ? Number(state.faults.directDelayMs) || 0 : 0;
       setTimeout(() => {
         if (this.connectionState === 'closed' || !relay) return;
         this.connectionState = 'connected';
         this.onconnectionstatechange?.(new Event('connectionstatechange'));
         for (const channel of this.channels) channel.start(relay);
-      }, this.delay);
+      }, this.delay + extra);
     }
 
     async addIceCandidate() {}
@@ -1264,6 +1298,34 @@ export function resumeFixtureInit(config) {
     /** @param {number} slot */
     currentPath(slot) {
       return currentSession(slot)?.path ?? null;
+    },
+    /**
+     * The direct-upgrade timeline of the current epoch, in ms from its wake:
+     * the first of each relay-side event, the number of direct attempts
+     * (peer connections) and refusals, and whether the app is still on a
+     * direct session it promoted before the wake. Numbers only.
+     *
+     * @param {number} slot
+     */
+    directTimeline(slot) {
+      const events = state.directEvents.filter((event) => event.epoch === state.epoch && event.at >= state.wakeAt);
+      /** @param {string} kind */
+      const first = (kind) => {
+        const event = events.find((entry) => entry.kind === kind);
+        return event ? Math.round(event.at - state.wakeAt) : null;
+      };
+      /** @param {string} kind */
+      const total = (kind) => events.filter((entry) => entry.kind === kind).length;
+      return {
+        attempts: total('peer'),
+        refused: total('refused'),
+        offer_ms: first('offer'),
+        answer_ms: first('answer'),
+        open_ms: first('open'),
+        authenticated_ms: first('authenticated'),
+        promoted_ms: first('promoted'),
+        stayed_direct: total('peer') === 0 && currentSession(slot)?.path === 'webrtc',
+      };
     },
     awaitFresh,
     measure,

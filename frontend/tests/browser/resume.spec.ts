@@ -420,9 +420,203 @@ test.describe('benchmark runner workloads', () => {
           expect(record.handshakes).toBeGreaterThanOrEqual(1);
         }
         if (scenario === 'network-change') expect(record.time_to_fresh_ms).toBeGreaterThanOrEqual(1_500);
+        const upgrade = record.direct_upgrade as Record<string, any>;
+        if (transport !== 'gateway-direct') {
+          expect(upgrade).toEqual({ outcome: 'not-applicable' });
+        } else if (SCENARIOS[scenario].connection === 'kept') {
+          // The promoted direct session survived the wake.
+          expect(upgrade).toMatchObject({ outcome: 'stayed-direct', attempts: 0, promoted_ms: null });
+        } else {
+          // A new direct session was negotiated after the reconnect.
+          expect(upgrade).toMatchObject({ outcome: 'promoted', window_ms: 30_000, refused: 0 });
+          expect(upgrade.attempts).toBeGreaterThanOrEqual(1);
+          const steps = [upgrade.offer_ms, upgrade.answer_ms, upgrade.open_ms, upgrade.authenticated_ms, upgrade.promoted_ms];
+          for (const step of steps) expect(typeof step).toBe('number');
+          expect([...steps].sort((left, right) => left - right)).toEqual(steps);
+          expect(upgrade.promoted_ms).toBeLessThanOrEqual(30_000);
+        }
       });
     }
   }
+});
+
+test.describe('benchmark runner direct upgrade outcomes', () => {
+  const stratum = (browserName: string) => ({
+    id: `${browserName}/gateway-direct/hidden-5m`,
+    browser: browserName,
+    device: browserName === 'webkit' ? 'iPhone 15' : 'Pixel 7',
+    transport: 'gateway-direct',
+    scenario: 'hidden-5m',
+  });
+
+  test('reports a delayed upgrade separately from the primary completion', async ({ browser, browserName, baseURL }) => {
+    test.setTimeout(90_000);
+    const run = stratum(browserName);
+    const record = await runEpoch(browser, devices, {
+      origin: String(baseURL), stratum: run, seed: epochSeed(20_261_003, run.id, 0), faults: { directDelayMs: 3_000 },
+    });
+    expect(record).toMatchObject({ harness_invalid: null, outcome: 'fresh' });
+    const upgrade = record.direct_upgrade as Record<string, number | string | null>;
+    expect(upgrade).toMatchObject({ outcome: 'promoted', refused: 0 });
+    expect(upgrade.promoted_ms).toBeGreaterThanOrEqual(3_000);
+    // The relayed path served fresh agents first; the primary time is not the upgrade's.
+    expect(record.time_to_fresh_ms).toBeLessThan(3_000);
+    expect(record.time_to_fresh_ms).toBeLessThan(Number(upgrade.promoted_ms));
+  });
+
+  test('reports a refused upgrade as not promoted while the primary resume completes', async ({ browser, browserName, baseURL }) => {
+    test.setTimeout(90_000);
+    const run = stratum(browserName);
+    const record = await runEpoch(browser, devices, {
+      origin: String(baseURL), stratum: run, seed: epochSeed(20_261_004, run.id, 0), faults: { directRefuse: true },
+    });
+    expect(record).toMatchObject({ harness_invalid: null, outcome: 'fresh' });
+    expect(record.time_to_fresh_ms).toBeLessThan(5_000);
+    const upgrade = record.direct_upgrade as Record<string, number | string | null>;
+    expect(upgrade).toMatchObject({ outcome: 'not-promoted', promoted_ms: null, open_ms: null, window_ms: 30_000 });
+    expect(upgrade.attempts).toBeGreaterThanOrEqual(1);
+    expect(upgrade.refused).toBeGreaterThanOrEqual(1);
+    // An attempt may still be negotiating when the window closes.
+    expect(upgrade.refused).toBeLessThanOrEqual(Number(upgrade.attempts));
+  });
+});
+
+/** Counts active change listeners on the agent rail's wide-screen media query. */
+async function trackRailMedia(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const native = window.matchMedia.bind(window);
+    let active = 0;
+    Object.defineProperty(window, '__railMediaListeners', { configurable: true, get: () => active });
+    window.matchMedia = (query: string) => {
+      const list = native(query);
+      if (query !== '(min-width: 900px)') return list;
+      const add = list.addEventListener.bind(list);
+      const remove = list.removeEventListener.bind(list);
+      const listeners = new Set<unknown>();
+      list.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions) => {
+        if (type === 'change' && !listeners.has(listener)) {
+          listeners.add(listener);
+          active += 1;
+        }
+        add(type, listener, options);
+      }) as typeof list.addEventListener;
+      list.removeEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: EventListenerOptions) => {
+        if (type === 'change' && listeners.delete(listener)) active -= 1;
+        remove(type, listener, options);
+      }) as typeof list.removeEventListener;
+      return list;
+    };
+  });
+}
+
+async function railListeners(page: Page): Promise<number> {
+  return page.evaluate(() => (window as any).__railMediaListeners as number);
+}
+
+async function refreshes(page: Page): Promise<number> {
+  return ((await fixture(page, 'stats')) as { refreshes: number }).refreshes;
+}
+
+async function openTerminal(page: Page): Promise<Locator> {
+  await page.locator('article.agent-card .agent-open').first().click();
+  const rail = page.locator('aside.agent-rail');
+  await expect(rail).toHaveCount(1);
+  return rail;
+}
+
+/** Settings, then Back to the terminal, then Back to the agent list. */
+async function backToAgents(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.locator('aside.agent-rail')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('main', { name: 'Agents' })).toBeVisible();
+}
+
+test.describe('in-app freshness needs a visible inventory view', () => {
+  test('does not count inventory behind a phone terminal whose agent rail is hidden', async ({ page }) => {
+    await trackRailMedia(page);
+    const booted = await boot(page, { relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })], seed: 24 });
+    await awaitFresh(page, [1]);
+    await quiesce(page);
+    const rail = await openTerminal(page);
+    // Mounted beside the terminal, but CSS-hidden at phone width.
+    await expect(rail).toBeHidden();
+    expect(await rail.evaluate((element) => getComputedStyle(element).display)).toBe('none');
+    expect(await railListeners(page)).toBe(1);
+    const asked = await refreshes(page);
+    await fixture(page, 'hide');
+    await fixture(page, 'show');
+    await expect.poll(() => refreshes(page)).toBeGreaterThan(asked);
+    await page.waitForTimeout(500);
+    const pending = await exportSummary(await openResumeTiming(page));
+    expect(group(pending.summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 1, fresh_on_time: 0 });
+    expect(group(pending.summary, 'wss/cloudflare', 'warm').phase_p50_ms).not.toHaveProperty('rendered');
+
+    // The agent list's first visible frame completes it, inside the deadline.
+    await backToAgents(page);
+    expect(await railListeners(page)).toBe(0);
+    await page.waitForTimeout(250);
+    const card = await openResumeTiming(page);
+    const shown = await exportSummary(card);
+    expect(group(shown.summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 0, fresh_on_time: 1 });
+    await expectNoSensitiveMarkers(booted, card, shown.text);
+  });
+
+  test('counts inventory shown by a visible desktop agent rail beside the terminal', async ({ page }) => {
+    await page.setViewportSize({ width: 1_200, height: 900 });
+    await trackRailMedia(page);
+    const booted = await boot(page, { relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })], seed: 25 });
+    await awaitFresh(page, [1]);
+    await quiesce(page);
+    const rail = await openTerminal(page);
+    await expect(rail).toBeVisible();
+    expect(await railListeners(page)).toBe(1);
+    const asked = await refreshes(page);
+    await fixture(page, 'hide');
+    await fixture(page, 'show');
+    await expect.poll(() => refreshes(page)).toBeGreaterThan(asked);
+    await page.waitForTimeout(500);
+    // Settings shows no inventory: completion must already have happened on the rail.
+    const card = await openResumeTiming(page);
+    const shown = await exportSummary(card);
+    expect(group(shown.summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 0, fresh_on_time: 1 });
+    expect(await railListeners(page)).toBe(0);
+    await expectNoSensitiveMarkers(booted, card, shown.text);
+  });
+
+  test('does not count a desktop rail hidden by a resize before the fresh frame', async ({ page }) => {
+    await page.setViewportSize({ width: 1_200, height: 900 });
+    await trackRailMedia(page);
+    const booted = await boot(page, {
+      relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })],
+      // The post-wake answer is held well inside the app's 2 s probe timeout.
+      faults: { delayRefreshMs: 1_200 },
+      seed: 26,
+    });
+    await awaitFresh(page, [1]);
+    await quiesce(page);
+    const rail = await openTerminal(page);
+    await expect(rail).toBeVisible();
+    const asked = await refreshes(page);
+    await fixture(page, 'hide');
+    await fixture(page, 'show');
+    // The window narrows before the fresh snapshot arrives and paints.
+    await page.setViewportSize({ width: 412, height: 839 });
+    await expect(rail).toBeHidden();
+    expect(await railListeners(page)).toBe(1);
+    await expect.poll(() => refreshes(page)).toBeGreaterThan(asked);
+    await page.waitForTimeout(1_700);
+    const pending = await exportSummary(await openResumeTiming(page));
+    expect(group(pending.summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 1, fresh_on_time: 0 });
+
+    await backToAgents(page);
+    expect(await railListeners(page)).toBe(0);
+    await page.waitForTimeout(250);
+    const card = await openResumeTiming(page);
+    const shown = await exportSummary(card);
+    expect(group(shown.summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 0, fresh_on_time: 1 });
+    await expectNoSensitiveMarkers(booted, card, shown.text);
+  });
 });
 
 test('stops and clears measurement when the user opts out', async ({ page }) => {

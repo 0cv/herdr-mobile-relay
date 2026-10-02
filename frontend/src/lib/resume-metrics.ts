@@ -14,10 +14,10 @@ import type { TransportKind, TransportPhase } from './transports/types';
  * attempts stay inside its elapsed time instead of becoming separate samples.
  * A sample succeeds only when authoritative, ready, non-stale inventory
  * requested after the wake arrives on the current connection generation and
- * path, is still authoritative on that path when its frame paints, and that
- * frame paints with an inventory view on screen while the app is unlocked,
- * before the fixed deadline. A wake that never gets that far ends as a
- * censored non-completion.
+ * path, is still the current authoritative snapshot on that path when its
+ * frame paints, and that frame shows a visible inventory view while the app
+ * is unlocked, before the fixed deadline. A wake that never gets that far
+ * ends as a censored non-completion.
  */
 
 /** Fixed completion deadline per epoch, from its first observable event. */
@@ -137,10 +137,28 @@ export interface ResumeParticipant {
 }
 
 /**
+ * One fresh snapshot waiting for the frame that shows it. Each snapshot is
+ * its own object: a frame (or a retry after unlocking or a view appearing)
+ * acts only if its object is still the track's pending snapshot, so an
+ * obsolete callback can never complete, alter or erase a newer one. This is
+ * internal bookkeeping and never part of a sample or the export.
+ */
+interface PendingSnapshot {
+  epoch: ResumeEpoch;
+  sample: ResumeSample;
+  generation: number;
+  validity: number;
+  path: TransportKind | '';
+  /** Its frame ran with nothing visible showing it, or behind the lock. */
+  waiting: boolean;
+}
+
+/**
  * Live connection identity for one relay. It is not a measurement: it lets a
  * later sample attribute callbacks to the right connection after the ring is
  * cleared or measurement is switched back on. The measurement references
- * (epoch, sample, record) are dropped whenever their epoch leaves the ring.
+ * (epoch, sample, record, pending) are dropped whenever their epoch leaves
+ * the ring.
  */
 interface Track {
   generation: number;
@@ -162,8 +180,19 @@ interface Track {
   epoch: ResumeEpoch | null;
   sample: ResumeSample | null;
   record: PathAttemptRecord | null;
-  /** Fresh inventory not yet seen: no inventory view, or behind the lock. */
-  awaiting: { generation: number; validity: number } | null;
+  /** The current fresh snapshot not yet seen, if any. */
+  pending: PendingSnapshot | null;
+}
+
+/**
+ * Whether an inventory view's root element is laid out and shown on a visible
+ * page. Inventory views register it with `presentInventory`, and it is
+ * evaluated at the frame that would complete a sample.
+ */
+export function shownOnScreen(element?: Element | null): boolean {
+  if (!element?.isConnected || document.visibilityState === 'hidden') return false;
+  const { width, height } = element.getBoundingClientRect();
+  return width > 0 && height > 0 && getComputedStyle(element).visibility === 'visible';
 }
 
 const INGRESS_PATHS = new Map<string, ResumePath>([
@@ -212,8 +241,8 @@ export class ResumeMetrics {
   private hiddenAt: number | null = null;
   private coldPending = true;
   private locked = false;
-  /** Mounted views that render the agent inventory (list or rail). */
-  private views = 0;
+  /** Visibility checks of the mounted views that render the agent inventory. */
+  private views = new Set<() => boolean>();
   private revisionValue = 0;
 
   constructor(clock: ResumeClock = browserClock(), enabled = storedEnabled()) {
@@ -251,9 +280,18 @@ export class ResumeMetrics {
   wake(signal: WakeSignal): void {
     if (!this.enabled) return;
     const epoch = this.collecting('wake');
-    if (epoch) this.signal(epoch, signal);
-    // Focus fires on every window switch; it only ever joins a wake.
-    else if (signal !== 'focus') this.open(signal === 'cold-start' ? 'visible' : signal, signal);
+    if (!epoch) {
+      // Focus fires on every window switch; it only ever joins a wake.
+      if (signal !== 'focus') this.open(signal === 'cold-start' ? 'visible' : signal, signal);
+      return;
+    }
+    this.signal(epoch, signal);
+    // A persisted pageshow can follow the resume or visible event of the same
+    // restore: the wake keeps its start and deadline but is a bfcache restore.
+    if (signal === 'pageshow' && !epoch.lifecycle) {
+      epoch.lifecycle = 'bfcache';
+      for (const sample of epoch.samples) sample.lifecycle = 'bfcache';
+    }
   }
 
   /**
@@ -307,31 +345,60 @@ export class ResumeMetrics {
 
   /**
    * Registers a mounted view that renders the agent inventory (the agent
-   * list, or the rail beside a terminal). Fresh inventory completes a sample
-   * only in a frame painted while one is mounted; one published while, say,
-   * Settings is open completes at the first frame after the view returns.
-   * Returns the unregister function.
+   * list, or the rail beside a terminal) with a check of whether it is shown.
+   * Fresh inventory completes a sample only in a frame in which a registered
+   * view is visible; one published while, say, Settings is open or a phone
+   * terminal hides the rail completes at the first frame after a visible view
+   * is registered. Returns the unregister function.
    */
-  presentInventory(): () => void {
-    this.views += 1;
+  presentInventory(visible: () => boolean = () => true): () => void {
+    const view = () => visible();
+    this.views.add(view);
     this.release();
-    let mounted = true;
     return () => {
-      if (!mounted) return;
-      mounted = false;
-      this.views = Math.max(0, this.views - 1);
+      this.views.delete(view);
     };
   }
 
-  /** Retries completions that were waiting to be seen. */
+  /** Retries, once each, the exact snapshots that were waiting to be seen. */
   private release(): void {
     for (const track of this.tracks.values()) {
-      const awaiting = track.awaiting;
-      const { epoch, sample } = track;
-      track.awaiting = null;
-      if (!awaiting || !epoch || !sample) continue;
-      this.clock.frame(() => this.settle(track, awaiting.generation, awaiting.validity, epoch, sample));
+      const pending = track.pending;
+      if (!pending?.waiting) continue;
+      pending.waiting = false;
+      this.clock.frame(() => this.settle(track, pending));
     }
+  }
+
+  private visibleView(): boolean {
+    for (const view of this.views) {
+      try {
+        if (view()) return true;
+      } catch {
+        // A view whose check fails is not shown.
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Withdraws the pending snapshot. Its inventory and rendered offsets go
+   * with it at once unless the sample already finished; nothing else of the
+   * sample is touched.
+   */
+  private withdrawPending(track: Track): void {
+    const pending = track.pending;
+    if (!pending) return;
+    track.pending = null;
+    if (pending.sample.outcome) return;
+    delete pending.sample.phases.inventory;
+    delete pending.sample.phases.rendered;
+  }
+
+  /** Whatever was pending can no longer complete: a new path, generation or readiness. */
+  private invalidate(track: Track): void {
+    track.validity += 1;
+    this.withdrawPending(track);
   }
 
   /**
@@ -340,6 +407,7 @@ export class ResumeMetrics {
    */
   attempt(relayId: string, hybrid: boolean): number {
     const track = this.track(relayId);
+    this.invalidate(track);
     const epoch = this.enabled ? this.current() : null;
     const sample = epoch ? this.sample(track) : null;
     if (epoch && sample && !sample.outcome) {
@@ -360,10 +428,8 @@ export class ResumeMetrics {
     track.authenticated = false;
     track.ingress = '';
     track.path = '';
-    track.validity += 1;
     track.carried = false;
     track.record = null;
-    track.awaiting = null;
     return track.generation;
   }
 
@@ -390,7 +456,7 @@ export class ResumeMetrics {
     if (phase === 'dial') {
       track.timedOut = false;
       track.authenticated = false;
-      track.validity += 1;
+      this.invalidate(track);
     }
     if (phase === 'timeout') track.timedOut = true;
     if (phase === 'authenticated') track.authenticated = true;
@@ -428,7 +494,7 @@ export class ResumeMetrics {
     if (!track) return;
     // A direct promotion or a fallback changes the path frames arrive on: a
     // snapshot from the previous path no longer completes the sample.
-    if (track.path !== path) track.validity += 1;
+    if (track.path !== path) this.invalidate(track);
     track.path = path;
     track.live = true;
     if (!this.enabled || path === 'webrtc' || !track.record || track.record.end) return;
@@ -442,7 +508,7 @@ export class ResumeMetrics {
     const track = this.tracked(relayId, generation);
     if (!track || !track.live) return;
     track.live = false;
-    track.validity += 1;
+    this.invalidate(track);
   }
 
   /**
@@ -479,14 +545,16 @@ export class ResumeMetrics {
    * Inventory was published: an agents snapshot, or the relay's readiness.
    * Only a ready, non-stale snapshot on the current generation and live
    * path, requested after the wake, completes the sample, and only once its
-   * frame paints with an inventory view on screen while the app is unlocked.
-   * A non-authoritative report (not ready, stale) withdraws any pending one.
+   * frame shows it in a visible inventory view while the app is unlocked. A
+   * newer fresh snapshot replaces one still waiting for its frame, because
+   * that frame shows the newer one. A non-authoritative report (not ready,
+   * stale) withdraws any pending one.
    */
   inventory(relayId: string, generation: number, fresh: boolean): void {
     const track = this.tracked(relayId, generation);
     if (!track) return;
     if (!fresh) {
-      track.validity += 1;
+      this.invalidate(track);
       return;
     }
     if (!track.live || !this.enabled) return;
@@ -498,12 +566,15 @@ export class ResumeMetrics {
       if (sample.outcome === 'deadline' && sample.lateFreshAt === undefined) sample.lateFreshAt = this.at(epoch);
       return;
     }
-    if (sample.phases.inventory !== undefined) return;
     if (!sample.attempts && !track.carried && sample.phases.probe === undefined) return;
+    this.withdrawPending(track);
+    const pending: PendingSnapshot = {
+      epoch, sample, generation, validity: track.validity, path: track.path, waiting: false,
+    };
+    track.pending = pending;
     sample.phases.inventory = this.at(epoch);
     sample.path = this.label(track);
-    const validity = track.validity;
-    this.clock.frame(() => this.settle(track, generation, validity, epoch, sample));
+    this.clock.frame(() => this.settle(track, pending));
   }
 
   end(relayId: string, generation: number, why: AttemptEnd): void {
@@ -511,8 +582,7 @@ export class ResumeMetrics {
     if (!track || generation <= 0 || track.generation !== generation || track.ended) return;
     track.ended = true;
     track.live = false;
-    track.validity += 1;
-    track.awaiting = null;
+    this.invalidate(track);
     if (!this.enabled) return;
     const sample = this.existing(track);
     const epoch = this.last();
@@ -537,8 +607,7 @@ export class ResumeMetrics {
     if (!track) return;
     track.ended = true;
     track.live = false;
-    track.validity += 1;
-    track.awaiting = null;
+    this.invalidate(track);
     const sample = this.existing(track);
     const epoch = this.last();
     if (this.enabled && sample && epoch && !sample.outcome) this.finish(epoch, sample, 'removed', null);
@@ -565,6 +634,7 @@ export class ResumeMetrics {
   /** App teardown: forgets measurements and connection identity alike. */
   reset(): void {
     this.epochs = [];
+    for (const track of this.tracks.values()) this.detach(track);
     this.tracks.clear();
     this.hiddenAt = null;
     this.locked = false;
@@ -609,7 +679,7 @@ export class ResumeMetrics {
         epoch: null,
         sample: null,
         record: null,
-        awaiting: null,
+        pending: null,
       };
       this.tracks.set(relayId, track);
     }
@@ -620,7 +690,7 @@ export class ResumeMetrics {
     track.epoch = null;
     track.sample = null;
     track.record = null;
-    track.awaiting = null;
+    track.pending = null;
     track.carried = false;
   }
 
@@ -658,6 +728,8 @@ export class ResumeMetrics {
   private open(trigger: WakeTrigger, first: string): void {
     const previous = this.last();
     if (previous && !previous.closed) this.close(previous, 'superseded');
+    // Snapshots of the replaced wake are detached, leaving its samples as recorded.
+    for (const track of this.tracks.values()) track.pending = null;
     const now = this.clock.now();
     const wall = this.clock.wall();
     const cold = this.coldPending;
@@ -709,34 +781,33 @@ export class ResumeMetrics {
   }
 
   /**
-   * The frame after fresh inventory was published. It completes the sample
-   * only if the connection generation and path that delivered it are still
-   * live and the snapshot is still authoritative; a connection or path
-   * retired, or inventory reported stale, before the paint cannot succeed,
-   * and a later fresh snapshot is needed. A frame with no inventory view
-   * mounted did not render it, and one behind the device lock was not seen:
-   * both wait for the first frame in which it is.
+   * The frame after a fresh snapshot was published, or a retry once a
+   * visible view appeared or the app unlocked. It acts only for the track's
+   * current pending snapshot: anything that retired its connection, path or
+   * readiness already withdrew it, and a newer snapshot replaced it, so an
+   * obsolete callback returns without touching anything. A frame with no
+   * visible inventory view did not show it, and one behind the device lock
+   * was not seen: both leave it waiting for the first frame in which it is.
    */
-  private settle(track: Track, generation: number, validity: number, epoch: ResumeEpoch, sample: ResumeSample): void {
-    if (track.sample !== sample) return;
+  private settle(track: Track, pending: PendingSnapshot): void {
+    if (track.pending !== pending) return;
+    const { epoch, sample } = pending;
+    if (track.sample !== sample || track.generation !== pending.generation || track.ended || !track.live
+      || track.validity !== pending.validity || track.path !== pending.path
+      || (sample.outcome && sample.outcome !== 'deadline')) {
+      this.withdrawPending(track);
+      return;
+    }
     const at = this.at(epoch);
-    if (track.generation !== generation || track.ended || !track.live || track.validity !== validity) {
-      if (!sample.outcome) {
-        delete sample.phases.inventory;
-        delete sample.phases.rendered;
-      }
+    const visible = this.visibleView();
+    if (visible && !sample.outcome) sample.phases.rendered ??= at;
+    if (!visible || this.locked) {
+      pending.waiting = true;
       return;
     }
-    if (sample.outcome) {
-      if (sample.outcome === 'deadline' && sample.lateFreshAt === undefined) sample.lateFreshAt = at;
-      return;
-    }
-    if (this.views) sample.phases.rendered ??= at;
-    if (!this.views || this.locked) {
-      track.awaiting = { generation, validity };
-      return;
-    }
-    if (at < RESUME_DEADLINE_MS) this.finish(epoch, sample, 'fresh', at);
+    track.pending = null;
+    if (sample.outcome) sample.lateFreshAt ??= at;
+    else if (at < RESUME_DEADLINE_MS) this.finish(epoch, sample, 'fresh', at);
     else {
       sample.lateFreshAt = at;
       this.finish(epoch, sample, 'deadline', null);
@@ -777,7 +848,7 @@ export class ResumeMetrics {
     track.epoch = epoch;
     track.sample = sample;
     track.record = null;
-    track.awaiting = null;
+    track.pending = null;
     track.carried = carried;
     epoch.samples.push(sample);
     return sample;

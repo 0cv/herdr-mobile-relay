@@ -17,7 +17,7 @@
     tabName,
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
-  import { resumeMetrics } from '$lib/resume-metrics';
+  import { resumeMetrics, shownOnScreen } from '$lib/resume-metrics';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
@@ -59,6 +59,7 @@
     ['blocked', 'Needs input', 'danger'],
   ] as const;
   let relativeNow = $state(Date.now());
+  let listRoot = $state<HTMLElement>();
   let movingTab = $state('');
   interface TabSlot {
     id: string;
@@ -440,8 +441,9 @@
 
   onMount(() => {
     const timer = setInterval(() => { relativeNow = Date.now(); }, 60_000);
-    // Local resume timing counts fresh inventory only once a view shows it.
-    const hide = resumeMetrics.presentInventory();
+    // Local resume timing counts fresh inventory only in a frame that shows
+    // this list on screen; an empty inventory counts as shown too.
+    const hide = resumeMetrics.presentInventory(() => shownOnScreen(listRoot));
     return () => {
       clearInterval(timer);
       hide();
@@ -649,7 +651,7 @@
   </div>
 {/snippet}
 
-<main class="agent-list" aria-label="Agents">
+<main bind:this={listRoot} class="agent-list" aria-label="Agents">
   {#each unavailableRelays as relay (relay.id)}
     {@const inventory = connections.get(relay.id)?.inventory}
     <section class="inventory-warning" role="status" aria-label={`${relay.label} agent inventory unavailable`}>

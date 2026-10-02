@@ -40,6 +40,12 @@ export const CONFIRMATORY_MIN_PAIRS = 400;
 const WARMUP_TIMEOUT_MS = 30_000;
 /** Idle time after the cold warm-up so no reply is still in flight at the wake. */
 export const IDLE_BEFORE_HIDE_MS = 500;
+/**
+ * The separate, bounded window in which a gateway-direct epoch's direct
+ * WebRTC upgrade is observed, from the same wake. It never changes the
+ * primary 60-second completion deadline or outcome.
+ */
+export const DIRECT_UPGRADE_WINDOW_MS = 30_000;
 const DEVICES = /** @type {const} */ ({ chromium: 'Pixel 7', webkit: 'iPhone 15' });
 
 /**
@@ -267,6 +273,7 @@ export function buildPreregistration(options) {
     order: options.design === 'paired' ? 'seeded independent random order per pair' : 'single variant',
     state_reset: 'fresh browser context, storage and synthetic relay for every run',
     idle_before_hide_ms: IDLE_BEFORE_HIDE_MS,
+    direct_upgrade_window_ms: DIRECT_UPGRADE_WINDOW_MS,
     hide_sequence: 'hide, then kill the socket (and blackhole new dials), then advance the frozen wall clock, then wait the real hidden time',
     scenarios: SCENARIOS,
     transports: TRANSPORTS,
@@ -283,8 +290,13 @@ export function buildPreregistration(options) {
     endpoints: {
       primary: 'on-time completion: the first frame that paints an agent card (not a workspace label) naming the active epoch\'s agents from a snapshot the relay sent with ready, non-stale inventory, on a session that is still the live authenticated path, with no unlock dialog covering it, within 60 s of the first visible event (navigation start after a discard)',
       time_to_fresh: 'all valid attempts; non-completions right-censored at 60 s with their reason',
-      supplementary: ['success-only p50/p95', 'dials, handshakes and bytes per epoch', 'hidden dials and bytes'],
-      not_measured: ['first-known render (no last-known view before B2)', 'direct WebRTC upgrade timings (synthetic DataChannel)', 'OS wake-to-JS, DNS, TCP, TLS'],
+      supplementary: [
+        'success-only p50/p95',
+        'dials, handshakes and bytes per epoch',
+        'hidden dials and bytes',
+        `direct WebRTC upgrade outcome and relay-side timeline within ${DIRECT_UPGRADE_WINDOW_MS / 1_000} s of the wake (gateway-direct strata; synthetic DataChannel, not real ICE), separate from the primary endpoint`,
+      ],
+      not_measured: ['first-known render (no last-known view before B2)', 'OS wake-to-JS, DNS, TCP, TLS', 'real ICE, radio or NAT behaviour'],
     },
     analysis: {
       method: options.design === 'pilot'
@@ -425,7 +437,8 @@ function delta(after, before) {
  *
  * @param {import('@playwright/test').Browser} browser
  * @param {Record<string, any>} devices
- * @param {{ origin: string; stratum: Record<string, any>; seed: number }} run
+ * @param {{ origin: string; stratum: Record<string, any>; seed: number; faults?: import('../tests/browser/resume-fixture.mjs').FixtureFaults }} run
+ *   `faults` is for the hosted browser suite only; preregistered runs never set it.
  */
 export async function runEpoch(browser, devices, run) {
   const { stratum, seed } = run;
@@ -439,7 +452,7 @@ export async function runEpoch(browser, devices, run) {
     harness_invalid: null,
     wake_document: spec.wake === 'reload' ? 'reloaded' : 'same',
     first_known_render_ms: null,
-    direct_upgrade: 'not-measured',
+    direct_upgrade: { outcome: 'not-applicable' },
   };
   /** @type {import('@playwright/test').BrowserContext | undefined} */
   let context;
@@ -467,6 +480,7 @@ export async function runEpoch(browser, devices, run) {
       connectionEvents: spec.wake === 'network-change',
       seed: schedule.fixtureSeed,
       latencyMs: /** @type {[number, number]} */ ([8, 30]),
+      faults: run.faults,
     });
     const response = await page.goto('/', { waitUntil: 'load', timeout: WARMUP_TIMEOUT_MS }).catch(() => null);
     if (!response || !response.ok()) {
@@ -537,6 +551,11 @@ export async function runEpoch(browser, devices, run) {
     } else {
       record.outcome = 'deadline';
     }
+    if (stratum.transport === 'gateway-direct') {
+      // Observed after the primary outcome is final; its failure never changes it.
+      record.direct_upgrade = await observeDirectUpgrade(page, result.wakeAt)
+        .catch(() => ({ outcome: 'unobserved', window_ms: DIRECT_UPGRADE_WINDOW_MS }));
+    }
   } catch (error) {
     const failed = failure();
     if (failed) record.outcome = failed;
@@ -549,6 +568,48 @@ export async function runEpoch(browser, devices, run) {
     await context.close().catch(() => {});
   }
   return record;
+}
+
+/**
+ * Waits, within the separate upgrade window from the wake, for the direct
+ * WebRTC path to be promoted, and records the relay-side timeline (numbers
+ * only). A wake that kept its earlier direct session is `stayed-direct`; one
+ * that never tried is `not-attempted`; tries without promotion inside the
+ * window are `not-promoted`. The caller records `unobserved` if the page
+ * could not be read.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {number} wakeAt
+ */
+export async function observeDirectUpgrade(page, wakeAt) {
+  const end = wakeAt + DIRECT_UPGRADE_WINDOW_MS;
+  await page.waitForFunction((limit) => {
+    const timeline = /** @type {any} */ (window).__resumeFixture.directTimeline(1);
+    return timeline.promoted_ms !== null || timeline.stayed_direct || performance.now() >= limit;
+  }, end, { polling: 100, timeout: DIRECT_UPGRADE_WINDOW_MS + 5_000 }).catch(() => {});
+  const timeline = /** @type {Record<string, unknown>} */ (await call(page, 'directTimeline', 1));
+  /** @param {string} key */
+  const number = (key) => {
+    const value = timeline[key];
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  };
+  const promotedAt = number('promoted_ms');
+  const promoted = promotedAt !== null && promotedAt <= DIRECT_UPGRADE_WINDOW_MS;
+  const attempts = number('attempts') ?? 0;
+  const outcome = promoted
+    ? 'promoted'
+    : timeline.stayed_direct === true ? 'stayed-direct' : attempts > 0 ? 'not-promoted' : 'not-attempted';
+  return {
+    outcome,
+    window_ms: DIRECT_UPGRADE_WINDOW_MS,
+    attempts,
+    refused: number('refused') ?? 0,
+    offer_ms: number('offer_ms'),
+    answer_ms: number('answer_ms'),
+    open_ms: number('open_ms'),
+    authenticated_ms: number('authenticated_ms'),
+    promoted_ms: promoted ? promotedAt : null,
+  };
 }
 
 /**

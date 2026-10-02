@@ -5,11 +5,13 @@ import {
   epochSchedule,
   epochSeed,
   DEFAULT_PILOT_SCENARIOS,
+  DIRECT_UPGRADE_WINDOW_MS,
   DEFAULT_PILOT_TRANSPORTS,
   harnessErrorClass,
   HARNESS_INVALID_CRITERIA,
   IDLE_BEFORE_HIDE_MS,
   NON_COMPLETION_OUTCOMES,
+  observeDirectUpgrade,
   pairOrder,
   relayForTransport,
   SCENARIOS,
@@ -43,6 +45,7 @@ describe('resume benchmark runner preregistration', () => {
       sample_unit: 'attempted wake epoch',
       replacement_limit: 2,
       idle_before_hide_ms: IDLE_BEFORE_HIDE_MS,
+      direct_upgrade_window_ms: DIRECT_UPGRADE_WINDOW_MS,
     });
     expect(plan.hide_sequence).toMatch(/kill the socket .* then advance the frozen wall clock/);
     expect(plan.strata).toHaveLength(16);
@@ -68,6 +71,8 @@ describe('resume benchmark runner preregistration', () => {
     expect(plan.endpoints.primary).toMatch(/agent card .*not a workspace label.*ready, non-stale.*live authenticated path/);
     expect(plan.bounds).toMatchObject({ reliability_margin: 0.01, target_p95_ratio: 0.8, regression_ratio: 1.1, min_pairs: 400 });
     expect(plan.endpoints.not_measured).toEqual(expect.arrayContaining(['OS wake-to-JS, DNS, TCP, TLS']));
+    expect(plan.endpoints.not_measured.join(' ')).not.toMatch(/direct WebRTC upgrade/);
+    expect(plan.endpoints.supplementary.join(' ')).toMatch(/direct WebRTC upgrade outcome .* within 30 s of the wake .*separate from the primary endpoint/);
     expect(digest(plan)).toBe(digest(JSON.parse(JSON.stringify(plan))));
   });
 
@@ -177,6 +182,46 @@ describe('resume benchmark matched conditions', () => {
     expect(schedule).toMatchObject({ frozenMs: 0, restoreAfterMs: null });
     expect(schedule.hiddenMs).toBeGreaterThanOrEqual(200);
     expect(schedule.hiddenMs).toBeLessThanOrEqual(400);
+  });
+
+  it('classifies the separately observed direct upgrade inside its own window', async () => {
+    const timeline = (overrides: Record<string, unknown>) => ({
+      attempts: 1, refused: 0, offer_ms: 40, answer_ms: 60, open_ms: 120, authenticated_ms: 180, promoted_ms: 200,
+      stayed_direct: false, ...overrides,
+    });
+    const observe = async (value: Record<string, unknown>) => {
+      const waits: Array<{ limit: unknown; options: unknown }> = [];
+      const page = {
+        waitForFunction: async (_: unknown, limit: unknown, options: unknown) => { waits.push({ limit, options }); },
+        evaluate: async (_: unknown, argument: { name: string; value: unknown }) => {
+          expect(argument).toEqual({ name: 'directTimeline', value: 1 });
+          return value;
+        },
+      };
+      const result = await observeDirectUpgrade(page as never, 1_000);
+      expect(waits).toEqual([{ limit: 1_000 + DIRECT_UPGRADE_WINDOW_MS, options: { polling: 100, timeout: DIRECT_UPGRADE_WINDOW_MS + 5_000 } }]);
+      return result;
+    };
+    expect(DIRECT_UPGRADE_WINDOW_MS).toBe(30_000);
+    expect(await observe(timeline({}))).toEqual({
+      outcome: 'promoted', window_ms: 30_000, attempts: 1, refused: 0,
+      offer_ms: 40, answer_ms: 60, open_ms: 120, authenticated_ms: 180, promoted_ms: 200,
+    });
+    expect(await observe(timeline({ attempts: 3, refused: 3, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null })))
+      .toMatchObject({ outcome: 'not-promoted', attempts: 3, refused: 3, promoted_ms: null });
+    // A promotion after the window is not an in-window upgrade.
+    expect(await observe(timeline({ promoted_ms: 30_001 }))).toMatchObject({ outcome: 'not-promoted', promoted_ms: null });
+    expect(await observe(timeline({ attempts: 0, offer_ms: null, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null, stayed_direct: true })))
+      .toMatchObject({ outcome: 'stayed-direct', attempts: 0 });
+    expect(await observe(timeline({ attempts: 0, offer_ms: null, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null })))
+      .toMatchObject({ outcome: 'not-attempted' });
+    // Only numbers and fixed outcome names are retained.
+    const kept = await observe({ ...timeline({ offer_ms: 'wss://relay.example', answer_ms: -1 }), sdp: 'v=0 secret' });
+    expect(Object.keys(kept).sort()).toEqual([
+      'answer_ms', 'attempts', 'authenticated_ms', 'offer_ms', 'open_ms', 'outcome', 'promoted_ms', 'refused', 'window_ms',
+    ]);
+    expect(kept).toMatchObject({ outcome: 'promoted', offer_ms: null, answer_ms: null });
+    expect(JSON.stringify(kept)).not.toMatch(/wss:|v=0/);
   });
 
   it('parses runner arguments with the pilot defaults', () => {
