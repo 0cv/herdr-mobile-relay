@@ -338,6 +338,20 @@ replacement case (`burst`), and a direct promotion landing between render and
 paint (`holdPaintUntilDirect`, a test-only widening of that window that holds
 the paint check until a direct session is selected): the gateway's card is
 rejected as `not-current-path` and only the direct path's snapshot counts.
+Presentation is checked both before scheduling and at the completion frame:
+connected, non-zero layout, a visible page, and no `display:none`, hidden
+visibility, zero opacity or `content-visibility:hidden` on the card or its
+ancestors. The visible rectangle must intersect the viewport and clipping
+ancestors, with an exposed hit-tested portion of the card (not an opaque
+overlay). DOM presence and an accessible name alone are not a paint.
+Mutation, visibility, resize, scroll and completed CSS-transition/animation
+changes retry eligibility; a permanently hidden card creates no frame retry
+loop. A reveal counts only its later qualifying frame, retaining the original
+wake and fixed 60-second deadline. A queued frame from an abandoned epoch
+cannot count for a later one. Chromium and WebKit regressions cover these
+presentation traps, hiding between scheduling and paint, and a reveal after
+the deadline. Test styles are served from a synthetic same-origin URL,
+without relaxing the shipped Content Security Policy.
 Everything else is a non-completion with its reason (`deadline`, `late`,
 `load-failed`, `warmup-failed`, `page-crash`, `browser-disconnected`,
 `harness-error`), right-censored at 60 s.
@@ -505,7 +519,69 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-Source: `check` run 36985761267, job *Resume benchmark pilot*, on commit
+The current presentation-checked pilot is `check` run **36997055130**, attempt
+1, job *Resume benchmark pilot*, on
+`6579a4ba774c37d62f6a8481f4b6c238762baf31`. It measures the unchanged shipped
+`web/` build
+`a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`;
+only the harness/tests changed, so no production bundle was regenerated.
+Preregistration SHA-256:
+`b5b7e0e794d516c0ba46c1acb3582b51ba3cae79e7c4210ed74bf0ef585f418d`.
+Chromium 151.0.7922.34 and WebKit 26.5, Node v22.23.3, hosted Linux;
+10.6 minutes. All **480 attempted epochs** (16 selected strata × 30) are
+retained: 480 on time, no non-completions, exclusions, replacements, missing
+outcomes or contract/evidence violations. No hidden-time dials or bytes.
+All 24/24 negative-control trials were safe, with none missing or duplicated.
+The default pilot has no direct-upgrade strata; those and the other selectable
+workloads remain separately exercised by the browser suite, not pooled here.
+
+| Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 21 (19–23) | 29 (27–31) | 0 / 0 | 1,176 | 0.24 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 70 (56–80) | 99 (90–104) | 1 / 1 | 3,478 | 0.30 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,057 (2,079–3,088) | 5,098 (5,047–5,105) | 1 / 1 | 3,620 | 0.34 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 136 (118–143) | 162 (157–167) | 1 / 1 | 3,655 | 0.19 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 23 (16–27) | 36 (32–36) | 0 / 0 | 776 | 0.36 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 102 (83–129) | 146 (136–154) | 1 / 1 | 2,636 | 0.36 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,047 (2,100–3,150) | 5,129 (5,102–5,137) | 1 / 1 | 2,707 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 141 (133–163) | 197 (187–241) | 1 / 1 | 2,803 | 0.22 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 34 (32–38) | 48 (42–49) | 0 / 0 | 1,176 | 0.17 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 99 (83–103) | 132 (117–133) | 1 / 1 | 3,478 | 0.22 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,078 (2,099–3,111) | 5,117 (5,084–5,129) | 1 / 1 | 3,822 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 182 (168–187) | 217 (215–227) | 1 / 1 | 3,442 | 0.14 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (32–41) | 48 (46–51) | 0 / 0 | 776 | 0.18 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 117 (100–132) | 149 (148–164) | 1 / 1 | 2,636 | 0.24 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,084 (2,148–3,112) | 5,120 (5,087–5,130) | 1 / 1 | 2,879 | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 198 (183–201) | 246 (230–268) | 1 / 1 | 2,742 | 0.14 |
+
+Thirty successes still bound failure only below about 11.4% (two-sided
+Wilson); the coarse p95 and log-time SD are planning inputs, not acceptance.
+The preregistered ≥400-pair, adequately powered B3 experiment remains future.
+The same run passed 649 unit tests, 352 Chromium/WebKit browser tests
+(including 32 presentation regressions), and 4 attention tests, without
+browser retries. Native preflight run 36997054896 attempt 1 also passed on
+that SHA. Mobile harness/device jobs were skipped; no physical qualification.
+Final documentation revisions require their own exact-SHA hosted evidence,
+retained privately rather than recursively changing this pilot citation.
+
+### Historical pilot results — void, retained only as history
+
+The table below formerly described the current baseline. It and its
+`fe6a696a` documentation-only repeat (36987388461) are **void for B1 endpoint
+acceptance**: original `807dcb5c:F022` found that their harness accepted
+CSS-hidden cards. No earlier pilot is reused to establish presentation,
+latency or reliability; the original artifacts and numbers are preserved.
+The repair's first run 36996036157 on `4010dad9` had a passing 480-epoch
+presentation-checked pilot but failed 28 new browser cases because inline
+injected test CSS violated the shipped CSP (each retried twice). That failure
+is retained, not recast as green; same-origin fixture CSS fixed the test
+setup in `6579a4ba`, without weakening CSP. For `807dcb5c:F023`, native
+36987388129 attempt 1 remains a failure (SIGTERM exit 2 versus 130 in
+`test_isolated_dev_coexists_with_active_service`). Attempt 2 passed, rerunning
+the failed Linux job and retaining Darwin's attempt-1 success. Neither its
+cause nor physical qualification is inferred from the rerun.
+
+Historical source (not current evidence): `check` run 36985761267, job *Resume benchmark pilot*, on commit
 `8a721261c68f2e71220d0b49755c71e7d5ecacae`, measuring the shipped `web/`
 build `a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`
 with the current-path endpoint, exclusion rules, contract checks and evidence
