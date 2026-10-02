@@ -1549,6 +1549,18 @@ function observeRuntimeControl(child: ChildProcess): RuntimeControlObserver {
 export function androidEnvironmentTests(harness: Harness): Test[] {
   const tests: Test[] = [];
   const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([`Android production CLI ${name}`, body]);
+  const darwinProcessExitTest = (name: string, body: () => Promise<TestOutcome>) => {
+    if (process.platform === 'darwin') test(name, body);
+  };
+  test('registers independent supervisor exit-status witness cases only where Darwin EVFILT_PROC NOTE_EXITSTATUS exists', async () => {
+    const registered = new Set(androidEnvironmentTests(harness).map(([name]) => name));
+    for (const name of [
+      'owned supervisor retires before its hard deadline with undrained, draining and closed optional observations',
+      'HOST lease parent loss retires generic command groups',
+      'HOST lease initialization and release interruption stay owned',
+      'HOST lease default and injected collectors retire on caller loss',
+    ]) assert.equal(registered.has(`Android production CLI ${name}`), process.platform === 'darwin', name);
+  });
   test('owned supervisor observations queue short writes and backpressure, bound loss and close failed sinks without waiting', async () => {
     const scriptedSink = (script: Array<number | string>) => {
       const sink = { output: [] as Buffer[], calls: 0, closes: 0, retries: [] as Array<() => void>, cancelled: 0 };
@@ -1726,8 +1738,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.deepEqual(admitNonblockingDescriptor(9, ignored.fcntl), { admitted: false, reason: 'status-readback-mismatch', before: 0x02, after: 0x02 });
     assert.deepEqual(ignored.state.calls.at(-1), [9, 4, 0x02]);
   });
-  test('owned supervisor retires before its hard deadline with undrained, draining and closed optional observations', async () => {
-    if (process.platform !== 'darwin') return 'independent supervisor exit status requires Darwin EVFILT_PROC NOTE_EXITSTATUS';
+  darwinProcessExitTest('owned supervisor retires before its hard deadline with undrained, draining and closed optional observations', async () => {
     const fixture = await harness.createFixture();
     const nodePath = execFileSync('node', ['-e', 'process.stdout.write(process.execPath)'], { encoding: 'utf8' }).trim();
     const requests = 32;
@@ -2836,12 +2847,33 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await rm(fixture.root, { recursive: true, force: true });
     }
   });
+  test('owned control channel teardown releases its pending descriptor read while the peer stays open', async () => {
+    assert.notEqual(process.platform, 'win32');
+    const source = `const {controlChannel}=await import(${JSON.stringify(repositoryPath('tests/mobile/support/owned-process-runtime.ts'))});const channel=controlChannel(3);channel.on('data',()=>{});channel.on('error',()=>{});setTimeout(()=>channel.destroy(),100);`;
+    const child = spawn(process.execPath, ['--no-env-file', '-e', source], { stdio: ['ignore', 'ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr!.on('data', chunk => { stderr += String(chunk); });
+    const peer = child.stdio[3] as Readable;
+    peer.resume();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | undefined>(resolve => {
+        timer = setTimeout(() => resolve(undefined), 3_000);
+        child.once('exit', (code, signal) => resolve({ code, signal }));
+      });
+      assert.deepEqual(exit, { code: 0, signal: null }, stderr);
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      peer.destroy();
+    }
+  });
   test('owned process retirement keeps target, relay and caller witnesses independent for full output', async () => {
     assert.notEqual(process.platform, 'win32');
     const nodePath = execFileSync('node', ['-e', 'process.stdout.write(process.execPath)'], { encoding: 'utf8' }).trim();
     const expectedStdout = Buffer.alloc(128_000, 83);
     const expectedStderr = 'source-bound stderr payload\\n';
-    const source = `process.stdout.write(Buffer.from(${JSON.stringify(expectedStdout.toString('base64'))},'base64'));process.stderr.write(${JSON.stringify(expectedStderr)});`;
+    const source = `process.stdout.write(Buffer.alloc(${expectedStdout.length},${expectedStdout[0]}));process.stderr.write(${JSON.stringify(expectedStderr)});`;
     const result = await boundedCommand(nodePath, ['-e', source], 5_000, { maxBytes: 140_000, cleanupReservationMs: 1_000 });
     assert.equal(result.stdout, expectedStdout.toString('utf8'));
     assert.equal(result.stderr, expectedStderr);
@@ -2952,8 +2984,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       }
     }
   });
-  test('HOST lease parent loss retires generic command groups', async () => {
-    if (process.platform !== 'darwin') return 'independent supervisor wait-status witness requires Darwin EVFILT_PROC NOTE_EXITSTATUS';
+  darwinProcessExitTest('HOST lease parent loss retires generic command groups', async () => {
     const fixture = await harness.createFixture();
     const fakeAdbEnvironment = await installFakeAdbLifetimeBackstop(fixture);
     const nodePath = execFileSync('node', ['-e', 'process.stdout.write(process.execPath)'], { encoding: 'utf8' }).trim();
@@ -3119,8 +3150,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await rm(fixture.root, { recursive: true, force: true });
     }
   });
-  test('HOST lease initialization and release interruption stay owned', async () => {
-    if (process.platform !== 'darwin') return 'independent supervisor wait-status witness requires Darwin EVFILT_PROC NOTE_EXITSTATUS';
+  darwinProcessExitTest('HOST lease initialization and release interruption stay owned', async () => {
     const fixture = await harness.createFixture();
     const nodePath = execFileSync('node', ['-e', 'process.stdout.write(process.execPath)'], { encoding: 'utf8' }).trim();
     assert.equal(callerDurationToRuntime(5_000, 10_000_000_000n, 1_000_000_000n, 2_500_000_000n), 13_500_000_000n);
@@ -3298,8 +3328,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await rm(fixture.root, { recursive: true, force: true });
     }
   });
-  test('HOST lease default and injected collectors retire on caller loss', async () => {
-    if (process.platform !== 'darwin') return 'independent supervisor wait-status witness requires Darwin EVFILT_PROC NOTE_EXITSTATUS';
+  darwinProcessExitTest('HOST lease default and injected collectors retire on caller loss', async () => {
     const fixture = await harness.createFixture();
     const fakeAdbEnvironment = await installFakeAdbLifetimeBackstop(fixture);
     const measurementModule = repositoryPath('tests/mobile/android-measurement.ts');
@@ -3450,9 +3479,10 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  test('retained initial and warm relaunch emit no fabricated close evidence or planned operations', async () => {
-    let completed = 0;
-    for (const group of Object.keys(androidLifecycleCases) as Array<keyof typeof androidLifecycleCases>) {
+  const lifecycleCaseCounts = { happy: 3, warmOwner: 18, coldHandoff: 20, readinessAndBudget: 13 } satisfies Record<keyof typeof androidLifecycleCases, number>;
+  for (const group of Object.keys(androidLifecycleCases) as Array<keyof typeof androidLifecycleCases>) {
+    test(`retained initial and warm relaunch emit no fabricated close evidence or planned operations: ${group}`, async () => {
+      let completed = 0;
       for (const name of androidLifecycleCases[group]) {
         const fixture = await harness.createFixture();
         await runAndroidLifecycleCase(fixture, group, name);
@@ -3461,9 +3491,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         completed++;
         console.log(`PASS SM56 lifecycle ${group}/${name}`);
       }
-    }
-    assert.equal(completed, 54);
-  });
+      assert.equal(completed, lifecycleCaseCounts[group]);
+    });
+  }
   test('SM56 warm lifecycle keeps independent and combined signal, stop and component drift fatal', async () => {
     for (const name of ['healthy-warm', 'early-isolated-signal9-only', 'unknown-stop-only', 'stable-binary-gms-components-only', 'signal9-stop-components-combined', 'package-identity-replacement-only']) {
       const fixture = await harness.createFixture();
@@ -6784,7 +6814,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const startupDelayPath = join(fixture.root, 'bounded-supervisor-startup-delay.mjs');
     const startupObserverPath = join(fixture.root, 'bounded-supervisor-startup-observer.jsonl');
     await mkdir(delayedRuntimeDirectory, { recursive: true });
-    await writeFile(startupDelayPath, 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,900);');
+    await writeFile(startupDelayPath, `import {monotonicNowNs} from ${JSON.stringify(repositoryPath('tests/mobile/support/owned-process.ts'))};const executionDeadlineNs=BigInt(process.argv[process.argv.indexOf('--supervisor')+1]);while(monotonicNowNs()<=executionDeadlineNs)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);`);
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     const realBun = execFileSync('which', ['bun'], { encoding: 'utf8' }).trim();
     const wrapper = `#!/bin/sh\nfor argument do\n  if [ "$argument" = '--supervisor' ]; then\n    printf '%s\\n' "$$" > ${quote(wrapperPIDPath)}\n    exec ${quote(realBun)} --no-env-file --preload ${quote(startupDelayPath)} "$@"\n  fi\ndone\nexec ${quote(realBun)} --no-env-file "$@"\n`;

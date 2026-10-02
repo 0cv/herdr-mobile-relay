@@ -33,6 +33,7 @@ const PLAN13_SINGLETON_PREFIX = 'iOS Plan13 hierarchy full install ';
 const OUTER_SINGLETON_PREFIXES = [
   'Android environment snapshot CLI ',
   'Android environment snapshot persists ',
+  'Android production CLI retained initial and warm relaunch ',
   'the workflow provenance adapter ',
   'unit runner listing and selection interface ',
   'unit runner explicit selection matches default filtered execution',

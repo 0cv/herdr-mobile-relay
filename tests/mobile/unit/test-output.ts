@@ -132,9 +132,9 @@ const diagnosticEmitters = new Map<string, DiagnosticEmitter>([
     [emitter('PASS retained signed launch recorded-two-page', 'android-retained-launch.ts')]],
   ['Android installed attachment selects the owned standalone window instead of a browser window', () =>
     [emitter('PASS retained signed launch recorded-two-page', 'android-retained-launch.ts')]],
-  ['Android production CLI retained initial and warm relaunch emit no fabricated close evidence or planned operations', () => {
-    const lines: SourceDiagnostic[] = [];
-    for (const [group, names] of Object.entries(androidLifecycleCases)) {
+  ...Object.entries(androidLifecycleCases).map(([group, names]): [string, DiagnosticEmitter] => [
+    `Android production CLI retained initial and warm relaunch emit no fabricated close evidence or planned operations: ${group}`, () => {
+      const lines: SourceDiagnostic[] = [];
       for (const name of names) {
         if (name === 'concurrent-cold-consumers') {
           for (const variant of TEARDOWN_SCENARIOS) {
@@ -147,9 +147,8 @@ const diagnosticEmitters = new Map<string, DiagnosticEmitter>([
         }
         lines.push(emitter(`PASS SM56 lifecycle ${group}/${name}`, 'android-environment.ts'));
       }
-    }
-    return lines;
-  }],
+      return lines;
+    }]),
   ['Android production CLI SM56 warm lifecycle keeps independent and combined signal, stop and component drift fatal', () =>
     WARM_ENVIRONMENT_SCENARIOS.map((name) => emitter(`PASS SM56 environment ${name}`, 'android-environment.ts'))],
   ['Android CI gates both local Appium launch paths', () => [

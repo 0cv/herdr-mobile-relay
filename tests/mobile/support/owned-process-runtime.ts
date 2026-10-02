@@ -233,12 +233,14 @@ class ControlChannel extends EventEmitter {
   destroy(error?: Error): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    // Linux close() leaves a read already blocked on this socket waiting for the peer; shutdown wakes it.
+    if (!closedDescriptors.has(this.fd)) runtimeLibrary?.symbols.shutdown(this.fd, 0);
     this.incoming.destroy(error);
     closeDescriptor(this.fd);
   }
 }
 
-function controlChannel(fd: number): ControlChannel {
+export function controlChannel(fd: number): ControlChannel {
   return new ControlChannel(fd);
 }
 
@@ -386,21 +388,27 @@ function send(stream: ControlChannel | Duplex, value: RecordValue): void {
   }
 }
 
-interface RuntimeClockLibrary {
-  symbols: { clock_gettime(clockID: number, timespec: number): number };
+interface RuntimeLibrarySymbols {
+  clock_gettime(clockID: number, timespec: number): number;
+  shutdown(fd: number, how: number): number;
+}
+
+interface RuntimeLibrary {
+  symbols: RuntimeLibrarySymbols;
   pointer(value: ArrayBuffer | ArrayBufferView): number;
 }
 
-const runtimeClockLibrary: RuntimeClockLibrary | undefined = process.versions.bun
+const runtimeLibrary: RuntimeLibrary | undefined = process.versions.bun
   ? (() => {
     const ffi = createRequire(import.meta.url)('bun:ffi') as {
       FFIType: Record<string, unknown>;
       ptr(value: ArrayBuffer | ArrayBufferView): number;
-      dlopen(name: string, definitions: Record<string, unknown>): { symbols: { clock_gettime(clockID: number, timespec: number): number } };
+      dlopen(name: string, definitions: Record<string, unknown>): { symbols: RuntimeLibrarySymbols };
     };
     const library = process.platform === 'darwin' ? '/usr/lib/libSystem.B.dylib' : 'libc.so.6';
     const loaded = ffi.dlopen(library, {
       clock_gettime: { args: [ffi.FFIType.i32, ffi.FFIType.ptr], returns: ffi.FFIType.i32 },
+      shutdown: { args: [ffi.FFIType.i32, ffi.FFIType.i32], returns: ffi.FFIType.i32 },
     });
     return { symbols: loaded.symbols, pointer: ffi.ptr };
   })()
@@ -408,9 +416,9 @@ const runtimeClockLibrary: RuntimeClockLibrary | undefined = process.versions.bu
 const runtimeTimespec = Buffer.alloc(16);
 
 function nowNs(): bigint {
-  if (!runtimeClockLibrary) return process.hrtime.bigint();
+  if (!runtimeLibrary) return process.hrtime.bigint();
   const clockID = process.platform === 'darwin' ? 4 : 1;
-  if (runtimeClockLibrary.symbols.clock_gettime(clockID, runtimeClockLibrary.pointer(runtimeTimespec)) !== 0) {
+  if (runtimeLibrary.symbols.clock_gettime(clockID, runtimeLibrary.pointer(runtimeTimespec)) !== 0) {
     throw new Error('owned process monotonic clock could not be read');
   }
   return runtimeTimespec.readBigInt64LE(0) * 1_000_000_000n + runtimeTimespec.readBigInt64LE(8);

@@ -56,6 +56,7 @@ export const testShardTests: Array<[string, () => Promise<TestOutcome>]> = [
       'alpha first', 'Foxtrot first', 'golf first', 'Mike first', 'november first', 'Zulu first',
       '3rd-party title', 'Repeated display title', 'Repeated display title',
       'Android environment snapshot CLI fixture', 'apple second', 'bravo second', 'charlie second', 'delta second', 'echo second', 'foxtrot second', 'golf second',
+      'Android production CLI retained initial and warm relaunch fixture: one', 'Android production CLI retained initial and warm relaunch fixture: two',
     ], [
       'iOS ordinary one', 'iOS ordinary two', 'iOS ordinary three', 'iOS ordinary four', 'iOS ordinary five',
       'iOS Plan13 hierarchy full install fixture one', 'iOS ordinary six', 'iOS ordinary seven',
@@ -92,6 +93,11 @@ export const testShardTests: Array<[string, () => Promise<TestOutcome>]> = [
     const long = source.cases.find(({ name }) => name === 'Android environment snapshot CLI fixture')!;
     assert.equal(first.shards.filter(({ selection }) => selection.includes(long.id)).length, 1);
     assert.deepEqual(first.shards.find(({ selection }) => selection.includes(long.id))!.selection, [long.id]);
+    const lifecycleCases = source.cases.filter(({ name }) => name.startsWith('Android production CLI retained initial and warm relaunch '));
+    assert.equal(lifecycleCases.length, 2);
+    for (const lifecycle of lifecycleCases) {
+      assert.deepEqual(first.shards.find(({ selection }) => selection.includes(lifecycle.id))!.selection, [lifecycle.id]);
+    }
 
     const innerIds = new Set(source.cases.filter(({ scope }) => scope === 'ios-inner').map(({ id }) => id));
     const plan13 = source.cases.filter(({ scope, name }) => scope === 'ios-inner' && name.startsWith('iOS Plan13 hierarchy full install '));
