@@ -127,9 +127,11 @@ export function initializeDeviceSecurity(): () => void {
     revalidateAfterResume();
   };
   const onOffline = () => {
+    relayStore.suspendAuthority();
     if (document.visibilityState === 'visible') resumeMetrics.network('offline');
   };
   const onPageHide = () => {
+    relayStore.suspendAuthority();
     resumeMetrics.hidden();
   };
   const onNetworkChange = () => {
@@ -144,6 +146,7 @@ export function initializeDeviceSecurity(): () => void {
     relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
   };
   const onFreeze = () => {
+    relayStore.suspendAuthority();
     resumeMetrics.hidden();
     if (deviceVerificationEnabled()) lockForDevice('resume');
   };

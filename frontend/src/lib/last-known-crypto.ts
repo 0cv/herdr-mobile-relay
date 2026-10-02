@@ -35,6 +35,31 @@ export interface LastKnownEnvelope {
   ciphertext: string;
 }
 
+/** Opaque association: legacy configuration IDs can contain sensitive names/hosts. */
+export async function deriveLastKnownAssociation(
+  context: LastKnownCryptoContext,
+  association: string,
+  webCrypto: Crypto = globalThis.crypto,
+  now = Date.now(),
+): Promise<string> {
+  validateContext(context, now);
+  if (!webCrypto?.subtle || typeof association !== 'string' || !association
+    || association.length > 8192 || encoder.encode(association).byteLength > 8192) throw unavailable();
+  const secret = canonicalDecode(context.credential.secret, 32);
+  try {
+    const material = await webCrypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveKey']);
+    const key = await webCrypto.subtle.deriveKey({
+      name: 'HKDF', hash: 'SHA-256', salt: encoder.encode('herdr:last-known:association:salt:v1'),
+      info: encoder.encode(JSON.stringify(['herdr:last-known:association:v1', context.origin,
+        context.credential.id, context.credential.version, context.credential.deviceId,
+        context.credential.role, LAST_KNOWN_SCHEMA])),
+    }, material, { name: 'HMAC', hash: 'SHA-256', length: 256 }, false, ['sign']);
+    return base64UrlEncode(await webCrypto.subtle.sign('HMAC', key, encoder.encode(association)));
+  } finally {
+    secret.fill(0);
+  }
+}
+
 /** Bounded, structural validation happens before base64 decoding or WebCrypto. */
 export function parseLastKnownEnvelope(raw: string, now = Date.now()): LastKnownEnvelope {
   if (typeof raw !== 'string' || raw.length > LAST_KNOWN_MAX_ENTRY_BYTES

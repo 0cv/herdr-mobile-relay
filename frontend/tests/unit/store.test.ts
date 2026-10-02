@@ -98,6 +98,13 @@ function exactWireScope(paneId: string, relayId: string) {
   };
 }
 
+function upgradedPeer(handlers: TransportHandlers): CorrelatedInventoryFixture {
+  const receive = handlers.onMessage;
+  const peer = new CorrelatedInventoryFixture(receive);
+  handlers.onMessage = (message) => { receive(peer.server(message) as Record<string, any>); peer.flush(); };
+  return peer;
+}
+
 function seedUploadAgent(socket: MockWebSocket): void {
   socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 }] });
 }
@@ -1043,20 +1050,26 @@ describe('relay command store', () => {
     let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
     let deliver: (message: Record<string, unknown>) => void = () => {};
     const sent: Record<string, string>[] = [];
-    transportHijack.current = (_relay, handlers) => ({
-      kind: 'websocket',
-      connect: () => {
-        dials += 1;
-        report = handlers.onStatus;
-        deliver = handlers.onMessage;
-        handlers.onStatus('connecting');
-      },
-      send: (payload) => {
-        sent.push(payload as unknown as Record<string, string>);
-        return true;
-      },
-      close: () => {},
-    });
+    let authentication: TransportAuthentication | undefined;
+    transportHijack.current = (_relay, handlers, options) => {
+      authentication = options;
+      const peer = upgradedPeer(handlers);
+      return {
+        kind: 'websocket',
+        connect: () => {
+          dials += 1;
+          report = handlers.onStatus;
+          deliver = handlers.onMessage;
+          handlers.onStatus('connecting');
+        },
+        send: (payload) => {
+          sent.push(payload as unknown as Record<string, string>);
+          peer.client(JSON.stringify(payload));
+          return true;
+        },
+        close: () => {},
+      };
+    };
     expect(relayStore.importSetupLink({
       hash: `#setup=${'G'.repeat(43)}&invite=invitation-forget01&invite_version=1`
         + `&invite_expires=${Date.now() + 60_000}&label=Forgotten&relay=${encodeURIComponent(relayUrl)}`,
@@ -1072,19 +1085,15 @@ describe('relay command store', () => {
     expect(stored.find((relay) => relay.id === relayId)).toMatchObject({ token: '', paired: true });
     expect(dials).toBe(1);
 
+    const options = authentication as TransportAuthentication | undefined;
+    const presented = options?.getAuthentication?.();
+    expect(presented?.kind).toBe('invitation');
+    await options?.onAuthenticated?.(presented!, {
+      credentialId: 'credential-forget', credentialVersion: 1, credentialSecret: 'H'.repeat(43),
+      deviceId: 'device-forget', role: 'controller', locale: 'en',
+    });
     report('connected', { path: 'websocket' });
     deliver({ type: 'push_config', protocol: 3, host: 'forgotten', capabilities: [], agent_profiles: [] });
-    // Pairing turned the invitation into a credential.
-    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-      version: 1,
-      relays: {
-        [relayId]: {
-          kind: 'credential', id: 'credential-forget', version: 1, secret: 'H'.repeat(43),
-          deviceId: 'device-forget', role: 'controller', locale: 'en',
-          issuedAt: Date.now(), invitationId: 'invitation-forget01',
-        },
-      },
-    }));
 
     const forgotten = relayStore.forgetCurrentDevice(relayId);
     const revoke = await vi.waitFor(() => {
@@ -2531,19 +2540,19 @@ describe('relay command store', () => {
     let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
     let deliver: (message: Record<string, any>) => void = () => {};
     const sent: Record<string, unknown>[] = [];
-    transportHijack.current = (_relay, handlers) => ({
-      kind: 'gateway',
-      connect: () => {
-        report = handlers.onStatus;
-        deliver = handlers.onMessage;
-        handlers.onStatus('connecting');
-      },
-      send: (payload) => {
-        sent.push(payload);
-        return true;
-      },
-      close: () => {},
-    });
+    transportHijack.current = (_relay, handlers) => {
+      const peer = upgradedPeer(handlers);
+      return {
+        kind: 'gateway',
+        connect: () => {
+          report = handlers.onStatus;
+          deliver = handlers.onMessage;
+          handlers.onStatus('connecting');
+        },
+        send: (payload) => { sent.push(payload); peer.client(JSON.stringify(payload)); return true; },
+        close: () => {},
+      };
+    };
     relayStore.addRelay({ label: 'Gateway', url: '', token: '', transport: 'hybrid', gatewayUrl: 'wss://gw.example' });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
@@ -2558,6 +2567,7 @@ describe('relay command store', () => {
       ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
+    deliver({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
     relayStore.watchPane(agent as never);
     deliver({
       type: 'pane_content',
@@ -2572,6 +2582,8 @@ describe('relay command store', () => {
 
     // Promotion to the direct path keeps the same user-selected cadence.
     report('connected', { path: 'webrtc' });
+    deliver({ type: 'agents', agents: [{ ...agent, pane_id: agent.raw_pane_id }] });
+    deliver({ type: 'pane_content', pane_id: 'w1:p1', content: 'one\n', format: 'ansi', content_fingerprint: 'content-2' });
     expect(get(relayStore.connections).get(relayId)?.path).toBe('webrtc');
     expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 100 });
   });

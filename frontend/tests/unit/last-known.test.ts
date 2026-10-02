@@ -2,7 +2,7 @@ import { get } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { base64UrlEncode } from '$lib/base64url';
 import type { RelayDeviceCredential } from '$lib/device-auth';
-import { encryptLastKnown } from '$lib/last-known-crypto';
+import { decryptLastKnown, deriveLastKnownAssociation, encryptLastKnown } from '$lib/last-known-crypto';
 import { LAST_KNOWN_STORAGE_KEY, LastKnownSessionCache, projectLastKnown, validateLastKnown } from '$lib/last-known';
 import {
   LAST_KNOWN_MAX_AGE_MS, LAST_KNOWN_MAX_PLAINTEXT_BYTES, LAST_KNOWN_MAX_STORED_BYTES,
@@ -45,9 +45,14 @@ async function stored(cache: LastKnownSessionCache, value = summary()): Promise<
   await vi.waitFor(() => expect(sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull());
 }
 
+async function opaqueId(relayId: string): Promise<string> {
+  return deriveLastKnownAssociation({ origin: 'https://app.example', relayId, credential, lastFreshAt: NOW }, relayId, crypto, NOW);
+}
+
 async function encrypted(value: LastKnownSummary): Promise<string> {
-  return encryptLastKnown(JSON.stringify(value), {
-    origin: 'https://app.example', relayId: value.relayId, credential, lastFreshAt: value.lastFreshAt,
+  const relayId = await opaqueId(value.relayId);
+  return encryptLastKnown(JSON.stringify({ ...value, relayId }), {
+    origin: 'https://app.example', relayId, credential, lastFreshAt: value.lastFreshAt,
   }, crypto, NOW);
 }
 
@@ -129,12 +134,41 @@ describe('failure-tolerant session cache foundation', () => {
     const restored = fixture();
     restored.unlock();
     await restored.cache.restore('local-relay');
-    expect(get(restored.cache.summaries).get('local-relay')).toEqual(summary());
+    expect(get(restored.cache.summaries).get('local-relay')).toEqual({ ...summary(), relayId: await opaqueId('local-relay') });
+    expect(raw).not.toContain('local-relay');
     sessionStorage.removeItem(LAST_KNOWN_STORAGE_KEY);
     const missing = fixture();
     missing.unlock();
     await missing.cache.restore('local-relay');
     expect(get(missing.cache.summaries).size).toBe(0);
+  });
+
+  it('does not expose legacy descriptive relay IDs and binds the full configuration identity', async () => {
+    const relayId = 'sensitive-computer-label-and-host-example';
+    const writer = fixture({ association: () => 'configuration-a' }); writer.unlock();
+    await stored(writer.cache, summary(relayId));
+    expect(sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)).not.toContain(relayId);
+    expect(sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)).not.toContain('configuration-a');
+    const reader = fixture({ association: () => 'configuration-b' }); reader.unlock();
+    await reader.cache.restore(relayId);
+    expect(get(reader.cache.summaries).size).toBe(0);
+  });
+
+  it('fences a suspended restore even after bounded scope-marker eviction, retaining the last-good blob', async () => {
+    const writer = fixture(); writer.unlock(); await stored(writer.cache);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const decrypt = vi.fn(async (...args: Parameters<typeof decryptLastKnown>) => { await gate; return decryptLastKnown(...args); });
+    const reader = fixture({ decrypt }); reader.unlock();
+    const restoring = reader.cache.restore('local-relay');
+    await vi.waitFor(() => expect(decrypt).toHaveBeenCalledOnce());
+    reader.cache.invalidateScope('local-relay');
+    for (let index = 0; index < 20; index++) reader.cache.invalidateScope(`other-${index}`);
+    release(); await restoring;
+    expect(get(reader.cache.summaries).size).toBe(0);
+    expect(sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull();
+    await reader.cache.restore('local-relay');
+    expect(get(reader.cache.summaries).size).toBe(1);
   });
 
   it('clears an already visible summary when the stored root becomes invalid', async () => {
@@ -184,9 +218,13 @@ describe('failure-tolerant session cache foundation', () => {
       const value = summary();
       const raw = await encrypted(value);
       sessionStorage.setItem(LAST_KNOWN_STORAGE_KEY, JSON.stringify({ schema: 1, epoch: 'A'.repeat(43), lastObservedAt: NOW, entries: [raw] }));
-      const f = fixture({ decrypt: async () => { await gate; return JSON.stringify(value); } });
+      const decrypt = vi.fn(async (...args: Parameters<typeof decryptLastKnown>) => {
+        await gate; return decryptLastKnown(...args);
+      });
+      const f = fixture({ decrypt });
       f.unlock();
       const restoring = f.cache.restore('local-relay');
+      await vi.waitFor(() => expect(decrypt).toHaveBeenCalledOnce());
       if (event === 'lock') f.cache.setLocked(true);
       if (event === 'forget') { f.rotate(); f.cache.forget(); }
       if (event === 'opt-out') { f.rotate(); f.cache.setEnabled(false); }
@@ -208,7 +246,7 @@ describe('failure-tolerant session cache foundation', () => {
       const f = fixture({ encrypt });
       f.unlock();
       f.cache.write(summary());
-      expect(encrypt).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(encrypt).toHaveBeenCalledOnce());
       if (event === 'forget') { f.rotate(); f.cache.forget(); }
       if (event === 'opt-out') { f.rotate(); f.cache.setEnabled(false); }
       if (event === 'lock') f.cache.setLocked(true);
@@ -230,8 +268,8 @@ describe('failure-tolerant session cache foundation', () => {
     const f = fixture({ encrypt });
     f.unlock();
     f.cache.write(summary('local-relay', 'first'));
+    await vi.waitFor(() => expect(encrypt).toHaveBeenCalledOnce());
     for (let index = 0; index < 100; index++) f.cache.write(summary('local-relay', `newest-${index}`));
-    expect(encrypt).toHaveBeenCalledOnce();
     release();
     await vi.waitFor(() => expect(sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull());
     expect(encrypt).toHaveBeenCalledTimes(2);
@@ -244,17 +282,19 @@ describe('failure-tolerant session cache foundation', () => {
     f.unlock();
     for (let index = 0; index < 11; index++) {
       f.cache.write(summary(`local-${index}`, 'label', NOW - 11 + index));
+      const association = await opaqueId(`local-${index}`);
       await vi.waitFor(() => {
         const raw = sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY);
         expect(raw).not.toBeNull();
-        expect(JSON.parse(raw!).entries.some((entry: string) => JSON.parse(entry).relayId === `local-${index}`)).toBe(true);
+        expect(JSON.parse(raw!).entries.some((entry: string) => JSON.parse(entry).relayId === association)).toBe(true);
       });
     }
     const raw = sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)!;
     expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(LAST_KNOWN_MAX_STORED_BYTES);
     const entries = JSON.parse(raw).entries as string[];
     expect(entries).toHaveLength(10);
-    expect(entries.some((entry) => JSON.parse(entry).relayId === 'local-0')).toBe(false);
+    const evicted = await opaqueId('local-0');
+    expect(entries.some((entry) => JSON.parse(entry).relayId === evicted)).toBe(false);
   });
 
   it('revalidates persisted opaque invalidation state before showing a suspended tab copy', async () => {

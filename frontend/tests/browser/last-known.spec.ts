@@ -3,10 +3,11 @@ import { fixtureRelay, resumeFixtureInit, type FixtureConfig } from './resume-fi
 
 const CACHE = 'herdr_last_known_session_v1';
 async function boot(page: Page, overrides: Partial<FixtureConfig> = {}) {
-  await page.addInitScript(resumeFixtureInit, {
+  const config: FixtureConfig = {
     relays: [fixtureRelay(1, 'wss')], seed: 321, latencyMs: [10, 11],
     faults: { delayRefreshMs: 1_500 }, ...overrides,
-  });
+  };
+  await page.addInitScript(resumeFixtureInit, config);
   await page.goto('/');
   await page.waitForFunction(() => Boolean((window as any).__resumeFixture?.ready()));
   await expect(page.locator('article.agent-card')).toHaveCount(1);

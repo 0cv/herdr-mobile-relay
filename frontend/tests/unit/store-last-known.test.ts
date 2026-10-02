@@ -5,14 +5,15 @@ import { base64UrlEncode } from '$lib/base64url';
 import { relayStore } from '$lib/store';
 import { targetRefForAgent } from '$lib/resource-id';
 import type { RelayConfig } from '$lib/types';
-import type { RelayTransport, TransportHandlers } from '$lib/transports';
+import type { RelayTransport, TransportHandlers, TransportAuthentication } from '$lib/transports';
 
-const sessions = vi.hoisted(() => new Map<string, { handlers: TransportHandlers; sent: Record<string, unknown>[] }>());
+const sessions = vi.hoisted(() => new Map<string, { handlers: TransportHandlers; sent: Record<string, unknown>[];
+  authentication?: TransportAuthentication }>());
 vi.mock('$lib/transports', async (original) => ({
   ...await original(),
-  createRelayTransport: (relay: RelayConfig, handlers: TransportHandlers): RelayTransport => {
+  createRelayTransport: (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication): RelayTransport => {
     const sent: Record<string, unknown>[] = [];
-    sessions.set(relay.id, { handlers, sent });
+    sessions.set(relay.id, { handlers, sent, authentication });
     return {
       kind: 'websocket', connect: () => handlers.onStatus('connected', { path: 'websocket' }),
       close: () => {}, send: (payload) => { sent.push(payload); return true; },
@@ -49,6 +50,7 @@ beforeEach(() => {
   relayStore.destroy(); sessions.clear(); localStorage.clear(); sessionStorage.clear();
   relayStore.relayConfigs.set([]);
   relayStore.setActionLocked(false);
+  relayStore.initialize(false);
 });
 afterEach(() => { relayStore.destroy(); vi.restoreAllMocks(); });
 
@@ -68,6 +70,47 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(get(relayStore.agents)).toHaveLength(1);
   });
 
+  it('does not promote an old session into a replaced or missing credential scope', () => {
+    const f = boot('relay-a', true, 'reader'); f.reply();
+    const target = targetRefForAgent(get(relayStore.agents)[0]);
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    credentials.updateCredential(f.id, { deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`,
+      credentialVersion: 2, role: 'controller', locale: 'en' });
+    window.dispatchEvent(new StorageEvent('storage', { key: 'herdr_device_auth_v1' }));
+    expect(get(relayStore.agents)).toEqual([]);
+    expect(relayStore.relayActionsFresh(f.id)).toBe(false);
+    expect(relayStore.sendRaw(f.id, { type: 'send_keys', target, keys: ['ENTER'] })).toBe(false);
+    relayStore.requestAgents(true); f.reply();
+    expect(relayStore.relayActionsFresh(f.id)).toBe(false);
+    credentials.remove(f.id);
+    expect(relayStore.sendRaw(f.id, { type: 'reset_devices' })).toBe(false);
+  });
+
+  it('cannot commit a late authenticated finish over a newer stored credential', () => {
+    const f = boot('relay-a', true, 'reader');
+    const presented = f.session.authentication?.getAuthentication?.();
+    expect(presented?.kind).toBe('credential');
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    credentials.updateCredential(f.id, { deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`,
+      credentialVersion: 2, role: 'reader', locale: 'en' });
+    expect(() => f.session.authentication?.onAuthenticated?.(presented!, {
+      deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`,
+      credentialVersion: 1, role: 'controller', locale: 'en',
+    })).toThrow('Authentication changed');
+    expect(credentials.get(f.id)).toMatchObject({ version: 2, role: 'reader' });
+  });
+
+  it('invalidates pre-suspension replies even when measurement/persistence are off', () => {
+    const f = boot();
+    const oldNonce = f.request().snapshot_request_id;
+    relayStore.setHidden(true);
+    f.reply(1, { snapshot_request_id: oldNonce });
+    expect(relayStore.relayActionsFresh(f.id)).toBe(false);
+    relayStore.setHidden(false);
+    relayStore.requestAgents(true); f.reply();
+    expect(relayStore.relayActionsFresh(f.id)).toBe(true);
+  });
+
   it('guards raw, command, upload, watches/leases and unknown commands before freshness', async () => {
     const f = boot();
     const target = { ...rawAgent(), relay_id: f.id };
@@ -79,6 +122,8 @@ describe('B2 store freshness and dispatch boundary', () => {
     relayStore.watchPane({ ...rawAgent(), relay_id: f.id, relay_label: f.id,
       raw_pane_id: 'pane-1', pane_id: `${f.id}::pane-1` });
     expect(relayStore.sendRaw(f.id, { type: 'refresh_agents' })).toBe(true);
+    expect(relayStore.sendRaw(f.id, { type: 'push_subscribe', subscription: {} })).toBe(true);
+    expect(relayStore.relayActionsFresh(f.id)).toBe(false);
     f.reply();
     expect(f.session.sent.some((message) => ['read_pane', 'watch_pane', 'install_update'].includes(String(message.type)))).toBe(false);
     expect(relayStore.sendRaw(f.id, { type: 'unknown_future_write' })).toBe(false);

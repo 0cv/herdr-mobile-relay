@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 import type { RelayDeviceCredential } from './device-auth';
-import { decryptLastKnown, encryptLastKnown, parseLastKnownEnvelope } from './last-known-crypto';
+import { decryptLastKnown, deriveLastKnownAssociation, encryptLastKnown, parseLastKnownEnvelope } from './last-known-crypto';
 import {
   LAST_KNOWN_AGENT_TYPES,
   LAST_KNOWN_MAX_AGE_MS,
@@ -136,6 +136,7 @@ interface PendingWrite {
   sequence: number;
   generation: number;
   epoch: string;
+  association: string;
 }
 
 export interface LastKnownCacheOptions {
@@ -144,6 +145,8 @@ export interface LastKnownCacheOptions {
   /** Must read persisted same-origin invalidation state, not an in-memory copy. */
   epoch: () => string | null;
   credential: (relayId: string) => RelayDeviceCredential | null;
+  /** Runtime-only configuration identity; never stored as plaintext metadata. */
+  association?: (relayId: string) => string;
   crypto?: Crypto;
   now?: () => number;
   monotonic?: () => number;
@@ -171,8 +174,9 @@ export class LastKnownSessionCache {
   private valuesEpoch: string | null = null;
   private visibleDeadlines = new Map<string, number>();
   private publishedCredentials = new Map<string, RelayDeviceCredential>();
+  private publishedAssociations = new Map<string, string>();
   private pending = new Map<string, PendingWrite>();
-  private restoring = new Map<string, object>();
+  private restoring = new Map<string, { invalidated: boolean }>();
   private latest = new Map<string, number>();
   private latestFreshAt = new Map<string, number>();
   private draining = false;
@@ -209,6 +213,20 @@ export class LastKnownSessionCache {
   /** Content-free cross-tab notification or resumed-tab revalidation. */
   invalidate(): void {
     this.fence();
+  }
+
+  /** Fence this connection/path/wake scope without deleting its last-good blob. */
+  invalidateScope(relayId: string): void {
+    const restore = this.restoring.get(relayId);
+    if (restore) restore.invalidated = true;
+    this.pending.delete(relayId);
+    this.latest.set(relayId, ++this.sequence);
+    this.latestFreshAt.delete(relayId);
+    if (this.latest.size > LAST_KNOWN_MAX_RELAYS + 1) {
+      const oldest = this.latest.keys().next().value;
+      if (oldest !== undefined) { this.latest.delete(oldest); this.latestFreshAt.delete(oldest); }
+    }
+    this.dropVisible(relayId);
   }
 
   /** One in-flight encryption and at most one pending snapshot per relay. */
@@ -252,6 +270,7 @@ export class LastKnownSessionCache {
     this.pending.set(summary.relayId, {
       summary: JSON.parse(JSON.stringify(summary)) as LastKnownSummary,
       credential: { ...credential }, sequence, generation: this.generation, epoch,
+      association: this.association(summary.relayId),
     });
     void this.drain();
   }
@@ -260,44 +279,55 @@ export class LastKnownSessionCache {
     const now = this.clock();
     const epoch = this.epoch();
     if (now === null || !this.canUse(epoch) || !lastKnownIdentifier(relayId)) return;
-    if (this.valuesEpoch !== null && this.valuesEpoch !== epoch) this.fence();
     if (this.restoring.has(relayId) || this.restoring.size >= LAST_KNOWN_MAX_RELAYS) return;
-    const token = {};
+    this.revalidate();
+    if (!this.canUse(epoch)) return;
+    if (this.valuesEpoch !== null && this.valuesEpoch !== epoch) this.fence();
+    const token = { invalidated: false };
     this.restoring.set(relayId, token);
     const generation = this.generation;
     const sequence = this.latest.get(relayId);
     try {
       const entries = this.read(epoch!, now);
-      const raw = entries.entries.find((entry) => parseLastKnownEnvelope(entry, now).relayId === relayId);
+      const credential = this.options.credential(relayId);
+      if (!credential || !entries.entries.length) { this.dropVisible(relayId); return; }
+      const association = this.association(relayId);
+      const opaqueId = await deriveLastKnownAssociation({
+        origin: this.options.origin, relayId, credential, lastFreshAt: now,
+      }, association, this.options.crypto ?? globalThis.crypto, now);
+      if (token.invalidated || generation !== this.generation || sequence !== this.latest.get(relayId)
+        || !this.canUse(epoch) || association !== this.association(relayId)
+        || !this.sameCredential(relayId, credential)) return;
+      const raw = entries.entries.find((entry) => parseLastKnownEnvelope(entry, now).relayId === opaqueId);
       if (!raw) { this.dropVisible(relayId); return; }
       const envelope = parseLastKnownEnvelope(raw, now);
-      const credential = this.options.credential(relayId);
-      if (!credential) { this.dropVisible(relayId); return; }
       const plaintext = await (this.options.decrypt ?? decryptLastKnown)(raw, {
-        origin: this.options.origin, relayId, credential, lastFreshAt: envelope.lastFreshAt,
+        origin: this.options.origin, relayId: opaqueId, credential, lastFreshAt: envelope.lastFreshAt,
       }, this.options.crypto ?? globalThis.crypto, now);
       // Validate the whole plaintext before publishing any rows.
       const currentNow = this.clock();
       if (currentNow === null) return;
-      const summary = validateLastKnown(JSON.parse(plaintext), relayId, currentNow);
-      if (generation !== this.generation || sequence !== this.latest.get(relayId)) return;
+      const summary = validateLastKnown(JSON.parse(plaintext), opaqueId, currentNow);
+      if (token.invalidated || generation !== this.generation || sequence !== this.latest.get(relayId)) return;
       if (!summary || summary.lastFreshAt !== envelope.lastFreshAt || !this.canUse(epoch)
-        || !this.sameCredential(relayId, credential)) { this.dropVisible(relayId); return; }
+        || association !== this.association(relayId) || !this.sameCredential(relayId, credential)) { this.dropVisible(relayId); return; }
       this.valuesEpoch = epoch;
       const deadline = (this.options.monotonic?.() ?? performance.now())
         + Math.max(0, summary.lastFreshAt + LAST_KNOWN_MAX_AGE_MS - currentNow);
       this.visibleDeadlines.set(relayId, Math.min(this.visibleDeadlines.get(relayId) ?? deadline, deadline));
       this.values.set(relayId, summary);
       this.publishedCredentials.set(relayId, { ...credential });
+      this.publishedAssociations.set(relayId, association);
       if (this.values.size > LAST_KNOWN_MAX_RELAYS) {
         const oldest = Array.from(this.values).sort((left, right) => left[1].lastFreshAt - right[1].lastFreshAt)[0][0];
         this.values.delete(oldest);
         this.visibleDeadlines.delete(oldest);
         this.publishedCredentials.delete(oldest);
+        this.publishedAssociations.delete(oldest);
       }
       this.publish();
     } catch {
-      if (generation === this.generation && sequence === this.latest.get(relayId)
+      if (!token.invalidated && generation === this.generation && sequence === this.latest.get(relayId)
         && this.restoring.get(relayId) === token) this.dropVisible(relayId);
       this.availabilityStore.update((state) => ({ ...state, unavailable: true }));
     } finally {
@@ -318,16 +348,18 @@ export class LastKnownSessionCache {
       const credential = this.publishedCredentials.get(relayId);
       let eligible = false;
       try {
-        eligible = Boolean(credential && this.sameCredential(relayId, credential));
+        eligible = Boolean(credential && this.sameCredential(relayId, credential)
+          && this.publishedAssociations.get(relayId) === this.association(relayId));
       } catch {
         // Denied credential storage is not permission to retain decrypted data.
       }
-      if (!eligible || !validateLastKnown(summary, relayId, now)
+      if (!eligible || !validateLastKnown(summary, summary.relayId, now)
         || (this.options.monotonic?.() ?? performance.now()) >= (this.visibleDeadlines.get(relayId) ?? 0)) {
         this.values.delete(relayId);
         this.visibleDeadlines.delete(relayId);
         this.publishedCredentials.delete(relayId);
-        purged.add(relayId);
+        this.publishedAssociations.delete(relayId);
+        purged.add(summary.relayId);
       }
     }
     this.publish();
@@ -337,6 +369,7 @@ export class LastKnownSessionCache {
       if (entries.entries.length) this.options.storage!.setItem(LAST_KNOWN_STORAGE_KEY, JSON.stringify(entries));
       else this.options.storage!.removeItem(LAST_KNOWN_STORAGE_KEY);
     } catch {
+      this.suppressed = true;
       this.fence();
       this.availabilityStore.set({ unavailable: true, persistenceUncertain: true });
     }
@@ -346,6 +379,7 @@ export class LastKnownSessionCache {
     if (!this.values.delete(relayId)) return;
     this.visibleDeadlines.delete(relayId);
     this.publishedCredentials.delete(relayId);
+    this.publishedAssociations.delete(relayId);
     this.publish();
   }
 
@@ -362,19 +396,25 @@ export class LastKnownSessionCache {
         const [relayId, work] = this.pending.entries().next().value!;
         this.pending.delete(relayId);
         try {
-          const raw = await (this.options.encrypt ?? encryptLastKnown)(JSON.stringify(work.summary), {
-            origin: this.options.origin, relayId, credential: work.credential,
+          const crypto = this.options.crypto ?? globalThis.crypto;
+          const encryptionNow = this.options.now?.() ?? Date.now();
+          const opaqueId = await deriveLastKnownAssociation({
+            origin: this.options.origin, relayId, credential: work.credential, lastFreshAt: work.summary.lastFreshAt,
+          }, work.association, crypto, encryptionNow);
+          if (!this.validWork(relayId, work)) continue;
+          const raw = await (this.options.encrypt ?? encryptLastKnown)(JSON.stringify({ ...work.summary, relayId: opaqueId }), {
+            origin: this.options.origin, relayId: opaqueId, credential: work.credential,
             lastFreshAt: work.summary.lastFreshAt,
-          }, this.options.crypto ?? globalThis.crypto, this.options.now?.() ?? Date.now());
+          }, crypto, encryptionNow);
           const now = this.clock();
           if (now === null || !this.validWork(relayId, work)
             || !validateLastKnown(work.summary, relayId, now)) continue;
           const entries = this.read(work.epoch, now);
           if (entries.entries.some((entry) => {
             const envelope = parseLastKnownEnvelope(entry, now);
-            return envelope.relayId === relayId && envelope.lastFreshAt > work.summary.lastFreshAt;
+            return envelope.relayId === opaqueId && envelope.lastFreshAt > work.summary.lastFreshAt;
           })) continue;
-          entries.entries = entries.entries.filter((entry) => parseLastKnownEnvelope(entry, now).relayId !== relayId);
+          entries.entries = entries.entries.filter((entry) => parseLastKnownEnvelope(entry, now).relayId !== opaqueId);
           entries.lastObservedAt = now;
           entries.entries.push(raw);
           entries.entries.sort((left, right) => parseLastKnownEnvelope(left, now).lastFreshAt
@@ -402,13 +442,18 @@ export class LastKnownSessionCache {
 
   private validWork(relayId: string, work: PendingWrite): boolean {
     return work.generation === this.generation && this.latest.get(relayId) === work.sequence
-      && this.canUse(work.epoch) && this.sameCredential(relayId, work.credential);
+      && this.canUse(work.epoch) && this.sameCredential(relayId, work.credential)
+      && work.association === this.association(relayId);
   }
 
   private sameCredential(relayId: string, expected: RelayDeviceCredential): boolean {
     const current = this.options.credential(relayId);
     return current?.kind === 'credential' && current.id === expected.id && current.version === expected.version
-      && current.secret === expected.secret && current.deviceId === expected.deviceId;
+      && current.secret === expected.secret && current.deviceId === expected.deviceId && current.role === expected.role;
+  }
+
+  private association(relayId: string): string {
+    return this.options.association?.(relayId) ?? relayId;
   }
 
   private read(epoch: string, now: number): StoredEntries {
@@ -428,6 +473,7 @@ export class LastKnownSessionCache {
       if (typeof entry !== 'string') throw unavailable();
       try {
         const envelope = parseLastKnownEnvelope(entry, now);
+        if (!/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(envelope.relayId)) throw unavailable();
         if (seen.has(envelope.relayId)) throw unavailable();
         seen.add(envelope.relayId);
         entries.push(entry);
@@ -471,6 +517,7 @@ export class LastKnownSessionCache {
     this.values.clear();
     this.visibleDeadlines.clear();
     this.publishedCredentials.clear();
+    this.publishedAssociations.clear();
     this.valuesEpoch = null;
     this.publish();
   }

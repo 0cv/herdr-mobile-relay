@@ -1,6 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlEncode } from './base64url';
-import { actionPolicy, CLEANUP_FOR, RECOVERY_ACTIONS } from './action-policy';
+import { actionPolicy, CLEANUP_FOR, RECOVERY_ACTIONS, SUBSCRIPTION_ACTIONS } from './action-policy';
 import { InventoryFreshness, INVENTORY_SNAPSHOT_CAPABILITY, type InventoryBinding } from './inventory-freshness';
 import { LastKnownSessionCache, projectLastKnown } from './last-known';
 import { LastKnownControl } from './last-known-control';
@@ -32,6 +32,7 @@ import { gatewayRendezvous } from './gateway-credentials';
 import { SLASH_COMMAND_MAX_ENTRIES } from './slash-command-limits';
 import {
   BrowserDeviceCredentialStore,
+  DEVICE_AUTH_STORAGE_KEY,
   commitDeviceEnrollment,
   type RelayDeviceCredential,
   type RelayInvitation,
@@ -569,6 +570,7 @@ class RelayStore {
   readonly pushTests = writable<Map<string, PushTestState>>(new Map());
 
   private connectionsValue = new Map<string, RelayConnection>();
+  private sessionCredentials = new WeakMap<RelayConnection, RelayDeviceCredential | null>();
   private agentsValue: Agent[] = [];
   private workspacesValue: RelayWorkspace[] = [];
   private activitiesValue: Activity[] = [];
@@ -596,13 +598,20 @@ class RelayStore {
   private toastId = 0;
   private pushConfigHandler: ((relayId: string) => void) | null = null;
   private readonly deviceCredentials = new BrowserDeviceCredentialStore(localStorage, Date.now, () => {
+    this.credentialsChanged();
     void this.lastKnownControl.forget();
   });
   private actionLocked = false;
   private stopLastKnown: (() => void) | null = null;
+  private stopCredentials: (() => void) | null = null;
   private readonly lastKnownCache: LastKnownSessionCache = new LastKnownSessionCache({
     storage: browserStorage(() => sessionStorage), origin: location.origin,
     epoch: () => this.lastKnownControl.epoch(), credential: (id) => this.deviceCredential(id),
+    association: (id) => {
+      const relay = this.configForRelay(id);
+      if (!relay) throw new Error('Last-known cache is unavailable.');
+      return JSON.stringify([relay.id, relay.url, relay.gatewayRelayId ?? '']);
+    },
   });
   readonly lastKnownControl: LastKnownControl = new LastKnownControl(browserStorage(() => localStorage), this.lastKnownCache);
   readonly lastKnown = this.lastKnownCache.summaries;
@@ -621,6 +630,12 @@ class RelayStore {
   initialize(connect = true): void {
     this.stopLastKnown?.();
     this.stopLastKnown = this.lastKnownControl.initialize();
+    this.stopCredentials?.();
+    const credentialChanged = (event: StorageEvent) => {
+      if (event.key === DEVICE_AUTH_STORAGE_KEY || event.key === null) this.credentialsChanged();
+    };
+    window.addEventListener('storage', credentialChanged);
+    this.stopCredentials = () => window.removeEventListener('storage', credentialChanged);
     this.lastKnownCache.setLocked(this.actionLocked);
     let relays = loadRelayConfigs();
     this.deferredPairingRelays.clear();
@@ -827,6 +842,8 @@ class RelayStore {
   destroy(): void {
     this.stopLastKnown?.();
     this.stopLastKnown = null;
+    this.stopCredentials?.();
+    this.stopCredentials = null;
     this.lastKnownCache.dispose();
     this.actionLocked = false;
     this.reconnectEnabled = false;
@@ -1059,6 +1076,7 @@ class RelayStore {
     const connection = this.newConnection(relay);
     connection.metricsGeneration = resumeMetrics.attempt(relay.id, relay.transport === 'hybrid');
     this.connectionsValue.set(relay.id, connection);
+    this.sessionCredentials.set(connection, this.deviceCredential(relay.id));
     this.emitConnections();
     connection.transport = createRelayTransport(relay, {
       onMessage: (message) => {
@@ -1076,9 +1094,19 @@ class RelayStore {
       getAuthentication: () => this.relayAuthentication(relay),
       onAuthenticated: (presented, enrollment) => {
         if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
+        const current = this.deviceCredentials.get(relay.id);
+        if (!current || current.kind !== presented.kind || current.id !== presented.id
+          || current.version !== presented.version || current.secret !== presented.secret
+          || (current.kind === 'credential' && presented.kind === 'credential'
+            && (current.deviceId !== presented.deviceId || current.role !== presented.role))
+          || (current.kind === 'invitation' && presented.kind === 'invitation'
+            && current.expiresAt !== presented.expiresAt)) {
+          throw new Error('Authentication changed; reconnect with the current credential.');
+        }
         if (presented.kind !== 'credential' || presented.id !== enrollment.credentialId
           || presented.version !== enrollment.credentialVersion) void this.lastKnownControl.forget();
         commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
+        this.sessionCredentials.set(connection, this.deviceCredential(relay.id));
         this.markRelayPaired(relay.id);
       },
       observe: (phase, path) => {
@@ -1253,7 +1281,13 @@ class RelayStore {
     if (this.hidden === hidden) return;
     this.hidden = hidden;
     this.hiddenSince = hidden ? Date.now() : 0;
+    if (hidden) this.suspendAuthority();
     this.syncKeepalive();
+  }
+
+  /** No dial or reconnect tuning: suspension/offline only withdraws authority. */
+  suspendAuthority(): void {
+    for (const [relayId, connection] of this.connectionsValue) this.invalidateFreshness(relayId, connection);
   }
 
   revalidateConnections(timeoutMs = healthTimeoutMs()): void {
@@ -1266,6 +1300,10 @@ class RelayStore {
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
       if (connection?.authRejected || connection?.pairingRequired) continue;
+      if (connection && !this.credentialMatchesSession(relay.id, connection)) {
+        this.connectRelay(relay);
+        continue;
+      }
       if (connection?.status === 'connecting') {
         // Replace a dial that predates the event this revalidation reacts to:
         // it likely started before the network came back and is blackholed.
@@ -1449,7 +1487,8 @@ class RelayStore {
       connection.snapshotPending = false;
       if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
       connection.snapshotTimer = null;
-      if (this.actionLocked || !connection.freshness.accept(this.inventoryBinding(connection), message)) return;
+      if (this.actionLocked || !this.credentialMatchesSession(relayId, connection)
+        || !connection.freshness.accept(this.inventoryBinding(connection), message)) return;
       const fresh = connection.freshness.current(this.inventoryBinding(connection));
       if (!fresh) return;
       connection.actionsFresh = true;
@@ -1459,7 +1498,8 @@ class RelayStore {
       this.reconcileResponding();
       if (fresh.workspaces) this.workspacesValue = [...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId), ...fresh.workspaces];
       // Persist only this validated correlated frame, never the presentation merge.
-      if (fresh.workspaces && connection.summaryGeneration === this.lastKnownControl.generation) {
+      if (fresh.workspaces && this.credentialMatchesSession(relayId, connection)
+        && connection.summaryGeneration === this.lastKnownControl.generation) {
         try { this.lastKnownCache.write(projectLastKnown(relayId, message.agents, message.workspaces, Date.now())); } catch { /* Cache misses never affect live rendering. */ }
       }
       this.publishAgents('correlated snapshot');
@@ -1474,7 +1514,9 @@ class RelayStore {
         }
       }
       this.pushConfigHandler?.(relayId);
-      if (connection.capabilities.includes('device_management')) void this.refreshDevices(relayId);
+      if (connection.capabilities.includes('device_management')) {
+        void this.refreshDevices(relayId).catch(() => this.showToast('Could not refresh paired devices.', true));
+      }
       return;
     }
     if (message.type === 'push_config') {
@@ -1541,9 +1583,7 @@ class RelayStore {
       if (connection.capabilities.includes('push_policy')) {
         this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
       }
-      if (connection.capabilities.includes('device_management')) {
-        void this.refreshDevices(relayId);
-      }
+      // Device administration reads wait for the correlated snapshot handler.
       return;
     }
     if (message.type === 'herdr_status' && connection) {
@@ -2022,10 +2062,32 @@ class RelayStore {
     return { connection, path: connection.pathIdentity, wake: connection.wakeGeneration };
   }
 
+  private credentialsChanged(): void {
+    for (const [relayId, connection] of this.connectionsValue) {
+      if (!this.credentialMatchesSession(relayId, connection)) this.invalidateFreshness(relayId, connection);
+    }
+    this.lastKnownCache.revalidate();
+    this.publishAgents('credential changed');
+    this.publishWorkspaces();
+    this.emitConnections();
+  }
+
+  private credentialMatchesSession(relayId: string, connection: RelayConnection): boolean {
+    try {
+      if (!this.sessionCredentials.has(connection)) return false;
+      const enrolled = this.sessionCredentials.get(connection);
+      const current = this.deviceCredential(relayId);
+      return enrolled === null ? current === null : Boolean(enrolled && current
+        && enrolled.id === current.id && enrolled.version === current.version && enrolled.secret === current.secret
+        && enrolled.deviceId === current.deviceId && enrolled.role === current.role);
+    } catch { return false; }
+  }
+
   relayActionsFresh(relayId: string): boolean {
     const connection = this.connectionsValue.get(relayId);
     return !this.actionLocked && connection?.status === 'connected' && connection.actionsFresh === true
       && connection.inventory.state === 'ready' && !connection.inventory.stale
+      && this.credentialMatchesSession(relayId, connection)
       && connection.freshness.current(this.inventoryBinding(connection)) !== null;
   }
 
@@ -2041,12 +2103,18 @@ class RelayStore {
     if (this.actionLocked) return;
     this.lastKnownControl.sync();
     for (const relay of get(this.relayConfigs)) {
-      if (!this.relayActionsFresh(relay.id)) void this.lastKnownCache.restore(relay.id);
+      if (!this.relayActionsFresh(relay.id)) this.restoreCacheLater(relay.id);
     }
+  }
+
+  private restoreCacheLater(relayId: string): void {
+    // Dial/correlated refresh dispatch must not wait on bounded cache parsing.
+    queueMicrotask(() => { void this.lastKnownCache.restore(relayId); });
   }
 
   private invalidateFreshness(relayId: string, connection: RelayConnection): void {
     connection.freshness.invalidate();
+    this.lastKnownCache.invalidateScope(relayId);
     resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
     connection.wakeGeneration++;
     connection.actionsFresh = false;
@@ -2056,7 +2124,7 @@ class RelayStore {
     if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
     connection.snapshotTimer = null;
     this.emitConnections();
-    if (!this.actionLocked) void this.lastKnownCache.restore(relayId);
+    if (!this.actionLocked) this.restoreCacheLater(relayId);
   }
 
   private requestFreshSnapshot(relayId: string, connection: RelayConnection): boolean {
@@ -2084,7 +2152,7 @@ class RelayStore {
       this.emitConnections();
     }, 15_000);
     this.emitConnections();
-    if (!this.actionLocked) void this.lastKnownCache.restore(relayId);
+    if (!this.actionLocked) this.restoreCacheLater(relayId);
     return this.sendRaw(relayId, request);
   }
 
@@ -2160,6 +2228,8 @@ class RelayStore {
     if (!connection || connection.closed) return false;
     const type = String(payload.type === 'command' ? payload.action : payload.type);
     if (RECOVERY_ACTIONS.has(type)) return true;
+    if (SUBSCRIPTION_ACTIONS.has(type)) return this.credentialMatchesSession(relayId, connection)
+      && payload.target === undefined && payload.pane_id === undefined && payload.workspace_id === undefined;
     const policy = actionPolicy(type);
     if (!policy) return false;
     const credential = this.deviceCredential(relayId);

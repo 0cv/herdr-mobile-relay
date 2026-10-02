@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { base64UrlEncode } from '$lib/base64url';
 import type { RelayDeviceCredential } from '$lib/device-auth';
-import { decryptLastKnown, encryptLastKnown, parseLastKnownEnvelope, type LastKnownCryptoContext } from '$lib/last-known-crypto';
+import { decryptLastKnown, deriveLastKnownAssociation, encryptLastKnown, parseLastKnownEnvelope, type LastKnownCryptoContext } from '$lib/last-known-crypto';
 import { LAST_KNOWN_MAX_AGE_MS, LAST_KNOWN_MAX_ENTRY_BYTES, LAST_KNOWN_MAX_PLAINTEXT_BYTES } from '$lib/last-known-types';
 
 const now = 1_800_000_000_000;
@@ -16,6 +16,25 @@ const decrypt = (raw: string, ctx = context) => decryptLastKnown(raw, ctx, crypt
 afterEach(() => vi.restoreAllMocks());
 
 describe('last-known domain-separated authenticated encryption', () => {
+  it('derives non-extractable, domain-separated opaque associations without persisting descriptive IDs', async () => {
+    const derive = vi.spyOn(crypto.subtle, 'deriveKey');
+    const basis = 'sensitive-host-and-label';
+    const alias = await deriveLastKnownAssociation(context, basis, crypto, now);
+    expect(alias).toHaveLength(43);
+    expect(alias).not.toContain(basis);
+    expect(derive.mock.calls[0][2]).toEqual({ name: 'HMAC', hash: 'SHA-256', length: 256 });
+    expect((await derive.mock.results[0].value).extractable).toBe(false);
+    expect(new TextDecoder().decode((derive.mock.calls[0][0] as HkdfParams).info)).toContain('herdr:last-known:association:v1');
+    await expect(deriveLastKnownAssociation(context, basis, crypto, now)).resolves.toBe(alias);
+    for (const changed of [
+      { ...context, origin: 'https://other.example' },
+      { ...context, credential: { ...credential, version: 2 } },
+      { ...context, credential: { ...credential, deviceId: 'other-device' } },
+      { ...context, credential: { ...credential, role: 'reader' as const } },
+    ]) expect(await deriveLastKnownAssociation(changed, basis, crypto, now)).not.toBe(alias);
+    expect(await deriveLastKnownAssociation(context, 'other-configuration', crypto, now)).not.toBe(alias);
+  });
+
   it('round-trips ciphertext only with random salt and fresh 96-bit IV per write', async () => {
     const text = JSON.stringify({ canary: 'private-label-canary' });
     const first = await encrypt(text);

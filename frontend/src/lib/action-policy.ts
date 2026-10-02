@@ -40,6 +40,7 @@ export function actionPolicy(type: unknown): ActionPolicy | null {
 
 /** Recovery never grants an operational target or dispatches a queued write. */
 export const RECOVERY_ACTIONS = new Set(['refresh_agents', 'webrtc_offer', 'webrtc_ice', 'webrtc_close']);
+export const SUBSCRIPTION_ACTIONS = new Set(['push_subscribe', 'push_unsubscribe']);
 export const CLEANUP_FOR = new Map([
   ['unwatch_pane', 'watch_pane'], ['release_pane_size', 'lease_pane_size'], ['upload_cancel', 'upload'],
 ]);

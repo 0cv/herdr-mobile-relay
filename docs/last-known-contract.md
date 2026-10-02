@@ -66,7 +66,13 @@ eviction is oldest first. Invalid/future times and detected rollback miss.
 Only validated enrolled per-device credentials qualify. HKDF-SHA-256 uses the
 decoded credential secret, a fresh random 256-bit salt and a distinct last-known
 domain. AES-256-GCM uses a fresh 96-bit IV on every write. Canonical AAD binds
-origin, local relay ID, credential ID/version, schema, last-fresh time and expiry.
+origin, opaque local relay association, credential ID/version, schema, last-fresh
+time and expiry. Legacy configuration IDs can contain names/hosts: they are never
+stored in the summary envelope. A separate non-extractable HKDF-SHA-256/HMAC key
+derives the opaque association from the runtime configuration identity and
+credential/device/version/role context. Changing the full configuration identity
+is a miss even if its legacy shortened ID collides. Origin, opaque credential
+identity/version, timestamps and ciphertext size remain observable metadata.
 Keys are non-extractable and never persisted. Envelopes are bounded and checked
 before decoding or decrypting; plaintext is validated entirely before publish.
 Failures never fall back to plaintext or affect pairing/reconnect.

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEVICE_CREDENTIAL_KEY, DEVICE_LOCK_KEY } from '$lib/config';
 import {
   initializeDeviceSecurity,
+  lockForDevice,
   securityState,
   unlockWithDevice,
 } from '$lib/security';
@@ -32,6 +33,7 @@ describe('device verification lifecycle', () => {
     vi.spyOn(relayStore, 'revalidateConnections').mockImplementation(() => {});
     vi.spyOn(relayStore, 'resetReconnectBackoff').mockImplementation(() => {});
     vi.spyOn(relayStore, 'setHidden').mockImplementation(() => {});
+    vi.spyOn(relayStore, 'suspendAuthority').mockImplementation(() => {});
     localStorage.setItem(DEVICE_LOCK_KEY, 'true');
     localStorage.setItem(DEVICE_CREDENTIAL_KEY, 'AQID');
     securityState.set({
@@ -51,6 +53,29 @@ describe('device verification lifecycle', () => {
     restoreProperty(window, 'PublicKeyCredential', publicKeyCredentialDescriptor);
     restoreProperty(document, 'visibilityState', visibilityDescriptor);
     restoreProperty(navigator, 'connection', connectionDescriptor);
+  });
+
+  it('withdraws authority on freeze, pagehide and offline even without device verification', () => {
+    localStorage.removeItem(DEVICE_LOCK_KEY);
+    const stop = initializeDeviceSecurity();
+    document.dispatchEvent(new Event('freeze'));
+    window.dispatchEvent(new Event('pagehide'));
+    window.dispatchEvent(new Event('offline'));
+    expect(relayStore.suspendAuthority).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it('does not unlock from an assertion that predates a later lock generation', async () => {
+    let resolve!: (value: unknown) => void;
+    getCredential.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const stop = initializeDeviceSecurity();
+    lockForDevice('resume');
+    resolve({ id: 'stale-fixture-assertion' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(get(securityState).locked).toBe(true);
+    expect(relayStore.connectAll).not.toHaveBeenCalled();
+    expect(relayStore.revalidateConnections).not.toHaveBeenCalled();
+    stop();
   });
 
   it('does not verify again when the authenticator returns focus to an unlocked app', async () => {
