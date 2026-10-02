@@ -292,6 +292,13 @@ test('does not count stale post-wake agents as fresh', async ({ page }) => {
   await expectNoSensitiveMarkers(booted, card, text);
 });
 
+/** Inject a same-origin test stylesheet without weakening the shipped CSP. */
+async function presentationStyle(page: Page, css: string) {
+  const url = new URL('/resume-presentation.css', page.url()).href;
+  await page.route(url, (route) => route.fulfill({ contentType: 'text/css', body: css }));
+  return page.addStyleTag({ url });
+}
+
 test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
   const hiddenStyles = {
     'display-none card': 'article.agent-card { display: none !important; }',
@@ -312,7 +319,7 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
       await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 41 });
       await awaitFresh(page, [1]);
       await quiesce(page);
-      const style = await page.addStyleTag({ content: css });
+      const style = await presentationStyle(page, css);
       await fixture(page, 'hide');
       const wakeAt = await fixture(page, 'show');
       await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'not-presented')).toBe(true);
@@ -335,9 +342,9 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
       await fixture(page, 'hide');
       const wakeAt = await fixture(page, 'show');
       await expect.poll(() => fixture(page, 'pendingPaints')).toBe(1);
-      const style = mode === 'page' ? null : await page.addStyleTag({
-        content: mode === 'card' ? hiddenStyles['display-none card'] : hiddenStyles['transparent ancestor'],
-      });
+      const style = mode === 'page' ? null : await presentationStyle(
+        page, mode === 'card' ? hiddenStyles['display-none card'] : hiddenStyles['transparent ancestor'],
+      );
       if (mode === 'page') {
         // Change effective visibility without starting a second fixture wake.
         await page.evaluate(() => {
@@ -367,7 +374,7 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 43 });
     await awaitFresh(page, [1]);
     await quiesce(page);
-    const style = await page.addStyleTag({ content: hiddenStyles['display-none card'] });
+    const style = await presentationStyle(page, hiddenStyles['display-none card']);
     await fixture(page, 'hide');
     const wakeAt = await fixture(page, 'show');
     await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'not-presented')).toBe(true);
