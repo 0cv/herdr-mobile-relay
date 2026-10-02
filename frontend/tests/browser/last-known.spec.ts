@@ -13,7 +13,7 @@ async function boot(page: Page, overrides: Partial<FixtureConfig> = {}) {
   await expect(page.locator('article.agent-card')).toHaveCount(1);
 }
 async function enable(page: Page) {
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: /^Settings(?:,|$)/ }).click();
   await page.getByRole('switch', { name: 'Keep an Encrypted Last-known Summary' }).check();
   await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key) !== null, CACHE)).toBe(true);
   await page.getByRole('button', { name: 'Back', exact: true }).click();
@@ -49,7 +49,7 @@ test('B2 same-tab restoration renders read-only summary before correlated invent
 
 test('B2 opt-out and Forget leave credentials paired and cannot restore old summaries', async ({ page }) => {
   await boot(page); await enable(page);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: /^Settings(?:,|$)/ }).click();
   const before = await page.evaluate(() => localStorage.getItem('herdr_device_auth_v1'));
   await page.getByRole('button', { name: 'Forget last-known data' }).click();
   await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), CACHE)).toBeNull();

@@ -22,14 +22,14 @@ test('B2 blocked workspace chunk is absent from eager summary/Settings paths and
   const gate = new Promise<void>((resolve) => { release = resolve; });
   await page.route(CHUNK, async (route) => { requests++; await gate; await route.continue(); });
   await boot(page);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: /^Settings(?:,|$)/ }).click();
   await page.getByRole('switch', { name: 'Keep an Encrypted Last-known Summary' }).check();
   await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key) !== null, CACHE)).toBe(true);
   await page.evaluate(() => (window as any).__resumeFixture.prepareDiscard());
   await page.goto('/');
   await expect(page.locator('[data-last-known]')).toBeVisible();
   expect(requests).toBe(0);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: /^Settings(?:,|$)/ }).click();
   await expect(page.getByRole('button', { name: 'Forget last-known data' })).toBeEnabled();
   await page.getByRole('button', { name: 'Forget last-known data' }).click();
   await page.getByRole('switch', { name: 'Keep an Encrypted Last-known Summary' }).uncheck();
