@@ -169,7 +169,7 @@ jobs:
   mobile-host-check:
     name: Mobile harness checks
     # Temporarily disabled while mobile CI is isolated on ci-mobile.
-    if: ${{ false }}
+    if: ${{ github.event_name == 'herdr-mobile-check-disabled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -192,7 +192,7 @@ jobs:
   mobile:
     name: Mobile device CI
     # Temporarily disabled alongside mobile-host-check and the release caller.
-    if: ${{ false }}
+    if: ${{ github.event_name == 'herdr-mobile-check-disabled' }}
     needs: [release, mobile-host-check]
     uses: ./.github/workflows/mobile-ci.yml
     with:

@@ -351,6 +351,21 @@ export function assertDistinctUpgrade(baseline: PreparedBundle, candidate: Prepa
   }
 }
 
+export function assertStylesheetMode(
+  baseline: BundleIdentity,
+  candidate: BundleIdentity,
+  mode: 'changed' | 'unchanged',
+): void {
+  const samePath = baseline.style === candidate.style;
+  const sameBytes = baseline.styleSha256 === candidate.styleSha256;
+  if (mode === 'changed' && (samePath || sameBytes)) {
+    throw new Error('CURRENT_BUILD: baseline and candidate stylesheets must have distinct immutable identities');
+  }
+  if (mode === 'unchanged' && (!samePath || !sameBytes)) {
+    throw new Error('CURRENT_BUILD: unchanged stylesheet mode must preserve path and bytes');
+  }
+}
+
 export async function writeBundleSet(filename: string, set: BundleSet): Promise<void> {
   await writeFile(filename, `${JSON.stringify(set, null, 2)}\n`, { mode: 0o600 });
 }

@@ -5,6 +5,10 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.6] - 2026-10-02
+
+Version 0.22.5 was withdrawn; this release skips its version and asset generation.
+
 ### Fixed
 
 - Run each macOS update and app deployment worker exactly once. launchd used to
@@ -16,6 +20,16 @@ project follows [Semantic Versioning](https://semver.org/).
   ([#57](https://github.com/0cv/herdr-mobile-relay/issues/57))
 - Show Pi's live commands on the phone when Pi runs on Bun on macOS. The Pi
   integration could not identify Herdr's socket there, so none were listed.
+- Include a static missing-page response in generated Pages bundles and require
+  application-resource revalidation instead of one-year immutable caching.
+  Recovery from responses already cached as immutable still needs qualification.
+- Include the transaction helper required by native service installers in
+  release archives.
+- Verify hosted application resources at their canonical URLs, including MIME,
+  digest, cache policy, and missing-asset responses, so cached failures cannot
+  hide behind cache-busting deployment checks.
+- Skip withdrawn asset generations and reject withdrawn application scripts
+  when preparing a release.
 
 ## [0.22.4] - 2026-10-01
 
@@ -1621,7 +1635,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...HEAD
+[0.22.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...v0.22.6
 [0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4
 [0.22.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.1...v0.22.2

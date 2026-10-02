@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { createServer } from 'node:http';
 
@@ -15,6 +16,26 @@ const types = {
   '.svg': 'image/svg+xml',
   '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
+
+const notFoundBody = await readFile(resolve(root, '404.html'));
+const policies = new Map([...((await readFile(resolve(root, '_headers'), 'utf8'))
+  .matchAll(/^(\/[^\n]*)\n {2}Cache-Control: ([^\n]*)$/gm))]
+  .map((match) => [match[1], match[2]]));
+
+function cachePolicy(pathname) {
+  if (policies.has(pathname)) return policies.get(pathname);
+  if (pathname.startsWith('/assets/')) return policies.get('/assets/*');
+  if (pathname.startsWith('/builds/')) return policies.get('/builds/*');
+  return 'no-cache';
+}
+
+function notFound(response) {
+  response.writeHead(404, {
+    'Cache-Control': 'no-store',
+    'Content-Type': 'text/html; charset=utf-8',
+    'X-Content-Type-Options': 'nosniff',
+  }).end(notFoundBody);
+}
 
 function encodingQuality(value, encoding) {
   if (!value) return 0;
@@ -43,12 +64,12 @@ createServer(async (request, response) => {
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = resolve(root, relative);
   if (file !== root && !file.startsWith(`${root}${sep}`)) {
-    response.writeHead(404).end('Not found\n');
+    notFound(response);
     return;
   }
   const details = await stat(file).catch(() => null);
   if (!details?.isFile()) {
-    response.writeHead(404).end('Not found\n');
+    notFound(response);
     return;
   }
   const compressedFile = `${file}.br`;
@@ -56,15 +77,23 @@ createServer(async (request, response) => {
   const useBrotli = compressedDetails?.isFile()
     && encodingQuality(request.headers['accept-encoding'], 'br') > 0;
   const headers = {
-    'Cache-Control': 'no-cache',
+    'Cache-Control': cachePolicy(pathname),
     'Content-Security-Policy': "default-src 'self'; connect-src 'self' https: ws: wss:; img-src 'self' blob: data:; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     'Content-Type': types[extname(file)] || 'application/octet-stream',
     Vary: 'Accept-Encoding',
     'X-Content-Type-Options': 'nosniff',
   };
   if (useBrotli) headers['Content-Encoding'] = 'br';
+  const selectedFile = useBrotli ? compressedFile : file;
+  const etag = `"${createHash('sha256').update(await readFile(selectedFile)).digest('hex')}"`;
+  headers.ETag = etag;
+  if (request.headers['if-none-match']?.split(',').some((value) => value.trim().replace(/^W\//, '') === etag)) {
+    response.writeHead(304, headers).end();
+    return;
+  }
   response.writeHead(200, headers);
-  createReadStream(useBrotli ? compressedFile : file).pipe(response);
+  if (request.method === 'HEAD') response.end();
+  else createReadStream(selectedFile).pipe(response);
 }).listen(port, '127.0.0.1', () => {
   console.log(`Serving ${root} on http://127.0.0.1:${port}`);
 });

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -44,10 +47,11 @@ const (
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 var (
-	projectPattern          = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
-	branchPattern           = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,118}[A-Za-z0-9])?$`)
-	errDeployLocked         = errors.New("another app deployment is already running")
-	errPublicOriginRedirect = errors.New("public version check redirected to another origin")
+	projectPattern             = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
+	branchPattern              = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,118}[A-Za-z0-9])?$`)
+	errDeployLocked            = errors.New("another app deployment is already running")
+	errPublicOriginRedirect    = errors.New("public version check redirected to another origin")
+	errPublicCanonicalRedirect = errors.New("canonical public resource must not redirect")
 )
 
 type Job struct {
@@ -652,7 +656,7 @@ func VerifyPublic(ctx context.Context, webRoot, origin, version, revision string
 	}
 	normalizedOrigin, err := setuphelper.NormalizeOrigin(origin, false)
 	if err != nil {
-		return fmt.Errorf("public app origin: %w", err)
+		return errors.New("public app origin must be a valid HTTPS origin without credentials, a path, query, or fragment")
 	}
 	descriptor, err := release.VerifyWebDescriptor(os.DirFS(webRoot), version)
 	if err != nil {
@@ -690,6 +694,24 @@ func verifyPublic(ctx context.Context, job Job) error {
 	defer cancel()
 	client := &http.Client{Timeout: publicRequestTimeout}
 	return verifyPublicWith(verifyCtx, job, client, publicRetryDelay)
+}
+
+type publicResourceFetchError struct {
+	resource string
+	cause    error
+}
+
+func (e *publicResourceFetchError) Error() string {
+	for _, err := range []error{errPublicOriginRedirect, errPublicCanonicalRedirect} {
+		if errors.Is(e.cause, err) {
+			return fmt.Sprintf("fetch public app resource /%s: %s", e.resource, err)
+		}
+	}
+	return fmt.Sprintf("fetch public app resource /%s failed", e.resource)
+}
+
+func (e *publicResourceFetchError) Unwrap() error {
+	return e.cause
 }
 
 type publicResponseError struct {
@@ -758,7 +780,10 @@ func verifyPublicWith(
 	}
 }
 
-const maxPublicResourceBytes = 32 * 1024 * 1024
+const (
+	maxPublicResourceBytes = 32 * 1024 * 1024
+	longPublicAssetMaxAge  = 24 * time.Hour
+)
 
 func publicResourceURL(origin, resource, cacheBust string) (string, error) {
 	if resource == "" || strings.HasPrefix(resource, "/") || strings.ContainsAny(resource, "\\?#") ||
@@ -770,7 +795,10 @@ func publicResourceURL(origin, resource, cacheBust string) (string, error) {
 		return "", err
 	}
 	parsed.Path = "/" + resource
-	parsed.RawQuery = "herdr_deploy_check=" + url.QueryEscape(cacheBust)
+	parsed.RawQuery = ""
+	if cacheBust != "" {
+		parsed.RawQuery = "herdr_deploy_check=" + url.QueryEscape(cacheBust)
+	}
 	return parsed.String(), nil
 }
 
@@ -789,13 +817,21 @@ func fetchPublicResource(
 	}
 	request.Header.Set("Accept", "*/*")
 	request.Header.Set("Accept-Encoding", acceptEncoding)
-	request.Header.Set("Cache-Control", "no-cache, no-store")
+	if cacheBust != "" {
+		request.Header.Set("Cache-Control", "no-cache, no-store")
+	} else {
+		canonicalClient := *client
+		canonicalClient.CheckRedirect = func(request *http.Request, _ []*http.Request) error {
+			if !samePublicOrigin(request.URL.String(), origin) {
+				return errPublicOriginRedirect
+			}
+			return errPublicCanonicalRedirect
+		}
+		client = &canonicalClient
+	}
 	response, err := client.Do(request)
 	if err != nil {
-		if errors.Is(err, errPublicOriginRedirect) {
-			return nil, nil, err
-		}
-		return nil, nil, fmt.Errorf("fetch public app resource: %w", err)
+		return nil, nil, &publicResourceFetchError{resource: resource, cause: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -806,7 +842,7 @@ func fetchPublicResource(
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxPublicResourceBytes+1))
 	if err != nil {
-		return nil, response.Header, fmt.Errorf("read public app resource: %w", err)
+		return nil, response.Header, &publicResourceFetchError{resource: resource, cause: err}
 	}
 	if len(body) > maxPublicResourceBytes {
 		return nil, response.Header, errors.New("public app resource exceeds verification limit")
@@ -823,7 +859,7 @@ func decodePublicRepresentation(body []byte, headers http.Header) ([]byte, error
 		reader := brotli.NewReader(bytes.NewReader(body))
 		decoded, err := io.ReadAll(io.LimitReader(reader, maxPublicResourceBytes+1))
 		if err != nil {
-			return nil, fmt.Errorf("decode Brotli public app resource: %w", err)
+			return nil, errors.New("decode Brotli public app resource failed")
 		}
 		if len(decoded) > maxPublicResourceBytes {
 			return nil, errors.New("decoded public app resource exceeds verification limit")
@@ -832,19 +868,19 @@ func decodePublicRepresentation(body []byte, headers http.Header) ([]byte, error
 	case "gzip":
 		reader, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
-			return nil, fmt.Errorf("decode gzip public app resource: %w", err)
+			return nil, errors.New("decode gzip public app resource failed")
 		}
 		defer reader.Close()
 		decoded, err := io.ReadAll(io.LimitReader(reader, maxPublicResourceBytes+1))
 		if err != nil {
-			return nil, fmt.Errorf("decode gzip public app resource: %w", err)
+			return nil, errors.New("decode gzip public app resource failed")
 		}
 		if len(decoded) > maxPublicResourceBytes {
 			return nil, errors.New("decoded public app resource exceeds verification limit")
 		}
 		return decoded, nil
 	default:
-		return nil, fmt.Errorf("unsupported public app Content-Encoding %q", encoding)
+		return nil, errors.New("unsupported public app Content-Encoding")
 	}
 }
 
@@ -867,7 +903,7 @@ func verifyPublicVersionMetadata(data []byte, job Job, descriptor release.WebDes
 		StyleSHA256  string `json:"style_sha256"`
 	}
 	if err := json.Unmarshal(data, &identity); err != nil {
-		return err
+		return errors.New("public version metadata is invalid")
 	}
 	javascript := descriptor.Files["javascript"]
 	stylesheet := descriptor.Files["stylesheet"]
@@ -905,6 +941,83 @@ func compareWebDescriptorIdentity(public, target release.WebDescriptor) error {
 	return nil
 }
 
+func publicResourceMIMEValid(kind string, headers http.Header) bool {
+	contentType, _, err := mime.ParseMediaType(headers.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	switch kind {
+	case "entry":
+		return contentType == "text/html"
+	case "javascript":
+		return contentType == "text/javascript" || contentType == "application/javascript"
+	case "stylesheet":
+		return contentType == "text/css"
+	default:
+		return false
+	}
+}
+
+func publicAssetCacheUnsafe(headers http.Header) bool {
+	for _, directive := range strings.Split(strings.Join(headers.Values("Cache-Control"), ","), ",") {
+		name, value, _ := strings.Cut(directive, "=")
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "immutable":
+			return true
+		case "max-age", "s-maxage":
+			seconds, err := strconv.ParseUint(strings.Trim(strings.TrimSpace(value), `"`), 10, 64)
+			if err != nil || seconds >= uint64(longPublicAssetMaxAge/time.Second) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func checkCanonicalPublicBundle(
+	ctx context.Context,
+	job Job,
+	client *http.Client,
+	descriptor release.WebDescriptor,
+) (bool, error) {
+	for _, kind := range []string{"entry", "javascript", "stylesheet"} {
+		file := descriptor.Files[kind]
+		for _, encoding := range []string{"identity", "br"} {
+			body, headers, err := fetchPublicResource(ctx, client, job.Origin, file.Path, "", encoding)
+			if err != nil {
+				return publicErrorRetryable(err), fmt.Errorf("canonical public resource /%s: %w", file.Path, err)
+			}
+			if !publicResourceMIMEValid(kind, headers) {
+				return false, fmt.Errorf("canonical public resource /%s has an invalid Content-Type for %s", file.Path, kind)
+			}
+			if kind != "entry" && publicAssetCacheUnsafe(headers) {
+				return false, fmt.Errorf("canonical public resource /%s has an unsafe Cache-Control policy", file.Path)
+			}
+			body, err = decodePublicRepresentation(body, headers)
+			if err != nil {
+				return true, fmt.Errorf("decode canonical public resource /%s failed", file.Path)
+			}
+			if publicDigest(body) != file.SHA256 {
+				return false, fmt.Errorf("canonical public resource /%s does not match its descriptor digest", file.Path)
+			}
+		}
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return false, errors.New("generate missing public asset probe failed")
+	}
+	missingPath := "assets/herdr-missing-" + hex.EncodeToString(nonce[:]) + ".js"
+	_, headers, err := fetchPublicResource(ctx, client, job.Origin, missingPath, "", "identity")
+	var responseErr *publicResponseError
+	if errors.As(err, &responseErr) {
+		return false, nil
+	}
+	if err != nil && headers == nil {
+		return publicErrorRetryable(err), fmt.Errorf("missing canonical public asset /%s: %w", missingPath, err)
+	}
+	return false, fmt.Errorf("missing canonical public asset /%s returned HTTP 200", missingPath)
+}
+
 func checkPublicBundle(
 	ctx context.Context,
 	job Job,
@@ -927,13 +1040,16 @@ func checkPublicBundle(
 	}
 	var rawDescriptor release.WebDescriptor
 	if err := json.Unmarshal(descriptorData, &rawDescriptor); err != nil {
-		return true, fmt.Errorf("decode public release descriptor: %w", err)
+		return true, errors.New("decode public release descriptor failed")
 	}
 	if rawDescriptor.Files == nil {
 		return true, errors.New("public release descriptor has no files")
 	}
 	if err := compareWebDescriptorIdentity(rawDescriptor, targetDescriptor); err != nil {
 		return true, err
+	}
+	if retryable, err := checkCanonicalPublicBundle(ctx, job, client, targetDescriptor); err != nil {
+		return retryable, err
 	}
 	files := make(map[string][]byte, len(targetDescriptor.Files))
 	for _, name := range []string{"entry", "javascript", "stylesheet"} {
@@ -965,7 +1081,7 @@ func checkPublicBundle(
 		}
 	}
 	if _, err := release.VerifyWebDescriptorData(descriptorData, files, job.Version); err != nil {
-		return true, fmt.Errorf("public web release descriptor: %w", err)
+		return true, errors.New("public web release descriptor verification failed")
 	}
 	versionData, versionHeaders, err := fetchPublicResource(
 		ctx, client, job.Origin, "version.json", cacheBust+"-version", "identity",
@@ -997,7 +1113,7 @@ func checkPublicBundle(
 }
 
 func publicErrorRetryable(err error) bool {
-	if errors.Is(err, errPublicOriginRedirect) {
+	if errors.Is(err, errPublicOriginRedirect) || errors.Is(err, errPublicCanonicalRedirect) {
 		return false
 	}
 	var responseErr *publicResponseError
@@ -1023,14 +1139,14 @@ func verifyVersion(data []byte, version, revision string) error {
 		Revision       string `json:"revision"`
 	}
 	if err := json.Unmarshal(data, &identity); err != nil {
-		return err
+		return errors.New("version metadata is invalid")
 	}
 	actualVersion := identity.ReleaseVersion
 	if actualVersion == "" {
 		actualVersion = identity.Version
 	}
 	if actualVersion != version || identity.Revision != revision {
-		return fmt.Errorf("expected %s (%s), got %s (%s)", version, revision, actualVersion, identity.Revision)
+		return errors.New("version metadata does not match the expected version and revision")
 	}
 	return nil
 }

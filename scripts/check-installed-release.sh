@@ -110,6 +110,12 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     --revision "$EXPECTED_REVISION" \
     "$RELEASE_DIR" >/dev/null
 
+[ -f "$RELEASE_DIR/relay/native-install-transaction.sh" ] || {
+    echo "release does not contain the native installer transaction helper" >&2
+    exit 1
+}
+bash -n "$RELEASE_DIR/relay/native-install-transaction.sh"
+
 bash "$RELEASE_DIR/relay/pi-commands.sh" install "$WORK_DIR/pi-agent" >/dev/null
 cmp "$RELEASE_DIR/relay/pi-command-bridge/bridge.mjs" \
     "$WORK_DIR/pi-agent/extensions/herdr-mobile-relay-commands/bridge.mjs"

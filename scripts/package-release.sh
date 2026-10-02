@@ -76,6 +76,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         herdr-mobile-relay-service.sh \
         install-service.sh \
         install-systemd-user-service.sh \
+        native-install-transaction.sh \
         plugin-on-event.sh \
         pi-commands.sh \
         service.sh \

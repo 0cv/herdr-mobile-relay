@@ -92,6 +92,13 @@ Pages app, configure exactly one stable relay as deployment owner with the
 before it installs and restarts the relay; a failed download, compatibility
 check, deployment, or public-origin check leaves the current relay running.
 
+Public verification waits for the target release descriptor, then checks the
+canonical entry, JavaScript, and stylesheet URLs without cache-busting queries.
+Wrong MIME types or digests, immutable or day-long asset cache policies, and
+successful responses for missing assets fail immediately. If `verify-public`
+names a cached canonical resource, purge exactly that URL in Cloudflare and
+re-run verification; do not clear the phone's data.
+
 The optional deployment-owner role requires Node.js 22 or newer — Wrangler's own
 floor, and what the action verifies before it records a directory — plus
 Cloudflare credentials on that computer only. The action looks for `node` where

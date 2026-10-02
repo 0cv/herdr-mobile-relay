@@ -16,7 +16,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery phone-recovery-check mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
@@ -38,6 +38,7 @@ help:
 	@echo "  make service-uninstall          Stop/remove the relay service"
 	@echo "  make speech-voices              Cache the neural voices that read responses aloud"
 	@echo "  make mobile-ci-check            Check the host-only installed-PWA harness"
+	@echo "  make phone-recovery-check       Run private Chromium and WebKit cache-recovery scenarios"
 	@echo "  make mobile-cache-recovery MOBILE_ARGS=...  Check cached stylesheet recovery with a bundle set"
 	@echo "  make mobile-ci-run MOBILE_ARGS=...  Run a configured device scenario"
 	@echo "  make mobile-android MOBILE_ARGS=... Run the installed Android suite"
@@ -148,6 +149,9 @@ release-bundle-check:
 	scripts/package-release.sh "$$version" "$$revision" "$$tmp"; \
 	test "$$(find "$$tmp" -name 'herdr-mobile-relay_*.tar.gz' | wc -l)" -eq 4; \
 	test -s "$$tmp/checksums.txt"; \
+	for archive in "$$tmp"/herdr-mobile-relay_*.tar.gz; do \
+		tar -tzf "$$archive" | grep -qx './relay/native-install-transaction.sh' || exit; \
+	done; \
 	host_os="$$(go env GOOS)"; host_arch="$$(go env GOARCH)"; \
 	scripts/check-installed-release.sh \
 		"$$tmp/herdr-mobile-relay_$${version}_$${host_os}_$${host_arch}.tar.gz" \
@@ -230,6 +234,27 @@ mobile-composite-check:
 mobile-cache-recovery:
 	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
 	bun run --cwd tests/mobile test:cache-recovery -- $(MOBILE_ARGS)
+
+phone-recovery-check:
+	@set -eu; \
+	umask 077; \
+	root="$$(mktemp -d /tmp/herdr-phone-recovery.XXXXXX)"; \
+	mkdir -m 700 "$$root/work" "$$root/evidence"; \
+	printf 'Sanitized evidence: %s\n' "$$root/evidence/result.json"; \
+	status=0; \
+	go test ./tests/mobile/fixture || status=$$?; \
+	if [ "$$status" -eq 0 ]; then bun run --cwd tests/mobile lint || status=$$?; fi; \
+	if [ "$$status" -eq 0 ]; then bun run --cwd tests/mobile check || status=$$?; fi; \
+	if [ "$$status" -eq 0 ]; then bun run --cwd tests/mobile test:unit || status=$$?; fi; \
+	if [ "$$status" -eq 0 ]; then bun tests/mobile/prepare-current.ts --output "$$root/work/bundles" --stylesheet unchanged || status=$$?; fi; \
+	if [ "$$status" -eq 0 ]; then go build -o "$$root/work/fixture-bin" ./tests/mobile/fixture || status=$$?; fi; \
+	if [ "$$status" -eq 0 ]; then bun run --cwd tests/mobile test:phone-recovery -- --bundle-set "$$root/work/bundles/bundle-set.json" --fixture "$$root/work/fixture-bin" --work "$$root/work/run" --output "$$root/evidence" || status=$$?; fi; \
+	if [ "$$status" -eq 0 ]; then rm -rf "$$root/work"; else \
+		if [ ! -f "$$root/evidence/result.json" ]; then printf '{"schema":1,"result":"failed","failure":"a focused fixture or build check failed before browser evidence was written"}\n' > "$$root/evidence/result.json"; fi; \
+		printf 'Private failure data preserved: %s\n' "$$root/work"; \
+	fi; \
+	printf 'Sanitized evidence: %s\n' "$$root/evidence/result.json"; \
+	exit "$$status"
 
 mobile-ci-run:
 	bun run --cwd tests/mobile run -- $(MOBILE_ARGS)

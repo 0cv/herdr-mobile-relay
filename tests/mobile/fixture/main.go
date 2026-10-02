@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,6 +17,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"math/big"
@@ -41,8 +43,16 @@ import (
 
 const (
 	maxRequestRecords = 2_000
+	maxRequestPaths   = 512
+	maxFaultEvents    = 1_024
+	maxActiveFaults   = 128
+	maxFaultResponses = 100
+	maxFaultLifetime  = 5 * time.Minute
 	controlSecretSize = 32
+	immutablePolicy   = "public, max-age=31536000, immutable"
 )
+
+var immutableHTML = []byte("<!doctype html><script src=\"/herdr-bootstrap.js\"></script>\n")
 
 type fixtureOptions struct {
 	oldRoot     string
@@ -54,6 +64,7 @@ type fixtureOptions struct {
 }
 
 type requestRecord struct {
+	Sequence        uint64 `json:"sequence"`
 	Method          string `json:"method"`
 	Path            string `json:"path"`
 	Accept          string `json:"accept_encoding,omitempty"`
@@ -61,7 +72,34 @@ type requestRecord struct {
 	Fault           string `json:"fault,omitempty"`
 	FaultID         string `json:"fault_id,omitempty"`
 	FaultGeneration string `json:"fault_generation,omitempty"`
+	Status          int    `json:"status,omitempty"`
+	ContentType     string `json:"content_type,omitempty"`
+	CacheControl    string `json:"cache_control,omitempty"`
+	Bytes           int64  `json:"bytes,omitempty"`
+	SHA256          string `json:"sha256,omitempty"`
 	At              string `json:"at"`
+}
+
+type faultAction struct {
+	Action       string `json:"action"`
+	ID           string `json:"id"`
+	Generation   string `json:"generation"`
+	Path         string `json:"path"`
+	Kind         string `json:"kind,omitempty"`
+	Policy       string `json:"policy,omitempty"`
+	Remaining    int    `json:"remaining"`
+	RequestCount int    `json:"request_count"`
+	At           string `json:"at"`
+}
+
+type repairPolicy struct {
+	ID         string
+	Generation string
+	Path       string
+	Policy     string
+	Remaining  int
+	ExpiresAt  time.Time
+	key        string
 }
 
 type responseFault struct {
@@ -90,6 +128,10 @@ type releaseRouter struct {
 	faults             map[string]*responseFault
 	barriers           map[string]chan struct{}
 	requests           []requestRecord
+	requestCounts      map[string]int
+	actions            []faultAction
+	repairPolicies     map[string]*repairPolicy
+	nextSequence       uint64
 	invalidated        bool
 	invalidationReason string
 }
@@ -109,12 +151,13 @@ func newReleaseRouter(oldRoot, candidateRoot string) (*releaseRouter, error) {
 		oldScript: releaseAsset(oldRoot, "script", "/assets/app.js"),
 		oldStyle:  releaseAsset(oldRoot, "style", "/assets/app.css"),
 		faults:    make(map[string]*responseFault), barriers: make(map[string]chan struct{}),
-		requests: make([]requestRecord, 0, maxRequestRecords),
+		requests: make([]requestRecord, 0, maxRequestRecords), requestCounts: make(map[string]int),
+		actions: make([]faultAction, 0, maxFaultEvents), repairPolicies: make(map[string]*repairPolicy),
 	}, nil
 }
 
 func (r *releaseRouter) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	release, handler, fault := r.route(request.Method, request.URL.Path)
+	release, handler, fault, policy := r.route(request.Method, request.URL.Path)
 	record := requestRecord{
 		Method: request.Method, Path: request.URL.Path, Accept: request.Header.Get("Accept-Encoding"),
 		Release: release, At: time.Now().UTC().Format(time.RFC3339Nano),
@@ -123,15 +166,20 @@ func (r *releaseRouter) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 		record.Fault = fault.Kind
 		record.FaultID = fault.ID
 		record.FaultGeneration = fault.Generation
-		r.record(record)
-		r.applyFault(w, request, fault, handler)
-		return
 	}
-	r.record(record)
-	handler.ServeHTTP(w, request)
+	sequence := r.record(record)
+	tracked := &responseRecorder{ResponseWriter: w, policy: policy, digest: sha256.New()}
+	if fault != nil {
+		r.applyFault(tracked, request, fault, handler)
+	} else if handler != nil {
+		handler.ServeHTTP(tracked, request)
+	} else {
+		http.Error(tracked, "release is unavailable", http.StatusServiceUnavailable)
+	}
+	r.completeRequest(sequence, tracked)
 }
 
-func (r *releaseRouter) route(method, path string) (string, *web.Handler, *responseFault) {
+func (r *releaseRouter) route(method, path string) (string, *web.Handler, *responseFault, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	release := r.active
@@ -140,8 +188,16 @@ func (r *releaseRouter) route(method, path string) (string, *web.Handler, *respo
 		handler = r.candidate
 	}
 	r.invalidateExpiredLocked(time.Now())
+	if len(path) > 2_048 || (r.requestCounts[path] == 0 && len(r.requestCounts) >= maxRequestPaths) {
+		r.invalidated = true
+		if r.invalidationReason == "" {
+			r.invalidationReason = "request path accounting limit reached"
+		}
+		return release, handler, &responseFault{ID: "fixture-expired", Generation: r.invalidationReason, Method: "*", Path: "*", Kind: "expired", Remaining: -1}, ""
+	}
+	r.requestCounts[path]++
 	if r.invalidated {
-		return release, handler, &responseFault{ID: "fixture-expired", Generation: r.invalidationReason, Method: "*", Path: "*", Kind: "expired", Remaining: -1}
+		return release, handler, &responseFault{ID: "fixture-expired", Generation: r.invalidationReason, Method: "*", Path: "*", Kind: "expired", Remaining: -1}, ""
 	}
 	key := faultKey(method, path)
 	fault := r.faults[key]
@@ -153,23 +209,87 @@ func (r *releaseRouter) route(method, path string) (string, *web.Handler, *respo
 		copy := *fault
 		copy.key = key
 		copy.admitted = true
+		r.recordFaultActionLocked("fault_consumed", fault, "", r.requestCounts[path])
 		if fault.Remaining > 0 {
 			fault.Remaining--
 			if fault.Kind == "stall" {
 				fault.inFlight++
-				if fault.Remaining == 0 {
-					copy.Remaining = 0
-				}
+				copy.Remaining = fault.Remaining
 			} else if fault.Remaining == 0 {
 				delete(r.faults, key)
-				if key != faultKey("*", path) {
-					delete(r.faults, faultKey("*", path))
-				}
+				r.recordFaultActionLocked("fault_exhausted", fault, "", r.requestCounts[path])
 			}
 		}
-		return release, handler, &copy
+		return release, handler, &copy, ""
 	}
-	return release, handler, nil
+	policyKey := faultKey(method, path)
+	policyFault := r.repairPolicies[policyKey]
+	if policyFault == nil {
+		policyKey = faultKey("*", path)
+		policyFault = r.repairPolicies[policyKey]
+	}
+	if policyFault != nil && !time.Now().Before(policyFault.ExpiresAt) {
+		r.recordFaultActionLocked("repair_policy_expired", &responseFault{ID: policyFault.ID, Generation: policyFault.Generation, Path: path}, policyFault.Policy, r.requestCounts[path])
+		delete(r.repairPolicies, policyKey)
+	} else if policyFault != nil {
+		policy := policyFault.Policy
+		policyFault.Remaining--
+		r.recordFaultActionLocked("repaired_response", &responseFault{ID: policyFault.ID, Generation: policyFault.Generation, Path: path, Remaining: policyFault.Remaining}, policy, r.requestCounts[path])
+		if policyFault.Remaining == 0 {
+			r.recordFaultActionLocked("repair_policy_exhausted", &responseFault{ID: policyFault.ID, Generation: policyFault.Generation, Path: path}, policy, r.requestCounts[path])
+			delete(r.repairPolicies, policyKey)
+		}
+		return release, handler, nil, policy
+	}
+	return release, handler, nil, ""
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	policy string
+	digest hash.Hash
+	status int
+	bytes  int64
+}
+
+func (w *responseRecorder) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	if w.policy != "" {
+		w.Header().Set("Cache-Control", w.policy)
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseRecorder) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	written, err := w.ResponseWriter.Write(data)
+	if written > 0 {
+		_, _ = w.digest.Write(data[:written])
+		w.bytes += int64(written)
+	}
+	return written, err
+}
+
+func (w *responseRecorder) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer cannot hijack")
+	}
+	return hijacker.Hijack()
 }
 
 func (r *releaseRouter) applyFault(w http.ResponseWriter, request *http.Request, fault *responseFault, handler *web.Handler) {
@@ -178,11 +298,18 @@ func (r *releaseRouter) applyFault(w http.ResponseWriter, request *http.Request,
 		http.NotFound(w, request)
 	case "corrupt":
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		if strings.HasSuffix(request.URL.Path, ".css") {
-			w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		}
+		w.Header().Set("Content-Type", fixtureResourceMIME(request.URL.Path))
 		_, _ = io.WriteString(w, "this is a deliberately corrupt mobile fixture response")
+	case "immutable-html":
+		w.Header().Set("Cache-Control", immutablePolicy)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(immutableHTML)
+	case "immutable-corrupt":
+		w.Header().Set("Cache-Control", immutablePolicy)
+		w.Header().Set("Content-Type", fixtureResourceMIME(request.URL.Path))
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "export const fixturePoison = 'not the canonical module';")
 	case "old":
 		if r.serveOldAsset(w, request) {
 			return
@@ -280,20 +407,34 @@ func (r *releaseRouter) activate(release string) error {
 }
 
 func (r *releaseRouter) addFault(fault responseFault) error {
-	if fault.Kind != "missing" && fault.Kind != "corrupt" && fault.Kind != "old" && fault.Kind != "drop" && fault.Kind != "stall" {
+	supported := fault.Kind == "missing" || fault.Kind == "corrupt" || fault.Kind == "old" || fault.Kind == "drop" || fault.Kind == "stall"
+	supported = supported || fault.Kind == "immutable-html" || fault.Kind == "immutable-corrupt"
+	if !supported {
 		return errors.New("unsupported fixture fault")
 	}
 	if fault.Method == "" {
 		fault.Method = "*"
 	}
-	if fault.Path == "" || !strings.HasPrefix(fault.Path, "/") {
-		return errors.New("fault path must be absolute")
+	fault.Method = strings.ToUpper(fault.Method)
+	if fault.Method != "*" && fault.Method != http.MethodGet && fault.Method != http.MethodHead {
+		return errors.New("fault method must be GET, HEAD, or *")
+	}
+	if len(fault.Path) > 2_048 || !strings.HasPrefix(fault.Path, "/") || !safeFixturePath(strings.TrimPrefix(fault.Path, "/")) || strings.Contains(fault.Path, "?") || strings.Contains(fault.Path, "#") {
+		return errors.New("fault path must be a safe absolute pathname")
 	}
 	if fault.Remaining == 0 {
 		fault.Remaining = 1
 	}
+	if fault.Remaining < -1 || fault.Remaining > maxFaultResponses {
+		return errors.New("fault response count is outside the fixture limit")
+	}
 	if fault.Kind == "stall" && fault.Barrier == "" {
 		return errors.New("stall faults require a barrier")
+	}
+	if fault.Kind == "immutable-html" || fault.Kind == "immutable-corrupt" {
+		if (!strings.HasPrefix(fault.Path, "/assets/") && !strings.HasPrefix(fault.Path, "/builds/")) || fixtureResourceMIME(fault.Path) == "application/octet-stream" {
+			return errors.New("immutable faults require an application JS or CSS resource path")
+		}
 	}
 	if fault.ID == "" {
 		fault.ID = fmt.Sprintf("fault-%d", time.Now().UnixNano())
@@ -301,8 +442,14 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	if fault.Generation == "" {
 		fault.Generation = fault.ID
 	}
+	if !validFaultLabel(fault.ID) || !validFaultLabel(fault.Generation) {
+		return errors.New("fault ID and generation must be short safe labels")
+	}
 	if fault.LifetimeMs <= 0 {
 		fault.LifetimeMs = 120_000
+	}
+	if fault.LifetimeMs > int(maxFaultLifetime/time.Millisecond) {
+		return errors.New("fault lifetime exceeds the fixture limit")
 	}
 	fault.ExpiresAt = time.Now().Add(time.Duration(fault.LifetimeMs) * time.Millisecond)
 	r.mu.Lock()
@@ -311,47 +458,121 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	if r.invalidated {
 		return errors.New("fixture fault lifetime expired; fixture is invalidated")
 	}
+	key := faultKey(fault.Method, fault.Path)
+	if r.faults[key] == nil && len(r.faults) >= maxActiveFaults {
+		return errors.New("active fixture fault limit reached")
+	}
+	if len(r.actions) >= maxFaultEvents {
+		return errors.New("fixture fault accounting limit reached")
+	}
 	if fault.Kind == "stall" {
+		if len(fault.Barrier) > 128 || !validFaultLabel(fault.Barrier) {
+			return errors.New("stall barrier must be a short safe label")
+		}
 		if _, ok := r.barriers[fault.Barrier]; !ok {
 			r.barriers[fault.Barrier] = make(chan struct{})
 		}
 	}
 	copy := fault
-	r.faults[faultKey(fault.Method, fault.Path)] = &copy
+	r.faults[key] = &copy
 	return nil
 }
 
 func (r *releaseRouter) clearFault(id, generation, method, path string) error {
+	return r.removeFault(id, generation, method, path, "fault_cleared", "")
+}
+
+func (r *releaseRouter) repairFault(id, generation, policy string) error {
+	if policy != "no-cache" && policy != "no-store" {
+		return errors.New("repair response policy must be no-cache or no-store")
+	}
+	if id == "" || generation == "" {
+		return errors.New("repair requires a fault ID and generation")
+	}
+	return r.removeFault(id, generation, "", "", "fault_repaired", policy)
+}
+
+func (r *releaseRouter) removeFault(id, generation, method, path, action, policy string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.invalidateExpiredLocked(time.Now())
 	if r.invalidated {
 		return errors.New("fixture fault lifetime expired; fixture is invalidated")
 	}
-	cleared := false
+	if id != "" && generation == "" {
+		return errors.New("fault generation is required")
+	}
 	for key, fault := range r.faults {
-		matchesID := id != "" && fault.ID == id && (generation == "" || fault.Generation == generation)
+		matchesID := id != "" && fault.ID == id && fault.Generation == generation
 		matchesPath := id == "" && key == faultKey(method, path)
-		if matchesID || matchesPath {
-			delete(r.faults, key)
-			cleared = true
+		if !matchesID && !matchesPath {
+			continue
+		}
+		if policy != "" && len(r.repairPolicies) >= maxActiveFaults {
+			return errors.New("repair policy limit reached")
+		}
+		delete(r.faults, key)
+		if policy != "" {
+			r.repairPolicies[key] = &repairPolicy{
+				ID: fault.ID, Generation: fault.Generation, Path: fault.Path, Policy: policy,
+				Remaining: 4, ExpiresAt: time.Now().Add(2 * time.Minute), key: key,
+			}
+		}
+		r.recordFaultActionLocked(action, fault, policy, r.requestCounts[fault.Path])
+		return nil
+	}
+	return errors.New("fault was not active")
+}
+
+func validFaultLabel(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') && character != '-' && character != '_' && character != '.' {
+			return false
 		}
 	}
-	if !cleared {
-		return errors.New("fault was not active")
+	return true
+}
+
+func fixtureResourceMIME(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".js"):
+		return "text/javascript; charset=utf-8"
+	case strings.HasSuffix(path, ".css"):
+		return "text/css; charset=utf-8"
+	default:
+		return "application/octet-stream"
 	}
-	return nil
 }
 
 func (r *releaseRouter) invalidateExpiredLocked(now time.Time) {
 	for _, fault := range r.faults {
 		if !fault.ExpiresAt.IsZero() && !now.Before(fault.ExpiresAt) {
-			r.invalidated = true
-			if r.invalidationReason == "" {
+			if !r.invalidated {
+				r.invalidated = true
 				r.invalidationReason = fmt.Sprintf("fault %s/%s expired", fault.ID, fault.Generation)
+				r.recordFaultActionLocked("fault_expired", fault, "", r.requestCounts[fault.Path])
 			}
+			return
 		}
 	}
+}
+
+func (r *releaseRouter) recordFaultActionLocked(action string, fault *responseFault, policy string, requestCount int) {
+	if len(r.actions) >= maxFaultEvents {
+		r.invalidated = true
+		if r.invalidationReason == "" {
+			r.invalidationReason = "fixture fault accounting limit reached"
+		}
+		return
+	}
+	r.actions = append(r.actions, faultAction{
+		Action: action, ID: fault.ID, Generation: fault.Generation, Path: fault.Path,
+		Kind: fault.Kind, Policy: policy, Remaining: fault.Remaining, RequestCount: requestCount,
+		At: time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }
 
 func (r *releaseRouter) activeFaults() []responseFault {
@@ -404,6 +625,7 @@ func (r *releaseRouter) finishFault(fault *responseFault) {
 	}
 	if active.Remaining == 0 && active.inFlight == 0 {
 		delete(r.faults, fault.key)
+		r.recordFaultActionLocked("fault_exhausted", active, "", r.requestCounts[active.Path])
 	}
 }
 
@@ -418,14 +640,36 @@ func (r *releaseRouter) barrier(name string) <-chan struct{} {
 	return channel
 }
 
-func (r *releaseRouter) record(record requestRecord) {
+func (r *releaseRouter) record(record requestRecord) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.requests) == maxRequestRecords {
 		copy(r.requests, r.requests[len(r.requests)-maxRequestRecords/2:])
 		r.requests = r.requests[:maxRequestRecords/2]
 	}
+	r.nextSequence++
+	record.Sequence = r.nextSequence
 	r.requests = append(r.requests, record)
+	return record.Sequence
+}
+
+func (r *releaseRouter) completeRequest(sequence uint64, response *responseRecorder) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index := len(r.requests) - 1; index >= 0; index-- {
+		if r.requests[index].Sequence != sequence {
+			continue
+		}
+		record := &r.requests[index]
+		record.Status = response.status
+		record.ContentType = response.Header().Get("Content-Type")
+		record.CacheControl = response.Header().Get("Cache-Control")
+		record.Bytes = response.bytes
+		if response.bytes > 0 {
+			record.SHA256 = fmt.Sprintf("%x", response.digest.Sum(nil))
+		}
+		return
+	}
 }
 
 func (r *releaseRouter) snapshotRequests() []requestRecord {
@@ -434,6 +678,25 @@ func (r *releaseRouter) snapshotRequests() []requestRecord {
 	result := make([]requestRecord, len(r.requests))
 	copy(result, r.requests)
 	return result
+}
+
+func (r *releaseRouter) snapshotAccounting() (map[string]int, []faultAction, []map[string]any) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	counts := make(map[string]int, len(r.requestCounts))
+	for path, count := range r.requestCounts {
+		counts[path] = count
+	}
+	actions := append([]faultAction(nil), r.actions...)
+	policies := make([]map[string]any, 0, len(r.repairPolicies))
+	for _, policy := range r.repairPolicies {
+		policies = append(policies, map[string]any{
+			"id": policy.ID, "generation": policy.Generation, "path": policy.Path,
+			"policy": policy.Policy, "remaining": policy.Remaining,
+		})
+	}
+	sort.Slice(policies, func(i, j int) bool { return policies[i]["path"].(string) < policies[j]["path"].(string) })
+	return counts, actions, policies
 }
 
 func (r *releaseRouter) close() error {
@@ -745,6 +1008,7 @@ func (f *fixture) snapshot() map[string]any {
 	active := f.router.active
 	f.router.mu.RUnlock()
 	faults := f.router.activeFaults()
+	requestCounts, actions, repairPolicies := f.router.snapshotAccounting()
 	invalidated, invalidationReason := f.router.invalidationState()
 	relays := make([]map[string]any, 0, len(f.relays))
 	for _, relay := range f.relays {
@@ -756,6 +1020,9 @@ func (f *fixture) snapshot() map[string]any {
 		"candidate":           f.candidate,
 		"old":                 f.old,
 		"requests":            f.router.snapshotRequests(),
+		"request_counts":      requestCounts,
+		"fault_actions":       actions,
+		"repair_policies":     repairPolicies,
 		"faults":              faults,
 		"invalidated":         invalidated,
 		"invalidation_reason": invalidationReason,
@@ -768,7 +1035,7 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if (request.URL.Path == "/activate" || request.URL.Path == "/fault" || request.URL.Path == "/fault/clear" || request.URL.Path == "/fault/release" || request.URL.Path == "/barrier/release" || request.URL.Path == "/relay/drop" || request.URL.Path == "/shutdown") && request.Method != http.MethodPost {
+	if (request.URL.Path == "/activate" || request.URL.Path == "/fault" || request.URL.Path == "/fault/clear" || request.URL.Path == "/fault/release" || request.URL.Path == "/fault/repair" || request.URL.Path == "/barrier/release" || request.URL.Path == "/relay/drop" || request.URL.Path == "/shutdown") && request.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -815,6 +1082,21 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 			}
 		}
 		if err := f.router.clearFault(payload.ID, payload.Generation, payload.Method, payload.Path); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	case "/fault/repair":
+		var payload struct {
+			ID         string `json:"id"`
+			Generation string `json:"generation"`
+			Policy     string `json:"response_policy"`
+		}
+		if err := json.NewDecoder(io.LimitReader(request.Body, 16*1024)).Decode(&payload); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if err := f.router.repairFault(payload.ID, payload.Generation, payload.Policy); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

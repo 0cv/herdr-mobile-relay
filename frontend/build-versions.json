@@ -1,5 +1,11 @@
 {
-  "assets": 395,
+  "assets": 397,
+  "withdrawnAssets": [
+    396
+  ],
+  "withdrawnScripts": [
+    "assets/app-9617cb64a45fb9bbb8aff3c0577e2ecdb3bdc2865bcd5de5e07e8f051155ead1.js"
+  ],
   "serviceWorker": 8,
   "notificationIcons": 4
 }

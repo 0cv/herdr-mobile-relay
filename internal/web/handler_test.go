@@ -1,10 +1,12 @@
 package web
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"testing"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/andybalholm/brotli"
 )
 
 func setupTestWebRoot(t *testing.T) string {
@@ -551,6 +554,205 @@ func TestBrotliRepresentationHasDistinctETagAndHonorsQZero(t *testing.T) {
 	h.ServeHTTP(disabled, disabledRequest)
 	if disabled.Header().Get("Content-Encoding") != "" || disabled.Body.String() != "console.log('app')" {
 		t.Fatalf("br;q=0 response encoding=%q body=%q", disabled.Header().Get("Content-Encoding"), disabled.Body.String())
+	}
+}
+
+func TestErrorsAreNonStoring(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := os.Remove(filepath.Join(root, "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		method string
+		path   string
+		status int
+	}{
+		{http.MethodPost, "/index.html", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/../index.html", http.StatusNotFound},
+		{http.MethodGet, "/secret.txt", http.StatusNotFound},
+		{http.MethodGet, "/fonts/missing.woff2", http.StatusNotFound},
+		{http.MethodGet, "/index.html", http.StatusNotFound},
+		{http.MethodGet, "/settings", http.StatusNotFound},
+		{http.MethodHead, "/assets/missing.js", http.StatusNotFound},
+	} {
+		t.Run(test.method+test.path, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set("If-None-Match", "*")
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, request)
+			if response.Code != test.status || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("error response = %d, cache=%q", response.Code, response.Header().Get("Cache-Control"))
+			}
+			if response.Header().Get("ETag") != "" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Fatalf("error headers = %v", response.Header())
+			}
+		})
+	}
+}
+
+func TestVerifiedReleaseMissesNeverServeShell(t *testing.T) {
+	root := setupContentAddressedWebRoot(t)
+	oldEntry := "builds/0.20.9-362-0123456789abcdef/index.html"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, oldEntry)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, oldEntry), []byte("<html>old shell</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	paths := []string{
+		"/assets/app.js", "/assets/app.css", "/assets/missing.js", "/assets/missing.css",
+		"/assets/ConversationHistory-362.js", "/assets/attachment-hash.worker-missing.js",
+		"/assets/missing", "/builds/missing", "/" + oldEntry,
+	}
+	for asset := range h.webFiles {
+		if err := os.Remove(filepath.Join(root, asset)); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, "/"+asset)
+	}
+	for _, encoding := range []string{"identity", "br"} {
+		for _, requestPath := range paths {
+			t.Run(encoding+requestPath, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, requestPath, nil)
+				request.Header.Set("Accept-Encoding", encoding)
+				request.Header.Set("If-None-Match", "*")
+				response := httptest.NewRecorder()
+				h.ServeHTTP(response, request)
+				if response.Code != http.StatusNotFound || response.Header().Get("Cache-Control") != "no-store" {
+					t.Fatalf("miss = %d, cache=%q", response.Code, response.Header().Get("Cache-Control"))
+				}
+				if strings.Contains(response.Header().Get("Content-Type"), "html") || response.Header().Get("Content-Encoding") != "" {
+					t.Fatalf("miss headers = %v", response.Header())
+				}
+			})
+		}
+	}
+}
+
+func TestVerifiedResourcesMIMEBrotliAndRevalidation(t *testing.T) {
+	root := setupContentAddressedWebRoot(t)
+	descriptorData, err := os.ReadFile(filepath.Join(root, "release.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var descriptor relayrelease.WebDescriptor
+	if err := json.Unmarshal(descriptorData, &descriptor); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range descriptor.Files {
+		body, err := os.ReadFile(filepath.Join(root, file.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var compressed bytes.Buffer
+		writer := brotli.NewWriter(&compressed)
+		if _, err := writer.Write(body); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, file.Path+".br"), compressed.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	for kind, file := range descriptor.Files {
+		for _, encoding := range []string{"identity", "br"} {
+			t.Run(kind+"/"+encoding, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, "/"+file.Path, nil)
+				request.Header.Set("Accept-Encoding", encoding)
+				response := httptest.NewRecorder()
+				h.ServeHTTP(response, request)
+				contentType := map[string]string{
+					"entry": "text/html; charset=utf-8", "javascript": "text/javascript; charset=utf-8", "stylesheet": "text/css; charset=utf-8",
+				}[kind]
+				if response.Code != http.StatusOK || response.Header().Get("Content-Type") != contentType {
+					t.Fatalf("resource = %d, MIME=%q", response.Code, response.Header().Get("Content-Type"))
+				}
+				body := response.Body.Bytes()
+				if encoding == "br" {
+					if response.Header().Get("Content-Encoding") != "br" {
+						t.Fatal("Brotli representation not selected")
+					}
+					decoded, err := io.ReadAll(brotli.NewReader(bytes.NewReader(body)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					body = decoded
+				}
+				if contentTestDigest(body) != file.SHA256 {
+					t.Fatal("decoded resource differs from descriptor")
+				}
+				request.Header.Set("If-None-Match", response.Header().Get("ETag"))
+				conditional := httptest.NewRecorder()
+				h.ServeHTTP(conditional, request)
+				if conditional.Code != http.StatusNotModified || conditional.Body.Len() != 0 {
+					t.Fatalf("conditional response = %d, bytes=%d", conditional.Code, conditional.Body.Len())
+				}
+				for _, header := range []string{"ETag", "Cache-Control", "Vary", "Content-Type", "Content-Encoding"} {
+					if conditional.Header().Get(header) != response.Header().Get(header) {
+						t.Errorf("304 %s = %q, want %q", header, conditional.Header().Get(header), response.Header().Get(header))
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRevalidationDoesNotReuseRepairedOrRemovedBody(t *testing.T) {
+	root := setupTestWebRoot(t)
+	script := filepath.Join(root, "assets", "app.js")
+	if err := os.WriteFile(script, []byte("<!doctype html>wrong body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	request := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	poison := httptest.NewRecorder()
+	h.ServeHTTP(poison, request)
+	if poison.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatal("mutable resource must require revalidation")
+	}
+	if err := os.WriteFile(script, []byte("console.log('repaired')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("If-None-Match", poison.Header().Get("ETag"))
+	repaired := httptest.NewRecorder()
+	h.ServeHTTP(repaired, request)
+	if repaired.Code != http.StatusOK || repaired.Body.String() != "console.log('repaired')" {
+		t.Fatalf("repair response = %d %q", repaired.Code, repaired.Body.String())
+	}
+	request.Header.Set("If-None-Match", repaired.Header().Get("ETag"))
+	unchanged := httptest.NewRecorder()
+	h.ServeHTTP(unchanged, request)
+	if unchanged.Code != http.StatusNotModified {
+		t.Fatalf("unchanged status = %d", unchanged.Code)
+	}
+	if err := os.Remove(script); err != nil {
+		t.Fatal(err)
+	}
+	removed := httptest.NewRecorder()
+	h.ServeHTTP(removed, request)
+	if removed.Code != http.StatusNotFound || removed.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("removed response = %d, cache=%q", removed.Code, removed.Header().Get("Cache-Control"))
 	}
 }
 
