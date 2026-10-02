@@ -117,7 +117,10 @@ phases that did not happen are `not_applicable`: gateway phases on WSS,
 handshake phases for a reused warm connection, probes on a cold launch. A
 snapshot that was already in flight when the probe was sent can be counted as
 the probe's answer; the probe-request rule bounds, but cannot remove, that
-ambiguity.
+ambiguity in the in-app metric. The hosted benchmark does not depend on it:
+its endpoint uses the synthetic relay's record of which snapshot belongs to
+which wake, and the runner and the browser tests that assert in-app outcomes
+idle for 500 ms after the cold connection's own refresh before hiding.
 
 ### Ingress labels come from the authenticated session
 

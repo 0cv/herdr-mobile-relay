@@ -222,6 +222,18 @@ test('splits a scripted device unlock from network work', async ({ page }) => {
   await expectNoSensitiveMarkers(booted, card, text);
 });
 
+/**
+ * Waits until the cold connection's own refresh has been answered and its
+ * reply delivered, as the benchmark runner does before hiding. The in-app
+ * metric cannot tell a reply already in flight at the wake from the answer to
+ * the post-wake probe (docs/resume.md), so tests that assert in-app outcomes
+ * start the wake from a quiet connection.
+ */
+async function quiesce(page: Page): Promise<void> {
+  await expect.poll(async () => ((await fixture(page, 'stats')) as { refreshes: number }).refreshes).toBeGreaterThanOrEqual(1);
+  await page.waitForTimeout(500);
+}
+
 async function renderLog(page: Page): Promise<RenderVerdict[]> {
   return (await fixture(page, 'renderLog')) as RenderVerdict[];
 }
@@ -241,6 +253,7 @@ test('does not count a workspace-only refresh as fresh agents', async ({ page })
     seed: 18,
   });
   await awaitFresh(page, [1]);
+  await quiesce(page);
   await fixture(page, 'hide');
   await fixture(page, 'show');
   // The refresh renders a new workspace label, but no post-wake agents.
@@ -261,6 +274,7 @@ test('does not count stale post-wake agents as fresh', async ({ page }) => {
     seed: 19,
   });
   await awaitFresh(page, [1]);
+  await quiesce(page);
   await fixture(page, 'hide');
   await fixture(page, 'show');
   // The stale agents do render; the endpoint rejects them.
@@ -284,6 +298,7 @@ test('counts a fresh snapshot that replaces another before it paints', async ({ 
     seed: 21,
   });
   await awaitFresh(page, [1]);
+  await quiesce(page);
   await fixture(page, 'hide');
   await fixture(page, 'show');
   await awaitFresh(page, [1], 5_000);
@@ -298,6 +313,7 @@ test('does not count agents delivered on a path the relay is abandoning', async 
     seed: 20,
   });
   await awaitFresh(page, [1]);
+  await quiesce(page);
   const before = (await fixture(page, 'stats')) as { handshakes: number };
   await fixture(page, 'hide');
   await fixture(page, 'show');
