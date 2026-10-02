@@ -483,41 +483,44 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-Source: `check` run 36972958606, job *Resume benchmark pilot*, on commit
-`b754d77f9829bf1b88e5275394dea71008f2abdf`, measuring the shipped `web/`
-build `87c8ebcd2b8ba1fc52d1ebc836125c2f494ef64aefae37661c344e1795ccb44e`
+Source: `check` run 36979888303, job *Resume benchmark pilot*, on commit
+`e19c79f95e2bf8f1b01420edd12003e1a9516ff3`, measuring the shipped `web/`
+build `a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`
 with the current-path endpoint, exclusion rules, contract checks and evidence
 validation described above (later commits that change only documentation ship
 the same build, and each hosted run repeats the pilot on its own commit).
-Preregistration SHA-256
-`dc8515e876db879d5fa1729658fef4eec8985303c0460e702ca704253f02892b`, no
+Preregistration SHA-256 (as bound into the evidence)
+`61839b49a015747a5ae64dc5b0994d2dd82d462793639ff8638a9d77c212c613`, no
 contract violations; Chromium 151.0.7922.34 and WebKit 26.5 under Node
-v22.23.3 on a hosted Linux runner; 10.7 minutes. 480 attempted epochs (the
+v22.23.3 on a hosted Linux runner; 10.8 minutes. The default pilot samples
+no `gateway-direct` stratum, so it has no direct-upgrade summary. 480 attempted epochs (the
 bounded default of 16 strata × 30), all valid, no harness exclusions or
 replacements; no hidden-time dials or bytes in any stratum. All 24
 negative-control trials (4 controls × 3 trials × 2 browsers) were safe. The
 other workloads and paths (`hidden-30s`, `hidden-long`, `network-change`,
 `wss-tailscale`, `gateway-direct`) were exercised once each per browser by
-the hosted browser suite in the same run, not sampled by this pilot.
+the hosted browser suite in the same run (for `gateway-direct` also checking
+the direct-upgrade record, plus one refused and one delayed upgrade), not
+sampled by this pilot.
 
 | Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
 | --- | --- | --- | --- | --- | --- | --- |
-| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 20 (18–23) | 32 (26–34) | 0 / 0 | 1,176 | 0.28 |
-| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 66 (59–75) | 99 (91–109) | 1 / 1 | 3,336 | 0.28 |
-| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,039 (2,077–3,081) | 5,105 (5,045–5,111) | 1 / 1 | 3,655 | 0.35 |
-| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 134 (120–140) | 179 (146–182) | 1 / 1 | 3,549 | 0.21 |
-| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 22 (16–26) | 35 (31–35) | 0 / 0 | 776 | 0.40 |
-| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 100 (80–123) | 153 (139–153) | 1 / 1 | 2,588 | 0.37 |
-| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,053 (2,103–3,146) | 5,129 (5,095–5,141) | 1 / 1 | 2,731 | 0.40 |
-| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 149 (135–159) | 217 (184–218) | 1 / 1 | 2,803 | 0.21 |
-| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 35 (32–38) | 47 (43–211) | 0 / 0 | 1,176 | 0.37 |
-| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 100 (84–115) | 132 (117–135) | 1 / 1 | 3,549 | 0.23 |
-| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,069 (2,101–3,112) | 5,124 (5,076–5,128) | 1 / 1 | 3,854 | 0.34 |
-| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 188 (168–199) | 249 (205–273) | 1 / 1 | 3,297 | 0.16 |
-| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (32–40) | 49 (45–50) | 0 / 0 | 776 | 0.18 |
-| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 131 (100–132) | 148 (148–164) | 1 / 1 | 2,711 | 0.23 |
-| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,085 (2,147–3,112) | 5,129 (5,102–5,175) | 1 / 1 | 2,875 | 0.36 |
-| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 198 (183–200) | 233 (230–246) | 1 / 1 | 2,783 | 0.13 |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 21 (19–23) | 31 (27–32) | 0 / 0 | 1,176 | 0.25 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 70 (57–78) | 97 (88–110) | 1 / 1 | 3,584 | 0.26 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,050 (2,082–3,077) | 5,101 (5,044–5,110) | 1 / 1 | 3,620 | 0.34 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 143 (135–159) | 174 (165–202) | 1 / 1 | 3,620 | 0.21 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 22 (16–27) | 34 (33–38) | 0 / 0 | 776 | 0.38 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 105 (87–129) | 156 (143–160) | 1 / 1 | 2,803 | 0.36 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,044 (2,097–3,141) | 5,132 (5,090–5,136) | 1 / 1 | 2,516 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 157 (136–171) | 208 (188–233) | 1 / 1 | 2,923 | 0.19 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 35 (33–38) | 49 (45–221) | 0 / 0 | 1,176 | 0.37 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 99 (84–104) | 132 (116–133) | 1 / 1 | 3,432 | 0.22 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,078 (2,111–3,113) | 5,125 (5,076–5,131) | 1 / 1 | 3,771 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 199 (184–204) | 238 (219–251) | 1 / 1 | 3,226 | 0.15 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (34–39) | 52 (45–52) | 0 / 0 | 776 | 0.19 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 117 (115–133) | 149 (148–164) | 1 / 1 | 2,657 | 0.21 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,086 (2,151–3,113) | 5,122 (5,085–5,130) | 1 / 1 | 2,879 | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 201 (186–214) | 248 (231–264) | 1 / 1 | 2,705 | 0.13 |
 
 Reading it as a pilot:
 
@@ -567,6 +570,16 @@ not reused:
   open authenticated session rather than the one the app was using, and its
   analyzer accepted registrations outside the contract. Superseded by the run
   above on the current endpoint and build, and not reused.
+- 36972958606 on `b754d77f9829bf1b88e5275394dea71008f2abdf` (build
+  `87c8ebcd2b8ba1fc52d1ebc836125c2f494ef64aefae37661c344e1795ccb44e`,
+  previously documented here) and its docs-only repeat 36974191330 on
+  `f36372995f619cb727b8fc7f33e53e55955d4ad5`: 480/480 on time with no
+  violations, but measured with the app's earlier in-app completion rule (a
+  queued frame could act on a superseded snapshot, and a mounted but hidden
+  rail counted as shown) and before the clustered-evidence refusal and the
+  direct-upgrade record. The pilot's endpoint is the harness's own painted
+  agent card, so these numbers are close, but they belong to an older build
+  and are not reused.
 
 ## Limits of this evidence
 
