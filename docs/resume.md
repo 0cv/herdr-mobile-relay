@@ -554,6 +554,61 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
+### Descendant-composition repair pilot — descriptive, not acceptance
+
+Source `4e4a38f2e79a11d079b4b2bb1f6d21e7b8c82bef`: `check`
+**37029148501**, attempt 1, pilot job **110911354476**; native preflight
+**37029147952**, attempt 1, both completed successfully. The harness now
+refuses non-leaf marker-text parents rather than inferring glyph exposure
+from a covering descendant. Shipping `web/` remains
+`a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`;
+no shipped bundle or runtime behaviour changed.
+Preregistration binding (compact JSON):
+`fb75b0b7dc43e199fa30c07ad193c1e94d896045dac730544b5c16b1d1512e5a`.
+Chromium 151.0.7922.34, WebKit 26.5, Node v22.23.3, hosted Linux;
+643,125 ms (10.7 minutes). All **480 attempted epochs** (16×30) are retained,
+all on time, with no exclusions, replacements, missing/exhausted outcomes,
+contract/evidence violations or hidden activity; all **24/24** baseline
+negative controls are safe. This one-variant pilot is not a comparison;
+paired controls against both variants remain required by the runner/analyzer.
+No numbers are pooled with historical pilots.
+
+| Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | SD of ln(ms) |
+| --- | --- | --- | --- | --- |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 24 (22–28) | 32 (30–34) | 0.21 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 71 (60–81) | 101 (89–105) | 0.29 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3053 (2080–3078) | 5100 (5040–5112) | 0.34 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 138 (124–151) | 203 (167–211) | 0.21 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 26 (21–31) | 39 (36–39) | 0.31 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 109 (91–129) | 158 (140–162) | 0.36 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3048 (2100–3140) | 5131 (5100–5147) | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 156 (130–171) | 208 (191–209) | 0.21 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 37 (34–39) | 51 (45–54) | 0.17 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 101 (85–116) | 135 (119–137) | 0.22 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3072 (2102–3115) | 5121 (5081–5131) | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 192 (175–217) | 234 (220–243) | 0.13 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 38 (37–41) | 52 (47–55) | 0.17 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 118 (103–134) | 151 (149–167) | 0.23 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3086 (2150–3115) | 5123 (5086–5131) | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 202 (184–217) | 239 (233–248) | 0.13 |
+
+Thirty on-time outcomes still only bound failure below about 11.4% (two-sided
+Wilson). These coarse p95/log-time figures are workload/variance inputs,
+**never p95 acceptance or superiority**. The same source run passed 649 unit,
+478 browser (156 presentation, 78/engine) and four attention tests, with no
+browser retries/flaky cases; the separate two-engine baseline preflight passed.
+The 12 added cases cover ordinary opaque targetable children before arrival
+and while a frame is held, prove the old descendant hit despite covering
+marker ranges, require later reveal, retain original-deadline censoring and
+isolate an abandoned frame; baseline leaf text remains eligible.
+The default pilot does not sample direct upgrades; all other selectable
+workloads/paths remain covered separately by the browser suite. Mobile jobs
+were skipped, not qualified. Final docs-only SHA CI/evidence is retained
+privately rather than recursively changing this source-pilot citation.
+**B1 remains unapproved pending the one authorized independent review.**
+Adequately powered preregistered ≥400-pair B3 confirmation and separately
+authorized B4/physical/live qualification remain future.
+
 ### Historical composition pilot — void for endpoint acceptance
 
 Independent review `df8f3015` on `baf7681d` left original
