@@ -176,7 +176,7 @@ export class LastKnownSessionCache {
   private publishedCredentials = new Map<string, RelayDeviceCredential>();
   private publishedAssociations = new Map<string, string>();
   private pending = new Map<string, PendingWrite>();
-  private restoring = new Map<string, { invalidated: boolean }>();
+  private restoring = new Map<string, { invalidated: boolean; retry: boolean }>();
   private latest = new Map<string, number>();
   private latestFreshAt = new Map<string, number>();
   private draining = false;
@@ -279,11 +279,18 @@ export class LastKnownSessionCache {
     const now = this.clock();
     const epoch = this.epoch();
     if (now === null || !this.canUse(epoch) || !lastKnownIdentifier(relayId)) return;
-    if (this.restoring.has(relayId) || this.restoring.size >= LAST_KNOWN_MAX_RELAYS) return;
+    const active = this.restoring.get(relayId);
+    if (active) {
+      // A new explicit request must not disappear behind a fenced old decrypt.
+      // Coalesce to one follow-up, which rechecks the current control/credential.
+      if (active.invalidated) active.retry = true;
+      return;
+    }
+    if (this.restoring.size >= LAST_KNOWN_MAX_RELAYS) return;
     this.revalidate();
     if (!this.canUse(epoch)) return;
     if (this.valuesEpoch !== null && this.valuesEpoch !== epoch) this.fence();
-    const token = { invalidated: false };
+    const token = { invalidated: false, retry: false };
     this.restoring.set(relayId, token);
     const generation = this.generation;
     const sequence = this.latest.get(relayId);
@@ -331,7 +338,10 @@ export class LastKnownSessionCache {
         && this.restoring.get(relayId) === token) this.dropVisible(relayId);
       this.availabilityStore.update((state) => ({ ...state, unavailable: true }));
     } finally {
-      if (this.restoring.get(relayId) === token) this.restoring.delete(relayId);
+      if (this.restoring.get(relayId) === token) {
+        this.restoring.delete(relayId);
+        if (token.retry) await this.restore(relayId);
+      }
     }
   }
 

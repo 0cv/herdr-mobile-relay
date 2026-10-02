@@ -171,6 +171,38 @@ describe('failure-tolerant session cache foundation', () => {
     expect(get(reader.cache.summaries).size).toBe(1);
   });
 
+  it('coalesces explicit restoration behind an invalidated decrypt without publishing its stale result', async () => {
+    const writer = fixture(); writer.unlock(); await stored(writer.cache);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const decrypt = vi.fn(async (...args: Parameters<typeof decryptLastKnown>) => { await gate; return decryptLastKnown(...args); });
+    const reader = fixture({ decrypt }); reader.unlock();
+    const restoring = reader.cache.restore('local-relay');
+    await vi.waitFor(() => expect(decrypt).toHaveBeenCalledOnce());
+    reader.cache.invalidateScope('local-relay');
+    for (let index = 0; index < 20; index++) await reader.cache.restore('local-relay');
+    expect(get(reader.cache.summaries).size).toBe(0);
+    release(); await restoring;
+    expect(decrypt).toHaveBeenCalledTimes(2);
+    expect(get(reader.cache.summaries).size).toBe(1);
+  });
+
+  it('a queued restoration still cannot publish after Forget', async () => {
+    const writer = fixture(); writer.unlock(); await stored(writer.cache);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const decrypt = vi.fn(async (...args: Parameters<typeof decryptLastKnown>) => { await gate; return decryptLastKnown(...args); });
+    const reader = fixture({ decrypt }); reader.unlock();
+    const restoring = reader.cache.restore('local-relay');
+    await vi.waitFor(() => expect(decrypt).toHaveBeenCalledOnce());
+    reader.cache.invalidateScope('local-relay');
+    await reader.cache.restore('local-relay');
+    reader.rotate(); reader.cache.forget();
+    release(); await restoring;
+    expect(decrypt).toHaveBeenCalledOnce();
+    expect(get(reader.cache.summaries).size).toBe(0);
+  });
+
   it('clears an already visible summary when the stored root becomes invalid', async () => {
     const f = fixture(); f.unlock();
     await stored(f.cache);
