@@ -16,6 +16,7 @@ type BundleChunk = {
   type: 'chunk';
   fileName: string;
   code: string;
+  imports?: string[];
 };
 type BundleAsset = {
   type: 'asset';
@@ -101,6 +102,9 @@ function stableReleaseAssets(): Plugin {
         return;
       }
 
+      if (appJavascript.imports?.some((name) => name.endsWith('.js'))) {
+        this.error('The measured eager application must not import an unaccounted shared JS chunk');
+      }
       // Inline custom properties in lazy components must match the one CSS asset.
       for (const item of Object.values(bundle)) {
         if (item.type === 'chunk') item.code = compactReleaseStyleNames(item.code);
@@ -226,6 +230,10 @@ export default defineConfig({
           const names = asset.names ?? [];
           return names.some((name) => name.endsWith('.css')) ? 'assets/app.css' : 'assets/[name][extname]';
         },
+        // Keep the static entry closure together: common dependencies of the
+        // deferred tools belong in the measured eager application, not a new
+        // shared sidecar hidden outside the initial-payload budget.
+        codeSplitting: { groups: [{ name: 'app', tags: ['$initial'] }] },
         // Lazy chunks inherit the release asset version so each release gets a
         // new immutable URL without participating in the entry digest cycle.
         chunkFileNames: `assets/[name]-${versions.assets}.js`,
