@@ -28,7 +28,9 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { DEFAULT_BOUNDS, EVIDENCE_SCHEMA } from './analyze-resume-benchmarks.mjs';
+import { DEFAULT_BOUNDS, EVIDENCE_SCHEMA, epochSeed } from './analyze-resume-benchmarks.mjs';
+
+export { epochSeed };
 import { fixtureRelay, resumeFixtureInit, resumeSensitiveMarkers } from '../tests/browser/resume-fixture.mjs';
 
 const FRONTEND = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -80,10 +82,26 @@ export const NEGATIVE_CONTROLS = Object.freeze({
   'ios-deferred-pairing': 'iOS Safari tab with a setup link: expect deferral to the Home Screen app and no dial.',
 });
 
+/**
+ * The only objective infrastructure exclusions. Both are established outside
+ * the page under test, before or independently of anything it does. A page
+ * crash, a lost browser, a bundle that fails to load, or an app that never
+ * renders its first inventory are attempted epochs that did not complete.
+ */
 export const HARNESS_INVALID_CRITERIA = Object.freeze([
-  { id: 'browser-crash', rule: 'The page or browser process crashed (Playwright crash/disconnect event).' },
-  { id: 'bundle-load-failed', rule: 'The bundle under test did not load with HTTP 200 from the local static server.' },
-  { id: 'warmup-timeout', rule: 'The initial cold connection that precedes the measured wake did not render within 30 s.' },
+  {
+    id: 'server-unavailable',
+    rule: 'The local static server refused or dropped an independent HTTP request made by the runner (a network error, not any HTTP status) right after the page failed to load.',
+  },
+  {
+    id: 'browser-unavailable',
+    rule: 'A fresh browser context or page could not be created, before the page under test was opened.',
+  },
+]);
+
+/** Non-completion reasons the runner records for app or harness failures. */
+export const NON_COMPLETION_OUTCOMES = Object.freeze([
+  'deadline', 'late', 'load-failed', 'warmup-failed', 'page-crash', 'browser-disconnected', 'harness-error',
 ]);
 
 /**
@@ -101,28 +119,6 @@ export function seededRandom(seed) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-/** @param {string} text */
-function hash32(text) {
-  let value = 0x811c9dc5;
-  for (let index = 0; index < text.length; index += 1) {
-    value ^= text.charCodeAt(index);
-    value = Math.imul(value, 0x01000193) >>> 0;
-  }
-  return value >>> 0;
-}
-
-/**
- * The seed for one epoch (or one matched pair): both variants of a pair use
- * exactly the same seed, so their scripted conditions are identical.
- *
- * @param {number} baseSeed
- * @param {string} stratum
- * @param {number} index
- */
-export function epochSeed(baseSeed, stratum, index) {
-  return (hash32(`${baseSeed}:${stratum}:${index}`) % 2_000_000_000) + 1;
 }
 
 /**
@@ -208,6 +204,8 @@ export function buildPreregistration(options) {
     deadline_ms: DEADLINE_MS,
     sample_size_per_stratum: options.samples,
     sample_unit: options.design === 'pilot' ? 'attempted wake epoch' : 'matched baseline/candidate pair',
+    browsers: [...options.browsers],
+    variants: options.design === 'paired' ? ['baseline', 'candidate'] : ['baseline'],
     strata,
     seeds: { base_seed: options.baseSeed, derivation: 'fnv1a32(base_seed:stratum:index) for each epoch or pair' },
     order: options.design === 'paired' ? 'seeded independent random order per pair' : 'single variant',
@@ -227,7 +225,7 @@ export function buildPreregistration(options) {
       negative_control: 'cancelled-unlock: the scripted authenticator rejects after 300 ms',
     },
     endpoints: {
-      primary: 'on-time completion: first frame painting the active epoch\'s authenticated ready non-stale inventory within 60 s of the first visible event (navigation start after a discard)',
+      primary: 'on-time completion: the first frame that paints an agent card (not a workspace label) naming the active epoch\'s agents from a snapshot the relay sent with ready, non-stale inventory, on a session that is still the live authenticated path, with no unlock dialog covering it, within 60 s of the first visible event (navigation start after a discard)',
       time_to_fresh: 'all valid attempts; non-completions right-censored at 60 s with their reason',
       supplementary: ['success-only p50/p95', 'dials, handshakes and bytes per epoch', 'hidden dials and bytes'],
       not_measured: ['first-known render (no last-known view before B2)', 'direct WebRTC upgrade timings (synthetic DataChannel)', 'OS wake-to-JS, DNS, TCP, TLS'],
@@ -242,6 +240,7 @@ export function buildPreregistration(options) {
     },
     bounds: { ...DEFAULT_BOUNDS },
     harness_invalid_criteria: HARNESS_INVALID_CRITERIA,
+    non_completion_outcomes: NON_COMPLETION_OUTCOMES,
     replacement_limit: 2,
     negative_controls: Object.entries(NEGATIVE_CONTROLS).map(([id, expectation]) => ({
       id,
@@ -335,6 +334,21 @@ function measure(page, deadline) {
 }
 
 /**
+ * Whether the local static server still answers at all. Any HTTP status means
+ * it is up, so a failed page load is then the bundle's own failure.
+ *
+ * @param {string} origin
+ */
+async function serverReachable(origin) {
+  try {
+    await fetch(`${origin}/`, { signal: AbortSignal.timeout(5_000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * @param {Record<string, number>} after
  * @param {Record<string, number>} before
  */
@@ -362,10 +376,6 @@ async function runEpoch(browser, devices, run) {
   const relay = stratum.transport === 'wss-cloudflare'
     ? fixtureRelay(1, 'wss', { ingress: 'cloudflare' })
     : fixtureRelay(1, 'hybrid');
-  const context = await browser.newContext({ ...devices[stratum.device], baseURL: run.origin, serviceWorkers: 'block' });
-  const page = await context.newPage();
-  let crashed = false;
-  page.on('crash', () => { crashed = true; });
   /** @type {Record<string, any>} */
   const record = {
     outcome: null,
@@ -375,6 +385,24 @@ async function runEpoch(browser, devices, run) {
     first_known_render_ms: null,
     direct_upgrade: 'not-measured',
   };
+  /** @type {import('@playwright/test').BrowserContext | undefined} */
+  let context;
+  /** @type {import('@playwright/test').Page} */
+  let page;
+  try {
+    context = await browser.newContext({ ...devices[stratum.device], baseURL: run.origin, serviceWorkers: 'block' });
+    page = await context.newPage();
+  } catch {
+    // Nothing of the page under test has run yet: an infrastructure failure.
+    await context?.close().catch(() => {});
+    record.harness_invalid = 'browser-unavailable';
+    return record;
+  }
+  let crashed = false;
+  page.on('crash', () => { crashed = true; });
+  // Page and browser failures from here on are attempted epochs that did not
+  // complete; they are never excluded.
+  const failure = () => (crashed ? 'page-crash' : browser.isConnected() ? null : 'browser-disconnected');
   try {
     await page.addInitScript(resumeFixtureInit, {
       relays: [relay],
@@ -384,7 +412,10 @@ async function runEpoch(browser, devices, run) {
     });
     const response = await page.goto('/', { waitUntil: 'load', timeout: WARMUP_TIMEOUT_MS }).catch(() => null);
     if (!response || !response.ok()) {
-      record.harness_invalid = crashed ? 'browser-crash' : 'bundle-load-failed';
+      const failed = failure();
+      if (failed) record.outcome = failed;
+      else if (!(await serverReachable(run.origin))) record.harness_invalid = 'server-unavailable';
+      else record.outcome = 'load-failed';
       return record;
     }
     const warm = await appDocument(page, WARMUP_TIMEOUT_MS)
@@ -394,7 +425,8 @@ async function runEpoch(browser, devices, run) {
       ))
       .catch(() => null);
     if (!warm || !('renderedAt' in warm)) {
-      record.harness_invalid = crashed ? 'browser-crash' : 'warmup-timeout';
+      // The app never showed its first fresh inventory: a failed attempt.
+      record.outcome = failure() ?? 'warmup-failed';
       return record;
     }
     await page.waitForTimeout(IDLE_BEFORE_HIDE_MS);
@@ -429,7 +461,8 @@ async function runEpoch(browser, devices, run) {
       record.outcome = 'deadline';
     }
   } catch (error) {
-    if (crashed || !browser.isConnected()) record.harness_invalid = 'browser-crash';
+    const failed = failure();
+    if (failed) record.outcome = failed;
     else {
       // Any other harness exception inside the measured epoch is a failure.
       record.outcome = 'harness-error';
@@ -448,12 +481,15 @@ async function runEpoch(browser, devices, run) {
  * @param {'chromium' | 'webkit'} name
  * @param {string} control
  * @param {number} trial
+ * @param {'baseline' | 'candidate'} variant
  */
-async function runNegativeControl(browser, devices, origin, name, control, trial) {
-  const context = await browser.newContext({ ...devices[DEVICES[name]], baseURL: origin, serviceWorkers: 'block' });
-  const page = await context.newPage();
-  const result = { control, browser: name, trial, expected: '', observed: '', safety: 'fail' };
+async function runNegativeControl(browser, devices, origin, name, control, trial, variant) {
+  const result = { control, browser: name, variant, trial, expected: '', observed: '', safety: 'fail' };
+  /** @type {import('@playwright/test').BrowserContext | undefined} */
+  let context;
   try {
+    context = await browser.newContext({ ...devices[DEVICES[name]], baseURL: origin, serviceWorkers: 'block' });
+    const page = await context.newPage();
     if (control === 'revoked-credential') {
       result.expected = 'refusal without fresh inventory or redial loop';
       await page.addInitScript(resumeFixtureInit, { relays: [fixtureRelay(1, 'wss', { revoked: true })], seed: trial + 1 });
@@ -506,10 +542,11 @@ async function runNegativeControl(browser, devices, origin, name, control, trial
       result.safety = deferred > 0 && stats.dials === 0 ? 'pass' : 'fail';
     }
   } catch {
+    // A control that cannot be observed is not a safe control.
     result.observed = 'harness error';
     result.safety = 'fail';
   } finally {
-    await context.close().catch(() => {});
+    await context?.close().catch(() => {});
   }
   return result;
 }
@@ -586,8 +623,15 @@ async function main() {
   const startedAt = Date.now();
   try {
     await Promise.all(options.browsers.map(async (name) => {
-      const browser = await (name === 'chromium' ? chromium : webkit).launch();
+      const launch = () => (name === 'chromium' ? chromium : webkit).launch();
+      let browser = await launch();
       environment.browsers[name] = browser.version();
+      // A lost browser is recorded against the epoch it ended; the next epoch
+      // gets a fresh one rather than inheriting the failure.
+      const ready = async () => {
+        if (!browser.isConnected()) browser = await launch();
+        return browser;
+      };
       try {
         for (const stratum of preregistration.strata.filter((entry) => entry.browser === name)) {
           for (let index = 0; index < options.samples; index += 1) {
@@ -597,7 +641,7 @@ async function main() {
               /** @type {Record<string, any>[]} */
               const round = [];
               for (const variant of variants) {
-                const record = await runEpoch(browser, devices, { origin: servers[variant].origin, stratum, seed });
+                const record = await runEpoch(await ready(), devices, { origin: servers[variant].origin, stratum, seed });
                 round.push({
                   stratum: stratum.id,
                   browser: name,
@@ -619,13 +663,19 @@ async function main() {
           }
           console.error(`${stratum.id}: ${attempts.filter((entry) => entry.stratum === stratum.id).length} attempts recorded`);
         }
-        for (const control of Object.keys(NEGATIVE_CONTROLS)) {
-          for (let trial = 0; trial < options.negativeTrials; trial += 1) {
-            negativeControls.push(await runNegativeControl(browser, devices, servers.baseline.origin, name, control, trial));
+        // Every variant must refuse what it should refuse: a candidate is never
+        // vouched for by the baseline's safety controls.
+        for (const variant of /** @type {Array<'baseline' | 'candidate'>} */ (preregistration.variants)) {
+          for (const control of Object.keys(NEGATIVE_CONTROLS)) {
+            for (let trial = 0; trial < options.negativeTrials; trial += 1) {
+              negativeControls.push(await runNegativeControl(
+                await ready(), devices, servers[variant].origin, name, control, trial, variant,
+              ));
+            }
           }
         }
       } finally {
-        await browser.close();
+        await browser.close().catch(() => {});
       }
     }));
   } finally {

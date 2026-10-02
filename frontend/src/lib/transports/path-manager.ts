@@ -296,6 +296,7 @@ export function createHybridTransport(
     gatewaysTried += 1;
     dialed = targets.length ? { ...relay, gatewayUrl: targets[gatewayIndex] } : relay;
     const attempt = ++gatewayAttempt;
+    const scoped = scopedAuthentication(() => attempt === gatewayAttempt);
     gateway = makeGateway(dialed, {
       onMessage(message: Record<string, any>): void {
         if (closed) return;
@@ -310,6 +311,10 @@ export function createHybridTransport(
       onStatus(status, detail): void {
         if (closed) return;
         if (status === 'closed') {
+          // Resume timing records how this gateway dial ended before the list
+          // moves on, so a later gateway's success cannot erase it. A device
+          // refusal is reported by the store as an authorization outcome.
+          if (detail?.code !== DEVICE_UNAUTHORIZED_CODE) observePhase(scoped.observe, 'failed', 'gateway');
           gatewayReady = false;
           gateway = null;
           if (detail?.code === DEVICE_UNAUTHORIZED_CODE) {
@@ -355,7 +360,7 @@ export function createHybridTransport(
         );
         if (status === 'connected') startDirect();
       },
-    }, scopedAuthentication(() => attempt === gatewayAttempt));
+    }, scoped);
     gateway.connect();
   }
 
@@ -370,6 +375,7 @@ export function createHybridTransport(
     legacyTried = true;
     active = 'legacy';
     handlers.onStatus('connecting', { reason: detail.reason });
+    const scoped = scopedAuthentication(() => active === 'legacy');
     legacy = makeLegacy(relay, {
       onMessage(message: Record<string, any>): void {
         if (closed || active !== 'legacy') return;
@@ -378,13 +384,14 @@ export function createHybridTransport(
       onStatus(status, legacyDetail): void {
         if (closed || active !== 'legacy') return;
         if (status === 'closed') {
+          if (legacyDetail?.code !== DEVICE_UNAUTHORIZED_CODE) observePhase(scoped.observe, 'failed', 'websocket');
           legacy = null;
           closed = true;
           stop();
         }
         handlers.onStatus(status, legacyDetail);
       },
-    }, scopedAuthentication(() => active === 'legacy'));
+    }, scoped);
     legacy.connect();
     return true;
   }

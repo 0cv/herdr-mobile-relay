@@ -149,7 +149,11 @@ addresses, SDP or ICE candidates, relay/device/pane identifiers, prompts,
 output, credentials, invitation fragments and raw errors are never recorded.
 The ring is cleared when the app is torn down, on **Clear Resume Timings**, and
 when the user turns measurement off; the only persisted value is that opt-out
-choice. The explicit export contains redacted aggregates and sample counts.
+choice. Outside the ring the app keeps, in memory and without any timing, only
+each relay's live connection identity (generation, path class, whether it
+authenticated, ingress descriptor) so a later wake is attributed correctly;
+it is dropped on teardown and relay removal. The explicit export contains
+redacted aggregates and sample counts.
 
 To label Cloudflare versus Tailscale WSS without guessing from a hostname, the
 relay adds an optional `ingress` field to the encrypted `push_config` snapshot

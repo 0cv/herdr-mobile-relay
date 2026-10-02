@@ -46,11 +46,14 @@ export function initializeDeviceSecurity(): () => void {
     relayStore.setHidden(document.visibilityState === 'hidden');
   };
   syncVisibility();
-  // Local resume timing only observes these lifecycle events; it never
-  // changes when or how the app reconnects.
+  // Local resume timing only observes these lifecycle events and the lock
+  // state; it never changes when or how the app reconnects.
+  const stopLockObserver = securityState.subscribe((state) => resumeMetrics.setLocked(state.locked));
   if (document.visibilityState === 'visible') resumeMetrics.wake('cold-start');
   else resumeMetrics.hidden();
   relayStore.initialize(false);
+  // The cold-start wake began before the saved relays were loaded.
+  resumeMetrics.enroll();
   if (deviceVerificationEnabled()) {
     clearConversationPreviews();
     securityState.update((state) => ({ ...state, locked: true, reason: 'open' }));
@@ -160,7 +163,8 @@ export function initializeDeviceSecurity(): () => void {
     window.removeEventListener('offline', onOffline);
     window.removeEventListener('pagehide', onPageHide);
     networkConnection?.removeEventListener('change', onNetworkChange);
-    resumeMetrics.clear();
+    stopLockObserver();
+    resumeMetrics.reset();
   };
 }
 

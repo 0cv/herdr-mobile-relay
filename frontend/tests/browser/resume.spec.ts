@@ -6,9 +6,17 @@ import {
   type FixtureConfig,
 } from './resume-fixture.mjs';
 
+interface RenderVerdict {
+  slot: number;
+  epoch: number;
+  seq: number;
+  verdict: string;
+}
+
 interface ExportedGroup {
   path: string;
   lifecycle: string;
+  samples: number;
   valid_attempts: number;
   fresh_on_time: number;
   non_completions: Record<string, number>;
@@ -212,6 +220,84 @@ test('splits a scripted device unlock from network work', async ({ page }) => {
   expect(summary.unlock).toMatchObject({ requested: 1, unlocked: 1, cancelled: 0, unlock_ms: { n: 1 } });
   expect(group(summary, 'wss/cloudflare', 'cold-launch').transport_eligible_ms.n).toBe(1);
   await expectNoSensitiveMarkers(booted, card, text);
+});
+
+async function renderLog(page: Page): Promise<RenderVerdict[]> {
+  return (await fixture(page, 'renderLog')) as RenderVerdict[];
+}
+
+async function awaitTimeout(page: Page, timeoutMs: number): Promise<void> {
+  const result = await page.evaluate(
+    ({ timeout }) => (window as any).__resumeFixture.awaitFresh([1], timeout),
+    { timeout: timeoutMs },
+  );
+  expect(result).toEqual({ timedOut: true });
+}
+
+test('does not count a workspace-only refresh as fresh agents', async ({ page }) => {
+  const booted = await boot(page, {
+    relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })],
+    faults: { workspaceOnly: true },
+    seed: 18,
+  });
+  await awaitFresh(page, [1]);
+  await fixture(page, 'hide');
+  await fixture(page, 'show');
+  // The refresh renders a new workspace label, but no post-wake agents.
+  await expect(page.getByText('fixture-ws-1-2').first()).toBeVisible();
+  await awaitTimeout(page, 3_000);
+  expect((await renderLog(page)).filter((entry) => entry.epoch === 2)).toEqual([]);
+
+  const card = await openResumeTiming(page);
+  const { text, summary } = await exportSummary(card);
+  expect(group(summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, fresh_on_time: 0 });
+  await expectNoSensitiveMarkers(booted, card, text);
+});
+
+test('does not count stale post-wake agents as fresh', async ({ page }) => {
+  const booted = await boot(page, {
+    relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })],
+    faults: { stale: true },
+    seed: 19,
+  });
+  await awaitFresh(page, [1]);
+  await fixture(page, 'hide');
+  await fixture(page, 'show');
+  // The stale agents do render; the endpoint rejects them.
+  await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'not-authoritative')).toBe(true);
+  await awaitTimeout(page, 3_000);
+  expect((await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'counted')).toBe(false);
+
+  const card = await openResumeTiming(page);
+  const { text, summary } = await exportSummary(card);
+  expect(group(summary, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, fresh_on_time: 0 });
+  await expectNoSensitiveMarkers(booted, card, text);
+});
+
+test('does not count agents delivered on a path the relay is abandoning', async ({ page }) => {
+  await boot(page, {
+    relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })],
+    faults: { abandonFirst: true },
+    seed: 20,
+  });
+  await awaitFresh(page, [1]);
+  const before = (await fixture(page, 'stats')) as { handshakes: number };
+  await fixture(page, 'hide');
+  await fixture(page, 'show');
+  const result = (await page.evaluate(
+    () => (window as any).__resumeFixture.measure([1], 20_000),
+  )) as { renderedAt?: number; wakeAt: number };
+  expect(result.renderedAt).toBeDefined();
+  // Success waited for the reconnect that follows the abandoned path.
+  expect(result.renderedAt! - result.wakeAt).toBeGreaterThanOrEqual(900);
+  const log = (await renderLog(page)).filter((entry) => entry.epoch === 2);
+  const rejected = log.find((entry) => entry.verdict === 'inactive-path');
+  const counted = log.find((entry) => entry.verdict === 'counted');
+  expect(rejected).toBeDefined();
+  expect(counted).toBeDefined();
+  expect(counted!.seq).toBeGreaterThan(rejected!.seq);
+  const after = (await fixture(page, 'stats')) as { handshakes: number };
+  expect(after.handshakes).toBe(before.handshakes + 1);
 });
 
 test('stops and clears measurement when the user opts out', async ({ page }) => {

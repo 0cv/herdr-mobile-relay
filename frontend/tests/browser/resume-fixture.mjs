@@ -40,7 +40,18 @@
  *   lock?: { delayMs: number; cancel: boolean } | null;
  *   blackholeAtStart?: boolean;
  *   iosTab?: boolean;
+ *   faults?: FixtureFaults;
  * }} FixtureConfig
+ * @typedef {{
+ *   workspaceOnly?: boolean;
+ *   stale?: boolean;
+ *   abandonFirst?: boolean;
+ * }} FixtureFaults
+ *   Negative conditions applied to snapshots sent after the first wake:
+ *   `workspaceOnly` answers a refresh without an agents snapshot, `stale`
+ *   marks the post-wake inventory stale, and `abandonFirst` sends the first
+ *   post-wake snapshot on a session the relay is abandoning (closed shortly
+ *   after). None of them may count as a fresh resume.
  */
 
 /**
@@ -113,16 +124,6 @@ export function resumeSensitiveMarkers(relays) {
 }
 
 /**
- * The inventory text a relay slot renders for one wake epoch.
- *
- * @param {number} slot
- * @param {number} epoch
- */
-export function resumeMarker(slot, epoch) {
-  return `resume-${slot}-${epoch}-ok`;
-}
-
-/**
  * Installs the synthetic relay in the page. Exposes `window.__resumeFixture`
  * for the harness.
  *
@@ -178,6 +179,16 @@ export function resumeFixtureInit(config) {
     bytes: 0,
     hiddenBytes: 0,
     wakeAt: 0,
+    snapshotSeq: 0,
+    /**
+     * Relay-side truth for every agents snapshot marker: which wake epoch it
+     * belongs to, whether its inventory was ready and not stale, and the
+     * session that carried it.
+     *
+     * @type {Map<string, { slot: number; epoch: number; authoritative: boolean; session: RelaySession }>}
+     */
+    snapshots: new Map(),
+    faults: { ...(config.faults || {}) },
   };
   let visibility = 'visible';
 
@@ -359,39 +370,52 @@ export function resumeFixtureInit(config) {
     }
   }
 
-  /** @param {number} slot @param {number} epoch */
-  function markerFor(slot, epoch) {
-    return `resume-${slot}-${epoch}-ok`;
+  /**
+   * The agent name a snapshot carries. Each snapshot gets its own sequence
+   * number, so a later authoritative snapshot changes the rendered card even
+   * when an earlier, rejected one belonged to the same epoch.
+   *
+   * @param {number} slot @param {number} epoch @param {number} seq
+   */
+  function markerFor(slot, epoch, seq) {
+    return `resume-${slot}-${epoch}-${seq}-ok`;
   }
-  /** @param {FixtureRelay} relay */
-  function inventoryFor(relay) {
-    const marker = markerFor(relay.slot, state.epoch);
+  const MARKER_PATTERN = /resume-(\d+)-(\d+)-(\d+)-ok/;
+  /** @param {FixtureRelay} relay @param {string} marker */
+  function agentsFor(relay, marker) {
     const workspaceId = `fixture-w${relay.slot}`;
-    return {
-      agents: [{
-        pane_id: `${workspaceId}:p1`,
-        workspace_id: workspaceId,
-        tab_id: `${workspaceId}:t1`,
-        tab_number: 1,
-        tab_label: marker,
-        cwd: '/home/fixture-private/project',
-        status: 'working',
-        project: marker,
-        agent: 'codex',
-        server_session_id: 'fixture-session',
-        terminal_id: `fixture-terminal-${relay.slot}`,
-        generation: 1,
-        agent_session_id: '',
-      }],
-      workspaces: [{
-        workspace_id: workspaceId,
-        number: relay.slot,
-        label: marker,
-        pane_count: 1,
-        tab_count: 1,
-        cwd: '/home/fixture-private/project',
-      }],
-    };
+    return [{
+      pane_id: `${workspaceId}:p1`,
+      workspace_id: workspaceId,
+      tab_id: `${workspaceId}:t1`,
+      tab_number: 1,
+      tab_label: marker,
+      cwd: '/home/fixture-private/project',
+      status: 'working',
+      project: marker,
+      agent: 'codex',
+      server_session_id: 'fixture-session',
+      terminal_id: `fixture-terminal-${relay.slot}`,
+      generation: 1,
+      agent_session_id: '',
+    }];
+  }
+  /**
+   * Workspace labels never carry an agent marker: a workspace refresh alone
+   * must not look like fresh agents.
+   *
+   * @param {FixtureRelay} relay
+   */
+  function workspacesFor(relay) {
+    const workspaceId = `fixture-w${relay.slot}`;
+    return [{
+      workspace_id: workspaceId,
+      number: relay.slot,
+      label: `fixture-ws-${relay.slot}-${state.epoch}`,
+      pane_count: 1,
+      tab_count: 1,
+      cwd: '/home/fixture-private/project',
+    }];
   }
 
   /**
@@ -404,12 +428,17 @@ export function resumeFixtureInit(config) {
      * @param {'websocket' | 'gateway' | 'webrtc'} path
      * @param {(frame: string | Uint8Array) => void} emit
      * @param {() => void} refuse
+     * @param {() => boolean} isOpen
+     * @param {() => void} terminate
      */
-    constructor(relay, path, emit, refuse) {
+    constructor(relay, path, emit, refuse, isOpen, terminate) {
       this.relay = relay;
       this.path = path;
       this.emit = emit;
       this.refuse = refuse;
+      this.isOpen = isOpen;
+      this.terminate = terminate;
+      this.abandoned = false;
       /** @type {CryptoKey | null} */
       this.sendKey = null;
       /** @type {CryptoKey | null} */
@@ -427,6 +456,11 @@ export function resumeFixtureInit(config) {
       this.queue = this.queue.then(() => this.handle(frame)).catch(() => {
         this.closed = true;
       });
+    }
+
+    /** The authenticated path is still the live one: open and not being abandoned. */
+    active() {
+      return this.ready && !this.closed && !this.abandoned && this.isOpen();
     }
 
     /** @param {string | Uint8Array} frame */
@@ -558,8 +592,27 @@ export function resumeFixtureInit(config) {
 
     /** @param {boolean} initial */
     async snapshot(initial) {
-      const { agents, workspaces } = inventoryFor(this.relay);
-      const inventory = { state: 'ready', stale: false, last_success_at: Date.now() };
+      const afterWake = state.epoch > 1;
+      const faults = afterWake ? state.faults : {};
+      const stale = faults.stale === true;
+      const inventory = stale
+        ? { state: 'error', stale: true, error_code: 'fixture_stale', last_success_at: Date.now() - 60_000 }
+        : { state: 'ready', stale: false, last_success_at: Date.now() };
+      const seq = ++state.snapshotSeq;
+      const marker = markerFor(this.relay.slot, state.epoch, seq);
+      const withAgents = initial || faults.workspaceOnly !== true;
+      if (withAgents) {
+        state.snapshots.set(marker, { slot: this.relay.slot, epoch: state.epoch, authoritative: !stale, session: this });
+      }
+      const abandon = faults.abandonFirst === true;
+      if (abandon) {
+        state.faults.abandonFirst = false;
+        // The relay is retiring this path: its last snapshot is still
+        // delivered and may even paint, but not on the path the app will use.
+        this.abandoned = true;
+      }
+      const agents = agentsFor(this.relay, marker);
+      const workspaces = workspacesFor(this.relay);
       if (initial) {
         /** @type {Record<string, unknown>} */
         const pushConfig = {
@@ -584,8 +637,9 @@ export function resumeFixtureInit(config) {
         return;
       }
       await this.send({ type: 'inventory_status', ...inventory });
-      await this.send({ type: 'agents', agents });
+      if (withAgents) await this.send({ type: 'agents', agents });
       await this.send({ type: 'workspaces', workspaces });
+      if (abandon) this.terminate();
     }
   }
 
@@ -646,7 +700,18 @@ export function resumeFixtureInit(config) {
         this.text(JSON.stringify({ type: 'gateway_hello', proto: 1, nonce: encode64(crypto.getRandomValues(new Uint8Array(32))) }));
         return;
       }
-      this.session = new RelaySession(relay, 'websocket', (frame) => this.text(String(frame)), () => this.serverClose(4401, ''));
+      this.session = new RelaySession(
+        relay,
+        'websocket',
+        (frame) => this.text(String(frame)),
+        () => this.serverClose(4401, ''),
+        () => this.isOpen(),
+        () => setTimeout(() => this.serverClose(1000, ''), 300),
+      );
+    }
+
+    isOpen() {
+      return this.readyState === 1 && !this.dead;
     }
 
     /** @param {string | ArrayBuffer | Uint8Array} data */
@@ -668,7 +733,14 @@ export function resumeFixtureInit(config) {
         const message = JSON.parse(data);
         if (message.type !== 'connect' || this.session) return;
         this.text(JSON.stringify({ type: 'ready' }));
-        this.session = new RelaySession(this.relay, 'gateway', (frame) => this.binary(frame), () => this.serverClose(1000, 'device_unauthorized'));
+        this.session = new RelaySession(
+          this.relay,
+          'gateway',
+          (frame) => this.binary(frame),
+          () => this.serverClose(1000, 'device_unauthorized'),
+          () => this.isOpen(),
+          () => setTimeout(() => this.serverClose(1000, ''), 300),
+        );
         return;
       }
       const logical = this.reassembly.push(data);
@@ -747,7 +819,17 @@ export function resumeFixtureInit(config) {
     start(relay) {
       if (this.readyState !== 'connecting') return;
       this.readyState = 'open';
-      this.session = new RelaySession(relay, 'webrtc', (frame) => this.deliver(frame), () => this.peer.close());
+      this.session = new RelaySession(
+        relay,
+        'webrtc',
+        (frame) => this.deliver(frame),
+        () => this.peer.close(),
+        () => this.readyState === 'open' && !this.dead && this.peer.connectionState !== 'closed',
+        () => setTimeout(() => {
+          this.readyState = 'closed';
+          this.onclose?.(new Event('close'));
+        }, 300),
+      );
       this.onopen?.(new Event('open'));
     }
 
@@ -836,30 +918,82 @@ export function resumeFixtureInit(config) {
   }
 
   /**
-   * First paint of each slot's inventory for each epoch, recorded from the
+   * First paint of each slot's fresh agents for each epoch, recorded from the
    * page itself so a render that beats the harness's own call still counts
    * from the moment it happened. -1 marks a render whose frame is pending.
    *
    * @type {Map<string, number>}
    */
   const rendered = new Map();
+  /**
+   * Every agent card marker the scan judged, once per marker and verdict, with
+   * only numbers and fixed reason codes.
+   *
+   * @type {Array<{ slot: number; epoch: number; seq: number; verdict: string }>}
+   */
+  const renderLog = [];
+  const logged = new Set();
+  /** @param {string} marker @param {RegExpExecArray} match @param {string} verdict */
+  function log(marker, match, verdict) {
+    const key = `${marker}:${verdict}`;
+    if (logged.has(key)) return;
+    logged.add(key);
+    renderLog.push({ slot: Number(match[1]), epoch: Number(match[2]), seq: Number(match[3]), verdict });
+  }
   /** @type {Set<() => void>} */
   const waiters = new Set();
   /** @param {number} slot @param {number} epoch */
   const renderKey = (slot, epoch) => `${slot}:${epoch}`;
+  /** Agent markers currently rendered as the accessible name of an agent card. */
+  function renderedAgentMarkers() {
+    /** @type {Map<string, Element>} */
+    const markers = new Map();
+    for (const card of document.querySelectorAll('article.agent-card')) {
+      const name = card.querySelector('.agent-open')?.getAttribute('aria-label') || '';
+      const match = MARKER_PATTERN.exec(name);
+      if (match) markers.set(match[0], card);
+    }
+    return markers;
+  }
+  /**
+   * The success endpoint. An agent card (not a workspace label) must name the
+   * current epoch's agents from a snapshot the relay sent with ready,
+   * non-stale inventory, on a session that is still the live authenticated
+   * path, with no unlock dialog covering it, and its frame must paint.
+   */
   function scan() {
-    const epoch = state.epoch;
-    const pending = config.relays.filter((relay) => !rendered.has(renderKey(relay.slot, epoch)));
     // Inventory behind the unlock dialog is not presented to the user.
-    if (!pending.length || !document.body || document.getElementById('unlock-dialog')) return;
-    const text = document.body.textContent || '';
-    for (const relay of pending) {
-      if (!text.includes(markerFor(relay.slot, epoch))) continue;
-      const key = renderKey(relay.slot, epoch);
+    if (!document.body || document.getElementById('unlock-dialog')) return;
+    const epoch = state.epoch;
+    for (const [marker, card] of renderedAgentMarkers()) {
+      const match = /** @type {RegExpExecArray} */ (MARKER_PATTERN.exec(marker));
+      const record = state.snapshots.get(marker);
+      if (!record || record.epoch !== epoch) continue;
+      const key = renderKey(record.slot, epoch);
+      if (rendered.has(key)) continue;
+      if (!record.authoritative) {
+        log(marker, match, 'not-authoritative');
+        continue;
+      }
+      if (card.classList.contains('stale')) {
+        log(marker, match, 'stale-card');
+        continue;
+      }
+      if (!record.session.active()) {
+        log(marker, match, 'inactive-path');
+        continue;
+      }
       rendered.set(key, -1);
-      // The inventory is in the DOM; the next animation frame paints it.
       requestAnimationFrame(() => {
+        // The frame painted only if the card and its live path survived it.
+        if (!renderedAgentMarkers().has(marker) || !record.session.active()
+          || document.getElementById('unlock-dialog')) {
+          rendered.delete(key);
+          log(marker, match, 'retired-before-paint');
+          return;
+        }
         rendered.set(key, performance.now());
+        log(marker, match, 'counted');
         for (const waiter of [...waiters]) waiter();
       });
     }
@@ -980,7 +1114,9 @@ export function resumeFixtureInit(config) {
     awaitFresh,
     measure,
     hasRendered,
-    marker: markerFor,
+    renderLog() {
+      return renderLog.map((entry) => ({ ...entry }));
+    },
     stats() {
       return {
         dials: state.dials,

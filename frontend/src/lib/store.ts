@@ -584,6 +584,7 @@ class RelayStore {
   private readonly deviceCredentials = new BrowserDeviceCredentialStore(localStorage);
 
   constructor() {
+    resumeMetrics.setParticipants(() => this.resumeParticipants());
     let previousRefreshInterval = get(terminalRefreshInterval);
     terminalRefreshInterval.subscribe((value) => {
       if (value === previousRefreshInterval) return;
@@ -664,6 +665,7 @@ class RelayStore {
   /** A deferred relay shows as a disconnected row that explains why it never dials. */
   private markPairingDeferred(relay: RelayConfig): void {
     this.disconnectRelay(relay.id);
+    resumeMetrics.withdraw(relay.id);
     const connection = this.newConnection(relay);
     connection.status = 'disconnected';
     connection.closed = true;
@@ -810,7 +812,27 @@ class RelayStore {
     clearConversationPreviews();
     this.watchedPanes.clear();
     this.paneWatchesStarted.clear();
-    resumeMetrics.clear();
+    resumeMetrics.reset();
+  }
+
+  /**
+   * Relays a wake can resume: configured, not waiting for Home Screen pairing,
+   * and holding something to authenticate with. Each one is enrolled in a
+   * resume-timing epoch even if its dial waits for device verification.
+   */
+  resumeParticipants(): Array<{ id: string; hybrid: boolean }> {
+    if (!this.reconnectEnabled) return [];
+    return get(this.relayConfigs).flatMap((relay) => {
+      if (this.deferredPairingRelays.has(relay.id)) return [];
+      const connection = this.connectionsValue.get(relay.id);
+      if (connection?.authRejected || connection?.pairingRequired || connection?.pairingDeferred) return [];
+      try {
+        if (this.pairingRequired(relay)) return [];
+      } catch {
+        return [];
+      }
+      return [{ id: relay.id, hybrid: relay.transport === 'hybrid' }];
+    });
   }
 
   setPushConfigHandler(handler: ((relayId: string) => void) | null): void {
@@ -936,6 +958,7 @@ class RelayStore {
   private markPairingRequired(relay: RelayConfig): void {
     if (this.connectionsValue.get(relay.id)?.pairingRequired) return;
     this.disconnectRelay(relay.id);
+    resumeMetrics.withdraw(relay.id);
     const connection = this.newConnection(relay);
     connection.status = 'disconnected';
     connection.closed = true;
@@ -1055,6 +1078,7 @@ class RelayStore {
       return;
     }
     if (status === 'connecting') {
+      resumeMetrics.connecting(relay.id, connection.metricsGeneration);
       if (connection.status === 'connecting') return;
       connection.status = 'connecting';
       this.emitConnections();
@@ -1169,6 +1193,7 @@ class RelayStore {
     }
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
+    resumeMetrics.end(id, connection.metricsGeneration, 'superseded');
     connection.closed = true;
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     this.clearHealthTimer(connection);
@@ -1310,6 +1335,7 @@ class RelayStore {
    * revalidation dials anything not connected the moment the app comes back.
    */
   private failKeepalive(relayId: string, connection: RelayConnection): void {
+    resumeMetrics.end(relayId, connection.metricsGeneration, 'timeout');
     if (!this.hidden) {
       this.connectRelay(connection.relay);
       return;

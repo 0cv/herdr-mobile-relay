@@ -46,11 +46,27 @@ export interface ResumeGroupSummary {
   successful_only_ms: ResumeDistribution;
   /** Fresh render measured from device unlock (or the wake when unlocked). */
   transport_eligible_ms: ResumeDistribution;
-  retries: { attempts: number; path_attempts: number; superseded: number; timeouts: number; failures: number };
+  retries: {
+    attempts: number;
+    path_attempts: number;
+    path_failures: number;
+    superseded: number;
+    timeouts: number;
+    failures: number;
+  };
+  /** How the recorded relay-URL and gateway dials ended (bounded per sample). */
+  path_outcomes: Record<string, number>;
   phase_p50_ms: Partial<Record<ResumePhase, number>>;
   unavailable: string[];
   not_applicable: string[];
-  direct: { attempted: number; promoted: number; failures: number; promoted_p50_ms: QuantileValue };
+  direct: {
+    attempted: number;
+    promoted: number;
+    failures: number;
+    promoted_p50_ms: QuantileValue;
+    /** ICE over the existing session replaces these on the direct path. */
+    not_applicable: string[];
+  };
 }
 
 export interface ResumeSummary {
@@ -120,17 +136,32 @@ function increment(record: Record<string, number>, key: string, by = 1): void {
   record[key] = (record[key] || 0) + by;
 }
 
-/** Phases a path class cannot observe, or that do not apply to it. */
-export function phaseAvailability(path: ResumePath, lifecycle: ResumeLifecycle, dialed: boolean): {
+const SOCKET_INTERNALS = ['dns', 'tcp', 'tls'];
+/** The direct upgrade runs ICE inside the existing session: no socket dial. */
+export const DIRECT_NOT_APPLICABLE = [...SOCKET_INTERNALS, 'websocket-open', ...GATEWAY_PHASES];
+
+/** True when the sample opened (or finished opening) a relay-URL or gateway WebSocket. */
+export function sampleUsedWebSocket(sample: ResumeSample): boolean {
+  return sample.pathAttempts > 0 || sample.attempts > 0
+    || ['open', 'e2ee-hello', 'authenticated'].some((phase) => sample.phases[phase as ResumePhase] !== undefined);
+}
+
+/**
+ * Phases a group could not observe, and phases that did not happen to it.
+ * The phone's wake before the first script is never observable. DNS, TCP and
+ * TLS happen inside a browser WebSocket dial, which exposes no split: they are
+ * unavailable when a sample in the group dialed, and not applicable when the
+ * group only reused a live connection, including the direct WebRTC path.
+ */
+export function phaseAvailability(path: ResumePath, lifecycle: ResumeLifecycle, usedWebSocket: boolean): {
   unavailable: string[];
   not_applicable: string[];
 } {
-  // Browsers expose no DNS/TCP/TLS split inside a WebSocket dial, and nothing
-  // before the first script runs, so these are never measured or guessed.
-  const unavailable = ['os-wake-to-js', 'dns', 'tcp', 'tls'];
+  const unavailable = ['os-wake-to-js'];
   const notApplicable: string[] = [];
+  if (usedWebSocket) unavailable.push(...SOCKET_INTERNALS);
+  else notApplicable.push(...SOCKET_INTERNALS, ...WSS_HANDSHAKE, ...GATEWAY_PHASES, ...E2EE_PHASES);
   if (!path.startsWith('gateway/')) notApplicable.push(...GATEWAY_PHASES);
-  if (!dialed) notApplicable.push(...WSS_HANDSHAKE, ...GATEWAY_PHASES, ...E2EE_PHASES);
   if (lifecycle === 'cold-launch' || lifecycle === 'discarded') notApplicable.push('probe', 'probe-answer');
   return { unavailable, not_applicable: [...new Set(notApplicable)] };
 }
@@ -195,22 +226,27 @@ function summarizeGroup(
   const successful: number[] = [];
   const eligible: number[] = [];
   const phases = new Map<ResumePhase, number[]>();
-  const retries = { attempts: 0, path_attempts: 0, superseded: 0, timeouts: 0, failures: 0 };
+  const retries = { attempts: 0, path_attempts: 0, path_failures: 0, superseded: 0, timeouts: 0, failures: 0 };
+  const pathOutcomes: Record<string, number> = {};
   const promoted: number[] = [];
   let inProgress = 0;
   let abandoned = 0;
   let fresh = 0;
   let late = 0;
-  let dialed = false;
+  let usedWebSocket = false;
   let directAttempted = 0;
   let directFailures = 0;
   for (const [epoch, sample] of members) {
     retries.attempts += sample.attempts;
     retries.path_attempts += sample.pathAttempts;
+    retries.path_failures += sample.pathFailures ?? 0;
     retries.superseded += sample.superseded;
     retries.timeouts += sample.timeouts;
     retries.failures += sample.failures;
-    dialed ||= sample.attempts > 0 || sample.phases.dial !== undefined;
+    for (const record of sample.paths ?? []) {
+      increment(pathOutcomes, `${record.path}:${record.end ?? (record.servedAt !== undefined ? 'served' : 'open')}`);
+    }
+    usedWebSocket ||= sampleUsedWebSocket(sample);
     if (sample.lateFreshAt !== undefined) late += 1;
     if (sample.direct) {
       directAttempted += sample.direct.attempts;
@@ -263,13 +299,15 @@ function summarizeGroup(
     successful_only_ms: distribution(successful),
     transport_eligible_ms: distribution(eligible),
     retries,
+    path_outcomes: pathOutcomes,
     phase_p50_ms: phaseMedians,
-    ...phaseAvailability(path, lifecycle, dialed),
+    ...phaseAvailability(path, lifecycle, usedWebSocket),
     direct: {
       attempted: directAttempted,
       promoted: promoted.length,
       failures: directFailures,
       promoted_p50_ms: censoredQuantile(promoted, 0.5, 1),
+      not_applicable: directAttempted > 0 ? [...DIRECT_NOT_APPLICABLE] : [],
     },
   };
 }

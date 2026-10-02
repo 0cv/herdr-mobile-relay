@@ -4,10 +4,17 @@
  *
  * Every valid attempted wake epoch is in the denominator. A non-completion is
  * right-censored at the fixed deadline (an infinite time here), keeps its
- * reason, and is never given a completed latency. Success-only percentiles are
- * reported as supplementary diagnostics only. Quantiles use the nearest-rank
- * definition over all attempts; a quantile that lands among censored values is
- * not identifiable, and neither is a bound that does.
+ * reason, and is never given a completed latency; a "fresh" record without a
+ * finite numeric time is a missing measurement, not a zero. Success-only
+ * percentiles are reported as supplementary diagnostics only. Quantiles use
+ * the nearest-rank definition over all attempts; a quantile that lands among
+ * censored values is not identifiable, and neither is a bound that does.
+ *
+ * Evidence is checked against its preregistration before any statistic: only
+ * preregistered strata, pair indices, seeds and bounded replacement rounds
+ * count, so collecting more than the fixed sample cannot buy precision. The
+ * preregistered negative controls must be complete for every browser, trial
+ * and variant, and all safe.
  *
  * Pilot evidence (one variant) yields variance and workload estimates for
  * planning, never acceptance. Paired evidence (baseline/candidate) yields
@@ -18,6 +25,9 @@
  *     quantile ratio candidate/baseline.
  * Family-wise error is controlled with Bonferroni over every preregistered
  * acceptance comparison; the adjusted level, method and counts are retained.
+ * A bound inside its threshold passes; a lower bound beyond it demonstrates a
+ * violation (not-accepted); anything else is inconclusive. Either way the
+ * baseline is kept unless every comparison passes.
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -138,6 +148,28 @@ export function seededRandom(seed) {
   };
 }
 
+/** @param {string} text */
+function hash32(text) {
+  let value = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    value ^= text.charCodeAt(index);
+    value = Math.imul(value, 0x01000193) >>> 0;
+  }
+  return value >>> 0;
+}
+
+/**
+ * The preregistered seed for one epoch (or one matched pair): both variants
+ * of a pair use exactly the same seed, so their scripted conditions match.
+ *
+ * @param {number} baseSeed
+ * @param {string} stratum
+ * @param {number} index
+ */
+export function epochSeed(baseSeed, stratum, index) {
+  return (hash32(`${baseSeed}:${stratum}:${index}`) % 2_000_000_000) + 1;
+}
+
 /**
  * Percentile bootstrap interval for one arm's all-attempt quantile.
  *
@@ -166,28 +198,36 @@ export function bootstrapQuantileInterval(values, q, level, resamples, seed) {
 }
 
 /**
- * One-sided upper bound for the paired quantile ratio candidate/baseline.
- * Blocks (independent pairs, or pairs sharing a scenario block) are resampled
- * with replacement. A replicate whose candidate quantile is censored is +∞;
- * one whose baseline quantile is censored is unknown and counted as +∞, so
- * censoring can only widen the bound.
+ * One-sided bounds for the paired quantile ratio candidate/baseline. Blocks
+ * (independent pairs, or pairs sharing a declared block) are resampled with
+ * replacement. A censored candidate quantile against a finite baseline is a
+ * genuinely large ratio (+∞ in both bounds). A censored baseline quantile is
+ * unknown: +∞ for the upper bound and 0 for the lower one, so censoring can
+ * only widen the interval and never demonstrate either result.
  *
  * @param {{ baseline: number; candidate: number; block?: string }[]} pairs
  * @param {number} q
  * @param {number} alpha one-sided level after multiplicity adjustment
  * @param {number} resamples
  * @param {number} seed
- * @returns {{ estimate: number; upper: number; identifiable: boolean }}
+ * @returns {{ estimate: number; lower: number; upper: number; identifiable: boolean }}
  */
 export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed) {
-  const ratio = (/** @type {number[]} */ candidate, /** @type {number[]} */ baseline) => {
-    const top = nearestRankQuantile(candidate, q);
-    const bottom = nearestRankQuantile(baseline, q);
-    if (!Number.isFinite(top) || !Number.isFinite(bottom) || bottom <= 0) return Number.POSITIVE_INFINITY;
+  /** @param {number[]} candidate @param {number[]} baseline */
+  const quantiles = (candidate, baseline) => ({
+    top: nearestRankQuantile(candidate, q),
+    bottom: nearestRankQuantile(baseline, q),
+  });
+  /** @param {{ top: number; bottom: number }} value @param {number} unknown */
+  const ratio = ({ top, bottom }, unknown) => {
+    if (!Number.isFinite(bottom) || bottom <= 0) return unknown;
+    if (!Number.isFinite(top)) return Number.POSITIVE_INFINITY;
     return top / bottom;
   };
-  if (!pairs.length) return { estimate: Number.NaN, upper: Number.POSITIVE_INFINITY, identifiable: false };
-  const estimate = ratio(pairs.map((pair) => pair.candidate), pairs.map((pair) => pair.baseline));
+  if (!pairs.length) {
+    return { estimate: Number.NaN, lower: 0, upper: Number.POSITIVE_INFINITY, identifiable: false };
+  }
+  const estimate = ratio(quantiles(pairs.map((pair) => pair.candidate), pairs.map((pair) => pair.baseline)), Number.NaN);
   /** @type {Map<string, { baseline: number; candidate: number }[]>} */
   const grouped = new Map();
   pairs.forEach((pair, index) => {
@@ -198,7 +238,8 @@ export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed) {
   });
   const blocks = [...grouped.values()];
   const random = seededRandom(seed);
-  const replicates = new Float64Array(resamples);
+  const uppers = new Float64Array(resamples);
+  const lowers = new Float64Array(resamples);
   for (let replicate = 0; replicate < resamples; replicate += 1) {
     /** @type {number[]} */
     const candidate = [];
@@ -210,11 +251,30 @@ export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed) {
         baseline.push(pair.baseline);
       }
     }
-    replicates[replicate] = ratio(candidate, baseline);
+    const value = quantiles(candidate, baseline);
+    uppers[replicate] = ratio(value, Number.POSITIVE_INFINITY);
+    lowers[replicate] = ratio(value, 0);
   }
-  replicates.sort();
-  const upper = replicates[Math.max(0, Math.ceil((1 - alpha) * resamples - RANK_EPSILON) - 1)];
-  return { estimate, upper, identifiable: Number.isFinite(estimate) && Number.isFinite(upper) };
+  uppers.sort();
+  lowers.sort();
+  const upper = uppers[Math.max(0, Math.ceil((1 - alpha) * resamples - RANK_EPSILON) - 1)];
+  const lower = lowers[Math.max(0, Math.ceil(alpha * resamples - RANK_EPSILON) - 1)];
+  return { estimate, lower, upper, identifiable: Number.isFinite(estimate) && Number.isFinite(upper) };
+}
+
+/**
+ * Decision for one preregistered comparison: a bound inside the threshold
+ * passes; a lower bound beyond it demonstrates a violation; anything else,
+ * including a precision-limited interval, is inconclusive.
+ *
+ * @param {{ enough: boolean; identifiable: boolean; lower: number; upper: number; threshold: number }} input
+ * @returns {'pass' | 'not-accepted' | 'inconclusive'}
+ */
+export function boundVerdict({ enough, identifiable, lower, upper, threshold }) {
+  if (!enough) return 'inconclusive';
+  if (identifiable && upper <= threshold) return 'pass';
+  if (lower > threshold) return 'not-accepted';
+  return 'inconclusive';
 }
 
 /** @param {number} value @param {number} deadline */
@@ -238,7 +298,7 @@ function round6(value) {
  *   order?: string;
  *   replacement?: number;
  *   outcome?: string;
- *   time_to_fresh_ms?: number | null;
+ *   time_to_fresh_ms?: unknown;
  *   harness_invalid?: string | null;
  *   dials?: number;
  *   handshakes?: number;
@@ -246,36 +306,41 @@ function round6(value) {
  *   hidden_dials?: number;
  *   hidden_bytes?: number;
  * }} AttemptRecord
+ * @typedef {{ excluded: string | null; completed: boolean; time: number; reason: string | null }} Classification
+ * @typedef {{
+ *   preregistration?: Record<string, any>;
+ *   attempts?: AttemptRecord[];
+ *   negative_controls?: Record<string, any>[];
+ * }} Evidence
  */
 
 /**
- * Classifies one attempted epoch. Only a fresh outcome with a time inside the
- * deadline completes; everything else is censored with its reason.
+ * Classifies one attempted epoch. Only a fresh outcome with a finite numeric
+ * time inside the deadline completes; everything else is censored with its
+ * reason. Absent, null, string or negative times are missing measurements.
  *
  * @param {AttemptRecord | undefined} record
  * @param {number} deadline
  * @param {string[]} allowedExclusions
- * @returns {{ excluded: string | null; completed: boolean; time: number; reason: string | null }}
+ * @returns {Classification}
  */
 export function classifyAttempt(record, deadline, allowedExclusions) {
-  if (!record) return { excluded: null, completed: false, time: Number.POSITIVE_INFINITY, reason: 'missing-outcome' };
+  /** @param {string} reason */
+  const censored = (reason) => ({ excluded: null, completed: false, time: Number.POSITIVE_INFINITY, reason });
+  if (!record) return censored('missing-outcome');
   if (record.harness_invalid) {
     if (allowedExclusions.includes(record.harness_invalid)) {
       return { excluded: record.harness_invalid, completed: false, time: Number.POSITIVE_INFINITY, reason: null };
     }
-    return { excluded: null, completed: false, time: Number.POSITIVE_INFINITY, reason: `disallowed-exclusion:${record.harness_invalid}` };
+    return censored(`disallowed-exclusion:${record.harness_invalid}`);
   }
-  const time = Number(record.time_to_fresh_ms);
-  if (record.outcome === 'fresh' && Number.isFinite(time) && time >= 0 && time <= deadline) {
+  if (record.outcome === 'fresh') {
+    const time = record.time_to_fresh_ms;
+    if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) return censored('missing-measurement');
+    if (time > deadline) return censored('late');
     return { excluded: null, completed: true, time, reason: null };
   }
-  if (record.outcome === 'fresh') return { excluded: null, completed: false, time: Number.POSITIVE_INFINITY, reason: 'late' };
-  return {
-    excluded: null,
-    completed: false,
-    time: Number.POSITIVE_INFINITY,
-    reason: typeof record.outcome === 'string' && record.outcome ? record.outcome : 'missing-outcome',
-  };
+  return censored(typeof record.outcome === 'string' && record.outcome ? record.outcome : 'missing-outcome');
 }
 
 /** @param {Record<string, number>} counts @param {string | null} key */
@@ -323,61 +388,211 @@ export function reliabilityPlanning(failureRate, margin, alpha, power) {
   };
 }
 
-/**
- * @param {{ preregistration?: Record<string, any>; attempts?: AttemptRecord[]; negative_controls?: Record<string, any>[] }} evidence
- */
+/** @param {Evidence} evidence */
 function settings(evidence) {
   const registration = evidence.preregistration || {};
   const analysis = registration.analysis || {};
+  const strata = Array.isArray(registration.strata) ? registration.strata : [];
+  const baseSeed = Number(registration.seeds?.base_seed);
+  const browsers = Array.isArray(registration.browsers)
+    ? registration.browsers.map(String)
+    : [...new Set(strata.map((/** @type {any} */ stratum) => String(stratum.browser || '')).filter(Boolean))];
+  const replacementLimit = Number(registration.replacement_limit);
   return {
+    registration,
     deadline: Number(registration.deadline_ms) || DEFAULT_DEADLINE_MS,
     bounds: { ...DEFAULT_BOUNDS, ...(registration.bounds || {}) },
     allowedExclusions: Array.isArray(registration.harness_invalid_criteria)
-      ? registration.harness_invalid_criteria.map((entry) => String(entry.id || entry))
+      ? registration.harness_invalid_criteria.map((/** @type {any} */ entry) => String(entry.id || entry))
       : [],
     resamples: Number(analysis.bootstrap_resamples) || 2_000,
     seed: Number(analysis.bootstrap_seed) || 1,
-    planned: Number(registration.sample_size_per_stratum) || 0,
+    baseSeed: Number.isFinite(baseSeed) ? baseSeed : null,
+    planned: Number.isSafeInteger(Number(registration.sample_size_per_stratum))
+      ? Number(registration.sample_size_per_stratum)
+      : 0,
+    replacementLimit: Number.isSafeInteger(replacementLimit) && replacementLimit >= 0 ? replacementLimit : 0,
     plannedFamily: Number(analysis.planned_family_size) || 2,
-    strata: Array.isArray(registration.strata) ? registration.strata : [],
+    strata,
+    browsers,
   };
 }
 
 /**
- * @param {Record<string, any>[]} controls
+ * Checks every attempt record against the preregistered universe and groups
+ * the admissible ones into rounds: stratum → pair index → replacement round →
+ * variant. A replacement round is admissible only after an excluded round,
+ * and at most `replacement_limit` of them. Anything else is a violation.
+ *
+ * @param {AttemptRecord[]} attempts
+ * @param {ReturnType<typeof settings>} config
+ * @param {Array<'baseline' | 'candidate'>} variants
  */
-function negativeControlSummary(controls) {
-  const results = controls.map((control) => ({
-    control: String(control.control || ''),
-    browser: String(control.browser || ''),
-    expected: String(control.expected || ''),
-    observed: String(control.observed || ''),
-    safety: control.safety === 'pass' ? 'pass' : 'fail',
-    // A refusal is the expected safe behaviour; it is never a latency success.
-    counted_as_latency_success: false,
-  }));
-  return { results, all_safe: results.every((result) => result.safety === 'pass') };
+export function indexAttempts(attempts, config, variants) {
+  const known = new Set(config.strata.map((/** @type {any} */ stratum) => String(stratum.id || stratum)));
+  /** @type {Record<string, number>} */
+  const violations = {};
+  /** @type {Map<string, Record<string, number>>} */
+  const stratumViolations = new Map();
+  /** @type {Map<string, Map<number, Map<number, Partial<Record<'baseline' | 'candidate', AttemptRecord>>>>>} */
+  const index = new Map();
+  /** @param {string} stratum @param {string} code */
+  const violate = (stratum, code) => {
+    tally(violations, code);
+    const forStratum = stratumViolations.get(stratum) ?? {};
+    tally(forStratum, code);
+    stratumViolations.set(stratum, forStratum);
+  };
+  for (const record of attempts) {
+    const stratum = String(record?.stratum ?? '');
+    if (!known.has(stratum)) {
+      tally(violations, 'unregistered-stratum');
+      continue;
+    }
+    const variant = record.variant ?? (variants.length === 1 ? variants[0] : undefined);
+    if (!variant || !variants.includes(variant)) {
+      violate(stratum, 'unknown-variant');
+      continue;
+    }
+    const pair = record.pair;
+    if (typeof pair !== 'number' || !Number.isSafeInteger(pair) || pair < 0 || pair >= config.planned) {
+      violate(stratum, 'pair-outside-preregistered-sample');
+      continue;
+    }
+    const replacement = record.replacement ?? 0;
+    if (typeof replacement !== 'number' || !Number.isSafeInteger(replacement) || replacement < 0
+      || replacement > config.replacementLimit) {
+      violate(stratum, 'replacement-limit-exceeded');
+      continue;
+    }
+    if (config.baseSeed !== null && record.seed !== epochSeed(config.baseSeed, stratum, pair)) {
+      violate(stratum, 'seed-mismatch');
+      continue;
+    }
+    const pairs = index.get(stratum) ?? new Map();
+    const rounds = pairs.get(pair) ?? new Map();
+    const round = rounds.get(replacement) ?? {};
+    if (round[variant]) {
+      violate(stratum, 'duplicate-record');
+      continue;
+    }
+    round[variant] = record;
+    rounds.set(replacement, round);
+    pairs.set(pair, rounds);
+    index.set(stratum, pairs);
+  }
+  return { index, violations, stratumViolations };
+}
+
+/**
+ * Resolves one pair index to its admissible round: the first round in which
+ * no variant was excluded for a preregistered infrastructure reason. A later
+ * round is a violation unless every earlier round was excluded.
+ *
+ * @param {Map<number, Partial<Record<'baseline' | 'candidate', AttemptRecord>>> | undefined} rounds
+ * @param {ReturnType<typeof settings>} config
+ * @param {Array<'baseline' | 'candidate'>} variants
+ * @returns {{ status: 'missing' | 'exhausted' | 'valid'; round?: Record<string, Classification>; block?: string; exclusions: string[]; violation: boolean }}
+ */
+function resolvePair(rounds, config, variants) {
+  /** @type {string[]} */
+  const exclusions = [];
+  if (!rounds || !rounds.size) return { status: 'missing', exclusions, violation: false };
+  const order = [...rounds.keys()].sort((left, right) => left - right);
+  for (let position = 0; position < order.length; position += 1) {
+    if (order[position] !== position) return { status: 'missing', exclusions, violation: true };
+    const records = /** @type {Partial<Record<'baseline' | 'candidate', AttemptRecord>>} */ (rounds.get(position));
+    /** @type {Record<string, Classification>} */
+    const classified = {};
+    for (const variant of variants) {
+      classified[variant] = classifyAttempt(records[variant], config.deadline, config.allowedExclusions);
+    }
+    const excluded = variants.map((variant) => classified[variant].excluded).find(Boolean);
+    if (excluded) {
+      exclusions.push(excluded);
+      continue;
+    }
+    const block = variants.map((variant) => records[variant]?.block).find((value) => value !== undefined);
+    // Rounds after an admissible one are unjustified replacements.
+    return { status: 'valid', round: classified, block, exclusions, violation: position !== order.length - 1 };
+  }
+  return { status: 'exhausted', exclusions, violation: false };
+}
+
+/**
+ * Coverage of the preregistered negative controls. Every declared control
+ * must have exactly one passing result for each browser, trial and variant.
+ * A refusal is the expected safe behaviour; it is never a latency success.
+ *
+ * @param {Record<string, any>[]} controls
+ * @param {ReturnType<typeof settings>} config
+ * @param {Array<'baseline' | 'candidate'>} variants
+ */
+export function negativeControlSummary(controls, config, variants) {
+  const declared = Array.isArray(config.registration.negative_controls) ? config.registration.negative_controls : [];
+  /** @type {Set<string>} */
+  const expected = new Set();
+  for (const control of declared) {
+    const trials = Math.max(0, Number(control.trials_per_browser) || 0);
+    for (const browser of config.browsers) {
+      for (let trial = 0; trial < trials; trial += 1) {
+        for (const variant of variants) expected.add(`${String(control.id)}|${browser}|${trial}|${variant}`);
+      }
+    }
+  }
+  /** @type {Set<string>} */
+  const seen = new Set();
+  let duplicates = 0;
+  let unexpected = 0;
+  const results = controls.map((control) => {
+    const result = {
+      control: String(control.control || ''),
+      browser: String(control.browser || ''),
+      variant: String(control.variant || (variants.length === 1 ? variants[0] : '')),
+      trial: Number(control.trial),
+      expected: String(control.expected || ''),
+      observed: String(control.observed || ''),
+      safety: control.safety === 'pass' ? 'pass' : 'fail',
+      counted_as_latency_success: false,
+    };
+    const key = `${result.control}|${result.browser}|${result.trial}|${result.variant}`;
+    if (seen.has(key)) duplicates += 1;
+    else if (!expected.has(key)) unexpected += 1;
+    seen.add(key);
+    return result;
+  });
+  const missing = [...expected].filter((key) => !seen.has(key)).length;
+  const failed = results.filter((result) => result.safety !== 'pass').length;
+  const complete = declared.length > 0 && missing === 0 && duplicates === 0 && unexpected === 0;
+  return {
+    declared: declared.length,
+    expected: expected.size,
+    observed: results.length,
+    missing,
+    duplicates,
+    unexpected,
+    failed,
+    complete,
+    all_safe: complete && failed === 0,
+    results,
+  };
 }
 
 /**
  * Pilot: one variant, every attempted epoch. Produces descriptive estimates
  * with uncertainty and planning inputs for a later confirmatory experiment.
  *
- * @param {{ preregistration?: Record<string, any>; attempts?: AttemptRecord[]; negative_controls?: Record<string, any>[] }} evidence
+ * @param {Evidence} evidence
  */
 export function analyzePilot(evidence) {
   const config = settings(evidence);
-  const attempts = evidence.attempts || [];
-  /** @type {Map<string, AttemptRecord[]>} */
-  const byStratum = new Map();
-  for (const name of config.strata.map((/** @type {any} */ stratum) => String(stratum.id || stratum))) byStratum.set(name, []);
-  for (const record of attempts) {
-    const list = byStratum.get(record.stratum) ?? [];
-    list.push(record);
-    byStratum.set(record.stratum, list);
-  }
+  /** @type {Array<'baseline' | 'candidate'>} */
+  const variants = ['baseline'];
+  const { index, violations, stratumViolations } = indexAttempts(evidence.attempts || [], config, variants);
   const familyAlpha = config.bounds.alpha / config.plannedFamily;
-  const strata = [...byStratum.entries()].map(([stratum, records], index) => {
+  const strata = config.strata.map((/** @type {any} */ plan, /** @type {number} */ position) => {
+    const stratum = String(plan.id || plan);
+    const pairs = index.get(stratum) ?? new Map();
     /** @type {Record<string, number>} */
     const reasons = {};
     /** @type {Record<string, number>} */
@@ -386,31 +601,49 @@ export function analyzePilot(evidence) {
     const all = [];
     /** @type {number[]} */
     const successes = [];
-    for (const record of records) {
-      const result = classifyAttempt(record, config.deadline, config.allowedExclusions);
-      if (result.excluded) {
-        tally(exclusions, result.excluded);
-        continue;
-      }
+    /** @type {AttemptRecord[]} */
+    const used = [];
+    let attempted = 0;
+    let missing = 0;
+    let exhausted = 0;
+    let unjustified = 0;
+    for (const rounds of pairs.values()) for (const round of rounds.values()) attempted += Object.keys(round).length;
+    for (let pair = 0; pair < config.planned; pair += 1) {
+      const resolved = resolvePair(pairs.get(pair), config, variants);
+      for (const reason of resolved.exclusions) tally(exclusions, reason);
+      if (resolved.violation) unjustified += 1;
+      if (resolved.status === 'missing') missing += 1;
+      if (resolved.status === 'exhausted') exhausted += 1;
+      if (resolved.status !== 'valid' || !resolved.round) continue;
+      const result = resolved.round.baseline;
       all.push(result.time);
       if (result.completed) successes.push(result.time);
       else tally(reasons, result.reason);
+      const record = pairs.get(pair)?.get(resolved.exclusions.length)?.baseline;
+      if (record) used.push(record);
     }
+    const ownViolations = { ...(stratumViolations.get(stratum) ?? {}) };
+    if (unjustified) ownViolations['unjustified-replacement'] = unjustified;
     const valid = all.length;
     const completion = wilsonInterval(successes.length, valid, normalQuantile(0.975));
-    const seed = config.seed + index * 101;
+    const seed = config.seed + position * 101;
     const p50 = bootstrapQuantileInterval(all, 0.5, 0.95, config.resamples, seed);
     const p95 = bootstrapQuantileInterval(all, 0.95, 0.95, config.resamples, seed + 1);
     const logs = successes.filter((value) => value > 0).map((value) => Math.log(value));
-    const numeric = (/** @type {keyof AttemptRecord} */ key) => records
+    const numeric = (/** @type {keyof AttemptRecord} */ key) => used
       .map((record) => Number(record[key]))
       .filter((value) => Number.isFinite(value));
     return {
       stratum,
-      attempted: records.length,
+      attempted,
       planned: config.planned,
-      sample_requirement_met: records.length >= config.planned,
-      excluded: { count: records.length - valid, reasons: exclusions },
+      // Only measured, non-excluded epochs count toward the planned sample.
+      sample_requirement_met: config.planned > 0 && valid === config.planned
+        && Object.keys(ownViolations).length === 0,
+      excluded: { count: Object.values(exclusions).reduce((total, value) => total + value, 0), reasons: exclusions },
+      missing,
+      exhausted,
+      violations: ownViolations,
       valid_attempts: valid,
       completed_on_time: successes.length,
       completion_rate: round6(completion.estimate),
@@ -445,7 +678,7 @@ export function analyzePilot(evidence) {
       ),
     };
   });
-  const controls = negativeControlSummary(evidence.negative_controls || []);
+  const controls = negativeControlSummary(evidence.negative_controls || [], config, variants);
   return {
     schema: ANALYSIS_SCHEMA,
     design: 'pilot',
@@ -465,20 +698,24 @@ export function analyzePilot(evidence) {
       power: config.bounds.power,
       discordance: 'independent failures at the pilot rate in both arms (2p(1-p)); a correlated pair design needs fewer pairs',
     },
+    violations,
     strata,
     negative_controls: controls,
-    sample_requirement_met: strata.every((stratum) => stratum.sample_requirement_met),
+    sample_requirement_met: strata.length > 0 && strata.every((stratum) => stratum.sample_requirement_met)
+      && Object.keys(violations).length === 0,
   };
 }
 
 /**
  * Paired confirmatory analysis.
  *
- * @param {{ preregistration?: Record<string, any>; attempts?: AttemptRecord[]; negative_controls?: Record<string, any>[] }} evidence
+ * @param {Evidence} evidence
  */
 export function analyzePaired(evidence) {
   const config = settings(evidence);
-  const attempts = evidence.attempts || [];
+  /** @type {Array<'baseline' | 'candidate'>} */
+  const variants = ['baseline', 'candidate'];
+  const { index, violations, stratumViolations } = indexAttempts(evidence.attempts || [], config, variants);
   const strataPlan = config.strata.map((/** @type {any} */ stratum) => ({
     id: String(stratum.id || stratum),
     role: stratum.role === 'regression' ? 'regression' : 'acceptance-target',
@@ -486,35 +723,29 @@ export function analyzePaired(evidence) {
   const family = strataPlan.reduce((total, stratum) => total + (stratum.role === 'regression' ? 3 : 2), 0) || 1;
   const adjustedAlpha = config.bounds.alpha / family;
   const z = normalQuantile(1 - adjustedAlpha);
-  const strata = strataPlan.map((plan, index) => {
-    /** @type {Map<string, { baseline?: AttemptRecord; candidate?: AttemptRecord }>} */
-    const rounds = new Map();
-    for (const record of attempts) {
-      if (record.stratum !== plan.id) continue;
-      const key = `${record.pair ?? 0}:${record.replacement ?? 0}`;
-      const round = rounds.get(key) ?? {};
-      if (record.variant === 'candidate') round.candidate = record;
-      else round.baseline = record;
-      rounds.set(key, round);
-    }
-    /** @type {Map<number, { baseline: ReturnType<typeof classifyAttempt>; candidate: ReturnType<typeof classifyAttempt>; block?: string }>} */
-    const pairs = new Map();
+  const floorMet = config.planned >= config.bounds.min_pairs;
+  const strata = strataPlan.map((plan, position) => {
+    const pairs = index.get(plan.id) ?? new Map();
     /** @type {Record<string, number>} */
     const exclusions = {};
-    const replacementCounts = new Map();
-    for (const [key, round] of [...rounds.entries()].sort(([left], [right]) => left.localeCompare(right, 'en', { numeric: true }))) {
-      const pair = Number(key.split(':')[0]);
-      replacementCounts.set(pair, (replacementCounts.get(pair) || 0) + 1);
-      const baseline = classifyAttempt(round.baseline, config.deadline, config.allowedExclusions);
-      const candidate = classifyAttempt(round.candidate, config.deadline, config.allowedExclusions);
-      // An objective infrastructure exclusion removes both variants of the pair.
-      if (baseline.excluded || candidate.excluded) {
-        tally(exclusions, baseline.excluded || candidate.excluded);
-        continue;
+    /** @type {Array<{ baseline: Classification; candidate: Classification; block?: string }>} */
+    const valid = [];
+    let missing = 0;
+    let exhausted = 0;
+    let unjustified = 0;
+    for (let pair = 0; pair < config.planned; pair += 1) {
+      const resolved = resolvePair(pairs.get(pair), config, variants);
+      for (const reason of resolved.exclusions) tally(exclusions, reason);
+      if (resolved.violation) unjustified += 1;
+      if (resolved.status === 'missing') missing += 1;
+      if (resolved.status === 'exhausted') exhausted += 1;
+      if (resolved.status === 'valid' && resolved.round) {
+        valid.push({ baseline: resolved.round.baseline, candidate: resolved.round.candidate, block: resolved.block });
       }
-      if (!pairs.has(pair)) pairs.set(pair, { baseline, candidate, block: round.baseline?.block ?? round.candidate?.block });
     }
-    const valid = [...pairs.values()];
+    const ownViolations = { ...(stratumViolations.get(plan.id) ?? {}) };
+    if (unjustified) ownViolations['unjustified-replacement'] = unjustified;
+    const invalid = Object.keys(ownViolations).length > 0;
     const table = { a: 0, b: 0, c: 0, d: 0 };
     /** @type {Record<string, number>} */
     const baselineReasons = {};
@@ -530,57 +761,71 @@ export function analyzePaired(evidence) {
       tally(baselineReasons, pair.baseline.reason);
       tally(candidateReasons, pair.candidate.reason);
     }
-    const reliability = newcombePairedDifference(table, z);
+    /** @type {string[]} */
     const reasons = [];
-    const enough = valid.length >= Math.max(config.planned, config.bounds.min_pairs);
-    if (!enough) reasons.push('insufficient-pairs');
-    const reliabilityVerdict = !enough
-      ? 'inconclusive'
-      : reliability.upper <= config.bounds.reliability_margin ? 'pass' : 'not-accepted';
+    if (!floorMet) reasons.push('preregistered-sample-below-floor');
+    if (valid.length !== config.planned) reasons.push('insufficient-pairs');
+    if (invalid) reasons.push('evidence-outside-preregistration');
+    const enough = floorMet && !invalid && config.planned > 0 && valid.length === config.planned;
+    const reliability = newcombePairedDifference(table, z);
+    const reliabilityVerdict = boundVerdict({
+      enough,
+      identifiable: Number.isFinite(reliability.upper),
+      lower: reliability.lower,
+      upper: reliability.upper,
+      threshold: config.bounds.reliability_margin,
+    });
+    if (enough && reliabilityVerdict === 'not-accepted') reasons.push('reliability-loss-exceeds-margin');
+    if (enough && reliabilityVerdict === 'inconclusive') reasons.push('reliability-bound-too-wide');
     const latencyPairs = valid.map((pair) => ({ baseline: pair.baseline.time, candidate: pair.candidate.time, block: pair.block }));
-    const seed = config.seed + index * 101;
-    const p95 = pairedQuantileRatioBound(latencyPairs, 0.95, adjustedAlpha, config.resamples, seed);
-    const threshold95 = plan.role === 'regression' ? config.bounds.regression_ratio : config.bounds.target_p95_ratio;
-    /** @param {{ upper: number; identifiable: boolean }} bound @param {number} threshold */
-    const verdictFor = (bound, threshold) => {
-      if (!enough || !bound.identifiable) return 'inconclusive';
-      return bound.upper <= threshold ? 'pass' : 'not-accepted';
+    const seed = config.seed + position * 101;
+    /** @param {number} q @param {number} threshold @param {string} name @param {number} offset */
+    const latencyComparison = (q, threshold, name, offset) => {
+      const bound = pairedQuantileRatioBound(latencyPairs, q, adjustedAlpha, config.resamples, seed + offset);
+      const verdict = boundVerdict({ enough, ...bound, threshold });
+      if (!bound.identifiable) reasons.push(`${name}-not-identifiable-below-deadline`);
+      else if (enough && verdict === 'not-accepted') reasons.push(`${name}-ratio-exceeds-threshold`);
+      else if (enough && verdict === 'inconclusive') reasons.push(`${name}-ratio-bound-too-wide`);
+      return {
+        estimate: round6(bound.estimate),
+        lower_bound: round6(bound.lower),
+        upper_bound: round6(bound.upper),
+        threshold,
+        identifiable: bound.identifiable,
+        verdict,
+      };
     };
+    /** @type {Record<string, ReturnType<typeof latencyComparison>>} */
     const latency = {
-      p95_ratio: {
-        estimate: round6(p95.estimate),
-        upper_bound: round6(p95.upper),
-        threshold: threshold95,
-        identifiable: p95.identifiable,
-        verdict: verdictFor(p95, threshold95),
-      },
+      p95_ratio: latencyComparison(
+        0.95,
+        plan.role === 'regression' ? config.bounds.regression_ratio : config.bounds.target_p95_ratio,
+        'p95',
+        0,
+      ),
     };
-    if (plan.role === 'regression') {
-      const p50 = pairedQuantileRatioBound(latencyPairs, 0.5, adjustedAlpha, config.resamples, seed + 1);
-      Object.assign(latency, {
-        p50_ratio: {
-          estimate: round6(p50.estimate),
-          upper_bound: round6(p50.upper),
-          threshold: config.bounds.regression_ratio,
-          identifiable: p50.identifiable,
-          verdict: verdictFor(p50, config.bounds.regression_ratio),
-        },
-      });
-    }
-    if (!p95.identifiable) reasons.push('p95-not-identifiable-below-deadline');
+    if (plan.role === 'regression') latency.p50_ratio = latencyComparison(0.5, config.bounds.regression_ratio, 'p50', 1);
     const verdicts = [reliabilityVerdict, ...Object.values(latency).map((entry) => entry.verdict)];
-    const verdict = verdicts.includes('not-accepted')
-      ? 'not-accepted'
-      : verdicts.every((entry) => entry === 'pass') ? 'pass' : 'inconclusive';
+    const verdict = invalid
+      ? 'invalid'
+      : verdicts.includes('not-accepted')
+        ? 'not-accepted'
+        : verdicts.every((entry) => entry === 'pass') ? 'pass' : 'inconclusive';
     const successful = valid.filter((pair) => pair.baseline.completed && pair.candidate.completed);
     const baselineSuccess = valid.filter((pair) => pair.baseline.completed).map((pair) => pair.baseline.time);
     const candidateSuccess = valid.filter((pair) => pair.candidate.completed).map((pair) => pair.candidate.time);
     return {
       stratum: plan.id,
       role: plan.role,
-      planned_pairs: Math.max(config.planned, config.bounds.min_pairs),
+      planned_pairs: config.planned,
       valid_pairs: valid.length,
-      excluded_pairs: { count: Object.values(exclusions).reduce((total, value) => total + value, 0), reasons: exclusions },
+      missing_pairs: missing,
+      excluded_pairs: {
+        rounds: Object.values(exclusions).reduce((total, value) => total + value, 0),
+        exhausted,
+        reasons: exclusions,
+      },
+      violations: ownViolations,
       paired_outcomes: {
         both_completed: table.d,
         baseline_only_failed: table.c,
@@ -594,6 +839,7 @@ export function analyzePaired(evidence) {
       non_completions: { baseline: baselineReasons, candidate: candidateReasons },
       reliability: {
         difference: round6(reliability.estimate),
+        lower_bound: round6(reliability.lower),
         upper_bound: round6(reliability.upper),
         margin: config.bounds.reliability_margin,
         method: 'newcombe-hybrid-score-paired (method 10)',
@@ -609,11 +855,19 @@ export function analyzePaired(evidence) {
       reasons,
     };
   });
+  const controls = negativeControlSummary(evidence.negative_controls || [], config, variants);
   const verdicts = strata.map((stratum) => stratum.verdict);
-  const overall = verdicts.includes('not-accepted')
-    ? 'not-accepted'
-    : verdicts.length && verdicts.every((verdict) => verdict === 'pass') ? 'pass' : 'inconclusive';
-  const controls = negativeControlSummary(evidence.negative_controls || []);
+  const globallyInvalid = Object.keys(violations).length > 0 || !strata.length;
+  /** @type {string[]} */
+  const reasons = [];
+  if (controls.failed) reasons.push('negative-control-unsafe');
+  if (!controls.complete) reasons.push('negative-controls-incomplete');
+  if (globallyInvalid) reasons.push('evidence-outside-preregistration');
+  let verdict;
+  if (controls.failed || verdicts.includes('not-accepted')) verdict = 'not-accepted';
+  else if (globallyInvalid || !controls.complete || verdicts.includes('invalid')) verdict = 'invalid';
+  else if (verdicts.every((entry) => entry === 'pass')) verdict = 'pass';
+  else verdict = 'inconclusive';
   return {
     schema: ANALYSIS_SCHEMA,
     design: 'paired',
@@ -627,22 +881,17 @@ export function analyzePaired(evidence) {
       critical_z: round6(z),
     },
     bootstrap: { resamples: config.resamples, seed: config.seed, unit: 'pair or declared block' },
+    replacement_limit: config.replacementLimit,
+    violations,
     strata,
     negative_controls: controls,
-    verdict: controls.all_safe ? overall : 'not-accepted',
-    accepted: controls.all_safe && overall === 'pass',
+    reasons,
+    verdict,
+    accepted: verdict === 'pass',
   };
 }
 
-/**
- * @param {{
- *   schema?: string;
- *   design?: string;
- *   preregistration?: Record<string, any>;
- *   attempts?: AttemptRecord[];
- *   negative_controls?: Record<string, any>[];
- * }} evidence
- */
+/** @param {Evidence & { schema?: string; design?: string }} evidence */
 export function analyzeEvidence(evidence) {
   if (evidence.schema !== EVIDENCE_SCHEMA) throw new Error(`unsupported evidence schema ${String(evidence.schema)}`);
   return evidence.design === 'paired' ? analyzePaired(evidence) : analyzePilot(evidence);
@@ -667,21 +916,24 @@ export function renderMarkdown(analysis) {
     lines.push('| Stratum | Attempted | Valid | On time | Completion (95% CI) | p50 ms (95% CI) | p95 ms (95% CI) | Non-completions |');
     lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
     for (const stratum of pilot.strata) {
-      lines.push(`| ${stratum.stratum} | ${stratum.attempted} | ${stratum.valid_attempts} | ${stratum.completed_on_time} | ${cell(stratum.completion_rate)} (${cell(stratum.completion_rate_ci95)}) | ${cell(stratum.time_to_fresh_ms.p50)} (${cell(stratum.time_to_fresh_ms.p50_ci95)}) | ${cell(stratum.time_to_fresh_ms.p95)} (${cell(stratum.time_to_fresh_ms.p95_ci95)}) | ${cell(JSON.stringify(stratum.non_completions))} |`);
+      lines.push(`| ${stratum.stratum} | ${stratum.attempted} | ${stratum.valid_attempts}/${stratum.planned} | ${stratum.completed_on_time} | ${cell(stratum.completion_rate)} (${cell(stratum.completion_rate_ci95)}) | ${cell(stratum.time_to_fresh_ms.p50)} (${cell(stratum.time_to_fresh_ms.p50_ci95)}) | ${cell(stratum.time_to_fresh_ms.p95)} (${cell(stratum.time_to_fresh_ms.p95_ci95)}) | ${cell(JSON.stringify(stratum.non_completions))} |`);
     }
+    if (!pilot.sample_requirement_met) lines.push('', '**The preregistered sample was not met; the pilot is incomplete.**');
   } else {
     const paired = /** @type {ReturnType<typeof analyzePaired>} */ (analysis);
     lines.push(`## Resume benchmark paired analysis: ${paired.verdict}`, '');
     lines.push(`Bonferroni family ${paired.multiplicity.family_size}, adjusted one-sided alpha ${paired.multiplicity.adjusted_alpha}.`, '');
-    lines.push('| Stratum | Role | Pairs | Reliability upper bound | p95 ratio upper bound | Verdict |');
-    lines.push('| --- | --- | --- | --- | --- | --- |');
+    lines.push('| Stratum | Role | Pairs | Reliability bounds | p95 ratio bounds | Verdict | Reasons |');
+    lines.push('| --- | --- | --- | --- | --- | --- | --- |');
     for (const stratum of paired.strata) {
-      lines.push(`| ${stratum.stratum} | ${stratum.role} | ${stratum.valid_pairs}/${stratum.planned_pairs} | ${cell(stratum.reliability.upper_bound)} | ${cell(stratum.latency.p95_ratio.upper_bound)} | ${stratum.verdict} |`);
+      lines.push(`| ${stratum.stratum} | ${stratum.role} | ${stratum.valid_pairs}/${stratum.planned_pairs} | ${cell(stratum.reliability.lower_bound)} – ${cell(stratum.reliability.upper_bound)} | ${cell(stratum.latency.p95_ratio.lower_bound)} – ${cell(stratum.latency.p95_ratio.upper_bound)} | ${stratum.verdict} | ${stratum.reasons.join(', ')} |`);
     }
   }
+  const controls = analysis.negative_controls;
   lines.push('', '### Negative controls (safety assertions, not latency successes)', '');
-  for (const control of analysis.negative_controls.results) {
-    lines.push(`- ${control.browser} ${control.control}: expected ${control.expected}, observed ${control.observed} — ${control.safety}`);
+  lines.push(`${controls.observed}/${controls.expected} preregistered trials recorded; ${controls.missing} missing, ${controls.duplicates} duplicate, ${controls.unexpected} unexpected, ${controls.failed} unsafe.`, '');
+  for (const control of controls.results) {
+    lines.push(`- ${control.browser} ${control.variant} ${control.control} #${control.trial}: expected ${control.expected}, observed ${control.observed} — ${control.safety}`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -706,7 +958,7 @@ async function main() {
   process.stdout.write(renderMarkdown(analysis));
   const complete = analysis.design === 'pilot'
     ? /** @type {ReturnType<typeof analyzePilot>} */ (analysis).sample_requirement_met
-    : true;
+    : /** @type {ReturnType<typeof analyzePaired>} */ (analysis).verdict !== 'invalid';
   if (!analysis.negative_controls.all_safe || !complete) process.exit(1);
 }
 

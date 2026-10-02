@@ -12,7 +12,8 @@ import {
 } from '$lib/resume-metrics';
 import { censoredQuantile, summarizeResume } from '$lib/resume-summary';
 import { relayStore } from '$lib/store';
-import type { RelayTransport, TransportAuthentication, TransportHandlers } from '$lib/transports';
+import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportPhase } from '$lib/transports';
+import { createHybridTransport } from '$lib/transports/path-manager';
 import type { RelayConfig } from '$lib/types';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
@@ -545,6 +546,361 @@ describe('local resume metrics', () => {
   });
 });
 
+/** Drives an authenticated gateway dial through every observable phase. */
+function dialGateway(metrics: ResumeMetrics, time: ReturnType<typeof fakeClock>, relayId: string, generation: number) {
+  for (const phase of ['dial', 'open', 'gateway-hello', 'gateway-proof', 'gateway-ready', 'e2ee-hello', 'e2ee-server-hello', 'e2ee-confirm', 'authenticated'] as const) {
+    time.advance(10);
+    metrics.phase(relayId, generation, phase, 'gateway');
+  }
+  metrics.connected(relayId, generation, 'gateway');
+}
+
+interface InternalTrack { epoch: unknown; sample: unknown; record: unknown; awaiting: unknown; generation: number }
+
+function internalTracks(metrics: ResumeMetrics): Map<string, InternalTrack> {
+  return (metrics as unknown as { tracks: Map<string, InternalTrack> }).tracks;
+}
+
+describe('resume metric completion and retirement', () => {
+  it('does not complete from inventory whose connection closed before the frame painted', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const first = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', first);
+    metrics.inventory('relay-a', first, true);
+    // The socket closes before the next animation frame.
+    metrics.end('relay-a', first, 'failed');
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: null, failures: 1 });
+    expect(only(metrics).phases).not.toHaveProperty('inventory');
+
+    const second = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', second);
+    metrics.inventory('relay-a', second, true);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh', doneAt: 212, attempts: 2, failures: 1, pathAttempts: 2 });
+    expect(only(metrics).paths.map((record) => [record.path, record.end ?? 'open', record.servedAt !== undefined]))
+      .toEqual([['websocket', 'failed', true], ['websocket', 'open', true]]);
+  });
+
+  it('does not complete from inventory whose gateway path was replaced before the frame painted', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-g', true);
+    dialGateway(metrics, time, 'relay-g', generation);
+    metrics.inventory('relay-g', generation, true);
+    // The serving gateway dies and the list moves on, inside one connection.
+    metrics.phase('relay-g', generation, 'failed', 'gateway');
+    metrics.connecting('relay-g', generation);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics).outcome).toBeNull();
+
+    dialGateway(metrics, time, 'relay-g', generation);
+    metrics.inventory('relay-g', generation, true);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh', path: 'gateway/relayed', pathAttempts: 2, pathFailures: 0 });
+    expect(only(metrics).paths.map((record) => [record.path, record.end ?? 'open'])).toEqual([['gateway', 'failed'], ['gateway', 'open']]);
+  });
+
+  it('counts inventory painted behind the device lock only once it can be seen', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.setLocked(true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: null, phases: { inventory: 90, rendered: 106 } });
+    time.advance(400);
+    metrics.setLocked(false);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh', doneAt: 522, phases: { rendered: 106 } });
+  });
+
+  it('enrols every eligible relay at the wake so a locked, undialled wake still ends', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.setParticipants(() => [{ id: 'relay-a', hybrid: false }, { id: 'relay-g', hybrid: true }]);
+    metrics.setLocked(true);
+    metrics.wake('cold-start');
+    expect(metrics.snapshot()[0].samples.map((sample) => [sample.path, sample.lifecycle, sample.outcome]))
+      .toEqual([['wss/ingress-unknown', 'cold-launch', null], ['gateway/relayed', 'cold-launch', null]]);
+    time.advance(150);
+    metrics.unlock('request');
+    time.advance(2_000);
+    metrics.unlock('failure');
+    time.advance(RESUME_DEADLINE_MS);
+    expect(metrics.snapshot()[0].samples.map((sample) => sample.outcome)).toEqual(['unlock-cancelled', 'unlock-cancelled']);
+    for (const group of summarizeResume(metrics.snapshot()).groups) {
+      expect(group).toMatchObject({ valid_attempts: 1, fresh_on_time: 0, non_completions: { 'unlock-cancelled': 1 } });
+    }
+
+    // A verification slower than the deadline: the wake fails, and its unlock
+    // delay is still recorded.
+    metrics.hidden();
+    time.advance(100);
+    metrics.wake('visible');
+    metrics.unlock('request');
+    time.advance(70_000);
+    metrics.unlock('success');
+    metrics.setLocked(false);
+    const late = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', late);
+    const second = metrics.snapshot()[1];
+    expect(second.samples.map((sample) => [sample.lifecycle, sample.outcome, sample.attempts]))
+      .toEqual([['reconnect', 'deadline', 0], ['reconnect', 'deadline', 0]]);
+    expect(second.unlock).toEqual({ requestedAt: 0, unlockedAt: 70_000 });
+  });
+
+  it('ends a carried dial that never reports a phase as a deadline failure', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.setParticipants(() => [{ id: 'relay-a', hybrid: false }]);
+    metrics.wake('cold-start');
+    metrics.attempt('relay-a', false);
+    metrics.hidden();
+    time.advance(100);
+    metrics.wake('visible');
+    time.advance(RESUME_DEADLINE_MS);
+    expect(only(metrics)).toMatchObject({ lifecycle: 'reconnect', attempts: 0, outcome: 'deadline', doneAt: null });
+    expect(summarizeResume(metrics.snapshot()).groups.find((group) => group.lifecycle === 'reconnect'))
+      .toMatchObject({ valid_attempts: 1, non_completions: { deadline: 1 } });
+  });
+
+  it('keeps sampling a healthy connection after Clear and after turning measurement off and on', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const live = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', live);
+    metrics.ingress('relay-a', live, 'cloudflare');
+    metrics.inventory('relay-a', live, true);
+    time.renderFrames();
+
+    const warmResume = () => {
+      metrics.hidden();
+      time.advance(1_000);
+      metrics.wake('visible');
+      time.advance(10);
+      metrics.probe('relay-a', live);
+      time.advance(30);
+      metrics.frame('relay-a', live);
+      metrics.inventory('relay-a', live, true);
+      time.advance(16);
+      time.renderFrames();
+      return only(metrics);
+    };
+    metrics.clear();
+    expect(metrics.snapshot()).toHaveLength(0);
+    expect(warmResume()).toMatchObject({ lifecycle: 'warm', path: 'wss/cloudflare', outcome: 'fresh', doneAt: 56 });
+    metrics.setEnabled(false);
+    metrics.setEnabled(true);
+    expect(metrics.snapshot()).toHaveLength(0);
+    expect(warmResume()).toMatchObject({ lifecycle: 'warm', path: 'wss/cloudflare', outcome: 'fresh' });
+
+    // A connection established while measurement was off is still attributed.
+    metrics.setEnabled(false);
+    const quiet = metrics.attempt('relay-a', false);
+    metrics.phase('relay-a', quiet, 'authenticated', 'websocket');
+    metrics.connected('relay-a', quiet, 'websocket');
+    metrics.ingress('relay-a', quiet, 'tailscale-byo');
+    metrics.setEnabled(true);
+    metrics.hidden();
+    metrics.wake('visible');
+    metrics.probe('relay-a', quiet);
+    metrics.inventory('relay-a', quiet, true);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ lifecycle: 'warm', path: 'wss/tailscale-byo', outcome: 'fresh' });
+  });
+
+  it('measures a network change that follows a completed wake as its own recovery', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const live = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', live);
+    metrics.inventory('relay-a', live, true);
+    time.advance(10);
+    time.renderFrames();
+    expect(only(metrics).outcome).toBe('fresh');
+    // A lifecycle duplicate inside the window still joins the finished wake.
+    metrics.wake('focus');
+    expect(metrics.snapshot()).toHaveLength(1);
+    // A real network change half a second later is a distinct recovery.
+    time.advance(400);
+    metrics.network('change');
+    expect(metrics.snapshot().map((epoch) => epoch.trigger)).toEqual(['cold-start', 'network']);
+    metrics.probe('relay-a', live);
+    time.advance(2_000);
+    metrics.end('relay-a', live, 'timeout');
+    const replacement = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', replacement);
+    metrics.inventory('relay-a', replacement, true);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ lifecycle: 'reconnect', outcome: 'fresh', timeouts: 1, attempts: 1, doneAt: 2_106 });
+  });
+
+  it('drops tracking references to measurements that left the ring', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    metrics.phase('relay-a', generation, 'dial', 'websocket');
+    metrics.hidden();
+    expect(internalTracks(metrics).get('relay-a')).toMatchObject({ epoch: expect.any(Object), sample: expect.any(Object) });
+    time.advance(RESUME_RETENTION_MS + 1);
+    expect(metrics.snapshot()).toHaveLength(0);
+    expect(internalTracks(metrics).get('relay-a')).toMatchObject({ epoch: null, sample: null, record: null, generation });
+
+    // The count bound severs references too, not only the age bound.
+    metrics.wake('visible');
+    metrics.attempt('relay-b', false);
+    metrics.hidden();
+    for (let index = 0; index < RESUME_MAX_EPOCHS; index += 1) {
+      time.advance(10);
+      metrics.wake('visible');
+      metrics.hidden();
+    }
+    expect(metrics.snapshot()).toHaveLength(RESUME_MAX_EPOCHS);
+    expect(internalTracks(metrics).get('relay-b')).toMatchObject({ epoch: null, sample: null, record: null });
+    metrics.clear();
+    for (const track of internalTracks(metrics).values()) expect(track).toMatchObject({ epoch: null, sample: null, awaiting: null });
+    metrics.reset();
+    expect(internalTracks(metrics).size).toBe(0);
+  });
+
+  it('keeps failed gateway and legacy dials in the sample when a later path succeeds', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-g', true);
+    time.advance(5);
+    metrics.phase('relay-g', generation, 'dial', 'gateway');
+    time.advance(20);
+    metrics.phase('relay-g', generation, 'open', 'gateway');
+    time.advance(25);
+    metrics.phase('relay-g', generation, 'failed', 'gateway');
+    time.advance(5);
+    metrics.phase('relay-g', generation, 'dial', 'gateway');
+    time.advance(10);
+    metrics.phase('relay-g', generation, 'timeout', 'gateway');
+    metrics.phase('relay-g', generation, 'failed', 'gateway');
+    // Every gateway failed: the legacy relay URL is the last resort.
+    time.advance(5);
+    metrics.phase('relay-g', generation, 'dial', 'websocket');
+    time.advance(30);
+    metrics.phase('relay-g', generation, 'authenticated', 'websocket');
+    metrics.connected('relay-g', generation, 'websocket');
+    metrics.inventory('relay-g', generation, true);
+    time.advance(16);
+    time.renderFrames();
+    const sample = only(metrics);
+    expect(sample).toMatchObject({ outcome: 'fresh', pathAttempts: 3, pathFailures: 2, timeouts: 1, failures: 0 });
+    expect(sample.paths).toEqual([
+      { path: 'gateway', dialAt: 5, reached: 'open', end: 'failed', endedAt: 50 },
+      { path: 'gateway', dialAt: 55, reached: 'dial', end: 'timeout', endedAt: 65 },
+      { path: 'websocket', dialAt: 70, reached: 'authenticated', servedAt: 100 },
+    ]);
+    expect(summarizeResume(metrics.snapshot()).groups[0]).toMatchObject({
+      retries: { path_attempts: 3, path_failures: 2, timeouts: 1 },
+      path_outcomes: { 'gateway:failed': 1, 'gateway:timeout': 1, 'websocket:served': 1 },
+    });
+  });
+
+  it('reports gateway and legacy path failures from the path manager', () => {
+    const observed: Array<[TransportPhase, string]> = [];
+    const scoped: Array<TransportAuthentication | undefined> = [];
+    const gateways: TransportHandlers[] = [];
+    const legacies: TransportHandlers[] = [];
+    const fake = (kind: RelayTransport['kind']): RelayTransport => ({ kind, connect: () => {}, send: () => true, close: () => {} });
+    const relay: RelayConfig = {
+      id: 'relay-g', label: 'Gateway', url: 'wss://legacy.invalid', token: '', transport: 'hybrid',
+      gatewayUrl: 'wss://a.invalid', gatewayUrls: ['wss://a.invalid', 'wss://b.invalid'],
+    };
+    const transport = createHybridTransport(relay, { onMessage: () => {}, onStatus: () => {} }, {
+      createGateway: (_relay, handlers, authentication) => {
+        gateways.push(handlers);
+        scoped.push(authentication);
+        return fake('gateway');
+      },
+      createDirect: () => fake('webrtc'),
+      createLegacy: (_relay, handlers, authentication) => {
+        legacies.push(handlers);
+        scoped.push(authentication);
+        return fake('websocket');
+      },
+    }, { observe: (phase, path) => observed.push([phase, path]) });
+    transport.connect();
+    scoped[0]?.observe?.('dial', 'gateway');
+    gateways[0].onStatus('closed', { reason: 'unknown', fatal: true, code: 'unknown_relay' });
+    scoped[1]?.observe?.('dial', 'gateway');
+    gateways[1].onStatus('closed', { reason: 'unknown', fatal: true, code: 'unknown_relay' });
+    expect(legacies).toHaveLength(1);
+    // A replaced gateway's late callback is not part of the current attempt.
+    scoped[0]?.observe?.('authenticated', 'gateway');
+    legacies[0].onStatus('closed', { reason: 'Relay disconnected' });
+    expect(observed).toEqual([
+      ['dial', 'gateway'], ['failed', 'gateway'], ['dial', 'gateway'], ['failed', 'gateway'], ['failed', 'websocket'],
+    ]);
+
+    // A device refusal is an authorization outcome, not a path failure.
+    observed.length = 0;
+    gateways.length = 0;
+    const refused = createHybridTransport({ ...relay, url: '', gatewayUrls: undefined }, { onMessage: () => {}, onStatus: () => {} }, {
+      createGateway: (_relay, handlers) => {
+        gateways.push(handlers);
+        return fake('gateway');
+      },
+      createDirect: () => fake('webrtc'),
+    }, { observe: (phase, path) => observed.push([phase, path]) });
+    refused.connect();
+    gateways[0].onStatus('closed', { reason: 'refused', fatal: true, code: 'device_unauthorized' });
+    expect(observed).toEqual([]);
+  });
+
+  it('marks socket phases not applicable on a reused or direct path and unavailable after a dial', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-g', true);
+    dialGateway(metrics, time, 'relay-g', generation);
+    metrics.inventory('relay-g', generation, true);
+    time.renderFrames();
+    for (const phase of ['dial', 'offer', 'answer', 'ice-connected', 'open', 'authenticated', 'promoted'] as const) {
+      time.advance(10);
+      metrics.phase('relay-g', generation, phase, 'webrtc');
+    }
+    metrics.connected('relay-g', generation, 'webrtc');
+    metrics.hidden();
+    time.advance(1_000);
+    metrics.wake('visible');
+    metrics.probe('relay-g', generation);
+    metrics.inventory('relay-g', generation, true);
+    time.renderFrames();
+
+    const groups = summarizeResume(metrics.snapshot()).groups;
+    const cold = groups.find((group) => group.path === 'gateway/relayed')!;
+    expect(cold.unavailable).toEqual(['os-wake-to-js', 'dns', 'tcp', 'tls']);
+    expect(cold.direct).toMatchObject({ attempted: 1, promoted: 1 });
+    expect(cold.direct.not_applicable).toEqual(expect.arrayContaining(['dns', 'tcp', 'tls', 'websocket-open']));
+    const direct = groups.find((group) => group.path === 'gateway/direct')!;
+    expect(direct).toMatchObject({ lifecycle: 'warm', valid_attempts: 1, fresh_on_time: 1 });
+    // ICE over the live session replaced DNS, TCP and TLS: they did not happen.
+    expect(direct.unavailable).toEqual(['os-wake-to-js']);
+    expect(direct.not_applicable).toEqual(expect.arrayContaining(['dns', 'tcp', 'tls', 'dial', 'open', 'authenticated']));
+  });
+});
+
 describe('store resume-metric wiring', () => {
   afterEach(() => {
     transportHijack.current = null;
@@ -552,6 +908,80 @@ describe('store resume-metric wiring', () => {
     relayStore.relayConfigs.set([]);
     resumeMetrics.setEnabled(true);
     vi.restoreAllMocks();
+  });
+
+  it('enrols only relays that can resume', () => {
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'websocket',
+      connect: () => { handlers.onStatus('connecting'); },
+      send: () => true,
+      close: () => {},
+    });
+    relayStore.destroy();
+    expect(relayStore.resumeParticipants()).toEqual([]);
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    // A relay key that cannot authenticate never dials, so it never resumes.
+    relayStore.addRelay({ label: 'Truncated', url: 'wss://truncated.example', token: 'truncated-key' });
+    const [fedora, truncated] = get(relayStore.relayConfigs);
+    expect(get(relayStore.connections).get(truncated.id)?.pairingRequired).toBe(true);
+    expect(relayStore.resumeParticipants()).toEqual([{ id: fedora.id, hybrid: false }]);
+  });
+
+  it('samples a warm resume on the same healthy socket after Clear and after off/on', async () => {
+    const sent: Record<string, unknown>[] = [];
+    let handlers: TransportHandlers | null = null;
+    transportHijack.current = (_relay, transportHandlers) => {
+      handlers = transportHandlers;
+      return {
+        kind: 'websocket',
+        connect: () => { transportHandlers.onStatus('connecting'); },
+        send: (payload) => {
+          sent.push(payload);
+          return true;
+        },
+        close: () => {},
+      };
+    };
+    relayStore.destroy();
+    resumeMetrics.setEnabled(true);
+    // Consume the page's one cold start, so later wakes are ordinary ones.
+    resumeMetrics.wake('cold-start');
+    resumeMetrics.hidden();
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    const live = handlers as TransportHandlers | null;
+    expect(live).not.toBeNull();
+    live!.onStatus('connected', { path: 'websocket' });
+    const agents = [{
+      pane_id: 'w1:p1', agent: 'codex', status: 'idle',
+      server_session_id: 'primary', terminal_id: 'terminal-w1:p1', generation: 1, agent_session_id: '',
+    }];
+    live!.onMessage({ type: 'push_config', protocol: 3, capabilities: [], agent_profiles: [], inventory: { state: 'ready', stale: false } });
+    live!.onMessage({ type: 'agents', agents });
+
+    const resets = [
+      () => resumeMetrics.clear(),
+      () => {
+        resumeMetrics.setEnabled(false);
+        resumeMetrics.setEnabled(true);
+      },
+    ];
+    for (const reset of resets) {
+      reset();
+      expect(resumeMetrics.snapshot()).toHaveLength(0);
+      resumeMetrics.hidden();
+      resumeMetrics.wake('visible');
+      sent.length = 0;
+      relayStore.revalidateConnections(2_000);
+      expect(sent).toContainEqual({ type: 'refresh_agents' });
+      live!.onMessage({ type: 'inventory_status', state: 'ready', stale: false });
+      live!.onMessage({ type: 'agents', agents });
+      await vi.waitFor(() => {
+        expect(resumeMetrics.snapshot().at(-1)?.samples[0]).toMatchObject({ lifecycle: 'warm', outcome: 'fresh', attempts: 0 });
+      });
+      expect(resumeMetrics.snapshot().at(-1)?.samples).toHaveLength(1);
+    }
   });
 
   it('scopes samples to the live connection generation and the authenticated descriptor', async () => {

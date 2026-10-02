@@ -20,38 +20,55 @@ A **wake epoch** begins at the first observable wake signal:
 | `resume` | the page lifecycle `resume` event after a freeze |
 | `network` | `online` or a `navigator.connection` change while visible and no epoch is collecting |
 
-Signals within two seconds of an epoch's start, while it still has an
-unfinished relay sample, or while device verification is pending, are
-**coalesced** into it and recorded with their first offset (for example
+A new signal joins (is **coalesced** into) the current epoch while that epoch
+is still collecting: a relay sample is unfinished or device verification is
+pending. A finished epoch absorbs only lifecycle duplicates (visible,
+pageshow, resume, focus) within two seconds of its start. A network `online`
+or `change` after every sample finished opens a new `network` epoch, even
+half a second later, so the revalidation it causes is measured rather than
+swallowed. Coalesced signals keep their first offset (for example
 `{ visible: 0, focus: 3, online: 40 }`). A focus event never opens an epoch on
-its own; a network change after an epoch has finished opens a new one, so a
-real network change while the app is in use is measured rather than
-suppressed. `offline` is recorded as a hint but never opens an epoch. Hiding,
+its own, and `offline` is recorded as a hint but never opens one. Hiding,
 freezing or `pagehide` closes the epoch; an unfinished sample is then
 `hidden` (abandoned), not a failure or a success.
 
-Each relay contributes one **sample** per epoch. The epoch owns every dial,
-retry, gateway fallback and replacement that follows, so a failed or
-superseded attempt stays inside the same elapsed time instead of becoming a
-separate success. Every connection attempt gets a generation number; the path
-manager additionally scopes each gateway, legacy and direct attempt, and any
-callback from an abandoned attempt is ignored. Counters record connection
-attempts, raw path dials, supersessions, timeouts (handshake timers or the
-2-second foreground probe) and failures.
+When an epoch opens, every relay that can resume is **enrolled** with one
+sample: configured, not waiting for Home Screen pairing, not refused, and
+holding a credential or usable key. (The cold start enrols again once saved
+relays are loaded.) A wake whose dial never starts because verification is
+pending or was cancelled, or whose carried dial never reports a phase, still
+ends with an outcome. The epoch owns every dial, retry, gateway fallback and
+replacement that follows, so a failed or superseded attempt stays inside the
+same elapsed time instead of becoming a separate success. Every connection
+attempt gets a generation number; the path manager additionally scopes each
+gateway, legacy and direct attempt, and any callback from an abandoned attempt
+is ignored. Counters record connection attempts, raw path dials, path dials
+that failed or timed out before becoming usable, supersessions, timeouts
+(handshake timers, the 2-second foreground probe or an unanswered keepalive)
+and connection failures. The first eight path dials of a sample are kept as
+records (`websocket` or `gateway`, dial offset, last milestone reached, when it
+became usable, and how it ended: `failed`, `timeout`, `superseded` or
+`auth-rejected`), so a failed first gateway is not erased when a second
+gateway or the legacy URL succeeds.
 
 A sample **succeeds** only when an `agents` snapshot arrives on the current
-connection generation while the relay reports inventory `ready` and not
-`stale`, that snapshot was requested after the wake (by a dial inside the
-epoch, or by the post-wake probe on a reused connection), and its animation
-frame renders, all within **60 seconds** of the epoch start. A fresh snapshot
-after the deadline is recorded as `lateFreshAt` and the sample stays a
-`deadline` non-completion. Other outcomes are `auth-rejected`,
-`unlock-cancelled`, `hidden` and `removed`.
+connection generation and live route while the relay reports inventory
+`ready` and not `stale`, that snapshot was requested after the wake (by a dial
+inside the epoch, or by the post-wake probe on a reused connection), and its
+animation frame paints while the app is unlocked, all within **60 seconds** of
+the epoch start. If the connection closes, the transport falls back to
+connecting, or a new path is dialled before that frame, the snapshot cannot
+complete the sample and a later fresh snapshot is needed. Inventory painted
+behind the device lock completes at the first frame after unlocking. A fresh
+snapshot after the deadline is recorded as `lateFreshAt` and the sample stays
+a `deadline` non-completion. Other outcomes are `auth-rejected`,
+`unlock-cancelled`, `hidden` and `removed` (the relay was removed or stopped
+being able to connect).
 
 **Lifecycle category** per sample: `cold-launch` or `discarded`
 (`document.wasDiscarded`) for a cold start, `bfcache` for a persisted
-`pageshow`, otherwise `reconnect` when a dial happened in the epoch and `warm`
-when the existing connection answered the probe.
+`pageshow`, otherwise `reconnect` when a dial happened (or was needed) in the
+epoch and `warm` when the existing connection answered the probe.
 
 ### Phases
 
@@ -88,15 +105,19 @@ served by the promoted path is labelled `gateway/direct`.
 ### What is not observable
 
 A web page cannot observe the operating system's wake before its first script
-runs, or DNS, TCP and TLS inside a browser WebSocket. These are always
-reported as `unavailable` (`os-wake-to-js`, `dns`, `tcp`, `tls`) and never as
-zero or an estimate; `dial` to `open` is the composite. A cold start records
-`navigationToAppMs`, navigation start to app start, which is observable. Phases
-that do not apply are reported as `not_applicable`: gateway phases on WSS,
-handshake phases for a reused warm connection, probes on a cold launch. The
-direct path has no DNS/TLS/WebSocket phase; ICE replaces them. A snapshot that
-was already in flight when the probe was sent can be counted as the probe's
-answer; the probe-request rule bounds, but cannot remove, that ambiguity.
+runs, so `os-wake-to-js` is always `unavailable`. DNS, TCP and TLS happen
+inside a browser WebSocket dial and expose no split: they are `unavailable`
+(never zero or an estimate) for groups that dialled a relay URL or gateway,
+with `dial` to `open` as the composite, and `not_applicable` for groups that
+only reused a live connection, including the direct WebRTC path, where ICE
+over the existing session replaces them (`direct.not_applicable` lists `dns`,
+`tcp`, `tls`, `websocket-open` and the gateway phases). A cold start records
+`navigationToAppMs`, navigation start to app start, which is observable. Other
+phases that did not happen are `not_applicable`: gateway phases on WSS,
+handshake phases for a reused warm connection, probes on a cold launch. A
+snapshot that was already in flight when the probe was sent can be counted as
+the probe's answer; the probe-request rule bounds, but cannot remove, that
+ambiguity.
 
 ### Ingress labels come from the authenticated session
 
@@ -116,7 +137,14 @@ the configured mode, not proof of the route, and grants nothing.
 
 - Memory only: at most 100 epochs and 24-hour logical retention (by both
   monotonic and wall clock; a wall clock that jumps backwards prunes rather
-  than extends), at most 16 relay samples per epoch.
+  than extends), at most 16 relay samples per epoch. When an epoch leaves the
+  ring, every internal reference to it and its samples is dropped too.
+- Per relay, the app keeps only live connection identity outside the ring
+  (connection generation, path class, whether it authenticated, and its
+  ingress descriptor), so the next wake on a healthy connection is labelled
+  and sampled correctly after **Clear** or after measurement is switched back
+  on. It holds no timing, is kept while measurement is off for that reason,
+  and is dropped on app teardown and when a relay is removed.
 - No uploads, analytics, service-worker work, background timers or extra
   health requests. Measurement is passive.
 - Recorded: path class, lifecycle, phase offsets, counters and outcome codes.
@@ -125,8 +153,8 @@ the configured mode, not proof of the route, and grants nothing.
   fragments or raw error text. Relay identifiers exist only as keys of an
   in-memory tracking map used to scope callbacks, and are never copied into a
   sample or the export.
-- Cleared on app teardown, on **Clear Resume Timings**, and when the user
-  turns measurement off. The opt-out (`herdr_resume_metrics = off` in
+- Timings are cleared on app teardown, on **Clear Resume Timings**, and when
+  the user turns measurement off. The opt-out (`herdr_resume_metrics = off` in
   localStorage) is the only persisted value.
 
 ## Exporting a summary
@@ -139,9 +167,10 @@ counts, and per path/lifecycle group: valid attempts, on-time completions,
 non-completions by reason, abandoned and late counts, all-attempt
 time-to-fresh p50/p95 (non-completions censored at 60 s; `insufficient` below
 5 or 20 samples; `beyond-deadline` when the quantile is censored),
-success-only and transport-eligible distributions, retry counters, phase
-medians, `unavailable` and `not_applicable` phase lists, and direct-upgrade
-counts. The card is a labelled region with a heading, a labelled switch, a
+success-only and transport-eligible distributions, retry counters (including
+path dials and path failures), path-attempt outcome counts such as
+`gateway:failed` or `websocket:served`, phase medians, `unavailable` and
+`not_applicable` phase lists, and direct-upgrade counts. The card is a labelled region with a heading, a labelled switch, a
 captioned table with row headers, and a polite live status line.
 
 ## Implementation map and deviations from the plan
@@ -152,8 +181,8 @@ captioned table with row headers, and a polite live status line.
 | `frontend/src/lib/resume-summary.ts` | new (not in the plan): redacted aggregates and labels, loaded only with the Settings card |
 | `frontend/src/components/ResumeTimingSettings.svelte` | new (not in the plan): the Settings card, a lazy chunk |
 | `frontend/src/components/SettingsView.svelte` | lazily loads the card |
-| `frontend/src/lib/security.ts`, `store.ts` | passive hooks only; control flow and every existing call are unchanged |
-| `frontend/src/lib/transports/types.ts`, `encrypted.ts`, `websocket.ts`, `gateway.ts`, `webrtc.ts`, `path-manager.ts`, `index.ts` | an optional `observe` callback in the existing `TransportAuthentication` options; observer exceptions are swallowed |
+| `frontend/src/lib/security.ts`, `store.ts` | passive hooks only (wake, lock state, enrolment, attempt, phase, connecting, retirement and inventory observations); control flow and every existing call are unchanged |
+| `frontend/src/lib/transports/types.ts`, `encrypted.ts`, `websocket.ts`, `gateway.ts`, `webrtc.ts`, `path-manager.ts`, `index.ts` | an optional `observe` callback in the existing `TransportAuthentication` options, including a `failed` observation when a gateway or legacy path closes; observer exceptions are swallowed |
 | `frontend/src/lib/types.ts` | unchanged: no shared view type needed a new field |
 | `internal/protocol/protocol.go`, `internal/app/server.go` | additive `ingress` descriptor |
 | `internal/protocol/protocol_test.go`, `internal/app/ingress_descriptor_test.go` | descriptor tests (a new server test file rather than growing `server_test.go`) |
@@ -197,12 +226,22 @@ there is no real radio, VPN, carrier, Cloudflare or Tailscale network. Results
 describe the app's own scheduling and protocol phases under these scripts,
 nothing more.
 
-**Endpoint.** Success is the first animation frame that paints the active
-epoch's authenticated, ready, non-stale inventory within 60 s of the first
-visible event (navigation start for a discard). The page records the paint
-itself, so a render that beats the harness call still counts from when it
-happened. Everything else is a non-completion with its reason (`deadline`,
-`late`, `harness-error`, ...), right-censored at 60 s.
+**Endpoint.** Success is the first animation frame that paints an agent card
+(its accessible name, never a workspace label) naming the active epoch's
+agents from a snapshot that the synthetic relay sent with `ready`, non-stale
+inventory, on a session that is still the live authenticated path, with no
+unlock dialog covering it, within 60 s of the first visible event (navigation
+start for a discard). Every snapshot carries its own sequence number, and the
+relay records each one's epoch, freshness and session, so the page can check
+the rendered card against the relay's truth. A card from a stale snapshot, a
+workspace-only refresh, or a session the relay is abandoning does not count;
+if the session is retired before the frame paints, the render does not count
+either. The page records the paint itself, so a render that beats the harness
+call still counts from when it happened. Hosted browser tests exercise each of
+these traps (`workspaceOnly`, `stale` and `abandonFirst` fixture faults).
+Everything else is a non-completion with its reason (`deadline`, `late`,
+`load-failed`, `warmup-failed`, `page-crash`, `browser-disconnected`,
+`harness-error`), right-censored at 60 s.
 
 **State reset and matching.** Every epoch, and in a paired design each
 variant of a pair, runs in a fresh browser context with fresh storage and a
@@ -217,25 +256,49 @@ derivation, hidden, network-restoration and unlock schedules, sample size and
 unit, endpoints, analysis method, bootstrap settings, family size, bounds,
 harness-invalid criteria, the replacement limit and the negative controls.
 
-**Harness-invalid exclusions** are objective and preregistered only:
-`browser-crash`, `bundle-load-failed` (the bundle did not load with HTTP 200)
-and `warmup-timeout` (the cold connection before the measured wake did not
-render within 30 s). They exclude both variants of a pair, are counted with
-reasons, and earn at most two same-seed replacements. Any other reason is a
-non-completion. A candidate failure is never an exclusion.
+**Harness-invalid exclusions** are objective, preregistered and established
+outside the page under test: `server-unavailable` (after a failed page load,
+an independent request from the runner to the local static server fails with
+a network error rather than any HTTP status) and `browser-unavailable` (a
+fresh browser context or page could not be created before the page was
+opened). They exclude both variants of a pair, are counted with reasons, and
+earn at most two same-seed replacements; a pair whose three rounds are all
+excluded is reported as exhausted and leaves the sample short. A page crash, a
+lost browser, a bundle that fails to load from a running server, and an app
+that never renders its first inventory are attempted epochs that did not
+complete (`page-crash`, `browser-disconnected`, `load-failed`,
+`warmup-failed`), never exclusions. A lost browser is relaunched for the next
+epoch.
 
 **Negative controls** are safety assertions, never latency successes:
 revoked credential (refusal, no fresh inventory, no redial loop), cancelled
 unlock (locked, no dial), permanent outage over a 15 s window (no fresh
-inventory, no crash), and iOS deferred pairing (deferral, no dial). A failed
-control fails the job.
+inventory, no crash), and iOS deferred pairing (deferral, no dial). Every
+control runs for every browser and trial against **each variant's** bundle,
+and each result names its variant. A failed, missing, duplicated or
+unexpected control result fails the job; safe baseline controls never vouch
+for a candidate.
 
 ## Analysis method
 
-All valid attempted epochs are in the denominators. Quantiles are nearest-rank
-over all attempts with non-completions censored beyond the deadline; when a
-quantile lands among censored values it is `beyond-deadline` and not
-identifiable. Success-only percentiles are supplementary diagnostics only.
+All valid attempted epochs are in the denominators. A `fresh` outcome counts
+only with a finite, non-negative numeric time within the deadline; an absent,
+null, string, negative or non-finite time is a `missing-measurement`
+non-completion, never a guessed zero. Quantiles are nearest-rank over all
+attempts with non-completions censored beyond the deadline; when a quantile
+lands among censored values it is `beyond-deadline` and not identifiable.
+Success-only percentiles are supplementary diagnostics only.
+
+Before any statistic, evidence is checked against its preregistration. Only
+preregistered strata and variants, pair indices `0 … n−1` for the fixed
+sample size `n`, the preregistered seed for each pair, and replacement rounds
+up to the limit count; a replacement round is admissible only after an
+excluded round, and duplicate records are refused. Any violation, including
+evidence collected beyond the preregistered sample, makes the stratum and the
+experiment `invalid`: extra pairs cannot buy precision. Each pair uses its
+first non-excluded round; a variant missing from that round is a
+`missing-outcome` non-completion. A pilot meets its sample only when every
+stratum has `n` measured, non-excluded epochs.
 
 - **Pilot** (one variant): Wilson 95% interval for on-time completion,
   percentile-bootstrap 95% intervals for all-attempt p50/p95, success-only
@@ -245,8 +308,9 @@ identifiable. Success-only percentiles are supplementary diagnostics only.
   interval for the paired difference in non-completion rates (method 10);
   latency uses a paired percentile bootstrap of the all-attempt quantile ratio
   candidate/baseline, resampling independent pairs or declared blocks; a
-  censored candidate replicate is +∞ and a censored baseline replicate is
-  treated as +∞, so censoring only widens bounds. Every bound is one-sided at
+  censored candidate quantile against a finite baseline is +∞, and a
+  censored baseline quantile is unknown (+∞ for the upper bound, 0 for the
+  lower bound), so censoring only widens bounds. Every bound is one-sided at
   95% with Bonferroni family-wise control over every preregistered acceptance
   comparison (2 per targeted stratum, 3 per regression control), and the
   adjusted level, method and counts are retained in the output.
@@ -254,12 +318,21 @@ identifiable. Success-only percentiles are supplementary diagnostics only.
 B3 decision rules, applied per stratum: the upper bound for
 `candidate − baseline` non-completion must be at most +1 percentage point;
 the targeted stratum's all-attempt p95 ratio upper bound at most 0.80;
-regression controls' p50 and p95 ratio upper bounds at most 1.10. Fewer pairs
-than planned (and never fewer than 400), a non-identifiable quantile or bound,
-or wide intervals are `inconclusive`; an identifiable bound beyond its
-threshold is `not-accepted`; an unsafe negative control rejects everything.
-The analyzer tests include a candidate that is twice as fast when it succeeds
-but fails 5% more often: it is `not-accepted`.
+regression controls' p50 and p95 ratio upper bounds at most 1.10. Each
+comparison is `pass` when its upper bound is within the threshold,
+`not-accepted` when even its one-sided lower bound (at the same adjusted
+level) is beyond it, a demonstrated violation, and `inconclusive` otherwise.
+A precision-limited interval, fewer valid pairs than preregistered, a
+preregistered sample below the 400-pair floor, or a non-identifiable
+quantile is `inconclusive`, with the reason, never a rejection or a pass. For
+example, a family of five with 400 pairs and no discordance has a
+reliability upper bound of 1.33 points: inconclusive. A censored baseline
+quantile is unknown and can demonstrate neither result. Every outcome other
+than `pass` on every comparison keeps the baseline. An unsafe negative
+control makes the experiment `not-accepted`; incomplete controls or
+evidence outside the preregistration make it `invalid`. The analyzer tests
+include a candidate that is twice as fast when it succeeds but fails 5% more
+often: its loss is demonstrated and it is `not-accepted`.
 
 ## Preregistration template and power assumptions for B3
 
@@ -296,6 +369,12 @@ p95 criterion without first reducing its non-completions.
 
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
+
+The figures below came from the first version of the harness, before review
+tightened the endpoint (agent cards only, relay-verified freshness and live
+path), the exclusion rules and the evidence validation. They are retained as
+history and are superseded by the rerun on the revised harness, which will
+replace this table.
 
 Source: `check` run 36940357170, job *Resume benchmark pilot*, on commit
 `005065acaafcebfd86be7c8e2024625cdb6cc9b3`, measuring the shipped `web/`

@@ -5,7 +5,9 @@ import {
   epochSchedule,
   epochSeed,
   harnessErrorClass,
+  HARNESS_INVALID_CRITERIA,
   IDLE_BEFORE_HIDE_MS,
+  NON_COMPLETION_OUTCOMES,
   pairOrder,
   parseArguments,
   PILOT_MIN_EPOCHS,
@@ -51,7 +53,14 @@ describe('resume benchmark runner preregistration', () => {
       'revoked-credential', 'cancelled-unlock', 'permanent-outage', 'ios-deferred-pairing',
     ]);
     expect(plan.negative_controls.every((control) => control.counts_as_latency_success === false)).toBe(true);
-    expect(plan.harness_invalid_criteria.map((criterion) => criterion.id)).toEqual(['browser-crash', 'bundle-load-failed', 'warmup-timeout']);
+    // Only failures established outside the page under test are exclusions;
+    // crashes, failed loads and failed warm-ups are censored non-completions.
+    expect(plan.harness_invalid_criteria.map((criterion) => criterion.id)).toEqual(['server-unavailable', 'browser-unavailable']);
+    expect(HARNESS_INVALID_CRITERIA.map((criterion) => criterion.id)).not.toEqual(expect.arrayContaining(['browser-crash']));
+    expect(plan.non_completion_outcomes).toEqual(expect.arrayContaining(['page-crash', 'browser-disconnected', 'warmup-failed', 'load-failed']));
+    expect(NON_COMPLETION_OUTCOMES).not.toEqual(expect.arrayContaining(plan.harness_invalid_criteria.map((criterion) => criterion.id)));
+    expect(plan).toMatchObject({ browsers: ['chromium', 'webkit'], variants: ['baseline'] });
+    expect(plan.endpoints.primary).toMatch(/agent card .*not a workspace label.*ready, non-stale.*live authenticated path/);
     expect(plan.bounds).toMatchObject({ reliability_margin: 0.01, target_p95_ratio: 0.8, regression_ratio: 1.1, min_pairs: 400 });
     expect(plan.endpoints.not_measured).toEqual(expect.arrayContaining(['OS wake-to-JS, DNS, TCP, TLS']));
     expect(digest(plan)).toBe(digest(JSON.parse(JSON.stringify(plan))));
@@ -74,6 +83,8 @@ describe('resume benchmark runner preregistration', () => {
     ]);
     expect(plan.analysis.planned_family_size).toBe(5);
     expect(plan).toMatchObject({ baseline_sha: BASELINE, candidate_sha: CANDIDATE, sample_unit: 'matched baseline/candidate pair' });
+    // Both variants run every negative control.
+    expect(plan.variants).toEqual(['baseline', 'candidate']);
   });
 
   it('refuses underpowered or ambiguous designs', () => {
