@@ -95,7 +95,8 @@ describe('resume timing settings card', () => {
     render(ResumeTimingSettings);
     await settle();
     expect(screen.getByRole('status')).toHaveTextContent('1 wake and 1 relay sample recorded.');
-    await advance(RESUME_RETENTION_MS + 10);
+    // The refresh fires just after the retention expiry (plus a 25 ms margin).
+    await advance(RESUME_RETENTION_MS + 100);
     expect(screen.getByRole('status')).toHaveTextContent('0 wakes and 0 relay samples recorded.');
     expect(screen.queryByRole('table')).toBeNull();
 
