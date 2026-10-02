@@ -456,6 +456,25 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     });
   }
 
+  test('a bounded empty pointer-transparent decoration outside inventory does not prevent presentation', async ({ page }) => {
+    await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 46 });
+    await awaitFresh(page, [1]);
+    await quiesce(page);
+    await presentationStyle(page, '#resume-decoration { position: fixed; top: 0; left: 0; width: 10px; height: 10px; background: black; pointer-events: none; }');
+    await page.evaluate(() => {
+      const decoration = document.createElement('span');
+      decoration.id = 'resume-decoration';
+      decoration.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(decoration);
+    });
+    await fixture(page, 'hide');
+    const wakeAt = await fixture(page, 'show');
+    const result = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000));
+    expect(result.wakeAt).toBe(wakeAt);
+    expect(result.renderedAt - result.wakeAt).toBeLessThanOrEqual(60_000);
+    expect((await renderLog(page)).filter((entry) => entry.epoch === 2 && entry.verdict === 'counted')).toHaveLength(1);
+  });
+
   test('an abandoned held frame cannot complete the next wake', async ({ page }) => {
     await boot(page, { relays: [fixtureRelay(1, 'wss')], faults: { holdPaint: true }, seed: 44 });
     await awaitFresh(page, [1]);

@@ -1221,6 +1221,18 @@ export function resumeFixtureInit(config) {
     const bounds = element.getBoundingClientRect();
     return rects.every((rect) => !overlaps(bounds, rect, 2));
   }
+  /** @param {Element} element @param {CSSStyleDeclaration} style @param {DOMRect[]} rects */
+  function supportedPointerTransparentBox(element, style, rects) {
+    // An empty ordinary leaf (e.g. the shipped nav-update badge) paints only
+    // its bounded background/border. No text/replaced content, descendants,
+    // border-image outset or overflow effects can extend ink from this box.
+    if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+      || !['span', 'div'].includes(element.localName) || element.children.length || element.textContent?.trim()
+      || style.boxShadow !== 'none' || style.textShadow !== 'none' || style.outlineStyle !== 'none'
+      || style.filter !== 'none' || style.mixBlendMode !== 'normal' || style.borderImageSource !== 'none') return false;
+    const bounds = element.getBoundingClientRect();
+    return rects.every((rect) => !overlaps(bounds, rect));
+  }
   /**
    * Pointer hit-testing intentionally ignores pointer-transparent paint and
    * shadows. It can only be an additional check, never our occlusion proof.
@@ -1239,7 +1251,7 @@ export function resumeFixtureInit(config) {
       const style = getComputedStyle(element);
       if (element.shadowRoot || element.localName.includes('-') || ['iframe', 'object', 'embed'].includes(element.localName)) return refuseComposition('composition:boundary');
       if (style.visibility === 'visible') {
-        if (style.pointerEvents === 'none') return refuseComposition('composition:pointer-transparent');
+        if (style.pointerEvents === 'none' && !supportedPointerTransparentBox(element, style, rects)) return refuseComposition('composition:pointer-transparent');
         if (style.textShadow !== 'none' || !supportedShadow(element, style, rects)) return refuseComposition('composition:shadow');
         if (style.outlineStyle !== 'none') return refuseComposition('composition:outline');
         if (style.mixBlendMode !== 'normal') return refuseComposition('composition:blend');
