@@ -438,37 +438,41 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-Source: `check` run 36964563904, job *Resume benchmark pilot*, on commit
-`b4ebbfbbb13d12c4a1979e3410f7bec19d9131c9`, measuring the shipped `web/`
-build `51ddf36c30aac7c7545fc683e0d3f51e40a4022ec73116794d4094066213807b`
-with the revised endpoint, exclusion rules and evidence validation described
-above (later commits that change only documentation ship the same build, and
-each hosted run repeats the pilot on its own commit). Preregistration
-SHA-256 `3d9d32bc7b340deca51f7666af0a0fec9a17d79f3cf4556395376c22a293e600`;
-Chromium 151.0.7922.34 and WebKit 26.5 under Node v22.23.3 on a hosted Linux
-runner; 10.6 minutes. 480 attempted epochs (16 strata × 30), all valid, no
-harness exclusions or replacements; no hidden-time dials or bytes in any
-stratum. All 24 negative-control trials (4 controls × 3 trials × 2 browsers)
-were safe.
+Source: `check` run 36972958606, job *Resume benchmark pilot*, on commit
+`b754d77f9829bf1b88e5275394dea71008f2abdf`, measuring the shipped `web/`
+build `87c8ebcd2b8ba1fc52d1ebc836125c2f494ef64aefae37661c344e1795ccb44e`
+with the current-path endpoint, exclusion rules, contract checks and evidence
+validation described above (later commits that change only documentation ship
+the same build, and each hosted run repeats the pilot on its own commit).
+Preregistration SHA-256
+`dc8515e876db879d5fa1729658fef4eec8985303c0460e702ca704253f02892b`, no
+contract violations; Chromium 151.0.7922.34 and WebKit 26.5 under Node
+v22.23.3 on a hosted Linux runner; 10.7 minutes. 480 attempted epochs (the
+bounded default of 16 strata × 30), all valid, no harness exclusions or
+replacements; no hidden-time dials or bytes in any stratum. All 24
+negative-control trials (4 controls × 3 trials × 2 browsers) were safe. The
+other workloads and paths (`hidden-30s`, `hidden-long`, `network-change`,
+`wss-tailscale`, `gateway-direct`) were exercised once each per browser by
+the hosted browser suite in the same run, not sampled by this pilot.
 
 | Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
 | --- | --- | --- | --- | --- | --- | --- |
-| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 20 (18–24) | 29 (26–31) | 0 / 0 | 1,176 | 0.27 |
-| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 64 (58–77) | 93 (86–101) | 1 / 1 | 3,265 | 0.29 |
-| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,046 (2,079–3,081) | 5,098 (5,032–5,103) | 1 / 1 | 3,407 | 0.34 |
-| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 137 (125–144) | 159 (152–167) | 1 / 1 | 3,549 | 0.18 |
-| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 20 (17–26) | 32 (31–32) | 0 / 0 | 776 | 0.37 |
-| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 101 (79–125) | 151 (144–152) | 1 / 1 | 2,588 | 0.37 |
-| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,050 (2,100–3,146) | 5,125 (5,099–5,142) | 1 / 1 | 2,660 | 0.40 |
-| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 149 (134–162) | 205 (190–223) | 1 / 1 | 2,779 | 0.20 |
-| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 36 (32–38) | 48 (42–48) | 0 / 0 | 1,176 | 0.17 |
-| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 99 (84–100) | 124 (115–132) | 1 / 1 | 3,455 | 0.23 |
-| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,066 (2,104–3,108) | 5,112 (5,082–5,125) | 1 / 1 | 3,797 | 0.34 |
-| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 187 (168–202) | 234 (214–237) | 1 / 1 | 3,439 | 0.16 |
-| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (32–40) | 50 (45–54) | 0 / 0 | 776 | 0.18 |
-| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 116 (99–131) | 148 (148–164) | 1 / 1 | 2,660 | 0.24 |
-| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,080 (2,147–3,107) | 5,117 (5,080–5,126) | 1 / 1 | 2,923 | 0.34 |
-| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 200 (171–202) | 249 (219–346) | 1 / 1 | 2,681 | 0.18 |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 20 (18–23) | 32 (26–34) | 0 / 0 | 1,176 | 0.28 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 66 (59–75) | 99 (91–109) | 1 / 1 | 3,336 | 0.28 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,039 (2,077–3,081) | 5,105 (5,045–5,111) | 1 / 1 | 3,655 | 0.35 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 134 (120–140) | 179 (146–182) | 1 / 1 | 3,549 | 0.21 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 22 (16–26) | 35 (31–35) | 0 / 0 | 776 | 0.40 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 100 (80–123) | 153 (139–153) | 1 / 1 | 2,588 | 0.37 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,053 (2,103–3,146) | 5,129 (5,095–5,141) | 1 / 1 | 2,731 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 149 (135–159) | 217 (184–218) | 1 / 1 | 2,803 | 0.21 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 35 (32–38) | 47 (43–211) | 0 / 0 | 1,176 | 0.37 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 100 (84–115) | 132 (117–135) | 1 / 1 | 3,549 | 0.23 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,069 (2,101–3,112) | 5,124 (5,076–5,128) | 1 / 1 | 3,854 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 188 (168–199) | 249 (205–273) | 1 / 1 | 3,297 | 0.16 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (32–40) | 49 (45–50) | 0 / 0 | 776 | 0.18 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 131 (100–132) | 148 (148–164) | 1 / 1 | 2,711 | 0.23 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,085 (2,147–3,112) | 5,129 (5,102–5,175) | 1 / 1 | 2,875 | 0.36 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 198 (183–200) | 233 (230–246) | 1 / 1 | 2,783 | 0.13 |
 
 Reading it as a pilot:
 
@@ -480,7 +484,7 @@ Reading it as a pilot:
   confirmatory design must state which assumption it uses, or first run a
   larger pilot.
 - A nearest-rank p95 of 30 values is essentially the second-largest value, so
-  the p95 intervals are coarse; the log-time SDs (0.16–0.40) are the variance
+  the p95 intervals are coarse; the log-time SDs (0.13–0.40) are the variance
   inputs for planning latency precision.
 - `blackhole-restore` is dominated by the scripted conditions: the 2-second
   foreground probe timeout, then a dial that waits for restoration and the
@@ -490,7 +494,8 @@ Reading it as a pilot:
 - Synthetic fixture latency, emulated suspension and headless browsers make
   these figures unsuitable for comparison with phones or real networks.
 
-Earlier runs are void and recorded here so their numbers are not reused:
+Earlier runs are void or superseded, and recorded here so their numbers are
+not reused:
 
 - 36938672837 on `da19f2591c0f90a1c102833004acdc1ef0cf139d`: every `discard`
   epoch was a harness error because the reload landed on the bootstrap
@@ -511,6 +516,12 @@ Earlier runs are void and recorded here so their numbers are not reused:
   skipped the newer snapshot while the first was pending. That harness race
   was fixed in `b4ebbfbb` (the frame re-reads what it paints) with a `burst`
   regression fixture; the app was unchanged.
+- 36964563904 on `b4ebbfbbb13d12c4a1979e3410f7bec19d9131c9` (build
+  `51ddf36c30aac7c7545fc683e0d3f51e40a4022ec73116794d4094066213807b`,
+  previously documented here): 480/480 on time, but its endpoint accepted any
+  open authenticated session rather than the one the app was using, and its
+  analyzer accepted registrations outside the contract. Superseded by the run
+  above on the current endpoint and build, and not reused.
 
 ## Limits of this evidence
 
