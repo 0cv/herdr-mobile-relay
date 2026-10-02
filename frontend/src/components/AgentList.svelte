@@ -17,6 +17,7 @@
     tabName,
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
+  import { resumeMetrics } from '$lib/resume-metrics';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
@@ -439,7 +440,12 @@
 
   onMount(() => {
     const timer = setInterval(() => { relativeNow = Date.now(); }, 60_000);
-    return () => clearInterval(timer);
+    // Local resume timing counts fresh inventory only once a view shows it.
+    const hide = resumeMetrics.presentInventory();
+    return () => {
+      clearInterval(timer);
+      hide();
+    };
   });
 </script>
 

@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "version": "0.22.4",
-  "assets": 399,
-  "build": "51ddf36c30aac7c7545fc683e0d3f51e40a4022ec73116794d4094066213807b",
-  "entry": "/builds/0.22.4-399-51ddf36c30aac7c7/index.html",
+  "assets": 400,
+  "build": "87c8ebcd2b8ba1fc52d1ebc836125c2f494ef64aefae37661c344e1795ccb44e",
+  "entry": "/builds/0.22.4-400-87c8ebcd2b8ba1fc/index.html",
   "files": {
     "entry": {
-      "path": "builds/0.22.4-399-51ddf36c30aac7c7/index.html",
-      "sha256": "d7ca2290a8da65bed010819a45a9574464c127af246079dadb57fb699919c3db",
-      "integrity": "sha256-18oikKjaZb7QEIGaRalXRGTBJ68kYHna21f7aZkZw9s=",
-      "brotli_sha256": "79105b724aab9734208b2057f0105a7f9e950e91a99bcd2627fe3c446913fea4",
-      "brotli_integrity": "sha256-eRBbckqrlzQgiyBX8BBaf56VDpGpm80mJ/48RGkT/qQ="
+      "path": "builds/0.22.4-400-87c8ebcd2b8ba1fc/index.html",
+      "sha256": "61620f61912aeadc375614b6cdc2562fdde265086204ddc492cb47b304dc0513",
+      "integrity": "sha256-YWIPYZEq6tw3VhS2zcJWL93iZQhiBN3EkstHswTcBRM=",
+      "brotli_sha256": "f9a6cc9ddfb96518fe336c922c2d9ea424617a3f3d06c756e13c51d1f41e5fa9",
+      "brotli_integrity": "sha256-+abMnd+5ZRj+M2ySLC2epCRhej89BsdW4TxR0fQeX6k="
     },
     "javascript": {
-      "path": "assets/app-531f9e9dca65c464f080c821d2a6a4fb6fa53dc12586a0ab271d62316532d5e8.js",
-      "sha256": "531f9e9dca65c464f080c821d2a6a4fb6fa53dc12586a0ab271d62316532d5e8",
-      "integrity": "sha256-Ux+encplxGTwgMgh0qak+2+lPcElhqCrJx1iMWUy1eg=",
-      "brotli_sha256": "a0086c3d6b1b3af7970381fca70ba38be0c2f928a9f61cca9800d61fbfa4edf6",
-      "brotli_integrity": "sha256-oAhsPWsbOveXA4H8pwuji+DC+Sip9hzKmADWH7+k7fY="
+      "path": "assets/app-bc4ffb66038164fb76b8453a04cf05378368ef47dba0c5171d397ad5944222b0.js",
+      "sha256": "bc4ffb66038164fb76b8453a04cf05378368ef47dba0c5171d397ad5944222b0",
+      "integrity": "sha256-vE/7ZgOBZPt2uEU6BM8FN4No70fboMUXHTl61ZRCIrA=",
+      "brotli_sha256": "86e7be3e8354720848c202fe66cd73f752115945358b6b79cd7c12d2e2d29972",
+      "brotli_integrity": "sha256-hue+PoNUcghIwgL+Zs1z91IRWUU1i2t5zXwS0uLSmXI="
     },
     "stylesheet": {
       "path": "assets/app-4707cdd35ae2a575800aa0215dc8223f1a404b30de6b7c988ba66e5a68c12df9.css",

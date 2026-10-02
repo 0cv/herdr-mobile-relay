@@ -1427,6 +1427,7 @@ class RelayStore {
       connection.herdrStatus = normalizeHerdrStatus(message.herdr_status);
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
+      this.reportUnready(relayId, connection);
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
       connection.speechLanguages = (Array.isArray(message.speech_languages) ? message.speech_languages : [])
         .filter(isSpeechLanguage);
@@ -1476,6 +1477,7 @@ class RelayStore {
     }
     if (message.type === 'inventory_status' && connection) {
       connection.inventory = normalizeAgentInventory(message);
+      this.reportUnready(relayId, connection);
       this.emitConnections();
       return;
     }
@@ -1778,6 +1780,17 @@ class RelayStore {
         this.acknowledgePaneFrame(watched, contentFingerprint);
       }
       this.startPaneWatch(paneId);
+    }
+  }
+
+  /**
+   * Tells local resume timing that this relay's inventory is not
+   * authoritative right now, so a fresh snapshot still waiting for its frame
+   * cannot complete a sample.
+   */
+  private reportUnready(relayId: string, connection: RelayConnection): void {
+    if (connection.inventory.state !== 'ready' || connection.inventory.stale) {
+      resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
     }
   }
 

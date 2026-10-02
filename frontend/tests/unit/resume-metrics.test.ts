@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RESUME_DEADLINE_MS,
   RESUME_MAX_EPOCHS,
@@ -52,6 +52,12 @@ function fakeClock(options: { discarded?: boolean; onLine?: boolean | null } = {
   };
 }
 
+/** Metrics with an agent list on screen, as when the app shows its home view. */
+function shown(metrics: ResumeMetrics): ResumeMetrics {
+  metrics.presentInventory();
+  return metrics;
+}
+
 function only(metrics: ResumeMetrics, epochIndex = -1): ResumeSample {
   const epoch = metrics.snapshot().at(epochIndex)!;
   expect(epoch.samples).toHaveLength(1);
@@ -72,7 +78,7 @@ function dialWss(metrics: ResumeMetrics, time: ReturnType<typeof fakeClock>, rel
 describe('local resume metrics', () => {
   it('records the exact phase order of a cold WSS dial labelled by an authenticated descriptor', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-a', false);
     dialWss(metrics, time, 'relay-a', generation);
@@ -127,7 +133,7 @@ describe('local resume metrics', () => {
 
   it('labels WSS ingress only from an authenticated descriptor, never from the relay address', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const cases: Array<[string, unknown, boolean]> = [
       ['relay-on-cloudflare.example.com', 'cloudflare', false],
@@ -168,7 +174,7 @@ describe('local resume metrics', () => {
 
   it('labels relayed gateway inventory separately from the later direct promotion', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('gateway-relay', true);
     for (const phase of ['dial', 'open', 'gateway-hello', 'gateway-proof', 'gateway-ready', 'e2ee-hello', 'e2ee-server-hello', 'e2ee-confirm', 'authenticated'] as const) {
@@ -206,7 +212,7 @@ describe('local resume metrics', () => {
 
   it('coalesces a wake burst into one epoch without suppressing a later network change', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     metrics.hidden();
     time.freeze(30_000);
@@ -239,7 +245,7 @@ describe('local resume metrics', () => {
 
   it('keeps failed and replaced dials inside one epoch and ignores abandoned callbacks', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const warm = metrics.attempt('relay-a', false);
     metrics.phase('relay-a', warm, 'authenticated', 'websocket');
@@ -303,7 +309,7 @@ describe('local resume metrics', () => {
 
   it('requires a post-wake request on the current generation before inventory counts as fresh', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const live = metrics.attempt('relay-a', false);
     metrics.phase('relay-a', live, 'authenticated', 'websocket');
@@ -348,7 +354,7 @@ describe('local resume metrics', () => {
 
   it('censors deadline misses, reports late fresh frames, and records auth refusal', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const slow = metrics.attempt('relay-a', false);
     metrics.phase('relay-a', slow, 'dial', 'websocket');
@@ -383,7 +389,7 @@ describe('local resume metrics', () => {
 
   it('splits device unlock from network work and keeps a locked wake open', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     time.advance(150);
     metrics.unlock('request');
@@ -423,7 +429,7 @@ describe('local resume metrics', () => {
 
   it('closes an unfinished epoch when the page hides and records hidden wall time', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-a', false);
     metrics.phase('relay-a', generation, 'dial', 'websocket');
@@ -441,7 +447,7 @@ describe('local resume metrics', () => {
 
   it('cancels a removed relay sample and drops every callback after clearing', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-a', false);
     metrics.phase('relay-a', generation, 'dial', 'websocket');
@@ -465,7 +471,7 @@ describe('local resume metrics', () => {
 
   it('marks a discarded page and never reports unobservable phases as measured', () => {
     const time = fakeClock({ discarded: true });
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-a', false);
     dialWss(metrics, time, 'relay-a', generation);
@@ -480,7 +486,7 @@ describe('local resume metrics', () => {
     expect(group.time_to_fresh_ms).toEqual({ n: 1, p50: 'insufficient', p95: 'insufficient' });
 
     const warmTime = fakeClock();
-    const warmMetrics = new ResumeMetrics(warmTime.clock, true);
+    const warmMetrics = shown(new ResumeMetrics(warmTime.clock, true));
     warmMetrics.wake('cold-start');
     const live = warmMetrics.attempt('relay-a', false);
     warmMetrics.connected('relay-a', live, 'websocket');
@@ -496,7 +502,7 @@ describe('local resume metrics', () => {
 
   it('bounds the ring to 100 epochs and 24 hours, and clears on request or opt-out', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     for (let index = 0; index < RESUME_MAX_EPOCHS + 20; index += 1) {
       metrics.wake('visible');
       metrics.hidden();
@@ -564,7 +570,7 @@ function internalTracks(metrics: ResumeMetrics): Map<string, InternalTrack> {
 describe('resume metric completion and retirement', () => {
   it('does not complete from inventory whose connection closed before the frame painted', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const first = metrics.attempt('relay-a', false);
     dialWss(metrics, time, 'relay-a', first);
@@ -588,7 +594,7 @@ describe('resume metric completion and retirement', () => {
 
   it('does not complete from inventory whose gateway path was replaced before the frame painted', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-g', true);
     dialGateway(metrics, time, 'relay-g', generation);
@@ -608,9 +614,103 @@ describe('resume metric completion and retirement', () => {
     expect(only(metrics).paths.map((record) => [record.path, record.end ?? 'open'])).toEqual([['gateway', 'failed'], ['gateway', 'open']]);
   });
 
-  it('counts inventory painted behind the device lock only once it can be seen', () => {
+  it('does not complete from relayed inventory when the direct path is promoted before the paint', () => {
+    const time = fakeClock();
+    const metrics = shown(new ResumeMetrics(time.clock, true));
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-g', true);
+    dialGateway(metrics, time, 'relay-g', generation);
+    metrics.inventory('relay-g', generation, true);
+    // The direct upgrade takes over before the frame that would paint it.
+    metrics.phase('relay-g', generation, 'promoted', 'webrtc');
+    metrics.connected('relay-g', generation, 'webrtc');
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics).outcome).toBeNull();
+    expect(only(metrics).phases).not.toHaveProperty('inventory');
+    // The direct path's own snapshot completes it.
+    time.advance(20);
+    metrics.inventory('relay-g', generation, true);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh', path: 'gateway/direct', doneAt: 142 });
+  });
+
+  it('does not complete from inventory the relay reports stale or not ready before the paint', () => {
+    const time = fakeClock();
+    const metrics = shown(new ResumeMetrics(time.clock, true));
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    // inventory_status turns stale (or the relay reports an error) first.
+    metrics.inventory('relay-a', generation, false);
+    time.renderFrames();
+    expect(only(metrics).outcome).toBeNull();
+    metrics.inventory('relay-a', generation, true);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh' });
+  });
+
+  it('counts fresh inventory only in a frame painted while an inventory view is mounted', () => {
     const time = fakeClock();
     const metrics = new ResumeMetrics(time.clock, true);
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    dialWss(metrics, time, 'relay-a', generation);
+    // Settings is open: the snapshot is published but nothing renders it.
+    metrics.inventory('relay-a', generation, true);
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: null });
+    expect(only(metrics).phases).not.toHaveProperty('rendered');
+    time.advance(1_000);
+    const hide = metrics.presentInventory();
+    time.advance(16);
+    time.renderFrames();
+    expect(only(metrics)).toMatchObject({ outcome: 'fresh', doneAt: 1_122, phases: { inventory: 90, rendered: 1_122 } });
+
+    // With every view gone again, the next wake waits for one to return.
+    hide();
+    hide();
+    metrics.hidden();
+    time.advance(100);
+    metrics.wake('visible');
+    metrics.probe('relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    time.renderFrames();
+    expect(only(metrics).outcome).toBeNull();
+    metrics.presentInventory();
+    time.renderFrames();
+    expect(only(metrics).outcome).toBe('fresh');
+  });
+
+  it('ignores observations that arrive after their connection ended', () => {
+    const time = fakeClock();
+    const metrics = shown(new ResumeMetrics(time.clock, true));
+    metrics.wake('cold-start');
+    const generation = metrics.attempt('relay-a', false);
+    metrics.phase('relay-a', generation, 'dial', 'websocket');
+    time.advance(30);
+    metrics.phase('relay-a', generation, 'open', 'websocket');
+    metrics.end('relay-a', generation, 'failed');
+    // A handshake promise that settles after the socket closed.
+    time.advance(40);
+    metrics.phase('relay-a', generation, 'e2ee-hello', 'websocket');
+    metrics.phase('relay-a', generation, 'authenticated', 'websocket');
+    metrics.connected('relay-a', generation, 'websocket');
+    metrics.frame('relay-a', generation);
+    metrics.inventory('relay-a', generation, true);
+    time.renderFrames();
+    const sample = only(metrics);
+    expect(sample).toMatchObject({ outcome: null, failures: 1 });
+    expect(sample.phases).toEqual({ dial: 0, open: 30 });
+    expect(sample.paths).toEqual([{ path: 'websocket', dialAt: 0, reached: 'open', end: 'failed', endedAt: 30 }]);
+  });
+
+  it('counts inventory painted behind the device lock only once it can be seen', () => {
+    const time = fakeClock();
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.setLocked(true);
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-a', false);
@@ -628,7 +728,7 @@ describe('resume metric completion and retirement', () => {
 
   it('enrols every eligible relay at the wake so a locked, undialled wake still ends', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.setParticipants(() => [{ id: 'relay-a', hybrid: false }, { id: 'relay-g', hybrid: true }]);
     metrics.setLocked(true);
     metrics.wake('cold-start');
@@ -663,7 +763,7 @@ describe('resume metric completion and retirement', () => {
 
   it('ends a carried dial that never reports a phase as a deadline failure', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.setParticipants(() => [{ id: 'relay-a', hybrid: false }]);
     metrics.wake('cold-start');
     metrics.attempt('relay-a', false);
@@ -678,7 +778,7 @@ describe('resume metric completion and retirement', () => {
 
   it('keeps sampling a healthy connection after Clear and after turning measurement off and on', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const live = metrics.attempt('relay-a', false);
     dialWss(metrics, time, 'relay-a', live);
@@ -724,7 +824,7 @@ describe('resume metric completion and retirement', () => {
 
   it('measures a network change that follows a completed wake as its own recovery', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const live = metrics.attempt('relay-a', false);
     dialWss(metrics, time, 'relay-a', live);
@@ -752,7 +852,7 @@ describe('resume metric completion and retirement', () => {
 
   it('drops tracking references to measurements that left the ring', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-a', false);
     metrics.phase('relay-a', generation, 'dial', 'websocket');
@@ -781,7 +881,7 @@ describe('resume metric completion and retirement', () => {
 
   it('keeps failed gateway and legacy dials in the sample when a later path succeeds', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-g', true);
     time.advance(5);
@@ -870,7 +970,7 @@ describe('resume metric completion and retirement', () => {
 
   it('marks socket phases not applicable on a reused or direct path and unavailable after a dial', () => {
     const time = fakeClock();
-    const metrics = new ResumeMetrics(time.clock, true);
+    const metrics = shown(new ResumeMetrics(time.clock, true));
     metrics.wake('cold-start');
     const generation = metrics.attempt('relay-g', true);
     dialGateway(metrics, time, 'relay-g', generation);
@@ -902,12 +1002,49 @@ describe('resume metric completion and retirement', () => {
 });
 
 describe('store resume-metric wiring', () => {
+  let hide: () => void = () => {};
+  beforeEach(() => {
+    // These tests stand in for an app showing its agent list.
+    hide = resumeMetrics.presentInventory();
+  });
+
   afterEach(() => {
+    hide();
     transportHijack.current = null;
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     resumeMetrics.setEnabled(true);
     vi.restoreAllMocks();
+  });
+
+  it('withdraws pending freshness when the relay reports its inventory stale', async () => {
+    let live: TransportHandlers | null = null;
+    transportHijack.current = (_relay, handlers) => {
+      live = handlers;
+      return { kind: 'websocket', connect: () => { handlers.onStatus('connecting'); }, send: () => true, close: () => {} };
+    };
+    relayStore.destroy();
+    resumeMetrics.setEnabled(true);
+    resumeMetrics.wake('cold-start');
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    const handlers = live as TransportHandlers | null;
+    handlers!.onStatus('connected', { path: 'websocket' });
+    handlers!.onMessage({ type: 'push_config', protocol: 3, capabilities: [], agent_profiles: [], inventory: { state: 'ready', stale: false } });
+    const agents = [{
+      pane_id: 'w1:p1', agent: 'codex', status: 'idle',
+      server_session_id: 'primary', terminal_id: 'terminal-w1:p1', generation: 1, agent_session_id: '',
+    }];
+    handlers!.onMessage({ type: 'agents', agents });
+    // Before the next frame, the relay reports its inventory stale.
+    handlers!.onMessage({ type: 'inventory_status', state: 'error', stale: true, error_code: 'herdr_down' });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(resumeMetrics.snapshot().at(-1)?.samples[0]?.outcome).toBeNull();
+    handlers!.onMessage({ type: 'inventory_status', state: 'ready', stale: false });
+    handlers!.onMessage({ type: 'agents', agents });
+    await vi.waitFor(() => {
+      expect(resumeMetrics.snapshot().at(-1)?.samples[0]?.outcome).toBe('fresh');
+    });
   });
 
   it('enrols only relays that can resume', () => {

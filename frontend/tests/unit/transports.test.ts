@@ -31,6 +31,7 @@ import {
   CHUNK_VERSION,
   MAX_LOGICAL_BYTES,
 } from '$lib/transports/chunking';
+import { createEncryptedTransport } from '$lib/transports/encrypted';
 import {
   createGatewayChannel,
   GATEWAY_HANDSHAKE_TIMEOUT_MS,
@@ -1289,5 +1290,55 @@ describe('hybrid relay configuration', () => {
     // Entries with neither address are still dropped.
     localStorage.setItem('herdr_relays', JSON.stringify([{ label: 'Broken', token: 'abc' }, legacy]));
     expect(loadRelayConfigs()).toEqual([legacy]);
+  });
+});
+
+describe('encrypted transport resume-timing observations', () => {
+  function encryptedAttempt() {
+    const observed: string[] = [];
+    const sent: E2EEWireFrame[] = [];
+    const statuses: TransportStatus[] = [];
+    let channel: FrameChannelHandlers | null = null;
+    const transport = createEncryptedTransport({
+      kind: 'websocket',
+      token: '',
+      codec: 'json',
+      handlers: { onMessage: () => {}, onStatus: (status) => { statuses.push(status); } },
+      getAuthentication: () => ({
+        kind: 'credential',
+        id: 'credential-1',
+        version: 1,
+        secret: base64UrlEncode(new Uint8Array(new ArrayBuffer(32)).fill(7)),
+        deviceId: 'device-1',
+        role: 'controller',
+        locale: 'en',
+        issuedAt: 1,
+      }),
+      observe: (phase) => { observed.push(phase); },
+      createChannel: (handlers) => {
+        channel = handlers;
+        return { kind: 'websocket', codec: 'json', open: () => {}, sendFrame: (frame) => { sent.push(frame); }, close: () => {} };
+      },
+    });
+    transport.connect();
+    return { observed, sent, statuses, channel: () => channel as FrameChannelHandlers | null };
+  }
+
+  it('neither sends nor reports a client hello once the attempt closed during key generation', async () => {
+    vi.useRealTimers();
+    const closed = encryptedAttempt();
+    // The raw socket opens and closes while the handshake keys are generated.
+    closed.channel()!.onOpen();
+    closed.channel()!.onClose({ reason: 'Relay disconnected' });
+    const open = encryptedAttempt();
+    open.channel()!.onOpen();
+    await vi.waitFor(() => expect(open.observed).toContain('e2ee-hello'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(closed.statuses).toEqual(['connecting', 'closed']);
+    expect(closed.observed).toEqual([]);
+    expect(closed.sent).toEqual([]);
+    // The same sequence without the close does send and report the hello.
+    expect(open.sent).toHaveLength(1);
+    expect(JSON.parse(String(open.sent[0]))).toMatchObject({ type: 'e2ee_client_hello' });
   });
 });

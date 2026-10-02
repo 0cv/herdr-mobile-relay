@@ -166,6 +166,22 @@ export function phaseAvailability(path: ResumePath, lifecycle: ResumeLifecycle, 
   return { unavailable, not_applicable: [...new Set(notApplicable)] };
 }
 
+/**
+ * Milliseconds until reading the ring would change the summary without any
+ * new event: the open wake reaching its deadline, or the oldest wake leaving
+ * the retention window. Null when nothing is pending. `now` and `wall` must
+ * come from the clocks the ring was recorded with.
+ */
+export function nextSummaryChangeMs(epochs: ResumeEpoch[], now: number, wall: number): number | null {
+  let next = Number.POSITIVE_INFINITY;
+  for (const epoch of epochs) {
+    if (!epoch.closed) next = Math.min(next, RESUME_DEADLINE_MS - (now - epoch.startedAt));
+    const age = Math.max(now - epoch.startedAt, wall - epoch.wallStartedAt);
+    next = Math.min(next, RESUME_RETENTION_MS - age + 1);
+  }
+  return Number.isFinite(next) ? Math.max(0, Math.ceil(next)) : null;
+}
+
 export function summarizeResume(epochs: ResumeEpoch[]): ResumeSummary {
   const groups = new Map<string, { path: ResumePath; lifecycle: ResumeLifecycle; samples: Array<[ResumeEpoch, ResumeSample]> }>();
   const triggers: Record<string, number> = {};

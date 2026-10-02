@@ -52,18 +52,26 @@ became usable, and how it ended: `failed`, `timeout`, `superseded` or
 gateway or the legacy URL succeeds.
 
 A sample **succeeds** only when an `agents` snapshot arrives on the current
-connection generation and live route while the relay reports inventory
+connection generation and live path while the relay reports inventory
 `ready` and not `stale`, that snapshot was requested after the wake (by a dial
 inside the epoch, or by the post-wake probe on a reused connection), and its
-animation frame paints while the app is unlocked, all within **60 seconds** of
-the epoch start. If the connection closes, the transport falls back to
-connecting, or a new path is dialled before that frame, the snapshot cannot
-complete the sample and a later fresh snapshot is needed. Inventory painted
-behind the device lock completes at the first frame after unlocking. A fresh
-snapshot after the deadline is recorded as `lateFreshAt` and the sample stays
-a `deadline` non-completion. Other outcomes are `auth-rejected`,
-`unlock-cancelled`, `hidden` and `removed` (the relay was removed or stopped
-being able to connect).
+animation frame paints with an inventory view on screen (the agent list, or
+the agent rail beside a terminal) while the app is unlocked, all within
+**60 seconds** of the epoch start. A pending snapshot stops counting if,
+before that frame, the connection closes, the transport falls back to
+connecting, a new path is dialled, the transport reports a different path (a
+direct WebRTC promotion, or a fallback to the gateway), or the relay reports
+its inventory not ready or stale; a later fresh snapshot on the current path
+is then needed. Fresh inventory published while no inventory view is mounted
+(for example with Settings open) completes at the first frame after one
+mounts, and inventory painted behind the device lock completes at the first
+frame after unlocking. Callbacks that arrive after their connection ended,
+such as a handshake promise that settles after the socket closed, are
+ignored; the encrypted transport also neither sends nor reports a client
+hello once its attempt has closed. A fresh snapshot after the deadline is
+recorded as `lateFreshAt` and the sample stays a `deadline` non-completion.
+Other outcomes are `auth-rejected`, `unlock-cancelled`, `hidden` and
+`removed` (the relay was removed or stopped being able to connect).
 
 **Lifecycle category** per sample: `cold-launch` or `discarded`
 (`document.wasDiscarded`) for a cold start, `bfcache` for a persisted
@@ -173,8 +181,17 @@ time-to-fresh p50/p95 (non-completions censored at 60 s; `insufficient` below
 success-only and transport-eligible distributions, retry counters (including
 path dials and path failures), path-attempt outcome counts such as
 `gateway:failed` or `websocket:served`, phase medians, `unavailable` and
-`not_applicable` phase lists, and direct-upgrade counts. The card is a labelled region with a heading, a labelled switch, a
-captioned table with row headers, and a polite live status line.
+`not_applicable` phase lists, and direct-upgrade counts. The card is a
+labelled region with a heading, a labelled switch, a captioned table with row
+headers, and a polite live status line.
+
+Deadlines and retention are applied whenever the ring is read, and time
+passing changes them without any event. The card therefore re-reads the ring
+on every recorded change, at the moment of export (so an export never carries
+a stale in-progress sample or a wake outside the 24-hour window), and once
+more when the open wake's deadline or the oldest wake's retention expiry is
+due while the card is open. That single timer exists only while Settings
+shows the card; nothing runs in the background otherwise.
 
 ## Implementation map and deviations from the plan
 
@@ -184,6 +201,8 @@ captioned table with row headers, and a polite live status line.
 | `frontend/src/lib/resume-summary.ts` | new (not in the plan): redacted aggregates and labels, loaded only with the Settings card |
 | `frontend/src/components/ResumeTimingSettings.svelte` | new (not in the plan): the Settings card, a lazy chunk |
 | `frontend/src/components/SettingsView.svelte` | lazily loads the card |
+| `frontend/src/components/AgentList.svelte`, `AgentRail.svelte` | not in the plan: register that an inventory view is mounted, so a sample completes only in a frame that renders inventory |
+| `frontend/tests/unit/resume-timing-settings.test.ts` | addition: the card's export and deadline/retention refresh with an advanced clock |
 | `frontend/src/lib/security.ts`, `store.ts` | passive hooks only (wake, lock state, enrolment, attempt, phase, connecting, retirement and inventory observations); control flow and every existing call are unchanged |
 | `frontend/src/lib/transports/types.ts`, `encrypted.ts`, `websocket.ts`, `gateway.ts`, `webrtc.ts`, `path-manager.ts`, `index.ts` | an optional `observe` callback in the existing `TransportAuthentication` options, including a `failed` observation when a gateway or legacy path closes; observer exceptions are swallowed |
 | `frontend/src/lib/types.ts` | unchanged: no shared view type needed a new field |
@@ -220,9 +239,24 @@ every wake. Scripted conditions:
 | Scenario | Conditions |
 | --- | --- |
 | `warm-short` | hidden 200–800 ms, connection kept |
-| `hidden-5m` | frozen page for 5 minutes (wall clock only), socket silently half-open |
+| `hidden-30s` | frozen page for 30 s (wall clock only), connection still healthy, so the app's probe keeps it |
+| `hidden-5m` | frozen page for 5 minutes, socket silently half-open |
+| `hidden-long` | frozen page for 2 hours, past the one-hour hidden keepalive bound, socket silently half-open |
 | `blackhole-restore` | frozen 30 s, half-open socket, new dials stall until the network returns 1–4 s after the wake, then connect on a 1/3/7/15/31 s SYN retransmission schedule; `online` fires at restoration |
+| `network-change` | page stays visible; the path goes silently half-open and 200–400 ms later `navigator.connection` reports a change, which starts the measured epoch (`online` stays true; WebKit, which has no `navigator.connection`, gets a fixture event target) |
 | `discard` | frozen 2 minutes, reload with `document.wasDiscarded`; measured from navigation start |
+
+Paths (`--transports`): `wss-cloudflare` and `wss-tailscale` (direct WSS
+whose authenticated descriptor says Cloudflare or managed Tailscale Serve),
+`gateway-relayed` (direct upgrade disabled) and `gateway-direct` (the measured
+wake starts once the direct WebRTC path has been promoted; a run that never
+promotes is a `warmup-failed` attempt). Every workload and path can be
+selected for a preregistered design with `--scenarios` and `--transports`.
+The default pilot stays bounded to `warm-short`, `hidden-5m`,
+`blackhole-restore` and `discard` on `wss-cloudflare` and `gateway-relayed`
+(16 strata), and the hosted browser suite runs one seeded epoch of every
+workload × path through the runner's own epoch code in both browsers, so each
+selectable stratum is shown to work without enlarging the pilot.
 
 Fixture latencies are synthetic (8–30 ms per hop), visibility is emulated, and
 there is no real radio, VPN, carrier, Cloudflare or Tailscale network. Results
@@ -232,9 +266,15 @@ nothing more.
 **Endpoint.** Success is the first animation frame that paints an agent card
 (its accessible name, never a workspace label) naming the active epoch's
 agents from a snapshot that the synthetic relay sent with `ready`, non-stale
-inventory, on a session that is still the live authenticated path, with no
-unlock dialog covering it, within 60 s of the first visible event (navigation
-start for a discard). Every snapshot carries its own sequence number, and the
+inventory, on a session that is still the live authenticated path and the one
+the app is currently using, with no unlock dialog covering it, within 60 s of
+the first visible event (navigation start for a discard, the change event
+for a network handoff). The relay knows which session is current from the
+order in which it handed each session's first application message to the
+app: the hybrid transport promotes a direct path on exactly that message and
+falls back to the gateway when direct dies, so the latest still-live session
+is the path in use. A gateway draining during the ten-second stability window
+after a promotion is open but not current, and its cards do not count. Every snapshot carries its own sequence number, and the
 relay records each one's epoch, freshness and session, so the page can check
 the rendered card against the relay's truth. A card from a stale snapshot, a
 workspace-only refresh, or a session the relay is abandoning does not count;
@@ -244,8 +284,11 @@ that replaced the first one before the paint (a reconnect's initial snapshot
 followed by the answer to the app's own refresh) counts at that frame. The
 page records the paint itself, so a render that beats the harness call still
 counts from when it happened. Hosted browser tests exercise each of these
-traps (`workspaceOnly`, `stale` and `abandonFirst` fixture faults) and the
-replacement case (`burst`).
+traps (`workspaceOnly`, `stale` and `abandonFirst` fixture faults), the
+replacement case (`burst`), and a direct promotion landing between render and
+paint (`holdPaintUntilDirect`, a test-only widening of that window that holds
+the paint check until a direct session is selected): the gateway's card is
+rejected as `not-current-path` and only the direct path's snapshot counts.
 Everything else is a non-completion with its reason (`deadline`, `late`,
 `load-failed`, `warmup-failed`, `page-crash`, `browser-disconnected`,
 `harness-error`), right-censored at 60 s.
@@ -314,10 +357,15 @@ stratum has `n` measured, non-excluded epochs.
 - **Paired** (confirmatory): reliability uses Newcombe's hybrid score
   interval for the paired difference in non-completion rates (method 10);
   latency uses a paired percentile bootstrap of the all-attempt quantile ratio
-  candidate/baseline, resampling independent pairs or declared blocks; a
-  censored candidate quantile against a finite baseline is +∞, and a
-  censored baseline quantile is unknown (+∞ for the upper bound, 0 for the
-  lower bound), so censoring only widens bounds. Every bound is one-sided at
+  candidate/baseline, resampling independent pairs or declared blocks. A
+  censored candidate quantile is only known to be at least the 60-second
+  deadline: +∞ for the upper bound, and the deadline itself for the lower
+  bound. A censored baseline quantile is unknown (+∞ for the upper bound, 0
+  for the lower bound). Censoring therefore only widens bounds: a censored
+  comparison is never identifiable and never passes, and it is rejected only
+  when even the censoring-aware lower bound exceeds the threshold (for
+  example a candidate p95 of at least 60 s against a 1 s baseline, but not
+  against a 59 s baseline, where a true 61 s would still be a ratio of 1.03). Every bound is one-sided at
   95% with Bonferroni family-wise control over every preregistered acceptance
   comparison (2 per targeted stratum, 3 per regression control), and the
   adjusted level, method and counts are retained in the output.
@@ -337,7 +385,18 @@ reliability upper bound of 1.33 points: inconclusive. A censored baseline
 quantile is unknown and can demonstrate neither result. Every outcome other
 than `pass` on every comparison keeps the baseline. An unsafe negative
 control makes the experiment `not-accepted`; incomplete controls or
-evidence outside the preregistration make it `invalid`. The analyzer tests
+evidence outside the preregistration make it `invalid`.
+
+The registration itself must stay inside the approved contract, or the
+analyzer reports `invalid` (and a pilot does not meet its sample) rather than
+analyse it under relaxed rules: `deadline_ms` exactly 60,000 (the analyzer
+always classifies at 60 s), bounds no laxer than the defaults (a margin above
+1 point, a target ratio above 0.80, a regression ratio above 1.10, fewer than
+400 minimum pairs, alpha above 0.05 or power below 0.8 are refused; stricter
+values are allowed and used), harness exclusions limited to
+`server-unavailable` and `browser-unavailable`, all four negative controls
+declared with at least one trial each, and at least 30 epochs per pilot
+stratum. The violations are listed in `contract_violations`. The analyzer tests
 include a candidate that is twice as fast when it succeeds but fails 5% more
 often: its loss is demonstrated and it is `not-accepted`.
 
@@ -350,9 +409,11 @@ Run `frontend/scripts/run-resume-benchmarks.mjs --design paired
 Record before running:
 
 - candidate and baseline SHAs, and web build hashes;
-- strata (browser × transport × scenario), which are targeted and which are
-  regression controls, so the family size is fixed (2 per target, 3 per
-  control);
+- strata (browser × transport × scenario, chosen from the seven workloads
+  and four paths above with `--browsers`, `--transports` and `--scenarios`),
+  which are targeted and which are regression controls, so the family size
+  is fixed (2 per target, 3 per control); regression controls should cover
+  every transport;
 - base seed, hidden, restoration and unlock schedules;
 - a fixed number of pairs per stratum chosen from the planning numbers below,
   never fewer than 400 and never extended after looking;

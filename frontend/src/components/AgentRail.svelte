@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import AgentLogo from '$components/AgentLogo.svelte';
   import { agentStatusTone, displayName, hostLabel, tabName } from '$lib/agents';
+  import { resumeMetrics } from '$lib/resume-metrics';
   import type { Agent } from '$lib/types';
   import { workspaceGroups } from '$lib/workspaces';
 
@@ -17,6 +19,8 @@
   } = $props();
 
   const groups = $derived(workspaceGroups(agents));
+  // Beside a terminal the rail is the visible agent inventory.
+  onMount(() => resumeMetrics.presentInventory());
 </script>
 
 <aside class="agent-rail" aria-label="Agent navigation">

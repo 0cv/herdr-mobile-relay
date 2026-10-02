@@ -10,7 +10,11 @@
  * the nearest-rank definition over all attempts; a quantile that lands among
  * censored values is not identifiable, and neither is a bound that does.
  *
- * Evidence is checked against its preregistration before any statistic: only
+ * The registration itself must stay inside the approved contract: the fixed
+ * 60-second deadline, bounds no laxer than the defaults (stricter is
+ * allowed), only the objective infrastructure exclusions, every required
+ * negative control, and at least 30 epochs per pilot stratum. Evidence is
+ * then checked against its preregistration before any statistic: only
  * preregistered strata, pair indices, seeds and bounded replacement rounds
  * count, so collecting more than the fixed sample cannot buy precision. The
  * preregistered negative controls must be complete for every browser, trial
@@ -200,19 +204,25 @@ export function bootstrapQuantileInterval(values, q, level, resamples, seed) {
 /**
  * One-sided bounds for the paired quantile ratio candidate/baseline. Blocks
  * (independent pairs, or pairs sharing a declared block) are resampled with
- * replacement. A censored candidate quantile against a finite baseline is a
- * genuinely large ratio (+∞ in both bounds). A censored baseline quantile is
- * unknown: +∞ for the upper bound and 0 for the lower one, so censoring can
- * only widen the interval and never demonstrate either result.
+ * replacement. Censoring is handled so it can only widen the interval:
+ *   - a censored candidate quantile is only known to be at least the
+ *     deadline, so the upper bound is +∞ and the lower bound uses the
+ *     deadline as the candidate quantile;
+ *   - a censored baseline quantile is unknown: +∞ for the upper bound and 0
+ *     for the lower one.
+ * A comparison whose estimate or upper bound is censored is not
+ * identifiable and can never pass; it can still be rejected when even the
+ * censoring-aware lower bound exceeds the threshold.
  *
  * @param {{ baseline: number; candidate: number; block?: string }[]} pairs
  * @param {number} q
  * @param {number} alpha one-sided level after multiplicity adjustment
  * @param {number} resamples
  * @param {number} seed
+ * @param {number} [deadline] the censoring time of non-completions
  * @returns {{ estimate: number; lower: number; upper: number; identifiable: boolean }}
  */
-export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed) {
+export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed, deadline = DEFAULT_DEADLINE_MS) {
   /** @param {number[]} candidate @param {number[]} baseline */
   const quantiles = (candidate, baseline) => ({
     top: nearestRankQuantile(candidate, q),
@@ -223,6 +233,11 @@ export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed) {
     if (!Number.isFinite(bottom) || bottom <= 0) return unknown;
     if (!Number.isFinite(top)) return Number.POSITIVE_INFINITY;
     return top / bottom;
+  };
+  /** The smallest ratio compatible with censoring at the deadline. */
+  const lowest = (/** @type {{ top: number; bottom: number }} */ { top, bottom }) => {
+    if (!Number.isFinite(bottom) || bottom <= 0) return 0;
+    return (Number.isFinite(top) ? top : Math.max(deadline, 0)) / bottom;
   };
   if (!pairs.length) {
     return { estimate: Number.NaN, lower: 0, upper: Number.POSITIVE_INFINITY, identifiable: false };
@@ -253,7 +268,7 @@ export function pairedQuantileRatioBound(pairs, q, alpha, resamples, seed) {
     }
     const value = quantiles(candidate, baseline);
     uppers[replicate] = ratio(value, Number.POSITIVE_INFINITY);
-    lowers[replicate] = ratio(value, 0);
+    lowers[replicate] = lowest(value);
   }
   uppers.sort();
   lowers.sort();
@@ -388,8 +403,77 @@ export function reliabilityPlanning(failureRate, margin, alpha, power) {
   };
 }
 
-/** @param {Evidence} evidence */
-function settings(evidence) {
+/** The only harness exclusions the approved contract allows. */
+export const OBJECTIVE_EXCLUSIONS = Object.freeze(['server-unavailable', 'browser-unavailable']);
+/** Negative controls every registration must declare. */
+export const REQUIRED_NEGATIVE_CONTROLS = Object.freeze([
+  'revoked-credential', 'cancelled-unlock', 'permanent-outage', 'ios-deferred-pairing',
+]);
+export const PILOT_MIN_EPOCHS = 30;
+/**
+ * Each preregistered bound may be stricter than the approved contract, never
+ * laxer: smaller margins, ratios and alpha; more pairs and power.
+ *
+ * @type {Record<string, (value: number) => boolean>}
+ */
+const BOUND_LIMITS = {
+  reliability_margin: (value) => value > 0 && value <= DEFAULT_BOUNDS.reliability_margin,
+  target_p95_ratio: (value) => value > 0 && value <= DEFAULT_BOUNDS.target_p95_ratio,
+  regression_ratio: (value) => value > 0 && value <= DEFAULT_BOUNDS.regression_ratio,
+  min_pairs: (value) => Number.isSafeInteger(value) && value >= DEFAULT_BOUNDS.min_pairs,
+  alpha: (value) => value > 0 && value <= DEFAULT_BOUNDS.alpha,
+  power: (value) => value >= DEFAULT_BOUNDS.power && value < 1,
+};
+
+/**
+ * Ways a registration departs from the approved B1/B3 contract. The analyzer
+ * refuses such evidence rather than analyse it under relaxed rules: a fixed
+ * 60-second deadline, bounds no laxer than the defaults, only the objective
+ * infrastructure exclusions, every negative control, and at least 30
+ * attempted epochs per pilot stratum.
+ *
+ * @param {Record<string, any>} registration
+ * @param {string} design
+ * @returns {string[]}
+ */
+export function contractViolations(registration, design) {
+  /** @type {string[]} */
+  const violations = [];
+  if (registration.deadline_ms !== DEFAULT_DEADLINE_MS) violations.push('deadline-not-60s');
+  const bounds = registration.bounds ?? {};
+  if (!bounds || typeof bounds !== 'object' || Array.isArray(bounds)) violations.push('invalid-bounds');
+  else {
+    for (const [key, valid] of Object.entries(BOUND_LIMITS)) {
+      if (bounds[key] !== undefined && !(typeof bounds[key] === 'number' && valid(bounds[key]))) {
+        violations.push(`relaxed-${key}`);
+      }
+    }
+  }
+  const criteria = registration.harness_invalid_criteria ?? [];
+  if (!Array.isArray(criteria)
+    || criteria.some((/** @type {any} */ entry) => !OBJECTIVE_EXCLUSIONS.includes(String(entry?.id ?? entry)))) {
+    violations.push('unapproved-exclusion-criterion');
+  }
+  const controls = Array.isArray(registration.negative_controls) ? registration.negative_controls : [];
+  for (const id of REQUIRED_NEGATIVE_CONTROLS) {
+    const declared = controls.find((/** @type {any} */ control) => control?.id === id);
+    const trials = Number(declared?.trials_per_browser);
+    if (!declared || !Number.isSafeInteger(trials) || trials < 1) {
+      violations.push('negative-control-not-registered');
+      break;
+    }
+  }
+  if (design !== 'paired' && !(Number(registration.sample_size_per_stratum) >= PILOT_MIN_EPOCHS)) {
+    violations.push('pilot-sample-below-30');
+  }
+  return violations;
+}
+
+/**
+ * @param {Evidence} evidence
+ * @param {string} design
+ */
+function settings(evidence, design) {
   const registration = evidence.preregistration || {};
   const analysis = registration.analysis || {};
   const strata = Array.isArray(registration.strata) ? registration.strata : [];
@@ -398,12 +482,22 @@ function settings(evidence) {
     ? registration.browsers.map(String)
     : [...new Set(strata.map((/** @type {any} */ stratum) => String(stratum.browser || '')).filter(Boolean))];
   const replacementLimit = Number(registration.replacement_limit);
+  const supplied = registration.bounds && typeof registration.bounds === 'object' ? registration.bounds : {};
+  /** @type {Record<string, number>} */
+  const stricter = {};
+  for (const [key, valid] of Object.entries(BOUND_LIMITS)) {
+    if (typeof supplied[key] === 'number' && valid(supplied[key])) stricter[key] = supplied[key];
+  }
   return {
     registration,
-    deadline: Number(registration.deadline_ms) || DEFAULT_DEADLINE_MS,
-    bounds: { ...DEFAULT_BOUNDS, ...(registration.bounds || {}) },
+    contract: contractViolations(registration, design),
+    // The deadline is fixed: a registration cannot extend it.
+    deadline: DEFAULT_DEADLINE_MS,
+    bounds: { ...DEFAULT_BOUNDS, ...stricter },
     allowedExclusions: Array.isArray(registration.harness_invalid_criteria)
-      ? registration.harness_invalid_criteria.map((/** @type {any} */ entry) => String(entry.id || entry))
+      ? registration.harness_invalid_criteria
+        .map((/** @type {any} */ entry) => String(entry?.id ?? entry))
+        .filter((/** @type {string} */ id) => OBJECTIVE_EXCLUSIONS.includes(id))
       : [],
     resamples: Number(analysis.bootstrap_resamples) || 2_000,
     seed: Number(analysis.bootstrap_seed) || 1,
@@ -585,7 +679,7 @@ export function negativeControlSummary(controls, config, variants) {
  * @param {Evidence} evidence
  */
 export function analyzePilot(evidence) {
-  const config = settings(evidence);
+  const config = settings(evidence, 'pilot');
   /** @type {Array<'baseline' | 'candidate'>} */
   const variants = ['baseline'];
   const { index, violations, stratumViolations } = indexAttempts(evidence.attempts || [], config, variants);
@@ -698,11 +792,12 @@ export function analyzePilot(evidence) {
       power: config.bounds.power,
       discordance: 'independent failures at the pilot rate in both arms (2p(1-p)); a correlated pair design needs fewer pairs',
     },
+    contract_violations: config.contract,
     violations,
     strata,
     negative_controls: controls,
     sample_requirement_met: strata.length > 0 && strata.every((stratum) => stratum.sample_requirement_met)
-      && Object.keys(violations).length === 0,
+      && Object.keys(violations).length === 0 && config.contract.length === 0,
   };
 }
 
@@ -712,7 +807,7 @@ export function analyzePilot(evidence) {
  * @param {Evidence} evidence
  */
 export function analyzePaired(evidence) {
-  const config = settings(evidence);
+  const config = settings(evidence, 'paired');
   /** @type {Array<'baseline' | 'candidate'>} */
   const variants = ['baseline', 'candidate'];
   const { index, violations, stratumViolations } = indexAttempts(evidence.attempts || [], config, variants);
@@ -781,7 +876,7 @@ export function analyzePaired(evidence) {
     const seed = config.seed + position * 101;
     /** @param {number} q @param {number} threshold @param {string} name @param {number} offset */
     const latencyComparison = (q, threshold, name, offset) => {
-      const bound = pairedQuantileRatioBound(latencyPairs, q, adjustedAlpha, config.resamples, seed + offset);
+      const bound = pairedQuantileRatioBound(latencyPairs, q, adjustedAlpha, config.resamples, seed + offset, config.deadline);
       const verdict = boundVerdict({ enough, ...bound, threshold });
       if (!bound.identifiable) reasons.push(`${name}-not-identifiable-below-deadline`);
       else if (enough && verdict === 'not-accepted') reasons.push(`${name}-ratio-exceeds-threshold`);
@@ -863,8 +958,13 @@ export function analyzePaired(evidence) {
   if (controls.failed) reasons.push('negative-control-unsafe');
   if (!controls.complete) reasons.push('negative-controls-incomplete');
   if (globallyInvalid) reasons.push('evidence-outside-preregistration');
+  if (config.contract.length) reasons.push('registration-violates-contract');
   let verdict;
-  if (controls.failed || verdicts.includes('not-accepted')) verdict = 'not-accepted';
+  // An unsafe control rejects anything. A registration outside the approved
+  // contract is not analysed further: its bounds cannot decide either way.
+  if (controls.failed) verdict = 'not-accepted';
+  else if (config.contract.length) verdict = 'invalid';
+  else if (verdicts.includes('not-accepted')) verdict = 'not-accepted';
   else if (globallyInvalid || !controls.complete || verdicts.includes('invalid')) verdict = 'invalid';
   else if (verdicts.every((entry) => entry === 'pass')) verdict = 'pass';
   else verdict = 'inconclusive';
@@ -882,6 +982,7 @@ export function analyzePaired(evidence) {
     },
     bootstrap: { resamples: config.resamples, seed: config.seed, unit: 'pair or declared block' },
     replacement_limit: config.replacementLimit,
+    contract_violations: config.contract,
     violations,
     strata,
     negative_controls: controls,
@@ -918,10 +1019,16 @@ export function renderMarkdown(analysis) {
     for (const stratum of pilot.strata) {
       lines.push(`| ${stratum.stratum} | ${stratum.attempted} | ${stratum.valid_attempts}/${stratum.planned} | ${stratum.completed_on_time} | ${cell(stratum.completion_rate)} (${cell(stratum.completion_rate_ci95)}) | ${cell(stratum.time_to_fresh_ms.p50)} (${cell(stratum.time_to_fresh_ms.p50_ci95)}) | ${cell(stratum.time_to_fresh_ms.p95)} (${cell(stratum.time_to_fresh_ms.p95_ci95)}) | ${cell(JSON.stringify(stratum.non_completions))} |`);
     }
+    if (pilot.contract_violations.length) {
+      lines.push('', `**The registration departs from the approved contract (${pilot.contract_violations.join(', ')}).**`);
+    }
     if (!pilot.sample_requirement_met) lines.push('', '**The preregistered sample was not met; the pilot is incomplete.**');
   } else {
     const paired = /** @type {ReturnType<typeof analyzePaired>} */ (analysis);
     lines.push(`## Resume benchmark paired analysis: ${paired.verdict}`, '');
+    if (paired.contract_violations.length) {
+      lines.push(`The registration departs from the approved contract (${paired.contract_violations.join(', ')}).`, '');
+    }
     lines.push(`Bonferroni family ${paired.multiplicity.family_size}, adjusted one-sided alpha ${paired.multiplicity.adjusted_alpha}.`, '');
     lines.push('| Stratum | Role | Pairs | Reliability bounds | p95 ratio bounds | Verdict | Reasons |');
     lines.push('| --- | --- | --- | --- | --- | --- | --- |');

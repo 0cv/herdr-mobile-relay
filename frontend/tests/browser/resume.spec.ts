@@ -1,4 +1,6 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { devices, expect, test, type Locator, type Page } from '@playwright/test';
+import { epochSeed } from '../../scripts/analyze-resume-benchmarks.mjs';
+import { runEpoch, SCENARIOS, TRANSPORTS } from '../../scripts/run-resume-benchmarks.mjs';
 import {
   fixtureRelay,
   resumeFixtureInit,
@@ -10,6 +12,7 @@ interface RenderVerdict {
   slot: number;
   epoch: number;
   seq: number;
+  path: string;
   verdict: string;
 }
 
@@ -17,6 +20,7 @@ interface ExportedGroup {
   path: string;
   lifecycle: string;
   samples: number;
+  in_progress: number;
   valid_attempts: number;
   fresh_on_time: number;
   non_completions: Record<string, number>;
@@ -331,6 +335,94 @@ test('does not count agents delivered on a path the relay is abandoning', async 
   expect(counted!.seq).toBeGreaterThan(rejected!.seq);
   const after = (await fixture(page, 'stats')) as { handshakes: number };
   expect(after.handshakes).toBe(before.handshakes + 1);
+});
+
+test('counts only the path the app is using when a direct promotion lands before the paint', async ({ page }) => {
+  await boot(page, {
+    relays: [fixtureRelay(1, 'hybrid')],
+    direct: true,
+    faults: { holdPaintUntilDirect: true },
+    seed: 22,
+  });
+  await awaitFresh(page, [1]);
+  await expect.poll(() => fixture(page, 'currentPath', 1)).toBe('webrtc');
+  await quiesce(page);
+  // Five frozen minutes on a dead path: the wake redials the gateway, whose
+  // fresh agents render first; the direct upgrade is promoted before their
+  // paint, so they are no longer on the path the app uses.
+  await fixture(page, 'hide');
+  await fixture(page, 'killConnections');
+  await fixture(page, 'freeze', 5 * 60_000);
+  await fixture(page, 'show');
+  await awaitFresh(page, [1], 20_000);
+  const log = (await renderLog(page)).filter((entry) => entry.epoch === 2);
+  const counted = log.filter((entry) => entry.verdict === 'counted');
+  expect(counted).toHaveLength(1);
+  expect(counted[0].path).toBe('webrtc');
+  expect(log.some((entry) => entry.path === 'gateway' && entry.verdict === 'retired-before-paint:not-current-path')).toBe(true);
+  expect(log.every((entry) => entry.path !== 'gateway' || entry.verdict !== 'counted')).toBe(true);
+});
+
+test('counts in-app freshness only once the agent list shows it', async ({ page }) => {
+  await boot(page, { relays: [fixtureRelay(1, 'wss', { ingress: 'cloudflare' })], seed: 23 });
+  await awaitFresh(page, [1]);
+  await quiesce(page);
+  // Settings replaces the agent list: a warm wake's fresh snapshot arrives
+  // but is not rendered anywhere.
+  const card = await openResumeTiming(page);
+  await fixture(page, 'hide');
+  await fixture(page, 'show');
+  await expect.poll(async () => ((await fixture(page, 'stats')) as { refreshes: number }).refreshes).toBeGreaterThanOrEqual(2);
+  await page.waitForTimeout(500);
+  const pending = (await exportSummary(card)).summary;
+  expect(group(pending, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 1, fresh_on_time: 0 });
+  // Back on the agent list, the next frame shows the fresh inventory.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('main', { name: 'Agents' })).toBeVisible();
+  await page.waitForTimeout(250);
+  const shown = (await exportSummary(await openResumeTiming(page))).summary;
+  expect(group(shown, 'wss/cloudflare', 'warm')).toMatchObject({ samples: 1, in_progress: 0, fresh_on_time: 1 });
+});
+
+/**
+ * Every preregisterable workload and path runs through the benchmark
+ * runner's own epoch code, one seeded epoch each, so the hosted suite proves
+ * the selectable strata work, not only the bounded default pilot.
+ */
+test.describe('benchmark runner workloads', () => {
+  for (const transport of Object.keys(TRANSPORTS)) {
+    for (const scenario of Object.keys(SCENARIOS) as Array<keyof typeof SCENARIOS>) {
+      test(`${transport} ${scenario} completes fresh through the runner`, async ({ browser, browserName, baseURL }) => {
+        test.setTimeout(90_000);
+        const id = `${browserName}/${transport}/${scenario}`;
+        const stratum = {
+          id,
+          browser: browserName,
+          device: browserName === 'webkit' ? 'iPhone 15' : 'Pixel 7',
+          transport,
+          scenario,
+        };
+        const record = await runEpoch(browser, devices, { origin: String(baseURL), stratum, seed: epochSeed(20_261_002, id, 0) });
+        expect(record, JSON.stringify({ outcome: record.outcome, error: record.harness_error })).toMatchObject({
+          harness_invalid: null,
+          outcome: 'fresh',
+          wake_document: SCENARIOS[scenario].wake === 'reload' ? 'reloaded' : 'same',
+        });
+        expect(record.time_to_fresh_ms).toBeGreaterThanOrEqual(0);
+        expect(record.time_to_fresh_ms).toBeLessThanOrEqual(60_000);
+        if (SCENARIOS[scenario].connection === 'kept') {
+          // The live connection answered the post-wake probe.
+          expect(record).toMatchObject({ dials: 0, handshakes: 0, direct_handshakes: 0 });
+          expect(record.refreshes).toBeGreaterThanOrEqual(1);
+        } else {
+          // The dead path was replaced inside the epoch.
+          expect(record.dials).toBeGreaterThanOrEqual(1);
+          expect(record.handshakes).toBeGreaterThanOrEqual(1);
+        }
+        if (scenario === 'network-change') expect(record.time_to_fresh_ms).toBeGreaterThanOrEqual(1_500);
+      });
+    }
+  }
 });
 
 test('stops and clears measurement when the user opts out', async ({ page }) => {

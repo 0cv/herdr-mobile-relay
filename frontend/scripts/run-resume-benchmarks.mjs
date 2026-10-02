@@ -42,28 +42,61 @@ const WARMUP_TIMEOUT_MS = 30_000;
 export const IDLE_BEFORE_HIDE_MS = 500;
 const DEVICES = /** @type {const} */ ({ chromium: 'Pixel 7', webkit: 'iPhone 15' });
 
+/**
+ * Preregisterable workloads. `wake` is how the measured epoch starts: the
+ * page becoming visible, a reload after an emulated discard, or a network
+ * handoff reported while the page stays visible. `real_hidden_ms` is the
+ * scripted real wait before that event (time hidden, or time on the silently
+ * dead path before the handoff is reported); `frozen_wall_ms` is wall-clock
+ * time that passes while the page is frozen.
+ */
 export const SCENARIOS = Object.freeze({
   'warm-short': {
     description: 'App switch: hidden 200-800 ms, connection kept, no frozen time.',
+    wake: 'visible',
     real_hidden_ms: [200, 800],
     frozen_wall_ms: 0,
     connection: 'kept',
   },
+  'hidden-30s': {
+    description: 'Frozen page for 30 s with the connection still healthy (inside the keepalive freshness bound): the app probes and keeps it.',
+    wake: 'visible',
+    real_hidden_ms: [200, 400],
+    frozen_wall_ms: 30_000,
+    connection: 'kept',
+  },
   'hidden-5m': {
     description: 'Frozen page for five minutes; the gateway/tunnel reaped the socket silently.',
+    wake: 'visible',
     real_hidden_ms: [200, 400],
     frozen_wall_ms: 300_000,
     connection: 'half-open',
   },
+  'hidden-long': {
+    description: 'Frozen page for two hours, past the one-hour hidden keepalive bound; the socket was reaped silently.',
+    wake: 'visible',
+    real_hidden_ms: [200, 400],
+    frozen_wall_ms: 7_200_000,
+    connection: 'half-open',
+  },
   'blackhole-restore': {
     description: 'Frozen 30 s with a half-open socket; new dials stall until the network returns 1-4 s after the wake, then connect on a 1/3/7/15/31 s SYN retransmission schedule; online fires at restoration.',
+    wake: 'visible',
     real_hidden_ms: [200, 400],
     frozen_wall_ms: 30_000,
     connection: 'half-open',
     restore_after_wake_ms: [1_000, 4_000],
   },
+  'network-change': {
+    description: 'The page stays visible; the path goes silently half-open (a Wi-Fi/cellular handoff) and 200-400 ms later navigator.connection reports a change, which starts the measured epoch; online stays true.',
+    wake: 'network-change',
+    real_hidden_ms: [200, 400],
+    frozen_wall_ms: 0,
+    connection: 'half-open',
+  },
   discard: {
     description: 'Page discarded while hidden for two minutes; reload with document.wasDiscarded. Measured from navigation start; OS wake-to-JS is unobservable.',
+    wake: 'reload',
     real_hidden_ms: [200, 400],
     frozen_wall_ms: 120_000,
     connection: 'none (reloaded)',
@@ -72,8 +105,31 @@ export const SCENARIOS = Object.freeze({
 
 export const TRANSPORTS = Object.freeze({
   'wss-cloudflare': 'Direct WSS with a Cloudflare ingress descriptor',
+  'wss-tailscale': 'Direct WSS with a managed Tailscale Serve ingress descriptor',
   'gateway-relayed': 'Community-gateway relayed path, direct upgrade disabled',
+  'gateway-direct': 'Community-gateway path with the direct WebRTC upgrade; the measured wake starts once direct is promoted',
 });
+
+/**
+ * The bounded default pilot. Every other workload and path is selectable
+ * with --scenarios and --transports for a preregistered design, and each is
+ * exercised by the hosted browser suite (tests/browser/resume.spec.ts).
+ */
+export const DEFAULT_PILOT_SCENARIOS = Object.freeze(['warm-short', 'hidden-5m', 'blackhole-restore', 'discard']);
+export const DEFAULT_PILOT_TRANSPORTS = Object.freeze(['wss-cloudflare', 'gateway-relayed']);
+
+/**
+ * The synthetic relay for a transport. Hostnames never decide the label; the
+ * ingress descriptor inside the authenticated session does.
+ *
+ * @param {string} transport
+ */
+export function relayForTransport(transport) {
+  if (transport === 'wss-cloudflare') return fixtureRelay(1, 'wss', { ingress: 'cloudflare' });
+  if (transport === 'wss-tailscale') return fixtureRelay(1, 'wss', { ingress: 'tailscale-managed' });
+  if (transport === 'gateway-relayed' || transport === 'gateway-direct') return fixtureRelay(1, 'hybrid');
+  throw new Error(`unknown transport ${transport}`);
+}
 
 export const NEGATIVE_CONTROLS = Object.freeze({
   'revoked-credential': 'Relay refuses the device credential: expect refusal, no fresh inventory, no redial loop.',
@@ -360,6 +416,7 @@ function delta(after, before) {
     bytes: after.bytes - before.bytes,
     hidden_dials: after.hiddenDials - before.hiddenDials,
     hidden_bytes: after.hiddenBytes - before.hiddenBytes,
+    direct_handshakes: after.directHandshakes - before.directHandshakes,
   };
 }
 
@@ -370,18 +427,17 @@ function delta(after, before) {
  * @param {Record<string, any>} devices
  * @param {{ origin: string; stratum: Record<string, any>; seed: number }} run
  */
-async function runEpoch(browser, devices, run) {
+export async function runEpoch(browser, devices, run) {
   const { stratum, seed } = run;
   const schedule = epochSchedule(seed, stratum.scenario);
-  const relay = stratum.transport === 'wss-cloudflare'
-    ? fixtureRelay(1, 'wss', { ingress: 'cloudflare' })
-    : fixtureRelay(1, 'hybrid');
+  const spec = SCENARIOS[/** @type {keyof typeof SCENARIOS} */ (stratum.scenario)];
+  const relay = relayForTransport(stratum.transport);
   /** @type {Record<string, any>} */
   const record = {
     outcome: null,
     time_to_fresh_ms: null,
     harness_invalid: null,
-    wake_document: stratum.scenario === 'discard' ? 'reloaded' : 'same',
+    wake_document: spec.wake === 'reload' ? 'reloaded' : 'same',
     first_known_render_ms: null,
     direct_upgrade: 'not-measured',
   };
@@ -407,6 +463,8 @@ async function runEpoch(browser, devices, run) {
     await page.addInitScript(resumeFixtureInit, {
       relays: [relay],
       forceRelay: stratum.transport === 'gateway-relayed',
+      direct: stratum.transport === 'gateway-direct',
+      connectionEvents: spec.wake === 'network-change',
       seed: schedule.fixtureSeed,
       latencyMs: /** @type {[number, number]} */ ([8, 30]),
     });
@@ -429,26 +487,45 @@ async function runEpoch(browser, devices, run) {
       record.outcome = failure() ?? 'warmup-failed';
       return record;
     }
+    if (stratum.transport === 'gateway-direct') {
+      // The measured wake starts from the promoted direct path.
+      const promoted = await page.waitForFunction(
+        () => /** @type {any} */ (window).__resumeFixture.currentPath(1) === 'webrtc',
+        null,
+        { timeout: WARMUP_TIMEOUT_MS },
+      ).then(() => true, () => false);
+      if (!promoted) {
+        record.outcome = failure() ?? 'warmup-failed';
+        return record;
+      }
+    }
     await page.waitForTimeout(IDLE_BEFORE_HIDE_MS);
     const before = /** @type {Record<string, number>} */ (await call(page, 'stats'));
-    await call(page, 'hide');
-    // The socket dies first, then time passes: nothing can arrive after the
-    // frozen interval begins and make a dead path look recently active.
-    if (stratum.scenario !== 'warm-short') await call(page, 'killConnections');
-    if (stratum.scenario === 'blackhole-restore') await call(page, 'blackhole');
-    if (schedule.frozenMs) await call(page, 'freeze', schedule.frozenMs);
-    await page.waitForTimeout(schedule.hiddenMs);
     let baseline = before;
-    if (stratum.scenario === 'discard') {
-      await call(page, 'prepareDiscard');
-      await page.reload({ waitUntil: 'commit', timeout: WARMUP_TIMEOUT_MS });
-      await appDocument(page, DEADLINE_MS);
-      baseline = { dials: 0, handshakes: 0, refreshes: 0, bytes: 0, hiddenDials: 0, hiddenBytes: 0 };
+    if (spec.wake === 'network-change') {
+      // Still visible: the path dies silently, then the handoff is reported.
+      await call(page, 'killConnections');
+      await page.waitForTimeout(schedule.hiddenMs);
+      await call(page, 'networkChange');
     } else {
-      await call(page, 'show');
-      if (stratum.scenario === 'blackhole-restore' && schedule.restoreAfterMs !== null) {
-        await page.waitForTimeout(schedule.restoreAfterMs);
-        await call(page, 'restore', true);
+      await call(page, 'hide');
+      // The socket dies first, then time passes: nothing can arrive after the
+      // frozen interval begins and make a dead path look recently active.
+      if (spec.connection !== 'kept') await call(page, 'killConnections');
+      if (stratum.scenario === 'blackhole-restore') await call(page, 'blackhole');
+      if (schedule.frozenMs) await call(page, 'freeze', schedule.frozenMs);
+      await page.waitForTimeout(schedule.hiddenMs);
+      if (spec.wake === 'reload') {
+        await call(page, 'prepareDiscard');
+        await page.reload({ waitUntil: 'commit', timeout: WARMUP_TIMEOUT_MS });
+        await appDocument(page, DEADLINE_MS);
+        baseline = { dials: 0, handshakes: 0, directHandshakes: 0, refreshes: 0, bytes: 0, hiddenDials: 0, hiddenBytes: 0 };
+      } else {
+        await call(page, 'show');
+        if (stratum.scenario === 'blackhole-restore' && schedule.restoreAfterMs !== null) {
+          await page.waitForTimeout(schedule.restoreAfterMs);
+          await call(page, 'restore', true);
+        }
       }
     }
     const result = /** @type {{ renderedAt?: number; wakeAt: number }} */ (await measure(page, DEADLINE_MS));
@@ -576,8 +653,8 @@ export function parseArguments(argv) {
     baselineSha: values['baseline-sha'] || '',
     candidateSha: values['candidate-sha'] || process.env.GITHUB_SHA || '',
     browsers: /** @type {Array<keyof typeof DEVICES>} */ (list(values.browsers, ['chromium', 'webkit'])),
-    transports: /** @type {Array<keyof typeof TRANSPORTS>} */ (list(values.transports, Object.keys(TRANSPORTS))),
-    scenarios: /** @type {Array<keyof typeof SCENARIOS>} */ (list(values.scenarios, Object.keys(SCENARIOS))),
+    transports: /** @type {Array<keyof typeof TRANSPORTS>} */ (list(values.transports, [...DEFAULT_PILOT_TRANSPORTS])),
+    scenarios: /** @type {Array<keyof typeof SCENARIOS>} */ (list(values.scenarios, [...DEFAULT_PILOT_SCENARIOS])),
     samples: Number(values.samples) || (design === 'paired' ? CONFIRMATORY_MIN_PAIRS : PILOT_MIN_EPOCHS),
     baseSeed: Number(values.seed) || 20_261_001,
     targets: list(values.targets, []),
@@ -696,7 +773,7 @@ async function main() {
   const serialized = JSON.stringify(evidence, null, 2);
   // Evidence is uploaded as an artifact: refuse to write anything that could
   // identify a relay, credential, path or content, even synthetic ones.
-  const relays = [fixtureRelay(1, 'wss', { ingress: 'cloudflare' }), fixtureRelay(1, 'hybrid')];
+  const relays = Object.keys(TRANSPORTS).map((transport) => relayForTransport(transport));
   for (const marker of resumeSensitiveMarkers(relays)) {
     if (serialized.includes(marker)) throw new Error('benchmark evidence contains a sensitive fixture marker');
   }

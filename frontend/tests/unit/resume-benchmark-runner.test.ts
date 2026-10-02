@@ -4,11 +4,16 @@ import {
   digest,
   epochSchedule,
   epochSeed,
+  DEFAULT_PILOT_SCENARIOS,
+  DEFAULT_PILOT_TRANSPORTS,
   harnessErrorClass,
   HARNESS_INVALID_CRITERIA,
   IDLE_BEFORE_HIDE_MS,
   NON_COMPLETION_OUTCOMES,
   pairOrder,
+  relayForTransport,
+  SCENARIOS,
+  TRANSPORTS,
   parseArguments,
   PILOT_MIN_EPOCHS,
 } from '../../scripts/run-resume-benchmarks.mjs';
@@ -133,6 +138,45 @@ describe('resume benchmark matched conditions', () => {
     expect(harnessErrorClass(new Error('Target page, context or browser has been closed'))).toBe('target-closed');
     expect(harnessErrorClass(new Error('wss://relay.example/ws failed'))).toBe('other');
     expect(harnessErrorClass('not an error')).toBe('other');
+  });
+
+  it('offers every approved workload and path while the default pilot stays bounded', () => {
+    expect(Object.keys(SCENARIOS)).toEqual([
+      'warm-short', 'hidden-30s', 'hidden-5m', 'hidden-long', 'blackhole-restore', 'network-change', 'discard',
+    ]);
+    expect(Object.fromEntries(Object.entries(SCENARIOS).map(([id, spec]) => [id, [spec.wake, spec.connection]]))).toEqual({
+      'warm-short': ['visible', 'kept'],
+      'hidden-30s': ['visible', 'kept'],
+      'hidden-5m': ['visible', 'half-open'],
+      'hidden-long': ['visible', 'half-open'],
+      'blackhole-restore': ['visible', 'half-open'],
+      'network-change': ['network-change', 'half-open'],
+      discard: ['reload', 'none (reloaded)'],
+    });
+    expect(SCENARIOS['hidden-30s'].frozen_wall_ms).toBe(30_000);
+    expect(SCENARIOS['hidden-long'].frozen_wall_ms).toBeGreaterThan(60 * 60_000);
+    expect(Object.keys(TRANSPORTS)).toEqual(['wss-cloudflare', 'wss-tailscale', 'gateway-relayed', 'gateway-direct']);
+    expect(relayForTransport('wss-cloudflare')).toMatchObject({ transport: 'wss', ingress: 'cloudflare' });
+    expect(relayForTransport('wss-tailscale')).toMatchObject({ transport: 'wss', ingress: 'tailscale-managed' });
+    expect(relayForTransport('gateway-direct')).toMatchObject({ transport: 'hybrid' });
+    expect(() => relayForTransport('wss-elsewhere')).toThrow(/unknown transport/);
+    expect([...DEFAULT_PILOT_SCENARIOS]).toEqual(['warm-short', 'hidden-5m', 'blackhole-restore', 'discard']);
+    expect([...DEFAULT_PILOT_TRANSPORTS]).toEqual(['wss-cloudflare', 'gateway-relayed']);
+
+    // A preregistered design can select all of them.
+    const everything = buildPreregistration({
+      ...pilotOptions,
+      transports: Object.keys(TRANSPORTS) as typeof pilotOptions.transports,
+      scenarios: Object.keys(SCENARIOS) as typeof pilotOptions.scenarios,
+    });
+    expect(everything.strata).toHaveLength(2 * 4 * 7);
+    expect(everything.strata.map((stratum) => stratum.id)).toEqual(expect.arrayContaining([
+      'webkit/wss-tailscale/network-change', 'chromium/gateway-direct/hidden-long', 'chromium/wss-cloudflare/hidden-30s',
+    ]));
+    const schedule = epochSchedule(epochSeed(1, 'chromium/wss-cloudflare/network-change', 0), 'network-change');
+    expect(schedule).toMatchObject({ frozenMs: 0, restoreAfterMs: null });
+    expect(schedule.hiddenMs).toBeGreaterThanOrEqual(200);
+    expect(schedule.hiddenMs).toBeLessThanOrEqual(400);
   });
 
   it('parses runner arguments with the pilot defaults', () => {

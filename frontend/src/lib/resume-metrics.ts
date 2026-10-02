@@ -14,8 +14,10 @@ import type { TransportKind, TransportPhase } from './transports/types';
  * attempts stay inside its elapsed time instead of becoming separate samples.
  * A sample succeeds only when authoritative, ready, non-stale inventory
  * requested after the wake arrives on the current connection generation and
- * route, and its frame is painted while the app is unlocked, before the fixed
- * deadline. A wake that never gets that far ends as a censored non-completion.
+ * path, is still authoritative on that path when its frame paints, and that
+ * frame paints with an inventory view on screen while the app is unlocked,
+ * before the fixed deadline. A wake that never gets that far ends as a
+ * censored non-completion.
  */
 
 /** Fixed completion deadline per epoch, from its first observable event. */
@@ -150,14 +152,18 @@ interface Track {
   authenticated: boolean;
   ingress: string;
   path: TransportKind | '';
-  /** Changes whenever the route that delivers frames may have changed. */
-  route: number;
+  /**
+   * Changes whenever a pending fresh snapshot stops being valid: the path
+   * that delivered it changed (a dial, a direct promotion or fallback, a
+   * reconnect) or the relay reported its inventory not ready or stale.
+   */
+  validity: number;
   carried: boolean;
   epoch: ResumeEpoch | null;
   sample: ResumeSample | null;
   record: PathAttemptRecord | null;
-  /** Fresh inventory painted behind the device lock, waiting to be seen. */
-  awaiting: { generation: number; route: number } | null;
+  /** Fresh inventory not yet seen: no inventory view, or behind the lock. */
+  awaiting: { generation: number; validity: number } | null;
 }
 
 const INGRESS_PATHS = new Map<string, ResumePath>([
@@ -206,6 +212,8 @@ export class ResumeMetrics {
   private hiddenAt: number | null = null;
   private coldPending = true;
   private locked = false;
+  /** Mounted views that render the agent inventory (list or rail). */
+  private views = 0;
   private revisionValue = 0;
 
   constructor(clock: ResumeClock = browserClock(), enabled = storedEnabled()) {
@@ -294,13 +302,35 @@ export class ResumeMetrics {
   setLocked(locked: boolean): void {
     if (this.locked === locked) return;
     this.locked = locked;
-    if (locked) return;
+    if (!locked) this.release();
+  }
+
+  /**
+   * Registers a mounted view that renders the agent inventory (the agent
+   * list, or the rail beside a terminal). Fresh inventory completes a sample
+   * only in a frame painted while one is mounted; one published while, say,
+   * Settings is open completes at the first frame after the view returns.
+   * Returns the unregister function.
+   */
+  presentInventory(): () => void {
+    this.views += 1;
+    this.release();
+    let mounted = true;
+    return () => {
+      if (!mounted) return;
+      mounted = false;
+      this.views = Math.max(0, this.views - 1);
+    };
+  }
+
+  /** Retries completions that were waiting to be seen. */
+  private release(): void {
     for (const track of this.tracks.values()) {
       const awaiting = track.awaiting;
       const { epoch, sample } = track;
       track.awaiting = null;
       if (!awaiting || !epoch || !sample) continue;
-      this.clock.frame(() => this.settle(track, awaiting.generation, awaiting.route, epoch, sample));
+      this.clock.frame(() => this.settle(track, awaiting.generation, awaiting.validity, epoch, sample));
     }
   }
 
@@ -330,7 +360,7 @@ export class ResumeMetrics {
     track.authenticated = false;
     track.ingress = '';
     track.path = '';
-    track.route += 1;
+    track.validity += 1;
     track.carried = false;
     track.record = null;
     track.awaiting = null;
@@ -360,7 +390,7 @@ export class ResumeMetrics {
     if (phase === 'dial') {
       track.timedOut = false;
       track.authenticated = false;
-      track.route += 1;
+      track.validity += 1;
     }
     if (phase === 'timeout') track.timedOut = true;
     if (phase === 'authenticated') track.authenticated = true;
@@ -396,6 +426,9 @@ export class ResumeMetrics {
   connected(relayId: string, generation: number, path: TransportKind): void {
     const track = this.tracked(relayId, generation);
     if (!track) return;
+    // A direct promotion or a fallback changes the path frames arrive on: a
+    // snapshot from the previous path no longer completes the sample.
+    if (track.path !== path) track.validity += 1;
     track.path = path;
     track.live = true;
     if (!this.enabled || path === 'webrtc' || !track.record || track.record.end) return;
@@ -404,12 +437,12 @@ export class ResumeMetrics {
     if (sample && epoch && !sample.outcome) track.record.servedAt ??= this.at(epoch);
   }
 
-  /** The transport fell back to connecting: the route that served frames is gone. */
+  /** The transport fell back to connecting: the path that served frames is gone. */
   connecting(relayId: string, generation: number): void {
     const track = this.tracked(relayId, generation);
     if (!track || !track.live) return;
     track.live = false;
-    track.route += 1;
+    track.validity += 1;
   }
 
   /**
@@ -443,13 +476,20 @@ export class ResumeMetrics {
   }
 
   /**
-   * An agents snapshot was published. Only a ready, non-stale snapshot on the
-   * current generation and live route, requested after the wake, completes
-   * the sample, and only once its frame paints while the app is unlocked.
+   * Inventory was published: an agents snapshot, or the relay's readiness.
+   * Only a ready, non-stale snapshot on the current generation and live
+   * path, requested after the wake, completes the sample, and only once its
+   * frame paints with an inventory view on screen while the app is unlocked.
+   * A non-authoritative report (not ready, stale) withdraws any pending one.
    */
   inventory(relayId: string, generation: number, fresh: boolean): void {
     const track = this.tracked(relayId, generation);
-    if (!track || !fresh || !track.live || !this.enabled) return;
+    if (!track) return;
+    if (!fresh) {
+      track.validity += 1;
+      return;
+    }
+    if (!track.live || !this.enabled) return;
     this.current();
     const epoch = this.last();
     const sample = epoch && track.epoch === epoch ? track.sample : null;
@@ -462,16 +502,16 @@ export class ResumeMetrics {
     if (!sample.attempts && !track.carried && sample.phases.probe === undefined) return;
     sample.phases.inventory = this.at(epoch);
     sample.path = this.label(track);
-    const route = track.route;
-    this.clock.frame(() => this.settle(track, generation, route, epoch, sample));
+    const validity = track.validity;
+    this.clock.frame(() => this.settle(track, generation, validity, epoch, sample));
   }
 
   end(relayId: string, generation: number, why: AttemptEnd): void {
-    const track = this.tracked(relayId, generation);
-    if (!track || track.ended) return;
+    const track = this.tracks.get(relayId);
+    if (!track || generation <= 0 || track.generation !== generation || track.ended) return;
     track.ended = true;
     track.live = false;
-    track.route += 1;
+    track.validity += 1;
     track.awaiting = null;
     if (!this.enabled) return;
     const sample = this.existing(track);
@@ -497,7 +537,7 @@ export class ResumeMetrics {
     if (!track) return;
     track.ended = true;
     track.live = false;
-    track.route += 1;
+    track.validity += 1;
     track.awaiting = null;
     const sample = this.existing(track);
     const epoch = this.last();
@@ -542,9 +582,14 @@ export class ResumeMetrics {
     this.clear();
   }
 
+  /**
+   * The live connection a callback belongs to. A callback from a replaced
+   * generation, or one arriving after its connection ended (a handshake
+   * promise that settles after the socket closed), is not part of any sample.
+   */
   private tracked(relayId: string, generation: number): Track | null {
     const track = this.tracks.get(relayId);
-    return generation > 0 && track && track.generation === generation ? track : null;
+    return generation > 0 && track && track.generation === generation && !track.ended ? track : null;
   }
 
   private track(relayId: string): Track {
@@ -559,7 +604,7 @@ export class ResumeMetrics {
         authenticated: false,
         ingress: '',
         path: '',
-        route: 0,
+        validity: 0,
         carried: false,
         epoch: null,
         sample: null,
@@ -665,14 +710,17 @@ export class ResumeMetrics {
 
   /**
    * The frame after fresh inventory was published. It completes the sample
-   * only if the connection generation and route that delivered it are still
-   * live; a connection or path retired before the paint cannot succeed, and a
-   * later fresh snapshot is needed.
+   * only if the connection generation and path that delivered it are still
+   * live and the snapshot is still authoritative; a connection or path
+   * retired, or inventory reported stale, before the paint cannot succeed,
+   * and a later fresh snapshot is needed. A frame with no inventory view
+   * mounted did not render it, and one behind the device lock was not seen:
+   * both wait for the first frame in which it is.
    */
-  private settle(track: Track, generation: number, route: number, epoch: ResumeEpoch, sample: ResumeSample): void {
+  private settle(track: Track, generation: number, validity: number, epoch: ResumeEpoch, sample: ResumeSample): void {
     if (track.sample !== sample) return;
     const at = this.at(epoch);
-    if (track.generation !== generation || track.ended || !track.live || track.route !== route) {
+    if (track.generation !== generation || track.ended || !track.live || track.validity !== validity) {
       if (!sample.outcome) {
         delete sample.phases.inventory;
         delete sample.phases.rendered;
@@ -683,9 +731,9 @@ export class ResumeMetrics {
       if (sample.outcome === 'deadline' && sample.lateFreshAt === undefined) sample.lateFreshAt = at;
       return;
     }
-    sample.phases.rendered ??= at;
-    if (this.locked) {
-      track.awaiting = { generation, route };
+    if (this.views) sample.phases.rendered ??= at;
+    if (!this.views || this.locked) {
+      track.awaiting = { generation, validity };
       return;
     }
     if (at < RESUME_DEADLINE_MS) this.finish(epoch, sample, 'fresh', at);

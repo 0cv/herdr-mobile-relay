@@ -175,6 +175,9 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
             finish({ reason: 'Encrypted relay handshake timed out' });
           }, handshakeTimeoutMs);
           void createE2EEClientHandshake(presentedAuthentication, undefined, codec).then((created) => {
+            // The attempt may have closed while the keys were generated; its
+            // channel already drops frames, so no hello is sent or observed.
+            if (finished) return;
             handshake = created;
             channel?.sendFrame(JSON.stringify(created.hello));
             observePhase(options.observe, 'e2ee-hello', kind);

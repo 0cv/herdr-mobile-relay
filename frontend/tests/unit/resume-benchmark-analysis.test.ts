@@ -168,9 +168,25 @@ describe('resume benchmark statistics', () => {
     // A censored baseline quantile is unknown: it can neither pass nor reject.
     const unknown = Array.from({ length: 20 }, () => ({ baseline: INFINITY, candidate: 700 }));
     expect(pairedQuantileRatioBound(unknown, 0.95, 0.025, 200, 9)).toMatchObject({ lower: 0, upper: INFINITY, identifiable: false });
-    // A censored candidate quantile against a finite baseline is genuinely large.
+    // A censored candidate quantile is only known to be at least the
+    // deadline: against a 1 s baseline the ratio is at least 60.
     const slower = Array.from({ length: 20 }, () => ({ baseline: 1_000, candidate: INFINITY }));
-    expect(pairedQuantileRatioBound(slower, 0.95, 0.025, 200, 9)).toMatchObject({ estimate: INFINITY, lower: INFINITY, identifiable: false });
+    expect(pairedQuantileRatioBound(slower, 0.95, 0.025, 200, 9)).toMatchObject({ estimate: INFINITY, lower: 60, upper: INFINITY, identifiable: false });
+  });
+
+  it('never turns censoring into a demonstrated latency rejection the evidence does not support', () => {
+    // Censored at 60 s against a 59 s baseline, the candidate's true p95 could
+    // be 61 s (ratio 1.03): neither a pass nor a demonstrated violation.
+    const close = Array.from({ length: 40 }, () => ({ baseline: 59_000, candidate: INFINITY }));
+    const bound = pairedQuantileRatioBound(close, 0.95, 0.01, 200, 9);
+    expect(bound.lower).toBeCloseTo(60_000 / 59_000, 10);
+    expect(bound).toMatchObject({ upper: INFINITY, identifiable: false });
+    expect(boundVerdict({ enough: true, ...bound, threshold: 1.1 })).toBe('inconclusive');
+    // Against a 1 s baseline the same censoring does demonstrate a violation.
+    const far = pairedQuantileRatioBound(Array.from({ length: 40 }, () => ({ baseline: 1_000, candidate: INFINITY })), 0.95, 0.01, 200, 9);
+    expect(boundVerdict({ enough: true, ...far, threshold: 1.1 })).toBe('not-accepted');
+    // A different deadline moves the censoring-aware lower bound with it.
+    expect(pairedQuantileRatioBound(close, 0.95, 0.01, 200, 9, 120_000).lower).toBeCloseTo(120_000 / 59_000, 10);
   });
 
   it('separates a pass, a demonstrated violation and an imprecise bound', () => {
@@ -438,6 +454,85 @@ describe('resume benchmark paired acceptance', () => {
     expect(analysis.strata[0].latency.p95_ratio).toMatchObject({ estimate: 1, lower_bound: 1, upper_bound: 1, verdict: 'not-accepted' });
     expect(analysis.strata[0].reasons).toContain('p95-ratio-exceeds-threshold');
     expect(analysis).toMatchObject({ verdict: 'not-accepted', accepted: false });
+  });
+
+  it('keeps a censored regression latency inconclusive at the stratum level', () => {
+    const regression = [{ id: 'webkit/wss/warm', role: 'regression' }];
+    const analysis = paired(regression, pairs(regression[0].id, 400, () => [59_000, null]));
+    const [stratum] = analysis.strata;
+    expect(stratum.latency.p95_ratio).toMatchObject({ identifiable: false, verdict: 'inconclusive' });
+    expect(stratum.latency.p95_ratio.lower_bound).toBeCloseTo(60_000 / 59_000, 5);
+    expect(stratum.latency.p50_ratio).toMatchObject({ identifiable: false, verdict: 'inconclusive' });
+    expect(stratum.reasons).toContain('p95-not-identifiable-below-deadline');
+    expect(stratum.reasons).not.toContain('p95-ratio-exceeds-threshold');
+    // The candidate still fails every attempt, which the reliability bound rejects.
+    expect(stratum.reliability.verdict).toBe('not-accepted');
+  });
+
+  it('refuses registrations that relax the approved contract', () => {
+    const controls = safeControls(['baseline', 'candidate']);
+    const base = preregistration(target);
+    // Every outcome misses the 60 s deadline; a 120 s registration would accept them.
+    const slow = pairs(target[0].id, 400, () => [100_000, 70_000]);
+    const relaxedDeadline = analyzePaired({ preregistration: { ...base, deadline_ms: 120_000 }, attempts: slow, negative_controls: controls });
+    expect(relaxedDeadline).toMatchObject({ verdict: 'invalid', accepted: false, deadline_ms: 60_000, contract_violations: ['deadline-not-60s'] });
+    expect(relaxedDeadline.reasons).toContain('registration-violates-contract');
+    expect(relaxedDeadline.strata[0].non_completions.candidate).toEqual({ late: 400 });
+
+    const good = pairs(target[0].id, 400, () => [1_000, 700]);
+    const relaxed: Array<[string, number]> = [
+      ['reliability_margin', 0.05], ['target_p95_ratio', 0.95], ['regression_ratio', 1.5],
+      ['min_pairs', 30], ['alpha', 0.2], ['power', 0.5],
+    ];
+    for (const [key, value] of relaxed) {
+      const result = analyzePaired({
+        preregistration: { ...base, bounds: { ...base.bounds, [key]: value } },
+        attempts: good,
+        negative_controls: controls,
+      });
+      expect(result.contract_violations, key).toEqual([`relaxed-${key}`]);
+      expect(result, key).toMatchObject({ verdict: 'invalid', accepted: false });
+    }
+
+    const excuse = analyzePaired({
+      preregistration: { ...base, harness_invalid_criteria: [...base.harness_invalid_criteria, { id: 'slow-network' }] },
+      attempts: good.map((record, index) => (index === 1 ? { ...record, harness_invalid: 'slow-network' } : record)),
+      negative_controls: controls,
+    });
+    expect(excuse).toMatchObject({ verdict: 'invalid', accepted: false, contract_violations: ['unapproved-exclusion-criterion'] });
+    // The unapproved reason is still a candidate failure, never an exclusion.
+    expect(excuse.strata[0].non_completions.candidate).toEqual({ 'disallowed-exclusion:slow-network': 1 });
+
+    const missingControl = analyzePaired({
+      preregistration: { ...base, negative_controls: base.negative_controls.slice(1) },
+      attempts: good,
+      negative_controls: controls.filter((control) => control.control !== 'revoked-credential'),
+    });
+    expect(missingControl).toMatchObject({ verdict: 'invalid', accepted: false, contract_violations: ['negative-control-not-registered'] });
+
+    // Stricter bounds are allowed, and used: a 0.5-point margin is too tight
+    // for 400 pairs, so the result is inconclusive rather than invalid.
+    const stricter = analyzePaired({
+      preregistration: { ...base, bounds: { ...base.bounds, reliability_margin: 0.005 } },
+      attempts: good,
+      negative_controls: controls,
+    });
+    expect(stricter).toMatchObject({ verdict: 'inconclusive', accepted: false, contract_violations: [] });
+    expect(stricter.strata[0].reliability).toMatchObject({ margin: 0.005, verdict: 'inconclusive' });
+
+    const pilot = analyzePilot({
+      preregistration: { ...preregistration([{ id: 'chromium/wss/warm' }], 30), deadline_ms: 120_000 },
+      attempts: Array.from({ length: 30 }, (_, index) => attempt('chromium/wss/warm', 'baseline', index, 90_000)),
+      negative_controls: safeControls(['baseline']),
+    });
+    expect(pilot).toMatchObject({ sample_requirement_met: false, contract_violations: ['deadline-not-60s'] });
+    expect(pilot.strata[0]).toMatchObject({ completed_on_time: 0, non_completions: { late: 30 } });
+    const small = analyzePilot({
+      preregistration: preregistration([{ id: 'chromium/wss/warm' }], 10),
+      attempts: Array.from({ length: 10 }, (_, index) => attempt('chromium/wss/warm', 'baseline', index, 900)),
+      negative_controls: safeControls(['baseline']),
+    });
+    expect(small).toMatchObject({ sample_requirement_met: false, contract_violations: ['pilot-sample-below-30'] });
   });
 
   it('adjusts for every preregistered comparison, including regression controls', () => {

@@ -1,24 +1,53 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import AppSwitch from '$components/ui/AppSwitch.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import { resumeMetrics } from '$lib/resume-metrics';
   import {
     formatQuantile,
+    nextSummaryChangeMs,
     resumeLifecycleLabel,
     resumePathLabel,
     summarizeResume,
   } from '$lib/resume-summary';
 
-  const revision = resumeMetrics.revision;
   let enabled = $state(resumeMetrics.enabled);
   let exported = $state('');
   let downloadUrl = $state('');
   let status = $state('');
-  const summary = $derived.by(() => {
-    void $revision;
-    return summarizeResume(resumeMetrics.snapshot());
+  let summary = $state(summarizeResume([]));
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let mounted = false;
+
+  /**
+   * Re-reads the ring. Deadlines and retention are applied when the ring is
+   * read, and time passing changes them without any event, so the summary is
+   * recomputed on every recorded change, at export, and once more when the
+   * next deadline or retention expiry is due while this card is open. No
+   * timer runs while Settings is closed.
+   */
+  function refresh(): void {
+    clearTimeout(refreshTimer);
+    refreshTimer = undefined;
+    if (!mounted) return;
+    const epochs = resumeMetrics.snapshot();
+    summary = summarizeResume(epochs);
+    const wait = nextSummaryChangeMs(epochs, performance.now(), Date.now());
+    if (wait !== null) refreshTimer = setTimeout(refresh, Math.min(wait + 25, 2_147_483_647));
+  }
+
+  onMount(() => {
+    mounted = true;
+    refresh();
+    // Reading the ring can itself close an expired wake and bump the
+    // revision, so changes are picked up in a microtask, never re-entrantly.
+    const stop = resumeMetrics.revision.subscribe(() => queueMicrotask(refresh));
+    return () => {
+      mounted = false;
+      stop();
+      clearTimeout(refreshTimer);
+    };
   });
 
   function releaseDownload(): void {
@@ -44,6 +73,8 @@
   }
 
   function exportSummary(): void {
+    // Export what the ring holds now, with deadlines and retention applied.
+    refresh();
     exported = JSON.stringify(summary, null, 2);
     releaseDownload();
     try {

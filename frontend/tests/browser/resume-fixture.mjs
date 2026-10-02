@@ -40,21 +40,28 @@
  *   lock?: { delayMs: number; cancel: boolean } | null;
  *   blackholeAtStart?: boolean;
  *   iosTab?: boolean;
+ *   connectionEvents?: boolean;
  *   faults?: FixtureFaults;
  * }} FixtureConfig
+ *   `connectionEvents` gives the page a `navigator.connection` event target
+ *   (WebKit has none), so `networkChange()` can report a network handoff.
  * @typedef {{
  *   workspaceOnly?: boolean;
  *   stale?: boolean;
  *   abandonFirst?: boolean;
  *   burst?: boolean;
+ *   holdPaintUntilDirect?: boolean;
  * }} FixtureFaults
- *   Conditions applied to snapshots sent after the first wake:
- *   `workspaceOnly` answers a refresh without an agents snapshot, `stale`
- *   marks the post-wake inventory stale, and `abandonFirst` sends the first
- *   post-wake snapshot on a session the relay is abandoning (closed shortly
- *   after); none of them may count as a fresh resume. `burst` sends two
- *   fresh agents snapshots back to back, so the second replaces the first
- *   before it paints; that must still count.
+ *   Conditions applied after the first wake: `workspaceOnly` answers a
+ *   refresh without an agents snapshot, `stale` marks the post-wake
+ *   inventory stale, and `abandonFirst` sends the first post-wake snapshot on
+ *   a session the relay is abandoning (closed shortly after); none of them
+ *   may count as a fresh resume. `burst` sends two fresh agents snapshots
+ *   back to back, so the second replaces the first before it paints; that
+ *   must still count. `holdPaintUntilDirect` is a test-only widening of the
+ *   render-to-paint window: the endpoint's paint check for a qualifying card
+ *   waits until a direct WebRTC session has been selected (at most 10 s),
+ *   so a direct promotion deterministically lands between render and paint.
  */
 
 /**
@@ -192,8 +199,42 @@ export function resumeFixtureInit(config) {
      */
     snapshots: new Map(),
     faults: { ...(config.faults || {}) },
+    /**
+     * Sessions in the order the app started receiving application messages
+     * on them. The app's hybrid transport promotes a direct path on its first
+     * application message and falls back to the gateway when direct dies, so
+     * the latest still-live session here is the path the app is using.
+     *
+     * @type {RelaySession[]}
+     */
+    selections: [],
   };
   let visibility = 'visible';
+  /** @type {Set<() => void>} */
+  const selectionWaiters = new Set();
+  /** @param {RelaySession} session */
+  function select(session) {
+    state.selections = state.selections.filter((entry) => entry !== session && entry.active());
+    state.selections.push(session);
+    for (const waiter of [...selectionWaiters]) waiter();
+  }
+  /**
+   * The session currently carrying the app's application traffic for a
+   * relay: the most recently selected one that is still the live path.
+   *
+   * @param {number} slot
+   * @returns {RelaySession | null}
+   */
+  function currentSession(slot) {
+    for (let index = state.selections.length - 1; index >= 0; index -= 1) {
+      const session = state.selections[index];
+      if (session.relay.slot === slot && session.active()) return session;
+    }
+    return null;
+  }
+  if (config.connectionEvents && !(/** @type {any} */ (navigator).connection instanceof EventTarget)) {
+    Object.defineProperty(navigator, 'connection', { configurable: true, value: new EventTarget() });
+  }
 
   /** @param {boolean} discarded @param {number | null} [wakeAbsolute] */
   function persist(discarded, wakeAbsolute = null) {
@@ -429,7 +470,7 @@ export function resumeFixtureInit(config) {
     /**
      * @param {FixtureRelay} relay
      * @param {'websocket' | 'gateway' | 'webrtc'} path
-     * @param {(frame: string | Uint8Array) => void} emit
+     * @param {(frame: string | Uint8Array, delivered?: () => void) => void} emit
      * @param {() => void} refuse
      * @param {() => boolean} isOpen
      * @param {() => void} terminate
@@ -442,6 +483,8 @@ export function resumeFixtureInit(config) {
       this.isOpen = isOpen;
       this.terminate = terminate;
       this.abandoned = false;
+      /** Whether the first application message has been handed to the app. */
+      this.chosen = false;
       /** @type {CryptoKey | null} */
       this.sendKey = null;
       /** @type {CryptoKey | null} */
@@ -576,13 +619,21 @@ export function resumeFixtureInit(config) {
       if (this.closed || !this.sendKey) return;
       const sequence = this.sendSequence;
       this.sendSequence += 1;
+      // The first application message after the handshake is when the app
+      // starts using this path (a direct path is promoted on it).
+      /** @type {(() => void) | undefined} */
+      let delivered;
+      if (this.ready && !this.chosen) {
+        this.chosen = true;
+        delivered = () => select(this);
+      }
       const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv: frameNonce(sequence), additionalData: frameAad('s2c', sequence), tagLength: 128 },
         this.sendKey,
         encoder.encode(JSON.stringify(message)),
       ));
       if (this.path === 'websocket') {
-        this.emit(JSON.stringify({ type: 'e2ee', version: 2, sequence, ciphertext: encode64(ciphertext) }));
+        this.emit(JSON.stringify({ type: 'e2ee', version: 2, sequence, ciphertext: encode64(ciphertext) }), delivered);
         return;
       }
       const frame = new Uint8Array(10 + ciphertext.length);
@@ -590,7 +641,7 @@ export function resumeFixtureInit(config) {
       frame[1] = 0;
       new DataView(frame.buffer).setBigUint64(2, BigInt(sequence), false);
       frame.set(ciphertext, 10);
-      this.emit(frame);
+      this.emit(frame, delivered);
     }
 
     /** @param {boolean} initial */
@@ -711,7 +762,7 @@ export function resumeFixtureInit(config) {
       this.session = new RelaySession(
         relay,
         'websocket',
-        (frame) => this.text(String(frame)),
+        (frame, delivered) => this.text(String(frame), delivered),
         () => this.serverClose(4401, ''),
         () => this.isOpen(),
         () => setTimeout(() => this.serverClose(1000, ''), 300),
@@ -744,7 +795,7 @@ export function resumeFixtureInit(config) {
         this.session = new RelaySession(
           this.relay,
           'gateway',
-          (frame) => this.binary(frame),
+          (frame, delivered) => this.binary(frame, delivered),
           () => this.serverClose(1000, 'device_unauthorized'),
           () => this.isOpen(),
           () => setTimeout(() => this.serverClose(1000, ''), 300),
@@ -755,23 +806,28 @@ export function resumeFixtureInit(config) {
       if (logical) this.session?.receive(sealed(logical) ? logical : decoder.decode(logical));
     }
 
-    /** @param {string} payload */
-    text(payload) {
+    /** @param {string} payload @param {() => void} [delivered] */
+    text(payload, delivered) {
       count(payload.length);
       setTimeout(() => {
-        if (!this.dead && this.readyState === 1) this.onmessage?.({ data: payload });
+        if (this.dead || this.readyState !== 1) return;
+        delivered?.();
+        this.onmessage?.({ data: payload });
       }, Math.floor(this.delay / 2));
     }
 
-    /** @param {string | Uint8Array} frame */
-    binary(frame) {
+    /** @param {string | Uint8Array} frame @param {() => void} [delivered] */
+    binary(frame, delivered) {
       const bytes = typeof frame === 'string' ? encoder.encode(frame) : frame;
-      for (const piece of chunkFrame(bytes, 262_144)) {
+      const pieces = chunkFrame(bytes, 262_144);
+      pieces.forEach((piece, index) => {
         count(piece.byteLength);
         setTimeout(() => {
-          if (!this.dead && this.readyState === 1) this.onmessage?.({ data: piece.buffer });
+          if (this.dead || this.readyState !== 1) return;
+          if (index === pieces.length - 1) delivered?.();
+          this.onmessage?.({ data: piece.buffer });
         }, Math.floor(this.delay / 2));
-      }
+      });
     }
 
     /** @param {number} code @param {string} reason */
@@ -830,7 +886,7 @@ export function resumeFixtureInit(config) {
       this.session = new RelaySession(
         relay,
         'webrtc',
-        (frame) => this.deliver(frame),
+        (frame, delivered) => this.deliver(frame, delivered),
         () => this.peer.close(),
         () => this.readyState === 'open' && !this.dead && this.peer.connectionState !== 'closed',
         () => setTimeout(() => {
@@ -853,15 +909,18 @@ export function resumeFixtureInit(config) {
       }, Math.floor(this.peer.delay / 2));
     }
 
-    /** @param {string | Uint8Array} frame */
-    deliver(frame) {
+    /** @param {string | Uint8Array} frame @param {() => void} [delivered] */
+    deliver(frame, delivered) {
       const bytes = typeof frame === 'string' ? encoder.encode(frame) : frame;
-      for (const piece of chunkFrame(bytes, 16_384)) {
+      const pieces = chunkFrame(bytes, 16_384);
+      pieces.forEach((piece, index) => {
         count(piece.byteLength);
         setTimeout(() => {
-          if (!this.dead && this.readyState === 'open') this.onmessage?.({ data: piece.buffer });
+          if (this.dead || this.readyState !== 'open') return;
+          if (index === pieces.length - 1) delivered?.();
+          this.onmessage?.({ data: piece.buffer });
         }, Math.floor(this.peer.delay / 2));
-      }
+      });
     }
 
     close() {
@@ -937,16 +996,23 @@ export function resumeFixtureInit(config) {
    * Every agent card marker the scan judged, once per marker and verdict, with
    * only numbers and fixed reason codes.
    *
-   * @type {Array<{ slot: number; epoch: number; seq: number; verdict: string }>}
+   * @type {Array<{ slot: number; epoch: number; seq: number; path: string; verdict: string }>}
    */
   const renderLog = [];
   const logged = new Set();
-  /** @param {string} marker @param {RegExpExecArray} match @param {string} verdict */
-  function log(marker, match, verdict) {
+  /** @param {string} marker @param {string} verdict */
+  function log(marker, verdict) {
     const key = `${marker}:${verdict}`;
-    if (logged.has(key)) return;
+    const match = MARKER_PATTERN.exec(marker);
+    if (logged.has(key) || !match) return;
     logged.add(key);
-    renderLog.push({ slot: Number(match[1]), epoch: Number(match[2]), seq: Number(match[3]), verdict });
+    renderLog.push({
+      slot: Number(match[1]),
+      epoch: Number(match[2]),
+      seq: Number(match[3]),
+      path: state.snapshots.get(marker)?.session.path ?? '',
+      verdict,
+    });
   }
   /** @type {Set<() => void>} */
   const waiters = new Set();
@@ -966,16 +1032,50 @@ export function resumeFixtureInit(config) {
   /**
    * Why a rendered agent card does not show fresh agents, or null when it
    * does: its snapshot must be ready and non-stale, its card not marked
-   * stale, and the session that carried it still the live authenticated path.
+   * stale, and the session that carried it still the live authenticated path
+   * and the one the app is currently using (a gateway draining after a
+   * direct promotion is open but no longer current).
    *
-   * @param {{ authoritative: boolean; session: RelaySession }} record
+   * @param {{ slot: number; authoritative: boolean; session: RelaySession }} record
    * @param {Element} card
    */
   function rejection(record, card) {
     if (!record.authoritative) return 'not-authoritative';
     if (card.classList.contains('stale')) return 'stale-card';
     if (!record.session.active()) return 'inactive-path';
+    if (currentSession(record.slot) !== record.session) return 'not-current-path';
     return null;
+  }
+  /** @param {number} slot */
+  function holdForDirect(slot) {
+    return state.epoch > 1 && state.faults.holdPaintUntilDirect === true
+      && currentSession(slot)?.path !== 'webrtc';
+  }
+  /**
+   * Runs the paint check at the next animation frame, or, under the
+   * `holdPaintUntilDirect` fault, at the moment a direct session is selected
+   * (at most 10 s later), before the app has applied anything it carries.
+   *
+   * @param {number} slot @param {() => void} check
+   */
+  function atPaint(slot, check) {
+    requestAnimationFrame(() => {
+      if (!holdForDirect(slot)) {
+        check();
+        return;
+      }
+      const release = () => {
+        if (holdForDirect(slot)) return;
+        selectionWaiters.delete(release);
+        clearTimeout(timer);
+        check();
+      };
+      const timer = setTimeout(() => {
+        selectionWaiters.delete(release);
+        requestAnimationFrame(check);
+      }, 10_000);
+      selectionWaiters.add(release);
+    });
   }
   /**
    * The success endpoint. An agent card (not a workspace label) must name the
@@ -988,52 +1088,56 @@ export function resumeFixtureInit(config) {
     if (!document.body || document.getElementById('unlock-dialog')) return;
     const epoch = state.epoch;
     for (const [marker, card] of renderedAgentMarkers()) {
-      const match = /** @type {RegExpExecArray} */ (MARKER_PATTERN.exec(marker));
       const record = state.snapshots.get(marker);
       if (!record || record.epoch !== epoch) continue;
       const key = renderKey(record.slot, epoch);
       if (rendered.has(key)) continue;
       const reason = rejection(record, card);
       if (reason) {
-        log(marker, match, reason);
+        log(marker, reason);
         continue;
       }
       rendered.set(key, -1);
-      requestAnimationFrame(() => paint(record.slot, epoch, key));
+      atPaint(record.slot, () => paint(record.slot, epoch, key));
     }
   }
   /**
    * The frame scheduled by a qualifying render. It re-reads what this frame
    * actually paints for the relay: a newer fresh snapshot that replaced the
    * first one before the paint counts here, while a card that lost its live
-   * path, became stale or is covered by the unlock dialog does not.
+   * or current path, became stale or is covered by the unlock dialog does not.
    *
    * @param {number} slot @param {number} epoch @param {string} key
    */
   function paint(slot, epoch, key) {
     const covered = Boolean(document.getElementById('unlock-dialog'));
     let painted = null;
+    /** @type {[string, string] | null} */
+    let retired = null;
     for (const [marker, card] of renderedAgentMarkers()) {
       const record = state.snapshots.get(marker);
-      if (!record || record.slot !== slot || record.epoch !== epoch || rejection(record, card)) continue;
-      painted = marker;
-      break;
-    }
-    if (covered || !painted) {
-      rendered.delete(key);
-      if (!logged.has(`${key}:retired`)) {
-        logged.add(`${key}:retired`);
-        renderLog.push({ slot, epoch, seq: -1, verdict: 'retired-before-paint' });
+      if (!record || record.slot !== slot || record.epoch !== epoch) continue;
+      const reason = covered ? 'covered' : rejection(record, card);
+      if (!reason) {
+        painted = marker;
+        break;
       }
+      retired ??= [marker, reason];
+    }
+    if (!painted) {
+      rendered.delete(key);
+      if (retired) log(retired[0], `retired-before-paint:${retired[1]}`);
       // Whatever replaced it gets its own chance at the next frame.
       scan();
       return;
     }
     rendered.set(key, performance.now());
-    log(painted, /** @type {RegExpExecArray} */ (MARKER_PATTERN.exec(painted)), 'counted');
+    log(painted, 'counted');
     for (const waiter of [...waiters]) waiter();
   }
   new MutationObserver(scan).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+  // A change of the current path can qualify a card that is already shown.
+  selectionWaiters.add(() => queueMicrotask(scan));
 
   /** @param {number[]} slots @param {number} timeoutMs */
   function awaitFresh(slots, timeoutMs) {
@@ -1145,6 +1249,21 @@ export function resumeFixtureInit(config) {
     /** @param {{ delayMs: number; cancel: boolean }} next */
     setUnlock(next) {
       state.lock = next;
+    },
+    /**
+     * The app keeps its socket but reports a network handoff (Wi-Fi to
+     * cellular): a new measured epoch starts at the change event.
+     */
+    networkChange() {
+      state.epoch += 1;
+      persist(false);
+      state.wakeAt = performance.now();
+      /** @type {any} */ (navigator).connection?.dispatchEvent(new Event('change'));
+      return state.wakeAt;
+    },
+    /** @param {number} slot */
+    currentPath(slot) {
+      return currentSession(slot)?.path ?? null;
     },
     awaitFresh,
     measure,
