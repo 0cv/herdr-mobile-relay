@@ -304,7 +304,7 @@ jobs:
         run: >-
           cd frontend && HERDR_WEB_ROOT="$GITHUB_WORKSPACE/web"
           bun x playwright test tests/browser/resume.spec.ts
-          --grep '^paint composition preflight$' --retries=0 --workers=1
+          --grep 'paint composition preflight$' --retries=0 --workers=1
       - run: make frontend-check
       - run: make web-release-check
 
@@ -338,7 +338,7 @@ jobs:
         run: >-
           cd frontend && HERDR_WEB_ROOT="$GITHUB_WORKSPACE/web"
           bun x playwright test tests/browser/resume.spec.ts
-          --grep '^paint composition preflight$' --retries=0 --workers=1
+          --grep 'paint composition preflight$' --retries=0 --workers=1
       - name: Run the preregistered pilot on the exact checkout and analyze every attempted epoch
         shell: bash
         run: |
