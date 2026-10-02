@@ -374,42 +374,37 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-The figures below came from the first version of the harness, before review
-tightened the endpoint (agent cards only, relay-verified freshness and live
-path), the exclusion rules and the evidence validation. They are retained as
-history and are superseded by the rerun on the revised harness, which will
-replace this table.
-
-Source: `check` run 36940357170, job *Resume benchmark pilot*, on commit
-`005065acaafcebfd86be7c8e2024625cdb6cc9b3`, measuring the shipped `web/`
-build `bc5f856f0c96e0c9007ec2f701cfefe00d5d53eb998a09b58dfdf0467a95afb5`
-(later commits that change only documentation or tests ship the same build,
-and each hosted run repeats the pilot on its own commit). Preregistration
-SHA-256 `9d9b1dc4be9920869ca9ef946ccb2cb2cf8cb4009216986fa5d3495f3154cbe0`;
+Source: `check` run 36964563904, job *Resume benchmark pilot*, on commit
+`b4ebbfbbb13d12c4a1979e3410f7bec19d9131c9`, measuring the shipped `web/`
+build `51ddf36c30aac7c7545fc683e0d3f51e40a4022ec73116794d4094066213807b`
+with the revised endpoint, exclusion rules and evidence validation described
+above (later commits that change only documentation ship the same build, and
+each hosted run repeats the pilot on its own commit). Preregistration
+SHA-256 `3d9d32bc7b340deca51f7666af0a0fec9a17d79f3cf4556395376c22a293e600`;
 Chromium 151.0.7922.34 and WebKit 26.5 under Node v22.23.3 on a hosted Linux
-runner; 10.7 minutes. 480 attempted epochs (16 strata × 30), all valid, no
+runner; 10.6 minutes. 480 attempted epochs (16 strata × 30), all valid, no
 harness exclusions or replacements; no hidden-time dials or bytes in any
 stratum. All 24 negative-control trials (4 controls × 3 trials × 2 browsers)
 were safe.
 
 | Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
 | --- | --- | --- | --- | --- | --- | --- |
-| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 20 (18–22) | 29 (26–30) | 0 / 0 | 1,170 | 0.27 |
-| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 67 (54–79) | 98 (87–103) | 1 / 1 | 3,398 | 0.32 |
-| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,042 (2,074–3,072) | 5,104 (5,034–5,105) | 1 / 1 | 3,398 | 0.35 |
-| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 139 (125–141) | 191 (161–227) | 1 / 1 | 3,539 | 0.20 |
-| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 21 (16–26) | 32 (30–36) | 0 / 0 | 771 | 0.35 |
-| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 103 (84–117) | 149 (135–153) | 1 / 1 | 2,533 | 0.36 |
-| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,056 (2,097–3,148) | 5,125 (5,097–5,145) | 1 / 1 | 2,676 | 0.40 |
-| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 143 (134–161) | 198 (181–229) | 1 / 1 | 2,795 | 0.22 |
-| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 34 (31–37) | 50 (43–210) | 0 / 0 | 1,170 | 0.37 |
-| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 100 (86–103) | 131 (116–131) | 1 / 1 | 3,503 | 0.21 |
-| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,069 (2,099–3,110) | 5,117 (5,076–5,130) | 1 / 1 | 3,782 | 0.34 |
-| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 185 (168–201) | 249 (216–266) | 1 / 1 | 3,388 | 0.17 |
-| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (33–39) | 49 (46–52) | 0 / 0 | 771 | 0.19 |
-| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 116 (101–131) | 148 (147–164) | 1 / 1 | 2,561 | 0.23 |
-| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,084 (2,147–3,112) | 5,120 (5,084–5,129) | 1 / 1 | 2,860 | 0.34 |
-| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 198 (183–201) | 247 (231–248) | 1 / 1 | 2,742 | 0.14 |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 20 (18–24) | 29 (26–31) | 0 / 0 | 1,176 | 0.27 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 64 (58–77) | 93 (86–101) | 1 / 1 | 3,265 | 0.29 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,046 (2,079–3,081) | 5,098 (5,032–5,103) | 1 / 1 | 3,407 | 0.34 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 137 (125–144) | 159 (152–167) | 1 / 1 | 3,549 | 0.18 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 20 (17–26) | 32 (31–32) | 0 / 0 | 776 | 0.37 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 101 (79–125) | 151 (144–152) | 1 / 1 | 2,588 | 0.37 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,050 (2,100–3,146) | 5,125 (5,099–5,142) | 1 / 1 | 2,660 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 149 (134–162) | 205 (190–223) | 1 / 1 | 2,779 | 0.20 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 36 (32–38) | 48 (42–48) | 0 / 0 | 1,176 | 0.17 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 99 (84–100) | 124 (115–132) | 1 / 1 | 3,455 | 0.23 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,066 (2,104–3,108) | 5,112 (5,082–5,125) | 1 / 1 | 3,797 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 187 (168–202) | 234 (214–237) | 1 / 1 | 3,439 | 0.16 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 36 (32–40) | 50 (45–54) | 0 / 0 | 776 | 0.18 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 116 (99–131) | 148 (148–164) | 1 / 1 | 2,660 | 0.24 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,080 (2,147–3,107) | 5,117 (5,080–5,126) | 1 / 1 | 2,923 | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 200 (171–202) | 249 (219–346) | 1 / 1 | 2,681 | 0.18 |
 
 Reading it as a pilot:
 
@@ -421,7 +416,7 @@ Reading it as a pilot:
   confirmatory design must state which assumption it uses, or first run a
   larger pilot.
 - A nearest-rank p95 of 30 values is essentially the second-largest value, so
-  the p95 intervals are coarse; the log-time SDs (0.14–0.40) are the variance
+  the p95 intervals are coarse; the log-time SDs (0.16–0.40) are the variance
   inputs for planning latency precision.
 - `blackhole-restore` is dominated by the scripted conditions: the 2-second
   foreground probe timeout, then a dial that waits for restoration and the
@@ -431,12 +426,27 @@ Reading it as a pilot:
 - Synthetic fixture latency, emulated suspension and headless browsers make
   these figures unsuitable for comparison with phones or real networks.
 
-An earlier run (36938672837 on `da19f2591c0f90a1c102833004acdc1ef0cf139d`)
-exposed two harness defects, both fixed before the run above and recorded here
-so its numbers are not reused: every `discard` epoch was a harness error
-because the reload landed on the bootstrap redirect, and killing sockets after
-advancing the frozen clock let an in-flight reply mark a dead path as recently
-active, which put a 2-second probe timeout into some `hidden-5m` epochs.
+Earlier runs are void and recorded here so their numbers are not reused:
+
+- 36938672837 on `da19f2591c0f90a1c102833004acdc1ef0cf139d`: every `discard`
+  epoch was a harness error because the reload landed on the bootstrap
+  redirect, and killing sockets after advancing the frozen clock let an
+  in-flight reply mark a dead path as recently active, which put a 2-second
+  probe timeout into some `hidden-5m` epochs.
+- 36940357170 on `005065acaafcebfd86be7c8e2024625cdb6cc9b3`: 480/480 on time,
+  but under the first endpoint, which accepted the epoch marker anywhere in
+  the page (including a workspace label) without relay-verified freshness or
+  a live-path check, and which treated crashes and failed warm-ups as
+  exclusions. Review replaced that endpoint.
+- 36946693294 on `a8dca37270e2bb2adf66accecf4958a60e2825a5`: the first run of
+  the revised endpoint recorded 42 non-completions (warm-up failures and
+  deadlines, most in WebKit `blackhole-restore`). Every deadline epoch had
+  `dials=1, handshakes=1, refreshes=1`: the app reconnected and received
+  fresh inventory, but the reconnect's initial snapshot was replaced by the
+  answer to the app's own refresh before its frame painted, and the harness
+  skipped the newer snapshot while the first was pending. That harness race
+  was fixed in `b4ebbfbb` (the frame re-reads what it paints) with a `burst`
+  regression fixture; the app was unchanged.
 
 ## Limits of this evidence
 
