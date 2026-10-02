@@ -137,6 +137,17 @@ describe('failure-tolerant session cache foundation', () => {
     expect(get(missing.cache.summaries).size).toBe(0);
   });
 
+  it('clears an already visible summary when the stored root becomes invalid', async () => {
+    const f = fixture(); f.unlock();
+    await stored(f.cache);
+    await f.cache.restore('local-relay');
+    expect(get(f.cache.summaries).size).toBe(1);
+    sessionStorage.setItem(LAST_KNOWN_STORAGE_KEY, '{malformed');
+    f.cache.revalidate();
+    expect(get(f.cache.summaries).size).toBe(0);
+    expect(get(f.cache.availability).unavailable).toBe(true);
+  });
+
   it('expires while mounted and after suspension without extending retention', async () => {
     const value = summary();
     const raw = await encrypted(value);

@@ -2914,6 +2914,8 @@ class RelayStore {
   }
 
   watchPane(agent: Agent): void {
+    const target = targetRefForAgent(agent);
+    if (!target || !this.canDispatch(agent.relay_id, { type: 'watch_pane', target })) return;
     this.watchedPanes.set(agent.pane_id, agent);
     this.startPaneWatch(agent.pane_id);
   }
@@ -3404,7 +3406,15 @@ class RelayStore {
       generation: target.generation,
       ...(target.agent_session_id ? { agent_session_id: target.agent_session_id } : {}),
     };
-    return new AttachmentBatchController(backendTarget, this.attachmentUploadCallbacks(agent.relay_id), {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    const binding = connection && this.inventoryBinding(connection);
+    const nonce = connection?.snapshotNonce;
+    const eligibleAtCreation = this.canDispatch(agent.relay_id, { type: 'upload_begin', target });
+    const eligible = () => Boolean(eligibleAtCreation && connection && binding
+      && this.isCurrentConnection(agent.relay_id, connection)
+      && connection.pathIdentity === binding.path && connection.wakeGeneration === binding.wake
+      && connection.snapshotNonce === nonce && this.relayActionsFresh(agent.relay_id));
+    return new AttachmentBatchController(backendTarget, this.attachmentUploadCallbacks(agent.relay_id, eligible), {
       maxFiles: 8,
       maxFileBytes: 20 * 1024 * 1024,
       maxBatchBytes: 50 * 1024 * 1024,
@@ -3413,25 +3423,31 @@ class RelayStore {
   }
 
   async uploadAttachments(agent: Agent, files: FileList | readonly File[]) {
+    const target = targetRefForAgent(agent);
+    if (!target || !this.canDispatch(agent.relay_id, { type: 'upload_begin', target })) {
+      throw new CommandError('Waiting for current authenticated inventory; attachments are unavailable.');
+    }
     const controller = this.attachmentController(agent);
     controller.select(files);
     return controller.upload();
   }
 
-  private attachmentUploadCallbacks(relayId: string): AttachmentUploadCallbacks {
+  private attachmentUploadCallbacks(relayId: string, eligible: () => boolean): AttachmentUploadCallbacks {
+    const send = <T extends Record<string, any>>(type: string, responseType: string, request: unknown, signal?: AbortSignal): Promise<T> =>
+      eligible() ? this.sendUploadRequest<T>(relayId, type, responseType, request, signal)
+        : Promise.reject(new CommandError('Attachment session changed; start a new upload after fresh inventory.'));
     return {
-      begin: (request, signal) => this.sendUploadRequest<UploadBeginResult>(
-        relayId, 'upload_begin', 'upload_begin_result', request, signal,
+      begin: (request, signal) => send<UploadBeginResult>(
+        'upload_begin', 'upload_begin_result', request, signal,
       ),
-      chunk: (request, signal) => this.sendUploadRequest<UploadChunkResult>(
-        relayId,
+      chunk: (request, signal) => send<UploadChunkResult>(
         'upload_chunk',
         'upload_chunk_result',
         { ...request, data: standardBase64Encode(request.data) },
         signal,
       ),
-      finish: (request, signal) => this.sendUploadRequest<UploadFinishResult>(
-        relayId, 'upload_finish', 'upload_finish_result', request, signal,
+      finish: (request, signal) => send<UploadFinishResult>(
+        'upload_finish', 'upload_finish_result', request, signal,
       ),
       cancel: (request) => this.sendUploadRequest<Record<string, any>>(
         relayId, 'upload_cancel', 'upload_cancel_result', request,
@@ -3517,7 +3533,8 @@ class RelayStore {
     }
     if (message.type === 'upload_begin_result' && typeof message.result.upload_id === 'string'
       && pending.targetKey && message.result.upload_id.length <= 256) {
-      this.connectionsValue.get(relayId)?.cleanupGrants.add(`upload:${pending.targetKey}:${message.result.upload_id}`);
+      const grants = this.connectionsValue.get(relayId)?.cleanupGrants;
+      if (grants && grants.size < 512) grants.add(`upload:${pending.targetKey}:${message.result.upload_id}`);
     }
     pending.resolve(message.result);
   }

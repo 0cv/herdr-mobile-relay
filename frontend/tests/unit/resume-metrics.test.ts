@@ -112,6 +112,23 @@ function dialWss(metrics: ResumeMetrics, time: ReturnType<typeof fakeClock>, rel
 }
 
 describe('local resume metrics', () => {
+  it('requires relay-scoped live presentation, never another relay or cached first-known rows', () => {
+    const time = fakeClock();
+    const metrics = new ResumeMetrics(time.clock, true);
+    metrics.presentInventory((relayId) => relayId === 'live-relay');
+    metrics.wake('cold-start');
+    for (const relayId of ['cached-relay', 'live-relay']) {
+      const generation = metrics.attempt(relayId, false);
+      dialWss(metrics, time, relayId, generation);
+      metrics.inventory(relayId, generation, true);
+    }
+    time.renderFrames();
+    expect(metrics.snapshot()[0].samples.map((sample) => sample.outcome)).toEqual([null, 'fresh']);
+    time.advance(RESUME_DEADLINE_MS);
+    expect(metrics.snapshot()[0].samples.map((sample) => sample.outcome)).toEqual(['deadline', 'fresh']);
+    expect(summarizeResume(metrics.snapshot()).groups.reduce((sum, group) => sum + group.valid_attempts, 0)).toBe(2);
+  });
+
   it('records the exact phase order of a cold WSS dial labelled by an authenticated descriptor', () => {
     const time = fakeClock();
     const metrics = shown(new ResumeMetrics(time.clock, true));

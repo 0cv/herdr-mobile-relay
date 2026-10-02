@@ -76,9 +76,27 @@ describe('B2 store freshness and dispatch boundary', () => {
       expect(relayStore.sendRaw(f.id, { type, target })).toBe(false);
     }
     await expect(relayStore.sendCommand(f.id, { type: 'install_update' })).rejects.toThrow('Waiting for current');
+    relayStore.watchPane({ ...rawAgent(), relay_id: f.id, relay_label: f.id,
+      raw_pane_id: 'pane-1', pane_id: `${f.id}::pane-1` });
     expect(relayStore.sendRaw(f.id, { type: 'refresh_agents' })).toBe(true);
     f.reply();
+    expect(f.session.sent.some((message) => ['read_pane', 'watch_pane', 'install_update'].includes(String(message.type)))).toBe(false);
     expect(relayStore.sendRaw(f.id, { type: 'unknown_future_write' })).toBe(false);
+  });
+
+  it('rejects stale upload initiation and fences a retained controller across lock/unlock generations', async () => {
+    const f = boot();
+    const agent = { ...rawAgent(), relay_id: f.id, relay_label: f.id,
+      raw_pane_id: 'pane-1', pane_id: `${f.id}::pane-1` };
+    await expect(relayStore.uploadAttachments(agent, [new File(['png'], 'shot.png', { type: 'image/png' })])).rejects.toThrow('attachments are unavailable');
+    f.reply();
+    const controller = relayStore.attachmentController(get(relayStore.agents)[0]);
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    relayStore.setActionLocked(true); relayStore.setActionLocked(false);
+    relayStore.requestAgents(true); f.reply();
+    expect(relayStore.relayActionsFresh(f.id)).toBe(true);
+    await expect(controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_failed' });
+    expect(f.session.sent.some((message) => message.type === 'upload_begin')).toBe(false);
   });
 
   it('re-resolves exact generations, never promotes a retained target by matching pane ID', async () => {

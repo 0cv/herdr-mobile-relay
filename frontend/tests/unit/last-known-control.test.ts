@@ -25,10 +25,9 @@ let locksDescriptor: PropertyDescriptor | undefined;
 
 function tab(shared: Storage, options: Partial<ConstructorParameters<typeof LastKnownSessionCache>[0]> = {}) {
   const session = new MemoryStorage();
-  let control: LastKnownControl;
   const cache = new LastKnownSessionCache({ storage: session, origin: 'https://app.example',
     credential: () => credential, epoch: () => control.epoch(), ...options });
-  control = new LastKnownControl(shared, cache);
+  const control = new LastKnownControl(shared, cache);
   cleanup.push(control.initialize());
   cache.setLocked(false);
   return { session, control, cache };

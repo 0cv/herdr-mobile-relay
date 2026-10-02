@@ -141,7 +141,7 @@ describe('relay command store', () => {
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', agent: 'codex' }] });
     const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_rename', name: '123' });
     const command = JSON.parse(socket.sent.at(-1)!);
-    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 3 });
+    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 3, ...exactWireScope('w1:p1', relayId) });
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
@@ -2004,6 +2004,7 @@ describe('relay command store', () => {
     currentSocket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Current agent', ...exactAgentFields() }] });
     const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_stop' });
     const command = JSON.parse(currentSocket.sent.at(-1)!);
+    expect(command.target.relay_id).toBe(relayId);
 
     oldSocket.message({ type: 'agents', agents: [] });
     oldSocket.serverClose();
@@ -2695,6 +2696,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
+    seedUploadAgent(socket);
     const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
@@ -2704,7 +2706,6 @@ describe('relay command store', () => {
       terminal_id: 'terminal-1',
       generation: 1,
     }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
-    seedUploadAgent(socket);
     await vi.waitFor(() => expect(socket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
 
     socket.serverClose();
@@ -2717,6 +2718,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
+    seedUploadAgent(socket);
     const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
@@ -2726,7 +2728,6 @@ describe('relay command store', () => {
       terminal_id: 'terminal-1',
       generation: 1,
     }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
-    seedUploadAgent(socket);
 
     const rejection = expect(upload).rejects.toMatchObject({ code: 'attachment_upload_failed' });
     await vi.advanceTimersByTimeAsync(60_000);
@@ -2741,6 +2742,7 @@ describe('relay command store', () => {
     fedoraSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     macSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'mac', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Fedora')!.id;
+    seedUploadAgent(fedoraSocket);
     const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
@@ -2750,7 +2752,6 @@ describe('relay command store', () => {
       terminal_id: 'terminal-1',
       generation: 1,
     }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
-    seedUploadAgent(fedoraSocket);
     await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
     const begin = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_begin');
     macSocket.message({
@@ -3211,7 +3212,6 @@ describe('relay command store', () => {
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
-    const relayId = get(relayStore.relayConfigs)[0].id;
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
     const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'submit_prompt', text: 'ship it' });
     expect(JSON.parse(socket.sent.at(-1)!).type).toBe('submit_prompt');
@@ -3230,7 +3230,6 @@ describe('relay command store', () => {
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
-    const relayId = get(relayStore.relayConfigs)[0].id;
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
     const pending = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'submit_prompt', text: 'ship it' });
     const command = JSON.parse(socket.sent.at(-1)!);
@@ -3251,7 +3250,6 @@ describe('relay command store', () => {
       type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
-    const relayId = get(relayStore.relayConfigs)[0].id;
     socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
     const outcome = relayStore.sendToAgent(get(relayStore.agents)[0], { type: 'agent_rename', name: 'renamed' })
       .then(() => null, (caught) => caught as CommandError);

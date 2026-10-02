@@ -152,10 +152,9 @@ export interface LastKnownCacheOptions {
 }
 
 /**
- * Session-only storage foundation. Default off and locked; it is intentionally
- * not instantiated by the application until cross-tab/lifecycle integration and
- * action gating are complete. The epoch provider is mandatory, fails closed,
- * and must be revalidated on resume before making summaries visible.
+ * Session-only storage, default off and locked. Independent action guards never
+ * consult these display summaries. The mandatory persisted epoch provider fails
+ * closed and must be revalidated on resume before making summaries visible.
  */
 export class LastKnownSessionCache {
   private readonly summariesStore = writable<ReadonlyMap<string, LastKnownSummary>>(new Map());
@@ -270,10 +269,10 @@ export class LastKnownSessionCache {
     try {
       const entries = this.read(epoch!, now);
       const raw = entries.entries.find((entry) => parseLastKnownEnvelope(entry, now).relayId === relayId);
-      if (!raw) return;
+      if (!raw) { this.dropVisible(relayId); return; }
       const envelope = parseLastKnownEnvelope(raw, now);
       const credential = this.options.credential(relayId);
-      if (!credential) return;
+      if (!credential) { this.dropVisible(relayId); return; }
       const plaintext = await (this.options.decrypt ?? decryptLastKnown)(raw, {
         origin: this.options.origin, relayId, credential, lastFreshAt: envelope.lastFreshAt,
       }, this.options.crypto ?? globalThis.crypto, now);
@@ -281,9 +280,9 @@ export class LastKnownSessionCache {
       const currentNow = this.clock();
       if (currentNow === null) return;
       const summary = validateLastKnown(JSON.parse(plaintext), relayId, currentNow);
-      if (!summary || summary.lastFreshAt !== envelope.lastFreshAt || generation !== this.generation
-        || sequence !== this.latest.get(relayId) || !this.canUse(epoch)
-        || !this.sameCredential(relayId, credential)) return;
+      if (generation !== this.generation || sequence !== this.latest.get(relayId)) return;
+      if (!summary || summary.lastFreshAt !== envelope.lastFreshAt || !this.canUse(epoch)
+        || !this.sameCredential(relayId, credential)) { this.dropVisible(relayId); return; }
       this.valuesEpoch = epoch;
       const deadline = (this.options.monotonic?.() ?? performance.now())
         + Math.max(0, summary.lastFreshAt + LAST_KNOWN_MAX_AGE_MS - currentNow);
@@ -298,6 +297,8 @@ export class LastKnownSessionCache {
       }
       this.publish();
     } catch {
+      if (generation === this.generation && sequence === this.latest.get(relayId)
+        && this.restoring.get(relayId) === token) this.dropVisible(relayId);
       this.availabilityStore.update((state) => ({ ...state, unavailable: true }));
     } finally {
       if (this.restoring.get(relayId) === token) this.restoring.delete(relayId);
@@ -336,8 +337,16 @@ export class LastKnownSessionCache {
       if (entries.entries.length) this.options.storage!.setItem(LAST_KNOWN_STORAGE_KEY, JSON.stringify(entries));
       else this.options.storage!.removeItem(LAST_KNOWN_STORAGE_KEY);
     } catch {
+      this.fence();
       this.availabilityStore.set({ unavailable: true, persistenceUncertain: true });
     }
+  }
+
+  private dropVisible(relayId: string): void {
+    if (!this.values.delete(relayId)) return;
+    this.visibleDeadlines.delete(relayId);
+    this.publishedCredentials.delete(relayId);
+    this.publish();
   }
 
   dispose(): void {

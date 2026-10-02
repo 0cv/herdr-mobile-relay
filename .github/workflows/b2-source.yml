@@ -31,8 +31,14 @@ jobs:
       - name: Focused Go tests including inventory barriers
         run: go test -race ./internal/app ./internal/coordinator ./internal/protocol
       - run: bun install --frozen-lockfile --cwd frontend
-      - name: Generate assets using the existing release pipeline
-        run: make web-release
+      - name: Verify source and generate assets only through the release pipeline
+        run: |
+          make frontend-check
+          if diff -qr frontend/dist web; then
+            make web-bundle-check
+          else
+            make web-release
+          fi
       - name: Install hosted browser engines
         run: cd frontend && bun x playwright install --with-deps chromium webkit
       - name: Functional packaged browser regressions
