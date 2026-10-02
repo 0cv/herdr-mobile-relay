@@ -54,14 +54,14 @@ test('B2 deferred surfaces load on demand; inspector custom properties agree wit
   await boot(page);
   await page.getByRole('button', { name: 'Manage workspaces', exact: true }).click();
   await toolsRetry(page);
-  await expect(page.getByRole('heading', { name: 'Workspaces', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Workspaces', exact: true, level: 2 })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Herdr workspaces' })).toContainText('fixture-ws-1');
   await page.getByRole('button', { name: 'Start agent', exact: true }).click();
   await expect(page.locator('#launch-profile')).toBeVisible();
   expect((await commands(page)).some((command) => command === 'agent_start')).toBe(false);
   await page.getByRole('button', { name: 'Back', exact: true }).first().click();
   // Routing may return to the workspaces surface; return to agents explicitly.
-  if (await page.getByRole('heading', { name: 'Workspaces', exact: true }).isVisible()) {
+  if (await page.getByRole('heading', { name: 'Workspaces', exact: true, level: 2 }).isVisible()) {
     await page.getByRole('button', { name: 'Back', exact: true }).first().click();
   }
   await page.locator('.agent-open').first().click();
