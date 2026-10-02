@@ -126,6 +126,7 @@ interface StoredEntries {
   schema: 1;
   /** Opaque persisted invalidation identity provided by lifecycle integration. */
   epoch: string;
+  lastObservedAt: number;
   entries: string[];
 }
 
@@ -145,6 +146,7 @@ export interface LastKnownCacheOptions {
   credential: (relayId: string) => RelayDeviceCredential | null;
   crypto?: Crypto;
   now?: () => number;
+  monotonic?: () => number;
   encrypt?: typeof encryptLastKnown;
   decrypt?: typeof decryptLastKnown;
 }
@@ -168,6 +170,7 @@ export class LastKnownSessionCache {
   private suppressed = false;
   private values = new Map<string, LastKnownSummary>();
   private valuesEpoch: string | null = null;
+  private visibleDeadlines = new Map<string, number>();
   private publishedCredentials = new Map<string, RelayDeviceCredential>();
   private pending = new Map<string, PendingWrite>();
   private restoring = new Map<string, object>();
@@ -282,11 +285,15 @@ export class LastKnownSessionCache {
         || sequence !== this.latest.get(relayId) || !this.canUse(epoch)
         || !this.sameCredential(relayId, credential)) return;
       this.valuesEpoch = epoch;
+      const deadline = (this.options.monotonic?.() ?? performance.now())
+        + Math.max(0, summary.lastFreshAt + LAST_KNOWN_MAX_AGE_MS - currentNow);
+      this.visibleDeadlines.set(relayId, Math.min(this.visibleDeadlines.get(relayId) ?? deadline, deadline));
       this.values.set(relayId, summary);
       this.publishedCredentials.set(relayId, { ...credential });
       if (this.values.size > LAST_KNOWN_MAX_RELAYS) {
         const oldest = Array.from(this.values).sort((left, right) => left[1].lastFreshAt - right[1].lastFreshAt)[0][0];
         this.values.delete(oldest);
+        this.visibleDeadlines.delete(oldest);
         this.publishedCredentials.delete(oldest);
       }
       this.publish();
@@ -314,8 +321,10 @@ export class LastKnownSessionCache {
       } catch {
         // Denied credential storage is not permission to retain decrypted data.
       }
-      if (!eligible || !validateLastKnown(summary, relayId, now)) {
+      if (!eligible || !validateLastKnown(summary, relayId, now)
+        || (this.options.monotonic?.() ?? performance.now()) >= (this.visibleDeadlines.get(relayId) ?? 0)) {
         this.values.delete(relayId);
+        this.visibleDeadlines.delete(relayId);
         this.publishedCredentials.delete(relayId);
         purged.add(relayId);
       }
@@ -357,6 +366,7 @@ export class LastKnownSessionCache {
             return envelope.relayId === relayId && envelope.lastFreshAt > work.summary.lastFreshAt;
           })) continue;
           entries.entries = entries.entries.filter((entry) => parseLastKnownEnvelope(entry, now).relayId !== relayId);
+          entries.lastObservedAt = now;
           entries.entries.push(raw);
           entries.entries.sort((left, right) => parseLastKnownEnvelope(left, now).lastFreshAt
             - parseLastKnownEnvelope(right, now).lastFreshAt);
@@ -395,14 +405,14 @@ export class LastKnownSessionCache {
   private read(epoch: string, now: number): StoredEntries {
     if (!this.options.storage) throw unavailable();
     const raw = this.options.storage.getItem(LAST_KNOWN_STORAGE_KEY);
-    if (!raw) return { schema: 1, epoch, entries: [] };
+    if (!raw) return { schema: 1, epoch, lastObservedAt: now, entries: [] };
     if (raw.length > LAST_KNOWN_MAX_STORED_BYTES
       || encoder.encode(raw).byteLength > LAST_KNOWN_MAX_STORED_BYTES) throw unavailable();
     const value: unknown = JSON.parse(raw);
-    if (!lastKnownRecord(value) || !lastKnownKeys(value, ['schema', 'epoch', 'entries'])
-      || value.schema !== 1 || !Array.isArray(value.entries)
+    if (!lastKnownRecord(value) || !lastKnownKeys(value, ['schema', 'epoch', 'lastObservedAt', 'entries'])
+      || value.schema !== 1 || !lastKnownTimestamp(value.lastObservedAt) || value.lastObservedAt > now || !Array.isArray(value.entries)
       || value.entries.length > LAST_KNOWN_MAX_RELAYS) throw unavailable();
-    if (value.epoch !== epoch) return { schema: 1, epoch, entries: [] };
+    if (value.epoch !== epoch) return { schema: 1, epoch, lastObservedAt: now, entries: [] };
     const seen = new Set<string>();
     const entries: string[] = [];
     for (const entry of value.entries) {
@@ -417,7 +427,7 @@ export class LastKnownSessionCache {
         // Discard independently so a bad relay cannot prevent other misses/writes.
       }
     }
-    return { schema: 1, epoch, entries };
+    return { schema: 1, epoch, lastObservedAt: now, entries };
   }
 
   private canUse(epoch: string | null): boolean {
@@ -450,6 +460,7 @@ export class LastKnownSessionCache {
     this.latest.clear();
     this.latestFreshAt.clear();
     this.values.clear();
+    this.visibleDeadlines.clear();
     this.publishedCredentials.clear();
     this.valuesEpoch = null;
     this.publish();
@@ -461,7 +472,9 @@ export class LastKnownSessionCache {
     this.summariesStore.set(new Map(this.values));
     if (!this.values.size) return;
     const expiry = Math.min(...Array.from(this.values.values(), (summary) => summary.lastFreshAt + LAST_KNOWN_MAX_AGE_MS));
-    this.expiryTimer = setTimeout(() => this.revalidate(), Math.max(0, expiry - (this.options.now?.() ?? Date.now())));
+    const monotonicRemaining = Math.min(...this.visibleDeadlines.values()) - (this.options.monotonic?.() ?? performance.now());
+    this.expiryTimer = setTimeout(() => this.revalidate(), Math.max(0, Math.min(30_000,
+      monotonicRemaining, expiry - (this.options.now?.() ?? Date.now()))));
   }
 }
 

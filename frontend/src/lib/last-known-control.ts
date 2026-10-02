@@ -10,6 +10,7 @@ interface Control { schema: 1; enabled: boolean; epoch: string }
 export class LastKnownControl {
   private control: Control | null = null;
   private blocked = true;
+  generation = 0;
   private channel: BroadcastChannel | null = null;
   private readonly stateStore = writable({ enabled: false, unavailable: false });
   readonly state = { subscribe: this.stateStore.subscribe };
@@ -60,6 +61,7 @@ export class LastKnownControl {
       return;
     }
     if (this.control && (current.epoch !== this.control.epoch || current.enabled !== this.control.enabled)) {
+      this.generation++;
       this.cache.forget();
       this.cache.setEnabled(current.enabled);
     }
@@ -74,6 +76,7 @@ export class LastKnownControl {
 
   /** Fence immediately; Web Locks serialize concurrent control changes, not data. */
   async rotate(enabled?: boolean): Promise<boolean> {
+    this.generation++;
     this.blocked = true;
     this.cache.forget();
     try {

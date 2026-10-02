@@ -8,6 +8,35 @@ rule, and it makes **no performance claim**. The last-known view (B2),
 reconnect changes (B3) and Push/physical qualification (B4) are separate
 deliverables.
 
+## B2 candidate: last-known is not fresh completion
+
+The source candidate adds an optional encrypted, tab-scoped, dated read-only summary
+and an independent action-freshness guard. Persistence defaults off and does not
+control action authority. Summary rows never receive a live-agent benchmark selector
+and cannot satisfy the fresh-inventory endpoint. First-known render is descriptive
+only, never an on-time fresh completion. The 60-second deadline, all-attempt
+accounting and conservative occlusion rules remain unchanged.
+
+Action freshness uses an authenticated random request nonce and one atomic response
+from a poll started after admission. An already-in-flight poll, handshake, ping,
+activity, workspace-only frame or uncorrelated legacy inventory cannot establish it.
+Connection/path replacement, wake, lock, refusal or unready/stale inventory invalidate
+it; workspace freshness is separate. Metrics observe this boundary, not grant it.
+Unsupported relays fail closed rather than falling back to B1's timing heuristic.
+
+The summary retains only bounded labels, coarse type/status and local last-fresh time;
+labels may be sensitive. It expires within 60 minutes, uses encrypted sessionStorage
+only, is removed from DOM/current references on lock and is invalidated by Forget,
+opt-out, removal, credential change or observed refusal. Tab restoration may retain
+it; fresh Home Screen sessions, tab closure or eviction may miss. Read the consent,
+bounds and threat-model limits in [security.md](security.md#opt-in-last-known-summaries).
+There is no real-device acceleration or B4 qualification claim.
+
+The pre-review B1 status/evidence passages below are historical; the roadmap records
+B1 approved at `1d545fc56dd8f0570f0e1157da3f3cd21c1ff00a` (closeout run `1a77291c`).
+This candidate's B2 hosted acceptance and independent approval remain outstanding;
+that B1 closeout does not approve B2 or statistical/physical confirmation.
+
 ## What the app measures
 
 A **wake epoch** begins at the first observable wake signal:

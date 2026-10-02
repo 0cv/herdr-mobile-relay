@@ -1,13 +1,20 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { LastKnownSummary } from '$lib/last-known';
   let { summary, relayLabel }: { summary: LastKnownSummary; relayLabel: string } = $props();
   const observed = $derived(new Date(summary.lastFreshAt));
+  let now = $state(Date.now());
+  const minutes = $derived(Math.max(0, Math.floor((now - summary.lastFreshAt) / 60_000)));
+  onMount(() => {
+    const timer = setInterval(() => { now = Date.now(); }, 30_000);
+    return () => clearInterval(timer);
+  });
 </script>
 
 <section class="last-known" aria-label={`${relayLabel} last-known summary`} data-last-known>
   <h2>{relayLabel}</h2>
   <p role="status">Last seen <time datetime={observed.toISOString()}>{observed.toLocaleString()}</time> — reconnecting; read-only</p>
-  <p>This local summary is not current inventory. It expires within 60 minutes of the time shown.</p>
+  <p>{minutes} minute{minutes === 1 ? '' : 's'} old. This local summary is not current inventory. It expires within 60 minutes of the time shown.</p>
   {#if summary.truncated}<p>Some labels or rows were shortened or omitted.</p>{/if}
   {#each summary.groups as group (group.id)}
     <h3>{group.label}</h3>

@@ -459,6 +459,7 @@ interface RelayConnection extends RelayConnectionView {
   wakeGeneration: number;
   snapshotPending: boolean;
   snapshotNonce: string;
+  summaryGeneration: number;
   snapshotTimer: ReturnType<typeof setTimeout> | null;
   cleanupGrants: Set<string>;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
@@ -599,11 +600,11 @@ class RelayStore {
   });
   private actionLocked = false;
   private stopLastKnown: (() => void) | null = null;
-  private readonly lastKnownCache = new LastKnownSessionCache({
+  private readonly lastKnownCache: LastKnownSessionCache = new LastKnownSessionCache({
     storage: browserStorage(() => sessionStorage), origin: location.origin,
     epoch: () => this.lastKnownControl.epoch(), credential: (id) => this.deviceCredential(id),
   });
-  readonly lastKnownControl = new LastKnownControl(browserStorage(() => localStorage), this.lastKnownCache);
+  readonly lastKnownControl: LastKnownControl = new LastKnownControl(browserStorage(() => localStorage), this.lastKnownCache);
   readonly lastKnown = this.lastKnownCache.summaries;
   readonly lastKnownAvailability = this.lastKnownCache.availability;
 
@@ -1008,7 +1009,7 @@ class RelayStore {
         (value) => this.parseFreshAgents(relay, value),
         (value) => this.parseFreshWorkspaces(relay, value),
       ),
-      pathIdentity: {}, wakeGeneration: 0, snapshotPending: false, snapshotNonce: '', snapshotTimer: null,
+      pathIdentity: {}, wakeGeneration: 0, snapshotPending: false, snapshotNonce: '', summaryGeneration: 0, snapshotTimer: null,
       cleanupGrants: new Set(), actionsFresh: false, workspacesFresh: false,
       status: 'connecting',
       path: '',
@@ -1461,7 +1462,7 @@ class RelayStore {
       this.agentsValue = [...this.agentsValue.filter((agent) => agent.relay_id !== relayId), ...fresh.agents];
       if (fresh.workspaces) this.workspacesValue = [...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId), ...fresh.workspaces];
       // Persist only this validated correlated frame, never the presentation merge.
-      if (fresh.workspaces) {
+      if (fresh.workspaces && connection.summaryGeneration === this.lastKnownControl.generation) {
         try { this.lastKnownCache.write(projectLastKnown(relayId, message.agents, message.workspaces, Date.now())); } catch { /* Cache misses never affect live rendering. */ }
       }
       this.publishAgents('correlated snapshot');
@@ -1659,6 +1660,13 @@ class RelayStore {
         ...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId),
         ...incoming,
       ];
+      if (connection?.actionsFresh && !connection.snapshotPending) {
+        const fresh = connection.freshness.current(this.inventoryBinding(connection));
+        if (!fresh?.workspaces || incoming.length !== fresh.workspaces.length
+          || incoming.some((workspace: RelayWorkspace) => !fresh.workspaces!.some((old) => old.workspace_id === workspace.workspace_id))) {
+          this.requestFreshSnapshot(relayId, connection);
+        }
+      }
       this.publishWorkspaces();
       return;
     }
@@ -1689,6 +1697,14 @@ class RelayStore {
         this.blockedSnapshotMisses,
         this.respondingValue,
       );
+      if (connection?.actionsFresh && !connection.snapshotPending) {
+        const fresh = connection.freshness.current(this.inventoryBinding(connection));
+        if (!fresh || incoming.length !== fresh.agents.length
+          || incoming.some((agent: Agent) => {
+            const target = targetRefForAgent(agent);
+            return !target || !fresh.agents.some((old) => targetRefMatchesAgent(target, old));
+          })) this.requestFreshSnapshot(relayId, connection);
+      }
       this.reconcileResponding();
       this.publishAgents('agents snapshot');
       if (connection) {
@@ -2043,12 +2059,15 @@ class RelayStore {
     connection.workspacesFresh = false;
     connection.snapshotPending = true;
     connection.snapshotNonce = String(request.snapshot_request_id);
+    connection.summaryGeneration = this.lastKnownControl.generation;
     if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
     connection.snapshotTimer = setTimeout(() => {
       if (!this.isCurrentConnection(relayId, connection)) return;
       this.invalidateFreshness(relayId, connection);
       this.emitConnections();
     }, 15_000);
+    this.emitConnections();
+    if (!this.actionLocked) void this.lastKnownCache.restore(relayId);
     return this.sendRaw(relayId, request);
   }
 
@@ -2107,21 +2126,32 @@ class RelayStore {
   }
 
   private canDispatch(relayId: string, payload: Record<string, unknown>): boolean {
+    try { return this.dispatchEligible(relayId, payload); } catch { return false; }
+  }
+
+  private dispatchEligible(relayId: string, payload: Record<string, unknown>): boolean {
     const connection = this.connectionsValue.get(relayId);
     if (!connection || connection.closed) return false;
     const type = String(payload.type === 'command' ? payload.action : payload.type);
     if (RECOVERY_ACTIONS.has(type)) return true;
     const policy = actionPolicy(type);
     if (!policy) return false;
-    if (policy.controller && this.deviceCredential(relayId)?.role === 'reader') return false;
+    const credential = this.deviceCredential(relayId);
+    if (policy.controller && credential?.role === 'reader'
+      && !(type === 'revoke_device' && payload.device_id === credential.deviceId)) return false;
     const cleanup = CLEANUP_FOR.get(type);
     const cleanupKey = this.cleanupKey(payload, relayId);
     if (cleanup && cleanupKey && connection.cleanupGrants.has(`${cleanup}:${cleanupKey}`)) return true;
     if (!this.relayActionsFresh(relayId)) return false;
+    if (['watch_pane', 'lease_pane_size', 'upload_begin'].includes(type)
+      && connection.cleanupGrants.size >= 512
+      && !connection.cleanupGrants.has(`${type}:${cleanupKey}`)) return false;
     const fresh = connection.freshness.current(this.inventoryBinding(connection));
     if (!fresh) return false;
     if (policy.target || payload.target) {
       const key = this.targetKey(relayId, payload.target);
+      const target = payload.target as Record<string, unknown> | undefined;
+      if (payload.pane_id !== undefined && payload.pane_id !== target?.pane_id) return false;
       if (!key || !fresh.agents.some((agent) => targetStoreKey(targetRefForAgent(agent)!) === key
         && this.agentsValue.some((current) => current.relay_id === relayId
           && targetRefMatchesAgent(targetRefForAgent(agent)!, current)))) return false;

@@ -140,7 +140,7 @@ describe('failure-tolerant session cache foundation', () => {
   it('expires while mounted and after suspension without extending retention', async () => {
     const value = summary();
     const raw = await encrypted(value);
-    sessionStorage.setItem(LAST_KNOWN_STORAGE_KEY, JSON.stringify({ schema: 1, epoch: 'A'.repeat(43), entries: [raw] }));
+    sessionStorage.setItem(LAST_KNOWN_STORAGE_KEY, JSON.stringify({ schema: 1, epoch: 'A'.repeat(43), lastObservedAt: NOW, entries: [raw] }));
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const { cache, unlock } = fixture({ now: () => Date.now() });
@@ -172,7 +172,7 @@ describe('failure-tolerant session cache foundation', () => {
       const gate = new Promise<void>((resolve) => { release = resolve; });
       const value = summary();
       const raw = await encrypted(value);
-      sessionStorage.setItem(LAST_KNOWN_STORAGE_KEY, JSON.stringify({ schema: 1, epoch: 'A'.repeat(43), entries: [raw] }));
+      sessionStorage.setItem(LAST_KNOWN_STORAGE_KEY, JSON.stringify({ schema: 1, epoch: 'A'.repeat(43), lastObservedAt: NOW, entries: [raw] }));
       const f = fixture({ decrypt: async () => { await gate; return JSON.stringify(value); } });
       f.unlock();
       const restoring = f.cache.restore('local-relay');
