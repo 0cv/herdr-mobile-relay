@@ -1,6 +1,6 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test';
 import { epochSeed } from '../../scripts/analyze-resume-benchmarks.mjs';
-import { runEpoch, SCENARIOS, TRANSPORTS } from '../../scripts/run-resume-benchmarks.mjs';
+import { observeDirectUpgrade, runEpoch, SCENARIOS, TRANSPORTS } from '../../scripts/run-resume-benchmarks.mjs';
 import {
   fixtureRelay,
   resumeFixtureInit,
@@ -478,6 +478,58 @@ test.describe('benchmark runner direct upgrade outcomes', () => {
     expect(upgrade.refused).toBeGreaterThanOrEqual(1);
     // An attempt may still be negotiating when the window closes.
     expect(upgrade.refused).toBeLessThanOrEqual(Number(upgrade.attempts));
+  });
+});
+
+test.describe('direct upgrade window', () => {
+  interface RawTimeline {
+    events: Array<{ kind: string; at_ms: number }>;
+    window_closed: boolean;
+    kept_direct: boolean | null;
+  }
+  const none = { attempts: 0, refused: 0, offer_ms: null, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null };
+
+  async function directBoot(page: Page, seed: number): Promise<void> {
+    // A one-second window keeps these checks short; preregistered runs use 30 s.
+    await boot(page, { relays: [fixtureRelay(1, 'hybrid')], direct: true, directWindowMs: 1_000, seed });
+    await awaitFresh(page, [1]);
+    await expect.poll(() => fixture(page, 'currentPath', 1)).toBe('webrtc');
+    await page.waitForTimeout(500);
+  }
+
+  test('ignores an upgrade that only happens after its window, even when the primary resume finishes later', async ({ page }) => {
+    test.setTimeout(60_000);
+    await directBoot(page, 27);
+    await fixture(page, 'hide');
+    // Silently half-open while hidden: the app only finds out from its 2 s
+    // post-wake probe, then reconnects and upgrades again after the window.
+    await fixture(page, 'killConnections');
+    await fixture(page, 'show');
+    const primary = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000)) as { renderedAt?: number; wakeAt: number };
+    expect(typeof primary.renderedAt).toBe('number');
+    expect(Number(primary.renderedAt) - primary.wakeAt).toBeGreaterThan(1_000);
+    await expect.poll(() => fixture(page, 'currentPath', 1), { timeout: 20_000 }).toBe('webrtc');
+    const raw = (await fixture(page, 'directTimeline', 1)) as RawTimeline;
+    expect(raw).toMatchObject({ window_closed: true, kept_direct: false });
+    // A complete new upgrade happened, all of it after the window closed.
+    for (const kind of ['peer', 'offer', 'answer', 'open', 'authenticated', 'promoted']) {
+      expect(raw.events.some((event) => event.kind === kind), kind).toBe(true);
+    }
+    expect(raw.events.every((event) => event.at_ms > 1_000)).toBe(true);
+    expect(await observeDirectUpgrade(page, 1_000)).toEqual({ outcome: 'not-attempted', window_ms: 1_000, ...none });
+  });
+
+  test('keeps a direct session that outlived its window as stayed-direct even if it dies afterwards', async ({ page }) => {
+    await directBoot(page, 28);
+    await fixture(page, 'hide');
+    await fixture(page, 'show');
+    await awaitFresh(page, [1]);
+    await expect.poll(async () => ((await fixture(page, 'directTimeline', 1)) as RawTimeline).window_closed).toBe(true);
+    expect(await fixture(page, 'directTimeline', 1)).toMatchObject({ kept_direct: true });
+    // The direct path dies after the window closed and before the record is read.
+    await fixture(page, 'killConnections');
+    expect(await fixture(page, 'currentPath', 1)).toBeNull();
+    expect(await observeDirectUpgrade(page, 1_000)).toEqual({ outcome: 'stayed-direct', window_ms: 1_000, ...none });
   });
 });
 

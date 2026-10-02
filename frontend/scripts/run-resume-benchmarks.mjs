@@ -42,10 +42,14 @@ const WARMUP_TIMEOUT_MS = 30_000;
 export const IDLE_BEFORE_HIDE_MS = 500;
 /**
  * The separate, bounded window in which a gateway-direct epoch's direct
- * WebRTC upgrade is observed, from the same wake. It never changes the
- * primary 60-second completion deadline or outcome.
+ * WebRTC upgrade is observed, from the same wake. The observation ends at
+ * the first promotion or when the window closes, whichever comes first,
+ * however early or late the primary outcome is; it never changes the primary
+ * 60-second completion deadline or outcome.
  */
 export const DIRECT_UPGRADE_WINDOW_MS = 30_000;
+/** Relay-side direct-upgrade events the fixture reports; anything else is ignored. */
+export const DIRECT_EVENT_KINDS = Object.freeze(['peer', 'offer', 'refused', 'answer', 'open', 'authenticated', 'promoted']);
 const DEVICES = /** @type {const} */ ({ chromium: 'Pixel 7', webkit: 'iPhone 15' });
 
 /**
@@ -294,14 +298,14 @@ export function buildPreregistration(options) {
         'success-only p50/p95',
         'dials, handshakes and bytes per epoch',
         'hidden dials and bytes',
-        `direct WebRTC upgrade outcome and relay-side timeline within ${DIRECT_UPGRADE_WINDOW_MS / 1_000} s of the wake (gateway-direct strata; synthetic DataChannel, not real ICE), separate from the primary endpoint`,
+        `direct WebRTC upgrade outcome and relay-side timeline from the wake until the first promotion or ${DIRECT_UPGRADE_WINDOW_MS / 1_000} s, whichever is first, independent of when the primary outcome is recorded (gateway-direct strata; synthetic DataChannel, not real ICE), separate from the primary endpoint`,
       ],
       not_measured: ['first-known render (no last-known view before B2)', 'OS wake-to-JS, DNS, TCP, TLS', 'real ICE, radio or NAT behaviour'],
     },
     analysis: {
       method: options.design === 'pilot'
         ? 'descriptive: Wilson 95% for completion, percentile bootstrap 95% for all-attempt quantiles, planning for a later confirmatory design'
-        : 'Newcombe paired difference for reliability; paired block bootstrap for quantile ratios; Bonferroni family-wise control; one-sided 95%',
+        : 'Tango asymptotic score bound for the paired difference in non-completion rates; paired percentile bootstrap of matched pairs for quantile ratios; Bonferroni family-wise control; one-sided 95%',
       bootstrap_resamples: 2_000,
       bootstrap_seed: options.baseSeed,
       planned_family_size: family,
@@ -481,6 +485,7 @@ export async function runEpoch(browser, devices, run) {
       seed: schedule.fixtureSeed,
       latencyMs: /** @type {[number, number]} */ ([8, 30]),
       faults: run.faults,
+      directWindowMs: stratum.transport === 'gateway-direct' ? DIRECT_UPGRADE_WINDOW_MS : 0,
     });
     const response = await page.goto('/', { waitUntil: 'load', timeout: WARMUP_TIMEOUT_MS }).catch(() => null);
     if (!response || !response.ok()) {
@@ -552,8 +557,9 @@ export async function runEpoch(browser, devices, run) {
       record.outcome = 'deadline';
     }
     if (stratum.transport === 'gateway-direct') {
-      // Observed after the primary outcome is final; its failure never changes it.
-      record.direct_upgrade = await observeDirectUpgrade(page, result.wakeAt)
+      // Read after the primary outcome is final; its failure never changes it,
+      // and its content depends only on the upgrade's own window.
+      record.direct_upgrade = await observeDirectUpgrade(page)
         .catch(() => ({ outcome: 'unobserved', window_ms: DIRECT_UPGRADE_WINDOW_MS }));
     }
   } catch (error) {
@@ -571,45 +577,82 @@ export async function runEpoch(browser, devices, run) {
 }
 
 /**
- * Waits, within the separate upgrade window from the wake, for the direct
- * WebRTC path to be promoted, and records the relay-side timeline (numbers
- * only). A wake that kept its earlier direct session is `stayed-direct`; one
- * that never tried is `not-attempted`; tries without promotion inside the
- * window are `not-promoted`. The caller records `unobserved` if the page
- * could not be read.
+ * The bounded direct-upgrade record of one wake, from the fixture's
+ * relay-side events (offsets from the wake) and its own window state. Only
+ * the span from the wake to the first promotion, or to the window end if
+ * there is none, counts: events after it are ignored, so the record does not
+ * depend on when it is read (a slow or censored primary outcome cannot add
+ * attempts, refusals or milestones from after the window, or take away a
+ * classification the window already settled).
  *
- * @param {import('@playwright/test').Page} page
- * @param {number} wakeAt
+ * - `promoted`: a direct session was first used inside the window;
+ * - `not-promoted`: direct attempts started inside the window, none promoted;
+ * - `stayed-direct`: no attempt, and the direct session the app used at the
+ *   wake was still its live path when the window closed, with no other
+ *   session selected in between (decided by the fixture at that moment);
+ * - `not-attempted`: neither;
+ * - `unobserved`: the window had not closed and nothing was promoted.
+ *
+ * Only fixed outcome names and finite, non-negative numbers are retained.
+ *
+ * @param {any} raw
+ * @param {number} [windowMs]
  */
-export async function observeDirectUpgrade(page, wakeAt) {
-  const end = wakeAt + DIRECT_UPGRADE_WINDOW_MS;
-  await page.waitForFunction((limit) => {
-    const timeline = /** @type {any} */ (window).__resumeFixture.directTimeline(1);
-    return timeline.promoted_ms !== null || timeline.stayed_direct || performance.now() >= limit;
-  }, end, { polling: 100, timeout: DIRECT_UPGRADE_WINDOW_MS + 5_000 }).catch(() => {});
-  const timeline = /** @type {Record<string, unknown>} */ (await call(page, 'directTimeline', 1));
-  /** @param {string} key */
-  const number = (key) => {
-    const value = timeline[key];
-    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+export function directUpgradeRecord(raw, windowMs = DIRECT_UPGRADE_WINDOW_MS) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  /** @type {any[]} */
+  const listed = Array.isArray(source.events) ? source.events : [];
+  /** @type {Array<{ kind: string; at: number }>} */
+  const events = listed
+    .filter((event) => event && DIRECT_EVENT_KINDS.includes(event.kind)
+      && typeof event.at_ms === 'number' && Number.isFinite(event.at_ms) && event.at_ms >= 0 && event.at_ms <= windowMs)
+    .map((event) => ({ kind: String(event.kind), at: Number(event.at_ms) }));
+  events.sort((left, right) => left.at - right.at);
+  const promotion = events.find((event) => event.kind === 'promoted');
+  if (!promotion && source.window_closed !== true) return { outcome: 'unobserved', window_ms: windowMs };
+  const end = promotion ? promotion.at : windowMs;
+  const span = events.filter((event) => event.at <= end);
+  /** @param {string} kind */
+  const count = (kind) => span.filter((event) => event.kind === kind).length;
+  /** @param {string} kind */
+  const first = (kind) => {
+    const event = span.find((entry) => entry.kind === kind);
+    return event ? Math.round(event.at) : null;
   };
-  const promotedAt = number('promoted_ms');
-  const promoted = promotedAt !== null && promotedAt <= DIRECT_UPGRADE_WINDOW_MS;
-  const attempts = number('attempts') ?? 0;
-  const outcome = promoted
+  const attempts = count('peer');
+  const outcome = promotion
     ? 'promoted'
-    : timeline.stayed_direct === true ? 'stayed-direct' : attempts > 0 ? 'not-promoted' : 'not-attempted';
+    : attempts > 0 ? 'not-promoted' : source.kept_direct === true ? 'stayed-direct' : 'not-attempted';
   return {
     outcome,
-    window_ms: DIRECT_UPGRADE_WINDOW_MS,
+    window_ms: windowMs,
     attempts,
-    refused: number('refused') ?? 0,
-    offer_ms: number('offer_ms'),
-    answer_ms: number('answer_ms'),
-    open_ms: number('open_ms'),
-    authenticated_ms: number('authenticated_ms'),
-    promoted_ms: promoted ? promotedAt : null,
+    refused: count('refused'),
+    offer_ms: first('offer'),
+    answer_ms: first('answer'),
+    open_ms: first('open'),
+    authenticated_ms: first('authenticated'),
+    promoted_ms: promotion ? Math.round(promotion.at) : null,
   };
+}
+
+/**
+ * Waits until the fixture's upgrade window for the current wake has closed or
+ * a promotion inside it has happened (returning at once if the primary
+ * outcome took longer), then returns the bounded record. The fixture opens
+ * that window at the wake with `directWindowMs`; the caller records
+ * `unobserved` if the page could not be read.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {number} [windowMs]
+ */
+export async function observeDirectUpgrade(page, windowMs = DIRECT_UPGRADE_WINDOW_MS) {
+  await page.waitForFunction((limit) => {
+    const timeline = /** @type {any} */ (window).__resumeFixture.directTimeline(1);
+    return timeline.window_closed === true
+      || timeline.events.some((/** @type {any} */ event) => event.kind === 'promoted' && event.at_ms <= limit);
+  }, windowMs, { polling: 100, timeout: windowMs + 5_000 }).catch(() => {});
+  return directUpgradeRecord(await call(page, 'directTimeline', 1), windowMs);
 }
 
 /**

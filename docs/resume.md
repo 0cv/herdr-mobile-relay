@@ -278,14 +278,23 @@ whose authenticated descriptor says Cloudflare or managed Tailscale Serve),
 `gateway-relayed` (direct upgrade disabled) and `gateway-direct` (the measured
 wake starts once the direct WebRTC path has been promoted; a run that never
 promotes is a `warmup-failed` attempt). For `gateway-direct` epochs the runner
-also keeps the **direct upgrade** as a separate, bounded observation: after
-the primary outcome is recorded it waits until the direct path is promoted,
-or 30 s after the same wake, and stores `direct_upgrade` with the outcome
-(`promoted`, `stayed-direct` when the earlier direct session survived the
-wake, `not-promoted`, `not-attempted`, or `unobserved` if the page could no
-longer be read), the number of direct attempts and
-refused offers, and the relay-side offsets from the wake of the first offer,
-answer, DataChannel open, direct E2EE authentication and promotion. The
+also keeps the **direct upgrade** as a separate, bounded observation. The
+fixture opens a 30-second window at the wake itself and closes it on its own
+timer; the observation covers the wake up to the first promotion or the
+window's end, whichever is first, however early or late the primary outcome
+is recorded. Once the primary outcome is final the runner waits for that
+window (returning at once if it is already over) and stores
+`direct_upgrade`: the outcome (`promoted` inside the window; `not-promoted`
+when direct attempts started inside it and none was promoted; `stayed-direct`
+when nothing was attempted and the direct session in use at the wake was
+still the live path when the window closed, decided at that moment, so a
+later loss does not change it; `not-attempted`; or `unobserved` if the window
+never closed or the page could no longer be read), the number of direct
+attempts and refused offers inside the window, and the relay-side offsets
+from the wake of the first offer, answer, DataChannel open, direct E2EE
+authentication and promotion inside it. Attempts, refusals and milestones
+after the window are ignored: an upgrade that only starts after it, even
+with a primary outcome recorded much later, is `not-attempted`. The
 primary 60-second deadline and outcome are unaffected, and the analyzer
 reports these as supplementary descriptive counts and promotion times only.
 Other paths record `not-applicable`. The synthetic DataChannel exercises the
@@ -394,9 +403,21 @@ stratum has `n` measured, non-excluded epochs.
   percentile-bootstrap 95% intervals for all-attempt p50/p95, success-only
   p50/p95, log-latency SD, dials/handshakes/bytes per epoch and hidden
   activity, and planning numbers for a confirmatory design.
-- **Paired** (confirmatory): reliability uses Newcombe's hybrid score
-  interval for the paired difference in non-completion rates (method 10);
-  latency uses a paired percentile bootstrap of the all-attempt quantile ratio
+- **Paired** (confirmatory): reliability uses Tango's asymptotic score
+  interval (1998) for the paired difference in non-completion rates, one of
+  the paired-proportion intervals Fagerland, Lydersen and Laake recommend.
+  It depends only on the discordant pairs and the number of pairs: how the
+  concordant pairs split between both-failed and both-completed carries no
+  information about the difference and cannot narrow the bound. With no
+  discordant pair the bound is ±z²/(n + z²) however many pairs failed in
+  both arms (an earlier Newcombe hybrid-score interval estimated the
+  correlation from the observed table and collapsed to zero width for, say,
+  200 both-failed and 200 both-completed pairs), and with no baseline-only
+  failure its upper bound is the Wilson upper bound of the candidate-only
+  rate. The analyzer tests compute its exact miss probability over every
+  outcome at rare discordance with mixed concordant outcomes (for example a
+  true 0.5-point loss with half the pairs failing in both arms, where it is
+  never missed). Latency uses a paired percentile bootstrap of the all-attempt quantile ratio
   candidate/baseline, resampling matched pairs. The matched pair is the only
   independent unit (each pair runs in fresh browser contexts with its own
   preregistered seed); evidence that labels records with a `block` or
@@ -468,8 +489,9 @@ Planning assumptions, computed by `reliabilityPlanning` from a pilot's failure
 rate `p`: with independent failures in both arms the discordance rate is
 `2p(1−p)`, and a paired non-inferiority test at margin 1 point, one-sided
 level `α/m` and 80% power needs about `(z₁₋α/m + z₀.₈)² · 2p(1−p) / 0.01²`
-pairs. Even with zero failures, the Wilson bound only falls inside the margin
-at `n ≥ z²(1−0.01)/0.01` pairs: 381 for a family of two, 498 for four.
+pairs. Even with zero discordant pairs (however many fail in both arms), the
+score bound z²/(n + z²) only falls inside the margin at `n ≥ z²(1−0.01)/0.01`
+pairs: 381 for a family of two, 498 for four.
 Examples: with zero discordance, 400 pairs give an upper bound of 0.95
 points at a family of two but 1.24 points at a family of four; a 10% pilot
 failure rate implies about 14,128 pairs for one target. 400 is a floor, not a
@@ -500,7 +522,9 @@ negative-control trials (4 controls × 3 trials × 2 browsers) were safe. The
 other workloads and paths (`hidden-30s`, `hidden-long`, `network-change`,
 `wss-tailscale`, `gateway-direct`) were exercised once each per browser by
 the hosted browser suite in the same run (for `gateway-direct` also checking
-the direct-upgrade record, plus one refused and one delayed upgrade), not
+the direct-upgrade record, plus one refused and one delayed upgrade, an
+upgrade that only happens after its window while the primary outcome comes
+later still, and a direct session that dies just after its window), not
 sampled by this pilot.
 
 | Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |

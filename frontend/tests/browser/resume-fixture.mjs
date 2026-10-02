@@ -42,9 +42,12 @@
  *   iosTab?: boolean;
  *   connectionEvents?: boolean;
  *   faults?: FixtureFaults;
+ *   directWindowMs?: number;
  * }} FixtureConfig
  *   `connectionEvents` gives the page a `navigator.connection` event target
  *   (WebKit has none), so `networkChange()` can report a network handoff.
+ *   `directWindowMs` opens a direct-upgrade observation window of that
+ *   length at every wake (see `directTimeline`).
  * @typedef {{
  *   workspaceOnly?: boolean;
  *   stale?: boolean;
@@ -225,6 +228,16 @@ export function resumeFixtureInit(config) {
     directEvents: [],
   };
   let visibility = 'visible';
+  /**
+   * The direct-upgrade observation window of the latest wake: the session
+   * each relay was using at the wake, relays that selected another session
+   * since, and, once the window has closed, whether the wake's direct session
+   * was still the live path at its end. It is decided at that moment, never
+   * from whatever is current when the harness reads it later.
+   *
+   * @type {{ epoch: number; wakeAt: number; closed: boolean; start: Map<number, any>; switched: Set<number>; kept: Map<number, boolean> } | null}
+   */
+  let directWindow = null;
   /** @param {string} kind */
   function noteDirect(kind) {
     state.directEvents.push({ kind, at: performance.now(), epoch: state.epoch });
@@ -236,7 +249,32 @@ export function resumeFixtureInit(config) {
     state.selections = state.selections.filter((entry) => entry !== session && entry.active());
     state.selections.push(session);
     if (session.path === 'webrtc') noteDirect('promoted');
+    const slot = session.relay.slot;
+    if (directWindow && !directWindow.closed && directWindow.start.get(slot) !== session) directWindow.switched.add(slot);
     for (const waiter of [...selectionWaiters]) waiter();
+  }
+  /** Opens the current wake's direct-upgrade window, closing it on its own timer. */
+  function openDirectWindow() {
+    const windowMs = Number(config.directWindowMs) || 0;
+    if (!(windowMs > 0)) return;
+    /** @type {NonNullable<typeof directWindow>} */
+    const current = {
+      epoch: state.epoch,
+      wakeAt: state.wakeAt,
+      closed: false,
+      start: new Map(config.relays.map((relay) => /** @type {[number, any]} */ ([relay.slot, currentSession(relay.slot)]))),
+      switched: new Set(),
+      kept: new Map(),
+    };
+    directWindow = current;
+    setTimeout(() => {
+      if (directWindow !== current) return;
+      for (const [slot, session] of current.start) {
+        current.kept.set(slot, Boolean(session && session.path === 'webrtc' && !current.switched.has(slot)
+          && currentSession(slot) === session));
+      }
+      current.closed = true;
+    }, Math.max(0, current.wakeAt + windowMs - performance.now()));
   }
   /**
    * The session currently carrying the app's application traffic for a
@@ -273,7 +311,10 @@ export function resumeFixtureInit(config) {
     Object.defineProperty(document, 'wasDiscarded', { configurable: true, value: true });
     // The wake of a discarded page is the reload itself, before the bootstrap
     // redirect: express it on this document's monotonic clock (it is negative).
-    if (typeof persisted.wakeAbsolute === 'number') state.wakeAt = persisted.wakeAbsolute - performance.timeOrigin;
+    if (typeof persisted.wakeAbsolute === 'number') {
+      state.wakeAt = persisted.wakeAbsolute - performance.timeOrigin;
+      openDirectWindow();
+    }
   }
   if (appDocument) persist(false);
 
@@ -1232,6 +1273,7 @@ export function resumeFixtureInit(config) {
       persist(false);
       visibility = 'visible';
       state.wakeAt = performance.now();
+      openDirectWindow();
       if (options.pageshow) window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
       document.dispatchEvent(new Event('visibilitychange'));
       window.dispatchEvent(new Event('focus'));
@@ -1292,6 +1334,7 @@ export function resumeFixtureInit(config) {
       state.epoch += 1;
       persist(false);
       state.wakeAt = performance.now();
+      openDirectWindow();
       /** @type {any} */ (navigator).connection?.dispatchEvent(new Event('change'));
       return state.wakeAt;
     },
@@ -1300,31 +1343,25 @@ export function resumeFixtureInit(config) {
       return currentSession(slot)?.path ?? null;
     },
     /**
-     * The direct-upgrade timeline of the current epoch, in ms from its wake:
-     * the first of each relay-side event, the number of direct attempts
-     * (peer connections) and refusals, and whether the app is still on a
-     * direct session it promoted before the wake. Numbers only.
+     * The raw direct-upgrade events of the current epoch since its wake
+     * (peer connection created, offer, refusal, answer, DataChannel open,
+     * direct authentication, promotion), as ms offsets from the wake, and the
+     * state of the wake's observation window: whether it has closed and, if
+     * so, whether the relay's direct session from the wake was still its live
+     * path at the end. Fixed names and numbers only; the runner bounds them
+     * to the window (`directUpgradeRecord`). The fixture's direct path serves
+     * a single relay, so events are not split by slot.
      *
      * @param {number} slot
      */
     directTimeline(slot) {
-      const events = state.directEvents.filter((event) => event.epoch === state.epoch && event.at >= state.wakeAt);
-      /** @param {string} kind */
-      const first = (kind) => {
-        const event = events.find((entry) => entry.kind === kind);
-        return event ? Math.round(event.at - state.wakeAt) : null;
-      };
-      /** @param {string} kind */
-      const total = (kind) => events.filter((entry) => entry.kind === kind).length;
+      const current = directWindow && directWindow.epoch === state.epoch ? directWindow : null;
       return {
-        attempts: total('peer'),
-        refused: total('refused'),
-        offer_ms: first('offer'),
-        answer_ms: first('answer'),
-        open_ms: first('open'),
-        authenticated_ms: first('authenticated'),
-        promoted_ms: first('promoted'),
-        stayed_direct: total('peer') === 0 && currentSession(slot)?.path === 'webrtc',
+        events: state.directEvents
+          .filter((event) => event.epoch === state.epoch && event.at >= state.wakeAt)
+          .map((event) => ({ kind: event.kind, at_ms: event.at - state.wakeAt })),
+        window_closed: Boolean(current?.closed),
+        kept_direct: current?.closed ? current.kept.get(slot) === true : null,
       };
     },
     awaitFresh,

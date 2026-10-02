@@ -7,6 +7,7 @@ import {
   DEFAULT_PILOT_SCENARIOS,
   DIRECT_UPGRADE_WINDOW_MS,
   DEFAULT_PILOT_TRANSPORTS,
+  directUpgradeRecord,
   harnessErrorClass,
   HARNESS_INVALID_CRITERIA,
   IDLE_BEFORE_HIDE_MS,
@@ -72,7 +73,7 @@ describe('resume benchmark runner preregistration', () => {
     expect(plan.bounds).toMatchObject({ reliability_margin: 0.01, target_p95_ratio: 0.8, regression_ratio: 1.1, min_pairs: 400 });
     expect(plan.endpoints.not_measured).toEqual(expect.arrayContaining(['OS wake-to-JS, DNS, TCP, TLS']));
     expect(plan.endpoints.not_measured.join(' ')).not.toMatch(/direct WebRTC upgrade/);
-    expect(plan.endpoints.supplementary.join(' ')).toMatch(/direct WebRTC upgrade outcome .* within 30 s of the wake .*separate from the primary endpoint/);
+    expect(plan.endpoints.supplementary.join(' ')).toMatch(/direct WebRTC upgrade outcome .* until the first promotion or 30 s, whichever is first, independent of when the primary outcome is recorded .*separate from the primary endpoint/);
     expect(digest(plan)).toBe(digest(JSON.parse(JSON.stringify(plan))));
   });
 
@@ -184,44 +185,85 @@ describe('resume benchmark matched conditions', () => {
     expect(schedule.hiddenMs).toBeLessThanOrEqual(400);
   });
 
-  it('classifies the separately observed direct upgrade inside its own window', async () => {
-    const timeline = (overrides: Record<string, unknown>) => ({
-      attempts: 1, refused: 0, offer_ms: 40, answer_ms: 60, open_ms: 120, authenticated_ms: 180, promoted_ms: 200,
-      stayed_direct: false, ...overrides,
-    });
-    const observe = async (value: Record<string, unknown>) => {
-      const waits: Array<{ limit: unknown; options: unknown }> = [];
-      const page = {
-        waitForFunction: async (_: unknown, limit: unknown, options: unknown) => { waits.push({ limit, options }); },
-        evaluate: async (_: unknown, argument: { name: string; value: unknown }) => {
-          expect(argument).toEqual({ name: 'directTimeline', value: 1 });
-          return value;
-        },
-      };
-      const result = await observeDirectUpgrade(page as never, 1_000);
-      expect(waits).toEqual([{ limit: 1_000 + DIRECT_UPGRADE_WINDOW_MS, options: { polling: 100, timeout: DIRECT_UPGRADE_WINDOW_MS + 5_000 } }]);
-      return result;
-    };
+  it('bounds the direct upgrade record to its own window, however late the primary outcome', async () => {
     expect(DIRECT_UPGRADE_WINDOW_MS).toBe(30_000);
-    expect(await observe(timeline({}))).toEqual({
+    const event = (kind: string, at: number) => ({ kind, at_ms: at });
+    const closed = (events: unknown[], kept: boolean | null = false) => ({ events, window_closed: true, kept_direct: kept });
+    const success = [
+      event('peer', 20.4), event('offer', 40), event('answer', 60), event('open', 120.6), event('authenticated', 180), event('promoted', 200),
+    ];
+    const nothing = { attempts: 0, refused: 0, offer_ms: null, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null };
+
+    // A promotion inside the window ends the observation: attempts and
+    // refusals after it, or after the window, never change the record.
+    const promoted = directUpgradeRecord({ events: [...success, event('peer', 5_000), event('refused', 5_100)], window_closed: false, kept_direct: null });
+    expect(promoted).toEqual({
       outcome: 'promoted', window_ms: 30_000, attempts: 1, refused: 0,
-      offer_ms: 40, answer_ms: 60, open_ms: 120, authenticated_ms: 180, promoted_ms: 200,
+      offer_ms: 40, answer_ms: 60, open_ms: 121, authenticated_ms: 180, promoted_ms: 200,
     });
-    expect(await observe(timeline({ attempts: 3, refused: 3, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null })))
-      .toMatchObject({ outcome: 'not-promoted', attempts: 3, refused: 3, promoted_ms: null });
-    // A promotion after the window is not an in-window upgrade.
-    expect(await observe(timeline({ promoted_ms: 30_001 }))).toMatchObject({ outcome: 'not-promoted', promoted_ms: null });
-    expect(await observe(timeline({ attempts: 0, offer_ms: null, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null, stayed_direct: true })))
-      .toMatchObject({ outcome: 'stayed-direct', attempts: 0 });
-    expect(await observe(timeline({ attempts: 0, offer_ms: null, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null })))
-      .toMatchObject({ outcome: 'not-attempted' });
-    // Only numbers and fixed outcome names are retained.
-    const kept = await observe({ ...timeline({ offer_ms: 'wss://relay.example', answer_ms: -1 }), sdp: 'v=0 secret' });
-    expect(Object.keys(kept).sort()).toEqual([
-      'answer_ms', 'attempts', 'authenticated_ms', 'offer_ms', 'open_ms', 'outcome', 'promoted_ms', 'refused', 'window_ms',
+    expect(directUpgradeRecord(closed([...success, event('peer', 31_000), event('refused', 31_100)]))).toEqual(promoted);
+
+    // A slow primary outcome read 40 s after the wake, whose only direct
+    // attempt, offer and promotion came 31-32 s after it: nothing was tried
+    // inside the window, and nothing after it is reported.
+    const late = closed([
+      event('peer', 31_000), event('offer', 31_050), event('answer', 31_100), event('open', 31_500), event('authenticated', 31_700), event('promoted', 32_000),
     ]);
-    expect(kept).toMatchObject({ outcome: 'promoted', offer_ms: null, answer_ms: null });
-    expect(JSON.stringify(kept)).not.toMatch(/wss:|v=0/);
+    expect(directUpgradeRecord(late)).toEqual({ outcome: 'not-attempted', window_ms: 30_000, ...nothing });
+
+    // Attempts inside the window that never promote, with more after it.
+    const refused = closed([
+      event('peer', 2_100), event('offer', 2_150), event('refused', 2_200),
+      event('peer', 6_200), event('offer', 6_250), event('refused', 6_300),
+      event('peer', 29_990), event('offer', 30_040), event('refused', 30_090),
+      event('peer', 45_000), event('promoted', 46_000),
+    ]);
+    expect(directUpgradeRecord(refused)).toEqual({
+      outcome: 'not-promoted', window_ms: 30_000, attempts: 3, refused: 2,
+      offer_ms: 2_150, answer_ms: null, open_ms: null, authenticated_ms: null, promoted_ms: null,
+    });
+
+    // Whether the wake's direct session survived is decided by the fixture
+    // when the window closes: a later loss or new attempt cannot undo it.
+    expect(directUpgradeRecord(closed([], true))).toEqual({ outcome: 'stayed-direct', window_ms: 30_000, ...nothing });
+    expect(directUpgradeRecord(closed([event('peer', 40_000), event('promoted', 40_300)], true))).toMatchObject({ outcome: 'stayed-direct', attempts: 0 });
+    expect(directUpgradeRecord(closed([event('peer', 1_000)], true))).toMatchObject({ outcome: 'not-promoted', attempts: 1 });
+    expect(directUpgradeRecord(closed([], false))).toMatchObject({ outcome: 'not-attempted' });
+
+    // Until the window closes, or something is promoted inside it, nothing is settled.
+    expect(directUpgradeRecord({ events: [event('peer', 1_000)], window_closed: false, kept_direct: null })).toEqual({ outcome: 'unobserved', window_ms: 30_000 });
+    expect(directUpgradeRecord(null)).toEqual({ outcome: 'unobserved', window_ms: 30_000 });
+
+    // A shorter window bounds every count and milestone the same way.
+    expect(directUpgradeRecord(closed(success), 150)).toEqual({
+      outcome: 'not-promoted', window_ms: 150, attempts: 1, refused: 0,
+      offer_ms: 40, answer_ms: 60, open_ms: 121, authenticated_ms: null, promoted_ms: null,
+    });
+
+    // Only fixed outcome names and finite, non-negative offsets are retained.
+    const noisy = directUpgradeRecord({
+      events: [
+        event('peer', 10), { kind: 'sdp', at_ms: 11, sdp: 'v=0 secret' }, { kind: 'offer', at_ms: 'wss://relay.example' },
+        event('answer', -1), event('open', Number.NaN), { kind: 'promoted', at_ms: 300, relay: 'wss://relay.example' },
+      ],
+      window_closed: true,
+      kept_direct: false,
+      relay: 'wss://relay.example',
+    });
+    expect(noisy).toEqual({ outcome: 'promoted', window_ms: 30_000, ...nothing, attempts: 1, promoted_ms: 300 });
+    expect(JSON.stringify(noisy)).not.toMatch(/wss:|v=0/);
+
+    // The runner waits for the window (or an in-window promotion) and reads once.
+    const waits: unknown[] = [];
+    const page = {
+      waitForFunction: async (_: unknown, limit: unknown, options: unknown) => { waits.push({ limit, options }); },
+      evaluate: async (_: unknown, argument: unknown) => {
+        expect(argument).toEqual({ name: 'directTimeline', value: 1 });
+        return late;
+      },
+    };
+    expect(await observeDirectUpgrade(page as never)).toEqual({ outcome: 'not-attempted', window_ms: 30_000, ...nothing });
+    expect(waits).toEqual([{ limit: 30_000, options: { polling: 100, timeout: 35_000 } }]);
   });
 
   it('parses runner arguments with the pilot defaults', () => {

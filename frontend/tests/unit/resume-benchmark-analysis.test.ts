@@ -10,11 +10,12 @@ import {
   epochSeed,
   EVIDENCE_SCHEMA,
   nearestRankQuantile,
-  newcombePairedDifference,
   normalQuantile,
   pairedQuantileRatioBound,
   reliabilityPlanning,
   renderMarkdown,
+  tangoPairedDifference,
+  tangoScore,
   wilsonInterval,
 } from '../../scripts/analyze-resume-benchmarks.mjs';
 
@@ -105,23 +106,92 @@ describe('resume benchmark statistics', () => {
     expect(pilot.upper).toBeCloseTo(0.9654, 3);
   });
 
-  it("matches Newcombe's paired-difference example and the zero-discordance bound", () => {
-    // Newcombe (1998) example: 36 concordant positive, 12 + 2 discordant, 0 concordant negative.
-    const example = newcombePairedDifference({ a: 36, b: 12, c: 2, d: 0 }, 1.959964);
-    expect(example.estimate).toBeCloseTo(0.2, 10);
-    expect(example.lower).toBeCloseTo(0.0569, 3);
-    expect(example.upper).toBeCloseTo(0.3404, 3);
-
-    // No discordant pairs at all still leaves a bound: (z^2/n) / (1 + z^2/n).
-    const none = newcombePairedDifference({ a: 0, b: 0, c: 0, d: 400 }, normalQuantile(0.95));
-    expect(none.estimate).toBe(0);
-    expect(none.phi).toBe(0);
-    expect(none.upper).toBeCloseTo(0.006718, 5);
-    expect(none.lower).toBeCloseTo(-0.006718, 5);
+  it("bounds a paired difference from its discordant pairs only (Tango's score interval)", () => {
+    const z95 = normalQuantile(0.95);
+    const z975 = normalQuantile(0.975);
+    // No discordant pair still leaves a bound, z^2 / (n + z^2), however the
+    // concordant pairs split: {200, 0, 0, 200} no longer collapses to zero.
+    for (const a of [0, 1, 37, 200, 399, 400]) {
+      const none = tangoPairedDifference({ a, b: 0, c: 0, d: 400 - a }, z95);
+      expect(none.estimate).toBe(0);
+      expect(none.upper, `a=${a}`).toBeCloseTo((z95 * z95) / (400 + z95 * z95), 10);
+      expect(none.upper).toBeCloseTo(0.006718, 5);
+      expect(none.lower).toBeCloseTo(-0.006718, 5);
+    }
+    expect(tangoPairedDifference({ a: 200, b: 0, c: 0, d: 200 }, z975).upper).toBeCloseTo(0.009512, 5);
     // Four hundred pairs with zero failures cannot show a 1-point margin once
     // the family is large enough: 400 is a floor, not a guarantee.
-    expect(newcombePairedDifference({ a: 0, b: 0, c: 0, d: 400 }, normalQuantile(0.975)).upper).toBeCloseTo(0.009512, 5);
-    expect(newcombePairedDifference({ a: 0, b: 0, c: 0, d: 400 }, normalQuantile(0.99)).upper).toBeCloseTo(0.013349, 5);
+    expect(tangoPairedDifference({ a: 0, b: 0, c: 0, d: 400 }, normalQuantile(0.99)).upper).toBeCloseTo(0.013349, 5);
+
+    // With c = 0 the upper bound is the Wilson upper bound of b / n.
+    for (const b of [1, 2, 3, 12, 40]) {
+      for (const a of [0, 150]) {
+        expect(tangoPairedDifference({ a, b, c: 0, d: 400 - a - b }, z975).upper, `b=${b} a=${a}`)
+          .toBeCloseTo(wilsonInterval(b, 400, z975).upper, 9);
+      }
+    }
+    expect(tangoPairedDifference({ a: 200, b: 1, c: 0, d: 199 }, z975).upper).toBeCloseTo(0.014023, 5);
+    expect(tangoPairedDifference({ a: 200, b: 3, c: 0, d: 197 }, z975).upper).toBeCloseTo(0.021816, 5);
+
+    // 36 concordant positive, 12 + 2 discordant: the bounds solve the score
+    // equation (hand-computed near 0.061 and 0.345), and swapping the
+    // discordant cells mirrors the interval.
+    const example = tangoPairedDifference({ a: 36, b: 12, c: 2, d: 0 }, z975);
+    expect(example.estimate).toBeCloseTo(0.2, 10);
+    expect(tangoScore(12, 2, 50, example.upper)).toBeCloseTo(-z975, 6);
+    expect(tangoScore(12, 2, 50, example.lower)).toBeCloseTo(z975, 6);
+    expect(example.lower).toBeCloseTo(0.061, 2);
+    expect(example.upper).toBeCloseTo(0.345, 2);
+    const mirrored = tangoPairedDifference({ a: 36, b: 2, c: 12, d: 0 }, z975);
+    expect(mirrored.lower).toBeCloseTo(-example.upper, 9);
+    expect(mirrored.upper).toBeCloseTo(-example.lower, 9);
+    // Concordant outcomes never move it.
+    expect(tangoPairedDifference({ a: 0, b: 12, c: 2, d: 36 }, z975)).toEqual(example);
+  });
+
+  it('keeps the reliability bound valid when concordant outcomes are mixed and discordance is rare', () => {
+    const n = 400;
+    const logFactorial = [0];
+    for (let k = 1; k <= n; k += 1) logFactorial.push(logFactorial[k - 1] + Math.log(k));
+    const logTerm = (count: number, probability: number) => (count === 0 ? 0 : count * Math.log(probability));
+    /**
+     * Exact probability, over independent pairs with cell probabilities
+     * pb (candidate only fails) and pc (baseline only fails), that the upper
+     * bound falls below the true difference pb - pc. The concordant pairs
+     * are split evenly between both-failed and both-completed.
+     */
+    const missUpper = (pb: number, pc: number, z: number) => {
+      let miss = 0;
+      for (let b = 0; b <= 80; b += 1) {
+        for (let c = 0; c <= 80; c += 1) {
+          const rest = n - b - c;
+          const probability = Math.exp(logFactorial[n] - logFactorial[b] - logFactorial[c] - logFactorial[rest]
+            + logTerm(b, pb) + logTerm(c, pc) + logTerm(rest, 1 - pb - pc));
+          if (!(probability > 1e-18)) continue;
+          const half = Math.floor(rest / 2);
+          if (tangoPairedDifference({ a: half, b, c, d: rest - half }, z).upper < pb - pc) miss += probability;
+        }
+      }
+      return miss;
+    };
+    const family2 = normalQuantile(1 - 0.025);
+    const family4 = normalQuantile(1 - 0.0125);
+    // The reported counterexample: a = d = 0.4975, b = 0.005, c = 0. Even
+    // with no discordant pair the bound stays above the true 0.5-point loss.
+    expect(missUpper(0.005, 0, family2)).toBe(0);
+    expect(missUpper(0.005, 0, family4)).toBe(0);
+    // At the 1-point margin only b = 0 misses: exactly 0.99^400.
+    expect(missUpper(0.01, 0, family2)).toBeCloseTo(0.99 ** 400, 12);
+    expect(0.99 ** 400).toBeLessThanOrEqual(0.025);
+    expect(missUpper(0.01, 0, family4)).toBe(0);
+    // At twice the margin b <= 2 misses: the binomial lower tail.
+    const atMostTwo = [0, 1, 2].reduce((total, k) => total
+      + Math.exp(logFactorial[n] - logFactorial[k] - logFactorial[n - k] + k * Math.log(0.02) + (n - k) * Math.log(0.98)), 0);
+    expect(missUpper(0.02, 0, family2)).toBeCloseTo(atMostTwo, 12);
+    expect(atMostTwo).toBeLessThanOrEqual(0.025);
+    // Rare discordance in both directions.
+    expect(missUpper(0.011, 0.001, family2)).toBeLessThanOrEqual(0.025);
+    expect(missUpper(0.011, 0.001, family4)).toBeLessThanOrEqual(0.0125);
   });
 
   it('places censored attempts last in nearest-rank quantiles', () => {
@@ -346,7 +416,10 @@ describe('resume benchmark paired acceptance', () => {
     const analysis = paired(target, pairs(target[0].id, 400, (index) => (index < 24 ? [null, null] : [1_000, 700])));
     const [stratum] = analysis.strata;
     expect(stratum.paired_outcomes).toMatchObject({ both_failed: 24, candidate_only_failed: 0, baseline_only_failed: 0 });
-    expect(stratum.reliability.upper_bound).toBeCloseTo(0.00837, 3);
+    // Concordant failures say nothing about the difference: the same bound as
+    // with no failure at all.
+    expect(stratum.reliability.upper_bound).toBeCloseTo(0.009512, 5);
+    expect(stratum.reliability.method).toBe('tango-asymptotic-score-paired');
     expect(stratum.reliability.verdict).toBe('pass');
     expect(stratum.latency.p95_ratio).toMatchObject({ identifiable: false, verdict: 'inconclusive' });
     expect(stratum.reasons).toContain('p95-not-identifiable-below-deadline');

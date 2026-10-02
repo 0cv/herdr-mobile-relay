@@ -23,8 +23,10 @@
  * Pilot evidence (one variant) yields variance and workload estimates for
  * planning, never acceptance. Paired evidence (baseline/candidate) yields
  * one-sided, multiplicity-adjusted bounds:
- *   - reliability: Newcombe's hybrid-score interval for the paired difference
- *     in non-completion rates (method 10, Statistics in Medicine 1998);
+ *   - reliability: Tango's asymptotic score interval for the paired
+ *     difference in non-completion rates (Statistics in Medicine 1998), which
+ *     depends only on the discordant pairs and the number of pairs, so a
+ *     split of concordant outcomes can never narrow it;
  *   - latency: a paired percentile bootstrap of the all-attempt quantile
  *     ratio candidate/baseline, resampling matched pairs.
  * The matched pair is the only independent unit: every pair runs in fresh
@@ -102,28 +104,68 @@ export function wilsonInterval(successes, n, z) {
 }
 
 /**
- * Newcombe's hybrid score interval (method 10) for p1 - p2 with paired data.
- * Cells: a = both positive, b = first only, c = second only, d = neither.
+ * Tango's score statistic for H0: p1 - p2 = delta with paired data, where b
+ * pairs are positive on the first member only, c on the second only, and n
+ * is the number of pairs. The variance n(2 q + delta - delta^2) is evaluated
+ * at q, the restricted maximum-likelihood estimate of the second-only cell
+ * probability under H0: the non-negative root of
+ * 2n q^2 + (-(b + c) + (2n - b + c) delta) q - c delta (1 - delta) = 0.
+ * Decreasing in delta; a zero variance gives a signed infinity.
+ *
+ * @param {number} b
+ * @param {number} c
+ * @param {number} n
+ * @param {number} delta
+ * @returns {number}
+ */
+export function tangoScore(b, c, n, delta) {
+  const quadratic = 2 * n;
+  const linear = -b - c + (2 * n - b + c) * delta;
+  const constant = -c * delta * (1 - delta);
+  const root = Math.sqrt(Math.max(0, linear * linear - 4 * quadratic * constant));
+  // The same root, written without cancellation when the linear term is positive.
+  const q = linear > 0 ? (-2 * constant) / (linear + root) : (root - linear) / (2 * quadratic);
+  const variance = n * (2 * Math.max(0, q) + delta - delta * delta);
+  const numerator = b - c - n * delta;
+  if (!(variance > 0)) return numerator > 0 ? Number.POSITIVE_INFINITY : numerator < 0 ? Number.NEGATIVE_INFINITY : 0;
+  return numerator / Math.sqrt(variance);
+}
+
+/**
+ * Tango's asymptotic score interval (Statistics in Medicine 1998; one of the
+ * paired-proportion intervals Fagerland, Lydersen and Laake recommend) for
+ * p1 - p2 with paired data. Cells: a = both positive, b = first only, c =
+ * second only, d = neither. The difference is pi_b - pi_c, and the interval
+ * uses only b, c and n: concordant pairs, however they split between a and
+ * d, carry no information about it and cannot narrow it. With no discordant
+ * pair it is +/- z^2 / (n + z^2); with c = 0 its upper bound is the Wilson
+ * upper bound of b / n. Each bound solves Z(delta) = -z (upper) or +z
+ * (lower), by bisection on the decreasing score.
  *
  * @param {{ a: number; b: number; c: number; d: number }} table
  * @param {number} z
- * @returns {{ estimate: number; lower: number; upper: number; phi: number }}
+ * @returns {{ estimate: number; lower: number; upper: number }}
  */
-export function newcombePairedDifference({ a, b, c, d }, z) {
+export function tangoPairedDifference({ a, b, c, d }, z) {
   const n = a + b + c + d;
-  if (n <= 0) return { estimate: Number.NaN, lower: -1, upper: 1, phi: 0 };
-  const p1 = (a + b) / n;
-  const p2 = (a + c) / n;
-  const first = wilsonInterval(a + b, n, z);
-  const second = wilsonInterval(a + c, n, z);
-  const marginProduct = (a + b) * (c + d) * (a + c) * (b + d);
-  const phi = marginProduct > 0 ? (a * d - b * c) / Math.sqrt(marginProduct) : 0;
-  const estimate = p1 - p2;
-  const delta = Math.sqrt(Math.max(0,
-    (p1 - first.lower) ** 2 - 2 * phi * (p1 - first.lower) * (second.upper - p2) + (second.upper - p2) ** 2));
-  const epsilon = Math.sqrt(Math.max(0,
-    (first.upper - p1) ** 2 - 2 * phi * (first.upper - p1) * (p2 - second.lower) + (p2 - second.lower) ** 2));
-  return { estimate, lower: Math.max(-1, estimate - delta), upper: Math.min(1, estimate + epsilon), phi };
+  if (n <= 0) return { estimate: Number.NaN, lower: -1, upper: 1 };
+  const estimate = (b - c) / n;
+  /** @param {number} low @param {number} high @param {number} target */
+  const solve = (low, high, target) => {
+    let inside = low;
+    let outside = high;
+    for (let step = 0; step < 200 && Math.abs(outside - inside) > 1e-15; step += 1) {
+      const middle = (inside + outside) / 2;
+      const score = tangoScore(b, c, n, middle);
+      // Upper bound: inside while Z > -z. Lower bound: inside while Z < +z.
+      if (target < 0 ? score > target : score < target) inside = middle;
+      else outside = middle;
+    }
+    return (inside + outside) / 2;
+  };
+  const upper = estimate >= 1 ? 1 : solve(estimate, 1, -z);
+  const lower = estimate <= -1 ? -1 : solve(estimate, -1, z);
+  return { estimate, lower: Math.max(-1, lower), upper: Math.min(1, upper) };
 }
 
 /**
@@ -913,7 +955,7 @@ export function analyzePaired(evidence) {
     if (valid.length !== config.planned) reasons.push('insufficient-pairs');
     if (invalid) reasons.push('evidence-outside-preregistration');
     const enough = floorMet && !invalid && config.planned > 0 && valid.length === config.planned;
-    const reliability = newcombePairedDifference(table, z);
+    const reliability = tangoPairedDifference(table, z);
     const reliabilityVerdict = boundVerdict({
       enough,
       identifiable: Number.isFinite(reliability.upper),
@@ -988,7 +1030,7 @@ export function analyzePaired(evidence) {
         lower_bound: round6(reliability.lower),
         upper_bound: round6(reliability.upper),
         margin: config.bounds.reliability_margin,
-        method: 'newcombe-hybrid-score-paired (method 10)',
+        method: 'tango-asymptotic-score-paired',
         verdict: reliabilityVerdict,
       },
       latency,
