@@ -54,6 +54,7 @@
  *   abandonFirst?: boolean;
  *   burst?: boolean;
  *   holdPaintUntilDirect?: boolean;
+ *   holdPaint?: boolean;
  *   delayRefreshMs?: number;
  *   directRefuse?: boolean;
  *   directDelayMs?: number;
@@ -68,6 +69,8 @@
  *   render-to-paint window: the endpoint's paint check for a qualifying card
  *   waits until a direct WebRTC session has been selected (at most 10 s),
  *   so a direct promotion deterministically lands between render and paint.
+ *   `holdPaint` holds post-wake completion checks until `releasePaint()`,
+ *   so presentation can change deterministically between scheduling and paint.
  *   `delayRefreshMs` answers each post-wake refresh that much later (keep it
  *   under the app's 2 s probe timeout). `directRefuse` closes every post-wake
  *   direct offer (a failed upgrade); `directDelayMs` connects post-wake
@@ -1119,8 +1122,53 @@ export function resumeFixtureInit(config) {
     if (card.classList.contains('stale')) return 'stale-card';
     if (!record.session.active()) return 'inactive-path';
     if (currentSession(record.slot) !== record.session) return 'not-current-path';
+    if (!presented(card)) return 'not-presented';
     return null;
   }
+  /**
+   * Presentation, not DOM presence: a nonzero card must have an unobscured
+   * portion inside the viewport and any clipping ancestors. Check effective
+   * CSS on the whole ancestor chain (opacity/content-visibility are not
+   * inherited), and hit-test the remaining area so overlays cannot pass.
+   * Evaluated both before scheduling and at the completion frame.
+   *
+   * @param {Element} card
+   */
+  function presented(card) {
+    if (!card.isConnected || document.visibilityState !== 'visible' || document.hidden) return false;
+    const rect = card.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return false;
+    let left = Math.max(0, rect.left);
+    let top = Math.max(0, rect.top);
+    let right = Math.min(innerWidth, rect.right);
+    let bottom = Math.min(innerHeight, rect.bottom);
+    for (let element = /** @type {Element | null} */ (card); element; element = element.parentElement) {
+      const style = getComputedStyle(element);
+      if (style.display === 'none' || style.visibility !== 'visible'
+        || Number(style.opacity) === 0 || style.contentVisibility === 'hidden') return false;
+      if (element === card) continue;
+      const bounds = element.getBoundingClientRect();
+      if (['hidden', 'clip', 'scroll', 'auto'].includes(style.overflowX)) {
+        left = Math.max(left, bounds.left);
+        right = Math.min(right, bounds.right);
+      }
+      if (['hidden', 'clip', 'scroll', 'auto'].includes(style.overflowY)) {
+        top = Math.max(top, bounds.top);
+        bottom = Math.min(bottom, bounds.bottom);
+      }
+    }
+    if (!(right > left && bottom > top)) return false;
+    // Inset points stay away from rounded borders; accept any exposed portion.
+    for (const x of [0.5, 0.25, 0.75]) {
+      for (const y of [0.5, 0.25, 0.75]) {
+        const hit = document.elementFromPoint(left + (right - left) * x, top + (bottom - top) * y);
+        if (hit && card.contains(hit)) return true;
+      }
+    }
+    return false;
+  }
+  /** @type {Set<() => void>} */
+  const heldPaints = new Set();
   /** @param {number} slot */
   function holdForDirect(slot) {
     return state.epoch > 1 && state.faults.holdPaintUntilDirect === true
@@ -1135,6 +1183,10 @@ export function resumeFixtureInit(config) {
    */
   function atPaint(slot, check) {
     requestAnimationFrame(() => {
+      if (state.epoch > 1 && state.faults.holdPaint) {
+        heldPaints.add(check);
+        return;
+      }
       if (!holdForDirect(slot)) {
         check();
         return;
@@ -1185,6 +1237,10 @@ export function resumeFixtureInit(config) {
    * @param {number} slot @param {number} epoch @param {string} key
    */
   function paint(slot, epoch, key) {
+    if (epoch !== state.epoch) {
+      rendered.delete(key);
+      return;
+    }
     const covered = Boolean(document.getElementById('unlock-dialog'));
     let painted = null;
     /** @type {[string, string] | null} */
@@ -1211,6 +1267,13 @@ export function resumeFixtureInit(config) {
     for (const waiter of [...waiters]) waiter();
   }
   new MutationObserver(scan).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+  // Reveals retry from observable presentation changes, not a frame loop.
+  // Permanently hidden cards therefore schedule no repeated paint checks.
+  document.addEventListener('visibilitychange', scan);
+  window.addEventListener('resize', scan);
+  window.addEventListener('scroll', scan, true);
+  document.addEventListener('transitionend', scan, true);
+  document.addEventListener('animationend', scan, true);
   // A change of the current path can qualify a card that is already shown.
   selectionWaiters.add(() => queueMicrotask(scan));
 
@@ -1363,6 +1426,12 @@ export function resumeFixtureInit(config) {
         window_closed: Boolean(current?.closed),
         kept_direct: current?.closed ? current.kept.get(slot) === true : null,
       };
+    },
+    pendingPaints() { return heldPaints.size; },
+    releasePaint() {
+      state.faults.holdPaint = false;
+      for (const check of heldPaints) requestAnimationFrame(check);
+      heldPaints.clear();
     },
     awaitFresh,
     measure,

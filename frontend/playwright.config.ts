@@ -9,6 +9,9 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,
+  // Retained hosted logs must identify each executed regression and engine,
+  // not just a dot count (the independent reviewer has no shell/network).
+  reporter: process.env.GITHUB_ACTIONS ? 'list' : undefined,
   // Two different, unrelated tests have crashed WebKit mid-run on GitHub's
   // shared runners ("Target page, context or browser has been closed") on
   // consecutive releases with no reproduction locally or in the pinned
