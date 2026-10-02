@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import AgentLogo, { hasAgentLogo } from '$components/AgentLogo.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
+  import LastKnownView from '$components/LastKnownView.svelte';
   import Button from '$components/ui/Button.svelte';
   import {
     agentLastActiveAt,
@@ -26,6 +27,7 @@
     agents,
     relays,
     connections = new Map(),
+    locked = true,
     workspaces = [],
     workspaceDisclosure = $bindable<Record<string, boolean>>({}),
     responding,
@@ -35,11 +37,17 @@
     relays: RelayConfig[];
     workspaces?: RelayWorkspace[];
     connections?: Map<string, RelayConnectionView>;
+    locked?: boolean;
     workspaceDisclosure?: Record<string, boolean>;
     responding: Set<string>;
     onopen: (agent: Agent) => void;
   } = $props();
 
+  const lastKnown = relayStore.lastKnown;
+  const summaries = $derived(locked ? [] : relays.flatMap((relay) => {
+    const summary = $lastKnown.get(relay.id);
+    return summary && !connections.get(relay.id)?.actionsFresh ? [{ relay, summary }] : [];
+  }));
   const unavailableRelays = $derived(relays.filter((relay) => {
     const connection = connections.get(relay.id);
     return connection?.status === 'connected' && connection.inventory.state === 'error';
@@ -652,6 +660,14 @@
 {/snippet}
 
 <main bind:this={listRoot} class="agent-list" aria-label="Agents">
+  {#each summaries as { relay, summary } (relay.id)}
+    <LastKnownView {summary} relayLabel={relay.label} />
+  {/each}
+  {#each relays.filter((relay) => connections.get(relay.id)?.status === 'connected' && !connections.get(relay.id)?.actionsFresh) as relay (relay.id)}
+    <p role="status">{relay.label}: awaiting current authenticated inventory; remote actions are unavailable.
+      {#if !connections.get(relay.id)?.capabilities.includes('inventory_snapshot_v1')}Upgrade this relay to enable correlated freshness.{/if}
+    </p>
+  {/each}
   {#each unavailableRelays as relay (relay.id)}
     {@const inventory = connections.get(relay.id)?.inventory}
     <section class="inventory-warning" role="status" aria-label={`${relay.label} agent inventory unavailable`}>

@@ -45,11 +45,11 @@ Compatibility is intentionally asymmetric:
 - A new client must learn the capability through the authenticated channel,
   not from an unauthenticated gateway descriptor.
 
-The frontend source primitives are not wired to the application yet. The relay
-advertises the additive capability, but the current app still uses legacy
-refreshes. In particular, existing `sendRaw` and `sendCommand` do not yet
-implement the complete B2 guard.
-Do not expose a cache UI or consent switch before the dispatch/caller audit.
+The current integration candidate wires correlated freshness into the store,
+filters live target surfaces, gates raw and command dispatch with an explicit
+policy, and adds a separate summary component and Settings consent. This is an
+unqualified candidate: hosted integration/caller regressions and review are
+still mandatory. Unsupported relays never satisfy action freshness.
 
 ## Summary schema and cryptographic boundary
 

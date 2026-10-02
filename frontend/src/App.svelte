@@ -746,7 +746,7 @@
       <p role="status">Unlocking and validating the exact notification target…</p>
     </main>
   {:else}
-    <AgentList bind:workspaceDisclosure agents={$agents} workspaces={$workspaces} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
+    <AgentList locked={$securityState.locked} bind:workspaceDisclosure agents={$agents} workspaces={$workspaces} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
   {/if}
 </div>
 

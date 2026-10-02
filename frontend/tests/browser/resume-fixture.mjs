@@ -607,7 +607,7 @@ export function resumeFixtureInit(config) {
         state.refreshes += 1;
         const hold = state.epoch > 1 ? Number(state.faults.delayRefreshMs) || 0 : 0;
         if (hold > 0) await new Promise((resolve) => setTimeout(resolve, hold));
-        await this.snapshot(false);
+        await this.snapshot(false, typeof message.snapshot_request_id === 'string' ? message.snapshot_request_id : '');
         return;
       }
       if (message.type === 'webrtc_offer' && this.path === 'gateway' && config.direct) {
@@ -722,8 +722,8 @@ export function resumeFixtureInit(config) {
       this.emit(frame, delivered);
     }
 
-    /** @param {boolean} initial */
-    async snapshot(initial) {
+    /** @param {boolean} initial @param {string} [nonce] */
+    async snapshot(initial, nonce = '') {
       const afterWake = state.epoch > 1;
       const faults = afterWake ? state.faults : {};
       const stale = faults.stale === true;
@@ -756,7 +756,7 @@ export function resumeFixtureInit(config) {
           version: 'fixture',
           release_version: '0.0.0',
           revision: 'fixture',
-          capabilities: [],
+          capabilities: ['inventory_snapshot_v1'],
           agent_profiles: [],
           inventory,
         };
@@ -769,6 +769,7 @@ export function resumeFixtureInit(config) {
         return;
       }
       await this.send({ type: 'inventory_status', ...inventory });
+      if (withAgents && nonce) await this.send({ type: 'inventory_snapshot', snapshot_request_id: nonce, inventory, agents, workspaces });
       if (withAgents) await this.send({ type: 'agents', agents });
       if (withAgents && faults.burst === true) {
         const next = markerFor(this.relay.slot, state.epoch, ++state.snapshotSeq);

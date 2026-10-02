@@ -454,6 +454,9 @@ export interface HerdrStatus {
 export interface RelayConnectionView {
   relay: RelayConfig;
   status: RelayStatus;
+  /** Correlated post-wake authority, independent of metrics and cache consent. */
+  actionsFresh?: boolean;
+  workspacesFresh?: boolean;
   /**
    * Physical path currently carrying traffic. `gateway` means the blind WSS
    * fallback, `webrtc` the direct DataChannel, `websocket` the legacy relay

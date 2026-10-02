@@ -1,5 +1,9 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlEncode } from './base64url';
+import { actionPolicy, CLEANUP_FOR, RECOVERY_ACTIONS } from './action-policy';
+import { InventoryFreshness, INVENTORY_SNAPSHOT_CAPABILITY, type InventoryBinding } from './inventory-freshness';
+import { LastKnownSessionCache, projectLastKnown } from './last-known';
+import { LastKnownControl } from './last-known-control';
 import { clearConversationPreviews, clearConversationPreviewsForRelay } from './conversation-cache-control';
 import {
   AttachmentBatchController,
@@ -58,6 +62,7 @@ import {
 } from './protocol';
 import {
   normalizeFrontendTargetRef,
+  isResourceId,
   targetRefForAgent,
   targetRefMatchesAgent,
   targetStoreKey,
@@ -449,6 +454,13 @@ function normalizeWorkspace(
 
 interface RelayConnection extends RelayConnectionView {
   transport: RelayTransport | null;
+  freshness: InventoryFreshness<Agent, RelayWorkspace>;
+  pathIdentity: object;
+  wakeGeneration: number;
+  snapshotPending: boolean;
+  snapshotNonce: string;
+  snapshotTimer: ReturnType<typeof setTimeout> | null;
+  cleanupGrants: Set<string>;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
@@ -479,6 +491,7 @@ interface PendingRequest extends PendingOperation {
 }
 
 interface PendingUpload extends PendingOperation {
+  targetKey: string;
   responseType: string;
   resolve: (result: Record<string, any>) => void;
 }
@@ -581,7 +594,18 @@ class RelayStore {
   private hiddenSince = 0;
   private toastId = 0;
   private pushConfigHandler: ((relayId: string) => void) | null = null;
-  private readonly deviceCredentials = new BrowserDeviceCredentialStore(localStorage);
+  private readonly deviceCredentials = new BrowserDeviceCredentialStore(localStorage, Date.now, () => {
+    void this.lastKnownControl.forget();
+  });
+  private actionLocked = false;
+  private stopLastKnown: (() => void) | null = null;
+  private readonly lastKnownCache = new LastKnownSessionCache({
+    storage: browserStorage(() => sessionStorage), origin: location.origin,
+    epoch: () => this.lastKnownControl.epoch(), credential: (id) => this.deviceCredential(id),
+  });
+  readonly lastKnownControl = new LastKnownControl(browserStorage(() => localStorage), this.lastKnownCache);
+  readonly lastKnown = this.lastKnownCache.summaries;
+  readonly lastKnownAvailability = this.lastKnownCache.availability;
 
   constructor() {
     resumeMetrics.setParticipants(() => this.resumeParticipants());
@@ -594,6 +618,9 @@ class RelayStore {
   }
 
   initialize(connect = true): void {
+    this.stopLastKnown?.();
+    this.stopLastKnown = this.lastKnownControl.initialize();
+    this.lastKnownCache.setLocked(this.actionLocked);
     let relays = loadRelayConfigs();
     this.deferredPairingRelays.clear();
     const setup = quickSetupConfig(location);
@@ -797,6 +824,10 @@ class RelayStore {
   }
 
   destroy(): void {
+    this.stopLastKnown?.();
+    this.stopLastKnown = null;
+    this.lastKnownCache.dispose();
+    this.actionLocked = false;
     this.reconnectEnabled = false;
     this.stopKeepalive();
     for (const id of [...this.connectionsValue.keys()]) this.disconnectRelay(id);
@@ -862,6 +893,7 @@ class RelayStore {
   }
 
   removeRelay(id: string): void {
+    void this.lastKnownControl.forget();
     resumeMetrics.removed(id);
     this.disconnectRelay(id);
     this.reconnectAttempts.delete(id);
@@ -972,6 +1004,12 @@ class RelayStore {
     return {
       relay,
       transport: null,
+      freshness: new InventoryFreshness(
+        (value) => this.parseFreshAgents(relay, value),
+        (value) => this.parseFreshWorkspaces(relay, value),
+      ),
+      pathIdentity: {}, wakeGeneration: 0, snapshotPending: false, snapshotNonce: '', snapshotTimer: null,
+      cleanupGrants: new Set(), actionsFresh: false, workspacesFresh: false,
       status: 'connecting',
       path: '',
       activeGatewayUrl: '',
@@ -1036,6 +1074,8 @@ class RelayStore {
     }, {
       getAuthentication: () => this.relayAuthentication(relay),
       onAuthenticated: (presented, enrollment) => {
+        if (presented.kind !== 'credential' || presented.id !== enrollment.credentialId
+          || presented.version !== enrollment.credentialVersion) void this.lastKnownControl.forget();
         commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
         this.markRelayPaired(relay.id);
       },
@@ -1057,6 +1097,8 @@ class RelayStore {
     if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
     if (status === 'connected') {
       const previousPath = connection.path;
+      this.invalidateFreshness(relay.id, connection);
+      connection.pathIdentity = {};
       connection.path = detail?.path || connection.transport?.kind || 'websocket';
       // Which candidate answered matters with a list: the app names it rather
       // than the configured head, which may be a gateway that was skipped.
@@ -1085,6 +1127,7 @@ class RelayStore {
       return;
     }
     this.clearHealthTimer(connection);
+    this.invalidateFreshness(relay.id, connection);
     connection.status = 'disconnected';
     resumeMetrics.end(
       relay.id,
@@ -1095,6 +1138,7 @@ class RelayStore {
     // The relay refuses this device's credential. Keep it until a confirmed,
     // newer invitation replaces it: gateway close reasons are not authenticated.
     if (detail?.code === 'device_unauthorized') {
+      void this.lastKnownControl.forget();
       clearConversationPreviewsForRelay(relay.id);
       connection.authRejected = true;
       connection.closed = true;
@@ -1129,7 +1173,7 @@ class RelayStore {
         protocol: RELAY_PROTOCOL_VERSION,
       });
     }
-    this.sendRaw(relayId, { type: 'refresh_agents' });
+    this.requestFreshSnapshot(relayId, connection);
   }
 
   /**
@@ -1193,6 +1237,7 @@ class RelayStore {
     }
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
+    this.invalidateFreshness(id, connection);
     resumeMetrics.end(id, connection.metricsGeneration, 'superseded');
     connection.closed = true;
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
@@ -1216,10 +1261,13 @@ class RelayStore {
   }
 
   revalidateConnections(timeoutMs = healthTimeoutMs()): void {
-    if (!this.reconnectEnabled) return;
+    this.lastKnownControl.sync();
+    this.lastKnownCache.revalidate();
+    if (!this.reconnectEnabled || this.actionLocked) return;
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
+      if (connection) this.invalidateFreshness(relay.id, connection);
       if (connection?.authRejected || connection?.pairingRequired) continue;
       if (connection?.status === 'connecting') {
         // Replace a dial that predates the event this revalidation reacts to:
@@ -1250,7 +1298,7 @@ class RelayStore {
         this.connectRelay(relay);
       }, timeoutMs);
       resumeMetrics.probe(relay.id, connection.metricsGeneration);
-      if (!this.sendRaw(relay.id, { type: 'refresh_agents' })) {
+      if (!this.requestFreshSnapshot(relay.id, connection)) {
         this.clearHealthTimer(connection);
         this.connectRelay(relay);
       }
@@ -1351,6 +1399,7 @@ class RelayStore {
    */
   private retireConnection(relayId: string, connection: RelayConnection, reason: string): void {
     this.clearHealthTimer(connection);
+    this.invalidateFreshness(relayId, connection);
     connection.closed = true;
     connection.transport?.close();
     connection.status = 'disconnected';
@@ -1398,6 +1447,31 @@ class RelayStore {
 
   private handleMessage(relayId: string, message: Record<string, any>): void {
     const connection = this.connectionsValue.get(relayId);
+    if (message.type === 'inventory_snapshot' && connection) {
+      if (message.snapshot_request_id !== connection.snapshotNonce) return;
+      connection.snapshotPending = false;
+      if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
+      connection.snapshotTimer = null;
+      if (this.actionLocked || !connection.freshness.accept(this.inventoryBinding(connection), message)) return;
+      const fresh = connection.freshness.current(this.inventoryBinding(connection));
+      if (!fresh) return;
+      connection.actionsFresh = true;
+      connection.workspacesFresh = fresh.workspaces !== null;
+      connection.inventory = normalizeAgentInventory(message.inventory);
+      this.agentsValue = [...this.agentsValue.filter((agent) => agent.relay_id !== relayId), ...fresh.agents];
+      if (fresh.workspaces) this.workspacesValue = [...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId), ...fresh.workspaces];
+      // Persist only this validated correlated frame, never the presentation merge.
+      if (fresh.workspaces) {
+        try { this.lastKnownCache.write(projectLastKnown(relayId, message.agents, message.workspaces, Date.now())); } catch { /* Cache misses never affect live rendering. */ }
+      }
+      this.publishAgents('correlated snapshot');
+      this.publishWorkspaces();
+      this.emitConnections();
+      resumeMetrics.inventory(relayId, connection.metricsGeneration, true);
+      this.pushConfigHandler?.(relayId);
+      if (connection.capabilities.includes('device_management')) void this.refreshDevices(relayId);
+      return;
+    }
     if (message.type === 'push_config') {
       if (!connection) return;
       // Pane revisions are monotonic only for one relay process. A new socket
@@ -1456,6 +1530,7 @@ class RelayStore {
           ))
         : [];
       this.emitConnections();
+      if (!connection.actionsFresh && !connection.snapshotPending) this.requestFreshSnapshot(relayId, connection);
       this.pushConfigHandler?.(relayId);
       if (connection.capabilities.includes('push_policy')) {
         this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
@@ -1478,6 +1553,8 @@ class RelayStore {
     if (message.type === 'inventory_status' && connection) {
       connection.inventory = normalizeAgentInventory(message);
       this.reportUnready(relayId, connection);
+      if (connection.inventory.state === 'ready' && !connection.inventory.stale
+        && !connection.actionsFresh && !connection.snapshotPending) this.requestFreshSnapshot(relayId, connection);
       this.emitConnections();
       return;
     }
@@ -1582,7 +1659,7 @@ class RelayStore {
         ...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId),
         ...incoming,
       ];
-      this.workspaces.set(this.workspacesValue);
+      this.publishWorkspaces();
       return;
     }
     if (message.type === 'agents') {
@@ -1618,7 +1695,7 @@ class RelayStore {
         resumeMetrics.inventory(
           relayId,
           connection.metricsGeneration,
-          connection.inventory.state === 'ready' && !connection.inventory.stale,
+          connection.actionsFresh === true && connection.inventory.state === 'ready' && !connection.inventory.stale,
         );
       }
       return;
@@ -1790,6 +1867,7 @@ class RelayStore {
    */
   private reportUnready(relayId: string, connection: RelayConnection): void {
     if (connection.inventory.state !== 'ready' || connection.inventory.stale) {
+      this.invalidateFreshness(relayId, connection);
       resumeMetrics.inventory(relayId, connection.metricsGeneration, false);
     }
   }
@@ -1823,7 +1901,12 @@ class RelayStore {
       reportAppAnomaly(`Duplicate agent identity from ${source}: ${duplicate}`);
       this.agentsValue = [...byPane.values()];
     }
-    this.agents.set(this.agentsValue);
+    this.agents.set(this.agentsValue.filter((agent) => {
+      const connection = this.connectionsValue.get(agent.relay_id);
+      const target = targetRefForAgent(agent);
+      return Boolean(target && connection && this.relayActionsFresh(agent.relay_id)
+        && connection.freshness.current(this.inventoryBinding(connection))?.agents.some((current) => targetRefMatchesAgent(target, current)));
+    }));
   }
   private mergePaneInteraction(paneId: string, message: Record<string, any>): void {
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
@@ -1851,7 +1934,7 @@ class RelayStore {
 
   private removeWorkspacesForRelay(relayId: string): void {
     this.workspacesValue = this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId);
-    this.workspaces.set(this.workspacesValue);
+    this.publishWorkspaces();
   }
 
   private clearSlashCommandCacheForRelay(relayId: string): void {
@@ -1911,10 +1994,164 @@ class RelayStore {
     this.pushTests.set(new Map(this.pushTestsValue));
   }
 
+  private inventoryBinding(connection: RelayConnection): InventoryBinding {
+    return { connection, path: connection.pathIdentity, wake: connection.wakeGeneration };
+  }
+
+  relayActionsFresh(relayId: string): boolean {
+    const connection = this.connectionsValue.get(relayId);
+    return !this.actionLocked && connection?.status === 'connected' && connection.actionsFresh === true
+      && connection.inventory.state === 'ready' && !connection.inventory.stale
+      && connection.freshness.current(this.inventoryBinding(connection)) !== null;
+  }
+
+  setActionLocked(locked: boolean): void {
+    this.actionLocked = locked;
+    this.lastKnownControl.sync();
+    this.lastKnownCache.setLocked(locked);
+    for (const [relayId, connection] of this.connectionsValue) this.invalidateFreshness(relayId, connection);
+    if (!locked) this.restoreLastKnown();
+  }
+
+  restoreLastKnown(): void {
+    if (this.actionLocked) return;
+    this.lastKnownControl.sync();
+    for (const relay of get(this.relayConfigs)) {
+      if (!this.relayActionsFresh(relay.id)) void this.lastKnownCache.restore(relay.id);
+    }
+  }
+
+  private invalidateFreshness(relayId: string, connection: RelayConnection): void {
+    connection.freshness.invalidate();
+    connection.wakeGeneration++;
+    connection.actionsFresh = false;
+    connection.workspacesFresh = false;
+    connection.snapshotPending = false;
+    connection.snapshotNonce = '';
+    if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
+    connection.snapshotTimer = null;
+    this.emitConnections();
+    if (!this.actionLocked) void this.lastKnownCache.restore(relayId);
+  }
+
+  private requestFreshSnapshot(relayId: string, connection: RelayConnection): boolean {
+    if (this.actionLocked || connection.status !== 'connected') return false;
+    const request = connection.freshness.request(this.inventoryBinding(connection),
+      connection.capabilities.includes(INVENTORY_SNAPSHOT_CAPABILITY));
+    if (!request) return this.sendRaw(relayId, { type: 'refresh_agents' });
+    connection.actionsFresh = false;
+    connection.workspacesFresh = false;
+    connection.snapshotPending = true;
+    connection.snapshotNonce = String(request.snapshot_request_id);
+    if (connection.snapshotTimer) clearTimeout(connection.snapshotTimer);
+    connection.snapshotTimer = setTimeout(() => {
+      if (!this.isCurrentConnection(relayId, connection)) return;
+      this.invalidateFreshness(relayId, connection);
+      this.emitConnections();
+    }, 15_000);
+    return this.sendRaw(relayId, request);
+  }
+
+  private parseFreshAgents(relay: RelayConfig, value: unknown): Agent[] | null {
+    if (!Array.isArray(value) || value.length > 10_000) return null;
+    const seen = new Set<string>();
+    const agents: Agent[] = [];
+    for (const row of value) {
+      if (!row || typeof row !== 'object' || Array.isArray(row) || !isResourceId(row.pane_id)) return null;
+      const agent = normalizeAgent(relay.id, relay.label, normalizeAgentTargetFields(row),
+        Boolean(this.connectionsValue.get(relay.id)?.capabilities.includes('attention_classification')));
+      if (!targetRefForAgent(agent) || seen.has(agent.raw_pane_id)) return null;
+      seen.add(agent.raw_pane_id);
+      agents.push(agent);
+    }
+    return agents;
+  }
+
+  private parseFreshWorkspaces(relay: RelayConfig, value: unknown): RelayWorkspace[] | null {
+    if (!Array.isArray(value) || value.length > 1_000) return null;
+    const seen = new Set<string>();
+    const workspaces: RelayWorkspace[] = [];
+    for (const row of value) {
+      if (!row || typeof row !== 'object' || Array.isArray(row) || !isResourceId(row.workspace_id)
+        || seen.has(row.workspace_id)) return null;
+      const workspace = normalizeWorkspace(relay.id, relay.label, row);
+      if (!workspace) return null;
+      seen.add(row.workspace_id);
+      workspaces.push(workspace);
+    }
+    return workspaces;
+  }
+
+  private publishWorkspaces(): void {
+    this.workspaces.set(this.workspacesValue.filter((workspace) => {
+      const connection = this.connectionsValue.get(workspace.relay_id);
+      return this.relayActionsFresh(workspace.relay_id) && connection?.workspacesFresh
+        && connection.freshness.current(this.inventoryBinding(connection))?.workspaces?.some((current) => current.workspace_id === workspace.workspace_id);
+    }));
+  }
+
+  private targetKey(relayId: string, value: unknown): string | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    if (row.relay_id !== undefined && row.relay_id !== relayId) return null;
+    const target = normalizeFrontendTargetRef({ ...row, relay_id: relayId });
+    return target ? targetStoreKey(target) : null;
+  }
+
+  private cleanupKey(payload: Record<string, unknown>, relayId?: string): string | null {
+    const id = relayId ?? (payload.target as Record<string, unknown> | undefined)?.relay_id;
+    if (typeof id !== 'string') return null;
+    const key = this.targetKey(id, payload.target);
+    if (!key) return null;
+    return typeof payload.upload_id === 'string' ? `${key}:${payload.upload_id}` : key;
+  }
+
+  private canDispatch(relayId: string, payload: Record<string, unknown>): boolean {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection || connection.closed) return false;
+    const type = String(payload.type === 'command' ? payload.action : payload.type);
+    if (RECOVERY_ACTIONS.has(type)) return true;
+    const policy = actionPolicy(type);
+    if (!policy) return false;
+    if (policy.controller && this.deviceCredential(relayId)?.role === 'reader') return false;
+    const cleanup = CLEANUP_FOR.get(type);
+    const cleanupKey = this.cleanupKey(payload, relayId);
+    if (cleanup && cleanupKey && connection.cleanupGrants.has(`${cleanup}:${cleanupKey}`)) return true;
+    if (!this.relayActionsFresh(relayId)) return false;
+    const fresh = connection.freshness.current(this.inventoryBinding(connection));
+    if (!fresh) return false;
+    if (policy.target || payload.target) {
+      const key = this.targetKey(relayId, payload.target);
+      if (!key || !fresh.agents.some((agent) => targetStoreKey(targetRefForAgent(agent)!) === key
+        && this.agentsValue.some((current) => current.relay_id === relayId
+          && targetRefMatchesAgent(targetRefForAgent(agent)!, current)))) return false;
+    }
+    if (policy.workspace) {
+      if (!fresh.workspaces || !connection.workspacesFresh) return false;
+      if (payload.workspace_id && (!fresh.workspaces.some((workspace) => workspace.workspace_id === payload.workspace_id)
+        || !this.workspacesValue.some((workspace) => workspace.relay_id === relayId && workspace.workspace_id === payload.workspace_id))) return false;
+      for (const field of ['workspace_ids', 'expected_workspace_ids']) {
+        if (payload[field] !== undefined && (!Array.isArray(payload[field])
+          || !(payload[field] as unknown[]).every((id) => fresh.workspaces!.some((workspace) => workspace.workspace_id === id)))) return false;
+      }
+    }
+    if (['upload_chunk', 'upload_finish', 'upload_cancel'].includes(type)
+      && (!cleanupKey || !connection.cleanupGrants.has(`upload:${cleanupKey}`))) return false;
+    return true;
+  }
+
   sendRaw(relayId: string, payload: Record<string, unknown>): boolean {
     const connection = this.connectionsValue.get(relayId);
-    if (!connection || connection.status !== 'connected') return false;
-    return connection.transport?.send(payload) ?? false;
+    if (!connection || connection.status !== 'connected' || !this.canDispatch(relayId, payload)) return false;
+    const sent = connection.transport?.send(payload) ?? false;
+    if (sent) {
+      const type = String(payload.type === 'command' ? payload.action : payload.type);
+      const key = this.cleanupKey(payload, relayId);
+      if (key && ['watch_pane', 'lease_pane_size'].includes(type)) connection.cleanupGrants.add(`${type}:${key}`);
+      const grant = CLEANUP_FOR.get(type);
+      if (key && grant) connection.cleanupGrants.delete(`${grant}:${key}`);
+    }
+    return sent;
   }
 
   sendCommand(
@@ -1928,6 +2165,7 @@ class RelayStore {
     if (!connection || connection.status !== 'connected') {
       return Promise.reject(new CommandError('Relay is not connected'));
     }
+    if (!this.canDispatch(relayId, payload)) return Promise.reject(new CommandError('Waiting for current authenticated inventory; actions are unavailable.'));
     const protocolError = relayProtocolError(connection);
     if (protocolError && !allowProtocolMismatch) return Promise.reject(new CommandError(protocolError));
     if (INVENTORY_REQUIRED_COMMANDS[String(payload.type)] && connection.inventory.state !== 'ready') {
@@ -2665,9 +2903,13 @@ class RelayStore {
     if (sent) this.paneWatchesStarted.add(paneId);
   }
 
-  requestAgents(): void {
+  requestAgents(forceFresh = false): void {
     for (const relayId of this.connectionsValue.keys()) {
-      this.sendRaw(relayId, { type: 'refresh_agents' });
+      const connection = this.connectionsValue.get(relayId)!;
+      if (forceFresh || (!connection.actionsFresh && !connection.snapshotPending)) {
+        this.invalidateFreshness(relayId, connection);
+        this.requestFreshSnapshot(relayId, connection);
+      } else this.sendRaw(relayId, { type: 'refresh_agents' });
     }
   }
   waitForAgent(
@@ -2681,7 +2923,7 @@ class RelayStore {
       if (!identity.name || ![agent.name, agent.tab_label].includes(identity.name)) return false;
       return !identity.cwd || !agent.cwd || agent.cwd === identity.cwd;
     };
-    const current = this.agentsValue.find(match);
+    const current = get(this.agents).find(match);
     if (current) return Promise.resolve(current);
 
     this.requestAgents();
@@ -3173,6 +3415,7 @@ class RelayStore {
       signal?.addEventListener('abort', abort, { once: true });
       this.pendingUploads.set(requestId, {
         relayId,
+        targetKey: this.targetKey(relayId, (request as Record<string, unknown>).target) || '',
         responseType,
         resolve: (result) => resolve(result as TResult),
         reject,
@@ -3215,6 +3458,10 @@ class RelayStore {
       pending.reject(error);
       return;
     }
+    if (message.type === 'upload_begin_result' && typeof message.result.upload_id === 'string'
+      && pending.targetKey && message.result.upload_id.length <= 256) {
+      this.connectionsValue.get(relayId)?.cleanupGrants.add(`upload:${pending.targetKey}:${message.result.upload_id}`);
+    }
     pending.resolve(message.result);
   }
 
@@ -3234,6 +3481,8 @@ class RelayStore {
   }
 
   private emitConnections(): void {
+    this.publishAgents('freshness lifecycle');
+    this.publishWorkspaces();
     this.connections.set(new Map(
       [...this.connectionsValue].map(([relayId, connection]) => [relayId, { ...connection }]),
     ));
@@ -3241,6 +3490,10 @@ class RelayStore {
     // keepalive has to be told that a relay came up or went away.
     this.syncKeepalive();
   }
+}
+
+function browserStorage(read: () => Storage): Storage | null {
+  try { return read(); } catch { return null; }
 }
 
 function clearChangedRelayPreviews(before: RelayConfig[], after: RelayConfig[]): void {

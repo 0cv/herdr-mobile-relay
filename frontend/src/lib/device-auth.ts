@@ -82,6 +82,7 @@ export class BrowserDeviceCredentialStore {
   constructor(
     private readonly storage: Storage,
     private readonly now: () => number = Date.now,
+    private readonly onChange: (() => void) | undefined = undefined,
   ) {}
 
   get(relayId: string): RelayInvitation | RelayDeviceCredential | null {
@@ -184,7 +185,12 @@ export class BrowserDeviceCredentialStore {
   }
 
   private write(state: PersistedDeviceAuthState): void {
-    this.storage.setItem(DEVICE_AUTH_STORAGE_KEY, JSON.stringify(state));
+    const before = JSON.stringify(this.read());
+    const after = JSON.stringify(state);
+    this.storage.setItem(DEVICE_AUTH_STORAGE_KEY, after);
+    if (before !== after) {
+      try { this.onChange?.(); } catch { /* Cache unavailability must not break enrollment. */ }
+    }
   }
 }
 

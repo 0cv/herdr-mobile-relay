@@ -25,6 +25,7 @@ export const securityState = writable<SecurityState>({
 
 let unlockInProgress = false;
 let automaticUnlockPending = false;
+let unlockGeneration = 0;
 const RESUME_HEALTH_TIMEOUT_MS = 2_000;
 
 export function deviceVerificationSupported(): boolean {
@@ -38,6 +39,9 @@ export function deviceVerificationEnabled(): boolean {
 
 export function initializeDeviceSecurity(): () => void {
   automaticUnlockPending = false;
+  const initiallyLocked = deviceVerificationEnabled();
+  securityState.update((state) => ({ ...state, locked: initiallyLocked, reason: 'open' }));
+  relayStore.setActionLocked(initiallyLocked);
   // The store keeps connections warm while hidden and skips the resume probe
   // once one has gone stale, so it needs the visibility truth from every path
   // that can flip it — not just `visibilitychange`, which some engines skip on
@@ -48,7 +52,13 @@ export function initializeDeviceSecurity(): () => void {
   syncVisibility();
   // Local resume timing only observes these lifecycle events and the lock
   // state; it never changes when or how the app reconnects.
-  const stopLockObserver = securityState.subscribe((state) => resumeMetrics.setLocked(state.locked));
+  let previousLocked = initiallyLocked;
+  const stopLockObserver = securityState.subscribe((state) => {
+    resumeMetrics.setLocked(state.locked);
+    if (state.locked === previousLocked) return;
+    previousLocked = state.locked;
+    relayStore.setActionLocked(state.locked);
+  });
   if (document.visibilityState === 'visible') resumeMetrics.wake('cold-start');
   else resumeMetrics.hidden();
   relayStore.initialize(false);
@@ -58,7 +68,10 @@ export function initializeDeviceSecurity(): () => void {
     clearConversationPreviews();
     securityState.update((state) => ({ ...state, locked: true, reason: 'open' }));
     void unlockWithDevice('open');
-  } else relayStore.connectAll();
+  } else {
+    relayStore.restoreLastKnown();
+    relayStore.connectAll();
+  }
 
   const networkConnection = (navigator as Navigator & { connection?: EventTarget }).connection;
   const revalidateAfterResume = () => {
@@ -169,7 +182,10 @@ export function initializeDeviceSecurity(): () => void {
 }
 
 export function lockForDevice(reason: 'open' | 'resume' = 'resume'): void {
-  if (!deviceVerificationEnabled() || get(securityState).locked) return;
+  if (!deviceVerificationEnabled()) return;
+  unlockGeneration++;
+  relayStore.setActionLocked(true);
+  if (get(securityState).locked) return;
   // Locking gates the interface, not the transport. Dropping the connection
   // here used to be free — the app was going idle anyway — but it now costs
   // every verification user the warm-resume path, and it buys no secrecy: the
@@ -189,6 +205,7 @@ export function lockForDevice(reason: 'open' | 'resume' = 'resume'): void {
  * and dials.
  */
 function resumeAfterUnlock(reason: 'open' | 'resume'): void {
+  relayStore.restoreLastKnown();
   if (reason !== 'resume') {
     relayStore.connectAll(false);
     return;
@@ -285,6 +302,7 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
     return false;
   }
   unlockInProgress = true;
+  const generation = unlockGeneration;
   securityState.update((state) => ({ ...state, locked: true, busy: true, reason, status: 'Waiting for device verification...' }));
   resumeMetrics.unlock('request');
   try {
@@ -296,7 +314,9 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
         timeout: 60_000,
       },
     });
-    if (!assertion) throw new Error('No assertion returned');
+    if (!assertion || generation !== unlockGeneration || document.visibilityState !== 'visible') {
+      throw new Error('Unlock is no longer current');
+    }
     resumeMetrics.unlock('success');
     securityState.update((state) => ({ ...state, locked: false, busy: false, status: '' }));
     resumeAfterUnlock(reason);
