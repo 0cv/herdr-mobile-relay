@@ -347,12 +347,29 @@ path canary. A text range scopes layout, viewport/clipping checks and exposed
 hit-tested area to the complete marker, not the article rectangle. It needs
 non-zero font/layout, a visible page and painted glyph color/text fill.
 Effective styles from the text parent through the card to the root must not
-hide it with `display:none`, hidden visibility, zero opacity,
-`content-visibility:hidden` or an `opacity(0)` filter (including percentage
-values and combined filter chains). Unknown SVG filters and masks are
-conservatively ineligible. Hidden descendants, clipping and opaque overlays
-cannot substitute a card background or logo for that text. DOM presence and
-an accessible name alone are not a paint.
+hide it with `display:none`, hidden visibility, zero opacity or
+`content-visibility:hidden`. Filtered/blended inventory and masks are
+conservatively ineligible, including zero-opacity filters in percentage or
+combined forms. DOM presence and an accessible name alone are not a paint.
+
+**Conservative composition eligibility.** Pointer hit-testing is only an
+additional geometry check, not proof of visual exposure: it ignores
+pointer-transparent paint and shadows. Independently, the harness refuses
+unsupported generated `::before`/`::after` boxes, pointer-transparent layers,
+shadows/outlines, compositing effects, active top layers and shadow/custom or
+replaced-content boundaries. The shipped in-flow disclosure arrow and small
+status-dot ring have narrowly checked, disjoint bounds. Empty ordinary
+`span`/`div` leaves with only bounded background/border paint can be
+pointer-transparent only when disjoint from the complete marker; the shipped
+nav-update badge therefore does not block inventory. Full-cover pseudo-boxes
+are refused regardless of pointer targeting, as are repositioned disclosure
+boxes and unbounded shadows. This is a deliberately limited supported
+composition, not a general pixel/compositor oracle. Unknown compositions stay
+in the attempted denominator as non-completions; there is no exclusion,
+deadline restart or alteration of the measured page's pointer styles.
+A separate hosted two-engine baseline preflight checks compatibility before
+the full suite and pilot; those functional checks are not pilot epochs.
+Fixed diagnostic codes contain no DOM labels, styles, URLs or identifiers.
 Mutation, visibility, resize, scroll and completed CSS-transition/animation
 changes retry eligibility; a permanently hidden card creates no frame retry
 loop. A reveal counts only its later qualifying frame, retaining the original
@@ -528,7 +545,79 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-The current marker-text-checked pilot is `check` run **37002392165**, attempt
+### Latest repair pilot — unreviewed, not B1 acceptance
+
+The latest hosted repair pilot is `check` run **37013311295**, attempt 1,
+job *Resume benchmark pilot*, on
+`c787975676a2167ca80e99be31ef13d86c6689e5`, measuring unchanged shipped `web/`
+`a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`.
+Only harness/tests/preregistration and hosted preflight wiring changed.
+Preregistration binding (compact JSON):
+`d711ca4dee5f77aea824e5f824e09a656e807a69e37e698824b2d40fcd7a540c`.
+Chromium 151.0.7922.34, WebKit 26.5, Node v22.23.3, hosted Linux;
+10.7 minutes. All **480 attempted epochs** (16×30) are retained, all on time;
+no non-completions, exclusions, replacements, missing/exhausted outcomes,
+contract/evidence violations or hidden activity. All 24/24 negative controls
+were safe. No direct-upgrade stratum is sampled in this bounded pilot; other
+selectable workloads/paths remain separately exercised by the browser suite.
+Numbers are not pooled or compared with older harness pilots.
+
+| Stratum | On time (Wilson 95%) | p50 ms (bootstrap 95%) | p95 ms (bootstrap 95%) | Dials / handshakes per epoch | Mean bytes | SD of ln(ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| chromium/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 24 (22–27) | 34 (30–45) | 0 / 0 | 1,198 | 0.24 |
+| chromium/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 72 (61–82) | 102 (90–106) | 1 / 1 | 3,658 | 0.29 |
+| chromium/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,058 (2,084–3,080) | 5,101 (5,041–5,115) | 1 / 1 | 3,694 | 0.34 |
+| chromium/wss-cloudflare/discard | 30/30 (88.6–100%) | 141 (122–145) | 185 (165–189) | 1 / 1 | 3,694 | 0.21 |
+| chromium/gateway-relayed/warm-short | 30/30 (88.6–100%) | 24 (22–31) | 37 (36–42) | 0 / 0 | 792 | 0.32 |
+| chromium/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 103 (91–128) | 160 (139–165) | 1 / 1 | 2,782 | 0.34 |
+| chromium/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,049 (2,100–3,149) | 5,137 (5,102–5,150) | 1 / 1 | 2,953 | 0.40 |
+| chromium/gateway-relayed/discard | 30/30 (88.6–100%) | 148 (137–172) | 245 (191–273) | 1 / 1 | 2,978 | 0.23 |
+| webkit/wss-cloudflare/warm-short | 30/30 (88.6–100%) | 35 (34–39) | 50 (44–51) | 0 / 0 | 1,198 | 0.17 |
+| webkit/wss-cloudflare/hidden-5m | 30/30 (88.6–100%) | 102 (87–117) | 135 (119–139) | 1 / 1 | 3,582 | 0.22 |
+| webkit/wss-cloudflare/blackhole-restore | 30/30 (88.6–100%) | 3,071 (2,103–3,115) | 5,119 (5,077–5,131) | 1 / 1 | 3,881 | 0.34 |
+| webkit/wss-cloudflare/discard | 30/30 (88.6–100%) | 190 (175–204) | 253 (231–260) | 1 / 1 | 3,345 | 0.15 |
+| webkit/gateway-relayed/warm-short | 30/30 (88.6–100%) | 39 (34–42) | 52 (47–56) | 0 / 0 | 792 | 0.18 |
+| webkit/gateway-relayed/hidden-5m | 30/30 (88.6–100%) | 118 (103–133) | 151 (149–166) | 1 / 1 | 2,646 | 0.23 |
+| webkit/gateway-relayed/blackhole-restore | 30/30 (88.6–100%) | 3,087 (2,149–3,114) | 5,122 (5,086–5,131) | 1 / 1 | 2,922 | 0.34 |
+| webkit/gateway-relayed/discard | 30/30 (88.6–100%) | 200 (183–204) | 235 (231–252) | 1 / 1 | 2,757 | 0.14 |
+
+Thirty successes only bound failure below about 11.4% (two-sided Wilson).
+These coarse p95/log-time estimates are planning inputs, never acceptance.
+The same run passed 649 unit tests, 460 browser tests (including 138
+presentation cases, 40 added this remediation) and four attention tests,
+without browser retries; the separate two-engine preflights also passed.
+Native preflight 37013310435 attempt 1 passed on the same SHA. Mobile
+harness/device jobs were skipped, not qualified. Final documentation SHA
+requires its own retained hosted evidence, not a recursively changed citation.
+
+**B1 remains unapproved.** Five historical plus both authorized successor
+review rounds are consumed. The last independent review left original
+`807dcb5c:F022`/successor F001 open on `f7f71cf6`; this subsequent repair is
+unreviewed under the exhausted allowance. Green tests/pilot cannot resolve
+that finding or constitute approval. Original `807dcb5c:F023` was independently
+resolved on reviewed `f7f71cf6`, not automatically on later source. B3 adequately
+powered ≥400-pair confirmation and separately authorized physical/mobile/live
+qualification remain future requirements.
+
+Final-remediation failures are retained, not relabelled passing: ordinary
+37009193750 on `5ec530fa` was cancelled after frontend/pilot timeouts while
+the first conservative predicate refused default pointer-transparent paint;
+37011871186 on `289556c4` failed with `No tests found` from an over-anchored
+preflight selector; 37012362996 on `98c1d8ad` ran both engines and failed
+preflight with `composition:pointer-transparent`. The bounded empty,
+non-overlapping leaf rule in `c7879756` admits the default nav-update badge
+without permitting full-cover layers. A one-error local type check also failed
+and was corrected before that commit. Earlier failure history remains below.
+
+### Historical marker-text pilot — void for endpoint acceptance
+
+Successor review 2 on `f7f71cf6` found that pointer hit-testing admitted
+fully painted, pointer-transparent overlays. Pilots 37002392165 and its
+final-documentation repeat 37003999674 are **void for B1 endpoint acceptance**.
+Their passing 98 presentation cases and 480 on-time epochs are retained facts,
+not general presentation proof; the former table below is historical only.
+
+The former marker-text-checked pilot was `check` run **37002392165**, attempt
 1, job *Resume benchmark pilot*, on
 `5d6bd88a258564681d4961ce74f72764e1d55b26`. It measures the unchanged shipped
 `web/` build
