@@ -498,7 +498,10 @@ export function resumeFixtureInit(config) {
       tab_id: `${workspaceId}:t1`,
       tab_number: 1,
       tab_label: marker,
-      cwd: '/home/fixture-private/project',
+      // Compact cards show cwd rather than project. Put the snapshot marker
+      // first so the actual inventory text (not merely aria-label) identifies
+      // this wake even on phone-width, ellipsized cards. Keep the path canary.
+      cwd: `/${marker}/home/fixture-private/project`,
       status: 'working',
       project: marker,
       agent: 'codex',
@@ -1115,55 +1118,101 @@ export function resumeFixtureInit(config) {
    * direct promotion is open but no longer current).
    *
    * @param {{ slot: number; authoritative: boolean; session: RelaySession }} record
-   * @param {Element} card
+   * @param {Element} card @param {string} marker
    */
-  function rejection(record, card) {
+  function rejection(record, card, marker) {
     if (!record.authoritative) return 'not-authoritative';
     if (card.classList.contains('stale')) return 'stale-card';
     if (!record.session.active()) return 'inactive-path';
     if (currentSession(record.slot) !== record.session) return 'not-current-path';
-    if (!presented(card)) return 'not-presented';
+    if (!presented(card, marker)) return 'not-presented';
     return null;
   }
-  /**
-   * Presentation, not DOM presence: a nonzero card must have an unobscured
-   * portion inside the viewport and any clipping ancestors. Check effective
-   * CSS on the whole ancestor chain (opacity/content-visibility are not
-   * inherited), and hit-test the remaining area so overlays cannot pass.
-   * Evaluated both before scheduling and at the completion frame.
-   *
-   * @param {Element} card
-   */
-  function presented(card) {
-    if (!card.isConnected || document.visibilityState !== 'visible' || document.hidden) return false;
-    const rect = card.getBoundingClientRect();
-    if (!(rect.width > 0 && rect.height > 0)) return false;
-    let left = Math.max(0, rect.left);
-    let top = Math.max(0, rect.top);
-    let right = Math.min(innerWidth, rect.right);
-    let bottom = Math.min(innerHeight, rect.bottom);
-    for (let element = /** @type {Element | null} */ (card); element; element = element.parentElement) {
-      const style = getComputedStyle(element);
-      if (style.display === 'none' || style.visibility !== 'visible'
-        || Number(style.opacity) === 0 || style.contentVisibility === 'hidden') return false;
-      if (element === card) continue;
-      const bounds = element.getBoundingClientRect();
-      if (['hidden', 'clip', 'scroll', 'auto'].includes(style.overflowX)) {
-        left = Math.max(left, bounds.left);
-        right = Math.min(right, bounds.right);
-      }
-      if (['hidden', 'clip', 'scroll', 'auto'].includes(style.overflowY)) {
-        top = Math.max(top, bounds.top);
-        bottom = Math.min(bottom, bounds.bottom);
-      }
+  /** @param {string} color */
+  function transparentColor(color) {
+    if (color === 'transparent') return true;
+    // Computed colors can be legacy rgba(), modern rgb(), or color()/oklch().
+    const alpha = color.includes('/') ? color.slice(color.lastIndexOf('/') + 1, -1)
+      : color.startsWith('rgba(') ? color.slice(color.lastIndexOf(',') + 1, -1) : null;
+    return alpha !== null && Number.parseFloat(alpha) === 0;
+  }
+  /** @param {CSSStyleDeclaration} style */
+  function unpainted(style) {
+    if (style.display === 'none' || style.visibility !== 'visible'
+      || Number(style.opacity) === 0 || style.contentVisibility === 'hidden') return true;
+    // Computed opacity filters normalize percentages/calc(); inspect every
+    // function, including one within a longer filter chain. Unknown SVG
+    // filters and masks are conservatively ineligible, never guessed visible.
+    if (/url\(/i.test(style.filter)) return true;
+    for (const match of style.filter.matchAll(/opacity\(\s*([^)]*)\)/gi)) {
+      if (Number.parseFloat(match[1]) === 0) return true;
     }
-    if (!(right > left && bottom > top)) return false;
-    // Inset points stay away from rounded borders; accept any exposed portion.
-    for (const x of [0.5, 0.25, 0.75]) {
-      for (const y of [0.5, 0.25, 0.75]) {
-        const hit = document.elementFromPoint(left + (right - left) * x, top + (bottom - top) * y);
-        if (hit && card.contains(hit)) return true;
+    return [style.maskImage, style.getPropertyValue('-webkit-mask-image')]
+      .some((mask) => Boolean(mask) && mask !== 'none');
+  }
+  /**
+   * A range of the actual snapshot-identifying text must paint. A visible
+   * article/background/button/logo alone cannot stand in for its inventory.
+   * Range geometry scopes clipping and hit-testing to the marker's glyphs;
+   * styles are checked from the text parent through the card to the root.
+   *
+   * @param {Text} text @param {string} marker
+   */
+  function textPresented(text, marker) {
+    const parent = text.parentElement;
+    if (!parent) return false;
+    const style = getComputedStyle(parent);
+    if (!(Number.parseFloat(style.fontSize) > 0) || transparentColor(style.color)
+      || transparentColor(style.getPropertyValue('-webkit-text-fill-color'))) return false;
+    const start = text.data.indexOf(marker);
+    if (start < 0) return false;
+    const range = document.createRange();
+    range.setStart(text, start);
+    range.setEnd(text, start + marker.length);
+    const rects = [...range.getClientRects()];
+    if (!rects.length) return false;
+    for (const rect of rects) {
+      if (!(rect.width > 0 && rect.height > 0)) return false;
+      let left = Math.max(0, rect.left);
+      let top = Math.max(0, rect.top);
+      let right = Math.min(innerWidth, rect.right);
+      let bottom = Math.min(innerHeight, rect.bottom);
+      for (let element = /** @type {Element | null} */ (parent); element; element = element.parentElement) {
+        const computed = getComputedStyle(element);
+        if (unpainted(computed)) return false;
+        const bounds = element.getBoundingClientRect();
+        if (['hidden', 'clip', 'scroll', 'auto'].includes(computed.overflowX)) {
+          left = Math.max(left, bounds.left);
+          right = Math.min(right, bounds.right);
+        }
+        if (['hidden', 'clip', 'scroll', 'auto'].includes(computed.overflowY)) {
+          top = Math.max(top, bounds.top);
+          bottom = Math.min(bottom, bounds.bottom);
+        }
       }
+      // The complete identifying marker must fit, not just an ellipsis or
+      // clipped prefix. One CSS pixel permits fractional text-box rounding.
+      if (!(right > left && bottom > top) || left > rect.left + 1 || right < rect.right - 1
+        || top > rect.top + 1 || bottom < rect.bottom - 1) return false;
+      let exposed = false;
+      for (const x of [0.5, 0.25, 0.75]) {
+        for (const y of [0.5, 0.25, 0.75]) {
+          const hit = document.elementFromPoint(left + (right - left) * x, top + (bottom - top) * y);
+          if (hit && parent.contains(hit)) exposed = true;
+        }
+      }
+      if (!exposed) return false;
+    }
+    return true;
+  }
+  /** @param {Element} card @param {string} marker */
+  function presented(card, marker) {
+    if (!card.isConnected || document.visibilityState !== 'visible' || document.hidden) return false;
+    const inventory = card.querySelector('.agent-open');
+    if (!inventory) return false;
+    const text = document.createTreeWalker(inventory, NodeFilter.SHOW_TEXT);
+    for (let node = text.nextNode(); node; node = text.nextNode()) {
+      if (textPresented(/** @type {Text} */ (node), marker)) return true;
     }
     return false;
   }
@@ -1219,7 +1268,7 @@ export function resumeFixtureInit(config) {
       if (!record || record.epoch !== epoch) continue;
       const key = renderKey(record.slot, epoch);
       if (rendered.has(key)) continue;
-      const reason = rejection(record, card);
+      const reason = rejection(record, card, marker);
       if (reason) {
         log(marker, reason);
         continue;
@@ -1248,7 +1297,7 @@ export function resumeFixtureInit(config) {
     for (const [marker, card] of renderedAgentMarkers()) {
       const record = state.snapshots.get(marker);
       if (!record || record.slot !== slot || record.epoch !== epoch) continue;
-      const reason = covered ? 'covered' : rejection(record, card);
+      const reason = covered ? 'covered' : rejection(record, card, marker);
       if (!reason) {
         painted = marker;
         break;

@@ -300,6 +300,24 @@ async function presentationStyle(page: Page, css: string) {
 }
 
 test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
+  // F001: backgrounds/logos/hit-testable articles cannot substitute for the
+  // actual marker-bearing inventory text, nor reveal paint-transparent text.
+  const invisibleInventoryStyles = {
+    'hidden marker-bearing button': 'article.agent-card .agent-open { visibility: hidden !important; }',
+    'display-none marker-bearing button': 'article.agent-card .agent-open { display: none !important; }',
+    'transparent marker-bearing button': 'article.agent-card .agent-open { opacity: 0 !important; }',
+    'hidden inventory descendant': 'article.agent-card .agent-copy { visibility: hidden !important; }',
+    'hidden inventory children': 'article.agent-card .agent-open * { visibility: hidden !important; }',
+    'filtered-transparent card': 'article.agent-card { filter: opacity(0) !important; }',
+    'filtered-transparent ancestor': 'main.agent-list { filter: opacity(0) !important; }',
+    'filtered-transparent button': 'article.agent-card .agent-open { filter: opacity(0) !important; }',
+    'filtered-transparent inventory descendant': 'article.agent-card .agent-copy { filter: blur(0px) opacity(0%) !important; }',
+    'transparent inventory glyphs': 'article.agent-card .agent-copy, article.agent-card .agent-copy * { color: transparent !important; }',
+    'transparent text-fill glyphs': 'article.agent-card .agent-open { -webkit-text-fill-color: transparent !important; }',
+    'zero-font inventory glyphs': 'article.agent-card .agent-copy, article.agent-card .agent-copy * { font-size: 0 !important; }',
+    'masked marker-bearing button': 'article.agent-card .agent-open { mask-image: linear-gradient(transparent, transparent) !important; -webkit-mask-image: linear-gradient(transparent, transparent) !important; }',
+    'clipped inventory descendant': 'article.agent-card .agent-copy { clip-path: inset(100%) !important; }',
+  };
   const hiddenStyles = {
     'display-none card': 'article.agent-card { display: none !important; }',
     'visibility-hidden card': 'article.agent-card { visibility: hidden !important; }',
@@ -312,6 +330,7 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     'offscreen ancestor': 'main.agent-list { transform: translateX(-200vw) !important; }',
     'clipped ancestor': 'main.agent-list { height: 0 !important; min-height: 0 !important; padding: 0 !important; overflow: hidden !important; }',
     'opaque overlay': 'body::after { content: ""; position: fixed; inset: 0; background: black; z-index: 2147483647; }',
+    ...invisibleInventoryStyles,
   };
 
   for (const [name, css] of Object.entries(hiddenStyles)) {
@@ -334,7 +353,10 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     });
   }
 
-  for (const mode of ['card', 'ancestor', 'page'] as const) {
+  for (const [mode, css] of Object.entries({
+    card: hiddenStyles['display-none card'], ancestor: hiddenStyles['transparent ancestor'], page: null,
+    ...invisibleInventoryStyles,
+  })) {
     test(`rechecks ${mode} presentation between scheduling and paint`, async ({ page }) => {
       await boot(page, { relays: [fixtureRelay(1, 'wss')], faults: { holdPaint: true }, seed: 42 });
       await awaitFresh(page, [1]);
@@ -342,9 +364,7 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
       await fixture(page, 'hide');
       const wakeAt = await fixture(page, 'show');
       await expect.poll(() => fixture(page, 'pendingPaints')).toBe(1);
-      const style = mode === 'page' ? null : await presentationStyle(
-        page, mode === 'card' ? hiddenStyles['display-none card'] : hiddenStyles['transparent ancestor'],
-      );
+      const style = css === null ? null : await presentationStyle(page, css);
       if (mode === 'page') {
         // Change effective visibility without starting a second fixture wake.
         await page.evaluate(() => {
@@ -370,34 +390,37 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     });
   }
 
-  test('a reveal after the original 60-second deadline remains a censored non-completion', async ({ page }) => {
-    await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 43 });
-    await awaitFresh(page, [1]);
-    await quiesce(page);
-    const style = await presentationStyle(page, hiddenStyles['display-none card']);
-    await fixture(page, 'hide');
-    const wakeAt = await fixture(page, 'show');
-    await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'not-presented')).toBe(true);
-    // Advance only the observed monotonic clock; do not spend a minute or
-    // change the fixture wake, connection generation, or deadline.
-    await page.evaluate(() => {
-      const now = performance.now.bind(performance);
-      performance.now = () => now() + 60_001;
+  for (const name of ['display-none card', 'hidden marker-bearing button', 'filtered-transparent card',
+    'filtered-transparent ancestor', 'transparent inventory glyphs', 'clipped inventory descendant'] as const) {
+    test(`a ${name} reveal after the original 60-second deadline remains a censored non-completion`, async ({ page }) => {
+      await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 43 });
+      await awaitFresh(page, [1]);
+      await quiesce(page);
+      const style = await presentationStyle(page, hiddenStyles[name]);
+      await fixture(page, 'hide');
+      const wakeAt = await fixture(page, 'show');
+      await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === 'not-presented')).toBe(true);
+      // Advance only the observed monotonic clock; do not spend a minute or
+      // change the fixture wake, connection generation, or deadline.
+      await page.evaluate(() => {
+        const now = performance.now.bind(performance);
+        performance.now = () => now() + 60_001;
+      });
+      const deadline = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000));
+      expect(deadline).toEqual({ timedOut: true, wakeAt });
+      await style.evaluate((element) => element.parentNode?.removeChild(element));
+      await awaitFresh(page, [1]);
+      const late = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000));
+      expect(late.wakeAt).toBe(wakeAt);
+      const elapsed = late.renderedAt - late.wakeAt;
+      expect(elapsed).toBeGreaterThan(60_000);
+      // This is the runner's classification of a retained late render. It is
+      // not excluded, never an on-time success, and remains in the denominator.
+      expect(classifyAttempt({ stratum: 'presentation-regression', outcome: 'late', time_to_fresh_ms: elapsed }, 60_000, [])).toEqual({
+        excluded: null, completed: false, time: Infinity, reason: 'late',
+      });
     });
-    const deadline = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000));
-    expect(deadline).toEqual({ timedOut: true, wakeAt });
-    await style.evaluate((element) => element.parentNode?.removeChild(element));
-    await awaitFresh(page, [1]);
-    const late = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000));
-    expect(late.wakeAt).toBe(wakeAt);
-    const elapsed = late.renderedAt - late.wakeAt;
-    expect(elapsed).toBeGreaterThan(60_000);
-    // This is the runner's classification of a retained late render. It is
-    // not excluded, never an on-time success, and remains in the denominator.
-    expect(classifyAttempt({ stratum: 'presentation-regression', outcome: 'late', time_to_fresh_ms: elapsed }, 60_000, [])).toEqual({
-      excluded: null, completed: false, time: Infinity, reason: 'late',
-    });
-  });
+  }
 
   test('an abandoned held frame cannot complete the next wake', async ({ page }) => {
     await boot(page, { relays: [fixtureRelay(1, 'wss')], faults: { holdPaint: true }, seed: 44 });

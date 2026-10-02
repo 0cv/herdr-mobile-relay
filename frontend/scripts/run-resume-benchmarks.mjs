@@ -292,7 +292,7 @@ export function buildPreregistration(options) {
       negative_control: 'cancelled-unlock: the scripted authenticator rejects after 300 ms',
     },
     endpoints: {
-      primary: 'on-time completion: the first frame that paints an agent card (not a workspace label) naming the active epoch\'s agents from a snapshot the relay sent with ready, non-stale inventory, on a session that is still the live authenticated path, with no unlock dialog covering it, within 60 s of the first visible event (navigation start after a discard)',
+      primary: 'on-time completion: the first frame that paints an agent card (not a workspace label), with its actual marker-bearing inventory text visible (not just an accessible name, background or logo), naming the active epoch\'s agents from a snapshot the relay sent with ready, non-stale inventory, on a session that is still the live authenticated path, with no unlock dialog covering it, within 60 s of the first visible event (navigation start after a discard)',
       time_to_fresh: 'all valid attempts; non-completions right-censored at 60 s with their reason',
       supplementary: [
         'success-only p50/p95',
