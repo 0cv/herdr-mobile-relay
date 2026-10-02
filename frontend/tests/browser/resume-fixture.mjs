@@ -41,6 +41,7 @@
  *   blackholeAtStart?: boolean;
  *   iosTab?: boolean;
  *   connectionEvents?: boolean;
+ *   workspaceTools?: boolean;
  *   faults?: FixtureFaults;
  *   directWindowMs?: number;
  * }} FixtureConfig
@@ -221,6 +222,8 @@ export function resumeFixtureInit(config) {
      * @type {RelaySession[]}
      */
     selections: [],
+    /** @type {string[]} */
+    toolCommands: [],
     /**
      * Relay-side direct-upgrade events: peer connection created, offer
      * received, offer refused, answer sent, DataChannel open, direct session
@@ -611,6 +614,25 @@ export function resumeFixtureInit(config) {
         await this.snapshot(false, typeof message.snapshot_request_id === 'string' ? message.snapshot_request_id : '');
         return;
       }
+      if (config.workspaceTools && message.request_id) {
+        state.toolCommands.push(String(message.type));
+        const root = '/home/fixture-private/project';
+        /** @type {Record<string, unknown>} */
+        const responses = {
+          list_directories: { current: { path: root, name: 'project' }, parent: null, directories: [] },
+          workspace_tree: { root, entries: [
+            { path: 'src', name: 'src', kind: 'directory' },
+            { path: 'src/main.ts', name: 'main.ts', kind: 'file', size: 12 },
+          ], truncated: false },
+          workspace_git_status: { available: true, branch: 'main', files: [{ path: 'src/main.ts', status: 'M' }] },
+          workspace_git_diff: { path: message.path, diff: '--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old\n+new\n', truncated: false },
+          workspace_file: { path: message.path, kind: 'text', text: 'fixture code', size: 12 },
+        };
+        const data = responses[String(message.type)];
+        if (data) await this.send({ type: 'command_result', request_id: message.request_id,
+          action: message.type, ok: true, phase: 'completed', data });
+        return;
+      }
       if (message.type === 'webrtc_offer' && this.path === 'gateway' && config.direct) {
         noteDirect('offer');
         if (state.epoch > 1 && state.faults.directRefuse) {
@@ -757,8 +779,9 @@ export function resumeFixtureInit(config) {
           version: 'fixture',
           release_version: '0.0.0',
           revision: 'fixture',
-          capabilities: ['inventory_snapshot_v1'],
-          agent_profiles: [],
+          capabilities: config.workspaceTools
+            ? ['inventory_snapshot_v1', 'workspace_management', 'workspace_inspection'] : ['inventory_snapshot_v1'],
+          agent_profiles: config.workspaceTools ? [{ id: 'codex', label: 'Codex' }] : [],
           inventory,
         };
         if (this.relay.ingress) pushConfig.ingress = this.relay.ingress;
@@ -1617,6 +1640,7 @@ export function resumeFixtureInit(config) {
     renderLog() {
       return renderLog.map((entry) => ({ ...entry }));
     },
+    toolCommands() { return [...state.toolCommands]; },
     stats() {
       return {
         dials: state.dials,

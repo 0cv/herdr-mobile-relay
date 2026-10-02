@@ -86,6 +86,23 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(relayStore.sendRaw(f.id, { type: 'reset_devices' })).toBe(false);
   });
 
+  it('changes the deferred UI fence on replacement, suspension and credential role/version changes', () => {
+    const f = boot(); f.reply();
+    const first = relayStore.deferredUiContext();
+    relayStore.suspendAuthority();
+    expect(relayStore.deferredUiContext()).not.toBe(first);
+    const suspended = relayStore.deferredUiContext();
+    relayStore.connectRelay(get(relayStore.relayConfigs)[0]);
+    expect(relayStore.deferredUiContext()).not.toBe(suspended);
+    const beforeRole = relayStore.deferredUiContext();
+    new BrowserDeviceCredentialStore(localStorage).updateCredential(f.id, {
+      deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`,
+      credentialVersion: 2, role: 'reader', locale: 'en',
+    });
+    expect(relayStore.deferredUiContext()).not.toBe(beforeRole);
+    expect(relayStore.deferredUiContext()).not.toContain(base64UrlEncode(new Uint8Array(32).fill(8)));
+  });
+
   it('cannot commit a late authenticated finish over a newer stored credential', () => {
     const f = boot('relay-a', true, 'reader');
     const presented = f.session.authentication?.getAuthentication?.();

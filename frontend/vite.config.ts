@@ -101,7 +101,10 @@ function stableReleaseAssets(): Plugin {
         return;
       }
 
-      appJavascript.code = compactReleaseStyleNames(appJavascript.code);
+      // Inline custom properties in lazy components must match the one CSS asset.
+      for (const item of Object.values(bundle)) {
+        if (item.type === 'chunk') item.code = compactReleaseStyleNames(item.code);
+      }
       appStylesheet.source = compactReleaseStyleNames(appStylesheet.source as string);
 
       const whitespaceTable = '` \t\n\\r\\f\\xA0\\v\uFEFF`';

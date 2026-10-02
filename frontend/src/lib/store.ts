@@ -571,6 +571,7 @@ class RelayStore {
 
   private connectionsValue = new Map<string, RelayConnection>();
   private sessionCredentials = new WeakMap<RelayConnection, RelayDeviceCredential | null>();
+  private deferredUiGeneration = 0;
   private readonly registeredAppOrigins = new WeakSet<RelayConnection>();
   private agentsValue: Agent[] = [];
   private workspacesValue: RelayWorkspace[] = [];
@@ -2062,6 +2063,18 @@ class RelayStore {
     }
   }
 
+  /** Opaque UI-load fence, not an action grant or a serialized credential. */
+  deferredUiContext(): string | null {
+    try {
+      return JSON.stringify([this.deferredUiGeneration, ...get(this.relayConfigs).map((relay) => {
+        const connection = this.connectionsValue.get(relay.id);
+        const credential = this.deviceCredential(relay.id);
+        return [relay.id, connection?.status, connection?.actionsFresh, connection?.workspacesFresh,
+          credential?.id, credential?.version, credential?.deviceId, credential?.role];
+      })]);
+    } catch { return null; }
+  }
+
   private credentialsChanged(): void {
     for (const [relayId, connection] of this.connectionsValue) {
       if (!this.credentialMatchesSession(relayId, connection)) this.invalidateFreshness(relayId, connection);
@@ -2113,6 +2126,7 @@ class RelayStore {
   }
 
   private invalidateFreshness(relayId: string, connection: RelayConnection): void {
+    this.deferredUiGeneration++;
     connection.freshness.invalidate();
     this.lastKnownCache.invalidateScope(relayId);
     resumeMetrics.inventory(relayId, connection.metricsGeneration, false);

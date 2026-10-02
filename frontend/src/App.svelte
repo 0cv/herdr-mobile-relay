@@ -5,15 +5,13 @@
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
   import AgentRail from '$components/AgentRail.svelte';
-  import LaunchView from '$components/LaunchView.svelte';
   import GlobalJump from '$components/GlobalJump.svelte';
   import LockScreen from '$components/LockScreen.svelte';
-  import ManageDialog from '$components/ManageDialog.svelte';
   import SettingsView from '$components/SettingsView.svelte';
   import TerminalView from '$components/TerminalView.svelte';
   import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
-  import WorkspaceInspector from '$components/WorkspaceInspector.svelte';
-  import WorkspaceManager from '$components/WorkspaceManager.svelte';
+  import AppDialog from '$components/ui/AppDialog.svelte';
+  import { deferredModule } from '$lib/deferred-module';
   import Button from '$components/ui/Button.svelte';
   import Toast from '$components/ui/Toast.svelte';
   import { agentOpeningView, hasConversationHistory } from '$lib/agent-view';
@@ -76,6 +74,8 @@
   let terminalView = $state<{ openFind: () => void } | null>(null);
   let jumpOpen = $state(false);
   let workspaceOpen = $state(false);
+  let dialogContext = $state<string | null>(null);
+  const workspaceTools = deferredModule(() => import('$lib/workspace-tools'));
   let workspaceDisclosure = $state<Record<string, boolean>>({});
   let lastBlocked = new Set<string>();
   let previousView = '';
@@ -118,6 +118,30 @@
         conversationHistoryLoadError = true;
       });
   });
+  const toolsSurface = $derived(workspaceOpen ? 'inspect' : manageOpen ? 'manage'
+    : ['workspaces', 'launch'].includes($currentView.view) ? $currentView.view : null);
+  const toolsContext = $derived.by(() => {
+    void $connections;
+    const scope = relayStore.deferredUiContext();
+    return $securityState.locked || scope === null ? null : JSON.stringify([
+      $currentView, scope, activeAgent ? targetRefForAgent(activeAgent) : null, activeAgent?.cwd,
+    ]);
+  });
+  $effect(() => {
+    if ((manageOpen || workspaceOpen) && dialogContext !== toolsContext) {
+      manageOpen = false; workspaceOpen = false;
+    }
+    workspaceTools.select(toolsSurface, toolsContext);
+  });
+  function openToolDialog(surface: 'manage' | 'inspect') {
+    if (!activeAgent || toolsContext === null) return;
+    dialogContext = toolsContext;
+    manageOpen = surface === 'manage'; workspaceOpen = surface === 'inspect';
+  }
+  function cancelTools() {
+    manageOpen = false; workspaceOpen = false;
+    if (['workspaces', 'launch'].includes(get(currentView).view)) closeCurrentView();
+  }
   const workspaceInspectionAvailable = $derived(Boolean(
     activeAgent?.cwd
     && activeConnection?.capabilities.includes('workspace_inspection'),
@@ -562,6 +586,20 @@
   }
 </script>
 
+{#snippet toolsNotice()}
+  {#if $workspaceTools.status === 'failed'}
+    <p role="alert">Workspace tools could not be loaded. No action was taken.</p>
+  {:else if $workspaceTools.status === 'changed'}
+    <p role="status">The session changed while opening workspace tools. Open them again to continue.</p>
+  {:else}
+    <p role="status">Opening workspace tools…</p>
+  {/if}
+  {#if ['failed', 'changed'].includes($workspaceTools.status)}
+    <Button disabled={$securityState.locked} onclick={() => workspaceTools.retry(toolsContext)}>Retry workspace tools</Button>
+  {/if}
+  <Button onclick={cancelTools}>{manageOpen || workspaceOpen ? 'Cancel' : 'Back'}</Button>
+{/snippet}
+
 <div class="app-shell">
   <header
     class="app-header"
@@ -624,13 +662,13 @@
           aria-label="Inspect workspace"
           disabled={!workspaceInspectionAvailable}
           title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
-          onclick={() => { workspaceOpen = true; }}
+          onclick={() => openToolDialog('inspect')}
         >
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <path d="M3 5.5h7l2 2h9v11H3z"></path>
           </svg>
         </Button>
-        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
+        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => openToolDialog('manage')}>•••</Button>
       {:else if $currentView.view === 'history'}
         <Button
           variant="ghost"
@@ -645,7 +683,7 @@
             <path d="m7 9 3 3-3 3M12 15h5"></path>
           </svg>
         </Button>
-        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
+        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => openToolDialog('manage')}>•••</Button>
       {:else}
         <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => toggle('workspaces')}>
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -675,15 +713,24 @@
 
   {#if $currentView.view === 'settings'}
     <SettingsView {readOnlyRelayIds} />
-  {:else if $currentView.view === 'workspaces'}
-    <WorkspaceManager {readOnlyRelayIds} />
-  {:else if $currentView.view === 'launch'}
-    <LaunchView
-      relayId={$currentView.relayId}
-      workspaceId={$currentView.workspaceId}
-      cwd={$currentView.cwd}
-      {readOnlyRelayIds}
-    />
+  {:else if $currentView.view === 'workspaces' || $currentView.view === 'launch'}
+    {#if $workspaceTools.status === 'ready' && $workspaceTools.value && !$securityState.locked}
+      {@const Tools = $workspaceTools.value}
+      {#if $currentView.view === 'workspaces'}
+        <Tools.WorkspaceManager {readOnlyRelayIds} />
+      {:else}
+        <Tools.LaunchView
+          relayId={$currentView.relayId}
+          workspaceId={$currentView.workspaceId}
+          cwd={$currentView.cwd}
+          {readOnlyRelayIds}
+        />
+      {/if}
+    {:else}
+      <main class="page terminal-loading" aria-label="Workspace tools">
+        {@render toolsNotice()}
+      </main>
+    {/if}
   {:else if $currentView.view === 'activity'}
     <ActivityView />
   {:else if $currentView.view === 'activity_detail'}
@@ -751,8 +798,25 @@
 </div>
 
 <UpdateProgressDialog {readOnlyRelayIds} />
-<ManageDialog bind:open={manageOpen} agent={activeAgent} readOnly={activeReadOnly} />
+{#if manageOpen && activeAgent && !$securityState.locked}
+  {#if $workspaceTools.status === 'ready' && $workspaceTools.value}
+    {@const Tools = $workspaceTools.value}
+    <Tools.ManageDialog bind:open={manageOpen} agent={activeAgent} readOnly={activeReadOnly} />
+  {:else}
+    <AppDialog id="workspace-tools-loading" bind:open={manageOpen} title="Manage agent">
+      {@render toolsNotice()}
+    </AppDialog>
+  {/if}
+{:else if workspaceOpen && activeAgent && !$securityState.locked}
+  {#if $workspaceTools.status === 'ready' && $workspaceTools.value}
+    {@const Tools = $workspaceTools.value}
+    <Tools.WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} />
+  {:else}
+    <AppDialog id="workspace-tools-loading" bind:open={workspaceOpen} title="Inspect workspace">
+      {@render toolsNotice()}
+    </AppDialog>
+  {/if}
+{/if}
 <GlobalJump bind:open={jumpOpen} agents={$agents} onselect={openAgent} />
-<WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} />
 <LockScreen />
 <Toast />
