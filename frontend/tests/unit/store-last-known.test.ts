@@ -179,6 +179,16 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(relayStore.sendRaw(f.id, { type: 'unwatch_pane', target })).toBe(false);
   });
 
+  it('clears only already-owned viewing suppression while locked, without acquiring a new target', () => {
+    const f = boot(); f.reply();
+    const target = targetRefForAgent(get(relayStore.agents)[0]);
+    expect(relayStore.sendRaw(f.id, { type: 'push_viewed_pane', target, visible: true, unlocked: true })).toBe(true);
+    relayStore.setActionLocked(true);
+    expect(relayStore.sendRaw(f.id, { type: 'push_viewed_pane', target, visible: true, unlocked: true })).toBe(false);
+    expect(relayStore.sendRaw(f.id, { type: 'push_viewed_pane', visible: false, unlocked: false })).toBe(true);
+    expect(relayStore.sendRaw(f.id, { type: 'push_viewed_pane', visible: false, unlocked: false })).toBe(false);
+  });
+
   it('rejects old callbacks on wake, path promotion and replacement connections; empty is authoritative', () => {
     const f = boot();
     const oldNonce = f.request().snapshot_request_id;

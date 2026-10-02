@@ -571,6 +571,7 @@ class RelayStore {
 
   private connectionsValue = new Map<string, RelayConnection>();
   private sessionCredentials = new WeakMap<RelayConnection, RelayDeviceCredential | null>();
+  private readonly registeredAppOrigins = new WeakSet<RelayConnection>();
   private agentsValue: Agent[] = [];
   private workspacesValue: RelayWorkspace[] = [];
   private activitiesValue: Activity[] = [];
@@ -1187,16 +1188,6 @@ class RelayStore {
     connection.lastMessageAt = Date.now();
     connection.status = 'connected';
     this.emitConnections();
-    const authentication = this.deviceCredentials.get(relayId);
-    if (runningAsInstalledApp()
-      && authentication?.kind === 'credential'
-      && authentication.role === 'controller') {
-      this.sendRaw(relayId, {
-        type: 'register_app_origin',
-        origin: location.origin,
-        protocol: RELAY_PROTOCOL_VERSION,
-      });
-    }
     this.requestFreshSnapshot(relayId, connection);
   }
 
@@ -1513,6 +1504,7 @@ class RelayStore {
           this.startPaneWatch(watched.pane_id);
         }
       }
+      this.registerAppOrigin(relayId, connection);
       this.pushConfigHandler?.(relayId);
       if (connection.capabilities.includes('device_management')) {
         void this.refreshDevices(relayId).catch(() => this.showToast('Could not refresh paired devices.', true));
@@ -2062,6 +2054,14 @@ class RelayStore {
     return { connection, path: connection.pathIdentity, wake: connection.wakeGeneration };
   }
 
+  private registerAppOrigin(relayId: string, connection: RelayConnection): void {
+    if (this.registeredAppOrigins.has(connection) || !runningAsInstalledApp() || !this.relayActionsFresh(relayId)) return;
+    if (this.deviceCredential(relayId)?.role !== 'controller') return;
+    if (this.sendRaw(relayId, { type: 'register_app_origin', origin: location.origin, protocol: RELAY_PROTOCOL_VERSION })) {
+      this.registeredAppOrigins.add(connection);
+    }
+  }
+
   private credentialsChanged(): void {
     for (const [relayId, connection] of this.connectionsValue) {
       if (!this.credentialMatchesSession(relayId, connection)) this.invalidateFreshness(relayId, connection);
@@ -2085,7 +2085,7 @@ class RelayStore {
 
   relayActionsFresh(relayId: string): boolean {
     const connection = this.connectionsValue.get(relayId);
-    return !this.actionLocked && connection?.status === 'connected' && connection.actionsFresh === true
+    return !this.actionLocked && !this.hidden && connection?.status === 'connected' && connection.actionsFresh === true
       && connection.inventory.state === 'ready' && !connection.inventory.stale
       && this.credentialMatchesSession(relayId, connection)
       && connection.freshness.current(this.inventoryBinding(connection)) !== null;
@@ -2128,7 +2128,7 @@ class RelayStore {
   }
 
   private requestFreshSnapshot(relayId: string, connection: RelayConnection): boolean {
-    if (this.actionLocked || connection.status !== 'connected') return false;
+    if (this.actionLocked || this.hidden || connection.status !== 'connected') return false;
     connection.actionsFresh = false;
     connection.workspacesFresh = false;
     connection.snapshotPending = false;
@@ -2230,6 +2230,8 @@ class RelayStore {
     if (RECOVERY_ACTIONS.has(type)) return true;
     if (SUBSCRIPTION_ACTIONS.has(type)) return this.credentialMatchesSession(relayId, connection)
       && payload.target === undefined && payload.pane_id === undefined && payload.workspace_id === undefined;
+    if (type === 'push_viewed_pane' && payload.visible === false && payload.target === undefined
+      && payload.pane_id === undefined && connection.cleanupGrants.has('viewing')) return true;
     const policy = actionPolicy(type);
     if (!policy) return false;
     const credential = this.deviceCredential(relayId);
@@ -2244,6 +2246,8 @@ class RelayStore {
       && !connection.cleanupGrants.has(`${type}:${cleanupKey}`)) return false;
     const fresh = connection.freshness.current(this.inventoryBinding(connection));
     if (!fresh) return false;
+    if (type === 'push_viewed_pane' && payload.visible === true && payload.unlocked === true
+      && connection.cleanupGrants.size >= 512 && !connection.cleanupGrants.has('viewing')) return false;
     if (policy.target || payload.target) {
       const key = this.targetKey(relayId, payload.target);
       const target = payload.target as Record<string, unknown> | undefined;
@@ -2273,6 +2277,10 @@ class RelayStore {
     if (sent) {
       const type = String(payload.type === 'command' ? payload.action : payload.type);
       const key = this.cleanupKey(payload, relayId);
+      if (type === 'push_viewed_pane') {
+        if (payload.visible === true && payload.unlocked === true && payload.target) connection.cleanupGrants.add('viewing');
+        else connection.cleanupGrants.delete('viewing');
+      }
       if (key && ['watch_pane', 'lease_pane_size'].includes(type)) connection.cleanupGrants.add(`${type}:${key}`);
       const grant = CLEANUP_FOR.get(type);
       if (key && grant) connection.cleanupGrants.delete(`${grant}:${key}`);

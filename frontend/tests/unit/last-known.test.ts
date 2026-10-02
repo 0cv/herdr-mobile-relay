@@ -310,7 +310,7 @@ describe('failure-tolerant session cache foundation', () => {
     expect(get(f.cache.summaries).size).toBe(0);
     f.unavailableEpoch();
     f.cache.write(summary());
-    expect(JSON.parse(sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)!).epoch).toBe('A'.repeat(43));
+    expect(sessionStorage.getItem(LAST_KNOWN_STORAGE_KEY)).toBeNull();
   });
 
   it('treats denied/quota storage and crypto failures as unavailability, never plaintext fallback', async () => {

@@ -1576,7 +1576,14 @@ describe('relay command store', () => {
     })));
     const relay = { label: 'Fedora', url: 'wss://fedora.example', token: '' };
     const relayId = makeRelayId(relay.label, relay.url);
-    relayStore.addRelay(relay);
+    const sent: Record<string, unknown>[] = [];
+    let deliver: TransportHandlers['onMessage'] = () => {};
+    transportHijack.current = (_relay, handlers) => {
+      const peer = upgradedPeer(handlers);
+      deliver = handlers.onMessage;
+      return { kind: 'websocket', connect: () => handlers.onStatus('connected'), close: () => {},
+        send: (payload) => { sent.push(payload); peer.client(JSON.stringify(payload)); return true; } };
+    };
     localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
       version: 1,
       relays: {
@@ -1594,18 +1601,15 @@ describe('relay command store', () => {
       },
     }));
 
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    const sent = socket.sent.map((payload) => JSON.parse(payload));
-
-    expect(sent).toEqual([
-      {
-        type: 'register_app_origin',
-        origin: location.origin,
-        protocol: 3,
-      },
-      { type: 'refresh_agents' },
+    relayStore.addRelay(relay);
+    expect(sent.filter((message) => message.type === 'register_app_origin')).toEqual([]);
+    deliver({ type: 'push_config', protocol: 3, capabilities: [] });
+    expect(sent.filter((message) => message.type === 'register_app_origin')).toEqual([
+      { type: 'register_app_origin', origin: location.origin, protocol: 3 },
     ]);
+    relayStore.requestAgents(true);
+    deliver({ type: 'agents', agents: [] });
+    expect(sent.filter((message) => message.type === 'register_app_origin')).toHaveLength(1);
   });
 
   it('does not let an installed reader credential register an app origin', () => {
@@ -1822,13 +1826,14 @@ describe('relay command store', () => {
     expect(agents.map((agent) => agent.project).sort()).toEqual(['Fedora app', 'Mac app']);
   });
 
-  it('survives a corrupted snapshot that repeats a pane and reports it', () => {
+  it('rejects a corrupted correlated snapshot that repeats a pane and reports it without crashing', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
     // The home view keys agent cards by pane_id: a duplicate from a corrupted
     // relay snapshot previously crashed Svelte's flush and every control in
-    // the app silently died. The newest copy wins and the anomaly is visible.
+    // the app silently died. The anomaly stays visible, but cannot establish
+    // authority by silently selecting one of the conflicting target identities.
     socket.message({
       type: 'agents',
       agents: [
@@ -1837,8 +1842,8 @@ describe('relay command store', () => {
       ],
     });
     const agents = get(relayStore.agents);
-    expect(agents).toHaveLength(1);
-    expect(agents[0].project).toBe('Second copy');
+    expect(agents).toHaveLength(0);
+    expect(relayStore.relayActionsFresh(get(relayStore.relayConfigs)[0].id)).toBe(false);
     const banner = document.querySelector('[role=alert]');
     expect(banner?.textContent).toContain('Duplicate agent identity');
     expect(banner?.textContent).toContain('w1:p1');
@@ -2902,7 +2907,10 @@ describe('relay command store', () => {
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
-    const pending = relayStore.sendCommand(relayId, { type: 'respond', pane_id: 'w1:p1', index: 0, total: 2 }, 12_000);
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', ...exactAgentFields() }] });
+    const pending = relayStore.sendCommand(relayId, {
+      type: 'respond', pane_id: 'w1:p1', ...exactWireScope('w1:p1', relayId), index: 0, total: 2,
+    }, 12_000);
     const command = JSON.parse(socket.sent.at(-1)!);
     await vi.advanceTimersByTimeAsync(9_000);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'accepted' });

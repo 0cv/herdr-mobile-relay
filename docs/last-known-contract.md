@@ -28,7 +28,12 @@ Expired responses are dropped. No command/action is queued for later replay.
 The frontend freshness primitive binds its single outstanding nonce to an
 opaque connection/session identity, active path identity and wake generation.
 Application integration invalidates it on replacement, wake, lock, unready
-inventory, descriptor/capability replacement and disconnection.
+inventory, descriptor/capability replacement, credential changes, hidden/offline/
+freeze/pagehide suspension and disconnection. Hidden pages cannot acquire fresh
+action authority; existing keepalive timing is unchanged. Scoped cleanup includes
+clearing previously-owned viewing suppression, never acquiring a new viewed
+target. Installed-controller app-origin registration waits for correlated fresh
+inventory and is sent once per connection.
 Only a matching ready/non-stale response grants freshness, including a valid
 empty inventory. Workspace validation is independent of agent validation.
 Re-resolution against current authoritative targets is still required at
