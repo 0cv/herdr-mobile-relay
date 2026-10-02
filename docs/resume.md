@@ -358,9 +358,10 @@ pointer-transparent paint and shadows. Independently, the harness refuses
 unsupported generated `::before`/`::after` boxes, pointer-transparent layers,
 shadows/outlines, compositing effects, active top layers and shadow/custom or
 replaced-content boundaries. The shipped in-flow disclosure arrow and small
-status-dot ring have narrowly checked, disjoint bounds. Empty ordinary
-`span`/`div` leaves with only bounded background/border paint can be
-pointer-transparent only when disjoint from the complete marker; the shipped
+status-dot ring have narrowly checked, disjoint bounds. Empty non-replaced
+block/inline `span`/`div` leaves with only bounded background/border paint can
+be pointer-transparent only when disjoint from the complete marker (not
+list-item or CSS-content replacements); the shipped
 nav-update badge therefore does not block inventory. Full-cover pseudo-boxes
 are refused regardless of pointer targeting, as are repositioned disclosure
 boxes and unbounded shadows. This is a deliberately limited supported
@@ -547,7 +548,7 @@ conditions. This is not p95 acceptance and supports no performance claim.**
 
 ### Latest repair pilot — unreviewed, not B1 acceptance
 
-The latest hosted repair pilot is `check` run **37013311295**, attempt 1,
+The latest cited repair pilot is `check` run **37013311295**, attempt 1,
 job *Resume benchmark pilot*, on
 `c787975676a2167ca80e99be31ef13d86c6689e5`, measuring unchanged shipped `web/`
 `a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`.

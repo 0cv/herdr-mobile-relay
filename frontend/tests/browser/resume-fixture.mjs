@@ -1228,6 +1228,7 @@ export function resumeFixtureInit(config) {
     // border-image outset or overflow effects can extend ink from this box.
     if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml'
       || !['span', 'div'].includes(element.localName) || element.children.length || element.textContent?.trim()
+      || !['block', 'inline', 'inline-block'].includes(style.display) || !['normal', 'none'].includes(style.content)
       || style.boxShadow !== 'none' || style.textShadow !== 'none' || style.outlineStyle !== 'none'
       || style.filter !== 'none' || style.mixBlendMode !== 'normal' || style.borderImageSource !== 'none') return false;
     const bounds = element.getBoundingClientRect();

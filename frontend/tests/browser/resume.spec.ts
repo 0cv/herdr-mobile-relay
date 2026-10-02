@@ -332,6 +332,7 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     'pointer-transparent sibling overlay': '.workspace-tab-header { position: fixed !important; inset: 0 !important; background: black !important; z-index: 2147483647 !important; pointer-events: none !important; }',
     'repositioned disclosure pseudo-overlay': '.workspace-card > summary::before { position: fixed !important; inset: 0 !important; background: black !important; z-index: 2147483647 !important; pointer-events: none !important; }',
     'unbounded shadow overlay': '.workspace-tab-header { position: fixed !important; width: 1px !important; height: 1px !important; top: 0 !important; left: 0 !important; box-shadow: 0 0 0 200vw black !important; z-index: 2147483647 !important; }',
+    'unsupported pointer-transparent list-marker composition': '.agent-identity > .status-dot { display: list-item !important; pointer-events: none !important; box-shadow: none !important; list-style-position: inside !important; }',
   };
   const hiddenStyles = {
     'display-none card': 'article.agent-card { display: none !important; }',
