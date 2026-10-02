@@ -370,6 +370,14 @@ in the attempted denominator as non-completions; there is no exclusion,
 deadline restart or alteration of the measured page's pointer styles.
 A separate hosted two-engine baseline preflight checks compatibility before
 the full suite and pilot; those functional checks are not pilot epochs.
+The marker-bearing Text node's parent must also be a **leaf element**.
+Arbitrary descendants are unsupported even if empty, disjoint or
+pointer-targetable: their ink cannot be inferred from their layout rectangles.
+In particular, an opaque absolute child can cover the complete marker while
+leaving its Text/range intact. A descendant hit is never evidence of exposed
+text; the additional hit test requires the leaf parent itself. The declared
+baseline marker spans remain eligible. This conservative refusal changes only
+the harness, not shipped frontend bytes or measured pointer styles.
 Fixed diagnostic codes contain no DOM labels, styles, URLs or identifiers.
 Mutation, visibility, resize, scroll and completed CSS-transition/animation
 changes retry eligibility; a permanently hidden card creates no frame retry
@@ -546,9 +554,25 @@ p95 criterion without first reducing its non-completions.
 **Pilot only: variance and workload estimates under scripted synthetic
 conditions. This is not p95 acceptance and supports no performance claim.**
 
-### Latest repair pilot — unreviewed, not B1 acceptance
+### Historical composition pilot — void for endpoint acceptance
 
-The latest cited repair pilot is `check` run **37013311295**, attempt 1,
+Independent review `df8f3015` on `baf7681d` left original
+`807dcb5c-6293-4de7-a330-12c899ac3380:F022` and successor
+`4be2b3b7-7383-40dd-85d4-1e060f314bb6:F001` OPEN: opaque ordinary child
+spans cover marker text but `parent.contains(elementFromPoint(...))`
+falsely accepts them. That counterexample was source-derived, not executed by
+the reviewer. Pilots **37013311295** on `c7879756` and **37017426942** on
+`baf7681d` are therefore **void for B1 endpoint acceptance**. Their 480 on-time
+attempts each, 24 safe controls and passing suites remain historical facts,
+not current eligibility proof; none are pooled with the repaired pilot.
+The same review independently resolved original
+`807dcb5c-6293-4de7-a330-12c899ac3380:F023` on `baf7681d`; that disposition
+requires fresh exact-new-SHA evidence, not automatic inheritance.
+Eight prior reviews remain consumed. The owner authorized one scoped repair,
+hosted verification and one further independent review; no post-negative
+repair or extra review is authorized. B1 remains unapproved pending that review.
+
+The historical cited repair pilot is `check` run **37013311295**, attempt 1,
 job *Resume benchmark pilot*, on
 `c787975676a2167ca80e99be31ef13d86c6689e5`, measuring unchanged shipped `web/`
 `a562bac854196a7a231a2ff999ccd9d9436727ec432bdbdfca4809e8e1ae6e05`.
@@ -591,8 +615,8 @@ Native preflight 37013310435 attempt 1 passed on the same SHA. Mobile
 harness/device jobs were skipped, not qualified. Final documentation SHA
 requires its own retained hosted evidence, not a recursively changed citation.
 
-**B1 remains unapproved.** Five historical plus both authorized successor
-review rounds are consumed. The last independent review left original
+**Historical status before the eighth review:** B1 remained unapproved.
+Five historical plus both authorized successor review rounds were consumed. The last independent review left original
 `807dcb5c:F022`/successor F001 open on `f7f71cf6`; this subsequent repair is
 unreviewed under the exhausted allowance. Green tests/pilot cannot resolve
 that finding or constitute approval. Original `807dcb5c:F023` was independently

@@ -476,6 +476,158 @@ test.describe('benchmark presentation endpoint (807dcb5c:F022)', () => {
     expect((await renderLog(page)).filter((entry) => entry.epoch === 2 && entry.verdict === 'counted')).toHaveLength(1);
   });
 
+  /** The latest F022/F001 counterexample: ordinary targetable child spans. */
+  async function coverMarkerText(page: Page): Promise<() => Promise<void>> {
+    const style = await presentationStyle(page, '.resume-text-parent { position: relative !important; } .resume-text-cover { position: absolute; inset: 0; display: block; background: black; z-index: 2147483647; pointer-events: auto; }');
+    await page.evaluate(() => {
+      const cover = () => {
+        for (const inventory of document.querySelectorAll('.agent-open')) {
+          const walker = document.createTreeWalker(inventory, NodeFilter.SHOW_TEXT);
+          for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+            if (!/resume-\d+-\d+-\d+-ok/.test(text.textContent || '')) continue;
+            const parent = text.parentElement;
+            if (!parent || parent.querySelector(':scope > .resume-text-cover')) continue;
+            parent.classList.add('resume-text-parent');
+            const child = document.createElement('span');
+            child.className = 'resume-text-cover';
+            parent.appendChild(child);
+          }
+        }
+      };
+      cover();
+      // Keep every identifying Text covered if Svelte replaces its parent.
+      const observer = new MutationObserver(cover);
+      observer.observe(document, { subtree: true, childList: true, characterData: true });
+      (window as any).__resumeCoverObserver = observer;
+    });
+    return async () => {
+      await page.evaluate(() => {
+        (window as any).__resumeCoverObserver.disconnect();
+        for (const child of document.querySelectorAll('.resume-text-cover')) child.remove();
+        for (const parent of document.querySelectorAll('.resume-text-parent')) parent.classList.remove('resume-text-parent');
+      });
+      await style.evaluate((element) => element.parentNode?.removeChild(element));
+    };
+  }
+
+  async function expectCoveredMarkerText(page: Page): Promise<void> {
+    const result = await page.evaluate(() => {
+      let markers = 0;
+      for (const inventory of document.querySelectorAll('.agent-open')) {
+        const walker = document.createTreeWalker(inventory, NodeFilter.SHOW_TEXT);
+        for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+          const match = /resume-\d+-\d+-\d+-ok/.exec(text.textContent || '');
+          if (!match || !text.parentElement) continue;
+          markers += 1;
+          const parent = text.parentElement;
+          const child = parent.querySelector(':scope > .resume-text-cover');
+          if (!child) return { markers, covered: false };
+          const range = document.createRange();
+          range.setStart(text, match.index);
+          range.setEnd(text, match.index + match[0].length);
+          const bounds = child.getBoundingClientRect();
+          const rects = [...range.getClientRects()];
+          if (!rects.length) return { markers, covered: false };
+          for (const rect of rects) {
+            const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+            if (hit !== child || !parent.contains(hit) || rect.width <= 0 || rect.height <= 0
+              || bounds.left > rect.left + 1 || bounds.right < rect.right - 1
+              || bounds.top > rect.top + 1 || bounds.bottom < rect.bottom - 1) return { markers, covered: false };
+          }
+        }
+      }
+      return { markers, covered: true };
+    });
+    expect(result.markers).toBeGreaterThan(0);
+    expect(result.covered).toBe(true);
+  }
+
+  for (const placement of ['before arrival', 'held frame'] as const) {
+    for (const late of [false, true]) {
+      test(`opaque targetable descendants ${placement}: ${late ? 'original deadline censors a late reveal' : 'only the later exposed frame counts'}`, async ({ page }) => {
+        await boot(page, { relays: [fixtureRelay(1, 'wss')], faults: { holdPaint: placement === 'held frame' }, seed: 47 });
+        await awaitFresh(page, [1]);
+        await quiesce(page);
+        let reveal: (() => Promise<void>) | undefined;
+        if (placement === 'before arrival') reveal = await coverMarkerText(page);
+        await fixture(page, 'hide');
+        const wakeAt = await fixture(page, 'show');
+        if (placement === 'held frame') {
+          await expect.poll(() => fixture(page, 'pendingPaints')).toBe(1);
+          reveal = await coverMarkerText(page);
+          await expectCoveredMarkerText(page);
+          await fixture(page, 'releasePaint');
+        }
+        const verdict = placement === 'held frame' ? 'retired-before-paint:not-presented' : 'not-presented';
+        await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 2 && entry.verdict === verdict)).toBe(true);
+        await expectCoveredMarkerText(page);
+        expect(await fixture(page, 'presentationFailure')).toBe('composition:inventory-descendants');
+        await awaitTimeout(page, 150);
+        expect(await fixture(page, 'pendingPaints')).toBe(0);
+        expect((await renderLog(page)).filter((entry) => entry.epoch === 2 && entry.verdict === 'counted')).toEqual([]);
+        if (late) {
+          await page.evaluate(() => {
+            const now = performance.now.bind(performance);
+            performance.now = () => now() + 60_001;
+          });
+          expect(await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000))).toEqual({ timedOut: true, wakeAt });
+        }
+        const revealAt = await page.evaluate(() => performance.now());
+        await reveal!();
+        await awaitFresh(page, [1]);
+        const result = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000));
+        expect(result.wakeAt).toBe(wakeAt);
+        expect(result.renderedAt).toBeGreaterThanOrEqual(revealAt);
+        const elapsed = result.renderedAt - result.wakeAt;
+        expect(classifyAttempt({ stratum: 'descendant-regression', outcome: elapsed <= 60_000 ? 'fresh' : 'late', time_to_fresh_ms: elapsed }, 60_000, [])).toMatchObject({
+          excluded: null, completed: !late, reason: late ? 'late' : null,
+        });
+        expect((await renderLog(page)).filter((entry) => entry.epoch === 2 && entry.verdict === 'counted')).toHaveLength(1);
+      });
+    }
+  }
+
+  test('opaque targetable descendants isolate an abandoned held frame from the next wake', async ({ page }) => {
+    await boot(page, { relays: [fixtureRelay(1, 'wss')], faults: { holdPaint: true }, seed: 48 });
+    await awaitFresh(page, [1]);
+    await quiesce(page);
+    await fixture(page, 'hide');
+    await fixture(page, 'show');
+    await expect.poll(() => fixture(page, 'pendingPaints')).toBe(1);
+    const reveal = await coverMarkerText(page);
+    await expectCoveredMarkerText(page);
+    await fixture(page, 'hide');
+    const wakeAt = await fixture(page, 'show');
+    await fixture(page, 'releasePaint');
+    await expect.poll(async () => (await renderLog(page)).some((entry) => entry.epoch === 3 && entry.verdict === 'not-presented')).toBe(true);
+    await awaitTimeout(page, 150);
+    expect((await renderLog(page)).filter((entry) => entry.epoch >= 2 && entry.verdict === 'counted')).toEqual([]);
+    await reveal();
+    await awaitFresh(page, [1]);
+    expect((await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000))).wakeAt).toBe(wakeAt);
+    expect((await renderLog(page)).filter((entry) => entry.epoch === 2 && entry.verdict === 'counted')).toEqual([]);
+    expect((await renderLog(page)).filter((entry) => entry.epoch === 3 && entry.verdict === 'counted')).toHaveLength(1);
+  });
+
+  test('declared baseline leaf inventory text remains eligible', async ({ page }) => {
+    await boot(page, { relays: [fixtureRelay(1, 'wss')], seed: 49 });
+    await awaitFresh(page, [1]);
+    await quiesce(page);
+    expect(await page.evaluate(() => {
+      const walker = document.createTreeWalker(document.querySelector('.agent-open')!, NodeFilter.SHOW_TEXT);
+      let leaves = 0;
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+        if (/resume-\d+-\d+-\d+-ok/.test(text.textContent || '') && text.parentElement?.children.length === 0) leaves += 1;
+      }
+      return leaves;
+    })).toBeGreaterThan(0);
+    await fixture(page, 'hide');
+    const wakeAt = await fixture(page, 'show');
+    const result = await page.evaluate(() => (window as any).__resumeFixture.measure([1], 60_000));
+    expect(result.wakeAt).toBe(wakeAt);
+    expect(result.renderedAt - result.wakeAt).toBeLessThanOrEqual(60_000);
+  });
+
   test('an abandoned held frame cannot complete the next wake', async ({ page }) => {
     await boot(page, { relays: [fixtureRelay(1, 'wss')], faults: { holdPaint: true }, seed: 44 });
     await awaitFresh(page, [1]);

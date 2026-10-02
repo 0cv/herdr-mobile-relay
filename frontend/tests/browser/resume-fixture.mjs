@@ -1285,6 +1285,13 @@ export function resumeFixtureInit(config) {
       || transparentColor(style.getPropertyValue('-webkit-text-fill-color'))) return false;
     const start = text.data.indexOf(marker);
     if (start < 0) return false;
+    // Only leaf text parents are supported. A descendant may paint over the
+    // marker while leaving its Text/Range intact, and parent.contains(hit)
+    // would mistake that covering child for exposed glyphs. Refuse this
+    // composition regardless of child bounds, paint or pointer targeting,
+    // rather than guess whether descendant ink stays inside its rectangles.
+    // The declared baseline's marker-bearing spans are leaves.
+    if (parent.children.length) return refuseComposition('composition:inventory-descendants');
     const range = document.createRange();
     range.setStart(text, start);
     range.setEnd(text, start + marker.length);
@@ -1317,7 +1324,7 @@ export function resumeFixtureInit(config) {
       for (const x of [0.5, 0.25, 0.75]) {
         for (const y of [0.5, 0.25, 0.75]) {
           const hit = document.elementFromPoint(left + (right - left) * x, top + (bottom - top) * y);
-          if (hit && parent.contains(hit)) exposed = true;
+          if (hit === parent) exposed = true;
         }
       }
       if (!exposed) return false;
