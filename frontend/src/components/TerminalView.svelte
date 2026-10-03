@@ -654,6 +654,8 @@
     // Resource cleanup must release the exact registration this mount owned,
     // not dereference a now-null prop or adopt a replacement target.
     const mountedAgent = agent;
+    const retained = relayStore.recoverAttachmentController(mountedAgent);
+    if (retained) bindAttachmentController(retained, mountedAgent);
     componentMounted = true;
     const stopWakeLock = mountTerminalWakeLock();
     const measurePane = () => requestPaneSizeLease(false);
@@ -1910,11 +1912,25 @@
     if (!rejected.length) attachmentSnapshot = null;
   }
 
+  let attachmentOwner: Agent | null = null;
+
+  function bindAttachmentController(controller: AttachmentBatchController, owner: Agent): void {
+    attachmentController = controller;
+    attachmentOwner = owner;
+    attachmentUnsubscribe?.();
+    attachmentUnsubscribe = controller.subscribe((snapshot) => {
+      attachmentSnapshot = snapshot;
+    });
+  }
+
   function releaseAttachmentController(controller: AttachmentBatchController, force = false): void {
     if (!force && (controller.hasPendingCleanup() || attachmentSnapshot?.items.some((item) => item.state === 'interrupted'))) return;
     attachmentUnsubscribe?.();
     attachmentUnsubscribe = null;
-    if (attachmentController === controller) attachmentController = null;
+    if (attachmentController === controller) {
+      attachmentController = null;
+      attachmentOwner = null;
+    }
   }
 
   async function filesSelected(files: FileList | File[]) {
@@ -1932,11 +1948,7 @@
         releaseAttachmentController(previous, true);
       }
       controller = relayStore.attachmentController(agent);
-      attachmentController = controller;
-      attachmentUnsubscribe?.();
-      attachmentUnsubscribe = controller.subscribe((snapshot) => {
-        attachmentSnapshot = snapshot;
-      });
+      bindAttachmentController(controller, agent);
       controller.select(selected);
       const attachments = await controller.upload();
       appendUploadedAttachments(attachments);
@@ -1991,7 +2003,11 @@
   }
 
   onDestroy(() => {
+    if (attachmentController && attachmentOwner) {
+      relayStore.retainAttachmentController(attachmentOwner, attachmentController);
+    }
     attachmentUnsubscribe?.();
+    // Failure remains visible and explicitly retryable on remount via the store.
     void attachmentController?.cancel().catch(() => {});
   });
 

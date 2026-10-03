@@ -572,6 +572,10 @@ class RelayStore {
 
   private connectionsValue = new Map<string, RelayConnection>();
   private sessionCredentials = new WeakMap<RelayConnection, RelayDeviceCredential | null>();
+  // Retain only cancellation across replacement authenticated connections,
+  // bound to the original credential, relay configuration and exact target.
+  private uploadCleanup = new Map<string, { relay: RelayConfig; credential: RelayDeviceCredential | null; grants: Set<string> }>();
+  private retainedAttachments = new Map<string, AttachmentBatchController>();
   private deferredUiGeneration = 0;
   private readonly registeredAppOrigins = new WeakSet<RelayConnection>();
   private agentsValue: Agent[] = [];
@@ -848,6 +852,8 @@ class RelayStore {
     this.stopCredentials?.();
     this.stopCredentials = null;
     this.lastKnownCache.dispose();
+    this.uploadCleanup.clear();
+    this.retainedAttachments.clear();
     this.actionLocked = false;
     this.reconnectEnabled = false;
     this.stopKeepalive();
@@ -917,6 +923,7 @@ class RelayStore {
     void this.lastKnownControl.forget();
     resumeMetrics.removed(id);
     this.disconnectRelay(id);
+    this.uploadCleanup.delete(id);
     this.reconnectAttempts.delete(id);
     this.deferredPairingRelays.delete(id);
     this.deviceCredentials.remove(id);
@@ -1022,6 +1029,14 @@ class RelayStore {
   }
 
   private newConnection(relay: RelayConfig): RelayConnection {
+    const cleanup = this.uploadCleanup.get(relay.id);
+    const credential = this.deviceCredential(relay.id);
+    const owner = cleanup?.credential;
+    const recoverable = cleanup && owner && credential
+      && owner.id === credential.id && owner.version === credential.version && owner.secret === credential.secret
+      && owner.deviceId === credential.deviceId && owner.role === credential.role
+      && !relayConnectionIdentityChanged(cleanup.relay, relay);
+    if (!recoverable) this.uploadCleanup.delete(relay.id);
     return {
       relay,
       transport: null,
@@ -1030,7 +1045,8 @@ class RelayStore {
         (value) => this.parseFreshWorkspaces(relay, value),
       ),
       pathIdentity: {}, wakeGeneration: 0, snapshotPending: false, snapshotNonce: '', summaryGeneration: 0, snapshotTimer: null,
-      cleanupGrants: new Set(), actionsFresh: false, workspacesFresh: false,
+      cleanupGrants: new Set(recoverable ? [...cleanup.grants].map((key) => `cancel:${key}`) : []),
+      actionsFresh: false, workspacesFresh: false,
       status: 'connecting',
       path: '',
       activeGatewayUrl: '',
@@ -1168,6 +1184,7 @@ class RelayStore {
       void this.lastKnownControl.forget();
       clearConversationPreviewsForRelay(relay.id);
       connection.authRejected = true;
+      this.uploadCleanup.delete(relay.id);
       connection.closed = true;
       clearTimeout(connection.reconnectTimer ?? undefined);
       connection.reconnectTimer = null;
@@ -2254,7 +2271,9 @@ class RelayStore {
       && !(type === 'revoke_device' && payload.device_id === credential.deviceId)) return false;
     const cleanup = CLEANUP_FOR.get(type);
     const cleanupKey = this.cleanupKey(payload, relayId);
-    if (cleanup && cleanupKey && connection.cleanupGrants.has(`${cleanup}:${cleanupKey}`)) return true;
+    if (type === 'upload_cancel' && !this.credentialMatchesSession(relayId, connection)) return false;
+    if (cleanup && cleanupKey && (connection.cleanupGrants.has(`${cleanup}:${cleanupKey}`)
+      || (type === 'upload_cancel' && connection.cleanupGrants.has(`cancel:${cleanup}:${cleanupKey}`)))) return true;
     if (!this.relayActionsFresh(relayId)) return false;
     if (['watch_pane', 'lease_pane_size', 'upload_begin'].includes(type)
       && connection.cleanupGrants.size >= 512
@@ -2288,7 +2307,16 @@ class RelayStore {
   sendRaw(relayId: string, payload: Record<string, unknown>): boolean {
     const connection = this.connectionsValue.get(relayId);
     if (!connection || connection.status !== 'connected' || !this.canDispatch(relayId, payload)) return false;
+    const reservation = payload.type === 'upload_begin' ? `upload_pending:${String(payload.request_id || '')}` : '';
+    if (reservation) {
+      const pending = this.pendingUploads.get(String(payload.request_id || ''));
+      if (!pending || pending.relayId !== relayId || pending.responseType !== 'upload_begin_result'
+        || pending.targetKey !== this.targetKey(relayId, payload.target)
+        || connection.cleanupGrants.has(reservation)) return false;
+      connection.cleanupGrants.add(reservation);
+    }
     const sent = connection.transport?.send(payload) ?? false;
+    if (!sent && reservation) connection.cleanupGrants.delete(reservation);
     if (sent) {
       const type = String(payload.type === 'command' ? payload.action : payload.type);
       const key = this.cleanupKey(payload, relayId);
@@ -3491,7 +3519,25 @@ class RelayStore {
     }
   }
 
+  retainAttachmentController(agent: Agent, controller: AttachmentBatchController): void {
+    if (!controller.hasPendingCleanup() && !controller.snapshot().uploading) return;
+    const key = `${agent.relay_id}:${agent.pane_id}`;
+    this.retainedAttachments.set(key, controller);
+    const stop = controller.subscribe((state) => {
+      if (controller.hasPendingCleanup() || state.uploading) return;
+      if (this.retainedAttachments.get(key) === controller) this.retainedAttachments.delete(key);
+      // subscribe immediately delivers its first state.
+      queueMicrotask(() => stop());
+    });
+  }
+
+  recoverAttachmentController(agent: Agent): AttachmentBatchController | null {
+    return this.retainedAttachments.get(`${agent.relay_id}:${agent.pane_id}`) ?? null;
+  }
+
   attachmentController(agent: Agent): AttachmentBatchController {
+    const retained = this.recoverAttachmentController(agent);
+    if (retained) return retained;
     const target = targetRefForAgent(agent);
     if (!target) throw new CommandError('This terminal does not have a stable attachment target.');
     const backendTarget: TargetRef = {
@@ -3566,7 +3612,10 @@ class RelayStore {
     if (signal?.aborted) return Promise.reject(new CommandError('Attachment upload was cancelled.'));
     const requestId = commandRequestId();
     return new Promise<TResult>((resolve, reject) => {
-      const cleanup = () => signal?.removeEventListener('abort', abort);
+      const cleanup = () => {
+        connection.cleanupGrants.delete(`upload_pending:${requestId}`);
+        signal?.removeEventListener('abort', abort);
+      };
       const timer = setTimeout(() => {
         cleanup();
         this.pendingUploads.delete(requestId);
@@ -3611,6 +3660,8 @@ class RelayStore {
     const requestId = String(message.request_id || '');
     const pending = this.pendingUploads.get(requestId);
     if (!pending || pending.relayId !== relayId || pending.responseType !== message.type) return;
+    const connection = this.connectionsValue.get(relayId);
+    const reserved = connection?.cleanupGrants.has(`upload_pending:${requestId}`);
     clearTimeout(pending.timer);
     pending.cleanup?.();
     this.pendingUploads.delete(requestId);
@@ -3630,14 +3681,29 @@ class RelayStore {
     }
     if (message.type === 'upload_begin_result' && typeof message.result.upload_id === 'string'
       && pending.targetKey && message.result.upload_id.length <= 256) {
-      const grants = this.connectionsValue.get(relayId)?.cleanupGrants;
-      if (grants && grants.size < 512) grants.add(`upload:${pending.targetKey}:${message.result.upload_id}`);
+      if (connection && reserved && message.result.upload_id) {
+        const key = `upload:${pending.targetKey}:${message.result.upload_id}`;
+        connection.cleanupGrants.add(key);
+        let cleanup = this.uploadCleanup.get(relayId);
+        if (!cleanup) {
+          const owner = this.sessionCredentials.get(connection);
+          cleanup = { relay: { ...connection.relay, gatewayUrls: connection.relay.gatewayUrls?.slice() },
+            credential: owner ? { ...owner } : null, grants: new Set() };
+          this.uploadCleanup.set(relayId, cleanup);
+        }
+        cleanup.grants.add(key);
+      }
     }
     if (['upload_finish_result', 'upload_cancel_result'].includes(message.type) && pending.targetKey && pending.uploadId) {
       // Only a matched successful finish/cancel releases its owned grant.
       // Errors/unknown outcomes retain cancellation authority; finish itself
       // still requires fresh action authority and is not a cleanup exception.
-      this.connectionsValue.get(relayId)?.cleanupGrants.delete(`upload:${pending.targetKey}:${pending.uploadId}`);
+      const key = `upload:${pending.targetKey}:${pending.uploadId}`;
+      connection?.cleanupGrants.delete(key);
+      connection?.cleanupGrants.delete(`cancel:${key}`);
+      const cleanup = this.uploadCleanup.get(relayId);
+      cleanup?.grants.delete(key);
+      if (!cleanup?.grants.size) this.uploadCleanup.delete(relayId);
     }
     pending.resolve(message.result);
   }

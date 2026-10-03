@@ -121,6 +121,21 @@ Readiness is checked again inside the send barrier. Failure, cancellation or a
 rejected topology commit cannot return ready data.
 Expired responses are dropped. No command/action is queued for later replay.
 
+Upload begins reserve one of the shared 512 cleanup slots before transmission;
+competing watch/lease/view acquisition cannot strand an admitted begin. Failed
+writes, errors, aborts, disconnection and the unchanged 60-second deadline release
+pending reservations. Successful begins replace them with exact-target upload grants.
+Only matched successful finish/cancel responses release established upload grants.
+After reconnect, only cancellation authority is retained, bound to the same enrolled
+credential (including secret, device, role and version) and relay connection configuration.
+It never restores chunk/finish, watch, lease or live-target authority. Removal,
+authentication rejection or a changed credential/configuration prevents recovery.
+Terminal teardown keeps a pending controller in the in-memory store so remounting
+that pane, even with a new live generation, exposes explicit cancellation retry for
+the original target/upload ID without starting another upload. Successful cleanup
+removes the retained controller. This is tab-lifetime recovery, not durable storage:
+reload/process loss still relies on the relay's bounded staged-upload expiration.
+
 The frontend freshness primitive binds its single outstanding nonce to an
 opaque connection/session identity, active path identity and wake generation.
 Application integration invalidates it on replacement, wake, lock, unready

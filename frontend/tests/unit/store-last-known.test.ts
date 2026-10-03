@@ -161,12 +161,14 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(f.session.sent.some((message) => message.type === 'upload_begin')).toBe(false);
   });
 
-  it.each(['error', 'timeout'] as const)('retains exact upload cleanup authority and controller identity for cancellation retry after %s', async (failure) => {
+  it.each([
+    ['error', false], ['timeout', false], ['error', true], ['timeout', true],
+  ] as const)('retains exact upload cleanup authority for retry after %s (replacement %s)', async (failure, reconnect) => {
     const f = boot('relay-a', true, 'controller', ['pane_size_lease']); f.reply();
     const other = boot('relay-b');
     const agent = get(relayStore.agents).find((item) => item.relay_id === f.id)!;
     const target = targetRefForAgent(agent);
-    const connection = relayStore.connection(f.id)!;
+    let connection = relayStore.connection(f.id)!;
     relayStore.sendRaw(f.id, { type: 'lease_pane_size', target, columns: 80 });
     const leaseGrant = [...connection.cleanupGrants][0];
     let cancels = 0;
@@ -199,6 +201,29 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(controller.snapshot().issue?.code).toBe('attachment_cancel_failed');
     expect(() => controller.select([new File(['png'], 'new.png', { type: 'image/png' })])).toThrow('attachment_batch_locked');
     expect(connection.cleanupGrants.size).toBe(2);
+    if (reconnect) {
+      relayStore.connectRelay(get(relayStore.relayConfigs).find((relay) => relay.id === f.id)!);
+      f.session = sessions.get(f.id)!;
+      connection = relayStore.connection(f.id)!;
+      expect(connection.cleanupGrants.size).toBe(1);
+      expect([...connection.cleanupGrants][0]).toMatch(/^cancel:upload:/);
+      expect(relayStore.relayActionsFresh(f.id)).toBe(false);
+      f.session.handlers.onMessage({ type: 'push_config', protocol: 3, inventory: { state: 'ready', stale: false },
+        capabilities: ['inventory_snapshot_v1'] });
+      f.session.handlers.onMessage({ type: 'inventory_snapshot',
+        snapshot_request_id: f.session.sent.findLast((message) => message.snapshot_request_id)!.snapshot_request_id,
+        inventory: { state: 'ready', stale: false }, agents: [rawAgent()], workspaces: [] });
+      expect(relayStore.relayActionsFresh(f.id)).toBe(true);
+      vi.spyOn(connection.transport!, 'send').mockImplementation((payload) => {
+        f.session.sent.push(payload);
+        if (payload.type === 'upload_cancel') cancels++;
+        return true;
+      });
+      for (const type of ['upload_chunk', 'upload_finish']) {
+        expect(relayStore.sendRaw(f.id, { type, target, upload_id: 'retry-owned' })).toBe(false);
+      }
+    }
+    expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target: { ...target, generation: 2 }, upload_id: 'retry-owned' })).toBe(false);
     expect(relayStore.sendRaw(other.id, { type: 'upload_cancel', target, upload_id: 'retry-owned' })).toBe(false);
     expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target, upload_id: 'unowned' })).toBe(false);
     const retry = controller.cancel();
@@ -208,12 +233,99 @@ describe('B2 store freshness and dispatch boundary', () => {
     other.session.handlers.onMessage({ type: 'upload_cancel_result', request_id: request.request_id, result: {} });
     f.session.handlers.onMessage({ type: 'upload_cancel_result', request_id: firstRequest.request_id, result: {} });
     f.session.handlers.onMessage({ type: 'upload_finish_result', request_id: request.request_id, result: {} });
-    expect(connection.cleanupGrants.size).toBe(2);
+    expect(connection.cleanupGrants.size).toBe(reconnect ? 1 : 2);
     f.session.handlers.onMessage({ type: 'upload_cancel_result', request_id: request.request_id, result: {} });
     await expect(retry).resolves.toBeUndefined();
     expect(controller.hasPendingCleanup()).toBe(false);
-    expect([...connection.cleanupGrants]).toEqual([leaseGrant]);
+    expect([...connection.cleanupGrants]).toEqual(reconnect ? [] : [leaseGrant]);
     expect(cancels).toBe(2);
+  });
+
+  it.each(['finish', 'cancel'] as const)('reserves the 512th cleanup slot before begin, preserving %s after competing admission', async (completion) => {
+    const f = boot('relay-a', true, 'controller', ['pane_size_lease', 'pane_realtime_delta']);
+    f.reply(1, { agents: Array.from({ length: 511 }, (_, index) => ({ ...rawAgent(), pane_id: `pane-${index}`, terminal_id: `terminal-${index}` })) });
+    const agents = get(relayStore.agents);
+    const connection = relayStore.connection(f.id)!;
+    for (const agent of agents) {
+      expect(relayStore.sendRaw(f.id, { type: 'lease_pane_size', target: targetRefForAgent(agent), columns: 80 })).toBe(true);
+    }
+    expect(connection.cleanupGrants.size).toBe(511);
+    vi.spyOn(connection.transport!, 'send').mockImplementation((payload) => {
+      f.session.sent.push(payload);
+      if (payload.type === 'upload_begin') {
+        expect(connection.cleanupGrants.size).toBe(512);
+        expect(relayStore.sendRaw(f.id, { type: 'watch_pane', target: targetRefForAgent(agents[0]) })).toBe(false);
+        queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_begin_result', request_id: payload.request_id,
+          result: { upload_id: 'reserved-upload', chunk_bytes: 262144, expires_at: new Date(Date.now() + 120_000).toISOString(),
+            limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 } } }));
+      } else if (payload.type === 'upload_chunk') {
+        expect([...connection.cleanupGrants].some((key) => key.endsWith(':reserved-upload'))).toBe(true);
+        queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_chunk_result', request_id: payload.request_id,
+          ...(completion === 'cancel' ? { error: { code: 'attachment_upload_failed' } }
+            : { result: { file_index: 0, next_sequence: 1, received_bytes: 3 } }) }));
+      } else if (payload.type === 'upload_finish') {
+        queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_finish_result', request_id: payload.request_id,
+          result: { attachments: [{ ref: 'attachment:reserved', name: 'shot.png', media_type: 'image/png', bytes: 3,
+            sha256: (payload.files as Array<{ sha256: string }>)[0].sha256,
+            expires_at: new Date(Date.now() + 60_000).toISOString() }] } }));
+      } else if (payload.type === 'upload_cancel') {
+        queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_cancel_result', request_id: payload.request_id, result: {} }));
+      }
+      return true;
+    });
+    const controller = relayStore.attachmentController(agents[0]);
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    if (completion === 'cancel') {
+      await expect(controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_failed' });
+      relayStore.suspendAuthority();
+      await expect(controller.cancel()).resolves.toBeUndefined();
+    } else await expect(controller.upload()).resolves.toHaveLength(1);
+    expect(connection.cleanupGrants.size).toBe(511);
+    expect([...connection.cleanupGrants].every((key) => key.startsWith('lease_pane_size:'))).toBe(true);
+  });
+
+  it.each(['write', 'error', 'timeout', 'abort', 'disconnect'] as const)('releases pending begin reservations after %s', async (failure) => {
+    const f = boot(); f.reply();
+    const connection = relayStore.connection(f.id)!;
+    const signal = new AbortController();
+    if (failure === 'write') vi.spyOn(connection.transport!, 'send').mockReturnValue(false);
+    if (failure === 'timeout') vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const request = (relayStore as any).sendUploadRequest(f.id, 'upload_begin', 'upload_begin_result',
+      { target: targetRefForAgent(get(relayStore.agents)[0]), files: [] }, signal.signal);
+    const rejected = expect(request).rejects.toBeDefined();
+    if (failure !== 'write') expect(connection.cleanupGrants.size).toBe(1);
+    if (failure === 'error') f.session.handlers.onMessage({ type: 'upload_begin_result',
+      request_id: f.session.sent.findLast((message) => message.type === 'upload_begin')!.request_id,
+      error: { code: 'attachment_upload_failed' } });
+    if (failure === 'timeout') await vi.advanceTimersByTimeAsync(60_000);
+    if (failure === 'abort') signal.abort();
+    if (failure === 'disconnect') relayStore.disconnectRelay(f.id);
+    await rejected;
+    expect(connection.cleanupGrants.size).toBe(0);
+  });
+
+  it.each(['credential', 'endpoint', 'removal', 'auth-rejected'] as const)('does not carry upload cancellation into a changed %s scope', async (change) => {
+    const f = boot(); f.reply();
+    const connection = relayStore.connection(f.id)!;
+    vi.spyOn(connection.transport!, 'send').mockImplementation((payload) => {
+      f.session.sent.push(payload);
+      if (payload.type === 'upload_begin') queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_begin_result',
+        request_id: payload.request_id, result: { upload_id: 'bound-cleanup' } }));
+      return true;
+    });
+    const target = targetRefForAgent(get(relayStore.agents)[0]);
+    await (relayStore as any).sendUploadRequest(f.id, 'upload_begin', 'upload_begin_result', { target, files: [] });
+    const relay = get(relayStore.relayConfigs)[0];
+    if (change === 'credential') {
+      new BrowserDeviceCredentialStore(localStorage).updateCredential(f.id, {
+        deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`, credentialVersion: 2, role: 'controller', locale: 'en' });
+      expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target, upload_id: 'bound-cleanup' })).toBe(false);
+    }
+    if (change === 'endpoint') relay.url = 'wss://different.example';
+    if (change === 'removal') relayStore.removeRelay(f.id);
+    if (change === 'auth-rejected') f.session.handlers.onStatus('closed', { code: 'device_unauthorized' });
+    relayStore.connectRelay(relay);
+    expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target, upload_id: 'bound-cleanup' })).toBe(false);
   });
 
   it('releases completed upload grants past the 512-grant budget without releasing other resources', async () => {
