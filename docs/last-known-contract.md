@@ -6,6 +6,29 @@ outstanding. No physical resume or performance claim is made.
 
 ## Hosted worker qualification
 
+### Latest review-remediation source
+
+Source `ca0267612b281dac17352559e12d244846964b4d` passed hosted run
+[37086787547](https://github.com/0cv/herdr-mobile-relay/actions/runs/37086787547):
+focused Go race checks, lint/type checks, **752 unit tests**, all **268 focused**
+and **492 complete** packaged Chromium-mobile/WebKit-mobile cases, without skipped
+browser cases. This includes post-freshness saved notification-policy fetch/display,
+failed opt-out sync/recovery fencing, and 513 completed uploads beyond the shared
+grant budget while preserving an unrelated lease. Native preflight also passed
+[37086787600](https://github.com/0cv/herdr-mobile-relay/actions/runs/37086787600).
+Existing release validation/accounting passed: **166939 B / 169216 B** initial
+gzip payload. These receipts address worker qualification, not reviewer dispositions.
+
+The source-bound `b2-generated-assets-ca0267612b281dac17352559e12d244846964b4d`
+artifact supplied the updated `web/` and `frontend/build-versions.json` verbatim.
+Its exact source binding, all 43 generated-file SHA-256 checks and complete manifest
+coverage passed before import and were verified again against the imported bytes.
+Manifest SHA-256: `d91ff4dfba49f01ef8587f43bb516aa20a37032afd105c5750b0164024bd9535`.
+Later source or asset revisions repeat the same hosted worker gates before handoff;
+independent B2 approval and physical/statistical qualification remain outstanding.
+
+### Pre-review baseline
+
 Source `a1510708672ce98fbcdc283e013d3b5f5ce80498` passed hosted run
 [37082388198](https://github.com/0cv/herdr-mobile-relay/actions/runs/37082388198):
 focused Go race tests, lint/type checks, 746 unit tests, 268 focused packaged
