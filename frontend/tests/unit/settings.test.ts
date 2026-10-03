@@ -610,11 +610,11 @@ describe('settings relay status', () => {
     handlers.onMessage({ type: 'push_policy', policy });
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Approval needed' })).not.toBeChecked());
     expect(screen.getByRole('switch', { name: 'Questions' })).not.toBeChecked();
-    expect(screen.getByRole('switch', { name: 'Finished', exact: true })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'Finished' })).toBeChecked();
     expect(screen.getByLabelText('Settle delay')).toHaveValue('5000');
     expect(screen.getByLabelText('Cooldown')).toHaveValue('60000');
     expect(screen.getByLabelText('Snooze')).toHaveValue('global');
-    await user.click(screen.getByRole('switch', { name: 'Finished', exact: true }));
+    await user.click(screen.getByRole('switch', { name: 'Finished' }));
     const save = sent.findLast((message) => message.type === 'push_policy_set')!;
     expect(save.policy).toMatchObject({ categories: { ...policy.categories, finished: false },
       settle_ms: 5000, cooldown_ms: 60000, snoozed: true, update_once: true });
