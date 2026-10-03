@@ -748,7 +748,7 @@ describe('accessible Svelte interactions', () => {
     const props = { agent, allAgents: [agent], responding: new Set<string>(),
       frame: { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' } };
     const first = render(TerminalView, props);
-    let second: typeof first | undefined;
+    let second: { unmount: () => void } | undefined;
     try {
       await fireEvent.change(first.container.querySelector('input[type="file"]')!, {
         target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
