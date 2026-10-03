@@ -215,6 +215,62 @@ describe('opaque persisted cross-tab last-known invalidation', () => {
     expect(b.control.epoch()).not.toBeNull();
   });
 
+  it.each([
+    ['missing API', 'write denied'], ['missing API', 'lock rejected'],
+    ['constructor rejected', 'write denied'], ['constructor rejected', 'lock rejected'],
+    ['delivery rejected', 'write denied'], ['delivery rejected', 'lock rejected'],
+  ] as const)('denies both open tabs with old consent when the channel is unavailable: %s / %s', async (channelFailure, mutationFailure) => {
+    const shared = new MemoryStorage();
+    const seed = tab(shared);
+    await seed.control.setEnabled(true);
+    seed.cache.write(snapshot());
+    await vi.waitFor(() => expect(seed.session.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull());
+    const raw = seed.session.getItem(LAST_KNOWN_STORAGE_KEY)!;
+    const persisted = shared.getItem(LAST_KNOWN_CONTROL_KEY);
+    cleanup.pop()!();
+    const Channel = globalThis.BroadcastChannel;
+    if (channelFailure === 'missing API') vi.stubGlobal('BroadcastChannel', undefined);
+    else vi.stubGlobal('BroadcastChannel', class {
+      constructor() { if (channelFailure === 'constructor rejected') throw new Error('channel unavailable'); }
+      postMessage() { throw new Error('delivery unavailable'); }
+      close() {}
+    });
+    const sessions = [new MemoryStorage(), new MemoryStorage()];
+    for (const session of sessions) session.setItem(LAST_KNOWN_STORAGE_KEY, raw);
+    // Both tabs are already open before the attempted opt-out, with valid old
+    // consent and encrypted roots. Neither may enable even transiently.
+    const a = tab(shared, { storage: sessions[0] });
+    const b = tab(shared, { storage: sessions[1] });
+    for (const instance of [a, b]) {
+      expect(get(instance.control.state)).toEqual({ enabled: false, unavailable: true });
+      expect(instance.control.epoch()).toBeNull();
+      await instance.cache.restore('local-relay');
+      expect(get(instance.cache.summaries).size).toBe(0);
+    }
+    const locks = Object.getOwnPropertyDescriptor(navigator, 'locks')!;
+    const write = mutationFailure === 'write denied'
+      ? vi.spyOn(shared, 'setItem').mockImplementation(() => { throw new Error('write denied'); }) : null;
+    if (mutationFailure === 'lock rejected') Object.defineProperty(navigator, 'locks', { configurable: true,
+      value: { request: async () => { throw new Error('lock rejected'); } } });
+    await expect(a.control.setEnabled(false)).resolves.toBe(false);
+    expect(shared.getItem(LAST_KNOWN_CONTROL_KEY)).toBe(persisted);
+    write?.mockRestore();
+    Object.defineProperty(navigator, 'locks', locks);
+    vi.stubGlobal('BroadcastChannel', Channel);
+    for (const instance of [a, b]) {
+      instance.control.sync();
+      window.dispatchEvent(new StorageEvent('storage', { key: LAST_KNOWN_CONTROL_KEY }));
+      window.dispatchEvent(new Event('pageshow'));
+      document.dispatchEvent(new Event('resume'));
+      instance.cache.write(snapshot());
+      await instance.cache.restore('local-relay');
+      expect(instance.control.epoch()).toBeNull();
+      expect(get(instance.control.state)).toEqual({ enabled: false, unavailable: true });
+      expect(get(instance.cache.summaries).size).toBe(0);
+    }
+    expect(sessions.every((session) => session.getItem(LAST_KNOWN_STORAGE_KEY) === null)).toBe(true);
+  });
+
   it('stays locally fail-closed if failed invalidation cannot be broadcast', async () => {
     const shared = new MemoryStorage();
     const a = tab(shared);

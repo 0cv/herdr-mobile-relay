@@ -106,7 +106,11 @@ Lock removes summary DOM and current decrypted references and fences pending
 callbacks. Forget, opt-out, credential changes, removal and observed auth refusal
 invalidate all last-known scopes conservatively using content-free same-origin
 notifications and persisted opaque epochs; suspended tabs revalidate those epochs.
-No summaries or secrets are broadcast. Failed durable control changes emit a
+No summaries or secrets are broadcast. Caching requires a usable BroadcastChannel
+before applying even a persisted opt-in; a missing, rejected or initially unwritable
+channel disables caching and clears current summaries/session roots. Later sync
+cannot silently restore consent after that failure. Storage events alone cannot
+notify peers of a failed durable mutation. Failed durable control changes emit a
 deny-only, content-free notification so listening peers clear summaries and remain
 fail-closed even when an old enabled record is readable. That signal never grants
 consent; unreachable/suspended peers may miss it, and failed durable invalidation

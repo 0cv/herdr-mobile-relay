@@ -49,10 +49,16 @@ These are named historical receipts, not qualification of later source/asset edi
 F005/F006 behavioral source `d7bf41cf8190526fe7bc1591a710c051d00eb9c8` also passed
 `37091060905` (759 unit tests, 268 focused and 492 complete browser cases) and
 native preflight `37091060885`; its 43-file generated artifact was verified/imported.
-That behavioral evidence does not satisfy the missing authenticated model provenance.
+That behavioral evidence is not independent approval or provider-model attestation.
 See [the qualification record](last-known-contract.md#hosted-worker-qualification)
-for final-candidate/source-import distinctions, subsequent SHA-bound receipts,
-and the current authenticated implementation-model provenance prerequisite.
+for final-candidate/source-import distinctions and subsequent SHA-bound receipts,
+and [the provenance boundary](last-known-contract.md#approval-and-qualification-boundary)
+for required extension preservation and actual local runtime inspection. Local
+`prepared.model` / `before_provider_request` observations identify Sol 6.1 beyond
+configured labels, but `providerBoundConfirmed:false`: no final-wire or returned
+provider-model proof is claimed. Provider attestation is an evidence limitation,
+not an additional plan-required gate. The original F007 blocked run remains
+historical; additive independent invalid-as-blocker dispositions are not B2 approval.
 Independent B2 approval
 and statistical/physical qualification remain outstanding; B1 closeout does not
 provide either.

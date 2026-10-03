@@ -20,13 +20,12 @@ export class LastKnownControl {
   constructor(private readonly storage: Storage | null, private readonly cache: LastKnownSessionCache) {}
 
   epoch = (): string | null => {
-    if (this.blocked || this.failedControlChange || this.pendingControlChanges) return null;
+    if (!this.channel || this.blocked || this.failedControlChange || this.pendingControlChanges) return null;
     const current = this.read();
     return current?.enabled ? current.epoch : null;
   };
 
   initialize(): () => void {
-    this.sync();
     const changed = (event: StorageEvent) => {
       if (event.key === LAST_KNOWN_CONTROL_KEY || event.key === null) this.sync();
     };
@@ -42,10 +41,17 @@ export class LastKnownControl {
         if (event.data?.type === 'invalidation_failed') this.failClosed();
         else this.sync();
       };
+      // Check delivery availability before enabling any restored consent.
+      // This content-free hint only asks peers to re-read persisted authority.
+      this.channel.postMessage({ type: 'invalidate' });
     } catch {
-      // Persisted epochs, storage events and resume revalidation remain required;
-      // notifications alone are never the authority for a restored tab copy.
+      this.channel?.close();
+      this.channel = null;
+      // Storage events cannot notify peers after a failed durable mutation.
+      // Without this deny-only path, caching is unavailable, not a fallback.
+      this.failClosed();
     }
+    this.sync();
     return () => {
       window.removeEventListener('storage', changed);
       window.removeEventListener('pageshow', resumed);
@@ -68,12 +74,12 @@ export class LastKnownControl {
       return;
     }
     const current = this.read();
-    if (!current || !navigator.locks?.request) {
+    if (!current || !navigator.locks?.request || !this.channel) {
       this.blocked = true;
       this.control = null;
       this.cache.setEnabled(false);
       this.cache.invalidate();
-      this.stateStore.set({ enabled: false, unavailable: this.storage === null || !navigator.locks?.request });
+      this.stateStore.set({ enabled: false, unavailable: this.storage === null || !navigator.locks?.request || !this.channel });
       return;
     }
     if (this.control && (current.epoch !== this.control.epoch || current.enabled !== this.control.enabled)) {
@@ -97,7 +103,7 @@ export class LastKnownControl {
     this.blocked = true;
     this.cache.forget();
     try {
-      if (!this.storage || !navigator.locks?.request) throw new Error('Coordination unavailable');
+      if (!this.storage || !navigator.locks?.request || !this.channel) throw new Error('Coordination unavailable');
       await navigator.locks.request(CHANNEL, () => {
         const previous = this.read();
         this.cache.forget();

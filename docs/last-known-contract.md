@@ -21,8 +21,9 @@ Complete initial payload accounting passed at **167168 B / 169216 B** gzip.
 Its source-bound generated assets were imported verbatim after all 43 SHA-256
 checks and complete coverage verification. Manifest SHA-256:
 `974bc82be191fe3dfa4cccdaf59d0e2c7e58d9744efd86ecf1c8cc73fbb6cc49`.
-This is behavioral evidence only: the authenticated implementation-model provenance
-prerequisite remains unverified as explained below. Post-import final-SHA receipts
+This is behavioral evidence only, not independent approval or provider-model
+attestation. Required local runtime provenance inspection and its limitations are
+explained below. Post-import final-SHA receipts
 are identified by the handoff and source-bound CI artifacts, not by substituting a
 pre-import source SHA for the final candidate.
 
@@ -187,7 +188,11 @@ The cache class starts disabled and locked. Lock, Forget and explicit invalidati
 fence pending asynchronous work before clearing current memory and summary DOM.
 Credential/removal/refusal lifecycle callers invalidate all scopes conservatively.
 `LastKnownControl` supplies mandatory persisted opaque epochs, Web Locks serialization
-and content-free storage/BroadcastChannel/resume notifications. No tab notification
+and content-free storage/BroadcastChannel/resume notifications. A usable
+BroadcastChannel is required before caching can become eligible, including from
+persisted opt-in: absent, rejected or initially unwritable channels fail closed.
+Storage events alone cannot carry a failed durable invalidation. Later sync or
+recovery of browser APIs does not silently undo this failure latch. No tab notification
 contains a relay ID, label, credential or ciphertext. A restored tab must validate
 its session envelope against the persisted epoch before displaying it. Snapshot
 requests capture control generation so a pre-Forget response cannot repopulate it.
@@ -210,13 +215,23 @@ qualification covered fail-closed dispatch, alternate caller/lifecycle paths,
 cross-tab restoration, component/browser journeys and B1 regressions; its generated
 assets were retrieved and source-bound before import and checked again afterward.
 Independent approval and physical/statistical qualification remain outstanding.
-The plan-required authenticated implementation-model provenance is also a current
-worker prerequisite: configuration/transcript model labels do not establish it.
-Available local records preserve the required extension policy and identify the
-requested `gpt-6.1-sol` model, but do not capture authenticated request/response
-model metadata. Native Pi records initialize assistant `model` from the selected
-model; provider response IDs alone do not prove the returned model. This missing
-provenance is not deferred to physical qualification or independent review.
+The plan requires preserving the model-authentication extension policy and
+inspecting actual model provenance; configured labels alone are insufficient.
+Inspected local runtime records preserve that policy and bind worker identities,
+turns and requests to `openai-codex/gpt-6.1-sol` through `prepared.model` and
+`before_provider_request` `ctx.model` observations. These are actual local
+runtime/request-selection metadata, not authenticated provider attestation:
+`providerBoundConfirmed:false`. They do not prove final wire bytes or which model
+the provider ultimately processed or returned; response IDs alone do not prove it.
+The literal plan does not prescribe provider receipts, final-wire binding or
+returned `response.model` as a mandatory evidence format.
+
+Historical finding `f4725027-0c33-4b3e-b695-bc66c554fcb9:F007` and that run's blocked
+outcome remain recorded, not rewritten. Additive independent adjudication
+`d2a143c2` and both first-round linked-successor reviewers judged it invalid as a
+blocker under the literal plan, while retaining the provider-attestation limitation.
+This is not B2 approval; complete final-revision independent review, required local
+provenance inspection and exact-SHA hosted qualification still apply.
 Any subsequent source or asset revision repeats hosted qualification before worker
 handoff; historical receipts are not substituted for current checks. Local project
 build/test scripts remain prohibited by the supplied plan.
