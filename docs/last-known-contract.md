@@ -33,6 +33,18 @@ chunk, feature, readiness/error path or deadline is removed or deferred. The unc
 release validator, complete packaged browser suites and exact-SHA byte equality
 remain required. Exact current receipts belong in the additive handoff index.
 
+A source transform gives the already-private bookkeeping members of `RelayStore`
+and `LastKnownSessionCache` native private representation, allowing the existing
+minifier to shorten their otherwise retained property names. It changes neither
+public APIs nor serialized fields, foreign objects, initializers, guards or timer
+values. Constructor parameter properties and the existing raw-upload regression
+seam remain unchanged. Only the two audited modules are transformed; dynamic
+indexed `this` access fails the transform rather than guessing. Hosted tests
+reverse this representation on both complete module ASTs and compare with the
+original, in addition to exercising their normal lifecycle/dispatch cases and
+all required packaged browser journeys. This is bookkeeping compaction, not a
+new security/heap-erasure promise or deferred dependency.
+
 Successor finding F008 identified an omission in earlier accounting: the loader
 was missing from the five-file totals. Those receipts and their reported numbers
 remain historical evidence, **not proof of complete eager-payload compliance**.

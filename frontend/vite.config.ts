@@ -5,6 +5,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 import versions from './build-versions.json' with { type: 'json' };
+import { nativePrivateBookkeeping } from './scripts/native-private-bookkeeping';
 
 const manifest = readFileSync(fileURLToPath(new URL('../herdr-plugin.toml', import.meta.url)), 'utf8');
 const productVersion = manifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
@@ -211,7 +212,7 @@ export function assetContentVersion(source: string | Uint8Array): string {
 const devRuntime = process.env.HERDR_DEV_RUNTIME === '1';
 
 export default defineConfig({
-  plugins: [svelte(devRuntime ? { compilerOptions: { dev: true } } : {}), stableReleaseAssets()],
+  plugins: [nativePrivateBookkeeping(), svelte(devRuntime ? { compilerOptions: { dev: true } } : {}), stableReleaseAssets()],
   resolve: {
     alias: {
       $lib: fileURLToPath(new URL('./src/lib', import.meta.url)),
