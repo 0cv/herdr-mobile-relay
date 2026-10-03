@@ -2095,7 +2095,13 @@ class RelayStore {
 
   private credentialsChanged(): void {
     for (const [relayId, connection] of this.connectionsValue) {
-      if (!this.credentialMatchesSession(relayId, connection)) this.invalidateFreshness(relayId, connection);
+      if (!this.credentialMatchesSession(relayId, connection)) {
+        this.uploadCleanup.delete(relayId);
+        for (const key of connection.cleanupGrants) {
+          if (key.startsWith('upload') || key.startsWith('cancel:upload:')) connection.cleanupGrants.delete(key);
+        }
+        this.invalidateFreshness(relayId, connection);
+      }
     }
     this.lastKnownCache.revalidate();
     this.publishAgents('credential changed');

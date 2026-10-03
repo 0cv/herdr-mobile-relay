@@ -304,7 +304,7 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(connection.cleanupGrants.size).toBe(0);
   });
 
-  it.each(['credential', 'endpoint', 'removal', 'auth-rejected'] as const)('does not carry upload cancellation into a changed %s scope', async (change) => {
+  it.each(['credential', 'endpoint', 'removal', 'auth-rejected', 'enrollment'] as const)('does not carry upload cancellation into a changed %s scope', async (change) => {
     const f = boot(); f.reply();
     const connection = relayStore.connection(f.id)!;
     vi.spyOn(connection.transport!, 'send').mockImplementation((payload) => {
@@ -325,6 +325,12 @@ describe('B2 store freshness and dispatch boundary', () => {
     if (change === 'removal') relayStore.removeRelay(f.id);
     if (change === 'auth-rejected') f.session.handlers.onStatus('closed', { code: 'device_unauthorized' });
     relayStore.connectRelay(relay);
+    if (change === 'enrollment') {
+      const authentication = sessions.get(f.id)!.authentication!;
+      authentication.onAuthenticated!(authentication.getAuthentication!()!, {
+        deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`, credentialVersion: 2, role: 'controller', locale: 'en',
+      });
+    }
     expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target, upload_id: 'bound-cleanup' })).toBe(false);
   });
 
