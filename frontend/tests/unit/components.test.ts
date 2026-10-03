@@ -16,6 +16,7 @@ import { setHomeLayout } from '$lib/preferences';
 import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
 
 import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
+import TerminalWithdrawalHarness from './TerminalWithdrawalHarness.svelte';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
 
@@ -51,6 +52,20 @@ const blockedAgent: Agent = {
 };
 
 describe('accessible Svelte interactions', () => {
+  it.each(['withdrawal', 'replacement'] as const)('cleans up the mount-owned watch on %s, not the reactive prop', async (change) => {
+    const owned: Agent = { ...blockedAgent, status: 'working', attention_kind: undefined, options: undefined,
+      server_session_id: 'primary', terminal_id: 'terminal-owned', generation: 1, agent_session_id: '' };
+    const watch = vi.spyOn(relayStore, 'watchPane').mockImplementation(() => undefined);
+    const unwatch = vi.spyOn(relayStore, 'unwatchPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const view = render(TerminalWithdrawalHarness, { agent: owned });
+    await waitFor(() => expect(watch).toHaveBeenCalledWith(owned));
+    const replacement: Agent = { ...owned, pane_id: 'fedora::replacement', raw_pane_id: 'replacement', terminal_id: 'terminal-replacement' };
+    await view.rerender({ agent: change === 'withdrawal' ? null : replacement });
+    expect(unwatch).toHaveBeenCalledExactlyOnceWith(owned);
+    expect(unwatch).not.toHaveBeenCalledWith(null);
+    expect(unwatch).not.toHaveBeenCalledWith(replacement);
+  });
   it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
     const user = userEvent.setup();
     const relay = { id: 'invited', label: 'Invited', url: 'wss://invited.example', token: '' };

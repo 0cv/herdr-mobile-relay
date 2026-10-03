@@ -44,8 +44,13 @@ export class CorrelatedInventoryFixture {
     if (message.type === 'workspaces' && Array.isArray(message.workspaces)) this.workspaces = message.workspaces;
     if (['agent_update', 'blocked'].includes(message.type) && typeof message.pane_id === 'string') {
       const index = this.agents.findIndex((agent) => agent.pane_id === message.pane_id);
-      Object.assign(message, this.identity({ ...(index < 0 ? {} : this.agents[index]), ...message }));
-      const agent: Record<string, any> = { ...message, status: message.type === 'blocked' ? 'blocked' : message.status };
+      const before = index < 0 ? {} : this.agents[index];
+      const identity: Record<string, unknown> = {};
+      for (const field of ['server_session_id', 'terminal_id', 'generation', 'agent_session_id']) {
+        if (before[field] !== undefined) identity[field] = before[field];
+      }
+      Object.assign(message, this.identity({ ...identity, ...message }));
+      const agent: Record<string, any> = { ...before, ...message, status: message.type === 'blocked' ? 'blocked' : message.status ?? before.status };
       if (index < 0) this.agents.push(agent);
       else if (typeof agent.pane_revision !== 'number' || typeof this.agents[index].pane_revision !== 'number'
         || agent.pane_revision >= (this.agents[index].pane_revision as number)) this.agents[index] = agent;

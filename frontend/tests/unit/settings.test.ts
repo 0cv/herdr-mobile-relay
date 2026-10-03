@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SettingsView from '$components/SettingsView.svelte';
+import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
 import {
   APP_ASSET_VERSION,
   APP_VERSION,
@@ -14,7 +15,7 @@ import { currentView, navigate } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
-import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { appUpdateStatus, beginUpdateProgress, clearUpdateProgress, MANAGED_UPDATE_COMMAND, updateProgressPlan } from '$lib/updates';
 import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
 import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
 
@@ -374,6 +375,37 @@ describe('settings relay status', () => {
       },
     });
     expect(await screen.findByText('Gateway: 0.17.0 · Latest: 0.17.0')).toBeInTheDocument();
+  });
+
+  it('waits for correlated authority before continuing a pending fleet update', async () => {
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config', protocol: 3, release_version: APP_VERSION,
+      capabilities: ['self_update'],
+      update: { state: 'available', current_version: APP_VERSION, available_version: '99.0.0',
+        target_revision: 'f'.repeat(40), can_install: true },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    expect(relayStore.relayActionsFresh(relayId)).toBe(true);
+    relayStore.requestAgents(true);
+    expect(relayStore.relayActionsFresh(relayId)).toBe(false);
+    const install = vi.spyOn(relayStore, 'installRelayUpdate').mockResolvedValue(undefined);
+    let mounted: ReturnType<typeof render> | undefined;
+    try {
+      beginUpdateProgress('99.0.0', [relayId], '');
+      mounted = render(UpdateProgressDialog);
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'Continue update' })).toBeInTheDocument());
+      expect(install).not.toHaveBeenCalled();
+      expect(get(updateProgressPlan)?.startedRelayIds).toEqual([]);
+      socket.server({ type: 'inventory_status', state: 'ready', stale: false });
+      await waitFor(() => expect(install).toHaveBeenCalledExactlyOnceWith(relayId));
+      expect(get(updateProgressPlan)?.errors).toEqual({});
+    } finally {
+      mounted?.unmount();
+      clearUpdateProgress();
+      install.mockRestore();
+    }
   });
 
   it('shows the complete one-time update command for an older relay', async () => {

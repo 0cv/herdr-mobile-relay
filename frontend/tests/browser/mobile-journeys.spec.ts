@@ -477,8 +477,16 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           payload = { ...payload, agents: this.inventoryAgents };
         } else if ((payload?.type === 'blocked' || payload?.type === 'agent_update') && payload.pane_id) {
           const index = this.inventoryAgents.findIndex((agent) => agent.pane_id === payload.pane_id);
-          payload = withExactIdentity({ ...(index < 0 ? {} : this.inventoryAgents[index]), ...payload });
-          const agent: Record<string, unknown> = { ...payload, status: payload.type === 'blocked' ? 'blocked' : payload.status };
+          const before = index < 0 ? {} : this.inventoryAgents[index];
+          // Deltas carry exact identity, not cached attention/interaction data.
+          // Missing fields must remain missing so the client merges its current
+          // question state rather than being overwritten by an old fixture row.
+          const identity: Record<string, unknown> = {};
+          for (const field of ['server_session_id', 'terminal_id', 'generation', 'agent_session_id']) {
+            if (before[field] !== undefined) identity[field] = before[field];
+          }
+          payload = withExactIdentity({ ...identity, ...payload });
+          const agent: Record<string, unknown> = { ...before, ...payload, status: payload.type === 'blocked' ? 'blocked' : payload.status ?? before.status };
           if (index < 0) this.inventoryAgents.push(agent);
           else if (typeof agent.pane_revision !== 'number' || typeof this.inventoryAgents[index].pane_revision !== 'number'
             || agent.pane_revision >= (this.inventoryAgents[index].pane_revision as number)) this.inventoryAgents[index] = agent;

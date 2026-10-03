@@ -650,6 +650,10 @@
   });
 
   onMount(() => {
+    // The parent withdraws the reactive prop before this branch is destroyed.
+    // Resource cleanup must release the exact registration this mount owned,
+    // not dereference a now-null prop or adopt a replacement target.
+    const mountedAgent = agent;
     componentMounted = true;
     const stopWakeLock = mountTerminalWakeLock();
     const measurePane = () => requestPaneSizeLease(false);
@@ -659,15 +663,10 @@
     let lastRefreshAt = Date.now();
     const visibilityChanged = () => {
       if (!paneVisible()) {
-        // Traffic stops while hidden, but lease renewals keep going for a
-        // bounded grace: desktop Safari reports an occluded window as hidden,
-        // so treating every app switch as departure lapsed the lease and
-        // resized the shared pane twice per glance, stranding stale copies of
-        // inline agents' status bars in the scrollback. Once the grace runs
-        // out the renewals stop and the relay's TTL hands the size back — a
-        // page hidden overnight cannot keep the pane narrow.
+        // Suspension withdraws authority. Only scoped cleanup is allowed;
+        // the store independently rejects hidden lease/watch acquisition.
         hiddenAt = Date.now();
-        relayStore.unwatchPane(agent);
+        relayStore.unwatchPane(mountedAgent);
         return;
       }
       hiddenAt = 0;
@@ -718,7 +717,7 @@
       if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
       if (keyReadTimer) clearTimeout(keyReadTimer);
       for (const command of keyQueue.splice(0)) command.resolve(false);
-      relayStore.unwatchPane(agent);
+      relayStore.unwatchPane(mountedAgent);
       releasePaneSizeLease(false);
       virtualRowObserver?.disconnect();
       if (virtualWindowFrame) cancelAnimationFrame(virtualWindowFrame);
