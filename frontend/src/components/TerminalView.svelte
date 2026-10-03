@@ -1913,10 +1913,12 @@
   }
 
   let attachmentOwner: Agent | null = null;
+  let attachmentScope: object | null = null;
 
   function bindAttachmentController(controller: AttachmentBatchController, owner: Agent): void {
     attachmentController = controller;
     attachmentOwner = owner;
+    attachmentScope = relayStore.attachmentCleanupScope(owner.relay_id);
     attachmentUnsubscribe?.();
     attachmentUnsubscribe = controller.subscribe((snapshot) => {
       attachmentSnapshot = snapshot;
@@ -1930,6 +1932,7 @@
     if (attachmentController === controller) {
       attachmentController = null;
       attachmentOwner = null;
+      attachmentScope = null;
     }
   }
 
@@ -2003,8 +2006,8 @@
   }
 
   onDestroy(() => {
-    if (attachmentController && attachmentOwner) {
-      relayStore.retainAttachmentController(attachmentOwner, attachmentController);
+    if (attachmentController && attachmentOwner && attachmentScope) {
+      relayStore.retainAttachmentController(attachmentOwner, attachmentController, attachmentScope);
     }
     attachmentUnsubscribe?.();
     // Failure remains visible and explicitly retryable on remount via the store.

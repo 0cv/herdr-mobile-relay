@@ -575,7 +575,8 @@ class RelayStore {
   // Retain only cancellation across replacement authenticated connections,
   // bound to the original credential, relay configuration and exact target.
   private uploadCleanup = new Map<string, { relay: RelayConfig; credential: RelayDeviceCredential | null; grants: Set<string> }>();
-  private retainedAttachments = new Map<string, AttachmentBatchController>();
+  private attachmentCleanupScopes = new Map<string, { credential: RelayDeviceCredential | null }>();
+  private retainedAttachments = new Map<string, { relayId: string; scope: object; controller: AttachmentBatchController }>();
   private deferredUiGeneration = 0;
   private readonly registeredAppOrigins = new WeakSet<RelayConnection>();
   private agentsValue: Agent[] = [];
@@ -854,6 +855,7 @@ class RelayStore {
     this.lastKnownCache.dispose();
     this.uploadCleanup.clear();
     this.retainedAttachments.clear();
+    this.attachmentCleanupScopes.clear();
     this.actionLocked = false;
     this.reconnectEnabled = false;
     this.stopKeepalive();
@@ -923,7 +925,7 @@ class RelayStore {
     void this.lastKnownControl.forget();
     resumeMetrics.removed(id);
     this.disconnectRelay(id);
-    this.uploadCleanup.delete(id);
+    this.invalidateUploadCleanup(id);
     this.reconnectAttempts.delete(id);
     this.deferredPairingRelays.delete(id);
     this.deviceCredentials.remove(id);
@@ -1033,10 +1035,9 @@ class RelayStore {
     const credential = this.deviceCredential(relay.id);
     const owner = cleanup?.credential;
     const recoverable = cleanup && owner && credential
-      && owner.id === credential.id && owner.version === credential.version && owner.secret === credential.secret
-      && owner.deviceId === credential.deviceId && owner.role === credential.role
+      && sameDeviceCredential(owner, credential)
       && !relayConnectionIdentityChanged(cleanup.relay, relay);
-    if (!recoverable) this.uploadCleanup.delete(relay.id);
+    if (!recoverable) this.invalidateUploadCleanup(relay.id);
     return {
       relay,
       transport: null,
@@ -1184,7 +1185,7 @@ class RelayStore {
       void this.lastKnownControl.forget();
       clearConversationPreviewsForRelay(relay.id);
       connection.authRejected = true;
-      this.uploadCleanup.delete(relay.id);
+      this.invalidateUploadCleanup(relay.id);
       connection.closed = true;
       clearTimeout(connection.reconnectTimer ?? undefined);
       connection.reconnectTimer = null;
@@ -2094,9 +2095,13 @@ class RelayStore {
   }
 
   private credentialsChanged(): void {
+    // Include detached scopes: credentials can change while no connection exists.
+    for (const [relayId, scope] of this.attachmentCleanupScopes) {
+      if (!this.attachmentCleanupScopeCurrent(relayId, scope)) this.invalidateUploadCleanup(relayId);
+    }
     for (const [relayId, connection] of this.connectionsValue) {
       if (!this.credentialMatchesSession(relayId, connection)) {
-        this.uploadCleanup.delete(relayId);
+        this.invalidateUploadCleanup(relayId);
         for (const key of connection.cleanupGrants) {
           if (key.startsWith('upload') || key.startsWith('cancel:upload:')) connection.cleanupGrants.delete(key);
         }
@@ -2114,9 +2119,7 @@ class RelayStore {
       if (!this.sessionCredentials.has(connection)) return false;
       const enrolled = this.sessionCredentials.get(connection);
       const current = this.deviceCredential(relayId);
-      return enrolled === null ? current === null : Boolean(enrolled && current
-        && enrolled.id === current.id && enrolled.version === current.version && enrolled.secret === current.secret
-        && enrolled.deviceId === current.deviceId && enrolled.role === current.role);
+      return sameDeviceCredential(enrolled, current);
     } catch { return false; }
   }
 
@@ -3525,20 +3528,51 @@ class RelayStore {
     }
   }
 
-  retainAttachmentController(agent: Agent, controller: AttachmentBatchController): void {
-    if (!controller.hasPendingCleanup() && !controller.snapshot().uploading) return;
+  private invalidateUploadCleanup(relayId: string): void {
+    this.uploadCleanup.delete(relayId);
+    this.attachmentCleanupScopes.delete(relayId);
+    for (const [key, entry] of this.retainedAttachments) {
+      if (entry.relayId === relayId) this.retainedAttachments.delete(key);
+    }
+  }
+
+  private attachmentCleanupScopeCurrent(relayId: string, scope: object): boolean {
+    const current = this.attachmentCleanupScopes.get(relayId);
+    if (!current || scope !== current) return false;
+    try { return sameDeviceCredential(current.credential, this.deviceCredential(relayId)); } catch { return false; }
+  }
+
+  attachmentCleanupScope(relayId: string): object {
+    let scope = this.attachmentCleanupScopes.get(relayId);
+    if (!scope) {
+      const credential = this.deviceCredential(relayId);
+      scope = { credential: credential ? { ...credential } : null };
+      this.attachmentCleanupScopes.set(relayId, scope);
+    }
+    return scope;
+  }
+
+  retainAttachmentController(agent: Agent, controller: AttachmentBatchController, scope: object): void {
+    // Capture the scope when binding, not during teardown after invalidation.
+    if (!this.attachmentCleanupScopeCurrent(agent.relay_id, scope)
+      || (!controller.hasPendingCleanup() && !controller.snapshot().uploading)) return;
     const key = `${agent.relay_id}:${agent.pane_id}`;
-    this.retainedAttachments.set(key, controller);
+    const entry = { relayId: agent.relay_id, scope, controller };
+    this.retainedAttachments.set(key, entry);
     const stop = controller.subscribe((state) => {
       if (controller.hasPendingCleanup() || state.uploading) return;
-      if (this.retainedAttachments.get(key) === controller) this.retainedAttachments.delete(key);
+      if (this.retainedAttachments.get(key) === entry) this.retainedAttachments.delete(key);
       // subscribe immediately delivers its first state.
       queueMicrotask(() => stop());
     });
   }
 
   recoverAttachmentController(agent: Agent): AttachmentBatchController | null {
-    return this.retainedAttachments.get(`${agent.relay_id}:${agent.pane_id}`) ?? null;
+    const key = `${agent.relay_id}:${agent.pane_id}`;
+    const entry = this.retainedAttachments.get(key);
+    if (entry && this.attachmentCleanupScopeCurrent(agent.relay_id, entry.scope)) return entry.controller;
+    this.retainedAttachments.delete(key);
+    return null;
   }
 
   attachmentController(agent: Agent): AttachmentBatchController {
@@ -3754,6 +3788,12 @@ function clearChangedRelayPreviews(before: RelayConfig[], after: RelayConfig[]):
     const old = previous.get(relay.id);
     if (old && relayConnectionIdentityChanged(old, relay)) clearConversationPreviewsForRelay(relay.id);
   }
+}
+
+function sameDeviceCredential(before: RelayDeviceCredential | null | undefined, after: RelayDeviceCredential | null): boolean {
+  return before === null ? after === null : Boolean(before && after
+    && before.id === after.id && before.version === after.version && before.secret === after.secret
+    && before.deviceId === after.deviceId && before.role === after.role);
 }
 
 function relayConnectionIdentityChanged(before: RelayConfig, after: RelayConfig): boolean {

@@ -133,7 +133,11 @@ authentication rejection or a changed credential/configuration prevents recovery
 Terminal teardown keeps a pending controller in the in-memory store so remounting
 that pane, even with a new live generation, exposes explicit cancellation retry for
 the original target/upload ID without starting another upload. Successful cleanup
-removes the retained controller. This is tab-lifetime recovery, not durable storage:
+removes the retained controller. Scope invalidation also discards retention so a
+fresh pane can start a new upload, without restoring revoked cleanup authority.
+The binding-time scope token fences late teardown callbacks from re-inserting an
+invalidated controller, including credential changes while disconnected.
+This is tab-lifetime recovery, not durable storage:
 reload/process loss still relies on the relay's bounded staged-upload expiration.
 
 The frontend freshness primitive binds its single outstanding nonce to an

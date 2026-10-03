@@ -776,6 +776,64 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
+  it.each([true, false])('remounts a changed cleanup scope with a fresh upload (teardown first %s)', async (teardownFirst) => {
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    const target = { server_session_id: 'server-session', pane_id: 'w1:p1', terminal_id: 'terminal', generation: 1 };
+    const result = (uploadId: string) => ({ upload_id: uploadId, chunk_bytes: 1024,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 } });
+    const limits = { maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 1024 };
+    const cancel = vi.fn().mockRejectedValue(new Error('uncertain old cleanup'));
+    const old = new AttachmentBatchController(target, {
+      begin: async () => result('revoked-cleanup'), chunk: async () => { throw new Error('unknown chunk'); },
+      finish: async () => { throw new Error('Unexpected finish'); }, cancel,
+    }, limits);
+    const begin = vi.fn().mockResolvedValue(result('new-scope-upload'));
+    const fresh = new AttachmentBatchController({ ...target, generation: 2 }, {
+      begin, chunk: async () => ({ file_index: 0, next_sequence: 1, received_bytes: 3 }),
+      finish: async (request) => ({ attachments: [{ ref: 'attachment:new-scope', name: 'shot.png', media_type: 'image/png', bytes: 3,
+        sha256: request.files[0].sha256, expires_at: new Date(Date.now() + 60_000).toISOString() }] }),
+      cancel: async () => undefined,
+    }, limits);
+    const create = vi.spyOn(relayStore, 'attachmentController').mockReturnValueOnce(old).mockReturnValue(fresh);
+    const agent: Agent = { ...blockedAgent, status: 'done', attention_kind: 'unknown', options: undefined };
+    const props = { agent, allAgents: [agent], responding: new Set<string>(),
+      frame: { paneId: agent.pane_id, content: 'Ready for a prompt', format: 'plain' } };
+    const first = render(TerminalView, props);
+    let second: { unmount: () => void } | undefined;
+    try {
+      await fireEvent.change(first.container.querySelector('input[type="file"]')!, {
+        target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
+      });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Discard upload' })).toBeEnabled());
+      if (!teardownFirst) relayStore.removeRelay(agent.relay_id);
+      first.unmount();
+      await waitFor(() => expect(old.snapshot().issue?.code).toBe('attachment_cancel_failed'));
+      if (teardownFirst) {
+        expect(relayStore.recoverAttachmentController(agent)).toBe(old);
+        relayStore.removeRelay(agent.relay_id);
+      }
+      expect(relayStore.recoverAttachmentController(agent)).toBeNull();
+      const current = { ...agent, generation: 2 };
+      const mounted = render(TerminalView, { ...props, agent: current, allAgents: [current] });
+      second = mounted;
+      expect(screen.queryByRole('button', { name: 'Retry attachment cancellation' })).not.toBeInTheDocument();
+      await fireEvent.change(mounted.container.querySelector('input[type="file"]')!, {
+        target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
+      });
+      await waitFor(() => expect(begin).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(fresh.snapshot().items[0]?.state).toBe('ready'));
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(old.hasPendingCleanup()).toBe(true);
+      expect(fresh.hasPendingCleanup()).toBe(false);
+    } finally {
+      second?.unmount();
+      vi.restoreAllMocks();
+    }
+  });
+
   it('keeps a failed attachment cancellation available for explicit retry', async () => {
     const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);

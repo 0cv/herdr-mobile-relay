@@ -334,6 +334,92 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target, upload_id: 'bound-cleanup' })).toBe(false);
   });
 
+  it.each([
+    ['credential', true], ['credential', false], ['endpoint', true], ['endpoint', false],
+    ['removal', true], ['removal', false], ['auth-rejected', true], ['auth-rejected', false],
+    ['enrollment', true], ['enrollment', false], ['detached-credential', true], ['detached-credential', false],
+  ] as const)('allows a fresh upload after %s invalidates retained cleanup (teardown first %s)', async (change, teardownFirst) => {
+    const f = boot(); f.reply();
+    const other = boot('relay-b');
+    const otherScope = relayStore.attachmentCleanupScope(other.id);
+    const agent = get(relayStore.agents).find((item) => item.relay_id === f.id)!;
+    const oldScope = relayStore.attachmentCleanupScope(f.id);
+    const old = relayStore.attachmentController(agent);
+    const connection = relayStore.connection(f.id)!;
+    vi.spyOn(connection.transport!, 'send').mockImplementation((payload) => {
+      f.session.sent.push(payload);
+      if (payload.type === 'upload_begin') queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_begin_result',
+        request_id: payload.request_id, result: { upload_id: 'invalidated-cleanup', chunk_bytes: 262144,
+          expires_at: new Date(Date.now() + 120_000).toISOString(),
+          limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 } } }));
+      if (payload.type === 'upload_chunk') queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_chunk_result',
+        request_id: payload.request_id, error: { code: 'attachment_upload_failed' } }));
+      if (payload.type === 'upload_cancel') queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_cancel_result',
+        request_id: payload.request_id, error: { code: 'attachment_cancel_failed' } }));
+      return true;
+    });
+    old.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    await expect(old.upload()).rejects.toMatchObject({ code: 'attachment_upload_failed' });
+    await expect(old.cancel()).rejects.toMatchObject({ code: 'attachment_cancel_failed' });
+    if (teardownFirst) {
+      relayStore.retainAttachmentController(agent, old, oldScope);
+      expect(relayStore.recoverAttachmentController(agent)).toBe(old);
+    }
+    const relay = get(relayStore.relayConfigs).find((item) => item.id === f.id)!;
+    if (change === 'credential' || change === 'detached-credential') {
+      if (change === 'detached-credential') relayStore.disconnectRelay(f.id);
+      new BrowserDeviceCredentialStore(localStorage).updateCredential(f.id, {
+        deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`, credentialVersion: 2, role: 'controller', locale: 'en' });
+    }
+    if (change === 'endpoint') relay.url = 'wss://changed-scope.example';
+    if (change === 'auth-rejected') f.session.handlers.onStatus('closed', { code: 'device_unauthorized' });
+    if (change === 'removal') {
+      relayStore.removeRelay(f.id);
+      boot(f.id);
+    } else relayStore.connectRelay(relay);
+    const session = sessions.get(f.id)!;
+    if (change === 'enrollment') {
+      const authentication = session.authentication!;
+      authentication.onAuthenticated!(authentication.getAuthentication!()!, {
+        deviceId: `device-${f.id}`, credentialId: `credential-${f.id}`, credentialVersion: 2, role: 'controller', locale: 'en' });
+    }
+    session.handlers.onMessage({ type: 'push_config', protocol: 3, inventory: { state: 'ready', stale: false },
+      capabilities: ['inventory_snapshot_v1'] });
+    session.handlers.onMessage({ type: 'inventory_snapshot',
+      snapshot_request_id: session.sent.findLast((message) => message.snapshot_request_id)!.snapshot_request_id,
+      inventory: { state: 'ready', stale: false }, agents: [rawAgent(2)], workspaces: [] });
+    expect(relayStore.relayActionsFresh(f.id)).toBe(true);
+    // A late destroy callback cannot reinsert the old scope even after fresh recovery.
+    relayStore.retainAttachmentController(agent, old, oldScope);
+    const current = get(relayStore.agents).find((item) => item.relay_id === f.id)!;
+    expect(relayStore.recoverAttachmentController(current)).toBeNull();
+    expect(relayStore.attachmentCleanupScope(other.id)).toBe(otherScope);
+    expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target: targetRefForAgent(agent), upload_id: 'invalidated-cleanup' })).toBe(false);
+    const fresh = relayStore.attachmentController(current);
+    expect(fresh).not.toBe(old);
+    vi.spyOn(relayStore.connection(f.id)!.transport!, 'send').mockImplementation((payload) => {
+      session.sent.push(payload);
+      let result: Record<string, unknown> = {};
+      if (payload.type === 'upload_begin') result = { upload_id: 'fresh-scope-upload', chunk_bytes: 262144,
+        expires_at: new Date(Date.now() + 120_000).toISOString(),
+        limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 } };
+      if (payload.type === 'upload_chunk') result = { file_index: 0, next_sequence: 1, received_bytes: 3 };
+      if (payload.type === 'upload_finish') result = { attachments: [{ ref: 'attachment:fresh-scope', name: 'shot.png',
+        media_type: 'image/png', bytes: 3, sha256: (payload.files as Array<{ sha256: string }>)[0].sha256,
+        expires_at: new Date(Date.now() + 60_000).toISOString() }] };
+      if (['upload_begin', 'upload_chunk', 'upload_finish'].includes(String(payload.type))) {
+        queueMicrotask(() => session.handlers.onMessage({ type: `${payload.type}_result`, request_id: payload.request_id, result }));
+      }
+      return true;
+    });
+    fresh.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    await expect(fresh.upload()).resolves.toHaveLength(1);
+    expect(session.sent.filter((message) => message.type === 'upload_begin')).toHaveLength(1);
+    expect(session.sent.some((message) => message.upload_id === 'invalidated-cleanup')).toBe(false);
+    expect(old.hasPendingCleanup()).toBe(true);
+    expect(fresh.hasPendingCleanup()).toBe(false);
+  });
+
   it('releases completed upload grants past the 512-grant budget without releasing other resources', async () => {
     const f = boot('relay-a', true, 'controller', ['pane_size_lease', 'pane_realtime_delta']); f.reply();
     const agent = get(relayStore.agents)[0];
