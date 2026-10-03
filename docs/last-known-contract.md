@@ -1,9 +1,26 @@
-# B2 last-known implementation contract (in progress)
+# B2 last-known implementation contract (awaiting independent approval)
 
-This is an implementation boundary, not acceptance evidence or an enablement
-announcement. B2 remains incomplete until integration, hosted tests, generated
-bundle verification and independent approval are complete. No physical resume
-or performance claim is made.
+This is an implementation boundary, not an enablement announcement. Worker
+hosted qualification is recorded below; independent B2 approval remains
+outstanding. No physical resume or performance claim is made.
+
+## Hosted worker qualification
+
+Source `a1510708672ce98fbcdc283e013d3b5f5ce80498` passed hosted run
+[37082388198](https://github.com/0cv/herdr-mobile-relay/actions/runs/37082388198):
+focused Go race tests, lint/type checks, 746 unit tests, 268 focused packaged
+browser cases and the complete 492-case Chromium-mobile/WebKit-mobile suite.
+There were no skipped browser cases. Existing release-graph validation and
+complete eager accounting passed: **166837 B / 169216 B** initial gzip payload.
+
+The source-bound `b2-generated-assets-a1510708672ce98fbcdc283e013d3b5f5ce80498`
+artifact supplied the imported `web/` and `frontend/build-versions.json` verbatim.
+Its source binding and all 43 generated-file SHA-256 checks passed, with complete
+manifest coverage including lazy chunks and compressed assets. The manifest's
+SHA-256 is `8e51d51dd64531f9ebd288d5565a2ba10fdccc38ce505cf816c50d2c30ae5496`.
+Final-revision hosted release equality and native preflight are required after
+this import; neither these checks nor independent approval is inferred from
+source qualification. No project code was executed locally.
 
 ## Correlated freshness and compatibility
 
