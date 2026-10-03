@@ -1,9 +1,9 @@
 import ts from 'typescript';
 import type { Plugin } from 'vite';
 
-// Existing raw-upload regression fixtures exercise this TS-private seam.
-// Preserve it rather than changing callers or weakening their negative cases.
-const reservedMembers = new Set(['sendUploadRequest']);
+// Existing raw-upload and async-encryption regression fixtures exercise these
+// TS-private seams. Preserve them without changing their negative cases.
+const reservedMembers = new Set(['sendUploadRequest', 'draining']);
 const classes = new Map([
   ['/src/lib/store.ts', 'RelayStore'],
   ['/src/lib/last-known.ts', 'LastKnownSessionCache'],

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { compactPrivateBookkeeping, nativePrivateBookkeeping } from '../../scripts/native-private-bookkeeping';
@@ -40,8 +41,19 @@ function canonical(source: string, filename: string, undo = false) {
     };
     return (root) => ts.visitNode(root, visit) as ts.SourceFile;
   }]);
-  try { return ts.createPrinter({ removeComments: true }).printFile(result.transformed[0]); }
-  finally { result.dispose(); }
+  try {
+    const printed = ts.createPrinter({ removeComments: true }).printFile(result.transformed[0]);
+    const parsed = ts.createSourceFile(filename, printed, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const fingerprint = (node: ts.Node): unknown => {
+      const children: unknown[] = [];
+      ts.forEachChild(node, (child) => { children.push(fingerprint(child)); });
+      const literal = ts.isIdentifier(node) || ts.isLiteralExpression(node)
+        || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node);
+      return [node.kind, node.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let | ts.NodeFlags.OptionalChain),
+        literal ? node.text : null, 'rawText' in node ? node.rawText : null, children];
+    };
+    return JSON.stringify(fingerprint(parsed));
+  } finally { result.dispose(); }
 }
 
 const fixture = `
@@ -78,9 +90,10 @@ describe('native private bookkeeping representation', () => {
   });
 
   it('retains the existing raw upload test seam and its generic signature', () => {
-    const source = 'export class Model { private count = 0; private sendUploadRequest<T>(value: T): T { this.count++; return value; } }';
+    const source = 'export class Model { private count = 0; private draining = false; private sendUploadRequest<T>(value: T): T { this.count++; return value; } }';
     const transformed = compactPrivateBookkeeping(source, 'fixture.ts', 'Model')!;
     expect(transformed).toContain('private sendUploadRequest<T>');
+    expect(transformed).toContain('private draining = false');
     const Native = execute(transformed).Model;
     const native = new Native();
     expect(native.sendUploadRequest({ target: 'old', upload_id: 'owned' })).toEqual({ target: 'old', upload_id: 'owned' });
@@ -119,11 +132,11 @@ describe('native private bookkeeping representation', () => {
   });
 
   it.each(['store', 'last-known'])('only changes private representation in actual %s source', (module) => {
-    const path = new URL(`../../src/lib/${module}.ts`, import.meta.url);
+    const path = resolve(import.meta.dirname, '../../src/lib', `${module}.ts`);
     const source = readFileSync(path, 'utf8');
     const className = module === 'store' ? 'RelayStore' : 'LastKnownSessionCache';
-    const transformed = compactPrivateBookkeeping(source, path.pathname, className)!;
+    const transformed = compactPrivateBookkeeping(source, path, className)!;
     expect(transformed).toContain('#');
-    expect(canonical(transformed, path.pathname, true)).toBe(canonical(source, path.pathname));
+    expect(canonical(transformed, path, true)).toBe(canonical(source, path));
   });
 });

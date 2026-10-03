@@ -37,8 +37,8 @@ A source transform gives the already-private bookkeeping members of `RelayStore`
 and `LastKnownSessionCache` native private representation, allowing the existing
 minifier to shorten their otherwise retained property names. It changes neither
 public APIs nor serialized fields, foreign objects, initializers, guards or timer
-values. Constructor parameter properties and the existing raw-upload regression
-seam remain unchanged. Only the two audited modules are transformed; dynamic
+values. Constructor parameter properties and the existing raw-upload and
+encryption-draining regression seams remain unchanged. Only the two audited modules are transformed; dynamic
 indexed `this` access fails the transform rather than guessing. Hosted tests
 reverse this representation on both complete module ASTs and compare with the
 original, in addition to exercising their normal lifecycle/dispatch cases and
