@@ -55,16 +55,23 @@ describe('accessible Svelte interactions', () => {
   it.each(['withdrawal', 'replacement'] as const)('cleans up the mount-owned watch on %s, not the reactive prop', async (change) => {
     const owned: Agent = { ...blockedAgent, status: 'working', attention_kind: undefined, options: undefined,
       server_session_id: 'primary', terminal_id: 'terminal-owned', generation: 1, agent_session_id: '' };
-    const watch = vi.spyOn(relayStore, 'watchPane').mockImplementation(() => undefined);
-    const unwatch = vi.spyOn(relayStore, 'unwatchPane').mockImplementation(() => undefined);
-    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    const watch = vi.spyOn(relayStore, 'watchPane').mockClear().mockImplementation(() => undefined);
+    const unwatch = vi.spyOn(relayStore, 'unwatchPane').mockClear().mockImplementation(() => undefined);
+    const read = vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     const view = render(TerminalWithdrawalHarness, { agent: owned });
-    await waitFor(() => expect(watch).toHaveBeenCalledWith(owned));
-    const replacement: Agent = { ...owned, pane_id: 'fedora::replacement', raw_pane_id: 'replacement', terminal_id: 'terminal-replacement' };
-    await view.rerender({ agent: change === 'withdrawal' ? null : replacement });
-    expect(unwatch).toHaveBeenCalledExactlyOnceWith(owned);
-    expect(unwatch).not.toHaveBeenCalledWith(null);
-    expect(unwatch).not.toHaveBeenCalledWith(replacement);
+    try {
+      await waitFor(() => expect(watch).toHaveBeenCalledWith(owned));
+      const replacement: Agent = { ...owned, pane_id: 'fedora::replacement', raw_pane_id: 'replacement', terminal_id: 'terminal-replacement' };
+      await view.rerender({ agent: change === 'withdrawal' ? null : replacement });
+      expect(unwatch).toHaveBeenCalledExactlyOnceWith(owned);
+      expect(unwatch).not.toHaveBeenCalledWith(null);
+      expect(unwatch).not.toHaveBeenCalledWith(replacement);
+    } finally {
+      view.unmount();
+      watch.mockRestore();
+      unwatch.mockRestore();
+      read.mockRestore();
+    }
   });
   it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
     const user = userEvent.setup();

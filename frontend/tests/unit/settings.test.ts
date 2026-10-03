@@ -381,9 +381,9 @@ describe('settings relay status', () => {
     const socket = MockWebSocket.instances[0];
     socket.open();
     socket.server({
-      type: 'push_config', protocol: 3, release_version: APP_VERSION,
+      type: 'push_config', protocol: 3, release_version: '0.15.0',
       capabilities: ['self_update'],
-      update: { state: 'available', current_version: APP_VERSION, available_version: '99.0.0',
+      update: { state: 'available', current_version: '0.15.0', available_version: APP_VERSION,
         target_revision: 'f'.repeat(40), can_install: true },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
@@ -393,7 +393,7 @@ describe('settings relay status', () => {
     const install = vi.spyOn(relayStore, 'installRelayUpdate').mockResolvedValue(undefined);
     let mounted: ReturnType<typeof render> | undefined;
     try {
-      beginUpdateProgress('99.0.0', [relayId], '');
+      beginUpdateProgress(APP_VERSION, [relayId], '');
       mounted = render(UpdateProgressDialog);
       await waitFor(() => expect(screen.getByRole('dialog', { name: 'Continue update' })).toBeInTheDocument());
       expect(install).not.toHaveBeenCalled();

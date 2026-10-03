@@ -1710,12 +1710,10 @@
     scheduleVirtualWindow();
   }
 
-  function paneSizeLeaseSupported(target: Agent): boolean {
+  function paneSizeLeaseSupported(target: Agent | null): boolean {
+    if (!componentMounted || !target || readOnly || questionMode) return false;
     const connection = $connections.get(target.relay_id);
-    return componentMounted
-      && !readOnly
-      && !questionMode
-      && connection?.status === 'connected'
+    return connection?.status === 'connected'
       && connection.capabilities.includes('pane_size_lease');
   }
 
@@ -1805,6 +1803,8 @@
   }
 
   function requestPaneSizeLease(force: boolean) {
+    // A scheduled tick may complete after the parent withdrew this branch.
+    if (!componentMounted || !agent) return;
     const target = agent;
     // A hidden page renews only within the grace window: after it, the
     // relay's lease TTL returns the desktop size, and the refocus handler
