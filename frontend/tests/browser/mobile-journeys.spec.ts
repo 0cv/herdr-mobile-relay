@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { installEncryptedJourneyPeer, type JourneyCredential, type JourneyPeer } from './encrypted-journey-fixture';
 
 const webRoot = process.env.HERDR_WEB_ROOT || 'dist';
 const APP_METADATA = JSON.parse(
@@ -20,11 +21,22 @@ interface BootOptions {
   navigatorStandalone?: boolean;
   userAgent?: string;
   largeSlashCatalog?: boolean;
+  reader?: boolean;
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent, largeSlashCatalog }) => {
+  await page.addInitScript(installEncryptedJourneyPeer);
+  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent, largeSlashCatalog, reader }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
+    const readerCredentials: Record<string, JourneyCredential> = {};
+    if (reader) {
+      for (const relay of savedRelays) readerCredentials[relay.id] = {
+        kind: 'credential', id: 'credential-reader', version: 1,
+        secret: btoa(String.fromCharCode(...new Uint8Array(32).fill(82))).replace(/=+$/, ''),
+        deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
+      };
+      localStorage.setItem('herdr_device_auth_v1', JSON.stringify({ version: 1, relays: readerCredentials }));
+    }
     if (navigatorStandalone !== null) {
       Object.defineProperty(navigator, 'standalone', { configurable: true, value: navigatorStandalone });
     }
@@ -54,6 +66,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     let nextInteraction: Record<string, unknown> | null = null;
     let conversationFixture: ConversationFixture | null = null;
     let autoCommands = true;
+    let autoInventory = true;
     const uploadFiles = new Map<string, Array<{ name: string; media_type: string; bytes: number }>>();
     const uploadReceived = new Map<string, number>();
     const installedVoices = new Set(['en']);
@@ -89,8 +102,17 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
       private inventoryWorkspaces: unknown[] = [];
       private inventoryStatus: Record<string, unknown> = { state: 'ready', stale: false };
       private snapshotNonce: string | null = null;
+      private peer: JourneyPeer | null = null;
       constructor(readonly url: string) {
         this.index = sockets.length;
+        const relay = savedRelays.find((candidate) => new URL(candidate.url).href === new URL(url).href);
+        const credential = relay && readerCredentials[relay.id];
+        if (credential) {
+          const harness = window as unknown as { __createJourneyPeer(credential: JourneyCredential, emit: (frame: string) => void, command: (message: Record<string, unknown>) => void): JourneyPeer };
+          this.peer = harness.__createJourneyPeer(credential, (frame) => {
+            if (this.readyState === MockSocket.OPEN) this.onmessage?.({ data: frame } as MessageEvent);
+          }, (message) => this.command(message));
+        }
         sockets.push(this);
         socketCommands.push([]);
         queueMicrotask(() => {
@@ -99,10 +121,14 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         });
       }
       send(serialized: string) {
-        const message = JSON.parse(serialized) as Record<string, unknown>;
+        if (this.peer) { this.peer.receive(serialized); return; }
+        this.command(JSON.parse(serialized) as Record<string, unknown>);
+      }
+      private command(message: Record<string, unknown>) {
         commands.push(message);
         socketCommands[this.index].push(message);
         if (message.type === 'refresh_agents' && typeof message.snapshot_request_id === 'string') {
+          if (!autoInventory) return;
           // Synthetic upgraded relay: admission precedes a new coherent poll.
           // Unrelated frames never mint or guess a client correlation nonce.
           const nonce = this.snapshotNonce = message.snapshot_request_id;
@@ -442,6 +468,9 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           payload = { ...payload, inventory: this.inventoryStatus,
             capabilities: [...new Set([...(payload.capabilities as string[] || []), 'inventory_snapshot_v1'])] };
         }
+        if (payload?.type === 'herdr_status' && Array.isArray(payload.capabilities)) {
+          payload = { ...payload, capabilities: [...new Set([...payload.capabilities, 'inventory_snapshot_v1'])] };
+        }
         if (payload?.type === 'inventory_status') this.inventoryStatus = { stale: false, ...payload };
         if (payload?.type === 'agents' && Array.isArray(payload.agents)) {
           this.inventoryAgents = (payload.agents as Record<string, unknown>[]).map(withExactIdentity);
@@ -455,7 +484,8 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
             || agent.pane_revision >= (this.inventoryAgents[index].pane_revision as number)) this.inventoryAgents[index] = agent;
         }
         if (payload?.type === 'workspaces' && Array.isArray(payload.workspaces)) this.inventoryWorkspaces = payload.workspaces;
-        this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
+        if (this.peer) this.peer.send(payload);
+        else this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
       }
       serverClose() { this.readyState = MockSocket.CLOSED; this.onclose?.(); }
     }
@@ -472,6 +502,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         conversationFixture = fixture;
       },
       __relayAutoCommands(enabled: boolean) { autoCommands = enabled; },
+      __relayAutoInventory(enabled: boolean) { autoInventory = enabled; },
     });
   }, {
     savedRelays: relays,
@@ -479,6 +510,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     navigatorStandalone: options.navigatorStandalone ?? null,
     userAgent: options.userAgent ?? '',
     largeSlashCatalog: options.largeSlashCatalog ?? false,
+    reader: options.reader ?? false,
   });
   await page.goto(path);
 }
@@ -690,6 +722,11 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
     },
   };
   await server(page, 0, { type: 'workspaces', workspaces: [parent, linked, shellOnly, phoneWorkspace] });
+  // Membership changes withdraw workspace authority and close retained intent.
+  // A fresh snapshot permits a new explicit opening, never a replayed create.
+  await expect(worktreeDialog).toBeHidden();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'worktree_create').length).toBe(0);
+  await projectCard.getByRole('button', { name: 'Worktrees' }).click();
   await worktreeDialog.getByLabel('Branch').fill('fix/issue-14');
   await worktreeDialog.getByLabel('Base ref').fill('main');
   await worktreeDialog.getByRole('button', { name: 'Confirm' }).click();
@@ -1493,7 +1530,7 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   await server(page, 0, { type: 'agents', agents: staleAgents });
 
   await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toContainText('changing too quickly');
-  await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeHidden();
   await expect(page.getByRole('img', { name: /agent inventory unavailable/ })).toBeVisible();
 
   await server(page, 0, {
@@ -2297,6 +2334,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
     content_fingerprint: 'content-2',
   });
 
+  const cachedScreen = await page.getByRole('log').locator('.term-screen').innerHTML();
   const activeCommandCount = (await commands(page)).length;
   await page.waitForTimeout(750);
   expect(await commands(page)).toHaveLength(activeCommandCount);
@@ -2313,7 +2351,7 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   await page.waitForTimeout(750);
   expect(await commands(page)).toHaveLength(hiddenCommandCount);
   const terminal = page.getByRole('log');
-  const cachedScreen = await terminal.locator('.term-screen').innerHTML();
+  await expect(terminal).toBeHidden();
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
@@ -2386,23 +2424,26 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await page.waitForTimeout(5_100);
-  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
-  await expect(page.getByRole('main', { name: 'Agent unavailable' })).toBeHidden();
-  await expect(page.getByRole('log')).toContainText('cached terminal output');
-  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeHidden();
+  await expect(page.getByRole('log')).toBeHidden();
+  await expect(page.getByRole('img', { name: 'Agent working' })).toBeHidden();
 
   // A half-open socket answers nothing — not even the refocus width lease.
-  // Without this the harness acks the lease, which reads as live traffic and
-  // defeats the resume probe this test exists to exercise.
+  // Neither command acks nor a correlated poll may provide live traffic.
   await setAutoCommands(page, false);
+  await page.evaluate(() => (window as any).__relayAutoInventory(false));
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(() => socketCount(page)).toBe(2);
   await setAutoCommands(page, true);
+  await page.evaluate(() => (window as any).__relayAutoInventory(true));
   await handshake(page, 1, {
     capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 1, {
+    type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
   });
   await expect.poll(async () =>
     (await commandsForSocket(page, 1)).some((command) => command.type === 'read_pane')).toBe(true);
@@ -2433,6 +2474,7 @@ test('replaces a half-open socket when the browser reports a network handoff', a
   await handshake(page, 0);
   const refreshesBefore = (await commandsForSocket(page, 0))
     .filter((command) => command.type === 'refresh_agents').length;
+  await page.evaluate(() => (window as any).__relayAutoInventory(false));
 
   await page.evaluate(() => {
     (navigator as Navigator & { connection: EventTarget }).connection.dispatchEvent(new Event('change'));
@@ -2574,28 +2616,8 @@ test('keeps a wide pane readable while its size lease is still pending', async (
 });
 
 test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
-  await boot(page, [fedora]);
+  await boot(page, [fedora], '/', { reader: true });
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_lease'] });
-  await page.evaluate(() => {
-    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-      version: 1,
-      relays: {
-        fedora: {
-          kind: 'credential',
-          id: 'credential-reader',
-          version: 1,
-          secret: 'R'.repeat(43),
-          deviceId: 'device-reader',
-          role: 'reader',
-          locale: 'en',
-          issuedAt: Date.now(),
-        },
-      },
-    }));
-  });
-  // Push a fresh connection snapshot so App's derived reader-role state observes
-  // the persisted credential before the agent view is rendered.
   await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_lease'] });
   await server(page, 0, {
     type: 'agents',
@@ -3119,19 +3141,8 @@ test('speak reports the relay copy failure when no parser can read the pane', as
 });
 
 test('a reader speaks the latest transcript turn without the relay copy command', async ({ page }) => {
-  await boot(page, [fedora]);
+  await boot(page, [fedora], '/', { reader: true });
   await expect.poll(() => socketCount(page)).toBe(1);
-  await page.evaluate(() => {
-    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-      version: 1,
-      relays: {
-        fedora: {
-          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
-          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
-        },
-      },
-    }));
-  });
   await handshake(page, 0, {
     capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
     speech_languages: ['en'],
@@ -3701,7 +3712,7 @@ test('does not lease rows unless the height setting is on', async ({ page }) => 
   expect(acquire).not.toHaveProperty('rows');
 });
 
-test('keeps renewing the pane lease briefly while hidden and re-leases on return', async ({ page }) => {
+test('withdraws hidden pane leases and re-leases only after fresh inventory on return', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -3723,16 +3734,13 @@ test('keeps renewing the pane lease briefly while hidden and re-leases on return
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  // Desktop Safari reports an occluded window as hidden, so a hidden page
-  // keeps renewing within the grace window instead of lapsing the lease —
-  // and resizing the shared pane — on every app switch. The 10s renewal
-  // must therefore still fire. Grace expiry is unit-tested on the pure
-  // policy helper; five minutes cannot elapse here.
+  // Suspension withdraws action authority: no grace-window renewal may
+  // reacquire a lease. Releasing an already-owned lease remains allowed.
   await page.waitForTimeout(11_000);
-  expect(((await commands(page))
-    .filter((command) => command.type === 'lease_pane_size')).length).toBeGreaterThanOrEqual(2);
   expect((await commands(page))
-    .filter((command) => command.type === 'release_pane_size')).toHaveLength(0);
+    .filter((command) => command.type === 'lease_pane_size')).toHaveLength(1);
+  expect((await commands(page))
+    .filter((command) => command.type === 'release_pane_size')).toHaveLength(1);
 
   // Refocus re-leases at once — the lease may have lapsed and the pane may be
   // back at the desktop width — and re-reads the pane without waiting for the
@@ -3742,7 +3750,7 @@ test('keeps renewing the pane lease briefly while hidden and re-leases on return
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThanOrEqual(3);
+    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThanOrEqual(2);
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
 });
@@ -4554,20 +4562,8 @@ test('default agent view: empty and failed pages do not trigger fallback', async
 });
 
 test('pane view override: readers can change it while mutation actions stay disabled', async ({ page }) => {
-  await boot(page, [fedora]);
+  await boot(page, [fedora], '/', { reader: true });
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['conversation_history'] });
-  await page.evaluate(() => {
-    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
-      version: 1,
-      relays: {
-        fedora: {
-          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
-          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
-        },
-      },
-    }));
-  });
   await handshake(page, 0, { capabilities: ['conversation_history'] });
   await server(page, 0, {
     type: 'agents',

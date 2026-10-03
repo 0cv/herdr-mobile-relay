@@ -114,6 +114,48 @@ describe('initial native session discovery navigation', () => {
     expect(get(currentView)).toEqual(view);
   });
 
+  it('retains only prior live route proof during revalidation, not authority', () => {
+    const before = agent();
+    const agents = writable([before]);
+    const view = { view: 'terminal' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    let revalidating = true;
+    stopFollowing = followInitialAgentSession(agents, () => revalidating);
+    agents.set([]);
+    expect(get(currentView)).toEqual(view);
+    expect(get(agents)).toEqual([]);
+    revalidating = false;
+    const after = agent({ generation: 2, agent_session_id: 'native-session' });
+    agents.set([after]);
+    expect(get(currentView)).toEqual({ ...view, target: targetRefForAgent(after) });
+    expect(targetRefMatchesAgent(view.target, after)).toBe(false);
+  });
+
+  it('clears retained route proof when fresh inventory confirms absence', () => {
+    const before = agent();
+    const agents = writable([before]);
+    const view = { view: 'terminal' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    let revalidating = true;
+    stopFollowing = followInitialAgentSession(agents, () => revalidating);
+    agents.set([]);
+    revalidating = false;
+    agents.set([]);
+    agents.set([agent({ generation: 2, agent_session_id: 'native-session' })]);
+    expect(get(currentView)).toEqual(view);
+  });
+
+  it('rejects replacement identity even after authority withdrawal', () => {
+    const before = agent();
+    const agents = writable([before]);
+    const view = { view: 'terminal' as const, paneId: before.pane_id, target: targetRefForAgent(before)! };
+    replaceView(view);
+    stopFollowing = followInitialAgentSession(agents, () => true);
+    agents.set([]);
+    agents.set([agent({ generation: 2, agent_session_id: 'native-session', terminal_id: 'replacement' })]);
+    expect(get(currentView)).toEqual(view);
+  });
+
   it('does not retarget a stale bookmark from its first snapshot', () => {
     const before = agent();
     const agents = writable<Agent[]>([]);

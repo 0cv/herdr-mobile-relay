@@ -47,6 +47,14 @@ jobs:
         run: cd frontend && HERDR_WEB_ROOT=../web bun x playwright test tests/browser/last-known.spec.ts tests/browser/resume.spec.ts tests/browser/workspace-tools.spec.ts --max-failures=1
       - name: Functional packaged browser regressions
         run: make frontend-browser-release
+      - name: Retain synthetic browser failure context
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: b2-browser-failure-context-${{ github.sha }}
+          path: frontend/test-results/**/error-context.md
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Record source and artifact binding
         run: |
           printf '%s\n' "$GITHUB_SHA" > b2-source-sha.txt

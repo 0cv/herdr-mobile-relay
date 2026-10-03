@@ -433,7 +433,7 @@
     const stopUpdates = initializeAppUpdates();
     const stopSecurity = initializeDeviceSecurity();
     const stopRouter = initializeRouter();
-    const stopAgentRoute = followInitialAgentSession(agents);
+    const stopAgentRoute = followInitialAgentSession(agents, (relayId) => !relayStore.relayActionsFresh(relayId));
     const setupLinkNavigation = () => {
       relayStore.importSetupLink(location, !$securityState.locked);
     };
