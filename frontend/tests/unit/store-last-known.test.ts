@@ -52,7 +52,7 @@ beforeEach(() => {
   relayStore.setActionLocked(false);
   relayStore.initialize(false);
 });
-afterEach(() => { relayStore.destroy(); vi.restoreAllMocks(); });
+afterEach(() => { relayStore.destroy(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('B2 store freshness and dispatch boundary', () => {
   it('does not accept old relay or uncorrelated inventory as authority with persistence/metrics disabled', () => {
@@ -159,6 +159,61 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(relayStore.relayActionsFresh(f.id)).toBe(true);
     await expect(controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_failed' });
     expect(f.session.sent.some((message) => message.type === 'upload_begin')).toBe(false);
+  });
+
+  it.each(['error', 'timeout'] as const)('retains exact upload cleanup authority and controller identity for cancellation retry after %s', async (failure) => {
+    const f = boot('relay-a', true, 'controller', ['pane_size_lease']); f.reply();
+    const other = boot('relay-b');
+    const agent = get(relayStore.agents).find((item) => item.relay_id === f.id)!;
+    const target = targetRefForAgent(agent);
+    const connection = relayStore.connection(f.id)!;
+    relayStore.sendRaw(f.id, { type: 'lease_pane_size', target, columns: 80 });
+    const leaseGrant = [...connection.cleanupGrants][0];
+    let cancels = 0;
+    vi.spyOn(connection.transport!, 'send').mockImplementation((payload) => {
+      f.session.sent.push(payload);
+      if (payload.type === 'upload_begin') queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_begin_result',
+        request_id: payload.request_id, result: { upload_id: 'retry-owned', chunk_bytes: 262144,
+          expires_at: new Date(Date.now() + 120_000).toISOString(),
+          limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 } } }));
+      if (payload.type === 'upload_chunk') queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_chunk_result',
+        request_id: payload.request_id, error: { code: 'attachment_upload_failed' } }));
+      if (payload.type === 'upload_cancel' && ++cancels === 1 && failure === 'error') {
+        queueMicrotask(() => f.session.handlers.onMessage({ type: 'upload_cancel_result',
+          request_id: payload.request_id, error: { code: 'attachment_cancel_failed' } }));
+      }
+      return true;
+    });
+    const controller = relayStore.attachmentController(agent);
+    controller.select([new File(['png'], 'shot.png', { type: 'image/png' })]);
+    await expect(controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_failed' });
+    expect(connection.cleanupGrants.size).toBe(2);
+    relayStore.suspendAuthority();
+    expect(relayStore.relayActionsFresh(f.id)).toBe(false);
+    if (failure === 'timeout') vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const first = expect(controller.cancel()).rejects.toMatchObject({ code: 'attachment_cancel_failed' });
+    const firstRequest = f.session.sent.findLast((message) => message.type === 'upload_cancel')!;
+    if (failure === 'timeout') await vi.advanceTimersByTimeAsync(60_000);
+    await first;
+    expect(controller.hasPendingCleanup()).toBe(true);
+    expect(controller.snapshot().issue?.code).toBe('attachment_cancel_failed');
+    expect(() => controller.select([new File(['png'], 'new.png', { type: 'image/png' })])).toThrow('attachment_batch_locked');
+    expect(connection.cleanupGrants.size).toBe(2);
+    expect(relayStore.sendRaw(other.id, { type: 'upload_cancel', target, upload_id: 'retry-owned' })).toBe(false);
+    expect(relayStore.sendRaw(f.id, { type: 'upload_cancel', target, upload_id: 'unowned' })).toBe(false);
+    const retry = controller.cancel();
+    const request = f.session.sent.findLast((message) => message.type === 'upload_cancel')!;
+    expect(request.upload_id).toBe('retry-owned');
+    expect(request.request_id).not.toBe(firstRequest.request_id);
+    other.session.handlers.onMessage({ type: 'upload_cancel_result', request_id: request.request_id, result: {} });
+    f.session.handlers.onMessage({ type: 'upload_cancel_result', request_id: firstRequest.request_id, result: {} });
+    f.session.handlers.onMessage({ type: 'upload_finish_result', request_id: request.request_id, result: {} });
+    expect(connection.cleanupGrants.size).toBe(2);
+    f.session.handlers.onMessage({ type: 'upload_cancel_result', request_id: request.request_id, result: {} });
+    await expect(retry).resolves.toBeUndefined();
+    expect(controller.hasPendingCleanup()).toBe(false);
+    expect([...connection.cleanupGrants]).toEqual([leaseGrant]);
+    expect(cancels).toBe(2);
   });
 
   it('releases completed upload grants past the 512-grant budget without releasing other resources', async () => {

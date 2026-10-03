@@ -25,6 +25,8 @@ const NOW = Date.UTC(2026, 0, 1);
 const notifications: unknown[] = [];
 const cleanup: Array<() => void> = [];
 let locksDescriptor: PropertyDescriptor | undefined;
+let deliverNotifications = false;
+const channels = new Set<{ onmessage?: (event: { data: unknown }) => void }>();
 
 function tab(shared: Storage, options: Partial<ConstructorParameters<typeof LastKnownSessionCache>[0]> = {}) {
   const session = new MemoryStorage();
@@ -39,6 +41,8 @@ const snapshot = () => projectLastKnown('local-relay', [{ name: 'sensitive-label
 
 beforeEach(() => {
   notifications.length = 0;
+  deliverNotifications = false;
+  channels.clear();
   locksDescriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
   let queue = Promise.resolve();
   Object.defineProperty(navigator, 'locks', { configurable: true, value: {
@@ -49,9 +53,17 @@ beforeEach(() => {
     },
   } });
   vi.stubGlobal('BroadcastChannel', class {
-    onmessage: unknown;
-    postMessage(message: unknown) { notifications.push(message); }
-    close() {}
+    onmessage?: (event: { data: unknown }) => void;
+    constructor() { channels.add(this); }
+    postMessage(message: unknown) {
+      notifications.push(message);
+      if (deliverNotifications) {
+        for (const peer of channels) {
+          if (peer !== this) queueMicrotask(() => peer.onmessage?.({ data: message }));
+        }
+      }
+    }
+    close() { channels.delete(this); }
   });
 });
 afterEach(() => {
@@ -159,6 +171,64 @@ describe('opaque persisted cross-tab last-known invalidation', () => {
     a.cache.write(snapshot());
     await vi.waitFor(() => expect(a.session.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull());
     expect(a.control.epoch()).not.toBeNull();
+  });
+
+  it.each(['write denied', 'lock rejected'] as const)('withdraws an already-open peer on failed opt-out and fences later sync: %s', async (failure) => {
+    const shared = new MemoryStorage();
+    const a = tab(shared);
+    await a.control.setEnabled(true);
+    const b = tab(shared);
+    b.cache.write(snapshot());
+    await vi.waitFor(() => expect(b.session.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull());
+    await b.cache.restore('local-relay');
+    expect(get(b.cache.summaries).size).toBe(1);
+    const persisted = shared.getItem(LAST_KNOWN_CONTROL_KEY);
+    const locks = Object.getOwnPropertyDescriptor(navigator, 'locks')!;
+    const write = failure === 'write denied'
+      ? vi.spyOn(shared, 'setItem').mockImplementation(() => { throw new Error('write denied'); }) : null;
+    if (failure === 'lock rejected') Object.defineProperty(navigator, 'locks', { configurable: true,
+      value: { request: async () => { throw new Error('lock rejected'); } } });
+    deliverNotifications = true;
+    await expect(a.control.setEnabled(false)).resolves.toBe(false);
+    await vi.waitFor(() => expect(get(b.cache.summaries).size).toBe(0));
+    expect(b.session.getItem(LAST_KNOWN_STORAGE_KEY)).toBeNull();
+    expect(shared.getItem(LAST_KNOWN_CONTROL_KEY)).toBe(persisted);
+    write?.mockRestore();
+    Object.defineProperty(navigator, 'locks', locks);
+    b.control.sync();
+    window.dispatchEvent(new Event('pageshow'));
+    b.cache.write(snapshot());
+    await b.cache.restore('local-relay');
+    expect(b.control.epoch()).toBeNull();
+    expect(get(b.control.state)).toEqual({ enabled: false, unavailable: true });
+    expect(b.session.getItem(LAST_KNOWN_STORAGE_KEY)).toBeNull();
+    expect(get(b.cache.summaries).size).toBe(0);
+    expect(notifications.at(-1)).toEqual({ type: 'invalidation_failed' });
+    expect(JSON.stringify(notifications)).not.toContain('sensitive-label-canary');
+    expect(JSON.stringify(notifications)).not.toContain(credential.secret);
+    expect(JSON.stringify(notifications)).not.toContain('local-relay');
+    // Success elsewhere cannot silently override the peer's failure latch.
+    await a.control.forget();
+    b.control.sync();
+    expect(b.control.epoch()).toBeNull();
+    await expect(b.control.setEnabled(true)).resolves.toBe(true);
+    expect(b.control.epoch()).not.toBeNull();
+  });
+
+  it('stays locally fail-closed if failed invalidation cannot be broadcast', async () => {
+    const shared = new MemoryStorage();
+    const a = tab(shared);
+    await a.control.setEnabled(true);
+    vi.spyOn(shared, 'setItem').mockImplementation(() => { throw new Error('write denied'); });
+    vi.stubGlobal('BroadcastChannel', class {
+      postMessage() { throw new Error('channel unavailable'); }
+      close() {}
+    });
+    const b = tab(shared);
+    await expect(b.control.forget()).resolves.toBe(false);
+    b.control.sync();
+    expect(b.control.epoch()).toBeNull();
+    expect(get(b.control.state)).toEqual({ enabled: false, unavailable: true });
   });
 
   it('does not let a sync restore enabled control during a pending opt-out', async () => {

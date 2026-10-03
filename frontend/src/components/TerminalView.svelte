@@ -1894,7 +1894,9 @@
     const rejected = attachmentSnapshot?.items.filter((item) => item.state === 'rejected') || [];
     if (!attachments.length) {
       uploadStatus = attachmentCancelRequested
-        ? 'Attachment upload canceled.'
+        ? attachmentController?.hasPendingCleanup()
+          ? 'Attachment cancellation is pending or unconfirmed.'
+          : 'Attachment upload canceled.'
         : rejected.length
           ? 'No selected attachments passed validation.'
           : 'No attachments were uploaded.';
@@ -1909,7 +1911,7 @@
   }
 
   function releaseAttachmentController(controller: AttachmentBatchController, force = false): void {
-    if (!force && attachmentSnapshot?.items.some((item) => item.state === 'interrupted')) return;
+    if (!force && (controller.hasPendingCleanup() || attachmentSnapshot?.items.some((item) => item.state === 'interrupted'))) return;
     attachmentUnsubscribe?.();
     attachmentUnsubscribe = null;
     if (attachmentController === controller) attachmentController = null;
@@ -1926,11 +1928,8 @@
     try {
       const previous = attachmentController;
       if (previous) {
-        try {
-          await previous.cancel();
-        } finally {
-          releaseAttachmentController(previous, true);
-        }
+        await previous.cancel();
+        releaseAttachmentController(previous, true);
       }
       controller = relayStore.attachmentController(agent);
       attachmentController = controller;
@@ -1943,7 +1942,9 @@
       appendUploadedAttachments(attachments);
     } catch (error) {
       uploadStatus = attachmentCancelRequested
-        ? 'Attachment upload canceled.'
+        ? attachmentController?.hasPendingCleanup()
+          ? 'Attachment cancellation is pending or unconfirmed.'
+          : 'Attachment upload canceled.'
         : error instanceof Error && error.message
           ? error.message
           : 'Attachments could not be uploaded.';
@@ -1985,13 +1986,13 @@
       uploadStatus = 'The relay could not confirm attachment cancellation.';
       uploadError = true;
     } finally {
-      releaseAttachmentController(controller, true);
+      releaseAttachmentController(controller);
     }
   }
 
   onDestroy(() => {
     attachmentUnsubscribe?.();
-    void attachmentController?.cancel();
+    void attachmentController?.cancel().catch(() => {});
   });
 
   function paste(event: ClipboardEvent) {
@@ -2404,6 +2405,9 @@
     </div>
     {#if attachmentSnapshot?.items.length}
       <AttachmentProgress snapshot={attachmentSnapshot} restartDisabled={inputLocked} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
+    {/if}
+    {#if attachmentSnapshot?.issue?.code === 'attachment_cancel_failed'}
+      <Button onclick={cancelAttachmentUpload}>Retry attachment cancellation</Button>
     {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}

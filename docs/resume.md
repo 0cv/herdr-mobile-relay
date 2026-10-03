@@ -41,8 +41,15 @@ preflight on attempt 2. Qualified generated assets were retrieved and verified.
 Review-remediation source `ca0267612b281dac17352559e12d244846964b4d` subsequently
 passed run `37086787547` (752 unit tests, 268 focused and 492 complete packaged
 browser cases) and native preflight `37086787600`; its assets were verified/imported.
+The imported final candidate `88a34571533d6f5a8ee2c556ca251f2d65a8874e` then
+passed final-SHA source/browser run `37087913459`, ordinary release qualification
+`37087913699`, and native preflight `37087913405`. Its final-SHA artifact was
+retrieved and all 43 hashes, complete coverage and byte-identical outputs verified.
+These are named historical receipts, not qualification of later source/asset edits.
 See [the qualification record](last-known-contract.md#hosted-worker-qualification)
-for source/artifact binding and later-remediation gating. Independent B2 approval
+for final-candidate/source-import distinctions, subsequent SHA-bound receipts,
+and the current authenticated implementation-model provenance prerequisite.
+Independent B2 approval
 and statistical/physical qualification remain outstanding; B1 closeout does not
 provide either.
 

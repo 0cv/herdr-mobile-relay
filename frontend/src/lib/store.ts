@@ -2298,7 +2298,9 @@ class RelayStore {
       }
       if (key && ['watch_pane', 'lease_pane_size'].includes(type)) connection.cleanupGrants.add(`${type}:${key}`);
       const grant = CLEANUP_FOR.get(type);
-      if (key && grant) connection.cleanupGrants.delete(`${grant}:${key}`);
+      // Upload cancellation is acknowledged cleanup: transport admission is
+      // not proof that the relay released its staged resource.
+      if (key && grant && type !== 'upload_cancel') connection.cleanupGrants.delete(`${grant}:${key}`);
     }
     return sent;
   }
@@ -3631,8 +3633,8 @@ class RelayStore {
       const grants = this.connectionsValue.get(relayId)?.cleanupGrants;
       if (grants && grants.size < 512) grants.add(`upload:${pending.targetKey}:${message.result.upload_id}`);
     }
-    if (message.type === 'upload_finish_result' && pending.targetKey && pending.uploadId) {
-      // Only the matched successful request releases its owned upload grant.
+    if (['upload_finish_result', 'upload_cancel_result'].includes(message.type) && pending.targetKey && pending.uploadId) {
+      // Only a matched successful finish/cancel releases its owned grant.
       // Errors/unknown outcomes retain cancellation authority; finish itself
       // still requires fresh action authority and is not a cleanup exception.
       this.connectionsValue.get(relayId)?.cleanupGrants.delete(`upload:${pending.targetKey}:${pending.uploadId}`);

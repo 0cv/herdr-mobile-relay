@@ -609,6 +609,28 @@ describe('attachment batches', () => {
     await expect(controller.restart()).resolves.toHaveLength(1);
   });
 
+  it('retains the old cleanup identity when restart cancellation fails', async () => {
+    const begin = vi.fn().mockResolvedValue({ upload_id: 'restart-owned', chunk_bytes: 1024,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 } });
+    const cancel = vi.fn().mockRejectedValueOnce(new Error('unknown cancellation')).mockResolvedValue(undefined);
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session', pane_id: 'pane', terminal_id: 'terminal', generation: 1,
+    }, { begin, cancel,
+      chunk: async () => { throw new Error('unknown upload state'); },
+      finish: async () => { throw new Error('unexpected finish'); },
+    }, { maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 1024 });
+    controller.select([new File(['note'], 'note.txt', { type: 'text/plain' })]);
+    await expect(controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_state_unknown' });
+    await expect(controller.restart()).rejects.toMatchObject({ code: 'attachment_cancel_failed' });
+    expect(controller.hasPendingCleanup()).toBe(true);
+    expect(begin).toHaveBeenCalledOnce();
+    await expect(controller.restart()).rejects.toMatchObject({ code: 'attachment_upload_state_unknown' });
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenNthCalledWith(2, expect.objectContaining({ upload_id: 'restart-owned' }));
+    expect(begin).toHaveBeenCalledTimes(2);
+  });
+
   it('cancels the relay session when cleared during upload_begin', async () => {
     let resolveBegin!: (result: {
       upload_id: string;

@@ -36,7 +36,12 @@ export class LastKnownControl {
     document.addEventListener('resume', resumed);
     try {
       this.channel = new BroadcastChannel(CHANNEL);
-      this.channel.onmessage = () => this.sync();
+      this.channel.onmessage = (event) => {
+        // A failed durable change is a deny-only hint, never authority to
+        // restore consent from an old readable enabled record.
+        if (event.data?.type === 'invalidation_failed') this.failClosed();
+        else this.sync();
+      };
     } catch {
       // Persisted epochs, storage events and resume revalidation remain required;
       // notifications alone are never the authority for a restored tab copy.
@@ -112,16 +117,27 @@ export class LastKnownControl {
       });
       return true;
     } catch {
-      this.failedControlChange = true;
-      this.blocked = true;
-      this.cache.setEnabled(false);
-      this.cache.invalidate();
-      this.stateStore.set({ enabled: false, unavailable: true });
+      this.failClosed();
+      try {
+        this.channel?.postMessage({ type: 'invalidation_failed' });
+      } catch {
+        // Unreachable/suspended peers and durable erasure remain uncertain;
+        // the local failure latch must survive notification failure too.
+      }
       return false;
     } finally {
       this.pendingControlChanges--;
       this.sync();
     }
+  }
+
+  private failClosed(): void {
+    this.generation++;
+    this.failedControlChange = true;
+    this.blocked = true;
+    this.cache.setEnabled(false);
+    this.cache.forget();
+    this.stateStore.set({ enabled: false, unavailable: true });
   }
 
   private read(): Control | null {

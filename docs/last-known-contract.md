@@ -6,7 +6,32 @@ outstanding. No physical resume or performance claim is made.
 
 ## Hosted worker qualification
 
-### Latest review-remediation source
+### Final candidate submitted to review round 2
+
+Candidate `88a34571533d6f5a8ee2c556ca251f2d65a8874e` passed final-SHA hosted
+[37087913459](https://github.com/0cv/herdr-mobile-relay/actions/runs/37087913459):
+752 unit tests, all 268 focused and 492 complete packaged browser cases, release
+parity (`diff -qr frontend/dist web`), and bundle/graph/accounting validation.
+Ordinary release qualification, including release equality, Go race/vet checks,
+four-target packaging and native release smoke, passed
+[37087913699](https://github.com/0cv/herdr-mobile-relay/actions/runs/37087913699).
+Native preflight passed
+[37087913405](https://github.com/0cv/herdr-mobile-relay/actions/runs/37087913405).
+There were no skipped required packaged browser cases; conditional mobile harness
+and physical-device jobs were skipped and do not establish physical qualification.
+The final-SHA artifact was retrieved: exact source binding, all 43 hashes,
+complete coverage and byte-identical checked-in outputs passed verification.
+Its manifest SHA-256 was
+`d91ff4dfba49f01ef8587f43bb516aa20a37032afd105c5750b0164024bd9535`.
+
+These are immutable receipts for the named candidate, not a declaration that a
+historical import source is the latest revision. Subsequent submissions identify
+their exact candidate and final-SHA receipts in the worker handoff and source-bound
+CI artifacts; match the head SHA in the
+[branch workflow runs](https://github.com/0cv/herdr-mobile-relay/actions?query=branch%3Aci-tailscale-native-preflight-ef9f843).
+A later source/asset change is not qualified by an older green receipt.
+
+### Historical source of the round-2 asset import
 
 Source `ca0267612b281dac17352559e12d244846964b4d` passed hosted run
 [37086787547](https://github.com/0cv/herdr-mobile-relay/actions/runs/37086787547):
@@ -148,7 +173,11 @@ its session envelope against the persisted epoch before displaying it. Snapshot
 requests capture control generation so a pre-Forget response cannot repopulate it.
 SessionStorage storage events alone do not clear other tabs. A failed control
 change stays fail-closed in the current tab across later notifications and resume
-syncs, even if the old persisted record remains enabled. A successful Forget retry
+syncs, even if the old persisted record remains enabled. A content-free failed-
+invalidation notification also withdraws summaries and latches off listening peers;
+it is deny-only, never authority to enable or restore. Unreachable/suspended peers
+may miss that signal: if durable invalidation fails, cross-tab/reload erasure remains
+uncertain and the operation reports failure rather than promising global deletion. A successful Forget retry
 conservatively persists off after such failure; enabling again requires an explicit
 successful opt-in. Sync cannot restore consent while a control change is pending.
 Storage-denied deletion must report uncertainty rather than promise durable erasure. Offline remote
@@ -161,6 +190,13 @@ qualification covered fail-closed dispatch, alternate caller/lifecycle paths,
 cross-tab restoration, component/browser journeys and B1 regressions; its generated
 assets were retrieved and source-bound before import and checked again afterward.
 Independent approval and physical/statistical qualification remain outstanding.
+The plan-required authenticated implementation-model provenance is also a current
+worker prerequisite: configuration/transcript model labels do not establish it.
+Available local records preserve the required extension policy and identify the
+requested `gpt-6.1-sol` model, but do not capture authenticated request/response
+model metadata. Native Pi records initialize assistant `model` from the selected
+model; provider response IDs alone do not prove the returned model. This missing
+provenance is not deferred to physical qualification or independent review.
 Any subsequent source or asset revision repeats hosted qualification before worker
 handoff; historical receipts are not substituted for current checks. Local project
 build/test scripts remain prohibited by the supplied plan.

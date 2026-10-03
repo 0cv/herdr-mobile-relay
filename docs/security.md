@@ -106,8 +106,12 @@ Lock removes summary DOM and current decrypted references and fences pending
 callbacks. Forget, opt-out, credential changes, removal and observed auth refusal
 invalidate all last-known scopes conservatively using content-free same-origin
 notifications and persisted opaque epochs; suspended tabs revalidate those epochs.
-No summaries or secrets are broadcast. Forget remains enabled locally without
-inventory. Only a later eligible correlated snapshot may repopulate the cache.
+No summaries or secrets are broadcast. Failed durable control changes emit a
+deny-only, content-free notification so listening peers clear summaries and remain
+fail-closed even when an old enabled record is readable. That signal never grants
+consent; unreachable/suspended peers may miss it, and failed durable invalidation
+cannot guarantee deletion across tabs or reloads. Forget remains enabled locally
+without inventory. Only a later eligible correlated snapshot may repopulate the cache.
 Deletion failure clears current memory but reports uncertainty: durable erasure
 across reloads is not promised when browser storage refuses deletion.
 
