@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
+import { constants, gzipSync } from 'node:zlib';
+import { minify } from 'rolldown/utils';
 
 const root = resolve(process.argv[2] || 'dist');
 const descriptorPath = join(root, 'release.json');
@@ -10,21 +12,28 @@ if (!javascript || typeof javascript.path !== 'string' || typeof javascript.sha2
   throw new Error('release.json does not describe an application script');
 }
 
-// Use the existing release runtime to compact both eagerly shipped scripts.
-// All imports stay external: no rebundling, new chunks, or changes to the eager
-// graph. The application digest is computed only after this transformation.
+// Compare a bounded set of transformations from the existing Oxc/Bun toolchain.
+// Keep the original if another minifier makes gzip larger. Imports stay external:
+// no new chunks, graph splitting, dropped diagnostics or deferred features.
+const gzipOptions = { level: 9, memLevel: 9, strategy: constants.Z_DEFAULT_STRATEGY, windowBits: 15 };
 async function compactScript(path, format) {
-  const result = await globalThis.Bun.build({
+  const original = await readFile(path);
+  const oxc = await minify(path, original.toString('utf8'), { module: format === 'esm' });
+  if (oxc.errors.length) throw new Error(`Could not compact release script ${path}: ${JSON.stringify(oxc.errors)}`);
+  const bun = await globalThis.Bun.build({
     entrypoints: [path],
     target: 'browser',
     format,
-    minify: true,
+    minify: { whitespace: true, syntax: true, identifiers: false },
     external: ['*'],
   });
-  if (!result.success || result.outputs.length !== 1) {
-    throw new Error(`Could not compact release script ${path}: ${result.logs.join('\n')}`);
+  if (!bun.success || bun.outputs.length !== 1) {
+    throw new Error(`Could not compact release script ${path}: ${bun.logs.join('\n')}`);
   }
-  return Buffer.from(await result.outputs[0].text());
+  const candidates = [original, Buffer.from(oxc.code), Buffer.from(await bun.outputs[0].text())];
+  const best = candidates.reduce((selected, source) => gzipSync(source, gzipOptions).length < gzipSync(selected, gzipOptions).length ? source : selected);
+  console.log(`Release script ${basename(path)}: gzip candidates ${candidates.map((source) => gzipSync(source, gzipOptions).length).join('/')} B; selected ${gzipSync(best, gzipOptions).length} B`);
+  return best;
 }
 const loaderPath = join(root, 'manifest-loader.js');
 await writeFile(loaderPath, await compactScript(loaderPath, 'iife'));

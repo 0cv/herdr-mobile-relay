@@ -102,6 +102,11 @@ describe('complete eager shell payload', () => {
     const f = fixture();
     const result = f.run('finalize-build.mjs');
     expect(result.status, result.stderr).toBe(0);
+    const selections = [...result.stdout.matchAll(/gzip candidates ([\d/]+) B; selected (\d+) B/g)];
+    expect(selections).toHaveLength(2);
+    for (const selection of selections) {
+      expect(Number(selection[2])).toBe(Math.min(...selection[1].split('/').map(Number)));
+    }
     const descriptor = JSON.parse(readFileSync(join(f.root, 'release.json'), 'utf8'));
     const script = descriptor.files.javascript;
     const source = readFileSync(join(f.root, script.path));

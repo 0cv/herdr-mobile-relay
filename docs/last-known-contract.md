@@ -25,9 +25,11 @@ is release-verifier metadata, not a startup fetch. These are shipped and validat
 but are outside the eager home/summary shell budget; the budget is not all traffic
 from later deep-link navigation, authenticated services, installation or updates.
 
-Release finalization uses the already-required Bun runtime to minify the loader
-and app module before hashing/compression. Imports remain external and no chunk,
-feature, readiness/error path or deadline is removed or deferred. The unchanged
+Release finalization compares a bounded set of original/Oxc/Bun representations
+using the existing release toolchain and the guard's unchanged gzip settings,
+retaining the smallest before hashing/compression. It never replaces an already
+smaller original with a larger transformation. Imports remain external and no
+chunk, feature, readiness/error path or deadline is removed or deferred. The unchanged
 release validator, complete packaged browser suites and exact-SHA byte equality
 remain required. Exact current receipts belong in the additive handoff index.
 
