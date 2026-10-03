@@ -46,6 +46,10 @@ passed final-SHA source/browser run `37087913459`, ordinary release qualificatio
 `37087913699`, and native preflight `37087913405`. Its final-SHA artifact was
 retrieved and all 43 hashes, complete coverage and byte-identical outputs verified.
 These are named historical receipts, not qualification of later source/asset edits.
+F005/F006 behavioral source `d7bf41cf8190526fe7bc1591a710c051d00eb9c8` also passed
+`37091060905` (759 unit tests, 268 focused and 492 complete browser cases) and
+native preflight `37091060885`; its 43-file generated artifact was verified/imported.
+That behavioral evidence does not satisfy the missing authenticated model provenance.
 See [the qualification record](last-known-contract.md#hosted-worker-qualification)
 for final-candidate/source-import distinctions, subsequent SHA-bound receipts,
 and the current authenticated implementation-model provenance prerequisite.

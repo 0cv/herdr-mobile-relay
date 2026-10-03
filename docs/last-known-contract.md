@@ -6,6 +6,26 @@ outstanding. No physical resume or performance claim is made.
 
 ## Hosted worker qualification
 
+### F005/F006 behavioral source receipt
+
+Source `d7bf41cf8190526fe7bc1591a710c051d00eb9c8` passed hosted
+[37091060905](https://github.com/0cv/herdr-mobile-relay/actions/runs/37091060905):
+focused Go race checks, lint/types, 759 unit tests, all 268 focused and 492 complete
+packaged Chromium-mobile/WebKit-mobile cases, without skipped browser cases.
+New coverage includes already-open peer invalidation after denied writes/rejected
+locks, recovered sync fencing, cancellation retry after error and 60-second timeout,
+exact grant ownership, retained controller identity, restart fencing and visible
+cancellation retry. Native preflight passed
+[37091060885](https://github.com/0cv/herdr-mobile-relay/actions/runs/37091060885).
+Complete initial payload accounting passed at **167168 B / 169216 B** gzip.
+Its source-bound generated assets were imported verbatim after all 43 SHA-256
+checks and complete coverage verification. Manifest SHA-256:
+`974bc82be191fe3dfa4cccdaf59d0e2c7e58d9744efd86ecf1c8cc73fbb6cc49`.
+This is behavioral evidence only: the authenticated implementation-model provenance
+prerequisite remains unverified as explained below. Post-import final-SHA receipts
+are identified by the handoff and source-bound CI artifacts, not by substituting a
+pre-import source SHA for the final candidate.
+
 ### Final candidate submitted to review round 2
 
 Candidate `88a34571533d6f5a8ee2c556ca251f2d65a8874e` passed final-SHA hosted
