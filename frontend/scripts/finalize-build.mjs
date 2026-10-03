@@ -10,8 +10,27 @@ if (!javascript || typeof javascript.path !== 'string' || typeof javascript.sha2
   throw new Error('release.json does not describe an application script');
 }
 
+// Use the existing release runtime to compact both eagerly shipped scripts.
+// All imports stay external: no rebundling, new chunks, or changes to the eager
+// graph. The application digest is computed only after this transformation.
+async function compactScript(path, format) {
+  const result = await globalThis.Bun.build({
+    entrypoints: [path],
+    target: 'browser',
+    format,
+    minify: true,
+    external: ['*'],
+  });
+  if (!result.success || result.outputs.length !== 1) {
+    throw new Error(`Could not compact release script ${path}: ${result.logs.join('\n')}`);
+  }
+  return Buffer.from(await result.outputs[0].text());
+}
+const loaderPath = join(root, 'manifest-loader.js');
+await writeFile(loaderPath, await compactScript(loaderPath, 'iife'));
 const sourcePath = join(root, javascript.path);
-const source = await readFile(sourcePath);
+const source = await compactScript(sourcePath, 'esm');
+await writeFile(sourcePath, source);
 const sha256 = createHash('sha256').update(source).digest('hex');
 const integrity = `sha256-${Buffer.from(sha256, 'hex').toString('base64')}`;
 const nextPath = `assets/app-${sha256}.js`;

@@ -4,6 +4,39 @@ This is an implementation boundary, not an enablement announcement. Worker
 hosted qualification is recorded below; independent B2 approval remains
 outstanding. No physical resume or performance claim is made.
 
+## Complete eager shell accounting
+
+The gzip ceiling remains **169216 bytes**. The size guard charges the stable
+fallback `index.html` and `herdr-bootstrap.js` even when the host redirects,
+the build-specific entry, its parser-blocking `manifest-loader.js`, the single
+application JS/CSS pair, the immediate startup update probe's `version.json`,
+and the larger gzip representation of `manifest.webmanifest` / `setup.webmanifest`.
+The loader selects exactly one manifest; both variants are measured, not added
+together. New shell scripts, stylesheets or preloads fail the guard until their
+scope is explicitly accounted for. Vite still rejects shared eager JS imports.
+
+The shell has no eager image or remote-font dependency. The apple-touch/PWA icons
+are install metadata, not page-rendered images; Nerd Symbols is a unicode-gated,
+`font-display: swap` face used by terminal/history content, not the initial
+home/summary surface. The hash worker and Terminal/Conversation/Settings chunks
+are content/action-triggered, not shared eager imports. Service-worker/push art
+requires notification state and authenticated relay configuration; `release.json`
+is release-verifier metadata, not a startup fetch. These are shipped and validated,
+but are outside the eager home/summary shell budget; the budget is not all traffic
+from later deep-link navigation, authenticated services, installation or updates.
+
+Release finalization uses the already-required Bun runtime to minify the loader
+and app module before hashing/compression. Imports remain external and no chunk,
+feature, readiness/error path or deadline is removed or deferred. The unchanged
+release validator, complete packaged browser suites and exact-SHA byte equality
+remain required. Exact current receipts belong in the additive handoff index.
+
+Successor finding F008 identified an omission in earlier accounting: the loader
+was missing from the five-file totals. Those receipts and their reported numbers
+remain historical evidence, **not proof of complete eager-payload compliance**.
+The startup manifest/version metadata are now also charged conservatively. No
+old receipt is retroactively relabelled as passing the expanded guard.
+
 ## Hosted worker qualification
 
 ### F005/F006 behavioral source receipt
@@ -17,7 +50,8 @@ locks, recovered sync fencing, cancellation retry after error and 60-second time
 exact grant ownership, retained controller identity, restart fencing and visible
 cancellation retry. Native preflight passed
 [37091060885](https://github.com/0cv/herdr-mobile-relay/actions/runs/37091060885).
-Complete initial payload accounting passed at **167168 B / 169216 B** gzip.
+The former five-file guard reported **167168 B / 169216 B** gzip;
+see the incomplete-accounting correction above.
 Its source-bound generated assets were imported verbatim after all 43 SHA-256
 checks and complete coverage verification. Manifest SHA-256:
 `974bc82be191fe3dfa4cccdaf59d0e2c7e58d9744efd86ecf1c8cc73fbb6cc49`.
@@ -32,7 +66,8 @@ pre-import source SHA for the final candidate.
 Candidate `88a34571533d6f5a8ee2c556ca251f2d65a8874e` passed final-SHA hosted
 [37087913459](https://github.com/0cv/herdr-mobile-relay/actions/runs/37087913459):
 752 unit tests, all 268 focused and 492 complete packaged browser cases, release
-parity (`diff -qr frontend/dist web`), and bundle/graph/accounting validation.
+parity (`diff -qr frontend/dist web`), and the then-current bundle/graph/size
+validation (not complete eager accounting; see the correction above).
 Ordinary release qualification, including release equality, Go race/vet checks,
 four-target packaging and native release smoke, passed
 [37087913699](https://github.com/0cv/herdr-mobile-relay/actions/runs/37087913699).
@@ -62,8 +97,9 @@ browser cases. This includes post-freshness saved notification-policy fetch/disp
 failed opt-out sync/recovery fencing, and 513 completed uploads beyond the shared
 grant budget while preserving an unrelated lease. Native preflight also passed
 [37086787600](https://github.com/0cv/herdr-mobile-relay/actions/runs/37086787600).
-Existing release validation/accounting passed: **166939 B / 169216 B** initial
-gzip payload. These receipts address worker qualification, not reviewer dispositions.
+The then-current release validator passed and the former five-file guard
+reported **166939 B / 169216 B** gzip (not complete eager accounting).
+These receipts address historical worker qualification, not reviewer dispositions.
 
 The source-bound `b2-generated-assets-ca0267612b281dac17352559e12d244846964b4d`
 artifact supplied the updated `web/` and `frontend/build-versions.json` verbatim.
@@ -79,8 +115,9 @@ Source `a1510708672ce98fbcdc283e013d3b5f5ce80498` passed hosted run
 [37082388198](https://github.com/0cv/herdr-mobile-relay/actions/runs/37082388198):
 focused Go race tests, lint/type checks, 746 unit tests, 268 focused packaged
 browser cases and the complete 492-case Chromium-mobile/WebKit-mobile suite.
-There were no skipped browser cases. Existing release-graph validation and
-complete eager accounting passed: **166837 B / 169216 B** initial gzip payload.
+There were no skipped browser cases. Existing release-graph validation passed;
+the former five-file guard reported **166837 B / 169216 B** gzip (not complete
+eager accounting; see the correction above).
 
 The source-bound `b2-generated-assets-a1510708672ce98fbcdc283e013d3b5f5ce80498`
 artifact supplied the imported `web/` and `frontend/build-versions.json` verbatim.

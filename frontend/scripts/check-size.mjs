@@ -87,7 +87,47 @@ const entry = descriptor?.files?.entry?.path;
 if (typeof entry !== 'string' || !entry.startsWith('builds/') || !entry.endsWith('/index.html')) {
   throw new Error('release.json does not describe a build-specific entry');
 }
-const files = ['index.html', 'herdr-bootstrap.js', entry, `assets/${appScript}`, `assets/${appStyle}`];
+const gzipOptions = {
+  level: 9,
+  memLevel: 9,
+  strategy: constants.Z_DEFAULT_STRATEGY,
+  windowBits: 15,
+};
+// The stable redirect fallback is charged even when the server redirects first.
+// manifest-loader.js is parser-blocking in the build entry. It inserts exactly
+// one manifest link; charge the larger gzip variant, not both mutually exclusive
+// manifests. Installation icons and content-triggered fonts/workers are not
+// eager shell dependencies (see docs/last-known-contract.md). The immediate
+// initializeAppUpdates probe also fetches version.json, so charge that metadata.
+const manifests = await Promise.all(['manifest.webmanifest', 'setup.webmanifest'].map(async (path) => ({
+  path,
+  gzipBytes: gzipSync(await readFile(join(root, path)), gzipOptions).length,
+})));
+const manifest = manifests.reduce((largest, value) => value.gzipBytes > largest.gzipBytes ? value : largest);
+console.log(`Manifest branch budget: ${manifests.map((value) => `${value.path}=${value.gzipBytes} B gzip`).join(', ')}; charging ${manifest.path}`);
+const files = ['index.html', 'herdr-bootstrap.js', entry, 'manifest-loader.js', manifest.path, 'version.json', `assets/${appScript}`, `assets/${appStyle}`];
+function attribute(tag, name) {
+  const match = tag.match(new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));
+  return match?.slice(1).find((value) => value !== undefined);
+}
+// Fail closed if a shell edit introduces another script, stylesheet or preload.
+// Vite separately rejects shared eager JS imports from the application bundle.
+for (const relative of ['index.html', entry]) {
+  const html = await readFile(join(root, relative), 'utf8');
+  for (const match of html.matchAll(/<script\b[^>]*>/gi)) {
+    const src = attribute(match[0], 'src');
+    if (!['/herdr-bootstrap.js', '/manifest-loader.js', `/assets/${appScript}`].includes(src)) {
+      throw new Error(`Unaccounted shell script in ${relative}: ${src || 'inline script'}`);
+    }
+  }
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const rel = attribute(match[0], 'rel')?.toLowerCase();
+    const href = attribute(match[0], 'href');
+    if ((rel === 'stylesheet' && href === `/assets/${appStyle}`)
+      || (rel === 'apple-touch-icon' && href === '/icons/apple-touch-icon.png')) continue;
+    throw new Error(`Unaccounted shell link in ${relative}: ${match[0]}`);
+  }
+}
 let totalRaw = 0;
 let totalGzip = 0;
 let totalBrotli = 0;
@@ -96,12 +136,7 @@ console.log('Initial payload budget:');
 for (const relative of files) {
   const source = await readFile(join(root, relative));
   const brotli = await readFile(join(root, `${relative}.br`));
-  const gzip = gzipSync(source, {
-    level: 9,
-    memLevel: 9,
-    strategy: constants.Z_DEFAULT_STRATEGY,
-    windowBits: 15,
-  });
+  const gzip = gzipSync(source, gzipOptions);
   totalRaw += source.length;
   totalGzip += gzip.length;
   totalBrotli += brotli.length;
