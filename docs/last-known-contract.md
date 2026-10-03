@@ -18,9 +18,19 @@ artifact supplied the imported `web/` and `frontend/build-versions.json` verbati
 Its source binding and all 43 generated-file SHA-256 checks passed, with complete
 manifest coverage including lazy chunks and compressed assets. The manifest's
 SHA-256 is `8e51d51dd64531f9ebd288d5565a2ba10fdccc38ce505cf816c50d2c30ae5496`.
-Final-revision hosted release equality and native preflight are required after
-this import; neither these checks nor independent approval is inferred from
-source qualification. No project code was executed locally.
+The imported revision `15d5edd5056c661a99e5173c30f45b405ed85686` subsequently
+passed the complete hosted suite in
+[37083443366](https://github.com/0cv/herdr-mobile-relay/actions/runs/37083443366),
+ordinary release equality and bundle qualification in
+[37083443624](https://github.com/0cv/herdr-mobile-relay/actions/runs/37083443624),
+and native preflight in
+[37083443380](https://github.com/0cv/herdr-mobile-relay/actions/runs/37083443380)
+(attempt 2; attempt 1 failed only on artifact-upload ETIMEDOUT). Its final-SHA
+artifact was also retrieved and all 43 checksums, complete manifest coverage,
+and byte-identical checked-in outputs were verified. These are named historical
+qualification receipts, not independent approval or a waiver for later revisions.
+Review remediations repeat the same hosted gates before worker handoff. No project
+code was executed locally.
 
 ## Correlated freshness and compatibility
 
@@ -66,11 +76,11 @@ Compatibility is intentionally asymmetric:
 - A new client must learn the capability through the authenticated channel,
   not from an unauthenticated gateway descriptor.
 
-The current integration candidate wires correlated freshness into the store,
-filters live target surfaces, gates raw and command dispatch with an explicit
-policy, and adds a separate summary component and Settings consent. This is an
-unqualified candidate: hosted integration/caller regressions and review are
-still mandatory. Unsupported relays never satisfy action freshness.
+The integration wires correlated freshness into the store, filters live target
+surfaces, gates raw and command dispatch with an explicit policy, and adds a
+separate summary component and Settings consent. Hosted integration/caller
+qualification passed at the named revisions above; independent review/approval
+remains outstanding. Unsupported relays never satisfy action freshness.
 
 ## Summary schema and cryptographic boundary
 
@@ -113,18 +123,24 @@ and content-free storage/BroadcastChannel/resume notifications. No tab notificat
 contains a relay ID, label, credential or ciphertext. A restored tab must validate
 its session envelope against the persisted epoch before displaying it. Snapshot
 requests capture control generation so a pre-Forget response cannot repopulate it.
-SessionStorage storage events alone do not clear other tabs. Storage-denied deletion must
-report uncertainty rather than promise durable erasure. Offline remote
+SessionStorage storage events alone do not clear other tabs. A failed control
+change stays fail-closed in the current tab across later notifications and resume
+syncs, even if the old persisted record remains enabled. A successful Forget retry
+conservatively persists off after such failure; enabling again requires an explicit
+successful opt-in. Sync cannot restore consent while a control change is pending.
+Storage-denied deletion must report uncertainty rather than promise durable erasure. Offline remote
 revocation is unknowable until observed; expiry bounds remaining visibility.
 
-## Outstanding delivery work
+## Approval and qualification boundary
 
-The integration is not an accepted B2 feature. Fail-closed dispatch and alternate
-caller/lifecycle coverage, cross-tab restoration, component/browser journeys and B1
-regressions must pass on the final revision. Hosted-generated assets must then be
-retrieved and bound to the release source. Security/mobile/resume documentation
-now describes the candidate, not qualification. Hosted execution is mandatory; local
-build/test scripts are prohibited by the supplied plan.
+The integration is not an independently accepted B2 feature. The named hosted
+qualification covered fail-closed dispatch, alternate caller/lifecycle paths,
+cross-tab restoration, component/browser journeys and B1 regressions; its generated
+assets were retrieved and source-bound before import and checked again afterward.
+Independent approval and physical/statistical qualification remain outstanding.
+Any subsequent source or asset revision repeats hosted qualification before worker
+handoff; historical receipts are not substituted for current checks. Local project
+build/test scripts remain prohibited by the supplied plan.
 
 ### Current source and verification status
 
@@ -137,23 +153,26 @@ build/test scripts are prohibited by the supplied plan.
 - Hosted foundations at `4bbe93098ffe9d38c6db43c8a8d3a5cf453b7013` passed runs
   `37044147190` (source/release pipeline) and `37044147180` (native preflight).
   Those are not integration acceptance.
-- Integration `e9ed8c3…` failed type checking. `ed07b0e…` passed lint/type checking
-  and focused Go race tests, but failed 61/709 frontend cases (648 passed),
-  including legacy fixture assumptions and one wake-guard regression. Release
-  generation/browser acceptance were consequently skipped. Fixes and stronger
-  correlation fixtures are being developed; final-revision passes remain required.
+- Historical integration `e9ed8c3…` failed type checking. `ed07b0e…` passed
+  lint/type checking and focused Go race tests, but failed 61/709 frontend cases
+  (648 passed), including legacy fixture assumptions and one wake-guard regression.
+  Release generation/browser acceptance were skipped in those failed runs. These
+  failures were repaired before the complete qualification recorded above; they
+  are retained as historical failures, not current outstanding acceptance work.
 - Source formatting only: `gofmt -w internal/coordinator/poller.go
   internal/app/server.go internal/app/inventory_snapshot.go
   internal/app/inventory_snapshot_test.go internal/protocol/protocol.go`
   completed with exit 0. No local project lint/type/build/test command ran.
 - B2-only revisions have been committed and non-force pushed under the explicit
   hosted-verification authorization. No local executable project check, deployment,
-  application installation or production mutation has been performed. Generated
-  assets for the integrated final candidate have not yet been retrieved.
+  application installation or production mutation has been performed. Qualified
+  generated assets were retrieved, fully checksum-verified and imported verbatim;
+  the imported final-SHA artifact was separately retrieved and verified as above.
 
 The earlier missing hosted-path authorization is resolved by explicit human
 guidance permitting B2-only commits/non-force pushes to the existing CI branch
 for disposable hosted tests/builds and artifact retrieval, with no deployment
 or installation. `.github/workflows/b2-source.yml` uses the existing release
 pipeline and hosted Go/frontend/browser checks, and returns SHA-bound generated
-assets. Its execution outcomes must be recorded; source inspection is not a pass.
+assets. The named execution outcomes above record that qualification; source
+inspection alone is not a pass.

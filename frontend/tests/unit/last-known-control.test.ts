@@ -117,6 +117,71 @@ describe('opaque persisted cross-tab last-known invalidation', () => {
     expect(b.control.epoch()).toBeNull();
   });
 
+  it.each(['write denied', 'coordination unavailable', 'lock rejected'] as const)('keeps a failed opt-out disabled after sync and recovery: %s', async (failure) => {
+    const shared = new MemoryStorage();
+    const a = tab(shared);
+    await expect(a.control.setEnabled(true)).resolves.toBe(true);
+    a.cache.write(snapshot());
+    await vi.waitFor(() => expect(a.session.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull());
+    const record = shared.getItem(LAST_KNOWN_CONTROL_KEY);
+    const locks = Object.getOwnPropertyDescriptor(navigator, 'locks')!;
+    const write = failure === 'write denied'
+      ? vi.spyOn(shared, 'setItem').mockImplementation(() => { throw new Error('write denied'); }) : null;
+    if (failure === 'coordination unavailable') Reflect.deleteProperty(navigator, 'locks');
+    if (failure === 'lock rejected') Object.defineProperty(navigator, 'locks', { configurable: true,
+      value: { request: async () => { throw new Error('lock rejected'); } } });
+    await expect(a.control.setEnabled(false)).resolves.toBe(false);
+    expect(shared.getItem(LAST_KNOWN_CONTROL_KEY)).toBe(record);
+    expect(a.session.getItem(LAST_KNOWN_STORAGE_KEY)).toBeNull();
+    write?.mockRestore();
+    Object.defineProperty(navigator, 'locks', locks);
+    // Coordination/readability recovered, but the old persisted opt-in must
+    // not override this tab's failed opt-out on any notification/resume path.
+    a.control.sync();
+    window.dispatchEvent(new StorageEvent('storage', { key: LAST_KNOWN_CONTROL_KEY }));
+    window.dispatchEvent(new Event('pageshow'));
+    document.dispatchEvent(new Event('resume'));
+    a.cache.write(snapshot());
+    await a.cache.restore('local-relay');
+    expect(get(a.control.state)).toEqual({ enabled: false, unavailable: true });
+    expect(a.control.epoch()).toBeNull();
+    expect(a.session.getItem(LAST_KNOWN_STORAGE_KEY)).toBeNull();
+    expect(get(a.cache.summaries).size).toBe(0);
+    const b = tab(shared);
+    await b.control.setEnabled(true);
+    a.control.sync();
+    expect(a.control.epoch()).toBeNull();
+    // A successful Forget retry conservatively persists off; it is not opt-in.
+    await expect(a.control.forget()).resolves.toBe(true);
+    expect(get(a.control.state)).toEqual({ enabled: false, unavailable: false });
+    expect(JSON.parse(shared.getItem(LAST_KNOWN_CONTROL_KEY)!).enabled).toBe(false);
+    await expect(a.control.setEnabled(true)).resolves.toBe(true);
+    a.cache.write(snapshot());
+    await vi.waitFor(() => expect(a.session.getItem(LAST_KNOWN_STORAGE_KEY)).not.toBeNull());
+    expect(a.control.epoch()).not.toBeNull();
+  });
+
+  it('does not let a sync restore enabled control during a pending opt-out', async () => {
+    const shared = new MemoryStorage();
+    const a = tab(shared);
+    await a.control.setEnabled(true);
+    let complete!: () => void;
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: {
+      request: (_name: string, callback: () => void) => new Promise<void>((resolve) => {
+        complete = () => { callback(); resolve(); };
+      }),
+    } });
+    const optOut = a.control.setEnabled(false);
+    a.control.sync();
+    expect(a.control.epoch()).toBeNull();
+    expect(get(a.control.state).enabled).toBe(false);
+    a.cache.write(snapshot());
+    expect(a.session.length).toBe(0);
+    complete();
+    await expect(optOut).resolves.toBe(true);
+    expect(get(a.control.state)).toEqual({ enabled: false, unavailable: false });
+  });
+
   it('fails closed with unavailable coordination or denied invalidation storage', async () => {
     const shared = new MemoryStorage();
     const a = tab(shared);

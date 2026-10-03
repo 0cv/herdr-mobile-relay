@@ -494,6 +494,7 @@ interface PendingRequest extends PendingOperation {
 
 interface PendingUpload extends PendingOperation {
   targetKey: string;
+  uploadId: string;
   responseType: string;
   resolve: (result: Record<string, any>) => void;
 }
@@ -1506,6 +1507,9 @@ class RelayStore {
         }
       }
       this.registerAppOrigin(relayId, connection);
+      if (connection.capabilities.includes('push_policy')) {
+        this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
+      }
       this.pushConfigHandler?.(relayId);
       if (connection.capabilities.includes('device_management')) {
         void this.refreshDevices(relayId).catch(() => this.showToast('Could not refresh paired devices.', true));
@@ -1573,10 +1577,7 @@ class RelayStore {
       this.emitConnections();
       if (!connection.actionsFresh && !connection.snapshotPending) this.requestFreshSnapshot(relayId, connection);
       this.pushConfigHandler?.(relayId);
-      if (connection.capabilities.includes('push_policy')) {
-        this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
-      }
-      // Device administration reads wait for the correlated snapshot handler.
+      // Policy and device administration reads wait for correlated freshness.
       return;
     }
     if (message.type === 'herdr_status' && connection) {
@@ -3581,6 +3582,8 @@ class RelayStore {
       this.pendingUploads.set(requestId, {
         relayId,
         targetKey: this.targetKey(relayId, (request as Record<string, unknown>).target) || '',
+        uploadId: typeof (request as Record<string, unknown>).upload_id === 'string'
+          ? String((request as Record<string, unknown>).upload_id) : '',
         responseType,
         resolve: (result) => resolve(result as TResult),
         reject,
@@ -3627,6 +3630,12 @@ class RelayStore {
       && pending.targetKey && message.result.upload_id.length <= 256) {
       const grants = this.connectionsValue.get(relayId)?.cleanupGrants;
       if (grants && grants.size < 512) grants.add(`upload:${pending.targetKey}:${message.result.upload_id}`);
+    }
+    if (message.type === 'upload_finish_result' && pending.targetKey && pending.uploadId) {
+      // Only the matched successful request releases its owned upload grant.
+      // Errors/unknown outcomes retain cancellation authority; finish itself
+      // still requires fresh action authority and is not a cleanup exception.
+      this.connectionsValue.get(relayId)?.cleanupGrants.delete(`upload:${pending.targetKey}:${pending.uploadId}`);
     }
     pending.resolve(message.result);
   }

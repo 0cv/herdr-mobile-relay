@@ -10,6 +10,8 @@ interface Control { schema: 1; enabled: boolean; epoch: string }
 export class LastKnownControl {
   private control: Control | null = null;
   private blocked = true;
+  private failedControlChange = false;
+  private pendingControlChanges = 0;
   generation = 0;
   private channel: BroadcastChannel | null = null;
   private readonly stateStore = writable({ enabled: false, unavailable: false });
@@ -18,7 +20,7 @@ export class LastKnownControl {
   constructor(private readonly storage: Storage | null, private readonly cache: LastKnownSessionCache) {}
 
   epoch = (): string | null => {
-    if (this.blocked) return null;
+    if (this.blocked || this.failedControlChange || this.pendingControlChanges) return null;
     const current = this.read();
     return current?.enabled ? current.epoch : null;
   };
@@ -51,6 +53,15 @@ export class LastKnownControl {
   }
 
   sync(): void {
+    // Notifications/resume cannot undo a local invalidation that failed to
+    // persist, nor restore authority while a serialized change is pending.
+    if (this.failedControlChange || this.pendingControlChanges) {
+      this.blocked = true;
+      this.cache.setEnabled(false);
+      this.cache.invalidate();
+      this.stateStore.set({ enabled: false, unavailable: this.failedControlChange });
+      return;
+    }
     const current = this.read();
     if (!current || !navigator.locks?.request) {
       this.blocked = true;
@@ -77,6 +88,7 @@ export class LastKnownControl {
   /** Fence immediately; Web Locks serialize concurrent control changes, not data. */
   async rotate(enabled?: boolean): Promise<boolean> {
     this.generation++;
+    this.pendingControlChanges++;
     this.blocked = true;
     this.cache.forget();
     try {
@@ -86,24 +98,29 @@ export class LastKnownControl {
         this.cache.forget();
         if (!previous && enabled === undefined) return;
         const current: Control = {
-          schema: 1, enabled: enabled ?? previous?.enabled ?? false,
+          // Retrying Forget after a failed change conservatively persists off;
+          // only a new explicit opt-in can restore consent in that state.
+          schema: 1, enabled: enabled ?? (this.failedControlChange ? false : previous?.enabled ?? false),
           epoch: base64UrlEncode(crypto.getRandomValues(new Uint8Array(32))),
         };
         this.storage!.setItem(LAST_KNOWN_CONTROL_KEY, JSON.stringify(current));
         if (this.read()?.epoch !== current.epoch) throw new Error('Invalidation storage unavailable');
         this.control = current;
-        this.cache.setEnabled(current.enabled);
-        this.blocked = false;
-        this.stateStore.set({ enabled: current.enabled, unavailable: false });
+        this.failedControlChange = false;
         // No labels, relay identifiers, credentials or ciphertext cross tabs.
         this.channel?.postMessage({ type: 'invalidate' });
       });
       return true;
     } catch {
+      this.failedControlChange = true;
+      this.blocked = true;
       this.cache.setEnabled(false);
       this.cache.invalidate();
       this.stateStore.set({ enabled: false, unavailable: true });
       return false;
+    } finally {
+      this.pendingControlChanges--;
+      this.sync();
     }
   }
 

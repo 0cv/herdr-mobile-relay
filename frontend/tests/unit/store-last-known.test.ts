@@ -25,7 +25,7 @@ function rawAgent(generation = 1) {
   return { pane_id: 'pane-1', server_session_id: 'primary', terminal_id: 'terminal-1', generation,
     agent_session_id: '', name: 'Safe label', agent: 'codex', status: 'idle', workspace_id: 'workspace-1' };
 }
-function boot(id = 'relay-a', supported = true, role: 'reader' | 'controller' = 'controller') {
+function boot(id = 'relay-a', supported = true, role: 'reader' | 'controller' = 'controller', capabilities: string[] = []) {
   const credentials = new BrowserDeviceCredentialStore(localStorage);
   credentials.saveInvitation(id, { id: 'fixture-invitation', version: 1,
     secret: base64UrlEncode(new Uint8Array(32).fill(7)), expiresAt: Date.now() + 60_000 });
@@ -36,7 +36,7 @@ function boot(id = 'relay-a', supported = true, role: 'reader' | 'controller' = 
   relayStore.connectRelay(relay);
   const session = sessions.get(id)!;
   session.handlers.onMessage({ type: 'push_config', protocol: 3, inventory: { state: 'ready', stale: false },
-    capabilities: supported ? ['inventory_snapshot_v1'] : [] });
+    capabilities: supported ? ['inventory_snapshot_v1', ...capabilities] : capabilities });
   const request = () => session.sent.findLast((payload) => payload.snapshot_request_id)!;
   const reply = (generation = 1, overrides: Record<string, unknown> = {}) => {
     session.handlers.onMessage({ type: 'inventory_snapshot', snapshot_request_id: request().snapshot_request_id,
@@ -159,6 +159,45 @@ describe('B2 store freshness and dispatch boundary', () => {
     expect(relayStore.relayActionsFresh(f.id)).toBe(true);
     await expect(controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_failed' });
     expect(f.session.sent.some((message) => message.type === 'upload_begin')).toBe(false);
+  });
+
+  it('releases completed upload grants past the 512-grant budget without releasing other resources', async () => {
+    const f = boot('relay-a', true, 'controller', ['pane_size_lease', 'pane_realtime_delta']); f.reply();
+    const agent = get(relayStore.agents)[0];
+    const target = targetRefForAgent(agent);
+    const connection = relayStore.connection(f.id)!;
+    expect(relayStore.sendRaw(f.id, { type: 'lease_pane_size', target, columns: 80 })).toBe(true);
+    const leaseGrant = [...connection.cleanupGrants][0];
+    let uploads = 0;
+    vi.spyOn(connection.transport!, 'send').mockImplementation((payload) => {
+      f.session.sent.push(payload);
+      let type = '';
+      let result: Record<string, unknown> = {};
+      if (payload.type === 'upload_begin') {
+        type = 'upload_begin_result';
+        result = { upload_id: `completed-${++uploads}`, chunk_bytes: 262144,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 } };
+      } else if (payload.type === 'upload_chunk') {
+        type = 'upload_chunk_result';
+        result = { file_index: 0, next_sequence: 1, received_bytes: 3 };
+      } else if (payload.type === 'upload_finish') {
+        type = 'upload_finish_result';
+        result = { attachments: [{ ref: `attachment:completed-${uploads}`, name: 'shot.png', media_type: 'image/png', bytes: 3,
+          sha256: (payload.files as Array<{ sha256: string }>)[0].sha256,
+          expires_at: new Date(Date.now() + 60_000).toISOString() }] };
+      }
+      if (type) queueMicrotask(() => f.session.handlers.onMessage({ type, request_id: payload.request_id, result }));
+      return true;
+    });
+    const file = new File(['png'], 'shot.png', { type: 'image/png' });
+    for (let index = 0; index < 513; index++) {
+      await expect(relayStore.uploadAttachments(agent, [file])).resolves.toHaveLength(1);
+      expect([...connection.cleanupGrants]).toEqual([leaseGrant]);
+    }
+    expect(uploads).toBe(513);
+    expect(relayStore.sendRaw(f.id, { type: 'watch_pane', target })).toBe(true);
+    expect(relayStore.sendRaw(f.id, { type: 'lease_pane_size', target, columns: 80 })).toBe(true);
   });
 
   it('re-resolves exact generations, never promotes a retained target by matching pane ID', async () => {

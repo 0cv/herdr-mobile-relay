@@ -18,6 +18,9 @@ import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, beginUpdateProgress, clearUpdateProgress, MANAGED_UPDATE_COMMAND, updateProgressPlan } from '$lib/updates';
 import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
 import { CorrelatedInventoryFixture } from './correlated-inventory-fixture';
+import { BrowserDeviceCredentialStore } from '$lib/device-auth';
+import { base64UrlEncode } from '$lib/base64url';
+import { defaultDevicePushPolicy } from '$lib/push-policy';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -568,6 +571,54 @@ describe('settings relay status', () => {
     expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
     expect(screen.getByText(/Resize Session automatically leases/)).toBeInTheDocument();
+  });
+
+  it('fetches and displays the saved device policy only after correlated freshness', async () => {
+    const user = userEvent.setup();
+    const relay = get(relayStore.relayConfigs)[0];
+    const credentials = new BrowserDeviceCredentialStore(localStorage);
+    credentials.saveInvitation(relay.id, { id: 'policy-invitation', version: 1,
+      secret: base64UrlEncode(new Uint8Array(32).fill(7)), expiresAt: Date.now() + 60_000 });
+    credentials.replaceInvitation(relay.id, 'policy-invitation', { deviceId: 'policy-device', credentialId: 'policy-credential',
+      credentialVersion: 1, credentialSecret: base64UrlEncode(new Uint8Array(32).fill(8)), role: 'controller', locale: 'en' });
+    const sent: Record<string, unknown>[] = [];
+    let handlers!: TransportHandlers;
+    transportHijack.current = (_relay, incoming) => {
+      handlers = incoming;
+      return { kind: 'websocket', connect: () => handlers.onStatus('connected', { path: 'websocket' }),
+        close: () => {}, send: (payload) => { sent.push(payload); return true; } };
+    };
+    relayStore.connectRelay(relay);
+    localStorage.setItem(PUSH_ENABLED_KEY, 'true');
+    render(SettingsView);
+    handlers.onMessage({ type: 'push_config', protocol: 3, capabilities: ['inventory_snapshot_v1', 'push_policy'],
+      inventory: { state: 'ready', stale: false } });
+    const snapshot = sent.findLast((message) => message.snapshot_request_id)!;
+    expect(sent.filter((message) => message.type === 'push_policy_get')).toHaveLength(0);
+    handlers.onMessage({ type: 'agents', agents: [] });
+    handlers.onMessage({ type: 'inventory_snapshot', snapshot_request_id: 'unmatched',
+      inventory: { state: 'ready', stale: false }, agents: [], workspaces: [] });
+    expect(sent.filter((message) => message.type === 'push_policy_get')).toHaveLength(0);
+    handlers.onMessage({ type: 'inventory_snapshot', snapshot_request_id: snapshot.snapshot_request_id,
+      inventory: { state: 'ready', stale: false }, agents: [], workspaces: [] });
+    expect(sent.filter((message) => message.type === 'push_policy_get')).toEqual([{ type: 'push_policy_get', protocol: 3 }]);
+    const policy = defaultDevicePushPolicy('policy-device');
+    policy.categories = { ...policy.categories, attention: false, question: false, finished: true };
+    policy.settle_ms = 5000;
+    policy.cooldown_ms = 60000;
+    policy.snoozed = true;
+    handlers.onMessage({ type: 'push_policy', policy });
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Approval needed' })).not.toBeChecked());
+    expect(screen.getByRole('switch', { name: 'Questions' })).not.toBeChecked();
+    expect(screen.getByRole('switch', { name: 'Finished', exact: true })).toBeChecked();
+    expect(screen.getByLabelText('Settle delay')).toHaveValue('5000');
+    expect(screen.getByLabelText('Cooldown')).toHaveValue('60000');
+    expect(screen.getByLabelText('Snooze')).toHaveValue('global');
+    await user.click(screen.getByRole('switch', { name: 'Finished', exact: true }));
+    const save = sent.findLast((message) => message.type === 'push_policy_set')!;
+    expect(save.policy).toMatchObject({ categories: { ...policy.categories, finished: false },
+      settle_ms: 5000, cooldown_ms: 60000, snoozed: true, update_once: true });
+    handlers.onMessage({ type: 'command_result', request_id: save.request_id, action: 'push_policy_set', ok: true, phase: 'confirmed' });
   });
 
   it('keeps notification controls out of the way until push delivery is enabled', async () => {

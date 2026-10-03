@@ -34,8 +34,14 @@ There is no real-device acceleration or B4 qualification claim.
 
 The pre-review B1 status/evidence passages below are historical; the roadmap records
 B1 approved at `1d545fc56dd8f0570f0e1157da3f3cd21c1ff00a` (closeout run `1a77291c`).
-This candidate's B2 hosted acceptance and independent approval remain outstanding;
-that B1 closeout does not approve B2 or statistical/physical confirmation.
+B2 hosted worker acceptance passed at `15d5edd5056c661a99e5173c30f45b405ed85686`:
+run `37083443366` passed all 492 packaged browser cases (plus 268 focused cases),
+`37083443624` passed ordinary release equality, and `37083443380` passed native
+preflight on attempt 2. Qualified generated assets were retrieved and verified.
+See [the qualification record](last-known-contract.md#hosted-worker-qualification)
+for source/artifact binding and later-remediation gating. Independent B2 approval
+and statistical/physical qualification remain outstanding; B1 closeout does not
+provide either.
 
 ## What the app measures
 

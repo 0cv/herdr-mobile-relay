@@ -2815,6 +2815,12 @@ describe('relay command store', () => {
     });
     await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_finish')).toBe(true));
     const finish = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_finish');
+    const grants = relayStore.connection(relayId)!.cleanupGrants;
+    expect(grants.size).toBe(1);
+    macSocket.message({ type: 'upload_finish_result', request_id: finish.request_id, result: { attachments: [] } });
+    fedoraSocket.message({ type: 'upload_finish_result', request_id: 'unmatched-finish', result: { attachments: [] } });
+    fedoraSocket.message({ type: 'upload_chunk_result', request_id: finish.request_id, result: { attachments: [] } });
+    expect(grants.size).toBe(1);
     fedoraSocket.message({
       type: 'upload_finish_result',
       request_id: finish.request_id,
@@ -2830,6 +2836,7 @@ describe('relay command store', () => {
       },
     });
     await expect(upload).resolves.toMatchObject([{ ref: 'attachment:opaque-1', name: 'shot.png' }]);
+    expect(grants.size).toBe(0);
   });
 
   it('does not apply a directory result to a replacement connection', async () => {
