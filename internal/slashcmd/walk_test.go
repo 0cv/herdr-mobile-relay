@@ -271,7 +271,7 @@ func TestScanSkillDirDeduplicatesSymlinkToSameSkill(t *testing.T) {
 	}
 }
 
-// fileFrontmatter reads a command file with os.ReadFile, which blocks forever on
+// readCommandFile opens a command file with os.Open, which blocks forever on
 // a pipe that has no writer. The relay polls this path, so a stray FIFO named
 // *.md would hang a service goroutine permanently.
 func TestWalkNonRegularCommandFileSkipped(t *testing.T) {

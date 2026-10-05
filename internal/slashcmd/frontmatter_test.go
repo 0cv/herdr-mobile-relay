@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -110,12 +111,30 @@ func TestFrontmatterEmptyInput(t *testing.T) {
 func TestReadSkillMetadataOversized(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
-	big := strings.Repeat("x", maxMetadataSize+1)
+	big := strings.Repeat("x", maxCommandFileSize+1)
 	writeTestFile(t, path, big)
 
 	_, ok := readSkillMetadata(path)
 	if ok {
 		t.Error("oversized file should return false")
+	}
+}
+
+func TestReadSkillMetadataLargeBody(t *testing.T) {
+	for _, size := range []int{64*1024 + 1, 100 * 1024, maxCommandFileSize} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			path := t.TempDir() + "/SKILL.md"
+			frontmatter := "---\nname: large\ndescription: Large skill\n---\n"
+			writeTestFile(t, path, frontmatter+strings.Repeat("x", size-len(frontmatter)))
+
+			fm, ok := readSkillMetadata(path)
+			if !ok {
+				t.Fatal("skill within the file size limit was rejected")
+			}
+			if fm["name"] != "large" || fm["description"] != "Large skill" {
+				t.Errorf("metadata = %v", fm)
+			}
+		})
 	}
 }
 
@@ -312,10 +331,10 @@ func TestReadSkillMetadataBlockScalarFromFile(t *testing.T) {
 func TestReadSkillMetadataOversizedBlockScalar(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/SKILL.md"
-	body := strings.Repeat("  filler line\n", maxMetadataSize/8)
+	body := strings.Repeat("  filler line\n", maxCommandFileSize/8)
 	writeTestFile(t, path, "---\nname: huge\ndescription: |\n"+body+"---\n")
 
 	if _, ok := readSkillMetadata(path); ok {
-		t.Error("oversized block scalar should still be rejected by maxMetadataSize")
+		t.Error("oversized block scalar should still be rejected by maxCommandFileSize")
 	}
 }

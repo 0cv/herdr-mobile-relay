@@ -12,9 +12,10 @@ const (
 	// maxCustomFiles is the per-request discovery budget for custom command and
 	// skill files. It bounds filesystem work independently of the serialized
 	// catalog size.
-	maxCustomFiles  = 2000
-	maxEntries      = 4096
-	maxMetadataSize = 64 * 1024
+	maxCustomFiles     = 2000
+	maxEntries         = 4096
+	maxMetadataSize    = 64 * 1024
+	maxCommandFileSize = 1 << 20
 )
 
 var commandNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$`)

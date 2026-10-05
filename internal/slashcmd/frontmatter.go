@@ -119,18 +119,34 @@ func foldBlockScalar(rest []string, folded bool) (string, int) {
 }
 
 func readSkillMetadata(path string) (map[string]string, bool) {
+	data, ok := readCommandFile(path)
+	if !ok {
+		return nil, false
+	}
+	return parseFrontmatterBytes(data)
+}
+
+func readSkillMetadataFile(file *os.File) (map[string]string, bool) {
+	data, ok := readBoundedCommandFile(file)
+	if !ok {
+		return nil, false
+	}
+	return parseFrontmatterBytes(data)
+}
+
+func readCommandFile(path string) ([]byte, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, false
 	}
 	defer file.Close()
-	return readSkillMetadataFile(file)
+	return readBoundedCommandFile(file)
 }
 
-func readSkillMetadataFile(file *os.File) (map[string]string, bool) {
-	data, err := io.ReadAll(io.LimitReader(file, maxMetadataSize+1))
-	if err != nil || len(data) > maxMetadataSize {
+func readBoundedCommandFile(file *os.File) ([]byte, bool) {
+	data, err := io.ReadAll(io.LimitReader(file, maxCommandFileSize+1))
+	if err != nil || len(data) > maxCommandFileSize {
 		return nil, false
 	}
-	return parseFrontmatterBytes(data)
+	return data, true
 }

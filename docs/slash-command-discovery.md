@@ -8,6 +8,10 @@ limits are shared in
 [`contracts/fixtures/slash_command_limits.json`](../contracts/fixtures/slash_command_limits.json)
 and are checked against the Go and TypeScript implementations.
 
+Command and skill files larger than 1 MiB are skipped without marking the
+catalog truncated; reads stop at that size. Cursor applies its own 1 MiB limit,
+described below.
+
 Hermes intentionally has two independent 2,000-file passes: one for its
 native project/profile skills and one for configured compatibility skill
 folders. It can therefore inspect more than 2,000 custom files in one request,
