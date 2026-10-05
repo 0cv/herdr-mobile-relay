@@ -5,6 +5,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.7] - 2026-10-05
+
+### Fixed
+
+- List command and skill files up to 1 MiB in the slash-command palette. Skills
+  larger than 64 KiB were silently left out, and commands larger than 64 KiB
+  lost their frontmatter, so hidden and non-invocable commands were listed
+  without descriptions. Larger files are skipped.
+  ([#59](https://github.com/0cv/herdr-mobile-relay/issues/59))
+
 ## [0.22.6] - 2026-10-02
 
 Version 0.22.5 was withdrawn; this release skips its version and asset generation.
@@ -1635,7 +1645,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...HEAD
+[0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7
 [0.22.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...v0.22.6
 [0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4
 [0.22.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...v0.22.3
