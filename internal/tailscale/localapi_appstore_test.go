@@ -47,20 +47,95 @@ func syntheticAppStoreDiscovery(port int, token string) func() (int, string, err
 	return func() (int, string, error) { return port, token, nil }
 }
 
-func TestAppStoreLocalAPIDisabledRefusesBeforeDiscovery(t *testing.T) {
-	var discoveries, dials int
-	api, err := newAppStoreLocalAPIWith("darwin", appStoreLocalAPIProfileEnabled, appStoreLocalAPIProfiles,
-		localAPITestVersion, appStoreTestMetadata(),
-		func() (int, string, error) { discoveries++; return appStoreTestPort, appStoreTestToken, nil },
-		func(context.Context, string, string) (net.Conn, error) {
-			dials++
-			return nil, errors.New("unexpected dial")
-		})
-	if api != nil || err != errLocalAPIUnsupportedVersion {
-		t.Fatalf("disabled App Store constructor = (%v, %v), want fixed refusal", api, err)
+type appStoreConstructorRecorder struct {
+	mu           sync.Mutex
+	discoveries  int
+	dials        int
+	requests     int
+	authAttempts int
+}
+
+func (r *appStoreConstructorRecorder) discover() (int, string, error) {
+	r.mu.Lock()
+	r.discoveries++
+	r.mu.Unlock()
+	return appStoreTestPort, appStoreTestToken, nil
+}
+
+func (r *appStoreConstructorRecorder) dial() func(context.Context, string, string) (net.Conn, error) {
+	fake := httpPipeDialer(appStoreTestPort, func(request *http.Request) (*http.Response, error) {
+		r.mu.Lock()
+		r.requests++
+		if _, _, ok := request.BasicAuth(); ok {
+			r.authAttempts++
+		}
+		r.mu.Unlock()
+		return nil, errors.New("unexpected fake LocalAPI request")
+	})
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		r.mu.Lock()
+		r.dials++
+		r.mu.Unlock()
+		return fake(ctx, network, address)
 	}
-	if discoveries != 0 || dials != 0 {
-		t.Fatalf("disabled constructor called discovery %d times and dial %d times", discoveries, dials)
+}
+
+func (r *appStoreConstructorRecorder) counts() (discoveries, dials, requests, authAttempts int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.discoveries, r.dials, r.requests, r.authAttempts
+}
+
+func assertAppStoreConstructorWasNotUsed(t *testing.T, recorder *appStoreConstructorRecorder) {
+	t.Helper()
+	discoveries, dials, requests, authAttempts := recorder.counts()
+	if discoveries != 0 || dials != 0 || requests != 0 || authAttempts != 0 {
+		t.Fatalf("refused constructor called discovery=%d dial=%d fake requests=%d auth attempts=%d; want all zero",
+			discoveries, dials, requests, authAttempts)
+	}
+}
+
+func TestAppStoreLocalAPIDisabledRefusesBeforeDiscovery(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			recorder := &appStoreConstructorRecorder{}
+			api, err := newAppStoreLocalAPIWith(goos, appStoreLocalAPIProfileEnabled, appStoreLocalAPIProfiles,
+				localAPITestVersion, appStoreTestMetadata(), recorder.discover, recorder.dial())
+			if api != nil || err != errLocalAPIUnsupportedVersion {
+				t.Fatalf("disabled App Store constructor = (%v, %v), want fixed refusal", api, err)
+			}
+			assertAppStoreConstructorWasNotUsed(t, recorder)
+		})
+	}
+}
+
+func TestAppStoreLocalAPIEnabledNonDarwinRefusesPlatformBeforeDiscovery(t *testing.T) {
+	recorder := &appStoreConstructorRecorder{}
+	api, err := newAppStoreLocalAPIWith("linux", true, []appStoreLocalAPIProfile{appStoreTestProfile()},
+		localAPITestVersion, appStoreTestMetadata(), recorder.discover, recorder.dial())
+	if api != nil || err == nil || err.Error() != unsupportedPlatformError().Error() {
+		t.Fatalf("enabled non-Darwin App Store constructor = (%v, %v), want platform refusal", api, err)
+	}
+	assertAppStoreConstructorWasNotUsed(t, recorder)
+}
+
+func TestAppStoreLocalAPIUnsupportedRuntimeRefusedFirst(t *testing.T) {
+	for _, goos := range []string{"android", "ios", "windows"} {
+		for _, enabled := range []bool{false, true} {
+			name := "disabled"
+			if enabled {
+				name = "enabled"
+			}
+			t.Run(goos+"/"+name, func(t *testing.T) {
+				recorder := &appStoreConstructorRecorder{}
+				api, err := newAppStoreLocalAPIWith(goos, enabled, []appStoreLocalAPIProfile{appStoreTestProfile()},
+					localAPITestVersion, appStoreTestMetadata(), recorder.discover, recorder.dial())
+				if api != nil || err == nil || err.Error() != unsupportedPlatformError().Error() {
+					t.Fatalf("unsupported runtime %q (enabled=%t) constructor = (%v, %v), want runtime refusal", goos, enabled, api, err)
+				}
+				assertAppStoreConstructorWasNotUsed(t, recorder)
+			})
+		}
 	}
 }
 

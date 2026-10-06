@@ -68,11 +68,11 @@ func newAppStoreLocalAPIWith(
 	if err := checkLocalAPIRuntime(goos); err != nil {
 		return nil, err
 	}
-	if goos != "darwin" {
-		return nil, unsupportedPlatformError()
-	}
 	if !enabled {
 		return nil, errLocalAPIUnsupportedVersion
+	}
+	if goos != "darwin" {
+		return nil, unsupportedPlatformError()
 	}
 	profile, ok := matchAppStoreLocalAPIProfile(versionMetadata, expectedVersion, profiles)
 	if !ok {
