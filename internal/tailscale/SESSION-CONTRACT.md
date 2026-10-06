@@ -47,10 +47,14 @@ revocation is still queued.
 ## Admission and registration
 
 Production construction is `NewSessionAuthority(expectedVersion,
-versionMetadata, httpsPort, backendPort)`. It uses the fixed R2A transport and
-its exact pinned version/build metadata policy; there is no endpoint, socket,
-CLI, token, or version injection. The only injected transport constructor is
-package-private and is used by deterministic tests.
+versionMetadata, httpsPort, backendPort)`. It uses `newLocalAPI` to select one
+transport cell from admitted metadata. The standalone cell keeps the fixed R2A
+Unix-socket policy. App Store metadata selects the separate R2D cell, which is
+unconditionally disabled (`appStoreLocalAPIProfileEnabled = false`) and has an
+empty production profile table; it never falls back to the standalone socket.
+There is no endpoint, socket, CLI, token, or version injection in the public
+constructor. Package-private synthetic profile/discovery/dial seams are used
+only by deterministic tests.
 
 `Prepare` requires a running authenticated status, a complete stable identity
 (node ID, numeric user ID and available user profile, DNS name, tailnet name,
@@ -146,12 +150,14 @@ owner makes no claim of guaranteed same-key preservation across those races.
 
 The watcher/session authority is in-process only and does not constrain other
 processes with LocalAPI authority. `routeCleared` is config-level, not proof of
-daemon bookkeeping/ingress drain. This R2B slice did not implement app gate revocation, keep-the-process-alive
-quarantine, shell O persistence, platform GUI/token discovery, actual daemon
-qualification, the held-output-pipe supervisor case, or hosted CI. The separate
-R2C app/control integration connects `SessionAuthority` to a revocable device
-bootstrap gate and private lifecycle control without changing the owner,
-selective-retirement, or remote-watch-unknown contract; see
+daemon bookkeeping/ingress drain. R2B did not implement app gate revocation,
+keep-the-process-alive quarantine, shell O persistence, actual daemon
+qualification, the held-output-pipe supervisor case, or hosted CI. R2D adds
+only the disabled fixture-level App Store transport below; it does not alter
+owner behavior. The separate R2C app/control integration connects
+`SessionAuthority` to a revocable device bootstrap gate and private lifecycle
+control without changing the owner, selective-retirement, or
+remote-watch-unknown contract; see
 [`../app/TAILSCALE-INTEGRATION.md`](../app/TAILSCALE-INTEGRATION.md). Native
 daemon/runtime qualification and final hosted CI remain independent gates.
 
@@ -161,6 +167,41 @@ watcher/session identifier, performs no independent ownership admission, and
 is used only for configured-origin admission and app-health consistency
 tests; every mutation and lifecycle fact still comes from the production
 authority's live LocalAPI checks.
+
+## Disabled App Store transport cell (R2D; fixture-only)
+
+The App Store macOS LocalAPI transport is a separate selector for the
+in-process `SessionAuthority`, not a change to the owner or to `Inspect`.
+`appStoreLocalAPIProfileEnabled` is `false` and the production exact-version
+profile table is empty. The exact tuple is `osVariant`, `gitCommit`,
+`extraGitCommit`, `long`, `daemonLong`, and `cap`; until an approved profile and
+switch exist, construction refuses before discovery. `Inspect` still has its
+independent App Store `gitCommit` version-admission mismatch, a documented
+follow-up outside this slice. `ServeRouteOwned` remains false, and
+`RemoteWatchRetirementUnknown` remains true.
+
+The fixture reuses pinned Tailscale v1.102.4 `client/local/local.go` (`Client`,
+`defaultDialer`, `DoLocalRequest`) and
+`safesocket/safesocket.go` / `safesocket/safesocket_darwin.go`
+(`LocalTCPPortAndToken`, `localTCPPortAndTokenDarwin`,
+`portAndTokenFromSameUserProof`), referenced through the unexported
+`appStoreDiscover` seam; `dialLoopbackTCP` defaults to
+`(&net.Dialer{}).DialContext`. All clients set `OmitAuth=true`; a bounded
+RoundTripper supplies `SetBasicAuth("", token)` exactly once. Discovery is
+one-shot, deadline-bounded at two seconds, and validates port 1..65535 plus a
+1..256-byte printable ASCII token excluding colon/whitespace. Upstream same-user
+proof discovery cannot be cancelled once started, so a timeout refuses while
+its goroutine may finish in the background. The dial target is exactly
+`local-tailscaled.sock:80`, redirected only to `127.0.0.1:<discovered-port>`;
+401/403 never rediscover or retry. Credentials, port, and auth headers are not
+reported.
+
+Tests inject only synthetic metadata, credentials, profiles and in-memory
+connections. The package `TestMain` replaces the production discovery and dial
+seams with fail-fast guards; tests do not call `lsof`, read proof files, open
+sockets, or contact a daemon/tailnet. This is fixture-only and not
+runtime-qualified: it does not enable pairing, change settings, or establish
+live authority.
 
 ## Source and test evidence map
 
@@ -202,3 +243,13 @@ process, daemon, user path, or service is used:
   `TestSessionAuthorityBackgroundMonitorSignalsRouteDrift`, and the
   `TestLocalAPI*` protocol tests cover serialized transitions, monitoring,
   bounded transports and request classification.
+- `TestAppStoreLocalAPIDisabledRefusesBeforeDiscovery`,
+  `TestAppStoreLocalAPIDiscoveryBoundsAndValidation`,
+  `TestAppStoreLocalAPIDialsOnlyDiscoveredLoopbackPort`,
+  `TestAppStoreLocalAPIRejectsInvalidIdentityAndVersion`,
+  `TestAppStoreLocalAPIMissingOrDeniedAuthenticationFailsClosed`,
+  `TestAppStoreLocalAPIRedactsDiscoveredSecret`,
+  `TestAppStoreLocalAPINeverUsesUpstreamDefaultAuthOrDiscovery`,
+  `TestSessionAuthorityAppStoreFakeDaemonLifecycle`, and
+  `TestLocalAPIStandaloneSocketPolicyUnchanged` cover the disabled App Store
+  cell using synthetic metadata/credentials and in-memory fakes only.

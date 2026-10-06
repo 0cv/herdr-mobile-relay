@@ -34,6 +34,7 @@ var (
 	errLocalAPIRequest            = errors.New("Tailscale LocalAPI request failed")
 	errLocalAPITimeout            = errors.New("Tailscale LocalAPI request timed out")
 	errLocalAPIAuthorization      = errors.New("Tailscale LocalAPI authorization denied")
+	errLocalAPIDiscovery          = errors.New("Tailscale LocalAPI discovery failed")
 	errLocalAPIResponse           = errors.New("invalid Tailscale LocalAPI response")
 	errLocalAPIWriteConflict      = errors.New("Tailscale Serve configuration changed")
 	errLocalAPIWatchTimeout       = errors.New("Tailscale LocalAPI watch did not produce an initial event in time")
@@ -46,21 +47,26 @@ type localAPI struct {
 	expectedVersion string
 }
 
+func (*localAPI) String() string { return "Tailscale LocalAPI client" }
+
 // newLocalAPI constructs the pinned production transport. Its endpoint and
 // socket selection are intentionally not configurable.
 func newLocalAPI(expectedVersion string, versionMetadata []byte) (*localAPI, error) {
-	if !localAPIVersionMetadataAllowed(versionMetadata, expectedVersion) {
-		return nil, errLocalAPIUnsupportedVersion
-	}
 	if err := checkLocalAPIRuntime(runtime.GOOS); err != nil {
 		return nil, err
 	}
-	transport, omitAuth, err := newPinnedLocalAPIRoundTripper()
+	if appStoreLocalAPIMetadataCandidate(versionMetadata) {
+		return newAppStoreLocalAPI(expectedVersion, versionMetadata)
+	}
+	if !localAPIVersionMetadataAllowed(versionMetadata, expectedVersion) {
+		return nil, errLocalAPIUnsupportedVersion
+	}
+	transport, dial, err := newPinnedLocalAPIRoundTripper()
 	if err != nil {
 		return nil, err
 	}
 	return &localAPI{
-		client:          &local.Client{Transport: transport, OmitAuth: omitAuth},
+		client:          &local.Client{Dial: dial, Transport: transport, OmitAuth: true},
 		expectedVersion: expectedVersion,
 	}, nil
 }

@@ -1,7 +1,9 @@
 package tailscale
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -9,10 +11,10 @@ import (
 // newPinnedLocalAPIRoundTripper keeps the upstream client's raw request and
 // authentication implementation while adding endpoint, redirect, and response
 // header bounds that DoLocalRequest's public seam does not expose.
-func newPinnedLocalAPIRoundTripper() (http.RoundTripper, bool, error) {
-	dial, omitAuth, err := platformLocalAPIDialer()
+func newPinnedLocalAPIRoundTripper() (http.RoundTripper, func(context.Context, string, string) (net.Conn, error), error) {
+	dial, err := platformLocalAPIDialer()
 	if err != nil {
-		return nil, true, err
+		return nil, nil, err
 	}
 	transport := &http.Transport{
 		DialContext:            dial,
@@ -20,16 +22,32 @@ func newPinnedLocalAPIRoundTripper() (http.RoundTripper, bool, error) {
 		DisableKeepAlives:      true,
 		MaxResponseHeaderBytes: localAPIDiagnosticLimit,
 	}
-	return noRedirectLocalAPITransport{next: transport}, omitAuth, nil
+	return noRedirectLocalAPITransport{next: transport}, dial, nil
 }
 
+type localAPIAuthToken struct{ value string }
+
+func (localAPIAuthToken) String() string   { return "[redacted]" }
+func (localAPIAuthToken) GoString() string { return "[redacted]" }
+
 type noRedirectLocalAPITransport struct {
-	next http.RoundTripper
+	next           http.RoundTripper
+	basicAuthToken localAPIAuthToken
 }
+
+func (noRedirectLocalAPITransport) String() string { return "bounded Tailscale LocalAPI transport" }
 
 func (t noRedirectLocalAPITransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if t.next == nil || !validLocalAPIRequest(request) {
 		return nil, errors.New("invalid local Tailscale API endpoint")
+	}
+	if t.basicAuthToken.value != "" {
+		if localAPIHeaderPresent(request.Header, "Authorization") {
+			return nil, errors.New("invalid local Tailscale API authentication")
+		}
+		request = request.Clone(request.Context())
+		request.Header = request.Header.Clone()
+		request.SetBasicAuth("", t.basicAuthToken.value)
 	}
 	response, err := t.next.RoundTrip(request)
 	if err != nil || response == nil {

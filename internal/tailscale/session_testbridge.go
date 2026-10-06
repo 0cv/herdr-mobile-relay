@@ -3,6 +3,8 @@
 package tailscale
 
 import (
+	"context"
+	"net"
 	"net/http"
 
 	"tailscale.com/client/local"
@@ -22,7 +24,13 @@ func NewSessionAuthorityWithRawLocalAPIForTest(httpsTransport http.RoundTripper,
 		return nil, errLocalAPIUnsupportedVersion
 	}
 	api := &localAPI{
-		client:          &local.Client{Transport: noRedirectLocalAPITransport{next: httpsTransport}, OmitAuth: true},
+		client: &local.Client{
+			Dial: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errLocalAPIRequest
+			},
+			Transport: noRedirectLocalAPITransport{next: httpsTransport},
+			OmitAuth:  true,
+		},
 		expectedVersion: expectedVersion,
 	}
 	return newSessionAuthority(api, httpsPort, backendPort)

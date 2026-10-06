@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -29,7 +30,14 @@ func (f localAPITestRoundTripper) RoundTrip(request *http.Request) (*http.Respon
 
 func newTestLocalAPI(rt http.RoundTripper) *localAPI {
 	return &localAPI{
-		client:          &local.Client{Transport: noRedirectLocalAPITransport{next: rt}, OmitAuth: true},
+		client: &local.Client{
+			Dial: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("test dial forbidden")
+			},
+			Transport: noRedirectLocalAPITransport{next: rt},
+			OmitAuth:  true,
+		},
+
 		expectedVersion: localAPITestVersion,
 	}
 }

@@ -1,4 +1,4 @@
-# Bounded LocalAPI transport contract (R2A)
+# Bounded LocalAPI transport contract (R2A / R2D fixture transport)
 
 ## Scope and authority boundary
 
@@ -12,11 +12,11 @@ relay ownership.
 The only production constructor is unexported `newLocalAPI(expectedVersion,
 versionMetadata)`. It requires independently obtained, source-valid version
 metadata and fixes the LocalAPI host, paths, transport, and platform socket
-policy. The LocalAPI-specific admission additionally requires `extraGitCommit`
-and `osVariant` to be absent or empty; supplemental GUI builds need a separately
-source-qualified exact policy and are refused here. Matching source metadata is
-not cryptographic artifact provenance. The legacy `Inspect` version contract is
-unchanged. Ordinary unit tests use in-memory `RoundTripper`s in `_test.go` files.
+policy. The standalone cell additionally requires `extraGitCommit` and
+`osVariant` to be absent or empty. App Store metadata selects a separate
+profile-gated cell described below; no metadata falls back between cells.
+Matching source metadata is not cryptographic artifact provenance. The legacy
+`Inspect` version contract is unchanged. Ordinary unit tests use in-memory `RoundTripper`s in `_test.go` files.
 The positive hosted app test uses `session_testbridge.go`, which is compiled only
 with the explicit `herdr_tailscale_test` build tag and accepts only a raw
 protocol `RoundTripper`; fixed LocalAPI host/path allowlists and production
@@ -43,10 +43,11 @@ The adapter permits only these requests to `http://local-tailscaled.sock`:
 | GET | `/localapi/v0/watch-ipn-bus?mask=2` | The pinned `ipn.NotifyWatchOpt` text codec encodes `NotifyInitialState` as decimal `2`; the daemon parses `mask` with `strconv.ParseUint`. Long-lived newline-delimited JSON stream; bounded first event and locally retained initial nonempty session ID. |
 
 No other methods, query strings, path aliases, hosts, schemes, proxy authorization,
-redirect targets, custom sockets, or network endpoints are accepted. The configured
-`http.Transport` has no `ProxyFromEnvironment` and dials only the pinned local
-Unix socket; Darwin loopback and token discovery are refused in this slice. It
-caps response headers at 64 KiB and disables transparent compression/keep-alive.
+redirect targets, custom sockets, or network endpoints are accepted. Each admitted
+cell uses an `http.Transport` without `ProxyFromEnvironment`; the standalone
+cells dial only their pinned local Unix sockets, while the disabled App Store
+cell's separate loopback restriction is specified below. Transports cap response
+headers at 64 KiB and disable transparent compression/keep-alive.
 One-shot requests (including response reads)
 use five-second contexts; each response body and each watch JSON event is capped
 at 1 MiB. The existing `strictJSON` enforces the byte, UTF-8, single-document,
@@ -102,29 +103,65 @@ and `DoLocalRequest`). The small documented duplication is its local
 `paths.DefaultTailscaledSocket`, exported source-backed primitives. The request
 still goes through `DoLocalRequest`, which adds Tailscale capability metadata.
 
-On Darwin, `DoLocalRequest` also calls `safesocket.LocalTCPPortAndToken`
-synchronously. The pinned App Store discovery path invokes `lsof` with
-`exec.Command(...).Output()` and has no context/deadline seam. To preserve the
-five-second request bound without adding unbounded process/token discovery, the
-Darwin constructor sets upstream `OmitAuth=true` and accepts only the
-peer-credential standalone Unix socket. Sandboxed GUI/App Store/MacSys loopback
-and proof-token discovery is deliberately unsupported/refused in R2A; it needs a
-separately reviewed bounded source/auth seam. No credential discovery, external
-process, or daemon connection was run for this slice.
+On Darwin, `DoLocalRequest` can call `safesocket.LocalTCPPortAndToken`
+synchronously unless every client sets `OmitAuth=true`. The pinned App Store
+fallback uses loopback TCP and HTTP Basic auth, while its same-user-proof lookup
+invokes `lsof` with `exec.Command(...).Output()` and has no context/deadline
+seam. Both LocalAPI cells therefore keep upstream auth discovery disabled. The
+standalone Darwin cell continues to use only its peer-credential Unix socket.
+The separate App Store cell below supplies a bounded wrapper around the exact
+upstream discovery function and adds the corresponding Basic header in the
+existing bounded transport. The wrapper times out but cannot cancel an already
+running upstream lookup.
 
 - Linux accepts only the generic upstream default
   `/var/run/tailscale/tailscaled.sock`; Unix peer credentials remain the
   source-backed authorization boundary. Distro-specific paths, custom sockets,
   and unknown OS targets refuse.
-- Darwin accepts only the pinned standalone socket
-  `/var/run/tailscaled.socket` with OS peer credentials. Sandboxed GUI,
-  App Store, and MacSys distributions are a distinct source cell and are
-  refused rather than entering the unbounded upstream `lsof` token path.
+- Darwin standalone accepts only the pinned socket `/var/run/tailscaled.socket`
+  with OS peer credentials. App Store GUI discovery is a distinct, disabled
+  LocalAPI source cell; MacSys remains unsupported.
 - Only Linux and macOS runtimes are admitted. Android (despite its Linux build
   tags), iOS (despite its Darwin build tags), Windows, and other targets refuse
   at construction; platform dialers also check the exact runtime OS. There is
   no CLI fallback, login, sudo, feature/prefs mutation, token extraction, or
   installation.
+
+## App Store LocalAPI cell (R2D; fixture-only, not runtime-qualified)
+
+The in-process `SessionAuthority` has a second, Darwin-only transport cell for
+the App Store GUI LocalAPI. It remains unconditionally disabled by
+`appStoreLocalAPIProfileEnabled = false`; the production exact-profile table
+`appStoreLocalAPIProfiles` is empty. The standalone Unix-socket cell is not a
+fallback: admitted metadata selects one cell, and a refused App Store identity
+never tries the standalone socket. The separate `Inspect`/CLI version admission
+still rejects the App Store `gitCommit` variant; that remains a documented
+follow-up and is not changed by this transport slice.
+
+The cell reuses the pinned v1.102.4 upstream implementation, not a new protocol:
+`client/local/local.go` (`Client`, `defaultDialer`, `DoLocalRequest`) supplies the
+fixed `local-tailscaled.sock:80` HTTP endpoint, and
+`safesocket/safesocket.go` / `safesocket/safesocket_darwin.go`
+(`LocalTCPPortAndToken`, `localTCPPortAndTokenDarwin`,
+`portAndTokenFromSameUserProof`) supplies the only discovery source through the
+unexported `appStoreDiscover` seam; `dialLoopbackTCP` defaults to
+`(&net.Dialer{}).DialContext`. Every `local.Client` has `OmitAuth=true` and
+explicit `Dial`/`Transport`; the bounded wrapper calls `SetBasicAuth("", token)`
+once. Discovery runs in a goroutine with
+a two-second deadline, but the upstream lookup has no cancellation seam and may
+continue after timeout. Discovery is one-shot per client; 401/403 do not
+rediscover or retry. Only ports 1..65535 and 1..256 printable ASCII token bytes
+excluding colon and whitespace are admitted. The HTTP dial accepts only
+`local-tailscaled.sock:80` and redirects only to the discovered
+`127.0.0.1:<port>`; alternate networks, hosts, ports, localhost, IPv6 and remote
+addresses are refused before dialing. Token and port are absent from fixed
+errors, string renderings, status and logs.
+
+Tests use only synthetic metadata/credentials and in-memory RoundTrippers or
+`net.Pipe`; the package `TestMain` replaces both production discovery and dial
+seams with fail-fast guards. No real same-user-proof lookup, socket, daemon, or
+LocalAPI was accessed. This is fixture-only; it is not runtime-qualified and
+does not enable pairing or live authority.
 
 The transport source seams were inspected in immutable Tailscale commit
 `bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8`:

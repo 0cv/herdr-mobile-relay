@@ -22,8 +22,11 @@ func TestLocalAPIProductionConstructorPinsTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct pinned LocalAPI transport: %v", err)
 	}
-	if api.client.OmitAuth != (runtime.GOOS == "darwin") {
-		t.Fatalf("OmitAuth = %t on %s", api.client.OmitAuth, runtime.GOOS)
+	if !api.client.OmitAuth {
+		t.Fatalf("OmitAuth = %t on %s, want true", api.client.OmitAuth, runtime.GOOS)
+	}
+	if api.client.Dial == nil {
+		t.Fatal("production LocalAPI client has no explicit dialer")
 	}
 	wrapper, ok := api.client.Transport.(noRedirectLocalAPITransport)
 	if !ok {
