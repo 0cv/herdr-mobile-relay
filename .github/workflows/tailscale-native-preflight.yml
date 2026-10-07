@@ -159,6 +159,134 @@ jobs:
           raise SystemExit(result)
           PY
 
+      - name: Run Darwin managed app/control integration and write SHA-bound evidence
+        id: darwin_managed_integration
+        if: ${{ success() && steps.provenance.outcome == 'success' && steps.setup_go.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          GOPROXY: off
+          GOSUMDB: off
+          GOENV: off
+          GOWORK: off
+          GOFLAGS: -mod=readonly
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          output_dir="$RUNNER_TEMP/tailscale-native-preflight"
+          pattern='^(TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire|TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets|TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation|TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation|TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement|TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls|TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement|TestTailscaleCLIReadinessArmAndDrift)$'
+          normal_log="$output_dir/darwin-managed-integration-normal.jsonl"
+          normal_stderr="$output_dir/darwin-managed-integration-normal.stderr"
+          race_log="$output_dir/darwin-managed-integration-race.jsonl"
+          race_stderr="$output_dir/darwin-managed-integration-race.stderr"
+          if go test -json -count=1 -tags=herdr_tailscale_test ./internal/app -run "$pattern" >"$normal_log" 2>"$normal_stderr"; then
+            normal_exit=0
+          else
+            normal_exit=$?
+          fi
+          if go test -json -race -count=1 -tags=herdr_tailscale_test ./internal/app -run "$pattern" >"$race_log" 2>"$race_stderr"; then
+            race_exit=0
+          else
+            race_exit=$?
+          fi
+          python3 - "$normal_log" "$output_dir/darwin-managed-integration-normal.log" "$GITHUB_SHA" normal "$normal_exit" "$race_log" "$output_dir/darwin-managed-integration-race.log" "$GITHUB_SHA" race "$race_exit" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          required = [
+              "TestManagedTailscaleHostedPositiveActivationArmEnrollAndRetire",
+              "TestManagedTailscaleDelayedVerifierCompletesWithinLifecycleBudgets",
+              "TestManagedTailscaleVerifierCancellationDoesNotPersistInvitation",
+              "TestManagedTailscaleLaterAdmissionFailuresDoNotPersistInvitation",
+              "TestManagedTailscaleCommittedArmSurvivesLostControlAcknowledgement",
+              "TestManagedTailscaleWatchEOFAtAdmissionHandoffNeverReopensOrEnrolls",
+              "TestManagedTailscaleRearmAfterEnrollmentAndLostAcknowledgement",
+              "TestTailscaleCLIReadinessArmAndDrift",
+          ]
+
+          def validate(log_path, evidence_path, candidate_sha, mode, test_exit_text):
+              actions = {}
+              observed_tests = set()
+              parse_failed = False
+              with pathlib.Path(log_path).open(encoding="utf-8") as stream:
+                  for line in stream:
+                      try:
+                          event = json.loads(line)
+                      except json.JSONDecodeError:
+                          parse_failed = True
+                          continue
+                      if not isinstance(event, dict):
+                          parse_failed = True
+                          continue
+                      name = event.get("Test")
+                      if name is not None:
+                          if not isinstance(name, str):
+                              parse_failed = True
+                              continue
+                          action = event.get("Action")
+                          if action is not None and not isinstance(action, str):
+                              parse_failed = True
+                              continue
+                          observed_tests.add(name)
+                          actions.setdefault(name, []).append(action)
+
+              results = []
+              for name in required:
+                  terminal = [action for action in actions.get(name, []) if action in {"pass", "skip", "fail"}]
+                  descendants = [
+                      action
+                      for test_name, test_actions in actions.items()
+                      if test_name.startswith(name + "/")
+                      for action in test_actions
+                      if action in {"skip", "fail"}
+                  ]
+                  if "fail" in terminal or "fail" in descendants:
+                      result = "fail"
+                  elif "skip" in terminal or "skip" in descendants:
+                      result = "skip"
+                  elif terminal == ["pass"] and not descendants:
+                      result = "pass"
+                  elif not terminal:
+                      result = "missing"
+                  else:
+                      result = "invalid-event-count"
+                  results.append({"name": name, "result": result})
+
+              try:
+                  test_exit = int(test_exit_text)
+              except ValueError:
+                  test_exit = 1
+                  parse_failed = True
+              passed = (
+                  test_exit == 0
+                  and bool(observed_tests)
+                  and all(case["result"] == "pass" for case in results)
+                  and not parse_failed
+              )
+              evidence = {
+                  "schema_version": 1,
+                  "candidate_sha": candidate_sha,
+                  "mode": mode,
+                  "go_test_exit_code": test_exit,
+                  "test_cases_observed": len(observed_tests),
+                  "required_cases": results,
+                  "json_parse_complete": not parse_failed,
+                  "result": "pass" if passed else "fail",
+              }
+              pathlib.Path(evidence_path).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+              return passed
+
+          normal_args = sys.argv[1:6]
+          race_args = sys.argv[6:11]
+          normal_passed = validate(*normal_args)
+          race_passed = validate(*race_args)
+          if not normal_passed or not race_passed:
+              print("required Darwin managed integration cases failed evidence validation", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
       - name: Write bounded sanitized startup diagnostics
         if: ${{ always() }}
         shell: bash
@@ -418,9 +546,10 @@ jobs:
           GO_VET_OUTCOME: ${{ steps.go_vet.outcome }}
           BUILD_OUTCOME: ${{ steps.supervisor_build.outcome }}
           DARWIN_TEST_OUTCOME: ${{ steps.darwin_lifecycle.outcome }}
+          DARWIN_MANAGED_INTEGRATION_OUTCOME: ${{ steps.darwin_managed_integration.outcome }}
         run: |
           set -euo pipefail
-          for result in "$PROVENANCE_OUTCOME" "$TOOL_PATHS_OUTCOME" "$SETUP_GO_OUTCOME" "$GO_TEST_OUTCOME" "$GO_VET_OUTCOME" "$BUILD_OUTCOME" "$DARWIN_TEST_OUTCOME"; do
+          for result in "$PROVENANCE_OUTCOME" "$TOOL_PATHS_OUTCOME" "$SETUP_GO_OUTCOME" "$GO_TEST_OUTCOME" "$GO_VET_OUTCOME" "$BUILD_OUTCOME" "$DARWIN_TEST_OUTCOME" "$DARWIN_MANAGED_INTEGRATION_OUTCOME"; do
             test "$result" = success || { printf 'Required preflight step outcome: %s\n' "$result" >&2; exit 1; }
           done
 

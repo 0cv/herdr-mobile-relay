@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -318,7 +319,7 @@ func newManagedTailscaleFixture(t *testing.T) *managedTailscaleFixture {
 	fixture.rootCerts = roots
 	tlsListener := tls.NewListener(publicTCP, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}})
 	go func() { _ = fixture.public.Serve(tlsListener) }()
-	installManagedHealthTestNetwork(t, fixture.server, fixture.hostPort, publicTCP.Addr().String(), roots)
+	installManagedHealthTestNetwork(t, fixture.server, fixture.hostPort, publicTCP.Addr().String(), backendLn.Addr().String(), roots)
 	return fixture
 }
 
@@ -663,19 +664,34 @@ func managedFixtureCertificate(t *testing.T, hostname string) (tls.Certificate, 
 }
 
 var managedHealthTestNetwork struct {
-	mu          sync.RWMutex
-	server      *Server
-	hostPort    string
-	dialAddress string
-	roots       *x509.CertPool
+	mu     sync.RWMutex
+	server *Server
+	routes []managedFixtureRoute
+	roots  *x509.CertPool
+}
+
+// managedFixtureRoute maps one exact destination the code under test may dial
+// to the one fixture-owned loopback endpoint that serves it.
+type managedFixtureRoute struct {
+	destination string
+	endpoint    string
+}
+
+// managedFixtureRoutes registers the public HTTPS name and the separately owned
+// local relay listener of one fixture. Nothing else is routable.
+func managedFixtureRoutes(hostPort, publicEndpoint, backendEndpoint string) []managedFixtureRoute {
+	return []managedFixtureRoute{
+		{destination: hostPort, endpoint: publicEndpoint},
+		{destination: backendEndpoint, endpoint: backendEndpoint},
+	}
 }
 
 // This replacement exists only in the explicitly tagged app test binary. The
 // production build uses managed_listener.go's fixed trust-store client.
 func managedHealthClientForServer(target *Server, timeout time.Duration) *http.Client {
 	managedHealthTestNetwork.mu.RLock()
-	server, hostPort, dialAddress, roots := managedHealthTestNetwork.server,
-		managedHealthTestNetwork.hostPort, managedHealthTestNetwork.dialAddress, managedHealthTestNetwork.roots
+	server, routes, roots := managedHealthTestNetwork.server,
+		managedHealthTestNetwork.routes, managedHealthTestNetwork.roots
 	managedHealthTestNetwork.mu.RUnlock()
 	if target != server || roots == nil {
 		return managedHealthClient(timeout)
@@ -685,43 +701,97 @@ func managedHealthClientForServer(target *Server, timeout time.Duration) *http.C
 		Transport: &http.Transport{
 			Proxy: nil, DisableKeepAlives: true,
 			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
-			DialContext:     managedFixtureDial(hostPort, dialAddress),
+			DialContext:     managedFixtureRouteDial(routes),
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
 
-func installManagedHealthTestNetwork(t *testing.T, server *Server, hostPort, dialAddress string, roots *x509.CertPool) {
+// installManagedHealthTestNetwork requires every fixture to name both its
+// public endpoint and its local relay listener, so a call site cannot register
+// the public route alone.
+func installManagedHealthTestNetwork(t *testing.T, server *Server, hostPort, publicEndpoint, backendEndpoint string, roots *x509.CertPool) {
 	t.Helper()
+	if server == nil || server.cfg == nil || server.cfg.Addr() != backendEndpoint {
+		t.Fatalf("managed fixture backend endpoint %q is not the server's configured local relay address", backendEndpoint)
+	}
+	routes := managedFixtureRoutes(hostPort, publicEndpoint, backendEndpoint)
 	managedHealthTestNetwork.mu.Lock()
 	managedHealthTestNetwork.server = server
-	managedHealthTestNetwork.hostPort = hostPort
-	managedHealthTestNetwork.dialAddress = dialAddress
+	managedHealthTestNetwork.routes = routes
 	managedHealthTestNetwork.roots = roots
 	managedHealthTestNetwork.mu.Unlock()
 	previousDefaultTransport := http.DefaultTransport
 	http.DefaultTransport = &http.Transport{
 		Proxy: nil, DisableKeepAlives: true,
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
-		DialContext:     managedFixtureDial(hostPort, dialAddress),
+		DialContext:     managedFixtureRouteDial(routes),
 	}
 	t.Cleanup(func() {
 		managedHealthTestNetwork.mu.Lock()
 		managedHealthTestNetwork.server = nil
-		managedHealthTestNetwork.hostPort = ""
-		managedHealthTestNetwork.dialAddress = ""
+		managedHealthTestNetwork.routes = nil
 		managedHealthTestNetwork.roots = nil
 		managedHealthTestNetwork.mu.Unlock()
 		http.DefaultTransport = previousDefaultTransport
 	})
 }
 
-func managedFixtureDial(hostPort, dialAddress string) func(context.Context, string, string) (net.Conn, error) {
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		if address == hostPort {
-			return (&net.Dialer{}).DialContext(ctx, network, dialAddress)
+func managedFixtureRouteDial(routes []managedFixtureRoute) func(context.Context, string, string) (net.Conn, error) {
+	return managedFixtureDialRoutesWith(routes, (&net.Dialer{}).DialContext)
+}
+
+// managedFixtureDialWith keeps the original single public route.
+func managedFixtureDialWith(hostPort, dialAddress string, dialContext func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return managedFixtureDialRoutesWith([]managedFixtureRoute{{destination: hostPort, endpoint: dialAddress}}, dialContext)
+}
+
+// managedFixtureDialRoutesWith fails closed. Every destination must be a
+// registered route: the fixture host name, or a canonical literal loopback
+// address and port. Every endpoint must be a literal loopback address with a
+// canonical port. Any invalid or duplicate route makes the whole dialer refuse
+// everything. Unregistered addresses (including other loopback ports) are
+// refused before DNS, proxy or any underlying dial; there is no fallback.
+func managedFixtureDialRoutesWith(routes []managedFixtureRoute, dialContext func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	validPort := func(port string) bool {
+		n, err := strconv.Atoi(port)
+		return err == nil && n > 0 && n <= 65535 && strconv.Itoa(n) == port
+	}
+	invalid := dialContext == nil || len(routes) == 0
+	allowed := make(map[string]string, len(routes))
+	for _, route := range routes {
+		destinationHost, destinationPort, destinationErr := net.SplitHostPort(route.destination)
+		endpointHost, endpointPort, endpointErr := net.SplitHostPort(route.endpoint)
+		endpointIP := net.ParseIP(endpointHost)
+		destinationIP := net.ParseIP(destinationHost)
+		destinationOK := destinationErr == nil && validPort(destinationPort) &&
+			(destinationHost == managedFixtureHost ||
+				(destinationIP != nil && destinationIP.IsLoopback() && destinationIP.String() == destinationHost))
+		endpointOK := endpointErr == nil && endpointIP != nil && endpointIP.IsLoopback() && validPort(endpointPort)
+		if !destinationOK || !endpointOK {
+			invalid = true
+			break
 		}
-		return (&net.Dialer{}).DialContext(ctx, network, address)
+		if _, duplicate := allowed[route.destination]; duplicate {
+			invalid = true
+			break
+		}
+		allowed[route.destination] = net.JoinHostPort(endpointIP.String(), endpointPort)
+	}
+	if invalid {
+		return func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("managed fixture dial configuration is invalid")
+		}
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		ownedEndpoint, ok := allowed[address]
+		if !ok {
+			return nil, fmt.Errorf("managed fixture dial refused non-allowlisted destination %q", address)
+		}
+		if network != "tcp" && network != "tcp4" && network != "tcp6" {
+			return nil, fmt.Errorf("managed fixture dial refused network %q", network)
+		}
+		return dialContext(ctx, network, ownedEndpoint)
 	}
 }
 

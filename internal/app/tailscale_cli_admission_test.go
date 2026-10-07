@@ -96,7 +96,7 @@ func TestTailscaleCLIReadinessArmAndDrift(t *testing.T) {
 	})
 	go func() { _ = publicServer.Serve(publicTLS) }()
 	t.Cleanup(func() { _ = publicServer.Close() })
-	installManagedHealthTestNetwork(t, server, managedFixtureHost+":"+publicPort, public.Addr().String(), roots)
+	installManagedHealthTestNetwork(t, server, managedFixtureHost+":"+publicPort, public.Addr().String(), backend.Addr().String(), roots)
 
 	verifier := &fixedCLIRouteVerifier{status: tailscalecli.RouteStatus{
 		JournalState:                    tailscalecli.StateRegistered,
