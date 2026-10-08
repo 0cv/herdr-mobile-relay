@@ -75,7 +75,7 @@ jobs:
             dist/release/checksums.txt "$version" "$GITHUB_SHA" linux/amd64
       - name: Publish this candidate's checksum/manifest-bound input
         id: bundle
-        uses: actions/upload-artifact@v8
+        uses: actions/upload-artifact@v7
         with:
           name: release-bundles
           path: dist/release/
@@ -135,7 +135,7 @@ jobs:
             --budget-seconds 1260
       - name: Upload only the sanitized bounded cell receipt
         if: always()
-        uses: actions/upload-artifact@v8
+        uses: actions/upload-artifact@v7
         with:
           name: darwin-package-browser-cell
           path: ${{ runner.temp }}/herdr-dpb-evidence/darwin-package-browser.json
