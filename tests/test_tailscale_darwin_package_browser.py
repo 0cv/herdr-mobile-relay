@@ -34,6 +34,7 @@ import sys
 import tarfile
 import threading
 import time
+import traceback
 from types import MappingProxyType, SimpleNamespace
 import urllib.parse
 import urllib.request
@@ -102,6 +103,38 @@ def cap(kind, value):
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def failure_detail(error, failed_command=None):
+    """Secret-free locator for a failed cell.
+
+    Records only the exception class, errno, and the innermost function/line in
+    this file, plus the failing tool label and exit code. Never messages,
+    output, paths or URLs.
+    """
+    here = os.path.realpath(__file__)
+    frames = [frame for frame in traceback.extract_tb(error.__traceback__)
+              if os.path.realpath(frame.filename) == here]
+    # Locate the caller of the generic refusal helpers, not the helper itself.
+    frames = [frame for frame in frames if frame.name not in {"require", "cap"}] or frames
+    last = frames[-1] if frames else None
+    code = getattr(error, "errno", None)
+    detail = {"type": re.sub(r"[^A-Za-z0-9_]", "", type(error).__name__)[:64] or "Unknown",
+              "errno": code if type(code) is int else None,
+              "function": (re.sub(r"[^A-Za-z0-9_]", "", last.name)[:64] or None) if last else None,
+              "line": last.lineno if last and type(last.lineno) is int else None,
+              "command": None, "exit_code": None}
+    if failed_command:
+        label, exit_code = failed_command
+        detail["command"] = label
+        detail["exit_code"] = exit_code if type(exit_code) is int else None
+    return detail
+
+
+def command_label(argv):
+    """Tool/subcommand label only: basenames of the first three arguments."""
+    parts = [re.sub(r"[^A-Za-z0-9_.:-]", "", os.path.basename(str(arg)))[:32] for arg in argv[:3]]
+    return " ".join(part for part in parts if part)[:96] or "unknown"
 
 
 def read_bounded(path, maximum):
@@ -186,7 +219,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
               "producer", "archive_hashes", "version", "manifest_sha256", "binary_sha256", "compiler",
               "browser_identity", "tools", "source_proof", "profile_inputs", "profile_policy", "service_guard",
               "trust_controls", "cases", "phases", "cleanup", "owned_cleanup", "request_counts",
-              "fixture_operations", "captured_output_bytes", "dependency_payload_bytes_peak", "failure"}
+              "fixture_operations", "captured_output_bytes", "dependency_payload_bytes_peak", "failure",
+              "failure_detail"}
     require(type(value) is dict and set(value) <= fields, "receipt_fields")
 
     def shape(item, keys):
@@ -229,6 +263,15 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     cap("dependencies", value.get("dependency_payload_bytes_peak"))
     if value["result"] == "fail":
         require(type(value.get("failure")) is str and re.fullmatch(r"[a-z0-9_]{1,80}", value["failure"]), "receipt_failure")
+        detail = value.get("failure_detail")
+        if detail is not None:
+            shape(detail, ("type", "errno", "function", "line", "command", "exit_code"))
+            require(type(detail["type"]) is str and re.fullmatch(r"[A-Za-z0-9_]{1,64}", detail["type"])
+                    and all(detail[key] is None or type(detail[key]) is int for key in ("errno", "line", "exit_code"))
+                    and (detail["function"] is None or (type(detail["function"]) is str
+                         and re.fullmatch(r"[A-Za-z0-9_]{1,64}", detail["function"])))
+                    and (detail["command"] is None or (type(detail["command"]) is str
+                         and re.fullmatch(r"[A-Za-z0-9_.: -]{1,96}", detail["command"]))), "receipt_failure_detail")
         # A cap failure records the actual count at detection, including bounded
         # chunks already read by concurrent drains. It is never a passing cap
         # observation, and must still produce a sanitized failure receipt.
@@ -237,7 +280,7 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
                 "receipt_failed_output_count")
         return False
     cap("raw", value.get("captured_output_bytes"))
-    require(set(value) == fields - {"failure"} and set(source_hashes) == set(FILES)
+    require(set(value) == fields - {"failure", "failure_detail"} and set(source_hashes) == set(FILES)
             and value["cleanup"] is True, "receipt_complete")
     require(re.fullmatch(r"[0-9a-f]{40}", value["candidate_tree"]), "receipt_tree")
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["version"]), "receipt_version")
@@ -1551,8 +1594,12 @@ def runtime(args):
     def interrupted(signum, _):
         raise Refusal("handled_signal_" + str(signum))
 
+    failed_command = []
+
     def command(argv, timeout=10, cwd=None):
         result = operations.capture(argv, timeout, cwd=cwd)
+        if result.returncode != 0:
+            failed_command[:] = [command_label(argv), result.returncode]
         require(result.returncode == 0, "command_failed")
         return result.stdout
 
@@ -1779,6 +1826,7 @@ def runtime(args):
             require(not command(["git", "status", "--porcelain=v1", "--untracked-files=all"]), "candidate_dirty")
     except (Exception, SystemExit, KeyboardInterrupt) as error:
         failure = str(error) if isinstance(error, Refusal) else "unexpected_exception"
+        receipt["failure_detail"] = failure_detail(error, failed_command or None)
     finally:
         os.environ.pop("GH_TOKEN", None)
         os.environ.pop("GITHUB_TOKEN", None)
