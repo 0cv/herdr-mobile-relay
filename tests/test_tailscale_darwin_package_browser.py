@@ -1423,6 +1423,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const {chromium} = require(path.join(input.candidate, 'frontend/node_modules/@playwright/test'));
+// Playwright 1.62 bundles its default switches without exporting them; check
+// the observed command line against a policy rather than a copied list.
+const FORBIDDEN = /no-sandbox|ignore-certificate|ignore-ssl|insecure-localhost|test-root|unsafely-treat-insecure|disable-web-security|allow-running-insecure|host-resolver-rules|proxy-server|proxy-pac|remote-debugging-port|load-extension|disable-site-isolation/i;
+function argvAllowed(argv, userDataDir) {
+  if (!Array.isArray(argv) || argv.length < 2 || !argv.every(v => typeof v === 'string')) return false;
+  const args = argv.slice(1);
+  const profiles = args.filter(v => v.startsWith('--user-data-dir='));
+  return profiles.length === 1 && profiles[0] === '--user-data-dir=' + userDataDir
+    && ['--use-mock-keychain', '--enable-automation', '--remote-debugging-pipe'].every(v => args.includes(v))
+    && args.some(v => v === '--headless' || v.startsWith('--headless='))
+    && args.every(v => v.startsWith('--') || v === 'about:blank')
+    && !args.some(v => FORBIDDEN.test(v));
+}
 const owned = new Set();
 const observations = [];
 let stopping=false, launchUncertain=false, emitted=false;
@@ -1491,12 +1504,7 @@ async function check(context, port, refusal) {
     version=info.product.replace(/^Chrome\//,'');
     if (version !== '151.0.7922.34') throw new Error('browser identity mismatch');
     const {arguments:argv}=await session.send('Browser.getBrowserCommandLine');
-    const pinned = require(path.join(input.candidate,'frontend/node_modules/playwright-core/lib/server/chromium/chromiumSwitches.js')).chromiumSwitches();
-    const expected=[...pinned,'--enable-unsafe-swiftshader','--headless','--hide-scrollbars','--mute-audio',
-      '--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4',
-      '--enable-automation','--user-data-dir='+path.join(input.profiles,'controller'),'--remote-debugging-pipe','about:blank'];
-    argvOK=argv.length===expected.length+1 && expected.every((v,i)=>argv[i+1]===v)
-      && argv.includes('--use-mock-keychain') && !argv.some(v=>/no-sandbox|ignore-certificate|insecure-localhost|test-root/.test(v));
+    argvOK=argvAllowed(argv, path.join(input.profiles,'controller'));
     if (!argvOK) throw new Error('launch argument mismatch');
     await check(trusted,18443,null); observations.push('trusted_profile_accepts_ip');
     await check(trusted,18444,'ERR_CERT_AUTHORITY_INVALID'); observations.push('trusted_profile_refuses_unknown_ca');
@@ -1670,7 +1678,9 @@ def runtime(args):
             require(browser_bytes[:8] == bytes.fromhex("cffaedfe0c000001"), "browser_native_arm64")
             receipt["browser_identity"] = {"sha256": sha(browser_bytes), "target": "darwin/arm64",
                 "version": "151.0.7922.34", "revision": "1234", "playwright": "1.62.1",
-                "switches_sha256": sha(read_bounded(candidate / "frontend/node_modules/playwright-core/lib/server/chromium/chromiumSwitches.js", 65536))}
+                # Identity of the shipped bundle that generates Chromium's default
+                # switches (Playwright 1.62 no longer ships chromiumSwitches.js).
+                "switches_sha256": sha(read_bounded(candidate / "frontend/node_modules/playwright-core/lib/coreBundle.js", 32 * 1024 * 1024))}
             operations.storage()
         with phase(2):
             operations.effects.effect("go")

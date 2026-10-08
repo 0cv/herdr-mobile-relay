@@ -44,6 +44,21 @@ const darwinDevelopmentImports = new Set();
 let unexpectedDarwinDestination = false;
 let darwinLaunchUncertain = false;
 let darwinStopping = false;
+// Playwright 1.62 bundles its default Chromium switches without exporting
+// them, so the observed command line is checked against a policy instead of a
+// copied internal list: exactly the owned profile, the required automation and
+// mock-keychain flags, only flag arguments, and no TLS/sandbox/proxy bypasses.
+const FORBIDDEN_LAUNCH_ARGUMENT = /no-sandbox|ignore-certificate|ignore-ssl|insecure-localhost|test-root|unsafely-treat-insecure|disable-web-security|allow-running-insecure|host-resolver-rules|proxy-server|proxy-pac|remote-debugging-port|load-extension|disable-site-isolation/i;
+function launchArgumentsAllowed(argv, userDataDir) {
+  if (!Array.isArray(argv) || argv.length < 2 || !argv.every((argument) => typeof argument === 'string')) return false;
+  const args = argv.slice(1);
+  const profiles = args.filter((argument) => argument.startsWith('--user-data-dir='));
+  return profiles.length === 1 && profiles[0] === '--user-data-dir=' + userDataDir
+    && ['--use-mock-keychain', '--enable-automation', '--remote-debugging-pipe'].every((flag) => args.includes(flag))
+    && args.some((argument) => argument === '--headless' || argument.startsWith('--headless='))
+    && args.every((argument) => argument.startsWith('--') || argument === 'about:blank')
+    && !args.some((argument) => FORBIDDEN_LAUNCH_ARGUMENT.test(argument));
+}
 function completeCases() {
   return !darwinStopping && !darwinLaunchUncertain && !unexpectedDarwinDestination && expectedCases.length > 0 && cases.length === expectedCases.length
     && cases.every((entry, index) => entry.name === expectedCases[index] && entry.passed === true);
@@ -375,15 +390,7 @@ async function openProfile(profile, path, url, developmentImport = false) {
       const session = await context.newCDPSession(page);
       const info = await session.send('Browser.getVersion');
       const { arguments: argv } = await session.send('Browser.getBrowserCommandLine');
-      const pinned = require(join(dirname(require.resolve('playwright-core')),
-        'lib/server/chromium/chromiumSwitches.js')).chromiumSwitches();
-      const expected = [...pinned, '--enable-unsafe-swiftshader', '--headless', '--hide-scrollbars', '--mute-audio',
-        '--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4',
-        '--enable-automation', '--user-data-dir=' + path, '--remote-debugging-pipe', 'about:blank'];
-      if (info.product !== 'Chrome/151.0.7922.34' || argv.length !== expected.length + 1
-        || !expected.every((argument, index) => argv[index + 1] === argument)
-        || !argv.includes('--use-mock-keychain')
-        || argv.some((argument) => /no-sandbox|ignore-certificate|insecure-localhost|test-root/.test(argument))) {
+      if (info.product !== 'Chrome/151.0.7922.34' || !launchArgumentsAllowed(argv, path)) {
         throw new Error('owned profile browser identity or launch arguments differ');
       }
       await session.detach();
