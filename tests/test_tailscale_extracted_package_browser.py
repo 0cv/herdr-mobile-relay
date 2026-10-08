@@ -49,7 +49,7 @@ FAILURE_CODES = {
     "archive_checksum_mismatch", "archive_extract_failure", "archive_unsafe_entry",
     "archive_binary_missing", "archive_manifest_missing",
     "archive_manifest_invalid", "archive_manifest_identity", "archive_binary_start",
-    "archive_binary_rejected", "archive_managed_wrapper_missing",
+    "archive_binary_timeout", "archive_binary_rejected", "archive_managed_wrapper_missing",
     "archive_external_wrapper_missing", "archive_managed_wrapper_not_executable",
     "archive_external_wrapper_not_executable", "archive_binary_not_executable",
     "fixture_browser_nss_setup_failed", "managed_launcher_spawn", "managed_launcher_output_limit",
@@ -597,7 +597,7 @@ class HerdrSocketFixture:
         "session.snapshot", "events.subscribe", "pane.read",
     }
 
-    def __init__(self, path: Path, scenario_path: Path, operations_path: Path):
+    def __init__(self, path: Path, scenario_path: Path, operations_path: Path, *, on_owned=None):
         scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
         self.panes = scenario.get("panes") or []
         self.tabs = scenario.get("tabs") or []
@@ -608,17 +608,22 @@ class HerdrSocketFixture:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.path.exists() or self.path.is_symlink():
             raise FileExistsError("selected Herdr fixture socket path already exists")
-        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.listener.bind(str(self.path))
-        os.chmod(self.path, 0o600)
-        self.listener.listen(8)
-        self.listener.settimeout(0.25)
         self.stopped = threading.Event()
         self.lock = threading.RLock()
         self.counts: dict[tuple[str, str], int] = {}
         self.connections: set[socket.socket] = set()
         self.workers: list[threading.Thread] = []
         self.thread = threading.Thread(target=self._serve, name="fixture-herdr-socket", daemon=True)
+        self.listener = None
+        # Darwin's owner ledger records this object before socket allocation,
+        # bind or thread start can fail. Linux retains the default no-hook path.
+        if on_owned is not None:
+            on_owned(self)
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(str(self.path))
+        os.chmod(self.path, 0o600)
+        self.listener.listen(8)
+        self.listener.settimeout(0.25)
         self.thread.start()
         write_json(self.operations_path, self.operation_summary())
 
@@ -675,14 +680,14 @@ class HerdrSocketFixture:
                 continue
             except OSError:
                 return
-            if self.stopped.is_set():
-                connection.close()
-                return
             with self.lock:
+                if self.stopped.is_set():
+                    connection.close()
+                    return
                 self.connections.add(connection)
                 worker = threading.Thread(target=self._handle, args=(connection,), daemon=True)
                 self.workers.append(worker)
-            worker.start()
+                worker.start()
 
     def _result(self, method: str, request: dict) -> dict:
         if method == "ping":
@@ -1344,7 +1349,7 @@ def safe_link_from_output(output: bytes, origin: str) -> str | None:
     return None
 
 
-def development_setup_link(printer_binary: Path, managed_link: str, app_origin: str) -> tuple[str, str]:
+def development_setup_link(printer_binary: Path, managed_link: str, app_origin: str, *, relay_https_origin: str | None = None, temporary_parent: Path | None = None) -> tuple[str, str]:
     try:
         parsed = urllib.parse.urlsplit(managed_link)
         fields = urllib.parse.parse_qs(parsed.fragment, strict_parsing=True)
@@ -1356,8 +1361,34 @@ def development_setup_link(printer_binary: Path, managed_link: str, app_origin: 
     if not printer_binary.is_file() or not os.access(printer_binary, os.X_OK):
         die("production development setup-link printer fixture is unavailable")
 
-    relay_https_origin = f"https://{HOST}:8443"
-    output_dir = Path(tempfile.mkdtemp(prefix="herdr-dev-link-printer-", dir="/tmp"))
+    if relay_https_origin is None:
+        relay_https_origin = f"https://{HOST}:8443"
+    try:
+        parsed_relay = urllib.parse.urlsplit(relay_https_origin)
+        relay_port = parsed_relay.port
+    except (TypeError, ValueError):
+        die("development-link fixture requires a bare HTTPS relay origin")
+    if (not isinstance(relay_https_origin, str)
+            or re.search(r"[\s\\?#]", relay_https_origin)
+            or parsed_relay.scheme != "https" or not parsed_relay.hostname
+            or parsed_relay.username is not None or parsed_relay.password is not None
+            or parsed_relay.path or parsed_relay.query or parsed_relay.fragment
+            or urllib.parse.urlunsplit(parsed_relay) != relay_https_origin
+            or (relay_port is not None and not 1 <= relay_port <= 65535)):
+        die("development-link fixture requires a bare HTTPS relay origin")
+    if temporary_parent is not None:
+        try:
+            parent_info = temporary_parent.lstat()
+            parent_safe = (temporary_parent.is_absolute()
+                           and temporary_parent.resolve(strict=True) == temporary_parent
+                           and stat.S_ISDIR(parent_info.st_mode)
+                           and parent_info.st_uid == os.getuid()
+                           and stat.S_IMODE(parent_info.st_mode) == 0o700)
+        except OSError:
+            parent_safe = False
+        if not parent_safe:
+            die("development-link fixture temporary parent is not a private owned directory")
+    output_dir = Path(tempfile.mkdtemp(prefix="herdr-dev-link-printer-", dir=temporary_parent if temporary_parent is not None else "/tmp"))
     os.chmod(output_dir, 0o700)
     output_path = output_dir / "setup-link.txt"
     printer_env = {
@@ -1369,6 +1400,8 @@ def development_setup_link(printer_binary: Path, managed_link: str, app_origin: 
         "HOME": str(output_dir),
         "PATH": "/usr/bin:/bin",
     }
+    if temporary_parent is not None:
+        printer_env["TMPDIR"] = str(output_dir)
     try:
         try:
             generated = subprocess.run(
@@ -1380,10 +1413,17 @@ def development_setup_link(printer_binary: Path, managed_link: str, app_origin: 
             die("production development setup-link printer fixture could not run")
         if generated.returncode != 0 or not output_path.is_file():
             die("production development setup-link printer fixture did not produce its private output")
-        if stat.S_IMODE(output_path.stat().st_mode) != 0o600:
-            die("production development setup-link printer fixture output was not private")
+        output_info = output_path.lstat()
+        if (not stat.S_ISREG(output_info.st_mode) or output_info.st_uid != os.getuid()
+                or output_info.st_nlink != 1 or stat.S_IMODE(output_info.st_mode) != 0o600
+                or output_info.st_size > 65536):
+            die("production development setup-link printer fixture output was not private and bounded")
         try:
-            output_lines = output_path.read_text(encoding="ascii").splitlines()
+            with output_path.open("rb") as stream:
+                output_bytes = stream.read(65537)
+            if len(output_bytes) > 65536:
+                die("production development setup-link printer fixture output exceeded its cap")
+            output_lines = output_bytes.decode("ascii").splitlines()
         except (OSError, UnicodeError):
             die("production development setup-link printer fixture output was unreadable")
     finally:
@@ -1399,7 +1439,7 @@ def development_setup_link(printer_binary: Path, managed_link: str, app_origin: 
         fields = urllib.parse.parse_qs(parsed_setup.fragment, strict_parsing=True)
     except ValueError:
         die("production development setup-link printer emitted an invalid app fragment")
-    relay_origin = f"wss://{HOST}:8443"
+    relay_origin = urllib.parse.urlunsplit(("wss", parsed_relay.netloc, "", "", ""))
     if (parsed_setup.scheme != parsed_app.scheme or parsed_setup.netloc != parsed_app.netloc
             or parsed_setup.path != "/" or parsed_setup.query
             or fields.get("relay") != [relay_origin] or fields.get("setup") != [token]):
@@ -1770,6 +1810,10 @@ def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_p
         browser_exception_type = "TimeoutExpired"
         die("persistent-profile browser acceptance exceeded its bounded runtime")
     # stdout is a bounded, sanitized JSON protocol, not Playwright's console.
+    if len(completed.stdout) > 65536:
+        browser_stage = "browser_runner"
+        browser_exception_type = "BrowserProtocolError"
+        die("browser acceptance evidence exceeded its cap")
     try:
         value = json.loads(completed.stdout)
     except (ValueError, UnicodeDecodeError):
@@ -1784,12 +1828,32 @@ def run_playwright(package_root: Path, input_record: dict, mode: str, evidence_p
     browser_stage = str(browser_progress_record["stage"])
     error_value = value.get("exception_type", "")
     browser_exception_type = error_value if isinstance(error_value, str) and error_value in BROWSER_EXCEPTION_TYPES else ""
-    if completed.returncode != 0 and not browser_exception_type:
-        browser_exception_type = "BrowserAssertionError"
+    expected = [
+        "dev_setup_link_imports_bare_wss_origin_in_extracted_frontend",
+        "launcher_generated_setup_link_enrolls_real_controller_profile",
+        "controller_reads_fake_inventory_and_sends_harmless_command",
+        "second_persistent_profile_enrolls_reader_and_read_only_is_enforced",
+    ] if mode == "enroll" else [
+        "reprint_and_managed_restart_preserve_enrolled_device_credentials",
+    ]
+    assertions = (
+        "controller_enrolled", "controller_read", "controller_command",
+        "reader_enrolled", "reader_read", "reader_mutation_denied", "credentials_preserved",
+    ) if mode == "enroll" else (
+        "controller_enrolled", "reader_enrolled", "credentials_preserved",
+    )
+    if (mode not in {"enroll", "reprint", "restart"} or completed.returncode != 0
+            or value.get("result") != "pass" or value.get("passed_cases") != expected
+            or value.get("owned_contexts_closed") is not True
+            or value.get("stage") != "browser_complete" or value.get("exception_type")
+            or not all(value.get(key) is True for key in assertions)):
+        if not browser_exception_type:
+            browser_exception_type = "BrowserAssertionError"
+        die("browser acceptance failed exit, cases, assertions or owned-closure agreement")
     return value
 
 
-def verify_archive(archive: Path, checksums: Path, version: str, revision: str, release: Path, mark_stage, record_digest, record_wrapper) -> tuple[str, Path]:
+def verify_archive(archive: Path, checksums: Path, version: str, revision: str, release: Path, mark_stage, record_digest, record_wrapper, *, target: str = "linux/amd64", verifier_timeout: float | None = None) -> tuple[str, Path]:
     name = archive.name
     mark_stage("archive_checksum")
     try:
@@ -1843,15 +1907,18 @@ def verify_archive(archive: Path, checksums: Path, version: str, revision: str, 
         manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
         die("release manifest could not be read", "archive_manifest_invalid")
-    if manifest_data.get("version") != version or manifest_data.get("revision") != revision or manifest_data.get("target") != "linux/amd64":
+    if (not isinstance(manifest_data, dict) or manifest_data.get("version") != version
+            or manifest_data.get("revision") != revision or manifest_data.get("target") != target):
         die("release manifest did not bind the tested package to the exact candidate", "archive_manifest_identity")
 
     mark_stage("archive_binary_verify")
     try:
         verified = subprocess.run([
-            str(binary), "verify-release", "--target", "linux/amd64", "--version", version,
+            str(binary), "verify-release", "--target", target, "--version", version,
             "--revision", revision, str(release),
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=verifier_timeout)
+    except subprocess.TimeoutExpired:
+        die("packaged relay verification exceeded its bounded runtime", "archive_binary_timeout")
     except OSError:
         die("packaged relay verification could not be started", "archive_binary_start")
     if verified.returncode:

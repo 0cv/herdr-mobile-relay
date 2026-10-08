@@ -1,20 +1,66 @@
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
-const require = createRequire('/workspace/frontend/package.json');
+const require = createRequire(new URL('../frontend/package.json', import.meta.url));
 const { chromium } = require('@playwright/test');
 const input = JSON.parse(await new Promise((resolve, reject) => {
   let data = '';
+  let bytes = 0;
   process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => { data += chunk; });
+  process.stdin.on('data', (chunk) => {
+    bytes += Buffer.byteLength(chunk);
+    if (bytes > 65536) {
+      reject(new Error('browser input cap exceeded'));
+      process.stdin.destroy();
+      return;
+    }
+    data += chunk;
+  });
   process.stdin.on('end', () => resolve(data));
   process.stdin.on('error', reject);
 }));
 
+const darwinFixture = input.fixture_platform === 'darwin-isolated-byo-v1';
+if (input.fixture_platform !== undefined && !darwinFixture) throw new Error('unknown fixture platform');
+if (darwinFixture && process.platform !== 'darwin') throw new Error('Darwin fixture requires Darwin');
+const preservationCase = darwinFixture
+  ? 'reprint_and_byo_restart_preserve_enrolled_device_credentials'
+  : 'reprint_and_managed_restart_preserve_enrolled_device_credentials';
+const enrollmentCases = [
+  'dev_setup_link_imports_bare_wss_origin_in_extracted_frontend',
+  'launcher_generated_setup_link_enrolls_real_controller_profile',
+  'controller_reads_fake_inventory_and_sends_harmless_command',
+  'second_persistent_profile_enrolls_reader_and_read_only_is_enforced',
+];
+const expectedCases = input.mode === 'enroll' ? enrollmentCases
+  : ['reprint', 'restart'].includes(input.mode) ? [preservationCase] : [];
 const cases = [];
-const record = (name, passed) => cases.push({ name, passed: Boolean(passed) });
+const ownedContexts = new Set();
+const darwinWorkerProfiles = new Set();
+const darwinLaunchProfiles = new Set();
+const darwinDevelopmentImports = new Set();
+let unexpectedDarwinDestination = false;
+let darwinLaunchUncertain = false;
+let darwinStopping = false;
+function completeCases() {
+  return !darwinStopping && !darwinLaunchUncertain && !unexpectedDarwinDestination && expectedCases.length > 0 && cases.length === expectedCases.length
+    && cases.every((entry, index) => entry.name === expectedCases[index] && entry.passed === true);
+}
+const record = (name, passed) => {
+  if (unexpectedDarwinDestination) {
+    throw Object.assign(new Error('unexpected owned browser destination'), { name: 'BrowserAssertionError' });
+  }
+  if (name !== expectedCases[cases.length]) {
+    throw Object.assign(new Error('unexpected browser case order'), { name: 'BrowserAssertionError' });
+  }
+  cases.push({ name, passed: passed === true });
+  // A failed case must not advance to invitation creation or another profile.
+  if (passed !== true) {
+    throw Object.assign(new Error('browser case failed'), { name: 'BrowserAssertionError' });
+  }
+};
 const authKey = 'herdr_device_auth_v1';
 const relaysKey = 'herdr_relays';
 const deadline = 15000;
@@ -130,6 +176,15 @@ function observePage(profile, page) {
     incrementDiagnostic(label, 'page_errors', classifyDiagnostic(text, name, 'page_error'));
   });
   page.on('websocket', (socket) => {
+    if (darwinFixture) {
+      try {
+        const destination = new URL(socket.url());
+        if (destination.origin !== input.origin.replace(/^https:/, 'wss:')
+          || !['/', '/ws'].includes(destination.pathname) || destination.search || destination.hash) {
+          unexpectedDarwinDestination = true;
+        }
+      } catch { unexpectedDarwinDestination = true; }
+    }
     incrementWebSocket(label, 'attempts');
     socket.on('close', () => incrementWebSocket(label, 'closed'));
     socket.on('socketerror', () => incrementWebSocket(label, 'errors'));
@@ -264,23 +319,128 @@ async function recordUISnapshot(profile, checkpoint, page) {
   await writeProgress();
 }
 
-async function openProfile(profile, path, url) {
+async function openProfile(profile, path, url, developmentImport = false) {
+  if (darwinStopping) throw new Error('owned browser shutdown has started');
+  if (darwinFixture && developmentImport) darwinDevelopmentImports.add(profile);
   await mkdir(path, { recursive: true, mode: 0o700 });
+  if (darwinStopping) throw new Error('owned browser shutdown has started');
+  if (darwinFixture) darwinLaunchUncertain = true;
   const context = await chromium.launchPersistentContext(path, {
     timeout: deadline,
     headless: true,
+    ...(darwinFixture ? { channel: 'chromium', chromiumSandbox: true, args: ['--enable-automation'] } : {}),
     viewport: { width: 412, height: 915 },
     deviceScaleFactor: 1,
     serviceWorkers: 'allow',
-    // No ignoreHTTPSErrors or certificate-ignore launch flags; the fixture CA
-    // is imported into this run's private HOME NSS store.
+    // TLS verification stays enabled. Linux uses private HOME NSS;
+    // Darwin uses only each owned profile's ServerCertificate database.
   });
+  ownedContexts.add(context);
+  if (darwinFixture) darwinLaunchUncertain = false;
+  if (darwinStopping) throw new Error('owned browser shutdown has started');
+  if (darwinFixture) {
+    // Constrain routed owned-page requests, not OS/browser-wide egress.
+    // Service-worker-owned interceptions are not attested by this route.
+    // Continue real requests; never fulfill TLS, responses, or worker content.
+    await context.route('**/*', async (route) => {
+      let allowed = false;
+      try { allowed = new URL(route.request().url()).origin === input.origin; } catch { /* refuse */ }
+      if (allowed) await route.continue();
+      else {
+        unexpectedDarwinDestination = true;
+        await route.abort('blockedbyclient');
+      }
+    });
+    if (developmentImport) {
+      await context.routeWebSocket('**/*', (webSocket) => {
+        let allowed = false;
+        try { allowed = new URL(webSocket.url()).origin === input.origin.replace(/^https:/, 'wss:'); } catch { /* refuse */ }
+        if (!allowed) unexpectedDarwinDestination = true;
+        // Import-only check: refuse, never fulfill or proxy, this one-use dial.
+        // This context is closed before launcher enrollment. All authenticated
+        // journeys use a new context with native, unrouted browser WSS/TLS.
+        webSocket.close({ code: 1008, reason: allowed ? 'development fragment import only' : 'owned destination refused' });
+      });
+    }
+  }
   context.setDefaultTimeout(deadline);
   context.setDefaultNavigationTimeout(deadline);
   const page = context.pages()[0] || await context.newPage();
   observePage(profile, page);
+  if (darwinFixture && profile === 'reader' && input.mode === 'enroll') {
+    await page.addInitScript(installReaderMutationProbe);
+  }
   try {
+    if (darwinFixture) {
+      const session = await context.newCDPSession(page);
+      const info = await session.send('Browser.getVersion');
+      const { arguments: argv } = await session.send('Browser.getBrowserCommandLine');
+      const pinned = require(join(dirname(require.resolve('playwright-core')),
+        'lib/server/chromium/chromiumSwitches.js')).chromiumSwitches();
+      const expected = [...pinned, '--enable-unsafe-swiftshader', '--headless', '--hide-scrollbars', '--mute-audio',
+        '--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4',
+        '--enable-automation', '--user-data-dir=' + path, '--remote-debugging-pipe', 'about:blank'];
+      if (info.product !== 'Chrome/151.0.7922.34' || argv.length !== expected.length + 1
+        || !expected.every((argument, index) => argv[index + 1] === argument)
+        || !argv.includes('--use-mock-keychain')
+        || argv.some((argument) => /no-sandbox|ignore-certificate|insecure-localhost|test-root/.test(argument))) {
+        throw new Error('owned profile browser identity or launch arguments differ');
+      }
+      await session.detach();
+      darwinLaunchProfiles.add(profile);
+      // Bootstrap only a genuinely empty profile, through the shipped Settings
+      // UI, before importing either setup fragment. Its Stop Push Notifications
+      // flow registers the root via legacyPushEndpoint but cannot subscribe push
+      // with zero relay connections. No harness worker registration is used.
+      await page.goto(input.origin + '/', { waitUntil: 'domcontentloaded', timeout: deadline });
+      const hasRoot = await page.evaluate(async () => Boolean(
+        (await navigator.serviceWorker.getRegistration())?.active));
+      if (!hasRoot) {
+        const empty = await page.evaluate(({ auth, relays }) => {
+          const configured = JSON.parse(localStorage.getItem(relays) || '[]');
+          const devices = JSON.parse(localStorage.getItem(auth) || 'null');
+          return Array.isArray(configured) && configured.length === 0
+            && Object.keys(devices?.relays || {}).length === 0;
+        }, { auth: authKey, relays: relaysKey });
+        if (!empty) throw new Error('worker bootstrap requires an empty private profile');
+        await context.grantPermissions(['notifications'], { origin: input.origin });
+        // Mount again so the shipped pushPreferences store observes the origin-
+        // scoped permission. pushOptedIn defaults true with a granted permission;
+        // clicking a stale Enable button would actually toggle OFF, not ON.
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: deadline });
+        await page.getByRole('navigation', { name: 'Application' })
+          .getByRole('button', { name: /^Settings/ }).click();
+        // Genuine opt-out initializes the root worker while there are no relays,
+        // before any connection callback can start an external subscription.
+        await page.getByRole('button', { name: 'Stop Push Notifications', exact: true }).click();
+        await page.getByRole('button', { name: 'Enable Push Notifications', exact: true })
+          .waitFor({ state: 'visible', timeout: deadline });
+        await context.clearPermissions();
+      }
+      await page.waitForFunction(async () => {
+        if (!globalThis.isSecureContext || !navigator.serviceWorker) return false;
+        const registration = await navigator.serviceWorker.getRegistration();
+        const worker = registration?.active;
+        if (!worker || worker.state !== 'activated') return false;
+        const script = new URL(worker.scriptURL);
+        return registration.scope === location.origin + '/'
+          && script.origin === location.origin && script.pathname === '/sw.js';
+      }, undefined, { timeout: deadline });
+    }
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: deadline });
+    if (darwinFixture) {
+      await page.waitForFunction(async () => {
+        const registration = await navigator.serviceWorker.getRegistration();
+        const active = registration?.active;
+        const controller = navigator.serviceWorker.controller;
+        if (!isSecureContext || !active || active.state !== 'activated' || !controller) return false;
+        const script = new URL(active.scriptURL);
+        return registration.scope === location.origin + '/' && script.origin === location.origin
+          && script.pathname === '/sw.js' && controller.scriptURL === active.scriptURL
+          && localStorage.getItem('herdr_push_enabled') === 'false';
+      }, undefined, { timeout: deadline });
+      darwinWorkerProfiles.add(profile);
+    }
   } catch (error) {
     let text = '';
     let name = '';
@@ -294,27 +454,127 @@ async function openProfile(profile, path, url) {
   return { context, page };
 }
 
-async function closeContextBounded(context) {
-  if (!context) return;
+async function closeContextBounded(context, end = Date.now() + 5000) {
+  if (!context || !ownedContexts.has(context)) return;
   let timer;
-  const timedOut = await Promise.race([
-    context.close().then(() => false, () => false),
-    new Promise((resolve) => { timer = setTimeout(() => resolve(true), 5000); }),
-  ]);
-  clearTimeout(timer);
-  if (!timedOut) return;
-  const browser = context.browser();
-  if (!browser) return;
-  let browserTimer;
-  await Promise.race([
-    browser.close().catch(() => {}),
-    new Promise((resolve) => { browserTimer = setTimeout(resolve, 2500); }),
-  ]);
-  clearTimeout(browserTimer);
+  try {
+    await Promise.race([
+      context.close(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('owned browser context closure timed out')), Math.max(0, end - Date.now()));
+      }),
+    ]);
+    ownedContexts.delete(context);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function closeOwnedContexts(end = Date.now() + 5000) {
+  const results = await Promise.allSettled([...ownedContexts].map((context) => closeContextBounded(context, end)));
+  if (results.some((entry) => entry.status !== 'fulfilled') || ownedContexts.size !== 0) {
+    throw new Error('owned browser cleanup failed or remains uncertain');
+  }
 }
 
 async function waitForAgent(page) {
   await page.getByRole('button', { name: /^Open / }).first().waitFor({ state: 'visible', timeout: deadline });
+}
+
+// Serialized into only the Darwin reader's enrollment page. Replace one real
+// pane-read payload BEFORE native AES-GCM encryption, using the UI's existing
+// authenticated session, sequence queue and native Chromium WSS connection.
+// No credentials, keys, handshake, ciphertext or server response are invented;
+// decryption and TLS verification remain native and responses pass unchanged.
+function installReaderMutationProbe() {
+  const subtle = crypto.subtle;
+  const nativeEncrypt = subtle.encrypt;
+  const nativeDecrypt = subtle.decrypt;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const requestId = 'package-reader-refusal-' + crypto.randomUUID();
+  let authenticatedReader = false;
+  let armed = false;
+  let attempted = false;
+  let encrypted = false;
+  let responseSeen = false;
+  let refused = false;
+  const sessionTraffic = (algorithm, direction) => {
+    if (algorithm?.name !== 'AES-GCM' || !algorithm.additionalData) return false;
+    const source = algorithm.additionalData;
+    const bytes = ArrayBuffer.isView(source)
+      ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength) : new Uint8Array(source);
+    const prefix = encoder.encode(`herdr-e2ee-v2 ${direction}`);
+    return bytes.length === prefix.length + 9 && bytes[prefix.length] === 0
+      && prefix.every((byte, index) => bytes[index] === byte);
+  };
+  subtle.encrypt = async function (algorithm, key, data) {
+    if (!armed || attempted || !authenticatedReader || !sessionTraffic(algorithm, 'c2s')) {
+      return Reflect.apply(nativeEncrypt, subtle, [algorithm, key, data]);
+    }
+    let message;
+    try { message = JSON.parse(decoder.decode(data)); } catch { /* leave other payloads unchanged */ }
+    if (message?.type !== 'read_pane' || message.pane_id !== 'workspace:agent'
+      || message.target?.pane_id !== message.pane_id || !message.server_session_id
+      || message.target?.server_session_id !== message.server_session_id) {
+      return Reflect.apply(nativeEncrypt, subtle, [algorithm, key, data]);
+    }
+    attempted = true; // One attempt only, even if encryption or delivery fails.
+    const mutation = {
+      type: 'submit_prompt', protocol: 3, request_id: requestId,
+      pane_id: message.pane_id, target: message.target, server_session_id: message.server_session_id,
+      text: 'package acceptance reader refusal harmless ping',
+    };
+    const ciphertext = await Reflect.apply(nativeEncrypt, subtle,
+      [algorithm, key, encoder.encode(JSON.stringify(mutation))]);
+    encrypted = true;
+    return ciphertext;
+  };
+  subtle.decrypt = async function (algorithm, key, data) {
+    // A failed native authentication tag never produces an observation.
+    const plaintext = await Reflect.apply(nativeDecrypt, subtle, [algorithm, key, data]);
+    if (!sessionTraffic(algorithm, 's2c')) return plaintext;
+    let message;
+    try { message = JSON.parse(decoder.decode(plaintext)); } catch { return plaintext; }
+    if (message?.type === 'e2ee_server_finish' && message.version === 2) {
+      authenticatedReader = message.role === 'reader';
+    }
+    if (encrypted && message?.request_id === requestId) {
+      responseSeen = true;
+      refused = message.type === 'error' && message.error?.code === 'reader_denied'
+        && message.error?.args?.operation === 'submit_prompt';
+      subtle.encrypt = nativeEncrypt;
+      subtle.decrypt = nativeDecrypt;
+    }
+    return plaintext;
+  };
+  Object.defineProperty(globalThis, '__herdrReaderMutationProbe', {
+    value: Object.freeze({
+      arm() {
+        if (!authenticatedReader || armed || attempted) return false;
+        armed = true;
+        return true;
+      },
+      status() { return { authenticatedReader, attempted, encrypted, responseSeen, refused }; },
+    }),
+  });
+}
+
+async function darwinReaderMutationRefused(page) {
+  // Reopening the genuine terminal UI causes a fresh read on the SAME enrolled
+  // connection. Its exact target becomes the one-shot harmless mutation above;
+  // do not enable the reader's disabled composer or insert a stored credential.
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await waitForAgent(page);
+  const armed = await page.evaluate(() => globalThis.__herdrReaderMutationProbe?.arm() === true);
+  if (!armed) throw new Error('reader mutation probe lacks an authenticated reader session');
+  await page.getByRole('button', { name: /^Open / }).first().click();
+  await page.waitForFunction(() => globalThis.__herdrReaderMutationProbe?.status().responseSeen === true,
+    undefined, { timeout: deadline });
+  return page.evaluate(() => {
+    const status = globalThis.__herdrReaderMutationProbe.status();
+    return status.authenticatedReader && status.attempted && status.encrypted && status.refused;
+  });
 }
 
 async function openFixtureAgent(page, profile) {
@@ -352,6 +612,14 @@ async function openFixtureAgent(page, profile) {
     throw error;
   }
   await recordUISnapshot(profile, 'prompt_visible', page);
+  if (darwinFixture) {
+    // Attribute the live fixture read to this page as well as checking socket
+    // counts. Another authenticated profile's polling cannot render its data
+    // here, and a stored credential alone cannot satisfy this assertion.
+    await page.getByRole('log', { name: 'Agent terminal output' })
+      .filter({ hasText: 'Harmless fixture output' })
+      .waitFor({ state: 'visible', timeout: deadline });
+  }
 }
 
 async function operationKinds(path) {
@@ -473,14 +741,20 @@ function safeExceptionType(error) {
 let resultEmitted = false;
 async function emitBrowserResult(values = {}, error = null) {
   if (resultEmitted) return;
-  const expectedCount = input.mode === 'enroll' ? 4 : 1;
-  const passed = cases.length === expectedCount && cases.every((entry) => entry.passed);
+  const passed = completeCases();
   const safeResult = {
     mode: ['enroll', 'reprint', 'restart'].includes(input.mode) ? input.mode : 'other',
     result: error ? 'fail' : passed ? 'pass' : 'fail',
     passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name),
     stage: progressStages.has(stage) ? stage : 'browser_runner',
     profiles: profileEvidence(),
+    owned_contexts_closed: ownedContexts.size === 0 && !darwinLaunchUncertain,
+    ...(darwinFixture ? {
+      fixture_platform: 'darwin-isolated-byo-v1',
+      app_worker_verified: darwinWorkerProfiles.has('controller') && darwinWorkerProfiles.has('reader'),
+      notification_delivery_disabled: darwinWorkerProfiles.has('controller') && darwinWorkerProfiles.has('reader'),
+      launch_arguments_verified: darwinLaunchProfiles.has('controller') && darwinLaunchProfiles.has('reader'),
+    } : {}),
   };
   for (const key of [
     'controller_enrolled', 'controller_read', 'controller_command', 'reader_enrolled',
@@ -490,8 +764,10 @@ async function emitBrowserResult(values = {}, error = null) {
   }
   if (error) safeResult.exception_type = safeExceptionType(error);
   else if (!passed) safeResult.exception_type = 'BrowserAssertionError';
+  const encoded = JSON.stringify(safeResult) + '\n';
+  if (Buffer.byteLength(encoded) > 65536) throw new Error('browser result cap exceeded');
   resultEmitted = true;
-  await new Promise((resolve) => process.stdout.write(JSON.stringify(safeResult) + '\n', resolve));
+  await new Promise((resolve) => process.stdout.write(encoded, resolve));
   await writeProgress();
 }
 
@@ -508,7 +784,7 @@ async function initialEnrollment() {
   let reader;
   try {
     await setStage('controller_enrollment');
-    controller = await openProfile('controller', controllerPath, input.dev_setup_url);
+    controller = await openProfile('controller', controllerPath, input.dev_setup_url, darwinFixture);
     await controller.page.waitForFunction(({ key, expected }) => {
       try {
         const relays = JSON.parse(localStorage.getItem(key) || '[]');
@@ -517,12 +793,30 @@ async function initialEnrollment() {
         return false;
       }
     }, { key: relaysKey, expected: input.dev_relay_origin }, { timeout: deadline });
+    if (darwinFixture && await controller.page.evaluate((key) => {
+      const state = JSON.parse(localStorage.getItem(key) || 'null');
+      return Object.values(state?.relays || {}).some((entry) => entry?.kind === 'credential');
+    }, authKey)) throw new Error('development import unexpectedly consumed bootstrap enrollment');
     record('dev_setup_link_imports_bare_wss_origin_in_extracted_frontend', true);
-    await controller.page.evaluate(() => {
-      localStorage.clear();
+    await controller.page.evaluate(({ darwin, auth, relays }) => {
+      if (darwin) {
+        // Preserve the notification opt-out created by the genuine UI. Clearing
+        // it would restore pushOptedIn's default after development-link import.
+        localStorage.removeItem(auth);
+        localStorage.removeItem(relays);
+      } else localStorage.clear();
       sessionStorage.clear();
-    });
-    await controller.page.goto(input.setup_url, { waitUntil: 'domcontentloaded', timeout: deadline });
+    }, { darwin: darwinFixture, auth: authKey, relays: relaysKey });
+    if (darwinFixture) {
+      // Dispose of the import-only interception entirely. The same persistent
+      // profile retains its genuine notification opt-out and root worker, but
+      // the launcher link now enrolls over native Chromium WSS with real TLS.
+      await closeContextBounded(controller.context);
+      darwinDevelopmentImports.delete('controller');
+      controller = await openProfile('controller', controllerPath, input.setup_url);
+    } else {
+      await controller.page.goto(input.setup_url, { waitUntil: 'domcontentloaded', timeout: deadline });
+    }
     await recordStorageSnapshot('controller', 'after_navigation', controller.page);
     const controllerCredential = await waitForCredential(controller.page, 'controller', 'controller');
     record('launcher_generated_setup_link_enrolls_real_controller_profile', controllerCredential?.role === 'controller');
@@ -588,13 +882,15 @@ async function initialEnrollment() {
     const readerPrompt = reader.page.getByRole('combobox', { name: 'Prompt' });
     const denied = await readerPrompt.isDisabled();
     const before = await operationCount(input.fake_herdr_operations, 'agent prompt');
-    if (!denied) {
+    const relayDenied = !darwinFixture || await darwinReaderMutationRefused(reader.page);
+    if (!darwinFixture && !denied) {
       await readerPrompt.fill('must not execute from reader');
       await reader.page.getByRole('button', { name: 'Send prompt' }).click().catch(() => {});
     }
     await reader.page.waitForTimeout(250);
     const after = await operationCount(input.fake_herdr_operations, 'agent prompt');
-    record('second_persistent_profile_enrolls_reader_and_read_only_is_enforced', readerCredential?.role === 'reader' && readerRead && denied && before === after);
+    const readerMutationDenied = denied && relayDenied && before === after;
+    record('second_persistent_profile_enrolls_reader_and_read_only_is_enforced', readerCredential?.role === 'reader' && readerRead && readerMutationDenied);
 
     await setStage('credential_preservation');
     const controllerNow = await credential(controller.page);
@@ -610,17 +906,13 @@ async function initialEnrollment() {
       controller_command: (await operationKinds(input.fake_herdr_operations)).includes('agent prompt'),
       reader_enrolled: readerCredential?.role === 'reader',
       reader_read: readerRead,
-      reader_mutation_denied: denied && before === after,
+      reader_mutation_denied: readerMutationDenied,
       credentials_preserved: true,
     };
-    await emitBrowserResult(values);
     return values;
-  } catch (error) {
-    await emitBrowserResult({}, error);
-    throw error;
   } finally {
-    await closeContextBounded(reader?.context);
-    await closeContextBounded(controller?.context);
+    // Includes contexts whose page navigation failed before openProfile returned.
+    await closeOwnedContexts();
   }
 }
 
@@ -638,24 +930,62 @@ async function preserveExistingProfiles() {
     const same = fingerprint(controllerCredential) === before.controller && fingerprint(readerCredential) === before.reader;
     await waitForAgent(controller.page);
     await waitForAgent(reader.page);
-    record('reprint_and_managed_restart_preserve_enrolled_device_credentials', same);
+    let controllerRead = false;
+    let readerRead = false;
+    if (darwinFixture) {
+      // A stored credential and cached agent card do not prove the restarted
+      // backend authenticated this browser. Require new fixture socket reads.
+      let baseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
+      await openFixtureAgent(controller.page, 'controller');
+      controllerRead = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', baseline + 1);
+      // Terminal polling is periodic. Retire the controller before measuring
+      // the reader so its background reads cannot satisfy the reader's case.
+      await closeContextBounded(controller.context);
+      baseline = await socketOperationCount(input.herdr_socket_operations, 'pane.read');
+      await openFixtureAgent(reader.page, 'reader');
+      readerRead = await waitForSocketOperation(input.herdr_socket_operations, 'pane.read', baseline + 1);
+    }
+    record(preservationCase, same && (!darwinFixture || (controllerRead && readerRead)));
     const values = {
       controller_enrolled: true,
       reader_enrolled: true,
       credentials_preserved: same,
+      ...(darwinFixture ? { controller_read: controllerRead, reader_read: readerRead } : {}),
     };
-    await emitBrowserResult(values);
     return values;
-  } catch (error) {
-    await emitBrowserResult({}, error);
-    throw error;
   } finally {
-    await closeContextBounded(reader?.context);
-    await closeContextBounded(controller?.context);
+    await closeOwnedContexts();
+  }
+}
+
+async function stopDarwinBrowser(exceptionType) {
+  if (darwinStopping) return;
+  darwinStopping = true;
+  // Python's owned-child INT wait is three seconds. Give the two contexts one
+  // shared two-second close window, not two renewed per-context deadlines.
+  // Hard interruption cannot prove closure; the parent retains uncertainty.
+  const hardStop = setTimeout(() => process.exit(1), 2800);
+  try {
+    await closeOwnedContexts(Date.now() + 2000);
+  } catch { /* ownedContexts/launch uncertainty remain in the failed result */ }
+  try {
+    await emitBrowserResult({}, Object.assign(new Error('owned browser interrupted'), { name: exceptionType }));
+  } finally {
+    clearTimeout(hardStop);
+    process.exit(1);
+  }
+}
+if (darwinFixture) {
+  for (const name of ['SIGINT', 'SIGTERM']) {
+    process.on(name, () => { void stopDarwinBrowser('BrowserAssertionError'); });
   }
 }
 
 const jsDeadlineTimer = setTimeout(() => {
+  if (darwinFixture) {
+    void stopDarwinBrowser('BrowserBudgetTimeout');
+    return;
+  }
   if (resultEmitted) {
     process.exit(1);
     return;
@@ -667,21 +997,29 @@ const jsDeadlineTimer = setTimeout(() => {
     exception_type: 'BrowserBudgetTimeout',
     stage: progressStages.has(stage) ? stage : 'browser_runner',
     profiles: profileEvidence(),
+    // The hard deadline cannot attest asynchronous closure/reaping on either OS.
+    owned_contexts_closed: false,
+    ...(darwinFixture ? { fixture_platform: 'darwin-isolated-byo-v1' } : {}),
   };
   resultEmitted = true;
-  process.stdout.write(JSON.stringify(timeoutRecord) + '\n', () => process.exit(1));
-}, 150000);
+  const encoded = JSON.stringify(timeoutRecord) + '\n';
+  if (Buffer.byteLength(encoded) > 65536) {
+    process.exit(1);
+    return;
+  }
+  process.stdout.write(encoded, () => process.exit(1));
+}, darwinFixture ? 145000 : 150000);
 
 let result = { mode: input.mode, result: 'fail', passed_cases: [] };
 try {
   if (input.mode === 'enroll') {
     await setStage('controller_enrollment');
     const values = await initialEnrollment();
-    result = { mode: input.mode, ...values, result: cases.length === 3 && cases.every((entry) => entry.passed) ? 'pass' : 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name) };
+    result = { mode: input.mode, ...values, result: completeCases() ? 'pass' : 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name) };
   } else if (input.mode === 'reprint' || input.mode === 'restart') {
     await setStage('credential_preservation');
     const values = await preserveExistingProfiles();
-    result = { mode: input.mode, ...values, result: cases.length === 1 && cases.every((entry) => entry.passed) ? 'pass' : 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name) };
+    result = { mode: input.mode, ...values, result: completeCases() ? 'pass' : 'fail', passed_cases: cases.filter((entry) => entry.passed).map((entry) => entry.name) };
   } else throw new Error('unknown browser acceptance mode');
   if (result.result === 'pass') await setStage('browser_complete');
   else result.exception_type = 'BrowserAssertionError';
@@ -693,9 +1031,10 @@ try {
     exception_type: safeExceptionType(error),
   };
 }
-clearTimeout(jsDeadlineTimer);
 if (!resultEmitted) {
-  await writeProgress();
-  process.stdout.write(JSON.stringify({ ...result, stage, profiles: profileEvidence() }) + '\n');
+  const error = result.result === 'pass' ? null
+    : Object.assign(new Error('browser acceptance failed'), { name: result.exception_type || 'BrowserAssertionError' });
+  await emitBrowserResult(result, error);
 }
+clearTimeout(jsDeadlineTimer);
 process.exitCode = result.result === 'pass' ? 0 : 1;

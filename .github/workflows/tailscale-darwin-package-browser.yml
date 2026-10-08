@@ -1,0 +1,143 @@
+name: Darwin extracted-package browser subcell
+
+on:
+  push:
+    branches: [ci/tailscale-native-preflight-ef9f843]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+# A fresh, explicit producer avoids pretending the inherited one-day artifact
+# still exists. Both jobs bind this exact push SHA; this is not workflow_run.
+jobs:
+  producer:
+    name: Fresh candidate release producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact-id: ${{ steps.bundle.outputs.artifact-id }}
+      artifact-digest: ${{ steps.bundle.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the exact, first-attempt, task-only candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REPOSITORY" = 0cv/herdr-mobile-relay
+          test "$GITHUB_REF" = refs/heads/ci/tailscale-native-preflight-ef9f843
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          python3 - <<'PY'
+          import subprocess
+          expected = {
+              '.github/workflows/tailscale-darwin-package-browser.yml',
+              'tests/test_tailscale_darwin_package_browser.py',
+              'tests/test_tailscale_extracted_package_browser.py',
+              'tests/tailscale-package-browser.mjs',
+          }
+          observed = subprocess.check_output([
+              'git', 'diff', '--name-only', 'cbacea6efe8916f2a040e6ca4927e221e9b6e15c',
+              'HEAD', '--',
+          ], timeout=10).decode().splitlines()
+          if set(observed) != expected or len(observed) != len(expected):
+              raise SystemExit('candidate is not the reviewed task-only tree')
+          PY
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Focused lint of the actual new workflow
+        run: >-
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          -shellcheck= -pyflakes= .github/workflows/tailscale-darwin-package-browser.yml
+      - name: Build only through the unchanged production release path
+        shell: bash
+        run: |
+          set -euo pipefail
+          make cross-build
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
+          test -n "$version"
+          scripts/package-release.sh "$version" "$GITHUB_SHA" dist/release
+          scripts/check-installed-release.sh \
+            "dist/release/herdr-mobile-relay_${version}_linux_amd64.tar.gz" \
+            dist/release/checksums.txt "$version" "$GITHUB_SHA" linux/amd64
+      - name: Publish this candidate's checksum/manifest-bound input
+        id: bundle
+        uses: actions/upload-artifact@v8
+        with:
+          name: release-bundles
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 1
+
+  darwin-package-browser:
+    name: Darwin arm64 extracted-package BYO browser
+    needs: producer
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the exact native first attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REPOSITORY" = 0cv/herdr-mobile-relay
+          test "$GITHUB_REF" = refs/heads/ci/tailscale-native-preflight-ef9f843
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.21.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: One bounded artifact/trust/BYO/browser attempt
+        timeout-minutes: 22
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HERDR_DARWIN_PACKAGE_BROWSER_CI: "1"
+          PRODUCER_ARTIFACT_ID: ${{ needs.producer.outputs.artifact-id }}
+          PRODUCER_ARTIFACT_DIGEST: ${{ needs.producer.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$PRODUCER_ARTIFACT_ID"
+          test -n "$PRODUCER_ARTIFACT_DIGEST"
+          python3 -I -B tests/test_tailscale_darwin_package_browser.py \
+            --fresh-producer --producer-sha "$GITHUB_SHA" \
+            --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
+            --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
+            --private-root "$RUNNER_TEMP/herdr-dpb-private" \
+            --evidence "$RUNNER_TEMP/herdr-dpb-evidence/darwin-package-browser.json" \
+            --budget-seconds 1260
+      - name: Upload only the sanitized bounded cell receipt
+        if: always()
+        uses: actions/upload-artifact@v8
+        with:
+          name: darwin-package-browser-cell
+          path: ${{ runner.temp }}/herdr-dpb-evidence/darwin-package-browser.json
+          if-no-files-found: error
+          retention-days: 1
