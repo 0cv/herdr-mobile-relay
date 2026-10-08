@@ -32,6 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_EVENT_NAME" = push
           test "$GITHUB_REPOSITORY" = 0cv/herdr-mobile-relay
           test "$GITHUB_REF" = refs/heads/ci/tailscale-native-preflight-ef9f843
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -97,6 +98,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_EVENT_NAME" = push
           test "$GITHUB_REPOSITORY" = 0cv/herdr-mobile-relay
           test "$GITHUB_REF" = refs/heads/ci/tailscale-native-preflight-ef9f843
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -113,6 +115,20 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      # Frozen first-push grant projection. The runner binds the bounded push
+      # event before/after and sole candidate parent before ANY launcher/query,
+      # and revalidates those inputs at both launcher boundaries. Later pushes
+      # and reruns refuse; this is not a global nonce across forbidden resets.
+      # These are operational admission checks, NOT cryptographic authentication
+      # or a security boundary against a local caller forging environment/event.
+      # The parent grant permits max-two label-scoped read-only queries ONLY in
+      # this isolated hosted runner on the single first-fast-forward CI attempt
+      # from pinned e59e8022. No local runtime or local launchctl is authorized,
+      # even if fabricated local inputs could satisfy the predicate.
+      # Consumer contract: this cell passes only if this step/job succeeds
+      # (runner exit 0) AND its published receipt validates as pass for the exact
+      # SHA/run/source/producer. A receipt alone never establishes pass. Command
+      # exit and filesystem publication are not claimed to be atomic.
       - name: One bounded artifact/trust/BYO/browser attempt
         timeout-minutes: 22
         shell: bash
@@ -126,13 +142,32 @@ jobs:
           umask 077
           test -n "$PRODUCER_ARTIFACT_ID"
           test -n "$PRODUCER_ARTIFACT_DIGEST"
+          # The runner writes PRIVATE staging only. Always capture its completed
+          # exit status before the separate bounded, offline publication command.
+          runner_status=0
           python3 -I -B tests/test_tailscale_darwin_package_browser.py \
             --fresh-producer --producer-sha "$GITHUB_SHA" \
             --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
             --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
+            --launchctl-query-grant '{"grantId":"q2-parent-launchctl-print-first-push-e59e8022-20261008","authorized":true,"pinnedParent":"e59e8022daaefed14317d760f17f904ad6cd55eb","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of the first fast-forward push from e59e8022daaefed14317d760f17f904ad6cd55eb"}}' \
             --private-root "$RUNNER_TEMP/herdr-dpb-private" \
-            --evidence "$RUNNER_TEMP/herdr-dpb-evidence/darwin-package-browser.json" \
-            --budget-seconds 1260
+            --evidence "$RUNNER_TEMP/herdr-dpb-staging/darwin-package-browser.json" \
+            --budget-seconds 1260 || runner_status=$?
+          # Nonzero runner exit (including a post-write deadline failure) can
+          # publish sanitized FAIL evidence only, never stale staged PASS bytes.
+          # Publication failure also fails this step under set -e; no retry or
+          # post-final-phase cleanup is performed. On publication success retain
+          # the runner's actual status, not the receipt's claimed result.
+          python3 -I -B tests/test_tailscale_darwin_package_browser.py \
+            --publish-receipt --runner-exit-code "$runner_status" \
+            --fresh-producer --producer-sha "$GITHUB_SHA" \
+            --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
+            --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
+            --staged-receipt "$RUNNER_TEMP/herdr-dpb-staging/darwin-package-browser.json" \
+            --evidence "$RUNNER_TEMP/herdr-dpb-evidence/darwin-package-browser.json"
+          exit "$runner_status"
+      # Upload only the post-exit published path, NEVER private staging. Upload
+      # on failure retains evidence, not cell acceptance; see consumer contract.
       - name: Upload only the sanitized bounded cell receipt
         if: always()
         uses: actions/upload-artifact@v7

@@ -11,6 +11,7 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass
 import datetime
+import errno
 import gzip
 import hashlib
 import http.client
@@ -61,6 +62,30 @@ LIMITS = MappingProxyType({
     "receipt": 262144, "total_seconds": 1260,
 })
 PHASES = (90, 300, 210, 630, 30)
+GUARDS = frozenset({"proxy", "herdr_socket", "fake_herdr", "pipe_drain"})
+# Admission projection of F3/LAUNCHCTL-FIRST-PUSH-GRANT.json. The expected
+# parent is a frozen parent-grant literal, NEVER selected from CI/git observations.
+# The earlier grant and authorized:false contract remain historical, unedited.
+# Exactly the next reviewed fast-forward and attempt 1; not a durable nonce
+# across prohibited branch reset/deletion/force-push/recreation or redispatch.
+# Operational admission only, NOT cryptographic hosted-runner authentication:
+# a local caller can forge environment/event inputs. The parent grant authorizes
+# at most two label-scoped read-only queries ONLY on the isolated hosted runner
+# in the single first-fast-forward attempt from the pinned e59e8022 parent.
+# No local runtime or local launchctl is authorized, even with fabricated inputs.
+LAUNCHCTL_GRANT_ID = "q2-parent-launchctl-print-first-push-e59e8022-20261008"
+LAUNCHCTL_PINNED_PARENT = "e59e8022daaefed14317d760f17f904ad6cd55eb"
+PUSH_EVENT_CAP = 65536
+LAUNCHCTL_SCOPE = MappingProxyType({
+    "command": "launchctl print gui/$(id -u)/com.herdr-mobile-relay.service",
+    "mode": "read-only query; output discarded", "maxQueries": 2,
+    "where": "isolated GitHub-hosted macos-15 Darwin runner only",
+    "when": "attempt 1 of the first fast-forward push from " + LAUNCHCTL_PINNED_PARENT,
+})
+# These are benign only on the client side. Backend calls wrap even these
+# exception types as fatal proxy errors before they reach the client boundary.
+CLIENT_ABORTS = (ssl.SSLError, ConnectionResetError, BrokenPipeError,
+                 ConnectionAbortedError, TimeoutError)
 ENROLL = (
     "dev_setup_link_imports_bare_wss_origin_in_extracted_frontend",
     "launcher_generated_setup_link_enrolls_real_controller_profile",
@@ -119,14 +144,14 @@ def failure_detail(error, failed_command=None):
     frames = [frame for frame in frames if frame.name not in {"require", "cap"}] or frames
     last = frames[-1] if frames else None
     code = getattr(error, "errno", None)
-    detail = {"type": re.sub(r"[^A-Za-z0-9_]", "", type(error).__name__)[:64] or "Unknown",
+    detail = {"type": type(error).__name__ if type(error).__name__ in SAFE_EXCEPTION_TYPES else "Unknown",
               "errno": code if type(code) is int else None,
-              "function": (re.sub(r"[^A-Za-z0-9_]", "", last.name)[:64] or None) if last else None,
+              "function": (last.name if last.name in SAFE_FUNCTIONS else "unknown") if last else None,
               "line": last.lineno if last and type(last.lineno) is int else None,
               "command": None, "exit_code": None}
     if failed_command:
         label, exit_code = failed_command
-        detail["command"] = label
+        detail["command"] = label if label in SAFE_COMMANDS else "unknown"
         detail["exit_code"] = exit_code if type(exit_code) is int else None
     return detail
 
@@ -134,7 +159,8 @@ def failure_detail(error, failed_command=None):
 def command_label(argv):
     """Tool/subcommand label only: basenames of the first three arguments."""
     parts = [re.sub(r"[^A-Za-z0-9_.:-]", "", os.path.basename(str(arg)))[:32] for arg in argv[:3]]
-    return " ".join(part for part in parts if part)[:96] or "unknown"
+    label = " ".join(part for part in parts if part)[:96]
+    return label if label in SAFE_COMMANDS else "unknown"
 
 
 def read_bounded(path, maximum):
@@ -212,6 +238,165 @@ def browser_result(data, mode, exit_code):
             "assertions": {key: value[key] for key in required}}
 
 
+# Diagnostic strings are a finite protocol, never truncated external values.
+SAFE_FAILURES = frozenset({"unexpected_exception", "fixture_refused", "command_failed", "phase_deadline",
+    "owned_operation_allowlist", "cleanup_uncertain", "receipt_validation", "cap_raw", "cap_dependencies",
+    "cap_stdin", "cap_result", "cap_receipt", "launchctl_authority", "service_guard_query_cap"})
+SAFE_EXCEPTION_TYPES = frozenset({"Unknown", "Refusal", "CleanupFailure", "GateFailure", "SystemExit",
+    "KeyboardInterrupt", "OSError", "FileNotFoundError", "PermissionError", "FileExistsError", "TimeoutError",
+    "ConnectionError", "ConnectionRefusedError", "ConnectionResetError", "BrokenPipeError", "ConnectionAbortedError",
+    "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "RuntimeError", "AssertionError",
+    "UnicodeError", "UnicodeDecodeError", "RecursionError", "SSLError", "SSLCertVerificationError",
+    "TimeoutExpired", "HTTPError", "URLError", "BadZipFile", "ReadError", "OperationalError"})
+SAFE_FUNCTIONS = frozenset({"unknown", "runtime", "command", "phase", "interrupted", "read_bounded", "strict_json",
+    "pairs", "producer", "hydrate", "fetch", "streaming_body", "archive_preflight", "entry_policy", "zip_entry",
+    "digest_policy", "checksum_policy", "manifest_policy", "paths_admission", "root_policy", "environment",
+    "check", "enter", "remaining", "alarm", "expired", "spawn", "capture", "capture_launcher", "storage",
+    "payload_storage_bytes", "check_guards", "effect", "require_launchctl", "profiles", "certificates",
+    "tls_controls", "private_link", "fake_operation_summary", "browser_result", "receipt_policy",
+    "receipt_values_safe", "verify", "remove_owned_tree", "stop", "close", "group_gone", "reap_bounded",
+    "read", "__init__", "socket_allowed", "fake_allowed", "start_launcher", "require", "cap",
+    "verify_producer_archive", "record_digest", "write_receipt", "publish_receipt", "publication"})
+SAFE_COMMANDS = frozenset({"unknown", "git rev-parse HEAD", "git rev-parse HEADtree", "git status --porcelainv1",
+    "git diff --name-only", "node --version", "bun --version", "go version", "curl --version", "openssl version",
+    "bun install --frozen-lockfile", "node cli.js install", "go build -modcacherw", "go test -modcacherw",
+    "go version -m", "bash setup-link.sh"})
+
+
+def safe_failure_code(error):
+    code = str(error) if isinstance(error, Refusal) else "unexpected_exception"
+    return code if code in SAFE_FAILURES else "fixture_refused"
+
+
+def receipt_values_safe(value):
+    """Closed typed schema for EVERY present field, on both PASS and FAIL.
+
+    Partial progress is allowed only at the top level (and source-hash map).
+    Nested structures are closed. No generic string sink accepts a filesystem
+    path or opaque token: strings are finite public literals, bounded versions,
+    or explicitly named digest fields. Refusals never include a value/key/path.
+    """
+    def enum(*items):
+        return lambda item: type(item) is str and item in items
+
+    def pattern(expression):
+        return lambda item: type(item) is str and re.fullmatch(expression, item) is not None
+
+    def integer(maximum=1000000, minimum=0):
+        return lambda item: type(item) is int and minimum <= item <= maximum
+
+    def nullable(rule):
+        return lambda item: item is None or rule(item)
+
+    boolean = lambda item: type(item) is bool
+    seconds = lambda item: type(item) in {int, float} and 0 <= item <= LIMITS["total_seconds"] + PHASES[4]
+    digest = pattern(r"[0-9a-f]{64}")
+    revision = pattern(r"[0-9a-f]{40}")
+    version = pattern(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[a-z]?")
+    count = integer()
+    exit_code = integer(2147483647, -2147483648)
+    assertion_names = ("controller_enrolled", "controller_read", "controller_command", "reader_enrolled",
+        "reader_read", "reader_mutation_denied", "credentials_preserved", "app_worker_verified",
+        "notification_delivery_disabled", "launch_arguments_verified")
+    assertions = {key: boolean for key in assertion_names}
+    case = {"mode": enum("enroll", "reprint", "restart"), "cases": (enum(*ENROLL, *PRESERVE), 4),
+        "ok": boolean, "contexts_closed": boolean, "exit_code": exit_code,
+        "result_bytes": integer(LIMITS["result"]), "stdin_bytes": integer(LIMITS["stdin"]),
+        "seconds": seconds, "assertions": assertions}
+    tls_category = enum("positive", "unknown_ca", "wrong_host")
+    tls_tool = {"category": tls_category, "exit_code": exit_code}
+    methods = enum("ping", "agent.list", "pane.list", "workspace.list", "tab.list", "session.snapshot",
+                   "events.subscribe", "pane.read", "other")
+    guard_observation = {"ordinal": integer(2, 1), "private_plist_before_absent": boolean,
+        "private_plist_after_absent": boolean, "setup_ready_seconds": seconds, "loaded_service": boolean,
+        "proof_kind": enum("source_bound_wrapper_continued"), "query_exit_zero": boolean,
+        "numeric_query_exit_observed": boolean}
+    schema = {
+        "schemaVersion": integer(1, 1), "candidate_sha": revision, "candidate_tree": revision,
+        "source_hashes": {path: digest for path in FILES}, "result": enum("pass", "fail"),
+        "scope": enum("darwin_arm64_byo_only"), "launchctl_query_grant_id": enum(LAUNCHCTL_GRANT_ID),
+        "github_run_id": integer(10**15 - 1, 1), "github_run_attempt": integer(1, 1),
+        "launchctl_query_pinned_parent": enum(LAUNCHCTL_PINNED_PARENT),
+        "producer": {"sha": revision, "run": integer(10**15, 1), "artifact": integer(10**15, 1),
+                     "zip_sha256": digest, "fresh": boolean},
+        "version": version, "manifest_sha256": digest, "binary_sha256": digest,
+        "compiler": {"version": enum("go1.27.1"), "target": enum("darwin/arm64"), "metadata_sha256": digest},
+        "browser_identity": {"sha256": digest, "version": enum("151.0.7922.34"), "revision": enum("1234"),
+            "playwright": enum("1.62.1"), "switches_sha256": digest, "target": enum("darwin/arm64")},
+        "tools": {key: version for key in ("python", "node", "bun", "go", "curl", "openssl")},
+        "source_proof": {"chromium_commit": enum("782af9cb30a53f54487e5d2e44738645a8ec457c"),
+            "playwright_tag": enum("v1.62.1"), "go_tag": enum("go1.27.1"), "trust": enum("TRUST-PROOF.md")},
+        "profile_inputs": {name: {"preferences_sha256": digest, **(
+            {"database_absent": boolean} if name == "negative" else {"database_sha256": digest})}
+            for name in ("controller", "reader", "negative")},
+        "profile_policy": {"schema": integer(1, 1), "root_der_sha256": digest,
+            "trust_blob": enum("0a020803"), "platform_integration": boolean, "sandbox": boolean, "mock_keychain": boolean},
+        "service_guard": {"uid": integer(2147483647), "label": enum("com.herdr-mobile-relay.service"),
+            "starts": integer(2), "command": enum("launchctl_print_gui_label"),
+            "launchctl_path": enum("/bin/launchctl"), "launchctl_sha256": digest,
+            "source_guard_sha256": digest, "source_launcher_sha256": digest, "observations": (guard_observation, 2)},
+        "trust_controls": {"python_curl_packaged_go": ({"category": tls_category,
+            "python": {"category": tls_category, "verify_code": nullable(integer(1000))},
+            "curl": tls_tool, "packaged_go": tls_tool}, 3),
+            "browser": {"ok": boolean, "argv_ok": boolean, "contexts_closed": boolean,
+                "version": enum("151.0.7922.34"), "observations": (enum("empty_profile_refuses_ca",
+                    "trusted_profile_accepts_ip", "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"), 4)}},
+        "cases": (case, 3), "phases": ({"id": integer(4), "ok": boolean, "exit_code": integer(1),
+            "cap_seconds": lambda item: type(item) is int and item in PHASES, "seconds": seconds}, 5),
+        "cleanup": boolean,
+        "owned_cleanup": {"children": count, "listeners": count,
+            "surviving_children": nullable(count), "surviving_listeners": nullable(count),
+            "observed_surviving_children": count, "observed_surviving_listeners": count,
+            "unobserved_children": count, "unobserved_listeners": count,
+            "closure_errors": (enum("child_cleanup", "child_observation_unavailable", "listener_cleanup",
+                "listener_observation_unavailable", "cleanup_deadline", "cleanup_incomplete", "browser_contexts_unobserved"), 7),
+            "uncertain": boolean, "root_deleted": boolean},
+        "request_counts": ({key: count for key in ("tls_accepted", "tls_refused", "http_get", "websocket", "client_aborted")}, 3),
+        "fixture_operations": {
+            "fake": ({"command": enum("agent list", "pane list", "workspace list", "tab list", "pane read", "agent prompt"),
+                "outcome": enum("started", "succeeded"), "count": count}, 12),
+            "socket": ({"method": methods, "outcome": enum("succeeded", "failed", "other"), "count": count}, 27)},
+        "captured_output_bytes": integer(LIMITS["raw"] + 131072),
+        "dependency_payload_bytes_peak": integer(LIMITS["dependencies"]),
+        "failure": enum(*SAFE_FAILURES), "failure_guard": enum(*GUARDS),
+        "failure_detail": {"type": enum(*SAFE_EXCEPTION_TYPES), "errno": nullable(exit_code),
+            "function": nullable(enum(*SAFE_FUNCTIONS)), "line": nullable(integer(1000000, 1)),
+            "command": nullable(enum(*SAFE_COMMANDS)), "exit_code": nullable(exit_code)},
+    }
+    if "archive_hashes" in value:
+        require(type(value.get("version")) is str and version(value["version"]), "receipt_schema")
+        schema["archive_hashes"] = {f"herdr-mobile-relay_{value['version']}_darwin_arm64.tar.gz": digest,
+                                    "checksums.txt": digest}
+
+    def verify(item, rule, partial=False):
+        if type(rule) is dict:
+            require(type(item) is dict and (set(item) <= set(rule) if partial else set(item) == set(rule)),
+                    "receipt_schema")
+            for key, nested in item.items():
+                # The source map is intentionally sparse on an early failure.
+                verify(nested, rule[key], rule is schema and key == "source_hashes")
+        elif type(rule) is tuple:
+            child_rule, maximum = rule
+            require(type(item) is list and len(item) <= maximum, "receipt_schema")
+            for nested in item:
+                # Request counter keys are finite, but zero counters are omitted.
+                verify(nested, child_rule, child_rule is schema["request_counts"][0])
+        else:
+            require(rule(item) is True, "receipt_schema")
+
+    # Browser cases are assigned only after full protocol validation. Their
+    # assertion schema depends on mode, not on PASS versus FAIL of the cell.
+    modes = value.get("cases", [])
+    require(type(modes) is list and len(modes) <= 3, "receipt_schema")
+    for result in modes:
+        require(type(result) is dict and type(result.get("assertions")) is dict, "receipt_schema")
+        keys = set(assertion_names) if result.get("mode") == "enroll" else set(assertion_names) - {
+            "controller_command", "reader_mutation_denied"}
+        require(set(result["assertions"]) == keys and all(boolean(v) for v in result["assertions"].values()), "receipt_schema")
+    case["assertions"] = lambda item: type(item) is dict and set(item) <= set(assertions) and all(boolean(v) for v in item.values())
+    verify(value, schema, partial=True)
+
+
 def receipt_policy(data, candidate, source_hashes, producer_identity):
     """Validate the uploaded protocol itself, not just runtime progress flags."""
     value = strict_json(data, "receipt")
@@ -220,7 +405,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
               "browser_identity", "tools", "source_proof", "profile_inputs", "profile_policy", "service_guard",
               "trust_controls", "cases", "phases", "cleanup", "owned_cleanup", "request_counts",
               "fixture_operations", "captured_output_bytes", "dependency_payload_bytes_peak", "failure",
-              "failure_detail"}
+              "failure_detail", "failure_guard", "launchctl_query_grant_id",
+              "github_run_id", "github_run_attempt", "launchctl_query_pinned_parent"}
     require(type(value) is dict and set(value) <= fields, "receipt_fields")
 
     def shape(item, keys):
@@ -253,6 +439,7 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
         else:
             require(item is None or type(item) in {bool, int, float}, "receipt_type")
     sanitized(value)
+    receipt_values_safe(value)
     require(type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
             and value.get("candidate_sha") == candidate and value.get("source_hashes") == source_hashes
             and value.get("producer") == producer_identity
@@ -261,8 +448,18 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     for item in source_hashes.values():
         digest(item)
     cap("dependencies", value.get("dependency_payload_bytes_peak"))
+    requests = value.get("request_counts")
+    require(type(requests) is list and len(requests) <= 3, "receipt_requests")
+    for request in requests:
+        require(type(request) is dict and set(request) <= {
+            "tls_accepted", "tls_refused", "http_get", "websocket", "client_aborted"}, "receipt_request_fields")
+        for amount in request.values():
+            count(amount)
     if value["result"] == "fail":
         require(type(value.get("failure")) is str and re.fullmatch(r"[a-z0-9_]{1,80}", value["failure"]), "receipt_failure")
+        if "failure_guard" in value or value["failure"] == "owned_operation_allowlist":
+            require(type(value.get("failure_guard")) is str and value["failure_guard"] in GUARDS,
+                    "receipt_failure_guard")
         detail = value.get("failure_detail")
         if detail is not None:
             shape(detail, ("type", "errno", "function", "line", "command", "exit_code"))
@@ -280,8 +477,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
                 "receipt_failed_output_count")
         return False
     cap("raw", value.get("captured_output_bytes"))
-    require(set(value) == fields - {"failure", "failure_detail"} and set(source_hashes) == set(FILES)
-            and value["cleanup"] is True, "receipt_complete")
+    require(set(value) == fields - {"failure", "failure_detail", "failure_guard"} and set(source_hashes) == set(FILES)
+            and value["cleanup"] is True and value["launchctl_query_grant_id"] == LAUNCHCTL_GRANT_ID, "receipt_complete")
     require(re.fullmatch(r"[0-9a-f]{40}", value["candidate_tree"]), "receipt_tree")
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["version"]), "receipt_version")
     archive_name = f"herdr-mobile-relay_{value['version']}_darwin_arm64.tar.gz"
@@ -393,12 +590,7 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
         "surviving_children", "surviving_listeners", "observed_surviving_children", "observed_surviving_listeners",
         "unobserved_children", "unobserved_listeners")) and owned["closure_errors"] == []
         and owned["uncertain"] is False and owned["root_deleted"] is True, "receipt_cleanup")
-    requests = value["request_counts"]
-    require(type(requests) is list and len(requests) == 3, "receipt_requests")
-    for request in requests:
-        require(type(request) is dict and set(request) <= {"tls_accepted", "tls_refused", "http_get", "websocket"}, "receipt_request_fields")
-        for amount in request.values():
-            count(amount)
+    require(len(requests) == 3, "receipt_requests")
     require(requests[0].get("websocket", 0) >= 2 and requests[0].get("http_get", 0) > 0
             and requests[0].get("tls_refused", 0) > 0
             and all(request.get("tls_refused", 0) > 0 for request in requests[1:])
@@ -777,20 +969,120 @@ class EffectGate:
     """The runtime boundary can be injected closed before any real operation."""
     KINDS = frozenset({"network", "executable", "browser", "go", "launchctl", "trust", "signal"})
 
-    def __init__(self, authorized):
+    def __init__(self, authorized, *, launchctl_grant=None, launchctl_context=None, launchctl_observe=None):
         require(type(authorized) is bool, "effect_gate_type")
         self.authorized = authorized
+        self.launchctl_grant, self.launchctl_context = launchctl_grant, launchctl_context
+        self.launchctl_observe = launchctl_observe
+        self.launchctl_queries = 0
+
+    def require_launchctl(self):
+        require(self.authorized and launchctl_authorized(self.launchctl_grant, self.launchctl_context),
+                "launchctl_authority")
+        # Runtime re-reads the bounded event and read-only git identity before
+        # launcher capture AND query reservation. Offline callers inject both.
+        if self.launchctl_observe is not None:
+            current = self.launchctl_observe()
+            require(current == self.launchctl_context and launchctl_authorized(self.launchctl_grant, current),
+                    "launchctl_authority")
 
     def effect(self, kind):
         require(self.authorized and kind in self.KINDS, "real_effect_refused")
+        if kind == "launchctl":
+            self.require_launchctl()
+            require(self.launchctl_queries < LAUNCHCTL_SCOPE["maxQueries"], "service_guard_query_cap")
+            self.launchctl_queries += 1
+
+
+def launchctl_packet_allowed(packet):
+    # Do not echo rejected input. The workflow projects this exact frozen grant
+    # ID/parent; packet equality is operational admission, not proof of origin.
+    if type(packet) is not str:
+        return False
+    try:
+        value = strict_json(packet.encode("utf-8"))
+    except (Refusal, UnicodeError):
+        return False
+    return (type(value) is dict and set(value) == {"grantId", "authorized", "pinnedParent", "scope"}
+            and value.get("grantId") == LAUNCHCTL_GRANT_ID and value.get("authorized") is True
+            and value.get("pinnedParent") == LAUNCHCTL_PINNED_PARENT
+            and type(value.get("scope")) is dict and value["scope"] == dict(LAUNCHCTL_SCOPE)
+            and type(value["scope"].get("maxQueries")) is int)
+
+
+def launchctl_authorized(packet, observation):
+    # Operational projection of the hosted-only parent grant, not proof of the
+    # caller's host. Forging a local observation never grants local permission.
+    return launchctl_packet_allowed(packet) and admission_policy(observation)
+
+
+def ci_context_allowed(observation):
+    # Environment/platform observations are operational admission checks, not
+    # authentication or a security boundary against a deliberately local forger.
+    return (type(observation) is dict and observation.get("system") == "Darwin"
+            and observation.get("machine") == "arm64" and observation.get("enabled") == "1"
+            and observation.get("repository") == REPOSITORY and observation.get("ref") == REF
+            and observation.get("attempt") == "1" and observation.get("event_name") == "push"
+            and observation.get("runner_environment") == "github-hosted" and observation.get("image_os") == "macos15"
+            and type(observation.get("candidate_sha")) is str
+            and re.fullmatch(r"[0-9a-f]{40}", observation["candidate_sha"]) is not None
+            and observation["candidate_sha"] != "0" * 40
+            and type(observation.get("run_id")) is str
+            and re.fullmatch(r"[1-9][0-9]{0,14}", observation["run_id"]) is not None)
 
 
 def admission_policy(observation):
-    # Read-only platform/CI observations are injected into this SAME predicate
-    # in offline mode; no environment, process or network probes are necessary.
-    return (observation.get("system") == "Darwin" and observation.get("machine") == "arm64"
-            and observation.get("enabled") == "1" and observation.get("repository") == REPOSITORY
-            and observation.get("ref") == REF and observation.get("attempt") == "1")
+    # Same pure operational predicate at CI admission and each launcher/query
+    # boundary. Rechecking forgeable inputs does not authenticate a hosted runner.
+    return (ci_context_allowed(observation)
+            and observation.get("event_before") == LAUNCHCTL_PINNED_PARENT
+            and observation.get("event_after") == observation["candidate_sha"]
+            and observation.get("event_ref") == REF
+            and all(observation.get(key) is False for key in ("event_forced", "event_created", "event_deleted"))
+            and observation.get("checked_out_sha") == observation["candidate_sha"]
+            and type(observation.get("candidate_parents")) is list
+            and observation["candidate_parents"] == [LAUNCHCTL_PINNED_PARENT])
+
+
+def git_candidate_identity(candidate):
+    # Read only the checked-out object's SHA/parents, not its message or files.
+    # No replacement objects, optional index locks or ambient git configuration.
+    try:
+        result = subprocess.run(["git", "--no-replace-objects", "--no-optional-locks",
+            "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+            "log", "-1", "--format=%H%n%P", "HEAD", "--"], cwd=candidate,
+            env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                 "GIT_OPTIONAL_LOCKS": "0"}, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+            check=False)
+        require(result.returncode == 0 and len(result.stdout) <= 4096, "launchctl_authority")
+        lines = result.stdout.decode("ascii").splitlines()
+        require(len(lines) == 2, "launchctl_authority")
+        return {"checked_out_sha": lines[0], "candidate_parents": lines[1].split()}
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        raise Refusal("launchctl_authority") from None
+
+
+def first_push_observation(observation, event_path, candidate, *, read_event=read_bounded,
+                           query_candidate=git_candidate_identity):
+    # The caller-selected event and checkout bind the authorized hosted attempt
+    # operationally; they do not make a forged local invocation authorized.
+    require(ci_context_allowed(observation), "ci_admission")
+    require(type(event_path) is str and event_path and Path(event_path).is_absolute(), "launchctl_authority")
+    try:
+        event = strict_json(read_event(Path(event_path), PUSH_EVENT_CAP))
+    except (OSError, Refusal):
+        raise Refusal("launchctl_authority") from None
+    require(type(event) is dict, "launchctl_authority")
+    # Check the event BEFORE git acquisition, let alone any privileged launcher.
+    require(event.get("before") == LAUNCHCTL_PINNED_PARENT
+            and event.get("after") == observation["candidate_sha"] and event.get("ref") == REF
+            and all(event.get(key) is False for key in ("forced", "created", "deleted")), "launchctl_authority")
+    identity = query_candidate(candidate)
+    require(type(identity) is dict and set(identity) == {"checked_out_sha", "candidate_parents"}, "launchctl_authority")
+    current = {**observation, **identity, "event_before": event["before"], "event_after": event["after"],
+        "event_ref": event["ref"], **{"event_" + key: event[key] for key in ("forced", "created", "deleted")}}
+    require(admission_policy(current), "launchctl_authority")
+    return current
 
 
 def child_environment_allowed(env):
@@ -826,6 +1118,21 @@ def socket_operations_allowed(counts):
 
 def proxy_operations_allowed(servers):
     return all(server.failure is False for server in servers)
+
+
+def owned_socket_closed(error, closing):
+    # Closing our own listener/client sockets may race an in-flight read.
+    # Do not suppress policy/internal exceptions merely because cleanup began.
+    return (closing and isinstance(error, OSError)
+            and error.errno in {errno.EBADF, errno.ENOTCONN})
+
+
+def proxy_request_counts(servers):
+    result = []
+    for server in servers:
+        with server.lock:
+            result.append(dict(server.counts))
+    return result
 
 
 def fake_operation_summary(data, complete=False):
@@ -886,12 +1193,26 @@ class Operations:
         self.effects = effects if effects is not None else EffectGate(True)
         self.raw, self.children, self.storage_peak = 0, [], 0
         self.output_lock = threading.Lock()
-        self.guards = []
+        self.guards, self.failure_guard = [], None
+
+    def add_guard(self, name, guard):
+        require(type(name) is str and name in GUARDS and callable(guard), "guard_identity")
+        self.guards.append((name, guard))
+
+    def check_guards(self, check=lambda: None):
+        for name, guard in self.guards:
+            check()
+            try:
+                allowed = guard() is True
+            except Exception:
+                allowed = False
+            if not allowed:
+                self.failure_guard = self.failure_guard or name
+                raise Refusal("owned_operation_allowlist")
 
     def check(self):
         self.budget.check()
-        for guard in self.guards:
-            require(guard() is True, "owned_operation_allowlist")
+        self.check_guards()
 
     def storage(self):
         # Count downloaded payload (including installer staging), not generated
@@ -915,6 +1236,16 @@ class Operations:
             stderr=subprocess.PIPE, start_new_session=True, close_fds=True), self.effects))
         self.children.append(child)
         return child
+
+    def capture_launcher(self, argv, guard, *, cwd, link_origin):
+        # This is the shared runtime/offline launcher boundary. Default
+        # EffectGate(True) is NOT sufficient for a protected launchctl query.
+        self.effects.require_launchctl()
+        self.check()
+        require(type(guard.get("starts")) is int and 0 <= guard["starts"] < 2, "service_guard_query_cap")
+        self.effects.effect("launchctl")
+        guard["starts"] += 1  # Reserve the attempt before capture can fail.
+        return self.capture(argv, 70, cwd=cwd, link_origin=link_origin)
 
     def capture(self, argv, timeout, data=b"", cwd=None, link_origin=None, env=None, result_cap=None):
         cap("stdin", len(data))
@@ -962,7 +1293,7 @@ class Operations:
                             # The foreground wrapper remains owned. Drain its
                             # remaining pipes with tracked bounded threads.
                             drain = PipeDrain(process, selector, self)
-                            self.guards.append(lambda: not drain.error)
+                            self.add_guard("pipe_drain", lambda: not drain.error)
                             child.startup_seconds = time.monotonic() - start
                             require(child.startup_seconds < timeout, "launcher_deadline")
                             return child, link
@@ -1193,6 +1524,157 @@ def archive_preflight(archive, version, revision, budget):
     return manifest
 
 
+def verify_producer_archive(archive, checksums, archive_hashes, version, revision,
+                            release, budget, verify_archive):
+    """Bind post-install verification inputs to the producer ZIP's two digests."""
+    budget.check()
+    require(type(archive_hashes) is dict and set(archive_hashes) == {archive.name, "checksums.txt"},
+            "archive_binding")
+    archive_bytes = read_bounded(archive, LIMITS["tar"])
+    budget.check()
+    digest_policy(sha(archive_bytes), archive_hashes[archive.name], "tar_digest")
+    checksum_bytes = read_bounded(checksums, 65536)
+    budget.check()
+    digest_policy(sha(checksum_bytes), archive_hashes["checksums.txt"], "checksum_digest")
+    checksum_policy(checksum_bytes, archive.name, archive_hashes[archive.name])
+    # Created exclusively AFTER candidate-controlled installs. Use only these
+    # bounded, producer-bound copies, not their previously writable input paths.
+    # This is cooperative byte binding, NOT hostile-same-UID containment: a
+    # concurrent same-UID process could still replace a file between our check
+    # and the helper's own re-open. No atomic-path guarantee is claimed.
+    captured = release.parent / "producer-verified-inputs"
+    captured.mkdir(mode=0o700)
+    copied_archive, copied_checksums = captured / archive.name, captured / "checksums.txt"
+    for path, data in ((copied_archive, archive_bytes), (copied_checksums, checksum_bytes)):
+        budget.check()
+        with path.open("xb") as output:
+            require(output.write(data) == len(data), "archive_copy_write")
+        budget.check()
+
+    def record_digest(actual):
+        # The shared helper invokes this BEFORE archive_extract and before its
+        # packaged verify-release subprocess. Never bind only its return value.
+        budget.check()
+        digest_policy(actual, archive_hashes[archive.name], "tar_digest")
+        digest_policy(sha(read_bounded(copied_checksums, 65536)),
+                      archive_hashes["checksums.txt"], "checksum_digest")
+        budget.check()
+
+    return verify_archive(copied_archive, copied_checksums, version, revision, release,
+        lambda _: budget.check(), record_digest, lambda *_: None,
+        target="darwin/arm64", verifier_timeout=10)
+
+
+def write_receipt(path, encoded, deadline):
+    """A complete write is not a successful command exit or a passing cell."""
+    cap("receipt", len(encoded))
+    deadline.check()
+    with path.open("xb") as destination:
+        require(destination.write(encoded) == len(encoded), "receipt_write")
+    deadline.check()  # Includes slow write/flush/close; staging may still contain pass bytes.
+
+
+def publish_receipt(staged, evidence, runner_exit, candidate, run_id, source_hashes,
+                    producer_identity, deadline):
+    """Offline publication AFTER the runner has exited, with no runtime effects.
+
+    A cell passes only with a successful workflow step/job (runner exit 0) AND
+    a published receipt validating as pass for the exact SHA/run/source/producer.
+    A receipt alone never establishes pass. This does not atomically couple
+    process exit and filesystem publication: a publisher error also fails the
+    workflow step, even if its output write completed before that error.
+    """
+    require(type(runner_exit) is int and 0 <= runner_exit <= 255, "publication_exit")
+    require(set(source_hashes) == set(FILES), "publication_sources")
+    # Fixed, typed fallback: never forward stale pass bytes or invalid staged
+    # fields. Zero counters here describe publication's lack of runtime evidence,
+    # not an inferred absence of requests/output in the failed runner.
+    value = {"schemaVersion": 1, "candidate_sha": candidate, "source_hashes": source_hashes,
+        "producer": producer_identity, "scope": "darwin_arm64_byo_only", "result": "fail",
+        "github_run_id": run_id, "github_run_attempt": 1,
+        "launchctl_query_grant_id": LAUNCHCTL_GRANT_ID,
+        "launchctl_query_pinned_parent": LAUNCHCTL_PINNED_PARENT,
+        "failure": "command_failed" if runner_exit else "receipt_validation",
+        "request_counts": [], "captured_output_bytes": 0, "dependency_payload_bytes_peak": 0}
+    if runner_exit:
+        value["failure_detail"] = {"type": "SystemExit", "errno": None, "function": "publish_receipt",
+            "line": None, "command": "unknown", "exit_code": runner_exit}
+    encode = lambda item: (json.dumps(item, separators=(",", ":")) + "\n").encode()
+    require(receipt_policy(encode(value), candidate, source_hashes, producer_identity) is False,
+            "publication_identity")
+    passed = False
+    deadline.check()
+    try:
+        data = read_bounded(staged, LIMITS["receipt"])
+        observed = strict_json(data, "receipt")
+        require(type(observed) is dict and type(observed.get("source_hashes")) is dict,
+                "receipt_identity")
+        observed_sources = observed["source_hashes"]
+        require(all(path in source_hashes and digest == source_hashes[path]
+                    for path, digest in observed_sources.items()), "receipt_identity")
+        qualified = receipt_policy(data, candidate, observed_sources, producer_identity)
+        # FAIL may be early/partial; every present run/grant field must still
+        # agree. PASS's closed schema requires ALL of these identities.
+        require(all(observed.get(key, expected) == expected for key, expected in (
+            ("github_run_id", run_id), ("github_run_attempt", 1),
+            ("launchctl_query_grant_id", LAUNCHCTL_GRANT_ID),
+            ("launchctl_query_pinned_parent", LAUNCHCTL_PINNED_PARENT))), "receipt_identity")
+        if qualified:
+            require(observed_sources == source_hashes, "receipt_identity")
+            if runner_exit == 0:
+                value, passed = observed, True
+        else:
+            value = observed  # Preserve only validated, sanitized failure evidence.
+    except (OSError, Refusal):
+        pass  # The fixed failure value contains no rejected bytes or error text.
+    deadline.check()
+    encoded = encode(value)
+    require(receipt_policy(encoded, candidate, value["source_hashes"], producer_identity) is passed,
+            "publication_result")
+    write_receipt(evidence, encoded, deadline)
+    return passed
+
+
+def publication(args):
+    # Offline file publication only; this entrypoint cannot authorize any
+    # launcher, launchctl, trust, browser, network or packaged-binary operation.
+    os.environ.pop("GH_TOKEN", None)
+    os.environ.pop("GITHUB_TOKEN", None)
+    source, run = os.environ.get("GITHUB_SHA"), os.environ.get("GITHUB_RUN_ID")
+    require(type(run) is str and re.fullmatch(r"[1-9][0-9]{0,14}", run)
+            and os.environ.get("GITHUB_RUN_ATTEMPT") == "1", "publication_identity")
+    run_id = int(run)
+    producer(args.producer_sha, args.producer_run, args.artifact_id, args.artifact_zip_sha256,
+             args.fresh_producer, source, run_id)
+    staged, evidence = args.staged_receipt, args.evidence
+    os.umask(0o077)
+    deadline = CleanupDeadline(seconds=5)
+    with deadline.alarm():
+        runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+        require(staged.is_absolute() and evidence.is_absolute()
+                and staged.parent != evidence.parent
+                and staged.parent.parent == evidence.parent.parent == runner_temp
+                and staged.name == evidence.name == "darwin-package-browser.json"
+                and not staged.parent.is_symlink()
+                and (not staged.parent.exists() or staged.parent.resolve(strict=True) == staged.parent),
+                "resource_path")
+        root_policy(evidence.parent.exists(), evidence.parent.is_symlink())
+        evidence.parent.mkdir(mode=0o700)
+        info = evidence.parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o700
+                and evidence.parent.resolve(strict=True) == evidence.parent, "receipt_parent_identity")
+        candidate = Path(__file__).resolve().parents[1]
+        sources = {path: sha(read_bounded(candidate / path, 8 * 1024 * 1024)) for path in FILES}
+        identity = {"sha": args.producer_sha, "run": args.producer_run, "artifact": args.artifact_id,
+                    "zip_sha256": args.artifact_zip_sha256, "fresh": args.fresh_producer}
+        passed = publish_receipt(staged, evidence, args.runner_exit_code, source, run_id, sources, identity, deadline)
+    # A zero-exit runner with absent/invalid/failed staging cannot make the step
+    # succeed. A failed runner gets sanitized evidence, then its status is kept
+    # by the workflow. No cleanup or retry is performed here.
+    return 0 if passed or args.runner_exit_code != 0 else 1
+
+
 def profiles(root, der, effects):
     effects.effect("trust")
     result = {}
@@ -1282,10 +1764,15 @@ class Proxy(http.server.HTTPServer):
         while not self.closing:
             try:
                 self.handle_request()
-            except Exception:
-                if not self.closing:
+            except Exception as error:
+                if not owned_socket_closed(error, self.closing):
                     self.failure = True
                 return
+
+    def handle_error(self, _request, _address):
+        # BaseServer catches dispatch errors before the accept loop sees them.
+        # Latch them without its default raw traceback/address logging.
+        self.failure = True
 
     def process_request(self, connection, address):
         with self.lock:
@@ -1297,23 +1784,36 @@ class Proxy(http.server.HTTPServer):
             self.workers.append(worker)
             worker.start()
 
+    def record(self, label):
+        with self.lock:
+            self.counts[label] = self.counts.get(label, 0) + 1
+
     def worker(self, connection, address):
+        accepted = False
         try:
             connection.settimeout(5)
             connection.do_handshake()
-            with self.lock:
-                self.counts["tls_accepted"] = self.counts.get("tls_accepted", 0) + 1
+            accepted = True
+            self.record("tls_accepted")
+            # BaseRequestHandler also finishes/flushes in its constructor. Its
+            # client-side errors belong to the post-handshake abort category.
             self.finish_request(connection, address)
-        except ssl.SSLError:
-            with self.lock:
-                self.counts["tls_refused"] = self.counts.get("tls_refused", 0) + 1
-        except Exception:
-            if not self.closing:
+        except CLIENT_ABORTS:
+            self.record("client_aborted" if accepted else "tls_refused")
+        except Exception as error:
+            if not owned_socket_closed(error, self.closing):
                 self.failure = True
         finally:
-            connection.close()
-            with self.lock:
-                self.connections.discard(connection)
+            try:
+                connection.close()
+            except CLIENT_ABORTS:
+                self.record("client_aborted" if accepted else "tls_refused")
+            except Exception as error:
+                if not owned_socket_closed(error, self.closing):
+                    self.failure = True
+            finally:
+                with self.lock:
+                    self.connections.discard(connection)
 
     def close(self, deadline):
         deadline.check()
@@ -1341,80 +1841,131 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def backend_call(self, operation, *args, **kwargs):
+        # Never misclassify a reset/timeout on the backend or proxy machinery
+        # as a benign browser abort, even if handler.finish later masks it.
+        try:
+            return operation(*args, **kwargs)
+        except Exception:
+            self.server.failure = True
+            raise Refusal("proxy_backend") from None
+
     def do_GET(self):
         server = self.server
-        upgrade = self.headers.get("Upgrade", "").lower()
-        require(public_request_allowed(self.path, self.headers.get("Host"), upgrade, server.paths,
+        # Reject ambiguity before scalar allowlist evaluation, traffic counters,
+        # backend allocation or forwarding, including WebSocket upgrade headers.
+        hosts, upgrades = self.headers.get_all("Host", []), self.headers.get_all("Upgrade", [])
+        require(len(hosts) == 1 and len(upgrades) <= 1, "request_header_multiplicity")
+        upgrade = upgrades[0].lower() if upgrades else ""
+        require(public_request_allowed(self.path, hosts[0], upgrade, server.paths,
                                        server.server_port), "request_allowlist")
-        require(not self.headers.get("Content-Length") and not self.headers.get("Transfer-Encoding"), "request_body")
-        with server.lock:
-            label = "websocket" if upgrade == "websocket" else "http_get"
-            server.counts[label] = server.counts.get(label, 0) + 1
+        require("Content-Length" not in self.headers and "Transfer-Encoding" not in self.headers, "request_body")
+        server.record("websocket" if upgrade == "websocket" else "http_get")
         # Shipped fragments contain a bare WSS origin, so Chromium requests
         # Upgrade at '/', not '/ws'. Preserve the real upgrade and subprotocol.
         if upgrade == "websocket":
             self.websocket()
             return
-        backend = http.client.HTTPConnection("127.0.0.1", 18377, timeout=5)
+        backend = self.backend_call(http.client.HTTPConnection, "127.0.0.1", 18377, timeout=5)
         try:
-            backend.request("GET", self.path, headers={"Host": self.headers["Host"]})
-            response = backend.getresponse()
-            data = response.read(LIMITS["individual"] + 1)
+            self.backend_call(backend.request, "GET", self.path, headers={"Host": self.headers["Host"]})
+            response = self.backend_call(backend.getresponse)
+            data = self.backend_call(response.read, LIMITS["individual"] + 1)
             cap("individual", len(data))
+            headers = self.backend_call(response.getheaders)
             self.send_response(response.status)
-            for key, value in response.getheaders():
+            for key, value in headers:
                 if key.lower() not in {"connection", "content-length", "transfer-encoding"}:
                     self.send_header(key, value)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
         finally:
-            backend.close()
+            self.backend_call(backend.close)
 
     def websocket(self):
         require(self.headers.get("Upgrade", "").lower() == "websocket", "request_upgrade")
-        backend = socket.create_connection(("127.0.0.1", 18377), timeout=5)
+        backend = self.backend_call(socket.create_connection, ("127.0.0.1", 18377), timeout=5)
         with self.server.lock:
             self.server.connections.add(backend)
         try:
             headers = "".join(f"{k}: {v}\r\n" for k, v in self.headers.items())
-            backend.sendall((f"GET {self.path} HTTP/1.1\r\n" + headers + "\r\n").encode("latin1"))
+            self.backend_call(backend.sendall, (f"GET {self.path} HTTP/1.1\r\n" + headers + "\r\n").encode("latin1"))
             response = bytearray()
             while b"\r\n\r\n" not in response:
-                chunk = backend.recv(4096)
+                chunk = self.backend_call(backend.recv, 4096)
                 require(bool(chunk), "websocket_upgrade")
                 response.extend(chunk)
                 cap("result", len(response))
             require(response.startswith(b"HTTP/1.1 101 "), "websocket_upgrade")
             self.connection.sendall(response)
             with selectors.DefaultSelector() as selector:
-                selector.register(backend, selectors.EVENT_READ, self.connection)
-                selector.register(self.connection, selectors.EVENT_READ, backend)
+                self.backend_call(selector.register, backend, selectors.EVENT_READ, self.connection)
+                self.backend_call(selector.register, self.connection, selectors.EVENT_READ, backend)
                 while True:
                     self.server.operations.budget.check()
-                    for key, _ in selector.select(0.1):
-                        chunk = key.fileobj.recv(16384)
+                    for key, _ in self.backend_call(selector.select, 0.1):
+                        chunk = (self.backend_call(backend.recv, 16384) if key.fileobj is backend
+                                 else self.connection.recv(16384))
                         if not chunk:
                             return
-                        key.data.sendall(chunk)
+                        if key.data is backend:
+                            self.backend_call(backend.sendall, chunk)
+                        else:
+                            self.connection.sendall(chunk)
         finally:
-            backend.close()
-            with self.server.lock:
-                self.server.connections.discard(backend)
+            try:
+                self.backend_call(backend.close)
+            finally:
+                with self.server.lock:
+                    self.server.connections.discard(backend)
 
     def handle_one_request(self):
         try:
-            super().handle_one_request()
-            if getattr(self, "command", "GET") != "GET":
-                self.server.failure = True
-        except Exception:
-            if not self.server.closing:
+            # Keep stdlib parsing and its request-line bound, but dispatch only
+            # GET and do not swallow TimeoutError as the stdlib dispatcher does.
+            self.raw_requestline = self.rfile.readline(65537)
+            require(len(self.raw_requestline) <= 65536, "request_line")
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+            words = self.raw_requestline.split()
+            require(words and words[0] == b"GET", "request_method")
+            require(self.parse_request(), "request_parse")
+            self.do_GET()
+            self.wfile.flush()
+        except CLIENT_ABORTS:
+            self.server.record("client_aborted")
+            self.close_connection = True
+        except Exception as error:
+            if not owned_socket_closed(error, self.server.closing):
                 self.server.failure = True
             raise
 
-    def do_POST(self):
+    def finish(self):
+        # The stdlib silently discards socket errors on this final flush.
+        # Classify every operation and close both streams, so a later client
+        # abort cannot mask an earlier internal error during handler finishing.
+        operations = [] if self.wfile.closed else [self.wfile.flush]
+        operations.extend((self.wfile.close, self.rfile.close))
+        first_error = None
+        for operation in operations:
+            try:
+                operation()
+            except CLIENT_ABORTS:
+                self.server.record("client_aborted")
+            except Exception as error:
+                if not owned_socket_closed(error, self.server.closing):
+                    self.server.failure = True
+                    first_error = first_error or error
+        if first_error is not None:
+            raise first_error
+
+    def send_error(self, code, message=None, explain=None):
+        # Parse errors remain fatal even if the client aborts during the error
+        # response, masking the parser's original rejection.
         self.server.failure = True
-        self.send_error(405)
+        super().send_error(code, message, explain)
 
 
 # No test-root, TLS-ignore, alternate browser, or NSS path in this probe.
@@ -1423,18 +1974,39 @@ const fs = require('node:fs');
 const path = require('node:path');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const {chromium} = require(path.join(input.candidate, 'frontend/node_modules/@playwright/test'));
-// Playwright 1.62 bundles its default switches without exporting them; check
-// the observed command line against a policy rather than a copied list.
-const FORBIDDEN = /no-sandbox|ignore-certificate|ignore-ssl|insecure-localhost|test-root|unsafely-treat-insecure|disable-web-security|allow-running-insecure|host-resolver-rules|proxy-server|proxy-pac|remote-debugging-port|load-extension|disable-site-isolation/i;
-function argvAllowed(argv, userDataDir) {
-  if (!Array.isArray(argv) || argv.length < 2 || !argv.every(v => typeof v === 'string')) return false;
+// Same declarative policy and predicate as the extracted-package driver.
+// Normalize case/underscore switch aliases, reject every sandbox mention, and
+// the finite zygote/single-process/in-process-GPU isolation-weakening family.
+// Do not reject /unsafe/: pinned Playwright uses SwiftShader/self-XSS flags.
+const LAUNCH_ARGUMENT_POLICY = {"switchPattern":"^--([A-Za-z][A-Za-z0-9_-]*)(?:=([^\\u0000-\\u001f\\u007f]*))?$","forbiddenPattern":"sandbox|ignore-certificate|ignore-ssl|insecure-localhost|test-root|unsafely-treat-insecure|disable-web-security|allow-running-insecure|host-resolver-rules|proxy-server|proxy-pac|proxy-bypass-list|remote-debugging-port|load-extension|disable-site-isolation","processIsolationNames":["no-zygote","single-process","in-process-gpu"]};
+function launchArgumentsAllowed(argv, userDataDir) {
+  if (!Array.isArray(argv) || argv.length < 2 || !argv.every((argument) => typeof argument === 'string')) return false;
   const args = argv.slice(1);
-  const profiles = args.filter(v => v.startsWith('--user-data-dir='));
-  return profiles.length === 1 && profiles[0] === '--user-data-dir=' + userDataDir
-    && ['--use-mock-keychain', '--enable-automation', '--remote-debugging-pipe'].every(v => args.includes(v))
-    && args.some(v => v === '--headless' || v.startsWith('--headless='))
-    && args.every(v => v.startsWith('--') || v === 'about:blank')
-    && !args.some(v => FORBIDDEN.test(v));
+  const switches = [];
+  const syntax = new RegExp(LAUNCH_ARGUMENT_POLICY.switchPattern);
+  const forbidden = new RegExp(LAUNCH_ARGUMENT_POLICY.forbiddenPattern, 'i');
+  for (const argument of args) {
+    if (argument === 'about:blank') continue;
+    const match = syntax.exec(argument);
+    if (!match || match[0] !== argument) return false;
+    const name = match[1].toLowerCase().replace(/_/g, '-');
+    const value = match[2] ?? '';
+    if (forbidden.test(name) || forbidden.test(value.replace(/_/g, '-'))
+      || LAUNCH_ARGUMENT_POLICY.processIsolationNames.includes(name)) return false;
+    switches.push({ name, value });
+  }
+  const profiles = switches.filter((entry) => entry.name === 'user-data-dir');
+  return profiles.length === 1 && profiles[0].value === userDataDir
+    && ['--use-mock-keychain', '--enable-automation', '--remote-debugging-pipe'].every((flag) => args.includes(flag))
+    && args.some((argument) => argument === '--headless' || argument.startsWith('--headless='));
+}
+const policyProfile = '/owned-policy-profile';
+const policyArgv = ['chromium', '--user-data-dir='+policyProfile, '--use-mock-keychain',
+  '--enable-automation', '--remote-debugging-pipe', '--headless', 'about:blank'];
+if (!launchArgumentsAllowed(policyArgv, policyProfile)
+    || ['--proxy-server=http://invalid', '--proxy-pac-url=http://invalid', '--proxy-bypass-list=*']
+      .some(flag => launchArgumentsAllowed([...policyArgv,flag], policyProfile))) {
+  throw new Error('launch argument policy regression');
 }
 const owned = new Set();
 const observations = [];
@@ -1504,7 +2076,7 @@ async function check(context, port, refusal) {
     version=info.product.replace(/^Chrome\//,'');
     if (version !== '151.0.7922.34') throw new Error('browser identity mismatch');
     const {arguments:argv}=await session.send('Browser.getBrowserCommandLine');
-    argvOK=argvAllowed(argv, path.join(input.profiles,'controller'));
+    argvOK=launchArgumentsAllowed(argv, path.join(input.profiles,'controller'));
     if (!argvOK) throw new Error('launch argument mismatch');
     await check(trusted,18443,null); observations.push('trusted_profile_accepts_ip');
     await check(trusted,18444,'ERR_CERT_AUTHORITY_INVALID'); observations.push('trusted_profile_refuses_unknown_ca');
@@ -1575,25 +2147,38 @@ def tls_controls(root, operations, binary, version, revision, candidate):
 
 
 def runtime(args):
-    require(admission_policy({"system": platform.system(), "machine": platform.machine(),
-            "enabled": os.environ.get("HERDR_DARWIN_PACKAGE_BROWSER_CI"),
-            "repository": os.environ.get("GITHUB_REPOSITORY"), "ref": os.environ.get("GITHUB_REF"),
-            "attempt": os.environ.get("GITHUB_RUN_ATTEMPT")}), "ci_admission")
+    budget = Budget()  # Admission acquisition consumes the unchanged phase/global caps.
+    ci_context = {"system": platform.system(), "machine": platform.machine(),
+        "enabled": os.environ.get("HERDR_DARWIN_PACKAGE_BROWSER_CI"),
+        "repository": os.environ.get("GITHUB_REPOSITORY"), "ref": os.environ.get("GITHUB_REF"),
+        "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"), "event_name": os.environ.get("GITHUB_EVENT_NAME"),
+        "candidate_sha": os.environ.get("GITHUB_SHA"), "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "runner_environment": os.environ.get("RUNNER_ENVIRONMENT"), "image_os": os.environ.get("ImageOS")}
+    require(ci_context_allowed(ci_context), "ci_admission")
+    require(launchctl_packet_allowed(args.launchctl_query_grant), "launchctl_authority")
     candidate = Path(__file__).resolve().parents[1]
-    source = os.environ.get("GITHUB_SHA", "")
-    require(re.fullmatch(r"[0-9a-f]{40}", source), "candidate_sha")
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    observe = lambda: first_push_observation(ci_context, event_path, candidate)
+    launchctl_context = observe()
+    require(launchctl_authorized(args.launchctl_query_grant, launchctl_context), "launchctl_authority")
+    source, run_id = launchctl_context["candidate_sha"], int(launchctl_context["run_id"])
     producer(args.producer_sha, args.producer_run, args.artifact_id, args.artifact_zip_sha256,
-             args.fresh_producer, source, int(os.environ["GITHUB_RUN_ID"]))
+             args.fresh_producer, source, run_id)
+    # Runtime evidence is PRIVATE STAGING ONLY, never the workflow upload path.
+    # Publication is a separate offline invocation after this command exits.
     root, evidence = args.private_root, args.evidence
     paths_admission(root, evidence, Path(os.environ["RUNNER_TEMP"]).resolve(strict=True), args.budget_seconds)
     os.umask(0o077)
     root_identity, evidence_identity = None, None
-    budget, cleanup = Budget(), Cleanup()
-    operations = Operations(root, {}, budget, cleanup)
+    cleanup = Cleanup()
+    operations = Operations(root, {}, budget, cleanup, EffectGate(True,
+        launchctl_grant=args.launchctl_query_grant, launchctl_context=launchctl_context, launchctl_observe=observe))
     receipt = {"schemaVersion": 1, "candidate_sha": source, "result": "fail", "phases": [],
+               "launchctl_query_grant_id": LAUNCHCTL_GRANT_ID, "launchctl_query_pinned_parent": LAUNCHCTL_PINNED_PARENT,
+               "github_run_id": run_id, "github_run_attempt": int(launchctl_context["attempt"]),
                "producer": {"sha": args.producer_sha, "run": args.producer_run, "artifact": args.artifact_id,
                             "zip_sha256": args.artifact_zip_sha256, "fresh": args.fresh_producer},
-               "cases": [], "cleanup": False, "scope": "darwin_arm64_byo_only",
+               "cases": [], "request_counts": [], "cleanup": False, "scope": "darwin_arm64_byo_only",
                "owned_cleanup": cleanup.evidence}
     initial_sources = {}
     failure, proxy_servers, socket_fixture = None, [], None
@@ -1700,9 +2285,8 @@ def runtime(args):
                                           cwd=kwargs.get("cwd"), env=kwargs.get("env"))
             helper.subprocess = SimpleNamespace(run=helper_run, DEVNULL=subprocess.DEVNULL,
                 PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired)
-            _, binary = helper.verify_archive(archive, root / "checksums.txt", version, args.producer_sha,
-                root / "release", lambda _: budget.check(), lambda _: None, lambda *_: None,
-                target="darwin/arm64", verifier_timeout=10)
+            _, binary = verify_producer_archive(archive, root / "checksums.txt", hashes, version,
+                args.producer_sha, root / "release", budget, helper.verify_archive)
             receipt["manifest_sha256"] = sha(read_bounded(root / "release/release-manifest.json", LIMITS["receipt"]))
             receipt["binary_sha256"] = sha(read_bounded(binary, LIMITS["individual"]))
             compiler = command(["go", "version", "-m", str(binary)])
@@ -1733,10 +2317,10 @@ def runtime(args):
                 with socket_fixture.lock:
                     return (socket_operations_allowed(socket_fixture.counts)
                             and (socket_fixture.stopped.is_set() or socket_fixture.thread.is_alive()))
-            operations.guards.append(socket_allowed)
+            operations.add_guard("herdr_socket", socket_allowed)
             for port, leaf in ((18443, "valid"), (18444, "unknown"), (18445, "wrong-host")):
                 proxy_servers.append(Proxy(port, root, leaf, operations))
-            operations.guards.append(lambda: proxy_operations_allowed(proxy_servers))
+            operations.add_guard("proxy", lambda: proxy_operations_allowed(proxy_servers))
             relay_key, instance = os.urandom(16).hex(), os.urandom(16).hex()
             env_file = root / "runtime/relay.env"
             env_file.write_text(f"HERDR_RELAY_TOKEN={relay_key}\nHERDR_RELAY_INSTANCE_ID={instance}\n"
@@ -1755,7 +2339,7 @@ def runtime(args):
                 if fake_path.exists():
                     fake_operation_summary(read_bounded(fake_path, 65536))
                 return True
-            operations.guards.append(fake_allowed)
+            operations.add_guard("fake_herdr", fake_allowed)
             wrapper_path = ("/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:"
                 + env["HOME"] + "/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + env["PATH"])
             launchctl_path = shutil.which("launchctl", path=wrapper_path)
@@ -1775,14 +2359,12 @@ def runtime(args):
                 require(shutil.which("launchctl", path=wrapper_path) == launchctl_path
                         and sha(read_bounded(Path(launchctl_path), LIMITS["individual"])) == guard["launchctl_sha256"],
                         "service_guard_command_drift")
-                operations.effects.effect("launchctl")
-                child, setup = operations.capture(launcher_args, 70, cwd=root / "release", link_origin=ORIGIN)
+                child, setup = operations.capture_launcher(launcher_args, guard, cwd=root / "release", link_origin=ORIGIN)
                 require(service_inputs_allowed(plist.exists(), plist.is_symlink(),
                                                shutil.which("launchctl", path=wrapper_path)), "private_service_definition")
                 require(shutil.which("launchctl", path=wrapper_path) == launchctl_path
                         and sha(read_bounded(Path(launchctl_path), LIMITS["individual"])) == guard["launchctl_sha256"],
                         "service_guard_command_drift")
-                guard["starts"] += 1
                 guard["observations"].append({"ordinal": guard["starts"],
                     "private_plist_before_absent": True, "private_plist_after_absent": True,
                     "setup_ready_seconds": child.startup_seconds, "loaded_service": False,
@@ -1823,9 +2405,9 @@ def runtime(args):
                 observation = browser_result(result.stdout, mode, result.returncode)
                 observation.update(seconds=result.seconds, stdin_bytes=len(browser_payload))
                 receipt["cases"].append(observation)
-                require(proxy_operations_allowed(proxy_servers), "request_allowlist")
-            require(socket_allowed(), "herdr_allowlist")
-            receipt["request_counts"] = [dict(server.counts) for server in proxy_servers]
+                operations.check()
+            operations.check()
+            receipt["request_counts"] = proxy_request_counts(proxy_servers)
             receipt["fixture_operations"] = {
                 "fake": fake_operation_summary(read_bounded(fake_path, 65536), complete=True),
                 "socket": socket_fixture.operation_summary()}
@@ -1835,7 +2417,7 @@ def runtime(args):
             require(initial_sources == {path: sha(read_bounded(candidate / path, 8 * 1024 * 1024)) for path in FILES}, "source_drift")
             require(not command(["git", "status", "--porcelain=v1", "--untracked-files=all"]), "candidate_dirty")
     except (Exception, SystemExit, KeyboardInterrupt) as error:
-        failure = str(error) if isinstance(error, Refusal) else "unexpected_exception"
+        failure = safe_failure_code(error)
         receipt["failure_detail"] = failure_detail(error, failed_command or None)
     finally:
         os.environ.pop("GH_TOKEN", None)
@@ -1852,15 +2434,14 @@ def runtime(args):
                     # Final observations follow every owned closure/reap: late
                     # failures cannot race the last pre-cleanup acceptance check.
                     try:
-                        for guard in operations.guards:
-                            deadline.check()
-                            require(guard() is True, "owned_operation_allowlist")
+                        operations.check_guards(deadline.check)
                         if failure is None and socket_fixture is not None:
                             receipt["fixture_operations"] = {"socket": socket_fixture.operation_summary(),
                                 "fake": fake_operation_summary(read_bounded(fake_path, 65536), complete=True)}
-                        receipt["request_counts"] = [dict(server.counts) for server in proxy_servers]
-                    except Exception:
-                        failure = failure or "owned_operation_allowlist"
+                    except Exception as error:
+                        if failure is None:
+                            failure = safe_failure_code(error)
+                            receipt["failure_detail"] = failure_detail(error)
                     # Even a late guard failure still attempts owned-root cleanup.
                     if root_identity is not None:
                         remove_owned_tree(root, root_identity, deadline)
@@ -1886,9 +2467,14 @@ def runtime(args):
                     "exit_code": 0 if receipt["cleanup"] else 1, "cap_seconds": PHASES[4], "seconds": round(seconds, 3)})
                 receipt["captured_output_bytes"] = operations.raw
                 receipt["dependency_payload_bytes_peak"] = operations.storage_peak
+                # Snapshot even if cleanup or a final guard failed. Failed cells
+                # may have fewer than three allocated proxies, but never raw data.
+                receipt["request_counts"] = proxy_request_counts(proxy_servers)
+                if operations.failure_guard is not None:
+                    receipt["failure_guard"] = operations.failure_guard
                 receipt["result"] = "pass" if failure is None and receipt["cleanup"] and len(receipt["cases"]) == 3 else "fail"
                 if failure:
-                    receipt["failure"] = failure if re.fullmatch(r"[a-z0-9_]{1,80}", failure) else "fixture_refused"
+                    receipt["failure"] = failure if failure in SAFE_FAILURES else "fixture_refused"
                 receipt["source_hashes"] = initial_sources
                 encoded = (json.dumps(receipt, separators=(",", ":")) + "\n").encode()
                 try:
@@ -1906,9 +2492,10 @@ def runtime(args):
                 require(stat.S_ISDIR(current_evidence.st_mode) and evidence.parent.resolve(strict=True) == evidence.parent
                         and (current_evidence.st_dev, current_evidence.st_ino) == (
                             evidence_identity.st_dev, evidence_identity.st_ino), "receipt_parent_drift")
-                with evidence.open("xb") as destination:
-                    destination.write(encoded)
-                deadline.check()  # A slow write/flush can never return a passing exit.
+                # Even a complete staged PASS followed by a deadline/signal
+                # failure cannot be published as PASS: publication requires the
+                # actual completed command's exit status, not these private bytes.
+                write_receipt(evidence, encoded, deadline)
         finally:
             for signum, previous in previous_signals.items():
                 signal.signal(signum, previous)
@@ -1978,6 +2565,8 @@ def offline_check(group):
             "schemaVersion": 1, "candidate_sha": BASE, "candidate_tree": "3" * 40,
             "source_hashes": sources, "producer": producer_id, "scope": "darwin_arm64_byo_only",
             "result": "pass", "version": "1.2.3", "cleanup": True,
+            "launchctl_query_grant_id": LAUNCHCTL_GRANT_ID, "launchctl_query_pinned_parent": LAUNCHCTL_PINNED_PARENT,
+            "github_run_id": 1, "github_run_attempt": 1,
             "archive_hashes": {"herdr-mobile-relay_1.2.3_darwin_arm64.tar.gz": "4" * 64, "checksums.txt": "5" * 64},
             "manifest_sha256": "6" * 64, "binary_sha256": "7" * 64,
             "compiler": {"version": "go1.27.1", "target": "darwin/arm64", "metadata_sha256": "8" * 64},
@@ -2022,15 +2611,246 @@ def offline_check(group):
                            for method, count in (("ping", 1), ("pane.read", 2))]},
             "captured_output_bytes": 100, "dependency_payload_bytes_peak": 1000,
         }
-        def receipt_reject(path, replacement):
+        def receipt_reject(path, replacement, failed=False):
             value = strict_json(encode(valid_receipt), "receipt")
+            if failed:
+                value.update(result="fail", failure="unexpected_exception")
             selected = value
             for part in path[:-1]:
                 selected = selected[part]
             selected[path[-1]] = replacement
             return rejects(lambda: receipt_policy(encode(value), BASE, sources, producer_id))
+        def request_receipts():
+            with_aborts = {**valid_receipt, "request_counts": [
+                {**request, "client_aborted": 2} for request in valid_receipt["request_counts"]]}
+            require(receipt_policy(encode(with_aborts), BASE, sources, producer_id), "offline_abort_receipt")
+            failed = {**with_aborts, "result": "fail", "failure": "owned_operation_allowlist", "failure_guard": "proxy"}
+            require(receipt_policy(encode(failed), BASE, sources, producer_id) is False, "offline_failed_guard_receipt")
+            for name in GUARDS:
+                require(receipt_policy(encode({**failed, "failure_guard": name}), BASE, sources, producer_id) is False,
+                        "offline_named_guard_receipt")
+            partial = {**failed, "failure": "command_failed", "request_counts": []}
+            require(receipt_policy(encode(partial), BASE, sources, producer_id) is False, "offline_partial_request_receipt")
+            missing = dict(failed)
+            del missing["request_counts"]
+            require(rejects(lambda: receipt_policy(encode(missing), BASE, sources, producer_id)), "offline_missing_counts")
+            missing = dict(failed)
+            del missing["failure_guard"]
+            require(rejects(lambda: receipt_policy(encode(missing), BASE, sources, producer_id)), "offline_missing_guard")
+            for bad in (None, "unknown", "https://invalid", 1, []):
+                require(rejects(lambda: receipt_policy(encode({**failed, "failure_guard": bad}), BASE, sources, producer_id)),
+                        "offline_guard_sanitized")
+            for result in (with_aborts, failed):
+                for bad in (True, 1.5, "2", -1, 1000001):
+                    require(rejects(lambda: receipt_policy(encode({**result, "request_counts": [
+                        {"client_aborted": bad}]}), BASE, sources, producer_id)), "offline_abort_count_type")
+                require(rejects(lambda: receipt_policy(encode({**result, "request_counts": [
+                    {"unknown": 1}]}), BASE, sources, producer_id)), "offline_request_label")
+                require(rejects(lambda: receipt_policy(encode({**result, "request_counts": [{}, {}, {}, {}]}),
+                    BASE, sources, producer_id)), "offline_request_count_bound")
+            # Abort counts cannot stand in for the positive traffic or any
+            # negative TLS refusal; negative ports must still serve no HTTP/WSS.
+            for index, label, amount in ((0, "http_get", 0), (0, "websocket", 0), (0, "tls_refused", 0),
+                    (1, "tls_refused", 0), (2, "tls_refused", 0), (1, "http_get", 1), (2, "websocket", 1)):
+                requests = [dict(request) for request in with_aborts["request_counts"]]
+                requests[index][label] = amount
+                require(rejects(lambda: receipt_policy(encode({**with_aborts, "request_counts": requests}),
+                    BASE, sources, producer_id)), "offline_abort_not_a_control")
+            return True
+        def safe_failure_receipts():
+            # Partial progress matching the three retained hosted failure shapes,
+            # with the current request-counter/guard protocol additions. This
+            # checks validity, not an attribution of the hosted guard's cause.
+            early_fields = {"schemaVersion", "candidate_sha", "candidate_tree", "source_hashes", "producer",
+                "scope", "result", "version", "cleanup", "archive_hashes", "tools", "source_proof",
+                "phases", "cases", "owned_cleanup", "request_counts", "captured_output_bytes",
+                "dependency_payload_bytes_peak", "launchctl_query_grant_id", "launchctl_query_pinned_parent",
+                "github_run_id", "github_run_attempt"}
+            early = {key: val for key, val in valid_receipt.items() if key in early_fields}
+            early.update(result="fail", failure="unexpected_exception", cases=[], request_counts=[],
+                phases=[dict(valid_receipt["phases"][i]) for i in (0, 1, 4)],
+                owned_cleanup={**valid_receipt["owned_cleanup"], "children": 11, "listeners": 0})
+            early["phases"][1].update(ok=False, exit_code=1)
+            require(receipt_policy(encode(early), BASE, sources, producer_id) is False, "offline_early_failure")
+            detail = {"type": "FileNotFoundError", "errno": 2, "function": "read_bounded", "line": 141,
+                      "command": None, "exit_code": None}
+            require(receipt_policy(encode({**early, "failure_detail": detail}), BASE, sources, producer_id) is False,
+                    "offline_detailed_early_failure")
+            later = {key: val for key, val in valid_receipt.items() if key not in {"trust_controls", "fixture_operations"}}
+            later.update(result="fail", failure="owned_operation_allowlist", failure_guard="proxy", cases=[],
+                service_guard={**valid_receipt["service_guard"], "starts": 0, "observations": []},
+                phases=[dict(phase) for phase in valid_receipt["phases"]], request_counts=[{}, {}, {}])
+            later["phases"][3].update(ok=False, exit_code=1)
+            require(receipt_policy(encode(later), BASE, sources, producer_id) is False, "offline_late_guard_failure")
+            uncertain = {**early, "failure": "cleanup_uncertain", "cleanup": False,
+                "owned_cleanup": {**early["owned_cleanup"], "surviving_children": None, "surviving_listeners": None,
+                    "unobserved_children": 11, "closure_errors": ["cleanup_deadline", "cleanup_incomplete"],
+                    "uncertain": True, "root_deleted": False}}
+            require(receipt_policy(encode(uncertain), BASE, sources, producer_id) is False, "offline_uncertain_failure")
+            no_sources = {**early, "source_hashes": {}}
+            require(receipt_policy(encode(no_sources), BASE, {}, producer_id) is False, "offline_pre_source_failure")
+            return True
+
+        def sensitive_failures():
+            path_value = "/private/tmp/credential"
+            token_value = "g8Qv3mZ6rT2pN9xL4cW7sK5uH0dF1jB8aE6yR3iM9oP2nS4tV7zX5"
+            failed = {**valid_receipt, "result": "fail", "failure": "unexpected_exception",
+                "failure_detail": {"type": "Refusal", "errno": None, "function": "check", "line": 1,
+                                   "command": None, "exit_code": None}}
+            def string_paths(item, prefix=()):
+                if type(item) is dict:
+                    for key, nested in item.items():
+                        yield from string_paths(nested, (*prefix, key))
+                elif type(item) is list:
+                    for index, nested in enumerate(item):
+                        yield from string_paths(nested, (*prefix, index))
+                elif type(item) is str:
+                    yield prefix
+            # Mutate every string leaf, not just tools.curl or a known URL.
+            for path in string_paths(failed):
+                for replacement in (path_value, "C:\\private\\credential", "../private/credential", token_value, token_value.lower()):
+                    value = strict_json(encode(failed), "receipt")
+                    selected = value
+                    for part in path[:-1]:
+                        selected = selected[part]
+                    selected[path[-1]] = replacement
+                    try:
+                        receipt_policy(encode(value), BASE, sources, producer_id)
+                    except Refusal as error:
+                        require(str(error) in {"receipt_schema", "receipt_sensitive", "receipt_identity"}
+                                and replacement not in str(error), "offline_receipt_no_echo")
+                    else:
+                        return False
+            for field in valid_receipt:
+                require(receipt_reject((field,), "opaque_invalid_field", failed=True), "offline_failed_field_type")
+            for field in ("command", "function", "type"):
+                for bad in (path_value, token_value):
+                    detail = {**failed["failure_detail"], field: bad}
+                    require(rejects(lambda: receipt_policy(encode({**failed, "failure_detail": detail}),
+                            BASE, sources, producer_id)), "offline_failed_diagnostic_field")
+            for bad in (path_value, token_value):
+                require(rejects(lambda: receipt_policy(encode({**failed, "failure_guard": bad}),
+                        BASE, sources, producer_id)), "offline_failed_guard_field")
+            require(safe_failure_code(Refusal(token_value)) == "fixture_refused"
+                    and command_label([path_value, token_value]) == "unknown", "offline_safe_diagnostics")
+            custom_error = type(token_value, (RuntimeError,), {})(path_value)
+            require(failure_detail(custom_error)["type"] == "Unknown", "offline_safe_exception")
+            return safe_failure_receipts()
+
+        def publication_cases():
+            # Same writer and publication function as runtime/workflow, with
+            # memory-only files and clocks. No filesystem allocation or timer.
+            now = [0.0]
+            clock = lambda: now[0]
+            class ReceiptFile:
+                def __init__(self, data=None, delay_at=None):
+                    self.data, self.delay_at = data, delay_at
+                def lstat(self):
+                    if self.data is None:
+                        raise FileNotFoundError("inert absent staging")
+                    return SimpleNamespace(st_mode=stat.S_IFREG, st_nlink=1, st_size=len(self.data),
+                                           st_dev=1, st_ino=2, st_mtime_ns=3)
+                def open(self, mode):
+                    if mode == "rb":
+                        return io.BytesIO(self.data)
+                    require(mode == "xb" and self.data is None, "offline_receipt_exclusive")
+                    owner = self
+                    class Writer(io.BytesIO):
+                        def write(self, data):
+                            count = super().write(data)
+                            if owner.delay_at == "write":
+                                now[0] = 30
+                            return count
+                        def close(self):
+                            owner.data = self.getvalue()
+                            super().close()
+                            if owner.delay_at == "close":
+                                now[0] = 30
+                    return Writer()
+            def publish(staged, status):
+                output = ReceiptFile()
+                qualified = publish_receipt(staged, output, status, BASE, 1, sources, producer_id,
+                                            CleanupDeadline(seconds=5, clock=clock))
+                observed = strict_json(output.data, "receipt")
+                require(receipt_policy(output.data, BASE, observed["source_hashes"], producer_id) is qualified,
+                        "offline_publication_validated")
+                require(len(output.data) <= LIMITS["receipt"], "offline_publication_bound")
+                return qualified, observed, output.data
+            # The original failure: all PASS bytes were written before the
+            # post-write deadline check refused. They remain PRIVATE and are
+            # never uploaded/published as PASS after the failed command exits.
+            for delay in ("write", "close"):
+                now[0] = 0
+                staged = ReceiptFile(delay_at=delay)
+                require(rejects(lambda: write_receipt(staged, encode(valid_receipt), CleanupDeadline(clock=clock))),
+                        "offline_slow_staging_refused")
+                require(strict_json(staged.data, "receipt")["result"] == "pass", "offline_stale_pass_reproduced")
+                now[0] = 0  # Separate post-exit publisher cap, not a renewed runtime budget.
+                qualified, observed, _ = publish(staged, 1)
+                require(not qualified and observed["result"] == "fail" and observed["failure"] == "command_failed"
+                        and "archive_hashes" not in observed, "offline_slow_write_no_published_pass")
+            now[0] = 0
+            staged = ReceiptFile()
+            write_receipt(staged, encode(valid_receipt), CleanupDeadline(clock=clock))
+            qualified, observed, _ = publish(staged, 0)
+            require(qualified and observed == valid_receipt, "offline_publication_positive")
+            qualified, observed, _ = publish(staged, 17)
+            require(not qualified and observed["result"] == "fail" and observed["failure_detail"]["exit_code"] == 17
+                    and "cases" not in observed and staged.data == encode(valid_receipt), "offline_failed_exit_stale_pass")
+            failed = {**valid_receipt, "result": "fail", "failure": "owned_operation_allowlist", "failure_guard": "proxy"}
+            qualified, observed, _ = publish(ReceiptFile(encode(failed)), 1)
+            require(not qualified and observed == failed, "offline_sanitized_failure_preserved")
+            qualified, observed, _ = publish(ReceiptFile(encode(failed)), 0)
+            require(not qualified and observed == failed, "offline_zero_exit_failed_receipt_not_pass")
+            early = {**failed, "source_hashes": {FILES[0]: sources[FILES[0]]}}
+            qualified, observed, _ = publish(ReceiptFile(encode(early)), 1)
+            require(not qualified and observed == early, "offline_partial_source_failure_preserved")
+            for bad in ({**valid_receipt, "github_run_id": 2}, {**valid_receipt, "candidate_sha": "c" * 40},
+                    {**valid_receipt, "source_hashes": {**sources, FILES[0]: "a" * 64}},
+                    {**valid_receipt, "producer": {**producer_id, "artifact": 2}}):
+                qualified, observed, _ = publish(ReceiptFile(encode(bad)), 0)
+                require(not qualified and observed["result"] == "fail" and observed["failure"] == "receipt_validation",
+                        "offline_publication_exact_binding")
+            for bad in (None, b"{", b" " * (LIMITS["receipt"] + 1), encode({**failed, "secret": "opaque_marker"})):
+                qualified, observed, data = publish(ReceiptFile(bad), 1)
+                require(not qualified and observed["result"] == "fail" and b"opaque_marker" not in data,
+                        "offline_invalid_staging_no_echo")
+            for status in (True, -1, 256):
+                output = ReceiptFile()
+                require(rejects(lambda: publish_receipt(staged, output, status, BASE, 1, sources, producer_id,
+                            CleanupDeadline(clock=clock))) and output.data is None, "offline_publication_exit_type")
+            # Source-bind the exit/publication/upload wiring as well as testing
+            # its functions. The runtime path is never the uploaded path.
+            workflow = read_bounded(Path(__file__).resolve().parents[1] / FILES[0], 65536).decode()
+            require('runner_status=0' in workflow and '|| runner_status=$?' in workflow
+                    and '--runner-exit-code "$runner_status"' in workflow and 'exit "$runner_status"' in workflow
+                    and '--publish-receipt' in workflow
+                    and '--evidence "$RUNNER_TEMP/herdr-dpb-staging/darwin-package-browser.json"' in workflow
+                    and 'path: ${{ runner.temp }}/herdr-dpb-evidence/darwin-package-browser.json' in workflow
+                    and 'path: ${{ runner.temp }}/herdr-dpb-staging' not in workflow, "offline_publication_workflow")
+            return True
+
         def receipt_cases():
+            # New first-push identity fields are mandatory on PASS; every
+            # present field is typed on FAIL as well (never an opaque sink).
+            for field in ("launchctl_query_grant_id", "launchctl_query_pinned_parent", "github_run_id", "github_run_attempt"):
+                missing = dict(valid_receipt)
+                del missing[field]
+                require(rejects(lambda: receipt_policy(encode(missing), BASE, sources, producer_id)), "offline_missing_grant_identity")
+            for failed in (False, True):
+                for field, invalid in (("launchctl_query_grant_id", ("q2-parent-launchctl-print-grant-20261008", None)),
+                        ("launchctl_query_pinned_parent", ("0" * 40, LAUNCHCTL_PINNED_PARENT.upper(), "1" * 40)),
+                        ("github_run_id", (True, 0, -1, 10**15, "1", 1.0)),
+                        ("github_run_attempt", (True, 0, 2, "1", 1.0)),
+                        ("candidate_sha", (BASE.upper(), BASE[:-1], "not_a_revision"))):
+                    for bad in invalid:
+                        require(receipt_reject((field,), bad, failed=failed), "offline_grant_identity_type")
+            partial = {**valid_receipt, "result": "fail", "failure": "unexpected_exception"}
+            for field in ("launchctl_query_grant_id", "launchctl_query_pinned_parent", "github_run_id", "github_run_attempt"):
+                del partial[field]
+            require(receipt_policy(encode(partial), BASE, sources, producer_id) is False, "offline_partial_grant_identity")
             return all(receipt_reject(path, replacement) for path, replacement in (
+                (("launchctl_query_grant_id",), "unknown_grant"),
                 (("cases",), valid_receipt["cases"][:-1]),
                 (("cases", 0, "cases"), list(ENROLL[:-1])),
                 (("cases", 0, "assertions", "reader_mutation_denied"), False),
@@ -2052,6 +2872,7 @@ def offline_check(group):
         operations = {
             "valid_result": lambda: browser_result(encode(valid), "enroll", 0)["ok"]
                 and receipt_policy(encode(valid_receipt), BASE, sources, producer_id)
+                and request_receipts()
                 and receipt_policy(encode({**valid_receipt, "result": "fail", "failure": "cap_raw",
                     "captured_output_bytes": LIMITS["raw"] + 16384}), BASE, sources, producer_id) is False,
             "malformed_json": lambda: rejects(lambda: browser_result(b"{", "enroll", 0)),
@@ -2068,12 +2889,14 @@ def offline_check(group):
                 and rejects(lambda: browser_result(encode({**valid, "notification_delivery_disabled": False}), "enroll", 0))
                 and receipt_reject(("phases", 3, "exit_code"), 1)
                 and receipt_reject(("phases", 3, "seconds"), 630)
-                and receipt_reject(("cases", 2, "exit_code"), 1),
+                and receipt_reject(("cases", 2, "exit_code"), 1)
+                and publication_cases(),
             "invalid_producer": lambda: rejects(lambda: producer(BASE, 1, 1, "0" * 64, False, BASE, 1)),
             "invalid_budget_or_paths": lambda: rejects(lambda: paths_admission(Path("relative"), Path("receipt"), Path("/tmp"), 1260)),
             "sensitive_receipt_fields": lambda: rejects(lambda: browser_result(encode({**valid, "secret": "x"}), "enroll", 0))
                 and receipt_reject(("tools", "secret"), "offline_marker")
-                and receipt_reject(("tools", "curl"), "https://invalid/#setup=offline_marker"),
+                and receipt_reject(("tools", "curl"), "https://invalid/#setup=offline_marker")
+                and sensitive_failures(),
         }
     elif group == "archive":
         valid_entries = [Entry(".", "directory", 0), Entry("web", "directory", 0),
@@ -2087,6 +2910,88 @@ def offline_check(group):
             require(entry_policy(valid_entries, "tar")["web/index.html"] == "file", "offline_archive")
             manifest_policy(manifest, "1.2.3", BASE, payload)
             checksum_policy(("0" * 64 + "  bundle.tar.gz\n").encode(), "bundle.tar.gz", "0" * 64)
+            # Exercise the actual post-install capture/callback boundary using
+            # in-memory paths and an injected verifier. Extraction and packaged
+            # binary execution are separate recorded effects, never real ones.
+            name = "herdr-mobile-relay_1.2.3_darwin_arm64.tar.gz"
+            original = b"producer archive"
+            original_checksums = (sha(original) + "  " + name + "\n").encode()
+            hashes = {name: sha(original), "checksums.txt": sha(original_checksums)}
+            def exercise(archive_bytes, checksum_bytes, tamper=None):
+                files, directories, effects = {}, set(), []
+                class MemoryPath:
+                    def __init__(self, path):
+                        self.path = Path(path)
+                    @property
+                    def parent(self):
+                        return MemoryPath(self.path.parent)
+                    @property
+                    def name(self):
+                        return self.path.name
+                    def __truediv__(self, child):
+                        return MemoryPath(self.path / child)
+                    def mkdir(self, mode):
+                        require(mode == 0o700 and self.path not in directories, "offline_capture_private_fresh")
+                        directories.add(self.path)
+                    def lstat(self):
+                        data = files[self.path]
+                        return SimpleNamespace(st_mode=stat.S_IFREG, st_nlink=1, st_size=len(data),
+                                               st_dev=1, st_ino=2, st_mtime_ns=3)
+                    def open(self, mode):
+                        if mode == "rb":
+                            return io.BytesIO(files[self.path])
+                        require(mode == "xb" and self.path not in files, "offline_capture_exclusive")
+                        owner = self
+                        class Writer(io.BytesIO):
+                            def close(self):
+                                files[owner.path] = self.getvalue()
+                                super().close()
+                        return Writer()
+                root = MemoryPath("/inert-package")
+                archive, checksums = root / name, root / "checksums.txt"
+                files[archive.path], files[checksums.path] = archive_bytes, checksum_bytes
+                def verifier(captured_archive, captured_checksums, version, revision, release,
+                             mark_stage, record_digest, record_wrapper, **options):
+                    require(captured_archive.parent.path == captured_checksums.parent.path ==
+                            Path("/inert-package/producer-verified-inputs")
+                            and captured_archive.parent.path in directories
+                            and captured_archive.name == name and version == "1.2.3" and revision == BASE
+                            and options == {"target": "darwin/arm64", "verifier_timeout": 10}, "offline_captured_inputs")
+                    effects.append("verifier")
+                    if tamper == "archive":
+                        files[captured_archive.path] = b"changed private copy"
+                    elif tamper == "checksums":
+                        files[captured_checksums.path] = b"changed private checksums"
+                    mark_stage("archive_checksum")
+                    actual = sha(read_bounded(captured_archive, LIMITS["tar"]))
+                    record_digest(actual)  # Same pre-extraction interface as the shared helper.
+                    checksum_policy(read_bounded(captured_checksums, 65536), name, actual)
+                    mark_stage("archive_extract")
+                    effects.append("extract")
+                    effects.append("binary_execution")
+                    return actual, release / "herdr-mobile-relay"
+                refused = False
+                try:
+                    actual, _ = verify_producer_archive(archive, checksums, hashes, "1.2.3", BASE,
+                        root / "release", Budget(lambda: 0.0), verifier)
+                    require(actual == hashes[name], "offline_verified_digest")
+                except Refusal:
+                    refused = True
+                return refused, effects, directories
+            refused, effects, directories = exercise(original, original_checksums)
+            require(not refused and effects == ["verifier", "extract", "binary_execution"]
+                    and directories == {Path("/inert-package/producer-verified-inputs")}, "offline_binding_positive")
+            changed = b"replacement archive"
+            changed_checksums = (sha(changed) + "  " + name + "\n").encode()
+            # Archive only, checksum only, and BOTH consistently replaced by an
+            # install: all refuse before even calling the extraction verifier.
+            for archive_bytes, checksum_bytes in ((changed, original_checksums),
+                    (original, original_checksums + b"\n"), (changed, changed_checksums)):
+                refused, effects, directories = exercise(archive_bytes, checksum_bytes)
+                require(refused and not effects and not directories, "offline_replacement_before_extraction_or_binary")
+            for tamper in ("archive", "checksums"):
+                refused, effects, _ = exercise(original, original_checksums, tamper)
+                require(refused and effects == ["verifier"], "offline_callback_before_extraction_or_binary")
             return True
         def zip_types():
             def item(name, kind):
@@ -2154,7 +3059,11 @@ def offline_check(group):
                     self.calls.append(kind)
                     super().effect(kind)
             valid_admission = {"system": "Darwin", "machine": "arm64", "enabled": "1",
-                               "repository": REPOSITORY, "ref": REF, "attempt": "1"}
+                "repository": REPOSITORY, "ref": REF, "attempt": "1", "event_name": "push", "run_id": "1",
+                "runner_environment": "github-hosted", "image_os": "macos15", "candidate_sha": "c" * 40,
+                "event_before": LAUNCHCTL_PINNED_PARENT, "event_after": "c" * 40, "event_ref": REF,
+                "event_forced": False, "event_created": False, "event_deleted": False,
+                "checked_out_sha": "c" * 40, "candidate_parents": [LAUNCHCTL_PINNED_PARENT]}
             require(admission_policy(valid_admission), "offline_admission_positive")
             require(socket_operations_allowed({("ping", "succeeded"): 1})
                     and proxy_operations_allowed([SimpleNamespace(failure=False)])
@@ -2183,14 +3092,430 @@ def offline_check(group):
             for guard in guards:
                 gate = ClosedRecordingGate()
                 mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), gate)
-                mock.guards.append(guard)
+                mock.add_guard("proxy", guard)
                 try:
                     mock.spawn(["must-not-execute"])
                 except Refusal as error:
-                    require(str(error) == "owned_operation_allowlist", "offline_real_guard_category")
+                    require(str(error) == "owned_operation_allowlist" and mock.failure_guard == "proxy",
+                            "offline_real_guard_category")
                 else:
                     return False
                 require(not gate.calls and not mock.children, "offline_effect_began")
+            for name in GUARDS:
+                mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), ClosedRecordingGate())
+                mock.add_guard(name, lambda: (_ for _ in ()).throw(ValueError("inert-private-error")))
+                require(rejects(mock.check) and mock.failure_guard == name, "offline_raised_guard_identity")
+                require(rejects(lambda: mock.check_guards(lambda: None)) and mock.failure_guard == name,
+                        "offline_final_guard_identity")
+            return True
+        def launchctl_grant_cases():
+            # Pure injected CI/event/git observations: no environment, event or
+            # checkout probes, git subprocess, host query or launcher. Only public
+            # policy source is read below. Exercise the actual bounded reader
+            # using in-memory metadata/streams, not a permissive substitute.
+            base = {"system": "Darwin", "machine": "arm64", "enabled": "1", "repository": REPOSITORY,
+                "ref": REF, "attempt": "1", "event_name": "push", "candidate_sha": "c" * 40, "run_id": "1",
+                "runner_environment": "github-hosted", "image_os": "macos15"}
+            event = {"before": LAUNCHCTL_PINNED_PARENT, "after": base["candidate_sha"], "ref": REF,
+                "forced": False, "created": False, "deleted": False}
+            identity = {"checked_out_sha": base["candidate_sha"], "candidate_parents": [LAUNCHCTL_PINNED_PARENT]}
+            reads, queries = [], []
+            class EventFile:
+                def __init__(self, data, *, mode=stat.S_IFREG, size=None, links=1):
+                    self.data = data
+                    self.info = SimpleNamespace(st_mode=mode, st_nlink=links,
+                        st_size=len(data) if size is None else size, st_dev=1, st_ino=2, st_mtime_ns=3)
+                def lstat(self):
+                    return self.info
+                def open(self, mode):
+                    require(mode == "rb", "offline_event_read_mode")
+                    return io.BytesIO(self.data)
+            def observe(observation=base, data=None, commit=identity, path="/inert-push-event.json", **metadata):
+                def read_event(selected, maximum):
+                    require(str(selected) == "/inert-push-event.json" and maximum == PUSH_EVENT_CAP == 65536,
+                            "offline_event_bound")
+                    reads.append(True)
+                    return read_bounded(EventFile(encode(event) if data is None else data, **metadata), maximum)
+                def query_candidate(selected):
+                    require(selected == Path("/inert-candidate"), "offline_candidate_query")
+                    queries.append(True)
+                    return commit
+                return first_push_observation(observation, path, Path("/inert-candidate"),
+                    read_event=read_event, query_candidate=query_candidate)
+            context = observe()
+            packet = {"grantId": LAUNCHCTL_GRANT_ID, "authorized": True,
+                "pinnedParent": LAUNCHCTL_PINNED_PARENT, "scope": dict(LAUNCHCTL_SCOPE)}
+            valid_packet = encode(packet).decode()
+            require(launchctl_authorized(valid_packet, context) and len(reads) == len(queries) == 1,
+                    "offline_launchctl_first_push_positive")
+            # Bind the workflow's explicit packet to the same exact frozen values.
+            workflow = read_bounded(Path(__file__).resolve().parents[1] / FILES[0], 65536).decode()
+            workflow_packet = re.search(r"--launchctl-query-grant '([^']+)'", workflow)
+            require(workflow_packet is not None and strict_json(workflow_packet[1].encode()) == packet,
+                    "offline_workflow_grant_binding")
+            for bad_base in ({**base, "attempt": "2"}, *({**base, "event_name": name}
+                    for name in ("workflow_dispatch", "pull_request", "schedule")),
+                    {**base, "candidate_sha": "0" * 40}, {**base, "candidate_sha": "C" * 40},
+                    {**base, "candidate_sha": "c" * 39}, {**base, "run_id": "0"}, {**base, "run_id": "1" * 16}):
+                before = (len(reads), len(queries))
+                require(rejects(lambda: observe(observation=bad_base)) and before == (len(reads), len(queries)),
+                        "offline_ci_refused_before_acquisition")
+            missing_before = dict(event)
+            del missing_before["before"]
+            bad_events = [missing_before, *({**event, "before": before} for before in
+                (None, 0, "0" * 40, LAUNCHCTL_PINNED_PARENT.upper(), LAUNCHCTL_PINNED_PARENT[:-1], "b" * 40)),
+                {**event, "after": "d" * 40}, {**event, "after": "C" * 40}, {**event, "ref": "refs/heads/other"},
+                *({**event, key: True} for key in ("forced", "created", "deleted")),
+                *({**event, key: 0} for key in ("forced", "created", "deleted")), [], None]
+            bad_data = [*(encode(item) for item in bad_events), b"{", b"not JSON", b"{\"before\": NaN}",
+                encode(event).replace(b'"before":', b'"before": null, "before":')]
+            for data in bad_data:
+                before = len(queries)
+                require(rejects(lambda: observe(data=data)) and len(queries) == before,
+                        "offline_event_refused_before_git")
+            for options in ({"path": None}, {"path": ""}, {"path": "relative"},
+                    {"data": b" " * (PUSH_EVENT_CAP + 1)}, {"size": PUSH_EVENT_CAP + 1},
+                    {"data": b" " * (PUSH_EVENT_CAP + 1), "size": 1},
+                    {"mode": stat.S_IFLNK}, {"mode": stat.S_IFDIR}, {"links": 2}):
+                require(rejects(lambda: observe(**options)), "offline_event_file_refused")
+            # Ordinary second fast-forward: both before and sole parent are the
+            # first candidate, not the frozen parent. No reusable grant.
+            later_base = {**base, "candidate_sha": "d" * 40}
+            later_event = {**event, "before": base["candidate_sha"], "after": later_base["candidate_sha"]}
+            later_identity = {"checked_out_sha": later_base["candidate_sha"], "candidate_parents": [base["candidate_sha"]]}
+            require(rejects(lambda: observe(observation=later_base, data=encode(later_event), commit=later_identity)),
+                    "offline_second_push_refused")
+            for commit in ({**identity, "candidate_parents": [LAUNCHCTL_PINNED_PARENT, "b" * 40]},
+                    {**identity, "candidate_parents": []}, {**identity, "candidate_parents": ["b" * 40]},
+                    {**identity, "candidate_parents": LAUNCHCTL_PINNED_PARENT},
+                    {**identity, "checked_out_sha": "d" * 40}, {}):
+                require(rejects(lambda: observe(commit=commit)), "offline_candidate_parent_refused")
+            bad_packets = [None, False, "", "null", "{}", "{", encode({**packet, "authorized": False}).decode(),
+                encode({**packet, "authorized": 1}).decode(), encode({**packet, "grantId": "unknown"}).decode(),
+                encode({**packet, "grantId": "q2-parent-launchctl-print-grant-20261008"}).decode(),
+                encode({**packet, "pinnedParent": "b" * 40}).decode(),
+                encode({key: value for key, value in packet.items() if key != "pinnedParent"}).decode(),
+                encode({**packet, "scope": False}).decode(), encode({**packet, "extra": True}).decode(),
+                encode({**packet, "scope": {**packet["scope"], "maxQueries": 3}}).decode(),
+                encode({**packet, "scope": {**packet["scope"], "maxQueries": 2.0}}).decode(),
+                encode({**packet, "scope": {**packet["scope"], "command": "launchctl bootstrap"}}).decode(),
+                valid_packet.replace('"authorized": true', '"authorized": true, "authorized": true')]
+            contexts = [(valid_packet, {**context, field: "unsafe"}) for field in context]
+            contexts.extend((valid_packet, {**context, "candidate_parents": parents})
+                for parents in ([], ["b" * 40], [LAUNCHCTL_PINNED_PARENT, "b" * 40]))
+            for raw, observation in [*((bad, context) for bad in bad_packets), *contexts]:
+                gate = EffectGate(True, launchctl_grant=raw, launchctl_context=observation)
+                mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), gate)
+                launches, guard = [], {"starts": 0}
+                mock.capture = lambda *args, **kwargs: launches.append(True)
+                require(rejects(lambda: mock.capture_launcher(["must-not-execute"], guard,
+                            cwd=None, link_origin=ORIGIN)) and not launches and not mock.children
+                        and guard["starts"] == gate.launchctl_queries == 0, "offline_launchctl_refused_before_launcher")
+                require(rejects(lambda: gate.effect("launchctl")) and gate.launchctl_queries == 0,
+                        "offline_launchctl_effect_refused")
+            require(rejects(lambda: EffectGate(True).effect("launchctl")), "offline_default_gate_not_launchctl_authority")
+            # Stale admission cannot authorize capture OR a direct query effect.
+            stale_gate = EffectGate(True, launchctl_grant=valid_packet, launchctl_context=context,
+                launchctl_observe=lambda: observe(data=encode(later_event)))
+            stale_mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), stale_gate)
+            stale_launches, stale_guard = [], {"starts": 0}
+            stale_mock.capture = lambda *args, **kwargs: stale_launches.append(True)
+            require(rejects(lambda: stale_mock.capture_launcher(["must-not-execute"], stale_guard, cwd=None, link_origin=ORIGIN))
+                and rejects(lambda: stale_gate.effect("launchctl")) and not stale_launches
+                and stale_guard["starts"] == stale_gate.launchctl_queries == 0, "offline_revalidation_before_effect")
+            gate = EffectGate(True, launchctl_grant=valid_packet, launchctl_context=context, launchctl_observe=observe)
+            mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), gate)
+            launches, guard = [], {"starts": 0}
+            mock.capture = lambda *args, **kwargs: launches.append(True)
+            for _ in range(2):
+                mock.capture_launcher(["inert-owned-launcher"], guard, cwd=None, link_origin=ORIGIN)
+            require(len(launches) == guard["starts"] == gate.launchctl_queries == 2
+                    and rejects(lambda: mock.capture_launcher(["must-not-execute"], guard, cwd=None, link_origin=ORIGIN))
+                    and rejects(lambda: gate.effect("launchctl"))
+                    and len(launches) == gate.launchctl_queries == 2, "offline_launchctl_two_queries_only")
+            return True
+
+        def launch_argument_cases():
+            # Source-bound interpretation of BOTH actual declarative JS policies.
+            # Bind the complete predicate to the finite interpreter below; never
+            # pretend Python ran JS or spawn Node/a browser in an offline case.
+            # These are NEW assertions in the existing case, not historical coverage.
+            expected_function = r'''function launchArgumentsAllowed(argv, userDataDir) {
+  if (!Array.isArray(argv) || argv.length < 2 || !argv.every((argument) => typeof argument === 'string')) return false;
+  const args = argv.slice(1);
+  const switches = [];
+  const syntax = new RegExp(LAUNCH_ARGUMENT_POLICY.switchPattern);
+  const forbidden = new RegExp(LAUNCH_ARGUMENT_POLICY.forbiddenPattern, 'i');
+  for (const argument of args) {
+    if (argument === 'about:blank') continue;
+    const match = syntax.exec(argument);
+    if (!match || match[0] !== argument) return false;
+    const name = match[1].toLowerCase().replace(/_/g, '-');
+    const value = match[2] ?? '';
+    if (forbidden.test(name) || forbidden.test(value.replace(/_/g, '-'))
+      || LAUNCH_ARGUMENT_POLICY.processIsolationNames.includes(name)) return false;
+    switches.push({ name, value });
+  }
+  const profiles = switches.filter((entry) => entry.name === 'user-data-dir');
+  return profiles.length === 1 && profiles[0].value === userDataDir
+    && ['--use-mock-keychain', '--enable-automation', '--remote-debugging-pipe'].every((flag) => args.includes(flag))
+    && args.some((argument) => argument === '--headless' || argument.startsWith('--headless='));
+}'''
+            # Full expected Playwright 1.62.1 macOS headless persistent argv from
+            # the frozen 9393fa79... bundle facts, with chromiumSandbox:true and
+            # our sole extra --enable-automation. Not a copied runtime allowlist.
+            profile = "/owned-policy-profile"
+            expected_argv = ["chromium", "--disable-field-trial-config", "--disable-background-networking",
+                "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
+                "--disable-back-forward-cache", "--disable-breakpad", "--disable-client-side-phishing-detection",
+                "--disable-component-extensions-with-background-pages", "--disable-component-update",
+                "--no-default-browser-check", "--disable-default-apps", "--disable-dev-shm-usage",
+                "--disable-edgeupdater", "--disable-extensions",
+                "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion",
+                "--enable-features=CDPScreenshotNewSurface", "--allow-pre-commit-input", "--disable-hang-monitor",
+                "--disable-ipc-flooding-protection", "--disable-popup-blocking", "--disable-prompt-on-repost",
+                "--disable-renderer-backgrounding", "--disable-updater-scheduler", "--force-color-profile=srgb",
+                "--metrics-recording-only", "--no-first-run", "--password-store=basic", "--use-mock-keychain",
+                "--no-service-autorun", "--export-tagged-pdf", "--disable-search-engine-choice-screen",
+                "--unsafely-disable-devtools-self-xss-warnings", "--edge-skip-compat-layer-relaunch",
+                "--disable-infobars", "--disable-search-engine-choice-screen", "--disable-sync",
+                "--enable-unsafe-swiftshader", "--headless", "--hide-scrollbars", "--mute-audio",
+                "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4",
+                "--enable-automation", "--user-data-dir=" + profile, "--remote-debugging-pipe", "about:blank"]
+            negative_flags = ("--disable-gpu-sandbox", "--disable-gpu-sandbox=1", "--DISABLE-GPU-SANDBOX",
+                "--disable_gpu_sandbox", "--no-sandbox", "--disable-setuid-sandbox", "--no-zygote-sandbox",
+                "--disable-renderer-sandbox", "--disable-features=GpuSandbox,NetworkServiceSandbox",
+                "--disable-features=gPuSaNdBoX", "-disable-gpu-sandbox", "https://foreign.invalid",
+                "--no-zygote", "--no_zygote=0", "--single-process", "--IN_PROCESS_GPU",
+                "--proxy-server=http://invalid", "--proxy-pac-url=http://invalid", "--proxy-bypass-list=*",
+                "--PROXY_BYPASS_LIST=*", "--ignore-certificate-errors", "--ignore-ssl-errors",
+                "--allow-insecure-localhost", "--test-root-certificate=1", "--unsafely-treat-insecure-origin-as-secure=1",
+                "--disable-web-security", "--allow-running-insecure-content", "--disable-site-isolation-trials",
+                "--host_resolver_rules=MAP * 127.0.0.1", "--remote-debugging-port=0", "--load-extension=/inert",
+                "--user_data_dir=/foreign", "--user-data-dir=" + profile, "--", "--bad name", "--flag=bad\nvalue")
+            shared = read_bounded(Path(__file__).resolve().parent / "tailscale-package-browser.mjs", 1024 * 1024).decode()
+            policies = []
+            for text in (shared, TRUST_SCRIPT):
+                declaration = re.search(r"const LAUNCH_ARGUMENT_POLICY = (\{[^\n]+\});\n", text)
+                function = re.search(r"function launchArgumentsAllowed\(argv, userDataDir\) \{.*?\n\}", text, re.S)
+                require(declaration is not None and function is not None and function[0] == expected_function,
+                        "offline_launch_argument_policy_source")
+                policy = strict_json(declaration[1].encode())
+                policies.append(policy)
+                syntax = re.compile(policy["switchPattern"], re.ASCII)
+                forbidden = re.compile(policy["forbiddenPattern"], re.I | re.ASCII)
+                def allowed(argv, user_data_dir):
+                    if type(argv) is not list or len(argv) < 2 or not all(type(v) is str for v in argv):
+                        return False
+                    args, switches = argv[1:], []
+                    for argument in args:
+                        if argument == "about:blank":
+                            continue
+                        match = syntax.fullmatch(argument)
+                        if match is None:
+                            return False
+                        name, value = match[1].lower().replace("_", "-"), match[2] or ""
+                        if forbidden.search(name) or forbidden.search(value.replace("_", "-")) or name in policy["processIsolationNames"]:
+                            return False
+                        switches.append((name, value))
+                    profiles = [value for name, value in switches if name == "user-data-dir"]
+                    return (profiles == [user_data_dir]
+                        and all(flag in args for flag in ("--use-mock-keychain", "--enable-automation", "--remote-debugging-pipe"))
+                        and any(v == "--headless" or v.startswith("--headless=") for v in args))
+                require(allowed(expected_argv, profile), "offline_full_expected_argv_positive")
+                for flag in negative_flags:
+                    require(not allowed([*expected_argv, flag], profile), "offline_launch_argument_refused")
+                for required in ("--use-mock-keychain", "--enable-automation", "--remote-debugging-pipe",
+                                 "--headless", "--user-data-dir=" + profile):
+                    require(not allowed([v for v in expected_argv if v != required], profile), "offline_required_switch")
+                require(not allowed(expected_argv, "/foreign") and not allowed([*expected_argv, 1], profile),
+                        "offline_owned_profile_and_types")
+            require(policies[0] == policies[1], "offline_same_argument_name_policy")
+            return True
+
+        def proxy_transport_cases():
+            # Exercise real worker -> BaseRequestHandler construction -> stdlib
+            # parsing -> our GET/abort/backend paths, using memory-only peers.
+            # No socket, listener, backend dial, signal or subprocess is created.
+            class Input(io.BytesIO):
+                def __init__(self, data, error, fail_at):
+                    super().__init__(data)
+                    self.error, self.fail_at, self.calls = error, fail_at, 0
+                def readline(self, maximum=-1):
+                    self.calls += 1
+                    if self.calls == self.fail_at:
+                        raise self.error("inert client read")
+                    return super().readline(maximum)
+            class Output(io.BytesIO):
+                def __init__(self, error, write_error, flush_at, close_error):
+                    super().__init__()
+                    self.error, self.write_error, self.flush_at, self.flushes = error, write_error, flush_at, 0
+                    self.close_error = close_error
+                def write(self, data):
+                    if self.write_error:
+                        raise self.error("inert client write")
+                    return super().write(data)
+                def flush(self):
+                    self.flushes += 1
+                    if self.flushes == self.flush_at:
+                        raise self.error("inert client flush")
+                    super().flush()
+                def close(self):
+                    super().close()
+                    if self.close_error is not None:
+                        error, self.close_error = self.close_error, None
+                        raise error("inert client close")
+            class Connection:
+                def __init__(self, data, error, read_at, write_error, flush_at, handshake, close_error):
+                    self.input = Input(data, error, read_at)
+                    self.output = Output(error, write_error, flush_at, close_error)
+                    self.error, self.handshake, self.closed = error, handshake, False
+                def settimeout(self, seconds):
+                    require(seconds == 5, "offline_proxy_timeout")
+                def do_handshake(self):
+                    if self.handshake:
+                        raise self.error("inert handshake")
+                def makefile(self, mode, _buffering):
+                    return self.input if mode == "rb" else self.output
+                def sendall(self, data):
+                    self.output.write(data)
+                def close(self):
+                    self.closed = True
+            class Backend:
+                status = 200
+                def __init__(self, error, fail_at):
+                    self.error, self.fail_at, self.closed = error, fail_at, False
+                def check(self, stage):
+                    if stage == self.fail_at:
+                        raise self.error("inert backend")
+                def request(self, *_args, **_kwargs):
+                    self.check("request")
+                def getresponse(self):
+                    self.check("response")
+                    return self
+                def read(self, _maximum):
+                    self.check("read")
+                    return b"fixture"
+                def getheaders(self):
+                    self.check("headers")
+                    return [("Content-Type", "text/plain")]
+                def sendall(self, _data):
+                    self.check("send")
+                def recv(self, _maximum):
+                    self.check("recv")
+                    return b"HTTP/1.1 101 Switching Protocols\r\n\r\n"
+                def close(self):
+                    self.check("close")
+                    self.closed = True
+            def exercise(data=b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n", *,
+                         error=TimeoutError, read_at=0, write_error=False, flush_at=0,
+                         handshake=False, backend_error="", buffered=True, closing=False, close_error=None):
+                backend = Backend(error, backend_error)
+                calls = []
+                class Handler(ProxyHandler):
+                    wbufsize = 1 if buffered else 0
+                    def backend_call(self, operation, *args, **kwargs):
+                        if operation in {http.client.HTTPConnection, socket.create_connection}:
+                            calls.append(operation)
+                            def construct():
+                                backend.check("connect")
+                                return backend
+                            return super().backend_call(construct)
+                        return super().backend_call(operation, *args, **kwargs)
+                server = object.__new__(Proxy)
+                server.lock, server.counts, server.failure, server.closing = threading.RLock(), {}, False, closing
+                server.server_port, server.server_name, server.paths = 18443, "inert", {"/healthz", "/", "/ws"}
+                server.RequestHandlerClass = Handler
+                connection = Connection(data, error, read_at, write_error, flush_at, handshake, close_error)
+                server.connections = {connection}
+                server.worker(connection, ("127.0.0.1", 1))
+                require(connection.closed and not server.connections, "offline_proxy_peer_closed")
+                require(proxy_request_counts([server]) == [server.counts], "offline_proxy_snapshot")
+                return server, calls
+            errors = (ssl.SSLEOFError, ssl.SSLZeroReturnError, ssl.SSLError, ConnectionResetError,
+                      BrokenPipeError, ConnectionAbortedError, TimeoutError)
+            for error in errors:
+                for options in ({"read_at": 1}, {"read_at": 2}, {"write_error": True},
+                                {"flush_at": 1}, {"flush_at": 2}):
+                    server, _ = exercise(error=error, **options)
+                    require(proxy_operations_allowed([server]) and server.counts.get("client_aborted") == 1
+                            and server.counts.get("tls_accepted") == 1 and not server.counts.get("tls_refused"),
+                            "offline_benign_client_abort")
+                server, calls = exercise(error=error, handshake=True)
+                require(proxy_operations_allowed([server]) and server.counts == {"tls_refused": 1} and not calls,
+                        "offline_handshake_refusal")
+                # Exactly the Python TLS-only positive control: no HTTP request.
+                server, _ = exercise(b"", error=error, flush_at=1)
+                require(proxy_operations_allowed([server]) and server.counts == {"tls_accepted": 1, "client_aborted": 1},
+                        "offline_handler_finish_abort")
+                for options in ({"read_at": 1}, {"write_error": True}):
+                    server, _ = exercise(error=error, buffered=False, **options)
+                    require(proxy_operations_allowed([server]) and server.counts.get("client_aborted") == 1,
+                            "offline_unbuffered_client_abort")
+                for stage in ("connect", "request", "response", "read", "headers", "close"):
+                    for closing in (False, True):
+                        server, _ = exercise(error=error, backend_error=stage, closing=closing)
+                        require(not proxy_operations_allowed([server]), "offline_backend_error_fatal")
+            server, _ = exercise(b"")
+            require(proxy_operations_allowed([server]) and server.counts == {"tls_accepted": 1}, "offline_tls_only_eof")
+            websocket = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: websocket\r\n\r\n"
+            server, _ = exercise(websocket, error=ssl.SSLEOFError, write_error=True)
+            require(proxy_operations_allowed([server]) and server.counts.get("websocket") == 1
+                    and server.counts.get("client_aborted") == 1, "offline_websocket_client_abort")
+            for stage in ("send", "recv"):
+                server, _ = exercise(websocket, error=ConnectionResetError, backend_error=stage)
+                require(not proxy_operations_allowed([server]), "offline_websocket_backend_error_fatal")
+            rejected = [f"{method} / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n".encode()
+                        for method in ("HEAD", "POST", "PUT", "DELETE", "OPTIONS", "TRACE", "CONNECT", "PATCH")]
+            rejected.extend((b"GET /private HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n",
+                b"GET /?secret=value HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: foreign.invalid\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: h2c\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nContent-Length: 1\r\n\r\nx",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nContent-Length:\r\n\r\nx",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                b"GET / HTTP/invalid\r\n\r\n",
+                b"GET /healthz HTTP/1.1\r\n\r\n",
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nHost: foreign.invalid\r\n\r\n",
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nHost: 127.0.0.1:18443\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nHost: foreign.invalid\r\nUpgrade: websocket\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: websocket\r\nUpgrade: h2c\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: websocket\r\nUpgrade: websocket\r\n\r\n",
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade:\r\nUpgrade: h2c\r\n\r\n"))
+            for request in rejected:
+                for closing in (False, True):
+                    server, calls = exercise(request, error=BrokenPipeError, flush_at=1, closing=closing)
+                    require(not proxy_operations_allowed([server]) and not calls
+                            and not server.counts.get("http_get") and not server.counts.get("websocket"),
+                            "offline_policy_failure_latched")
+                mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), EffectGate(False))
+                mock.add_guard("proxy", lambda: proxy_operations_allowed([server]))
+                require(rejects(lambda: mock.spawn(["must-not-execute"])) and mock.failure_guard == "proxy"
+                        and not mock.children, "offline_policy_stops_effects")
+            for error in (RuntimeError, ValueError, OSError):
+                for closing in (False, True):
+                    server, _ = exercise(error=error, read_at=1, closing=closing)
+                    require(not proxy_operations_allowed([server]) and not server.counts.get("client_aborted"),
+                            "offline_internal_error_fatal")
+            for error in (RuntimeError, TimeoutError, ConnectionResetError):
+                server = object.__new__(Proxy)
+                server.failure = False
+                connection = Connection(b"", error, 0, False, 0, False, None)
+                server.get_request = lambda: (connection, ("127.0.0.1", 1))
+                def dispatch_failure(*_args):
+                    raise error("inert dispatch error")
+                server.process_request = dispatch_failure
+                server.shutdown_request = lambda request: request.close()
+                server._handle_request_noblock()  # Real stdlib dispatch/error hook.
+                require(server.failure is True and connection.closed, "offline_dispatch_error_fatal")
+            server, _ = exercise(error=RuntimeError, flush_at=2, close_error=BrokenPipeError)
+            require(not proxy_operations_allowed([server]) and server.counts.get("client_aborted") == 1,
+                    "offline_finish_internal_error_not_masked")
+            server, _ = exercise(error=lambda _: OSError(errno.EBADF, "inert owned closure"), read_at=1, closing=True)
+            require(proxy_operations_allowed([server]) and not server.counts.get("client_aborted"), "offline_owned_close_race")
+            require(owned_socket_closed(OSError(errno.EBADF, "inert owned closure"), True)
+                    and not owned_socket_closed(OSError(errno.EBADF, "inert live error"), False)
+                    and not owned_socket_closed(ValueError("inert internal error"), True), "offline_owned_closure_scope")
             return True
         def dependency_storage():
             directory = Path("/inert-installer-payload")
@@ -2270,6 +3595,9 @@ def offline_check(group):
             return rejects(lambda: certificates(root, adapter))
         def forbidden_effects():
             require(real_guards(), "offline_real_guards")
+            require(launchctl_grant_cases(), "offline_launchctl_grants")
+            require(launch_argument_cases(), "offline_launch_argument_policy")
+            require(proxy_transport_cases(), "offline_proxy_transport")
             require(certificate_configuration(), "offline_certificate_configuration")
             gate = EffectGate(False)
             mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), gate)
@@ -2446,13 +3774,22 @@ def main(argv=None):
     parser.add_argument("--artifact-id", type=int)
     parser.add_argument("--artifact-zip-sha256")
     parser.add_argument("--fresh-producer", action="store_true")
+    parser.add_argument("--launchctl-query-grant")
     parser.add_argument("--private-root", type=Path)
-    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--evidence", type=Path, help="private staging for runtime; published path for --publish-receipt")
+    parser.add_argument("--publish-receipt", action="store_true")
+    parser.add_argument("--staged-receipt", type=Path)
+    parser.add_argument("--runner-exit-code", type=int)
     parser.add_argument("--budget-seconds", type=int, default=1260)
     args = parser.parse_args(argv)
     if args.offline_self_check:
         require(len(sys.argv[1:] if argv is None else argv) == 2, "offline_arguments")
         return offline_check(args.offline_self_check)
+    if args.publish_receipt:
+        require(args.staged_receipt is not None and args.evidence is not None
+                and args.runner_exit_code is not None, "publication_paths_missing")
+        return publication(args)
+    require(args.staged_receipt is None and args.runner_exit_code is None, "runtime_arguments")
     require(args.private_root is not None and args.evidence is not None, "runtime_paths_missing")
     return runtime(args)
 

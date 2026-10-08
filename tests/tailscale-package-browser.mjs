@@ -44,20 +44,42 @@ const darwinDevelopmentImports = new Set();
 let unexpectedDarwinDestination = false;
 let darwinLaunchUncertain = false;
 let darwinStopping = false;
-// Playwright 1.62 bundles its default Chromium switches without exporting
-// them, so the observed command line is checked against a policy instead of a
-// copied internal list: exactly the owned profile, the required automation and
-// mock-keychain flags, only flag arguments, and no TLS/sandbox/proxy bypasses.
-const FORBIDDEN_LAUNCH_ARGUMENT = /no-sandbox|ignore-certificate|ignore-ssl|insecure-localhost|test-root|unsafely-treat-insecure|disable-web-security|allow-running-insecure|host-resolver-rules|proxy-server|proxy-pac|remote-debugging-port|load-extension|disable-site-isolation/i;
+// Same declarative policy and predicate as the Darwin trust-control driver.
+// Parse switch names first: case and underscore aliases cannot evade policy.
+// Any sandbox mention (also in feature values) is refused. The finite additional
+// family removes the zygote/process boundaries or moves GPU work in-process.
+// Do not reject /unsafe/: pinned Playwright uses SwiftShader/self-XSS flags.
+const LAUNCH_ARGUMENT_POLICY = {"switchPattern":"^--([A-Za-z][A-Za-z0-9_-]*)(?:=([^\\u0000-\\u001f\\u007f]*))?$","forbiddenPattern":"sandbox|ignore-certificate|ignore-ssl|insecure-localhost|test-root|unsafely-treat-insecure|disable-web-security|allow-running-insecure|host-resolver-rules|proxy-server|proxy-pac|proxy-bypass-list|remote-debugging-port|load-extension|disable-site-isolation","processIsolationNames":["no-zygote","single-process","in-process-gpu"]};
 function launchArgumentsAllowed(argv, userDataDir) {
   if (!Array.isArray(argv) || argv.length < 2 || !argv.every((argument) => typeof argument === 'string')) return false;
   const args = argv.slice(1);
-  const profiles = args.filter((argument) => argument.startsWith('--user-data-dir='));
-  return profiles.length === 1 && profiles[0] === '--user-data-dir=' + userDataDir
+  const switches = [];
+  const syntax = new RegExp(LAUNCH_ARGUMENT_POLICY.switchPattern);
+  const forbidden = new RegExp(LAUNCH_ARGUMENT_POLICY.forbiddenPattern, 'i');
+  for (const argument of args) {
+    if (argument === 'about:blank') continue;
+    const match = syntax.exec(argument);
+    if (!match || match[0] !== argument) return false;
+    const name = match[1].toLowerCase().replace(/_/g, '-');
+    const value = match[2] ?? '';
+    if (forbidden.test(name) || forbidden.test(value.replace(/_/g, '-'))
+      || LAUNCH_ARGUMENT_POLICY.processIsolationNames.includes(name)) return false;
+    switches.push({ name, value });
+  }
+  const profiles = switches.filter((entry) => entry.name === 'user-data-dir');
+  return profiles.length === 1 && profiles[0].value === userDataDir
     && ['--use-mock-keychain', '--enable-automation', '--remote-debugging-pipe'].every((flag) => args.includes(flag))
-    && args.some((argument) => argument === '--headless' || argument.startsWith('--headless='))
-    && args.every((argument) => argument.startsWith('--') || argument === 'about:blank')
-    && !args.some((argument) => FORBIDDEN_LAUNCH_ARGUMENT.test(argument));
+    && args.some((argument) => argument === '--headless' || argument.startsWith('--headless='));
+}
+// Pure predicate regressions: no browser/process effect, and no bypass even
+// when all required owned-profile and automation flags are present.
+const policyProfile = '/owned-policy-profile';
+const policyArgv = ['chromium', '--user-data-dir=' + policyProfile, '--use-mock-keychain',
+  '--enable-automation', '--remote-debugging-pipe', '--headless', 'about:blank'];
+if (!launchArgumentsAllowed(policyArgv, policyProfile)
+  || ['--proxy-server=http://invalid', '--proxy-pac-url=http://invalid', '--proxy-bypass-list=*']
+    .some((flag) => launchArgumentsAllowed([...policyArgv, flag], policyProfile))) {
+  throw new Error('launch argument policy regression');
 }
 function completeCases() {
   return !darwinStopping && !darwinLaunchUncertain && !unexpectedDarwinDestination && expectedCases.length > 0 && cases.length === expectedCases.length
