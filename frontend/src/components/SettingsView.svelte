@@ -21,7 +21,6 @@
     TERMINAL_REFRESH_LABELS,
     TERMINAL_REFRESH_OPTIONS,
     THEMES,
-    TERMINAL_RESIZE_BACKEND_AVAILABLE,
     type AgentView,
     type HomeLayout,
     type InterfaceSize,
@@ -46,14 +45,10 @@
     setDefaultAgentView,
     setHomeLayout,
     setInterfaceSize,
-    setTerminalHeightLease,
-    setTerminalResizeSession,
     setTerminalHistoryLines,
     setTerminalRefreshInterval,
     setTerminalWakeLock,
     setTheme,
-    terminalHeightLease,
-    terminalResizeSession,
     terminalWakeLock,
     terminalHistoryLines,
     terminalRefreshInterval,
@@ -840,23 +835,7 @@
       {/each}
     </fieldset>
     <p class="hint">How often the relay checks the visible pane. 250 ms is balanced; faster refresh uses more computer and phone CPU during active output.</p>
-    <AppSwitch
-      checked={$terminalResizeSession}
-      label="Resize Session"
-      descriptionId="resize-session-hint"
-      onchange={(value) => {
-        if (setTerminalResizeSession(value) === 'unavailable') relayStore.showToast('Resize Session preference could not be saved.');
-      }}
-    />
-    <p class="hint" id="resize-session-hint">Off by default, saved on this device. Resizing changes the shared desktop and SSH terminal too. Currently unavailable: the experimental TTY backend can desynchronize Herdr's grid and cannot safely identify replacement terminals. Neither switch enables resizing in this build, including on older relays. Controller terminals stay desktop-sized and scroll horizontally; read-only reader panes wrap to the available width.</p>
-    <AppSwitch
-      checked={$terminalHeightLease}
-      disabled={!$terminalResizeSession || !TERMINAL_RESIZE_BACKEND_AVAILABLE}
-      label="Lease Terminal Height"
-      descriptionId="height-lease-hint"
-      onchange={(value) => setTerminalHeightLease(value)}
-    />
-    <p class="hint" id="height-lease-hint">Saved separately, but requires Resize Session and a qualified backend. Turning height off alone did not disable width in older apps. Height changes can strand duplicate inline-agent status bars in the scrollback.</p>
+    <p class="hint">Controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width. Resizing the shared terminal from the phone is not available.</p>
     <AppSwitch
       checked={$terminalWakeLock}
       label="Keep Screen Awake"

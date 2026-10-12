@@ -9,11 +9,6 @@ export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
-export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';
-// No qualified target-bound resize backend exists in this build. In particular,
-// legacy relay capabilities are not evidence of safe optional resizing.
-export const TERMINAL_RESIZE_BACKEND_AVAILABLE = false;
-export const TERMINAL_HEIGHT_LEASE_KEY = 'herdr_terminal_height_lease';
 export const TERMINAL_WAKE_LOCK_KEY = 'herdr_terminal_wake_lock';
 export const HOME_LAYOUT_KEY = 'herdr_home_workspace_layout';
 export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
@@ -73,24 +68,11 @@ export const TERMINAL_REFRESH_LABELS: Record<TerminalRefreshInterval, string> = 
   500: '500 ms',
   1_000: '1 s',
 };
+// Bounds for the column count a reader pane wraps at, measured from the
+// phone's own width: a probe that lands outside this range is a measurement
+// error, not a terminal size.
 export const MIN_PANE_SIZE_COLUMNS = 40;
 export const MAX_PANE_SIZE_COLUMNS = 240;
-export const MIN_PANE_SIZE_ROWS = 10;
-export const MAX_PANE_SIZE_ROWS = 120;
-// A hidden page keeps renewing its pane-size lease for this long. Desktop
-// Safari reports an occluded window as hidden, so every switch to another app
-// would otherwise lapse the lease after its 30s TTL and resize the shared
-// pane twice per glance — each cycle can strand a stale copy of an inline
-// agent's status bar in the scrollback. The grace is bounded so a page that
-// stays hidden — a phone in a pocket whose open DataChannel keeps it
-// unfrozen — still gives the desktop its size back within minutes, not
-// overnight.
-export const PANE_LEASE_HIDDEN_GRACE_MS = 5 * 60_000;
-
-export function paneLeaseRenewalAllowed(visible: boolean, hiddenAt: number, now: number): boolean {
-  if (visible) return true;
-  return hiddenAt > 0 && now - hiddenAt < PANE_LEASE_HIDDEN_GRACE_MS;
-}
 
 export const THEME_COLORS: Record<Theme, string> = {
   dark: '#0a0a0a',

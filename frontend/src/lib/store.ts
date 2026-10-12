@@ -12,15 +12,10 @@ import {
   canInviteFrom,
   importQuickSetup,
   loadRelayConfigs,
-  MAX_PANE_SIZE_COLUMNS,
-  MAX_PANE_SIZE_ROWS,
-  MIN_PANE_SIZE_COLUMNS,
-  MIN_PANE_SIZE_ROWS,
   normalizeRelayConfig,
   quickSetupConfig,
   quickSetupInvitation,
   RELAY_KEY_BYTES,
-  TERMINAL_RESIZE_BACKEND_AVAILABLE,
   saveRelayConfigs,
   shouldDeferPairingConnection,
   shouldRetainSetupFragment,
@@ -80,7 +75,6 @@ import {
   clearPaneAgentViewOverridesForRelay,
   terminalHistoryLines,
   terminalRefreshInterval,
-  terminalResizeSession,
 } from './preferences';
 import {
   clearPendingRelayUpdate,
@@ -1642,7 +1636,6 @@ class RelayStore {
         noEchoPrompt: deltaNoEcho
           ? typeof message.no_echo_prompt === 'string' ? message.no_echo_prompt : frame?.noEchoPrompt
           : undefined,
-        resizeSettling: message.resize_settling === true,
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -1668,7 +1661,6 @@ class RelayStore {
         nextFrame.noEcho = true;
         if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
       }
-      if (message.resize_settling === true) nextFrame.resizeSettling = true;
       this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -1862,10 +1854,8 @@ class RelayStore {
         ...payload,
         request_id: requestId,
         protocol: RELAY_PROTOCOL_VERSION,
+        client_id: pushClientId(),
       };
-      if (payload.type !== 'lease_pane_size' && payload.type !== 'release_pane_size') {
-        command.client_id = pushClientId();
-      }
       if (!this.sendRaw(relayId, command)) {
         clearTimeout(timer);
         cleanup();
@@ -2405,63 +2395,6 @@ class RelayStore {
   private rejectPendingOperations(relayId: string, message: string): void {
     this.rejectPending(this.pendingRequests, relayId, message);
     this.rejectPending(this.pendingUploads, relayId, message);
-  }
-
-  async leasePaneSize(
-    agent: Agent,
-    columns: number,
-    rows = 0,
-  ): Promise<{ columns: number; rows: number }> {
-    if (!TERMINAL_RESIZE_BACKEND_AVAILABLE || !get(terminalResizeSession)) {
-      throw new CommandError('Resize Session is disabled or unavailable');
-    }
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('pane_size_lease')) {
-      throw new CommandError('Relay lacks pane-size lease support');
-    }
-    if (!Number.isInteger(columns) || columns < MIN_PANE_SIZE_COLUMNS || columns > MAX_PANE_SIZE_COLUMNS) {
-      throw new CommandError(
-        `Terminal columns must be between ${MIN_PANE_SIZE_COLUMNS} and ${MAX_PANE_SIZE_COLUMNS}`,
-      );
-    }
-    // Rows ride the same lease only when the relay understands them; an old
-    // relay would silently ignore the field and the client must not believe
-    // a height was applied.
-    const leaseRows = connection.capabilities.includes('pane_size_lease_rows') ? rows : 0;
-    if (leaseRows !== 0
-      && (!Number.isInteger(leaseRows) || leaseRows < MIN_PANE_SIZE_ROWS || leaseRows > MAX_PANE_SIZE_ROWS)) {
-      throw new CommandError(
-        `Terminal rows must be between ${MIN_PANE_SIZE_ROWS} and ${MAX_PANE_SIZE_ROWS}`,
-      );
-    }
-    const payload: Record<string, any> = { type: 'lease_pane_size', columns };
-    if (leaseRows) payload.rows = leaseRows;
-    const result = await this.sendToAgent(agent, payload);
-    if (result.action && result.action !== 'lease_pane_size') {
-      throw new CommandError('Wrong pane-size lease confirmation');
-    }
-    const appliedColumns = Number(result.data?.columns);
-    if (!Number.isInteger(appliedColumns)
-      || appliedColumns < MIN_PANE_SIZE_COLUMNS
-      || appliedColumns > MAX_PANE_SIZE_COLUMNS) {
-      throw new CommandError('Relay did not confirm the applied terminal columns');
-    }
-    let appliedRows = 0;
-    if (leaseRows) {
-      appliedRows = Number(result.data?.rows);
-      if (!Number.isInteger(appliedRows) || appliedRows < 1) {
-        throw new CommandError('Relay did not confirm the applied terminal rows');
-      }
-    }
-    return { columns: appliedColumns, rows: appliedRows };
-  }
-
-  async releasePaneSize(agent: Agent): Promise<void> {
-    // Cleanup does not require consent or capability advertisement.
-    const result = await this.sendToAgent(agent, { type: 'release_pane_size' });
-    if (result.action && result.action !== 'release_pane_size') {
-      throw new CommandError('Relay returned the wrong pane-size release confirmation');
-    }
   }
 
   async getConversationHistory(agent: Agent, request: ConversationHistoryRequest = {}): Promise<ConversationPage> {

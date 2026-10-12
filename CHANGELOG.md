@@ -7,13 +7,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Contain shared-terminal resizing: Resize Session is a per-device default-off
-  preference, and the relay rejects acquisition/renewal from stale clients.
-  The legacy direct-TTY backend remains unavailable even with operator consent
-  (`HERDR_PANE_SIZE_LEASE_ENABLED=true`), pending terminal-identity and lifecycle
-  qualification. Controllers retain a desktop-sized, horizontally scrollable
-  view and all normal actions. This does not implement coordinated resizing or
-  restore geometry left by older code; a normal local resize may still be needed.
+- Remove phone-driven terminal resizing. The legacy direct-TTY backend resized
+  the shared PTY behind Herdr's back, desynchronizing Herdr's grid and garbling
+  the desktop and SSH views; it is deleted rather than gated, with no operator
+  flag and no Resize Session or height switch. The relay never advertises the
+  lease capabilities, answers an older app's `lease_pane_size` with a clear
+  failure before any TTY I/O, and completes `release_pane_size` as a no-op.
+  Controllers keep a desktop-sized, horizontally scrollable view and all normal
+  actions; readers wrap to the phone width. Coordinated resizing needs a Herdr
+  API that does not exist yet, and geometry left by older code is not restored;
+  a normal local resize may still be needed.
   ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
 
 ## [0.22.7] - 2026-10-05

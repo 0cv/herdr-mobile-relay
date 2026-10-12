@@ -54,9 +54,9 @@ setup and want to know what every screen and control is for.
   Speak button.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
-| Agents | Native Resize |
-| --- | --- |
-| <img src="../images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="../images/native_mobile_resolution.jpeg" alt="OMP terminal rendered at native mobile width" width="392"> |
+| Agents |
+| --- |
+| <img src="../images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> |
 
 | Plan Questions | Notifications |
 | --- | --- |
@@ -224,53 +224,29 @@ controls to resize it without changing the rest of the app.
 
 ## Mobile terminal
 
-**Resize Session** is now a persistent, per-browser/app preference, **off by
-default**, including after an upgrade. The old height preference is not consent:
-in older apps, turning **Lease Terminal Height** off still leased width.
-Height's saved value is retained, but its switch is subordinate to Resize
-Session and backend availability.
+**Resizing the shared terminal from the phone is not available.** There is no
+Resize Session switch, no height switch, and no relay setting: the phone shows
+the pane at the size Herdr gives it.
 
-**Resizing is unavailable in this build, even if either saved preference or
-`HERDR_PANE_SIZE_LEASE_ENABLED` is true.** The experimental direct-TTY backend
-reopened cached terminal paths without authoritative incarnation validation and
-could desynchronize Herdr's grid from the PTY. It has not passed the lifecycle
-safety gate. No new size lease is created or renewed, even on an older relay
-advertising legacy capabilities. Saving Resize Session consent does not enable
-that backend.
+Controller terminals keep the desktop width, with column alignment preserved,
+and scroll horizontally. Read-only reader panes wrap desktop-width text to the
+phone width instead. Prompts, keys, approvals, uploads, terminal reading, and
+Conversation work the same in both layouts; reader pairing is not a resizing
+workaround, and browser wrapping cannot reconstruct an independently sized
+full-screen TUI for one shared PTY.
 
-Controller terminals preserve desktop-width column alignment and scroll
-horizontally. Reader rendering is unchanged (desktop-width text wraps to the
-phone viewport). Prompts, keys, approvals, uploads, terminal reading, and
-Conversation remain available; reader pairing is not a resizing workaround.
-Herdr 0.7.5 remains the minimum. Browser wrapping cannot reconstruct an
-independently sized full-screen TUI for one shared PTY.
+Why: Herdr owns the terminal grid and the PTY together. An earlier release
+resized the PTY directly with `stty`, which Herdr does not see; its grid stayed
+at the layout size while the application drew at the phone's, garbling the
+desktop and SSH views ([issue 60](https://github.com/0cv/herdr-mobile-relay/issues/60)).
+That backend has been removed. An older app that still asks for a size lease
+is answered with a clear failure and its cleanup request succeeds, so it keeps
+working without resizing anything.
 
-Old/cached apps are protected by the new relay's default-off gate and unavailable
-backend, including direct lease requests. Updating only the app cannot impose
-this relay gate or lifecycle fixes on an older relay. If a future qualified
-backend is enabled by its operator, old apps may still request automatic leases;
-operator consent does not supply per-device consent to legacy apps.
-
-This is containment, **not** safe optional or coordinated resizing. It does not
-restore geometry left by older code or an interrupted process. Stop further
-leasing (update the relay and app, or close old clients), then perform a normal
-local terminal/window resize if necessary. Do not use ad hoc `stty` as a durable
-fix. Restarting an old relay is not proof of restored geometry.
-
-For older relays only: ordinary navigation release shortens that client's lease
-to at most ten seconds; disconnect attempts cleanup immediately; a lost client's
-lease expires after 120 seconds without renewal. Older apps can keep renewing
-for five minutes while hidden. These are lease/cleanup timings, **not restoration
-guarantees**: old restores can fail and retry indefinitely. This containment build
-creates no leases, so there is no online immediate-revocation feature or
-restoration acknowledgement to promise. Offline delivery cannot be guaranteed.
-Target-bound per-client revocation and generation ordering must be qualified
-before any backend is re-enabled. A coordinated Herdr-owned resize contract
-remains a separate integration; native-client views alone do not give different
-render widths to one shared PTY.
-
-See [resize containment and follow-up evidence](pane-size-leasing.md) for operator
-configuration and the remaining safety boundary.
+Coordinated resizing needs a Herdr API that sets a pane's absolute rows and
+columns for grid and PTY together. Herdr 0.9.3 (socket protocol 22) has none:
+`pane.resize` only changes split ratios. The remaining gates are recorded in
+[pane-size-leasing.md](pane-size-leasing.md).
 
 Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
 1,000 is the default and the ceiling on the gateway-relayed path; direct

@@ -220,8 +220,6 @@ type Inbound struct {
 	Cursor               string          `json:"cursor,omitempty"`
 	Retry                bool            `json:"retry,omitempty"`
 	Limit                int             `json:"limit,omitempty"`
-	Columns              int             `json:"columns,omitempty"`
-	Rows                 int             `json:"rows,omitempty"`
 	Format               string          `json:"format,omitempty"`
 	Path                 string          `json:"path,omitempty"`
 	Filename             string          `json:"filename,omitempty"`

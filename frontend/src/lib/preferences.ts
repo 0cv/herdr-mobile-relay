@@ -9,8 +9,6 @@ import {
   INTERFACE_SIZES,
   TERMINAL_HISTORY_KEY,
   TERMINAL_HISTORY_OPTIONS,
-  TERMINAL_HEIGHT_LEASE_KEY,
-  TERMINAL_RESIZE_SESSION_KEY,
   TERMINAL_WAKE_LOCK_KEY,
   TERMINAL_REFRESH_KEY,
   TERMINAL_REFRESH_OPTIONS,
@@ -33,14 +31,6 @@ import {
   parsePaneViewPreferenceKey,
   type PaneAgentViewOverrides,
 } from './agent-view';
-
-export function readTerminalResizeSession(storage?: Pick<Storage, 'getItem'>): boolean {
-  try {
-    return (storage || localStorage).getItem(TERMINAL_RESIZE_SESSION_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}
 
 export function readDefaultAgentView(storage?: Pick<Storage, 'getItem'>): AgentView {
   try {
@@ -110,15 +100,6 @@ export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
 export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
 export const homeLayout = writable<HomeLayout>(savedHomeLayout());
-// Off by default: resizing the shared pane's height strands stale copies of
-// inline agents' status bars in the scrollback (the terminal reflows the
-// primary buffer before the agent can repaint), so only people who need
-// full-screen TUIs to fit the phone opt in.
-// Never migrate consent from the old height-only preference.
-export const terminalResizeSession = writable<boolean>(readTerminalResizeSession());
-export const terminalHeightLease = writable<boolean>(
-  localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',
-);
 export const terminalWakeLock = writable<boolean>(
   localStorage.getItem(TERMINAL_WAKE_LOCK_KEY) === 'true',
 );
@@ -208,22 +189,6 @@ export function setTerminalRefreshInterval(value: TerminalRefreshInterval): void
   terminalRefreshInterval.set(value);
 }
 
-export function setTerminalResizeSession(value: boolean): 'saved' | 'unavailable' {
-  // Turning off remains effective locally even if persistence is unavailable.
-  if (!value) terminalResizeSession.set(false);
-  try {
-    localStorage.setItem(TERMINAL_RESIZE_SESSION_KEY, String(value));
-  } catch {
-    return 'unavailable';
-  }
-  terminalResizeSession.set(value);
-  return 'saved';
-}
-
-export function setTerminalHeightLease(value: boolean): void {
-  localStorage.setItem(TERMINAL_HEIGHT_LEASE_KEY, String(value));
-  terminalHeightLease.set(value);
-}
 export function setTerminalWakeLock(value: boolean): void {
   localStorage.setItem(TERMINAL_WAKE_LOCK_KEY, String(value));
   terminalWakeLock.set(value);
