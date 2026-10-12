@@ -9,6 +9,7 @@
     MIN_PANE_SIZE_COLUMNS,
     MIN_PANE_SIZE_ROWS,
     paneLeaseRenewalAllowed,
+    TERMINAL_RESIZE_BACKEND_AVAILABLE,
   } from '$lib/config';
   import {
     agentNeedsInspection,
@@ -37,7 +38,7 @@
     speechState,
     stopSpeech,
   } from '$lib/speech';
-  import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
+  import { interfaceSize, terminalHeightLease, terminalResizeSession, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
@@ -245,7 +246,8 @@
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(!readOnly && responsePending && attentionKind(agent) === 'question' && interaction));
   const resizeSessionActive = $derived(
-    Boolean(!readOnly && $connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
+    Boolean(TERMINAL_RESIZE_BACKEND_AVAILABLE && $terminalResizeSession
+      && !readOnly && $connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
   );
   // The capability only says the relay can lease; it does not mean this pane
   // has a width yet. The wrapping layout is engaged solely when it does.
@@ -509,7 +511,7 @@
     const interfaceSizeValue = $interfaceSize;
     const paneId = agent.pane_id;
     void interfaceSizeValue;
-    if (readOnly) {
+    if (!resizeSessionActive || readOnly) {
       releasePaneSizeLease(componentMounted);
       paneSizeLeaseError = '';
       return;
@@ -526,7 +528,7 @@
     }
     if (!connection.capabilities.includes('pane_size_lease')) {
       discardPaneSizeLease();
-      paneSizeLeaseError = 'Resize Session is unavailable on this relay.';
+      paneSizeLeaseError = '';
       return;
     }
     if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
@@ -1713,7 +1715,8 @@
 
   function paneSizeLeaseSupported(target: Agent): boolean {
     const connection = $connections.get(target.relay_id);
-    return componentMounted
+    return resizeSessionActive
+      && componentMounted
       && !readOnly
       && !questionMode
       && connection?.status === 'connected'
@@ -1789,6 +1792,7 @@
     leaseTarget = null;
     lastLeasedColumns = 0;
     lastLeasedRows = 0;
+    renderedResizeColumns = 0;
     clearResizeSettling();
     queuedLease = null;
   }

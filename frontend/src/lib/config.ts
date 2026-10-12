@@ -9,6 +9,10 @@ export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
+export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';
+// No qualified target-bound resize backend exists in this build. In particular,
+// legacy relay capabilities are not evidence of safe optional resizing.
+export const TERMINAL_RESIZE_BACKEND_AVAILABLE = false;
 export const TERMINAL_HEIGHT_LEASE_KEY = 'herdr_terminal_height_lease';
 export const TERMINAL_WAKE_LOCK_KEY = 'herdr_terminal_wake_lock';
 export const HOME_LAYOUT_KEY = 'herdr_home_workspace_layout';

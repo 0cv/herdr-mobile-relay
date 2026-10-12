@@ -224,33 +224,53 @@ controls to resize it without changing the rest of the app.
 
 ## Mobile terminal
 
-Controller terminals use **Resize Session** whenever the relay advertises size
-leases. While a terminal is open and the app is visible, the relay leases the
-live PTY at the measured phone width. Reader terminals never change the shared
-PTY; they wrap desktop-width rows to the phone viewport instead. Closing a
-controller terminal restores the previous width about ten seconds later, so
-stepping back into the same agent resumes instantly instead of resizing the
-pane twice. A hidden controller page keeps renewing its lease for five minutes
-— desktop Safari reports an occluded window as hidden, so brief switches to
-another app must not resize the shared pane — after which the desktop size
-returns within about two minutes. A sleeping phone freezes sooner than that, a
-disconnecting phone and relay shutdown restore the size immediately, and
-returning to the terminal takes the phone size again.
+**Resize Session** is now a persistent, per-browser/app preference, **off by
+default**, including after an upgrade. The old height preference is not consent:
+in older apps, turning **Lease Terminal Height** off still leased width.
+Height's saved value is retained, but its switch is subordinate to Resize
+Session and backend availability.
 
-**Lease Terminal Height** (Settings → Terminal, off by default) additionally
-leases the phone's measured height, so full-screen agents redraw to fit the
-phone instead of serving a mostly empty desktop-sized grid. The shared pane
-physically shrinks to phone size on the computer, and each height change can
-strand a stale copy of an inline agent's status bar (omp, Claude Code) in the
-scrollback: the terminal reflows its primary buffer before the agent can
-repaint, and scrollback cannot be erased afterwards. Leave it off unless you
-mostly drive full-screen TUIs from the phone. While the height is leased, the
-on-screen keyboard never shrinks it — the lease keeps the resting height and
-re-measures when the keyboard closes.
+**Resizing is unavailable in this build, even if either saved preference or
+`HERDR_PANE_SIZE_LEASE_ENABLED` is true.** The experimental direct-TTY backend
+reopened cached terminal paths without authoritative incarnation validation and
+could desynchronize Herdr's grid from the PTY. It has not passed the lifecycle
+safety gate. No new size lease is created or renewed, even on an older relay
+advertising legacy capabilities. Saving Resize Session consent does not enable
+that backend.
 
-Herdr 0.9.0's independent client views do not replace this option: the relay
-still reads pane snapshots and resizes the shared PTY, rather than attaching as
-a native Herdr terminal client. Clients sharing a tab still share its size.
+Controller terminals preserve desktop-width column alignment and scroll
+horizontally. Reader rendering is unchanged (desktop-width text wraps to the
+phone viewport). Prompts, keys, approvals, uploads, terminal reading, and
+Conversation remain available; reader pairing is not a resizing workaround.
+Herdr 0.7.5 remains the minimum. Browser wrapping cannot reconstruct an
+independently sized full-screen TUI for one shared PTY.
+
+Old/cached apps are protected by the new relay's default-off gate and unavailable
+backend, including direct lease requests. Updating only the app cannot impose
+this relay gate or lifecycle fixes on an older relay. If a future qualified
+backend is enabled by its operator, old apps may still request automatic leases;
+operator consent does not supply per-device consent to legacy apps.
+
+This is containment, **not** safe optional or coordinated resizing. It does not
+restore geometry left by older code or an interrupted process. Stop further
+leasing (update the relay and app, or close old clients), then perform a normal
+local terminal/window resize if necessary. Do not use ad hoc `stty` as a durable
+fix. Restarting an old relay is not proof of restored geometry.
+
+For older relays only: ordinary navigation release shortens that client's lease
+to at most ten seconds; disconnect attempts cleanup immediately; a lost client's
+lease expires after 120 seconds without renewal. Older apps can keep renewing
+for five minutes while hidden. These are lease/cleanup timings, **not restoration
+guarantees**: old restores can fail and retry indefinitely. This containment build
+creates no leases, so there is no online immediate-revocation feature or
+restoration acknowledgement to promise. Offline delivery cannot be guaranteed.
+Target-bound per-client revocation and generation ordering must be qualified
+before any backend is re-enabled. A coordinated Herdr-owned resize contract
+remains a separate integration; native-client views alone do not give different
+render widths to one shared PTY.
+
+See [resize containment and follow-up evidence](pane-size-leasing.md) for operator
+configuration and the remaining safety boundary.
 
 Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
 1,000 is the default and the ceiling on the gateway-relayed path; direct

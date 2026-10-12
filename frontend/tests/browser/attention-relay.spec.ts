@@ -85,6 +85,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   })).toBeVisible();
   await expect(page.getByText(
     'Proceed with a safe default so we can finalize the file-create plan immediately.',
+    { exact: true },
   )).toBeVisible();
   await expect(page.getByRole('button', { name: '← Previous' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Back' }).click();

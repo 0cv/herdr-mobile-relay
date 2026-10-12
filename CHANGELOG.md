@@ -5,6 +5,17 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Contain shared-terminal resizing: Resize Session is a per-device default-off
+  preference, and the relay rejects acquisition/renewal from stale clients.
+  The legacy direct-TTY backend remains unavailable even with operator consent
+  (`HERDR_PANE_SIZE_LEASE_ENABLED=true`), pending terminal-identity and lifecycle
+  qualification. Controllers retain a desktop-sized, horizontally scrollable
+  view and all normal actions. This does not implement coordinated resizing or
+  restore geometry left by older code; a normal local resize may still be needed.
+  ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
+
 ## [0.22.7] - 2026-10-05
 
 ### Fixed

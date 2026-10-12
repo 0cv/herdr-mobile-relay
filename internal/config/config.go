@@ -40,6 +40,9 @@ type Config struct {
 	ReleaseRoot    string
 	ServiceName    string
 
+	// PaneSizeLeaseEnabled is restart-only operator consent, not backend eligibility.
+	PaneSizeLeaseEnabled bool
+
 	// GatewayURL is the configured tie-break leader, kept equal to
 	// GatewayURLs[0] so readers that only know one gateway keep working. The
 	// transport may select another healthy entry at runtime.
@@ -77,10 +80,11 @@ func Load() (*Config, error) {
 		LogFormat:    envOr("HERDR_RELAY_LOG_FORMAT", "text"),
 		ServiceName:  envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
 
-		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
-		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
-		PortMappingEnabled:  envBoolOr("HERDR_REACHABILITY_PORT_MAPPING", true),
-		RearmBootstrap:      envBoolOr("HERDR_RELAY_REARM_BOOTSTRAP", false),
+		WebRTCUDPPort:        envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
+		ForceRelayTransport:  envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
+		PortMappingEnabled:   envBoolOr("HERDR_REACHABILITY_PORT_MAPPING", true),
+		RearmBootstrap:       envBoolOr("HERDR_RELAY_REARM_BOOTSTRAP", false),
+		PaneSizeLeaseEnabled: envBoolOr("HERDR_PANE_SIZE_LEASE_ENABLED", false),
 	}
 
 	logLevel, err := parseLogLevel(os.Getenv("HERDR_RELAY_LOG_LEVEL"))

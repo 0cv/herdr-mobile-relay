@@ -532,7 +532,11 @@ describe('settings relay status', () => {
     expect(screen.queryByRole('group', { name: 'Terminal Width' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
-    expect(screen.getByText(/Resize Session automatically leases/)).toBeInTheDocument();
+    const resizeSession = screen.getByRole('switch', { name: /^Resize Session$/ });
+    expect(resizeSession).not.toBeChecked();
+    expect(resizeSession).toHaveAccessibleDescription(/Controller terminals stay desktop-sized and scroll horizontally; read-only reader panes wrap to the available width\./);
+    expect(screen.getByRole('switch', { name: 'Lease Terminal Height' })).toBeDisabled();
+    expect(screen.getByText(/Currently unavailable: the experimental TTY backend/)).toBeInTheDocument();
   });
 
   it('keeps notification controls out of the way until push delivery is enabled', async () => {

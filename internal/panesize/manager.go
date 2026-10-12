@@ -42,6 +42,7 @@ const (
 )
 
 var (
+	ErrUnavailable        = errors.New("Pane size leasing is unavailable: the legacy TTY backend is not identity-safe")
 	ErrClosed             = errors.New("Pane size leasing is shut down")
 	ErrInvalidColumns     = errors.New("Columns must be between 40 and 240")
 	ErrInvalidRows        = errors.New("Rows must be between 10 and 120")
@@ -87,20 +88,31 @@ type paneState struct {
 }
 
 type Manager struct {
-	mu       sync.Mutex
-	provider ProcessInfoProvider
-	runner   commandRunner
-	goos     string
-	ttl      time.Duration
-	grace    time.Duration
-	now      func() time.Time
-	logger   *slog.Logger
-	panes    map[string]*paneState
-	closed   bool
+	mu        sync.Mutex
+	provider  ProcessInfoProvider
+	runner    commandRunner
+	goos      string
+	ttl       time.Duration
+	grace     time.Duration
+	now       func() time.Time
+	logger    *slog.Logger
+	panes     map[string]*paneState
+	closed    bool
+	available bool
 }
 
 func NewManager(provider ProcessInfoProvider, logger *slog.Logger) *Manager {
-	return newManager(provider, execCommandRunner{}, runtime.GOOS, LeaseTTL, ReleaseGrace, time.Now, logger)
+	m := newManager(provider, execCommandRunner{}, runtime.GOOS, LeaseTTL, ReleaseGrace, time.Now, logger)
+	// The legacy path reopens a cached TTY pathname for mutations. It cannot
+	// prove terminal incarnation or coordinate Herdr's grid, so production must
+	// never activate it, including when the operator setting is true.
+	m.available = false
+	return m
+}
+
+// Available reports backend eligibility, independently of operator consent.
+func (m *Manager) Available() bool {
+	return m != nil && m.available
 }
 
 func newManager(
@@ -124,6 +136,8 @@ func newManager(
 		now:      now,
 		logger:   logger,
 		panes:    make(map[string]*paneState),
+		// Private construction enables only isolated legacy algorithm tests.
+		available: true,
 	}
 }
 
@@ -132,6 +146,9 @@ func (m *Manager) Acquire(
 	clientID, paneID string,
 	columns, rows int,
 ) (int, int, error) {
+	if !m.Available() {
+		return 0, 0, ErrUnavailable
+	}
 	if clientID == "" || paneID == "" {
 		return 0, 0, ErrInvalidLease
 	}

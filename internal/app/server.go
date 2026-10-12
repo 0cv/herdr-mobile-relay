@@ -749,29 +749,8 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
 			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
-		case "lease_pane_size":
-			columns, rows, leaseErr := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
-			if leaseErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "lease_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(
-				client,
-				inbound.RequestID,
-				"lease_pane_size",
-				true,
-				"completed",
-				"",
-				inbound.PaneID,
-				map[string]any{"columns": columns, "rows": rows},
-			)
-		case "release_pane_size":
-			leaseErr := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID)
-			if leaseErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "release_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(client, inbound.RequestID, "release_pane_size", true, "completed", "", inbound.PaneID, nil)
+		case "lease_pane_size", "release_pane_size":
+			s.handlePaneSizeCommand(client, inbound)
 		case "read_pane":
 			s.applyPaneReadLease(msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
@@ -1443,12 +1422,45 @@ func (s *Server) Run(ctx context.Context) error {
 	return runErr
 }
 
+func (s *Server) handlePaneSizeCommand(client *transport.ClientConn, inbound protocol.Inbound) {
+	if inbound.Type == "release_pane_size" {
+		// Remains idempotent while unavailable. Production managers cannot have
+		// acquired legacy state; do not invent a restore against a cached path.
+		err := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID)
+		if err != nil {
+			s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", err.Error(), inbound.PaneID, nil)
+			return
+		}
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, nil)
+		return
+	}
+	if !s.paneSizeLeaseEligible() {
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", "Resize Session is disabled or unavailable on this relay", inbound.PaneID, nil)
+		return
+	}
+	columns, rows, err := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
+	if err != nil {
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", err.Error(), inbound.PaneID, nil)
+		return
+	}
+	s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, map[string]any{"columns": columns, "rows": rows})
+}
+
+// Operator consent alone must not expose an unqualified backend. All transports
+// share this gate through the ordered command handler and capability builder.
+func (s *Server) paneSizeLeaseEligible() bool {
+	return s.cfg != nil && s.cfg.PaneSizeLeaseEnabled && s.paneSizeM.Available()
+}
+
 func (s *Server) effectiveCapabilities() []string {
 	return s.effectiveCapabilitiesFor(s.herdrC.CapabilityStatus())
 }
 
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
+	if s.paneSizeLeaseEligible() {
+		capabilities = append(capabilities, "pane_size_lease", "pane_size_lease_rows")
+	}
 	if s.pushM != nil {
 		capabilities = append(capabilities, "typed_push", "push_policy")
 	}

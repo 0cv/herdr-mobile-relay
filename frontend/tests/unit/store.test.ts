@@ -937,7 +937,7 @@ describe('relay command store', () => {
   });
 
 
-  it('acquires and releases validated pane-size leases for capable relays', async () => {
+  it('rejects legacy acquisitions but retains owner-scoped cleanup', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -954,28 +954,9 @@ describe('relay command store', () => {
     });
     const agent = get(relayStore.agents)[0];
 
-    const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const acquire = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'lease_pane_size');
-    expect(acquire).toMatchObject({
-      type: 'lease_pane_size',
-      pane_id: 'w1:p1',
-      columns: 83,
-      protocol: 3,
-    });
-    expect(acquire.request_id).toBeTruthy();
-    expect(acquire).not.toHaveProperty('client_id');
-    // The relay does not advertise row support: rows must not be sent, and
-    // no applied height may be believed.
-    expect(acquire).not.toHaveProperty('rows');
-    socket.message({
-      type: 'command_result',
-      action: 'lease_pane_size',
-      request_id: acquire.request_id,
-      ok: true,
-      data: { columns: 83 },
-    });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 0 });
+    await expect(relayStore.leasePaneSize(agent, 83, 32)).rejects.toThrow(/disabled or unavailable/);
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'lease_pane_size')).toHaveLength(0);
 
     const release = relayStore.releasePaneSize(agent);
     const releaseCommand = socket.sent.map((payload) => JSON.parse(payload))
@@ -994,10 +975,10 @@ describe('relay command store', () => {
       ok: true,
     });
     await expect(release).resolves.toBeUndefined();
-    await expect(relayStore.leasePaneSize(agent, 39)).rejects.toThrow(/between 40 and 240/);
+    await expect(relayStore.leasePaneSize(agent, 39)).rejects.toThrow(/disabled or unavailable/);
   });
 
-  it('leases rows only when the relay advertises row support', async () => {
+  it('does not lease either dimension even when a legacy relay advertises both', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -1014,26 +995,10 @@ describe('relay command store', () => {
     });
     const agent = get(relayStore.agents)[0];
 
-    const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const acquire = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'lease_pane_size');
-    expect(acquire).toMatchObject({
-      type: 'lease_pane_size',
-      pane_id: 'w1:p1',
-      columns: 83,
-      rows: 32,
-      protocol: 3,
-    });
-    socket.message({
-      type: 'command_result',
-      action: 'lease_pane_size',
-      request_id: acquire.request_id,
-      ok: true,
-      // Another client holds a shorter lease: the applied height wins.
-      data: { columns: 83, rows: 30 },
-    });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 30 });
-    await expect(relayStore.leasePaneSize(agent, 80, 9)).rejects.toThrow(/between 10 and 120/);
+    await expect(relayStore.leasePaneSize(agent, 83, 32)).rejects.toThrow(/disabled or unavailable/);
+    await expect(relayStore.leasePaneSize(agent, 80, 9)).rejects.toThrow(/disabled or unavailable/);
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'lease_pane_size')).toHaveLength(0);
   });
 
   it('replaces a stale connecting attempt on revalidation but keeps a young one', () => {

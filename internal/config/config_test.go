@@ -33,6 +33,23 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestPaneSizeLeaseSettingFailsClosed(t *testing.T) {
+	for _, raw := range []string{"", "false", "0", "typo", " true ", "yes", "true", "1"} {
+		t.Run(raw, func(t *testing.T) {
+			isolateLoadEnvironment(t)
+			t.Setenv("HERDR_PANE_SIZE_LEASE_ENABLED", raw)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := raw == "true" || raw == "1"
+			if cfg.PaneSizeLeaseEnabled != want {
+				t.Fatalf("setting %q = %v, want %v", raw, cfg.PaneSizeLeaseEnabled, want)
+			}
+		})
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	for _, test := range []struct {
 		name  string

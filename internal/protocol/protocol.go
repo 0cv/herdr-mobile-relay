@@ -496,8 +496,6 @@ var Capabilities = []string{
 	"structured_questions",
 	"slash_commands",
 	"conversation_history",
-	"pane_size_lease",
-	"pane_size_lease_rows",
 	"workspace_inspection",
 	"semantic_input",
 	"secret_input",

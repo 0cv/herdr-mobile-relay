@@ -20,6 +20,7 @@ import {
   quickSetupConfig,
   quickSetupInvitation,
   RELAY_KEY_BYTES,
+  TERMINAL_RESIZE_BACKEND_AVAILABLE,
   saveRelayConfigs,
   shouldDeferPairingConnection,
   shouldRetainSetupFragment,
@@ -79,6 +80,7 @@ import {
   clearPaneAgentViewOverridesForRelay,
   terminalHistoryLines,
   terminalRefreshInterval,
+  terminalResizeSession,
 } from './preferences';
 import {
   clearPendingRelayUpdate,
@@ -2410,6 +2412,9 @@ class RelayStore {
     columns: number,
     rows = 0,
   ): Promise<{ columns: number; rows: number }> {
+    if (!TERMINAL_RESIZE_BACKEND_AVAILABLE || !get(terminalResizeSession)) {
+      throw new CommandError('Resize Session is disabled or unavailable');
+    }
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('pane_size_lease')) {
       throw new CommandError('Relay lacks pane-size lease support');
@@ -2452,10 +2457,7 @@ class RelayStore {
   }
 
   async releasePaneSize(agent: Agent): Promise<void> {
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('pane_size_lease')) {
-      throw new CommandError('Relay lacks pane-size lease support');
-    }
+    // Cleanup does not require consent or capability advertisement.
     const result = await this.sendToAgent(agent, { type: 'release_pane_size' });
     if (result.action && result.action !== 'release_pane_size') {
       throw new CommandError('Relay returned the wrong pane-size release confirmation');
