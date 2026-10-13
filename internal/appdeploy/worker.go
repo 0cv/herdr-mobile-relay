@@ -821,9 +821,22 @@ func fetchPublicResource(
 		request.Header.Set("Cache-Control", "no-cache, no-store")
 	} else {
 		canonicalClient := *client
-		canonicalClient.CheckRedirect = func(request *http.Request, _ []*http.Request) error {
+		previousRedirect := client.CheckRedirect
+		canonicalClient.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 			if !samePublicOrigin(request.URL.String(), origin) {
 				return errPublicOriginRedirect
+			}
+			// Pages normalizes a build's index.html to its directory with a
+			// 308. Allow that one exact hop only for the verified build entry,
+			// without a query/fragment. The caller still checks MIME and digest
+			// of the returned bytes in both identity and Brotli probes.
+			if strings.HasPrefix(resource, "builds/") && strings.HasSuffix(resource, "/index.html") &&
+				len(via) == 1 && request.Response != nil && request.Response.StatusCode == http.StatusPermanentRedirect &&
+				request.URL.String() == strings.TrimSuffix(resourceURL, "index.html") {
+				if previousRedirect != nil {
+					return previousRedirect(request, via)
+				}
+				return nil
 			}
 			return errPublicCanonicalRedirect
 		}

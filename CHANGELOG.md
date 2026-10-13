@@ -5,6 +5,19 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.9] - 2026-10-13
+
+### Fixed
+
+- Accept Cloudflare Pages' single same-origin HTTP 308 redirect from a
+  build-specific `index.html` to its directory during phone-app deployment
+  verification. This fixes the `canonical public resource must not redirect`
+  failure introduced in 0.22.6. Query-changing redirects, additional hops and
+  JavaScript/CSS redirects remain rejected; the entry's MIME type and exact
+  content digest are still checked. If the old verifier blocks a phone-driven
+  upgrade, update the deployment-owner relay manually first, then retry app
+  deployment without clearing phone storage or pairing again.
+
 ## [0.22.8] - 2026-10-13
 
 ### Changed
@@ -1676,7 +1689,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...HEAD
+[0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
 [0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8
 [0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7
 [0.22.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...v0.22.6
