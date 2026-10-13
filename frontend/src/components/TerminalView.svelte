@@ -3,7 +3,13 @@
   import AttachmentProgress from '$components/AttachmentProgress.svelte';
   import Button from '$components/ui/Button.svelte';
   import QuestionForm from '$components/QuestionForm.svelte';
-  import { MAX_PANE_SIZE_COLUMNS, MIN_PANE_SIZE_COLUMNS } from '$lib/config';
+  import {
+    MAX_PANE_SIZE_COLUMNS,
+    MAX_PANE_SIZE_ROWS,
+    MIN_PANE_SIZE_COLUMNS,
+    MIN_PANE_SIZE_ROWS,
+    paneLeaseRenewalAllowed,
+  } from '$lib/config';
   import {
     agentNeedsInspection,
     agentNeedsResponse,
@@ -31,7 +37,7 @@
     speechState,
     stopSpeech,
   } from '$lib/speech';
-  import { interfaceSize, theme } from '$lib/preferences';
+  import { interfaceSize, terminalHeightLease, terminalResizeSession, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
@@ -42,6 +48,7 @@
     stripAnsi,
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
+    terminalResizeLayoutEngaged,
     terminalScreenColumns,
   } from '$lib/terminal';
   import { detectTerminalMenu, terminalTextInputMode } from '$lib/terminal-menu';
@@ -109,6 +116,16 @@
   let noEchoDraftTainted = false;
   let draftPersistenceWarning = $state('');
   let historyTruncated = $state(false);
+  // Pre-resize frame kept only to suppress display of transient frames while
+  // the agent repaints at the new width.
+  // Raw state: the effect compares frame identity, which a deep proxy breaks.
+  let resizeFrameBaseline = $state.raw<TerminalFrame | undefined>(undefined);
+  // The relay flags frames while a pane repaints at a new size. Suppressing
+  // them keeps a half-drawn screen off the phone, but a shared session whose
+  // desktop client keeps fighting the leased size can flag every frame, so the
+  // wait is bounded: a stale screen is worse than a transient one.
+  let resizeWaitExpired = $state(false);
+  let resizeWaitTimer: ReturnType<typeof setTimeout> | null = null;
   let displayed = $state('');
   let renderedHtml = $state('');
   let renderedRows = $state<RenderedTerminalRow[]>([]);
@@ -121,6 +138,8 @@
   let virtualLayoutSignature = '';
   let virtualStickToBottom = true;
   let virtualScrollResetPending = false;
+  let pendingResizeAnchor: VirtualTerminalAnchor | null = null;
+  let pendingResizeStick: boolean | null = null;
   let pendingLayoutStick: boolean | null = null;
   let virtualScrollTop = 0;
   let virtualClientHeight = 0;
@@ -157,6 +176,7 @@
   let attachmentUnsubscribe: (() => void) | null = null;
   let attachmentCancelRequested = false;
   let copyingAgentResponse = $state(false);
+  let paneSizeLeaseError = $state('');
   let requestedPaneId = '';
   let slashCatalog = $state<SlashCommandCatalog>({ commands: [], truncated: false });
   let slashCatalogLoading = $state(true);
@@ -171,8 +191,11 @@
   let dismissedSlashQuery = $state<string | null>(null);
   let dismissedMenuSignature = $state('');
   const CELL_MEASURE_TEXT = '0000000000';
+  const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
   const PANE_REALTIME_RESYNC_MS = 15_000;
   const MAX_VISIBLE_SLASH_COMMANDS = 200;
+  // One relay poll of slack over its own three-second settling window.
+  const PANE_RESIZE_WAIT_MAX_MS = 4_000;
   // Herdr's key parser covers f1..f24; the pad exposes the range phones need.
   const FUNCTION_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   const RESPONSE_COPY_AGENT_IDS = new Set([
@@ -185,11 +208,29 @@
     return RESPONSE_COPY_AGENT_IDS.has(normalized);
   }
   let componentMounted = false;
+  let leaseGeneration = 0;
+  let leaseInFlight = false;
+  let leaseTarget: Agent | null = null;
+  let lastLeasedColumns = $state(0);
+  let lastLeasedRows = 0;
+  let renderedResizeColumns = $state(0);
   let measuredCellWidth = $state(0);
+  let queuedLease: { columns: number; rows: number; force: boolean } | null = null;
+  // Set when the page goes hidden; renewals continue within the grace so a
+  // desktop browser that reports occluded windows as hidden does not lapse
+  // the lease on every app switch.
+  let hiddenAt = 0;
   // A locked app is showing this pane to nobody who has verified, so it counts
   // as hidden for reads and watches. The connection now survives the lock, so
   // without this the terminal would keep streaming behind the unlock screen.
   const paneVisible = () => document.visibilityState === 'visible' && !$securityState.locked;
+  // The lease needs its own gate: being locked is not the same as being
+  // briefly hidden. The grace window below exists so an app switch does not
+  // resize the computer's pane, but an unverified holder must not keep it
+  // narrowed at all, so a lock skips the grace instead of entering it. The
+  // relay's TTL hands the size back if the lock outlasts it.
+  const paneLeaseAllowed = () => !$securityState.locked
+    && paneLeaseRenewalAllowed(document.visibilityState === 'visible', hiddenAt, Date.now());
   // A lock flip changes what "visible" means for this pane, and no visibility
   // event comes with it, so the pane handler is called directly.
   let paneVisibilityChanged: (() => void) | null = null;
@@ -203,12 +244,29 @@
   const inspectionMode = $derived(agentNeedsInspection(agent));
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(!readOnly && responsePending && attentionKind(agent) === 'question' && interaction));
-  // Two layout regimes, chosen by role. The phone cannot resize the shared
-  // terminal, so a controller sees the pane at the desktop's own width: the
-  // fixed layout keeps its columns aligned and scrolls sideways. A reader
-  // wraps rows at the phone instead, so it is not stranded on line tails
-  // after every refresh.
-  const wrappedLayout = $derived(readOnly);
+  // Resize Session needs three things: this device opted in, it controls the
+  // relay, and the relay advertises the opt-in capability. The legacy
+  // pane_size_lease name is ignored: a relay offering only that resizes on any
+  // lease, with no opt-in check.
+  const resizeSessionActive = $derived(
+    Boolean($terminalResizeSession
+      && !readOnly && $connections.get(agent.relay_id)?.capabilities.includes('pane_size_opt_in')),
+  );
+  // The capability only says the relay can lease; it does not mean this pane
+  // has a width yet. The wrapping layout is engaged solely when it does.
+  const resizeLayoutActive = $derived(terminalResizeLayoutEngaged(
+    resizeSessionActive,
+    measuredCellWidth,
+    lastLeasedColumns || renderedResizeColumns,
+  ));
+  // Three regimes, not two. A relay that cannot lease at all serves a pane at
+  // its own width, and the fixed layout keeps that pane's columns aligned and
+  // scrolling sideways. A relay that can lease but has not granted a width yet
+  // is showing a pane whose width is nobody's: alignment is already lost, so
+  // those rows wrap at the container instead of stranding the reader on line
+  // tails after every refresh. Readers use the same wrapping regime because
+  // their role can never obtain a size lease.
+  const resizeLayoutPending = $derived(readOnly || (resizeSessionActive && !resizeLayoutActive));
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -280,9 +338,16 @@
     // Every width is emitted in px of the measured probe cell, never in ch:
     // Safari's Core Text port resolves 1ch against different font metrics
     // than the rendered glyph advance, so an Nch cap wraps short of N cells.
-    // Before the probe is measured no width is emitted at all.
+    // Before the probe is measured no cap is emitted at all. The wrapping
+    // layout is gated on the same predicate, so the missing cap can no longer
+    // fall back to the container width and shred rows mid-word: the fixed
+    // layout applies instead until a real cap exists.
     if (measuredCellWidth <= 0) return undefined;
+    const capColumns = lastLeasedColumns || renderedResizeColumns;
     const styles = [`--terminal-cell-width: ${measuredCellWidth.toFixed(4)}px`];
+    if (resizeLayoutActive) {
+      styles.push(`--terminal-width: ${(capColumns * measuredCellWidth).toFixed(4)}px`);
+    }
     if (virtualContentColumns > 0) {
       styles.push(`--terminal-content-width: ${(virtualContentColumns * measuredCellWidth).toFixed(4)}px`);
     }
@@ -364,13 +429,51 @@
     const next = frame;
     const matchingFrame = next?.paneId === agent.pane_id ? next : undefined;
     const preserve = true;
-    // A controller keeps each row's trailing padding: the pane really is the
-    // desktop's width. A reader's rows wrap at the phone instead of trailing
-    // off the side of a desktop-width grid.
-    const preserveLineEnds = !readOnly;
-    if (!matchingFrame) {
+    // Keyed to the session, not to resizeLayoutActive, on purpose: a relay that
+    // can lease will repaint this pane at the phone's width, so trailing padding
+    // measured at the desktop width is stale whether or not the width has landed
+    // yet. A reader cannot lease at all, so its rows wrap at the phone instead
+    // of trailing off the side of a desktop-width grid.
+    const preserveLineEnds = !resizeSessionActive && !readOnly;
+    // A frame read while the agent repaints at a new width is transient. Keep
+    // the phone's last stable frame painted until the new stable frame lands,
+    // but never past the deadline: a relay that keeps flagging frames would
+    // otherwise freeze this pane on a screen that is minutes old.
+    const waitingForResizedFrame = resizeSessionActive
+      && !paneSizeLeaseError
+      && !resizeWaitExpired
+      && (lastLeasedColumns === 0
+        || (Boolean(resizeFrameBaseline)
+          && (next === resizeFrameBaseline || next?.resizeSettling === true)));
+    const cachedFrame = waitingForResizedFrame
+      && matchingFrame
+      && matchingFrame.resizeSettling !== true
+      && (!resizeFrameBaseline || matchingFrame === resizeFrameBaseline)
+        ? matchingFrame
+        : undefined;
+    if (waitingForResizedFrame) {
       untrack(() => {
-        const rendered = renderTerminalContent('Loading…', 'plain');
+        if (pendingResizeStick !== null) return;
+        pendingResizeStick = virtualStickToBottom;
+        pendingResizeAnchor = virtualStickToBottom
+          ? null
+          : currentVirtualAnchor(terminalElement?.scrollTop || 0);
+      });
+      if (cachedFrame) {
+        historyTruncated = Boolean(cachedFrame.truncated);
+        untrack(() => { void applyFrame(cachedFrame, preserve, preserveLineEnds) });
+        return;
+      }
+      if (renderedRows.length) return;
+    }
+    if (!matchingFrame || waitingForResizedFrame) {
+      untrack(() => {
+        if (!waitingForResizedFrame) {
+          pendingResizeStick = null;
+          pendingResizeAnchor = null;
+        }
+        const message = waitingForResizedFrame ? 'Resizing terminal…' : 'Loading…';
+        const rendered = renderTerminalContent(message, 'plain');
         displayed = rendered.display;
         renderedHtml = rendered.html;
         renderedRows = rendered.rows;
@@ -381,6 +484,7 @@
       });
       return;
     }
+    if (resizeSessionActive && lastLeasedColumns > 0) renderedResizeColumns = lastLeasedColumns;
     historyTruncated = Boolean(matchingFrame.truncated);
     untrack(() => { void applyFrame(matchingFrame, preserve, preserveLineEnds) });
   });
@@ -392,6 +496,7 @@
       requestedPaneId = '';
       return;
     }
+    if (resizeSessionActive && !paneSizeLeaseError) return;
     if (paneId === requestedPaneId) return;
     requestedPaneId = paneId;
     relayStore.readPane(agent);
@@ -402,6 +507,43 @@
     if (locked === paneLocked) return;
     paneLocked = locked;
     paneVisibilityChanged?.();
+  });
+
+  $effect(() => {
+    const connection = $connections.get(agent.relay_id);
+    const interfaceSizeValue = $interfaceSize;
+    const paneId = agent.pane_id;
+    void interfaceSizeValue;
+    if (!$terminalResizeSession) {
+      // Turned off: the store has already released every pane this phone
+      // leased, immediately. Only the local lease state is left to drop.
+      discardPaneSizeLease();
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (!resizeSessionActive || readOnly) {
+      releasePaneSizeLease(componentMounted);
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (questionMode) {
+      releasePaneSizeLease(componentMounted);
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (connection?.status !== 'connected') {
+      discardPaneSizeLease();
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (!connection.capabilities.includes('pane_size_opt_in')) {
+      discardPaneSizeLease();
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
+    paneSizeLeaseError = '';
+    void tick().then(() => requestPaneSizeLease(false));
   });
 
   $effect.pre(() => {
@@ -461,6 +603,7 @@
       }
       previousWidth = nextWidth;
       previousHeight = nextHeight;
+      requestPaneSizeLease(false);
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -521,18 +664,31 @@
   onMount(() => {
     componentMounted = true;
     const stopWakeLock = mountTerminalWakeLock();
+    const measurePane = () => requestPaneSizeLease(false);
     const realtimeDeltaEnabled = () => Boolean(
       $connections.get(agent.relay_id)?.capabilities.includes('pane_realtime_delta'),
     );
     let lastRefreshAt = Date.now();
     const visibilityChanged = () => {
       if (!paneVisible()) {
+        // Traffic stops while hidden, but lease renewals keep going for a
+        // bounded grace: desktop Safari reports an occluded window as hidden,
+        // so treating every app switch as departure lapsed the lease and
+        // resized the shared pane twice per glance, stranding stale copies of
+        // inline agents' status bars in the scrollback. Once the grace runs
+        // out the renewals stop and the relay's TTL hands the size back — a
+        // page hidden overnight cannot keep the pane narrow.
+        hiddenAt = Date.now();
         relayStore.unwatchPane(agent);
         return;
       }
+      hiddenAt = 0;
       lastRefreshAt = Date.now();
       relayStore.readPane(agent);
       relayStore.watchPane(agent);
+      // Re-lease at once: if the lease lapsed while asleep, the pane is back
+      // at the desktop width until this lands.
+      requestPaneSizeLease(true);
     };
     paneVisibilityChanged = visibilityChanged;
     const findShortcut = (event: KeyboardEvent) => {
@@ -544,6 +700,8 @@
       openTerminalFind();
     };
     window.addEventListener('keydown', findShortcut);
+    window.addEventListener('resize', measurePane);
+    window.visualViewport?.addEventListener('resize', measurePane);
     document.addEventListener('visibilitychange', visibilityChanged);
     const refresh = setInterval(() => {
       if (!paneVisible()) return;
@@ -553,16 +711,27 @@
       relayStore.readPane(agent);
     }, 3_000);
     if (paneVisible()) relayStore.watchPane(agent);
+    const refreshPaneSizeLease = setInterval(
+      () => {
+        if (paneLeaseAllowed()) requestPaneSizeLease(true);
+      },
+      PANE_SIZE_LEASE_REFRESH_MS,
+    );
+    void tick().then(measurePane);
     return () => {
       componentMounted = false;
+      window.removeEventListener('resize', measurePane);
+      window.visualViewport?.removeEventListener('resize', measurePane);
       document.removeEventListener('visibilitychange', visibilityChanged);
       paneVisibilityChanged = null;
       window.removeEventListener('keydown', findShortcut);
       clearInterval(refresh);
+      clearInterval(refreshPaneSizeLease);
       if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
       if (keyReadTimer) clearTimeout(keyReadTimer);
       for (const command of keyQueue.splice(0)) command.resolve(false);
       relayStore.unwatchPane(agent);
+      releasePaneSizeLease(false);
       virtualRowObserver?.disconnect();
       if (virtualWindowFrame) cancelAnimationFrame(virtualWindowFrame);
       stopWakeLock();
@@ -572,9 +741,11 @@
   async function applyFrame(
     next: TerminalFrame,
     preserve = true,
-    preserveLineEnds = preserve && !readOnly,
+    preserveLineEnds = preserve && !resizeSessionActive && !readOnly,
   ) {
-    const renderColumnCap = wrappedLayout ? measuredPaneColumns() || 0 : 0;
+    const renderColumnCap = resizeLayoutActive
+      ? lastLeasedColumns
+      : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0);
     const layoutChanged = preserve !== lastPreserveLayout
       || preserveLineEnds !== lastPreserveLineEnds
       || renderColumnCap !== lastRenderColumnCap;
@@ -587,7 +758,7 @@
       // Cap box-drawing rows at the width in force. A fixed-grid row is a run
       // of fixed-width cells with no wrap opportunity between them, so past
       // the cap it must render as plain text that can wrap instead. Zero means
-      // "no cap": the controller's pane really is this wide.
+      // "no cap", which only a relay that cannot lease is entitled to.
       renderColumnCap,
     );
     lastContent = next.content;
@@ -595,13 +766,15 @@
       && next.format === lastFormat && !layoutChanged) return;
     const frameStick = virtualStickToBottom || Boolean(terminalElement
       && terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48);
-    const stick = layoutChanged && pendingLayoutStick !== null
-      ? pendingLayoutStick
-      : frameStick;
+    const stick = resizeSessionActive && pendingResizeStick !== null
+      ? pendingResizeStick
+      : layoutChanged && pendingLayoutStick !== null
+        ? pendingLayoutStick
+        : frameStick;
     const previousTop = terminalElement?.scrollTop || 0;
     let previousAnchor = stick
       ? null
-      : currentVirtualAnchor(previousTop);
+      : pendingResizeAnchor || currentVirtualAnchor(previousTop);
     // Rows cropped from the front shift every index; keep the anchor on the
     // same row.
     const rowShift = renderedRowShift(renderedRows, rendered.rows);
@@ -609,6 +782,8 @@
     if (previousAnchor && rowShift) {
       previousAnchor = { ...previousAnchor, index: Math.max(0, previousAnchor.index - rowShift) };
     }
+    pendingResizeStick = null;
+    pendingResizeAnchor = null;
     if (layoutChanged) pendingLayoutStick = null;
     virtualStickToBottom = stick;
     virtualScrollResetPending = Boolean(terminalElement);
@@ -719,7 +894,9 @@
       || Math.round(window.visualViewport?.width || window.innerWidth);
     const layoutSignature = [
       lastPreserveLayout ? 'preserve' : 'readable',
+      resizeLayoutActive ? 'resize' : 'fixed',
       lastPreserveLineEnds ? 'line-ends' : 'wrapped',
+      lastLeasedColumns || renderedResizeColumns,
       $interfaceSize,
       width,
     ].join(':');
@@ -733,16 +910,23 @@
     const style = terminalElement ? getComputedStyle(terminalElement) : null;
     const parsedLineHeight = Number.parseFloat(style?.lineHeight || '');
     const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : 18;
-    const wrappingColumns = measuredPaneColumns() || 80;
+    const wrappingColumns = measuredPaneColumns()
+      || lastLeasedColumns
+      || renderedResizeColumns
+      || 80;
     const sizes = renderedRows.map((row) => {
       const measured = virtualHeightCache.get(row.html);
       if (measured) return measured;
       if (row.separator) return lineHeight * 1.2;
-      // A controller's rows stay on one line each: the pane is the desktop's
-      // width and scrolls sideways. A reader's rows wrap at the phone, wide
-      // box-drawing rows excepted (they scroll inside their own row), and
-      // estimating those at one line parks the scroll past the content.
-      const wraps = (!lastPreserveLayout || (wrappedLayout && !row.wideGrid))
+      // One line per row only where the row really stays on one line: a leased
+      // pane's fixed-grid rows. Everything else wraps at the width in force,
+      // and estimating those at one line parks the scroll past the content.
+      // Rows wrap in the two regimes that have a width to wrap at: engaged
+      // (the leased width, fixed grids excepted) and pending (the container).
+      // A relay that cannot lease keeps every row on one line.
+      const wraps = (!lastPreserveLayout
+        || (resizeLayoutPending && !row.wideGrid)
+        || (resizeLayoutActive && !row.fixedGrid && !row.wideGrid))
         ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
         : 1;
       return lineHeight * wraps;
@@ -758,8 +942,14 @@
       nextTop = terminalScreenOffset() + virtualIndex.offset(anchorIndex) + anchorOffset;
     }
 
-    if (!lastPreserveLayout || wrappedLayout) virtualContentColumns = 0;
-    else virtualContentColumns = terminalScreenColumns(renderedRows);
+    if (!lastPreserveLayout || resizeLayoutPending) virtualContentColumns = 0;
+    else {
+      virtualContentColumns = terminalScreenColumns(
+        renderedRows,
+        resizeLayoutActive,
+        lastLeasedColumns || renderedResizeColumns,
+      );
+    }
     renderVirtualWindow(nextTop, true);
     return nextTop;
   }
@@ -1533,6 +1723,30 @@
     scheduleVirtualWindow();
   }
 
+  function paneSizeLeaseSupported(target: Agent): boolean {
+    const connection = $connections.get(target.relay_id);
+    return resizeSessionActive
+      && componentMounted
+      && !readOnly
+      && !questionMode
+      && connection?.status === 'connected'
+      && connection.capabilities.includes('pane_size_opt_in');
+  }
+
+  function paneSizeRowLeaseSupported(target: Agent): boolean {
+    return $terminalHeightLease && Boolean(
+      $connections.get(target.relay_id)?.capabilities.includes('pane_size_opt_in_rows'),
+    );
+  }
+
+  // A toggle flips the next lease immediately: on adds the measured rows, off
+  // renews width-only, which lifts this client's row constraint on the relay.
+  $effect(() => {
+    const enabled = $terminalHeightLease;
+    void enabled;
+    void tick().then(() => requestPaneSizeLease(false));
+  });
+
   function measuredPaneColumns(): number | null {
     if (!terminalElement || !cellMeasureElement) return null;
     const cellWidth = cellMeasureElement.getBoundingClientRect().width / CELL_MEASURE_TEXT.length;
@@ -1549,6 +1763,147 @@
       Math.max(MIN_PANE_SIZE_COLUMNS, Math.floor(usableWidth / cellWidth)),
     );
   }
+
+  // 0 means "do not lease rows": the relay keeps the pane's own height.
+  function measuredPaneRows(): number {
+    if (!terminalElement) return 0;
+    const style = getComputedStyle(terminalElement);
+    const lineHeight = Number.parseFloat(style.lineHeight);
+    const verticalPadding = (Number.parseFloat(style.paddingTop) || 0)
+      + (Number.parseFloat(style.paddingBottom) || 0);
+    const usableHeight = terminalElement.clientHeight - verticalPadding;
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0 || usableHeight <= 0) return 0;
+    return Math.min(
+      MAX_PANE_SIZE_ROWS,
+      Math.max(MIN_PANE_SIZE_ROWS, Math.floor(usableHeight / lineHeight)),
+    );
+  }
+
+  function beginResizeSettling() {
+    resizeFrameBaseline = frame;
+    resizeWaitExpired = false;
+    if (resizeWaitTimer !== null) clearTimeout(resizeWaitTimer);
+    resizeWaitTimer = setTimeout(() => {
+      resizeWaitTimer = null;
+      resizeWaitExpired = true;
+    }, PANE_RESIZE_WAIT_MAX_MS);
+  }
+
+  function clearResizeSettling() {
+    resizeFrameBaseline = undefined;
+    resizeWaitExpired = false;
+    if (resizeWaitTimer === null) return;
+    clearTimeout(resizeWaitTimer);
+    resizeWaitTimer = null;
+  }
+
+  function discardPaneSizeLease() {
+    leaseGeneration += 1;
+    leaseTarget = null;
+    lastLeasedColumns = 0;
+    lastLeasedRows = 0;
+    renderedResizeColumns = 0;
+    clearResizeSettling();
+    queuedLease = null;
+  }
+
+  function releasePaneSizeLease(reportFailure: boolean) {
+    const target = leaseTarget;
+    discardPaneSizeLease();
+    if (!target) return;
+    void relayStore.releasePaneSize(target).catch((error) => {
+      const connection = $connections.get(target.relay_id);
+      if (reportFailure && componentMounted && connection?.status === 'connected') {
+        paneSizeLeaseError = `Resize Session release failed: ${(error as Error).message}`;
+      }
+    });
+  }
+
+  function requestPaneSizeLease(force: boolean) {
+    const target = agent;
+    // A hidden page renews only within the grace window: after it, the
+    // relay's lease TTL returns the desktop size, and the refocus handler
+    // re-leases the moment the page is visible again.
+    if (!paneLeaseAllowed()) return;
+    if (!paneSizeLeaseSupported(target)) return;
+    const columns = measuredPaneColumns();
+    if (columns === null) {
+      if (terminalElement && cellMeasureElement) {
+        paneSizeLeaseError = 'Resize Session could not measure the terminal cell width.';
+      }
+      return;
+    }
+    let rows = paneSizeRowLeaseSupported(target) ? measuredPaneRows() : 0;
+    // The on-screen keyboard shrinks the terminal while the user types, and
+    // leasing that transient height would SIGWINCH the agent twice per
+    // keyboard toggle. Every full-height redraw can strand a stale copy of a
+    // bottom-anchored status bar in the scrollback, so while a text input
+    // owns focus the lease keeps its resting height and may only grow; the
+    // resize listeners re-measure the moment the keyboard closes.
+    const active = document.activeElement;
+    const typing = active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement;
+    if (typing && rows && lastLeasedRows && rows < lastLeasedRows) rows = lastLeasedRows;
+    const sameTarget = leaseTarget?.pane_id === target.pane_id;
+    if (!force && sameTarget && columns === lastLeasedColumns && rows === lastLeasedRows) return;
+    if (queuedLease && queuedLease.columns === columns && queuedLease.rows === rows) {
+      queuedLease = { columns, rows, force: queuedLease.force || force };
+    } else queuedLease = { columns, rows, force };
+    if (!leaseInFlight) void flushPaneSizeLease();
+  }
+
+  async function flushPaneSizeLease() {
+    if (leaseInFlight) return;
+    leaseInFlight = true;
+    try {
+      while (queuedLease) {
+        const request = queuedLease;
+        queuedLease = null;
+        const target = agent;
+        if (!paneSizeLeaseSupported(target)) continue;
+        if (!request.force
+          && leaseTarget?.pane_id === target.pane_id
+          && request.columns === lastLeasedColumns
+          && request.rows === lastLeasedRows) continue;
+        if (leaseTarget && leaseTarget.pane_id !== target.pane_id) {
+          releasePaneSizeLease(componentMounted);
+        }
+        const generation = leaseGeneration;
+        leaseTarget = target;
+        try {
+          if (request.columns !== lastLeasedColumns
+            || request.rows !== lastLeasedRows) beginResizeSettling();
+          const applied = await relayStore.leasePaneSize(target, request.columns, request.rows);
+          if (generation !== leaseGeneration
+            || leaseTarget?.pane_id !== target.pane_id
+            || !paneSizeLeaseSupported(target)) continue;
+          const changed = applied.columns !== lastLeasedColumns
+            || applied.rows !== lastLeasedRows;
+          lastLeasedColumns = applied.columns;
+          lastLeasedRows = applied.rows;
+          paneSizeLeaseError = '';
+          if (changed) {
+            // The pane repaints at the new size: read again so the live
+            // screen is the resized one. History stays with the relay journal.
+            relayStore.readPane(target, true);
+          }
+        } catch (error) {
+          if (generation === leaseGeneration
+            && leaseTarget?.pane_id === target.pane_id
+            && paneSizeLeaseSupported(target)) {
+            queuedLease = null;
+            lastLeasedColumns = 0;
+            lastLeasedRows = 0;
+            clearResizeSettling();
+            paneSizeLeaseError = `Resize Session failed: ${(error as Error).message}`;
+          }
+        }
+      }
+    } finally {
+      leaseInFlight = false;
+      if (queuedLease) void flushPaneSizeLease();
+    }
+  }
+
 
   function appendUploadedAttachments(attachments: AttachmentRef[]): void {
     const rejected = attachmentSnapshot?.items.filter((item) => item.state === 'rejected') || [];
@@ -1828,7 +2183,7 @@
   {/if}
   <div class="term-wrap">
   <div
-    class:resize-pending={wrappedLayout}
+    class:resize-layout={resizeLayoutActive} class:resize-pending={resizeLayoutPending}
     class="term-content preserve-layout"
     style={terminalContentStyle}
     bind:this={terminalElement}
@@ -2067,6 +2422,7 @@
     {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
+    {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
     {#if historyTruncated}
       <p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>
     {/if}

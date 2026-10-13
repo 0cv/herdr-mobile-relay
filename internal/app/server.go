@@ -36,6 +36,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
+	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
@@ -110,6 +111,7 @@ type Server struct {
 	speechLanguages  []string
 	speechRequests   map[string]*speechRequest
 	copyMu           sync.Mutex
+	paneSizeM        *panesize.Manager
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
 	appDeployM       *appdeploy.Manager
@@ -243,6 +245,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		speechRemove:        speech.Remove,
 		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
+		paneSizeM:           panesize.NewManager(herdrClient, logger),
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
@@ -359,9 +362,8 @@ func validateExactPaneTarget(state *coordinator.State, inbound protocol.Inbound,
 		}
 		// These operations clean up owner-scoped state already recorded by
 		// client id and pane id or speech request id. A replaced pane must not
-		// strand the old watch or synthesis merely because its exact target is
-		// now stale; release_pane_size has no state left but keeps the same
-		// allowance so an older app's cleanup never fails.
+		// strand the old watch, size lease, or synthesis merely because its
+		// exact target is now stale.
 		return nil
 	}
 	if target == nil {
@@ -625,6 +627,12 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.hybrid != nil {
 			s.hybrid.forgetClient(client.ID())
 		}
+		// A departing phone gives its panes back at once, without the
+		// navigation grace. Restores that cannot finish now continue in the
+		// manager's bounded cleanup.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.paneSizeM.ReleaseClient(releaseCtx, client.ID())
 	})
 
 	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
@@ -745,7 +753,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case "lease_pane_size", "release_pane_size":
 			s.handlePaneSizeCommand(client, inbound)
 		case "read_pane":
-			stripPaneReadGeometry(msg)
+			s.applyPaneReadLease(client.ID(), msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
 			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
 			if inbound.Target != nil {
@@ -1337,6 +1345,7 @@ func (s *Server) Run(ctx context.Context) error {
 	})
 	startBackground(func() { s.poller.RunEvents(ctx, eventClient) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
+	startBackground(func() { s.paneSizeM.Run(ctx) })
 	profileSignals := make(chan os.Signal, 1)
 	signal.Notify(profileSignals, syscall.SIGHUP)
 	defer signal.Stop(profileSignals)
@@ -1375,6 +1384,11 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.dispatcher != nil {
 		s.dispatcher.CancelInflight()
 	}
+	paneSizeShutdownCtx, cancelPaneSizes := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := s.paneSizeM.Shutdown(paneSizeShutdownCtx); runErr == nil && err != nil {
+		runErr = fmt.Errorf("pane size lease shutdown: %w", err)
+	}
+	cancelPaneSizes()
 	httpShutdownCtx, cancelHTTP := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := srv.Shutdown(httpShutdownCtx); runErr == nil && err != nil {
 		runErr = fmt.Errorf("http shutdown: %w", err)
@@ -1409,18 +1423,34 @@ func (s *Server) Run(ctx context.Context) error {
 	return runErr
 }
 
-// The phone cannot resize the shared terminal: a PTY resize Herdr does not
-// perform leaves its grid at the layout size while the application draws at
-// the requested one (issue 60), and Herdr exposes no absolute rows/columns
-// pane operation to do it coordinately. The wire commands stay recognized so
-// an older app gets a clean answer: acquisition and renewal fail, and release
-// stays an idempotent no-op because there is no lease state to clean up.
+// Resize Session is a per-device opt-in. A PTY resize Herdr does not perform
+// leaves its grid at the layout size while the application draws at the
+// leased one, so the desktop and SSH views of a leased pane look garbled
+// (issue 60); Herdr exposes no absolute rows/columns operation to avoid that.
+// Apps up to 0.22.7 leased automatically whenever the relay advertised
+// pane_size_lease, so only a request carrying opt_in is honoured: anything
+// else fails before any Herdr, process or TTY access. Release stays an
+// idempotent cleanup; immediate skips the navigation grace.
 func (s *Server) handlePaneSizeCommand(client *transport.ClientConn, inbound protocol.Inbound) {
 	if inbound.Type == "release_pane_size" {
+		if err := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID, inbound.Immediate); err != nil {
+			s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+			return
+		}
 		s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, nil)
 		return
 	}
-	s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", "Resize Session is unavailable on this relay", inbound.PaneID, nil)
+	if !inbound.OptIn || !s.paneSizeM.Available() {
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.ErrUnavailable.Error(), inbound.PaneID, nil)
+		return
+	}
+	columns, rows, err := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
+	if err != nil {
+		s.logger.Debug("pane size lease failed", "pane_id", inbound.PaneID, "error", err)
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+		return
+	}
+	s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, map[string]any{"columns": columns, "rows": rows})
 }
 
 func (s *Server) effectiveCapabilities() []string {
@@ -1429,6 +1459,11 @@ func (s *Server) effectiveCapabilities() []string {
 
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
+	// Never the legacy pane_size_lease names: apps up to 0.22.7 lease
+	// automatically when they see them.
+	if s.paneSizeM.Available() {
+		capabilities = append(capabilities, protocol.PaneSizeOptInCapability, protocol.PaneSizeOptInRowsCapability)
+	}
 	if s.pushM != nil {
 		capabilities = append(capabilities, "typed_push", "push_policy")
 	}
@@ -2851,6 +2886,13 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 		}
 		question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
 	}
+	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly &&
+		s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow) {
+		// The agent re-renders its transcript after a size change and can
+		// push a redrawn block into the scrollback for a while; the app must
+		// not commit rows from frames read inside this window as history.
+		response["resize_settling"] = true
+	}
 	agentLower := strings.ToLower(agent)
 	if classification.Interaction != nil ||
 		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
@@ -2892,6 +2934,7 @@ func paneFrameFingerprint(response map[string]any) string {
 		response["truncated"],
 		response["viewport_only"],
 		response["viewport_rows"],
+		response["resize_settling"],
 		response["attention_kind"],
 		response["prompt"],
 		response["command"],

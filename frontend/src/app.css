@@ -519,6 +519,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .terminal-virtual-spacer { display: block; pointer-events: none; width: 1px; }
 .term-content.preserve-layout { overflow-wrap: normal; white-space: pre; }
 .term-content.preserve-layout > .term-screen { display: grid; min-width: 100%; width: max(100%, var(--terminal-content-width, 100%)); }
+.term-content.preserve-layout.resize-layout > .term-screen { min-width: 0; }
+.term-content.preserve-layout.resize-layout > .term-screen > .ansi-line-background {
+  justify-self: start;
+  width: var(--terminal-width, auto);
+}
 .term-content.preserve-layout > .term-screen > .ansi-line { overflow: visible; }
 /* No content-visibility on terminal rows: the component virtualizes them
    itself, mounting only a pixel-bounded window. content-visibility: auto on
@@ -526,14 +531,26 @@ textarea { min-height: 6.5rem; resize: vertical; }
    contain-intrinsic height regardless of wrapping, corrupting scrollHeight
    and the row measurements — the transcript loaded with its bottom hidden
    and scrolling flickered until every row had been rendered (issue #11). */
+.term-content.preserve-layout.resize-layout > .term-screen > .ansi-line {
+  max-width: var(--terminal-width, 100%);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.term-content.preserve-layout.resize-layout > .term-screen > .ansi-line.terminal-grid-line {
+  max-width: none;
+  overflow-wrap: normal;
+  white-space: pre;
+}
+.term-content.preserve-layout.resize-layout .terminal-grid-line .terminal-cell-run { display: inline-block; }
+.term-content.preserve-layout.resize-layout .terminal-cell-run { display: inline; }
 /* A box-drawn row wider than the pane cannot reflow, but wrapping it destroys
    its column alignment. It keeps its cell grid inside a per-row horizontal
    scroller clipped at the pane width; TerminalView keeps a contiguous block's
    rows scrolling in lockstep so the table pans as one unit. Only this row
    scrolls - the pane itself never pans sideways. */
-.term-content.preserve-layout.resize-pending > .term-screen > .ansi-line.terminal-wide-grid {
+.term-content.preserve-layout:is(.resize-layout, .resize-pending) > .term-screen > .ansi-line.terminal-wide-grid {
   display: block;
-  max-width: 100%;
+  max-width: var(--terminal-width, 100%);
   overflow-x: auto;
   overscroll-behavior-x: contain;
   overflow-wrap: normal;
@@ -541,13 +558,12 @@ textarea { min-height: 6.5rem; resize: vertical; }
   scrollbar-width: none;
 }
 .term-content.preserve-layout .terminal-wide-grid .terminal-cell-run { display: inline-block; }
-/* A reader pane: the pane's width is the desktop's, not the phone's, so
-   column alignment is already lost. Wrap at the container rather than
-   scrolling sideways - a pan survives every refresh, stranding the reader on
-   the tails of the newest lines. A controller pane keeps the rules above,
-   where the pane really is this wide. Box-drawing rows past this width are
-   classified in terminal.ts and scroll inside their own row instead of
-   wrapping. */
+/* No lease has landed: the pane's width is not the phone's, so column
+   alignment is already lost. Wrap at the container rather than scrolling
+   sideways - a pan survives every refresh, stranding the reader on the tails
+   of the newest lines. A leased pane keeps the rules above, where the pane
+   really is this wide. Box-drawing rows past this width are classified in
+   terminal.ts and scroll inside their own row instead of wrapping. */
 .term-content.preserve-layout.resize-pending > .term-screen {
   min-width: 0;
   width: 100%;

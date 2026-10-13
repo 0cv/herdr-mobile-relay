@@ -599,6 +599,8 @@ export interface TerminalFrame {
   noEcho?: boolean;
   /** The recognized secret prompt line, when noEcho is set. */
   noEchoPrompt?: string;
+  /** Frame read inside the post-resize settle window; its rows must not be committed to history. */
+  resizeSettling?: boolean;
 }
 
 export interface ToastMessage {

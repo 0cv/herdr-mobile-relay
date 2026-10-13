@@ -14,11 +14,18 @@ import (
 
 const defaultPaneWatchInterval = 250 * time.Millisecond
 
+// paneResizeSettleWindow bounds how long after an actual leased-size change
+// pane frames are marked resize_settling. Full-screen agents re-render their
+// transcript on SIGWINCH and can push redrawn rows into the scrollback for a
+// couple of seconds; observed up to ~2s for omp under load.
+const paneResizeSettleWindow = 3 * time.Second
+
 type paneWatchFrame struct {
 	content             string
 	contentFingerprint  string
 	frameFingerprint    string
 	classificationAgent string
+	resizeSettling      bool
 }
 
 type paneWatch struct {
@@ -198,7 +205,7 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 
 func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatchFrame) {
 	message := watchMessage(watch)
-	stripPaneReadGeometry(message)
+	s.applyPaneReadLease(watch.client.ID(), message)
 	response := s.preparePaneResponse(message, s.dispatcher.HandleReadPane(watch.ctx, message))
 	response["target"] = watch.target
 	content, ok := successfulPaneContent(response)
@@ -208,12 +215,14 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 	contentFingerprint := paneFingerprint(content)
 	frameFingerprint := paneFrameFingerprint(response)
 	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	resizeSettling, _ := response["resize_settling"].(bool)
 	response["content_fingerprint"] = contentFingerprint
 	return response, &paneWatchFrame{
 		content:             content,
 		contentFingerprint:  contentFingerprint,
 		frameFingerprint:    frameFingerprint,
 		classificationAgent: classificationAgentID,
+		resizeSettling:      resizeSettling,
 	}
 }
 
@@ -225,7 +234,9 @@ func paneWatchNeedsFrameRead(
 	if previousProbe == "" || probeFingerprint != previousProbe {
 		return true
 	}
-	return acknowledged != nil && acknowledged.classificationAgent != classificationAgentID
+	return acknowledged != nil &&
+		(acknowledged.resizeSettling ||
+			acknowledged.classificationAgent != classificationAgentID)
 }
 
 func (s *Server) paneWatchCurrent(watch *paneWatch) bool {
@@ -277,11 +288,21 @@ func watchMessage(watch *paneWatch) map[string]any {
 	}
 }
 
-// A pane is always read at Herdr's own size: the phone has no way to resize
-// it, so a client-supplied geometry must not select the resized read path.
-func stripPaneReadGeometry(message map[string]any) {
+// applyPaneReadLease never trusts a client-supplied read geometry. A client
+// that itself holds an active lease on the pane reads it at the leased size
+// (the viewport-only read path); every other client, including readers and
+// controllers with Resize Session off, reads the pane at Herdr's own size.
+func (s *Server) applyPaneReadLease(clientID string, message map[string]any) {
 	delete(message, "terminal_columns")
 	delete(message, "terminal_rows")
+	if s.paneSizeM == nil {
+		return
+	}
+	paneID, _ := message["pane_id"].(string)
+	if columns, rows, ok := s.paneSizeM.ReadGeometry(clientID, paneID); ok {
+		message["terminal_columns"] = columns
+		message["terminal_rows"] = rows
+	}
 }
 
 func paneWatchUpdate(

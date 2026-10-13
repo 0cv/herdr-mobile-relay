@@ -931,7 +931,11 @@ func (r *scriptedRelay) handle(client *transport.ClientConn, raw map[string]any,
 		}}})
 		r.commandResult(client, inbound.RequestID, inbound.Type, true, nil)
 	default:
-		r.commandResult(client, inbound.RequestID, inbound.Type, true, map[string]any{})
+		result := map[string]any{}
+		if inbound.Type == "lease_pane_size" {
+			result = map[string]any{"columns": inbound.Columns, "rows": inbound.Rows}
+		}
+		r.commandResult(client, inbound.RequestID, inbound.Type, true, result)
 	}
 }
 

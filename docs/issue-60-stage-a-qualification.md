@@ -1,4 +1,4 @@
-# Issue 60 — removal and historical containment evidence
+# Issue 60 — opt-in resizing, removal and historical containment evidence
 
 Issue: https://github.com/0cv/herdr-mobile-relay/issues/60
 ("Resize session garbles the desktop view"). Behavior and operator notes are in
@@ -8,7 +8,99 @@ history (plans, review rounds, failed attempts, fixture details) is archived
 outside the repository under
 `~/.pi/workflows/recovery/issue60-handoff-20261011T090823Z/`.
 
-## Final removal (Option B, assets 403)
+## Option 2: opt-in resizing (assets 405)
+
+This supersedes the removal below. The owner chose to bring Resize Session
+back as a per-device opt-in, default off, accepting that the desktop and SSH
+views of a leased pane look garbled while the phone holds it (Herdr 0.9.3 /
+protocol 22 has no grid+PTY resize API). Design and residual risks are in
+[pane-size-leasing.md](pane-size-leasing.md).
+
+Implemented:
+
+- Relay advertises `pane_size_opt_in` / `pane_size_opt_in_rows` on darwin and
+  linux only, never `pane_size_lease`; `lease_pane_size` without `opt_in: true`
+  fails before any Herdr, process or TTY access; `release_pane_size` accepts
+  `immediate`. Lease read geometry applies only to the lease holder;
+  `resize_settling` is back.
+- New `internal/panesize`: direct `TIOCGWINSZ`/`TIOCSWINSZ` on a descriptor
+  opened before a fresh `pane.get` / `pane.process_info` / `ps` re-validation;
+  confirmed-gone versus unknown outcomes; a restore-pending state with at most
+  five attempts in thirty seconds and one warning; generation fencing;
+  per-dimension restore; bounded shutdown restore.
+- App: Resize Session and Lease Terminal Height switches with the disclosure,
+  gated on controller role, the opt-in capability and the switch; immediate
+  release of every owned lease (including panes in navigation grace) when the
+  switch is turned off; late replies ignored.
+
+Automated verification by the implementation agent, 2026-10-13, on the initial
+assets-404 candidate (macOS arm64 host; all exited 0 unless stated):
+
+- `gofmt` clean; `go build ./... && go vet ./...`; `go test ./...`;
+  `go test -race -count=1 ./internal/panesize ./internal/app
+  ./internal/coordinator ./internal/transport`.
+- Real-PTY tests on macOS: ioctl get/set through the production
+  implementation, a mismatched device number refused without writing either
+  PTY, and a held slave descriptor pinning its `/dev/ttysNNN` name across
+  eight new allocations (reused immediately after release). The Linux variants
+  (`TIOCSPTLCK`/`TIOCGPTN`) were compiled and vetted with `GOOS=linux` but not
+  executed.
+- `GOOS=windows go build ./...` fails exactly as at the previous commit in
+  packages that do not build on Windows (`internal/herdr`, `appdeploy`,
+  `profiles`, `pibridge`, `cmd/fake-herdr`); the non-darwin/linux build of
+  `internal/panesize` was type-checked with `GOOS=freebsd go vet`.
+- `go test -count=1 ./tests/blackbox -run PaneSize` against the compiled relay.
+- `make production-path-audit`; `make frontend-check` (567 unit tests / 33
+  files); one `make web-release` (assets 404); `make web-release-check`
+  (`frontend/dist` equals `web`, 222 Chromium/WebKit journeys, four real-relay
+  fixture journeys).
+
+Parent verification on that initial candidate: **`make check` exited 0**,
+including shell fixtures, all Go tests/race tests, 567 frontend tests,
+222 browser journeys plus four real-relay fixture journeys, four-platform
+cross-builds and release bundles. A separate uncached macOS manager run passed
+its real-PTY tests without skips. Read-only requests to the running Herdr
+confirmed the `pane.get` and `pane.process_info` response shapes; no terminal
+was resized.
+
+Independent review `0902c9bb…` requested changes: a disconnect could scan before
+an acquisition inserted its lease (P1); busy-pane waiting could delay the fixed
+cleanup deadline (P2); and Settings needed an explicit scrollback-loss warning
+(P2). Parent corrections check cancellation under the disconnect scan's mutex,
+start cleanup when the last lease ends (including the original expiry time for
+a delayed sweep), and disclose scrollback truncation/loss. Deterministic tests
+reproduced both backend defects before the fixes, then the complete manager
+suite passed uncached with `-race -count=3`. Assets **405** include the warning.
+The first review attempt `8d50265f…` failed immediately on a provider rate limit;
+it reviewed nothing. Follow-up `e4190083…` confirmed the insertion race and
+warning fixes, but caught a second deadline race: a successful acquisition
+finishing after release could erase release-created cleanup. Completion now
+supersedes cleanup only while live leases remain. A write-boundary regression
+covers first acquisition and renewal, both disconnect and immediate release;
+it preserves the original deadline/generation and proves deadline exhaustion
+makes no additional lookup or write. The pre-fix failure is retained.
+
+Final independent reviewer `f83fe68a…` accepted that correction with no new
+findings, without executing tests or accessing live panes. This is separate
+source-review acceptance, not approval of the historical workflows below.
+The complete manager suite again passed `-race -count=3`.
+
+Parent final verification, 2026-10-13, after all code corrections:
+**`make check` exited 0**, with `GOTELEMETRY=off` and existing Go caches exported.
+This covered formatting/vet/all Go tests/all race tests, shell fixtures,
+production-path audit, frontend lint/types/**567 tests / 33 files**,
+build/budgets, generated/shipped parity, **222 browser journeys + four real-relay
+fixture journeys**, four-platform cross-builds and release-bundle checks.
+The directly captured exit status and full log are retained under the recovery
+root's `option2-Hyc6r8/post-commit-race-make-check.{exit,log}`, alongside all
+review receipts and failed/passing regression logs. `git diff --check` passed.
+Assets remained **405**; no additional generation was needed.
+
+**Not yet phone-verified.** No phone-driven resize or real desktop/SSH view has
+been observed with this build. Linux real-PTY tests remain compiled, not run.
+The dev tunnel and production relay have not been restarted or updated.
+
+## Removal (Option B, assets 403, superseded by Option 2)
 
 This supersedes the gated Stage A build below. The `internal/panesize` package,
 `stty` backend, sweep/restore lifecycle, operator flag, both Settings switches,

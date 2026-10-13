@@ -147,10 +147,10 @@ func TestCommandResultMessageIncludesData(t *testing.T) {
 	}
 }
 
-// The legacy resize commands have no backend but keep their ordered mutation
-// class, so an old app's request is answered in sequence with its other
-// pane commands instead of racing ahead of them.
-func TestLegacyPaneSizeCommandsRemainOrdered(t *testing.T) {
+// The resize commands keep their ordered mutation class, so a lease or
+// release is answered in sequence with the client's other pane commands
+// instead of racing ahead of them.
+func TestPaneSizeCommandsRemainOrdered(t *testing.T) {
 	for _, action := range []string{"lease_pane_size", "release_pane_size"} {
 		if !isCoordinatorMutation(action) {
 			t.Errorf("isCoordinatorMutation(%q) = false", action)
