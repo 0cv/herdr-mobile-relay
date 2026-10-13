@@ -48,7 +48,13 @@ BASE = "cbacea6efe8916f2a040e6ca4927e221e9b6e15c"
 REF = "refs/heads/ci/tailscale-native-preflight-ef9f843"
 REPOSITORY = "0cv/herdr-mobile-relay"
 PLATFORM = "darwin-isolated-byo-v1"
-ORIGIN = "https://127.0.0.1:18443"
+# The Darwin fixture serves the phone app AND the relay WSS dial at this one
+# origin. The production development-link printer (printDevelopmentSetupLink)
+# refuses any relay origin whose port is not tailscalecli.DevelopmentHTTPSPort
+# (8443), and the frozen browser runner refuses any WebSocket destination other
+# than this origin's WSS twin, so the single fixture origin must use 8443. Only
+# the two negative TLS controls keep 18444/18445.
+ORIGIN = "https://127.0.0.1:8443"
 FILES = (
     ".github/workflows/tailscale-darwin-package-browser.yml",
     "tests/test_tailscale_darwin_package_browser.py",
@@ -115,21 +121,22 @@ FAKE_ROW_CAP = len(FAKE_DIAGNOSTIC_COMMANDS) * len(FAKE_DIAGNOSTIC_OUTCOMES)
 # Each fake-herdr row is ~0.4 KiB (it records the socket path); the observed Linux run
 # issued 14. This bounds the live evidence file with a wide margin, never the allowlist.
 FAKE_OPERATIONS_CAP = 262144
-# Admission projection of the owner's current launchctl grant (8c1f22ff parent,
-# 20261013, iteration 2). The expected parent is a frozen parent-grant literal,
+# Admission projection of the owner's current launchctl grant (dd608845 parent,
+# 20261013, iteration 3). The expected parent is a frozen parent-grant literal,
 # NEVER selected from CI/git observations. The spent e59e8022 grant
 # (q2-parent-launchctl-print-first-push-e59e8022-20261008), the spent 3c8f0c8d
-# grant (q2-owner-launchctl-print-push-3c8f0c8d-20261012) and the earlier
+# grant (q2-owner-launchctl-print-push-3c8f0c8d-20261012), the spent 8c1f22ff
+# grant (q2-owner-launchctl-print-push-8c1f22ff-20261013) and the earlier
 # authorized:false contract remain historical and are refused by this predicate.
 # Exactly the next reviewed fast-forward and attempt 1; not a durable nonce
 # across prohibited branch reset/deletion/force-push/recreation or redispatch.
 # Operational admission only, NOT cryptographic hosted-runner authentication:
 # a local caller can forge environment/event inputs. The parent grant authorizes
 # at most two label-scoped read-only queries ONLY on the isolated hosted runner
-# in the single first-fast-forward attempt from the pinned 8c1f22ff parent.
+# in the single first-fast-forward attempt from the pinned dd608845 parent.
 # No local runtime or local launchctl is authorized, even with fabricated inputs.
-LAUNCHCTL_GRANT_ID = "q2-owner-launchctl-print-push-8c1f22ff-20261013"
-LAUNCHCTL_PINNED_PARENT = "8c1f22ff4980335ce0d1acc1731429a3457067a9"
+LAUNCHCTL_GRANT_ID = "q2-owner-launchctl-print-push-dd608845-20261013"
+LAUNCHCTL_PINNED_PARENT = "dd608845b73c0323f5cbcfa140ad52affb28ec7f"
 PUSH_EVENT_CAP = 65536
 LAUNCHCTL_SCOPE = MappingProxyType({
     "command": "launchctl print gui/$(id -u)/com.herdr-mobile-relay.service",
@@ -196,8 +203,9 @@ def failure_detail(error, failed_command=None):
     """Secret-free locator for a failed cell.
 
     Records only the exception class, errno, and the innermost function/line in
-    this file, plus the failing tool label and exit code. Never messages,
-    output, paths or URLs.
+    this file, the innermost function/line (and, for GateFailure, the fixed
+    code) in the imported extracted helper, plus the failing tool label and
+    exit code. Never messages, output, paths or URLs.
     """
     here = os.path.realpath(__file__)
     frames = [frame for frame in traceback.extract_tb(error.__traceback__)
@@ -210,12 +218,32 @@ def failure_detail(error, failed_command=None):
               "errno": code if type(code) is int else None,
               "function": (last.name if last.name in SAFE_FUNCTIONS else "unknown") if last else None,
               "line": last.lineno if last and type(last.lineno) is int else None,
-              "command": None, "exit_code": None}
+              "command": None, "exit_code": None, **helper_locator(error)}
     if failed_command:
         label, exit_code = failed_command
         detail["command"] = label if label in SAFE_COMMANDS else "unknown"
         detail["exit_code"] = exit_code if type(exit_code) is int else None
     return detail
+
+
+def helper_locator(error):
+    """Innermost frame in the imported extracted helper, excluding its die() raiser.
+
+    The helper's GateFailure codes are coarse (most die() sites share
+    "fixture_assertion"), so the helper line identifies the failing check. The
+    helper is recognised by its repository-relative path (it is imported from
+    the candidate checkout under another module name). Function names and codes
+    come from fixed sets; anything else is "unknown"/None. Never a message.
+    """
+    suffix = "/" + FILES[2]
+    frames = [frame for frame in traceback.extract_tb(error.__traceback__)
+              if os.path.realpath(frame.filename).replace(os.sep, "/").endswith(suffix)
+              and frame.name != "die"]
+    last = frames[-1] if frames else None
+    code = getattr(error, "code", None) if type(error).__name__ == "GateFailure" else None
+    return {"helper_function": (last.name if last.name in SAFE_HELPER_FUNCTIONS else "unknown") if last else None,
+            "helper_line": last.lineno if last and type(last.lineno) is int else None,
+            "helper_code": code if type(code) is str and code in SAFE_HELPER_CODES else None}
 
 
 def command_label(argv):
@@ -319,6 +347,21 @@ SAFE_FUNCTIONS = frozenset({"unknown", "runtime", "command", "phase", "interrupt
     "receipt_values_safe", "verify", "remove_owned_tree", "stop", "close", "group_gone", "reap_bounded",
     "read", "__init__", "socket_allowed", "fake_allowed", "start_launcher", "require", "cap",
     "verify_producer_archive", "record_digest", "write_receipt", "publish_receipt", "publication"})
+# Helper (tests/test_tailscale_extracted_package_browser.py) frames reachable from
+# the Darwin runtime and its GateFailure codes. "die" is deliberately absent: the
+# locator names the die() caller. The offline parser group pins that each name
+# exists in the helper.
+SAFE_HELPER_FUNCTIONS = frozenset({"unknown", "development_setup_link", "safe_link_from_output", "verify_archive",
+    "write_json", "sha256", "wait_ready", "close", "operation_summary", "diagnostic_summary", "socket_scenario_view",
+    "socket_ordinary_result", "socket_predispatch_refusal", "dispatch_socket_request", "socket_exception_category",
+    "socket_diagnostic_snapshot", "handle_socket_connection", "__init__", "_serve", "_handle", "_result",
+    "_publish_operations"})
+SAFE_HELPER_CODES = frozenset({"fixture_assertion", "unexpected_exception", "archive_checksum_io",
+    "archive_checksum_mismatch", "archive_extract_failure", "archive_unsafe_entry", "archive_binary_missing",
+    "archive_manifest_missing", "archive_manifest_invalid", "archive_manifest_identity", "archive_binary_start",
+    "archive_binary_timeout", "archive_binary_rejected", "archive_managed_wrapper_missing",
+    "archive_external_wrapper_missing", "archive_managed_wrapper_not_executable",
+    "archive_external_wrapper_not_executable", "archive_binary_not_executable"})
 SAFE_COMMANDS = frozenset({"unknown", "git rev-parse HEAD", "git rev-parse HEADtree", "git status --porcelainv1",
     "git diff --name-only", "node --version", "bun --version", "go version", "curl --version", "openssl version",
     "bun install --frozen-lockfile", "node cli.js install", "go build -modcacherw", "go test -modcacherw",
@@ -430,7 +473,10 @@ def receipt_values_safe(value):
         "failure": enum(*SAFE_FAILURES), "failure_guard": enum(*GUARDS),
         "failure_detail": {"type": enum(*SAFE_EXCEPTION_TYPES), "errno": nullable(exit_code),
             "function": nullable(enum(*SAFE_FUNCTIONS)), "line": nullable(integer(1000000, 1)),
-            "command": nullable(enum(*SAFE_COMMANDS)), "exit_code": nullable(exit_code)},
+            "command": nullable(enum(*SAFE_COMMANDS)), "exit_code": nullable(exit_code),
+            "helper_function": nullable(enum(*SAFE_HELPER_FUNCTIONS)),
+            "helper_line": nullable(integer(1000000, 1)),
+            "helper_code": nullable(enum(*SAFE_HELPER_CODES))},
     }
     if "archive_hashes" in value:
         require(type(value.get("version")) is str and version(value["version"]), "receipt_schema")
@@ -537,9 +583,14 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
                     "receipt_failure_guard")
         detail = value.get("failure_detail")
         if detail is not None:
-            shape(detail, ("type", "errno", "function", "line", "command", "exit_code"))
+            shape(detail, ("type", "errno", "function", "line", "command", "exit_code",
+                           "helper_function", "helper_line", "helper_code"))
             require(type(detail["type"]) is str and re.fullmatch(r"[A-Za-z0-9_]{1,64}", detail["type"])
-                    and all(detail[key] is None or type(detail[key]) is int for key in ("errno", "line", "exit_code"))
+                    and all(detail[key] is None or type(detail[key]) is int
+                            for key in ("errno", "line", "exit_code", "helper_line"))
+                    and all(detail[key] is None or (type(detail[key]) is str
+                            and re.fullmatch(r"[A-Za-z0-9_]{1,64}", detail[key]))
+                            for key in ("helper_function", "helper_code"))
                     and (detail["function"] is None or (type(detail["function"]) is str
                          and re.fullmatch(r"[A-Za-z0-9_]{1,64}", detail["function"])))
                     and (detail["command"] is None or (type(detail["command"]) is str
@@ -1165,7 +1216,7 @@ def service_inputs_allowed(plist_present, plist_symlink, command_path):
 
 
 def fixture_port_allowed(port):
-    return type(port) is int and port in {18443, 18444, 18445}
+    return type(port) is int and port in {8443, 18444, 18445}
 
 
 def deployment_query_allowed(path, query):
@@ -1974,7 +2025,8 @@ def publish_receipt(staged, evidence, runner_exit, candidate, run_id, source_has
         "request_counts": [], "captured_output_bytes": 0, "dependency_payload_bytes_peak": 0}
     if runner_exit:
         value["failure_detail"] = {"type": "SystemExit", "errno": None, "function": "publish_receipt",
-            "line": None, "command": "unknown", "exit_code": runner_exit}
+            "line": None, "command": "unknown", "exit_code": runner_exit,
+            "helper_function": None, "helper_line": None, "helper_code": None}
     encode = lambda item: (json.dumps(item, separators=(",", ":")) + "\n").encode()
     require(receipt_policy(encode(value), candidate, source_hashes, producer_identity) is False,
             "publication_identity")
@@ -2446,7 +2498,7 @@ async function check(context, port, refusal) {
   let ok=false, argvOK=false, version='';
   try {
     const empty=await open(path.join(input.profiles,'negative'));
-    await check(empty,18443,'ERR_CERT_AUTHORITY_INVALID');
+    await check(empty,8443,'ERR_CERT_AUTHORITY_INVALID');
     observations.push('empty_profile_refuses_ca');
     await close(empty);
     const trusted=await open(path.join(input.profiles,'controller'));
@@ -2458,7 +2510,7 @@ async function check(context, port, refusal) {
     const {arguments:argv}=await session.send('Browser.getBrowserCommandLine');
     argvOK=launchArgumentsAllowed(argv, path.join(input.profiles,'controller'));
     if (!argvOK) throw new Error('launch argument mismatch');
-    await check(trusted,18443,null); observations.push('trusted_profile_accepts_ip');
+    await check(trusted,8443,null); observations.push('trusted_profile_accepts_ip');
     await check(trusted,18444,'ERR_CERT_AUTHORITY_INVALID'); observations.push('trusted_profile_refuses_unknown_ca');
     await check(trusted,18445,'ERR_CERT_COMMON_NAME_INVALID'); observations.push('trusted_profile_refuses_wrong_host');
     await close(trusted);
@@ -2487,7 +2539,7 @@ def packaged_go_tls_control(root, operations, binary, version, revision, origin,
 
 def tls_controls(root, operations, binary, version, revision, candidate):
     outcomes = []
-    for port, expected in ((18443, "positive"), (18444, "unknown_ca"), (18445, "wrong_host")):
+    for port, expected in ((8443, "positive"), (18444, "unknown_ca"), (18445, "wrong_host")):
         origin = f"https://127.0.0.1:{port}"
         context = ssl.create_default_context(cafile=str(root / "ca.pem"))
         python_code = None
@@ -2711,7 +2763,7 @@ def runtime(args):
             def socket_allowed():
                 return socket_fixture_allowed(socket_fixture, receipt)
             operations.add_guard("herdr_socket", socket_allowed)
-            for port, leaf in ((18443, "valid"), (18444, "unknown"), (18445, "wrong-host")):
+            for port, leaf in ((8443, "valid"), (18444, "unknown"), (18445, "wrong-host")):
                 proxy_servers.append(Proxy(port, root, leaf, operations))
             operations.add_guard("proxy", lambda: proxy_operations_allowed(proxy_servers))
             relay_key, instance = os.urandom(16).hex(), os.urandom(16).hex()
@@ -2980,7 +3032,7 @@ def offline_check(group):
              "reader_enrolled", "reader_read", "reader_mutation_denied", "credentials_preserved",
              "app_worker_verified", "notification_delivery_disabled", "launch_arguments_verified")}}
     encode = lambda value: json.dumps(value).encode()
-    if group in {"phase-caps", "cleanup"}:
+    if group in {"parser", "phase-caps", "cleanup"}:
         spec = importlib.util.spec_from_file_location("extracted_package_fixture", Path(__file__).resolve().parents[1] / FILES[2])
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
@@ -3106,7 +3158,8 @@ def offline_check(group):
             early["phases"][1].update(ok=False, exit_code=1)
             require(receipt_policy(encode(early), BASE, sources, producer_id) is False, "offline_early_failure")
             detail = {"type": "FileNotFoundError", "errno": 2, "function": "read_bounded", "line": 141,
-                      "command": None, "exit_code": None}
+                      "command": None, "exit_code": None,
+                      "helper_function": None, "helper_line": None, "helper_code": None}
             require(receipt_policy(encode({**early, "failure_detail": detail}), BASE, sources, producer_id) is False,
                     "offline_detailed_early_failure")
             later = {key: val for key, val in valid_receipt.items() if key not in {"trust_controls", "fixture_operations"}}
@@ -3124,12 +3177,104 @@ def offline_check(group):
             require(receipt_policy(encode(no_sources), BASE, {}, producer_id) is False, "offline_pre_source_failure")
             return True
 
+        def dev_link_origin_contract():
+            # iteration-2 hosted failure: the fixture origin used a port the production
+            # development-link printer refuses. Bind the fixture origin to every
+            # consumer of that contract by source, without running any of them.
+            root = Path(__file__).resolve().parents[1]
+            parsed = urllib.parse.urlsplit(ORIGIN)
+            go_port = re.search(r"DevelopmentHTTPSPort\s*=\s*(\d+)", (root / "internal/tailscalecli/client.go").read_text())
+            printer = (root / "cmd/herdr-mobile-relay/dev_tailscale_cli.go").read_text()
+            browser = (root / "tests/tailscale-package-browser.mjs").read_text()
+            require(parsed.scheme == "https" and parsed.hostname == "127.0.0.1" and parsed.port == 8443
+                    and parsed.path == "" and parsed.query == "" and parsed.fragment == ""
+                    and ORIGIN == "https://127.0.0.1:8443", "offline_origin_canonical")
+            require(go_port is not None and int(go_port.group(1)) == parsed.port
+                    and "relayURL.Port() != strconv.Itoa(tailscalecli.DevelopmentHTTPSPort)" in printer,
+                    "offline_origin_printer_port")
+            # The frozen runner permits exactly this origin's WSS twin as the one-use
+            # import dial (refusing and recording any other destination), so the
+            # development relay origin must be this same authority.
+            require(browser.count("input.origin.replace(/^https:/, 'wss:')") == 2
+                    and "allowed = new URL(route.request().url()).origin === input.origin" in browser,
+                    "offline_origin_browser_destinations")
+            require(fixture_port_allowed(8443) and fixture_port_allowed(18444) and fixture_port_allowed(18445)
+                    and not fixture_port_allowed(18443) and not fixture_port_allowed(443), "offline_origin_ports")
+            return True
+
+        def helper_locator_cases():
+            # A real helper GateFailure (the iteration-2 hosted shape): the locator names
+            # the die() CALLER line inside the helper, plus the fixed code, while the
+            # Darwin-file locator still reports its own innermost frame.
+            try:
+                helper.development_setup_link(Path("/nonexistent-printer"), "https://x.invalid/#setup=" + "a" * 32, ORIGIN)
+            except helper.GateFailure as error:
+                detail = failure_detail(error)
+            else:
+                return False
+            helper_lines = Path(__file__).resolve().parents[1].joinpath(FILES[2]).read_text().splitlines()
+            require(detail["type"] == "GateFailure" and detail["helper_function"] == "development_setup_link"
+                    and detail["helper_code"] == "fixture_assertion" and type(detail["helper_line"]) is int
+                    and "die(" in helper_lines[detail["helper_line"] - 1]
+                    and "printer fixture is unavailable" in helper_lines[detail["helper_line"] - 1]
+                    and detail["function"] == "unknown", "offline_helper_locator_real")
+            require(set(detail) == {"type", "errno", "function", "line", "command", "exit_code",
+                                    "helper_function", "helper_line", "helper_code"}, "offline_helper_locator_shape")
+            # No helper frame: function/line are null (the code is a property of the
+            # GateFailure itself); a non-GateFailure never reports a code.
+            require(helper_locator(helper.GateFailure("fixture_assertion")) ==
+                    {"helper_function": None, "helper_line": None, "helper_code": "fixture_assertion"}
+                    and helper_locator(Refusal("x")) == {"helper_function": None, "helper_line": None,
+                                                         "helper_code": None}, "offline_helper_locator_absent")
+            def synthetic(function, code, filename=None, kind="GateFailure"):
+                exception = type(kind, (RuntimeError,), {})("secret message")
+                exception.code = code
+                namespace = {"error": exception}
+                source = "def " + function + "():\n    raise error\n"
+                try:
+                    exec(compile(source, filename or "/any/checkout/" + FILES[2], "exec"), namespace)
+                    namespace[function]()
+                except RuntimeError as raised:
+                    return helper_locator(raised)
+            require(synthetic("development_setup_link", "archive_binary_missing") ==
+                    {"helper_function": "development_setup_link", "helper_line": 2, "helper_code": "archive_binary_missing"}
+                    and synthetic("https___evil_example_token", "fixture_assertion")["helper_function"] == "unknown"
+                    and synthetic("die", "fixture_assertion")["helper_function"] is None
+                    and synthetic("development_setup_link", "/private/tmp/credential")["helper_code"] is None
+                    and synthetic("development_setup_link", "fixture_refused")["helper_code"] is None
+                    and synthetic("development_setup_link", "archive_binary_missing", kind="OSError")["helper_code"] is None
+                    and synthetic("development_setup_link", "fixture_assertion", "/any/checkout/" + FILES[2] + ".bak")
+                        == {"helper_function": None, "helper_line": None, "helper_code": "fixture_assertion"}
+                    and synthetic("development_setup_link", "fixture_assertion", "/any/other.py")
+                        == {"helper_function": None, "helper_line": None, "helper_code": "fixture_assertion"},
+                    "offline_helper_locator_safe_sets")
+            # The fixed sets cannot rot: every named function exists in the helper and
+            # every code is one the helper itself defines.
+            import ast
+            names = {node.name for node in ast.walk(ast.parse("\n".join(helper_lines))) if isinstance(node, ast.FunctionDef)}
+            require(SAFE_HELPER_FUNCTIONS - {"unknown"} <= names and "die" not in SAFE_HELPER_FUNCTIONS
+                    and SAFE_HELPER_CODES <= helper.FAILURE_CODES, "offline_helper_locator_sets_exist")
+            # Receipt policy accepts the helper locator and refuses unsafe or mistyped values.
+            failed = {**valid_receipt, "result": "fail", "failure": "unexpected_exception", "failure_detail": detail}
+            require(receipt_policy(encode(failed), BASE, sources, producer_id) is False, "offline_helper_locator_receipt")
+            for key, bad in (("helper_line", "7"), ("helper_line", True), ("helper_line", 0), ("helper_line", 1000001),
+                    ("helper_function", "evil_name"), ("helper_function", 7), ("helper_code", "evil_code"),
+                    ("helper_code", 7)):
+                require(rejects(lambda: receipt_policy(encode({**failed, "failure_detail": {**detail, key: bad}}),
+                        BASE, sources, producer_id)), "offline_helper_locator_receipt_refused")
+            for key in ("helper_function", "helper_line", "helper_code"):
+                require(rejects(lambda: receipt_policy(encode({**failed, "failure_detail": {
+                        name: item for name, item in detail.items() if name != key}}), BASE, sources, producer_id)),
+                    "offline_helper_locator_receipt_incomplete")
+            return True
+
         def sensitive_failures():
             path_value = "/private/tmp/credential"
             token_value = "g8Qv3mZ6rT2pN9xL4cW7sK5uH0dF1jB8aE6yR3iM9oP2nS4tV7zX5"
             failed = {**valid_receipt, "result": "fail", "failure": "unexpected_exception",
                 "failure_detail": {"type": "Refusal", "errno": None, "function": "check", "line": 1,
-                                   "command": None, "exit_code": None}}
+                                   "command": None, "exit_code": None,
+                                   "helper_function": None, "helper_line": None, "helper_code": None}}
             def string_paths(item, prefix=()):
                 if type(item) is dict:
                     for key, nested in item.items():
@@ -3156,7 +3301,7 @@ def offline_check(group):
                         return False
             for field in valid_receipt:
                 require(receipt_reject((field,), "opaque_invalid_field", failed=True), "offline_failed_field_type")
-            for field in ("command", "function", "type"):
+            for field in ("command", "function", "type", "helper_function", "helper_code"):
                 for bad in (path_value, token_value):
                     detail = {**failed["failure_detail"], field: bad}
                     require(rejects(lambda: receipt_policy(encode({**failed, "failure_detail": detail}),
@@ -3168,6 +3313,7 @@ def offline_check(group):
                     and command_label([path_value, token_value]) == "unknown", "offline_safe_diagnostics")
             custom_error = type(token_value, (RuntimeError,), {})(path_value)
             require(failure_detail(custom_error)["type"] == "Unknown", "offline_safe_exception")
+            require(helper_locator_cases(), "offline_helper_locator")
             return safe_failure_receipts()
 
         def socket_pass_refusals():
@@ -3749,7 +3895,8 @@ def offline_check(group):
                 and receipt_reject(("cases", 2, "exit_code"), 1)
                 and publication_cases() and socket_pass_refusals(),
             "invalid_producer": lambda: rejects(lambda: producer(BASE, 1, 1, "0" * 64, False, BASE, 1)),
-            "invalid_budget_or_paths": lambda: rejects(lambda: paths_admission(Path("relative"), Path("receipt"), Path("/tmp"), 1260)),
+            "invalid_budget_or_paths": lambda: rejects(lambda: paths_admission(Path("relative"), Path("receipt"), Path("/tmp"), 1260))
+                and dev_link_origin_contract(),
             "sensitive_receipt_fields": lambda: rejects(lambda: browser_result(encode({**valid, "secret": "x"}), "enroll", 0))
                 and receipt_reject(("tools", "secret"), "offline_marker")
                 and receipt_reject(("tools", "curl"), "https://invalid/#setup=offline_marker")
@@ -4042,11 +4189,11 @@ def offline_check(group):
                 (stylesheet, "-stylesheet"), (stylesheet, "-br-stylesheet"),
                 ("/version.json", "-version"), ("/version.json", "-version-br")]
             for path, suffix in verifier_requests:
-                require(public_request_allowed(path + "?" + cache_bust + suffix, "127.0.0.1:18443", "",
-                                               verifier_paths, 18443), "offline_verifier_query_positive")
+                require(public_request_allowed(path + "?" + cache_bust + suffix, "127.0.0.1:8443", "",
+                                               verifier_paths, 8443), "offline_verifier_query_positive")
             for nonce, attempt in (("0", "0"), (str(-(2**63)), str(2**63 - 1)), (str(2**63 - 1), "1")):
                 require(public_request_allowed("/release.json?herdr_deploy_check=" + BASE + "-" + nonce + "-" + attempt,
-                        "127.0.0.1:18443", "", verifier_paths, 18443), "offline_verifier_integer_bounds")
+                        "127.0.0.1:8443", "", verifier_paths, 8443), "offline_verifier_integer_bounds")
             for query in (cache_bust + "&" + cache_bust, cache_bust + "&v=1", "v=1&" + cache_bust,
                           cache_bust + "-other", cache_bust + "-entry", cache_bust + "&arbitrary=1",
                           cache_bust.replace("=", "=%61", 1), cache_bust.replace("-0", "-00"),
@@ -4055,29 +4202,29 @@ def offline_check(group):
                           "herdr_deploy_check=" + BASE + "-" + str(-(2**63) - 1) + "-0",
                           "herdr_deploy_check=" + BASE + "-0-" + str(2**63), cache_bust + "0" * 129,
                           cache_bust + "\n", cache_bust + "%26v=1", cache_bust.replace("check", "%63heck")):
-                require(not public_request_allowed("/release.json?" + query, "127.0.0.1:18443", "",
-                            verifier_paths, 18443), "offline_verifier_query_refusal")
+                require(not public_request_allowed("/release.json?" + query, "127.0.0.1:8443", "",
+                            verifier_paths, 8443), "offline_verifier_query_refusal")
             raw = "/release.json?" + cache_bust
-            for request, host, upgrade, paths, port in ((raw, "foreign.invalid", "", verifier_paths, 18443),
-                    (raw, "127.0.0.1:18444", "", verifier_paths, 18443),
+            for request, host, upgrade, paths, port in ((raw, "foreign.invalid", "", verifier_paths, 8443),
+                    (raw, "127.0.0.1:18444", "", verifier_paths, 8443),
                     (raw, "127.0.0.1:443", "", verifier_paths, 443),
-                    (raw, "127.0.0.1:18443", "websocket", verifier_paths, 18443),
-                    (raw, "127.0.0.1:18443", "", set(), 18443),
-                    (raw + "#fragment", "127.0.0.1:18443", "", verifier_paths, 18443),
-                    ("https://127.0.0.1:18443" + raw, "127.0.0.1:18443", "", verifier_paths, 18443),
-                    ("/healthz?" + cache_bust, "127.0.0.1:18443", "", {"/healthz"}, 18443),
-                    (javascript + "?" + cache_bust + "-stylesheet", "127.0.0.1:18443", "", verifier_paths, 18443)):
+                    (raw, "127.0.0.1:8443", "websocket", verifier_paths, 8443),
+                    (raw, "127.0.0.1:8443", "", set(), 8443),
+                    (raw + "#fragment", "127.0.0.1:8443", "", verifier_paths, 8443),
+                    ("https://127.0.0.1:8443" + raw, "127.0.0.1:8443", "", verifier_paths, 8443),
+                    ("/healthz?" + cache_bust, "127.0.0.1:8443", "", {"/healthz"}, 8443),
+                    (javascript + "?" + cache_bust + "-stylesheet", "127.0.0.1:8443", "", verifier_paths, 8443)):
                 require(not public_request_allowed(request, host, upgrade, paths, port), "offline_verifier_authority_refusal")
-            require(public_request_allowed("/healthz?v=legacy._-1", "127.0.0.1:18443", "", {"/healthz"}, 18443)
-                    and not public_request_allowed("/healthz?v=" + "a" * 129, "127.0.0.1:18443", "", {"/healthz"}, 18443),
+            require(public_request_allowed("/healthz?v=legacy._-1", "127.0.0.1:8443", "", {"/healthz"}, 8443)
+                    and not public_request_allowed("/healthz?v=" + "a" * 129, "127.0.0.1:8443", "", {"/healthz"}, 8443),
                     "offline_existing_version_query")
             require(socket_operations_allowed({("ping", "succeeded"): 1})
                     and proxy_operations_allowed([SimpleNamespace(failure=False)])
                     and child_environment_allowed({"HOME": "/owned/home"})
                     and service_inputs_allowed(False, False, "/bin/launchctl")
-                    and fixture_port_allowed(18443)
-                    and public_request_allowed("/", "127.0.0.1:18443", "websocket", {"/"}, 18443)
-                    and public_request_allowed("/healthz", "127.0.0.1:18443", "", {"/healthz"}, 18443),
+                    and fixture_port_allowed(8443)
+                    and public_request_allowed("/", "127.0.0.1:8443", "websocket", {"/"}, 8443)
+                    and public_request_allowed("/healthz", "127.0.0.1:8443", "", {"/healthz"}, 8443),
                     "offline_owned_guard_positive")
             guards = [lambda field=field: admission_policy({**valid_admission, field: "unsafe"})
                       for field in valid_admission]
@@ -4090,11 +4237,11 @@ def offline_check(group):
                            lambda: service_inputs_allowed(False, True, "/bin/launchctl"),
                            lambda: service_inputs_allowed(False, False, "/unowned/launchctl"),
                            lambda: fixture_port_allowed(443),
-                           lambda: public_request_allowed("/", "foreign.invalid", "websocket", {"/"}, 18443),
-                           lambda: public_request_allowed("https://foreign.invalid/", "127.0.0.1:18443", "", {"/"}, 18443),
-                           lambda: public_request_allowed("/private", "127.0.0.1:18443", "", {"/"}, 18443),
-                           lambda: public_request_allowed("/?secret=value", "127.0.0.1:18443", "", {"/"}, 18443),
-                           lambda: public_request_allowed("/healthz", "127.0.0.1:18443", "websocket", {"/healthz"}, 18443)])
+                           lambda: public_request_allowed("/", "foreign.invalid", "websocket", {"/"}, 8443),
+                           lambda: public_request_allowed("https://foreign.invalid/", "127.0.0.1:8443", "", {"/"}, 8443),
+                           lambda: public_request_allowed("/private", "127.0.0.1:8443", "", {"/"}, 8443),
+                           lambda: public_request_allowed("/?secret=value", "127.0.0.1:8443", "", {"/"}, 8443),
+                           lambda: public_request_allowed("/healthz", "127.0.0.1:8443", "websocket", {"/healthz"}, 8443)])
             for guard in guards:
                 gate = ClosedRecordingGate()
                 mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), gate)
@@ -4166,12 +4313,13 @@ def offline_check(group):
             require(launchctl_packet_allowed(workflow_packets[0])
                     and launchctl_authorized(workflow_packets[0], context),
                     "offline_workflow_grant_accepted")
-            # The complete spent e59e8022 and 3c8f0c8d packets, including their
+            # The complete spent e59e8022, 3c8f0c8d and 8c1f22ff packets, including their
             # original scope.when, are refused, as is stale-parent event/candidate
             # context for either parent.
             spent_grants = (
                 ("q2-parent-launchctl-print-first-push-e59e8022-20261008", "e59e8022daaefed14317d760f17f904ad6cd55eb"),
-                ("q2-owner-launchctl-print-push-3c8f0c8d-20261012", "3c8f0c8db54e9e147bd0034bab83051fe186324e"))
+                ("q2-owner-launchctl-print-push-3c8f0c8d-20261012", "3c8f0c8db54e9e147bd0034bab83051fe186324e"),
+                ("q2-owner-launchctl-print-push-8c1f22ff-20261013", "8c1f22ff4980335ce0d1acc1731429a3457067a9"))
             for spent_grant, spent_parent in spent_grants:
                 spent_packet = encode({"grantId": spent_grant, "authorized": True, "pinnedParent": spent_parent,
                     "scope": {**LAUNCHCTL_SCOPE, "when": "attempt 1 of the first fast-forward push from " + spent_parent}}).decode()
@@ -4188,7 +4336,7 @@ def offline_check(group):
                         and not launchctl_authorized(workflow_packets[0], {**context, "event_before": spent_parent})
                         and not launchctl_authorized(workflow_packets[0], {**context, "candidate_parents": [spent_parent]})
                         and (len(reads), len(queries)) == (before[0] + 2, before[1] + 1),
-                        "offline_spent_e59_grant_refused" if spent_parent.startswith("e59") else "offline_spent_3c8_grant_refused")
+                        "offline_spent_" + spent_parent[:3] + "_grant_refused")
             for bad_base in ({**base, "attempt": "2"}, *({**base, "event_name": name}
                     for name in ("workflow_dispatch", "pull_request", "schedule")),
                     {**base, "candidate_sha": "0" * 40}, {**base, "candidate_sha": "C" * 40},
@@ -4459,7 +4607,7 @@ def offline_check(group):
                 def close(self):
                     self.check("close")
                     self.closed = True
-            def exercise(data=b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n", *,
+            def exercise(data=b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n", *,
                          error=TimeoutError, read_at=0, write_error=False, flush_at=0,
                          handshake=False, backend_error="", buffered=True, closing=False, close_error=None):
                 backend = Backend(error, backend_error)
@@ -4476,7 +4624,7 @@ def offline_check(group):
                         return super().backend_call(operation, *args, **kwargs)
                 server = object.__new__(Proxy)
                 server.lock, server.counts, server.failure, server.closing = threading.RLock(), {}, False, closing
-                server.server_port, server.server_name, server.paths = 18443, "inert", {"/healthz", "/", "/ws"}
+                server.server_port, server.server_name, server.paths = 8443, "inert", {"/healthz", "/", "/ws"}
                 server.RequestHandlerClass = Handler
                 connection = Connection(data, error, read_at, write_error, flush_at, handshake, close_error)
                 server.connections = {connection}
@@ -4510,30 +4658,30 @@ def offline_check(group):
                         require(not proxy_operations_allowed([server]), "offline_backend_error_fatal")
             server, _ = exercise(b"")
             require(proxy_operations_allowed([server]) and server.counts == {"tls_accepted": 1}, "offline_tls_only_eof")
-            websocket = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: websocket\r\n\r\n"
+            websocket = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nUpgrade: websocket\r\n\r\n"
             server, _ = exercise(websocket, error=ssl.SSLEOFError, write_error=True)
             require(proxy_operations_allowed([server]) and server.counts.get("websocket") == 1
                     and server.counts.get("client_aborted") == 1, "offline_websocket_client_abort")
             for stage in ("send", "recv"):
                 server, _ = exercise(websocket, error=ConnectionResetError, backend_error=stage)
                 require(not proxy_operations_allowed([server]), "offline_websocket_backend_error_fatal")
-            rejected = [f"{method} / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n".encode()
+            rejected = [f"{method} / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n".encode()
                         for method in ("HEAD", "POST", "PUT", "DELETE", "OPTIONS", "TRACE", "CONNECT", "PATCH")]
-            rejected.extend((b"GET /private HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n",
-                b"GET /?secret=value HTTP/1.1\r\nHost: 127.0.0.1:18443\r\n\r\n",
+            rejected.extend((b"GET /private HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                b"GET /?secret=value HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
                 b"GET / HTTP/1.1\r\nHost: foreign.invalid\r\n\r\n",
-                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: h2c\r\n\r\n",
-                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nContent-Length: 1\r\n\r\nx",
-                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nContent-Length:\r\n\r\nx",
-                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nUpgrade: h2c\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nContent-Length: 1\r\n\r\nx",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nContent-Length:\r\n\r\nx",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
                 b"GET / HTTP/invalid\r\n\r\n",
                 b"GET /healthz HTTP/1.1\r\n\r\n",
-                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nHost: foreign.invalid\r\n\r\n",
-                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nHost: 127.0.0.1:18443\r\n\r\n",
-                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nHost: foreign.invalid\r\nUpgrade: websocket\r\n\r\n",
-                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: websocket\r\nUpgrade: h2c\r\n\r\n",
-                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade: websocket\r\nUpgrade: websocket\r\n\r\n",
-                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:18443\r\nUpgrade:\r\nUpgrade: h2c\r\n\r\n"))
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nHost: foreign.invalid\r\n\r\n",
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nHost: foreign.invalid\r\nUpgrade: websocket\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nUpgrade: websocket\r\nUpgrade: h2c\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nUpgrade: websocket\r\nUpgrade: websocket\r\n\r\n",
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nUpgrade:\r\nUpgrade: h2c\r\n\r\n"))
             for request in rejected:
                 for closing in (False, True):
                     server, calls = exercise(request, error=BrokenPipeError, flush_at=1, closing=closing)
@@ -4999,7 +5147,7 @@ def offline_check(group):
                 calls.append((argv, timeout))
                 return response
             mock = SimpleNamespace(capture=capture)
-            for category, port, timeout in (("positive", 18443, 10), ("unknown_ca", 18444, 130),
+            for category, port, timeout in (("positive", 8443, 10), ("unknown_ca", 18444, 130),
                                              ("wrong_host", 18445, 130)):
                 origin = f"https://127.0.0.1:{port}"
                 result = packaged_go_tls_control(root, mock, binary, "fixture-version", "fixture-revision", origin, category)

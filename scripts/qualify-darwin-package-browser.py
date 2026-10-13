@@ -55,8 +55,8 @@ FILES = (
     "tests/test_tailscale_extracted_package_browser.py",
     "tests/tailscale-package-browser.mjs",
 )
-GRANT_ID = "q2-owner-launchctl-print-push-8c1f22ff-20261013"
-PINNED_PARENT = "8c1f22ff4980335ce0d1acc1731429a3457067a9"
+GRANT_ID = "q2-owner-launchctl-print-push-dd608845-20261013"
+PINNED_PARENT = "dd608845b73c0323f5cbcfa140ad52affb28ec7f"
 PHASES = (90, 300, 210, 630, 30)
 TOTAL_SECONDS = 1260
 RAW_CAP = 2 * 1024 * 1024
@@ -808,6 +808,15 @@ def self_test():
         launchctl_query_grant_id="q2-owner-launchctl-print-push-3c8f0c8d-20261012"), "receipt_grant")
     receipt_case("reject_spent_3c8_parent", lambda r: r.update(
         launchctl_query_pinned_parent="3c8f0c8db54e9e147bd0034bab83051fe186324e"), "receipt_grant")
+    # Iteration-3 locator fields (innermost helper frame) never make a failed receipt acceptable.
+    receipt_case("reject_helper_locator_failure", lambda r: r.update(result="fail", failure="unexpected_exception",
+        failure_detail={"type": "GateFailure", "errno": None, "function": "runtime", "line": 1, "command": None,
+                        "exit_code": None, "helper_function": "development_setup_link", "helper_line": 1,
+                        "helper_code": "fixture_assertion"}), "receipt_failure_present")
+    receipt_case("reject_spent_8c1_grant", lambda r: r.update(
+        launchctl_query_grant_id="q2-owner-launchctl-print-push-8c1f22ff-20261013"), "receipt_grant")
+    receipt_case("reject_spent_8c1_parent", lambda r: r.update(
+        launchctl_query_pinned_parent="8c1f22ff4980335ce0d1acc1731429a3457067a9"), "receipt_grant")
     # A FAIL receipt carrying the runner's bucketed fake-operation diagnostics (incl. "other") is a
     # fixed non-qualifying verdict, never an exception and never qualified.
     diagnostic_fail = run(SELF_SHA, fixture_runs(), mutated(lambda r: (r.update(
