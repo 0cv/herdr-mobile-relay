@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.8] - 2026-10-13
+
 ### Changed
 
 - Resize Session is now a per-device opt-in, off by default. Settings states
@@ -13,10 +15,11 @@ project follows [Semantic Versioning](https://semver.org/).
   garbled until the phone lets go, and agents may leave narrow copies of their
   output in the scrollback. Resizing may also truncate scrollback and lose
   older output. Herdr has no API to resize a pane's grid and
-  terminal together, so this cannot be avoided. The previous size is restored
-  when the phone leaves (at once when the switch is turned off), keeping any
-  dimension changed on the laptop meanwhile. Lease Terminal Height stays a
-  separate opt-in. Linux and macOS relays only; when off or unsupported,
+  terminal together, so this cannot be avoided. Restoration is requested
+  when the phone leaves (immediately when the switch is turned off), with
+  best-effort preservation of dimensions changed on the laptop meanwhile.
+  Lease Terminal Height stays a separate, remembered opt-in, inactive while
+  Resize Session is off. Linux and macOS relays only; when off or unsupported,
   controllers keep the desktop width with horizontal scrolling and readers
   wrap. Relays no longer advertise the capability that made apps up to 0.22.7
   resize automatically, and refuse resize requests that do not carry the new
@@ -24,7 +27,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Never resize a terminal the lease was not acquired on. Every resize and
+- Guard against resizing a closed or replaced terminal. Every resize and
   restore now opens the TTY first and then re-checks the pane's Herdr terminal,
   shell process and TTY before writing through the held descriptor, using
   direct ioctls instead of `stty`. A closed or replaced pane is dropped without
@@ -1673,7 +1676,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...HEAD
+[0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8
 [0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7
 [0.22.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...v0.22.6
 [0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4

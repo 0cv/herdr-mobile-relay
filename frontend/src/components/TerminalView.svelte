@@ -536,11 +536,6 @@
       paneSizeLeaseError = '';
       return;
     }
-    if (!connection.capabilities.includes('pane_size_opt_in')) {
-      discardPaneSizeLease();
-      paneSizeLeaseError = '';
-      return;
-    }
     if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
     paneSizeLeaseError = '';
     void tick().then(() => requestPaneSizeLease(false));

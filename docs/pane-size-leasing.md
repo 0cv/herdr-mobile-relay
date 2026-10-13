@@ -1,4 +1,4 @@
-# Pane-size leasing: opt-in Resize Session (issue 60)
+# Pane-size leasing: opt-in Resize Session
 
 Resize Session lets a controller phone resize the shared pane to fit itself
 while it has the pane open. It is a per-device opt-in, off by default, and it
@@ -6,8 +6,7 @@ is honest about its cost: **while a phone holds a lease, the desktop and SSH
 views of that pane look garbled.** This page records the design, the safety
 boundary every write passes through, the cleanup budget, and the risks that
 remain. User-facing behavior is in
-[mobile-app.md](mobile-app.md#mobile-terminal); verification history is in
-[issue-60-stage-a-qualification.md](issue-60-stage-a-qualification.md).
+[mobile-app.md](mobile-app.md#mobile-terminal).
 
 ## Why the garbling is inherent
 
@@ -18,7 +17,7 @@ window size directly (`TIOCSWINSZ`). The application redraws at the leased
 size, Herdr's grid stays at the layout size, and every other client of that
 pane sees the mismatch until the lease ends. No identity or lifecycle care on
 the relay side can fix that; a Herdr-owned resize API is the proper fix (see
-[Remaining gates](#remaining-gates)).
+[Follow-up work](#follow-up-work)).
 
 ## Protocol and compatibility
 
@@ -174,10 +173,10 @@ compare-and-set for the window size.
   while Herdr still reports the old terminal for the pane. The pinning claim
   rests on the kernel behavior above, measured on macOS only so far.
 - **Platforms** — darwin and linux only; other builds do not advertise it.
-- **Not phone-verified** — this implementation has unit, real-PTY, relay
-  blackbox and browser coverage, but no observation on a real phone yet.
+- **Phone qualification incomplete** — unit, real-PTY, relay blackbox and
+  browser tests do not establish an end-to-end real-phone resize/restore pass.
 
-## Remaining gates
+## Follow-up work
 
 **Coordinated resizing needs Herdr.** The proper contract is an absolute
 rows/columns operation owned by Herdr that updates grid and PTY together, is

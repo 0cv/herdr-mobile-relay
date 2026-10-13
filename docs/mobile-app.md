@@ -241,11 +241,12 @@ pane open. Turn it on only if you accept what that costs:
 - Agents redraw at the new size and may leave narrow copies of their output in
   the scrollback, which cannot be erased afterwards. Resizing may also truncate
   scrollback and lose older output.
-- The previous size comes back when the phone leaves the pane: about ten
-  seconds after closing the terminal (so stepping straight back in does not
-  resize twice), at once when you turn Resize Session off or the phone
-  disconnects, and within two minutes if the phone just goes silent. A
-  dimension you changed on the laptop meanwhile is left as you set it. If the
+- The relay attempts to restore the previous size when the phone leaves the
+  pane: about ten seconds after closing the terminal (so stepping straight
+  back in does not resize twice), immediately when you turn Resize Session
+  off or the phone disconnects, and within two minutes if the phone just goes
+  silent. Dimensions that differ from the last leased value are left alone;
+  preserving local changes is best effort, not a guarantee. If the
   relay cannot confirm the pane is still the terminal it resized, it writes
   nothing; after about thirty seconds of failed attempts it logs a warning,
   and a normal local resize puts the pane right.
@@ -263,7 +264,9 @@ on and a relay that supports it) also fits the height, so full-screen agents
 redraw to the phone instead of serving a mostly empty desktop-sized grid. Each
 height change can strand a stale copy of an inline agent's status bar (omp,
 Claude Code) in the scrollback. While the height is leased, the on-screen
-keyboard never shrinks it.
+keyboard never shrinks it. Turning Resize Session off disables height leasing
+without clearing its saved preference: a checked but disabled height switch
+is inactive and is reused when Resize Session is enabled again.
 
 Older apps (0.22.7 and earlier) resized automatically whenever a relay offered
 it. This relay no longer offers that, and refuses any resize request that does

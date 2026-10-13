@@ -285,7 +285,7 @@ func (m *Manager) Acquire(
 	}
 	opCtx, cancel := context.WithTimeout(ctx, m.opTimeout)
 	defer cancel()
-	state, created, err := m.lockPane(opCtx, paneID, true)
+	state, created, err := m.lockPane(opCtx, paneID)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrClosed):
@@ -682,10 +682,10 @@ func (m *Manager) ResizedWithin(paneID string, window time.Duration) bool {
 	return m.now().Sub(state.resizedAt) < window
 }
 
-// lockPane returns the pane's current state with its I/O lock held. With
-// create, a missing pane gets an unresolved placeholder, so concurrent first
-// acquisitions of one pane serialize on a single state.
-func (m *Manager) lockPane(ctx context.Context, paneID string, create bool) (*paneState, bool, error) {
+// lockPane returns the pane's current state with its I/O lock held. A missing
+// pane gets an unresolved placeholder, so concurrent first acquisitions of
+// one pane serialize on a single state.
+func (m *Manager) lockPane(ctx context.Context, paneID string) (*paneState, bool, error) {
 	for {
 		m.mu.Lock()
 		if m.closed {
@@ -694,10 +694,6 @@ func (m *Manager) lockPane(ctx context.Context, paneID string, create bool) (*pa
 		}
 		state := m.panes[paneID]
 		if state == nil {
-			if !create {
-				m.mu.Unlock()
-				return nil, false, nil
-			}
 			state = &paneState{lock: make(chan struct{}, 1), leases: make(map[string]Lease)}
 			state.lock <- struct{}{} // a fresh channel never blocks
 			m.panes[paneID] = state

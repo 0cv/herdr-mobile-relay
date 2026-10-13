@@ -561,11 +561,22 @@ describe('settings relay status', () => {
       capabilities: ['pane_size_opt_in', 'pane_size_opt_in_rows'],
     });
     await waitFor(() => expect(height).toBeEnabled());
+    await user.click(height);
+    expect(height).toBeChecked();
 
     await user.click(resize);
     expect(resize).not.toBeChecked();
     expect(height).toBeDisabled();
+    expect(height).toBeChecked();
+    expect(height).toHaveAccessibleDescription(/The checked preference is remembered but inactive while Resize Session is off\./);
     expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('false');
+
+    await user.click(resize);
+    expect(height).toBeEnabled();
+    expect(height).toBeChecked();
+    // Leave the shared preferences at their defaults for subsequent tests.
+    await user.click(height);
+    await user.click(resize);
   });
 
   it('keeps notification controls out of the way until push delivery is enabled', async () => {

@@ -857,7 +857,7 @@
       descriptionId="height-lease-hint"
       onchange={(value) => setTerminalHeightLease(value)}
     />
-    <p class="hint" id="height-lease-hint">Also fits the shared terminal's height to this phone. Requires Resize Session and a connected relay that supports it. Height changes can strand duplicate inline-agent status bars in the scrollback.</p>
+    <p class="hint" id="height-lease-hint">Also fits the shared terminal's height to this phone. Requires Resize Session and a connected relay that supports it. The checked preference is remembered but inactive while Resize Session is off. Height changes can strand duplicate inline-agent status bars in the scrollback.</p>
     <AppSwitch
       checked={$terminalWakeLock}
       label="Keep Screen Awake"
