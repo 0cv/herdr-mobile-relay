@@ -55,8 +55,8 @@ FILES = (
     "tests/test_tailscale_extracted_package_browser.py",
     "tests/tailscale-package-browser.mjs",
 )
-GRANT_ID = "q2-owner-launchctl-print-push-3c8f0c8d-20261012"
-PINNED_PARENT = "3c8f0c8db54e9e147bd0034bab83051fe186324e"
+GRANT_ID = "q2-owner-launchctl-print-push-8c1f22ff-20261013"
+PINNED_PARENT = "8c1f22ff4980335ce0d1acc1731429a3457067a9"
 PHASES = (90, 300, 210, 630, 30)
 TOTAL_SECONDS = 1260
 RAW_CAP = 2 * 1024 * 1024
@@ -88,7 +88,15 @@ SOCKET_PAIRS = frozenset(
 SOCKET_METHODS = SOCKET_ORDINARY | {"workspace.move_block", "tab.move", "other"}
 SOCKET_OUTCOMES = frozenset({"succeeded", "refused_expected", "rejected", "failed"})
 SOCKET_BUCKETS = ("handler_exceptions", "stream_exceptions", "listener_exceptions", "publication_exceptions")
-FAKE_COMMANDS = frozenset({"agent list", "pane list", "workspace list", "tab list", "pane read", "agent prompt"})
+# Mirrors the runner's exact enumerated READ-ONLY Herdr CLI queries (FAKE_READ_ONLY in
+# tests/test_tailscale_darwin_package_browser.py) plus the single harmless prompt. Read-only
+# rows may be started/succeeded/failed; the prompt must be exactly one succeeded row.
+FAKE_READ_ONLY_COMMANDS = frozenset({"agent list", "pane list", "workspace list", "tab list", "pane read",
+    "integration status", "agent get", "pane process-info", "worktree list"})
+FAKE_PROMPT = "agent prompt"
+FAKE_COMMANDS = FAKE_READ_ONLY_COMMANDS | {FAKE_PROMPT}
+FAKE_OUTCOMES = frozenset({"started", "succeeded", "failed"})
+FAKE_ROW_CAP = len(FAKE_COMMANDS) * len(FAKE_OUTCOMES)
 PASS_FIELDS = frozenset({
     "schemaVersion", "candidate_sha", "candidate_tree", "source_hashes", "result", "scope", "producer",
     "archive_hashes", "version", "manifest_sha256", "binary_sha256", "compiler", "browser_identity", "tools",
@@ -412,16 +420,18 @@ def check_requests_and_operations(value):
                     for r in requests[1:]), "receipt_request_controls")
     operations = value["fixture_operations"]
     require(is_exact(operations, ("fake", "socket")) and type(operations["fake"]) is list
-            and len(operations["fake"]) <= 12, "receipt_operations")
+            and len(operations["fake"]) <= FAKE_ROW_CAP, "receipt_operations")
     seen = {}
     for row in operations["fake"]:
         # Type-check labels before any hashed membership: [] / {} are valid JSON but unhashable.
         require(is_exact(row, ("command", "outcome", "count")) and type(row["command"]) is str
                 and row["command"] in FAKE_COMMANDS and type(row["outcome"]) is str
-                and row["outcome"] == "succeeded" and row["command"] not in seen and is_int(row["count"], 1, 1000000)
-                and (row["command"] != "agent prompt" or row["count"] == 1), "receipt_fake_operation")
-        seen[row["command"]] = row["count"]
-    require(seen.get("agent prompt") == 1, "receipt_fake_mutation")
+                and row["outcome"] in FAKE_OUTCOMES and (row["command"], row["outcome"]) not in seen
+                and is_int(row["count"], 1, COUNT_MAX)
+                and (row["command"] != FAKE_PROMPT or (row["outcome"] == "succeeded" and row["count"] == 1)),
+                "receipt_fake_operation")
+        seen[(row["command"], row["outcome"])] = row["count"]
+    require(seen.get((FAKE_PROMPT, "succeeded")) == 1, "receipt_fake_mutation")
     check_socket(operations, value["socket_diagnostics"])
 
 
@@ -655,8 +665,12 @@ def fixture_receipt(sha=SELF_SHA, run=SELF_RUNS["darwin"]):
             "unobserved_listeners": 0, "closure_errors": [], "uncertain": False, "root_deleted": True},
         "request_counts": [{"tls_accepted": 10, "tls_refused": 3, "http_get": 20, "websocket": 4, "client_aborted": 1},
                            {"tls_refused": 2}, {"tls_refused": 2}],
-        "fixture_operations": {"fake": [{"command": c, "outcome": "succeeded", "count": 1 if c == "agent prompt" else 3}
-            for c in ("agent list", "pane list", "workspace list", "tab list", "pane read", "agent prompt")],
+        "fixture_operations": {"fake": [{"command": c, "outcome": o, "count": 1 if c == "agent prompt" else n}
+            for c, o, n in (("agent get", "failed", 3), ("agent list", "succeeded", 3), ("agent prompt", "succeeded", 1),
+                            ("integration status", "failed", 2), ("pane list", "succeeded", 3),
+                            ("pane process-info", "failed", 4), ("pane read", "succeeded", 3),
+                            ("tab list", "succeeded", 3), ("workspace list", "succeeded", 3),
+                            ("worktree list", "failed", 3), ("worktree list", "started", 1))],
             "socket": rows},
         "captured_output_bytes": 123456, "dependency_payload_bytes_peak": 987654321,
         "launchctl_query_grant_id": GRANT_ID, "github_run_id": run, "github_run_attempt": 1,
@@ -790,6 +804,19 @@ def self_test():
         launchctl_query_grant_id="q2-parent-launchctl-print-first-push-e59e8022-20261008"), "receipt_grant")
     receipt_case("reject_spent_parent", lambda r: r.update(
         launchctl_query_pinned_parent="e59e8022daaefed14317d760f17f904ad6cd55eb"), "receipt_grant")
+    receipt_case("reject_spent_3c8_grant", lambda r: r.update(
+        launchctl_query_grant_id="q2-owner-launchctl-print-push-3c8f0c8d-20261012"), "receipt_grant")
+    receipt_case("reject_spent_3c8_parent", lambda r: r.update(
+        launchctl_query_pinned_parent="3c8f0c8db54e9e147bd0034bab83051fe186324e"), "receipt_grant")
+    # A FAIL receipt carrying the runner's bucketed fake-operation diagnostics (incl. "other") is a
+    # fixed non-qualifying verdict, never an exception and never qualified.
+    diagnostic_fail = run(SELF_SHA, fixture_runs(), mutated(lambda r: (r.update(
+        result="fail", failure="owned_operation_allowlist", failure_guard="fake_herdr"),
+        r["fixture_operations"].update(fake=[{"command": "agent get", "outcome": "failed", "count": 2},
+            {"command": "other", "outcome": "failed", "count": 13}, {"command": "other", "outcome": "other", "count": 1}]))))
+    expect("reject_fake_diagnostic_fail", diagnostic_fail, "receipt_not_pass")
+    results.append(("reject_fake_diagnostic_fail_fixed_codes", diagnostic_fail["failures"] == [
+        "receipt_not_pass", "receipt_failure_present"]))
     receipt_case("reject_schema_two", lambda r: r.update(schemaVersion=2), "receipt_identity")
     receipt_case("reject_scope", lambda r: r.update(scope="other"), "receipt_identity")
     receipt_case("reject_producer_stale", lambda r: r["producer"].update(fresh=False), "receipt_producer")
@@ -846,11 +873,43 @@ def self_test():
     receipt_case("reject_missing_requests", lambda r: r.update(request_counts=[]), "receipt_requests")
     receipt_case("reject_negative_control_served", lambda r: r["request_counts"][2].update(http_get=1),
                  "receipt_request_controls")
-    receipt_case("reject_missing_prompt", lambda r: r["fixture_operations"]["fake"].pop(), "receipt_fake_mutation")
-    receipt_case("reject_prompt_twice", lambda r: r["fixture_operations"]["fake"][-1].update(count=2),
+    def fake_rows(function):
+        def apply(receipt):
+            rows = receipt["fixture_operations"]["fake"]
+            function(rows, next(row for row in rows if row["command"] == FAKE_PROMPT))
+        return apply
+    # The fixture itself accepts read-only started/succeeded/failed rows (accept_all_pass above).
+    receipt_case("reject_missing_prompt", fake_rows(lambda rows, prompt: rows.remove(prompt)), "receipt_fake_mutation")
+    receipt_case("reject_prompt_twice", fake_rows(lambda rows, prompt: prompt.update(count=2)), "receipt_fake_operation")
+    receipt_case("reject_fake_started", fake_rows(lambda rows, prompt: prompt.update(outcome="started")),
                  "receipt_fake_operation")
-    receipt_case("reject_fake_started", lambda r: r["fixture_operations"]["fake"][0].update(outcome="started"),
+    receipt_case("reject_fake_prompt_failed", fake_rows(lambda rows, prompt: prompt.update(outcome="failed")),
                  "receipt_fake_operation")
+    receipt_case("reject_fake_prompt_duplicate_row", fake_rows(lambda rows, prompt: rows.append(dict(prompt))),
+                 "receipt_fake_operation")
+    receipt_case("reject_fake_other_command", fake_rows(lambda rows, prompt: rows.append(
+        {"command": "other", "outcome": "failed", "count": 1})), "receipt_fake_operation")
+    receipt_case("reject_fake_other_outcome", fake_rows(lambda rows, prompt: rows.append(
+        {"command": "agent list", "outcome": "other", "count": 1})), "receipt_fake_operation")
+    receipt_case("reject_fake_duplicate_pair", fake_rows(lambda rows, prompt: rows.append(dict(rows[0]))),
+                 "receipt_fake_operation")
+    receipt_case("accept_fake_count_max", fake_rows(lambda rows, prompt: rows[0].update(count=COUNT_MAX)), None)
+    receipt_case("reject_fake_count_over_runner_cap", fake_rows(lambda rows, prompt: rows[0].update(count=COUNT_MAX + 1)),
+                 "receipt_fake_operation")
+    receipt_case("reject_fake_zero_count", fake_rows(lambda rows, prompt: rows[0].update(count=0)),
+                 "receipt_fake_operation")
+    receipt_case("reject_fake_bool_count", fake_rows(lambda rows, prompt: rows[0].update(count=True)),
+                 "receipt_fake_operation")
+    receipt_case("reject_fake_extra_row_key", fake_rows(lambda rows, prompt: rows[0].update(argv=["x"])),
+                 "receipt_fake_operation")
+    for mutating in ("pane run", "pane send-keys", "pane send-text", "pane close", "workspace create", "workspace rename",
+                     "tab create", "tab rename", "agent start", "agent rename", "worktree create", "worktree open",
+                     "worktree remove", "integration install"):
+        receipt_case("reject_fake_mutating_" + mutating.replace(" ", "_"), fake_rows(lambda rows, prompt, m=mutating:
+            rows.append({"command": m, "outcome": "succeeded", "count": 1})), "receipt_fake_operation")
+    receipt_case("reject_fake_row_cap", fake_rows(lambda rows, prompt: rows.extend(
+        {"command": "agent list", "outcome": "succeeded", "count": index + 1} for index in range(FAKE_ROW_CAP))),
+        "receipt_operations")
 
     def socket_mutation(function):
         def apply(receipt):

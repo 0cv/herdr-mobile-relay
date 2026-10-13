@@ -35,6 +35,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import traceback
@@ -88,20 +89,47 @@ SOCKET_EXCEPTION_CATEGORIES = frozenset({"timeout", "connection_reset", "broken_
 SOCKET_EXCEPTION_BUCKETS = ("handler_exceptions", "stream_exceptions", "listener_exceptions", "publication_exceptions")
 SOCKET_GUARDS = frozenset({"allowed", "unexpected_pair", "probe_cap_exceeded", "counter_saturated",
     "recorded_exception", "listener_not_alive", "not_evaluated"})
-# Admission projection of the owner's current launchctl grant (3c8f0c8d parent,
-# 20261012). The expected parent is a frozen parent-grant literal, NEVER
-# selected from CI/git observations. The spent e59e8022 grant
-# (q2-parent-launchctl-print-first-push-e59e8022-20261008) and the earlier
+# Exact enumerated READ-ONLY Herdr CLI queries the packaged relay can issue,
+# derived from internal/herdr/client.go (+ call sites): (argv length, literal
+# flag positions). Operand positions must be non-empty and not option-like.
+# Every mutating command (workspace/tab create|rename, pane run|send-*|close,
+# agent start|rename, worktree create|open|remove, ...) is deliberately absent.
+# "--version" is a single argument: fake-herdr exits before recording it.
+FAKE_READ_ONLY = MappingProxyType({
+    "agent list": (2, {}), "pane list": (2, {}), "workspace list": (2, {}), "tab list": (2, {}),
+    "integration status": (2, {}),                                   # internal/profiles/resolver.go
+    "agent get": (3, {}),                                            # internal/coordinator/lifecycle.go
+    "pane process-info": (4, {2: "--pane"}),                         # internal/panesize/manager.go, pi_commands.go
+    "worktree list": (4, {2: "--workspace"}),                        # internal/coordinator/workspace.go
+    "pane read": (9, {3: "--lines", 5: "--source", 7: "--format"}),  # socket-failure fallback only
+})
+# The single harmless controller command; the only mutation ever accepted.
+FAKE_PROMPT = "agent prompt"
+FAKE_PROMPT_ARGV = ("agent", "prompt", "workspace:agent", "package acceptance harmless ping")
+FAKE_COMMANDS = frozenset(FAKE_READ_ONLY) | {FAKE_PROMPT}
+FAKE_OUTCOMES = frozenset({"started", "succeeded", "failed"})
+# A refusal diagnostic may additionally bucket anything else as "other".
+FAKE_DIAGNOSTIC_COMMANDS = FAKE_COMMANDS | {"other"}
+FAKE_DIAGNOSTIC_OUTCOMES = FAKE_OUTCOMES | {"other"}
+FAKE_ROW_CAP = len(FAKE_DIAGNOSTIC_COMMANDS) * len(FAKE_DIAGNOSTIC_OUTCOMES)
+# Each fake-herdr row is ~0.4 KiB (it records the socket path); the observed Linux run
+# issued 14. This bounds the live evidence file with a wide margin, never the allowlist.
+FAKE_OPERATIONS_CAP = 262144
+# Admission projection of the owner's current launchctl grant (8c1f22ff parent,
+# 20261013, iteration 2). The expected parent is a frozen parent-grant literal,
+# NEVER selected from CI/git observations. The spent e59e8022 grant
+# (q2-parent-launchctl-print-first-push-e59e8022-20261008), the spent 3c8f0c8d
+# grant (q2-owner-launchctl-print-push-3c8f0c8d-20261012) and the earlier
 # authorized:false contract remain historical and are refused by this predicate.
 # Exactly the next reviewed fast-forward and attempt 1; not a durable nonce
 # across prohibited branch reset/deletion/force-push/recreation or redispatch.
 # Operational admission only, NOT cryptographic hosted-runner authentication:
 # a local caller can forge environment/event inputs. The parent grant authorizes
 # at most two label-scoped read-only queries ONLY on the isolated hosted runner
-# in the single first-fast-forward attempt from the pinned 3c8f0c8d parent.
+# in the single first-fast-forward attempt from the pinned 8c1f22ff parent.
 # No local runtime or local launchctl is authorized, even with fabricated inputs.
-LAUNCHCTL_GRANT_ID = "q2-owner-launchctl-print-push-3c8f0c8d-20261012"
-LAUNCHCTL_PINNED_PARENT = "3c8f0c8db54e9e147bd0034bab83051fe186324e"
+LAUNCHCTL_GRANT_ID = "q2-owner-launchctl-print-push-8c1f22ff-20261013"
+LAUNCHCTL_PINNED_PARENT = "8c1f22ff4980335ce0d1acc1731429a3457067a9"
 PUSH_EVENT_CAP = 65536
 LAUNCHCTL_SCOPE = MappingProxyType({
     "command": "launchctl print gui/$(id -u)/com.herdr-mobile-relay.service",
@@ -388,8 +416,8 @@ def receipt_values_safe(value):
             "uncertain": boolean, "root_deleted": boolean},
         "request_counts": ({key: count for key in ("tls_accepted", "tls_refused", "http_get", "websocket", "client_aborted")}, 3),
         "fixture_operations": {
-            "fake": ({"command": enum("agent list", "pane list", "workspace list", "tab list", "pane read", "agent prompt"),
-                "outcome": enum("started", "succeeded"), "count": count}, 12),
+            "fake": ({"command": enum(*FAKE_DIAGNOSTIC_COMMANDS), "outcome": enum(*FAKE_DIAGNOSTIC_OUTCOMES),
+                "count": count}, FAKE_ROW_CAP),
             "socket": (socket_row, 26)},
         "socket_diagnostics": {"schema": integer(1, 1), "rows": (socket_row, 26),
             "reasons": lambda item: socket_counter_map_safe(item, SOCKET_REASONS),
@@ -438,6 +466,7 @@ def receipt_values_safe(value):
     verify(value, schema, partial=True)
     if "fixture_operations" in value:
         require("socket_diagnostics" in value, "receipt_schema")
+        require(fake_rows_policy(value["fixture_operations"]["fake"], complete=False), "receipt_schema")
         socket_row_counts(value["fixture_operations"]["socket"])
     if "socket_diagnostics" in value:
         socket_diagnostics_policy(value["socket_diagnostics"])
@@ -644,15 +673,9 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     operations = value["fixture_operations"]
     shape(operations, ("fake", "socket"))
     require(type(operations["fake"]) is list and type(operations["socket"]) is list, "receipt_operations")
-    seen = set()
-    for row in operations["fake"]:
-        shape(row, ("command", "outcome", "count"))
-        require(row["command"] in {"agent list", "pane list", "workspace list", "tab list", "pane read", "agent prompt"}
-                and row["outcome"] == "succeeded" and row["command"] not in seen, "receipt_fake_operation")
-        seen.add(row["command"])
-        count(row["count"])
-        require(row["count"] > 0 and (row["command"] != "agent prompt" or row["count"] == 1), "receipt_fake_count")
-    require("agent prompt" in seen, "receipt_fake_mutation")
+    require(fake_rows_policy(operations["fake"], complete=True), "receipt_fake_operation")
+    require(("agent prompt", "succeeded") in {(row["command"], row["outcome"]) for row in operations["fake"]},
+            "receipt_fake_mutation")
     counts = {}
     for row in operations["socket"]:
         shape(row, ("method", "outcome", "count"))
@@ -1377,7 +1400,26 @@ def proxy_request_counts(servers):
     return result
 
 
+def fake_read_only_shape(argv):
+    """True only for an exact enumerated read-only query argv (no wildcard)."""
+    if not (type(argv) is list and len(argv) >= 2 and all(type(arg) is str for arg in argv)):
+        return False
+    rule = FAKE_READ_ONLY.get(" ".join(argv[:2]))
+    if rule is None:
+        return False
+    length, literals = rule
+    return len(argv) == length and all(
+        argv[index] == literals[index] if index in literals else (argv[index] != "" and not argv[index].startswith("-"))
+        for index in range(2, length))
+
+
 def fake_operation_summary(data, complete=False):
+    """Strict summary: refuse any command outside the enumerated allowlist.
+
+    Read-only queries may be started/succeeded/failed (cmd/fake-herdr records
+    "failed" for read queries it does not implement; a query may still be in
+    flight while the relay runs). The one harmless prompt must have succeeded
+    when complete, and is never accepted as failed."""
     counts, sequences = {}, set()
     for line in data.splitlines():
         value = strict_json(line)
@@ -1387,19 +1429,111 @@ def fake_operation_summary(data, complete=False):
         argv = value.get("argv")
         require(type(argv) is list and len(argv) >= 2 and all(type(arg) is str for arg in argv), "fake_operation_argv")
         command = " ".join(argv[:2])
-        require(command in {"agent list", "pane list", "workspace list", "tab list", "pane read", "agent prompt"},
-                "fake_operation_allowlist")
-        if command == "agent prompt":
-            require(argv == ["agent", "prompt", "workspace:agent", "package acceptance harmless ping"],
-                    "fake_mutation_allowlist")
+        require(command in FAKE_COMMANDS, "fake_operation_allowlist")
         outcome = value.get("outcome")
-        require(outcome in {"started", "succeeded"} and (not complete or outcome == "succeeded"), "fake_operation_outcome")
+        if command == FAKE_PROMPT:
+            require(tuple(argv) == FAKE_PROMPT_ARGV, "fake_mutation_allowlist")
+            require(outcome in {"started", "succeeded"} and (not complete or outcome == "succeeded"),
+                    "fake_operation_outcome")
+        else:
+            require(fake_read_only_shape(argv), "fake_operation_allowlist")
+            require(outcome in FAKE_OUTCOMES, "fake_operation_outcome")
         key = (command, outcome)
         counts[key] = counts.get(key, 0) + 1
-    require(sum(count for (command, _), count in counts.items() if command == "agent prompt") <= 1,
+    require(sum(count for (command, _), count in counts.items() if command == FAKE_PROMPT) <= 1,
             "fake_mutation_count")
     return [{"command": command, "outcome": outcome, "count": count}
             for (command, outcome), count in sorted(counts.items())]
+
+
+def fake_operation_diagnostics(data):
+    """Sanitized, secret-free bucketed summary for FAIL receipts. Never raises.
+
+    Only category labels and counts survive: argv, paths, environment and
+    identifiers are dropped; an unknown or malformed command is "other" and an
+    unknown outcome is "other". Used to name the category of a guard refusal."""
+    counts = {}
+    for line in data[:FAKE_OPERATIONS_CAP].splitlines():
+        try:
+            value = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if type(value) is not dict:
+            continue
+        argv = value.get("argv")
+        command = "other"
+        if type(argv) is list and len(argv) >= 2 and all(type(arg) is str for arg in argv):
+            name = " ".join(argv[:2])
+            if (name == FAKE_PROMPT and tuple(argv) == FAKE_PROMPT_ARGV) or (
+                    name in FAKE_READ_ONLY and fake_read_only_shape(argv)):
+                command = name
+        outcome = value.get("outcome")
+        key = (command, outcome if type(outcome) is str and outcome in FAKE_OUTCOMES else "other")
+        counts[key] = min(counts.get(key, 0) + 1, COUNT_MAX)
+    return [{"command": command, "outcome": outcome, "count": count}
+            for (command, outcome), count in sorted(counts.items())]
+
+
+def read_fake_operations(path, opener=os.open):
+    """Bounded, validated snapshot of the live fake-herdr evidence file.
+
+    cmd/fake-herdr writes a complete temp file and renames it over the
+    pathname on every started/finished record, so the pathname's inode
+    legitimately changes while the relay runs. Read through ONE opened
+    descriptor instead of requiring the pathname to stay unchanged: the opened
+    inode is never modified after its rename (an unlinked one has st_nlink 0),
+    so it is an immutable, complete snapshot and no retry is needed. Symlinks,
+    non-regular files, hard-linked files and oversize files still refuse; the
+    content/shape validation of fake_operation_summary is unchanged."""
+    try:
+        descriptor = opener(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:  # symlink (ELOOP), absent or unreadable evidence is a fixed refusal
+        raise Refusal("file_identity") from None
+    try:
+        info = os.fstat(descriptor)
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink <= 1, "file_identity")
+        require(info.st_size <= FAKE_OPERATIONS_CAP, "file_cap")
+        chunks, size = [], 0
+        while size <= FAKE_OPERATIONS_CAP:
+            chunk = os.read(descriptor, min(65536, FAKE_OPERATIONS_CAP + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        require(size <= FAKE_OPERATIONS_CAP, "file_cap")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def fake_failure_rows(path):
+    """Best-effort bounded read for FAIL diagnostics; never raises."""
+    try:
+        return fake_operation_diagnostics(read_fake_operations(path).decode("utf-8", "replace"))
+    except Exception:
+        return []
+
+
+def fake_rows_policy(rows, complete):
+    """Closed shape of fake rows. complete=True is a PASS receipt: no "other",
+    unique (command, outcome), prompt exactly once and succeeded. complete=False
+    (FAIL diagnostics) additionally admits the "other" buckets."""
+    commands = FAKE_COMMANDS if complete else FAKE_DIAGNOSTIC_COMMANDS
+    outcomes = FAKE_OUTCOMES if complete else FAKE_DIAGNOSTIC_OUTCOMES
+    if not (type(rows) is list and len(rows) <= FAKE_ROW_CAP):
+        return False
+    seen = set()
+    for row in rows:
+        if not (type(row) is dict and set(row) == {"command", "outcome", "count"}
+                and type(row["command"]) is str and row["command"] in commands
+                and type(row["outcome"]) is str and row["outcome"] in outcomes
+                and type(row["count"]) is int and 0 < row["count"] <= COUNT_MAX
+                and (row["command"], row["outcome"]) not in seen):
+            return False
+        seen.add((row["command"], row["outcome"]))
+        if complete and row["command"] == FAKE_PROMPT and (row["outcome"] != "succeeded" or row["count"] != 1):
+            return False
+    return True
 
 
 def payload_storage_bytes(directories, check, *, walk=os.walk, metadata=Path.lstat):
@@ -2438,7 +2572,7 @@ def runtime(args):
                "cases": [], "request_counts": [], "cleanup": False, "scope": "darwin_arm64_byo_only",
                "owned_cleanup": cleanup.evidence}
     initial_sources = {}
-    failure, proxy_servers, socket_fixture = None, [], None
+    failure, proxy_servers, socket_fixture, fake_path = None, [], None, None
     previous_signals = {}
 
     def interrupted(signum, _):
@@ -2596,7 +2730,7 @@ def runtime(args):
             fake_path = root / "fake-operations.jsonl"
             def fake_allowed():
                 if fake_path.exists():
-                    fake_operation_summary(read_bounded(fake_path, 65536))
+                    fake_operation_summary(read_fake_operations(fake_path))
                 return True
             operations.add_guard("fake_herdr", fake_allowed)
             wrapper_path = ("/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:"
@@ -2668,7 +2802,7 @@ def runtime(args):
             operations.check()
             receipt["request_counts"] = proxy_request_counts(proxy_servers)
             receipt["fixture_operations"] = {
-                "fake": fake_operation_summary(read_bounded(fake_path, 65536), complete=True),
+                "fake": fake_operation_summary(read_fake_operations(fake_path), complete=True),
                 "socket": socket_fixture.operation_summary()}
             require(any(row["command"] == "agent prompt" and row["outcome"] == "succeeded" and row["count"] == 1
                         for row in receipt["fixture_operations"]["fake"]), "fake_controller_command_missing")
@@ -2703,11 +2837,17 @@ def runtime(args):
                         operations.check_guards(deadline.check)
                         if failure is None and socket_fixture is not None:
                             receipt["fixture_operations"]["fake"] = fake_operation_summary(
-                                read_bounded(fake_path, 65536), complete=True)
+                                read_fake_operations(fake_path), complete=True)
                     except Exception as error:
                         if failure is None:
                             failure = safe_failure_code(error)
                             receipt["failure_detail"] = failure_detail(error)
+                    # A FAIL receipt otherwise carries no fake-operation rows, so a
+                    # fake_herdr refusal cannot name its category. Record the
+                    # sanitized bucketed summary (never argv/paths/ids); an
+                    # unreadable file simply leaves the rows empty.
+                    if failure is not None and fake_path is not None and "fixture_operations" in receipt:
+                        receipt["fixture_operations"]["fake"] = fake_failure_rows(fake_path)
                     # Even a late guard failure still attempts owned-root cleanup.
                     if root_identity is not None:
                         remove_owned_tree(root, root_identity, deadline)
@@ -3391,11 +3531,205 @@ def offline_check(group):
                 (("request_counts", 0, "websocket"), 0),
                 (("captured_output_bytes",), LIMITS["raw"] + 1),
             ))
+        def fake_operation_cases():
+            canonical = {
+                "agent list": ["agent", "list"], "pane list": ["pane", "list"],
+                "workspace list": ["workspace", "list"], "tab list": ["tab", "list"],
+                "integration status": ["integration", "status"], "agent get": ["agent", "get", "1-1"],
+                "pane process-info": ["pane", "process-info", "--pane", "1-1"],
+                "worktree list": ["worktree", "list", "--workspace", "w_1"],
+                "pane read": ["pane", "read", "1-1", "--lines", "80", "--source", "recent", "--format", "text"]}
+            require(set(canonical) == set(FAKE_READ_ONLY), "offline_fake_canonical_set")
+            prompt = list(FAKE_PROMPT_ARGV)
+            def log(*items):
+                return b"".join(encode({"sequence": index, "argv": argv, "outcome": outcome,
+                                        "environment": {"HERDR_SOCKET_PATH": "/private/x"}}) + b"\n"
+                                for index, (argv, outcome) in enumerate(items, 1))
+            def refused(data, complete=False):
+                return rejects(lambda: fake_operation_summary(data, complete=complete))
+            # Every enumerated read-only query is accepted for all three outcomes, live and complete.
+            for argv in canonical.values():
+                for outcome in ("started", "succeeded", "failed"):
+                    for complete in (False, True):
+                        rows = fake_operation_summary(log((argv, outcome), (prompt, "succeeded")), complete=complete)
+                        require({"command": " ".join(argv[:2]), "outcome": outcome, "count": 1} in rows
+                                and {"command": "agent prompt", "outcome": "succeeded", "count": 1} in rows,
+                                "offline_fake_read_only_accepted")
+            # The observed Linux-shaped run: repeated failed queries plus the one prompt, complete.
+            observed = log(*([(canonical[name], "failed") for name in (
+                "integration status", "pane process-info", "worktree list", "agent get")] * 3 + [(prompt, "succeeded")]))
+            require(fake_operation_summary(observed, complete=True) == [
+                {"command": "agent get", "outcome": "failed", "count": 3},
+                {"command": "agent prompt", "outcome": "succeeded", "count": 1},
+                {"command": "integration status", "outcome": "failed", "count": 3},
+                {"command": "pane process-info", "outcome": "failed", "count": 3},
+                {"command": "worktree list", "outcome": "failed", "count": 3}], "offline_fake_observed_shape")
+            # The single harmless prompt: started live, never failed, once, exact argv, succeeded when complete.
+            require(fake_operation_summary(log((prompt, "started"))) == [
+                {"command": "agent prompt", "outcome": "started", "count": 1}], "offline_fake_prompt_live")
+            require(refused(log((prompt, "started")), True) and refused(log((prompt, "failed")))
+                    and refused(log((prompt, "succeeded"), (prompt, "succeeded")))
+                    and refused(log((prompt[:3] + ["other text"], "succeeded")))
+                    and refused(log((prompt[:2], "succeeded"))), "offline_fake_prompt_refused")
+            # Every mutating Herdr CLI command (and anything unknown) is refused for every outcome.
+            mutating = (["workspace", "create", "--cwd", "/x", "--label", "l", "--no-focus"],
+                ["workspace", "rename", "w", "l"], ["tab", "create", "--workspace", "w", "--cwd", "/x", "--label", "l", "--no-focus"],
+                ["tab", "rename", "t", "l"], ["pane", "run", "p", "cmd"], ["pane", "send-keys", "p", "Enter"],
+                ["pane", "send-text", "p", "t"], ["pane", "close", "p"], ["agent", "rename", "p", "n"],
+                ["agent", "start", "n", "--kind", "k", "--pane", "p", "--timeout", "1"],
+                ["worktree", "create", "--workspace", "w", "--branch", "b", "--no-focus"],
+                ["worktree", "open", "--workspace", "w", "--no-focus"], ["worktree", "remove", "--workspace", "w"],
+                ["integration", "install"], ["server", "stop"], ["pane", "unknown"])
+            for argv in mutating:
+                for outcome in ("started", "succeeded", "failed", "other"):
+                    require(refused(log((argv, outcome))) and refused(log((argv, outcome)), True)
+                            and refused(log((canonical["pane list"], "succeeded"), (argv, outcome))),
+                            "offline_fake_mutation_refused")
+            # Exact argv shape: no wildcard, extra/missing/option-like operands refuse.
+            shaped = [canonical["agent get"] + ["extra"], canonical["agent list"] + ["--all"],
+                canonical["integration status"] + ["--json"], ["agent", "get"], ["agent", "get", ""], ["agent", "get", "--pane"],
+                ["pane", "process-info", "1-1"], ["pane", "process-info", "--workspace", "1-1"],
+                ["pane", "process-info", "--pane", ""], ["pane", "process-info", "--pane", "-x"],
+                ["worktree", "list", "--pane", "w"], ["worktree", "list", "--workspace", "w", "--no-focus"],
+                canonical["pane read"][:-2], ["pane", "read", "1-1", "--source", "recent", "--lines", "80", "--format", "text"]]
+            require(all(refused(log((argv, "succeeded"))) for argv in shaped), "offline_fake_shape_refused")
+            require(refused(log((["--version"], "succeeded"))) and refused(log((canonical["agent list"], "bogus")))
+                    and refused(log((canonical["agent list"], None)))
+                    and refused(log((canonical["agent list"], "succeeded")) + log((canonical["pane list"], "succeeded")))
+                    and refused(b"{") and refused(log(([], "succeeded"))) and refused(log(([1, 2], "succeeded"))),
+                    "offline_fake_malformed_refused")
+            # Source-bound: every CLI command client.go can issue is classified; nothing is unaccounted for.
+            client = (Path(__file__).resolve().parents[1] / "internal/herdr/client.go").read_text()
+            issued = {" ".join(pair) for pair in re.findall(
+                r'(?:runResult\(ctx, &result,|runCommand\(ctx,|args := \[\]string\{|args = append\(args,)\s*"([a-z-]+)",\s*"([a-z-]+)"',
+                client)}
+            known_mutating = {" ".join(argv[:2]) for argv in mutating[:13]}
+            require(issued >= {"integration status", "pane process-info", "worktree list", "agent get", "pane read",
+                                "agent prompt"} and issued <= FAKE_COMMANDS | known_mutating
+                    and issued - FAKE_COMMANDS == known_mutating
+                    and FAKE_COMMANDS - issued <= {"agent list", "pane list", "workspace list", "tab list"},
+                    "offline_fake_source_classification")
+            # FAIL diagnostics: bucketed, secret-free, never raising; unreadable evidence leaves no rows.
+            marker = "offline_secret_marker"
+            noisy = (log((["worktree", "create", "--workspace", marker], "failed"),
+                         (canonical["agent get"], "failed"), (canonical["agent get"], "weird"), ([marker, marker], "succeeded"))
+                     + b"{\n" + b"\n".join(encode(item) for item in ([1], {"argv": "x"}, {"argv": [marker]})) + b"\n")
+            diagnostic = fake_operation_diagnostics(noisy.decode())
+            require(diagnostic == [{"command": "agent get", "outcome": "failed", "count": 1},
+                                   {"command": "agent get", "outcome": "other", "count": 1},
+                                   {"command": "other", "outcome": "failed", "count": 1},
+                                   {"command": "other", "outcome": "other", "count": 2},
+                                   {"command": "other", "outcome": "succeeded", "count": 1}]
+                    and marker not in json.dumps(diagnostic) and fake_operation_diagnostics("") == [],
+                    "offline_fake_diagnostics")
+            require(fake_rows_policy(diagnostic, complete=False) and not fake_rows_policy(diagnostic, complete=True),
+                    "offline_fake_diagnostic_policy")
+            with tempfile.TemporaryDirectory() as directory:
+                evidence = Path(directory) / "fake-operations.jsonl"
+                require(fake_failure_rows(evidence) == [], "offline_fake_failure_rows_absent")
+                evidence.write_bytes(noisy)
+                require(fake_failure_rows(evidence) == diagnostic, "offline_fake_failure_rows")
+                link = Path(directory) / "link.jsonl"
+                link.symlink_to(evidence)
+                require(fake_failure_rows(link) == [], "offline_fake_failure_rows_symlink")
+            # Receipts: PASS admits all enumerated read-only rows, FAIL admits diagnostics incl. "other";
+            # neither admits duplicates, prompt anomalies, unknown labels or an oversize row set.
+            every = sorted([{"command": name, "outcome": outcome, "count": 2} for name in canonical
+                            for outcome in ("started", "succeeded", "failed")]
+                           + [{"command": "agent prompt", "outcome": "succeeded", "count": 1}],
+                           key=lambda row: (row["command"], row["outcome"]))
+            def fake_receipt(rows, **changes):
+                value = {**valid_receipt, **changes}
+                value["fixture_operations"] = {**valid_receipt["fixture_operations"], "fake": rows}
+                return encode(value)
+            def fail(rows):
+                return fake_receipt(rows, result="fail", failure="owned_operation_allowlist", failure_guard="fake_herdr")
+            prompt_row = {"command": "agent prompt", "outcome": "succeeded", "count": 1}
+            require(receipt_policy(fake_receipt(every), BASE, sources, producer_id)
+                    and receipt_policy(fail(diagnostic), BASE, sources, producer_id) is False
+                    and receipt_policy(fail([]), BASE, sources, producer_id) is False
+                    and receipt_policy(fail(every), BASE, sources, producer_id) is False,
+                    "offline_fake_receipts_accepted")
+            bad_pass = (
+                [], [{"command": "agent get", "outcome": "failed", "count": 1}],
+                [prompt_row, {**prompt_row, "outcome": "started"}], [{**prompt_row, "outcome": "failed"}],
+                [{**prompt_row, "count": 2}], [prompt_row, dict(prompt_row)],
+                [prompt_row, {"command": "other", "outcome": "failed", "count": 1}],
+                [prompt_row, {"command": "agent get", "outcome": "other", "count": 1}],
+                [prompt_row, {"command": "pane run", "outcome": "succeeded", "count": 1}],
+                [prompt_row, {"command": "agent get", "outcome": "failed", "count": 0}],
+                [prompt_row, {"command": "agent get", "outcome": "failed", "count": True}],
+                [prompt_row, {"command": "agent get", "outcome": "failed", "count": 1, "argv": []}],
+                [prompt_row, {"command": ["agent", "get"], "outcome": "failed", "count": 1}],
+                [prompt_row, {"command": "agent get", "outcome": ["failed"], "count": 1}],
+                [prompt_row, {"command": "agent get", "outcome": "failed", "count": 1},
+                 {"command": "agent get", "outcome": "failed", "count": 2}], {"fake": []}, None)
+            require(all(rejects(lambda rows=rows: receipt_policy(fake_receipt(rows), BASE, sources, producer_id))
+                        for rows in bad_pass), "offline_fake_pass_receipt_refused")
+            bad_fail = (
+                [{"command": "pane run", "outcome": "failed", "count": 1}],
+                [{"command": "other", "outcome": "bogus", "count": 1}],
+                [{"command": "other", "outcome": "failed", "count": 1}, {"command": "other", "outcome": "failed", "count": 1}],
+                [{"command": "other", "outcome": "failed", "count": 0}],
+                [{"command": "other", "outcome": "failed", "count": 1, "argv": ["x"]}],
+                [{"command": "other", "outcome": "failed"}],
+                [{"command": name, "outcome": str(index), "count": 1} for index in range(FAKE_ROW_CAP + 1)
+                 for name in ("other",)])
+            require(all(rejects(lambda rows=rows: receipt_policy(fail(rows), BASE, sources, producer_id))
+                        for rows in bad_fail), "offline_fake_fail_receipt_refused")
+            # The live evidence file is atomically replaced by fake-herdr. One descriptor is an
+            # immutable snapshot: a replacement between open and read, or any number of
+            # concurrent replacements, never refuses a legitimate file.
+            line = log((canonical["agent get"], "failed"))
+            newer = log((canonical["agent get"], "failed"), (canonical["pane list"], "succeeded"))
+            with tempfile.TemporaryDirectory() as directory:
+                evidence = Path(directory) / "fake-operations.jsonl"
+                def publish(data, name="staged"):
+                    staged = Path(directory) / name
+                    staged.write_bytes(data)
+                    os.replace(staged, evidence)
+                publish(line)
+                require(read_fake_operations(evidence) == line and fake_operation_summary(
+                    read_fake_operations(evidence)) == [{"command": "agent get", "outcome": "failed", "count": 1}],
+                    "offline_fake_read_real_file")
+                def replacing_opener(target, flags):
+                    descriptor = os.open(target, flags)
+                    for count in range(8):  # more replacements than any bounded retry could absorb
+                        publish(newer, "staged" + str(count))
+                    return descriptor
+                require(read_fake_operations(evidence, replacing_opener) == line
+                        and read_fake_operations(evidence) == newer, "offline_fake_read_snapshot_under_replacement")
+                stop = threading.Event()
+                def writer():
+                    while not stop.is_set():
+                        publish(line, "w1")
+                        publish(newer, "w2")
+                thread = threading.Thread(target=writer, daemon=True)
+                thread.start()
+                try:
+                    require(all(len(fake_operation_summary(read_fake_operations(evidence), complete=False)) in (1, 2)
+                                for _ in range(300)), "offline_fake_read_concurrent_replacement")
+                finally:
+                    stop.set()
+                    thread.join(5)
+                require(not thread.is_alive(), "offline_fake_read_writer_stopped")
+                link = Path(directory) / "link.jsonl"
+                link.symlink_to(evidence)
+                hard = Path(directory) / "hard.jsonl"
+                os.link(evidence, hard)
+                folder = Path(directory) / "folder"
+                folder.mkdir()
+                big = Path(directory) / "big.jsonl"
+                big.write_bytes(b"x" * (FAKE_OPERATIONS_CAP + 1))
+                require(all(rejects(lambda target=target: read_fake_operations(target))
+                            for target in (link, hard, folder, big, Path(directory) / "absent.jsonl")),
+                        "offline_fake_read_refusals")
+            return True
         operations = {
             "valid_result": lambda: browser_result(encode(valid), "enroll", 0)["ok"]
                 and receipt_policy(encode(valid_receipt), BASE, sources, producer_id)
                 and valid_receipt["socket_diagnostics"]["publication_exceptions"] == {}
-                and request_receipts()
+                and request_receipts() and fake_operation_cases()
                 and receipt_policy(encode({**valid_receipt, "result": "fail", "failure": "cap_raw",
                     "captured_output_bytes": LIMITS["raw"] + 16384}), BASE, sources, producer_id) is False,
             "malformed_json": lambda: rejects(lambda: browser_result(b"{", "enroll", 0)),
@@ -3832,27 +4166,29 @@ def offline_check(group):
             require(launchctl_packet_allowed(workflow_packets[0])
                     and launchctl_authorized(workflow_packets[0], context),
                     "offline_workflow_grant_accepted")
-            # The complete spent e59e8022 packet, including its original scope.when,
-            # is refused, as is stale-parent event/candidate-parent context.
-            spent_parent = "e59e8022daaefed14317d760f17f904ad6cd55eb"
-            spent_packet = encode({"grantId": "q2-parent-launchctl-print-first-push-e59e8022-20261008",
-                "authorized": True, "pinnedParent": spent_parent,
-                "scope": {**LAUNCHCTL_SCOPE, "when": "attempt 1 of the first fast-forward push from " + spent_parent}}).decode()
-            spent_event = {**event, "before": spent_parent}
-            spent_identity = {**identity, "candidate_parents": [spent_parent]}
-            before = (len(reads), len(queries))
-            require(LAUNCHCTL_GRANT_ID != "q2-parent-launchctl-print-first-push-e59e8022-20261008"
-                    and LAUNCHCTL_PINNED_PARENT != spent_parent
-                    and not launchctl_packet_allowed(spent_packet)
-                    and not launchctl_authorized(spent_packet, context)
-                    and rejects(lambda: observe(data=encode(spent_event)))
-                    and rejects(lambda: observe(commit=spent_identity))
-                    and not admission_policy({**context, "event_before": spent_parent})
-                    and not admission_policy({**context, "candidate_parents": [spent_parent]})
-                    and not launchctl_authorized(workflow_packets[0], {**context, "event_before": spent_parent})
-                    and not launchctl_authorized(workflow_packets[0], {**context, "candidate_parents": [spent_parent]})
-                    and (len(reads), len(queries)) == (before[0] + 2, before[1] + 1),
-                    "offline_spent_e59_grant_refused")
+            # The complete spent e59e8022 and 3c8f0c8d packets, including their
+            # original scope.when, are refused, as is stale-parent event/candidate
+            # context for either parent.
+            spent_grants = (
+                ("q2-parent-launchctl-print-first-push-e59e8022-20261008", "e59e8022daaefed14317d760f17f904ad6cd55eb"),
+                ("q2-owner-launchctl-print-push-3c8f0c8d-20261012", "3c8f0c8db54e9e147bd0034bab83051fe186324e"))
+            for spent_grant, spent_parent in spent_grants:
+                spent_packet = encode({"grantId": spent_grant, "authorized": True, "pinnedParent": spent_parent,
+                    "scope": {**LAUNCHCTL_SCOPE, "when": "attempt 1 of the first fast-forward push from " + spent_parent}}).decode()
+                spent_event = {**event, "before": spent_parent}
+                spent_identity = {**identity, "candidate_parents": [spent_parent]}
+                before = (len(reads), len(queries))
+                require(LAUNCHCTL_GRANT_ID != spent_grant and LAUNCHCTL_PINNED_PARENT != spent_parent
+                        and not launchctl_packet_allowed(spent_packet)
+                        and not launchctl_authorized(spent_packet, context)
+                        and rejects(lambda: observe(data=encode(spent_event)))
+                        and rejects(lambda: observe(commit=spent_identity))
+                        and not admission_policy({**context, "event_before": spent_parent})
+                        and not admission_policy({**context, "candidate_parents": [spent_parent]})
+                        and not launchctl_authorized(workflow_packets[0], {**context, "event_before": spent_parent})
+                        and not launchctl_authorized(workflow_packets[0], {**context, "candidate_parents": [spent_parent]})
+                        and (len(reads), len(queries)) == (before[0] + 2, before[1] + 1),
+                        "offline_spent_e59_grant_refused" if spent_parent.startswith("e59") else "offline_spent_3c8_grant_refused")
             for bad_base in ({**base, "attempt": "2"}, *({**base, "event_name": name}
                     for name in ("workflow_dispatch", "pull_request", "schedule")),
                     {**base, "candidate_sha": "0" * 40}, {**base, "candidate_sha": "C" * 40},
