@@ -9,6 +9,7 @@ that disposable container; never enable this gate against a developer host.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.server
 import json
@@ -26,6 +27,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import typing
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -589,28 +591,311 @@ class APIState:
                 self.registration_healthz_probes.append(probe)
 
 
+PROBE_CAP = 64  # Deliberate finite refusal bound, not measured traffic.
+COUNT_MAX = 65535
+SOCKET_REQUEST_MAX = 1024 * 1024
+SOCKET_ORDINARY = frozenset({
+    "ping", "agent.list", "pane.list", "workspace.list", "tab.list",
+    "session.snapshot", "events.subscribe", "pane.read",
+})
+SOCKET_PAIRS = frozenset(
+    {(method, outcome) for method in SOCKET_ORDINARY - {"pane.read"} for outcome in ("succeeded", "failed")}
+    | {("pane.read", outcome) for outcome in ("succeeded", "refused_expected", "rejected", "failed")}
+    | {(method, outcome) for method in ("workspace.move_block", "tab.move")
+       for outcome in ("refused_expected", "rejected", "failed")}
+    | {("other", "rejected"), ("other", "failed")}
+)
+SOCKET_REASONS = frozenset({
+    "ordinary", "inert_probe", "probe_shape", "invalid_params", "unsupported_method",
+    "malformed_request", "non_object_request", "invalid_envelope", "invalid_request_id",
+    "oversize_request", "incomplete_request", "recv_failed", "send_failed", "internal_error",
+})
+SOCKET_EXCEPTION_CATEGORIES = frozenset({"timeout", "connection_reset", "broken_pipe", "os_error", "internal"})
+SOCKET_EXCEPTION_BUCKETS = ("handler_exceptions", "stream_exceptions", "listener_exceptions", "publication_exceptions")
+PROBE_MATCHERS = frozenset({"empty_list", "empty_str", "int:0", "int:1", "false", "str:ansi", "str:visible"})
+SOCKET_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+
+class InertProbe(typing.NamedTuple):
+    method: str
+    params: tuple[tuple[str, str], ...]
+    code: str
+    message: str
+
+
+INERT_PROBES: tuple[InertProbe, ...] = (
+    InertProbe("workspace.move_block", (("workspace_ids", "empty_list"),),
+               "workspace_move_block_failed", "empty selection"),
+    InertProbe("tab.move", (("insert_index", "int:0"), ("tab_id", "empty_str")), "tab_not_found", "empty tab"),
+    InertProbe("pane.read", (("format", "str:ansi"), ("lines", "int:1"), ("pane_id", "empty_str"),
+                           ("source", "str:visible"), ("strip_ansi", "false")), "pane_not_found", "empty pane"),
+)
+
+
+def socket_scenario_view(scenario: dict) -> dict:
+    if type(scenario) is not dict:
+        raise ValueError("invalid fixture scenario")
+    view = {key: scenario.get(key, []) for key in ("panes", "tabs", "workspaces")}
+    view["content"] = scenario.get("content", {})
+    if (any(type(view[key]) is not list for key in ("panes", "tabs", "workspaces"))
+            or type(view["content"]) is not dict
+            or any(type(key) is not str or type(value) is not str for key, value in view["content"].items())):
+        raise ValueError("invalid fixture scenario")
+    return view
+
+
+def socket_ordinary_result(method: str, request: dict, scenario_view: dict) -> dict:
+    if method == "ping":
+        return {
+            "type": "pong", "version": "0.9.0", "protocol": 1,
+            "capabilities": {"endpoint_protocol_generation": 1},
+        }
+    if method == "agent.list":
+        return {"type": "agent_list", "agents": scenario_view["panes"]}
+    if method == "pane.list":
+        return {"type": "pane_list", "panes": scenario_view["panes"]}
+    if method == "workspace.list":
+        return {"type": "workspace_list", "workspaces": scenario_view["workspaces"]}
+    if method == "tab.list":
+        return {"type": "tab_list", "tabs": scenario_view["tabs"]}
+    if method == "session.snapshot":
+        return {"type": "session_snapshot", "snapshot": {
+            "version": "0.9.0", "protocol": 1, "workspaces": scenario_view["workspaces"],
+            "tabs": scenario_view["tabs"], "panes": scenario_view["panes"], "agents": scenario_view["panes"],
+        }}
+    if method == "events.subscribe":
+        return {"type": "subscription_started"}
+    if method == "pane.read":
+        params = request.get("params")
+        pane_id = params.get("pane_id") if isinstance(params, dict) else None
+        text = scenario_view["content"].get(pane_id, "Harmless package fixture output")
+        return {"type": "pane_read", "read": {"text": text, "truncated": False}}
+    raise ValueError("unsupported fixture method")
+
+
+def inert_probe_matches(probe: InertProbe, params: object) -> bool:
+    if type(params) is not dict or sorted(params) != [key for key, _ in probe.params]:
+        return False
+    for key, tag in probe.params:
+        value = params[key]
+        if tag == "empty_list":
+            matches = type(value) is list and not value
+        elif tag == "empty_str":
+            matches = type(value) is str and value == ""
+        elif tag in {"int:0", "int:1"}:
+            matches = type(value) is int and value == int(tag[-1])
+        elif tag == "false":
+            matches = value is False
+        elif tag in {"str:ansi", "str:visible"}:
+            matches = type(value) is str and value == tag[4:]
+        else:
+            return False
+        if not matches:
+            return False
+    return True
+
+
+def socket_predispatch_refusal(reason: str) -> tuple:
+    return ({"id": "", "error": {"code": "invalid_request", "message": "invalid request: fixture refused"}},
+            "other", "rejected", reason)
+
+
+def dispatch_socket_request(line_bytes: bytes, scenario_view: dict) -> tuple:
+    """Pure one-line dispatch: no forwarding, mutation, logging or I/O."""
+    if len(line_bytes) >= SOCKET_REQUEST_MAX:
+        return socket_predispatch_refusal("oversize_request")
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError("duplicate request key")
+            value[key] = item
+        return value
+    def constant(_value):
+        raise ValueError("invalid request constant")
+    try:
+        request = json.loads(line_bytes.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError):
+        return socket_predispatch_refusal("malformed_request")
+    if type(request) is not dict:
+        return socket_predispatch_refusal("non_object_request")
+    if (not {"id", "method"} <= set(request) or not set(request) <= {"id", "method", "params"}
+            or type(request["method"]) is not str):
+        return socket_predispatch_refusal("invalid_envelope")
+    rid = request["id"]
+    if type(rid) is not str or SOCKET_REQUEST_ID.fullmatch(rid) is None:
+        return socket_predispatch_refusal("invalid_request_id")
+    method, params = request["method"], request.get("params")
+    for probe in INERT_PROBES:
+        if method != probe.method:
+            continue
+        if inert_probe_matches(probe, params):
+            return ({"id": rid, "error": {"code": probe.code, "message": probe.message}},
+                    method, "refused_expected", "inert_probe")
+        if method != "pane.read" or (type(params) is dict and params.get("pane_id") == ""):
+            return ({"id": rid, "error": {"code": "fixture_refused", "message": "fixture probe shape refused"}},
+                    method, "rejected", "probe_shape")
+        if type(params) is not dict or type(params.get("pane_id")) is not str:
+            return ({"id": rid, "error": {"code": "fixture_refused", "message": "fixture params refused"}},
+                    method, "rejected", "invalid_params")
+    if method not in SOCKET_ORDINARY:
+        return ({"id": rid, "error": {"code": "unknown_method", "message": "fixture method unavailable"}},
+                "other", "rejected", "unsupported_method")
+    return ({"id": rid, "result": socket_ordinary_result(method, request, scenario_view)},
+            method, "succeeded", "ordinary")
+
+
+def socket_exception_category(error: Exception) -> str:
+    # Subclasses must precede OSError; no exception text is retained.
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, ConnectionResetError):
+        return "connection_reset"
+    if isinstance(error, BrokenPipeError):
+        return "broken_pipe"
+    if isinstance(error, OSError):
+        return "os_error"
+    return "internal"
+
+
+class SocketCounters:
+    """Closed, lock-protected counters saturate at acquisition, not at rendering."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.counts, self.reasons = {}, {}
+        self.handler_exceptions, self.stream_exceptions, self.listener_exceptions = {}, {}, {}
+        self.publication_exceptions = {}
+        self.handled_connections, self.saturated = 0, False
+
+    def _increment(self, bucket, key):
+        count = min(bucket.get(key, 0) + 1, COUNT_MAX)
+        bucket[key] = count
+        if count == COUNT_MAX:
+            self.saturated = True
+
+    def record(self, label, outcome, reason, error=None):
+        exceptional = reason in {"recv_failed", "send_failed", "internal_error"}
+        if (label, outcome) not in SOCKET_PAIRS or reason not in SOCKET_REASONS or exceptional != (error is not None):
+            raise ValueError("invalid socket counter label")
+        with self.lock:
+            self._increment(self.counts, (label, outcome))
+            self._increment(self.reasons, reason)
+            self.handled_connections = min(self.handled_connections + 1, COUNT_MAX)
+            if self.handled_connections == COUNT_MAX:
+                self.saturated = True
+            if error is not None:
+                self._increment(self.handler_exceptions, socket_exception_category(error))
+
+    def record_exception(self, bucket, error):
+        if bucket not in SOCKET_EXCEPTION_BUCKETS[1:]:
+            raise ValueError("invalid socket exception bucket")
+        with self.lock:
+            self._increment(getattr(self, bucket), socket_exception_category(error))
+
+    def operation_summary(self):
+        with self.lock:
+            return [{"method": method, "outcome": outcome, "count": count}
+                    for (method, outcome), count in sorted(self.counts.items())]
+
+
+def socket_diagnostic_snapshot(state) -> dict:
+    """Snapshot duck-typed thread/stop/counter state before owned cleanup."""
+    counters = state.counters
+    with counters.lock:
+        thread = state.thread
+        if state.stopped.is_set():
+            liveness = "stopped"
+        elif thread is None or thread.ident is None:
+            liveness = "not_started"
+        else:
+            liveness = "serving" if thread.is_alive() else "early_death"
+        return {"schema": 1, "rows": counters.operation_summary(), "reasons": dict(counters.reasons),
+                "handler_exceptions": dict(counters.handler_exceptions),
+                "stream_exceptions": dict(counters.stream_exceptions),
+                "listener_exceptions": dict(counters.listener_exceptions),
+                "publication_exceptions": dict(counters.publication_exceptions),
+                "saturated": counters.saturated, "liveness_before_cleanup": liveness}
+
+
+def handle_socket_connection(recv, send, scenario_view, counters, *, set_timeout=None, on_terminal=None,
+                             retiring=None):
+    """One terminal row/reason per connection; stream hold has a separate bucket.
+
+    `retiring` reports that the owner has begun closing connections. An EBADF or
+    ENOTCONN raised by the held-stream receive after that point is the owner's
+    own shutdown/close of this descriptor, not a relay fault. Every other error
+    (e.g. a reset on a still-live descriptor), any error while not retiring, and
+    any non-OSError is still recorded fail-closed."""
+    label, outcome, reason, error = "other", "rejected", "incomplete_request", None
+    response = None
+    try:
+        if set_timeout is not None:
+            set_timeout(5.0)
+        request_line = bytearray()
+        while b"\n" not in request_line and len(request_line) < SOCKET_REQUEST_MAX:
+            chunk = recv(min(4096, SOCKET_REQUEST_MAX - len(request_line)))
+            if not chunk:
+                break
+            request_line.extend(chunk)
+        newline = request_line.find(b"\n")
+    except Exception as caught:
+        outcome, reason, error = "failed", "recv_failed", caught
+    else:
+        if newline < 0 and len(request_line) < SOCKET_REQUEST_MAX:
+            response = None  # Clean EOF before newline, including an empty request.
+        else:
+            try:
+                if newline < 0:
+                    response, label, outcome, reason = socket_predispatch_refusal("oversize_request")
+                else:
+                    response, label, outcome, reason = dispatch_socket_request(bytes(request_line[:newline]), scenario_view)
+            except Exception as caught:
+                label, outcome, reason, error = "other", "failed", "internal_error", caught
+    if response is not None:
+        try:
+            send(json.dumps(response, separators=(",", ":")).encode() + b"\n")
+        except Exception as caught:
+            outcome, reason, error = "failed", "send_failed", caught
+    counters.record(label, outcome, reason, error)
+    if on_terminal is not None:
+        try:
+            on_terminal()
+        except Exception as caught:
+            counters.record_exception("publication_exceptions", caught)
+    if label != "events.subscribe" or outcome != "succeeded":
+        return
+    try:
+        if set_timeout is not None:
+            set_timeout(None)
+        while recv(4096):
+            pass
+    except Exception as caught:
+        # Only a descriptor already closed/shut down by the owner is benign; a
+        # reset or any other error on a live descriptor stays a recorded fault.
+        if (isinstance(caught, OSError) and caught.errno in (errno.EBADF, errno.ENOTCONN)
+                and retiring is not None and retiring()):
+            return
+        counters.record_exception("stream_exceptions", caught)
+
+
 class HerdrSocketFixture:
     """Faithful disposable implementation of the production Herdr socket API."""
 
-    METHODS = {
-        "ping", "agent.list", "pane.list", "workspace.list", "tab.list",
-        "session.snapshot", "events.subscribe", "pane.read",
-    }
+    METHODS = SOCKET_ORDINARY
 
     def __init__(self, path: Path, scenario_path: Path, operations_path: Path, *, on_owned=None):
-        scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
-        self.panes = scenario.get("panes") or []
-        self.tabs = scenario.get("tabs") or []
-        self.workspaces = scenario.get("workspaces") or []
-        self.content = scenario.get("content") or {}
+        self.scenario_view = socket_scenario_view(json.loads(scenario_path.read_text(encoding="utf-8")))
+        self.panes, self.tabs = self.scenario_view["panes"], self.scenario_view["tabs"]
+        self.workspaces, self.content = self.scenario_view["workspaces"], self.scenario_view["content"]
         self.path = path
         self.operations_path = operations_path
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.path.exists() or self.path.is_symlink():
             raise FileExistsError("selected Herdr fixture socket path already exists")
         self.stopped = threading.Event()
-        self.lock = threading.RLock()
-        self.counts: dict[tuple[str, str], int] = {}
+        self.counters = SocketCounters()
+        self.lock, self.counts = self.counters.lock, self.counters.counts
+        self.operations_lock = threading.RLock()
         self.connections: set[socket.socket] = set()
         self.workers: list[threading.Thread] = []
         self.thread = threading.Thread(target=self._serve, name="fixture-herdr-socket", daemon=True)
@@ -628,18 +913,15 @@ class HerdrSocketFixture:
         write_json(self.operations_path, self.operation_summary())
 
     def operation_summary(self) -> list[dict[str, str | int]]:
-        with self.lock:
-            return [
-                {"method": method, "outcome": outcome, "count": count}
-                for (method, outcome), count in sorted(self.counts.items())
-            ]
+        return self.counters.operation_summary()
 
-    def _record(self, method: str, outcome: str) -> None:
-        safe_method = method if method in self.METHODS else "other"
-        safe_outcome = outcome if outcome in {"succeeded", "failed"} else "other"
-        with self.lock:
-            key = (safe_method, safe_outcome)
-            self.counts[key] = self.counts.get(key, 0) + 1
+    def diagnostic_summary(self) -> dict:
+        return socket_diagnostic_snapshot(self)
+
+    def _publish_operations(self) -> None:
+        # Serialize the Linux evidence writer without holding the diagnostic
+        # acquisition lock across filesystem I/O.
+        with self.operations_lock:
             write_json(self.operations_path, self.operation_summary())
 
     def wait_ready(self, timeout: float = 5.0) -> None:
@@ -673,85 +955,37 @@ class HerdrSocketFixture:
         raise TimeoutError("selected Herdr fixture socket did not become protocol-ready")
 
     def _serve(self) -> None:
-        while not self.stopped.is_set():
-            try:
-                connection, _ = self.listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            with self.lock:
-                if self.stopped.is_set():
-                    connection.close()
-                    return
-                self.connections.add(connection)
-                worker = threading.Thread(target=self._handle, args=(connection,), daemon=True)
-                self.workers.append(worker)
-                worker.start()
+        try:
+            while not self.stopped.is_set():
+                try:
+                    connection, _ = self.listener.accept()
+                except socket.timeout:
+                    continue  # Idle polling is not listener-loop death.
+                with self.lock:
+                    if self.stopped.is_set():
+                        connection.close()
+                        return
+                    self.connections.add(connection)
+                    worker = threading.Thread(target=self._handle, args=(connection,), daemon=True)
+                    self.workers.append(worker)
+                    worker.start()
+        except Exception as error:
+            # Same rule as the held-stream branch: only a descriptor the owner
+            # already closed (EBADF/ENOTCONN) after retirement began is benign.
+            # Any other listener error stays recorded even if `stopped` flipped.
+            if not (self.stopped.is_set() and isinstance(error, OSError)
+                    and error.errno in (errno.EBADF, errno.ENOTCONN)):
+                self.counters.record_exception("listener_exceptions", error)
 
     def _result(self, method: str, request: dict) -> dict:
-        if method == "ping":
-            return {
-                "type": "pong", "version": "0.9.0", "protocol": 1,
-                "capabilities": {"endpoint_protocol_generation": 1},
-            }
-        if method == "agent.list":
-            return {"type": "agent_list", "agents": self.panes}
-        if method == "pane.list":
-            return {"type": "pane_list", "panes": self.panes}
-        if method == "workspace.list":
-            return {"type": "workspace_list", "workspaces": self.workspaces}
-        if method == "tab.list":
-            return {"type": "tab_list", "tabs": self.tabs}
-        if method == "session.snapshot":
-            return {"type": "session_snapshot", "snapshot": {
-                "version": "0.9.0", "protocol": 1, "workspaces": self.workspaces,
-                "tabs": self.tabs, "panes": self.panes, "agents": self.panes,
-            }}
-        if method == "events.subscribe":
-            return {"type": "subscription_started"}
-        if method == "pane.read":
-            params = request.get("params")
-            pane_id = params.get("pane_id") if isinstance(params, dict) else None
-            text = self.content.get(pane_id, "Harmless package fixture output")
-            return {"type": "pane_read", "read": {"text": text, "truncated": False}}
-        raise ValueError("unsupported fixture method")
+        return socket_ordinary_result(method, request, self.scenario_view)
 
     def _handle(self, connection: socket.socket) -> None:
-        method = "other"
-        responded = False
         try:
             with connection:
-                connection.settimeout(5.0)
-                request_line = bytearray()
-                while b"\n" not in request_line and len(request_line) <= 1024 * 1024:
-                    chunk = connection.recv(4096)
-                    if not chunk:
-                        return
-                    request_line.extend(chunk)
-                request = json.loads(bytes(request_line).split(b"\n", 1)[0])
-                method_value = request.get("method") if isinstance(request, dict) else None
-                method = method_value if isinstance(method_value, str) else "other"
-                request_id = request.get("id", "") if isinstance(request, dict) else ""
-                if method not in self.METHODS:
-                    self._record(method, "failed")
-                    response = {"id": request_id, "error": {
-                        "code": "unknown_method", "message": "fixture method unavailable",
-                    }}
-                else:
-                    result = self._result(method, request)
-                    response = {"id": request_id, "result": result}
-                connection.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
-                responded = True
-                if method in self.METHODS:
-                    self._record(method, "succeeded")
-                if method == "events.subscribe":
-                    connection.settimeout(None)
-                    while connection.recv(4096):
-                        pass
-        except (OSError, ValueError, TypeError, AttributeError):
-            if method in self.METHODS and not responded:
-                self._record(method, "failed")
+                handle_socket_connection(connection.recv, connection.sendall, self.scenario_view, self.counters,
+                    set_timeout=connection.settimeout, on_terminal=self._publish_operations,
+                    retiring=self.stopped.is_set)
         finally:
             with self.lock:
                 self.connections.discard(connection)

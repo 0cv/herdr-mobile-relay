@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """One isolated Darwin/arm64 extracted-package BYO browser cell.
 
-Imports are stdlib-only and inert. Offline checks run before admission or any
-project import. This is not managed Serve, host trust, or a zero-egress sandbox.
+Imports are stdlib-only and inert. Offline checks never enter admission/runtime;
+the authorized finalizer inspects the helper before its offline import.
+This is not managed Serve, host trust, or a zero-egress sandbox.
 A source review is not evidence that an actual browser/package qualifies.
 """
 from __future__ import annotations
@@ -17,6 +18,7 @@ import hashlib
 import http.client
 import http.server
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -52,6 +54,11 @@ FILES = (
     "tests/test_tailscale_extracted_package_browser.py",
     "tests/tailscale-package-browser.mjs",
 )
+# The exact task-only candidate change set from BASE: the four receipt-hashed
+# FILES plus the standalone qualification gate. FILES (receipt source_hashes,
+# helper/MJS indexes) deliberately stays the four runner files.
+QUALIFY_GATE = "scripts/qualify-darwin-package-browser.py"
+CANDIDATE_PATHS = (*FILES, QUALIFY_GATE)
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")
 LIMITS = MappingProxyType({
@@ -63,18 +70,38 @@ LIMITS = MappingProxyType({
 })
 PHASES = (90, 300, 210, 630, 30)
 GUARDS = frozenset({"proxy", "herdr_socket", "fake_herdr", "pipe_drain"})
-# Admission projection of F3/LAUNCHCTL-FIRST-PUSH-GRANT.json. The expected
-# parent is a frozen parent-grant literal, NEVER selected from CI/git observations.
-# The earlier grant and authorized:false contract remain historical, unedited.
+PROBE_CAP = 64  # Deliberate finite refusal bound, not an observed refresh count.
+COUNT_MAX = 65535
+SOCKET_ORDINARY = frozenset({"ping", "agent.list", "pane.list", "workspace.list", "tab.list",
+    "session.snapshot", "events.subscribe", "pane.read"})
+SOCKET_PROBES = frozenset({"workspace.move_block", "tab.move", "pane.read"})
+SOCKET_PAIRS = frozenset(
+    {(method, outcome) for method in SOCKET_ORDINARY - {"pane.read"} for outcome in ("succeeded", "failed")}
+    | {("pane.read", outcome) for outcome in ("succeeded", "refused_expected", "rejected", "failed")}
+    | {(method, outcome) for method in SOCKET_PROBES - {"pane.read"}
+       for outcome in ("refused_expected", "rejected", "failed")}
+    | {("other", "rejected"), ("other", "failed")})
+SOCKET_REASONS = frozenset({"ordinary", "inert_probe", "probe_shape", "invalid_params", "unsupported_method",
+    "malformed_request", "non_object_request", "invalid_envelope", "invalid_request_id", "oversize_request",
+    "incomplete_request", "recv_failed", "send_failed", "internal_error"})
+SOCKET_EXCEPTION_CATEGORIES = frozenset({"timeout", "connection_reset", "broken_pipe", "os_error", "internal"})
+SOCKET_EXCEPTION_BUCKETS = ("handler_exceptions", "stream_exceptions", "listener_exceptions", "publication_exceptions")
+SOCKET_GUARDS = frozenset({"allowed", "unexpected_pair", "probe_cap_exceeded", "counter_saturated",
+    "recorded_exception", "listener_not_alive", "not_evaluated"})
+# Admission projection of the owner's current launchctl grant (3c8f0c8d parent,
+# 20261012). The expected parent is a frozen parent-grant literal, NEVER
+# selected from CI/git observations. The spent e59e8022 grant
+# (q2-parent-launchctl-print-first-push-e59e8022-20261008) and the earlier
+# authorized:false contract remain historical and are refused by this predicate.
 # Exactly the next reviewed fast-forward and attempt 1; not a durable nonce
 # across prohibited branch reset/deletion/force-push/recreation or redispatch.
 # Operational admission only, NOT cryptographic hosted-runner authentication:
 # a local caller can forge environment/event inputs. The parent grant authorizes
 # at most two label-scoped read-only queries ONLY on the isolated hosted runner
-# in the single first-fast-forward attempt from the pinned e59e8022 parent.
+# in the single first-fast-forward attempt from the pinned 3c8f0c8d parent.
 # No local runtime or local launchctl is authorized, even with fabricated inputs.
-LAUNCHCTL_GRANT_ID = "q2-parent-launchctl-print-first-push-e59e8022-20261008"
-LAUNCHCTL_PINNED_PARENT = "e59e8022daaefed14317d760f17f904ad6cd55eb"
+LAUNCHCTL_GRANT_ID = "q2-owner-launchctl-print-push-3c8f0c8d-20261012"
+LAUNCHCTL_PINNED_PARENT = "3c8f0c8db54e9e147bd0034bab83051fe186324e"
 PUSH_EVENT_CAP = 65536
 LAUNCHCTL_SCOPE = MappingProxyType({
     "command": "launchctl print gui/$(id -u)/com.herdr-mobile-relay.service",
@@ -120,6 +147,13 @@ class Refusal(RuntimeError):
 def require(condition, code):
     if not condition:
         raise Refusal(code)
+
+
+def candidate_scope_allowed(changed):
+    # Exact set equality AND no duplicates: extras, missing entries and repeats refuse.
+    return (type(changed) is list and all(type(path) is str for path in changed)
+            and len(changed) == len(set(changed)) == len(CANDIDATE_PATHS)
+            and set(changed) == set(CANDIDATE_PATHS))
 
 
 def cap(kind, value):
@@ -253,7 +287,7 @@ SAFE_FUNCTIONS = frozenset({"unknown", "runtime", "command", "phase", "interrupt
     "digest_policy", "checksum_policy", "manifest_policy", "paths_admission", "root_policy", "environment",
     "check", "enter", "remaining", "alarm", "expired", "spawn", "capture", "capture_launcher", "storage",
     "payload_storage_bytes", "check_guards", "effect", "require_launchctl", "profiles", "certificates",
-    "tls_controls", "private_link", "fake_operation_summary", "browser_result", "receipt_policy",
+    "tls_controls", "packaged_go_tls_control", "private_link", "fake_operation_summary", "browser_result", "receipt_policy",
     "receipt_values_safe", "verify", "remove_owned_tree", "stop", "close", "group_gone", "reap_bounded",
     "read", "__init__", "socket_allowed", "fake_allowed", "start_launcher", "require", "cap",
     "verify_producer_archive", "record_digest", "write_receipt", "publish_receipt", "publication"})
@@ -305,8 +339,9 @@ def receipt_values_safe(value):
         "seconds": seconds, "assertions": assertions}
     tls_category = enum("positive", "unknown_ca", "wrong_host")
     tls_tool = {"category": tls_category, "exit_code": exit_code}
-    methods = enum("ping", "agent.list", "pane.list", "workspace.list", "tab.list", "session.snapshot",
-                   "events.subscribe", "pane.read", "other")
+    methods = enum(*SOCKET_ORDINARY, "workspace.move_block", "tab.move", "other")
+    socket_row = {"method": methods, "outcome": enum("succeeded", "refused_expected", "rejected", "failed"),
+                  "count": integer(COUNT_MAX, 1)}
     guard_observation = {"ordinal": integer(2, 1), "private_plist_before_absent": boolean,
         "private_plist_after_absent": boolean, "setup_ready_seconds": seconds, "loaded_service": boolean,
         "proof_kind": enum("source_bound_wrapper_continued"), "query_exit_zero": boolean,
@@ -355,7 +390,13 @@ def receipt_values_safe(value):
         "fixture_operations": {
             "fake": ({"command": enum("agent list", "pane list", "workspace list", "tab list", "pane read", "agent prompt"),
                 "outcome": enum("started", "succeeded"), "count": count}, 12),
-            "socket": ({"method": methods, "outcome": enum("succeeded", "failed", "other"), "count": count}, 27)},
+            "socket": (socket_row, 26)},
+        "socket_diagnostics": {"schema": integer(1, 1), "rows": (socket_row, 26),
+            "reasons": lambda item: socket_counter_map_safe(item, SOCKET_REASONS),
+            **{key: lambda item: socket_counter_map_safe(item, SOCKET_EXCEPTION_CATEGORIES)
+               for key in SOCKET_EXCEPTION_BUCKETS},
+            "saturated": boolean, "liveness_before_cleanup": enum("serving", "stopped", "early_death", "not_started"),
+            "closed_after_cleanup": enum("closed", "open", "not_observed"), "guard": enum(*SOCKET_GUARDS)},
         "captured_output_bytes": integer(LIMITS["raw"] + 131072),
         "dependency_payload_bytes_peak": integer(LIMITS["dependencies"]),
         "failure": enum(*SAFE_FAILURES), "failure_guard": enum(*GUARDS),
@@ -395,6 +436,11 @@ def receipt_values_safe(value):
         require(set(result["assertions"]) == keys and all(boolean(v) for v in result["assertions"].values()), "receipt_schema")
     case["assertions"] = lambda item: type(item) is dict and set(item) <= set(assertions) and all(boolean(v) for v in item.values())
     verify(value, schema, partial=True)
+    if "fixture_operations" in value:
+        require("socket_diagnostics" in value, "receipt_schema")
+        socket_row_counts(value["fixture_operations"]["socket"])
+    if "socket_diagnostics" in value:
+        socket_diagnostics_policy(value["socket_diagnostics"])
 
 
 def receipt_policy(data, candidate, source_hashes, producer_identity):
@@ -406,7 +452,7 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
               "trust_controls", "cases", "phases", "cleanup", "owned_cleanup", "request_counts",
               "fixture_operations", "captured_output_bytes", "dependency_payload_bytes_peak", "failure",
               "failure_detail", "failure_guard", "launchctl_query_grant_id",
-              "github_run_id", "github_run_attempt", "launchctl_query_pinned_parent"}
+              "github_run_id", "github_run_attempt", "launchctl_query_pinned_parent", "socket_diagnostics"}
     require(type(value) is dict and set(value) <= fields, "receipt_fields")
 
     def shape(item, keys):
@@ -617,6 +663,7 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
         counts[key] = row["count"]
     require(socket_operations_allowed(counts) and counts.get(("pane.read", "succeeded"), 0) >= 2
             and counts.get(("ping", "succeeded"), 0) > 0, "receipt_socket_operations")
+    socket_diagnostics_policy(value["socket_diagnostics"], passing=True, operation_rows=operations["socket"])
     return True
 
 
@@ -784,10 +831,10 @@ class Budget:
 
 
 class CleanupDeadline:
-    """One monotonic cap shared by all closures, deletion and receipt writing."""
-    def __init__(self, seconds=30, clock=time.monotonic, latest=None, reserve=0):
+    """One monotonic cap shared by observations, closures, deletion and receipt writing."""
+    def __init__(self, seconds=30, clock=time.monotonic, latest=None, reserve=0, started=None):
         self.clock, self.reserve = clock, reserve
-        self.end = clock() + seconds
+        self.end = (clock() if started is None else started) + seconds
         if latest is not None:
             self.end = min(self.end, latest)
 
@@ -1098,6 +1145,31 @@ def fixture_port_allowed(port):
     return type(port) is int and port in {18443, 18444, 18445}
 
 
+def deployment_query_allowed(path, query):
+    # appdeploy.publicResourceURL/checkPublicBundle: QueryEscape leaves this
+    # bounded, literal SHA/int64/nonnegative-int grammar unchanged. Do not
+    # decode queries or admit arbitrary cache keys, duplicate keys or mixtures.
+    match = re.fullmatch(r"herdr_deploy_check=[0-9a-f]{40}-(0|-?[1-9][0-9]{0,18})-"
+                         r"(0|[1-9][0-9]{0,18})(?:-(entry|javascript|stylesheet|br-entry|"
+                         r"br-javascript|br-stylesheet|version|version-br))?", query)
+    if match is None:
+        return False
+    nonce, attempt, resource = match.groups()
+    if not -(2**63) <= int(nonce) < 2**63 or not 0 <= int(attempt) < 2**63:
+        return False
+    if path == "/release.json":
+        return resource is None
+    if path == "/version.json":
+        return resource in {"version", "version-br"}
+    if re.fullmatch(r"/builds/[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[a-f0-9]{16,64}/index\.html", path):
+        return resource in {"entry", "br-entry"}
+    if re.fullmatch(r"/assets/app-[a-f0-9]{64}\.js", path):
+        return resource in {"javascript", "br-javascript"}
+    if re.fullmatch(r"/assets/app-[a-f0-9]{64}\.css", path):
+        return resource in {"stylesheet", "br-stylesheet"}
+    return False
+
+
 def public_request_allowed(raw_path, host, upgrade, paths, port):
     try:
         parts = urllib.parse.urlsplit(raw_path)
@@ -1105,15 +1177,185 @@ def public_request_allowed(raw_path, host, upgrade, paths, port):
         return False
     return (fixture_port_allowed(port) and not parts.scheme and not parts.netloc
             and parts.path in paths and not parts.fragment
-            and (not parts.query or re.fullmatch(r"v=[A-Za-z0-9._-]{1,128}", parts.query) is not None)
+            and (not parts.query or re.fullmatch(r"v=[A-Za-z0-9._-]{1,128}", parts.query) is not None
+                 or (raw_path == parts.path + "?" + parts.query
+                     and deployment_query_allowed(parts.path, parts.query)))
             and host == "127.0.0.1:" + str(port)
             and (not upgrade or (upgrade == "websocket" and parts.path in {"/", "/ws"} and not parts.query)))
 
 
+def socket_pair_guard(counts):
+    for pair, count in counts.items():
+        if (type(pair) is not tuple or len(pair) != 2 or pair not in SOCKET_PAIRS
+                or type(count) is not int or not 1 <= count <= COUNT_MAX):
+            return "unexpected_pair"
+        method, outcome = pair
+        if method in SOCKET_ORDINARY and outcome == "succeeded":
+            continue
+        if method in SOCKET_PROBES and outcome == "refused_expected":
+            if count > PROBE_CAP:
+                return "probe_cap_exceeded"
+            continue
+        return "unexpected_pair"
+    return "allowed"
+
+
 def socket_operations_allowed(counts):
-    allowed = {"ping", "agent.list", "pane.list", "workspace.list", "tab.list", "session.snapshot",
-               "events.subscribe", "pane.read"}
-    return all(method in allowed and outcome == "succeeded" for method, outcome in counts)
+    return socket_pair_guard(counts) == "allowed"
+
+
+def socket_counter_map_safe(item, keys):
+    return (type(item) is dict and set(item) <= keys
+            and all(type(count) is int and 1 <= count <= COUNT_MAX for count in item.values()))
+
+
+def socket_row_counts(rows):
+    require(type(rows) is list and len(rows) <= 26, "receipt_schema")
+    counts = {}
+    order = []
+    for row in rows:
+        require(type(row) is dict and set(row) == {"method", "outcome", "count"}, "receipt_schema")
+        require(type(row["method"]) is str and type(row["outcome"]) is str, "receipt_schema")
+        pair = (row["method"], row["outcome"])
+        require(pair in SOCKET_PAIRS and pair not in counts
+                and type(row["count"]) is int and 1 <= row["count"] <= COUNT_MAX, "receipt_schema")
+        order.append(pair)
+        counts[pair] = row["count"]
+    require(order == sorted(order), "receipt_schema")
+    return counts
+
+
+def socket_diagnostic_guard(diagnostics):
+    if diagnostics["saturated"]:
+        return "counter_saturated"
+    if any(diagnostics[key] for key in SOCKET_EXCEPTION_BUCKETS):
+        return "recorded_exception"
+    if diagnostics["liveness_before_cleanup"] != "serving":
+        return "listener_not_alive"
+    return socket_pair_guard({(row["method"], row["outcome"]): row["count"] for row in diagnostics["rows"]})
+
+
+def socket_diagnostics_policy(diagnostics, passing=False, operation_rows=None):
+    fields = {"schema", "rows", "reasons", *SOCKET_EXCEPTION_BUCKETS, "saturated",
+              "liveness_before_cleanup", "closed_after_cleanup", "guard"}
+    require(type(diagnostics) is dict and set(diagnostics) == fields
+            and type(diagnostics["schema"]) is int and diagnostics["schema"] == 1, "receipt_schema")
+    counts = socket_row_counts(diagnostics["rows"])
+    require(socket_counter_map_safe(diagnostics["reasons"], SOCKET_REASONS)
+            and all(socket_counter_map_safe(diagnostics[key], SOCKET_EXCEPTION_CATEGORIES) for key in SOCKET_EXCEPTION_BUCKETS)
+            and type(diagnostics["saturated"]) is bool
+            and type(diagnostics["liveness_before_cleanup"]) is str
+            and diagnostics["liveness_before_cleanup"] in {"serving", "stopped", "early_death", "not_started"}
+            and type(diagnostics["closed_after_cleanup"]) is str
+            and diagnostics["closed_after_cleanup"] in {"closed", "open", "not_observed"}
+            and type(diagnostics["guard"]) is str and diagnostics["guard"] in SOCKET_GUARDS, "receipt_schema")
+    if not diagnostics["saturated"]:
+        require(sum(counts.values()) < COUNT_MAX
+                and sum(counts.values()) == sum(diagnostics["reasons"].values())
+                and sum(diagnostics["handler_exceptions"].values()) == sum(diagnostics["reasons"].get(key, 0)
+                    for key in ("recv_failed", "send_failed", "internal_error")), "receipt_schema")
+    if passing:
+        require(diagnostics["guard"] == socket_diagnostic_guard(diagnostics) == "allowed"
+                and diagnostics["closed_after_cleanup"] == "closed"
+                and set(diagnostics["reasons"]) <= {"ordinary", "inert_probe"}
+                and diagnostics["rows"] == operation_rows, "receipt_socket_diagnostics")
+    return True
+
+
+def socket_fixture_allowed(fixture, receipt):
+    current = fixture.diagnostic_summary()
+    if fixture.stopped.is_set() and "socket_diagnostics" in receipt:
+        # Cleanup stops the listener, but never excuses a late row or fault.
+        current["liveness_before_cleanup"] = receipt["socket_diagnostics"]["liveness_before_cleanup"]
+    return socket_diagnostic_guard(current) == "allowed"
+
+
+def capture_socket_diagnostics(receipt, fixture, check=lambda: None):
+    # Exactly one before-cleanup snapshot, even on a construction/guard failure.
+    # Commit only a complete observation obtained within the caller's deadline.
+    check()
+    diagnostics = fixture.diagnostic_summary()
+    diagnostics.update(closed_after_cleanup="not_observed", guard=socket_diagnostic_guard(diagnostics))
+    socket_diagnostics_policy(diagnostics)
+    check()
+    receipt["socket_diagnostics"] = diagnostics
+    receipt["fixture_operations"] = {"fake": receipt.get("fixture_operations", {}).get("fake", []),
+                                     "socket": diagnostics["rows"]}
+    return diagnostics
+
+
+def finish_socket_diagnostics(diagnostics, owner, check=lambda: None):
+    check()
+    try:
+        diagnostics["closed_after_cleanup"] = "closed" if owner.closed() else "open"
+    except Exception:
+        diagnostics["closed_after_cleanup"] = "not_observed"
+    # owner.closed may catch an alarm interruption as an unavailable observation.
+    # Check before the NEXT lock so a consumed one-shot alarm cannot leave that
+    # subsequent acquisition unbounded.
+    check()
+    publication_summary = getattr(owner, "publication_summary", None)
+    if publication_summary is None:
+        return
+    # A worker may finish its sole callback during retirement, even if closure
+    # fails. Refresh only sticky publication evidence, never the captured rows,
+    # reasons or pre-cleanup liveness. No filesystem I/O occurs under this lock.
+    publication = publication_summary()
+    check()
+    # Sticky late fault categories (publication, held-stream, listener) only
+    # ever grow. A late handler fault or non-allowed row cannot enter the
+    # immutable captured rows/reasons, so it is carried as the final guard
+    # reason instead, at the SAME priority as the live guard (saturation, then
+    # any exception, then liveness, then pairs) even when the captured guard
+    # was already a refusal. A late allowed row changes nothing.
+    for bucket in ("publication_exceptions", "stream_exceptions", "listener_exceptions"):
+        for category, count in publication.get(bucket, {}).items():
+            diagnostics[bucket][category] = max(diagnostics[bucket].get(category, 0), count)
+    diagnostics["saturated"] = diagnostics["saturated"] or publication["saturated"]
+    guard = socket_diagnostic_guard(diagnostics)
+    if guard not in {"counter_saturated", "recorded_exception"}:
+        if publication.get("handler_exceptions"):
+            guard = "recorded_exception"
+        elif guard == "allowed":
+            late_pair = publication.get("pair_guard", "allowed")
+            guard = late_pair if late_pair in SOCKET_GUARDS else "unexpected_pair"
+    diagnostics["guard"] = guard
+
+
+def cleanup_socket_observation(receipt, fixture, cleanup, deadline, *, initial=False):
+    """Runtime alarm is already armed; never renew it or retry an unavailable snapshot."""
+    if fixture is None:
+        return True
+    try:
+        deadline.check()
+        if initial:
+            capture_socket_diagnostics(receipt, fixture, deadline.check)
+        else:
+            require("socket_diagnostics" in receipt, "receipt_failure_validation")
+            finish_socket_diagnostics(receipt["socket_diagnostics"], SocketOwner(fixture), deadline.check)
+            require(receipt["socket_diagnostics"]["closed_after_cleanup"] != "not_observed",
+                    "cleanup_uncertain")
+        deadline.check()
+        return True
+    except Exception as error:
+        cleanup.error("cleanup_deadline" if isinstance(error, Refusal)
+                      and str(error) == "cleanup_deadline" else "cleanup_incomplete")
+        receipt["cleanup"], receipt["result"] = False, "fail"
+        receipt.setdefault("failure", "cleanup_uncertain")
+        return False
+
+
+def require_socket_cleanup_evidence(receipt, fixture):
+    # A partial failure may retain a valid initial snapshot with explicit late
+    # uncertainty. Without it there is no bounded valid runner receipt: retain
+    # any existing operations, refuse staging, and let the nonzero exit bind the
+    # separate publisher's lack-of-evidence failure. Never fabricate empty rows.
+    if fixture is not None:
+        require("socket_diagnostics" in receipt and "fixture_operations" in receipt,
+                "receipt_failure_validation")
+        socket_diagnostics_policy(receipt["socket_diagnostics"])
+        require(receipt["fixture_operations"]["socket"] == receipt["socket_diagnostics"]["rows"],
+                "receipt_failure_validation")
 
 
 def proxy_operations_allowed(servers):
@@ -1623,6 +1865,10 @@ def publish_receipt(staged, evidence, runner_exit, candidate, run_id, source_has
             require(observed_sources == source_hashes, "receipt_identity")
             if runner_exit == 0:
                 value, passed = observed, True
+            else:
+                # Keep the fully validated, source-bound socket snapshot as
+                # failure evidence, never the staged PASS or its assertions.
+                value["socket_diagnostics"] = observed["socket_diagnostics"]
         else:
             value = observed  # Preserve only validated, sanitized failure evidence.
     except (OSError, Refusal):
@@ -2093,6 +2339,18 @@ async function check(context, port, refusal) {
 '''
 
 
+def packaged_go_tls_control(root, operations, binary, version, revision, origin, category):
+    require(category in {"positive", "unknown_ca", "wrong_host"}, "tls_category")
+    # Production appdeploy.verifyPublic retries TLS errors until its two-minute
+    # context expires. A ten-second wrapper deadline cannot observe that exit
+    # or its categorized certificate error. Allow ten seconds of startup/exit
+    # margin for negative controls; Operations.capture still clamps this to the
+    # unchanged phase/global remainder. Never count a wrapper timeout as refusal.
+    timeout = 10 if category == "positive" else 130
+    return operations.capture([str(binary), "verify-public", "--origin", origin, "--web-root",
+                               str(root / "release/web"), "--version", version, "--revision", revision], timeout)
+
+
 def tls_controls(root, operations, binary, version, revision, candidate):
     outcomes = []
     for port, expected in ((18443, "positive"), (18444, "unknown_ca"), (18445, "wrong_host")):
@@ -2109,8 +2367,7 @@ def tls_controls(root, operations, binary, version, revision, candidate):
                     or (expected == "unknown_ca" and error.verify_code in {20, 21})), "python_tls_refusal")
         curl = operations.capture(["curl", "--noproxy", "*", "--fail", "--silent", "--show-error",
                                    "--max-time", "5", "--max-redirs", "0", origin + "/healthz"], 6)
-        go = operations.capture([str(binary), "verify-public", "--origin", origin, "--web-root",
-                                 str(root / "release/web"), "--version", version, "--revision", revision], 10)
+        go = packaged_go_tls_control(root, operations, binary, version, revision, origin, expected)
         if expected == "positive":
             require(curl.returncode == 0 and go.returncode == 0, "tls_positive")
         else:
@@ -2231,7 +2488,7 @@ def runtime(args):
             require(command(["git", "rev-parse", "HEAD"]).decode().strip() == source, "candidate_head")
             require(not command(["git", "status", "--porcelain=v1", "--untracked-files=all"]), "candidate_dirty")
             changed = command(["git", "diff", "--name-only", BASE, source, "--"]).decode().splitlines()
-            require(set(changed) == set(FILES), "candidate_scope")
+            require(candidate_scope_allowed(changed), "candidate_scope")
             receipt["candidate_tree"] = command(["git", "rev-parse", "HEAD^{tree}"]).decode().strip()
             version, archive, hashes = hydrate(args, root, budget, candidate, operations.effects)
             receipt["archive_hashes"] = hashes
@@ -2310,13 +2567,15 @@ def runtime(args):
                 "workspaces": [{"workspace_id": "workspace", "label": "Package fixture"}],
                 "tabs": [{"tab_id": "tab", "workspace_id": "workspace", "label": "Package fixture", "cwd": str(root)}],
                 "content": {"workspace:agent": "Harmless fixture output"}}))
+            def own_socket(fixture):
+                nonlocal socket_fixture
+                socket_fixture = fixture  # Retain even if allocation/bind/start raises.
+                cleanup.listener(SocketOwner(fixture))
             socket_fixture = helper.HerdrSocketFixture(root / "runtime/herdr.sock", scenario,
-                root / "socket-operations.json", on_owned=lambda fixture: cleanup.listener(SocketOwner(fixture)))
+                root / "socket-operations.json", on_owned=own_socket)
             socket_fixture.wait_ready()
             def socket_allowed():
-                with socket_fixture.lock:
-                    return (socket_operations_allowed(socket_fixture.counts)
-                            and (socket_fixture.stopped.is_set() or socket_fixture.thread.is_alive()))
+                return socket_fixture_allowed(socket_fixture, receipt)
             operations.add_guard("herdr_socket", socket_allowed)
             for port, leaf in ((18443, "valid"), (18444, "unknown"), (18445, "wrong-host")):
                 proxy_servers.append(Proxy(port, root, leaf, operations))
@@ -2420,24 +2679,31 @@ def runtime(args):
         failure = safe_failure_code(error)
         receipt["failure_detail"] = failure_detail(error, failed_command or None)
     finally:
+        # Anchor once at cleanup entry, BEFORE diagnostic locks or other work.
+        # The alarm and serialization reserve share this end (also globally
+        # clamped); a slow/interrupted initial observation cannot renew it.
+        start = budget.clock()
+        deadline = CleanupDeadline(clock=budget.clock, started=start,
+            latest=budget.start + LIMITS["total_seconds"], reserve=1)
         os.environ.pop("GH_TOKEN", None)
         os.environ.pop("GITHUB_TOKEN", None)
-        start = time.monotonic()
-        # Reserve receipt time WITHIN the same immutable end, not a fresh
-        # deadline after cleanup. Work exhaustion can then retain failure
-        # observations in a bounded receipt without any further cleanup effects.
-        deadline = CleanupDeadline(latest=budget.start + LIMITS["total_seconds"], reserve=1)
         try:
             try:
                 with deadline.alarm():
-                    receipt["owned_cleanup"] = cleanup.close(deadline)
+                    if not cleanup_socket_observation(receipt, socket_fixture, cleanup, deadline, initial=True):
+                        failure = failure or "cleanup_uncertain"
+                    try:
+                        receipt["owned_cleanup"] = cleanup.close(deadline)
+                    finally:
+                        if not cleanup_socket_observation(receipt, socket_fixture, cleanup, deadline):
+                            failure = failure or "cleanup_uncertain"
                     # Final observations follow every owned closure/reap: late
                     # failures cannot race the last pre-cleanup acceptance check.
                     try:
                         operations.check_guards(deadline.check)
                         if failure is None and socket_fixture is not None:
-                            receipt["fixture_operations"] = {"socket": socket_fixture.operation_summary(),
-                                "fake": fake_operation_summary(read_bounded(fake_path, 65536), complete=True)}
+                            receipt["fixture_operations"]["fake"] = fake_operation_summary(
+                                read_bounded(fake_path, 65536), complete=True)
                     except Exception as error:
                         if failure is None:
                             failure = safe_failure_code(error)
@@ -2476,6 +2742,13 @@ def runtime(args):
                 if failure:
                     receipt["failure"] = failure if failure in SAFE_FAILURES else "fixture_refused"
                 receipt["source_hashes"] = initial_sources
+                # Carry late faults into serialization under the SAME end,
+                # without reacquiring an unavailable initial observation. A
+                # refresh interruption may keep valid partial failure evidence,
+                # but must revoke PASS before validation or staging.
+                if not cleanup_socket_observation(receipt, socket_fixture, cleanup, deadline):
+                    failure = failure or "cleanup_uncertain"
+                require_socket_cleanup_evidence(receipt, socket_fixture)
                 encoded = (json.dumps(receipt, separators=(",", ":")) + "\n").encode()
                 try:
                     qualified = receipt_policy(encoded, source, initial_sources, receipt["producer"])
@@ -2532,9 +2805,18 @@ class SocketOwner:
         return (self.fixture.listener is None or self.fixture.listener.fileno() == -1) and all(not thread.is_alive()
             for thread in [self.fixture.thread, *self.fixture.workers])
 
+    def publication_summary(self):
+        counters = self.fixture.counters
+        with counters.lock:
+            return {"publication_exceptions": dict(counters.publication_exceptions),
+                    "stream_exceptions": dict(counters.stream_exceptions),
+                    "listener_exceptions": dict(counters.listener_exceptions),
+                    "handler_exceptions": dict(counters.handler_exceptions),
+                    "pair_guard": socket_pair_guard(dict(counters.counts)), "saturated": counters.saturated}
+
 
 def offline_check(group):
-    """Finite assertions against the same policies used above; no runtime import."""
+    """Finite offline assertions; helper import only after the finalizer's AST inspection."""
     require(group in OFFLINE, "offline_group")
     cases = []
 
@@ -2558,6 +2840,10 @@ def offline_check(group):
              "reader_enrolled", "reader_read", "reader_mutation_denied", "credentials_preserved",
              "app_worker_verified", "notification_delivery_disabled", "launch_arguments_verified")}}
     encode = lambda value: json.dumps(value).encode()
+    if group in {"phase-caps", "cleanup"}:
+        spec = importlib.util.spec_from_file_location("extracted_package_fixture", Path(__file__).resolve().parents[1] / FILES[2])
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
     if group == "parser":
         sources = {path: "1" * 64 for path in FILES}
         producer_id = {"sha": BASE, "run": 1, "artifact": 1, "zip_sha256": "2" * 64, "fresh": True}
@@ -2611,6 +2897,13 @@ def offline_check(group):
                            for method, count in (("ping", 1), ("pane.read", 2))]},
             "captured_output_bytes": 100, "dependency_payload_bytes_peak": 1000,
         }
+        socket_rows = valid_receipt["fixture_operations"]["socket"]
+        socket_rows.extend({"method": method, "outcome": "refused_expected", "count": 1} for method in sorted(SOCKET_PROBES))
+        socket_rows.sort(key=lambda row: (row["method"], row["outcome"]))
+        valid_receipt["socket_diagnostics"] = {"schema": 1, "rows": socket_rows,
+            "reasons": {"ordinary": 3, "inert_probe": 3},
+            **{key: {} for key in SOCKET_EXCEPTION_BUCKETS}, "saturated": False,
+            "liveness_before_cleanup": "serving", "closed_after_cleanup": "closed", "guard": "allowed"}
         def receipt_reject(path, replacement, failed=False):
             value = strict_json(encode(valid_receipt), "receipt")
             if failed:
@@ -2737,6 +3030,76 @@ def offline_check(group):
             require(failure_detail(custom_error)["type"] == "Unknown", "offline_safe_exception")
             return safe_failure_receipts()
 
+        def socket_pass_refusals():
+            for pair in sorted(SOCKET_PAIRS):
+                if socket_operations_allowed({pair: 1}):
+                    continue
+                value = strict_json(encode(valid_receipt), "receipt")
+                rows = [{"method": pair[0], "outcome": pair[1], "count": 1}]
+                value["fixture_operations"]["socket"] = rows
+                value["socket_diagnostics"].update(rows=rows, reasons={"unsupported_method": 1}, guard="unexpected_pair")
+                require(rejects(lambda: receipt_policy(encode(value), BASE, sources, producer_id)), "offline_refused_pair_pass")
+            for bucket in SOCKET_EXCEPTION_BUCKETS:
+                for category in SOCKET_EXCEPTION_CATEGORIES:
+                    require(receipt_reject(("socket_diagnostics", bucket), {category: 1}), "offline_exception_pass")
+            require(receipt_reject(("socket_diagnostics", "saturated"), True), "offline_saturation_pass")
+            for guard in SOCKET_GUARDS - {"allowed"}:
+                require(receipt_reject(("socket_diagnostics", "guard"), guard), "offline_socket_guard_pass")
+            for liveness in ("stopped", "early_death", "not_started"):
+                require(receipt_reject(("socket_diagnostics", "liveness_before_cleanup"), liveness), "offline_listener_pass")
+            for closed in ("open", "not_observed"):
+                require(receipt_reject(("socket_diagnostics", "closed_after_cleanup"), closed), "offline_socket_closure_pass")
+            require(receipt_reject(("socket_diagnostics", "rows"), []), "offline_socket_row_agreement")
+            return True
+
+        def socket_privacy():
+            diagnostics = valid_receipt["socket_diagnostics"]
+            invalid = [(("unknown",), 1), (("publication_exceptions_unknown",), {"internal": 1}),
+                (("schema",), True), (("schema",), 2), (("saturated",), 1),
+                (("rows",), diagnostics["rows"] * 6), (("rows",), list(reversed(diagnostics["rows"]))),
+                (("rows",), [diagnostics["rows"][0]] * 2), (("rows", 0, "unknown"), 1),
+                (("rows", 0, "method"), "unsafe.mutation"), (("rows", 0, "outcome"), "other"),
+                (("reasons",), {"ordinary": 1}), (("reasons",), {"unknown": 6}),
+                (("liveness_before_cleanup",), "alive"), (("closed_after_cleanup",), "unknown"), (("guard",), "unknown")]
+            for bucket in SOCKET_EXCEPTION_BUCKETS:
+                invalid.append(((bucket,), {"unknown": 1}))
+            for bad in (True, 0, 65536, -1, 1.0, "1"):
+                invalid.append((("rows", 0, "count"), bad))
+                invalid.append((("reasons",), {"ordinary": bad}))
+                invalid.extend(((bucket,), {"internal": bad}) for bucket in SOCKET_EXCEPTION_BUCKETS)
+            for bad in ("/private/tmp/credential", "../private/credential", "inert-opaque-token-123456789"):
+                for field in ("schema", "rows", "reasons", *SOCKET_EXCEPTION_BUCKETS, "saturated",
+                              "liveness_before_cleanup", "closed_after_cleanup", "guard"):
+                    invalid.append(((field,), bad))
+                for field in ("method", "outcome", "count"):
+                    invalid.append((("rows", 0, field), bad))
+                invalid.append((("reasons",), {bad: 1}))
+                invalid.extend(((bucket,), {bad: 1}) for bucket in SOCKET_EXCEPTION_BUCKETS)
+            for path, replacement in invalid:
+                value = strict_json(encode(valid_receipt), "receipt")
+                value.update(result="fail", failure="unexpected_exception")
+                selected = value["socket_diagnostics"]
+                for part in path[:-1]:
+                    selected = selected[part]
+                selected[path[-1]] = replacement
+                try:
+                    receipt_policy(encode(value), BASE, sources, producer_id)
+                except Refusal as error:
+                    require(str(error) in {"receipt_schema", "receipt_sensitive"}, "offline_socket_no_echo")
+                    require(not any(marker in str(error) for marker in ("/private", "credential", "inert-opaque-token")),
+                            "offline_publication_private_fields_no_echo")
+                else:
+                    return False
+            for pair in (("ping", "refused_expected"), ("other", "succeeded"), ("tab.move", "succeeded")):
+                require(receipt_reject(("socket_diagnostics", "rows"), [
+                    {"method": pair[0], "outcome": pair[1], "count": 1}], failed=True), "offline_impossible_row")
+            for result in ("pass", "fail"):
+                missing = {key: value for key, value in valid_receipt.items() if key != "socket_diagnostics"}
+                if result == "fail":
+                    missing.update(result="fail", failure="unexpected_exception")
+                require(rejects(lambda: receipt_policy(encode(missing), BASE, sources, producer_id)), "offline_missing_socket_diagnostics")
+            return True
+
         def publication_cases():
             # Same writer and publication function as runtime/workflow, with
             # memory-only files and clocks. No filesystem allocation or timer.
@@ -2776,6 +3139,20 @@ def offline_check(group):
                         "offline_publication_validated")
                 require(len(output.data) <= LIMITS["receipt"], "offline_publication_bound")
                 return qualified, observed, output.data
+            def preserve_socket_failure(diagnostics):
+                failed = {**valid_receipt, "result": "fail", "failure": "owned_operation_allowlist",
+                    "failure_guard": "herdr_socket", "socket_diagnostics": diagnostics,
+                    "fixture_operations": {**valid_receipt["fixture_operations"], "socket": diagnostics["rows"]}}
+                data = (json.dumps(failed, separators=(",", ":")) + "\n").encode()
+                before = encode(diagnostics)
+                require(socket_diagnostics_policy(diagnostics)
+                        and receipt_policy(data, BASE, sources, producer_id) is False,
+                        "offline_saturation_failure_valid")
+                for status in (0, 17):
+                    staged = ReceiptFile(data)
+                    qualified, observed, uploaded = publish(staged, status)
+                    require(not qualified and observed == failed and uploaded == staged.data == data
+                            and encode(diagnostics) == before, "offline_saturation_failure_bytes_preserved")
             # The original failure: all PASS bytes were written before the
             # post-write deadline check refused. They remain PRIVATE and are
             # never uploaded/published as PASS after the failed command exits.
@@ -2797,6 +3174,151 @@ def offline_check(group):
             qualified, observed, _ = publish(staged, 17)
             require(not qualified and observed["result"] == "fail" and observed["failure_detail"]["exit_code"] == 17
                     and "cases" not in observed and staged.data == encode(valid_receipt), "offline_failed_exit_stale_pass")
+            require(observed["socket_diagnostics"] == valid_receipt["socket_diagnostics"], "offline_failed_exit_socket_snapshot")
+            # Synthetic aggregate boundaries, not observed historical traffic.
+            # Ordinary rows and bounded inert probes split EVERY bucket below
+            # COUNT_MAX while the handled-connection total reaches/exceeds it.
+            for total in (COUNT_MAX - 1, COUNT_MAX, COUNT_MAX + 1):
+                rows = [{"method": "pane.read", "outcome": "succeeded", "count": total - 4},
+                        {"method": "ping", "outcome": "succeeded", "count": 1}]
+                rows.extend({"method": method, "outcome": "refused_expected", "count": 1}
+                            for method in sorted(SOCKET_PROBES))
+                rows.sort(key=lambda row: (row["method"], row["outcome"]))
+                reasons = {"ordinary": total - 3, "inert_probe": 3}
+                require(sum(row["count"] for row in rows) == sum(reasons.values()) == total
+                        and all(0 < count < COUNT_MAX for count in (
+                            *[row["count"] for row in rows], *reasons.values()))
+                        and socket_operations_allowed(socket_row_counts(rows)), "offline_aggregate_subcap_buckets")
+                for saturated in (False, True):
+                    aggregate = strict_json(encode(valid_receipt), "receipt")
+                    aggregate["fixture_operations"]["socket"] = rows
+                    diagnostics = aggregate["socket_diagnostics"]
+                    diagnostics.update(rows=rows, reasons=reasons, saturated=saturated,
+                                       guard="counter_saturated" if saturated else "allowed")
+                    before = encode(diagnostics)
+                    valid_snapshot = saturated or total < COUNT_MAX
+                    if valid_snapshot:
+                        require(socket_diagnostics_policy(diagnostics), "offline_aggregate_diagnostic_valid")
+                    else:
+                        require(rejects(lambda: socket_diagnostics_policy(diagnostics)),
+                                "offline_aggregate_unsaturated_diagnostic_refused")
+                    # Also try a forged allowed guard with matching fixture
+                    # rows and a successful runner exit: none excuses saturation.
+                    for guard in (("counter_saturated", "allowed") if saturated else ("allowed",)):
+                        claimed = {**aggregate, "socket_diagnostics": {**diagnostics, "guard": guard}}
+                        passing = not saturated and total < COUNT_MAX
+                        if passing:
+                            require(socket_diagnostics_policy(claimed["socket_diagnostics"], passing=True,
+                                        operation_rows=rows)
+                                    and receipt_policy(encode(claimed), BASE, sources, producer_id),
+                                    "offline_aggregate_below_boundary_pass")
+                        else:
+                            require(rejects(lambda: socket_diagnostics_policy(claimed["socket_diagnostics"],
+                                        passing=True, operation_rows=rows))
+                                    and rejects(lambda: receipt_policy(encode(claimed), BASE, sources, producer_id)),
+                                    "offline_aggregate_direct_and_uploaded_pass_refused")
+                        staged = ReceiptFile(encode(claimed))
+                        qualified, observed, _ = publish(staged, 0)
+                        require(qualified is passing and observed["result"] == ("pass" if passing else "fail")
+                                and staged.data == encode(claimed), "offline_aggregate_publication_exit_zero")
+                        require(observed == claimed if passing else observed["failure"] == "receipt_validation",
+                                "offline_aggregate_publication_fail_closed")
+                    # A truthful saturated failure below the terminal boundary
+                    # can come from an independently clipped exception bucket.
+                    failed_diagnostics = diagnostics
+                    if total < COUNT_MAX:
+                        failed_diagnostics = {**diagnostics,
+                            "publication_exceptions": {"os_error": COUNT_MAX if saturated else 1},
+                            "guard": "counter_saturated" if saturated else "recorded_exception"}
+                    if valid_snapshot:
+                        preserve_socket_failure(failed_diagnostics)
+                    else:
+                        failed = {**aggregate, "result": "fail", "failure": "owned_operation_allowlist",
+                            "failure_guard": "herdr_socket", "socket_diagnostics": failed_diagnostics}
+                        require(rejects(lambda: receipt_policy(encode(failed), BASE, sources, producer_id)),
+                                "offline_aggregate_impossible_failure_refused")
+                        for status in (0, 17):
+                            staged = ReceiptFile(encode(failed))
+                            qualified, observed, _ = publish(staged, status)
+                            require(not qualified and observed["result"] == "fail"
+                                    and "socket_diagnostics" not in observed and staged.data == encode(failed),
+                                    "offline_aggregate_impossible_failure_not_forwarded")
+                    require(encode(diagnostics) == before, "offline_aggregate_observations_unchanged")
+            # Unsaturated row/reason and handler/reason disagreement still
+            # refuses FAIL evidence, independently of the aggregate boundary.
+            for changes in ({"reasons": {"ordinary": 2, "inert_probe": 3}},
+                            {"handler_exceptions": {"timeout": 1}, "guard": "recorded_exception"}):
+                diagnostics = {**strict_json(encode(valid_receipt["socket_diagnostics"])), **changes}
+                failed = {**valid_receipt, "result": "fail", "failure": "owned_operation_allowlist",
+                    "failure_guard": "herdr_socket", "socket_diagnostics": diagnostics}
+                require(rejects(lambda: socket_diagnostics_policy(diagnostics))
+                        and rejects(lambda: receipt_policy(encode(failed), BASE, sources, producer_id)),
+                        "offline_unsaturated_counter_disagreement_refused")
+                qualified, observed, _ = publish(ReceiptFile(encode(failed)), 0)
+                require(not qualified and observed["failure"] == "receipt_validation"
+                        and "socket_diagnostics" not in observed, "offline_counter_disagreement_not_forwarded")
+            # Matching handler failures remain genuine unsaturated evidence.
+            diagnostics = strict_json(encode(valid_receipt["socket_diagnostics"]))
+            diagnostics.update(rows=[{"method": "other", "outcome": "failed", "count": 1}],
+                reasons={"recv_failed": 1}, handler_exceptions={"timeout": 1}, guard="recorded_exception")
+            preserve_socket_failure(diagnostics)
+            # Acquisition-consistent separate bucket clipping: terminal rows
+            # and reasons (or handler categories and reasons) can disagree.
+            diagnostics = strict_json(encode(valid_receipt["socket_diagnostics"]))
+            diagnostics.update(rows=[{"method": "pane.read", "outcome": "succeeded", "count": COUNT_MAX},
+                                     {"method": "ping", "outcome": "succeeded", "count": 1}],
+                reasons={"ordinary": COUNT_MAX}, saturated=True, guard="counter_saturated")
+            require(sum(row["count"] for row in diagnostics["rows"]) != sum(diagnostics["reasons"].values()),
+                    "offline_clipped_terminal_totals_disagree")
+            preserve_socket_failure(diagnostics)
+            diagnostics = strict_json(encode(valid_receipt["socket_diagnostics"]))
+            diagnostics.update(rows=[{"method": "other", "outcome": "failed", "count": COUNT_MAX}],
+                reasons={"recv_failed": COUNT_MAX}, handler_exceptions={"timeout": COUNT_MAX, "os_error": 1},
+                saturated=True, guard="counter_saturated")
+            require(sum(diagnostics["handler_exceptions"].values()) != sum(diagnostics["reasons"].values()),
+                    "offline_clipped_exception_totals_disagree")
+            preserve_socket_failure(diagnostics)
+            # Exception buckets can saturate with only a few terminal rows;
+            # the saturation flag must not be equated with the row total.
+            diagnostics = strict_json(encode(valid_receipt["socket_diagnostics"]))
+            diagnostics.update(publication_exceptions={"os_error": COUNT_MAX},
+                               saturated=True, guard="counter_saturated")
+            preserve_socket_failure(diagnostics)
+            for category in SOCKET_EXCEPTION_CATEGORIES:
+                fault = strict_json(encode(valid_receipt), "receipt")
+                fault["socket_diagnostics"]["publication_exceptions"] = {category: 1}
+                # A claimed allowed guard, successful exit, or later complete
+                # write cannot turn the sticky callback fault into PASS.
+                require(rejects(lambda: receipt_policy(encode(fault), BASE, sources, producer_id))
+                        and socket_diagnostic_guard(fault["socket_diagnostics"]) == "recorded_exception",
+                        "offline_publication_fault_direct_pass_refused")
+                for _ in range(2):
+                    fault_staged = ReceiptFile()
+                    write_receipt(fault_staged, encode(fault), CleanupDeadline(clock=clock))
+                    qualified, observed, data = publish(fault_staged, 0)
+                    require(not qualified and observed["result"] == "fail" and observed["failure"] == "receipt_validation"
+                            and strict_json(fault_staged.data, "receipt")["socket_diagnostics"]["publication_exceptions"] == {category: 1}
+                            and b"/private" not in data and b"inert-token" not in data,
+                            "offline_later_write_callback_fault_not_pass")
+                late_fault = strict_json(encode(valid_receipt), "receipt")
+                before = strict_json(encode(late_fault["socket_diagnostics"]), "receipt")
+                late_owner = SimpleNamespace(closed=lambda: True, publication_summary=lambda: {
+                    "publication_exceptions": {category: 1}, "saturated": False})
+                finish_socket_diagnostics(late_fault["socket_diagnostics"], late_owner)
+                require(late_fault["socket_diagnostics"] == {**before, "publication_exceptions": {category: 1},
+                        "guard": "recorded_exception"}
+                        and rejects(lambda: receipt_policy(encode(late_fault), BASE, sources, producer_id)),
+                        "offline_late_receipt_refresh_refuses_direct_pass")
+                qualified, observed, _ = publish(ReceiptFile(encode(late_fault)), 0)
+                require(not qualified and observed["result"] == "fail" and observed["failure"] == "receipt_validation",
+                        "offline_late_receipt_refresh_refuses_uploaded_pass")
+                fault["socket_diagnostics"]["guard"] = "recorded_exception"
+                fault.update(result="fail", failure="owned_operation_allowlist", failure_guard="herdr_socket")
+                require(receipt_policy(encode(fault), BASE, sources, producer_id) is False,
+                        "offline_publication_fault_valid_failure")
+                for status in (0, 1):
+                    qualified, observed, _ = publish(ReceiptFile(encode(fault)), status)
+                    require(not qualified and observed == fault, "offline_publication_fault_failure_preserved")
             failed = {**valid_receipt, "result": "fail", "failure": "owned_operation_allowlist", "failure_guard": "proxy"}
             qualified, observed, _ = publish(ReceiptFile(encode(failed)), 1)
             require(not qualified and observed == failed, "offline_sanitized_failure_preserved")
@@ -2872,6 +3394,7 @@ def offline_check(group):
         operations = {
             "valid_result": lambda: browser_result(encode(valid), "enroll", 0)["ok"]
                 and receipt_policy(encode(valid_receipt), BASE, sources, producer_id)
+                and valid_receipt["socket_diagnostics"]["publication_exceptions"] == {}
                 and request_receipts()
                 and receipt_policy(encode({**valid_receipt, "result": "fail", "failure": "cap_raw",
                     "captured_output_bytes": LIMITS["raw"] + 16384}), BASE, sources, producer_id) is False,
@@ -2890,13 +3413,13 @@ def offline_check(group):
                 and receipt_reject(("phases", 3, "exit_code"), 1)
                 and receipt_reject(("phases", 3, "seconds"), 630)
                 and receipt_reject(("cases", 2, "exit_code"), 1)
-                and publication_cases(),
+                and publication_cases() and socket_pass_refusals(),
             "invalid_producer": lambda: rejects(lambda: producer(BASE, 1, 1, "0" * 64, False, BASE, 1)),
             "invalid_budget_or_paths": lambda: rejects(lambda: paths_admission(Path("relative"), Path("receipt"), Path("/tmp"), 1260)),
             "sensitive_receipt_fields": lambda: rejects(lambda: browser_result(encode({**valid, "secret": "x"}), "enroll", 0))
                 and receipt_reject(("tools", "secret"), "offline_marker")
                 and receipt_reject(("tools", "curl"), "https://invalid/#setup=offline_marker")
-                and sensitive_failures(),
+                and sensitive_failures() and socket_privacy(),
         }
     elif group == "archive":
         valid_entries = [Entry(".", "directory", 0), Entry("web", "directory", 0),
@@ -3043,13 +3566,121 @@ def offline_check(group):
                 budget.enter(i)
                 now[0] += 1
                 budget.check()
-            return budget.remaining() > 0
+            require(budget.remaining() > 0, "offline_within_limits")
+            scenario = helper.socket_scenario_view({"panes": [{"pane_id": "fixture:pane"}],
+                "tabs": [{"tab_id": "fixture-tab"}], "workspaces": [{"workspace_id": "fixture-workspace"}],
+                "content": {"fixture:pane": "Harmless fixture output"}})
+            # Literal pre-change result shapes and insertion order, not a second
+            # call to the new result implementation used as its own oracle.
+            expected = {
+                "ping": {"type": "pong", "version": "0.9.0", "protocol": 1,
+                    "capabilities": {"endpoint_protocol_generation": 1}},
+                "agent.list": {"type": "agent_list", "agents": scenario["panes"]},
+                "pane.list": {"type": "pane_list", "panes": scenario["panes"]},
+                "workspace.list": {"type": "workspace_list", "workspaces": scenario["workspaces"]},
+                "tab.list": {"type": "tab_list", "tabs": scenario["tabs"]},
+                "session.snapshot": {"type": "session_snapshot", "snapshot": {"version": "0.9.0", "protocol": 1,
+                    "workspaces": scenario["workspaces"], "tabs": scenario["tabs"], "panes": scenario["panes"], "agents": scenario["panes"]}},
+                "events.subscribe": {"type": "subscription_started"},
+                "pane.read": {"type": "pane_read", "read": {"text": "Harmless fixture output", "truncated": False}}}
+            compact = lambda value: json.dumps(value, separators=(",", ":")).encode()
+            counters = helper.SocketCounters()
+            for method, result in expected.items():
+                request = {"id": "mobile-relay-api-1", "method": method, "params": {"pane_id": "fixture:pane"}}
+                response, label, outcome, reason = helper.dispatch_socket_request(compact(request), scenario)
+                require(compact(response) == compact({"id": request["id"], "result": result})
+                        and (label, outcome, reason) == (method, "succeeded", "ordinary"), "offline_ordinary_bytes")
+                require(compact(helper.HerdrSocketFixture._result(SimpleNamespace(scenario_view=scenario), method, request))
+                        == compact(result), "offline_result_delegation")
+                counters.record(label, outcome, reason)
+            request = {"id": "package-fixture-readiness", "method": "pane.read", "params": {"pane_id": "nonempty-unknown"}}
+            response, label, outcome, reason = helper.dispatch_socket_request(compact(request), scenario)
+            require(compact(response) == compact({"id": request["id"], "result": {"type": "pane_read",
+                "read": {"text": "Harmless package fixture output", "truncated": False}}})
+                and (label, outcome, reason) == ("pane.read", "succeeded", "ordinary"), "offline_nonempty_pane_bytes")
+            rows = counters.operation_summary()
+            require(rows == [{"method": method, "outcome": "succeeded", "count": 1} for method in sorted(SOCKET_ORDINARY)]
+                    and all(set(row) == {"method", "outcome", "count"} for row in rows), "offline_linux_rows")
+            return True
         def immutable():
             try:
                 LIMITS["stdin"] = 999999
             except TypeError:
-                return LIMITS["stdin"] == 65536 and PHASES == (90, 300, 210, 630, 30)
-            return False
+                require(LIMITS["stdin"] == 65536 and PHASES == (90, 300, 210, 630, 30), "offline_limits_immutable")
+            else:
+                return False
+            expected = (
+                ("workspace.move_block", (("workspace_ids", "empty_list"),), "workspace_move_block_failed", "empty selection"),
+                ("tab.move", (("insert_index", "int:0"), ("tab_id", "empty_str")), "tab_not_found", "empty tab"),
+                ("pane.read", (("format", "str:ansi"), ("lines", "int:1"), ("pane_id", "empty_str"),
+                    ("source", "str:visible"), ("strip_ansi", "false")), "pane_not_found", "empty pane"))
+            require(type(helper.INERT_PROBES) is tuple and len(helper.INERT_PROBES) == 3
+                    and helper.INERT_PROBES == expected and helper.InertProbe._fields == ("method", "params", "code", "message")
+                    and helper.PROBE_MATCHERS == {"empty_list", "empty_str", "int:0", "int:1", "false", "str:ansi", "str:visible"}
+                    and helper.PROBE_CAP == PROBE_CAP == 64 and helper.COUNT_MAX == COUNT_MAX == 65535
+                    and helper.SOCKET_PAIRS == SOCKET_PAIRS and len(SOCKET_PAIRS) == 26
+                    and helper.SOCKET_REASONS == SOCKET_REASONS and len(SOCKET_REASONS) == 14
+                    and helper.SOCKET_EXCEPTION_CATEGORIES == SOCKET_EXCEPTION_CATEGORIES, "offline_probe_contract")
+            require(helper.SOCKET_EXCEPTION_BUCKETS == SOCKET_EXCEPTION_BUCKETS == (
+                    "handler_exceptions", "stream_exceptions", "listener_exceptions", "publication_exceptions")
+                    and SOCKET_EXCEPTION_CATEGORIES == {"timeout", "connection_reset", "broken_pipe", "os_error", "internal"},
+                    "offline_publication_closed_contract")
+            for error_type, category in ((TimeoutError, "timeout"), (ConnectionResetError, "connection_reset"),
+                    (BrokenPipeError, "broken_pipe"), (OSError, "os_error"), (RuntimeError, "internal")):
+                counters = helper.SocketCounters()
+                error = error_type("/private/inert-token-never-recorded")
+                for _ in range(COUNT_MAX + 2):
+                    counters.record_exception("publication_exceptions", error)
+                state = SimpleNamespace(counters=counters, thread=SimpleNamespace(ident=1, is_alive=lambda: True),
+                    stopped=SimpleNamespace(is_set=lambda: False))
+                diagnostics = helper.socket_diagnostic_snapshot(state)
+                diagnostics.update(closed_after_cleanup="closed", guard=socket_diagnostic_guard(diagnostics))
+                require(counters.publication_exceptions == {category: COUNT_MAX} and counters.saturated is True
+                        and counters.counts == counters.reasons == {} and counters.handled_connections == 0
+                        and diagnostics["guard"] == "counter_saturated"
+                        and socket_diagnostics_policy(diagnostics)
+                        and rejects(lambda: socket_diagnostics_policy(diagnostics, passing=True, operation_rows=[])),
+                        "offline_publication_acquisition_saturation")
+                require(b"/private" not in encode(diagnostics) and b"inert-token" not in encode(diagnostics),
+                        "offline_saturated_publication_privacy")
+            for bucket in ("unknown", "handler_exceptions", "publication_exceptions_unknown"):
+                try:
+                    helper.SocketCounters().record_exception(bucket, RuntimeError("inert invalid bucket"))
+                except ValueError:
+                    pass
+                else:
+                    return False
+            values = {"empty_list": [], "empty_str": "", "int:0": 0, "int:1": 1,
+                      "false": False, "str:ansi": "ansi", "str:visible": "visible"}
+            scenario = helper.socket_scenario_view({})
+            for probe in helper.INERT_PROBES:
+                require(type(probe) is helper.InertProbe and type(probe.params) is tuple
+                        and all(type(pair) is tuple and len(pair) == 2 and pair[1] in helper.PROBE_MATCHERS for pair in probe.params),
+                        "offline_nested_probe_tuple")
+                attempts = (lambda: setattr(probe, "method", "unsafe"), lambda: setattr(probe, "params", ()),
+                    lambda: probe.params[0].__setitem__(0, "unsafe"), lambda: helper.INERT_PROBES.__setitem__(0, probe))
+                for attempt in attempts:
+                    try:
+                        attempt()
+                    except (AttributeError, TypeError):
+                        pass
+                    else:
+                        return False
+                request = encode({"id": "mobile-relay-api-1", "method": probe.method,
+                                  "params": {key: values[tag] for key, tag in probe.params}})
+                first = helper.dispatch_socket_request(request, scenario)[0]
+                first["id"], first["error"]["code"] = "changed", "changed"
+                second = helper.dispatch_socket_request(request, scenario)[0]
+                require(second == {"id": "mobile-relay-api-1", "error": {"code": probe.code, "message": probe.message}}
+                        and second is not first and second["error"] is not first["error"], "offline_fresh_probe_response")
+            for bad in ([], {"panes": {}}, {"tabs": None}, {"workspaces": "invalid"}, {"content": {"pane": 1}}, {"content": {1: "text"}}):
+                try:
+                    helper.socket_scenario_view(bad)
+                except ValueError:
+                    pass
+                else:
+                    return False
+            return True
         def real_guards():
             class ClosedRecordingGate(EffectGate):
                 def __init__(self):
@@ -3065,6 +3696,47 @@ def offline_check(group):
                 "event_forced": False, "event_created": False, "event_deleted": False,
                 "checked_out_sha": "c" * 40, "candidate_parents": [LAUNCHCTL_PINNED_PARENT]}
             require(admission_policy(valid_admission), "offline_admission_positive")
+            # UNEXECUTED: exercise the production predicate with the accepted
+            # Go generator's resource/suffix pairs, not a permissive proxy stub.
+            entry = "/builds/1.2.3-1-" + "a" * 16 + "/index.html"
+            javascript = "/assets/app-" + "b" * 64 + ".js"
+            stylesheet = "/assets/app-" + "c" * 64 + ".css"
+            verifier_paths = {"/release.json", "/version.json", entry, javascript, stylesheet}
+            cache_bust = "herdr_deploy_check=" + BASE + "-1791800000000000000-0"
+            verifier_requests = [("/release.json", ""), (entry, "-entry"), (entry, "-br-entry"),
+                (javascript, "-javascript"), (javascript, "-br-javascript"),
+                (stylesheet, "-stylesheet"), (stylesheet, "-br-stylesheet"),
+                ("/version.json", "-version"), ("/version.json", "-version-br")]
+            for path, suffix in verifier_requests:
+                require(public_request_allowed(path + "?" + cache_bust + suffix, "127.0.0.1:18443", "",
+                                               verifier_paths, 18443), "offline_verifier_query_positive")
+            for nonce, attempt in (("0", "0"), (str(-(2**63)), str(2**63 - 1)), (str(2**63 - 1), "1")):
+                require(public_request_allowed("/release.json?herdr_deploy_check=" + BASE + "-" + nonce + "-" + attempt,
+                        "127.0.0.1:18443", "", verifier_paths, 18443), "offline_verifier_integer_bounds")
+            for query in (cache_bust + "&" + cache_bust, cache_bust + "&v=1", "v=1&" + cache_bust,
+                          cache_bust + "-other", cache_bust + "-entry", cache_bust + "&arbitrary=1",
+                          cache_bust.replace("=", "=%61", 1), cache_bust.replace("-0", "-00"),
+                          "herdr_deploy_check=" + BASE + "-0--1", "herdr_deploy_check=" + BASE.upper() + "-0-0",
+                          "herdr_deploy_check=" + BASE + "-" + str(2**63) + "-0",
+                          "herdr_deploy_check=" + BASE + "-" + str(-(2**63) - 1) + "-0",
+                          "herdr_deploy_check=" + BASE + "-0-" + str(2**63), cache_bust + "0" * 129,
+                          cache_bust + "\n", cache_bust + "%26v=1", cache_bust.replace("check", "%63heck")):
+                require(not public_request_allowed("/release.json?" + query, "127.0.0.1:18443", "",
+                            verifier_paths, 18443), "offline_verifier_query_refusal")
+            raw = "/release.json?" + cache_bust
+            for request, host, upgrade, paths, port in ((raw, "foreign.invalid", "", verifier_paths, 18443),
+                    (raw, "127.0.0.1:18444", "", verifier_paths, 18443),
+                    (raw, "127.0.0.1:443", "", verifier_paths, 443),
+                    (raw, "127.0.0.1:18443", "websocket", verifier_paths, 18443),
+                    (raw, "127.0.0.1:18443", "", set(), 18443),
+                    (raw + "#fragment", "127.0.0.1:18443", "", verifier_paths, 18443),
+                    ("https://127.0.0.1:18443" + raw, "127.0.0.1:18443", "", verifier_paths, 18443),
+                    ("/healthz?" + cache_bust, "127.0.0.1:18443", "", {"/healthz"}, 18443),
+                    (javascript + "?" + cache_bust + "-stylesheet", "127.0.0.1:18443", "", verifier_paths, 18443)):
+                require(not public_request_allowed(request, host, upgrade, paths, port), "offline_verifier_authority_refusal")
+            require(public_request_allowed("/healthz?v=legacy._-1", "127.0.0.1:18443", "", {"/healthz"}, 18443)
+                    and not public_request_allowed("/healthz?v=" + "a" * 129, "127.0.0.1:18443", "", {"/healthz"}, 18443),
+                    "offline_existing_version_query")
             require(socket_operations_allowed({("ping", "succeeded"): 1})
                     and proxy_operations_allowed([SimpleNamespace(failure=False)])
                     and child_environment_allowed({"HOME": "/owned/home"})
@@ -3150,9 +3822,37 @@ def offline_check(group):
                     "offline_launchctl_first_push_positive")
             # Bind the workflow's explicit packet to the same exact frozen values.
             workflow = read_bounded(Path(__file__).resolve().parents[1] / FILES[0], 65536).decode()
-            workflow_packet = re.search(r"--launchctl-query-grant '([^']+)'", workflow)
-            require(workflow_packet is not None and strict_json(workflow_packet[1].encode()) == packet,
+            workflow_packets = re.findall(r"--launchctl-query-grant '([^']+)'", workflow)
+            require(len(workflow_packets) == 1 and workflow.count("--launchctl-query-grant") == 1
+                    and strict_json(workflow_packets[0].encode()) == packet,
                     "offline_workflow_grant_binding")
+            # The literal actually projected by the YAML itself (not only the
+            # reconstructed packet) passes the production parser and admission
+            # predicate with the valid synthetic first-push context.
+            require(launchctl_packet_allowed(workflow_packets[0])
+                    and launchctl_authorized(workflow_packets[0], context),
+                    "offline_workflow_grant_accepted")
+            # The complete spent e59e8022 packet, including its original scope.when,
+            # is refused, as is stale-parent event/candidate-parent context.
+            spent_parent = "e59e8022daaefed14317d760f17f904ad6cd55eb"
+            spent_packet = encode({"grantId": "q2-parent-launchctl-print-first-push-e59e8022-20261008",
+                "authorized": True, "pinnedParent": spent_parent,
+                "scope": {**LAUNCHCTL_SCOPE, "when": "attempt 1 of the first fast-forward push from " + spent_parent}}).decode()
+            spent_event = {**event, "before": spent_parent}
+            spent_identity = {**identity, "candidate_parents": [spent_parent]}
+            before = (len(reads), len(queries))
+            require(LAUNCHCTL_GRANT_ID != "q2-parent-launchctl-print-first-push-e59e8022-20261008"
+                    and LAUNCHCTL_PINNED_PARENT != spent_parent
+                    and not launchctl_packet_allowed(spent_packet)
+                    and not launchctl_authorized(spent_packet, context)
+                    and rejects(lambda: observe(data=encode(spent_event)))
+                    and rejects(lambda: observe(commit=spent_identity))
+                    and not admission_policy({**context, "event_before": spent_parent})
+                    and not admission_policy({**context, "candidate_parents": [spent_parent]})
+                    and not launchctl_authorized(workflow_packets[0], {**context, "event_before": spent_parent})
+                    and not launchctl_authorized(workflow_packets[0], {**context, "candidate_parents": [spent_parent]})
+                    and (len(reads), len(queries)) == (before[0] + 2, before[1] + 1),
+                    "offline_spent_e59_grant_refused")
             for bad_base in ({**base, "attempt": "2"}, *({**base, "event_name": name}
                     for name in ("workflow_dispatch", "pull_request", "schedule")),
                     {**base, "candidate_sha": "0" * 40}, {**base, "candidate_sha": "C" * 40},
@@ -3233,6 +3933,22 @@ def offline_check(group):
                     and rejects(lambda: mock.capture_launcher(["must-not-execute"], guard, cwd=None, link_origin=ORIGIN))
                     and rejects(lambda: gate.effect("launchctl"))
                     and len(launches) == gate.launchctl_queries == 2, "offline_launchctl_two_queries_only")
+            return True
+
+        def candidate_scope_cases():
+            # Production predicate on injected lists only: no git, process or file I/O.
+            gate = "scripts/qualify-darwin-package-browser.py"
+            require(FILES == tuple(CANDIDATE_PATHS[:4]) and len(FILES) == 4 and gate not in FILES
+                    and CANDIDATE_PATHS == (*FILES, gate) and QUALIFY_GATE == gate, "offline_candidate_paths_constants")
+            exact = list(CANDIDATE_PATHS)
+            require(candidate_scope_allowed(exact) and candidate_scope_allowed(list(reversed(exact))),
+                    "offline_candidate_scope_exact")
+            invalid = [[], list(FILES), exact[:-1], exact + ["README.md"], exact + [exact[0]],
+                [*FILES, FILES[0]], [*exact[:-1], exact[0]], exact + [gate], ["unrelated.txt", *exact[1:]],
+                tuple(exact), set(exact), None, "".join(exact), [*exact[:-1], 1], [*exact[:-1], None]]
+            invalid.extend(exact[:index] + exact[index + 1:] for index in range(len(exact)))
+            invalid.extend([*exact[:index], *exact[index + 1:], "extra.txt"] for index in range(len(exact)))
+            require(all(not candidate_scope_allowed(item) for item in invalid), "offline_candidate_scope_refusals")
             return True
 
         def launch_argument_cases():
@@ -3593,12 +4309,385 @@ def offline_check(group):
                         and option(signing, "-out") == str(root / (name + ".pem")), "offline_leaf_binding")
             adapter.returncode = 1
             return rejects(lambda: certificates(root, adapter))
+        def socket_contract_cases():
+            scenario = helper.socket_scenario_view({})
+            def state(counters, alive=True, started=True, stopped=False):
+                return SimpleNamespace(counters=counters, thread=SimpleNamespace(ident=1 if started else None,
+                    is_alive=lambda: alive), stopped=SimpleNamespace(is_set=lambda: stopped))
+            class ObservedLock:
+                def __init__(self, lock):
+                    self.lock, self.depth = lock, 0
+                def __enter__(self):
+                    self.lock.__enter__()
+                    self.depth += 1
+                    return self
+                def __exit__(self, *args):
+                    self.depth -= 1
+                    return self.lock.__exit__(*args)
+            def exercise(raw, recv_error=None, send_error=None, stream_error=None, view=scenario, publication_error=None):
+                counters, sent, timeouts = helper.SocketCounters(), [], []
+                counters.lock = ObservedLock(counters.lock)
+                source = io.BytesIO(raw)
+                responded, flow, callbacks = [False], [], []
+                def recv(maximum):
+                    flow.append("recv")
+                    if recv_error is not None:
+                        raise recv_error("/private/inert-token-never-recorded")
+                    if responded[0] and stream_error is not None:
+                        raise stream_error("/private/inert-token-never-recorded")
+                    return source.read(maximum)
+                def send(data):
+                    flow.append("send")
+                    sent.append(data)
+                    if send_error is not None:
+                        raise send_error("/private/inert-token-never-recorded")
+                    responded[0] = True
+                def timeout(value):
+                    flow.append("hold" if value is None else "timeout")
+                    timeouts.append(value)
+                def terminal():
+                    callbacks.append((counters.lock.depth, counters.handled_connections,
+                        sum(counters.counts.values()), sum(counters.reasons.values()), list(flow)))
+                    flow.append("callback")
+                    if publication_error is not None:
+                        raise publication_error("/private/inert-token-never-recorded")
+                helper.handle_socket_connection(recv, send, view, counters, set_timeout=timeout, on_terminal=terminal)
+                require(len(callbacks) == flow.count("callback") == 1 and callbacks[0][:4] == (0, 1, 1, 1)
+                        and (not sent or callbacks[0][4][-1] == "send") and counters.lock.depth == 0,
+                        "offline_callback_once_after_terminal_outside_lock")
+                if timeouts[-1] is None:
+                    require(flow[flow.index("callback") + 1:] == ["hold", "recv"], "offline_callback_before_stream_hold")
+                if publication_error is None:
+                    require(counters.publication_exceptions == {}, "offline_successful_callback_empty_bucket")
+                diagnostics = helper.socket_diagnostic_snapshot(state(counters))
+                diagnostics.update(closed_after_cleanup="not_observed", guard=socket_diagnostic_guard(diagnostics))
+                require(socket_diagnostics_policy(diagnostics) and counters.handled_connections == 1
+                        and sum(row["count"] for row in diagnostics["rows"]) == sum(diagnostics["reasons"].values()) == 1,
+                        "offline_one_terminal_row")
+                require(b"/private" not in encode(diagnostics) and b"inert-token" not in encode(diagnostics), "offline_socket_counter_privacy")
+                return counters, sent, timeouts, diagnostics
+            def request(method, params, rid="mobile-relay-api-1"):
+                return encode({"id": rid, "method": method, "params": params})
+            # Inert replay of the packaged relay's own socket traffic (capabilities.go
+            # refresh: ping + three capability probes; client.go/events.go reads and
+            # subscription). HEAD recorded the two move probes as ("other", "failed"),
+            # which its allowlist refused; the current fixture answers them with the
+            # recognized validation refusals and counts them as refused_expected.
+            relay_traffic = [
+                ("ping", {}, "mobile-relay-api-1", None), ("workspace.move_block", {"workspace_ids": []},
+                    "mobile-relay-api-2", "workspace_move_block_failed"),
+                ("tab.move", {"tab_id": "", "insert_index": 0}, "mobile-relay-api-3", "tab_not_found"),
+                ("pane.read", {"pane_id": "", "source": "visible", "lines": 1, "format": "ansi", "strip_ansi": False},
+                    "mobile-relay-api-4", "pane_not_found"),
+                ("agent.list", {}, "mobile-relay-api-5", None), ("pane.list", {}, "mobile-relay-api-6", None),
+                ("workspace.list", {}, "mobile-relay-api-7", None), ("tab.list", {}, "mobile-relay-api-8", None),
+                ("pane.read", {"pane_id": "workspace:agent", "source": "visible", "lines": 20, "format": "text",
+                    "strip_ansi": True}, "mobile-relay-api-9", None),
+                ("session.snapshot", {}, "mobile-relay-snapshot", None),
+                ("events.subscribe", {"subscriptions": []}, "mobile-relay-events", None)]
+            relay_counts = {}
+            for method, params, rid, code in relay_traffic:
+                response, label, outcome, _reason = helper.dispatch_socket_request(request(method, params, rid), scenario)
+                require(response["id"] == rid and label == method and ("error" in response) == (code is not None)
+                        and (code is None or response["error"]["code"] == code), "offline_relay_traffic_response")
+                relay_counts[(label, outcome)] = relay_counts.get((label, outcome), 0) + 1
+            require(socket_operations_allowed(relay_counts)
+                    and relay_counts[("pane.read", "refused_expected")] == relay_counts[("pane.read", "succeeded")] == 1
+                    and relay_counts[("workspace.move_block", "refused_expected")] == 1
+                    and relay_counts[("tab.move", "refused_expected")] == 1
+                    and not socket_operations_allowed({("other", "failed"): 2, ("ping", "succeeded"): 1}),
+                    "offline_relay_traffic_allowed")
+            values = {"empty_list": [], "empty_str": "", "int:0": 0, "int:1": 1,
+                      "false": False, "str:ansi": "ansi", "str:visible": "visible"}
+            for probe in helper.INERT_PROBES:
+                params = {key: values[tag] for key, tag in probe.params}
+                response, label, outcome, reason = helper.dispatch_socket_request(request(probe.method, params), scenario)
+                require(response == {"id": "mobile-relay-api-1", "error": {"code": probe.code, "message": probe.message}}
+                        and (label, outcome, reason) == (probe.method, "refused_expected", "inert_probe"), "offline_exact_probe")
+                counters, sent, _, _ = exercise(request(probe.method, params) + b"\n")
+                require(counters.counts == {(probe.method, "refused_expected"): 1}
+                        and json.loads(sent[0]) == response, "offline_probe_sent_before_record")
+                shape_reason = "invalid_params" if probe.method == "pane.read" else "probe_shape"
+                require(helper.dispatch_socket_request(encode({"id": "mobile-relay-api-1", "method": probe.method}), scenario)[1:]
+                        == (probe.method, "rejected", shape_reason), "offline_missing_probe_params")
+                negatives = [(bad, shape_reason) for bad in (None, [], "wrong", False, 0, 0.0)]
+                negatives.append(({**params, "extra": 1}, "probe_shape"))
+                for key in params:
+                    missing = {name: value for name, value in params.items() if name != key}
+                    negatives.append((missing, "invalid_params" if probe.method == "pane.read" and key == "pane_id" else "probe_shape"))
+                    replacements = {
+                        "workspace_ids": [["nonempty"], None, {}, "", False, 0],
+                        "tab_id": ["nonempty", None, [], False, 0],
+                        "insert_index": [True, False, 0.0, "0", 1, None, []],
+                        "pane_id": [None, True, 0, 0.0, []],
+                        "lines": [True, False, 1.0, "1", 0, 2, None],
+                        "format": ["text", None, [], True], "source": ["recent", None, [], True],
+                        "strip_ansi": [True, 0, "false", None, []]}
+                    for bad in replacements[key]:
+                        negatives.append(({**params, key: bad}, "invalid_params" if key == "pane_id" else "probe_shape"))
+                for negative, expected_reason in negatives:
+                    response, label, outcome, reason = helper.dispatch_socket_request(request(probe.method, negative), scenario)
+                    require((label, outcome, reason) == (probe.method, "rejected", expected_reason)
+                            and response["id"] == "mobile-relay-api-1" and response["error"]["code"] == "fixture_refused",
+                            "offline_probe_negative")
+            for method in ("pane.send_input", "pane.send_keys", "workspace.move", "agent.stop", "unknown"):
+                response, label, outcome, reason = helper.dispatch_socket_request(request(method, {}), scenario)
+                require((label, outcome, reason) == ("other", "rejected", "unsupported_method")
+                        and response["error"]["code"] == "unknown_method" and response["id"] == "mobile-relay-api-1",
+                        "offline_no_mutation_authority")
+            predispatch = [(b"{", "malformed_request"), (b"\xff", "malformed_request"),
+                (b'{"id":"x","id":"y","method":"ping"}', "malformed_request"),
+                (b'{"id":"x","method":"ping","params":{"duplicate":1,"duplicate":2}}', "malformed_request"),
+                (b"[]", "non_object_request"), (b"null", "non_object_request"), (b"1", "non_object_request"),
+                (encode({"id": "do-not-echo", "method": "ping", "extra": 1}), "invalid_envelope"),
+                (encode({"method": "ping"}), "invalid_envelope"), (encode({"id": "do-not-echo"}), "invalid_envelope"),
+                (encode({"id": "do-not-echo", "method": False}), "invalid_envelope")]
+            predispatch.extend((b'{"id":"x","method":"ping","params":' + constant + b'}', "malformed_request")
+                               for constant in (b"NaN", b"Infinity", b"-Infinity"))
+            predispatch.extend((request("ping", {}, rid), "invalid_request_id")
+                               for rid in (False, 1, None, [], {}, "", "x" * 129, "/private/path", "x\n"))
+            for raw, expected_reason in predispatch:
+                response, label, outcome, reason = helper.dispatch_socket_request(raw, scenario)
+                require((label, outcome, reason) == ("other", "rejected", expected_reason)
+                        and response == {"id": "", "error": {"code": "invalid_request", "message": "invalid request: fixture refused"}},
+                        "offline_predispatch_no_echo")
+                counters, sent, _, _ = exercise(raw + b"\n")
+                require(counters.reasons == {expected_reason: 1} and json.loads(sent[0])["id"] == "", "offline_predispatch_handled")
+            for rid in ("package-fixture-readiness", "mobile-relay-api-123", "fixture:pane", "x" * 128):
+                require(helper.dispatch_socket_request(request("ping", {}, rid), scenario)[0]["id"] == rid, "offline_compatible_ids")
+            for raw in (b"", request("ping", {})):
+                counters, sent, _, _ = exercise(raw)
+                require(counters.counts == {("other", "rejected"): 1} and counters.reasons == {"incomplete_request": 1}
+                        and not sent, "offline_clean_incomplete")
+            require(helper.dispatch_socket_request(b"x" * helper.SOCKET_REQUEST_MAX, scenario)[3] == "oversize_request", "offline_dispatch_size")
+            for raw in (b"x" * helper.SOCKET_REQUEST_MAX, b"x" * helper.SOCKET_REQUEST_MAX + b"\n"):
+                counters, sent, _, _ = exercise(raw)
+                require(counters.reasons == {"oversize_request": 1} and json.loads(sent[0])["id"] == "", "offline_oversize_handled")
+            raw = request("ping", {})
+            counters, _, _, _ = exercise(raw + b" " * (helper.SOCKET_REQUEST_MAX - 1 - len(raw)) + b"\n")
+            require(counters.counts == {("ping", "succeeded"): 1}, "offline_read_bound_positive")
+            errors = ((TimeoutError, "timeout"), (ConnectionResetError, "connection_reset"),
+                      (BrokenPipeError, "broken_pipe"), (OSError, "os_error"), (RuntimeError, "internal"))
+            for error, category in errors:
+                counters, sent, timeouts, diagnostics = exercise(request("ping", {}) + b"\n", publication_error=error)
+                require(counters.counts == {("ping", "succeeded"): 1} and counters.reasons == {"ordinary": 1}
+                        and counters.publication_exceptions == {category: 1}
+                        and counters.handler_exceptions == counters.stream_exceptions == counters.listener_exceptions == {}
+                        and json.loads(sent[0])["result"]["type"] == "pong" and timeouts == [5.0]
+                        and diagnostics["guard"] == "recorded_exception", "offline_callback_fault_not_transport_failure")
+                fixture_state = state(counters)
+                fixture_state.diagnostic_summary = lambda: helper.socket_diagnostic_snapshot(fixture_state)
+                captured = capture_socket_diagnostics({}, fixture_state)
+                require(captured["publication_exceptions"] == {category: 1}
+                        and captured["liveness_before_cleanup"] == "serving"
+                        and captured["closed_after_cleanup"] == "not_observed"
+                        and not socket_fixture_allowed(fixture_state, {}), "offline_callback_fault_before_cleanup_capture")
+                later_source, later_sent, later_callbacks = io.BytesIO(request("ping", {}) + b"\n"), [], []
+                helper.handle_socket_connection(later_source.read, later_sent.append, scenario, counters,
+                    on_terminal=lambda: later_callbacks.append((counters.lock.depth, counters.handled_connections,
+                        dict(counters.publication_exceptions))))
+                later = helper.socket_diagnostic_snapshot(state(counters))
+                later.update(closed_after_cleanup="closed", guard=socket_diagnostic_guard(later))
+                require(later_callbacks == [(0, 2, {category: 1})] and len(later_sent) == 1
+                        and counters.counts == {("ping", "succeeded"): 2} and counters.reasons == {"ordinary": 2}
+                        and counters.handled_connections == 2 and later["publication_exceptions"] == {category: 1}
+                        and diagnostics["publication_exceptions"] == {category: 1}
+                        and later["guard"] == "recorded_exception" and socket_diagnostics_policy(later)
+                        and rejects(lambda: socket_diagnostics_policy(later, passing=True, operation_rows=later["rows"])),
+                        "offline_later_callback_success_keeps_fault")
+                counters, _, timeouts, diagnostics = exercise(request("events.subscribe", {}) + b"\n", publication_error=error)
+                require(counters.counts == {("events.subscribe", "succeeded"): 1} and counters.reasons == {"ordinary": 1}
+                        and counters.publication_exceptions == {category: 1} and counters.stream_exceptions == {}
+                        and timeouts == [5.0, None] and diagnostics["guard"] == "recorded_exception",
+                        "offline_callback_fault_keeps_stream_eof_hold")
+                counters, _, timeouts, _ = exercise(request("events.subscribe", {}) + b"\n",
+                    publication_error=error, stream_error=ConnectionResetError)
+                require(counters.publication_exceptions == {category: 1} and counters.stream_exceptions == {"connection_reset": 1}
+                        and counters.handler_exceptions == {} and counters.reasons == {"ordinary": 1}
+                        and counters.handled_connections == 1 and timeouts == [5.0, None],
+                        "offline_callback_and_stream_faults_separate")
+            counters, _, _, _ = exercise(request("ping", {}) + b"\n", send_error=BrokenPipeError, publication_error=OSError)
+            require(counters.counts == {("ping", "failed"): 1} and counters.reasons == {"send_failed": 1}
+                    and counters.handler_exceptions == {"broken_pipe": 1} and counters.publication_exceptions == {"os_error": 1}
+                    and counters.handled_connections == 1, "offline_send_and_callback_faults_separate")
+            # Exercise the actual Linux publisher ordering with an in-memory
+            # writer, not a fixture, socket, filesystem operation or fault.
+            counters, source, writes, sequence = helper.SocketCounters(), io.BytesIO(request("ping", {}) + b"\n"), [], []
+            counters.lock = ObservedLock(counters.lock)
+            publisher = SimpleNamespace(operations_lock=ObservedLock(threading.RLock()), operations_path=object(),
+                operation_summary=counters.operation_summary)
+            original_writer = helper.write_json
+            def memory_write(path, rows):
+                sequence.append("write")
+                writes.append((path, rows, counters.lock.depth, publisher.operations_lock.depth))
+            def memory_send(_data):
+                sequence.append("send")
+                require(counters.handled_connections == 0, "offline_publisher_send_before_record")
+            helper.write_json = memory_write
+            try:
+                helper.handle_socket_connection(source.read, memory_send, scenario, counters,
+                    on_terminal=lambda: helper.HerdrSocketFixture._publish_operations(publisher))
+            finally:
+                helper.write_json = original_writer
+            require(sequence == ["send", "write"] and writes == [(publisher.operations_path,
+                    [{"method": "ping", "outcome": "succeeded", "count": 1}], 0, 1)]
+                    and counters.publication_exceptions == {} and counters.reasons == {"ordinary": 1}
+                    and counters.handled_connections == 1 and counters.lock.depth == publisher.operations_lock.depth == 0,
+                    "offline_publisher_io_outside_counter_lock")
+            for error, category in errors:
+                counters, sent, _, diagnostics = exercise(b"", recv_error=error)
+                require(not sent and counters.counts == {("other", "failed"): 1}
+                        and counters.reasons == {"recv_failed": 1} and counters.handler_exceptions == {category: 1}
+                        and diagnostics["guard"] == "recorded_exception", "offline_recv_failure")
+                send_requests = [(request("ping", {}), "ping"), (b"{", "other"),
+                    (request("unknown", {}), "other"), (request("tab.move", {"tab_id": "", "insert_index": 0}), "tab.move"),
+                    (request("tab.move", {"tab_id": "nonempty", "insert_index": 0}), "tab.move")]
+                for raw, label in send_requests:
+                    counters, sent, _, diagnostics = exercise(raw + b"\n", send_error=error)
+                    require(len(sent) == 1 and counters.counts == {(label, "failed"): 1}
+                            and counters.reasons == {"send_failed": 1} and counters.handler_exceptions == {category: 1}
+                            and diagnostics["guard"] == "recorded_exception", "offline_failed_send_not_success_or_rejection")
+                counters, _, timeouts, diagnostics = exercise(request("events.subscribe", {}) + b"\n", stream_error=error)
+                require(counters.counts == {("events.subscribe", "succeeded"): 1} and counters.reasons == {"ordinary": 1}
+                        and counters.handler_exceptions == {} and counters.stream_exceptions == {category: 1}
+                        and timeouts == [5.0, None] and diagnostics["guard"] == "recorded_exception", "offline_stream_exception_separate")
+                counters = helper.SocketCounters()
+                fixture_state = state(counters, alive=False)
+                class FailedListenerDispatch:
+                    def __enter__(self):
+                        raise error("/private/inert-token")
+                    def __exit__(self, *_args):
+                        return False
+                # An accept polling timeout continues normally. Exercise loop
+                # death after accept, before a handler is reached, for all five
+                # categories (including timeout) without inventing a row.
+                fixture_state.listener = SimpleNamespace(accept=lambda: (None, None))
+                fixture_state.lock = FailedListenerDispatch()
+                helper.HerdrSocketFixture._serve(fixture_state)  # Duck state only; no fixture or socket allocation.
+                diagnostics = helper.socket_diagnostic_snapshot(fixture_state)
+                require(counters.counts == counters.reasons == {} and counters.handled_connections == 0
+                        and counters.listener_exceptions == {category: 1} and diagnostics["liveness_before_cleanup"] == "early_death"
+                        and socket_diagnostic_guard(diagnostics) == "recorded_exception", "offline_listener_death_no_row")
+            # Every ordinary and probe reply also produces a truthful failed
+            # row if sending it fails; the successful/refused row is not kept.
+            send_cases = [(method, {"pane_id": "nonempty"}) for method in SOCKET_ORDINARY]
+            send_cases.extend((probe.method, {key: values[tag] for key, tag in probe.params}) for probe in helper.INERT_PROBES)
+            for method, params in send_cases:
+                counters, _, _, _ = exercise(request(method, params) + b"\n", send_error=BrokenPipeError)
+                require(counters.counts == {(method, "failed"): 1} and counters.reasons == {"send_failed": 1},
+                        "offline_all_reply_send_failures")
+            counters = helper.SocketCounters()
+            idle_state, stopping = state(counters), [False]
+            idle_state.stopped = SimpleNamespace(is_set=lambda: stopping[0])
+            def idle_timeout():
+                stopping[0] = True
+                raise TimeoutError("inert accept poll")
+            idle_state.listener = SimpleNamespace(accept=idle_timeout)
+            helper.HerdrSocketFixture._serve(idle_state)
+            require(counters.counts == counters.reasons == counters.listener_exceptions == {}, "offline_accept_poll_not_death")
+            # Retirement flips during accept: only an owner-closed descriptor
+            # (EBADF) is benign; EIO on a live listener stays a recorded fault.
+            for retiring_error, expected_bucket in ((OSError(errno.EBADF, "inert closed listener"), {}),
+                    (OSError(errno.EIO, "/private/inert-token"), {"os_error": 1}),
+                    (ConnectionResetError("/private/inert-token"), {"connection_reset": 1})):
+                counters = helper.SocketCounters()
+                race_state, flag = state(counters), [False]
+                race_state.stopped = SimpleNamespace(is_set=lambda: flag[0])
+                def accept_after_retirement(error=retiring_error):
+                    flag[0] = True  # SocketOwner.close sets stopped before closing the listener.
+                    raise error
+                race_state.listener = SimpleNamespace(accept=accept_after_retirement)
+                helper.HerdrSocketFixture._serve(race_state)
+                require(counters.listener_exceptions == expected_bucket and counters.counts == counters.reasons == {}
+                        and b"inert-token" not in encode(counters.listener_exceptions), "offline_listener_retirement_errno_scope")
+            counters = helper.SocketCounters()
+            for alive, started, stopped, expected in ((True, True, False, "serving"), (False, True, False, "early_death"),
+                    (False, False, False, "not_started"), (False, True, True, "stopped")):
+                require(helper.socket_diagnostic_snapshot(state(counters, alive, started, stopped))["liveness_before_cleanup"] == expected,
+                        "offline_liveness_enum")
+            counters, _, timeouts, diagnostics = exercise(request("events.subscribe", {}) + b"\n")
+            require(counters.stream_exceptions == {} and counters.handler_exceptions == {}
+                    and counters.counts == {("events.subscribe", "succeeded"): 1} and timeouts == [5.0, None]
+                    and diagnostics["guard"] == "allowed", "offline_stream_eof_normal")
+            counters, sent, _, diagnostics = exercise(request("agent.list", {}) + b"\n", view={})
+            require(not sent and counters.counts == {("other", "failed"): 1}
+                    and counters.reasons == {"internal_error": 1} and counters.handler_exceptions == {"internal": 1}
+                    and diagnostics["guard"] == "recorded_exception", "offline_internal_dispatch_failure")
+            # All 44 matrix cells: 26 producible and 18 impossible, never just a
+            # positive sample. Only successful reads and bounded refusals admit.
+            methods = SOCKET_ORDINARY | SOCKET_PROBES | {"other"}
+            for method in methods:
+                for outcome in ("succeeded", "refused_expected", "rejected", "failed"):
+                    pair = (method, outcome)
+                    admit = (method in SOCKET_ORDINARY and outcome == "succeeded") or (method in SOCKET_PROBES and outcome == "refused_expected")
+                    require(socket_operations_allowed({pair: 1}) is admit, "offline_full_pair_matrix")
+                    rows = [{"method": method, "outcome": outcome, "count": 1}]
+                    if pair in SOCKET_PAIRS:
+                        require(socket_row_counts(rows) == {pair: 1}, "offline_producible_pair")
+                    else:
+                        require(rejects(lambda: socket_row_counts(rows)), "offline_impossible_pair")
+            for method in SOCKET_PROBES:
+                require(socket_operations_allowed({(method, "refused_expected"): 64})
+                        and socket_pair_guard({(method, "refused_expected"): 65}) == "probe_cap_exceeded", "offline_probe_cap_boundary")
+            for count in (True, 0, 65536, 1.0, "1"):
+                require(not socket_operations_allowed({("ping", "succeeded"): count}), "offline_guard_typed_count")
+            counters = helper.SocketCounters()
+            for _ in range(COUNT_MAX + 2):
+                counters.record("ping", "succeeded", "ordinary")
+            diagnostics = helper.socket_diagnostic_snapshot(state(counters))
+            require(counters.counts == {("ping", "succeeded"): COUNT_MAX} and counters.reasons == {"ordinary": COUNT_MAX}
+                    and counters.handled_connections == COUNT_MAX and counters.saturated is True
+                    and socket_diagnostic_guard(diagnostics) == "counter_saturated", "offline_acquisition_saturation")
+            counters = helper.SocketCounters()
+            error = TimeoutError("/private/inert-token")
+            for _ in range(COUNT_MAX + 2):
+                counters.record("other", "failed", "recv_failed", error)
+            require(counters.counts == {("other", "failed"): COUNT_MAX} and counters.reasons == {"recv_failed": COUNT_MAX}
+                    and counters.handler_exceptions == {"timeout": COUNT_MAX} and counters.saturated is True,
+                    "offline_handler_acquisition_saturation")
+            for bucket in ("stream_exceptions", "listener_exceptions"):
+                counters = helper.SocketCounters()
+                for _ in range(COUNT_MAX + 2):
+                    counters.record_exception(bucket, RuntimeError("/private/inert-token"))
+                require(getattr(counters, bucket) == {"internal": COUNT_MAX} and counters.saturated is True,
+                        "offline_exception_acquisition_saturation")
+            return True
+
+        def packaged_go_tls_control_cases():
+            # Exercise the production command boundary with an inert capture,
+            # not the binary, a subprocess, a clock sleep or a TLS connection.
+            root, binary = Path("/must-not-be-accessed"), Path("/must-not-execute")
+            calls = []
+            response = SimpleNamespace(returncode=1, stdout=b"", stderr=b"inert certificate refusal")
+            def capture(argv, timeout):
+                calls.append((argv, timeout))
+                return response
+            mock = SimpleNamespace(capture=capture)
+            for category, port, timeout in (("positive", 18443, 10), ("unknown_ca", 18444, 130),
+                                             ("wrong_host", 18445, 130)):
+                origin = f"https://127.0.0.1:{port}"
+                result = packaged_go_tls_control(root, mock, binary, "fixture-version", "fixture-revision", origin, category)
+                require(result is response and calls[-1] == ([str(binary), "verify-public", "--origin", origin,
+                        "--web-root", str(root / "release/web"), "--version", "fixture-version",
+                        "--revision", "fixture-revision"], timeout), "offline_packaged_tls_command_deadline")
+            require(rejects(lambda: packaged_go_tls_control(root, mock, binary, "v", "r", ORIGIN, "other"))
+                    and len(calls) == 3 and PHASES == (90, 300, 210, 630, 30)
+                    and LIMITS["total_seconds"] == 1260, "offline_packaged_tls_caps_unchanged")
+            def expired(*_args):
+                raise Refusal("command_deadline")
+            require(rejects(lambda: packaged_go_tls_control(root, SimpleNamespace(capture=expired), binary,
+                    "v", "r", ORIGIN, "unknown_ca")), "offline_packaged_tls_timeout_not_refusal")
+            return True
+
         def forbidden_effects():
             require(real_guards(), "offline_real_guards")
             require(launchctl_grant_cases(), "offline_launchctl_grants")
+            require(candidate_scope_cases(), "offline_candidate_scope")
             require(launch_argument_cases(), "offline_launch_argument_policy")
             require(proxy_transport_cases(), "offline_proxy_transport")
             require(certificate_configuration(), "offline_certificate_configuration")
+            require(packaged_go_tls_control_cases(), "offline_packaged_tls_control")
+            require(socket_contract_cases(), "offline_socket_contract")
             gate = EffectGate(False)
             mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(), gate)
             blocked = all(rejects(lambda name=name: gate.effect(name)) for name in EffectGate.KINDS)
@@ -3709,13 +4798,388 @@ def offline_check(group):
             now[0] = 30
             require(rejects(reserved.check), "offline_receipt_deadline_refusal")
             return True
-        operations = {"ordered_success": cleanup_case, "failure_cleanup": lambda: cleanup_case(handled=True),
+        def cleanup_entry_observation_cases():
+            # UNEXECUTED: injected clock/lock observations use the real extracted
+            # snapshot and runtime cleanup seam; no timers, threads, files or
+            # sockets. A lock may consume time, refuse, or be interrupted.
+            for consumed, interruption, latest in ((7, None, 140), (4, RuntimeError, 140),
+                    (29, Refusal, 140), (31, None, 140), (7, None, 106)):
+                now, acquisitions = [100.0], []
+                clock = lambda: now[0]
+                cleanup = Cleanup()
+                deadline = CleanupDeadline(clock=clock, started=now[0], latest=latest, reserve=1)
+                end = min(130, latest)
+                counters = helper.SocketCounters()
+                counters.record("ping", "succeeded", "ordinary")
+                class ObservationLock:
+                    def __enter__(self):
+                        acquisitions.append(True)
+                        now[0] += consumed
+                        if interruption is not None:
+                            raise interruption("cleanup_deadline" if interruption is Refusal else "inert observation")
+                    def __exit__(self, *_):
+                        pass
+                # operation_summary nests the RLock; keep the real counter
+                # renderer with its original inert lock, and inject only the
+                # outer snapshot's potentially blocking acquisition.
+                state = SimpleNamespace(counters=SimpleNamespace(lock=ObservationLock(),
+                    operation_summary=counters.operation_summary, reasons=counters.reasons, counts=counters.counts,
+                    **{key: getattr(counters, key) for key in SOCKET_EXCEPTION_BUCKETS}, saturated=False),
+                    thread=SimpleNamespace(ident=1, is_alive=lambda: True),
+                    stopped=SimpleNamespace(is_set=lambda: False), workers=[], listener=None)
+                state.diagnostic_summary = lambda: helper.socket_diagnostic_snapshot(state)
+                receipt = {"result": "pass", "cleanup": True,
+                    "fixture_operations": {"fake": [], "socket": counters.operation_summary()}}
+                obtained = cleanup_socket_observation(receipt, state, cleanup, deadline, initial=True)
+                require(deadline.end == end and acquisitions == [True], "offline_initial_observation_anchored")
+                if consumed == 7 and latest == 140:
+                    require(obtained and deadline.remaining(30) == 22, "offline_snapshot_consumes_cleanup_time")
+                    cleanup.close(deadline)
+                    require_socket_cleanup_evidence(receipt, state)
+                    # A late publication lock consumes the same remaining time.
+                    state.counters.lock = ObservationLock()
+                    require(cleanup_socket_observation(receipt, state, cleanup, deadline)
+                            and deadline.end == end and deadline.remaining(30) == 15,
+                            "offline_late_observation_same_end")
+                else:
+                    require(not obtained and receipt["result"] == "fail" and receipt["cleanup"] is False
+                            and receipt["failure"] == "cleanup_uncertain" and cleanup.evidence["uncertain"]
+                            and "socket_diagnostics" not in receipt
+                            and receipt["fixture_operations"]["socket"] == counters.operation_summary()
+                            and rejects(lambda: require_socket_cleanup_evidence(receipt, state)),
+                            "offline_unavailable_snapshot_no_invented_evidence")
+                    child = InertChild()
+                    cleanup.child(child)
+                    require(rejects(lambda: cleanup.close(deadline)), "offline_partial_cleanup_uncertain")
+                    require(child.events == (["INT", "wait3", "reap2"] if consumed == 4 else [])
+                            and cleanup.evidence["root_deleted"] is False, "offline_remaining_time_only_cleanup")
+                    require(not cleanup_socket_observation(receipt, state, cleanup, deadline)
+                            and acquisitions == [True], "offline_no_initial_observation_retry")
+            # Valid initial evidence + unavailable late publication observation
+            # is a coherent FAIL, with sticky diagnostics and cleanup uncertainty.
+            now = [0.0]
+            cleanup, counters = Cleanup(), helper.SocketCounters()
+            counters.record("ping", "succeeded", "ordinary")
+            state = SimpleNamespace(counters=counters, thread=SimpleNamespace(ident=1, is_alive=lambda: False),
+                stopped=SimpleNamespace(is_set=lambda: True), workers=[], listener=None)
+            state.diagnostic_summary = lambda: helper.socket_diagnostic_snapshot(state)
+            deadline = CleanupDeadline(clock=lambda: now[0], started=0, reserve=1)
+            sources = {path: "1" * 64 for path in FILES}
+            identity = {"sha": BASE, "run": 1, "artifact": 1, "zip_sha256": "2" * 64, "fresh": True}
+            receipt = {"schemaVersion": 1, "candidate_sha": BASE, "source_hashes": sources,
+                "producer": identity, "scope": "darwin_arm64_byo_only", "result": "pass", "cleanup": True,
+                "owned_cleanup": cleanup.evidence, "request_counts": [], "captured_output_bytes": 0,
+                "dependency_payload_bytes_peak": 0}
+            require(cleanup_socket_observation(receipt, state, cleanup, deadline, initial=True), "offline_partial_snapshot")
+            class UnavailableLock:
+                def __enter__(self):
+                    now[0] += 4
+                    raise Refusal("cleanup_deadline")
+                def __exit__(self, *_):
+                    pass
+            counters.lock = UnavailableLock()
+            require(not cleanup_socket_observation(receipt, state, cleanup, deadline)
+                    and receipt["result"] == "fail" and receipt["cleanup"] is False
+                    and deadline.end == 30 and deadline.remaining(30) == 25,
+                    "offline_partial_refresh_revokes_pass")
+            require_socket_cleanup_evidence(receipt, state)
+            require(receipt_policy(encode(receipt), BASE, sources, identity) is False, "offline_partial_failure_receipt")
+            class Staged:
+                def lstat(self):
+                    return SimpleNamespace(st_mode=stat.S_IFREG, st_nlink=1, st_size=len(encode(receipt)),
+                        st_dev=1, st_ino=2, st_mtime_ns=3)
+                def open(self, mode):
+                    require(mode == "rb", "offline_partial_staging_read")
+                    return io.BytesIO(encode(receipt))
+            class Published(io.BytesIO):
+                def open(self, mode):
+                    require(mode == "xb", "offline_partial_publication_write")
+                    return self
+                def close(self):
+                    pass
+            output = Published()
+            deadline.reserve = 0
+            require(not publish_receipt(Staged(), output, 1, BASE, 1, sources, identity, deadline)
+                    and strict_json(output.getvalue())["result"] == "fail" and deadline.end == 30,
+                    "offline_partial_publication_never_pass")
+            return True
+        def socket_snapshot_cleanup(early_death=False):
+            # Same capture/finish and owner close as runtime, entirely duck-typed
+            # memory state. No HerdrSocketFixture, socket, thread or file exists.
+            stopped, alive, descriptor, observations = [False], [not early_death], [3], []
+            counters = helper.SocketCounters()
+            if not early_death:
+                counters.record("other", "rejected", "unsupported_method")
+            class Stop:
+                def is_set(self):
+                    return stopped[0]
+                def set(self):
+                    stopped[0] = True
+            class Thread:
+                ident = 1
+                def is_alive(self):
+                    return alive[0]
+                def join(self, _timeout):
+                    alive[0] = False
+            class Listener:
+                def close(self):
+                    descriptor[0] = -1
+                def fileno(self):
+                    return descriptor[0]
+            fixture = SimpleNamespace(counters=counters, lock=counters.lock, thread=Thread(), stopped=Stop(),
+                listener=Listener(), workers=[], connections=set(), path=SimpleNamespace(unlink=lambda **_kwargs: None))
+            def snapshot():
+                observations.append(stopped[0])
+                return helper.socket_diagnostic_snapshot(fixture)
+            fixture.diagnostic_summary = snapshot
+            receipt = {}
+            diagnostics = capture_socket_diagnostics(receipt, fixture)
+            before = strict_json(encode(diagnostics), "receipt")
+            require(observations == [False] and diagnostics["closed_after_cleanup"] == "not_observed"
+                    and diagnostics["liveness_before_cleanup"] == ("early_death" if early_death else "serving")
+                    and diagnostics["guard"] == ("listener_not_alive" if early_death else "unexpected_pair"),
+                    "offline_before_cleanup_snapshot")
+            owner = SocketOwner(fixture)
+            if early_death:
+                require(rejects(lambda: owner.close(CleanupDeadline(clock=lambda: 0.0))), "offline_early_death_owner_refusal")
+            else:
+                owner.close(CleanupDeadline(clock=lambda: 0.0))
+            # A late terminal row changes live counters, never the already
+            # captured rows/reasons or their matching receipt socket rows.
+            counters.record("ping", "succeeded", "ordinary")
+            finish_socket_diagnostics(diagnostics, owner)
+            require(observations == [False] and stopped[0] and diagnostics == {**before, "closed_after_cleanup": "closed"}
+                    and diagnostics["rows"] == receipt["fixture_operations"]["socket"]
+                    and helper.socket_diagnostic_snapshot(fixture)["liveness_before_cleanup"] == "stopped"
+                    and helper.socket_diagnostic_snapshot(fixture)["rows"] != diagnostics["rows"],
+                    "offline_after_cleanup_consistency")
+            require(socket_diagnostics_policy(diagnostics)
+                    and rejects(lambda: socket_diagnostics_policy(diagnostics, passing=True, operation_rows=diagnostics["rows"])),
+                    "offline_failure_snapshot_not_pass")
+            finish_socket_diagnostics(diagnostics, SimpleNamespace(closed=lambda: False))
+            require(diagnostics["closed_after_cleanup"] == "open", "offline_open_after_cleanup")
+            finish_socket_diagnostics(diagnostics, SimpleNamespace(closed=lambda: (_ for _ in ()).throw(RuntimeError("inert private error"))))
+            require(diagnostics["closed_after_cleanup"] == "not_observed", "offline_closure_unobserved")
+            return True
+        def publication_cleanup_cases(closure_error=False):
+            # Model a recorded terminal response whose sole publication callback
+            # is still pending when the parent snapshots. Retirement acquires
+            # its fault; no real thread, socket, fixture or filesystem is used.
+            for saturate in (False, True):
+                stopped, alive, descriptor, events = [False], [True, True], [3], []
+                counters = helper.SocketCounters()
+                counters.record("ping", "succeeded", "ordinary")
+                class Stop:
+                    def is_set(self):
+                        return stopped[0]
+                    def set(self):
+                        stopped[0] = True
+                def failed_callback():
+                    events.append("callback")
+                    raise OSError("/private/inert-token-never-recorded")
+                class Thread:
+                    def __init__(self, index):
+                        self.index, self.ident = index, index + 1
+                    def is_alive(self):
+                        return alive[self.index]
+                    def join(self, _timeout):
+                        events.append("worker_join" if self.index else "listener_join")
+                        if self.index:
+                            if saturate:
+                                # Pure boundary state, followed by actual typed
+                                # acquisition at COUNT_MAX during retirement.
+                                with counters.lock:
+                                    counters.publication_exceptions["os_error"] = COUNT_MAX - 1
+                            try:
+                                failed_callback()
+                            except Exception as error:
+                                counters.record_exception("publication_exceptions", error)
+                            events.append("later_callback")  # A successful later callback cannot clear the bucket.
+                        alive[self.index] = False
+                        if self.index and closure_error:
+                            raise RuntimeError("/private/inert-token-never-recorded")
+                class Listener:
+                    def close(self):
+                        events.append("listener_close")
+                        descriptor[0] = -1
+                    def fileno(self):
+                        return descriptor[0]
+                def unlink(**_kwargs):
+                    events.append("unlink")
+                fixture = SimpleNamespace(counters=counters, lock=counters.lock, thread=Thread(0), stopped=Stop(),
+                    listener=Listener(), workers=[Thread(1)], connections=set(), path=SimpleNamespace(unlink=unlink))
+                fixture.diagnostic_summary = lambda: helper.socket_diagnostic_snapshot(fixture)
+                receipt = {}
+                diagnostics = capture_socket_diagnostics(receipt, fixture)
+                before = strict_json(encode(diagnostics), "receipt")
+                require(before["publication_exceptions"] == {} and before["saturated"] is False
+                        and before["liveness_before_cleanup"] == "serving" and before["guard"] == "allowed",
+                        "offline_publication_before_retirement")
+                cleanup, child, owner = Cleanup(), InertChild(), SocketOwner(fixture)
+                other_listener = InertListener()
+                cleanup.child(child)
+                cleanup.listener(other_listener)
+                cleanup.listener(owner)
+                operations = Operations(Path("/must-not-be-accessed"), {}, Budget(lambda: 0.0), cleanup, EffectGate(False))
+                operations.add_guard("herdr_socket", lambda: socket_fixture_allowed(fixture, receipt))
+                operations.check_guards()
+                try:
+                    cleanup.close(CleanupDeadline(clock=lambda: 0.0))
+                except CleanupFailure as error:
+                    require(closure_error and error.evidence is cleanup.evidence, "offline_publication_cleanup_failure")
+                else:
+                    require(not closure_error, "offline_publication_cleanup_error_not_suppressed")
+                finally:
+                    finish_socket_diagnostics(diagnostics, owner)
+                expected_count = COUNT_MAX if saturate else 1
+                expected_guard = "counter_saturated" if saturate else "recorded_exception"
+                expected_events = ["listener_close", "listener_join", "worker_join", "callback", "later_callback"]
+                if not closure_error:
+                    expected_events.append("unlink")
+                require(events == expected_events
+                        and child.events == ["INT", "wait3", "reap2"] and child.done() and owner.closed() and other_listener.closed()
+                        and cleanup.evidence["uncertain"] is closure_error
+                        and cleanup.evidence["closure_errors"] == (["listener_cleanup"] if closure_error else [])
+                        and cleanup.evidence["surviving_children"] == cleanup.evidence["surviving_listeners"] == 0,
+                        "offline_publication_fault_keeps_owned_cleanup")
+                require(diagnostics == {**before, "publication_exceptions": {"os_error": expected_count},
+                        "saturated": saturate, "closed_after_cleanup": "closed", "guard": expected_guard}
+                        and diagnostics["rows"] == receipt["fixture_operations"]["socket"]
+                        and counters.handled_connections == sum(counters.counts.values()) == sum(counters.reasons.values()) == 1
+                        and counters.handler_exceptions == counters.stream_exceptions == counters.listener_exceptions == {},
+                        "offline_retirement_fault_refresh_not_second_terminal")
+                require(socket_diagnostics_policy(diagnostics)
+                        and rejects(lambda: socket_diagnostics_policy(diagnostics, passing=True, operation_rows=diagnostics["rows"]))
+                        and not socket_fixture_allowed(fixture, receipt) and rejects(operations.check_guards)
+                        and operations.failure_guard == "herdr_socket", "offline_actual_late_callback_guard_refuses")
+                finish_socket_diagnostics(diagnostics, owner)  # Final serialization refresh is monotonic too.
+                require(diagnostics["publication_exceptions"] == {"os_error": expected_count}
+                        and diagnostics["guard"] == expected_guard and counters.handled_connections == 1,
+                        "offline_final_publication_refresh_sticky")
+                unobserved = SimpleNamespace(closed=lambda: (_ for _ in ()).throw(RuntimeError("/private/inert-token")),
+                    publication_summary=owner.publication_summary)
+                finish_socket_diagnostics(diagnostics, unobserved)
+                require(diagnostics["closed_after_cleanup"] == "not_observed"
+                        and diagnostics["publication_exceptions"] == {"os_error": expected_count}
+                        and diagnostics["saturated"] is saturate and diagnostics["liveness_before_cleanup"] == "serving"
+                        and b"/private" not in encode(diagnostics) and b"inert-token" not in encode(diagnostics),
+                        "offline_unobserved_closure_keeps_callback_fault")
+            return True
+        def late_socket_fault_cases():
+            # A held-stream/listener/handler fault or non-allowed row arriving
+            # after the before-cleanup snapshot is carried into the final guard
+            # reason; captured rows/reasons/liveness stay immutable. Inert state.
+            # Both a clean snapshot and one already refused (unexpected_pair):
+            # the final reason follows the live guard's priority, so a late
+            # handler/stream/listener exception still wins over a pair refusal.
+            for refused in (False, True):
+                for kind, late_guard in (("stream", "recorded_exception"), ("listener", "recorded_exception"),
+                        ("handler", "recorded_exception"), ("row", "unexpected_pair")):
+                    counters = helper.SocketCounters()
+                    counters.record("events.subscribe", "succeeded", "ordinary")
+                    if refused:
+                        counters.record("other", "rejected", "unsupported_method")
+                    fixture = SimpleNamespace(counters=counters, thread=SimpleNamespace(ident=1, is_alive=lambda: True),
+                        stopped=SimpleNamespace(is_set=lambda: False))
+                    diagnostics = helper.socket_diagnostic_snapshot(fixture)
+                    diagnostics.update(closed_after_cleanup="not_observed", guard=socket_diagnostic_guard(diagnostics))
+                    before = strict_json(encode(diagnostics), "receipt")
+                    require(before["guard"] == ("unexpected_pair" if refused else "allowed")
+                            and before["liveness_before_cleanup"] == "serving", "offline_late_fault_before_snapshot")
+                    if kind == "stream":
+                        counters.record_exception("stream_exceptions", ConnectionResetError("/private/inert-token"))
+                    elif kind == "listener":
+                        counters.record_exception("listener_exceptions", OSError("/private/inert-token"))
+                    elif kind == "handler":
+                        counters.record("other", "failed", "recv_failed", TimeoutError("/private/inert-token"))
+                    else:
+                        counters.record("other", "rejected", "incomplete_request")
+                    owner = SimpleNamespace(closed=lambda: True,
+                        publication_summary=SocketOwner(SimpleNamespace(counters=counters)).publication_summary)
+                    for _ in range(2):  # Final serialization refresh is monotonic too.
+                        finish_socket_diagnostics(diagnostics, owner)
+                        expected = {**before, "closed_after_cleanup": "closed", "guard": late_guard}
+                        if kind == "stream":
+                            expected["stream_exceptions"] = {"connection_reset": 1}
+                        elif kind == "listener":
+                            expected["listener_exceptions"] = {"os_error": 1}
+                        require(diagnostics == expected and socket_diagnostics_policy(diagnostics)
+                                and rejects(lambda: socket_diagnostics_policy(diagnostics, passing=True,
+                                    operation_rows=diagnostics["rows"]))
+                                and b"/private" not in encode(diagnostics) and b"inert-token" not in encode(diagnostics),
+                                "offline_late_socket_fault_guard_reason")
+            return True
+        def owner_close_stream_cases():
+            # Production seam, inert memory state: a successful subscription's
+            # publication callback is pending when the owner begins closing the
+            # connection; the held-stream receive then runs on the closed
+            # descriptor. That EBADF is the owner's own retirement, not a
+            # fault. Genuine live errors (even after the retirement flag) and
+            # non-OSError faults stay recorded.
+            scenario = helper.socket_scenario_view({})
+            raw = encode({"id": "mobile-relay-events", "method": "events.subscribe",
+                          "params": {"subscriptions": []}}) + b"\n"
+            def run(retiring_enabled, owner_closes, stream_error):
+                counters, source, closed, stopped = helper.SocketCounters(), io.BytesIO(raw), [False], [False]
+                def recv(maximum):
+                    if closed[0]:
+                        raise OSError(errno.EBADF, "inert closed descriptor")
+                    if source.tell() >= len(raw) and stream_error is not None:
+                        raise stream_error("/private/inert-token-never-recorded")
+                    return source.read(maximum)
+                def terminal():  # The owner's close happens while this callback is pending.
+                    if owner_closes:  # "flag": retirement signalled, descriptor still live (SocketOwner.close order).
+                        stopped[0], closed[0] = True, owner_closes == "close"
+                helper.handle_socket_connection(recv, lambda data: None, scenario, counters,
+                    set_timeout=lambda value: None, on_terminal=terminal,
+                    retiring=(lambda: stopped[0]) if retiring_enabled else None)
+                return counters
+            quiet = run(True, "close", None)
+            require(quiet.stream_exceptions == quiet.publication_exceptions == quiet.handler_exceptions
+                    == quiet.listener_exceptions == {} and quiet.counts == {("events.subscribe", "succeeded"): 1}
+                    and quiet.reasons == {"ordinary": 1} and quiet.handled_connections == 1,
+                    "offline_owner_close_not_stream_fault")
+            snapshot = helper.socket_diagnostic_snapshot(SimpleNamespace(counters=quiet,
+                thread=SimpleNamespace(ident=1, is_alive=lambda: True), stopped=SimpleNamespace(is_set=lambda: False)))
+            require(socket_diagnostic_guard(snapshot) == "allowed", "offline_owner_close_guard_allowed")
+            control = run(False, "close", None)  # Without the retirement signal the same race is a recorded fault.
+            require(control.stream_exceptions == {"os_error": 1}, "offline_owner_close_control_records")
+            live = run(True, False, ConnectionResetError)  # Genuine error while NOT retiring stays fail-closed.
+            require(live.stream_exceptions == {"connection_reset": 1}, "offline_live_stream_error_recorded")
+            # Retirement signalled but the descriptor is still live: a genuine reset
+            # (or any other OSError) is NOT owner-induced and must be recorded.
+            flagged = run(True, "flag", ConnectionResetError)
+            require(flagged.stream_exceptions == {"connection_reset": 1}, "offline_live_reset_after_retirement_recorded")
+            flagged_io = run(True, "flag", lambda text: OSError(errno.EIO, text))
+            require(flagged_io.stream_exceptions == {"os_error": 1}, "offline_live_oserror_after_retirement_recorded")
+            snapshot = helper.socket_diagnostic_snapshot(SimpleNamespace(counters=flagged,
+                thread=SimpleNamespace(ident=1, is_alive=lambda: True), stopped=SimpleNamespace(is_set=lambda: False)))
+            require(socket_diagnostic_guard(snapshot) == "recorded_exception", "offline_live_reset_guard_refuses")
+            def raises_non_os(retiring):
+                counters = helper.SocketCounters()
+                source = io.BytesIO(raw)
+                def recv(maximum):
+                    if source.tell() >= len(raw):
+                        raise ValueError("/private/inert-token-never-recorded")
+                    return source.read(maximum)
+                helper.handle_socket_connection(recv, lambda data: None, scenario, counters,
+                    set_timeout=lambda value: None, retiring=retiring)
+                return counters
+            require(sum(raises_non_os(lambda: True).stream_exceptions.values()) == 1,
+                    "offline_non_os_stream_error_while_retiring_recorded")
+            fixture_source = inspect.getsource(helper.HerdrSocketFixture._handle)
+            require("retiring=self.stopped.is_set" in fixture_source, "offline_fixture_wires_retirement_signal")
+            return True
+        operations = {"ordered_success": cleanup_case, "failure_cleanup": lambda: cleanup_case(handled=True) and socket_snapshot_cleanup()
+                and publication_cleanup_cases() and late_socket_fault_cases() and owner_close_stream_cases(),
             "handled_signal_cleanup": lambda: cleanup_case(handled=True),
-            "bounded_escalation_and_reap": lambda: cleanup_case(escalation=True) and aggregate_and_deletion_deadlines(),
+            "bounded_escalation_and_reap": lambda: cleanup_case(escalation=True) and aggregate_and_deletion_deadlines()
+                and cleanup_entry_observation_cases(),
             "unowned_ids_refused": lambda: rejects(lambda: Cleanup().stop(InertChild())),
             "surviving_children_fail": lambda: cleanup_case(survive=True),
             "surviving_listener_fail": lambda: cleanup_case(listener_survives=True),
-            "closure_error_fails": lambda: cleanup_case(error=True),
+            "closure_error_fails": lambda: cleanup_case(error=True) and socket_snapshot_cleanup(early_death=True)
+                and publication_cleanup_cases(closure_error=True),
             "symlink_root_refused": lambda: rejects(lambda: root_policy(False, True)),
             "existing_root_refused": lambda: rejects(lambda: root_policy(True, False))}
     require(set(operations) == set(OFFLINE[group]), "offline_definition")

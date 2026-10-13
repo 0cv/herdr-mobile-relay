@@ -44,6 +44,7 @@ jobs:
               'tests/test_tailscale_darwin_package_browser.py',
               'tests/test_tailscale_extracted_package_browser.py',
               'tests/tailscale-package-browser.mjs',
+              'scripts/qualify-darwin-package-browser.py',
           }
           observed = subprocess.check_output([
               'git', 'diff', '--name-only', 'cbacea6efe8916f2a040e6ca4927e221e9b6e15c',
@@ -123,7 +124,7 @@ jobs:
       # or a security boundary against a local caller forging environment/event.
       # The parent grant permits max-two label-scoped read-only queries ONLY in
       # this isolated hosted runner on the single first-fast-forward CI attempt
-      # from pinned e59e8022. No local runtime or local launchctl is authorized,
+      # from pinned 3c8f0c8d. No local runtime or local launchctl is authorized,
       # even if fabricated local inputs could satisfy the predicate.
       # Consumer contract: this cell passes only if this step/job succeeds
       # (runner exit 0) AND its published receipt validates as pass for the exact
@@ -149,7 +150,7 @@ jobs:
             --fresh-producer --producer-sha "$GITHUB_SHA" \
             --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
             --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
-            --launchctl-query-grant '{"grantId":"q2-parent-launchctl-print-first-push-e59e8022-20261008","authorized":true,"pinnedParent":"e59e8022daaefed14317d760f17f904ad6cd55eb","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of the first fast-forward push from e59e8022daaefed14317d760f17f904ad6cd55eb"}}' \
+            --launchctl-query-grant '{"grantId":"q2-owner-launchctl-print-push-3c8f0c8d-20261012","authorized":true,"pinnedParent":"3c8f0c8db54e9e147bd0034bab83051fe186324e","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of the first fast-forward push from 3c8f0c8db54e9e147bd0034bab83051fe186324e"}}' \
             --private-root "$RUNNER_TEMP/herdr-dpb-private" \
             --evidence "$RUNNER_TEMP/herdr-dpb-staging/darwin-package-browser.json" \
             --budget-seconds 1260 || runner_status=$?
