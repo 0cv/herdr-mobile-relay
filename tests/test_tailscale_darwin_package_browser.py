@@ -121,22 +121,23 @@ FAKE_ROW_CAP = len(FAKE_DIAGNOSTIC_COMMANDS) * len(FAKE_DIAGNOSTIC_OUTCOMES)
 # Each fake-herdr row is ~0.4 KiB (it records the socket path); the observed Linux run
 # issued 14. This bounds the live evidence file with a wide margin, never the allowlist.
 FAKE_OPERATIONS_CAP = 262144
-# Admission projection of the owner's current launchctl grant (dd608845 parent,
-# 20261013, iteration 3). The expected parent is a frozen parent-grant literal,
+# Admission projection of the owner's current launchctl grant (2230f96f parent,
+# 20261013, iteration 4). The expected parent is a frozen parent-grant literal,
 # NEVER selected from CI/git observations. The spent e59e8022 grant
 # (q2-parent-launchctl-print-first-push-e59e8022-20261008), the spent 3c8f0c8d
 # grant (q2-owner-launchctl-print-push-3c8f0c8d-20261012), the spent 8c1f22ff
-# grant (q2-owner-launchctl-print-push-8c1f22ff-20261013) and the earlier
+# grant (q2-owner-launchctl-print-push-8c1f22ff-20261013), the spent dd608845
+# grant (q2-owner-launchctl-print-push-dd608845-20261013) and the earlier
 # authorized:false contract remain historical and are refused by this predicate.
 # Exactly the next reviewed fast-forward and attempt 1; not a durable nonce
 # across prohibited branch reset/deletion/force-push/recreation or redispatch.
 # Operational admission only, NOT cryptographic hosted-runner authentication:
 # a local caller can forge environment/event inputs. The parent grant authorizes
 # at most two label-scoped read-only queries ONLY on the isolated hosted runner
-# in the single first-fast-forward attempt from the pinned dd608845 parent.
+# in the single first-fast-forward attempt from the pinned 2230f96f parent.
 # No local runtime or local launchctl is authorized, even with fabricated inputs.
-LAUNCHCTL_GRANT_ID = "q2-owner-launchctl-print-push-dd608845-20261013"
-LAUNCHCTL_PINNED_PARENT = "dd608845b73c0323f5cbcfa140ad52affb28ec7f"
+LAUNCHCTL_GRANT_ID = "q2-owner-launchctl-print-push-2230f96f-20261013"
+LAUNCHCTL_PINNED_PARENT = "2230f96fb61e1740c21154935a25c235bab71cf3"
 PUSH_EVENT_CAP = 65536
 LAUNCHCTL_SCOPE = MappingProxyType({
     "command": "launchctl print gui/$(id -u)/com.herdr-mobile-relay.service",
@@ -457,7 +458,12 @@ def receipt_values_safe(value):
             "closure_errors": (enum("child_cleanup", "child_observation_unavailable", "listener_cleanup",
                 "listener_observation_unavailable", "cleanup_deadline", "cleanup_incomplete", "browser_contexts_unobserved"), 7),
             "uncertain": boolean, "root_deleted": boolean},
-        "request_counts": ({key: count for key in ("tls_accepted", "tls_refused", "http_get", "websocket", "client_aborted")}, 3),
+        "request_counts": ({key: count for key in ("tls_accepted", "tls_refused", "http_get", "websocket",
+                                                   "websocket_refused", "client_aborted")}, 3),
+        # FAIL receipts only: the secret-free first-cause locator of each latched proxy.
+        "proxy_failure": ({"proxy": integer(2), "reason": enum(*PROXY_FAILURE_REASONS),
+            "path": enum(*PROXY_PATH_CATEGORIES), "query": enum(*PROXY_QUERY_CATEGORIES),
+            "method": enum(*PROXY_METHOD_CATEGORIES)}, 3),
         "fixture_operations": {
             "fake": ({"command": enum(*FAKE_DIAGNOSTIC_COMMANDS), "outcome": enum(*FAKE_DIAGNOSTIC_OUTCOMES),
                 "count": count}, FAKE_ROW_CAP),
@@ -527,7 +533,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
               "trust_controls", "cases", "phases", "cleanup", "owned_cleanup", "request_counts",
               "fixture_operations", "captured_output_bytes", "dependency_payload_bytes_peak", "failure",
               "failure_detail", "failure_guard", "launchctl_query_grant_id",
-              "github_run_id", "github_run_attempt", "launchctl_query_pinned_parent", "socket_diagnostics"}
+              "github_run_id", "github_run_attempt", "launchctl_query_pinned_parent", "socket_diagnostics",
+              "proxy_failure"}
     require(type(value) is dict and set(value) <= fields, "receipt_fields")
 
     def shape(item, keys):
@@ -573,7 +580,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     require(type(requests) is list and len(requests) <= 3, "receipt_requests")
     for request in requests:
         require(type(request) is dict and set(request) <= {
-            "tls_accepted", "tls_refused", "http_get", "websocket", "client_aborted"}, "receipt_request_fields")
+            "tls_accepted", "tls_refused", "http_get", "websocket", "websocket_refused", "client_aborted"},
+            "receipt_request_fields")
         for amount in request.values():
             count(amount)
     if value["result"] == "fail":
@@ -603,7 +611,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
                 "receipt_failed_output_count")
         return False
     cap("raw", value.get("captured_output_bytes"))
-    require(set(value) == fields - {"failure", "failure_detail", "failure_guard"} and set(source_hashes) == set(FILES)
+    require(set(value) == fields - {"failure", "failure_detail", "failure_guard", "proxy_failure"}
+            and set(source_hashes) == set(FILES)
             and value["cleanup"] is True and value["launchctl_query_grant_id"] == LAUNCHCTL_GRANT_ID, "receipt_complete")
     require(re.fullmatch(r"[0-9a-f]{40}", value["candidate_tree"]), "receipt_tree")
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["version"]), "receipt_version")
@@ -720,7 +729,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     require(requests[0].get("websocket", 0) >= 2 and requests[0].get("http_get", 0) > 0
             and requests[0].get("tls_refused", 0) > 0
             and all(request.get("tls_refused", 0) > 0 for request in requests[1:])
-            and all(request.get("http_get", 0) == request.get("websocket", 0) == 0 for request in requests[1:]), "receipt_request_controls")
+            and all(request.get("http_get", 0) == request.get("websocket", 0) == request.get("websocket_refused", 0) == 0
+                    for request in requests[1:]), "receipt_request_controls")
     operations = value["fixture_operations"]
     shape(operations, ("fake", "socket"))
     require(type(operations["fake"]) is list and type(operations["socket"]) is list, "receipt_operations")
@@ -939,16 +949,54 @@ class CleanupDeadline:
             signal.signal(signal.SIGALRM, previous)
 
 
-def remove_owned_tree(root, identity, deadline, remove=shutil.rmtree):
+def remove_owned_tree(root, identity, deadline, remove=shutil.rmtree, sleep=time.sleep):
     deadline.check()
     info = root.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_ino == identity.st_ino
             and info.st_dev == identity.st_dev and root.resolve(strict=True) == root,
             "cleanup_root_identity")
-    deadline.check()
-    remove(root)  # Runtime alarm covers this entire operation, including C/IO waits.
+    # A detached Chromium helper that outlives its aborted driver can still be
+    # writing under a profile for a moment (its debugging pipe has just closed),
+    # which makes one rmtree pass fail with ENOTEMPTY. Retry a few times inside
+    # the same shared deadline; the last OSError is never swallowed.
+    for attempt in range(REMOVE_ATTEMPTS):
+        deadline.check()
+        try:
+            remove(root)  # Runtime alarm covers this entire operation, including C/IO waits.
+            break
+        except FileNotFoundError:
+            break
+        except OSError:
+            if attempt == REMOVE_ATTEMPTS - 1:
+                raise
+            sleep(deadline.remaining(0.25))
     deadline.check()
     require(not root.exists() and not root.is_symlink(), "cleanup_root_survived")
+
+
+REMOVE_ATTEMPTS = 4
+
+
+def close_owned_resources(cleanup, deadline):
+    """Close every owned child/listener. True when the only recorded uncertainty is the
+    unattested browser-context closure and the owned root may still be deleted; any other
+    closure uncertainty re-raises CleanupFailure exactly as before."""
+    try:
+        cleanup.close(deadline)
+    except CleanupFailure as closure:
+        if not owned_root_removable(closure.evidence):
+            raise
+        return True
+    return False
+
+
+def owned_root_removable(evidence):
+    """True only when every owned child/listener is observed gone and the sole
+    recorded closure uncertainty is the unattested browser-context closure."""
+    return (type(evidence) is dict and evidence.get("closure_errors") == ["browser_contexts_unobserved"]
+            and all(type(evidence.get(key)) is int and evidence[key] == 0 for key in (
+                "surviving_children", "surviving_listeners", "observed_surviving_children",
+                "observed_surviving_listeners", "unobserved_children", "unobserved_listeners")))
 
 
 class CleanupFailure(Refusal):
@@ -1244,6 +1292,27 @@ def deployment_query_allowed(path, query):
     return False
 
 
+BUILD_ENTRY_PATH = re.compile(r"/builds/[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[a-f0-9]{16,64}/index\.html")
+
+
+def browser_query_allowed(path, query):
+    """The two exact query forms the shipped phone app itself issues.
+
+    frontend/src/lib/updates.ts checkAppUpdate/waitForDeployedApp read
+    `/version.json?check=<Date.now()>` on EVERY app start (and periodically), and
+    cacheBustedAppUrl / public/manifest-loader.js retry navigate to
+    `/index.html?herdr_reload=<version|current|recovery>-<Date.now()>`, which the
+    relay web handler 307-redirects to the digest-addressed build entry while
+    KEEPING the query. Each form is bound to its own path, literal and bounded.
+    Query decoding, extra keys, mixtures and other paths stay refused.
+    """
+    if path == "/version.json":
+        return re.fullmatch(r"check=[0-9]{1,16}", query) is not None
+    if path in {"/", "/index.html"} or BUILD_ENTRY_PATH.fullmatch(path) is not None:
+        return re.fullmatch(r"herdr_reload=[A-Za-z0-9._-]{1,64}-[0-9]{1,16}", query) is not None
+    return False
+
+
 def public_request_allowed(raw_path, host, upgrade, paths, port):
     try:
         parts = urllib.parse.urlsplit(raw_path)
@@ -1253,7 +1322,8 @@ def public_request_allowed(raw_path, host, upgrade, paths, port):
             and parts.path in paths and not parts.fragment
             and (not parts.query or re.fullmatch(r"v=[A-Za-z0-9._-]{1,128}", parts.query) is not None
                  or (raw_path == parts.path + "?" + parts.query
-                     and deployment_query_allowed(parts.path, parts.query)))
+                     and (deployment_query_allowed(parts.path, parts.query)
+                          or browser_query_allowed(parts.path, parts.query))))
             and host == "127.0.0.1:" + str(port)
             and (not upgrade or (upgrade == "websocket" and parts.path in {"/", "/ws"} and not parts.query)))
 
@@ -1434,6 +1504,83 @@ def require_socket_cleanup_evidence(receipt, fixture):
 
 def proxy_operations_allowed(servers):
     return all(server.failure is False for server in servers)
+
+
+# A latched proxy failure is recorded as a FIXED secret-free locator, never a raw
+# path, query, header, token, address or exception message. Every value below is
+# a member of one of these finite sets; anything else collapses to a default.
+PROXY_FAILURE_REASONS = frozenset({
+    "request_line", "request_method", "request_parse", "request_header_multiplicity", "request_allowlist",
+    "request_body", "request_upgrade", "websocket_upgrade", "proxy_backend", "cap_individual", "cap_result",
+    "phase_stopped", "phase_deadline", "handler_exception", "handler_finish", "server_error", "accept_error",
+    "worker_exception"})
+PROXY_PATH_CATEGORIES = frozenset({
+    "unknown", "invalid", "root", "index", "healthz", "release", "version", "build_entry", "asset", "icon", "font",
+    "manifest", "service_worker", "script", "favicon", "websocket", "other"})
+PROXY_QUERY_CATEGORIES = frozenset({"unknown", "none", "version", "deploy_check", "check", "reload", "other"})
+PROXY_METHOD_CATEGORIES = frozenset({"unknown", "get", "head", "post", "put", "delete", "options", "patch",
+                                     "connect", "trace", "other"})
+PROXY_FIXED_PATHS = MappingProxyType({
+    "/": "root", "/index.html": "index", "/healthz": "healthz", "/release.json": "release",
+    "/version.json": "version", "/favicon.ico": "favicon", "/sw.js": "service_worker",
+    "/manifest.webmanifest": "manifest", "/setup.webmanifest": "manifest", "/herdr-bootstrap.js": "script",
+    "/manifest-loader.js": "script", "/notification-icons.js": "script", "/ws": "websocket"})
+
+
+def proxy_request_categories(raw_path):
+    """(path, query) coarse categories of a request target. Never echoes any part of it."""
+    try:
+        parts = urllib.parse.urlsplit(raw_path)
+    except (ValueError, TypeError, AttributeError):
+        return "invalid", "other"
+    if parts.scheme or parts.netloc:
+        return "invalid", "other"
+    path = parts.path
+    if path in PROXY_FIXED_PATHS:
+        path_category = PROXY_FIXED_PATHS[path]
+    elif BUILD_ENTRY_PATH.fullmatch(path) is not None:
+        path_category = "build_entry"
+    else:
+        path_category = next((name for prefix, name in (("/assets/", "asset"), ("/icons/", "icon"),
+                                                         ("/fonts/", "font")) if path.startswith(prefix)), "other")
+    query = parts.query
+    if not query:
+        query_category = "none"
+    elif re.fullmatch(r"v=[A-Za-z0-9._-]{1,128}", query) is not None:
+        query_category = "version"
+    else:
+        query_category = next((name for prefix, name in (("herdr_deploy_check=", "deploy_check"),
+            ("check=", "check"), ("herdr_reload=", "reload")) if query.startswith(prefix)), "other")
+    return path_category, query_category
+
+
+def proxy_method_category(raw):
+    try:
+        name = raw.decode("ascii").lower() if type(raw) is bytes else str(raw).lower()
+    except UnicodeError:
+        return "other"
+    return name if name in PROXY_METHOD_CATEGORIES - {"unknown", "other"} else "other"
+
+
+def proxy_failure_reason(error):
+    code = str(error) if isinstance(error, Refusal) else "handler_exception"
+    return code if code in PROXY_FAILURE_REASONS else "handler_exception"
+
+
+def proxy_failure_rows(servers):
+    """One secret-free row per proxy that latched a failure (at most one per proxy)."""
+    rows = []
+    for index, server in enumerate(servers):
+        if getattr(server, "failure", False) is not True:
+            continue
+        recorded = getattr(server, "failure_reason", None)
+        if (type(recorded) is not tuple or len(recorded) != 4 or recorded[0] not in PROXY_FAILURE_REASONS
+                or recorded[1] not in PROXY_PATH_CATEGORIES or recorded[2] not in PROXY_QUERY_CATEGORIES
+                or recorded[3] not in PROXY_METHOD_CATEGORIES):
+            recorded = ("handler_exception", "unknown", "unknown", "unknown")
+        rows.append({"proxy": index, "reason": recorded[0], "path": recorded[1], "query": recorded[2],
+                     "method": recorded[3]})
+    return rows
 
 
 def owned_socket_closed(error, closing):
@@ -2172,7 +2319,7 @@ class Proxy(http.server.HTTPServer):
         operations.effects.effect("network")
         self.operations, self.lock = operations, threading.RLock()
         self.workers, self.connections, self.counts = [], set(), {}
-        self.failure = False
+        self.failure, self.failure_reason = False, None
         self.paths = {"/", "/index.html", "/healthz", "/release.json", "/version.json", "/ws", "/favicon.ico"}
         self.paths.update("/" + p.relative_to(root / "release/web").as_posix()
                           for p in (root / "release/web").rglob("*") if p.is_file())
@@ -2198,13 +2345,26 @@ class Proxy(http.server.HTTPServer):
                 self.handle_request()
             except Exception as error:
                 if not owned_socket_closed(error, self.closing):
-                    self.failure = True
+                    self.latch("accept_error")
                 return
+
+    def latch(self, reason, path="unknown", query="unknown", method="unknown"):
+        """Latch the fatal proxy failure with a fixed secret-free first-cause locator."""
+        # First cause wins. A concurrent second latch may race this check; either
+        # value is a true cause, and both are fixed-set, so no lock is required.
+        # The locator is published before the flag the guard polls.
+        if getattr(self, "failure_reason", None) is None:
+            self.failure_reason = (
+                reason if reason in PROXY_FAILURE_REASONS else "handler_exception",
+                path if path in PROXY_PATH_CATEGORIES else "unknown",
+                query if query in PROXY_QUERY_CATEGORIES else "unknown",
+                method if method in PROXY_METHOD_CATEGORIES else "unknown")
+        self.failure = True
 
     def handle_error(self, _request, _address):
         # BaseServer catches dispatch errors before the accept loop sees them.
         # Latch them without its default raw traceback/address logging.
-        self.failure = True
+        self.latch("server_error")
 
     def process_request(self, connection, address):
         with self.lock:
@@ -2234,7 +2394,7 @@ class Proxy(http.server.HTTPServer):
             self.record("client_aborted" if accepted else "tls_refused")
         except Exception as error:
             if not owned_socket_closed(error, self.closing):
-                self.failure = True
+                self.latch("worker_exception")
         finally:
             try:
                 connection.close()
@@ -2242,7 +2402,7 @@ class Proxy(http.server.HTTPServer):
                 self.record("client_aborted" if accepted else "tls_refused")
             except Exception as error:
                 if not owned_socket_closed(error, self.closing):
-                    self.failure = True
+                    self.latch("worker_exception")
             finally:
                 with self.lock:
                     self.connections.discard(connection)
@@ -2270,8 +2430,15 @@ class Proxy(http.server.HTTPServer):
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    # Coarse fixed-set categories of the request being handled, for the
+    # secret-free first-cause locator only. Never the raw target.
+    diag_method = diag_path = diag_query = "unknown"
+
     def log_message(self, *_):
         pass
+
+    def latch(self, reason):
+        self.server.latch(reason, self.diag_path, self.diag_query, self.diag_method)
 
     def backend_call(self, operation, *args, **kwargs):
         # Never misclassify a reset/timeout on the backend or proxy machinery
@@ -2279,11 +2446,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             return operation(*args, **kwargs)
         except Exception:
-            self.server.failure = True
+            self.latch("proxy_backend")
             raise Refusal("proxy_backend") from None
 
     def do_GET(self):
         server = self.server
+        self.diag_path, self.diag_query = proxy_request_categories(self.path)
         # Reject ambiguity before scalar allowlist evaluation, traffic counters,
         # backend allocation or forwarding, including WebSocket upgrade headers.
         hosts, upgrades = self.headers.get_all("Host", []), self.headers.get_all("Upgrade", [])
@@ -2329,7 +2497,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 require(bool(chunk), "websocket_upgrade")
                 response.extend(chunk)
                 cap("result", len(response))
-            require(response.startswith(b"HTTP/1.1 101 "), "websocket_upgrade")
+            if not response.startswith(b"HTTP/1.1 101 "):
+                self.relay_upgrade_refusal(backend, response)
+                return
             self.connection.sendall(response)
             with selectors.DefaultSelector() as selector:
                 self.backend_call(selector.register, backend, selectors.EVENT_READ, self.connection)
@@ -2352,6 +2522,42 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 with self.server.lock:
                     self.server.connections.discard(backend)
 
+    def relay_upgrade_refusal(self, backend, response):
+        """Relay a legitimate non-101 upgrade answer to the browser; never latch it.
+
+        The relay hub answers a handshake it will not upgrade with a bounded
+        net/http error (400 wrong subprotocol, 403 origin, 503 pairing not ready
+        or shutting down). A restarting backend legitimately does this, and the
+        shipped client retries. Anything that is not a well-formed 4xx/5xx status
+        line stays a fatal websocket_upgrade failure. The answer is forwarded
+        verbatim and bounded; the connection is then closed.
+        """
+        head, _, body = bytes(response).partition(b"\r\n\r\n")
+        lines = head.split(b"\r\n")
+        require(re.fullmatch(rb"HTTP/1\.1 [45][0-9]{2}(?: [\x20-\x7e]{0,64})?", lines[0]) is not None,
+                "websocket_upgrade")
+        lengths = [line.split(b":", 1)[1].strip() for line in lines[1:]
+                   if line.split(b":", 1)[0].strip().lower() == b"content-length" and b":" in line]
+        data = bytearray(response)
+        # Fail closed on every present framing declaration: exactly one canonical Content-Length
+        # (no leading zeros, bounded digits) and no Transfer-Encoding, before anything is forwarded.
+        require(all(line.split(b":", 1)[0].strip().lower() != b"transfer-encoding" for line in lines[1:])
+                and len(lengths) <= 1
+                and all(re.fullmatch(rb"(?:0|[1-9][0-9]{0,6})", length) is not None for length in lengths),
+                "websocket_upgrade")
+        if lengths:
+            expected = int(lengths[0])
+            cap("result", len(head) + 4 + expected)
+            while len(body) < expected:
+                chunk = self.backend_call(backend.recv, 4096)
+                # EOF before the declared body is complete is a backend fault, not a refusal.
+                require(bool(chunk), "websocket_upgrade")
+                body += chunk
+                data.extend(chunk)
+        self.connection.sendall(bytes(data))
+        self.server.record("websocket_refused")
+        self.close_connection = True
+
     def handle_one_request(self):
         try:
             # Keep stdlib parsing and its request-line bound, but dispatch only
@@ -2362,6 +2568,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.close_connection = True
                 return
             words = self.raw_requestline.split()
+            self.diag_method = proxy_method_category(words[0]) if words else "unknown"
             require(words and words[0] == b"GET", "request_method")
             require(self.parse_request(), "request_parse")
             self.do_GET()
@@ -2371,7 +2578,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
         except Exception as error:
             if not owned_socket_closed(error, self.server.closing):
-                self.server.failure = True
+                self.latch(proxy_failure_reason(error))
             raise
 
     def finish(self):
@@ -2388,7 +2595,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.server.record("client_aborted")
             except Exception as error:
                 if not owned_socket_closed(error, self.server.closing):
-                    self.server.failure = True
+                    self.latch("handler_finish")
                     first_error = first_error or error
         if first_error is not None:
             raise first_error
@@ -2396,7 +2603,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def send_error(self, code, message=None, explain=None):
         # Parse errors remain fatal even if the client aborts during the error
         # response, masking the parser's original rejection.
-        self.server.failure = True
+        self.latch("request_parse")
         super().send_error(code, message, explain)
 
 
@@ -2625,6 +2832,7 @@ def runtime(args):
                "owned_cleanup": cleanup.evidence}
     initial_sources = {}
     failure, proxy_servers, socket_fixture, fake_path = None, [], None, None
+    closure_uncertain = False
     previous_signals = {}
 
     def interrupted(signum, _):
@@ -2879,7 +3087,15 @@ def runtime(args):
                     if not cleanup_socket_observation(receipt, socket_fixture, cleanup, deadline, initial=True):
                         failure = failure or "cleanup_uncertain"
                     try:
-                        receipt["owned_cleanup"] = cleanup.close(deadline)
+                        # Recorded closure uncertainty (browser contexts a guard-aborted
+                        # runner could not attest) must not skip owned-root deletion when
+                        # every owned child and listener is observed gone. It stays in the
+                        # evidence, keeps cleanup False and never replaces the original
+                        # failure. Any other uncertainty still aborts before deletion.
+                        closure_uncertain = close_owned_resources(cleanup, deadline)
+                        receipt["owned_cleanup"] = cleanup.evidence
+                        if closure_uncertain:
+                            failure = failure or "cleanup_uncertain"
                     finally:
                         if not cleanup_socket_observation(receipt, socket_fixture, cleanup, deadline):
                             failure = failure or "cleanup_uncertain"
@@ -2907,7 +3123,7 @@ def runtime(args):
                         require(not root.exists() and not root.is_symlink(), "cleanup_root_unowned")
                     deadline.check()
                     receipt["owned_cleanup"]["root_deleted"] = True
-                    receipt["cleanup"] = True
+                    receipt["cleanup"] = not closure_uncertain
             except Exception as error:
                 receipt["cleanup"] = False
                 cleanup.error("cleanup_deadline" if isinstance(error, Refusal)
@@ -2928,6 +3144,14 @@ def runtime(args):
                 # Snapshot even if cleanup or a final guard failed. Failed cells
                 # may have fewer than three allocated proxies, but never raw data.
                 receipt["request_counts"] = proxy_request_counts(proxy_servers)
+                # Name the first cause of every latched proxy failure (fixed codes
+                # and coarse categories only). A latch that no guard observed yet
+                # still revokes PASS.
+                latched = proxy_failure_rows(proxy_servers)
+                if latched:
+                    receipt["proxy_failure"] = latched
+                    failure = failure or "owned_operation_allowlist"
+                    operations.failure_guard = operations.failure_guard or "proxy"
                 if operations.failure_guard is not None:
                     receipt["failure_guard"] = operations.failure_guard
                 receipt["result"] = "pass" if failure is None and receipt["cleanup"] and len(receipt["cases"]) == 3 else "fail"
@@ -3136,11 +3360,48 @@ def offline_check(group):
             # Abort counts cannot stand in for the positive traffic or any
             # negative TLS refusal; negative ports must still serve no HTTP/WSS.
             for index, label, amount in ((0, "http_get", 0), (0, "websocket", 0), (0, "tls_refused", 0),
-                    (1, "tls_refused", 0), (2, "tls_refused", 0), (1, "http_get", 1), (2, "websocket", 1)):
+                    (1, "tls_refused", 0), (2, "tls_refused", 0), (1, "http_get", 1), (2, "websocket", 1),
+                    (1, "websocket_refused", 1), (2, "websocket_refused", 1)):
                 requests = [dict(request) for request in with_aborts["request_counts"]]
                 requests[index][label] = amount
                 require(rejects(lambda: receipt_policy(encode({**with_aborts, "request_counts": requests}),
                     BASE, sources, producer_id)), "offline_abort_not_a_control")
+            return True
+        def proxy_failure_receipts():
+            # The secret-free first-cause locator is a FAIL-only field with a closed schema.
+            failed = {**valid_receipt, "result": "fail", "failure": "owned_operation_allowlist",
+                      "failure_guard": "proxy"}
+            row = {"proxy": 0, "reason": "request_allowlist", "path": "version", "query": "check", "method": "get"}
+            require(receipt_policy(encode({**failed, "proxy_failure": [row]}), BASE, sources, producer_id) is False,
+                    "offline_proxy_failure_receipt")
+            for field, values in (("reason", PROXY_FAILURE_REASONS), ("path", PROXY_PATH_CATEGORIES),
+                                  ("query", PROXY_QUERY_CATEGORIES), ("method", PROXY_METHOD_CATEGORIES)):
+                for value in values:
+                    require(receipt_policy(encode({**failed, "proxy_failure": [{**row, field: value}]}),
+                            BASE, sources, producer_id) is False, "offline_proxy_failure_values")
+            require(receipt_policy(encode({**failed, "proxy_failure": [{**row, "proxy": index} for index in (0, 1, 2)]}),
+                    BASE, sources, producer_id) is False and receipt_policy(encode({**failed, "proxy_failure": []}),
+                    BASE, sources, producer_id) is False, "offline_proxy_failure_rows_bound")
+            bad_rows = ([{**row, "proxy": 3}], [{**row, "proxy": -1}], [{**row, "proxy": True}], [{**row, "proxy": "0"}],
+                [{**row, "reason": "/private/path"}], [{**row, "reason": "https://invalid"}], [{**row, "path": "/private"}],
+                [{**row, "path": "builds"}], [{**row, "query": "check=1"}], [{**row, "query": "token"}],
+                [{**row, "method": "GET"}], [{**row, "method": "secret"}], [{**row, "reason": None}],
+                [{**row, "reason": ["request_allowlist"]}], [{**row, "url": "x"}], [{key: val for key, val in row.items()
+                    if key != "query"}], [dict(row)] * 4, row, "request_allowlist", 1, None, [None], [[]])
+            for bad in bad_rows:
+                require(rejects(lambda: receipt_policy(encode({**failed, "proxy_failure": bad}), BASE, sources, producer_id)),
+                        "offline_proxy_failure_refusal")
+            # A PASS receipt can never carry a failure locator, and the counter for a relayed
+            # non-101 upgrade answer is an ordinary non-negative count, not a free-form label.
+            require(rejects(lambda: receipt_policy(encode({**valid_receipt, "proxy_failure": [row]}),
+                    BASE, sources, producer_id)), "offline_proxy_failure_pass_refused")
+            refused = {**valid_receipt, "request_counts": [{**request} for request in valid_receipt["request_counts"]]}
+            refused["request_counts"][0]["websocket_refused"] = 2
+            require(receipt_policy(encode(refused), BASE, sources, producer_id) is True, "offline_websocket_refused_count")
+            for bad in (True, -1, "2", 1.5, 1000001):
+                refused["request_counts"][0]["websocket_refused"] = bad
+                require(rejects(lambda: receipt_policy(encode(refused), BASE, sources, producer_id)),
+                        "offline_websocket_refused_count_type")
             return True
         def safe_failure_receipts():
             # Partial progress matching the three retained hosted failure shapes,
@@ -3875,7 +4136,7 @@ def offline_check(group):
             "valid_result": lambda: browser_result(encode(valid), "enroll", 0)["ok"]
                 and receipt_policy(encode(valid_receipt), BASE, sources, producer_id)
                 and valid_receipt["socket_diagnostics"]["publication_exceptions"] == {}
-                and request_receipts() and fake_operation_cases()
+                and request_receipts() and proxy_failure_receipts() and fake_operation_cases()
                 and receipt_policy(encode({**valid_receipt, "result": "fail", "failure": "cap_raw",
                     "captured_output_bytes": LIMITS["raw"] + 16384}), BASE, sources, producer_id) is False,
             "malformed_json": lambda: rejects(lambda: browser_result(b"{", "enroll", 0)),
@@ -4218,6 +4479,55 @@ def offline_check(group):
             require(public_request_allowed("/healthz?v=legacy._-1", "127.0.0.1:8443", "", {"/healthz"}, 8443)
                     and not public_request_allowed("/healthz?v=" + "a" * 129, "127.0.0.1:8443", "", {"/healthz"}, 8443),
                     "offline_existing_version_query")
+            # Iteration-4 blocker: the shipped app itself issues /version.json?check=<ms> on every
+            # start (checkAppUpdate) and /index.html?herdr_reload=<key>-<ms> on reload/recovery, which
+            # the relay 307-redirects to the build entry KEEPING the query. Admit exactly those.
+            app_paths = {"/", "/index.html", "/healthz", "/release.json", "/version.json", entry, javascript,
+                         stylesheet, "/sw.js", "/manifest.webmanifest", "/herdr-bootstrap.js"}
+            admitted = ["/version.json?check=" + stamp for stamp in ("0", "1791800000000", "9" * 16)]
+            admitted += [path + "?herdr_reload=" + key + "-" + stamp
+                         for path in ("/", "/index.html", entry)
+                         for key in ("current", "recovery", "0.22.4", "0.22.4-rc.1", "a" * 64)
+                         for stamp in ("1", "1791800000000", "9" * 16)]
+            for request in admitted:
+                require(public_request_allowed(request, "127.0.0.1:8443", "", app_paths, 8443),
+                        "offline_app_query_positive")
+            require(not public_request_allowed("/version.json?check=1", "127.0.0.1:8443", "", {"/healthz"}, 8443)
+                    and not public_request_allowed("/version.json?check=1", "127.0.0.1:18444", "", app_paths, 8443)
+                    and not public_request_allowed("/version.json?check=1", "127.0.0.1:443", "", app_paths, 443),
+                    "offline_app_query_needs_owned_path_and_port")
+            for request in ("/version.json?check=", "/version.json?check=abc", "/version.json?check=-1",
+                            "/version.json?check=1.5", "/version.json?check=" + "1" * 17,
+                            "/version.json?check=1&check=2", "/version.json?check=1&v=1", "/version.json?v=1&check=1",
+                            "/version.json?check=1&arbitrary=1", "/version.json?check=%31", "/version.json?check=1\n",
+                            "/version.json?CHECK=1", "/version.json?check=1#fragment", "/version.json?check==1",
+                            "//version.json?check=1", "/version.json?herdr_reload=current-1",
+                            "/version.json?" + cache_bust.replace("-0", "-0-version") + "&check=1",
+                            "/healthz?check=1", "/release.json?check=1", "/sw.js?check=1", "/?check=1",
+                            "/index.html?check=1", entry + "?check=1", javascript + "?check=1",
+                            "/index.html?herdr_reload=", "/index.html?herdr_reload=current",
+                            "/index.html?herdr_reload=current-", "/index.html?herdr_reload=-1",
+                            "/index.html?herdr_reload=current-abc", "/index.html?herdr_reload=current-" + "1" * 17,
+                            "/index.html?herdr_reload=" + "a" * 65 + "-1", "/index.html?herdr_reload=a/b-1",
+                            "/index.html?herdr_reload=a%2Fb-1", "/index.html?herdr_reload=current-1&v=1",
+                            "/index.html?herdr_reload=current-1&herdr_reload=current-2",
+                            "/index.html?herdr_reload=current-1&other=1", "/index.html?herdr_reload=current-1\n",
+                            "/index.html?herdr_reload=current-1#fragment", "/index.html?herdr_reload=current-1&check=1",
+                            "/healthz?herdr_reload=current-1", "/version.json?herdr_reload=current-1",
+                            javascript + "?herdr_reload=current-1", "/builds/../index.html?herdr_reload=current-1",
+                            "/private?herdr_reload=current-1", "/manifest.webmanifest?herdr_reload=current-1"):
+                require(not public_request_allowed(request, "127.0.0.1:8443", "", app_paths, 8443),
+                        "offline_app_query_refusal")
+            # Neither form may ride a WebSocket upgrade (bare wss origin, no query) or a foreign host.
+            for request in ("/?herdr_reload=current-1", "/version.json?check=1", "/index.html?herdr_reload=current-1"):
+                require(not public_request_allowed(request, "127.0.0.1:8443", "websocket", app_paths, 8443)
+                        and not public_request_allowed(request, "foreign.invalid", "", app_paths, 8443),
+                        "offline_app_query_upgrade_host_refusal")
+            require(public_request_allowed("/", "127.0.0.1:8443", "websocket", app_paths, 8443)
+                    and not public_request_allowed("/index.html", "127.0.0.1:8443", "websocket", app_paths, 8443)
+                    and not public_request_allowed("/anything", "127.0.0.1:8443", "", app_paths, 8443)
+                    and not public_request_allowed("/spa-route", "127.0.0.1:8443", "", app_paths, 8443),
+                    "offline_app_surface_still_exact")
             require(socket_operations_allowed({("ping", "succeeded"): 1})
                     and proxy_operations_allowed([SimpleNamespace(failure=False)])
                     and child_environment_allowed({"HOME": "/owned/home"})
@@ -4313,13 +4623,14 @@ def offline_check(group):
             require(launchctl_packet_allowed(workflow_packets[0])
                     and launchctl_authorized(workflow_packets[0], context),
                     "offline_workflow_grant_accepted")
-            # The complete spent e59e8022, 3c8f0c8d and 8c1f22ff packets, including their
+            # The complete spent e59e8022, 3c8f0c8d, 8c1f22ff and dd608845 packets, including their
             # original scope.when, are refused, as is stale-parent event/candidate
             # context for either parent.
             spent_grants = (
                 ("q2-parent-launchctl-print-first-push-e59e8022-20261008", "e59e8022daaefed14317d760f17f904ad6cd55eb"),
                 ("q2-owner-launchctl-print-push-3c8f0c8d-20261012", "3c8f0c8db54e9e147bd0034bab83051fe186324e"),
-                ("q2-owner-launchctl-print-push-8c1f22ff-20261013", "8c1f22ff4980335ce0d1acc1731429a3457067a9"))
+                ("q2-owner-launchctl-print-push-8c1f22ff-20261013", "8c1f22ff4980335ce0d1acc1731429a3457067a9"),
+                ("q2-owner-launchctl-print-push-dd608845-20261013", "dd608845b73c0323f5cbcfa140ad52affb28ec7f"))
             for spent_grant, spent_parent in spent_grants:
                 spent_packet = encode({"grantId": spent_grant, "authorized": True, "pinnedParent": spent_parent,
                     "scope": {**LAUNCHCTL_SCOPE, "when": "attempt 1 of the first fast-forward push from " + spent_parent}}).decode()
@@ -4550,10 +4861,11 @@ def offline_check(group):
                 def __init__(self, error, write_error, flush_at, close_error):
                     super().__init__()
                     self.error, self.write_error, self.flush_at, self.flushes = error, write_error, flush_at, 0
-                    self.close_error = close_error
+                    self.close_error, self.written = close_error, bytearray()
                 def write(self, data):
                     if self.write_error:
                         raise self.error("inert client write")
+                    self.written.extend(data)
                     return super().write(data)
                 def flush(self):
                     self.flushes += 1
@@ -4583,8 +4895,8 @@ def offline_check(group):
                     self.closed = True
             class Backend:
                 status = 200
-                def __init__(self, error, fail_at):
-                    self.error, self.fail_at, self.closed = error, fail_at, False
+                def __init__(self, error, fail_at, chunks=None):
+                    self.error, self.fail_at, self.closed, self.chunks = error, fail_at, False, chunks
                 def check(self, stage):
                     if stage == self.fail_at:
                         raise self.error("inert backend")
@@ -4603,14 +4915,17 @@ def offline_check(group):
                     self.check("send")
                 def recv(self, _maximum):
                     self.check("recv")
+                    if self.chunks is not None:
+                        return self.chunks.pop(0) if self.chunks else b""
                     return b"HTTP/1.1 101 Switching Protocols\r\n\r\n"
                 def close(self):
                     self.check("close")
                     self.closed = True
             def exercise(data=b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n", *,
                          error=TimeoutError, read_at=0, write_error=False, flush_at=0,
-                         handshake=False, backend_error="", buffered=True, closing=False, close_error=None):
-                backend = Backend(error, backend_error)
+                         handshake=False, backend_error="", buffered=True, closing=False, close_error=None,
+                         chunks=None, capture=None):
+                backend = Backend(error, backend_error, None if chunks is None else list(chunks))
                 calls = []
                 class Handler(ProxyHandler):
                     wbufsize = 1 if buffered else 0
@@ -4624,9 +4939,12 @@ def offline_check(group):
                         return super().backend_call(operation, *args, **kwargs)
                 server = object.__new__(Proxy)
                 server.lock, server.counts, server.failure, server.closing = threading.RLock(), {}, False, closing
+                server.failure_reason = None
                 server.server_port, server.server_name, server.paths = 8443, "inert", {"/healthz", "/", "/ws"}
                 server.RequestHandlerClass = Handler
                 connection = Connection(data, error, read_at, write_error, flush_at, handshake, close_error)
+                if capture is not None:
+                    capture.append(connection)
                 server.connections = {connection}
                 server.worker(connection, ("127.0.0.1", 1))
                 require(connection.closed and not server.connections, "offline_proxy_peer_closed")
@@ -4665,6 +4983,129 @@ def offline_check(group):
             for stage in ("send", "recv"):
                 server, _ = exercise(websocket, error=ConnectionResetError, backend_error=stage)
                 require(not proxy_operations_allowed([server]), "offline_websocket_backend_error_fatal")
+            # A legitimate non-101 upgrade answer (relay not ready / restarting / wrong subprotocol / origin)
+            # is relayed verbatim to the browser and never latches a proxy failure.
+            for answer in (b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nwait\n",
+                           b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
+                           b"HTTP/1.1 403 Forbidden\r\nContent-Length: 19\r\n\r\nOrigin not allowed\n",
+                           b"HTTP/1.1 503 Service Unavailable\r\n\r\n"):
+                sent = []
+                server, _ = exercise(websocket, error=ConnectionResetError, chunks=[answer], capture=sent)
+                require(proxy_operations_allowed([server]) and server.failure_reason is None
+                        and server.counts == {"tls_accepted": 1, "websocket": 1, "websocket_refused": 1}
+                        and proxy_failure_rows([server]) == []
+                        and bytes(sent[0].output.written) == answer, "offline_websocket_refusal_relayed")
+            # The head and the declared body may arrive in separate backend reads; a body cut short by EOF is fatal.
+            sent = []
+            server, _ = exercise(websocket, error=ConnectionResetError, capture=sent, chunks=[
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\n", b"wa", b"it\n"])
+            require(proxy_operations_allowed([server]) and bytes(sent[0].output.written) == (
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\nwait\n"), "offline_websocket_refusal_split")
+            sent = []
+            server, _ = exercise(websocket, error=ConnectionResetError, capture=sent, chunks=[
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\nwait\n"])
+            require(not proxy_operations_allowed([server]) and not server.counts.get("websocket_refused")
+                    and server.failure_reason[0] == "websocket_upgrade" and not sent[0].output.written,
+                    "offline_websocket_refusal_short_fatal")
+            # Every present-but-unusable framing declaration is fatal and forwards nothing.
+            for framing in (b"Content-Length: 000009\r\n", b"Content-Length: 100000\r\n", b"Content-Length: 70000\r\n",
+                            b"Content-Length: 9999999999999999999999\r\n", b"Content-Length: +5\r\n",
+                            b"Content-Length: 5 5\r\n", b"Content-Length: -1\r\n", b"Content-Length: \r\n",
+                            b"Content-Length: 5\r\nContent-Length: 5\r\n", b"Content-Length: 5\r\nContent-Length: 6\r\n",
+                            b"content-length : 000005\r\n", b"Transfer-Encoding: chunked\r\n",
+                            b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n"):
+                sent = []
+                server, _ = exercise(websocket, error=ConnectionResetError, capture=sent, chunks=[
+                    b"HTTP/1.1 503 Service Unavailable\r\n" + framing + b"\r\nwait\n"])
+                require(not proxy_operations_allowed([server]) and not server.counts.get("websocket_refused")
+                        and server.failure_reason[0] in {"websocket_upgrade", "cap_result"}
+                        and not sent[0].output.written, "offline_websocket_refusal_framing_fatal")
+            # A client abort while relaying stays benign; a backend fault mid-body is still fatal.
+            server, _ = exercise(websocket, error=ssl.SSLEOFError, write_error=True,
+                                 chunks=[b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"])
+            require(proxy_operations_allowed([server]) and server.counts.get("client_aborted") == 1,
+                    "offline_websocket_refusal_client_abort")
+            server, _ = exercise(websocket, error=ConnectionResetError, backend_error="recv",
+                                 chunks=[b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\n"])
+            require(not proxy_operations_allowed([server]), "offline_websocket_refusal_backend_fault")
+            # Not a refusal answer (success/redirect/1xx/other protocol/garbage/oversize/early EOF) stays fatal.
+            for answer in (b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", b"HTTP/1.1 302 Found\r\n\r\n",
+                           b"HTTP/1.1 100 Continue\r\n\r\n", b"HTTP/1.0 503 Service Unavailable\r\n\r\n",
+                           b"HTTP/1.1 6xx Bad\r\n\r\n", b"HTTP/1.1 503\x00 Bad\r\n\r\n", b"garbage\r\n\r\n",
+                           b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 70000\r\n\r\n", b""):
+                sent = []
+                server, _ = exercise(websocket, error=ConnectionResetError, chunks=[answer], capture=sent)
+                require(not proxy_operations_allowed([server]) and not server.counts.get("websocket_refused")
+                        and server.failure_reason[0] in {"websocket_upgrade", "cap_result"}
+                        and not sent[0].output.written, "offline_websocket_malformed_refusal_fatal")
+            # First-cause locators: fixed codes and coarse categories only, never a raw path/query/token.
+            diagnostics = (
+                (b"GET /version.json?check=abc HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_allowlist", "version", "check", "get")),
+                (b"GET /private?secret=value HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_allowlist", "other", "other", "get")),
+                (b"GET /index.html?herdr_reload=bad HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_allowlist", "index", "reload", "get")),
+                (b"GET /healthz?herdr_deploy_check=zzz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_allowlist", "healthz", "deploy_check", "get")),
+                (b"GET /assets/app-" + b"a" * 64 + b".js?x=1 HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_allowlist", "asset", "other", "get")),
+                (b"GET / HTTP/1.1\r\nHost: foreign.invalid\r\nUpgrade: websocket\r\n\r\n",
+                 ("request_allowlist", "root", "none", "get")),
+                (b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nUpgrade: h2c\r\n\r\n",
+                 ("request_allowlist", "root", "none", "get")),
+                (b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nContent-Length: 1\r\n\r\nx",
+                 ("request_body", "root", "none", "get")),
+                (b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_header_multiplicity", "healthz", "none", "get")),
+                (b"HEAD /healthz?token=secret HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_method", "unknown", "unknown", "head")),
+                (b"BREW /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
+                 ("request_method", "unknown", "unknown", "other")),
+                (b"GET /healthz HTTP/invalid\r\n\r\n", ("request_parse", "unknown", "unknown", "get")))
+            for request, expected in diagnostics:
+                server, calls = exercise(request, error=BrokenPipeError, flush_at=1)
+                encoded_rows = json.dumps(proxy_failure_rows([server]))
+                require(not proxy_operations_allowed([server]) and server.failure_reason == expected
+                        and proxy_failure_rows([server]) == [{"proxy": 0, "reason": expected[0], "path": expected[1],
+                            "query": expected[2], "method": expected[3]}]
+                        and not any(word in encoded_rows for word in ("secret", "private", "abc", "token", "bad", "zzz", "x=1")),
+                        "offline_proxy_failure_locator")
+            server, _ = exercise(error=ConnectionResetError, backend_error="request")
+            require(server.failure_reason == ("proxy_backend", "healthz", "none", "get"), "offline_proxy_backend_locator")
+            # The FIRST cause wins and an unknown/forged code collapses to a safe default.
+            probe = object.__new__(Proxy)
+            probe.failure = False
+            probe.latch("worker_exception", "healthz", "none", "get")
+            probe.latch("request_allowlist", "root", "none", "get")
+            require(probe.failure is True and probe.failure_reason == ("worker_exception", "healthz", "none", "get"),
+                    "offline_proxy_first_cause")
+            probe = object.__new__(Proxy)
+            probe.latch("/private/token", "/private", "token=1", "GET")
+            require(probe.failure_reason == ("handler_exception", "unknown", "unknown", "unknown"), "offline_proxy_locator_defaults")
+            require(proxy_failure_rows([SimpleNamespace(failure=False), SimpleNamespace(failure=True),
+                    SimpleNamespace(failure=True, failure_reason=("request_allowlist", "/x", "check", "get")),
+                    SimpleNamespace(failure=True, failure_reason=("request_allowlist", "version", "check", "get"))]) == [
+                    {"proxy": 1, "reason": "handler_exception", "path": "unknown", "query": "unknown", "method": "unknown"},
+                    {"proxy": 2, "reason": "handler_exception", "path": "unknown", "query": "unknown", "method": "unknown"},
+                    {"proxy": 3, "reason": "request_allowlist", "path": "version", "query": "check", "method": "get"}]
+                    and proxy_failure_rows([]) == [], "offline_proxy_failure_rows")
+            for target in ("/", "/index.html", "/healthz?v=1", "/builds/1.2.3-1-" + "a" * 16 + "/index.html",
+                           "/release.json?herdr_deploy_check=x", "/version.json?check=1", "/anything/else?secret=1",
+                           "https://foreign.invalid/x", "//foreign.invalid/x", "/\x00?x", "http://[::1"):
+                path_category, query_category = proxy_request_categories(target)
+                require(path_category in PROXY_PATH_CATEGORIES and query_category in PROXY_QUERY_CATEGORIES
+                        and not any(word in path_category + query_category for word in ("secret", "foreign", "anything", "builds")),
+                        "offline_proxy_categories_fixed")
+            require(proxy_request_categories("/version.json?check=1") == ("version", "check")
+                    and proxy_request_categories("/private?secret=1") == ("other", "other")
+                    and proxy_request_categories("https://foreign.invalid/") == ("invalid", "other")
+                    and proxy_method_category(b"GET") == "get" and proxy_method_category(b"\xff") == "other"
+                    and proxy_method_category(b"secret") == "other"
+                    and proxy_failure_reason(Refusal("request_allowlist")) == "request_allowlist"
+                    and proxy_failure_reason(Refusal("/private/path")) == "handler_exception"
+                    and proxy_failure_reason(RuntimeError("request_allowlist")) == "handler_exception",
+                    "offline_proxy_category_mapping")
             rejected = [f"{method} / HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n".encode()
                         for method in ("HEAD", "POST", "PUT", "DELETE", "OPTIONS", "TRACE", "CONNECT", "PATCH")]
             rejected.extend((b"GET /private HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n",
@@ -5273,6 +5714,88 @@ def offline_check(group):
             require(evidence["root_deleted"] is False and evidence["uncertain"] is True
                     and evidence["surviving_children"] == 0 and evidence["surviving_listeners"] == 0,
                     "offline_deletion_evidence")
+            # Mid-browser abort: a detached helper may still be writing under the owned root for a
+            # moment, so a pass can fail with ENOTEMPTY. A few bounded retries inside the SAME shared
+            # deadline complete deletion; the last error is never swallowed and the cap is never renewed.
+            def flaky(failures, error=lambda: OSError(errno.ENOTEMPTY, "inert racing helper"), spend=0):
+                calls = []
+                def remove_pass(value):
+                    calls.append(True)
+                    now[0] += spend
+                    if len(calls) <= failures:
+                        raise error()
+                    value.present = False
+                return remove_pass, calls
+            for failures in (0, 1, REMOVE_ATTEMPTS - 1):
+                root.present, now[0], slept = True, 0, []
+                remove_pass, calls = flaky(failures)
+                remove_owned_tree(root, identity, CleanupDeadline(clock=clock), remove_pass, slept.append)
+                require(len(calls) == failures + 1 and root.present is False and len(slept) == failures
+                        and all(0 < pause <= 0.25 for pause in slept), "offline_deletion_retry_completes")
+            root.present, now[0] = True, 0
+            remove_pass, calls = flaky(REMOVE_ATTEMPTS)
+            try:
+                remove_owned_tree(root, identity, CleanupDeadline(clock=clock), remove_pass, lambda _: None)
+            except OSError:
+                require(len(calls) == REMOVE_ATTEMPTS and root.present is True, "offline_deletion_retry_exhausted")
+            else:
+                return False
+            root.present, now[0] = True, 0
+            remove_pass, calls = flaky(REMOVE_ATTEMPTS, spend=31)
+            require(rejects(lambda: remove_owned_tree(root, identity, CleanupDeadline(clock=clock), remove_pass,
+                    lambda _: None)) and len(calls) == 1 and root.present is True, "offline_deletion_retry_deadline")
+            root.present, now[0] = True, 0
+            remove_pass, calls = flaky(1, error=lambda: FileNotFoundError(errno.ENOENT, "inert vanished"))
+            require(rejects(lambda: remove_owned_tree(root, identity, CleanupDeadline(clock=clock), remove_pass,
+                    lambda _: None)) and len(calls) == 1 and root.present is True, "offline_deletion_vanished_survivor")
+            root.present, now[0] = True, 0
+            remove_pass, calls = flaky(0)
+            remove_owned_tree(root, identity, CleanupDeadline(clock=clock), remove_pass, lambda _: None)
+            require(len(calls) == 1 and root.present is False and REMOVE_ATTEMPTS == 4, "offline_deletion_single_pass")
+            # Guard-aborted browser: only the unattested-contexts closure error is recorded while every
+            # owned child/listener is observed gone. Closure stays uncertain (cleanup remains False,
+            # the original failure is never replaced) but the root MUST still be deleted. Anything
+            # else uncertain still aborts before deletion exactly as before.
+            def aborted_owner(*errors, survive=False, listener=False, listener_error=False):
+                owner, child = Cleanup(), InertChild(survive)
+                owner.child(child)
+                owner.listener(InertListener(listener, listener_error))
+                for error in errors:
+                    owner.error(error)
+                return owner
+            owner = aborted_owner("browser_contexts_unobserved")
+            require(close_owned_resources(owner, CleanupDeadline()) is True
+                    and owner.evidence["closure_errors"] == ["browser_contexts_unobserved"]
+                    and owner.evidence["uncertain"] is True and owner.evidence["root_deleted"] is False
+                    and owner.evidence["surviving_children"] == owner.evidence["surviving_listeners"] == 0
+                    and owned_root_removable(owner.evidence), "offline_aborted_browser_closure_removable")
+            require(close_owned_resources(aborted_owner(), CleanupDeadline()) is False, "offline_clean_closure")
+            for refused in (aborted_owner("browser_contexts_unobserved", survive=True),
+                            aborted_owner("browser_contexts_unobserved", listener=True),
+                            aborted_owner("browser_contexts_unobserved", listener_error=True),
+                            aborted_owner("browser_contexts_unobserved", "cleanup_deadline"),
+                            aborted_owner("browser_contexts_unobserved", "cleanup_incomplete"),
+                            aborted_owner("cleanup_incomplete"), aborted_owner("child_cleanup"),
+                            aborted_owner(survive=True)):
+                try:
+                    close_owned_resources(refused, CleanupDeadline())
+                except CleanupFailure as failure:
+                    require(failure.evidence is refused.evidence and not owned_root_removable(failure.evidence),
+                            "offline_unattested_closure_not_removable")
+                else:
+                    return False
+            for evidence in (None, [], {}, {"closure_errors": []}, {"closure_errors": ["browser_contexts_unobserved"]},
+                             {**owner.evidence, "unobserved_children": 1}, {**owner.evidence, "surviving_listeners": None},
+                             {**owner.evidence, "observed_surviving_children": 1}, {**owner.evidence, "surviving_children": True},
+                             {**owner.evidence, "closure_errors": ["browser_contexts_unobserved", "browser_contexts_unobserved"]}):
+                require(not owned_root_removable(evidence), "offline_removable_predicate_strict")
+            # The runtime must keep ordering: close (tolerating only the removable case), THEN delete,
+            # and only a certain closure can make cleanup True. Bind the shipped source to that shape.
+            runtime_source = inspect.getsource(runtime)
+            require(runtime_source.index("close_owned_resources(cleanup, deadline)")
+                    < runtime_source.index("remove_owned_tree(root, root_identity, deadline)")
+                    < runtime_source.index('receipt["cleanup"] = not closure_uncertain')
+                    and 'failure = failure or "cleanup_uncertain"' in runtime_source, "offline_runtime_cleanup_order")
             now[0] = 0
             reserved = CleanupDeadline(clock=clock, reserve=1)
             now[0] = 29

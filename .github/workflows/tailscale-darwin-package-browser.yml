@@ -124,7 +124,7 @@ jobs:
       # or a security boundary against a local caller forging environment/event.
       # The parent grant permits max-two label-scoped read-only queries ONLY in
       # this isolated hosted runner on the single first-fast-forward CI attempt
-      # from pinned dd608845. No local runtime or local launchctl is authorized,
+      # from pinned 2230f96f. No local runtime or local launchctl is authorized,
       # even if fabricated local inputs could satisfy the predicate.
       # Consumer contract: this cell passes only if this step/job succeeds
       # (runner exit 0) AND its published receipt validates as pass for the exact
@@ -150,7 +150,7 @@ jobs:
             --fresh-producer --producer-sha "$GITHUB_SHA" \
             --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
             --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
-            --launchctl-query-grant '{"grantId":"q2-owner-launchctl-print-push-dd608845-20261013","authorized":true,"pinnedParent":"dd608845b73c0323f5cbcfa140ad52affb28ec7f","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of the first fast-forward push from dd608845b73c0323f5cbcfa140ad52affb28ec7f"}}' \
+            --launchctl-query-grant '{"grantId":"q2-owner-launchctl-print-push-2230f96f-20261013","authorized":true,"pinnedParent":"2230f96fb61e1740c21154935a25c235bab71cf3","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of the first fast-forward push from 2230f96fb61e1740c21154935a25c235bab71cf3"}}' \
             --private-root "$RUNNER_TEMP/herdr-dpb-private" \
             --evidence "$RUNNER_TEMP/herdr-dpb-staging/darwin-package-browser.json" \
             --budget-seconds 1260 || runner_status=$?

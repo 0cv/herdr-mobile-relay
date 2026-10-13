@@ -55,8 +55,8 @@ FILES = (
     "tests/test_tailscale_extracted_package_browser.py",
     "tests/tailscale-package-browser.mjs",
 )
-GRANT_ID = "q2-owner-launchctl-print-push-dd608845-20261013"
-PINNED_PARENT = "dd608845b73c0323f5cbcfa140ad52affb28ec7f"
+GRANT_ID = "q2-owner-launchctl-print-push-2230f96f-20261013"
+PINNED_PARENT = "2230f96fb61e1740c21154935a25c235bab71cf3"
 PHASES = (90, 300, 210, 630, 30)
 TOTAL_SECONDS = 1260
 RAW_CAP = 2 * 1024 * 1024
@@ -413,11 +413,12 @@ def check_requests_and_operations(value):
     require(type(requests) is list and len(requests) == 3, "receipt_requests")
     for request in requests:
         require(type(request) is dict and set(request) <= {"tls_accepted", "tls_refused", "http_get", "websocket",
-                "client_aborted"} and all(is_int(v, 0, 1000000) for v in request.values()), "receipt_request_fields")
+                "websocket_refused", "client_aborted"} and all(is_int(v, 0, 1000000) for v in request.values()),
+                "receipt_request_fields")
     require(requests[0].get("websocket", 0) >= 2 and requests[0].get("http_get", 0) > 0
             and requests[0].get("tls_refused", 0) > 0
             and all(r.get("tls_refused", 0) > 0 and r.get("http_get", 0) == 0 and r.get("websocket", 0) == 0
-                    for r in requests[1:]), "receipt_request_controls")
+                    and r.get("websocket_refused", 0) == 0 for r in requests[1:]), "receipt_request_controls")
     operations = value["fixture_operations"]
     require(is_exact(operations, ("fake", "socket")) and type(operations["fake"]) is list
             and len(operations["fake"]) <= FAKE_ROW_CAP, "receipt_operations")
@@ -443,7 +444,7 @@ def validate_receipt(value, sha, run_id):
         early = []
         if value.get("result") != "pass":
             early.append("receipt_not_pass")
-        if any(key in value for key in ("failure", "failure_detail", "failure_guard")):
+        if any(key in value for key in ("failure", "failure_detail", "failure_guard", "proxy_failure")):
             early.append("receipt_failure_present")
         if early:
             return early
@@ -817,6 +818,28 @@ def self_test():
         launchctl_query_grant_id="q2-owner-launchctl-print-push-8c1f22ff-20261013"), "receipt_grant")
     receipt_case("reject_spent_8c1_parent", lambda r: r.update(
         launchctl_query_pinned_parent="8c1f22ff4980335ce0d1acc1731429a3457067a9"), "receipt_grant")
+    # Iteration-4 diagnostics: a relayed non-101 upgrade answer is an ordinary counter (never on a
+    # negative-TLS control), while any proxy first-cause locator marks the receipt non-passing.
+    expect("accept_websocket_refused_counter", run(SELF_SHA, fixture_runs(), mutated(
+        lambda r: r["request_counts"][0].update(websocket_refused=2))))
+    receipt_case("reject_websocket_refused_on_control", lambda r: r["request_counts"][1].update(websocket_refused=1),
+                 "receipt_request_controls")
+    receipt_case("reject_websocket_refused_type", lambda r: r["request_counts"][0].update(websocket_refused=True),
+                 "receipt_request_fields")
+    receipt_case("reject_proxy_failure_locator", lambda r: r.update(proxy_failure=[{
+        "proxy": 0, "reason": "request_allowlist", "path": "version", "query": "check", "method": "get"}]),
+        "receipt_failure_present")
+    diagnostic_proxy = run(SELF_SHA, fixture_runs(), mutated(lambda r: r.update(
+        result="fail", failure="owned_operation_allowlist", failure_guard="proxy",
+        proxy_failure=[{"proxy": 0, "reason": "request_allowlist", "path": "version", "query": "check",
+                        "method": "get"}])))
+    expect("reject_proxy_failure_fail_receipt", diagnostic_proxy, "receipt_not_pass")
+    results.append(("reject_proxy_failure_fixed_codes", diagnostic_proxy["failures"] == [
+        "receipt_not_pass", "receipt_failure_present"]))
+    receipt_case("reject_spent_dd6_grant", lambda r: r.update(
+        launchctl_query_grant_id="q2-owner-launchctl-print-push-dd608845-20261013"), "receipt_grant")
+    receipt_case("reject_spent_dd6_parent", lambda r: r.update(
+        launchctl_query_pinned_parent="dd608845b73c0323f5cbcfa140ad52affb28ec7f"), "receipt_grant")
     # A FAIL receipt carrying the runner's bucketed fake-operation diagnostics (incl. "other") is a
     # fixed non-qualifying verdict, never an exception and never qualified.
     diagnostic_fail = run(SELF_SHA, fixture_runs(), mutated(lambda r: (r.update(
