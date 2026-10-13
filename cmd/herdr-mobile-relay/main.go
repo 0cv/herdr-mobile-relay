@@ -48,6 +48,12 @@ func main() {
 }
 
 func run(args []string) (int, error) {
+	return runWithServerRunner(args, (*app.Server).Run)
+}
+
+// The runner seam leaves production dispatch/config/construction intact while
+// hosted command tests can inspect the real store without starting listeners.
+func runWithServerRunner(args []string, runner func(*app.Server, context.Context) error) (int, error) {
 	command := "serve"
 	if len(args) > 0 {
 		command, args = args[0], args[1:]
@@ -64,7 +70,16 @@ func run(args []string) (int, error) {
 		if len(args) != 0 {
 			return 2, errors.New("serve does not accept arguments")
 		}
-		return runServe()
+		return runServeWithRunner(false, runner)
+	case "serve-installed":
+		if len(args) != 0 {
+			return 2, errors.New("serve-installed does not accept arguments")
+		}
+		return runServeWithRunner(true, runner)
+	case "doctor":
+		return runDoctorCommand(args, false)
+	case "status":
+		return runDoctorCommand(args, true)
 	case "version":
 		if len(args) == 1 && args[0] == "--json" {
 			data, _ := json.Marshal(map[string]string{"version": version, "revision": revision, "target": release.CurrentTarget()})
@@ -95,6 +110,11 @@ func run(args []string) (int, error) {
 			return 2, errors.New("usage: herdr-mobile-relay verify-readiness INSTANCE VERSION REVISION WEB_HASH")
 		}
 		return status(readiness.Verify(os.Stdin, readiness.Expected{Instance: args[0], Version: args[1], Revision: args[2], WebHash: args[3]}))
+	case "verify-gateway-health":
+		if len(args) != 4 {
+			return 2, errors.New("usage: herdr-mobile-relay verify-gateway-health INSTANCE VERSION REVISION WEB_HASH")
+		}
+		return status(readiness.VerifyGatewayHealth(os.Stdin, readiness.Expected{Instance: args[0], Version: args[1], Revision: args[2], WebHash: args[3]}))
 	case "verify-public":
 		verifyFlags := flag.NewFlagSet("verify-public", flag.ContinueOnError)
 		verifyFlags.SetOutput(os.Stderr)
@@ -102,11 +122,18 @@ func run(args []string) (int, error) {
 		origin := verifyFlags.String("origin", "", "public app origin")
 		version := verifyFlags.String("version", "", "expected release version (defaults to the local descriptor)")
 		revision := verifyFlags.String("revision", "", "expected release revision (defaults to local version metadata)")
+		webHash := verifyFlags.String("web-hash", "", "optional exact packaged web hash")
 		if err := verifyFlags.Parse(args); err != nil {
 			return 2, err
 		}
 		if verifyFlags.NArg() != 0 || *origin == "" {
 			return 2, errors.New("usage: herdr-mobile-relay verify-public --origin ORIGIN [--web-root DIRECTORY] [--version VERSION] [--revision REVISION]")
+		}
+		if *webHash != "" {
+			actual, err := release.WebHashFS(os.DirFS(*webRoot))
+			if err != nil || actual != *webHash {
+				return 1, errors.New("phone-app bundle does not match the packaged relay identity")
+			}
 		}
 		return status(appdeploy.VerifyPublic(context.Background(), *webRoot, *origin, *version, *revision))
 	case "app-deploy-worker":
@@ -118,7 +145,7 @@ func run(args []string) (int, error) {
 		if len(args) != 0 {
 			return 2, errors.New("app-deploy-configured does not accept arguments")
 		}
-		cfg, err := config.Load()
+		cfg, err := loadCommandConfig()
 		if err != nil {
 			return 1, err
 		}
@@ -187,7 +214,7 @@ func run(args []string) (int, error) {
 		if len(args) != 0 {
 			return 2, errors.New("support does not accept arguments")
 		}
-		cfg, err := config.Load()
+		cfg, err := loadCommandConfig()
 		if err != nil {
 			return 1, err
 		}
@@ -469,14 +496,55 @@ func verifyReleaseIdentity(
 	return nil
 }
 
-func runServe() (int, error) {
+// loadCommandConfig keeps credential-bearing gateway input out of every public
+// configuration error path. Config validation can interpolate the raw URL; do
+// not retain or wrap that error when gateway input is present. Non-gateway
+// admission refusals (including the disabled CLI gate) keep their identities.
+func loadCommandConfig() (*config.Config, error) {
 	cfg, err := config.Load()
+	if err != nil && strings.TrimSpace(os.Getenv("HERDR_GATEWAY_URL")) != "" {
+		return nil, errors.New("invalid relay configuration")
+	}
+	return cfg, err
+}
+
+func runServe() (int, error) {
+	return runServeWithRunner(false, (*app.Server).Run)
+}
+
+func runServeWithRunner(installed bool, runner func(*app.Server, context.Context) error) (int, error) {
+	if installed {
+		// Match the wrapper's strict false-only policy before config.Load can
+		// silently interpret an unknown rearm value as its false fallback.
+		switch os.Getenv("HERDR_RELAY_REARM_BOOTSTRAP") {
+		case "", "0", "false", "False", "FALSE", "f", "F":
+		default:
+			return 1, errors.New("installed service refuses bootstrap re-enrollment policy")
+		}
+	}
+	cfg, err := loadCommandConfig()
 	if err != nil {
+		if installed {
+			// Config errors can contain raw gateway URLs or other environment
+			// input. Do not wrap or expose them through this public service path.
+			return 1, errors.New("invalid installed service configuration")
+		}
 		return 1, err
 	}
 
 	logger := newRelayLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr))
 	slog.SetDefault(logger)
+
+	if installed {
+		// Constructor policy validation occurs before managed-owner acquisition
+		// and before any app/store/listener side effects. No CLI authority is
+		// acquired by this dispatch; ordinary config loading stays unchanged.
+		srv, err := app.NewInstalledService(cfg, version, revision, logger)
+		if err != nil {
+			return 1, err
+		}
+		return runSignalServer(srv, runner)
+	}
 
 	// O is acquired before managed app/control resources. Tailscale ownership
 	// is released only after exact route clearing and local watch closure; an
@@ -548,7 +616,7 @@ func runServe() (int, error) {
 				}
 			}
 		}()
-		if err := srv.Run(context.Background()); err != nil {
+		if err := runner(srv, context.Background()); err != nil {
 			return 1, err
 		}
 		if !srv.ManagedOwnerReleaseSafe() {
@@ -557,13 +625,17 @@ func runServe() (int, error) {
 		return 0, nil
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	srv, err = app.NewOwned(cfg, version, revision, logger, owner)
 	if err != nil {
 		return 1, err
 	}
-	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
+	return runSignalServer(srv, runner)
+}
+
+func runSignalServer(srv *app.Server, runner func(*app.Server, context.Context) error) (int, error) {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := runner(srv, ctx); err != nil && ctx.Err() == nil {
 		return 1, err
 	}
 	return 0, nil

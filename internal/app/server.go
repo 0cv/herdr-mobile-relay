@@ -190,6 +190,78 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	return newServer(cfg, version, revision, logger)
 }
 
+// NewInstalledService starts only the ordinary authenticated Cloudflare/gateway
+// service. Its process-local policy suppresses startup invitation ensure/reset;
+// it is not managed/BYO/CLI authority and does not disable device authentication.
+// All policy refusals precede construction (including cache/store creation).
+func NewInstalledService(cfg *config.Config, version, revision string, logger *slog.Logger) (*Server, error) {
+	if cfg == nil {
+		return nil, errors.New("installed service requires configuration")
+	}
+	if cfg.Transport != config.TransportCloudflare && cfg.Transport != config.TransportGateway {
+		return nil, errors.New("installed service supports only Cloudflare or gateway transport")
+	}
+	if cfg.ManagedRunID != "" || cfg.ControlRunID != "" || cfg.PairingSocketPath != "" {
+		return nil, errors.New("installed service refuses foreground ownership/control identities")
+	}
+	if cfg.RearmBootstrap {
+		return nil, errors.New("installed service refuses bootstrap re-enrollment policy")
+	}
+	if len(cfg.Token) != 32 {
+		return nil, errors.New("installed service requires a relay key of exactly 32 bytes")
+	}
+	if !filepath.IsAbs(cfg.RuntimeDir) {
+		return nil, errors.New("installed service requires an absolute runtime directory")
+	}
+	if cfg.Transport == config.TransportCloudflare && (cfg.GatewayURL != "" || len(cfg.GatewayURLs) != 0) {
+		return nil, errors.New("gateway configuration conflicts with Cloudflare service")
+	}
+	if cfg.Transport == config.TransportGateway {
+		if len(cfg.GatewayURLs) == 0 {
+			return nil, errors.New("gateway service requires configured gateways")
+		}
+		if cfg.GatewayURL != "" && cfg.GatewayURL != cfg.GatewayURLs[0] {
+			return nil, errors.New("gateway service requires a consistent gateway leader")
+		}
+		for _, gateway := range cfg.GatewayURLs {
+			if err := validateInstalledGatewayOrigin(gateway); err != nil {
+				return nil, err
+			}
+		}
+	}
+	server := newServerWithStartup(cfg, version, revision, logger, nil, nil, installedServiceStartup)
+	if server.initErr != nil {
+		// Never return a usable unauthenticated server after a store failure.
+		_ = server.hub.Shutdown(context.Background())
+		return nil, server.initErr
+	}
+	return server, nil
+}
+
+// validateInstalledGatewayOrigin mirrors the packaged shell's
+// normalize_gateway_url boundary without invoking a tool or logging raw input.
+// Ordinary foreground/config loading keeps its existing semantics.
+func validateInstalledGatewayOrigin(gateway string) error {
+	refusal := errors.New("gateway service requires a credential-free ws/wss base origin")
+	parsed, err := url.Parse(gateway)
+	if err != nil || (parsed.Scheme != "ws" && parsed.Scheme != "wss") ||
+		parsed.ForceQuery || strings.Contains(gateway, "#") {
+		return refusal
+	}
+	// Reuse the same HTTP(S) origin policy as normalize_gateway_url: trusted
+	// remote WSS or loopback-only WS, no credentials/path/query/fragment, and
+	// valid host/port. Empty query/fragment delimiters are also refused above.
+	if parsed.Scheme == "wss" {
+		parsed.Scheme = "https"
+	} else {
+		parsed.Scheme = "http"
+	}
+	if _, err := setuphelper.NormalizeOrigin(parsed.String(), true); err != nil {
+		return refusal
+	}
+	return nil
+}
+
 // NewDevelopmentCLI is the only constructor that admits the CLI-backed
 // development transport. The workflow handle is process-local and provides the
 // registration verifier used by readiness checks.
@@ -366,12 +438,30 @@ func newServer(cfg *config.Config, version, revision string, logger *slog.Logger
 	return newServerWithSession(cfg, version, revision, logger, nil, nil)
 }
 
+type startupPolicy uint8
+
+const (
+	foregroundStartup startupPolicy = iota
+	installedServiceStartup
+)
+
 func newServerWithSession(
 	cfg *config.Config,
 	version, revision string,
 	logger *slog.Logger,
 	owner *ManagedOwner,
 	authority managedTailscaleAuthority,
+) *Server {
+	return newServerWithStartup(cfg, version, revision, logger, owner, authority, foregroundStartup)
+}
+
+func newServerWithStartup(
+	cfg *config.Config,
+	version, revision string,
+	logger *slog.Logger,
+	owner *ManagedOwner,
+	authority managedTailscaleAuthority,
+	policy startupPolicy,
 ) *Server {
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
@@ -457,11 +547,19 @@ func newServerWithSession(
 		store, err := deviceauth.Open(filepath.Join(cfg.RuntimeDir, "device-auth"), storeOptions...)
 		if err != nil {
 			deviceStoreErr = fmt.Errorf("initialize device authentication: %w", err)
-		} else if err := armBootstrap(store, cfg, hostname); err != nil {
-			deviceStoreErr = fmt.Errorf("initialize device pairing: %w", err)
 		} else {
-			deviceStore = store
-			hub.SetE2EEAuthResolver(store)
+			// Installed startup may initialize an empty private store, but must
+			// leave every existing invitation and credential untouched. Explicit
+			// operator issuance still uses armBootstrapForControl below.
+			if policy == foregroundStartup {
+				if err := armBootstrap(store, cfg, hostname); err != nil {
+					deviceStoreErr = fmt.Errorf("initialize device pairing: %w", err)
+				}
+			}
+			if deviceStoreErr == nil {
+				deviceStore = store
+				hub.SetE2EEAuthResolver(store)
+			}
 		}
 	}
 

@@ -1,6 +1,7 @@
 package readiness
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,13 @@ func Verify(reader io.Reader, expected Expected) error {
 	if expected.Instance == "" {
 		return errors.New("expected relay instance is required")
 	}
-	decoder := json.NewDecoder(io.LimitReader(reader, 64*1024+1))
+	// Reject an over-limit body before decoding: a truncated valid prefix
+	// followed by whitespace must not masquerade as a complete response.
+	body, err := io.ReadAll(io.LimitReader(reader, 64*1024+1))
+	if err != nil || len(body) > 64*1024 {
+		return errors.New("invalid readiness response")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	value, err := uniqueValue(decoder, 0)
 	if err != nil {
 		return errors.New("invalid readiness response")
@@ -36,6 +43,54 @@ func Verify(reader io.Reader, expected Expected) error {
 		if !ok || actual == "" || (want != "" && actual != want) {
 			return fmt.Errorf("readiness %s does not match", key)
 		}
+	}
+	return nil
+}
+
+// VerifyGatewayHealth is a distinct installed-gateway acceptance check, not a
+// relaxation or extension of /readyz. It consumes only bounded input, performs
+// no queries or state changes, and never includes response data in errors.
+func VerifyGatewayHealth(reader io.Reader, expected Expected) error {
+	if expected.Instance == "" || expected.Version == "" || expected.Revision == "" || expected.WebHash == "" {
+		return errors.New("exact gateway relay identity is required")
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, 64*1024+1))
+	if err != nil || len(body) > 64*1024 {
+		return errors.New("invalid gateway health response")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	value, err := uniqueValue(decoder, 0)
+	if err != nil {
+		return errors.New("invalid gateway health response")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("invalid gateway health response")
+	}
+	response, ok := value.(map[string]any)
+	if !ok || response["status"] != "ok" || response["readiness"] != "ready" ||
+		response["transport"] != "gateway" || response["protocol"] != float64(protocol.Version) {
+		return errors.New("gateway relay is not ready")
+	}
+	inventory, _ := response["inventory"].(map[string]any)
+	if inventory["state"] != "ready" || inventory["stale"] != false {
+		return errors.New("gateway inventory is not ready")
+	}
+	for key, want := range map[string]string{
+		"instance":        expected.Instance,
+		"release_version": expected.Version,
+		"revision":        expected.Revision,
+		"bundle_hash":     expected.WebHash,
+		"bundle_version":  expected.Version,
+		"bundle_revision": expected.Revision,
+	} {
+		if response[key] != want {
+			return errors.New("gateway relay identity does not match")
+		}
+	}
+	gateway, _ := response["gateway"].(map[string]any)
+	relayID, _ := gateway["relay_id"].(string)
+	if gateway["enabled"] != true || gateway["registered"] != true || relayID == "" {
+		return errors.New("gateway registration is not verified")
 	}
 	return nil
 }

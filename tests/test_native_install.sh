@@ -1,14 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# No local execution, even synthetic: fail rather than silently skip the
+# required hosted public-entrypoint cases. Guard precedes temp files/builds.
+if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+    echo "native installation fixtures require disposable GitHub-hosted CI" >&2
+    exit 2
+fi
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-native-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 export NATIVE_HELPER="$WORK_DIR/helper"
-go build -o "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay"
+python3 - "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay" <<'PY'
+import subprocess, sys
+subprocess.run(["go", "build", "-o", sys.argv[1], sys.argv[2]], check=True, timeout=180)
+PY
+HOST_PATH="$PATH"
+native_fixture_install() {
+    python3 - "$1" <<'PY'
+import subprocess, sys
+result = subprocess.run(["/bin/bash", sys.argv[1]], stdin=subprocess.DEVNULL, timeout=30)
+raise SystemExit(result.returncode)
+PY
+}
 # plutil ships only with macOS. Elsewhere the launchd cases get a stand-in
 # that still rejects a missing or empty staged plist.
 HOST_PLUTIL="$(command -v plutil || true)"
 
+# Failure propagates into unchanged Makefile shell-check; Python also guards
+# before any subprocess activity and uses this already built strict helper.
+python3 - "$REPO_DIR/tests/test_service_transport_dispatch.py" <<'PY'
+import subprocess, sys
+subprocess.run([sys.executable, sys.argv[1]], check=True, timeout=300)
+PY
+
+# Separate guarded diagnostic-wrapper cases; failures propagate, never skip.
+python3 - "$REPO_DIR/tests/test_plugin_doctor.py" <<'PY'
+import subprocess, sys
+subprocess.run([sys.executable, sys.argv[1]], check=True, timeout=120)
+PY
+
+# Guarded navigation/header fixtures use only disposable actions/diagnostics.
+python3 - "$REPO_DIR/tests/test_setup_menu.py" <<'PY'
+import subprocess, sys
+subprocess.run([sys.executable, sys.argv[1]], check=True, timeout=180)
+PY
+
+for transport in cloudflare gateway; do
 for platform in systemd launchd; do
   for initial in active inactive fresh; do
     for failure in none write reload start readiness public rollback; do
@@ -21,8 +58,8 @@ for platform in systemd launchd; do
             *:none|*:rollback) ;;
             *) continue ;;
         esac
-        CASE="$WORK_DIR/$platform-$initial-$failure-$envstate home & space"
-        export HOME="$CASE" CASE FAILURE="$failure" INITIAL="$initial"
+        CASE="$WORK_DIR/$transport-$platform-$initial-$failure-$envstate home & space"
+        export HOME="$CASE" CASE FAILURE="$failure" INITIAL="$initial" FIXTURE_TRANSPORT="$transport"
         export XDG_STATE_HOME="$HOME/state"
         BIN="$HOME/.local/bin"
         mkdir -p "$BIN" "$HOME/config" "$HOME/releases/current/relay" "$HOME/releases/current/web" "$HOME/.config/systemd/user" "$HOME/Library/LaunchAgents" "$HOME/tmp"
@@ -41,6 +78,16 @@ for platform in systemd launchd; do
                 export CLOUDFLARED_CONFIG="$HOME/config/tunnel.yml"
                 ;;
         esac
+        if [ "$transport" = gateway ]; then
+            printf 'HERDR_RELAY_TRANSPORT=gateway\nHERDR_GATEWAY_URL=wss://gateway.example.test\n' >> "$HERDR_RELAY_ENV"
+            printf 'https://app.example.test\n' > "$HOME/config/phone-app-origin-configured"
+        fi
+        # Real copied native installers must normalize saved legacy raw keys
+        # on success, and restore their exact snapshot on transaction failure.
+        if [ -f "$HERDR_RELAY_ENV" ]; then
+            printf 'GH_TOKEN=synthetic-native-gh-canary\nGITHUB_TOKEN=synthetic-native-github-canary\n' >> "$HERDR_RELAY_ENV"
+        fi
+        # Retained Cloudflare bytes must survive gateway success and failure.
         printf 'hostname: relay.example.test\n' > "$HOME/config/tunnel.yml"
         printf '#!/bin/sh\nexit 0\n' > "$HOME/releases/current/relay/herdr-mobile-relay-service.sh"
         chmod 700 "$HOME/releases/current/relay/herdr-mobile-relay-service.sh"
@@ -52,7 +99,11 @@ for platform in systemd launchd; do
 case "$1" in
 version) printf '{"version":"version","revision":"revision"}\n' ;;
 # Shell JSON fields use the compiled strict decoder, as packaged releases do.
-json-field|verify-readiness) exec "$NATIVE_HELPER" "$@" ;;
+json-field|verify-readiness|verify-gateway-health|normalize-origin) exec "$NATIVE_HELPER" "$@" ;;
+verify-public)
+    printf '%s\n' "$*" >> "$CASE/app-check.log"
+    [ "$FAILURE" != public ]
+    ;;
 *) exit 1 ;;
 esac
 EOF
@@ -103,7 +154,12 @@ revision=revision
 instance=$(sed -n "s/^HERDR_RELAY_INSTANCE_ID=['\"]*\([^'\"]*\)['\"]*$/\1/p" "$HERDR_RELAY_ENV" 2>/dev/null | tail -1)
 [ "$FAILURE" != readiness ] || status=degraded
 case "$*" in *https://*) [ "$FAILURE" != public ] || revision=foreign ;; esac
-printf '{"status":"ready","inventory":{"state":"%s"},"instance":"%s","release_version":"version","revision":"%s","bundle_hash":"web","protocol":3}\n' "$status" "$instance" "$revision"
+case "$*" in
+*/healthz*)
+    printf '{"status":"ok","readiness":"ready","transport":"gateway","inventory":{"state":"%s","stale":false},"instance":"%s","release_version":"version","revision":"%s","bundle_hash":"web","bundle_version":"version","bundle_revision":"revision","protocol":3,"gateway":{"enabled":true,"registered":true,"relay_id":"fixture"}}\n' "$status" "$instance" "$revision"
+    ;;
+*) printf '{"status":"ready","inventory":{"state":"%s"},"instance":"%s","release_version":"version","revision":"%s","bundle_hash":"web","protocol":3}\n' "$status" "$instance" "$revision" ;;
+esac
 EOF
         cat > "$BIN/cp" <<'EOF'
 #!/bin/sh
@@ -112,7 +168,11 @@ if [ "$FAILURE" = write ]; then
 fi
 exec /bin/cp "$@"
 EOF
-        for command in cloudflared sleep systemd-analyze; do printf '#!/bin/sh\nexit 0\n' > "$BIN/$command"; done
+        for command in sleep systemd-analyze; do printf '#!/bin/sh\nexit 0\n' > "$BIN/$command"; done
+        printf '#!/bin/sh\n[ "$FIXTURE_TRANSPORT" = cloudflare ] || { touch "$CASE/cloudflare-called"; exit 99; }\n' > "$BIN/cloudflared"
+        for command in tailscale tailscaled herdr ssh scp sftp npx wrangler security sudo brew apt-get open; do
+            printf '#!/bin/sh\ntouch "$CASE/dangerous-tool-called"\nexit 99\n' > "$BIN/$command"
+        done
         if [ -z "$HOST_PLUTIL" ]; then
             printf '#!/bin/sh\n[ "$1" = -lint ] && [ -s "$2" ]\n' > "$BIN/plutil"
         fi
@@ -121,7 +181,7 @@ EOF
 if [ "$1" = -u ]; then printf '501\n'; else /usr/bin/id "$@"; fi
 EOF
         chmod 700 "$BIN/"* "$HOME/releases/current/herdr-mobile-relay"
-        export PATH="$BIN:$PATH"
+        export PATH="$BIN:$HOST_PATH"
         if [ "$initial" = active ]; then touch "$CASE/loaded" "$CASE/legacy-loaded"; fi
         if [ "$platform" = systemd ]; then
             definition="$HOME/.config/systemd/user/herdr-mobile-relay.service"
@@ -137,10 +197,19 @@ EOF
             printf 'legacy definition\n' > "$legacy"
         fi
         if [ -f "$HERDR_RELAY_ENV" ]; then cp "$HERDR_RELAY_ENV" "$CASE/env-before"; fi
-        if bash "$REPO_DIR/relay/$script" > "$CASE/output" 2>&1; then
+        cp -R "$REPO_DIR/relay/." "$HOME/releases/current/relay/"
+        if native_fixture_install "$HOME/releases/current/relay/$script" > "$CASE/output" 2>&1; then
             if [ "$failure" != none ]; then echo "$platform accepted $failure failure" >&2; exit 1; fi
             test ! -e "$legacy"
+            if grep -Eq '^(GH_TOKEN|GITHUB_TOKEN)=' "$HERDR_RELAY_ENV"; then
+                echo "$platform retained a legacy raw token key after successful installation" >&2
+                exit 1
+            fi
             test -n "$(sed -n 's/^HERDR_RELAY_INSTANCE_ID=//p' "$HERDR_RELAY_ENV")"
+            if [ "$transport" = gateway ]; then
+                grep -F 'verify-public --web-root' "$CASE/app-check.log" >/dev/null
+                grep -Fx 'https://app.example.test' "$HOME/config/phone-app-origin-configured" >/dev/null
+            fi
         else
             if [ "$failure" = none ]; then cat "$CASE/output" >&2; exit 1; fi
             if [ "$initial" = fresh ]; then
@@ -160,8 +229,16 @@ EOF
                 test -n "$(find "$HOME/state" -name herdr-native-recovery.\* -type d -print -quit)"
             fi
         fi
+        test ! -e "$CASE/cloudflare-called"
+        test ! -e "$CASE/dangerous-tool-called"
+        if grep -Eq 'synthetic-native-(gh|github)-canary' "$CASE/output"; then
+            echo "$platform exposed a credential canary in installer output" >&2
+            exit 1
+        fi
+        grep -Fx 'hostname: relay.example.test' "$HOME/config/tunnel.yml" >/dev/null
      done
     done
   done
+done
 done
 printf 'native installation transaction fixtures passed\n'

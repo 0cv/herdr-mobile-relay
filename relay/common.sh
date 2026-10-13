@@ -1240,6 +1240,114 @@ relay_transport_mode() {
     esac
 }
 
+# Installed entrypoints must not migrate/write configuration before their
+# foreground/CLI/selection refusals. An unmigrated legacy plugin environment
+# needs an explicit file choice, never silent Cloudflare inference.
+relay_service_env_file() {
+    local script_dir="$1" env_file
+    env_file="$(relay_env_file_read_only "$script_dir")" || return 1
+    if [ -z "${HERDR_RELAY_ENV:-}" ] && [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ] &&
+        [ ! -f "$env_file" ] && [ -f "$script_dir/.env" ]; then
+        echo "✗ Legacy relay configuration needs an explicit HERDR_RELAY_ENV selection before service installation/start; no files were migrated." >&2
+        return 1
+    fi
+    printf '%s\n' "$env_file"
+}
+
+# Installed entrypoints call this only after loading the selected environment.
+# Unlike chooser overrides, dispatch must agree with config.resolveTransport:
+# trim edges (not embedded whitespace), infer legacy gateway, reject conflicts.
+relay_service_transport_mode() {
+    local mode gateways
+    mode="$(printf '%s' "${HERDR_RELAY_TRANSPORT:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+    gateways="$(gateway_urls)"
+    if [ -z "$mode" ]; then
+        if [ -n "$gateways" ]; then mode=gateway; else mode=cloudflare; fi
+    fi
+    case "$mode" in
+        gateway)
+            [ -n "$gateways" ] || { echo "✗ Gateway transport requires HERDR_GATEWAY_URL." >&2; return 1; }
+            ;;
+        cloudflare|tailscale|tailscale-cli|tailscale-external)
+            [ -z "$gateways" ] || { echo "✗ HERDR_GATEWAY_URL conflicts with the selected transport." >&2; return 1; }
+            ;;
+        *) echo "✗ Invalid HERDR_RELAY_TRANSPORT selection." >&2; return 1 ;;
+    esac
+    [ "${HERDR_TAILSCALE_REQUEST:-}" != 1 ] || mode=tailscale
+    printf '%s\n' "$mode"
+}
+
+# Validate the saved list without choosing/publishing another transport or
+# rewriting it. Runtime requires ws/wss; the stricter packaged origin parser
+# additionally refuses credentials and non-base URLs. Empty entries match the
+# legacy runtime list parser; embedded whitespace is never silently removed.
+validate_service_gateway_urls() (
+    local raw="${HERDR_GATEWAY_URL:-}" entry count=0
+    set -f
+    IFS=','
+    # shellcheck disable=SC2086
+    set -- $raw
+    for entry in "$@"; do
+        entry="$(printf '%s' "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ -n "$entry" ] || continue
+        case "$entry" in ws://*|wss://*) ;; *) return 1 ;; esac
+        normalize_gateway_url "$entry" >/dev/null 2>&1 || return 1
+        count=$((count + 1))
+    done
+    [ "$count" -gt 0 ]
+)
+
+# Noninteractive native install prerequisite: an already selected HTTPS app,
+# never discovery, publication, prompts or recording a changed origin.
+gateway_install_phone_app_origin() {
+    local env_file="$1" origin
+    validate_service_gateway_urls || {
+        echo "✗ Configure a valid ws:// or wss:// base gateway list in HERDR_GATEWAY_URL before installing." >&2
+        return 1
+    }
+    origin="$(phone_app_base_url "" "$env_file" 2>/dev/null)" || origin=""
+    case "$origin" in
+        https://*) printf '%s\n' "$origin" ;;
+        *)
+            echo "✗ Select an installed HTTPS Herdr phone app first (HERDR_PHONE_APP_URL or saved app origin)." >&2
+            echo "  A gateway carries relay traffic only; the installer does not choose or publish an app." >&2
+            return 1
+            ;;
+    esac
+}
+
+# /readyz stays transport-neutral. This distinct /healthz gate binds actual
+# registration to the exact already verified local relay/release/bundle.
+verify_gateway_install_readiness() {
+    local port="$1" health="$2" origin="$3" binary attempt observed version revision web_hash instance
+    binary="$(relay_binary)" || return 1
+    instance="$(json_string_field "$health" instance "$binary")"
+    version="$(json_string_field "$health" release_version "$binary")"
+    revision="$(json_string_field "$health" revision "$binary")"
+    web_hash="$(json_string_field "$health" bundle_hash "$binary")"
+    [ -n "$instance" ] && [ -n "$version" ] && [ -n "$revision" ] && [ -n "$web_hash" ] || return 1
+    # Pin the extracted packaged web root, not HERDR_WEB_ROOT. The optional
+    # hash gate ties the full trusted app comparison to this exact /readyz
+    # identity, including a different build of the same release/revision.
+    if ! "$binary" verify-public --web-root "$(dirname "$binary")/web" --origin "$origin" \
+        --version "$version" --revision "$revision" --web-hash "$web_hash" >/dev/null 2>&1; then
+        echo "✗ The selected HTTPS phone app must serve the exact trusted packaged bundle; restoring the previous installation." >&2
+        return 1
+    fi
+    for ((attempt = 1; attempt <= 15; attempt++)); do
+        if observed="$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 --max-filesize 65536 \
+            "http://127.0.0.1:$port/healthz" 2>/dev/null)" &&
+            printf '%s\n' "$observed" | "$binary" verify-gateway-health \
+                "$instance" "$version" "$revision" "$web_hash" >/dev/null 2>&1; then
+            echo "Gateway registration and exact trusted phone-app bundle verified; phone reachability remains unproved."
+            return 0
+        fi
+        if [ "$attempt" -lt 15 ]; then sleep 1; fi
+    done
+    echo "✗ The selected relay did not report verified gateway registration with usable inventory; restoring the previous installation." >&2
+    return 1
+}
+
 clear_tailscale_selection() {
     local env_file="$1"
 
@@ -1612,9 +1720,11 @@ ensure_relay_env() {
         append_env_default "$env_file" CLOUDFLARED_CONFIG "$cloudflared_config"
     fi
     persist_github_token "$env_file" "$release_token"
-    # Migrate older installs that exposed the token to the complete service
-    # process tree. Only the credential-file path remains in relay.env.
+    # Drop both legacy raw keys, including saved values whose callers already
+    # scrubbed the in-memory environment. Loading this file again must expose
+    # only the updater's private credential-file pointer, never a raw token.
     remove_env_value_atomic "$env_file" GH_TOKEN
+    remove_env_value_atomic "$env_file" GITHUB_TOKEN
 }
 
 load_relay_env() {

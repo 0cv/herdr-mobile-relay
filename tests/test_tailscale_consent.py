@@ -2,7 +2,8 @@
 
 Run only through S4/run-checks.sh. The environment guard prevents accidental
 execution; bwrap, not that guard, supplies filesystem/network/PID isolation.
-Every product entrypoint is an exact copy, including the shared env loader.
+Every product entrypoint is an exact copy. Direct foreground/chooser paths
+retain the shared env loader; menu diagnostics must not use it.
 Retained /work fixtures contain synthetic data and per-invocation traces.
 """
 import errno
@@ -24,11 +25,12 @@ if os.environ.get("HERDR_S4_SANDBOX") != "1":
 SOURCE = Path(os.environ["HERDR_S4_SOURCE_ROOT"])
 if str(SOURCE) not in ("/src", "/before"):
     raise SystemExit("Expected the wrapper's /src or /before source mount")
-SCRIPTS = ("common.sh", "tailscale.sh", "plugin-setup-menu.sh", "plugin-choose-transport.sh")
+SCRIPTS = ("common.sh", "tailscale.sh", "plugin-setup-menu.sh", "plugin-choose-transport.sh", "plugin-status.sh")
 PROMPT = b"Configure this Tailscale Serve session? [y/N] "
 
 # All dependency adapters are inert, including absolute sibling entrypoints.
-# Exact read-only menu/service probes are distinguished from forbidden actions.
+# Direct foreground preflight probes are distinguished from forbidden actions;
+# the menu can call only the inert finite diagnostic below, never those probes.
 ADAPTER = r'''#!/usr/bin/python3
 import json, os, pathlib, sys
 name = pathlib.Path(sys.argv[0]).name
@@ -47,6 +49,11 @@ if name == "systemctl" and args in (["--user", "is-active", "--quiet", "herdr-mo
 if name == "curl" and args in (["-fsS", "--max-time", "2", "http://127.0.0.1:8375/healthz"], ["-fsS", "--max-time", "3", "https://app.example.invalid/version.json"]):
     record("probe")
     sys.exit(22)
+if name == "fake-relay" and len(args) == 3 and args[0] == "status" and args[1] == "--config":
+    # Inert rendering only; this is NOT Go health or config-reader evidence.
+    record("diagnostic")
+    print("selected_transport=unknown status=unknown exit=3")
+    sys.exit(3)
 if name == "fake-relay" and len(args) == 3 and args[0] == "json-field":
     kind, key = args[1:]
     try:
@@ -124,7 +131,7 @@ class Fixture:
         for p in (self.scripts, self.bin, self.logs, self.home):
             p.mkdir()
         # No real sibling can be reached: every repository shell sibling is a
-        # fail-on-use adapter, then EXACTLY the four product files are copied.
+        # fail-on-use adapter, then EXACTLY the five product files are copied.
         for p in Path("/src/relay").glob("*.sh"):
             self.executable(self.scripts / p.name, ADAPTER)
         for name in SCRIPTS:
@@ -352,11 +359,15 @@ class ConsentTests(unittest.TestCase):
         f.reset_calls()
         self.refused(f, f.run(extra={"HERDR_TAILSCALE_YES": "1"}))
 
-    def test_menu_inherited_yes_refused(self):
+    def test_menu_removed_managed_alias_never_inspects_or_consents(self):
         f = Fixture("HERDR_TAILSCALE_YES=1\n")
-        self.refused(f, f.run("plugin-setup-menu.sh", data="t\nq\n",
-                             extra={"HERDR_TAILSCALE_YES": "1"}), menu=True)
-        self.assertTrue([c for c in f.calls() if c[1] == "curl" and c[0] == "probe"])
+        code, text = f.run("plugin-setup-menu.sh", data="t\nq\n",
+                           extra={"HERDR_TAILSCALE_YES": "1"})
+        self.assertEqual(code, 0, text)
+        self.assertIn("Invalid choice", text)
+        self.assertNotIn("Managed Tailscale Serve (foreground)", text)
+        self.assertEqual([c[0] for c in f.calls()], ["diagnostic"], f.calls())
+        self.preserved(f)
 
     def test_chooser_inherited_yes_refused(self):
         f = Fixture("HERDR_TAILSCALE_YES=1\n")
@@ -366,14 +377,26 @@ class ConsentTests(unittest.TestCase):
     def test_preconsent_no_migration(self):
         for layout in ("legacy-absent", "legacy-existing", "existing"):
             for entry, args, data in (("tailscale.sh", (), ""),
-                                      ("plugin-choose-transport.sh", ("tailscale",), ""),
-                                      ("plugin-setup-menu.sh", (), "t\nq\n")):
+                                      ("plugin-choose-transport.sh", ("tailscale",), "")):
                 with self.subTest(layout=layout, entry=entry):
                     f = Fixture(layout=layout)
                     configured = layout == "existing"
                     self.refused(f, f.run(entry, args, data),
                                  reason="Explicit Tailscale Serve consent is required" if configured else "Relay credentials are not configured; run setup before Tailscale Serve",
-                                 inspected=configured, menu=entry == "plugin-setup-menu.sh")
+                                 inspected=configured)
+
+    def test_menu_navigation_no_migration_for_all_layouts(self):
+        for layout in ("override", "legacy-absent", "legacy-existing", "existing"):
+            with self.subTest(layout=layout):
+                f = Fixture(layout=layout)
+                code, text = f.run("plugin-setup-menu.sh", data="t\nb\n9\n3\n1\n3\nb\nq\n")
+                self.assertEqual(code, 0, text)
+                self.assertIn("Always on unavailable", text)
+                self.assertIn("Route removal unavailable", text)
+                self.assertTrue(f.calls(), "diagnostic adapter was not reached")
+                self.assertTrue(all(c[0] == "diagnostic" for c in f.calls()), f.calls())
+                self.assertFalse([c for c in f.calls() if c[0] in ("inspect", "check-port", "consent-passed", "probe")])
+                self.preserved(f)
 
     def test_unknown_arguments_refused(self):
         for args in (("--unknown",), ("extra",), ("--confirm-serve=false",),

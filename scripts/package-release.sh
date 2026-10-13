@@ -79,6 +79,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         install-service.sh \
         install-systemd-user-service.sh \
         plugin-on-event.sh \
+        plugin-status.sh \
         pi-commands.sh \
         service.sh \
         setup-link.sh \

@@ -474,6 +474,9 @@ esac
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 EXPECTED_TOKEN="test-private-token"
+# Seed both legacy file keys; ambient credentials still have their existing
+# precedence and must be persisted only through the private updater pointer.
+printf 'GH_TOKEN=legacy-gh-canary\nGITHUB_TOKEN=legacy-github-canary\n' > "$ENV_FILE"
 GH_TOKEN="$EXPECTED_TOKEN"
 GITHUB_TOKEN="$EXPECTED_TOKEN"
 export GH_TOKEN GITHUB_TOKEN
@@ -484,10 +487,16 @@ if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
     echo "ensure_relay_env left the raw release token in the caller's environment" >&2
     exit 1
 fi
-if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
-    echo "relay.env exposed GH_TOKEN" >&2
+if grep -Eq '^(GH_TOKEN|GITHUB_TOKEN)=' "$ENV_FILE"; then
+    echo "relay.env exposed a legacy raw GitHub token key" >&2
     exit 1
 fi
+# Re-loading the normalized file must not re-export either saved raw key to
+# unrelated children (the configure-app-deploy call ordering).
+(
+    load_relay_env "$ENV_FILE"
+    test "$(/bin/sh -c 'printf "%s|%s" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}"')" = '|'
+)
 TOKEN_FILE="$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)"
 if [ "$TOKEN_FILE" != "$WORK_DIR/config/github-token" ]; then
     echo "ensure_relay_env stored an unexpected GitHub token path" >&2
@@ -1460,8 +1469,8 @@ test "$(gateway_selection_choice latency '')" = "latency"
 test "$(gateway_selection_choice latency 2)" = "ordered"
 test "$(gateway_selection_choice ordered nonsense)" = "ordered"
 # Without a terminal the action's own default stands. A saved policy in the
-# environment must not answer for the operator: the setup menu loads relay.env
-# before running an action, so honouring it here would let an old own-gateway
+# environment must not answer for the operator: callers may already export
+# a saved relay.env policy, so honouring it here would let an old own-gateway
 # `ordered` silently follow them into a freshly chosen community list.
 test "$(prompt_gateway_selection ordered < /dev/null)" = "ordered"
 test "$(HERDR_GATEWAY_SELECTION=ordered prompt_gateway_selection latency < /dev/null)" = "latency"
@@ -1536,8 +1545,8 @@ printf 'started\n' > "$CHOOSER_START_MARKER"
 EOF
 chmod 700 "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh"
 export CHOOSER_START_MARKER
-# The setup menu loads relay.env before running an action, so a policy left by
-# an earlier own-gateway setup is already exported here. Choosing Community has
+# A caller may export a policy left by an earlier own-gateway setup. The menu
+# no longer sources relay.env, but other direct callers can. Choosing Community has
 # to reset it: these candidates are interchangeable, and inheriting `ordered`
 # would silently pin the pool to whichever entry happens to be listed first.
 CHOOSER_OUTPUT="$(
@@ -1747,117 +1756,88 @@ test "$(printf '%s\n' "$STABLE_SWITCH_OUTPUT" |
     grep -c 'Herdr Mobile Relay stable tunnel setup')" -eq 1 ||
     { echo "stable tunnel action printed its heading more than once" >&2; exit 1; }
 
-# The setup menu opens after every install, including upgrades, so it has to
-# report what exists before offering to change it: a stale phone app is exactly
-# the thing a person cannot otherwise see.
+# Navigation/header correspondence only; inert diagnostics cannot qualify Go
+# health. The guarded native menu fixture additionally uses NATIVE_HELPER.
 MENU_BIN_DIR="$WORK_DIR/menu-bin"
 MENU_ENV="$WORK_DIR/config/menu.env"
-MENU_ROOT="$WORK_DIR/menu-release"
-mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current"
-printf '{\n  "version": "9.9.9"\n}\n' > "$MENU_ROOT/current/release-manifest.json"
-printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\nHERDR_APP_DEPLOY_ORIGIN='https://app.example.test'\n" > "$MENU_ENV"
-printf "HERDR_GATEWAY_DEPLOY_HOST='gw-owned.example.test'\n" \
-    > "$WORK_DIR/config/gateway-deploy"
-printf 'https://relay.example.test\n' > "$WORK_DIR/config/phone-app-origin"
+MENU_SCRIPT_DIR="$WORK_DIR/menu-scripts"
+MENU_TOOL_MARKER="$WORK_DIR/menu-tool-called"
+MENU_SOURCE_MARKER="$WORK_DIR/menu-config-sourced"
+mkdir -p "$MENU_BIN_DIR" "$MENU_SCRIPT_DIR"
+cp "$REPO_DIR/relay/plugin-setup-menu.sh" "$REPO_DIR/relay/plugin-status.sh" "$MENU_SCRIPT_DIR/"
+printf 'K=$(touch "%s")\nHERDR_GATEWAY_URL=wss://private-menu-canary\n' "$MENU_SOURCE_MARKER" > "$MENU_ENV"
+cat > "$MENU_BIN_DIR/diagnostic" <<'EOF'
+#!/bin/sh
+case "$1" in
+    status) printf 'selected_transport=unknown status=unknown exit=3 local_relay=unknown\n' ;;
+    doctor) printf 'Doctor fixture: incomplete (exit 3)\n' ;;
+    *) exit 91 ;;
+esac
+exit 3
+EOF
 cat > "$MENU_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
-case "$*" in
-    *127.0.0.1*healthz*) printf '{"status":"ok","release_version":"9.9.9","gateway_url":"wss://gw-b.example.test","gateway_version":"9.9.8","gateway_available_version":"9.9.10"}\n' ;;
-    *app.example.test/version.json*) printf '{"version":"9.9.8","assets":1}\n' ;;
-    *gw-owned.example.test/healthz*) printf '{"ok":true,"version":"9.9.8","revision":"abc123"}\n' ;;
-    *) exit 22 ;;
-esac
+printf called > "$MENU_TOOL_MARKER"
+exit 91
 EOF
-chmod 700 "$MENU_BIN_DIR/curl"
-# Entering an action and finishing it has to come back here, not end the pane:
-# 9 shows the status, then the menu is redrawn and q leaves. Without a terminal
-# the return prompt is skipped, so the input carries no extra newline.
-# shellcheck disable=SC2031 # Pass this fixture-only PATH to the child command.
+chmod 700 "$MENU_BIN_DIR/diagnostic" "$MENU_BIN_DIR/curl"
+export MENU_TOOL_MARKER
 MENU_OUTPUT="$(
-    printf '9\nq\n' |
-        PATH="$MENU_BIN_DIR:$PATH" \
-        HERDR_RELAY_BIN="$NORMALIZE_BIN" \
-        HERDR_RELEASE_ROOT="$MENU_ROOT" \
-        HERDR_RELAY_ENV="$MENU_ENV" \
-        bash "$REPO_DIR/relay/plugin-setup-menu.sh"
+    printf 't\nb\n9\n6\nq\n' |
+        PATH="$MENU_BIN_DIR:$PATH" HERDR_RELAY_BIN="$MENU_BIN_DIR/diagnostic" \
+        HERDR_RELAY_ENV="$MENU_ENV" bash "$MENU_SCRIPT_DIR/plugin-setup-menu.sh"
 )"
 case "$MENU_OUTPUT" in
-    *"Herdr Mobile Relay status"*) ;;
-    *) echo "setup menu did not open the status action" >&2; exit 1 ;;
+    *"Current setup (selection, not readiness): selected_transport=unknown status=unknown exit=3"*"Doctor fixture: incomplete (exit 3)"*) ;;
+    *) echo "setup menu did not use packaged diagnostics/header" >&2; exit 1 ;;
 esac
-test "$(printf '%s\n' "$MENU_OUTPUT" | grep -c 'Herdr Mobile Relay Setup')" -ge 2 ||
-    { echo "setup menu did not come back after an action" >&2; exit 1; }
+test "$(printf '%s\n' "$MENU_OUTPUT" | grep -c 'Herdr Mobile Relay Setup')" -eq 2 ||
+    { echo "invalid aliases rerendered/probed or doctor did not return" >&2; exit 1; }
 case "$MENU_OUTPUT" in
-    *"Relay:      9.9.9 running"*) ;;
-    *) echo "setup menu did not report the running release" >&2; exit 1 ;;
-esac
-# The status line names the rule that picked this gateway, so "why that one"
-# is answerable without opening relay.env.
-case "$MENU_OUTPUT" in
-    *"gateway wss://gw-b.example.test runs 9.9.8; latest available 9.9.10 (+1 fallback, first listed wins)"*) ;;
-    *) echo "setup menu did not report the active gateway, version, and selection rule" >&2; exit 1 ;;
+    *"1. Cloudflare"*"2. WebRTC Gateway"*"3. Tailscale"*"4. Show setup QR"*"5. Publish the phone app"*"6. Doctor"*"Exit, change nothing"*) ;;
+    *) echo "setup menu navigation labels are obsolete" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
-    *"serves 9.9.8, this relay ships 9.9.9"*) ;;
-    *) echo "setup menu did not report the stale phone app" >&2; exit 1 ;;
+    *private-menu-canary*|*"Managed Tailscale Serve (foreground)"*|*"Show Full Status"*) echo "menu retained raw/removed presentation" >&2; exit 1 ;;
 esac
-case "$MENU_OUTPUT" in
-    *"Own gateway: gw-owned.example.test runs 9.9.8; plugin offers 9.9.10 - run herdr plugin install 0cv/herdr-mobile-relay, then redeploy with 3"*) ;;
-    *) echo "setup menu did not report how to update the stale self-hosted gateway" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Exit, change nothing"*) ;;
-    *) echo "setup menu did not offer a way out" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Choose Phone App and Show QR"*) ;;
-    *) echo "setup menu did not expose the phone app origin chooser" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Temporary Cloudflare Tunnel"*"Community WebRTC Gateway"*"Your Own WebRTC Gateway"*"Stable Tunnel"*) ;;
-    *) echo "setup menu did not flatten every connection action" >&2; exit 1 ;;
-esac
-case "$MENU_OUTPUT" in
-    *"Choose Connection Method"*)
-        echo "setup menu retained the redundant connection submenu" >&2
-        exit 1
-        ;;
-esac
+test ! -e "$MENU_TOOL_MARKER"
+test ! -e "$MENU_SOURCE_MARKER"
 
-# The menu process itself is long-lived. After a transport action removes a
-# file-backed gateway, its inherited copy must be cleared before the next
-# action; re-sourcing a file cannot unset a variable that is no longer present.
+# The parent never imports file-backed routing. Clearing it in an explicitly
+# selected inert child cannot leave a stale exported value for the next action.
 REFRESH_MENU_DIR="$WORK_DIR/refresh-menu-scripts"
 REFRESH_MENU_ENV="$WORK_DIR/config/refresh-menu.env"
 REFRESH_MENU_MARKER="$WORK_DIR/refresh-menu-state"
 mkdir -p "$REFRESH_MENU_DIR"
-cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-setup-menu.sh" \
-    "$REFRESH_MENU_DIR/"
-printf "HERDR_GATEWAY_URL='wss://stale.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" \
-    > "$REFRESH_MENU_ENV"
+cp "$REPO_DIR/relay/plugin-setup-menu.sh" "$REFRESH_MENU_DIR/"
+printf "HERDR_GATEWAY_URL='wss://stale.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" > "$REFRESH_MENU_ENV"
 cat > "$REFRESH_MENU_DIR/plugin-choose-transport.sh" <<'EOF'
 #!/bin/sh
+[ "$1" = temporary ] || exit 91
+[ "${HERDR_GATEWAY_URL+x}" != x ] || exit 92
 : > "$HERDR_RELAY_ENV"
 EOF
 cat > "$REFRESH_MENU_DIR/plugin-status.sh" <<'EOF'
 #!/bin/sh
 if [ "${HERDR_GATEWAY_URL+x}" = x ]; then
-    printf 'stale=%s\n' "$HERDR_GATEWAY_URL" > "$REFRESH_MENU_MARKER"
-else
-    printf 'unset\n' > "$REFRESH_MENU_MARKER"
+    printf stale > "$REFRESH_MENU_MARKER"
+    exit 92
 fi
+printf 'unset\n' > "$REFRESH_MENU_MARKER"
+printf 'selected_transport=unknown status=unknown exit=3\n'
+exit 3
 EOF
-chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" \
-    "$REFRESH_MENU_DIR/plugin-status.sh"
+chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" "$REFRESH_MENU_DIR/plugin-status.sh"
 export REFRESH_MENU_MARKER
-printf '1\n9\nq\n' |
-    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
-    bash "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
-test "$(cat "$REFRESH_MENU_MARKER")" = "unset"
+(
+    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION HERDR_RELAY_TRANSPORT
+    printf '1\n1\nb\n6\nq\n' | HERDR_RELAY_ENV="$REFRESH_MENU_ENV" bash "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
+)
+test "$(cat "$REFRESH_MENU_MARKER")" = unset
+test ! -s "$REFRESH_MENU_ENV"
 
-# A setup pane can outlive an in-place plugin update. Replacing its script
-# directory leaves the shell in a deleted cwd; the next action must first enter
-# the newly installed directory rather than leaking getcwd/chdir failures.
+# Preserve the deleted-cwd regression, using new Doctor numbering. A header is
+# NOT the selected action: the marker must be written only by the doctor call.
 STALE_MENU_DIR="$WORK_DIR/stale-menu-scripts"
 STALE_MENU_OLD="$WORK_DIR/stale-menu-old"
 STALE_MENU_FIFO="$WORK_DIR/stale-menu-input"
@@ -1865,27 +1845,21 @@ STALE_MENU_OUTPUT="$WORK_DIR/stale-menu-output"
 STALE_MENU_MARKER="$WORK_DIR/stale-menu-action"
 export STALE_MENU_MARKER
 mkdir -p "$STALE_MENU_DIR"
-cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-setup-menu.sh" \
-    "$STALE_MENU_DIR/"
+cp "$REPO_DIR/relay/plugin-setup-menu.sh" "$STALE_MENU_DIR/"
 mkfifo "$STALE_MENU_FIFO"
 exec 7<> "$STALE_MENU_FIFO"
 (
-    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$MENU_ENV" \
-        bash "$STALE_MENU_DIR/plugin-setup-menu.sh" <&7 \
-        > "$STALE_MENU_OUTPUT" 2>&1
+    bash "$STALE_MENU_DIR/plugin-setup-menu.sh" <&7 > "$STALE_MENU_OUTPUT" 2>&1
 ) &
 STALE_MENU_PID=$!
 STALE_MENU_RENDERED=false
 for _attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if grep -q "Exit, change nothing" "$STALE_MENU_OUTPUT" 2>/dev/null; then
-        STALE_MENU_RENDERED=true
-        break
-    fi
+    if grep -q 'Exit, change nothing' "$STALE_MENU_OUTPUT" 2>/dev/null; then STALE_MENU_RENDERED=true; break; fi
     sleep 0.1
 done
 if [ "$STALE_MENU_RENDERED" != true ]; then
     printf 'q\n' >&7
-    wait "$STALE_MENU_PID" || true
+    if wait "$STALE_MENU_PID"; then :; fi
     echo "setup menu did not render before cwd replacement" >&2
     exit 1
 fi
@@ -1894,10 +1868,12 @@ rm -rf "$STALE_MENU_OLD"
 mkdir -p "$STALE_MENU_DIR"
 cat > "$STALE_MENU_DIR/plugin-status.sh" <<'EOF'
 #!/bin/sh
-printf 'action ran\n' > "$STALE_MENU_MARKER"
+if [ "$#" -eq 0 ]; then printf 'action ran\n' > "$STALE_MENU_MARKER"; fi
+printf 'selected_transport=unknown status=unknown exit=3\n'
+exit 3
 EOF
 chmod 700 "$STALE_MENU_DIR/plugin-status.sh"
-printf '9\nq\n' >&7
+printf '6\nq\n' >&7
 wait "$STALE_MENU_PID"
 exec 7>&-
 test -f "$STALE_MENU_MARKER"
@@ -2182,5 +2158,28 @@ case "$(print_setup_link_arming 1)" in
     *"relay is not running here"*) ;;
     *) echo "the not-running hint is missing" >&2; exit 1 ;;
 esac
+
+# Installed dispatch must match runtime resolution, not chooser overrides.
+(
+    unset HERDR_RELAY_TRANSPORT HERDR_GATEWAY_URL HERDR_TAILSCALE_REQUEST HERDR_RELAY_ENV
+    test "$(relay_service_transport_mode)" = cloudflare
+    export HERDR_GATEWAY_URL=wss://gateway.example.test
+    test "$(relay_service_transport_mode)" = gateway
+    export HERDR_RELAY_TRANSPORT=' GATEWAY '
+    test "$(relay_service_transport_mode)" = gateway
+    export HERDR_RELAY_TRANSPORT=cloudflare
+    if relay_service_transport_mode >/dev/null 2>&1; then
+        echo "installed dispatch accepted a Cloudflare/gateway conflict" >&2; exit 1
+    fi
+    unset HERDR_GATEWAY_URL
+    for mode in gateway invalid 'cloud flare'; do
+        export HERDR_RELAY_TRANSPORT="$mode"
+        if relay_service_transport_mode >/dev/null 2>&1; then
+            echo "installed dispatch accepted an invalid selection" >&2; exit 1
+        fi
+    done
+    export HERDR_RELAY_TRANSPORT=tailscale-cli HERDR_TAILSCALE_REQUEST=1
+    test "$(relay_service_transport_mode)" = tailscale
+)
 
 echo "common shell tests passed"

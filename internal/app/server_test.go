@@ -2,7 +2,12 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -2747,6 +2753,436 @@ func TestReadyzNotReady(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["status"] != "unavailable" {
 		t.Errorf("status = %v, want unavailable", resp["status"])
+	}
+}
+
+// All installed-startup cases use real disposable authentication stores. No
+// real service, gateway connection or Herdr process is started by construction.
+func installedConfigForTest(t *testing.T, mode string) *config.Config {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	cfg := &config.Config{
+		Host:         "127.0.0.1",
+		Port:         8375,
+		PluginPort:   8376,
+		Token:        strings.Repeat("k", 32),
+		InstanceID:   "installed-fixture",
+		Transport:    mode,
+		RuntimeDir:   filepath.Join(root, "runtime"),
+		CacheDir:     filepath.Join(root, "cache"),
+		ConfigHome:   filepath.Join(root, "config"),
+		DataHome:     filepath.Join(root, "data"),
+		ReleaseRoot:  filepath.Join(root, "release"),
+		HerdrBin:     filepath.Join(root, "absent-herdr"),
+		PollInterval: 2,
+	}
+	if mode == config.TransportGateway {
+		cfg.GatewayURL = "wss://gateway.example.test"
+		cfg.GatewayURLs = []string{cfg.GatewayURL}
+	}
+	return cfg
+}
+
+func installedServerForTest(t *testing.T, cfg *config.Config) *Server {
+	t.Helper()
+	server, err := NewInstalledService(cfg, "fixture-version", "fixture-revision", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.hub.Shutdown(context.Background()) })
+	if server.deviceStore() == nil || server.bootstrapGate != nil || server.initErr != nil {
+		t.Fatal("installed server did not attach the ordinary authenticated store")
+	}
+	return server
+}
+
+func installedAuthBytes(t *testing.T, cfg *config.Config) []byte {
+	t.Helper()
+	path := filepath.Join(cfg.RuntimeDir, "device-auth", "devices.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal("fixture authentication file is not private")
+	}
+	return data
+}
+
+func enrollInstalledFixture(t *testing.T, store *deviceauth.Store, role deviceauth.Role) transport.E2EEAuthResult {
+	t.Helper()
+	invite, err := store.CreateInvitation(string(role), role, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: invite.InvitationID, Version: invite.Version, Locale: "en",
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthCredential, ID: result.Identity.CredentialID,
+		Version: result.Identity.CredentialVersion, Locale: "en",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestInstalledStartupPreservesAuthenticationState(t *testing.T) {
+	for _, mode := range []string{config.TransportGateway, config.TransportCloudflare} {
+		for _, state := range []string{"fresh", "expired-bootstrap", "expired-ordinary", "live-bootstrap", "live-ordinary", "pending", "consumed", "enrolled-live"} {
+			t.Run(mode+"/"+state, func(t *testing.T) {
+				cfg := installedConfigForTest(t, mode)
+				var originals []transport.E2EEAuthResult
+				if state != "fresh" {
+					// Deterministically expired or far-future invitation records;
+					// constructor reopens with its ordinary clock, never a test gate.
+					now := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+					if strings.HasPrefix(state, "expired") {
+						now = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+					}
+					store, err := deviceauth.Open(filepath.Join(cfg.RuntimeDir, "device-auth"), deviceauth.WithClock(func() time.Time { return now }))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if state == "consumed" || state == "enrolled-live" {
+						for _, role := range []deviceauth.Role{deviceauth.RoleController, deviceauth.RoleReader} {
+							originals = append(originals, enrollInstalledFixture(t, store, role))
+						}
+					}
+					if state != "consumed" {
+						if strings.HasSuffix(state, "ordinary") {
+							if _, err := store.CreateInvitation("reader", deviceauth.RoleReader, "en"); err != nil {
+								t.Fatal(err)
+							}
+						} else if err := store.ArmBootstrapInvitation([]byte(cfg.Token), "fixture", "en"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if state == "pending" {
+						if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+							Kind: transport.E2EEAuthInvitation, ID: "bootstrap", Version: 1, Locale: "en",
+						}, true); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				var before []byte
+				if state != "fresh" {
+					before = installedAuthBytes(t, cfg)
+				}
+				for restart := 0; restart < 3; restart++ {
+					server := installedServerForTest(t, cfg)
+					after := installedAuthBytes(t, cfg)
+					if before == nil {
+						var disk struct {
+							Invitation  json.RawMessage        `json:"invitation"`
+							Credentials []deviceauth.Credential `json:"credentials"`
+						}
+						if err := json.Unmarshal(after, &disk); err != nil {
+							t.Fatal(err)
+						}
+						if len(disk.Invitation) != 0 || len(disk.Credentials) != 0 || server.deviceStore().BootstrapStatus().Armed {
+							t.Fatal("fresh installed startup minted an invitation/credential")
+						}
+						before = after
+					}
+					if !bytes.Equal(before, after) {
+						t.Fatal("installed startup/restart changed persisted invitation/auth state")
+					}
+					for _, original := range originals {
+						id := original.Identity
+						credential, ok := server.deviceStore().AuthorizeCredential(id.CredentialID, id.CredentialVersion)
+						secret, err := server.deviceStore().ResolveE2EESecret(context.Background(), transport.E2EEAuthSelector{
+							Kind: transport.E2EEAuthCredential, ID: id.CredentialID, Version: id.CredentialVersion,
+						})
+						if !ok || credential.DeviceID != id.DeviceID || string(credential.Role) != id.Role || err != nil || !bytes.Equal(secret, original.CredentialSecret) {
+							t.Fatal("installed restart lost credential identity/role/secret")
+						}
+						read := protocol.ActionMetadata{Operation: "read_pane", Class: protocol.ActionReadOnly}
+						write := protocol.ActionMetadata{Operation: "send_input", Class: protocol.ActionMutating}
+						if authorizeAuthenticatedIdentity(id, true, read, "") != nil ||
+							(authorizeAuthenticatedIdentity(id, true, write, "") != nil) != (id.Role == string(protocol.RoleReader)) {
+							t.Fatal("installed restart changed controller/reader authorization")
+						}
+					}
+					unknown := transport.E2EEAuthSelector{Kind: transport.E2EEAuthCredential, ID: "unknown", Version: 1}
+					if _, ok := server.deviceStore().AuthorizeCredential(unknown.ID, unknown.Version); ok {
+						t.Fatal("unknown credential gained authorization")
+					}
+					if _, err := server.deviceStore().ResolveE2EESecret(context.Background(), unknown); !errors.Is(err, deviceauth.ErrAuthentication) {
+						t.Fatal("unknown credential gained secret resolution")
+					}
+					if !bytes.Equal(before, installedAuthBytes(t, cfg)) {
+						t.Fatal("read-only credential checks changed stored state")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestInstalledStartupRefusesPolicyBeforeEffects(t *testing.T) {
+	for name, mutate := range map[string]func(*config.Config){
+		"tokenless":         func(c *config.Config) { c.Token = "" },
+		"invalid token":     func(c *config.Config) { c.Token = "short" },
+		"rearm":             func(c *config.Config) { c.RearmBootstrap = true },
+		"managed identity":  func(c *config.Config) { c.ManagedRunID = "foreground" },
+		"control identity":  func(c *config.Config) { c.ControlRunID = "foreground" },
+		"control socket":    func(c *config.Config) { c.PairingSocketPath = "/fixture/control" },
+		"managed transport": func(c *config.Config) { c.Transport = config.TransportTailscale },
+		"BYO transport":     func(c *config.Config) { c.Transport = config.TransportTailscaleExternal },
+		"CLI transport":     func(c *config.Config) { c.Transport = config.TransportTailscaleCLI },
+		"unknown transport": func(c *config.Config) { c.Transport = "other" },
+		"missing transport": func(c *config.Config) { c.Transport = "" },
+		"gateway conflict":  func(c *config.Config) { c.GatewayURL = "wss://gateway.example.test" },
+		"missing gateways":  func(c *config.Config) { c.Transport = config.TransportGateway },
+		"invalid gateways": func(c *config.Config) {
+			c.Transport = config.TransportGateway
+			c.GatewayURLs = []string{"https://gateway.example.test"}
+		},
+		"relative runtime": func(c *config.Config) { c.RuntimeDir = "relative-fixture" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := installedConfigForTest(t, config.TransportCloudflare)
+			runtimeDir := cfg.RuntimeDir
+			mutate(cfg)
+			server, err := NewInstalledService(cfg, "version", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if server != nil || err == nil {
+				t.Fatal("installed policy conflict was admitted")
+			}
+			for _, path := range []string{runtimeDir, cfg.CacheDir, cfg.ReleaseRoot, cfg.ConfigHome} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatal("refused constructor created runtime/cache/store resources")
+				}
+			}
+		})
+	}
+	if server, err := NewInstalledService(nil, "version", "revision", nil); server != nil || err == nil {
+		t.Fatal("nil installed configuration was admitted")
+	}
+}
+
+func TestInstalledGatewayOriginRefusalsBeforeEffects(t *testing.T) {
+	for name, gateway := range map[string]string{
+		"userinfo":       "wss://fixture-user:fixture-origin-canary@gateway.example.test",
+		"path":           "wss://gateway.example.test/path",
+		"escaped path":   "wss://gateway.example.test/%2F",
+		"query":          "wss://gateway.example.test?private=fixture-origin-canary",
+		"empty query":    "wss://gateway.example.test?",
+		"fragment":       "wss://gateway.example.test#fixture-origin-canary",
+		"empty fragment": "wss://gateway.example.test#",
+		"remote WS":      "ws://gateway.example.test",
+		"invalid port":   "wss://gateway.example.test:65536",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := installedConfigForTest(t, config.TransportGateway)
+			// Validate every fallback too, not only the selected first entry.
+			cfg.GatewayURLs = append(cfg.GatewayURLs, gateway)
+			var log bytes.Buffer
+			server, err := NewInstalledService(cfg, "version", "revision", slog.New(slog.NewTextHandler(&log, nil)))
+			if server != nil || err == nil {
+				t.Fatal("installed constructor admitted a non-origin gateway")
+			}
+			if strings.Contains(err.Error()+log.String(), gateway) || strings.Contains(err.Error()+log.String(), "fixture-origin-canary") {
+				t.Fatal("gateway refusal disclosed raw gateway input")
+			}
+			for _, path := range []string{cfg.RuntimeDir, cfg.CacheDir, cfg.ReleaseRoot, cfg.ConfigHome} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatal("invalid gateway caused constructor side effects")
+				}
+			}
+		})
+	}
+	for _, gateway := range []string{"wss://gateway.example.test", "wss://gateway.example.test/", "wss://gateway.example.test:8443", "ws://127.0.0.1:8377", "ws://[::1]:8377"} {
+		t.Run("valid-"+gateway, func(t *testing.T) {
+			cfg := installedConfigForTest(t, config.TransportGateway)
+			cfg.GatewayURL = gateway
+			cfg.GatewayURLs = []string{gateway}
+			installedServerForTest(t, cfg)
+		})
+	}
+	t.Run("inconsistent leader", func(t *testing.T) {
+		cfg := installedConfigForTest(t, config.TransportGateway)
+		cfg.GatewayURL = "wss://fixture-user:fixture-origin-canary@gateway.example.test"
+		server, err := NewInstalledService(cfg, "version", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if server != nil || err == nil || strings.Contains(err.Error(), "fixture-origin-canary") {
+			t.Fatal("inconsistent gateway leader was admitted or disclosed")
+		}
+		if _, err := os.Lstat(cfg.RuntimeDir); !os.IsNotExist(err) {
+			t.Fatal("inconsistent gateway leader caused store side effects")
+		}
+	})
+}
+
+func TestInstalledStartupStoreFailureIsFatal(t *testing.T) {
+	for _, mode := range []string{config.TransportGateway, config.TransportCloudflare} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := installedConfigForTest(t, mode)
+			dir := filepath.Join(cfg.RuntimeDir, "device-auth")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "devices.json")
+			bad := []byte("not a device store\n")
+			if err := os.WriteFile(path, bad, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			server, err := NewInstalledService(cfg, "version", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if server != nil || err == nil || !strings.Contains(err.Error(), "initialize device authentication") {
+				t.Fatal("store failure returned a usable/unauthenticated server")
+			}
+			if !bytes.Equal(bad, installedAuthBytes(t, cfg)) {
+				t.Fatal("failed startup replaced invalid authentication state")
+			}
+		})
+	}
+}
+
+func TestInstalledExplicitOperatorIssuancePreservesEnrolledDevices(t *testing.T) {
+	for _, mode := range []string{config.TransportGateway, config.TransportCloudflare} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := installedConfigForTest(t, mode)
+			server := installedServerForTest(t, cfg)
+			store := server.deviceStore()
+			var originals []transport.E2EEAuthResult
+			for _, role := range []deviceauth.Role{deviceauth.RoleController, deviceauth.RoleReader} {
+				originals = append(originals, enrollInstalledFixture(t, store, role))
+			}
+			prior := store.ListCredentials("")
+			if status, err := server.armBootstrapForControl(); err != nil || !status.InvitationArmed {
+				t.Fatal("explicit operator issuance after installed startup failed")
+			}
+			if !reflect.DeepEqual(prior, store.ListCredentials("")) {
+				t.Fatal("explicit issuance erased/changed enrolled credentials")
+			}
+			before := installedAuthBytes(t, cfg)
+			server = installedServerForTest(t, cfg)
+			if !bytes.Equal(before, installedAuthBytes(t, cfg)) {
+				t.Fatal("restart changed explicit operator invitation")
+			}
+			for _, original := range originals {
+				assertInstalledHubCredential(t, server, original)
+			}
+			assertInstalledHubCredential(t, server, transport.E2EEAuthResult{
+				Identity:         transport.AuthenticatedIdentity{CredentialID: "unknown", CredentialVersion: 1},
+				CredentialSecret: bytes.Repeat([]byte{1}, 32),
+			})
+			if !bytes.Equal(before, installedAuthBytes(t, cfg)) {
+				t.Fatal("challenge-only auth tests changed persisted state")
+			}
+		})
+	}
+}
+
+// Drive the genuine Hub's credential resolution with a valid encrypted-protocol
+// hello. A signed server challenge proves the constructor attached the real
+// store, not just a field used by direct-store assertions. Unknown selectors
+// must close unauthorized. Stop before completion so last-seen writes do not
+// obscure the byte-for-byte restart/issuance preservation assertion.
+func assertInstalledHubCredential(t *testing.T, server *Server, original transport.E2EEAuthResult) {
+	t.Helper()
+	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
+	defer httpServer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), &websocket.DialOptions{Subprotocols: []string{"herdr-e2ee-v2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := bytes.Repeat([]byte{2}, 32)
+	binding := []byte("herdr-e2ee-v2 auth\x00credential\x00" + original.Identity.CredentialID + "\x00" + strconv.FormatUint(original.Identity.CredentialVersion, 10) + "\x00")
+	tag := func(parts ...[]byte) []byte {
+		mac := hmac.New(sha256.New, original.CredentialSecret)
+		for _, part := range parts {
+			_, _ = mac.Write(part)
+		}
+		return mac.Sum(nil)
+	}
+	hello, err := json.Marshal(map[string]any{
+		"type": "e2ee_client_hello", "version": 2, "auth_kind": "credential",
+		"auth_id": original.Identity.CredentialID, "auth_version": original.Identity.CredentialVersion,
+		"nonce":      base64.RawURLEncoding.EncodeToString(nonce),
+		"public_key": base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()),
+		"proof":      base64.RawURLEncoding.EncodeToString(tag([]byte("herdr-e2ee-v2 client\x00"), binding, nonce, key.PublicKey().Bytes())),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
+		t.Fatal(err)
+	}
+	_, response, err := conn.Read(ctx)
+	if original.Identity.CredentialID == "unknown" {
+		if websocket.CloseStatus(err) != websocket.StatusCode(transport.UnauthorizedCloseCode) {
+			t.Fatal("unknown credential did not fail closed at the real Hub")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var challenge struct {
+		Type      string `json:"type"`
+		Nonce     string `json:"nonce"`
+		PublicKey string `json:"public_key"`
+		Proof     string `json:"proof"`
+	}
+	if err := json.Unmarshal(response, &challenge); err != nil {
+		t.Fatal(err)
+	}
+	serverNonce, nonceErr := base64.RawURLEncoding.DecodeString(challenge.Nonce)
+	serverKey, keyErr := base64.RawURLEncoding.DecodeString(challenge.PublicKey)
+	proof, proofErr := base64.RawURLEncoding.DecodeString(challenge.Proof)
+	if challenge.Type != "e2ee_server_hello" || nonceErr != nil || keyErr != nil || proofErr != nil ||
+		!hmac.Equal(proof, tag([]byte("herdr-e2ee-v2 server\x00"), binding, nonce, key.PublicKey().Bytes(), serverNonce, serverKey)) {
+		t.Fatal("real Hub challenge did not authenticate with the enrolled credential")
+	}
+}
+
+func TestForegroundStartupStillEnsuresAndRearmsBootstrap(t *testing.T) {
+	for _, state := range []string{"fresh", "expired", "enrolled-stable", "enrolled-quick"} {
+		t.Run(state, func(t *testing.T) {
+			cfg := installedConfigForTest(t, config.TransportCloudflare)
+			if strings.HasPrefix(state, "enrolled") {
+				enrollBootstrapDevice(t, cfg.RuntimeDir, cfg.Token)
+				cfg.RearmBootstrap = state == "enrolled-quick"
+			} else if state == "expired" {
+				store, err := deviceauth.Open(filepath.Join(cfg.RuntimeDir, "device-auth"), deviceauth.WithClock(func() time.Time {
+					return time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.EnsureBootstrapInvitation([]byte(cfg.Token), "fixture", "en"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := New(cfg, "version", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			t.Cleanup(func() { _ = server.hub.Shutdown(context.Background()) })
+			if server.initErr != nil || server.deviceStore() == nil {
+				t.Fatal("foreground device authentication failed")
+			}
+			if server.deviceStore().BootstrapStatus().Armed != (state != "enrolled-stable") {
+				t.Fatal("foreground bootstrap semantics changed")
+			}
+			wantDevices := 0
+			if state == "enrolled-stable" {
+				wantDevices = 1
+			}
+			if len(server.deviceStore().ListCredentials("")) != wantDevices {
+				t.Fatal("foreground requested reset/stable retention semantics changed")
+			}
+		})
 	}
 }
 

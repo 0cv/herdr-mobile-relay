@@ -11,7 +11,13 @@ printf 'synthetic-file-token\n' > "$WORK/private-token"
 chmod 600 "$WORK/private-token"
 cat > "$WORK/relay" <<'EOF'
 #!/bin/sh
+case "$1" in
+normalize-origin) printf 'https://gateway.example.test\n'; exit 0 ;;
+serve-installed) ;;
+*) exit 2 ;;
+esac
 printf '%s|%s|%s|%s' "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${HERDR_GITHUB_TOKEN_FILE:-}" "${HTTPS_PROXY:-}" > "$SERVICE_TEST_ROOT/relay-environment"
+[ "${SERVICE_TEST_TRANSPORT:-}" != gateway ] || exit 23
 for attempt in 1 2 3 4 5; do
     [ ! -f "$SERVICE_TEST_ROOT/tunnel-environment" ] || exit 0
     sleep 0.1
@@ -35,4 +41,37 @@ if grep -E 'synthetic-(service|ambient|file)-token' "$WORK/output" >/dev/null; t
     echo 'service tracing exposed a credential' >&2
     exit 1
 fi
+# Gateway retains the updater pointer for the relay but starts no tunnel,
+# even when unrelated Cloudflare configuration is still saved.
+rm -f "$WORK/tunnel-environment" "$WORK/relay-environment"
+printf 'HERDR_RELAY_TRANSPORT=gateway\nHERDR_GATEWAY_URL=wss://gateway.example.test\nCLOUDFLARED_CONFIG=%q\n' "$WORK/tunnel.yml" >> "$WORK/relay.env"
+status=0
+SERVICE_TEST_TRANSPORT=gateway GH_TOKEN=synthetic-ambient-token GITHUB_TOKEN=synthetic-ambient-token \
+HERDR_GITHUB_TOKEN_FILE="$WORK/ambient-pointer" HTTPS_PROXY=http://proxy.invalid \
+HERDR_RELAY_ENV="$WORK/relay.env" HERDR_RELAY_BIN="$WORK/relay" \
+CLOUDFLARED_BIN="$WORK/cloudflared" \
+bash -x "$ROOT/relay/herdr-mobile-relay-service.sh" > "$WORK/gateway-output" 2>&1 || status=$?
+test "$status" = 23
+test "$(<"$WORK/relay-environment")" = "||$WORK/private-token|http://proxy.invalid"
+test ! -e "$WORK/tunnel-environment"
+if grep -E 'synthetic-(service|ambient|file)-token' "$WORK/gateway-output" >/dev/null; then
+    echo 'gateway service tracing exposed a credential' >&2
+    exit 1
+fi
+# Native installers scrub raw in-memory keys before normalization. Even with
+# no ambient release token, ensure_relay_env must remove both saved legacy
+# keys while retaining the already selected private updater pointer.
+(
+    # shellcheck source=../relay/common.sh
+    . "$ROOT/relay/common.sh"
+    unset GH_TOKEN GITHUB_TOKEN
+    printf 'HERDR_RELAY_TOKEN=0123456789abcdef0123456789abcdef\nHERDR_RELAY_INSTANCE_ID=fixture\n' >> "$WORK/relay.env"
+    ensure_relay_env "$WORK/relay.env"
+    if grep -Eq '^(GH_TOKEN|GITHUB_TOKEN)=' "$WORK/relay.env"; then
+        echo 'normalized service environment retained a legacy raw token key' >&2
+        exit 1
+    fi
+    load_relay_env "$WORK/relay.env"
+    test "$(/bin/sh -c 'printf "%s|%s|%s" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${HERDR_GITHUB_TOKEN_FILE:-}"')" = "||$WORK/private-token"
+)
 printf 'service credential boundaries passed\n'

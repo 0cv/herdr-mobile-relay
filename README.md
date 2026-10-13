@@ -42,16 +42,18 @@ herdr plugin pane open \
   --focus
 ```
 
-Start with **Community WebRTC Gateway**. It is the recommended path: as fast
+Start with **2 WebRTC Gateway → 1 Community gateways**. It is the recommended path: as fast
 to set up as the temporary tunnel, with stable relay connectivity and no
 Cloudflare account, domain, `cloudflared`, or tunnel configuration. If prompted,
 choose the installed Herdr app that should host the phone UI. The relay starts
 and prints a QR code.
 
-For tailnet HTTPS, choose either **Managed Tailscale Serve (foreground)**, which
-requires a supported authenticated node and manages only its own temporary Serve
-route, or **Operator-owned Tailscale HTTPS Serve (BYO, foreground)**, which uses
-a canonical HTTPS origin you already route to this loopback relay. BYO can keep
+For tailnet HTTPS in the setup menu, choose **3 Tailscale → 2 Your own HTTPS
+route (advanced BYO)**, which uses a canonical HTTPS origin you already route to
+this loopback relay. Managed foreground is no longer a menu choice; its explicit
+`HERDR_RELAY_TRANSPORT=tailscale` / `relay/plugin-choose-transport.sh tailscale`
+entrypoints remain unchanged for supported authenticated standalone nodes, with
+fresh consent and session guards. BYO can keep
 an independently hosted phone app, whose exact bundle Herdr verifies before
 pairing. It does not inspect or change Tailscale state; the ingress remains
 yours when Herdr stops. Both are foreground-only. A separate CLI-backed
@@ -66,8 +68,8 @@ macOS/arm64 profile and an unambiguous CLI; without an App Store app it uses the
 legacy standalone-daemon mode instead. If an App Store app is detected but CLI
 checks fail, option 2 is unavailable rather than falling back. Its description
 says which mode is selected and whether the route survives stopping the relay.
-Menu checks read local files and platform metadata only; they never run
-Tailscale. The App Store Install CLI's exact forwarding wrapper is treated as an
+That development chooser's checks read local files and platform metadata only;
+they never run Tailscale. The App Store Install CLI's exact forwarding wrapper is treated as an
 alias of its bundle executable; all other distinct executables or wrappers stay
 ambiguous. Explicit absolute `HERDR_DEV_TAILSCALE_CLI_BIN` or
 `HERDR_TAILSCALE_CLI_BIN` overrides still take precedence, and invalid overrides
@@ -125,16 +127,59 @@ https://github.com/user-attachments/assets/e52c4fd0-ef77-4852-bb43-078a7154eae8
 The walkthrough follows setup from scanning the QR through the agent list,
 terminal controls, and notification settings.
 
+## Setup navigation
+
+Top level: **1 Cloudflare**, **2 WebRTC Gateway**, **3 Tailscale** open submenus.
+**4 Show setup QR** reprints the pairing QR and chooses which phone app it opens;
+**5 Publish the phone app to your Cloudflare Pages (advanced)** delegates to the
+existing deployment configuration flow: one stable app address for all computers,
+needed for gateways unless an app address already exists. **6 Doctor** calls the
+packaged diagnostic wrapper; **q Exit** leaves from any menu.
+
+- Cloudflare: 1 temporary tunnel; 2 stable tunnel/background service;
+  3 change hostname; 4 remove stable tunnel.
+- WebRTC Gateway: 1 community gateways; 2 deploy/upgrade your own gateway through
+  the existing chooser.
+- Tailscale: 1 Always on **unavailable** pending runtime/phone qualification and
+  separate production enablement; 2 your own HTTPS route (advanced BYO);
+  3 Remove Herdr's own route **unavailable** because no qualified standalone
+  installed-route cleanup adapter exists. Selecting unavailable entries does
+  nothing; there is no automatic Tailscale cleanup, Serve reset or development
+  recovery shortcut.
+
+**b Back** returns one level. Blank at the top opens Cloudflare, never a tunnel;
+blank/invalid input in submenus starts nothing. EOF/q exits; old t/b and 7/8/9
+shortcuts do not select actions at the top. Explicit actions keep their own
+consent/transport-switch/session guards. A child refusal/cancellation is not
+reported as success and triggers no second action; interactive actions have one
+return pause, pipelines have none. Actions return to their current menu.
+
+The main-menu header requests one read-only `plugin-status.sh --concise` report
+on entry/return, not on each invalid key. `selected_transport` is finite literal
+configuration selection, **not observed readiness** or permission to activate CLI.
+Invalid/missing config projects unknown; unavailable diagnostics never build,
+download, repair or prevent navigation. Only reviewed loopback observations may
+run; no external ingress, service-controller or Tailscale query originates here.
+The parent never sources configuration or imports file-backed routing after an
+action; the next header uses a fresh diagnostic read.
+
+This is source-only navigation/presentation work. Gateway inline app
+choose/publish when missing is still unfinished, and the existing QR/publishing
+children's storage/cancellation/onboarding behavior is unchanged, not qualified
+by this slice. `QUICKSTART.md` remains unchanged and still documents obsolete
+managed/BYO t/b menu shortcuts; use this section for current navigation. Full
+item-5/A1, hosted/package and phone qualification remain outstanding.
+
 ## Choosing how your phone connects
 
-The setup menu exposes each complete connection path directly:
+Transport paths below are not all setup-menu choices:
 
 | Choice | Needs | Best for |
 | --- | --- | --- |
 | Community gateway | no account, domain, or tunnel configuration; an installed app origin | the recommended stable, no-configuration relay path |
 | Cloudflare tunnel | nothing for a temporary URL; a Cloudflare account and domain for a permanent hostname | the fastest one-computer trial or a permanent background service |
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
-| Managed Tailscale Serve (foreground) | a supported authenticated Tailscale node | private tailnet access; Herdr owns only its temporary route |
+| Managed Tailscale Serve (foreground, explicit entrypoint only) | a supported authenticated Tailscale node | private tailnet access; Herdr owns only its temporary route |
 | Operator-owned Tailscale HTTPS Serve (BYO, foreground) | an existing HTTPS Serve origin routed to the loopback relay | use ingress you configure and retain |
 | CLI-backed background Serve (not enabled) | pending App Store/Linux runtime qualification and separate risk acceptance | planned persistent user-service lifecycle; unavailable today |
 
@@ -145,6 +190,178 @@ fallback; Cloudflare and Tailscale traffic stay on their trusted HTTPS paths.
 - **[Transports explained →](docs/transports.md)**
 - **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**
 - **[Run your own gateway →](docs/gateway-self-hosting.md)**
+
+## Doctor and status (partial diagnostics)
+
+The packaged binary exposes one read-only observation model:
+
+```text
+herdr-mobile-relay doctor [--json] [--probe-ingress] [--config ABSOLUTE_FILE]
+herdr-mobile-relay status [--json] [--probe-ingress] [--config ABSOLUTE_FILE]
+```
+
+`doctor` explains each check; `status` is concise. Both `--json` forms emit the
+same schema-v1 report and use its exit decision. Select exactly one config:
+explicit `--config`, then `HERDR_RELAY_ENV`, then
+`HERDR_PLUGIN_CONFIG_DIR/relay.env`, otherwise the executing package's
+`relay/.env`. Paths must be absolute; explicit paths must also be canonical and
+control-free. There is no installed-service discovery or ambient credential,
+port, transport or web-root merge. On Linux, the selected owner-only regular
+file is parsed as bounded literal data, never sourced. On Darwin, selected
+configuration and packaged release-manifest metadata acquisition are reported
+unavailable before parent traversal, content open or read: mode bits cannot
+exclude ACL grants and no bounded descriptor-bound ACL inspector is implemented.
+Missing, unsafe or malformed files are not created, repaired or migrated.
+
+The packaged wrapper accepts
+`relay/plugin-status.sh [--concise] [--json] [--probe-ingress] [--config ABSOLUTE_FILE]`.
+By default it calls **doctor**; `--concise` selects **status** (consumed by the
+wrapper, not forwarded as a binary flag). Concise plus JSON is the same schema,
+not a separate health policy. All report renderings include finite
+`selected_transport`, independently of the unchanged checks/exit decision.
+The wrapper preserves its exit and never queries services or dumps raw
+health/support/configuration. It prefers
+its adjacent package binary; otherwise it uses `HERDR_RELAY_BIN`, or
+`HERDR_RELEASE_ROOT/current/herdr-mobile-relay` (default:
+`${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay/current/herdr-mobile-relay`).
+Its config fallback is the wrapper's own `.env`; explicit `--config` and the two
+config environment selectors take precedence. Binary selectors must identify a
+trusted executable, not a build/download fallback. Only interactive human pane
+invocations pause; JSON, pipelines and setup-menu invocations do not.
+
+Exit priority is **2 > 1 > 3 > 0**: 2 invalid invocation/configuration, 1 observed
+required failure, 3 required observation unavailable/incomplete, 0 all applicable
+required host checks completed (explicit warnings may remain). Valid `--json`
+invocations produce one document even for missing/refused configuration. Invalid
+arguments—including duplicates, positional arguments, boolean values or a
+relative `--config`—produce no document and a fixed stderr diagnostic. Output
+failures return 1 with a fixed diagnostic; a failed write cannot guarantee a
+complete document. The wrapper suppresses loader/path diagnostics; a report
+whose decision is 2 gains no extra refusal text. A binary invocation refusal
+(no report) uses fixed stderr text. Neither interface prints private identifiers,
+addresses or paths.
+
+Current diagnostic ladder:
+
+1. Literal configuration and bounded package **metadata**. On Darwin, both
+   early filesystem acquisitions are unavailable before parent traversal,
+   content open or read because ACL grants are not represented by mode bits and
+   no bounded descriptor-bound ACL inspector is implemented. This refusal is
+   derived from the actual host, not an advertised package target or config
+   value. On Linux, installed executable shim/`current` symlinks are resolved to
+   a regular executable before selecting the package root; unresolved paths
+   leave build metadata unavailable. The package's regular, no-follow
+   `release-manifest.json` must match compiled version/revision/target and its
+   own listed web-map digest. Metadata alone does **not** verify installed
+   bytes. Missing/mismatched metadata cannot be replaced by a responding
+   relay's identity. Symlinked or unsafe metadata paths are unavailable, not
+   guessed development health.
+2. Installed-package **byte consistency**, independently reacquired from that
+   physical executing package root on Linux. On Darwin, Bundle is currently
+   required **unknown/unavailable before bundle filesystem acquisition**:
+   owner/mode bits cannot establish safety against ACL-granted foreign writers,
+   and no bounded descriptor-bound ACL inspector is implemented. This applies
+   to ancestors, package directories and files, including apparently sealed
+   packages. No ACL is changed or inferred safe. An advertised manifest target
+   cannot bypass the host permission policy. Darwin bundle observations require
+   a separately reviewed ACL-safe adapter, not a config/environment override.
+
+   Where writer safety is supported, the bundle observation checks the complete
+   inventory and every listed SHA-256: binary, public documents/example config,
+   exact shipped wrappers/bridge sources, and all supported public web bytes,
+   including Brotli, lazy assets, fonts, icons and historical build entries, plus
+   the binary's regular/executable-permission shape (without executing it). It
+   compares the actual web-map hash and the current release descriptor's exact
+   entry/JS/style digests, SRI, same-origin references and version/build contract.
+   Manifest paths cannot authorize private config, tokens, devices, journals,
+   runtime/support/log/data/research content; unexpected content is inventoried
+   through metadata only, never opened. Symlinks (including parents), hardlinks,
+   special files, foreign owners and unsafe writers are refused. Public sealed
+   and ordinary package modes are supported on the implemented host policy;
+   unsupported/unestablished ACL safety stays unknown. No permission changes
+   occur.
+
+   Complete stable agreement yields an observed bundle OK. Stable complete
+   hash/descriptor contradictions, a readable regular relay binary lacking
+   execute permission, or unlisted approved public files yield an observed
+   failure only after complete snapshot revalidation. Missing, unreadable,
+   unsafe, changing, unsupported, malformed, oversized, cancelled or otherwise
+   incomplete evidence stays unknown. On Linux, metadata can remain available
+   while bundle verification fails.
+   Bounds: manifest/descriptor 256 KiB; 1024 listed files; 1280 total entries,
+   128 directories, depth 5 and 128-byte names; binary 128 MiB, other content
+   32 MiB/file (HTML entry 1 MiB), package total 256 MiB; streaming reads 32 KiB.
+   Larger future shapes require reviewed support, never partial hashing.
+   Manifest, named/opened files, root/directories and complete inventory are
+   revalidated around acquisition under the remaining 20-second budget. This
+   is a cooperative consistency observation, **not** an atomic adversarial
+   snapshot, publisher signature/authentication, executable-format/behavior
+   validation or release/runtime qualification. Compressed bytes are hashed, not
+   decompressed; browser asset validity remains a separate release gate. A
+   same-owner attacker can replace metadata and content or edit/restore between
+   observations. The separate complete eager gzip ceiling of 169216 bytes is
+   unchanged and not measured by doctor.
+3. Exact loopback relay health/readiness and, in gateway mode, attributed local
+   registration. Only fixed GETs to `127.0.0.1` at the selected port are allowed;
+   bare liveness is insufficient. Gateway registration does not prove a phone's
+   relayed/direct connection. Ordinary Cloudflare/gateway/BYO observations are
+   supported; managed identities without bound workflow authority stay unknown.
+4. **Herdr ping only**, for exact construction-bound ordinary Cloudflare,
+   gateway and BYO selections with an expected relay instance and complete build.
+   Only literal `HERDR_SOCKET_PATH='/absolute/private/herdr.sock'` in the selected
+   configuration can authorize the Unix socket; ambient `HERDR_SOCKET_PATH`,
+   HOME/XDG defaults, discovery, flags and TCP are not socket selectors. Missing
+   or unsupported paths mean unavailable, with no fallback or routing change.
+   The path must be canonical, absolute, control-free and at most 103 UTF-8 bytes.
+
+   Linux uses no-follow parent/socket metadata, owner-only selected parent,
+   same-effective-user socket/peer attribution, no foreign socket writers, and
+   a finite local POSIX ACL-mask filesystem policy (ext, XFS, Btrfs, tmpfs,
+   ramfs; unestablished overlay backing is unavailable). Unsafe ownership/permissions,
+   symlinks, special replacements, unknown/remote/FUSE permission models and
+   changing evidence are unavailable. Darwin is **unavailable before connecting**:
+   owner/mode bits and peer UID do not establish Darwin ACL writer safety.
+   No ACL inspector subprocess, chmod, bypass or permission repair is used.
+
+   One fixed correlated newline JSON `ping` with empty params is sent; there
+   are no retries, feature probes, terminal/workspace/tab reads or subscriptions.
+   A complete typed pong has a bounded version and positive Herdr server protocol
+   (not the relay protocol); bounded additive data is discarded. Duplicate,
+   malformed, conflicting, oversized, truncated and already-buffered extra frames
+   are rejected. Response acquisition is at most 64 KiB including framing; a full
+   budget without a terminator is invalid. A nonblocking receive-queue metadata
+   check reads no extra response bytes and cannot prove absence of future frames.
+   Each connection is deadline/cancellation bounded to at most three seconds and
+   owned resources are closed. Filesystem timing and pathname attribution remain
+   cooperative, not hard OS deadlines, atomic pathname-race protection or
+   authentication against a malicious same-user server.
+
+   A validated ping is still required **unknown**, query evidence
+   `herdr_ping_incomplete`: installed-client, running-version and feature comparison
+   remains incomplete. No raw socket path, version, protocol, capability payload,
+   peer identifier or server error enters any report. The same composition is used
+   by doctor/status and their wrapper/menu header; ping cannot make a partial
+   report exit 0. Other required failures still take exit 1, invalid config exit 2.
+5. Service lifecycle, full Herdr comparison, pairing aggregates, Cloudflare
+   supervision and phone activity remain unavailable in this slice. A consistent
+   package, matching local health and valid ping still leave required categories
+   unknown; none proves phone/direct-path reachability. CLI admission/inspection
+   stays disabled. BYO makes zero Tailscale/LocalAPI/CLI calls. `--probe-ingress`
+   currently adds required unknown checks and sends **no external request**;
+   it cannot make an incomplete report healthy.
+
+No stores, invitations, services or routes are created/changed. Reads and
+cooperative queries share a 20-second scheduling budget, ordinary queries at most
+three seconds; a noncooperative filesystem cannot be promised a hard deadline.
+Host observations never establish sleeping-phone/VPN reachability. Do not delete
+recovery evidence or adopt a matching route to make a check pass; exact recovery
+instructions await the separately qualified lifecycle integration. Existing
+`support` behavior is unchanged, not repaired by doctor.
+
+This integration is source-only/unexecuted at authoring. Compilation, hosted
+fixtures, complete category coverage, extracted-package/ordinary/native checks,
+menu flows and separately authorized phone/live qualification remain mandatory;
+these commands do not establish whole-roadmap or CLI-service approval.
 
 ## Agents with a non-default config directory
 

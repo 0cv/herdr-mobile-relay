@@ -1,0 +1,1016 @@
+{
+  "schema": "herdr.tailscale-r1-source-evidence.v1",
+  "purpose": "R1 source/design research for DR-1 only; not runtime qualification, owner approval, or implementation approval.",
+  "repository": {
+    "url": "https://github.com/0cv/herdr-mobile-relay",
+    "branch": "ci/tailscale-native-preflight-ef9f843",
+    "head": "d2e5d01075a87fc43a6c9c5b78cb06ac4a17b7b5",
+    "initial_tracked_status": "clean",
+    "preexisting_untracked_work": ["docs/plans/"],
+    "preservation_note": "The pre-existing docs/plans tree was preserved; only the three R1-authorized documents were edited/added."
+  },
+  "upstream": {
+    "repository": "https://github.com/tailscale/tailscale",
+    "tag": "v1.102.4",
+    "commit": "bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8",
+    "commit_selection_source": "internal/tailscale/CONTRACT.md",
+    "signature_status": "Not verified by this R1 research. The existing pinned-source contract records signature verification as false/unknown_key; no artifact-signing claim is made.",
+    "retrieval": "Pinned raw public source bytes were downloaded with curl -fsSL to a private temporary directory outside the checkout. Hashes below are SHA-256 of the retrieved bytes; each URL is immutable at the commit.",
+    "runtime_boundary": "No Tailscale executable was downloaded, built, installed, or run; no daemon, control plane, tailnet, GUI, token, pairing, or live service was contacted."
+  },
+  "evidence_records": [
+    {
+      "id": "UP-001",
+      "path": "cmd/tailscale/cli/serve_v2.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/cmd/tailscale/cli/serve_v2.go#L435-L557",
+      "lines": "435-557",
+      "sha256": "6bedc8ae035963f443c7176f69fe631f802a524a216577df6c1981afdb54ae95",
+      "source_observation": "CLI reads Serve config/status, calls enableFeatureInteractive for HTTPS, opens a WatchIPNBus in foreground mode, takes SessionID from the initial notification, installs the nested foreground config, calls SetServeConfig, then waits on the watcher.",
+      "inference": "Parent process supervision/output does not transfer this in-process watcher/session authority to the relay.",
+      "qualification": "pinned-source observation; not a binary/runtime observation"
+    },
+    {
+      "id": "UP-002",
+      "path": "ipn/backend.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/backend.go#L295-L315",
+      "lines": "295-315",
+      "sha256": "e71a93c81358c8916de1b6cc1272985268699fc66096944cca8924e4c5725e13",
+      "source_observation": "Notify.SessionID identifies a unique WatchIPNBus session and is set only in the first message when requesting NotifyInitialState; Notify itself is explicitly marked unstable.",
+      "inference": "Treat the ID as session metadata paired with the live watcher, not as a standalone secret/capability or stable cross-version token.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-003",
+      "path": "ipn/ipnlocal/local.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnlocal/local.go#L3717-L3880",
+      "lines": "3717-3880",
+      "sha256": "e3f29a92e870ee23fdbecf8d1c0a0ccc1f3b7e0858785d9121224dc290ee403d",
+      "source_observation": "WatchNotificationsAs creates a random hex session ID, registers the watcher, supplies the initial session ID, and defers DeleteForegroundSession for that ID on any handler exit, whether orderly or involuntary.",
+      "inference": "The deferred cleanup unconditionally deletes whatever value then occupies that one foreground session key, before the client necessarily observes an involuntary exit. Other independent session IDs and Serve fields are not the target of this single-key deletion. Same-key preservation after unplanned watcher loss is outside the guarantee; orderly live-watcher reconciliation cannot fence involuntary deletion. Source gives no finite cleanup deadline.",
+      "qualification": "pinned-source observation; does not establish runtime timing"
+    },
+    {
+      "id": "UP-004",
+      "path": "ipn/ipnlocal/serve.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnlocal/serve.go#L306-L438",
+      "lines": "306-438",
+      "sha256": "e6c03677c4fa5ba650f73100a459d5533b0767796eab88c77d675f7e478f3c86",
+      "source_observation": "Serve ETag is SHA-256 of marshaled current view. SetServeConfig serializes compare and update under the backend mutex; non-empty stale ETag returns ErrETagMismatch; empty ETag expressly disables the check. DeleteForegroundSession removes only the specified foreground key while locked.",
+      "inference": "R2 must reject missing/empty ETags and avoid blind retry after ambiguous results. Relay selective updates/deletes and daemon watch cleanup target only one foreground session key, leaving other routes/background fields/independent keys untouched. The cleanup endpoint's exact-key deletion does not compare nested route content, so orderly retirement should conditionally remove the exact expected entry and verify absence while the watcher remains live; this cannot preserve a replacement under that same key on involuntary watch exit. ETag is not protection from an authorized writer that deliberately sends no condition.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-005",
+      "path": "ipn/ipnlocal/serve.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnlocal/serve.go#L1614-L1650",
+      "lines": "1614-1650",
+      "sha256": "e6c03677c4fa5ba650f73100a459d5533b0767796eab88c77d675f7e478f3c86",
+      "source_observation": "Serve-config reload filters foreground entries whose session IDs are not present in the active watcher map.",
+      "inference": "A daemon/profile reload can remove inactive foreground entries, but this does not establish an immediate cleanup deadline or authorize route adoption.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-006",
+      "path": "client/local/serve.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/client/local/serve.go#L17-L56",
+      "lines": "17-56",
+      "sha256": "5f6953d80408cf9f4805cd7a24773e06b8b36873d5f36c5587bb01578991d7c0",
+      "source_observation": "GetServeConfig returns the API response plus ETag; SetServeConfig places config.ETag into If-Match for a non-nil config, without refusing an empty value. The method is documented in the source as unstable.",
+      "inference": "Do not rely on a convenience method to enforce a non-empty precondition; validate the ETag before posting.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-007",
+      "path": "ipn/localapi/serve.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/localapi/serve.go#L25-L109",
+      "lines": "25-109",
+      "sha256": "b72a474e83d6c5bf9278f210470796e0790c832610e538df5b67d37311025aac",
+      "source_observation": "GET requires PermitRead and returns Serve config plus Etag. POST requires PermitWrite, reads If-Match, maps stale ETag to HTTP 412 and delegates to the backend. Source has a platform-specific path/Unix-socket authorization check.",
+      "inference": "Local API write authorization and Tailscale Serve session ownership are separate gates; denial is a refusal, never grounds for a fallback writer.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-008",
+      "path": "ipn/localapi/localapi.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/localapi/localapi.go#L197-L277",
+      "lines": "197-277",
+      "sha256": "b13da90ef452b4e9ab01bc123a55cb11650e28d38207ef72359b63a225a1dc47",
+      "source_observation": "Handler documents RequiredPassword for sandboxed macOS same-user-proof GUI auth, separate PermitRead and PermitWrite, and Basic-auth token validation when RequiredPassword is set. The API response includes Tailscale-Version.",
+      "inference": "A candidate must verify actual platform auth/read/write access and strictly compare version; the library's warning callback is not a version admission rule.",
+      "qualification": "pinned-source observation; product-bundle server wiring/runtime not exercised"
+    },
+    {
+      "id": "UP-009",
+      "path": "ipn/localapi/localapi.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/localapi/localapi.go#L887-L935",
+      "lines": "887-935",
+      "sha256": "b13da90ef452b4e9ab01bc123a55cb11650e28d38207ef72359b63a225a1dc47",
+      "source_observation": "watch-ipn-bus is a streaming JSON endpoint gated by PermitRead and tied to the request context.",
+      "inference": "Request-context cancellation is the source-supported way to end the client watch stream, but the source specifies no daemon-side acknowledgement that the server's deferred session deletion completed and no finite cleanup deadline. R2 must distinguish local stream closure from watcher retirement and retain unknown state absent further source evidence.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-010",
+      "path": "client/local/local.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/client/local/local.go#L60-L175",
+      "lines": "60-175",
+      "sha256": "c3fd3412fa51656d4daccdb2f586b9e238c642cd3e5a059f3ebd7be00acb8f72",
+      "source_observation": "The Go LocalAPI Client states that its API is not necessarily stable, has platform default dialing and local auth, adds a macOS token as HTTP Basic auth, and has an optional version-mismatch notification callback when the response header differs.",
+      "inference": "The pinned Go client reuses upstream path/auth handling, but the relay must separately enforce the exact version and not assume API compatibility after a Tailscale update.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-011",
+      "path": "client/local/local.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/client/local/local.go#L1482-L1547",
+      "lines": "1482-1547",
+      "sha256": "c3fd3412fa51656d4daccdb2f586b9e238c642cd3e5a059f3ebd7be00acb8f72",
+      "source_observation": "WatchIPNBus is explicitly unstable, lives for its context, and constructs a json.Decoder directly over the streaming response body.",
+      "inference": "A bounded R2 watch should use pinned transport/auth with a separately bounded decoder or another explicitly bounded implementation; this API must be retested on every supported pin.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-012",
+      "path": "ipn/ipnserver/server.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnserver/server.go#L210-L225",
+      "lines": "210-225",
+      "sha256": "e9dc45450618291948271f977e1a363bb0ccf995d4f28f52d681a36acf3def7f",
+      "source_observation": "The public server configures the LocalAPI handler with an Actor and assigns read/write permissions from actor permissions; the handler wiring shown there does not set RequiredPassword.",
+      "inference": "The generic LocalAPI handler and sandboxed Mac token comments do not prove every product bundle's complete server wiring; qualify each intended GUI distribution instead of extrapolating from source transport alone.",
+      "qualification": "pinned-source observation and explicit integration limitation"
+    },
+    {
+      "id": "UP-013",
+      "path": "ipn/ipnserver/server.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnserver/server.go#L324-L352",
+      "lines": "324-352",
+      "sha256": "e9dc45450618291948271f977e1a363bb0ccf995d4f28f52d681a36acf3def7f",
+      "source_observation": "Permissions documents explicit-token permission inference for sandboxed Mac clients and Unix-socket actor permissions for other supported cases. A non-Unix actor connection does not receive those Unix peer-credential permissions in this function.",
+      "inference": "Do not claim the sandboxed GUI cell from the same-user-proof client code alone; verify the precise app-side token authorization path and its write scope.",
+      "qualification": "pinned-source observation; app-bundle runtime not tested"
+    },
+    {
+      "id": "UP-014",
+      "path": "ipn/ipnserver/actor.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnserver/actor.go#L204-L248",
+      "lines": "204-248",
+      "sha256": "0b2da0db9ba59bb98f37942ecb8483fc2cc8e7244e5cc86016d93ebd34594477",
+      "source_observation": "Standalone Darwin local-admin checks fall through to Unix root/operator/sudo logic; sandboxed macOS is specifically excluded from that Unix check because its permission model differs.",
+      "inference": "Standalone daemon and sandboxed GUI are separate support cells and need different auth tests.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-015",
+      "path": "ipn/ipnauth/ipnauth.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnauth/ipnauth.go#L158-L210",
+      "lines": "158-210",
+      "sha256": "da492b0a4827a1adec1f7dc2d058fa3f85435df5d5a1bb34672aa775bb79e9c2",
+      "source_observation": "When peer credentials are used, root, the daemon's same user, configured operator, and on Darwin local admin are read/write; unknown peers and ordinary non-operators are read-only.",
+      "inference": "The relay must use only an already-authorized identity and fail closed if mutation permission is absent.",
+      "qualification": "pinned-source observation; actual installed peer credentials/config unqualified"
+    },
+    {
+      "id": "UP-016",
+      "path": "safesocket/safesocket_darwin.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/safesocket/safesocket_darwin.go#L59-L159",
+      "lines": "59-159",
+      "sha256": "11ff8c307c44b3fb3f2fd6da20a2acf0e1d18c88d5949cfd75e0051222995e7d",
+      "source_observation": "Darwin client transport uses directly set credentials for a GUI-hosted CLI, otherwise tries same-user proof then falls back to the default Unix socket; the provider initializes a localhost listener and same-user-proof credential file.",
+      "inference": "A normal non-GUI relay can use these paths only if the selected product exposes the expected local credential/socket and its authorization succeeds.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-017",
+      "path": "safesocket/safesocket_darwin.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/safesocket/safesocket_darwin.go#L207-L356",
+      "lines": "207-356",
+      "sha256": "11ff8c307c44b3fb3f2fd6da20a2acf0e1d18c88d5949cfd75e0051222995e7d",
+      "source_observation": "Source documents MacSys shared same-user-proof files and App Store GUI same-user proof discovery with lsof constrained to the current UID/IPNExtension process; standalone macsys files may be readable by the admin group.",
+      "inference": "These are implementation-specific transports, not proof of a particular app version's native availability, TCC behavior, permissions or runtime compatibility.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-018",
+      "path": "paths/paths.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/paths/paths.go#L22-L61",
+      "lines": "22-61",
+      "sha256": "e534ebb1ed064b761473b1bbb883403212a76749bc7d2227ed2b6cb88bb6c157",
+      "source_observation": "Default socket path is Darwin /var/run/tailscaled.socket; Linux uses /var/run/tailscale/tailscaled.sock when /var/run exists, with explicit Synology/Gokrazy/QNAP exceptions and fallback behavior.",
+      "inference": "Do not assume one Linux path or equate standalone Darwin daemon access with GUI-managed Tailscale.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-019",
+      "path": "safesocket/safesocket.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/safesocket/safesocket.go#L99-L127",
+      "lines": "99-127",
+      "sha256": "aa01cd26a62f0218f481f339eb32812c176ab9361c73ce5764dd7a1f4cd3ab73",
+      "source_observation": "Peer-credential use depends on the build feature and OS; Linux and Darwin are listed among Unix peer-credential platforms.",
+      "inference": "The actual installed daemon's build feature must be verified for each support cell.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-020",
+      "path": "safesocket/unixsocket.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/safesocket/unixsocket.go#L85-L91",
+      "lines": "85-91",
+      "sha256": "79e47d102e767f2733ef13afdc8eca96812ceb7e2d11d3d64121e63d73bb83e5",
+      "source_observation": "Unix socket creation mode is 0666 when peer credentials are enabled and 0600 otherwise; mode alone does not decide API read/write permission.",
+      "inference": "Path/mode and authenticated peer authorization both need distro-specific checks.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-021",
+      "path": "ipn/ipnstate/ipnstate.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnstate/ipnstate.go#L31-L95",
+      "lines": "31-95",
+      "sha256": "f0a1ec32918502b0c248a095c5d123704e4ad47a4bbc72db6e3e18f3af084268",
+      "source_observation": "Status contains daemon Version, Self, CurrentTailnet, CertDomains and profile data. CertDomains means the control plane will assist with certificate provisioning for names; it is not an explicit HTTPS-enable flag.",
+      "inference": "Continue the existing strict identity/version policy; do not use CertDomains alone as HTTPS eligibility.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-022",
+      "path": "ipn/ipnstate/ipnstate.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnstate/ipnstate.go#L171-L259",
+      "lines": "171-259",
+      "sha256": "f0a1ec32918502b0c248a095c5d123704e4ad47a4bbc72db6e3e18f3af084268",
+      "source_observation": "TailnetStatus exposes Name, MagicDNSSuffix and MagicDNSEnabled; Self PeerStatus exposes stable ID, numeric UserID, FQDN DNSName and node data.",
+      "inference": "These available values form an identity tuple, not a tailnet/account UUID; compare only source-backed fields and do not invent missing identifiers.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-023",
+      "path": "cmd/tailscale/cli/serve_legacy.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/cmd/tailscale/cli/serve_legacy.go#L793-L855",
+      "lines": "793-855",
+      "sha256": "dcf2943904a1e6e555ba90b0314b297c991dd650e68feb91d83c43ff3378ba91",
+      "source_observation": "enableFeatureInteractive checks Self capability, may query feature state and show instructions, and can wait on the notification bus for enablement.",
+      "inference": "The relay should require HTTPS capability already enabled, not reproduce an implicit UI/control-plane enablement flow.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-024",
+      "path": "ipn/serve.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/serve.go#L33-L86",
+      "lines": "33-86",
+      "sha256": "6776fb414ebeac4ea316e1da87cd038d0e8904b3778310e73ff56c0a9065b51f",
+      "source_observation": "ServeConfig stores Foreground as a map from IPN bus session ID to config; source comments define foreground config as valid for that watch session lifetime and explain it prevents ungraceful shutdown from leaving unexpected ports exposed.",
+      "inference": "Foreground scoping is the appropriate lifecycle boundary, provided the relay itself holds the corresponding watcher.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-025",
+      "path": "ipn/ipnserver/actor.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnserver/actor.go#L204-L248",
+      "lines": "204-248",
+      "sha256": "0b2da0db9ba59bb98f37942ecb8483fc2cc8e7244e5cc86016d93ebd34594477",
+      "source_observation": "Source notes sandboxed Mac authorization is distinct and errs on less permission for unknown identity; standalone Darwin falls through to Unix admin logic.",
+      "inference": "Do not extrapolate standalone socket authority to App Store/MacSys or vice versa.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-026",
+      "path": "version/version.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/version/version.go#L60-L104",
+      "lines": "60-104",
+      "sha256": "0092d64e6fc86c7824ff389c2fb182fa24d34c6b3b8a5d9ebe6fdfe44b57225e",
+      "source_observation": "Pinned source defines short and long version representations.",
+      "inference": "A LocalAPI header/status value must be checked under the repository's exact source/build policy, not treated as a cryptographic artifact attestation.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-027",
+      "path": "go.mod",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/go.mod",
+      "lines": "1-532",
+      "sha256": "a83e830a7b4dffa80a6c2478b44758695d01c0a3e35e14b824a4e81824ca67d2",
+      "source_observation": "The upstream module declares Go 1.26.6 and 515 distinct module requirements across the repository (counted from require blocks/directives in this file).",
+      "inference": "This is not the imported package's resolved transitive closure or binary-size measurement; R2 must resolve the exact package closure before accepting the dependency.",
+      "qualification": "source plus reproducible whole-go.mod count; package closure unmeasured"
+    },
+    {
+      "id": "UP-028",
+      "path": "LICENSE",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/LICENSE",
+      "lines": "1-28",
+      "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b",
+      "source_observation": "Pinned upstream root license is BSD 3-Clause; cited source files also carry BSD-3-Clause SPDX headers.",
+      "inference": "License appears compatible subject to normal distribution notices; no legal review/approval is implied.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-029",
+      "path": "cmd/tailscale/cli/version.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/cmd/tailscale/cli/version.go#L21-L81",
+      "lines": "21-81",
+      "sha256": "3f82b3119d6a82d53ea21f657d95e1b90f74fcad969abcedd5c835c5f59290c5",
+      "source_observation": "The --daemon version command queries StatusWithoutPeers, then places daemon Status.Version in DaemonLong alongside the CLI's own version metadata.",
+      "inference": "Retain an exact separate client/daemon check; the relay's in-process client must not use only its own package version or a short/status version as admission.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-030",
+      "path": "version/prop.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/version/prop.go#L257-L324",
+      "lines": "257-324",
+      "sha256": "562b460a83e4346a39315f89f115bd1e7ec3f0e906ebe25fb07cf5572741e70c",
+      "source_observation": "Pinned source defines build metadata fields used by the CLI's version JSON, distinct from the daemon's reported long version.",
+      "inference": "Preserve the existing strict metadata policy and do not treat an upstream source commit/version string as cryptographic binary provenance.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-031",
+      "path": "Tailscale product-bundle macOS GUI LocalAPI server integration (not found in inspected pinned public source set)",
+      "url": null,
+      "lines": null,
+      "sha256": null,
+      "source_observation": "No product-bundle server implementation for the intended installed GUI distribution was inspected; the available public source contains generic LocalAPI handler/token comments and client credential-discovery code.",
+      "inference": "The exact app-bundle authentication/read-write wiring remains unverified; do not claim unconditional GUI distribution support from the transport code alone.",
+      "qualification": "essential product-specific integration evidence unavailable in this source set"
+    },
+    {
+      "id": "UP-032",
+      "path": "ipn/ipnlocal/serve.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnlocal/serve.go#L1736-L1834",
+      "lines": "1736-1834",
+      "sha256": "e6c03677c4fa5ba650f73100a459d5533b0767796eab88c77d675f7e478f3c86",
+      "source_observation": "validateServeConfigUpdate validates config shape, listener conflicts and Serve type constraints; it does not verify that each incoming Foreground session ID remains in the active watcher map.",
+      "inference": "The POST path has no source-backed atomic liveness guard for a watcher ID that closes around SetServeConfig; the client must not treat watcher creation/ETag alone as closing this race.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-033",
+      "path": "ipn/ipnlocal/serve.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnlocal/serve.go#L1571-L1650",
+      "lines": "1571-1650",
+      "sha256": "e6c03677c4fa5ba650f73100a459d5533b0767796eab88c77d675f7e478f3c86",
+      "source_observation": "SetServeConfig's listener-update path reloads the stored configuration; reload removes foreground entries only when their IDs are absent from the active watcher map at that reload point.",
+      "inference": "A SetServeConfig interleaving before the watch-map removal can leave an entry in the in-memory effective config after the watch later disappears; R2 needs explicit conditional compensation and a read-only retirement check.",
+      "qualification": "pinned-source observation"
+    },
+    {
+      "id": "UP-034",
+      "path": "ipn/ipnlocal/local.go",
+      "url": "https://github.com/tailscale/tailscale/blob/bbcd7d1fc2054b9189ebc1531acf74bd880ca0c8/ipn/ipnlocal/local.go#L3845-L3880",
+      "lines": "3845-3880",
+      "sha256": "e3f29a92e870ee23fdbecf8d1c0a0ccc1f3b7e0858785d9121224dc290ee403d",
+      "source_observation": "The watcher-map deletion defer is registered before the later DeleteForegroundSession defer. Go runs defers in last-in-first-out order; DeleteForegroundSession therefore completes before the watcher entry is removed, and the two operations use separately acquired backend locks.",
+      "inference": "A competing config POST can interleave in the gap; watcher closure alone is not a race-free guarantee that a route posted after the cleanup check will be removed.",
+      "qualification": "pinned-source observation"
+    }
+  ],
+  "qualification_scale": {
+    "source_observed": "A statement directly supported by the pinned file/line citation; it is still not a runtime fact.",
+    "inferred": "A design consequence drawn from separately recorded source observations.",
+    "unverified_runtime": "Installed binary, package, host permissions, daemon behavior, and native/macOS/Linux compatibility were not run or qualified.",
+    "unavailable": "The essential product-specific source/evidence was not present in the inspected pinned public-source set.",
+    "field_mapping": {
+      "evidence_records[].source_observation": "source_observed",
+      "evidence_records[].inference": "inferred",
+      "verification_boundary.runtime_qualification": "unverified_runtime",
+      "UP-031": "unavailable"
+    }
+  },
+  "record_qualification_level": {
+    "UP-001": "source_observed",
+    "UP-002": "source_observed",
+    "UP-003": "source_observed",
+    "UP-004": "source_observed",
+    "UP-005": "source_observed",
+    "UP-006": "source_observed",
+    "UP-007": "source_observed",
+    "UP-008": "source_observed",
+    "UP-009": "source_observed",
+    "UP-010": "source_observed",
+    "UP-011": "source_observed",
+    "UP-012": "source_observed",
+    "UP-013": "source_observed",
+    "UP-014": "source_observed",
+    "UP-015": "source_observed",
+    "UP-016": "source_observed",
+    "UP-017": "source_observed",
+    "UP-018": "source_observed",
+    "UP-019": "source_observed",
+    "UP-020": "source_observed",
+    "UP-021": "source_observed",
+    "UP-022": "source_observed",
+    "UP-023": "source_observed",
+    "UP-024": "source_observed",
+    "UP-025": "source_observed",
+    "UP-026": "source_observed",
+    "UP-027": "source_observed",
+    "UP-028": "source_observed",
+    "UP-029": "source_observed",
+    "UP-030": "source_observed",
+    "UP-031": "unavailable",
+    "UP-032": "source_observed",
+    "UP-033": "source_observed",
+    "UP-034": "source_observed"
+  },
+  "repository_inputs": [
+    {
+      "path": "internal/tailscale/CONTRACT.md",
+      "sha256": "a2c35e6feb4d5bbd6ece601a2415267581d7d62f82898c208285f1d196421dbf",
+      "role": "Existing pinned-source contract and parser/version/identity requirements."
+    },
+    {
+      "path": "internal/tailscale/tailscale.go",
+      "sha256": "96ad128b1c34aeb3963d84dfac709dda843e28cb61de29e11ab52b62deb652f8",
+      "role": "Read-only adapter and Inspect caller behavior."
+    },
+    {
+      "path": "internal/tailscale/contract.go",
+      "sha256": "63fd5e989dab17863854d7e776b6934371ef0f63d3080ba399c232ae240e5080",
+      "role": "Ownership/route contract types and fixed fail-closed flag."
+    },
+    {
+      "path": "internal/tailscale/tailscale_test.go",
+      "sha256": "0be4ae9460e823e5acfe313e98d4429d2c27209bdf10046ebc7faa3219d71ace",
+      "role": "Existing adapter tests/call contract."
+    },
+    {
+      "path": "relay/tailscale.sh",
+      "sha256": "32488f14a98559efe3bcb5f6bb548936e0b33b90e95a8a13b4a133aca8d78d0b",
+      "role": "Launcher order, CLI child/supervision and ownership gates."
+    },
+    {
+      "path": "relay/setup-link.sh",
+      "sha256": "604d491fa94ca0e3409d7e37cdf271f5c7bd4c341a5d009106137fd943678110",
+      "role": "Reprint/health caller and status gate."
+    },
+    {
+      "path": "relay/common.sh",
+      "sha256": "694275e9d3a638aa690ef836b86a7290e9b21d268969a25a54f9d1217f43a430",
+      "role": "Shared bounded process/JSON and ownership caller behavior."
+    },
+    {
+      "path": "cmd/herdr-mobile-relay/main.go",
+      "sha256": "ddb9023d4af9d8ca319a9b621d33176f20894d32642c056b48916845401e70e7",
+      "role": "Long-lived runServe, managed O acquisition and current unconditional deferred retirement."
+    },
+    {
+      "path": "cmd/herdr-mobile-relay/managed_reprint.go",
+      "sha256": "b0d48aa86cbb96fe99686b635346d773a6af9a5627d68b47aa6bcf87176af93a",
+      "role": "Managed reprint path and T transaction."
+    },
+    {
+      "path": "internal/app/managed_owner.go",
+      "sha256": "6f3596dcdf09860b45f07fdbb62890a0aa802b7e5a86e7674ac3c4b8b8b2e6f8",
+      "role": "O ownership lock, Validate, Retire and retained-root Close semantics."
+    },
+    {
+      "path": "internal/app/server.go",
+      "sha256": "af404c30d50e102531caa3f03cfa2972766a6fe565141de518d7c3c290decd59",
+      "role": "Eager bootstrap arm/raw E2EE resolver installation, local listeners/readiness, pairing-control callback and server lifecycle."
+    },
+    {
+      "path": "internal/localcontrol/localcontrol.go",
+      "sha256": "f690ae29f7236b410c4228ade9765a2a5de86b33be0f5f3dcd9283cffa04b600",
+      "role": "Private status/arm request-response boundary."
+    },
+    {
+      "path": "internal/deviceauth/resolver.go",
+      "sha256": "6949014159c7759032b80ddb8bf44abcaba83c9f736187d9cd2c8aad9af1986b",
+      "role": "E2EE invitation resolver path; expired bootstrap invitation may be refreshed and persisted during ResolveE2EESecret."
+    },
+    {
+      "path": "internal/transport/e2ee.go",
+      "sha256": "9affdb87748239ada2e22059599fdf280d5d43a099897f69b45b42c551c58aa7",
+      "role": "E2EE handshake calls ResolveE2EESecret and CompleteE2EEAuth; proposed BootstrapGate must guard both invitation operations."
+    },
+    {
+      "path": "internal/transport/ws.go",
+      "sha256": "d2ddb277b1e0fb748b5a8fc41a9fe16cf0a885180a653b316451e3b735ee08cc",
+      "role": "Hub snapshots its E2EE resolver for each incoming connection; caller/test mapping and revocable resolver gate boundary."
+    },
+    {
+      "path": "internal/managedstate/state.go",
+      "sha256": "6fec10cb59c0b9e7a81568655d138f9361e45b29220921f29bc0d7e8e080f04b",
+      "role": "Managed state and T transaction semantics."
+    },
+    {
+      "path": "internal/processsupervisor/supervisor.go",
+      "sha256": "72f01f40c57fcfb34dc4cf07270b5aac0e903e513d726c090a8f82da1c2fb86f",
+      "role": "Existing child/process lifetime supervision boundary."
+    },
+    {
+      "path": "go.mod",
+      "sha256": "f3c56c1b188fa4c5530da908e71e2bd796ead1786b0ea6709faeab628ffe6da9",
+      "role": "Project Go toolchain/module baseline; unchanged by R1."
+    },
+    {
+      "path": "docs/plans/tailscale-macos/R1-OWNERSHIP-DESIGN.md",
+      "sha256": "4d9d901351829d80f1988462d4f60f89040feae6e1f4c4f3ffc8da854bd7bc23",
+      "role": "Imported plan design requirements."
+    },
+    {
+      "path": "docs/plans/tailscale-macos/REMAINING-IMPLEMENTATION-PLAN.md",
+      "sha256": "7260cf2f52ff759806ec55a859d9cd6810ddeca167ae2a82ff8a2cedde658bca",
+      "role": "R1/R2 sequencing and review/owner gates."
+    },
+    {
+      "path": "docs/plans/tailscale-macos/execution/STATUS.json",
+      "sha256": "a1d1e25775ebcf930f6288009ad5bce94fcf55ba4a9a82acb23f6b95f6119586",
+      "role": "Existing execution checkpoint; not edited and not treated as this R1 post-review verdict."
+    },
+    {
+      "path": "docs/plans/tailscale-macos/imported/SHA256SUMS",
+      "sha256": "ac60e5f6cd63ea08a184168cf4c37314fac23e6322388fa72e46a74278420dcf",
+      "role": "Protected imported handoff integrity manifest; not edited."
+    },
+    {
+      "path": "go.sum",
+      "sha256": "017975f182cdb69be063ac85fdcf687cc7db2f8af66bda592491fa90e2af1fba",
+      "role": "Current dependency lockfile; only conditionally in the proposed R2 allowlist after explicit dependency approval."
+    },
+    {
+      "path": "cmd/herdr-mobile-relay/main_test.go",
+      "sha256": "89354b5e2cb18664e0ad2360893a1aaaef2dae3565a989ce49c69461a356827f",
+      "role": "Current CLI/server integration test baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "cmd/herdr-mobile-relay/command_test.go",
+      "sha256": "0108edc9dd1d4d0fa91ab4ed35469919c8915a09435e150787fd56214fd64dce",
+      "role": "Current command parser/control test baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "cmd/herdr-mobile-relay/tailscale_admission_test.go",
+      "sha256": "cd0b5e773e38990d23d878a00b76059a67acbab1d91b7d7663f21250aafb3279",
+      "role": "Current fail-closed Tailscale admission test baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "internal/localcontrol/localcontrol_test.go",
+      "sha256": "ec12191e49e1792d372ab4d45848260b6a0fdd4afaa7b5fc4bf2e912b9873c41",
+      "role": "Current private control protocol test baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale.sh",
+      "sha256": "9d037e38a26b59d170d2db5cc2b2940f8763183cf6b47b8524c60785e792801d",
+      "role": "Current shell Tailscale launcher/cleanup fixture baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale_launcher_order.py",
+      "sha256": "fb062c32a8451adafdbd22bbf75778679dbe77801e8ae37c38c219173309d0da",
+      "role": "Current launcher ordering sandbox baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale_consent.py",
+      "sha256": "7f5f92d155cf415f414f61dc57391cf4f92735ba6946150b6746ea0e79dc0ea5",
+      "role": "Current consent-before-mutation sandbox baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale_process_groups.py",
+      "sha256": "f87de540e2428f007b82aca66d98e90fec44d739dfa58991555b7a0b7f248c98",
+      "role": "Current POSIX process-tree sandbox baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale_process_groups_darwin.py",
+      "sha256": "0e8a7a4d79908a5c40d17ab29dd2610153848f85cca885cc3dc91b34cdf52d05",
+      "role": "Current Darwin process-tree sandbox baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale_release_identity.py",
+      "sha256": "97f4058ce8e4bc2832f4a6a1373aceee682968aaee559011258176bdf4daab31",
+      "role": "Current release-identity launcher regression baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale_reprint.py",
+      "sha256": "71292a74ab50d7b430939c4b64866825e06a6b7419beb7fa687aef9368dc91fc",
+      "role": "Current managed reprint regression baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "tests/test_tailscale_space_paths.py",
+      "sha256": "abf1eaa3124d12238f4d1a13b3cf19f08a109828e16c4b8c1d25d7cfb9b9db4a",
+      "role": "Current paths-with-spaces launcher sandbox baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "internal/deviceauth/store.go",
+      "sha256": "9319b47e2ec655f6bba86d3a1e93bd56813380d916f0a12f1bdb0c9ec0d671d3",
+      "role": "Current deviceauth.Open startup behavior; it protects the directory, loads, and persists the store. Included as a source input for proposed non-mutating Tailscale OpenDeferred scope."
+    },
+    {
+      "path": "internal/deviceauth/store_test.go",
+      "sha256": "0ca291fb6618f45c26ab73d55a48753e93115d635366709495ee7b1fc714ad67",
+      "role": "Current device-store behavior test baseline in the proposed bounded R2 allowlist."
+    },
+    {
+      "path": "internal/deviceauth/managed_identity_test.go",
+      "sha256": "fcf87f1107ca60d05ec51ea47b2d5b7049b04f66d75cded2d616ac1d847cff74",
+      "role": "Current device-store filesystem identity/permission test baseline for proposed read-only deferred open."
+    },
+    {
+      "path": "internal/deviceauth/tailscale_preservation_test.go",
+      "sha256": "397e98a8dec061521758f7f53e1fa7cb91ccc42e2eb062b254652e48dff5b6fa",
+      "role": "Current Tailscale credential-preservation test baseline in the proposed bounded R2 allowlist."
+    }
+  ],
+  "review_batch": {
+    "stage": "reviewer",
+    "worker_turn": 9,
+    "review_start": 2,
+    "latest_review_start": 10,
+    "audit_start": 0,
+    "rounds_recorded": [2, 3, 4, 5, 6],
+    "latest_round": 6,
+    "latest_step": 18,
+    "complete": true,
+    "source_recording_note": "Round-3 provenance/dispositions were preserved in a compacted handoff and are explicitly paraphrased below; available round-2, round-4, round-5 and round-6 reviewer reports are recorded with provenance. Round-6 report bodies and assessments are transcribed from the controller handoff.",
+    "reports": [
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 1,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Correctness, contracts, edge cases, and missed requirements. Also report any other concrete defect.",
+          "round": 2,
+          "step": 4,
+          "workerTurn": 2
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F002 and F004 are resolved in the revised design documents. F001 remains open because an in-flight registration POST can commit after cleanup observes the session key absent; F003 remains open because the active authentication resolver can refresh an expired bootstrap invitation before the owner gate.",
+          "findings": [],
+          "assessments": [
+            {"id":"F001","verdict":"open","evidence":"The ADR now recognizes the watcher/POST race and specifies exact-key conditional compensation in state-machine steps 5 and 8, with cases in R2 test 4. However, on an ambiguous registration acknowledgement, cleanup can GET the effective config before the original POST finishes and see the key absent, then treat absence as retirement. The original POST may subsequently commit using the unchanged non-empty ETag; the cited daemon source has no active-watcher admission guard, and the design does not require draining/proving completion of that POST before accepting an absent read. ETag compensation is only attempted when the route is present. Therefore the specific late-commit interleaving still lacks a safe retirement proof; require a serialization/fencing guarantee or retain unknown/not-retired status when the registration outcome is unresolved."},
+            {"id":"F002","verdict":"resolved","evidence":"The revised ADR and decision brief both contain a Trust and threat model section: they explicitly assume cooperating writers, disclaim resistance to malicious same-UID/root/operator actors, describe broad LocalAPI write authority, distinguish the in-memory watcher handle from sensitive auth material, and connect the filesystem/TOCTOU assumption to DR-2. This addresses the requested threat boundary without overstating protection."},
+            {"id":"F003","verdict":"open","evidence":"The ADR now addresses the eager `armBootstrap` constructor call and separates local from pairing readiness, but says the deferred-mode server may still install its authentication resolver. In the current source, `internal/app/server.go` installs the device store as the hub resolver during construction; `internal/transport/e2ee.go` calls `ResolveE2EESecret` during handshake; and `internal/deviceauth/resolver.go` refreshes and persists an expired bootstrap invitation when the bootstrap selector is presented and there are no credentials (around lines 35-40). That path can mutate/accept bootstrap state before live Serve readiness despite skipping `EnsureBootstrapInvitation`. The design/test must gate or safely defer this resolver behavior too; test 11's no-refresh assertion does not specify that control."},
+            {"id":"F004","verdict":"resolved","evidence":"The ADR's Launcher cleanup handoff and the decision brief specify an owner-side authenticated, idempotent localcontrol `retire` acknowledgement for the exact run/session before the launcher stops the owner. The launcher may discard records only after positive retirement and clean exit; ambiguous/lost retirement retains evidence, and unrelated Serve routes do not fail retirement. This directly removes global Serve/Funnel emptiness as an ownership proxy. The design-only scope does not require changing the shell in this R1 slice."}
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 2,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Verification coverage, integration, operational feasibility, security, and failure recovery. Also report any other concrete defect.",
+          "round": 2,
+          "step": 4,
+          "workerTurn": 2
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F002–F004 are addressed in the revised design. F001 remains open: the compensation design can falsely declare retirement if an ambiguous registration POST is still pending when a fresh read observes the session key absent. The R2 test specification also omits an explicit production-adapter test/case-to-caller mapping required by the plan.",
+          "findings": [
+            {"id":"F005","reported_id":"","title":"R2 tests do not require exercising the planned production adapter or map cases to callers","evidence":"The original plan requires each R2 test to map to a production interface/caller and specifically requires positive/negative tests to exercise the actual planned adapter, not only a fake that reports ownership. DR-1's “R2 test specification” lists behavioral cases but provides no case-to-interface mapping. Test 1 refers to the “existing source adapter” (the current read-only adapter); test 5 specifies a positive route/readiness condition without requiring the future LocalAPI ownership adapter to execute it; test 9 addresses distribution permissions but likewise does not require that adapter. Thus the suite can satisfy the written cases with mocked ownership responses while never validating the production authority path. Add an explicit case-to-caller mapping and a test that drives the actual planned adapter against a bounded fake LocalAPI contract, with a negative control proving observed route/session data cannot substitute for its held watcher handle."}
+          ],
+          "assessments": [
+            {"id":"F001","verdict":"open","evidence":"The revision adds exact-key conditional compensation and tests the watcher-map deletion interleaving, but does not cover an ambiguous registration POST that remains in flight. In DR-1 state 8, after closing the watch the client reads the effective Serve view and treats an absent key as retired; state 5 explicitly allows a lost acknowledgement to enter reconciliation. A server-side POST can still be waiting to apply when the client times out, and a separate fresh GET may observe the key absent before that POST later commits. The sourced absence of an atomic active-watcher guard means the subsequent read does not itself prove the earlier mutation has settled. Test 4 covers a dropped acknowledgement after the state write, but not a late commit after the cleanup read has observed absence. The design must establish a settlement/serialization guarantee or classify this ambiguous case as unknown, and test the absent-read/late-commit interleaving."},
+            {"id":"F002","verdict":"resolved","evidence":"DR-1 now has a dedicated “Trust and threat model” section stating the cooperating-writer assumption; explaining that a malicious same-UID, root, or operator process can omit ETags, manipulate watches/configuration, and change local state; identifying broad LocalAPI write authority; treating the session handle as in-memory rather than secret; and protecting transport credentials. It explicitly connects the same-UID filesystem/TOCTOU boundary to DR-2. The owner brief repeats these limits and makes owner acceptance an explicit decision."},
+            {"id":"F003","verdict":"resolved","evidence":"DR-1's state-machine step 4 and “Existing bootstrap/readiness integration gap” cite the current eager `armBootstrap` call and prescribe a managed-Tailscale-only deferred-arm policy, preserving non-Tailscale startup and enrolled credentials. They distinguish local listener health from pairing/authority readiness and require live owner validation plus durable `armBootstrapForControl` acknowledgement before pairing becomes ready. R2 test 11 asserts no pre-readiness invitation, no ownerless arm, and unchanged non-Tailscale behavior. This resolves the design omission without pretending product code was changed in this documentation-only slice."},
+            {"id":"F004","verdict":"resolved","evidence":"DR-1's “Launcher cleanup handoff” specifies an owner-side localcontrol `retire` acknowledgement for the exact in-memory session before owner shutdown, deletion of shell records only after acknowledged retirement and clean exit, and retention of recovery evidence for missing/ambiguous acknowledgement. It explicitly permits unrelated Serve routes to remain and forbids using global emptiness or PID evidence as ownership. R2 test 12 covers normal and abnormal shell cleanup. The current shell is intentionally unchanged pending R2."}
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 1,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Correctness, contracts, edge cases, and missed requirements. Also report any other concrete defect.",
+          "round": 3,
+          "step": 6,
+          "workerTurn": 3
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "Round-3 reviewer independently marked F001, F003, and F005 resolved, and raised F006 for a bounded R2 change allowlist plus a concise owner approval statement naming API/version, distributions, dependency, and mutation scope.",
+          "findings": [
+            {
+              "id": "F006",
+              "reported_id": null,
+              "title": "R2 approval boundary lacks a bounded file/change allowlist and scoped owner approval",
+              "evidence": "Paraphrase of the round-3 reviewer finding from the compacted handoff: require a bounded R2 file/change allowlist and a concise explicit owner approval statement covering the exact API/version, supported distributions, dependency choice, and mutation scope."
+            }
+          ],
+          "assessments": [
+            {
+              "id": "F001",
+              "verdict": "resolved",
+              "evidence": "Paraphrase of independent round-3 disposition: accepted the unresolved-write/absent-read quarantine response and forced late-commit test specified in DR-1."
+            },
+            {
+              "id": "F003",
+              "verdict": "resolved",
+              "evidence": "Paraphrase of independent round-3 disposition: accepted the closed BootstrapGate around invitation resolution and completion, including refresh/consumption coverage."
+            },
+            {
+              "id": "F005",
+              "verdict": "resolved",
+              "evidence": "Paraphrase of independent round-3 disposition: accepted the R2 case-to-caller map and production-adapter fake-LocalAPI tests with a no-held-watcher negative control."
+            }
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 2,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Verification coverage, integration, operational feasibility, security, and failure recovery. Also report any other concrete defect.",
+          "round": 3,
+          "step": 6,
+          "workerTurn": 3
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "Round-3 reviewer independently marked F001, F003, and F005 resolved, and raised F007 requiring removal of the separately launched/supervised Tailscale Serve child and its cleanup path, plus an explicit R2 file allowlist.",
+          "findings": [
+            {
+              "id": "F007",
+              "reported_id": null,
+              "title": "Proposed in-process ownership leaves the separate Tailscale Serve child and launcher cleanup unspecified",
+              "evidence": "Paraphrase of the round-3 reviewer finding from the compacted handoff: explicitly remove the separately launched and supervised `tailscale serve` child from the in-process owner design, specify its process/session/cleanup changes, and define the R2 source/test file allowlist."
+            }
+          ],
+          "assessments": [
+            {
+              "id": "F001",
+              "verdict": "resolved",
+              "evidence": "Paraphrase of independent round-3 disposition: accepted the unresolved-write/absent-read quarantine response and forced late-commit test specified in DR-1."
+            },
+            {
+              "id": "F003",
+              "verdict": "resolved",
+              "evidence": "Paraphrase of independent round-3 disposition: accepted the closed BootstrapGate around invitation resolution and completion, including refresh/consumption coverage."
+            },
+            {
+              "id": "F005",
+              "verdict": "resolved",
+              "evidence": "Paraphrase of independent round-3 disposition: accepted the R2 case-to-caller map and production-adapter fake-LocalAPI tests with a no-held-watcher negative control."
+            }
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 1,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Correctness, contracts, edge cases, and missed requirements. Also report any other concrete defect.",
+          "round": 4,
+          "step": 14,
+          "workerTurn": 7
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F006 and F007 are resolved in the current ADR and decision brief. One new artifact defect remains: the source-evidence JSON repeats an object member, making the evidence document non-deterministic for parsers that handle duplicate keys differently.",
+          "findings": [
+            {
+              "id": "F008",
+              "reported_id": "",
+              "title": "Source-evidence JSON repeats the `featureReady` member",
+              "evidence": "In `docs/plans/tailscale-macos/execution/R1-SOURCE-EVIDENCE.json`, `verification_boundary.approval_state` contains two consecutive `\"featureReady\": false` members. JSON object member names should be unique; parsers may silently keep the first or last value, and `python -m json.tool` does not detect this. Remove the duplicate and validate with duplicate-key rejection so the approval-state evidence has an unambiguous representation."
+            }
+          ],
+          "assessments": [
+            {
+              "id": "F006",
+              "verdict": "resolved",
+              "evidence": "The final `docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md` now has “Proposed R2 change allowlist and bounded owner approval”: it enumerates production and test paths, makes `go.mod`/`go.sum` conditional, and provides an owner response template naming the pinned source/version, exact platform cells, dependency, existing privilege, and mutation/prohibition scope. Blank choices do not authorize R2."
+            },
+            {
+              "id": "F007",
+              "verdict": "resolved",
+              "evidence": "The final ADR’s “Launcher migration and cleanup handoff” explicitly requires removing the separate `$TS_BIN serve` child, its PID/job/log/session fields, monitoring, signaling, and global-empty cleanup checks, while retaining relay supervision and defining the `retire`/quarantine flow. The decision brief repeats this migration and includes `relay/tailscale.sh` and `relay/setup-link.sh` in the scoped R2 allowlist."
+            }
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 2,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Verification coverage, integration, operational feasibility, security, and failure recovery. Also report any other concrete defect.",
+          "round": 4,
+          "step": 14,
+          "workerTurn": 7
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F006 and F007 are fixed in the current artifacts. I found one new cleanup-isolation defect: closing the owned watcher itself deletes any current config under that session key, including the replacement state the design says to preserve. Runtime qualification is correctly not applicable to this documentation-only R1-A review.",
+          "findings": [
+            {
+              "id": "F009",
+              "reported_id": "",
+              "title": "Closing the foreground watcher can erase a changed same-session route",
+              "evidence": "`internal/tailscale/DR-1-session-authority.md` records that watcher exit invokes `DeleteForegroundSession(sessionID)` and removes that foreground key (source evidence UP-003/UP-004; ADR lines 24, 54). The retirement sequence closes the watch before reconciling the Serve view (step 8), yet step 8 and R2 test 6 say a changed/expanded same-ID entry is not ours to delete and foreign state must be preserved. If that key is replaced or changed while the watch is live, closing the watcher deletes it before the subsequent GET can detect the replacement. Reconcile while the watcher remains live and retain/quarantine the owner rather than closing it when the key is not the exact submitted route; add a test that changes the same-ID config immediately before retirement."
+            }
+          ],
+          "assessments": [
+            {
+              "id": "F006",
+              "verdict": "resolved",
+              "evidence": "The current brief contains an explicit R2 production and test path allowlist plus a fill-every-field owner response template specifying the pinned v1.102.4 commit, exact platform/distribution matrix, build metadata policy, dependency choice, existing authorization, and permitted mutations (`docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md`, “Proposed R2 change allowlist and bounded owner approval”). It also states that unlisted changes need an approved amendment and that the statement does not authorize runtime activity."
+            },
+            {
+              "id": "F007",
+              "verdict": "resolved",
+              "evidence": "The ADR now explicitly requires removing the external `$TS_BIN serve` child, its PID/job/log/session records, supervision/monitor/signal and global-empty cleanup paths, retaining only relay-process supervision (`internal/tailscale/DR-1-session-authority.md`, “Launcher migration and cleanup handoff,” especially steps 1–5). The brief's R2 allowlist names both launcher scripts and repeats the no-child/no-fallback boundary. This addresses the finding; product changes remain correctly deferred to R2."
+            }
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 1,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Correctness, contracts, edge cases, and missed requirements. Also report any other concrete defect.",
+          "round": 5,
+          "step": 16,
+          "workerTurn": 8
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F008 is resolved. F009 remains open because the owner-facing decision brief still specifies the unsafe close-before-reconcile order. I also found an unsubstantiated watcher-close acknowledgement requirement in the proposed retirement protocol.",
+          "findings": [
+            {
+              "id": "F010",
+              "reported_id": "",
+              "title": "Retirement requires an unspecified daemon-side watcher-close acknowledgement",
+              "evidence": "`internal/tailscale/DR-1-session-authority.md`, state-machine step 8, requires a “close acknowledgement” and a final read before reporting `retired=true`, but provides no operation or observable event that supplies that acknowledgement. The source inventory’s UP-009 describes the watch as a streaming endpoint tied to request-context cancellation; UP-003 records server-side `DeleteForegroundSession` on watch exit and no finite cleanup deadline. Local cancellation/closing the response proves only that the client ended its stream, not that the daemon’s deferred cleanup has completed. R2 therefore cannot satisfy the stated retirement contract from the cited source as written; identify a source-backed acknowledgement or keep closure/retirement unverified and quarantined."
+            }
+          ],
+          "assessments": [
+            {
+              "id": "F008",
+              "verdict": "resolved",
+              "evidence": "The current `verification_boundary.approval_state` object in `docs/plans/tailscale-macos/execution/R1-SOURCE-EVIDENCE.json` (lines 815–826) contains one canonical `featureReady: false` member; the duplicate cited by F008 is gone."
+            },
+            {
+              "id": "F009",
+              "verdict": "open",
+              "evidence": "The ADR now correctly reconciles the full session key while L is live, but `docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md`, “Proposed safety protocol” item 8, still says to “close the watch and conditionally remove” the owned key, in that order. UP-003/UP-004 state that watch exit invokes `DeleteForegroundSession(sessionID)`, deleting whatever is then stored under that key. The brief therefore still directs the F009 failure: changed same-ID state can be erased before selective reconciliation."
+            }
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 2,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Verification coverage, integration, operational feasibility, security, and failure recovery. Also report any other concrete defect.",
+          "round": 5,
+          "step": 16,
+          "workerTurn": 8
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F008 is resolved in the current JSON. F009 remains open because the ADR's corrected cleanup order conflicts with the owner brief, which still directs closing the watcher before inspecting/removing the session key. I also found a separate mismatch between the proposed startup's device-store writes and the scoped owner approval statement. Documentation-only verification is applicable; runtime tests remain correctly not applicable to R1-A.",
+          "findings": [
+            {
+              "id": "F011",
+              "reported_id": "",
+              "title": "R2 approval scope omits the device-store write performed during startup",
+              "evidence": "The R2 sequence opens the device-auth store during unarmed startup, before live route validation (`internal/tailscale/DR-1-session-authority.md`, state-machine step 4). The current `deviceauth.Open` calls `protectDirectory`, loads the store, then unconditionally calls `persistLocked` (`internal/deviceauth/store.go`, `Open`, approximately lines 138–162); `app.newServer` invokes it before `armBootstrap` (`internal/app/server.go`, approximately lines 274–280). But the owner-approval template limits local persistence to selected transport/origin/run-recovery files and the existing bootstrap invitation after owner validation (`docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md`, “Owner response”). The R2 allowlist does not include `internal/deviceauth/store.go`. Thus the specified startup necessarily creates/rewrites persistent device-store state outside the stated mutation scope, before the specified validation point. The approval boundary or startup/allowlist must explicitly account for this before R2."
+            }
+          ],
+          "assessments": [
+            {
+              "id": "F008",
+              "verdict": "resolved",
+              "evidence": "In the current `verification_boundary.approval_state` object in `docs/plans/tailscale-macos/execution/R1-SOURCE-EVIDENCE.json`, there is one canonical `\\\"featureReady\\\": false` member and no redundant `feature_ready` alias. The duplicate member reported by F008 is absent."
+            },
+            {
+              "id": "F009",
+              "verdict": "open",
+              "evidence": "The ADR now correctly says to reconcile the whole `Foreground[sessionID]` while L is live and not close L when the value is changed (`internal/tailscale/DR-1-session-authority.md`, state-machine step 8). However, the owner-facing brief still says: “For settled registration, close the watch and conditionally remove only the exact owned key” (`docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md`, proposed safety protocol step 8). The cited daemon behavior is that closing the watcher unconditionally deletes the current value under that session key. These conflicting instructions leave the original unsafe close-before-reconciliation path in the deliverable, so F009 is not fully resolved."
+            }
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 1,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Correctness, contracts, edge cases, and missed requirements. Also report any other concrete defect.",
+          "round": 6,
+          "step": 18,
+          "workerTurn": 9
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F009–F011 are resolved in the current ADR and decision brief. One required R2 lifecycle edge is missing from the proposed test specification: held output pipes.",
+          "findings": [
+            {
+              "id": "",
+              "title": "R2 lifecycle test matrix omits the required held-output-pipe case",
+              "evidence": "The approved R1 assignment, section 8 case 6, explicitly requires testing parent/helper/relay death, cancellation, held output pipes, and daemon restart. The current ADR's R2 cases 7, 10, and 12 cover watcher/owner loss, stream cancellation, and shell cleanup, but nowhere specify a held stdout/stderr pipe scenario or its required cleanup/evidence assertion (see `internal/tailscale/DR-1-session-authority.md`, “R2 test specification” and “R2 production adapter and caller-to-test map”). Thus the proposed R2 suite could satisfy its listed lifecycle cases without checking the required inherited-pipe failure mode or ensuring it cannot falsely certify clean shutdown/retirement."
+            }
+          ],
+          "assessments": [
+            {
+              "id": "F009",
+              "verdict": "resolved",
+              "evidence": "The ADR state-machine step 8 and the decision brief's “Proposed safety protocol” step 8 now reconcile the full `Foreground[sessionID]` value while L is live, conditionally remove it only when it exactly matches the submitted route, and refuse both mutation and watcher cancellation on changed same-ID state. R2 test 6 explicitly requires preserving that changed state and retaining O/L/control in quarantine. This addresses the previous close-before-reconciliation path."
+            },
+            {
+              "id": "F010",
+              "verdict": "resolved",
+              "evidence": "The current ADR states that UP-003/UP-009 provide no daemon-side watcher-close acknowledgement or finite cleanup deadline; it separates `route_cleared` from `watcher_close_unverified`, forbids `retired=true` or releasing O based on local cancellation/EOF/absent reads, and retains the process/control/record in quarantine. The brief repeats this limit in its retirement protocol and owner decision, and R2 tests 10/12 enforce it. The unsupported retirement cell is explicitly kept unavailable rather than claiming an unsourced acknowledgement."
+            },
+            {
+              "id": "F011",
+              "verdict": "resolved",
+              "evidence": "The ADR's startup step 4 specifies a Tailscale-only `deviceauth.OpenDeferred` that may read/validate but cannot create/protect/chmod the directory or initialize/rewrite `devices.json` before route readiness. The resolver gate remains closed until readiness; post-readiness store initialization and invitation persistence are explicitly scoped. The brief's R2 allowlist includes `internal/deviceauth/store.go` and focused tests, and its owner response bounds these writes while preserving credentials. This closes the prior startup-mutation/approval mismatch."
+            }
+          ],
+          "blocker": null
+        }
+      },
+      {
+        "source": {
+          "stage": "reviewer",
+          "reviewerIndex": 2,
+          "model": "openai-codex/gpt-6-luna:max",
+          "focus": "Verification coverage, integration, operational feasibility, security, and failure recovery. Also report any other concrete defect.",
+          "round": 6,
+          "step": 18,
+          "workerTurn": 9
+        },
+        "result": {
+          "verdict": "findings",
+          "summary": "F010 and F011 are resolved in the current documents. F009 remains open: orderly retirement now reconciles before local watcher cancellation, but unexpected watcher loss can trigger the same daemon-side deletion before the relay receives the loss signal.",
+          "findings": [],
+          "assessments": [
+            {
+              "id": "F009",
+              "verdict": "open",
+              "evidence": "The ordered-retirement fix is present in `internal/tailscale/DR-1-session-authority.md`, state-machine step 8, and `docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md`, safety-protocol step 8: reconcile while L is live, preserve changed same-ID state, and do not cancel L on a mismatch. However, the ADR's source observations state that any watch exit invokes `DeleteForegroundSession(sessionID)` (UP-003/UP-004). On an involuntary watcher loss, that daemon defer runs before the client can receive stream completion and perform the live-L reconciliation. The failure path in step 7 and R2 test 7 cover watcher loss/quarantine but do not cover a changed same-ID entry at that moment or acknowledge that upstream may delete it. Thus the deliverable still cannot claim preservation of foreign same-ID state for this failure path; explicitly bound that guarantee and its operational consequence, or otherwise resolve the unplanned-close case."
+            },
+            {
+              "id": "F010",
+              "verdict": "resolved",
+              "evidence": "Both documents now distinguish exact route cleanup from watcher closure and state that UP-003/UP-009 provide no daemon-side close acknowledgement or finite cleanup deadline. They explicitly prohibit treating local cancellation, EOF, reader exit, or a post-close absent read as `retired=true`; the process/O/control and recovery record remain quarantined, and feature support remains unavailable absent further source evidence (`DR-1` state-machine step 8; decision brief safety-protocol step 8 and risk/recovery decision 8). This is the requested safe disposition where no acknowledgement is sourced."
+            },
+            {
+              "id": "F011",
+              "verdict": "resolved",
+              "evidence": "The design now requires a Tailscale-only `deviceauth.OpenDeferred` that reads/validates without directory creation/protection/chmod or `devices.json` initialization/rewrite before route readiness (`DR-1` state-machine step 4 and decision brief safety-protocol step 4). The R2 allowlist includes `internal/deviceauth/store.go` and deferred-open tests, while the owner response explicitly bounds post-readiness store/directory/invitation writes and preserves existing credentials. This closes the prior mismatch between startup behavior and approval scope."
+            }
+          ],
+          "blocker": null
+        }
+      }
+    ],
+    "reviewBlockers": [],
+    "worker_responses": [
+      {
+        "id": "F009",
+        "disposition": "response_documented_open_after_mixed_round_6",
+        "evidence": "This revision narrows the guarantee: cooperating writers reserve/modify only their own ephemeral session key; changed same-key state detected while L is live gets no relay write or intentional cancellation, but any involuntary watcher exit may delete the then-current same-key value before relay observation. Quarantine/O cannot prevent that. Test 7 models the daemon's actual single-key deletion and requires no claim of same-key preservation; unrelated keys/routes/background fields remain untouched. Reviewer 1 marked F009 resolved in round 6; reviewer 2 kept it open."
+      },
+      {
+        "id": "F010",
+        "disposition": "independently_resolved_round_6",
+        "evidence": "Both round-6 reviewers independently resolved F010. The design still does not invent a daemon close acknowledgement and requires a separately reviewed retirement contract before positive integration."
+      },
+      {
+        "id": "F011",
+        "disposition": "independently_resolved_round_6",
+        "evidence": "Both round-6 reviewers independently resolved F011. The deferred/no-write device-store startup design and bounded post-readiness write scope are retained."
+      },
+      {
+        "id": "F012",
+        "disposition": "response_documented_open",
+        "evidence": "Added the R1-assignment-required held inherited stdout/stderr pipe scenario to R2 test 7 and its production-caller map. The test exercises the existing supervised relay/process-group boundary and allowlisted Linux/macOS integration tests; bounded cleanup/no hang is required, and stream EOF/WaitDelay/process exit must not be mistaken for Tailscale route cleanup or watcher retirement. F012 remains open pending independent review."
+      }
+    ],
+    "worker_disposition": "Round-2 reviewers resolved F002/F004; round-3 reviewers resolved F001/F003/F005; both round-4 reviewers resolved F006/F007; round-5 reviewers resolved F008; round-6 reviewers resolved F010/F011, with mixed F009 verdicts (reviewer 1 resolved; reviewer 2 open) and new F012. Worker documents the F009/F012 responses without closing either; owner approval, R2 implementation, and runtime qualification remain separate gates."
+  },
+  "verification_boundary": {
+    "go_version_observed": "go1.27.1 darwin/arm64",
+    "tests_build_vet_or_runtime_checks": "No Go tests, builds, vet, or runtime checks were run, per the R1-A documentation-only/no-tests handoff. No implementation pass is claimed. Applicable source/document checks are recorded separately; protected imported files remain checksum-verified.",
+    "runtime_qualification": "Not applicable to R1-A; runtimeQualified=false (not performed).",
+    "editable_paths_authorized": [
+      "internal/tailscale/DR-1-session-authority.md",
+      "docs/plans/tailscale-macos/execution/R1-DESIGN-REVIEW.md",
+      "docs/plans/tailscale-macos/execution/R1-SOURCE-EVIDENCE.json"
+    ],
+    "approval_state": {
+      "independent_authority_security_review": "round-6 reviewer 1 independently resolved F009/F010/F011 and raised F012; F012 response documented and pending review",
+      "independent_platform_integration_review": "round-6 reviewer 2 independently resolved F010/F011 and left F009 open due involuntary watcher loss; F009 response documents the bounded guarantee and remains open pending controller adjudication",
+      "owner_decision": "pending",
+      "ownerApproved": false,
+      "r2_implementation": "not started",
+      "r2ImplementationStarted": false,
+      "runtime_qualification": "not applicable to R1-A; not performed",
+      "runtimeQualified": false,
+      "ServeRouteOwned_production_behavior": false,
+      "featureReady": false
+    }
+  }
+}

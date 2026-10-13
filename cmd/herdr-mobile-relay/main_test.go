@@ -3,23 +3,447 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/app"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 )
+
+func installedCommandEnv(t *testing.T, mode string) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, key := range []string{
+		"HERDR_GATEWAY_URL", "HERDR_GATEWAY_SELECTION", "HERDR_RELAY_REARM_BOOTSTRAP",
+		"HERDR_RELAY_RUN_ID", "HERDR_RELAY_CONTROL_RUN_ID", "HERDR_RELAY_PAIRING_SOCKET",
+		"HERDR_TAILSCALE_ORIGIN", "HERDR_EXTERNAL_HTTPS_ORIGIN", "HERDR_PHONE_APP_URL",
+		"HERDR_TAILSCALE_CLI_ORIGIN", "HERDR_TAILSCALE_CLI_SCOPE", "HERDR_TAILSCALE_CLI_STATE_ROOT",
+		"HERDR_TAILSCALE_CLI_COORDINATION_ROOT", "HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT",
+	} {
+		t.Setenv(key, "")
+	}
+	for key, value := range map[string]string{
+		"HOME": root, "XDG_CONFIG_HOME": filepath.Join(root, "config"),
+		"XDG_CACHE_HOME": filepath.Join(root, "cache"), "XDG_DATA_HOME": filepath.Join(root, "data"),
+		"HERDR_RELAY_ENV": filepath.Join(root, "runtime", "relay.env"),
+		"HERDR_RELEASE_ROOT": filepath.Join(root, "release"), "HERDR_WEB_ROOT": filepath.Join(root, "web"),
+		"HERDR_BIN": filepath.Join(root, "absent-herdr"), "HERDR_SOCKET_PATH": filepath.Join(root, "absent-socket"),
+		"HERDR_RELAY_TOKEN": strings.Repeat("k", 32), "HERDR_RELAY_INSTANCE_ID": "installed-command-fixture",
+		"HERDR_RELAY_TRANSPORT": mode, "HERDR_RELAY_HOST": "127.0.0.1",
+		"HERDR_RELAY_PORT": "8375", "HERDR_RELAY_PLUGIN_PORT": "8376",
+		"HERDR_RELAY_LOG_FORMAT": "text", "HERDR_RELAY_LOG_LEVEL": "error",
+	} {
+		t.Setenv(key, value)
+	}
+	if mode == config.TransportGateway {
+		t.Setenv("HERDR_GATEWAY_URL", "wss://gateway.example.test")
+	}
+	prior := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prior) })
+	return root
+}
+
+func TestInstalledCommandUsesRealNonArmingConstructor(t *testing.T) {
+	for _, mode := range []string{config.TransportGateway, config.TransportCloudflare} {
+		t.Run(mode, func(t *testing.T) {
+			root := installedCommandEnv(t, mode)
+			path := filepath.Join(root, "runtime", "device-auth", "devices.json")
+			var before []byte
+			for restart := 0; restart < 3; restart++ {
+				called := false
+				code, err := runWithServerRunner([]string{"serve-installed"}, func(server *app.Server, ctx context.Context) error {
+					called = true
+					if server == nil || ctx.Err() != nil {
+						t.Fatal("installed command did not hand a real server to the lifecycle")
+					}
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var disk struct {
+						Invitation json.RawMessage `json:"invitation"`
+						Credentials []deviceauth.Credential `json:"credentials"`
+					}
+					if err := json.Unmarshal(data, &disk); err != nil {
+						t.Fatal(err)
+					}
+					if len(disk.Invitation) != 0 || len(disk.Credentials) != 0 {
+						t.Fatal("public installed command armed an invitation")
+					}
+					if before != nil && !bytes.Equal(before, data) {
+						t.Fatal("public installed restart changed persisted state")
+					}
+					before = data
+					return nil
+				})
+				if code != 0 || err != nil || !called {
+					t.Fatalf("installed dispatch = (%d, %v), runner called=%v", code, err, called)
+				}
+			}
+		})
+	}
+}
+
+func TestForegroundCommandCompatibilityStillEnsuresBootstrap(t *testing.T) {
+	for _, args := range [][]string{nil, {"serve"}} {
+		t.Run(fmtCommandArgs(args), func(t *testing.T) {
+			root := installedCommandEnv(t, config.TransportCloudflare)
+			called := false
+			code, err := runWithServerRunner(args, func(_ *app.Server, _ context.Context) error {
+				called = true
+				store, err := deviceauth.Open(filepath.Join(root, "runtime", "device-auth"))
+				if err != nil || !store.BootstrapStatus().Armed {
+					t.Fatal("ordinary/default serve no longer ensures initial bootstrap")
+				}
+				return nil
+			})
+			if code != 0 || err != nil || !called {
+				t.Fatalf("foreground dispatch = (%d, %v), called=%v", code, err, called)
+			}
+		})
+	}
+}
+
+func fmtCommandArgs(args []string) string {
+	if len(args) == 0 {
+		return "default"
+	}
+	return strings.Join(args, "-")
+}
+
+func TestInstalledCommandRefusesBeforeConstructionOrOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		key string
+		value string
+		wantCode int
+	}{
+		{name: "extra arguments", args: []string{"serve-installed", "extra"}, wantCode: 2},
+		{name: "tokenless", key: "HERDR_RELAY_TOKEN", wantCode: 1},
+		{name: "rearm", key: "HERDR_RELAY_REARM_BOOTSTRAP", value: "true", wantCode: 1},
+		{name: "managed identity", key: "HERDR_RELAY_RUN_ID", value: "foreground", wantCode: 1},
+		{name: "control identity", key: "HERDR_RELAY_CONTROL_RUN_ID", value: "foreground", wantCode: 1},
+		{name: "control socket", key: "HERDR_RELAY_PAIRING_SOCKET", value: "/fixture/control", wantCode: 1},
+		{name: "managed", key: "HERDR_RELAY_TRANSPORT", value: config.TransportTailscale, wantCode: 1},
+		{name: "BYO", key: "HERDR_RELAY_TRANSPORT", value: config.TransportTailscaleExternal, wantCode: 1},
+		{name: "CLI", key: "HERDR_RELAY_TRANSPORT", value: config.TransportTailscaleCLI, wantCode: 1},
+		{name: "unknown", key: "HERDR_RELAY_TRANSPORT", value: "unknown", wantCode: 1},
+		{name: "gateway conflict", key: "HERDR_GATEWAY_URL", value: "wss://gateway.example.test", wantCode: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := installedCommandEnv(t, config.TransportCloudflare)
+			if test.key != "" {
+				t.Setenv(test.key, test.value)
+			}
+			args := test.args
+			if args == nil {
+				args = []string{"serve-installed"}
+			}
+			code, err := runWithServerRunner(args, func(_ *app.Server, _ context.Context) error {
+				t.Fatal("refused installed command reached the run lifecycle")
+				return nil
+			})
+			if code != test.wantCode || err == nil {
+				t.Fatalf("installed refusal = (%d, %v), want %d/error", code, err, test.wantCode)
+			}
+			for _, dir := range []string{"runtime", "cache", "config", "release", "data"} {
+				if _, err := os.Lstat(filepath.Join(root, dir)); !os.IsNotExist(err) {
+					t.Fatalf("refused public command touched %s: %v", dir, err)
+				}
+			}
+		})
+	}
+}
+
+func TestInstalledCommandRejectsNonOriginGatewaysBeforeEffects(t *testing.T) {
+	for name, gateway := range map[string]string{
+		"userinfo":       "wss://fixture-user:fixture-origin-canary@gateway.example.test",
+		"path":           "wss://gateway.example.test/path",
+		"escaped path":   "wss://gateway.example.test/%2F",
+		"query":          "wss://gateway.example.test?private=fixture-origin-canary",
+		"empty query":    "wss://gateway.example.test?",
+		"fragment":       "wss://gateway.example.test#fixture-origin-canary",
+		"empty fragment": "wss://gateway.example.test#",
+		"remote WS":      "ws://gateway.example.test",
+	} {
+		for _, position := range []string{"leader", "fallback"} {
+			t.Run(name+"/"+position, func(t *testing.T) {
+				root := installedCommandEnv(t, config.TransportGateway)
+				list := gateway
+				if position == "fallback" {
+					list = "wss://gateway.example.test," + gateway
+				}
+				t.Setenv("HERDR_GATEWAY_URL", list)
+				code, err := runWithServerRunner([]string{"serve-installed"}, func(_ *app.Server, _ context.Context) error {
+					t.Fatal("non-origin public gateway selection reached the run lifecycle")
+					return nil
+				})
+				if code != 1 || err == nil {
+					t.Fatal("direct public installed command admitted a non-origin gateway")
+				}
+				if strings.Contains(err.Error(), gateway) || strings.Contains(err.Error(), "fixture-origin-canary") {
+					t.Fatal("public gateway refusal disclosed raw gateway input")
+				}
+				for _, dir := range []string{"runtime", "cache", "config", "release", "data"} {
+					if _, err := os.Lstat(filepath.Join(root, dir)); !os.IsNotExist(err) {
+						t.Fatal("invalid public gateway selection created app/store resources")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestInstalledCommandConfigErrorsAreNonDisclosing(t *testing.T) {
+	for name, gateway := range map[string]string{
+		"unsupported scheme": "https://fixture-user:fixture-origin-canary@gateway.example.test",
+		"malformed escape":   "wss://fixture-user:fixture-origin-canary@gateway.example.test/%zz",
+		"missing host":       "wss:fixture-origin-canary",
+	} {
+		for _, position := range []string{"leader", "fallback"} {
+			t.Run(name+"/"+position, func(t *testing.T) {
+				root := installedCommandEnv(t, config.TransportGateway)
+				list := gateway
+				if position == "fallback" {
+					list = "wss://gateway.example.test," + gateway
+				}
+				t.Setenv("HERDR_GATEWAY_URL", list)
+				code, err := runWithServerRunner([]string{"serve-installed"}, func(_ *app.Server, _ context.Context) error {
+					t.Fatal("invalid installed configuration reached the run lifecycle")
+					return nil
+				})
+				if code != 1 || err == nil || err.Error() != "invalid installed service configuration" {
+					t.Fatal("installed config failure did not return a fixed non-disclosing error")
+				}
+				if errors.Unwrap(err) != nil {
+					t.Fatal("installed config refusal retained the raw configuration error")
+				}
+				for _, dir := range []string{"runtime", "cache", "config", "release", "data"} {
+					if _, err := os.Lstat(filepath.Join(root, dir)); !os.IsNotExist(err) {
+						t.Fatal("invalid installed configuration created app/store resources")
+					}
+				}
+				output, fileErr := os.CreateTemp(root, "reported-error-*")
+				if fileErr != nil {
+					t.Fatal(fileErr)
+				}
+				defer output.Close()
+				reportError(output, []string{"serve-installed"}, err)
+				if _, fileErr := output.Seek(0, io.SeekStart); fileErr != nil {
+					t.Fatal(fileErr)
+				}
+				data, fileErr := io.ReadAll(output)
+				if fileErr != nil {
+					t.Fatal(fileErr)
+				}
+				if !bytes.Contains(data, []byte("invalid installed service configuration")) ||
+					bytes.Contains(data, []byte("fixture-origin-canary")) ||
+					bytes.Contains(data, []byte("fixture-user")) || bytes.Contains(data, []byte(gateway)) {
+					t.Fatal("reported installed configuration error is missing or disclosed gateway input")
+				}
+			})
+		}
+	}
+}
+
+func TestPublicCommandConfigErrorsAreNonDisclosing(t *testing.T) {
+	for _, args := range [][]string{nil, {"serve"}, {"app-deploy-configured"}, {"support"}} {
+		for name, gateway := range map[string]string{
+			"unsupported scheme": "https://fixture-user:fixture-origin-canary@gateway.example.test",
+			"malformed escape":   "wss://fixture-user:fixture-origin-canary@gateway.example.test/%zz",
+			"missing host":       "wss:fixture-origin-canary",
+		} {
+			for _, position := range []string{"leader", "fallback"} {
+				t.Run(fmtCommandArgs(args)+"/"+name+"/"+position, func(t *testing.T) {
+					root := installedCommandEnv(t, config.TransportGateway)
+					list := gateway
+					if position == "fallback" {
+						list = "wss://gateway.example.test," + gateway
+					}
+					t.Setenv("HERDR_GATEWAY_URL", list)
+					t.Setenv("JOURNAL_STREAM", "")
+					code, err := runWithServerRunner(args, func(_ *app.Server, _ context.Context) error {
+						t.Fatal("invalid public configuration reached the run lifecycle")
+						return nil
+					})
+					if code != 1 || err == nil || err.Error() != "invalid relay configuration" || errors.Unwrap(err) != nil {
+						t.Fatal("public config failure did not return a fixed error without a raw cause")
+					}
+					for _, dir := range []string{"runtime", "cache", "config", "release", "data"} {
+						if _, err := os.Lstat(filepath.Join(root, dir)); !os.IsNotExist(err) {
+							t.Fatal("invalid public configuration created runtime resources")
+						}
+					}
+					for _, format := range []string{"text", "json"} {
+						t.Setenv("HERDR_RELAY_LOG_FORMAT", format)
+						for _, journal := range []bool{false, true} {
+							output, fileErr := os.CreateTemp(root, "public-reported-error-*")
+							if fileErr != nil {
+								t.Fatal(fileErr)
+							}
+							defer output.Close()
+							if journal {
+								reportErrorWithJournal(output, args, err, true)
+							} else {
+								reportError(output, args, err)
+							}
+							if _, fileErr := output.Seek(0, io.SeekStart); fileErr != nil {
+								t.Fatal(fileErr)
+							}
+							data, fileErr := io.ReadAll(output)
+							if fileErr != nil {
+								t.Fatal(fileErr)
+							}
+							if !bytes.Contains(data, []byte("invalid relay configuration")) ||
+								bytes.Contains(data, []byte("fixture-origin-canary")) ||
+								bytes.Contains(data, []byte("fixture-user")) || bytes.Contains(data, []byte(gateway)) {
+								t.Fatal("public error output is missing or disclosed raw gateway input")
+							}
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestForegroundCommandRequestedRearmStillReplacesBootstrap(t *testing.T) {
+	for _, args := range [][]string{nil, {"serve"}} {
+		t.Run(fmtCommandArgs(args), func(t *testing.T) {
+			root := installedCommandEnv(t, config.TransportCloudflare)
+			store, err := deviceauth.Open(filepath.Join(root, "runtime", "device-auth"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.EnsureBootstrapInvitation([]byte(strings.Repeat("k", 32)), "fixture", "en"); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, "runtime", "device-auth", "devices.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HERDR_RELAY_REARM_BOOTSTRAP", "true")
+			called := false
+			code, err := runWithServerRunner(args, func(_ *app.Server, _ context.Context) error {
+				called = true
+				after, err := os.ReadFile(path)
+				if err != nil || bytes.Equal(before, after) {
+					t.Fatal("foreground requested rearm did not replace the persisted invitation")
+				}
+				reopened, err := deviceauth.Open(filepath.Join(root, "runtime", "device-auth"))
+				if err != nil || !reopened.BootstrapStatus().Armed {
+					t.Fatal("foreground requested rearm did not leave a live bootstrap")
+				}
+				return nil
+			})
+			if code != 0 || err != nil || !called {
+				t.Fatal("public config error redaction changed successful foreground rearm")
+			}
+		})
+	}
+}
+
+func TestInstalledCommandRejectsRawRearmBeforeConfigOrEffects(t *testing.T) {
+	for _, mode := range []string{config.TransportGateway, config.TransportCloudflare} {
+		for _, value := range []string{"invalid", "true", "1", "True", "TRUE", "t", "T", " false ", "fixture-rearm-canary"} {
+			t.Run(mode+"/"+value, func(t *testing.T) {
+				root := installedCommandEnv(t, mode)
+				t.Setenv("HERDR_RELAY_REARM_BOOTSTRAP", value)
+				if value == "fixture-rearm-canary" {
+					// Also prove raw policy validation precedes config errors;
+					// the other cases use otherwise valid configuration.
+					t.Setenv("HERDR_RELAY_TOKEN", "invalid-token-length")
+				}
+				code, err := runWithServerRunner([]string{"serve-installed"}, func(_ *app.Server, _ context.Context) error {
+					t.Fatal("raw rearm refusal reached the run lifecycle")
+					return nil
+				})
+				if code != 1 || err == nil || err.Error() != "installed service refuses bootstrap re-enrollment policy" {
+					t.Fatal("installed command did not refuse raw rearm before configuration")
+				}
+				for _, dir := range []string{"runtime", "cache", "config", "release", "data"} {
+					if _, err := os.Lstat(filepath.Join(root, dir)); !os.IsNotExist(err) {
+						t.Fatal("raw rearm refusal created app/store resources")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestInstalledCommandAcceptsOnlyFalseRearmSpellings(t *testing.T) {
+	for _, mode := range []string{config.TransportGateway, config.TransportCloudflare} {
+		for _, value := range []string{"", "0", "false", "False", "FALSE", "f", "F"} {
+			t.Run(mode+"/"+value, func(t *testing.T) {
+				root := installedCommandEnv(t, mode)
+				t.Setenv("HERDR_RELAY_REARM_BOOTSTRAP", value)
+				called := false
+				code, err := runWithServerRunner([]string{"serve-installed"}, func(_ *app.Server, _ context.Context) error {
+					called = true
+					store, err := deviceauth.Open(filepath.Join(root, "runtime", "device-auth"))
+					if err != nil || store.BootstrapStatus().Armed {
+						t.Fatal("false rearm spelling failed authenticated non-arming startup")
+					}
+					return nil
+				})
+				if code != 0 || err != nil || !called {
+					t.Fatal("installed command refused a wrapper-supported false rearm spelling")
+				}
+			})
+		}
+	}
+}
+
+func TestForegroundCommandMalformedRearmRetainsFallback(t *testing.T) {
+	for _, args := range [][]string{nil, {"serve"}} {
+		t.Run(fmtCommandArgs(args), func(t *testing.T) {
+			root := installedCommandEnv(t, config.TransportCloudflare)
+			t.Setenv("HERDR_RELAY_REARM_BOOTSTRAP", "invalid")
+			called := false
+			code, err := runWithServerRunner(args, func(_ *app.Server, _ context.Context) error {
+				called = true
+				store, err := deviceauth.Open(filepath.Join(root, "runtime", "device-auth"))
+				if err != nil || !store.BootstrapStatus().Armed {
+					t.Fatal("ordinary serve no longer ensures bootstrap with config's false fallback")
+				}
+				return nil
+			})
+			if code != 0 || err != nil || !called {
+				t.Fatal("installed raw-policy validation changed ordinary/default serve")
+			}
+		})
+	}
+}
+
+func TestInstalledCommandPropagatesRunnerFailure(t *testing.T) {
+	installedCommandEnv(t, config.TransportCloudflare)
+	failure := errors.New("fixture lifecycle failure")
+	code, err := runWithServerRunner([]string{"serve-installed"}, func(_ *app.Server, _ context.Context) error { return failure })
+	if code != 1 || !errors.Is(err, failure) {
+		t.Fatalf("installed lifecycle failure = (%d, %v)", code, err)
+	}
+}
 
 func TestPrintDevelopmentSetupLinkUsesBareVerifiedRelayOrigin(t *testing.T) {
 	cfg := &config.Config{
@@ -366,6 +790,148 @@ func TestVerifyReleaseIdentity(t *testing.T) {
 	crossTarget.Target = "other/target"
 	if err := verifyReleaseIdentity(crossTarget, "", "", "other/target", true); err != nil {
 		t.Fatalf("cross-target build-host verification rejected: %v", err)
+	}
+}
+
+// A fresh subprocess keeps the trust pool independent of other unit tests.
+// A run-owned root stands in for OS trust on both hosted platforms; the actual
+// command still uses default verified TLS, never an insecure client. The only
+// HTTPS endpoint is this run-owned disposable loopback fixture;
+// no account, external network, real service or Tailscale is contacted.
+func TestVerifyPublicExactTrustedGatewayApp(t *testing.T) {
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("exact trusted app subprocess fixture is hosted-only")
+	}
+	webRoot, err := filepath.Abs(filepath.Join("..", "..", "web"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := release.WebHashFS(os.DirFS(webRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.ReadFile(filepath.Join(webRoot, "version.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity struct {
+		Version  string `json:"release_version"`
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(metadata, &identity); err != nil || identity.Version == "" || identity.Revision == "" {
+		t.Fatal("packaged fixture identity is missing")
+	}
+	server := httptest.NewTLSServer(http.FileServer(http.Dir(webRoot)))
+	defer server.Close()
+	root := t.TempDir()
+	cert := filepath.Join(root, "fixture-ca.pem")
+	if err := os.WriteFile(cert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustDir := filepath.Join(root, "empty-trust-dir")
+	if err := os.Mkdir(trustDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args, err := json.Marshal([]string{"verify-public", "--web-root", webRoot, "--origin", server.URL,
+		"--version", identity.Version, "--revision", identity.Revision, "--web-hash", hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestGatewayAppVerifierSubprocess$")
+	cmd.Env = []string{"HOME=" + root, "PATH=/usr/bin:/bin", "SSL_CERT_FILE=" + cert, "SSL_CERT_DIR=" + trustDir,
+		"GODEBUG=x509usefallbackroots=1", "HERDR_TEST_GATEWAY_APP_CA=" + cert,
+		"GITHUB_ACTIONS=true", "RUNNER_ENVIRONMENT=github-hosted", "HERDR_TEST_GATEWAY_APP_ARGS=" + string(args)}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("exact trusted packaged app refused: %v (%s)", err, output)
+	}
+}
+
+func TestGatewayAppVerifierSubprocess(t *testing.T) {
+	text := os.Getenv("HERDR_TEST_GATEWAY_APP_ARGS")
+	if text == "" {
+		return
+	}
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Fatal("app verifier subprocess must be hosted")
+	}
+	cert, err := os.ReadFile(os.Getenv("HERDR_TEST_GATEWAY_APP_CA"))
+	if err != nil {
+		t.Fatal("fixture trust root unavailable")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(cert) {
+		t.Fatal("invalid fixture trust root")
+	}
+	x509.SetFallbackRoots(pool)
+	var args []string
+	if err := json.Unmarshal([]byte(text), &args); err != nil {
+		t.Fatal("invalid app fixture argv")
+	}
+	code, err := run(args)
+	if err != nil {
+		t.Fatal("app verifier refused the fixture")
+	}
+	if code != 0 {
+		t.Fatal("app verifier did not pass")
+	}
+}
+
+func TestVerifyPublicPackagedHashRefusesBeforeNetwork(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "version.json"), []byte(`{"release_version":"version","revision":"revision"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, hash := range []string{"foreign", "different-build-same-release"} {
+		code, err := run([]string{"verify-public", "--web-root", root, "--origin", "https://unreachable.invalid", "--web-hash", hash})
+		if code != 1 || err == nil || err.Error() != "phone-app bundle does not match the packaged relay identity" {
+			t.Fatalf("hash mismatch was not refused before network: (%d, %v)", code, err)
+		}
+	}
+}
+
+func TestVerifyGatewayHealthCommand(t *testing.T) {
+	valid := `{"status":"ok","readiness":"ready","transport":"gateway","inventory":{"state":"ready","stale":false},"instance":"instance","release_version":"version","revision":"revision","bundle_hash":"web","bundle_version":"version","bundle_revision":"revision","protocol":3,"gateway":{"enabled":true,"registered":true,"relay_id":"fixture"}}`
+	for _, test := range []struct {
+		name string
+		body string
+		args []string
+		code int
+	}{
+		{"ready", valid, []string{"instance", "version", "revision", "web"}, 0},
+		{"foreign", valid, []string{"foreign", "version", "revision", "web"}, 1},
+		{"unregistered", strings.Replace(valid, `"registered":true`, `"registered":false`, 1), []string{"instance", "version", "revision", "web"}, 1},
+		{"malformed redacted", `{"private":"secret-canary",`, []string{"instance", "version", "revision", "web"}, 1},
+		{"usage", valid, nil, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input, err := os.CreateTemp(t.TempDir(), "health")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer input.Close()
+			if _, err := input.WriteString(test.body); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := input.Seek(0, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			previous := os.Stdin
+			os.Stdin = input
+			defer func() { os.Stdin = previous }()
+			code, runErr := run(append([]string{"verify-gateway-health"}, test.args...))
+			if code != test.code || (runErr == nil) != (test.code == 0) {
+				t.Fatalf("command = (%d, %v), want code %d", code, runErr, test.code)
+			}
+			if runErr != nil && strings.Contains(runErr.Error(), "secret-canary") {
+				t.Fatal("gateway verifier exposed its input")
+			}
+		})
 	}
 }
 
