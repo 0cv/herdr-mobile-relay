@@ -164,12 +164,13 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await page.getByRole('button', { name: 'Back' }).click();
 
   await page.getByRole('button', { name: /Open claude-review on Captured relay/ }).click();
-  await expect(page.getByRole('group', {
+  const claudeReview = page.getByRole('group', {
     name: 'Review your answers and choose what to do',
-  })).toBeVisible();
+  });
+  await expect(claudeReview).toBeVisible();
   await expect(page.getByText('Question 5 of 5')).toBeVisible();
   await expect(page.getByRole('radio', { name: /Submit answers/ })).toBeVisible();
-  await expect(page.getByText(
+  await expect(claudeReview.getByText(
     'What kind of webapp are you building: Content/marketing site',
   )).toBeVisible();
   await expect(page.getByRole('button', { name: '← Previous' })).toBeVisible();
@@ -200,11 +201,13 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await page.getByRole('button', { name: 'Back' }).click();
 
   await page.getByRole('button', { name: /Open opencode-review on Captured relay/ }).click();
-  await expect(page.getByRole('group', {
+  const opencodeReview = page.getByRole('group', {
     name: 'Review your answers and choose what to do',
-  })).toBeVisible();
+  });
+  await expect(opencodeReview).toBeVisible();
   await expect(page.getByText('Question 5 of 5')).toBeVisible();
-  await expect(page.getByText(/Trip vibe: Nature and outdoors/)).toBeVisible();
+  // The terminal can show the same text; verify the interactive review summary.
+  await expect(opencodeReview.getByText(/Trip vibe: Nature and outdoors/)).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
 
   await page.getByRole('button', { name: /Open qoder-standalone on Captured relay/ }).click();
