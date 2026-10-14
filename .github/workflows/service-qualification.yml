@@ -13,8 +13,9 @@ env:
 # A thin wrapper: every guard, suite, bound and fail-closed rule lives in
 # scripts/ci/run-service-qualification.sh. macOS runs the stock /bin/bash 3.2,
 # Ubuntu runs bash 5. No retries, no secrets, no continue-on-error. The script
-# enforces its own aggregate time budget (inside this 60-minute job cap) so it
-# always finishes and writes the summary that the upload step requires.
+# attempts every suite and enforces its own aggregate time budget (inside this
+# 60-minute job cap) so it always finishes and writes the summary that the
+# upload step requires.
 jobs:
   service-qualification:
     name: Service qualification (${{ matrix.runner }})

@@ -17,13 +17,13 @@
 #     never sets, defaults or forges GITHUB_ACTIONS, RUNNER_ENVIRONMENT or any
 #     HERDR_* hosted marker; the suites refuse on their own when those are not
 #     the real runner values, and that refusal is a failure like any other.
-#   * Every suite runs, even after an earlier failure, until the aggregate
-#     time budget below is spent; a suite that cannot start inside the budget
-#     is recorded as failed (exit 125) and not run. A suite passes only by
-#     exiting 0. Nonzero, death by signal, a hosted-guard refusal, a wall-clock
-#     timeout and a suite that modifies the checkout all fail it.
+#   * Every suite is attempted, even after earlier failures or timeouts. A
+#     suite passes only by exiting 0. Nonzero, death by signal, a hosted-guard
+#     refusal, a wall-clock timeout and a suite that modifies the checkout all
+#     fail it.
 #   * The script exits nonzero unless every suite passed, and it always writes
-#     its summary before the workflow's job cap can end the job.
+#     its summary before the workflow's job cap can end the job (see the time
+#     budget below).
 #
 # This script runs project tests. It is meant to be run by CI only.
 set -eu
@@ -34,11 +34,19 @@ SUITE_TIMEOUT_SECONDS=900
 HELPER_BUILD_TIMEOUT_SECONDS=180
 # Nine suites at their own bound could need far more than the workflow's
 # 60-minute job cap, which must also cover checkout, toolchain setup, the
-# summary and the artifact upload. The suites therefore share this aggregate
-# budget, measured from script start; once it is spent the remaining suites
-# are not run and are recorded as failed, so the summary is still written.
-TOTAL_BUDGET_SECONDS=2880
-NOT_RUN_STATUS=125
+# summary and the artifact upload. The suites therefore share an aggregate
+# budget measured from script start, WITHOUT ever skipping a suite: every
+# suite that has not run yet keeps a reserved MIN_SUITE_SECONDS out of the
+# budget, and a suite may use at most what remains after those reservations
+# (never more than SUITE_TIMEOUT_SECONDS). While the budget is ample, suites
+# keep their full bound; after repeated timeouts, later suites still start
+# and get at least MIN_SUITE_SECONDS. In the worst case (every suite runs to
+# its limit) the total stays near TOTAL_BUDGET_SECONDS; the dispatch suite's
+# build and test phases can add at most one more MIN_SUITE_SECONDS. That is
+# about 48 minutes, leaving about 12 minutes of the 60-minute job cap for
+# checkout, toolchain setup, the summary and the upload.
+TOTAL_BUDGET_SECONDS=2700
+MIN_SUITE_SECONDS=150
 EXPECTED_SUITE_COUNT=9
 
 refuse() {
@@ -186,14 +194,20 @@ banner() {
 }
 
 # remaining_seconds CAP STARTED: sets limit_left to how long a command may still
-# run for a suite that started at STARTED (a $SECONDS value): the lesser of what
-# is left of that suite's own CAP and what is left of the aggregate budget.
-# A value below 1 means there is no time left.
+# run for the suite currently being run, which started at STARTED (a $SECONDS
+# value): the lesser of what is left of that suite's own CAP and what is left of
+# the aggregate budget after reserving MIN_SUITE_SECONDS for every suite that has
+# not run yet. The budget share is never below MIN_SUITE_SECONDS, so every suite
+# is always attempted (this clamp only matters against small per-suite overhead
+# drift; the reservations make it unreachable otherwise).
 remaining_seconds() {
     suite_left=$(($1 - (SECONDS - $2)))
-    total_left=$((TOTAL_BUDGET_SECONDS - (SECONDS - script_started)))
+    later_suites=$((EXPECTED_SUITE_COUNT - suite_count - 1))
+    [ "$later_suites" -ge 0 ] || later_suites=0
+    budget_left=$((TOTAL_BUDGET_SECONDS - (SECONDS - script_started) - later_suites * MIN_SUITE_SECONDS))
+    [ "$budget_left" -ge "$MIN_SUITE_SECONDS" ] || budget_left=$MIN_SUITE_SECONDS
     limit_left=$suite_left
-    [ "$total_left" -ge "$suite_left" ] || limit_left=$total_left
+    [ "$budget_left" -ge "$suite_left" ] || limit_left=$budget_left
 }
 
 # record_suite NAME EXIT SECONDS: appends to the table and the summary, and
@@ -232,12 +246,7 @@ run_suite() {
     suite_started=$SECONDS
     suite_status=0
     remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$suite_started"
-    if [ "$limit_left" -lt 1 ]; then
-        printf 'aggregate time budget exhausted; this suite is not run\n' >&2
-        suite_status=$NOT_RUN_STATUS
-    else
-        run_closed "$limit_left" "$suite_extra" "$@" || suite_status=$?
-    fi
+    run_closed "$limit_left" "$suite_extra" "$@" || suite_status=$?
     record_suite "$suite_name" "$suite_status" "$((SECONDS - suite_started))"
     check_checkout "$suite_name"
 }
@@ -261,26 +270,21 @@ dispatch_status=0
 banner "$dispatch_name"
 dispatch_started=$SECONDS
 remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$dispatch_started"
-if [ "$limit_left" -lt 1 ]; then
-    printf 'aggregate time budget exhausted; this suite is not run\n' >&2
-    dispatch_status=$NOT_RUN_STATUS
+build_limit=$limit_left
+[ "$build_limit" -le "$HELPER_BUILD_TIMEOUT_SECONDS" ] || build_limit=$HELPER_BUILD_TIMEOUT_SECONDS
+printf 'building the NATIVE_HELPER relay binary for this suite\n'
+run_closed "$build_limit" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
+    dispatch_status=$?
+if [ "$dispatch_status" -ne 0 ]; then
+    printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
 else
-    build_limit=$limit_left
-    [ "$build_limit" -le "$HELPER_BUILD_TIMEOUT_SECONDS" ] || build_limit=$HELPER_BUILD_TIMEOUT_SECONDS
-    printf 'building the NATIVE_HELPER relay binary for this suite\n'
-    run_closed "$build_limit" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
-        dispatch_status=$?
-    if [ "$dispatch_status" -ne 0 ]; then
-        printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
+    remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$dispatch_started"
+    if [ "$limit_left" -lt 1 ]; then
+        printf 'the suite bound was spent by the helper build; the suite is not run\n' >&2
+        dispatch_status=124
     else
-        remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$dispatch_started"
-        if [ "$limit_left" -lt 1 ]; then
-            printf 'the suite bound was spent by the helper build; the suite is not run\n' >&2
-            dispatch_status=124
-        else
-            run_closed "$limit_left" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
-                dispatch_status=$?
-        fi
+        run_closed "$limit_left" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
+            dispatch_status=$?
     fi
 fi
 record_suite "$dispatch_name" "$dispatch_status" "$((SECONDS - dispatch_started))"
