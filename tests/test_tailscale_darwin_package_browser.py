@@ -1360,13 +1360,60 @@ IDENTITY_KEYS = frozenset({"checked_out_sha", "candidate_parents", "scope_base_p
 GIT_OUTPUT_CAP = 4096
 
 
-def git_candidate_identity(candidate, before, runner=subprocess.run):
+def run_git_bounded(argv, *, cwd, env, stdout, stderr, timeout, check):
+    # A subprocess.run-shaped runner for git_candidate_identity whose stdout collection is
+    # bounded WHILE the child runs: at most GIT_OUTPUT_CAP + 1 bytes are ever held (a
+    # `git log` parent list or a `rev-list` answer cannot grow memory without bound), and
+    # the child's process group is killed and reaped as soon as it exceeds that cap or the
+    # deadline. A result longer than the cap is returned as GIT_OUTPUT_CAP + 1 bytes so the
+    # caller refuses it by length; a deadline raises TimeoutExpired after the kill and reap.
+    # Only the one call shape git_candidate_identity uses is accepted.
+    require(stdout == subprocess.PIPE and stderr == subprocess.DEVNULL and check is False
+            and type(timeout) is int and timeout > 0, "launchctl_authority")
+    process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    try:
+        descriptor = process.stdout.fileno()
+        os.set_blocking(descriptor, False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(descriptor, selectors.EVENT_READ)
+            while len(data) <= GIT_OUTPUT_CAP:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                if not selector.select(min(remaining, 0.25)):
+                    continue
+                try:
+                    chunk = os.read(descriptor, GIT_OUTPUT_CAP + 1 - len(data))
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    break
+                data += chunk
+        if len(data) <= GIT_OUTPUT_CAP:
+            process.wait(timeout=max(deadline - time.monotonic(), 0.001))
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        process.wait()
+        process.stdout.close()
+    return subprocess.CompletedProcess(argv, process.returncode, bytes(data))
+
+
+def git_candidate_identity(candidate, before, runner=run_git_bounded):
     # Read only the checked-out object's SHA/parents and three history facts, not
     # messages or files. Four read-only git queries with one hardened invocation:
     # no replacement objects, optional index locks or ambient git configuration.
     # `before` is the push event's pre-push tip; it must already be a lowercase
     # 40-hex SHA (never option-like text) before any argv is built. The runner is
-    # injectable so the argv and the strict exit-code mapping can be tested offline.
+    # injectable so the argv and the strict exit-code mapping can be tested offline; the
+    # default runner bounds the output while collecting it. The length check in query()
+    # below still applies to any injected runner.
     require(full_sha(before), "launchctl_authority")
     prefix = ["git", "--no-replace-objects", "--no-optional-locks",
               "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]
@@ -5139,6 +5186,56 @@ def offline_check(group):
                         "offline_git_identity_unsafe_before_refused")
             return True
 
+        def bounded_git_runner_cases():
+            # run_git_bounded with REAL, harmless children: the interpreter running this check
+            # (never git, launchctl or any service tool). The stdout cap must be enforced WHILE
+            # collecting, the child must be killed and reaped at the cap or the deadline, and the
+            # deadline must hold for a silent child and for a slow dribble that stays under the
+            # cap. Every child has its own short lifetime, and every case is time-limited.
+            def child(code):
+                return [sys.executable, "-I", "-B", "-c", code]
+            options = dict(cwd="/", env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=10, check=False)
+            flood = "import os,time\nend=time.monotonic()+30\nwhile time.monotonic()<end:\n    os.write(1,b'x'*65536)\n"
+            started = time.monotonic()
+            result = run_git_bounded(child(flood), **options)
+            require(type(result.stdout) is bytes and len(result.stdout) == GIT_OUTPUT_CAP + 1
+                    and type(result.returncode) is int and time.monotonic() - started < 8,
+                    "offline_bounded_git_flood_cut_at_cap")
+            # Exactly the cap is accepted whole; one byte more is returned as cap + 1 bytes, which the
+            # caller refuses by length (query() requires len <= GIT_OUTPUT_CAP).
+            exact = run_git_bounded(child("import os\nos.write(1,b'y'*%d)" % GIT_OUTPUT_CAP), **options)
+            over = run_git_bounded(child("import os\nos.write(1,b'y'*%d)" % (GIT_OUTPUT_CAP + 1)), **options)
+            require(exact.returncode == 0 and len(exact.stdout) == GIT_OUTPUT_CAP
+                    and len(over.stdout) == GIT_OUTPUT_CAP + 1, "offline_bounded_git_cap_boundary")
+            small = run_git_bounded(child("import sys\nsys.stdout.write('hello')"), **options)
+            failed = run_git_bounded(child("import sys\nsys.stdout.write('z')\nraise SystemExit(3)"), **options)
+            require(small.returncode == 0 and small.stdout == b"hello"
+                    and failed.returncode == 3 and failed.stdout == b"z", "offline_bounded_git_status_and_output")
+            def times_out(code, seconds):
+                begun = time.monotonic()
+                try:
+                    run_git_bounded(child(code), **{**options, "timeout": seconds})
+                except subprocess.TimeoutExpired:
+                    return time.monotonic() - begun < seconds + 5
+                return False
+            require(times_out("import time\ntime.sleep(30)", 1)
+                    and times_out("import os,time\nfor _ in range(100):\n    os.write(1,b'a')\n    time.sleep(0.2)", 1),
+                    "offline_bounded_git_deadline_silent_and_dribble")
+            try:
+                run_git_bounded(["/nonexistent-offline-binary"], **options)
+            except OSError:
+                pass
+            else:
+                return False
+            # Only the exact call shape git_candidate_identity uses is accepted.
+            for bad in ({"stdout": subprocess.DEVNULL}, {"stderr": subprocess.PIPE}, {"check": True},
+                        {"timeout": 0}, {"timeout": 1.5}, {"timeout": None}):
+                require(rejects(lambda bad=bad: run_git_bounded(child("pass"), **{**options, **bad})),
+                        "offline_bounded_git_call_shape")
+            require(git_candidate_identity.__defaults__ == (run_git_bounded,), "offline_bounded_git_is_default")
+            return True
+
         def launch_argument_cases():
             # Source-bound interpretation of BOTH actual declarative JS policies.
             # Bind the complete predicate to the finite interpreter below; never
@@ -6002,6 +6099,7 @@ def offline_check(group):
             require(launchctl_grant_cases(), "offline_launchctl_grants")
             require(candidate_scope_cases(), "offline_candidate_scope")
             require(git_identity_cases(), "offline_git_identity")
+            require(bounded_git_runner_cases(), "offline_bounded_git_runner")
             require(launch_argument_cases(), "offline_launch_argument_policy")
             require(proxy_transport_cases(), "offline_proxy_transport")
             require(certificate_configuration(), "offline_certificate_configuration")
