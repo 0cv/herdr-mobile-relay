@@ -249,6 +249,13 @@ native_install_restore_activation() {
     local label enabled active previous
     # Any restoration failure is handled by the caller BEFORE this function.
     native_install_label_quiet "$native_label" && native_install_label_quiet "$native_legacy_label" || return 1
+    # No prior activation without the readiness evidence saved at begin. Return
+    # BEFORE any manager action (reload/enable/disable/restart/bootstrap) so an
+    # unverified service is never started: the services stay quiesced and the
+    # caller retains the recovery evidence.
+    if [ "$native_active" = true ] || [ "$native_legacy_active" = true ]; then
+        [ "$native_previous_ready" = true ] || return 1
+    fi
     if [ "$native_manager" = systemd ]; then systemctl --user daemon-reload || return 1; fi
     for label in "$native_label" "$native_legacy_label"; do
         enabled="$native_enabled"; [ "$label" != "$native_legacy_label" ] || enabled="$native_legacy_enabled"

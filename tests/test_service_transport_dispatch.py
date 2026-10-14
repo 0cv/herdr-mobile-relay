@@ -1285,7 +1285,16 @@ def main():
                         assert fixture.definition.read_text() == "previous definition\n"
                         assert fixture.legacy.read_text() == "legacy definition\n"
                         assert fixture.envfile.read_bytes() == before
-                        assert (fixture.root / "activation").read_bytes() == activation
+                        if failure != "readiness":
+                            assert (fixture.root / "activation").read_bytes() == activation
+                        else:
+                            # FAILURE=readiness also makes the PRIOR /readyz unready, so no readiness
+                            # evidence exists for the previously active service. Rollback must restore
+                            # the files but must not reactivate an unverified service: it stays
+                            # quiesced and recovery evidence is retained (A1-F007 transaction rollback).
+                            assert "rollback is incomplete" in result.stderr
+                            assert list((fixture.root / "state").glob("**/herdr-native-recovery.*"))
+                            assert not any(s["active"] for s in json.loads((fixture.root / "activation").read_text()).values())
                     assert (fixture.root / "config/phone-app-origin-configured").read_text() == "https://app.example.test\n"
                     assert (fixture.root / "config/tunnel.yml").read_text() == "hostname: relay.example.test\n"
         finally:

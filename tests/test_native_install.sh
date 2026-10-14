@@ -313,8 +313,9 @@ try:
             for initial in ("active", "inactive", "fresh"):
                 for failure in ("", "read", "query", "snapshot", "candidate", "chmod", "token", "rename", "commit", "reload", "start", "stop",
                                 "ready-stop-fail", "ready-still-active", "ready-unknown", "ready-restore", "ready-safe",
-                                "public-stop-fail", "public-unknown", "public-safe"):
+                                "public-stop-fail", "public-unknown", "public-safe", "prior-unready"):
                     if (failure == "reload" and platform == "launchd") or (failure == "stop" and initial != "active"): continue
+                    if failure == "prior-unready" and initial != "active": continue
                     f = d.Fixture(parent, f"{platform}-{transport}-{initial}-{failure or 'ok'}", transport, platform, initial != "fresh")
                     if initial == "inactive":
                         d.write(f.root / "activation", json.dumps({k: dict(active=False, enabled=False) for k in ("current", "legacy")}))
@@ -323,6 +324,10 @@ try:
                     with f.envfile.open("a") as out:
                         out.write("  export GH_TOKEN='fixture-native-'\"selected-secret\"\n\tGITHUB_TOKEN=" + canary + "\n")
                     if failure.startswith("public-"): f.env["FAILURE"] = "app"
+                    # The stub's readiness failure answers /readyz with an error inventory for the
+                    # PRIOR service at begin and, after publication, for the replacement.
+                    # "prior-unready" itself matches no other fixture condition.
+                    if failure == "prior-unready": f.env["FAILURE"] = "readiness"
                     f.env.update(NATIVE_FAILURE=failure, GH_TOKEN="ambient-unselected", GITHUB_TOKEN="ambient-distinct",
                                  HERDR_GITHUB_TOKEN_FILE="/ambient/not-selected")
                     sidecar = f.root / "config/github-token"
@@ -360,6 +365,23 @@ try:
                         elif failure == "stop":
                             assert snapshot(resources(f)) == before and state(f)["current"]["active"]
                             assert recovery(f) and "rollback is incomplete" in result.stderr
+                        elif failure == "prior-unready":
+                            # The prior service was active but its /readyz was unverifiable at begin,
+                            # so no saved readiness evidence exists, and the replacement then failed
+                            # readiness. Rollback restores the files but must NOT reactivate the
+                            # unverified prior service: no manager enable/restart/bootstrap/kickstart
+                            # after rollback starts, services stay quiesced, recovery is retained.
+                            assert recovery(f) and "rollback is incomplete" in result.stderr
+                            assert snapshot(resources(f)) == before
+                            events = f.events()
+                            # Forward activation of the replacement, then the rollback quiesce stop.
+                            activated = next(i for i, e in enumerate(events)
+                                             if e["kind"] == "manager" and e["command"] in ("restart", "bootstrap"))
+                            rollback = next(i for i, e in enumerate(events)
+                                            if i > activated and e["kind"] == "manager" and e["command"] in ("stop", "bootout"))
+                            assert not any(e["kind"] == "manager" and e["command"] in ("enable", "restart", "bootstrap", "kickstart")
+                                           for e in events[rollback + 1:]), "unverified prior service reactivated"
+                            assert not any(s["active"] for s in state(f).values()), "unverified prior service left active"
                         else:
                             assert snapshot(resources(f)) == before and state(f) == activation
                     for r in recovery(f):
