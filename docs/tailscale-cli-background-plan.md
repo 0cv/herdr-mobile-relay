@@ -584,12 +584,14 @@ historical. Do not edit or relabel prior blocked, cancelled, capped, or approved
 runs. Do not modify the orchestration controller to obtain an approval.
 
 Preserve the pre-existing modified `internal/tailscale/DR-1-session-authority.md`
-and untracked `docs/plans/`, `docs/collie-tailscale-comparison.md`,
-`docs/collie-tailscale-delivery-plan.md`, `frontend/package-lock.json`, and
-`package-lock.json`. Preserve
-`/Users/christophe.vidal/Development/misc/pi-orchestration/workflows/review.js`.
-Do not stash, reset, discard, stage, or overwrite unrelated changes or existing
-private development state.
+and untracked `docs/plans/`, `docs/collie-tailscale-comparison.md`, and
+`docs/collie-tailscale-delivery-plan.md`. (This list originally also named
+`frontend/package-lock.json` and `package-lock.json`. Both were accidental npm
+artifacts and were removed from the candidate; they must not be preserved or
+regenerated, and the frontend installs from `frontend/bun.lock`.) Preserve the
+operator's local pi-orchestration `workflows/review.js`, which lives outside
+this repository. Do not stash, reset, discard, stage, or overwrite unrelated
+changes or existing private development state.
 
 The current plan-editing turn is documentation-only: no service/daemon/CLI/socket
 access, lifecycle tests, implementation, commit, or push. This sentence does not
