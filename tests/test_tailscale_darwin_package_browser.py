@@ -52,6 +52,10 @@ BASE = "cbacea6efe8916f2a040e6ca4927e221e9b6e15c"
 # grant's push admission is anchored to it (see ALLOWED, REQUIRED and the grant).
 SCOPE_BASE = "c77855cb4e779c00a85d194f5bffe72ac3016554"
 REF = "refs/heads/ci/tailscale-native-preflight-ef9f843"
+# The exact Python the cell and its admission steps run under, pinned in the workflow
+# with actions/setup-python (the runner image's ambient python3 is mutable). The
+# receipt and the qualify gate require the same exact value, like Node, Bun and Go.
+PYTHON_VERSION = "3.14.0"
 REPOSITORY = "0cv/herdr-mobile-relay"
 PLATFORM = "darwin-isolated-byo-v1"
 # The Darwin fixture serves the phone app AND the relay WSS dial at this one
@@ -245,12 +249,12 @@ FAKE_OPERATIONS_CAP = 262144
 # qualify gate's PASS_FIELDS are unchanged; their value is now the grant's pinned
 # scope base, not a single parent. The grant covers any attempt-1, non-forced,
 # linear fast-forward push to the CI branch whose `before` is SCOPE_BASE or a
-# descendant of it (the candidate has exactly one parent, and `before` is an
-# ancestor of the candidate), because the CI loop pushes more commits after the
-# first one. A rerun, workflow_dispatch, a created or deleted ref, a force push, a
-# merge-commit candidate, before == after, a before that is not an ancestor of
-# the candidate and a push after a non-descendant reset all refuse. Only the tip
-# commit's parent count is checked, not every intermediate commit. Operational
+# descendant of it (`before` is an ancestor of the candidate, the candidate has
+# exactly one parent, and NO commit in the pushed range before..candidate is a
+# merge), because the CI loop pushes more commits after the first one. A rerun,
+# workflow_dispatch, a created or deleted ref, a force push, a merge commit
+# anywhere in the pushed range, before == after, a before that is not an ancestor
+# of the candidate and a push after a non-descendant reset all refuse. Operational
 # admission only, NOT cryptographic hosted-runner authentication: a local caller
 # can forge environment/event inputs. The grant authorizes at most two
 # label-scoped read-only queries ONLY on the isolated hosted runner. No local
@@ -753,7 +757,8 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
     digest(browser["sha256"])
     digest(browser["switches_sha256"])
     shape(value["tools"], ("python", "node", "bun", "go", "curl", "openssl"))
-    require(value["tools"]["node"] == "24.21.0" and value["tools"]["bun"] == "1.4.0"
+    require(value["tools"]["python"] == PYTHON_VERSION and value["tools"]["node"] == "24.21.0"
+            and value["tools"]["bun"] == "1.4.0"
             and value["tools"]["go"] == "1.27.1" and all(type(v) is str and re.fullmatch(
                 r"[0-9]+\.[0-9]+\.[0-9]+[a-z]?", v) for v in value["tools"].values()), "receipt_tools")
     require(value["source_proof"] == {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c",
@@ -1332,8 +1337,9 @@ def admission_policy(observation):
     # boundary. Rechecking forgeable inputs does not authenticate a hosted runner.
     # Fast-forward ancestry: an attempt-1, non-forced push whose `before` is a real
     # tip different from the candidate, that descends from SCOPE_BASE (equal counts)
-    # and is an ancestor of the candidate, and whose candidate has exactly one
-    # parent (linear tip). Both ancestry facts come from git and must be exactly True.
+    # and is an ancestor of the candidate, whose candidate has exactly one parent and
+    # whose whole pushed range before..candidate contains no merge commit (linear
+    # history, not only a linear tip). The three git facts must each be exactly True.
     return (ci_context_allowed(observation)
             and full_sha(observation.get("event_before"))
             and observation["event_before"] != observation.get("event_after")
@@ -1345,17 +1351,18 @@ def admission_policy(observation):
             and len(observation["candidate_parents"]) == 1
             and full_sha(observation["candidate_parents"][0])
             and observation.get("scope_base_precedes_before") is True
-            and observation.get("before_precedes_candidate") is True)
+            and observation.get("before_precedes_candidate") is True
+            and observation.get("pushed_range_linear") is True)
 
 
-IDENTITY_KEYS = frozenset({"checked_out_sha", "candidate_parents",
-                           "scope_base_precedes_before", "before_precedes_candidate"})
+IDENTITY_KEYS = frozenset({"checked_out_sha", "candidate_parents", "scope_base_precedes_before",
+                           "before_precedes_candidate", "pushed_range_linear"})
 GIT_OUTPUT_CAP = 4096
 
 
 def git_candidate_identity(candidate, before, runner=subprocess.run):
-    # Read only the checked-out object's SHA/parents and two ancestry facts, not
-    # messages or files. Three read-only git queries with one hardened invocation:
+    # Read only the checked-out object's SHA/parents and three history facts, not
+    # messages or files. Four read-only git queries with one hardened invocation:
     # no replacement objects, optional index locks or ambient git configuration.
     # `before` is the push event's pre-push tip; it must already be a lowercase
     # 40-hex SHA (never option-like text) before any argv is built. The runner is
@@ -1380,6 +1387,14 @@ def git_candidate_identity(candidate, before, runner=subprocess.run):
         require(status in (0, 1), "launchctl_authority")
         return status == 0
 
+    def linear(older, newer):
+        # `rev-list --merges --max-count=1 older..newer` prints the first merge commit
+        # in the pushed range, if any: empty output is a merge-free range. Any status
+        # but 0 (an unknown object, a signal) is a refusal, never "linear".
+        result = query("rev-list", "--merges", "--max-count=1", older + ".." + newer, "--")
+        require(result.returncode == 0, "launchctl_authority")
+        return result.stdout == b""
+
     try:
         result = query("log", "-1", "--format=%H%n%P", "HEAD", "--")
         require(result.returncode == 0, "launchctl_authority")
@@ -1387,7 +1402,8 @@ def git_candidate_identity(candidate, before, runner=subprocess.run):
         require(len(lines) == 2, "launchctl_authority")
         return {"checked_out_sha": lines[0], "candidate_parents": lines[1].split(),
                 "scope_base_precedes_before": ancestor(SCOPE_BASE, before),
-                "before_precedes_candidate": ancestor(before, "HEAD")}
+                "before_precedes_candidate": ancestor(before, "HEAD"),
+                "pushed_range_linear": linear(before, "HEAD")}
     except (OSError, UnicodeError, subprocess.TimeoutExpired):
         raise Refusal("launchctl_authority") from None
 
@@ -3059,7 +3075,7 @@ def runtime(args):
                 match = re.search(rb"[0-9]+\.[0-9]+\.[0-9]+[a-z]?", output)
                 require(match is not None, "tool_version")
                 tools[name] = match[0].decode("ascii")
-            require(tools["node"] == "24.21.0" and tools["bun"] == "1.4.0"
+            require(tools["python"] == PYTHON_VERSION and tools["node"] == "24.21.0" and tools["bun"] == "1.4.0"
                     and tools["go"] == "1.27.1", "tool_identity")
             receipt["tools"] = tools
             command(["bun", "install", "--frozen-lockfile"], 290, candidate / "frontend")
@@ -3437,7 +3453,7 @@ def offline_check(group):
             "compiler": {"version": "go1.27.1", "target": "darwin/arm64", "metadata_sha256": "8" * 64},
             "browser_identity": {"sha256": "9" * 64, "version": "151.0.7922.34", "revision": "1234",
                 "playwright": "1.62.1", "target": "darwin/arm64", "switches_sha256": "a" * 64},
-            "tools": {"python": "3.14.0", "node": "24.21.0", "bun": "1.4.0", "go": "1.27.1",
+            "tools": {"python": PYTHON_VERSION, "node": "24.21.0", "bun": "1.4.0", "go": "1.27.1",
                       "curl": "8.7.1", "openssl": "3.3.6"},
             "source_proof": {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c",
                 "playwright_tag": "v1.62.1", "go_tag": "go1.27.1", "trust": "TRUST-PROOF.md"},
@@ -4087,6 +4103,7 @@ def offline_check(group):
                 (("cases", 0, "cases"), list(ENROLL[:-1])),
                 (("cases", 0, "assertions", "reader_mutation_denied"), False),
                 (("trust_controls", "browser", "observations"), []),
+                (("tools", "python"), "3.13.1"), (("tools", "python"), PYTHON_VERSION + "1"),
                 (("trust_controls", "python_curl_packaged_go", 1, "packaged_go", "exit_code"), 0),
                 (("trust_controls", "python_curl_packaged_go", 2, "python", "verify_code"), 20),
                 (("service_guard", "observations", 0, "loaded_service"), True),
@@ -4600,7 +4617,7 @@ def offline_check(group):
                 "event_before": LAUNCHCTL_PINNED_PARENT, "event_after": "c" * 40, "event_ref": REF,
                 "event_forced": False, "event_created": False, "event_deleted": False,
                 "checked_out_sha": "c" * 40, "candidate_parents": [LAUNCHCTL_PINNED_PARENT],
-                "scope_base_precedes_before": True, "before_precedes_candidate": True}
+                "scope_base_precedes_before": True, "before_precedes_candidate": True, "pushed_range_linear": True}
             require(admission_policy(valid_admission), "offline_admission_positive")
             # UNEXECUTED: exercise the production predicate with the accepted
             # Go generator's resource/suffix pairs, not a permissive proxy stub.
@@ -4745,9 +4762,9 @@ def offline_check(group):
                 "runner_environment": "github-hosted", "image_os": "macos15"}
             event = {"before": LAUNCHCTL_PINNED_PARENT, "after": base["candidate_sha"], "ref": REF,
                 "forced": False, "created": False, "deleted": False}
-            # The two ancestry facts are what git would report for this observation.
+            # The three history facts are what git would report for this observation.
             identity = {"checked_out_sha": base["candidate_sha"], "candidate_parents": [LAUNCHCTL_PINNED_PARENT],
-                "scope_base_precedes_before": True, "before_precedes_candidate": True}
+                "scope_base_precedes_before": True, "before_precedes_candidate": True, "pushed_range_linear": True}
             reads, queries, query_befores = [], [], []
             class EventFile:
                 def __init__(self, data, *, mode=stat.S_IFREG, size=None, links=1):
@@ -4804,6 +4821,16 @@ def offline_check(group):
                     and "scripts/qualify-darwin-package-browser.py --self-test" in workflow
                     and workflow.index("--offline-self-check parser") < workflow.index("--fresh-producer"),
                     "offline_workflow_scope_and_controls_binding")
+            # The Python runtime is pinned in BOTH jobs, before the first python3 invocation of each
+            # job, to the exact value the receipt and the qualify gate require.
+            pins = [m.start() for m in re.finditer(r"uses: actions/setup-python@v6\n(?:        timeout-minutes: [0-9]+\n)?"
+                                                   r"        with:\n          python-version: \"" + re.escape(PYTHON_VERSION) + r"\"\n",
+                                                   workflow)]
+            require(workflow.count("actions/setup-python@") == 2 and len(pins) == 2
+                    and pins[0] < workflow.index("python3 -I -B -")
+                    and pins[1] < workflow.index("--offline-self-check parser")
+                    and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", PYTHON_VERSION) is not None,
+                    "offline_workflow_python_pin")
             # The complete spent 2230f96f, e59e8022, 3c8f0c8d, 8c1f22ff and dd608845 packets,
             # including their original scope.when, are refused at packet level. At event
             # level a spent parent as `before` is refused because git reports that
@@ -4873,7 +4900,7 @@ def offline_check(group):
             later_event = {**event, "before": base["candidate_sha"], "after": later_base["candidate_sha"]}
             later_identity = {"checked_out_sha": later_base["candidate_sha"],
                 "candidate_parents": [base["candidate_sha"]],
-                "scope_base_precedes_before": True, "before_precedes_candidate": True}
+                "scope_base_precedes_before": True, "before_precedes_candidate": True, "pushed_range_linear": True}
             later_context = observe(observation=later_base, data=encode(later_event), commit=later_identity)
             require(admission_policy(later_context) and launchctl_authorized(valid_packet, later_context)
                     and launchctl_authorized(workflow_packets[0], later_context)
@@ -4894,6 +4921,16 @@ def offline_check(group):
                     and rejects(lambda: observe(observation=later_base, data=encode(later_event),
                         commit={**later_identity, "candidate_parents": [base["candidate_sha"], "b" * 40]})),
                     "offline_later_push_refusals")
+            # A merge commit ANYWHERE in the pushed range refuses even though the candidate tip
+            # has exactly one parent (before -> merge -> single-parent tip): git reports the range
+            # as not linear. This holds for the first push and for a later push.
+            require(rejects(lambda: observe(commit={**identity, "pushed_range_linear": False}))
+                    and rejects(lambda: observe(observation=later_base, data=encode(later_event),
+                        commit={**later_identity, "pushed_range_linear": False}))
+                    and not admission_policy({**context, "pushed_range_linear": False})
+                    and not launchctl_authorized(valid_packet, {**context, "pushed_range_linear": False})
+                    and not launchctl_authorized(workflow_packets[0], {**later_context, "pushed_range_linear": False}),
+                    "offline_merge_in_pushed_range_refused")
             for commit in ({**identity, "candidate_parents": [LAUNCHCTL_PINNED_PARENT, "b" * 40]},
                     {**identity, "candidate_parents": []}, {**identity, "candidate_parents": LAUNCHCTL_PINNED_PARENT},
                     {**identity, "candidate_parents": ["not-a-sha"]}, {**identity, "candidate_parents": [LAUNCHCTL_PINNED_PARENT.upper()]},
@@ -4901,10 +4938,12 @@ def offline_check(group):
                     {**identity, "scope_base_precedes_before": False}, {**identity, "before_precedes_candidate": False},
                     {**identity, "scope_base_precedes_before": 1}, {**identity, "before_precedes_candidate": "unsafe"},
                     {**identity, "scope_base_precedes_before": None},
+                    {**identity, "pushed_range_linear": False}, {**identity, "pushed_range_linear": None},
+                    {**identity, "pushed_range_linear": 1}, {**identity, "pushed_range_linear": "true"},
                     {**identity, "checked_out_sha": "d" * 40}, {}):
                 require(rejects(lambda: observe(commit=commit)), "offline_candidate_parent_refused")
             # Ancestry facts missing, or extra identity keys, never pass.
-            for key in ("scope_base_precedes_before", "before_precedes_candidate"):
+            for key in ("scope_base_precedes_before", "before_precedes_candidate", "pushed_range_linear"):
                 require(rejects(lambda key=key: observe(commit={k: v for k, v in identity.items() if k != key})),
                         "offline_ancestry_fact_required")
             require(rejects(lambda: observe(commit={**identity, "extra": True})), "offline_identity_key_set")
@@ -4922,7 +4961,7 @@ def offline_check(group):
             contexts.extend((valid_packet, {**context, "candidate_parents": parents})
                 for parents in ([], ["b" * 39], [LAUNCHCTL_PINNED_PARENT, "b" * 40]))
             contexts.extend((valid_packet, {**context, key: value})
-                for key in ("scope_base_precedes_before", "before_precedes_candidate")
+                for key in ("scope_base_precedes_before", "before_precedes_candidate", "pushed_range_linear")
                 for value in (False, None, 1, 0, "true"))
             contexts.extend((valid_packet, {**context, "event_before": before})
                 for before in ("0" * 40, context["event_after"], "b" * 39, LAUNCHCTL_PINNED_PARENT.upper()))
@@ -4987,14 +5026,21 @@ def offline_check(group):
             require(re.fullmatch(r"[0-9a-f]{40}", SCOPE_BASE) is not None and SCOPE_BASE != BASE
                     and LAUNCHCTL_PINNED_PARENT == SCOPE_BASE, "offline_scope_base_constant")
             minimal, full = list(REQUIRED), list(ALLOWED)
+            # `outside` is a path that is NOT allowed. (README.md, for one, IS allowed:
+            # it is an ordinary parked-WIP entry, so it is a valid optional extra.)
+            outside = "outside-the-allowlist/unlisted.txt"
+            require(outside not in ALLOWED and "extra.txt" not in ALLOWED and "unrelated.txt" not in ALLOWED
+                    and "relay\\common.sh" not in ALLOWED, "offline_scope_outside_paths_not_allowed")
+            optional = [path for path in ALLOWED if path not in REQUIRED][0]
             require(candidate_scope_allowed(minimal) and candidate_scope_allowed(list(reversed(minimal)))
                     and candidate_scope_allowed(full) and candidate_scope_allowed(list(reversed(full)))
-                    and candidate_scope_allowed([*REQUIRED, ALLOWED[0]] if ALLOWED[0] not in REQUIRED else minimal),
+                    and candidate_scope_allowed([*minimal, optional]) and candidate_scope_allowed([optional, *minimal]),
                     "offline_candidate_scope_accepts")
-            invalid = [[], list(FILES), full + ["README.md"], minimal + ["README.md"], full + [full[0]],
-                minimal + [minimal[0]], ["unrelated.txt", *minimal[1:]], full + ["extra.txt"],
-                full + ["../" + full[0]], full + ["/" + full[0]], full + [full[0] + "/"], full + [full[0].upper()],
-                full + [full[0].replace("/", "\\")], full + ["relay"], full + ["relay/"], full + ["tests/*.py"],
+            invalid = [[], list(FILES), full + [outside], minimal + [outside], [outside, *full], full + [full[0]],
+                minimal + [minimal[0]], [*minimal, optional, optional], ["unrelated.txt", *minimal[1:]],
+                full + ["extra.txt"], full + ["../" + full[0]], full + ["/" + full[0]], full + [full[0] + "/"],
+                full + [full[0].upper()], full + ["relay\\common.sh"], full + ["relay"], full + ["relay/"],
+                full + ["tests/*.py"],
                 tuple(full), set(full), frozenset(minimal), None, "".join(minimal), {"a": 1},
                 [*minimal, 1], [*minimal, None], [*minimal, b"x"], [*full, ("a",)], [*minimal, True]]
             # Each REQUIRED path missing, one at a time, from the otherwise complete set.
@@ -5015,8 +5061,9 @@ def offline_check(group):
             # over-long output. No real git, no process and no file I/O.
             head, parent, before = "c" * 40, "a" * 40, "b" * 40
             log_out = (head + "\n" + parent + "\n").encode()
+            merge_out = ("d" * 40 + "\n").encode()
             candidate = Path("/inert-candidate")
-            def fake(merge_statuses=(0, 0), *, log=(0, log_out), error=None, junk=b"", log_error=None):
+            def fake(merge_statuses=(0, 0), *, log=(0, log_out), error=None, junk=b"", range_result=(0, b"")):
                 statuses, calls = list(merge_statuses), []
                 def runner(argv, **kwargs):
                     calls.append((list(argv), kwargs))
@@ -5024,6 +5071,8 @@ def offline_check(group):
                         raise error
                     if "log" in argv:
                         return SimpleNamespace(returncode=log[0], stdout=log[1])
+                    if "rev-list" in argv:
+                        return SimpleNamespace(returncode=range_result[0], stdout=range_result[1])
                     return SimpleNamespace(returncode=statuses.pop(0), stdout=junk)
                 return runner, calls
             hardened = ["git", "--no-replace-objects", "--no-optional-locks", "-c", "core.fsmonitor=false",
@@ -5032,11 +5081,13 @@ def offline_check(group):
                            "GIT_OPTIONAL_LOCKS": "0"}
             runner, calls = fake()
             require(git_candidate_identity(candidate, before, runner) == {"checked_out_sha": head,
-                    "candidate_parents": [parent], "scope_base_precedes_before": True, "before_precedes_candidate": True}
+                    "candidate_parents": [parent], "scope_base_precedes_before": True,
+                    "before_precedes_candidate": True, "pushed_range_linear": True}
                     and [argv for argv, _ in calls] == [
                         hardened + ["log", "-1", "--format=%H%n%P", "HEAD", "--"],
                         hardened + ["merge-base", "--is-ancestor", SCOPE_BASE, before],
-                        hardened + ["merge-base", "--is-ancestor", before, "HEAD"]]
+                        hardened + ["merge-base", "--is-ancestor", before, "HEAD"],
+                        hardened + ["rev-list", "--merges", "--max-count=1", before + "..HEAD", "--"]]
                     and all(kwargs == {"cwd": candidate, "env": environment, "stdout": subprocess.PIPE,
                                        "stderr": subprocess.DEVNULL, "timeout": 10, "check": False}
                             for _, kwargs in calls), "offline_git_identity_argv")
@@ -5045,8 +5096,19 @@ def offline_check(group):
                                        ((0, 1), (True, False)), ((1, 1), (False, False))):
                 runner, _ = fake(statuses)
                 value = git_candidate_identity(candidate, before, runner)
-                require((value["scope_base_precedes_before"], value["before_precedes_candidate"]) == expected,
-                        "offline_git_identity_exit_mapping")
+                require((value["scope_base_precedes_before"], value["before_precedes_candidate"]) == expected
+                        and value["pushed_range_linear"] is True, "offline_git_identity_exit_mapping")
+            # The range query: empty output is a merge-free range; a printed merge commit is not
+            # linear (reported as False, never raised); any status but 0 refuses, as does a
+            # malformed or over-long answer.
+            runner, _ = fake(range_result=(0, merge_out))
+            require(git_candidate_identity(candidate, before, runner)["pushed_range_linear"] is False,
+                    "offline_git_identity_merge_in_range")
+            for result in ((1, b""), (128, b""), (129, b""), (-9, b""), (255, b""), (True, b""), (0, "not bytes"),
+                           (0, None), (0, b"x" * (GIT_OUTPUT_CAP + 1)), (2, merge_out)):
+                runner, _ = fake(range_result=result)
+                require(rejects(lambda runner=runner: git_candidate_identity(candidate, before, runner)),
+                        "offline_git_identity_range_refused")
             # Any other status (unknown object 128, usage 129, a signal, bool/non-int) refuses,
             # in either query, and so does a failing or malformed `log`.
             for statuses in ((2, 0), (0, 2), (128, 0), (0, 128), (129, 0), (-9, 0), (0, -9), (True, 0), (0, False), (255, 0)):

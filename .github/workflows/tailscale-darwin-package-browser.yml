@@ -27,6 +27,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Python is pinned, not the mutable runner image's ambient python3: the scope
+      # check below and every later python3 step run under this exact version, which
+      # the receipt and the qualification gate also require (PYTHON_VERSION).
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.0"
       # The scope allowlist lives in exactly one place: the Darwin runner module,
       # which is stdlib-only and import-inert. This step loads it and calls the
       # same candidate_scope_allowed predicate the runner applies in phase 0.
@@ -91,7 +97,8 @@ jobs:
     needs: producer
     runs-on: macos-15
     # Job budget: the offline-controls step (10) plus the cell step (22) is 32
-    # minutes of this 40-minute cap, leaving 8 for checkout and toolchain setup.
+    # minutes of this 40-minute cap, leaving 8 for checkout and toolchain setup
+    # (Go, Node, Bun and the pinned Python).
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
@@ -120,6 +127,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      # Pinned Python for the offline controls, the cell and its publication step.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.0"
       # The offline negative controls and the qualification gate's own self-test run
       # on the hosted runner BEFORE the cell, because they cannot be run locally and
       # would otherwise stay unexecuted. They need no token and no producer input.
@@ -135,14 +146,15 @@ jobs:
           python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check cleanup
           python3 -I -B scripts/qualify-darwin-package-browser.py --self-test
       # Frozen fast-forward grant projection. The runner binds the bounded push
-      # event before/after, the sole candidate parent and two git ancestry facts
-      # (the scope base precedes `before`, and `before` precedes the candidate)
-      # before ANY launcher/query, and revalidates those inputs at both launcher
-      # boundaries. Any attempt-1, non-forced, linear fast-forward push to this
-      # branch whose `before` descends from the pinned scope base is admitted, so
-      # later pushes of the CI loop pass; reruns, redispatch, created or deleted
-      # refs, force pushes, merge-commit candidates and a `before` that is not an
-      # ancestor of the candidate refuse. This is not a global nonce across
+      # event before/after, the sole candidate parent and three git history facts
+      # (the scope base precedes `before`, `before` precedes the candidate, and the
+      # pushed range before..candidate contains no merge commit) before ANY
+      # launcher/query, and revalidates those inputs at both launcher boundaries.
+      # Any attempt-1, non-forced, linear fast-forward push to this branch whose
+      # `before` descends from the pinned scope base is admitted, so later pushes
+      # of the CI loop pass; reruns, redispatch, created or deleted refs, force
+      # pushes, a merge commit anywhere in the pushed range and a `before` that is
+      # not an ancestor of the candidate refuse. This is not a global nonce across
       # forbidden resets. These are operational admission checks, NOT cryptographic
       # authentication or a security boundary against a local caller forging
       # environment/event inputs. The grant permits max-two label-scoped read-only

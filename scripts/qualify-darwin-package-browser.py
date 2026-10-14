@@ -63,6 +63,9 @@ FILES = (
 # the owner approves the push that triggers the hosted run.
 GRANT_ID = "q3-roadmap-launchctl-print-ff-c77855cb-20261014"
 PINNED_PARENT = "c77855cb4e779c00a85d194f5bffe72ac3016554"
+# The exact Python the workflow pins (actions/setup-python); the receipt must record it,
+# like Node, Bun and Go, in lockstep with PYTHON_VERSION in the Darwin runner.
+PYTHON_VERSION = "3.14.0"
 PHASES = (90, 300, 210, 630, 30)
 TOTAL_SECONDS = 1260
 RAW_CAP = 2 * 1024 * 1024
@@ -357,8 +360,8 @@ def check_identities(value):
             and browser["playwright"] == "1.62.1" and browser["target"] == "darwin/arm64"
             and is_digest(browser["sha256"]) and is_digest(browser["switches_sha256"]), "receipt_browser")
     tools = value["tools"]
-    require(is_exact(tools, ("python", "node", "bun", "go", "curl", "openssl")) and tools["node"] == "24.21.0"
-            and tools["bun"] == "1.4.0" and tools["go"] == "1.27.1"
+    require(is_exact(tools, ("python", "node", "bun", "go", "curl", "openssl")) and tools["python"] == PYTHON_VERSION
+            and tools["node"] == "24.21.0" and tools["bun"] == "1.4.0" and tools["go"] == "1.27.1"
             and all(type(v) is str and TOOL_VERSION.fullmatch(v) for v in tools.values()), "receipt_tools")
     policy = value["profile_policy"]
     require(is_exact(policy, ("schema", "root_der_sha256", "trust_blob", "platform_integration", "sandbox", "mock_keychain"))
@@ -644,7 +647,7 @@ def fixture_receipt(sha=SELF_SHA, run=SELF_RUNS["darwin"]):
         "compiler": {"version": "go1.27.1", "target": "darwin/arm64", "metadata_sha256": digest("7")},
         "browser_identity": {"sha256": digest("8"), "version": "151.0.7922.34", "revision": "1234",
             "playwright": "1.62.1", "switches_sha256": digest("9"), "target": "darwin/arm64"},
-        "tools": {"python": "3.14.7", "node": "24.21.0", "bun": "1.4.0", "go": "1.27.1", "curl": "8.7.1",
+        "tools": {"python": PYTHON_VERSION, "node": "24.21.0", "bun": "1.4.0", "go": "1.27.1", "curl": "8.7.1",
                   "openssl": "1.1.1w"},
         "source_proof": {"chromium_commit": "782af9cb30a53f54487e5d2e44738645a8ec457c", "playwright_tag": "v1.62.1",
                          "go_tag": "go1.27.1", "trust": "TRUST-PROOF.md"},
@@ -989,6 +992,8 @@ def self_test():
     receipt_case("reject_compiler", lambda r: r["compiler"].update(version="go1.26.0"), "receipt_compiler")
     receipt_case("reject_browser_identity", lambda r: r["browser_identity"].update(version="150.0.0.0"), "receipt_browser")
     receipt_case("reject_tools", lambda r: r["tools"].update(node="24.0.0"), "receipt_tools")
+    receipt_case("reject_python_drift", lambda r: r["tools"].update(python="3.13.1"), "receipt_tools")
+    receipt_case("reject_python_suffix", lambda r: r["tools"].update(python=PYTHON_VERSION + "1"), "receipt_tools")
     receipt_case("reject_source_proof", lambda r: r["source_proof"].update(go_tag="go1.26"), "receipt_source_proof")
     receipt_case("reject_profile_policy", lambda r: r["profile_policy"].update(platform_integration=True),
                  "receipt_profile_policy")
