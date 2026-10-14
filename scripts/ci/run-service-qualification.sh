@@ -46,20 +46,25 @@ HELPER_BUILD_TIMEOUT_SECONDS=180
 # TOTAL_BUDGET_SECONDS, measured from the FIRST step of the job: the workflow's
 # first step records the job start time in SERVICE_QUALIFICATION_JOB_STARTED,
 # and script_started is derived from it below, so checkout, provenance and
-# toolchain setup are inside the budget. The budget never skips a suite: every
-# suite that has not run yet keeps a reserved MIN_SUITE_SECONDS out of it, and
-# a suite may use at most what remains after those reservations (never more
-# than SUITE_TIMEOUT_SECONDS). While the budget is ample, suites keep their
-# full bound; after repeated timeouts, later suites still start and get at
-# least MIN_SUITE_SECONDS. If every suite runs to its limit they end about
-# TOTAL_BUDGET_SECONDS after the job start (the dispatch suite's build and
-# test phases can add at most one more MIN_SUITE_SECONDS), which leaves the
-# rest of the 60 minutes, at least about 7, for the summary, the upload and the
-# post-job steps, provided setup left room for the reservations.
-# Residual, stated plainly: this cannot prevent the cap from being reached if
-# the steps before the script consume most of it, or if the runner or Actions
-# hangs. The job is then cancelled by GitHub: a red job with a missing
-# artifact, never a pass.
+# toolchain setup are inside the budget.
+#   * The steps before this script are individually time-limited in the
+#     workflow (step-level timeout-minutes, 22 minutes in total).
+#   * This script refuses early (exit 2, fixed message) if more than 25 minutes
+#     of the job were already used before it: the budget that remains must
+#     cover (EXPECTED_SUITE_COUNT + 1) x MIN_SUITE_SECONDS, i.e. one reserve
+#     per suite plus one for the dispatch suite's second phase.
+#   * Otherwise every suite is attempted and never skipped: every suite that
+#     has not run yet keeps a reserved MIN_SUITE_SECONDS out of the budget, and
+#     a suite may use at most what remains after those reservations (never more
+#     than SUITE_TIMEOUT_SECONDS). While the budget is ample, suites keep their
+#     full bound; after repeated timeouts, later suites still start with at
+#     least MIN_SUITE_SECONDS. If every suite runs to its limit they end about
+#     53 minutes after the job start (about 3170 seconds in the worst case the
+#     guard admits), leaving at least about 7 minutes of the 60-minute cap for
+#     the summary, the upload and the post-job steps.
+# Only residual, stated plainly: a runner or Actions infrastructure hang
+# outside any step's control makes GitHub cancel the job. That is a red job
+# with a missing artifact, never a pass.
 TOTAL_BUDGET_SECONDS=3000
 MIN_SUITE_SECONDS=150
 EXPECTED_SUITE_COUNT=9
@@ -98,9 +103,14 @@ GO_BIN=$(command -v go 2>/dev/null) || refuse 'go was not found on PATH'
 
 # The budget clock starts at the job's first step (see the budget comment
 # above). The variable is validated, not defaulted: a missing, malformed or
-# future start time refuses. A large elapsed time is NOT a refusal: the clamp
-# at MIN_SUITE_SECONDS in remaining_seconds() keeps every suite attempted.
-# run_closed forwards an explicit allowlist, so the suites never see it.
+# future start time refuses. Then the precondition the reservation scheme
+# assumes is enforced: the budget that remains at this point must cover one
+# MIN_SUITE_SECONDS reserve per suite plus one more for the dispatch suite's
+# second phase. With the current constants that is 1500 seconds, so the script
+# refuses if more than 25 minutes of the job were already used. The workflow
+# bounds the earlier steps to 22 minutes in total, so this is an invariant
+# check that the workflow makes unreachable, not a tuning knob. The suites never
+# see the variable: run_closed forwards an explicit allowlist.
 job_started=${SERVICE_QUALIFICATION_JOB_STARTED:-}
 case "$job_started" in
     '' | *[!0-9]*) refuse 'the job start time (SERVICE_QUALIFICATION_JOB_STARTED) is missing or not a number' ;;
@@ -112,6 +122,9 @@ case "$job_now" in
 esac
 job_elapsed=$((10#$job_now - 10#$job_started))
 [ "$job_elapsed" -ge 0 ] || refuse 'the job start time is in the future'
+job_budget_floor=$(( (EXPECTED_SUITE_COUNT + 1) * MIN_SUITE_SECONDS ))
+[ "$(( TOTAL_BUDGET_SECONDS - job_elapsed ))" -ge "$job_budget_floor" ] ||
+    refuse 'too little of the job time budget remains to attempt every suite (the steps before this script took too long)'
 script_started=$((SECONDS - job_elapsed))
 
 # ----------------------------------------------------------- bookkeeping ----
@@ -229,9 +242,10 @@ banner() {
 # run for the suite currently being run, which started at STARTED (a $SECONDS
 # value): the lesser of what is left of that suite's own CAP and what is left of
 # the aggregate budget after reserving MIN_SUITE_SECONDS for every suite that has
-# not run yet. The budget share is never below MIN_SUITE_SECONDS, so every suite
-# is always attempted (this clamp only matters against small per-suite overhead
-# drift; the reservations make it unreachable otherwise).
+# not run yet. The start guard above makes those reservations attainable, so the
+# budget share is clamped to at least MIN_SUITE_SECONDS only as protection
+# against small per-suite overhead drift (a few seconds per suite); it is not
+# what keeps the suites inside the job cap.
 remaining_seconds() {
     suite_left=$(($1 - (SECONDS - $2)))
     later_suites=$((EXPECTED_SUITE_COUNT - suite_count - 1))
