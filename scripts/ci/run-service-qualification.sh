@@ -17,16 +17,28 @@
 #     never sets, defaults or forges GITHUB_ACTIONS, RUNNER_ENVIRONMENT or any
 #     HERDR_* hosted marker; the suites refuse on their own when those are not
 #     the real runner values, and that refusal is a failure like any other.
-#   * Every suite always runs, even after an earlier failure. A suite passes
-#     only by exiting 0. Nonzero, death by signal, a hosted-guard refusal, a
-#     wall-clock timeout and a suite that modifies the checkout all fail it.
-#   * The script exits nonzero unless every suite passed.
+#   * Every suite runs, even after an earlier failure, until the aggregate
+#     time budget below is spent; a suite that cannot start inside the budget
+#     is recorded as failed (exit 125) and not run. A suite passes only by
+#     exiting 0. Nonzero, death by signal, a hosted-guard refusal, a wall-clock
+#     timeout and a suite that modifies the checkout all fail it.
+#   * The script exits nonzero unless every suite passed, and it always writes
+#     its summary before the workflow's job cap can end the job.
 #
 # This script runs project tests. It is meant to be run by CI only.
 set -eu
 
+# One suite may run at most SUITE_TIMEOUT_SECONDS in total; for the dispatch
+# suite that single bound covers the helper build AND the tests.
 SUITE_TIMEOUT_SECONDS=900
 HELPER_BUILD_TIMEOUT_SECONDS=180
+# Nine suites at their own bound could need far more than the workflow's
+# 60-minute job cap, which must also cover checkout, toolchain setup, the
+# summary and the artifact upload. The suites therefore share this aggregate
+# budget, measured from script start; once it is spent the remaining suites
+# are not run and are recorded as failed, so the summary is still written.
+TOTAL_BUDGET_SECONDS=2880
+NOT_RUN_STATUS=125
 EXPECTED_SUITE_COUNT=9
 
 refuse() {
@@ -78,6 +90,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+script_started=$SECONDS
 GOTOOLCHAIN=${GOTOOLCHAIN:-local}
 overall=pass
 checkout_unchanged=1
@@ -144,7 +157,9 @@ PY
 #
 # Runs COMMAND through bounded() under a closed environment: `env -i` plus
 # exactly HOME TMPDIR PATH GOTOOLCHAIN GOFLAGS GITHUB_ACTIONS RUNNER_ENVIRONMENT
-# RUNNER_TEMP and, when EXTRA is non-empty, that one NAME=value assignment. The
+# RUNNER_TEMP and, when EXTRA is non-empty, that one NAME=value assignment.
+# TMPDIR is the runner's real value and is omitted when the runner has none
+# (suites then use their own /tmp fallback); it is not replaced by RUNNER_TEMP. The
 # suites build fixtures that assert on ambient credentials and tool selection,
 # so they must not inherit the rest of the runner environment. The runner PATH
 # is kept so the setup-go/setup-bun/python3 toolchains resolve. GITHUB_ACTIONS
@@ -155,7 +170,7 @@ run_closed() {
     closed_extra=$2
     shift 2
     bounded "$closed_limit" /usr/bin/env -i \
-        HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$PATH" \
+        HOME="$HOME" ${TMPDIR:+"TMPDIR=$TMPDIR"} PATH="$PATH" \
         GOTOOLCHAIN="$GOTOOLCHAIN" GOFLAGS="${GOFLAGS:-}" \
         GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
         RUNNER_TEMP="$RUNNER_TEMP" \
@@ -168,6 +183,17 @@ banner() {
     printf '\n================================================================\n'
     printf 'SUITE %s\n' "$1"
     printf '================================================================\n'
+}
+
+# remaining_seconds CAP STARTED: sets limit_left to how long a command may still
+# run for a suite that started at STARTED (a $SECONDS value): the lesser of what
+# is left of that suite's own CAP and what is left of the aggregate budget.
+# A value below 1 means there is no time left.
+remaining_seconds() {
+    suite_left=$(($1 - (SECONDS - $2)))
+    total_left=$((TOTAL_BUDGET_SECONDS - (SECONDS - script_started)))
+    limit_left=$suite_left
+    [ "$total_left" -ge "$suite_left" ] || limit_left=$total_left
 }
 
 # record_suite NAME EXIT SECONDS: appends to the table and the summary, and
@@ -205,7 +231,13 @@ run_suite() {
     banner "$suite_name"
     suite_started=$SECONDS
     suite_status=0
-    run_closed "$SUITE_TIMEOUT_SECONDS" "$suite_extra" "$@" || suite_status=$?
+    remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$suite_started"
+    if [ "$limit_left" -lt 1 ]; then
+        printf 'aggregate time budget exhausted; this suite is not run\n' >&2
+        suite_status=$NOT_RUN_STATUS
+    else
+        run_closed "$limit_left" "$suite_extra" "$@" || suite_status=$?
+    fi
     record_suite "$suite_name" "$suite_status" "$((SECONDS - suite_started))"
     check_checkout "$suite_name"
 }
@@ -220,24 +252,38 @@ run_suite tests/test_service_supervision.py '' "$PYTHON3" tests/test_service_sup
 # builds it, and it runs this file as a child. To run it standalone, build the
 # same helper the same way (go build -o <helper> ./cmd/herdr-mobile-relay).
 # The build only compiles; it does not run the relay. A failed build fails the
-# suite without running it.
+# suite without running it. The build and the tests share ONE suite bound
+# (SUITE_TIMEOUT_SECONDS, measured from dispatch_started): the build gets at
+# most HELPER_BUILD_TIMEOUT_SECONDS of it and the tests get whatever remains.
 dispatch_name=tests/test_service_transport_dispatch.py
 helper="$work_dir/native-helper"
-helper_status=0
+dispatch_status=0
 banner "$dispatch_name"
 dispatch_started=$SECONDS
-printf 'building the NATIVE_HELPER relay binary for this suite\n'
-run_closed "$HELPER_BUILD_TIMEOUT_SECONDS" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
-    helper_status=$?
-if [ "$helper_status" -ne 0 ]; then
-    printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
-    record_suite "$dispatch_name" "$helper_status" "$((SECONDS - dispatch_started))"
+remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$dispatch_started"
+if [ "$limit_left" -lt 1 ]; then
+    printf 'aggregate time budget exhausted; this suite is not run\n' >&2
+    dispatch_status=$NOT_RUN_STATUS
 else
-    dispatch_status=0
-    run_closed "$SUITE_TIMEOUT_SECONDS" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
+    build_limit=$limit_left
+    [ "$build_limit" -le "$HELPER_BUILD_TIMEOUT_SECONDS" ] || build_limit=$HELPER_BUILD_TIMEOUT_SECONDS
+    printf 'building the NATIVE_HELPER relay binary for this suite\n'
+    run_closed "$build_limit" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
         dispatch_status=$?
-    record_suite "$dispatch_name" "$dispatch_status" "$((SECONDS - dispatch_started))"
+    if [ "$dispatch_status" -ne 0 ]; then
+        printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
+    else
+        remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$dispatch_started"
+        if [ "$limit_left" -lt 1 ]; then
+            printf 'the suite bound was spent by the helper build; the suite is not run\n' >&2
+            dispatch_status=124
+        else
+            run_closed "$limit_left" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
+                dispatch_status=$?
+        fi
+    fi
 fi
+record_suite "$dispatch_name" "$dispatch_status" "$((SECONDS - dispatch_started))"
 check_checkout "$dispatch_name"
 
 run_suite tests/test_service_uninstall_cli.py '' "$PYTHON3" tests/test_service_uninstall_cli.py
