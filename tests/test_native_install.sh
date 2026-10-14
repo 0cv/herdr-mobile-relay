@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# No local execution, even synthetic: fail rather than silently skip the
-# required hosted public-entrypoint cases. Guard precedes temp files/builds.
-if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+# Guard before temporary roots, subprocesses and builds. Never fabricate flags.
+if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "$EUID" -eq 0 ]; then
     echo "native installation fixtures require disposable GitHub-hosted CI" >&2
     exit 2
 fi
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 2)' || exit 2
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-native-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
@@ -14,231 +14,430 @@ python3 - "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay" <<'PY'
 import subprocess, sys
 subprocess.run(["go", "build", "-o", sys.argv[1], sys.argv[2]], check=True, timeout=180)
 PY
-HOST_PATH="$PATH"
-native_fixture_install() {
-    python3 - "$1" <<'PY'
-import subprocess, sys
-result = subprocess.run(["/bin/bash", sys.argv[1]], stdin=subprocess.DEVNULL, timeout=30)
-raise SystemExit(result.returncode)
-PY
-}
-# plutil ships only with macOS. Elsewhere the launchd cases get a stand-in
-# that still rejects a missing or empty staged plist.
-HOST_PLUTIL="$(command -v plutil || true)"
-
-# Failure propagates into unchanged Makefile shell-check; Python also guards
-# before any subprocess activity and uses this already built strict helper.
-python3 - "$REPO_DIR/tests/test_service_transport_dispatch.py" <<'PY'
-import subprocess, sys
-subprocess.run([sys.executable, sys.argv[1]], check=True, timeout=300)
+# Existing production-dispatch, diagnostic and navigation suites remain wired;
+# they retain their separate acceptance boundaries and their own hosted guards.
+python3 - "$REPO_DIR" <<'PY'
+import pathlib, subprocess, sys
+repo = pathlib.Path(sys.argv[1])
+for name, timeout in (("test_service_transport_dispatch.py", 900),
+                      ("test_plugin_doctor.py", 120), ("test_setup_menu.py", 180)):
+    subprocess.run([sys.executable, str(repo / "tests" / name)], check=True, timeout=timeout)
 PY
 
-# Separate guarded diagnostic-wrapper cases; failures propagate, never skip.
-python3 - "$REPO_DIR/tests/test_plugin_doctor.py" <<'PY'
-import subprocess, sys
-subprocess.run([sys.executable, sys.argv[1]], check=True, timeout=120)
-PY
+# Reuse the actual-copy fixture, strict compiled helper and dynamic, inert
+# label-specific controllers. No duplicated/hand-copied production policy.
+python3 - "$REPO_DIR" "$WORK_DIR" <<'PY'
+import importlib.util, json, os, pathlib, signal, stat, subprocess, sys, time
+repo, parent = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("dispatch_fixture", repo / "tests/test_service_transport_dispatch.py")
+d = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(d)
+canary = "fixture-native-selected-secret"
 
-# Guarded navigation/header fixtures use only disposable actions/diagnostics.
-python3 - "$REPO_DIR/tests/test_setup_menu.py" <<'PY'
-import subprocess, sys
-subprocess.run([sys.executable, sys.argv[1]], check=True, timeout=180)
-PY
 
-for transport in cloudflare gateway; do
-for platform in systemd launchd; do
-  for initial in active inactive fresh; do
-    for failure in none write reload start readiness public rollback; do
-     for envstate in preset absent no-instance; do
-        # A host that has never been configured reaches the installer with no
-        # relay.env, or one without an instance identity, so the readiness
-        # gate must read the identity the installer itself just generated.
-        case "$envstate:$failure" in
-            preset:*) ;;
-            *:none|*:rollback) ;;
-            *) continue ;;
-        esac
-        CASE="$WORK_DIR/$transport-$platform-$initial-$failure-$envstate home & space"
-        export HOME="$CASE" CASE FAILURE="$failure" INITIAL="$initial" FIXTURE_TRANSPORT="$transport"
-        export XDG_STATE_HOME="$HOME/state"
-        BIN="$HOME/.local/bin"
-        mkdir -p "$BIN" "$HOME/config" "$HOME/releases/current/relay" "$HOME/releases/current/web" "$HOME/.config/systemd/user" "$HOME/Library/LaunchAgents" "$HOME/tmp"
-        export TMPDIR="$HOME/tmp/"
-        export HERDR_RELEASE_ROOT="$HOME/releases"
-        export HERDR_RELAY_ENV="$HOME/config/relay.env"
-        case "$envstate" in
-            preset)
-                printf 'HERDR_RELAY_TOKEN=test\nHERDR_RELAY_INSTANCE_ID=instance\nHERDR_RELAY_PORT=18375\nCLOUDFLARED_CONFIG=%q\n' "$HOME/config/tunnel.yml" > "$HERDR_RELAY_ENV"
-                ;;
-            no-instance)
-                printf 'HERDR_RELAY_TOKEN=test\nHERDR_RELAY_PORT=18375\nCLOUDFLARED_CONFIG=%q\n' "$HOME/config/tunnel.yml" > "$HERDR_RELAY_ENV"
-                ;;
-            absent)
-                rm -f "$HERDR_RELAY_ENV"
-                export CLOUDFLARED_CONFIG="$HOME/config/tunnel.yml"
-                ;;
-        esac
-        if [ "$transport" = gateway ]; then
-            printf 'HERDR_RELAY_TRANSPORT=gateway\nHERDR_GATEWAY_URL=wss://gateway.example.test\n' >> "$HERDR_RELAY_ENV"
-            printf 'https://app.example.test\n' > "$HOME/config/phone-app-origin-configured"
-        fi
-        # Real copied native installers must normalize saved legacy raw keys
-        # on success, and restore their exact snapshot on transaction failure.
-        if [ -f "$HERDR_RELAY_ENV" ]; then
-            printf 'GH_TOKEN=synthetic-native-gh-canary\nGITHUB_TOKEN=synthetic-native-github-canary\n' >> "$HERDR_RELAY_ENV"
-        fi
-        # Retained Cloudflare bytes must survive gateway success and failure.
-        printf 'hostname: relay.example.test\n' > "$HOME/config/tunnel.yml"
-        printf '#!/bin/sh\nexit 0\n' > "$HOME/releases/current/relay/herdr-mobile-relay-service.sh"
-        chmod 700 "$HOME/releases/current/relay/herdr-mobile-relay-service.sh"
-        cp "$REPO_DIR/web/release.json" "$HOME/releases/current/web/release.json"
-        printf '{"version":"version","revision":"revision","web_hash":"web"}\n' \
-            > "$HOME/releases/current/release-manifest.json"
-        cat > "$HOME/releases/current/herdr-mobile-relay" <<'EOF'
-#!/bin/sh
-case "$1" in
-version) printf '{"version":"version","revision":"revision"}\n' ;;
-# Shell JSON fields use the compiled strict decoder, as packaged releases do.
-json-field|verify-readiness|verify-gateway-health|normalize-origin) exec "$NATIVE_HELPER" "$@" ;;
-verify-public)
-    printf '%s\n' "$*" >> "$CASE/app-check.log"
-    [ "$FAILURE" != public ]
-    ;;
-*) exit 1 ;;
-esac
-EOF
-        cat > "$BIN/systemctl" <<'EOF'
-#!/bin/bash
-printf '%s\n' "$*" >> "$CASE/manager.log"
-case "$*" in
-*is-active*) [ "$INITIAL" = active ] && exit 0; exit 3 ;;
-*is-enabled*) [ "$INITIAL" = active ] && exit 0; exit 1 ;;
-*stop*) [ "$FAILURE" != rollback ] || exit 1; exit 0 ;;
-*daemon-reload*) step=reload ;;
-*restart*) step=start ;;
-*) exit 0 ;;
-esac
-if [ "$FAILURE" = "$step" ] || { [ "$FAILURE" = rollback ] && [ "$step" = start ]; }; then
-    if [ ! -f "$CASE/failed" ] || [ "$FAILURE" = rollback ]; then touch "$CASE/failed"; exit 1; fi
+def snapshot(paths):
+    return {str(p): (p.read_bytes(), stat.S_IMODE(p.stat().st_mode)) if p.exists() else None for p in paths}
+
+
+def resources(f):
+    return [f.definition, f.legacy, f.envfile, f.root / "config/github-token"]
+
+
+def recovery(f):
+    return list((f.root / "state").glob("**/herdr-native-recovery.*"))
+
+
+def state(f):
+    return json.loads((f.root / "activation").read_text())
+
+
+def run(f, conditional=""):
+    # Ordinary cells use the REAL installer. Conditional cells call the REAL
+    # transaction API with a conditional EXIT trap, not a conditional source
+    # of the whole installer (which would mask unrelated public-gate errexit).
+    command = ["/bin/bash", "-x", str(f.script)]
+    if conditional:
+        command = ["/bin/bash", "-x", "-c", NATIVE_EXIT_PROBE, str(f.script), str(f.script.parent), f.platform,
+                   str(f.definition), str(f.legacy), conditional]
+    proc = subprocess.Popen(command, env=f.env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=40)
+        result = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+        f.check_safe(stdout + stderr)
+        assert canary not in stdout + stderr, "native credential exposed"
+        return result
+    finally:
+        # This fixture invocation group only, never native cleanup evidence.
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        proc.wait(timeout=5)
+
+
+# F006: actual transaction-local acquisition and actual native_install_exit.
+# This harness sources exact copied originals, never substitutes observers.
+# Ordinary full-installer cells use actual generated definitions; this API
+# control uses an inert candidate marker, not native-definition qualification.
+NATIVE_EXIT_PROBE = r'''
+set +x
+set -euo pipefail
+SCRIPT_DIR="$1"
+. "$1/common.sh"
+. "$1/native-install-transaction.sh"
+ENV_FILE="$HERDR_RELAY_ENV"
+if [ "$2" = systemd ]; then
+    label=herdr-mobile-relay.service; legacy=herdr-remote.service
+else
+    label=com.herdr-mobile-relay.service; legacy=com.herdr-remote.service
 fi
-EOF
-        cat > "$BIN/launchctl" <<'EOF'
-#!/bin/bash
-printf '%s\n' "$*" >> "$CASE/manager.log"
-if [ "$1" = print ]; then
-    case "$2" in gui/*/*) ;; gui/*) exit 0 ;; esac
-fi
-loaded="$CASE/loaded"
-case "$*" in *herdr-remote*) loaded="$CASE/legacy-loaded" ;; esac
-case "$1" in
-print) [ -f "$loaded" ]; exit $? ;;
-bootout) if [ "$FAILURE" = rollback ] && [ -f "$CASE/failed" ]; then exit 1; fi; rm -f "$loaded" ;;
-bootstrap)
-    if [ "$FAILURE" = reload ] && ! grep -q 'previous definition' "$3"; then touch "$CASE/failed"; exit 1; fi
-    touch "$loaded"
-    ;;
-kickstart)
-    if [ "$FAILURE" = start ] || [ "$FAILURE" = rollback ]; then touch "$CASE/failed"; exit 1; fi
-    ;;
-*) exit 0 ;;
+native_installer_admit "$ENV_FILE" "$ENV_FILE" "$3" "$4" || exit 1
+native_install_begin "$2" "$3" "$4" "$ENV_FILE" "$label" "$legacy" "$NATIVE_SIDECAR" || exit 1
+case "$5" in
+    if) trap 'if native_install_exit; then :; fi' EXIT ;;
+    or) trap 'native_install_exit || exit 1' EXIT ;;
+    *) exit 97 ;;
 esac
-if [ "$FAILURE" = rollback ] && [ "$1" = bootstrap ] && [ -f "$CASE/failed" ]; then exit 1; fi
-EOF
-        # The fake relay answers with whatever instance identity the env file
-        # currently records, so a generated identity is matched like a
-        # preconfigured one.
-        cat > "$BIN/curl" <<'EOF'
-#!/bin/sh
-status=ready
-revision=revision
-instance=$(sed -n "s/^HERDR_RELAY_INSTANCE_ID=['\"]*\([^'\"]*\)['\"]*$/\1/p" "$HERDR_RELAY_ENV" 2>/dev/null | tail -1)
-[ "$FAILURE" != readiness ] || status=degraded
-case "$*" in *https://*) [ "$FAILURE" != public ] || revision=foreign ;; esac
-case "$*" in
-*/healthz*)
-    printf '{"status":"ok","readiness":"ready","transport":"gateway","inventory":{"state":"%s","stale":false},"instance":"%s","release_version":"version","revision":"%s","bundle_hash":"web","bundle_version":"version","bundle_revision":"revision","protocol":3,"gateway":{"enabled":true,"registered":true,"relay_id":"fixture"}}\n' "$status" "$instance" "$revision"
-    ;;
-*) printf '{"status":"ready","inventory":{"state":"%s"},"instance":"%s","release_version":"version","revision":"%s","bundle_hash":"web","protocol":3}\n' "$status" "$instance" "$revision" ;;
-esac
-EOF
-        cat > "$BIN/cp" <<'EOF'
-#!/bin/sh
-if [ "$FAILURE" = write ]; then
-    case "$*" in *.herdr-service.*) exit 1 ;; esac
+native_installer_candidate "$ENV_FILE" "${CLOUDFLARED_CONFIG:-}" || exit 1
+printf 'inert transaction replacement marker\n' > "$native_recovery/new.definition" || exit 1
+chmod 600 "$native_recovery/new.definition" || exit 1
+native_install_publish "$native_recovery/new.definition" || exit 1
+native_install_activate || exit 1
+instance="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)" || exit 1
+health="$(wait_for_relay_health 18375 15 1 "$instance")" || exit 23
+if [ "$TRANSPORT" = gateway ]; then
+    origin="$(gateway_install_phone_app_origin "$ENV_FILE")" || exit 1
+    verify_gateway_install_readiness 18375 "$health" "$origin" || exit 23
+else
+    verify_public_readiness "$ENV_FILE" "$health" || exit 23
 fi
-exec /bin/cp "$@"
-EOF
-        for command in sleep systemd-analyze; do printf '#!/bin/sh\nexit 0\n' > "$BIN/$command"; done
-        printf '#!/bin/sh\n[ "$FIXTURE_TRANSPORT" = cloudflare ] || { touch "$CASE/cloudflare-called"; exit 99; }\n' > "$BIN/cloudflared"
-        for command in tailscale tailscaled herdr ssh scp sftp npx wrangler security sudo brew apt-get open; do
-            printf '#!/bin/sh\ntouch "$CASE/dangerous-tool-called"\nexit 99\n' > "$BIN/$command"
-        done
-        if [ -z "$HOST_PLUTIL" ]; then
-            printf '#!/bin/sh\n[ "$1" = -lint ] && [ -s "$2" ]\n' > "$BIN/plutil"
-        fi
-        cat > "$BIN/id" <<'EOF'
-#!/bin/sh
-if [ "$1" = -u ]; then printf '501\n'; else /usr/bin/id "$@"; fi
-EOF
-        chmod 700 "$BIN/"* "$HOME/releases/current/herdr-mobile-relay"
-        export PATH="$BIN:$HOST_PATH"
-        if [ "$initial" = active ]; then touch "$CASE/loaded" "$CASE/legacy-loaded"; fi
-        if [ "$platform" = systemd ]; then
-            definition="$HOME/.config/systemd/user/herdr-mobile-relay.service"
-            legacy="$HOME/.config/systemd/user/herdr-remote.service"
-            script=install-systemd-user-service.sh
-        else
-            definition="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
-            legacy="$HOME/Library/LaunchAgents/com.herdr-remote.service.plist"
-            script=install-service.sh
-        fi
-        if [ "$initial" != fresh ]; then
-            printf 'previous definition\n' > "$definition"
-            printf 'legacy definition\n' > "$legacy"
-        fi
-        if [ -f "$HERDR_RELAY_ENV" ]; then cp "$HERDR_RELAY_ENV" "$CASE/env-before"; fi
-        cp -R "$REPO_DIR/relay/." "$HOME/releases/current/relay/"
-        if native_fixture_install "$HOME/releases/current/relay/$script" > "$CASE/output" 2>&1; then
-            if [ "$failure" != none ]; then echo "$platform accepted $failure failure" >&2; exit 1; fi
-            test ! -e "$legacy"
-            if grep -Eq '^(GH_TOKEN|GITHUB_TOKEN)=' "$HERDR_RELAY_ENV"; then
-                echo "$platform retained a legacy raw token key after successful installation" >&2
-                exit 1
-            fi
-            test -n "$(sed -n 's/^HERDR_RELAY_INSTANCE_ID=//p' "$HERDR_RELAY_ENV")"
-            if [ "$transport" = gateway ]; then
-                grep -F 'verify-public --web-root' "$CASE/app-check.log" >/dev/null
-                grep -Fx 'https://app.example.test' "$HOME/config/phone-app-origin-configured" >/dev/null
-            fi
-        else
-            if [ "$failure" = none ]; then cat "$CASE/output" >&2; exit 1; fi
-            if [ "$initial" = fresh ]; then
-                test ! -e "$definition"
-                test ! -e "$legacy"
-            else
-                grep -Fx 'previous definition' "$definition" >/dev/null
-                grep -Fx 'legacy definition' "$legacy" >/dev/null
-            fi
-            if [ -f "$CASE/env-before" ]; then
-                cmp "$HERDR_RELAY_ENV" "$CASE/env-before"
-            else
-                test ! -e "$HERDR_RELAY_ENV"
-            fi
-            if [ "$failure" = rollback ]; then
-                grep -F 'rollback is incomplete' "$CASE/output" >/dev/null
-                test -n "$(find "$HOME/state" -name herdr-native-recovery.\* -type d -print -quit)"
-            fi
-        fi
-        test ! -e "$CASE/cloudflare-called"
-        test ! -e "$CASE/dangerous-tool-called"
-        if grep -Eq 'synthetic-native-(gh|github)-canary' "$CASE/output"; then
-            echo "$platform exposed a credential canary in installer output" >&2
-            exit 1
-        fi
-        grep -Fx 'hostname: relay.example.test' "$HOME/config/tunnel.yml" >/dev/null
-     done
-    done
-  done
-done
-done
-printf 'native installation transaction fixtures passed\n'
+exit 97  # A fault cell must never pass its actual readiness/public gate.
+'''
+
+NATIVE_PROBE = r'''
+set +x
+set -euo pipefail
+. "$1/common.sh"
+. "$1/native-install-transaction.sh"
+native_manager="$2"
+if [ "$4" = reader ]; then native_install_read_bounded "$5"; exit $?; fi
+result=0
+case "$4" in
+    observe-if) if native_install_observe "$3"; then :; else result=1; fi ;;
+    observe-or) native_install_observe "$3" || result=1 ;;
+    quiet-if) if native_install_label_quiet "$3"; then :; else result=1; fi ;;
+    quiet-or) native_install_label_quiet "$3" || result=1 ;;
+    *) exit 97 ;;
+esac
+if [ "$5" = unknown ] && [ "$result" -ne 0 ]; then
+    [ "$NATIVE_STATE:$NATIVE_ENABLED" = unknown:unknown ] || exit 97
+fi
+printf '%s:%s\n' "$NATIVE_STATE" "$NATIVE_ENABLED"
+exit "$result"
+'''
+
+
+def probe(f, label, invocation, expectation="unknown", data=None, limit=4096):
+    argument = str(limit) if invocation == "reader" else expectation
+    command = ["/bin/bash", "-c", NATIVE_PROBE, "native-probe", str(f.script.parent), f.platform, label, invocation, argument]
+    proc = subprocess.Popen(command, env=f.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(input=data, timeout=20)
+        f.check_safe((stdout + stderr).decode())
+        return proc.returncode, stdout
+    finally:
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        proc.wait(timeout=5)
+
+
+def capture_control(f, seam, role, payload, status=0, when="initial", at=1):
+    d.write(f.root / "native-capture.json", json.dumps(dict(seam=seam, label=role, hex=payload.hex(), status=status, when=when, at=at)))
+
+
+def capture_frames(platform, role):
+    label = ("herdr-mobile-relay.service" if role == "current" else "herdr-remote.service") if platform == "systemd" else (
+        "com.herdr-mobile-relay.service" if role == "current" else "com.herdr-remote.service")
+    if platform == "systemd":
+        return label, [("systemd", b"LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n", 0, b"inactive", 4096)]
+    negative = ('Could not find service "' + label + '" in domain for user gui: ' + str(os.getuid())).encode()
+    disabled = ('disabled services = {\n "' + label + '" => true\n}').encode()
+    return label, [("domain", b"gui/fixture = {}", 0, b"fixture", 65536),
+                   ("label", negative, 113, b"service", 65536),
+                   ("disabled", disabled, 0, b"true", 65536)]
+
+
+def capture_faults(seam, payload, status, part, limit):
+    return [("middle-nul", payload.replace(part, part[:2] + b"\x00" + part[2:], 1), status),
+            ("prefix-nul", b"\x00" + payload, status), ("suffix-nul", payload + b"\x00", status),
+            ("oversized", b"x" * (limit + 1), status),
+            # An exact nonzero launchd absence is SUPPORTED, not a failed
+            # capture. Failed label probes must have a nonmatching diagnostic.
+            ("failed", b"controller unavailable" if seam == "label" else payload, 2),
+            ("partial", payload[:len(payload) // 2], 2), ("empty", b"", 2)]
+
+
+def native_capture_cases(parent, platform, transport):
+    for role in ("current", "legacy"):
+        label, frames = capture_frames(platform, role)
+        for seam, payload, status, part, limit in frames:
+            faults = capture_faults(seam, payload, status, part, limit)
+            for name, data, code in faults:
+                for invocation in ("observe-if", "observe-or", "quiet-if", "quiet-or"):
+                    f = d.Fixture(parent, f"capture-probe-{platform}-{transport}-{role}-{seam}-{name}-{invocation}", transport, platform)
+                    before = snapshot(resources(f)); capture_control(f, seam, role, data, code)
+                    result, output = probe(f, label, invocation)
+                    assert result == 1 and output == b"unknown:unknown\n"
+                    assert snapshot(resources(f)) == before and not recovery(f)
+                    assert not any(e["kind"] == "native-live-attempt" for e in f.events())
+                    assert bystander.poll() is None
+            # Initial discovery, post-snapshot/polling, then ACTUAL readiness
+            # and public failure EXIT rollback after replacement activation.
+            for initial in (False, True):
+                cells = [("initial", 1, name, data, code, "") for name, data, code in faults]
+                cells += [("fresh", number, "middle-nul", faults[0][1], status, "") for number in (2, 3, 4)]
+                cells += [(phase, 1, name, data, code, conditional)
+                          for phase in ("ready", "public")
+                          for name, data, code in faults[:6]
+                          for conditional in ("", "if", "or")]
+                for phase, at, name, data, code, conditional in cells:
+                    f = d.Fixture(parent, f"capture-exit-{platform}-{transport}-{role}-{seam}-{initial}-{phase}-{at}-{name}-{conditional}", transport, platform, initial)
+                    d.write(f.root / "config/github-token", "prior-unselected-sidecar\n")
+                    (f.root / "config/github-token").chmod(0o640)
+                    with f.envfile.open("a") as out: out.write("GH_TOKEN='" + canary + "'\n")
+                    before = snapshot(resources(f)); protected = snapshot([f.root / "config/devices.json", f.root / "config/tunnel.yml"])
+                    # Global domain/map counters count both begin observations.
+                    if seam in ("domain", "disabled"):
+                        at = (2 if role == "legacy" else 1) if phase == "initial" else at + 1 if phase == "fresh" else 1
+                    capture_control(f, seam, role, data, code, "rollback" if phase in ("ready", "public") else "initial", at)
+                    if phase in ("ready", "public"):
+                        f.env["NATIVE_FAILURE"] = phase + "-capture"
+                        if phase == "public": f.env["FAILURE"] = "app"
+                    result = run(f, conditional)
+                    assert result.returncode != 0
+                    events = f.events(); fault = next(i for i, e in enumerate(events) if e["kind"] == "native-capture-fault")
+                    assert not any(e["kind"] == "native-live-attempt" for e in events[fault + 1:]), "destructive attempt after unknown observation"
+                    assert not any(e["kind"] == "manager" and e["command"] in ("restart", "bootstrap", "kickstart", "enable") for e in events[fault + 1:]), "prior activation after unknown observation"
+                    frozen = json.loads((f.root / "native-fault-snapshot.json").read_text())
+                    for path, value in frozen.items():
+                        p = f.root / path
+                        assert ([p.read_bytes().hex(), stat.S_IMODE(p.stat().st_mode)] if p.exists() else None) == value
+                    assert snapshot(map(pathlib.Path, protected)) == protected and bystander.poll() is None
+                    if phase in ("ready", "public"):
+                        assert (f.root / "replacement-active").exists() and (f.root / "native-capture-armed").exists()
+                        armed = json.loads((f.root / "native-armed-snapshot.json").read_text())
+                        assert armed == frozen, "rollback mutated replacement resources before refusal"
+                        assert f.definition.read_text() != "previous definition\n"
+                        assert (f.root / "config/github-token").read_text() == canary + "\n"
+                        assert recovery(f) and "rollback is incomplete" in result.stderr
+                        if role == "current" or seam in ("domain", "disabled"):
+                            assert state(f)["current"]["active"], "active replacement must remain untouched on first unknown probe"
+                    else:
+                        assert snapshot(resources(f)) == before
+                        if phase == "fresh": assert recovery(f) and "rollback is incomplete" in result.stderr
+                        else: assert not recovery(f)  # begin never completed; no publication
+                    for directory in recovery(f): assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+                    if phase != "initial":
+                        saved = json.loads((f.root / "native-fault-recovery.json").read_text())
+                        assert saved
+                        for path, value in saved.items():
+                            p = f.root / path
+                            assert p.exists() and not p.is_symlink()
+                            assert [p.read_bytes().hex() if p.is_file() else None, stat.S_IMODE(p.stat().st_mode)] == value
+        # Supported absent/inactive quiet EOF, exact nonzero absence, loaded
+        # header EOF (not quiet), and actual reader byte-bound controls.
+        f = d.Fixture(parent, f"capture-valid-{platform}-{transport}-{role}", transport, platform)
+        result, output = probe(f, label, "quiet-if", "supported")
+        assert result == 0 and output in (b"absent:false\n", b"inactive:false\n")
+        for seam, payload, code, part, limit in frames:
+            capture_control(f, seam, role, payload.rstrip(b"\n"), code)
+            result, output = probe(f, label, "quiet-or", "supported")
+            assert result == 0 and output in (b"absent:false\n", b"inactive:false\n")
+        if platform == "launchd":
+            capture_control(f, "label", role, ("gui/" + str(os.getuid()) + "/" + label + " = {}").encode())
+            assert probe(f, label, "observe-if", "supported") == (0, b"loaded:false\n")
+            assert probe(f, label, "quiet-or", "supported") == (1, b"loaded:false\n")
+        for bound in (4096, 65536):
+            for data, expected in ((b"", 0), (b"x" * (bound - 1), 0), (b"x" * bound, 0),
+                                   (b"x" * (bound + 1), 1), (b"x\x00", 1), (b"\x00x", 1)):
+                result, output = probe(f, label, "reader", data=data, limit=bound)
+                assert result == expected and output == (data if expected == 0 else b"")
+
+
+bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"], start_new_session=True)
+try:
+    for platform in ("systemd", "launchd"):
+        for transport in ("gateway", "cloudflare"):
+            native_capture_cases(parent, platform, transport)
+            # Deterministic policy refusals precede all managers, HTTP/app,
+            # relay/tunnel dispatch and credential/configuration mutation.
+            for name, addition in (
+                ("run", "HERDR_RELAY_RUN_ID=foreground\n"),
+                ("control", "HERDR_RELAY_CONTROL_RUN_ID=foreground\n"),
+                ("pairing", "HERDR_RELAY_PAIRING_SOCKET=/fixture/control\n"),
+                ("rearm", "HERDR_RELAY_REARM_BOOTSTRAP=1\n"),
+                ("rearm-invalid", "HERDR_RELAY_REARM_BOOTSTRAP=invalid\n"),
+                ("conflict", "HERDR_RELAY_TOKEN=distinct\n"),
+                ("expansion", "GH_TOKEN=$(herdr forbidden)\n"),
+                ("routing", "PATH=/forbidden\n"),
+                ("raw-distinct", "GH_TOKEN=one\nGITHUB_TOKEN=two\n"),
+                ("pointer-relative", "HERDR_GITHUB_TOKEN_FILE=relative\n")):
+                f = d.Fixture(parent, f"{platform}-{transport}-refuse-{name}", transport, platform, True)
+                with f.envfile.open("a") as out: out.write(addition)
+                before = snapshot(resources(f)); activation = state(f)
+                assert run(f).returncode != 0
+                assert snapshot(resources(f)) == before and state(f) == activation
+                assert not recovery(f)
+                assert not any(e["kind"] in ("manager", "http", "app", "dispatch", "cli-gate", "relay", "tunnel") for e in f.events())
+            # An absent ancestor plus '..' must not mask an existing resource
+            # until mkdir/publication. Refuse before touching either spelling.
+            f = d.Fixture(parent, f"{platform}-{transport}-future-alias", transport, platform, True)
+            before = snapshot(resources(f)); activation = state(f)
+            f.env["HERDR_RELAY_ENV"] = str(f.root / "uncreated/../config/relay.env")
+            assert run(f).returncode != 0
+            assert snapshot(resources(f)) == before and state(f) == activation
+            assert not (f.root / "uncreated").exists() and not recovery(f)
+            assert not any(e["kind"] in ("manager", "http", "app", "dispatch", "cli-gate", "relay", "tunnel") for e in f.events())
+            for raw_key in ("short", "x" * 33, "z" * 32, "é" * 16):
+                f = d.Fixture(parent, f"{platform}-{transport}-key-{len(raw_key)}", transport, platform)
+                d.write(f.envfile, f.envfile.read_text().replace("0123456789abcdef0123456789abcdef", raw_key))
+                before = snapshot(resources(f))
+                result = run(f)
+                assert (result.returncode == 0) == (len(raw_key.encode()) == 32), "key is bytes, not hex"
+                if result.returncode: assert snapshot(resources(f)) == before and not recovery(f)
+            for spelling in ("0", "false", "False", "FALSE", "f", "F"):
+                f = d.Fixture(parent, f"{platform}-{transport}-false-{spelling}", transport, platform)
+                with f.envfile.open("a") as out: out.write("HERDR_RELAY_REARM_BOOTSTRAP=" + spelling + "\n")
+                assert run(f).returncode == 0
+
+            for initial in ("active", "inactive", "fresh"):
+                for failure in ("", "read", "query", "snapshot", "candidate", "chmod", "token", "rename", "commit", "reload", "start", "stop",
+                                "ready-stop-fail", "ready-still-active", "ready-unknown", "ready-restore", "ready-safe",
+                                "public-stop-fail", "public-unknown", "public-safe"):
+                    if (failure == "reload" and platform == "launchd") or (failure == "stop" and initial != "active"): continue
+                    f = d.Fixture(parent, f"{platform}-{transport}-{initial}-{failure or 'ok'}", transport, platform, initial != "fresh")
+                    if initial == "inactive":
+                        d.write(f.root / "activation", json.dumps({k: dict(active=False, enabled=False) for k in ("current", "legacy")}))
+                    # Identical saved raw values and supported shell-quoted
+                    # fragments; ambient credentials MUST NOT be consulted.
+                    with f.envfile.open("a") as out:
+                        out.write("  export GH_TOKEN='fixture-native-'\"selected-secret\"\n\tGITHUB_TOKEN=" + canary + "\n")
+                    if failure.startswith("public-"): f.env["FAILURE"] = "app"
+                    f.env.update(NATIVE_FAILURE=failure, GH_TOKEN="ambient-unselected", GITHUB_TOKEN="ambient-distinct",
+                                 HERDR_GITHUB_TOKEN_FILE="/ambient/not-selected")
+                    sidecar = f.root / "config/github-token"
+                    # Even an existing UNSELECTED migration destination is a
+                    # resource: its prior bytes/mode must survive rollback.
+                    if initial != "fresh":
+                        d.write(sidecar, "prior-unselected-sidecar\n"); sidecar.chmod(0o640)
+                    before = snapshot(resources(f)); activation = state(f)
+                    protected = snapshot([f.root / "config/tunnel.yml", f.root / "config/phone-app-origin-configured", f.root / "config/devices.json",
+                                          f.script.parent / "herdr-mobile-relay-service.sh"])
+                    result = run(f)
+                    assert snapshot(map(pathlib.Path, protected)) == protected
+                    assert bystander.poll() is None, "native cleanup killed an unrelated process"
+                    if not failure:
+                        assert result.returncode == 0 and not f.legacy.exists() and not recovery(f)
+                        assert sidecar.read_text() == canary + "\n" and stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+                        assert "GH_TOKEN=" not in f.envfile.read_text() and "GITHUB_TOKEN=" not in f.envfile.read_text()
+                        assert state(f)["current"]["active"] and not state(f)["legacy"]["active"]
+                    else:
+                        assert result.returncode != 0
+                        if failure in ("ready-stop-fail", "ready-still-active", "ready-unknown", "ready-restore", "public-stop-fail", "public-unknown"):
+                            assert recovery(f), "unsafe/failed rollback discarded private recovery"
+                            assert "rollback is incomplete" in result.stderr
+                            assert f.definition.exists() and f.envfile.exists() and sidecar.exists()
+                            # No prior activation follows the first failed
+                            # restore; no resource mutation follows an unknown
+                            # or still-active replacement observation.
+                            events = f.events()
+                            if failure == "ready-restore":
+                                fault = next(i for i, e in enumerate(events) if e["kind"] == "fault")
+                                assert not any(e["kind"] == "manager" and e["command"] in ("restart", "bootstrap") for e in events[fault + 1:])
+                            else:
+                                assert f.definition.read_text() != "previous definition\n"
+                                assert sidecar.read_text() == canary + "\n"
+                        elif failure == "stop":
+                            assert snapshot(resources(f)) == before and state(f)["current"]["active"]
+                            assert recovery(f) and "rollback is incomplete" in result.stderr
+                        else:
+                            assert snapshot(resources(f)) == before and state(f) == activation
+                    for r in recovery(f):
+                        assert stat.S_IMODE(r.stat().st_mode) == 0o700
+
+            # F001: the real installer has set -u and starts identity tracking
+            # empty. /bin/bash is stock 3.2 on the admitted Darwin runner.
+            f = d.Fixture(parent, f"{platform}-{transport}-empty-identities", transport, platform)
+            result = run(f)
+            assert result.returncode == 0 and "unbound variable" not in result.stderr
+            assert state(f)["current"]["active"] and not f.legacy.exists() and not recovery(f)
+
+            # F002: private metadata does not make a selected credential safe
+            # to overwrite/remove as a transaction destination. With false
+            # activation, launchd labels are absent even when files exist.
+            for role in ("environment", "current", "legacy"):
+                for prior_active in (False, True):
+                    f = d.Fixture(parent, f"{platform}-{transport}-pointer-overlap-{role}-{prior_active}",
+                                  transport, platform, prior_active)
+                    pointer = {"environment": f.envfile, "current": f.definition, "legacy": f.legacy}[role]
+                    if role != "environment": d.write(pointer, "synthetic-selected-credential\n")
+                    with f.envfile.open("a") as out:
+                        out.write(f"HERDR_GITHUB_TOKEN_FILE='{pointer}'\nGH_TOKEN=one\nGITHUB_TOKEN=two\n")
+                    before = snapshot(resources(f)); activation = state(f)
+                    result = run(f)
+                    assert result.returncode != 0 and "overlaps native transaction destinations" in result.stderr
+                    assert snapshot(resources(f)) == before and state(f) == activation and not recovery(f)
+                    assert not any(e["kind"] in ("manager", "http", "app", "dispatch", "cli-gate", "relay", "tunnel") for e in f.events())
+                    assert bystander.poll() is None
+
+            # A valid saved private pointer wins over contradictory raw keys;
+            # neither its target nor an unselected destination is rewritten.
+            f = d.Fixture(parent, f"{platform}-{transport}-pointer", transport, platform)
+            pointer = f.root / "private-selected"
+            d.write(pointer, "selected-pointer-content\n")
+            with f.envfile.open("a") as out:
+                out.write(f"HERDR_GITHUB_TOKEN_FILE='{pointer}'\nGH_TOKEN=one\nGITHUB_TOKEN=two\n")
+            before = snapshot([pointer, f.root / "config/github-token"])
+            assert run(f).returncode == 0
+            assert snapshot(map(pathlib.Path, before)) == before
+            assert "GH_TOKEN=" not in f.envfile.read_text() and "GITHUB_TOKEN=" not in f.envfile.read_text()
+
+            for missing in ("file", "key", "instance"):
+                f = d.Fixture(parent, f"{platform}-{transport}-defaults-{missing}", transport, platform)
+                if missing == "file":
+                    f.envfile.unlink()
+                    f.env.update(HERDR_RELAY_TRANSPORT=transport, HERDR_RELAY_PORT="18375")
+                    if transport == "gateway": f.env["HERDR_GATEWAY_URL"] = "wss://gateway.example.test"
+                else:
+                    prefix = "HERDR_RELAY_TOKEN=" if missing == "key" else "HERDR_RELAY_INSTANCE_ID="
+                    d.write(f.envfile, "\n".join(line for line in f.envfile.read_text().splitlines() if not line.startswith(prefix)) + "\n")
+                assert run(f).returncode == 0
+                lines = dict(line.split("=", 1) for line in f.envfile.read_text().splitlines() if "=" in line)
+                assert len(lines["HERDR_RELAY_TOKEN"].strip("'")) == 32
+                assert lines["HERDR_RELAY_INSTANCE_ID"].strip("'")
+
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                f = d.Fixture(parent, f"{platform}-{transport}-cancel-{sig}", transport, platform, True)
+                before = snapshot(resources(f)); activation = state(f)
+                f.env["NATIVE_FAILURE"] = "cancel"
+                proc = subprocess.Popen(["/bin/bash", "-x", str(f.script)], env=f.env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 15
+                    while not (f.root / "cancel-gate").exists():
+                        assert proc.poll() is None and time.monotonic() < deadline, "did not reach postactivation cancellation gate"
+                        time.sleep(.02)
+                    proc.send_signal(sig); (f.root / "cancel-release").touch()
+                    stdout, stderr = proc.communicate(timeout=20)
+                    f.check_safe(stdout + stderr)
+                    assert proc.returncode == 128 + sig
+                    assert snapshot(resources(f)) == before and state(f) == activation
+                    assert bystander.poll() is None
+                finally:
+                    if proc.poll() is None:
+                        # Owned fallback containment, not supervisor evidence.
+                        os.killpg(proc.pid, signal.SIGKILL); proc.communicate(timeout=5)
+finally:
+    bystander.terminate(); bystander.wait(timeout=5)
+print("hosted native admission/resource/rollback fixture source exercised")
+PY

@@ -125,10 +125,15 @@ CLI_FIXTURE_ENV="$WORK_DIR/cli-service.env"
 CLI_FIXTURE_RECORD="$WORK_DIR/cli-service.record"
 CLI_FIXTURE_RELAY="$WORK_DIR/cli-fake-relay"
 CLI_FIXTURE_SENTINEL="$WORK_DIR/cli-invoked"
-mkdir -p "$CLI_FIXTURE_ROOT/relay" "$CLI_FIXTURE_HOME"
+(umask 077; mkdir -p "$CLI_FIXTURE_ROOT/relay" "$CLI_FIXTURE_HOME")
+chmod 700 "$CLI_FIXTURE_ROOT" "$CLI_FIXTURE_ROOT/relay" "$CLI_FIXTURE_HOME"
 for WRAPPER in common.sh herdr-mobile-relay-service.sh tailscale-cli-service.sh; do
     cp "$RELEASE_DIR/relay/$WRAPPER" "$CLI_FIXTURE_ROOT/relay/$WRAPPER"
+    cmp "$RELEASE_DIR/relay/$WRAPPER" "$CLI_FIXTURE_ROOT/relay/$WRAPPER" >/dev/null || {
+        echo 'extracted CLI wrapper copy mismatch' >&2; exit 1;
+    }
 done
+(umask 077; : > "$CLI_FIXTURE_ENV"; : > "$CLI_FIXTURE_RELAY"; : > "$WORK_DIR/cli-service.log")
 cat > "$CLI_FIXTURE_ENV" <<'EOF'
 HERDR_RELAY_TRANSPORT='tailscale-cli'
 HERDR_RELAY_INSTANCE_ID='release-fixture-instance'
@@ -136,33 +141,32 @@ HERDR_RELAY_PORT='18377'
 HERDR_TAILSCALE_CLI_SCOPE='development'
 EOF
 CLI_FIXTURE_CLI="$WORK_DIR/fake-tailscale"
-printf '#!/bin/sh\n: > "$HERDR_CLI_SENTINEL"\nexit 97\n' > "$CLI_FIXTURE_CLI"
+(umask 077; printf '#!/bin/sh\nprintf "CLI command attempted\\n" >> "$HERDR_CLI_SERVICE_RECORD"\n: > "$HERDR_CLI_SENTINEL"\nexit 97\n' > "$CLI_FIXTURE_CLI")
 chmod 700 "$CLI_FIXTURE_CLI"
 cat > "$CLI_FIXTURE_RELAY" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$HERDR_CLI_SERVICE_RECORD"
-case "$*" in 'tailscale-cli activation-check') exit 0 ;; esac
+# Every attempted relay command, including activation-check, is forbidden.
 echo unexpected service relay command >&2
 exit 97
 EOF
 chmod 700 "$CLI_FIXTURE_RELAY"
-HOME="$CLI_FIXTURE_HOME" \
-PATH="/usr/bin:/bin" \
-HERDR_RELAY_ENV="$CLI_FIXTURE_ENV" \
-HERDR_RELAY_BIN="$CLI_FIXTURE_RELAY" \
-HERDR_CLI_SERVICE_RECORD="$CLI_FIXTURE_RECORD" \
-HERDR_CLI_SENTINEL="$CLI_FIXTURE_SENTINEL" \
-HERDR_TAILSCALE_CLI_BIN="$CLI_FIXTURE_CLI" \
-"$CLI_FIXTURE_ROOT/relay/herdr-mobile-relay-service.sh" >"$WORK_DIR/cli-service.log" 2>&1 || {
-    echo "extracted CLI service dispatch failed" >&2
-    sed -n '1,80p' "$WORK_DIR/cli-service.log" >&2
-    exit 1
-}
-[ "$(sed -n '1p' "$CLI_FIXTURE_RECORD")" = 'tailscale-cli activation-check' ] &&
-    [ "$(wc -l < "$CLI_FIXTURE_RECORD" | tr -d ' ')" = 1 ] &&
-    [ ! -e "$CLI_FIXTURE_SENTINEL" ] &&
-    grep -Fq 'Installed-service CLI startup is disabled' "$WORK_DIR/cli-service.log" || {
-    echo "extracted CLI service did not remain disabled before CLI execution" >&2
+# Admit the complete fixed diagnostic bytes, not just one matching line.
+# Extra text (including ready=true, ready: true or JSON) is never a refusal.
+CLI_FIXTURE_EXPECTED="$WORK_DIR/cli-service.expected"
+(umask 077; printf '%s\n' 'Installed-service CLI startup is disabled: unavailable/non-ready; no service was started.' > "$CLI_FIXTURE_EXPECTED")
+CLI_FIXTURE_STATUS=0
+# No ambient configuration/tool routing or selected credentials enter this cell.
+(umask 077; env -i HOME="$CLI_FIXTURE_HOME" PATH="/usr/bin:/bin" LC_ALL=C \
+    HERDR_RELAY_ENV="$CLI_FIXTURE_ENV" HERDR_RELAY_BIN="$CLI_FIXTURE_RELAY" \
+    HERDR_CLI_SERVICE_RECORD="$CLI_FIXTURE_RECORD" HERDR_CLI_SENTINEL="$CLI_FIXTURE_SENTINEL" \
+    HERDR_TAILSCALE_CLI_BIN="$CLI_FIXTURE_CLI" \
+    /bin/bash "$CLI_FIXTURE_ROOT/relay/herdr-mobile-relay-service.sh") \
+    >"$WORK_DIR/cli-service.log" 2>&1 || CLI_FIXTURE_STATUS=$?
+[ "$CLI_FIXTURE_STATUS" -eq 69 ] &&
+    [ ! -e "$CLI_FIXTURE_RECORD" ] && [ ! -e "$CLI_FIXTURE_SENTINEL" ] &&
+    cmp "$CLI_FIXTURE_EXPECTED" "$WORK_DIR/cli-service.log" >/dev/null 2>&1 || {
+    echo 'extracted CLI service must be unavailable/non-ready (69) with zero command effects' >&2
     exit 1
 }
 

@@ -8,6 +8,310 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 
+# The additive installed supervisor seam preserves status and refuses unknown
+# generations. Parent-shell mocks here are bounded; real job-table/race cases
+# are in the hosted-only test_service_supervision.py, not foreground contracts.
+(
+    fixture_record='[7]+ 900 Running fixture'
+    fixture_waits=0
+    fixture_code=0
+    _child_job_long_record() {
+        CHILD_JOB_OUTPUT="$fixture_record"
+        [ -n "$fixture_record" ]
+    }
+    _supervised_child_capture_records() {
+        SUPERVISED_JOB_RECORDS="$fixture_record"
+        [ -n "$fixture_record" ]
+    }
+    wait() {
+        test "$1" = 900 || return 99
+        fixture_waits=$((fixture_waits + 1))
+        return "$fixture_code"
+    }
+    supervised_child_capture 900
+    test "$SUPERVISED_JOB_SPEC:$SUPERVISED_JOB_STATE" = '%7:Running'
+    fixture_record='[7]+ 900 Stopped (signal) fixture'
+    supervised_child_observe %7 900
+    test "$SUPERVISED_JOB_STATE" = Stopped
+    test "$fixture_waits" = 0
+    for fixture_record in '[7]+ 901 Running bystander' ''; do
+        status=0
+        supervised_child_observe %7 900 || status=$?
+        test "$status" = 1
+        test "$fixture_waits" = 0
+    done
+    fixture_record='[7]+ 901 Running bystander'
+    status=0
+    supervised_child_capture 900 || status=$?
+    test "$status" = 1
+    test -z "$SUPERVISED_JOB_SPEC"
+    for fixture_code in 0 23; do
+        SUPERVISED_REAPED_COUNT=0
+        if [ "$fixture_code" = 0 ]; then
+            fixture_record='[7]+ 900 Done fixture'
+        else
+            fixture_record='[7]+ 900 Exit 23 fixture'
+        fi
+        status=0
+        supervised_child_capture 900 || status=$?
+        test "$status:$SUPERVISED_JOB_SPEC:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = "2:%7:Terminal:$fixture_code"
+        fixture_record='[7]+ 901 Running reused-generation'
+        status=0
+        supervised_child_observe %7 900 || status=$?
+        test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = "2:Terminal:$fixture_code"
+        # Cached completion is not the new generation's live signal authority.
+        supervised_child_observe %7 901
+        test "$SUPERVISED_JOB_STATE" = Running
+    done
+    test "$fixture_waits" = 2
+)
+(
+    # Supervision alone extends signal-terminal vocabulary. Exact identity is
+    # required even for familiar labels; wait supplies status, not the label.
+    fixture_record='[7]+ 900 Running fixture'
+    fixture_waits=0
+    fixture_code=0
+    expected_waits=0
+    _child_job_long_record() {
+        CHILD_JOB_OUTPUT="$fixture_record"
+        [ -n "$fixture_record" ]
+    }
+    _supervised_child_capture_records() { SUPERVISED_JOB_RECORDS="$fixture_record"; }
+    wait() {
+        test "$1" = 900 || return 99
+        fixture_waits=$((fixture_waits + 1))
+        return "$fixture_code"
+    }
+    status=0
+    _child_job_record_state 900 7 '[7]+ 900 Broken pipe fixture' || status=$?
+    test "$status" = 1  # No change to the foreground parser contract.
+    for fixture_phase in capture observe; do
+        for fixture_case in \
+            '141|Broken pipe' '141|Broken pipe: 13' \
+            '129|Hangup: 1' '130|Interrupt' '131|Quit' '131|Quit: 3' \
+            '132|Illegal instruction' '133|Trace/breakpoint trap' '133|Trace/BPT trap: 5' \
+            '134|IOT trap' '134|Abort trap: 6' '134|Aborted: 6' \
+            '135|Bus error' '138|Bus error: 10' '135|EMT trap: 7' \
+            '137|Killed: 9' '143|Terminated: 15' '142|Alarm clock' \
+            '138|User defined signal 1' '158|User defined signal 1: 30' \
+            '140|User defined signal 2' '159|User defined signal 2: 31' \
+            '159|Bad system call' '140|Bad system call: 12' '144|Stack fault' \
+            '157|I/O possible' '151|IO possible: 23' \
+            '152|CPU time limit exceeded' '152|Cputime limit exceeded: 24' \
+            '153|File size limit exceeded' '153|Filesize limit exceeded: 25' \
+            '154|Virtual timer expired' '155|Profiling timer expired' \
+            '158|Power failure' '157|Resource lost' \
+            '160|Signal 32' '160|Unknown signal 32' '162|Real-time signal 0'; do
+            SUPERVISED_REAPED_COUNT=0
+            fixture_code="${fixture_case%%|*}"
+            fixture_description="${fixture_case#*|}"
+            fixture_record='[7]+ 900 Running fixture'
+            supervised_child_capture 900
+            for fixture_record in \
+                "[7]+ 901 $fixture_description bystander" \
+                "[8]+ 900 $fixture_description reused-spec" \
+                '[7]+ 900 Unknown phase fixture' \
+                '[7]+ 900 Broken pipeline fixture' \
+                $'[7]+ 900 Broken pipe fixture\n[8] 901 Running unrelated'; do
+                status=0
+                supervised_child_observe %7 900 || status=$?
+                test "$status" = 1
+                test "$fixture_waits" = "$expected_waits"
+            done
+            fixture_record="[7]+ 900 $fixture_description fixture"
+            status=0
+            if [ "$fixture_phase" = capture ]; then
+                supervised_child_capture 900 || status=$?
+            else
+                supervised_child_observe %7 900 || status=$?
+            fi
+            test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = "2:Terminal:$fixture_code"
+            expected_waits=$((expected_waits + 1))
+            test "$fixture_waits" = "$expected_waits"
+            fixture_record='[7]+ 901 Running reused-generation'
+            status=0
+            supervised_child_observe %7 900 || status=$?
+            test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = "2:Terminal:$fixture_code"
+            test "$fixture_waits" = "$expected_waits"
+            supervised_child_observe %7 901
+            test "$SUPERVISED_JOB_STATE" = Running
+        done
+    done
+)
+(
+    # A full-table capture must not discard a sibling's terminal observation,
+    # nor reap an unrelated Done record. Subsequent pruning retains status 23.
+    fixture_records='[4]+ 900 Running relay'
+    fixture_waits=0
+    _supervised_child_capture_records() { SUPERVISED_JOB_RECORDS="$fixture_records"; }
+    _child_job_long_record() { return 1; }
+    wait() {
+        test "$1" = 900 || return 99
+        fixture_waits=$((fixture_waits + 1))
+        return 23
+    }
+    supervised_child_capture 900
+    fixture_records=$'[4]- 900 Exit 23 relay\n[5]+ 901 Running tunnel\n[6] 999 Done unrelated'
+    supervised_child_capture 901
+    test "$SUPERVISED_JOB_SPEC:$SUPERVISED_JOB_STATE" = '%5:Running'
+    status=0
+    supervised_child_observe %4 900 || status=$?
+    test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = '2:Terminal:23'
+    status=0
+    supervised_child_observe %5 901 || status=$?
+    test "$status" = 1
+    test "$fixture_waits" = 1
+)
+
+# Literal normalization and failure propagation are tested inside conditionals:
+# no helper may depend on set -e to protect original bytes/mode/absence.
+(
+    file="$WORK_DIR/literal.env"
+    printf '  export GH_TOKEN=\x27same\x27\n\tGITHUB_TOKEN="same"\nGH_TOKEN=same\nKEEP=\x27literal # value\x27\n' > "$file"
+    literal_env_scan "$file"
+    literal_env_get GH_TOKEN; test "$LITERAL_VALUE" = same
+    remove_env_value_atomic "$file" GH_TOKEN
+    remove_env_value_atomic "$file" GITHUB_TOKEN
+    test "$(cat "$file")" = "KEEP='literal # value'"
+    value="space ' quote; \$HOME \`command\` \\\ literal"
+    set_env_value_atomic "$file" ROUND_TRIP "$value"
+    literal_env_scan "$file"; literal_env_get ROUND_TRIP
+    test "$LITERAL_VALUE" = "$value"
+    for invalid in 'GH_TOKEN=$(printf forbidden)' 'export GH_TOKEN="unterminated' 'GH_TOKEN=one; echo forbidden' 'GH_TOKEN=one GH_TOKEN=two'; do
+        printf '%s\n' "$invalid" > "$file"
+        if literal_env_scan "$file"; then echo 'accepted executable/malformed literal input' >&2; exit 1; fi
+        cp -p "$file" "$file.before"
+        if remove_env_value_atomic "$file" GH_TOKEN; then exit 1; fi
+        cmp "$file" "$file.before"
+    done
+    printf 'GH_TOKEN=one\nGH_TOKEN=two\n' > "$file"
+    if literal_env_scan "$file"; then echo 'accepted conflicting duplicate' >&2; exit 1; fi
+    printf '%8193s\n' x > "$file"
+    if literal_env_scan "$file"; then exit 1; fi
+    printf '%262145s' x > "$file"
+    if literal_env_scan "$file"; then exit 1; fi
+    for ((line=0; line<4097; line++)); do printf '# comment\n'; done > "$file"
+    if literal_env_scan "$file"; then exit 1; fi
+)
+for operation in set remove equals; do
+    for failure in read filter write chmod rename; do
+        (
+            file="$WORK_DIR/atomic-$operation-$failure.env"
+            printf 'GH_TOKEN=synthetic-atomic-canary\nKEEP=untouched\n' > "$file"
+            chmod 640 "$file"; cp -p "$file" "$file.before"
+            case "$failure" in
+                read) head() { printf 'GH_TOKEN=partial'; return 2; } ;;
+                filter) literal_env_filter() { LITERAL_FILTERED=partial; return 2; } ;;
+                write) printf() { if [ "$1" = '%s' ]; then builtin printf 'partial'; return 2; fi; builtin printf "$@"; } ;;
+                chmod) chmod() { return 1; } ;;
+                rename) mv() { return 1; } ;;
+            esac
+            result=0
+            case "$operation" in
+                set) set_env_value_atomic "$file" GH_TOKEN replacement || result=$? ;;
+                remove) remove_env_value_atomic "$file" GH_TOKEN || result=$? ;;
+                equals) remove_env_value_if_equals_atomic "$file" GH_TOKEN synthetic-atomic-canary || result=$? ;;
+            esac
+            test "$result" -ne 0
+            cmp "$file" "$file.before"
+            identity="$(stat -c '%a' "$file" 2>/dev/null)" || identity="$(stat -f '%Lp' "$file")"
+            test "$identity" = 640
+            test -z "$(find "$WORK_DIR" -name '.relay-env.*' -print)"
+        )
+    done
+done
+# Selected-resource role separation must also use checked device/inode
+# identity, not spelling alone (e.g. case-insensitive Darwin filesystems).
+# This is a metadata-equivalence fault fixture, not real APFS integration.
+for failure in same-inode pointer-read destination-read pointer-malformed destination-malformed distinct; do
+    (
+        directory="$(cd "$WORK_DIR" && pwd -P)"
+        pointer="$directory/selected-$failure"; destination="$directory/definition-$failure"
+        printf 'synthetic-private-selected\n' > "$pointer"
+        printf 'synthetic-definition\n' > "$destination"
+        chmod 600 "$pointer" "$destination"
+        cp -p "$pointer" "$pointer.before"; cp -p "$destination" "$destination.before"
+        stat() {
+            if [ "$2" = '%d:%i' ]; then
+                if { [ "$failure" = pointer-read ] && [ "$3" = "$pointer" ]; } ||
+                    { [ "$failure" = destination-read ] && [ "$3" = "$destination" ]; }; then return 2; fi
+                if { [ "$failure" = pointer-malformed ] && [ "$3" = "$pointer" ]; } ||
+                    { [ "$failure" = destination-malformed ] && [ "$3" = "$destination" ]; }; then
+                    printf 'malformed\n'; return 0
+                fi
+                if [ "$failure" = same-inode ] || [ "$3" = "$pointer" ]; then printf '1:42\n'; else printf '1:43\n'; fi
+                return 0
+            fi
+            command stat "$@"
+        }
+        status=0; output="$(native_selected_pointer_disjoint "$pointer" "$destination" 2>&1)" || status=$?
+        if [ "$failure" = distinct ]; then test "$status" = 0; else test "$status" -ne 0; fi
+        if [ "$failure" = same-inode ]; then [[ "$output" == *'overlaps native transaction destinations'* ]]; fi
+        cmp "$pointer" "$pointer.before"; cmp "$destination" "$destination.before"
+        private_owned_file "$pointer"; private_owned_file "$destination"
+    )
+done
+# Each quote emission must fail closed in conditional/|| contexts, including
+# a later fragment after earlier bytes have already been emitted. Successful
+# but malformed/lossy serializer output must also be rejected before mktemp.
+for context in conditional or; do
+    for failure in opening fragment-first fragment-later closing malformed lost-value; do
+        (
+            file="$WORK_DIR/quote-$context-$failure.env"
+            printf 'GH_TOKEN=synthetic-quote-canary\nKEEP=untouched\n' > "$file"
+            chmod 640 "$file"; cp -p "$file" "$file.before"
+            value="first'between'last"; quote_fragments=0
+            case "$failure" in
+                malformed) shell_quote_value() { builtin printf "'unterminated"; } ;;
+                lost-value) shell_quote_value() { builtin printf "'different'"; } ;;
+                *) printf() {
+                    local point=other
+                    case "$1" in
+                        "'") point=opening ;;
+                        "%s'\n") point=closing ;;
+                        "%s'"*) point=fragment; quote_fragments=$((quote_fragments + 1)) ;;
+                    esac
+                    if [ "$point" = "$failure" ] ||
+                        { [ "$point" = fragment ] && [ "$failure" = fragment-first ] && [ "$quote_fragments" = 1 ]; } ||
+                        { [ "$point" = fragment ] && [ "$failure" = fragment-later ] && [ "$quote_fragments" = 2 ]; }; then
+                        builtin printf 'partial'; return 2
+                    fi
+                    builtin printf "$@"
+                } ;;
+            esac
+            result=0
+            if [ "$context" = conditional ]; then
+                if set_env_value_atomic "$file" GH_TOKEN "$value"; then result=0; else result=$?; fi
+            else
+                set_env_value_atomic "$file" GH_TOKEN "$value" || result=$?
+            fi
+            test "$result" -ne 0
+            cmp "$file" "$file.before"
+            identity="$(stat -c '%a' "$file" 2>/dev/null)" || identity="$(stat -f '%Lp' "$file")"
+            test "$identity" = 640
+            test -z "$(find "$WORK_DIR" -name '.relay-env.*' -print)"
+        )
+    done
+done
+(
+    # Existing-file callers keep their umask; native staging sets its own.
+    file="$WORK_DIR/existing-umask.env"
+    printf 'HERDR_RELAY_TOKEN=0123456789abcdef0123456789abcdef\nHERDR_RELAY_INSTANCE_ID=fixture\n' > "$file"
+    unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
+    umask 022; previous_umask="$(umask)"
+    ensure_relay_env "$file" '' ''
+    test "$(umask)" = "$previous_umask"
+)
+(
+    file="$WORK_DIR/default-failure.env"
+    printf 'HERDR_RELAY_TOKEN=\nGH_TOKEN=saved-only\n' > "$file"
+    cp -p "$file" "$file.before"
+    generate_token() { printf 'partial'; return 2; }
+    if ensure_relay_env "$file" '' explicit-ambient-contract; then exit 1; fi
+    cmp "$file" "$file.before"
+    test ! -e "$WORK_DIR/github-token"
+)
+
 id() {
     if [ "${1:-}" = "-u" ]; then
         printf '0\n'
@@ -1716,30 +2020,40 @@ esac
 
 # The top-level Stable Tunnel action clears a gateway before stable setup, so
 # the service and QR cannot accidentally retain the previous transport.
-STABLE_SWITCH_DIR="$WORK_DIR/stable-switch"
-STABLE_SWITCH_ENV="$WORK_DIR/config/stable-switch.env"
-STABLE_SWITCH_MARKER="$WORK_DIR/stable-switch-called"
+# Match the native fixtures' physical roots on Darwin (/var may be an alias).
+STABLE_SWITCH_ROOT="$(cd "$WORK_DIR" && pwd -P)"
+STABLE_SWITCH_DIR="$STABLE_SWITCH_ROOT/stable-switch"
+STABLE_SWITCH_ENV="$STABLE_SWITCH_ROOT/config/stable-switch.env"
+STABLE_SWITCH_MARKER="$STABLE_SWITCH_ROOT/stable-switch-called"
 mkdir -p "$STABLE_SWITCH_DIR"
 cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-install-service.sh" \
     "$STABLE_SWITCH_DIR/"
 cat > "$STABLE_SWITCH_DIR/stable-setup.sh" <<'EOF'
 #!/usr/bin/env bash
 if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$HERDR_RELAY_ENV" ||
-    [ -n "${HERDR_GATEWAY_URL:-}" ]; then
+    [ -n "${HERDR_GATEWAY_URL:-}${HERDR_GATEWAY_SELECTION:-}" ]; then
     echo "stable setup still inherited the gateway" >&2
     exit 1
 fi
+[ "$HERDR_RELAY_ENV" = "$STABLE_SWITCH_EXPECTED_ENV" ] &&
+    [ "${HERDR_STABLE_SETUP_WRAPPED:-}" = 1 ] &&
+    [ "${HERDR_RELAY_TRANSPORT:-}" = cloudflare ] || exit 1
+[ -z "${HERDR_TAILSCALE_ORIGIN:-}${HERDR_EXTERNAL_HTTPS_ORIGIN:-}" ] || exit 1
 if [ "${HERDR_STABLE_SETUP_WRAPPED:-}" != 1 ]; then
     echo "🐑 Herdr Mobile Relay stable tunnel setup"
 fi
 printf 'called\n' > "$STABLE_SWITCH_MARKER"
+exit "${STABLE_SWITCH_CODE:-0}"
 EOF
 chmod 700 "$STABLE_SWITCH_DIR/stable-setup.sh"
 printf "HERDR_GATEWAY_URL='wss://gw.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" \
     > "$STABLE_SWITCH_ENV"
 export STABLE_SWITCH_MARKER
+export STABLE_SWITCH_EXPECTED_ENV="$STABLE_SWITCH_ENV"
 STABLE_SWITCH_OUTPUT="$(
     HERDR_RELAY_ENV="$STABLE_SWITCH_ENV" HERDR_GATEWAY_URL="wss://inherited.example.test" \
+        HERDR_GATEWAY_SELECTION=latency HERDR_TAILSCALE_ORIGIN=https://stale.example.test \
+        HERDR_EXTERNAL_HTTPS_ORIGIN=https://stale.example.test \
         bash "$STABLE_SWITCH_DIR/plugin-install-service.sh" 2>&1
 )"
 [ -f "$STABLE_SWITCH_MARKER" ] ||
@@ -1755,6 +2069,14 @@ esac
 test "$(printf '%s\n' "$STABLE_SWITCH_OUTPUT" |
     grep -c 'Herdr Mobile Relay stable tunnel setup')" -eq 1 ||
     { echo "stable tunnel action printed its heading more than once" >&2; exit 1; }
+for STABLE_SWITCH_CODE in 23 130 143; do
+    STABLE_SWITCH_STATUS=0
+    HERDR_RELAY_ENV="$STABLE_SWITCH_ENV" STABLE_SWITCH_CODE="$STABLE_SWITCH_CODE" \
+        HERDR_SETUP_MENU=1 bash "$STABLE_SWITCH_DIR/plugin-install-service.sh" \
+        > "$WORK_DIR/stable-switch-failure.log" 2>&1 || STABLE_SWITCH_STATUS=$?
+    [ "$STABLE_SWITCH_STATUS" -eq "$STABLE_SWITCH_CODE" ] ||
+        { echo "stable tunnel action lost the child failure/cancellation status" >&2; exit 1; }
+done
 
 # Navigation/header correspondence only; inert diagnostics cannot qualify Go
 # health. The guarded native menu fixture additionally uses NATIVE_HELPER.

@@ -395,6 +395,193 @@ stop_child_job() {
     _child_job_reap_forced_kill "$job_spec" "$expected_pid"
 }
 
+# Installed-service supervision has a separate, status-preserving contract.
+# Call these functions DIRECTLY in the owning shell, never in $(...). The
+# existing foreground activity/stop helpers above intentionally remain unchanged.
+# Return 0 = Running/Stopped, 2 = validated/reaped Terminal, 1 = unknown.
+# Results live in SUPERVISED_JOB_SPEC/STATE/STATUS, not stdout.
+SUPERVISED_CAPTURED_COUNT=0
+SUPERVISED_CAPTURED_SPECS=()
+SUPERVISED_CAPTURED_PIDS=()
+SUPERVISED_REAPED_COUNT=0
+SUPERVISED_REAPED_SPECS=()
+SUPERVISED_REAPED_PIDS=()
+SUPERVISED_REAPED_STATUSES=()
+SUPERVISED_JOB_SPEC=""
+SUPERVISED_JOB_STATE=""
+SUPERVISED_JOB_STATUS=""
+
+_supervised_child_cached() {
+    local job_spec="$1" expected_pid="$2" index
+    for ((index = 0; index < SUPERVISED_REAPED_COUNT; index++)); do
+        if [ "${SUPERVISED_REAPED_SPECS[index]}" = "$job_spec" ] &&
+            [ "${SUPERVISED_REAPED_PIDS[index]}" = "$expected_pid" ]; then
+            SUPERVISED_JOB_STATE=Terminal
+            SUPERVISED_JOB_STATUS="${SUPERVISED_REAPED_STATUSES[index]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_supervised_child_capture_records() {
+    local output_file line
+    SUPERVISED_JOB_RECORDS=""
+    output_file="$(mktemp "${TMPDIR:-/tmp}/herdr-supervised-jobs.XXXXXX")" || return 1
+    # %+ need not select a just-completed child when other jobs are Running.
+    # Read the owning parent's table, not process discovery or a subshell copy.
+    if ! LC_ALL=C jobs -l > "$output_file" 2>/dev/null; then
+        rm -f "$output_file"
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        SUPERVISED_JOB_RECORDS="$SUPERVISED_JOB_RECORDS$line"$'\n'
+    done < "$output_file"
+    rm -f "$output_file" || return 1
+    [ -n "$SUPERVISED_JOB_RECORDS" ]
+}
+
+_supervised_child_record_state() {
+    local expected_pid="$1" job_number="$2" job_output="$3" record_status=0
+    local job_token listed_pid description
+
+    _child_job_record_state "$expected_pid" "$job_number" "$job_output" || record_status=$?
+    [ "$record_status" -eq 1 ] || return "$record_status"
+
+    # The foreground parser's unknown result can mean an identity mismatch,
+    # not just an unfamiliar label. Revalidate the exact pair before extending
+    # its terminal vocabulary; an unknown generation never permits a wait.
+    [ -n "$job_output" ] || return 1
+    case "$job_output" in *$'\n'*) return 1 ;; esac
+    IFS=$' \t' read -r job_token listed_pid description <<< "$job_output"
+    case "$job_token" in
+        "[$job_number]"|"[$job_number]+"|"[$job_number]-") ;;
+        *) return 1 ;;
+    esac
+    [ "$listed_pid" = "$expected_pid" ] || return 1
+
+    # LC_ALL=C Bash signal-terminal descriptions on Linux/Darwin include
+    # multiword labels and Darwin's colon suffix. A word/colon boundary avoids
+    # accepting unrelated prefixes. These labels only authorize a terminal
+    # wait; the status comes from wait, NEVER a guessed signal/description.
+    # Keep this extension private to supervision: foreground contracts do not
+    # change. Running/Stopped were classified by the original parser above.
+    case "$description" in
+        "Hangup"[[:space:]:]*|"Interrupt"[[:space:]:]*|"Quit"[[:space:]:]*|\
+        "Killed"[[:space:]:]*|"Terminated"[[:space:]:]*|"Aborted"[[:space:]:]*|\
+        "Illegal instruction"[[:space:]:]*|"Trace/BPT trap"[[:space:]:]*|\
+        "Trace/breakpoint trap"[[:space:]:]*|"IOT trap"[[:space:]:]*|\
+        "Abort trap"[[:space:]:]*|"EMT trap"[[:space:]:]*|"Bus error"[[:space:]:]*|\
+        "Broken pipe"[[:space:]:]*|"Alarm clock"[[:space:]:]*|\
+        "User defined signal 1"[[:space:]:]*|"User defined signal 2"[[:space:]:]*|\
+        "Bad system call"[[:space:]:]*|"Stack fault"[[:space:]:]*|\
+        "I/O possible"[[:space:]:]*|"IO possible"[[:space:]:]*|\
+        "CPU time limit exceeded"[[:space:]:]*|"Cputime limit exceeded"[[:space:]:]*|\
+        "File size limit exceeded"[[:space:]:]*|"Filesize limit exceeded"[[:space:]:]*|\
+        "Virtual timer expired"[[:space:]:]*|"Profiling timer expired"[[:space:]:]*|\
+        "Power failure"[[:space:]:]*|"Resource lost"[[:space:]:]*|\
+        "Signal "[0-9]*|"Unknown signal "[0-9]*|"Real-time signal "[0-9]*)
+            CHILD_JOB_STATE=Terminal
+            return 2
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+_supervised_child_record() {
+    local job_spec="$1" expected_pid="$2" job_output="$3"
+    local record_status=0 index
+    local CHILD_JOB_STATE=""
+
+    if _supervised_child_cached "$job_spec" "$expected_pid"; then
+        return 2
+    fi
+    _supervised_child_record_state "$expected_pid" "${job_spec#%}" "$job_output" || record_status=$?
+    SUPERVISED_JOB_STATE="$CHILD_JOB_STATE"
+    [ "$record_status" -ne 1 ] || return 1
+    [ "$record_status" -eq 2 ] || return 0
+
+    # Only an exact terminal jobspec/PID record permits this nonblocking wait.
+    # jobs -l may prune it; wait by original PID, not a subsequently reused spec.
+    # Cache completion/status only: this cache can NEVER authorize a signal.
+    SUPERVISED_JOB_STATE=Terminal
+    SUPERVISED_JOB_STATUS=0
+    wait "$expected_pid" 2>/dev/null || SUPERVISED_JOB_STATUS=$?
+    index=$SUPERVISED_REAPED_COUNT
+    SUPERVISED_REAPED_SPECS[index]="$job_spec"
+    SUPERVISED_REAPED_PIDS[index]="$expected_pid"
+    SUPERVISED_REAPED_STATUSES[index]="$SUPERVISED_JOB_STATUS"
+    SUPERVISED_REAPED_COUNT=$((SUPERVISED_REAPED_COUNT + 1))
+    return 2
+}
+
+supervised_child_capture() {
+    local expected_pid="$1" token listed_pid state number record_status=0
+    local line candidate="" matches=0 index known_status
+    SUPERVISED_JOB_SPEC=""
+    SUPERVISED_JOB_STATE=""
+    SUPERVISED_JOB_STATUS=""
+    case "$expected_pid" in ''|*[!0-9]*) return 1 ;; esac
+    _supervised_child_capture_records || return 1
+
+    while IFS= read -r line; do
+        IFS=$' \t' read -r token listed_pid state _ <<< "$line"
+        if [ "$listed_pid" = "$expected_pid" ]; then
+            candidate="$line"
+            matches=$((matches + 1))
+        fi
+        # jobs -l can prune ANY reported terminal record. Retain/reap every
+        # already-captured essential's exact terminal pair while it is visible.
+        # Unrelated generations are neither waited nor given signal authority.
+        for ((index = 0; index < SUPERVISED_CAPTURED_COUNT; index++)); do
+            if [ "$listed_pid" = "${SUPERVISED_CAPTURED_PIDS[index]}" ]; then
+                known_status=0
+                _supervised_child_record "${SUPERVISED_CAPTURED_SPECS[index]}" \
+                    "${SUPERVISED_CAPTURED_PIDS[index]}" "$line" || known_status=$?
+                # Unknown records remain a refusal on the next fresh observation.
+                [ "$known_status" -ne 1 ] || continue
+            fi
+        done
+    done <<< "$SUPERVISED_JOB_RECORDS"
+    SUPERVISED_JOB_STATE=""
+    SUPERVISED_JOB_STATUS=""
+    [ "$matches" -eq 1 ] || return 1
+    IFS=$' \t' read -r token listed_pid state _ <<< "$candidate"
+    case "$token" in
+        \[*\]+|\[*\]-|\[*\]) number="${token#\[}"; number="${number%%\]*}" ;;
+        *) return 1 ;;
+    esac
+    case "$number" in ''|*[!0-9]*) return 1 ;; esac
+    _supervised_child_record "%$number" "$expected_pid" "$candidate" || record_status=$?
+    [ "$record_status" -ne 1 ] || return 1
+    SUPERVISED_JOB_SPEC="%$number"
+    for ((index = 0; index < SUPERVISED_CAPTURED_COUNT; index++)); do
+        if [ "${SUPERVISED_CAPTURED_SPECS[index]}" = "%$number" ] &&
+            [ "${SUPERVISED_CAPTURED_PIDS[index]}" = "$expected_pid" ]; then
+            return "$record_status"
+        fi
+    done
+    SUPERVISED_CAPTURED_SPECS[SUPERVISED_CAPTURED_COUNT]="%$number"
+    SUPERVISED_CAPTURED_PIDS[SUPERVISED_CAPTURED_COUNT]="$expected_pid"
+    SUPERVISED_CAPTURED_COUNT=$((SUPERVISED_CAPTURED_COUNT + 1))
+    return "$record_status"
+}
+
+supervised_child_observe() {
+    local job_spec="$1" expected_pid="$2" number
+    SUPERVISED_JOB_STATE=""
+    SUPERVISED_JOB_STATUS=""
+    case "$job_spec" in %[0-9]*) number="${job_spec#%}" ;; *) return 1 ;; esac
+    case "$number" in ''|*[!0-9]*) return 1 ;; esac
+    case "$expected_pid" in ''|*[!0-9]*) return 1 ;; esac
+
+    if _supervised_child_cached "$job_spec" "$expected_pid"; then
+        return 2
+    fi
+    _child_job_long_record "$job_spec" || return 1
+    _supervised_child_record "$job_spec" "$expected_pid" "$CHILD_JOB_OUTPUT"
+}
+
 relay_release_root() {
     printf '%s\n' "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}"
 }
@@ -521,42 +708,79 @@ relay_env_file_read_only() {
     fi
 }
 
+# Removal selection considers BOTH affected definitions. A legacy survivor or
+# a failed decoder is not absence. Distinct selected files require recovery.
 service_environment_file() {
-    local script_dir="$1"
-    local unit_file="$HOME/.config/systemd/user/herdr-mobile-relay.service"
-    local plist_file="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
-    local configured=""
-
-    case "$(uname -s)" in
-        Linux)
-            if [ -f "$unit_file" ]; then
-                # Decode once, exactly as the installers serialize: main's
-                # complete-assignment quoting or the earlier value quoting.
-                configured="$(systemd_field "$unit_file" Environment)" || configured=""
-                [ -n "$configured" ] && [ -r "$configured" ] || {
-                    echo "Cannot read the installed HERDR_RELAY_ENV; refusing silent CLI route retention." >&2
-                    return 1
-                }
-                printf '%s\n' "$configured"
-                return 0
+    local script_dir="$1" manager label definition configured selected="" line trimmed directive section count environment current_encoding legacy_encoding
+    case "$(uname -s)" in Linux) manager=systemd ;; Darwin) manager=launchd ;; *) return 1 ;; esac
+    for label in $(service_removal_labels "$manager"); do
+        definition="$(service_removal_path "$manager" "$label")" || return 1
+        service_removal_resource "$definition" || return 1
+        if [ "$manager" = systemd ]; then
+            # BOTH labels, including missing primary files, need effective
+            # configuration agreement before any route/native authority.
+            service_removal_systemd_configuration "$label" || return 1
+        fi
+        [ "$SERVICE_REMOVAL_RESOURCE_ID" != absent ] || continue
+        literal_env_read "$definition" || return 1
+        if [ "$manager" = systemd ]; then
+            count=0; environment=""; section=""
+            while IFS= read -r line; do
+                line="${line#"${line%%[![:space:]]*}"}"
+                case "$line" in ''|\#*|\;*) continue ;; esac
+                trimmed="${line%"${line##*[![:space:]]}"}"
+                # No logical-line continuation is supported: it could hide
+                # an environment directive split across physical lines.
+                case "$trimmed" in *\\) return 1 ;; '['*) section="$trimmed"; continue ;; esac
+                case "$line" in *=*) ;; *) continue ;; esac
+                directive="${line%%=*}"
+                directive="${directive%"${directive##*[![:space:]]}"}"
+                # systemd accepts whitespace around '='. Recognize the key
+                # before admitting ONLY the producer's canonical spelling;
+                # a later spaced override/reset must never be ignored.
+                case "$directive" in
+                    Environment)
+                        [ "$section" = '[Service]' ] && [ "${line%%=*}" = Environment ] || return 1
+                        count=$((count + 1)); environment="$line" ;;
+                    EnvironmentFile|PassEnvironment|UnsetEnvironment) return 1 ;;
+                esac
+            done <<< "$LITERAL_TEXT"
+            [ "$count" -eq 1 ] || return 1
+            # Use the existing ONCE-only backslash/percent decoder, never
+            # feed its decoded output through another decoder.
+            configured="$(systemd_field "$definition" Environment && printf '.')" || return 1
+        else
+            service_removal_plist_label "$definition" "$label" || return 1
+            configured="$(plutil -extract EnvironmentVariables.HERDR_RELAY_ENV raw -o - "$definition" 2>/dev/null && printf '.')" || return 1
+        fi
+        configured="${configured%.}"
+        configured="${configured%$'\n'}"
+        if [ "$manager" = systemd ]; then
+            # Admit ONLY an exact current/legacy producer round trip. An
+            # unescaped %u (or unsupported escape/quoting) is not a literal
+            # path: systemd would interpret it differently. Decode once.
+            current_encoding="$(systemd_quoted "HERDR_RELAY_ENV=$configured")" || return 1
+            legacy_encoding="$(systemd_quote_value "$configured")" || return 1
+            if [ "$environment" != "Environment=$current_encoding" ] &&
+                [ "$environment" != "Environment=HERDR_RELAY_ENV=$legacy_encoding" ]; then
+                # Whole-assignment quotes around an otherwise unquoted
+                # current emission are equivalent, not a new decoder.
+                case "$current_encoding" in \"*) return 1 ;; esac
+                [ "$environment" = "Environment=\"$current_encoding\"" ] || return 1
             fi
-            ;;
-        Darwin)
-            if [ -f "$plist_file" ]; then
-                configured="$(plutil -extract EnvironmentVariables.HERDR_RELAY_ENV raw -o - "$plist_file" 2>/dev/null)" || {
-                    echo "Cannot identify HERDR_RELAY_ENV in the installed launchd service; refusing silent CLI route retention." >&2
-                    return 1
-                }
-                [ -n "$configured" ] && [ -r "$configured" ] || {
-                    echo "Cannot read the installed HERDR_RELAY_ENV; refusing silent CLI route retention." >&2
-                    return 1
-                }
-                printf '%s\n' "$configured"
-                return 0
-            fi
-            ;;
-    esac
-    relay_env_file_read_only "$script_dir"
+        fi
+        service_removal_env_safe "$configured" || return 1
+        # An installed definition pointing at missing config is ambiguous,
+        # unlike no definition and a genuinely absent fallback config.
+        [ -f "$configured" ] && [ -r "$configured" ] || return 1
+        [ -z "$selected" ] || [ "$selected" = "$configured" ] || return 1
+        selected="$configured"
+    done
+    if [ -z "$selected" ]; then
+        selected="$(relay_env_file_read_only "$script_dir")" || return 1
+        service_removal_env_safe "$selected" || return 1
+    fi
+    printf '%s\n' "$selected"
 }
 
 relay_env_file() {
@@ -1130,71 +1354,409 @@ env_file_value() {
     )
 }
 
-# Inspect only the exact literal transport assignment; uninstall must not source
-# arbitrary relay.env shell code just to decide whether a persistent route exists.
-service_cli_route_disposition() {
-    local env_file="$1"
-    local script_dir="$2"
-    local prior_disposition="${3:-}"
-    local choice line transport_value transport_mode=""
+# Service-definition removal only. No transaction, process discovery, route,
+# reservation or credential cleanup. Finite polls are NOT a hard OS deadline.
+service_removal_labels() {
+    case "$1" in
+        systemd) printf '%s\n' herdr-mobile-relay.service herdr-remote.service ;;
+        launchd) printf '%s\n' com.herdr-mobile-relay.service com.herdr-remote.service ;;
+        *) return 1 ;;
+    esac
+}
 
-    case "$prior_disposition" in
-        retained)
-            echo "Full uninstall already obtained explicit consent to retain the persistent CLI Serve route."
-            return 0
-            ;;
-        removed)
-            echo "Full uninstall already completed exact-route removal and readback."
-            return 0
-            ;;
-        "") ;;
-        *) echo "✗ Invalid prior CLI route disposition." >&2; return 1 ;;
+service_removal_path() {
+    case "$1:$2" in
+        systemd:herdr-mobile-relay.service|systemd:herdr-remote.service) printf '%s/.config/systemd/user/%s\n' "$HOME" "$2" ;;
+        launchd:com.herdr-mobile-relay.service|launchd:com.herdr-remote.service) printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$2" ;;
+        *) return 1 ;;
     esac
-    [ -r "$env_file" ] || return 0
+}
+
+service_removal_env_safe() {
+    local file="$1" parent identity
+    case "$file" in ''|*[$'\001'-$'\037'$'\177']*) return 1 ;; esac
+    native_resource_parents_safe "$file" || return 1
+    # Negative -e/-L below an unsearchable or non-directory ancestor do
+    # NOT establish absence. Walk all ancestors, even after a negative
+    # predicate, until each existing prefix (including /) is checked.
+    parent="$(dirname "$file")" || return 1
+    while :; do
+        if [ "$parent" = / ] || [ -e "$parent" ] || [ -L "$parent" ]; then
+            [ -d "$parent" ] && [ ! -L "$parent" ] && [ -x "$parent" ] || return 1
+            identity="$(stat -c '%d:%i' "$parent" 2>/dev/null)" ||
+                identity="$(stat -f '%d:%i' "$parent" 2>/dev/null)" || return 1
+            [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+        fi
+        [ "$parent" != / ] || break
+        parent="$(dirname "$parent")" || return 1
+    done
+    if [ -e "$file" ] || [ -L "$file" ]; then
+        native_mutable_file_safe "$file" && [ -r "$file" ] || return 1
+    fi
+    return 0
+}
+
+service_removal_selected_disjoint() {
+    local selected="$1" destination="$2" identity other
+    [ -n "$selected" ] || return 0
+    # Static alternate spellings can name the same single-link inode on
+    # case-insensitive filesystems. Metadata is NOT authentication/a lock.
+    service_removal_env_safe "$selected" && service_removal_env_safe "$destination" || return 1
+    [ "$selected" != "$destination" ] || return 1
+    [ -e "$selected" ] || return 0
+    identity="$(stat -c '%d:%i' "$selected" 2>/dev/null)" ||
+        identity="$(stat -f '%d:%i' "$selected" 2>/dev/null)" || return 1
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    if [ -e "$destination" ]; then
+        other="$(stat -c '%d:%i' "$destination" 2>/dev/null)" ||
+            other="$(stat -f '%d:%i' "$destination" 2>/dev/null)" || return 1
+        [[ "$other" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+        [ "$identity" != "$other" ] || return 1
+    fi
+    return 0
+}
+
+service_removal_plist_label() {
+    local file="$1" expected="$2" actual
+    case "$expected" in com.herdr-mobile-relay.service|com.herdr-remote.service) ;; *) return 1 ;; esac
+    literal_env_read "$file" || return 1
+    actual="$(plutil -extract Label raw -o - "$file" 2>/dev/null && printf '.')" || return 1
+    actual="${actual%.}"; actual="${actual%$'\n'}"
+    # Do not follow a definition's arbitrary label into manager authority.
+    [ "$actual" = "$expected" ]
+}
+
+service_removal_resource() {
+    local file="$1" identity
+    SERVICE_REMOVAL_RESOURCE_ID=unknown
+    export -n SERVICE_REMOVAL_RESOURCE_ID
+    service_removal_env_safe "$file" || return 1
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+        SERVICE_REMOVAL_RESOURCE_ID=absent; return 0
+    fi
+    identity="$(stat -c '%d:%i:%s:%Y' "$file" 2>/dev/null)" ||
+        identity="$(stat -f '%d:%i:%z:%m' "$file" 2>/dev/null)" || return 1
+    [[ "$identity" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
+    SERVICE_REMOVAL_RESOURCE_ID="$identity"
+    return 0
+}
+
+# Removal-specific effective systemd configuration admission, NOT quiescence.
+# Only the established fragment with NO effective overlays or pending reload
+# is supported. Never read a manager-reported arbitrary path or merge drop-ins.
+service_removal_systemd_configuration() {
+    local label="$1" file original output line count=0 code=0
+    local id="" load="" active="" enabled="" fragment="" overlays="" reload=""
+    local i=0 l=0 a=0 e=0 f=0 d=0 n=0 probe_status
+    local LC_ALL=C
+    file="$(service_removal_path systemd "$label")" || return 1
+    service_removal_resource "$file" || return 1
+    original="$SERVICE_REMOVAL_RESOURCE_ID"
+    # Bash 3.2 read bounds acquisition to 4097 bytes and detects NUL. Only
+    # EOF with <=4096 bytes is accepted. Both pipeline statuses are checked;
+    # partial output/query failure cannot turn into empty metadata/absence.
+    # These bounds do NOT impose a hard deadline on a nonresponsive tool.
+    output="$(
+        LC_ALL=C systemctl --user show "$label" --all --property=Id --property=LoadState --property=ActiveState --property=UnitFileState --property=FragmentPath --property=DropInPaths --property=NeedDaemonReload --no-pager 2>/dev/null | (
+            code=0
+            IFS= read -r -d '' -n 4097 output || code=$?
+            [ "$code" -eq 1 ] && [ "${#output}" -le 4096 ] || exit 1
+            printf '%s' "$output" || exit 1
+        )
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+        printf '.'
+    )" || return 1
+    output="${output%.}"; output="${output%$'\n'}"
     while IFS= read -r line; do
+        count=$((count + 1))
         case "$line" in
-            HERDR_RELAY_TRANSPORT=*|export\ HERDR_RELAY_TRANSPORT=*)
-                transport_value="${line#*=}"
-                transport_value="${transport_value//\'/}"
-                transport_value="${transport_value//\"/}"
-                case "$transport_value" in
-                    tailscale-cli) transport_mode=tailscale-cli ;;
-                    cloudflare|gateway|tailscale|tailscale-external) transport_mode=other ;;
-                    *) transport_mode=unknown ;;
-                esac
-                ;;
+            Id=*) i=$((i + 1)); id="${line#*=}" ;;
+            LoadState=*) l=$((l + 1)); load="${line#*=}" ;;
+            ActiveState=*) a=$((a + 1)); active="${line#*=}" ;;
+            UnitFileState=*) e=$((e + 1)); enabled="${line#*=}" ;;
+            FragmentPath=*) f=$((f + 1)); fragment="${line#*=}" ;;
+            DropInPaths=*) d=$((d + 1)); overlays="${line#*=}" ;;
+            NeedDaemonReload=*) n=$((n + 1)); reload="${line#*=}" ;;
+            *) return 1 ;;
         esac
-    done < "$env_file"
-    case "$transport_mode" in
-        tailscale-cli) ;;
-        unknown)
-            echo "Cannot safely identify the installed relay transport; refusing service-only uninstall." >&2
-            return 1
-            ;;
-        *) return 0 ;;
-    esac
-    echo "The CLI-backed Tailscale Serve route is persistent and is not removed with this service."
-    echo "Choose whether to remove that exact route, retain it, or cancel service removal."
-    [ -t 0 ] || {
-        echo "✗ Interactive route disposition is required; the service was left installed." >&2
+    done <<< "$output"
+    [ "$count:$i:$l:$a:$e:$f:$d:$n" = 7:1:1:1:1:1:1:1 ] || return 1
+    [ "$id" = "$label" ] && [ -z "$overlays" ] && [ "$reload" = no ] || return 1
+    if [ "$original" = absent ]; then
+        [ "$load:$active" = not-found:inactive ] && [ -z "$fragment" ] || return 1
+        case "$enabled" in ''|not-found) ;; *) return 1 ;; esac
+    else
+        [ "$load" = loaded ] && [ "$fragment" = "$file" ] || return 1
+        case "$active" in active|inactive|failed|activating|deactivating) ;; *) return 1 ;; esac
+        case "$enabled" in enabled|disabled) ;; *) return 1 ;; esac
+    fi
+    service_removal_resource "$file" || return 1
+    [ "$SERVICE_REMOVAL_RESOURCE_ID" = "$original" ]
+}
+
+# Lifecycle acquisition must reject binary/over-limit input BEFORE Bash can
+# discard NUL in command substitution. EOF alone (status 1) with bounded text
+# is admitted; a NUL delimiter or limit+1 bytes makes read return 0 and refuses.
+# This reader bounds bytes, not the completion time of the producer/filesystem.
+service_removal_read_bounded() {
+    local limit="$1" output="" code=0
+    local LC_ALL=C
+    case "$limit" in 4096|65536) ;; *) return 1 ;; esac
+    IFS= read -r -d '' -n "$((limit + 1))" output || code=$?
+    [ "$code" -eq 1 ] && [ "${#output}" -le "$limit" ] || return 1
+    printf '%s' "$output"
+}
+
+# Supported systemd vocabulary is deliberately narrow: loaded with a known
+# active state and enabled/disabled, or coherent not-found/inactive/no unit.
+# Launchd requires exact domain/label headers and the documented not-found
+# diagnostic. Loaded/waiting is never quiet. Missing disabled entry is enabled.
+service_removal_observe() {
+    local manager="$1" label="$2" output line code=0 domain uid count=0 load="" active="" enabled="" l=0 a=0 e=0 probe_status
+    local LC_ALL=C
+    SERVICE_REMOVAL_STATE=unknown SERVICE_REMOVAL_ENABLED=unknown
+    export -n SERVICE_REMOVAL_STATE SERVICE_REMOVAL_ENABLED
+    service_removal_path "$manager" "$label" >/dev/null || return 1
+    if [ "$manager" = systemd ]; then
+        output="$(
+            LC_ALL=C systemctl --user show "$label" --property=LoadState --property=ActiveState --property=UnitFileState --no-pager 2>/dev/null | service_removal_read_bounded 4096
+            probe_status=( "${PIPESTATUS[@]}" )
+            [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+            printf '.'
+        )" || return 1
+        output="${output%.}"; output="${output%$'\n'}"
+        while IFS= read -r line; do
+            count=$((count + 1))
+            case "$line" in
+                LoadState=*) l=$((l + 1)); load="${line#*=}" ;;
+                ActiveState=*) a=$((a + 1)); active="${line#*=}" ;;
+                UnitFileState=*) e=$((e + 1)); enabled="${line#*=}" ;;
+                *) return 1 ;;
+            esac
+        done <<< "$output"
+        [ "$count:$l:$a:$e" = 3:1:1:1 ] || return 1
+        if [ "$load" = not-found ]; then
+            [ "$active" = inactive ] || return 1
+            case "$enabled" in ''|not-found) ;; *) return 1 ;; esac
+            SERVICE_REMOVAL_STATE=absent SERVICE_REMOVAL_ENABLED=false; return 0
+        fi
+        [ "$load" = loaded ] || return 1
+        case "$active" in active|inactive|failed|activating|deactivating) ;; *) return 1 ;; esac
+        case "$enabled" in enabled) SERVICE_REMOVAL_ENABLED=true ;; disabled) SERVICE_REMOVAL_ENABLED=false ;; *) return 1 ;; esac
+        SERVICE_REMOVAL_STATE="$active"; return 0
+    fi
+    uid="$(id -u)" || return 1
+    case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+    domain="gui/$uid"
+    output="$(
+        LC_ALL=C launchctl print "$domain" 2>/dev/null | service_removal_read_bounded 65536
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+        printf '.'
+    )" || return 1
+    output="${output%.}"; output="${output%$'\n'}"
+    case "$output" in "$domain = {"$'\n'*'}'|"$domain = {}") ;; *) return 1 ;; esac
+    output="$(
+        LC_ALL=C launchctl print "$domain/$label" 2>&1 | service_removal_read_bounded 65536
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[1]}" -eq 0 ] || exit 1
+        # Transport the genuine producer status OUTSIDE the bounded text;
+        # only the existing exact not-found diagnostic admits nonzero.
+        printf '\n%s.' "${probe_status[0]}"
+    )" || return 1
+    code="${output##*$'\n'}"; code="${code%.}"
+    output="${output%$'\n'*}"; output="${output%$'\n'}"
+    if [ "$code" -ne 0 ]; then
+        [ "$output" = "Could not find service \"$label\" in domain for user gui: $uid" ] || return 1
+        active=absent
+    else
+        case "$output" in "$domain/$label = {"$'\n'*'}'|"$domain/$label = {}") ;; *) return 1 ;; esac
+        active=loaded
+    fi
+    output="$(
+        LC_ALL=C launchctl print-disabled "$domain" 2>/dev/null | service_removal_read_bounded 65536
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+        printf '.'
+    )" || return 1
+    output="${output%.}"; output="${output%$'\n'}"
+    enabled=true
+    count=0; l=0; a=0
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+        if [ "$l" -eq 0 ]; then
+            [ "$line" = 'disabled services = {' ] || return 1
+            l=1; continue
+        fi
+        [ "$a" -eq 0 ] || return 1
+        case "$line" in
+            '}') a=1 ;;
+            "\"$label\" => true") enabled=false; count=$((count + 1)) ;;
+            "\"$label\" => false") enabled=true; count=$((count + 1)) ;;
+            \"*\"\ =\>\ true|\"*\"\ =\>\ false) case "$line" in *"\"$label\""*) return 1 ;; esac ;;
+            *) return 1 ;;
+        esac
+    done <<< "$output"
+    [ "$l:$a" = 1:1 ] && [ "$count" -le 1 ] || return 1
+    SERVICE_REMOVAL_STATE="$active" SERVICE_REMOVAL_ENABLED="$enabled"
+    return 0
+}
+
+service_removal_quiet() {
+    service_removal_observe "$1" "$2" || return 1
+    case "$SERVICE_REMOVAL_STATE:$SERVICE_REMOVAL_ENABLED" in absent:false|inactive:false) return 0 ;; *) return 1 ;; esac
+}
+
+service_removal_one() {
+    local manager="$1" label="$2" file original attempt uid quiet=false
+    file="$(service_removal_path "$manager" "$label")" || return 1
+    service_removal_resource "$file" || return 1
+    original="$SERVICE_REMOVAL_RESOURCE_ID"
+    if [ "$manager" = launchd ] && [ "$original" != absent ]; then
+        service_removal_plist_label "$file" "$label" || return 1
+    elif [ "$manager" = systemd ]; then
+        service_removal_systemd_configuration "$label" || return 1
+        [ "$SERVICE_REMOVAL_RESOURCE_ID" = "$original" ] || return 1
+    fi
+    service_removal_observe "$manager" "$label" || return 1
+    if [ "$manager" = systemd ]; then
+        case "$SERVICE_REMOVAL_STATE" in
+            absent|inactive) ;;
+            *) systemctl --user stop "$label" >/dev/null 2>&1 || return 1 ;;
+        esac
+        if [ "$SERVICE_REMOVAL_ENABLED" != false ]; then
+            systemctl --user disable "$label" >/dev/null 2>&1 || return 1
+        fi
+    else
+        uid="$(id -u)" || return 1
+        case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+        if [ "$SERVICE_REMOVAL_ENABLED" != false ]; then
+            launchctl disable "gui/$uid/$label" >/dev/null 2>&1 || return 1
+        fi
+        if [ "$SERVICE_REMOVAL_STATE" != absent ]; then
+            launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || return 1
+        fi
+    fi
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        service_removal_observe "$manager" "$label" || return 1
+        case "$SERVICE_REMOVAL_STATE:$SERVICE_REMOVAL_ENABLED" in absent:false|inactive:false) quiet=true; break ;; esac
+        [ "$attempt" -eq 10 ] || sleep 0.1 || return 1
+    done
+    [ "$quiet" = true ] || return 1
+    service_removal_resource "$file" || return 1
+    [ "$SERVICE_REMOVAL_RESOURCE_ID" = "$original" ] || return 1
+    if [ "$manager" = systemd ]; then
+        service_removal_systemd_configuration "$label" || return 1
+        [ "$SERVICE_REMOVAL_RESOURCE_ID" = "$original" ] || return 1
+    fi
+    service_removal_quiet "$manager" "$label" || return 1
+    service_removal_resource "$file" || return 1
+    [ "$SERVICE_REMOVAL_RESOURCE_ID" = "$original" ] || return 1
+    if [ "$manager" = launchd ] && [ "$original" != absent ]; then
+        service_removal_plist_label "$file" "$label" || return 1
+    elif [ "$manager" = systemd ]; then
+        service_removal_systemd_configuration "$label" || return 1
+        [ "$SERVICE_REMOVAL_RESOURCE_ID" = "$original" ] || return 1
+    fi
+    # Last manager observation immediately precedes deletion. Cooperative
+    # observations/metadata do not make pathname/controller races atomic.
+    service_removal_quiet "$manager" "$label" || return 1
+    if [ "$original" = absent ]; then
+        printf 'Verified absent user service definition: %s.\n' "$label" || return 1
+        return 0
+    fi
+    rm -f -- "$file" || { echo 'Service definition removal did not complete.' >&2; return 1; }
+    if [ "$manager" = systemd ] && ! systemctl --user daemon-reload >/dev/null 2>&1; then
+        printf 'Removed %s definition, but systemd reload failed; no restoration or activation attempted.\n' "$label" >&2
         return 1
+    fi
+    printf 'Removed quiescent user service definition: %s.\n' "$label"
+}
+
+service_removal_all() {
+    local manager="$1" label failed=false
+    case "$manager" in systemd|launchd) ;; *) return 1 ;; esac
+    for label in $(service_removal_labels "$manager"); do
+        if ! service_removal_one "$manager" "$label"; then
+            printf 'Removal incomplete for %s; unsafe resources and existing recovery evidence were not cleared.\n' "$label" >&2
+            failed=true
+        fi
+    done
+    [ "$failed" = false ] || return 1
+    echo 'Verified quiescence and service-definition removal for both Herdr labels; any explicit route disposition was separate from native definition removal.'
+}
+
+# Bounded literal admission precedes even a prior explicit route disposition.
+# No selected assignment is evaluated or imported into manager/tool routing.
+service_cli_route_disposition() {
+    local env_file="$1" script_dir="$2" prior_disposition="${3:-}" choice mode ambient index key gateways pointer manager label destination
+    service_removal_env_safe "$env_file" && literal_env_scan "$env_file" || {
+        echo 'Cannot safely identify the installed relay transport; service removal refused.' >&2; return 1;
     }
-    read -r -p "Route disposition [r]emove / [k]eep route / [c]ancel: " choice || return 1
+    for ((index=0; index<${#LITERAL_KEYS[@]}; index++)); do
+        key="${LITERAL_KEYS[index]}"
+        case "$key" in
+            # The existing exact-route adapter may consume these routes after
+            # loading the file. Saved data cannot select its relay/helper,
+            # interpreter, web root or internal service-cleanup permission.
+            HERDR_BIN|HERDR_BIN_PATH|HERDR_PLUTIL|HERDR_RELEASE_ROOT|HERDR_WEB_ROOT|\
+            HERDR_RELAY_BIN|HERDR_RELAY_BIN_DIR|HERDR_APP_DEPLOY_NPX|HERDR_APP_DEPLOY_NODE_DIR|\
+            HERDR_DEV_*|HERDR_CLI_*|HERDR_STABLE_*|HERDR_SETUP_*) return 1 ;;
+            HERDR_RELAY_ENV) [ "${LITERAL_VALUES[index]}" = "$env_file" ] || return 1 ;;
+            HERDR_PLUGIN_CONFIG_DIR) [ "${LITERAL_VALUES[index]}" = "$(dirname "$env_file")" ] || return 1 ;;
+            HERDR_*|CLOUDFLARED_*|TUNNEL_ORIGIN_CERT|GH_TOKEN|GITHUB_TOKEN|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy) ;;
+            *) return 1 ;;
+        esac
+    done
+    # Selected updater credentials are read-only roles, never definitions to
+    # delete. Reuse the existing role-disjointness guard without token reads,
+    # migration, recovery creation or changing transaction machinery.
+    literal_env_get HERDR_GITHUB_TOKEN_FILE; pointer="$LITERAL_VALUE"
+    case "$(uname -s)" in Linux) manager=systemd ;; Darwin) manager=launchd ;; *) return 1 ;; esac
+    for label in $(service_removal_labels "$manager"); do
+        destination="$(service_removal_path "$manager" "$label")" || return 1
+        [ "$env_file" != "$destination" ] || return 1
+        native_selected_pointer_disjoint "$pointer" "$env_file" "$destination" || return 1
+        for key in CLOUDFLARED_CONFIG TUNNEL_ORIGIN_CERT; do
+            literal_env_get "$key"
+            service_removal_selected_disjoint "$LITERAL_VALUE" "$destination" || return 1
+        done
+    done
+    literal_env_get HERDR_GATEWAY_URL; gateways="$LITERAL_VALUE"
+    literal_env_get HERDR_RELAY_TRANSPORT
+    mode="$LITERAL_VALUE"
+    mode="${mode#"${mode%%[![:space:]]*}"}"; mode="${mode%"${mode##*[![:space:]]}"}"
+    mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')" || return 1
+    ambient="${HERDR_RELAY_TRANSPORT:-}"
+    ambient="${ambient#"${ambient%%[![:space:]]*}"}"; ambient="${ambient%"${ambient##*[![:space:]]}"}"
+    ambient="$(printf '%s' "$ambient" | tr '[:upper:]' '[:lower:]')" || return 1
+    case "$mode" in ''|cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) ;; *) return 1 ;; esac
+    case "$ambient" in ''|cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) ;; *) return 1 ;; esac
+    [ -z "$mode" ] || [ -z "$ambient" ] || [ "$mode" = "$ambient" ] || return 1
+    mode="${mode:-$ambient}"
+    if [ -n "$gateways" ]; then case "$mode" in ''|gateway) ;; *) return 1 ;; esac; fi
+    case "$prior_disposition" in
+        retained) echo 'Prior explicit route disposition: retained; no route operation attempted here.'; return 0 ;;
+        removed) echo 'Prior explicit route disposition: removed; no route operation or readback attempted here.'; return 0 ;;
+        '') ;;
+        *) echo 'Invalid prior CLI route disposition.' >&2; return 1 ;;
+    esac
+    [ "$mode" = tailscale-cli ] || return 0
+    echo 'The CLI-backed Tailscale Serve route is persistent and is not removed with this service.'
+    echo 'Choose whether to remove that exact route, retain it, or cancel service removal.'
+    [ -t 0 ] || { echo 'Interactive route disposition is required; the service was left installed.' >&2; return 1; }
+    read -r -p 'Route disposition [r]emove / [k]eep route / [c]ancel: ' choice || return 1
     case "$choice" in
         r|R|remove|REMOVE)
             (unset HERDR_TAILSCALE_REQUEST; HERDR_RELAY_ENV="$env_file" "$script_dir/tailscale-cli.sh" unpublish) || {
-                echo "✗ Exact route removal failed; the service was left installed. Choose keep explicitly or retry after recovery." >&2
-                return 1
+                echo 'Exact route removal failed; the service was left installed. Choose keep explicitly or retry after recovery.' >&2; return 1;
             }
             ;;
-        k|K|keep|KEEP)
-            echo "Persistent Tailscale Serve route will remain after this service is removed."
-            ;;
-        *)
-            echo "Cancelled; service and Tailscale Serve route were left unchanged."
-            return 1
-            ;;
+        k|K|keep|KEEP) echo 'Persistent Tailscale Serve route will remain after this service is removed.' ;;
+        *) echo 'Cancelled; service and Tailscale Serve route were left unchanged.'; return 1 ;;
     esac
+    return 0
 }
 
 # Transport selection is intentionally centralized. An unset mode preserves the
@@ -1587,144 +2149,431 @@ arm_tailscale_setup_link() {
 shell_quote_value() {
     local value="$1"
     local prefix
-    printf "'"
+    printf "'" || return 1
     while [[ "$value" == *"'"* ]]; do
         prefix="${value%%"'"*}"
-        printf "%s'\\\\''" "$prefix"
+        printf "%s'\\\\''" "$prefix" || return 1
         value="${value#*"'"}"
     done
-    printf "%s'\n" "$value"
+    printf "%s'\n" "$value" || return 1
+    return 0
+}
+
+# Literal env grammar (Bash 3.2): <=256KiB, <=4096 lines, <=8192 bytes/line.
+# Blank/comment lines or [indent][export SPACE]NAME=VALUE only. VALUE may
+# concatenate unquoted/single/double-quoted fragments (including shell_quote_value
+# output). Backslash quotes one unquoted byte; in double quotes only \\, ", $, `
+# may be escaped. No expansion, substitution, operators, multiline or controls.
+# Unquoted whitespace ends the value; only whitespace/comment may follow.
+# Native admission rejects ALL unsupported lines and conflicting duplicates;
+# identical duplicates are allowed. Filtering parses target assignments with
+# this same grammar, preserves unrelated bytes, and refuses malformed targets.
+literal_env_read() {
+    local file="$1" size
+    local LC_ALL=C
+    LITERAL_TEXT=""
+    export -n LITERAL_TEXT LITERAL_VALUE LITERAL_KEY LITERAL_FILTERED
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then return 0; fi
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    size="$(wc -c < "$file")" || return 1
+    size="${size//[[:space:]]/}"
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$size" -le 262144 ] || return 1
+    # Sentinel preserves final newlines; partial/read failures are not absence.
+    LITERAL_TEXT="$(head -c 262145 "$file" && printf '.')" || return 1
+    LITERAL_TEXT="${LITERAL_TEXT%.}"
+    [ "${#LITERAL_TEXT}" -eq "$size" ]  # Also refuses NUL loss in Bash strings.
+}
+
+literal_env_assignment() {
+    local text="$1" c next mode=bare ended=false i
+    local LC_ALL=C
+    LITERAL_KEY="" LITERAL_VALUE=""
+    [ "${#text}" -le 8192 ] || return 2
+    case "$text" in *[$'\001'-$'\010'$'\013'-$'\037'$'\177']*) return 2 ;; esac
+    while [[ "$text" == [' '$'\t']* ]]; do text="${text:1}"; done
+    case "$text" in ''|\#*) return 1 ;; esac
+    case "$text" in export[' '$'\t']*) text="${text:6}"; while [[ "$text" == [' '$'\t']* ]]; do text="${text:1}"; done ;; esac
+    case "$text" in *=*) LITERAL_KEY="${text%%=*}"; text="${text#*=}" ;; *) return 2 ;; esac
+    case "$LITERAL_KEY" in ''|[0-9]*|*[!a-zA-Z0-9_]*) return 2 ;; esac
+    for ((i=0; i<${#text}; i++)); do
+        c="${text:i:1}"
+        if [ "$ended" = true ]; then
+            case "$c" in ' '|$'\t') continue ;; \#) break ;; *) return 2 ;; esac
+        fi
+        case "$mode:$c" in
+            "single:'") mode=bare ;;
+            single:*) LITERAL_VALUE="$LITERAL_VALUE$c" ;;
+            'double:"') mode=bare ;;
+            'bare:"') mode=double ;;
+            "bare:'") mode=single ;;
+            'bare: '|bare:$'\t') ended=true ;;
+            'bare:\'|'double:\')
+                i=$((i + 1)); [ "$i" -lt "${#text}" ] || return 2
+                next="${text:i:1}"
+                if [ "$mode" = double ]; then
+                    case "$next" in '\'|'"'|'$'|'`') ;; *) return 2 ;; esac
+                fi
+                LITERAL_VALUE="$LITERAL_VALUE$next"
+                ;;
+            'double:$'|'double:`') return 2 ;;
+            bare:*)
+                case "$c" in '$'|'`'|'('|')'|'{'|'}'|';'|'&'|'|'|'<'|'>'|'*'|'?'|'['|']'|'!'|'~'|'#') return 2 ;; esac
+                LITERAL_VALUE="$LITERAL_VALUE$c"
+                ;;
+            double:*) LITERAL_VALUE="$LITERAL_VALUE$c" ;;
+        esac
+    done
+    [ "$mode" = bare ] || return 2
+    return 0
+}
+
+literal_env_scan() {
+    local file="$1" remaining line count=0 status index found
+    LITERAL_KEYS=() LITERAL_VALUES=()
+    literal_env_read "$file" || return 1
+    remaining="$LITERAL_TEXT"
+    while [ -n "$remaining" ]; do
+        line="${remaining%%$'\n'*}"
+        if [[ "$remaining" == *$'\n'* ]]; then remaining="${remaining#*$'\n'}"; else remaining=""; fi
+        count=$((count + 1)); [ "$count" -le 4096 ] || return 1
+        status=0; literal_env_assignment "$line" || status=$?
+        [ "$status" -ne 1 ] || continue
+        [ "$status" -eq 0 ] || return 1
+        found=false
+        for ((index=0; index<${#LITERAL_KEYS[@]}; index++)); do
+            if [ "${LITERAL_KEYS[index]}" = "$LITERAL_KEY" ]; then
+                [ "${LITERAL_VALUES[index]}" = "$LITERAL_VALUE" ] || return 1
+                found=true; break
+            fi
+        done
+        if [ "$found" = false ]; then LITERAL_KEYS+=("$LITERAL_KEY"); LITERAL_VALUES+=("$LITERAL_VALUE"); fi
+    done
+    return 0
+}
+
+literal_env_get() {
+    local key="$1" index
+    LITERAL_FOUND=false LITERAL_VALUE=""
+    for ((index=0; index<${#LITERAL_KEYS[@]}; index++)); do
+        if [ "${LITERAL_KEYS[index]}" = "$key" ]; then
+            LITERAL_FOUND=true LITERAL_VALUE="${LITERAL_VALUES[index]}"; return 0
+        fi
+    done
+    return 0
+}
+
+literal_env_filter() {
+    local key="$1" remaining="$LITERAL_TEXT" line newline status count=0
+    LITERAL_FILTERED="" LITERAL_FOUND=false
+    while [ -n "$remaining" ]; do
+        line="${remaining%%$'\n'*}"; newline=""
+        if [[ "$remaining" == *$'\n'* ]]; then remaining="${remaining#*$'\n'}"; newline=$'\n'; else remaining=""; fi
+        count=$((count + 1)); [ "$count" -le 4096 ] || return 1
+        status=0; literal_env_assignment "$line" || status=$?
+        if [ "$status" -eq 0 ] && [ "$LITERAL_KEY" = "$key" ]; then
+            LITERAL_FOUND=true; continue
+        fi
+        if [ "$status" -eq 2 ]; then case "$line" in *"$key"*) return 1 ;; esac; fi
+        LITERAL_FILTERED="$LITERAL_FILTERED$line$newline"
+    done
+    return 0
+}
+
+literal_env_lookup() {
+    local file="$1" key="$2" remaining line status found=false value="" count=0
+    literal_env_read "$file" || return 1
+    remaining="$LITERAL_TEXT"
+    while [ -n "$remaining" ]; do
+        line="${remaining%%$'\n'*}"
+        if [[ "$remaining" == *$'\n'* ]]; then remaining="${remaining#*$'\n'}"; else remaining=""; fi
+        count=$((count + 1)); [ "$count" -le 4096 ] || return 1
+        status=0; literal_env_assignment "$line" || status=$?
+        if [ "$status" -eq 2 ]; then case "$line" in *"$key"*) return 1 ;; esac; fi
+        if [ "$status" -eq 0 ] && [ "$LITERAL_KEY" = "$key" ]; then found=true; value="$LITERAL_VALUE"; fi
+    done
+    LITERAL_FOUND="$found" LITERAL_VALUE="$value"
+    return 0
+}
+
+literal_env_replace() {
+    local file="$1" data="$2" directory temp
+    directory="$(dirname "$file")" || return 1
+    mkdir -p "$directory" || return 1
+    temp="$(mktemp "$directory/.relay-env.XXXXXX")" || return 1
+    if ! printf '%s' "$data" > "$temp" || ! chmod 600 "$temp" || ! mv -f "$temp" "$file"; then
+        rm -f "$temp"; return 1
+    fi
+    return 0
 }
 
 set_env_value_atomic() {
-    local env_file="$1"
-    local key="$2"
-    local value="$3"
-    local directory
-    local temp_file
-
-    case "$key" in
-        [A-Z_]* ) ;;
-        *) echo "Cannot write an invalid relay environment key." >&2; return 1 ;;
-    esac
-    case "$key" in *[!A-Z0-9_]* ) echo "Cannot write an invalid relay environment key." >&2; return 1 ;; esac
-    case "$value" in *$'\n'*|*$'\r'*) echo "Cannot write $key: line breaks are unsupported." >&2; return 1 ;; esac
-
-    directory="$(dirname "$env_file")"
-    mkdir -p "$directory"
-    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
-    if [ -f "$env_file" ]; then
-        grep -v "^${key}=" "$env_file" > "$temp_file" || true
-    fi
-    printf '%s=' "$key" >> "$temp_file"
-    shell_quote_value "$value" >> "$temp_file"
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$env_file"
+    set +x
+    local file="$1" key="$2" value="$3" quoted
+    case "$key" in ''|[0-9]*|*[!A-Z0-9_]*) return 1 ;; esac
+    case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    literal_env_read "$file" && literal_env_filter "$key" || return 1
+    quoted="$(shell_quote_value "$value")" || return 1
+    # Serialization must be complete and lossless before creating a temporary.
+    literal_env_assignment "$key=$quoted" || return 1
+    [ "$LITERAL_KEY" = "$key" ] && [ "$LITERAL_VALUE" = "$value" ] || return 1
+    if [ -n "$LITERAL_FILTERED" ] && [[ "$LITERAL_FILTERED" != *$'\n' ]]; then LITERAL_FILTERED="$LITERAL_FILTERED"$'\n'; fi
+    literal_env_replace "$file" "$LITERAL_FILTERED$key=$quoted"$'\n'
 }
 
 remove_env_value_if_equals_atomic() {
-    local env_file="$1"
-    local key="$2"
-    local expected="$3"
-    local current
-    local directory
-    local temp_file
-
-    if [ ! -f "$env_file" ]; then
-        return 0
-    fi
-    current="$(
-        set -a
-        # shellcheck source=/dev/null
-        . "$env_file"
-        set +a
-        printf '%s\n' "${!key-}"
-    )"
-    if [ "$current" != "$expected" ]; then
-        return 0
-    fi
-
-    directory="$(dirname "$env_file")"
-    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
-    grep -v "^${key}=" "$env_file" > "$temp_file" || true
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$env_file"
+    set +x
+    local file="$1" key="$2" expected="$3" current
+    literal_env_lookup "$file" "$key" || return 1
+    current="$LITERAL_VALUE"
+    [ "$LITERAL_FOUND" = true ] && [ "$current" = "$expected" ] || return 0
+    remove_env_value_atomic "$file" "$key"
 }
 
 remove_env_value_atomic() {
-    local env_file="$1"
-    local key="$2"
-    local directory
-    local temp_file
-
-    if [ ! -f "$env_file" ] || ! grep -q "^${key}=" "$env_file"; then
-        return 0
-    fi
-    directory="$(dirname "$env_file")"
-    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
-    grep -v "^${key}=" "$env_file" > "$temp_file" || true
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$env_file"
+    set +x
+    local file="$1" key="$2"
+    case "$key" in ''|[0-9]*|*[!A-Z0-9_]*) return 1 ;; esac
+    literal_env_read "$file" && literal_env_filter "$key" || return 1
+    [ "$LITERAL_FOUND" = true ] || return 0
+    literal_env_replace "$file" "$LITERAL_FILTERED"
 }
 
 persist_github_token() {
-    local env_file="$1"
-    local token_file
-    local temp_file
-    local release_token="${2:-${GH_TOKEN:-}}"
-
-    if [ -z "$release_token" ]; then
-        return 0
+    set +x
+    local file="$1" token="${2:-${GH_TOKEN:-}}" source="${3:-$1}" directory pointer recovery published=false failed=false target index
+    export -n token
+    [ -n "$token" ] || return 0
+    directory="$(dirname "$file")" || return 1
+    pointer="$directory/github-token"
+    [ "$(canonical_file_path "$file")" != "$(canonical_file_path "$pointer")" ] || return 1
+    recovery="$(mktemp -d "$directory/.relay-persist.XXXXXX")" || return 1
+    chmod 700 "$recovery" || { rm -rf "$recovery"; return 1; }
+    index=0
+    for target in "$file" "$pointer"; do
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            if ! native_mutable_file_safe "$target" || ! cp -p "$target" "$recovery/$index"; then rm -rf "$recovery"; return 1; fi
+        fi
+        index=$((index + 1))
+    done
+    if ! { [ ! -e "$source" ] || cp -p "$source" "$recovery/candidate"; } ||
+        ! set_env_value_atomic "$recovery/candidate" HERDR_GITHUB_TOKEN_FILE "$pointer" ||
+        ! printf '%s\n' "$token" > "$recovery/token" || ! chmod 600 "$recovery/token"; then
+        rm -rf "$recovery"; return 1
     fi
-    token_file="$(dirname "$env_file")/github-token"
-    temp_file="$(mktemp "$(dirname "$env_file")/.github-token.XXXXXX")"
-    printf '%s\n' "$release_token" > "$temp_file"
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$token_file"
-    set_env_value_atomic "$env_file" HERDR_GITHUB_TOKEN_FILE "$token_file"
+    # A second-resource rename failure restores the first resource's exact
+    # bytes/mode/absence. Failed restoration retains this owned private backup.
+    if mv -f "$recovery/token" "$pointer"; then
+        published=true
+        if mv -f "$recovery/candidate" "$file"; then rm -rf "$recovery"; return $?; fi
+    fi
+    if [ "$published" = true ]; then
+        if [ -f "$recovery/1" ]; then
+            cp -p "$recovery/1" "$recovery/restore" && mv -f "$recovery/restore" "$pointer" || failed=true
+        else rm -f "$pointer" || failed=true; fi
+    fi
+    if [ "$failed" = true ]; then echo 'Updater persistence restoration is incomplete; private recovery retained.' >&2;
+    else rm -rf "$recovery"; fi
+    return 1
 }
 
 append_env_default() {
-    local env_file="$1"
-    local key="$2"
-    local value="$3"
-
-    if grep -q "^${key}=" "$env_file"; then
-        return
-    fi
-    set_env_value_atomic "$env_file" "$key" "$value"
+    local file="$1" key="$2" value="$3"
+    literal_env_lookup "$file" "$key" || return 1
+    [ "$LITERAL_FOUND" = false ] || return 0
+    set_env_value_atomic "$file" "$key" "$value"
 }
 
 ensure_relay_env() {
-    local env_file="$1"
-    local cloudflared_config="${2:-}"
-    local release_token="${3:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
-    # The raw release token lives only in the private token file from here on,
-    # so no child of this shell (npx, wrangler, node, cloudflared) inherits it.
+    set +x
+    local file="$1" cloudflared_config="${2:-}" token="${3:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}" value directory candidate
+    export -n token
     unset GH_TOKEN GITHUB_TOKEN
+    literal_env_read "$file" || return 1
+    [ -e "$file" ] || umask 077
+    directory="$(dirname "$file")" || return 1
+    mkdir -p "$directory" || return 1
+    candidate="$(mktemp "$directory/.relay-defaults.XXXXXX")" || return 1
+    if [ -e "$file" ] && ! cp -p "$file" "$candidate"; then rm -f "$candidate"; return 1; fi
+    if ! literal_env_lookup "$candidate" HERDR_RELAY_TOKEN; then rm -f "$candidate"; return 1; fi
+    if [ -z "$LITERAL_VALUE" ]; then
+        value="$(generate_token)" || { rm -f "$candidate"; return 1; }
+        [ -n "$value" ] && set_env_value_atomic "$candidate" HERDR_RELAY_TOKEN "$value" || { rm -f "$candidate"; return 1; }
+    fi
+    literal_env_lookup "$candidate" HERDR_RELAY_INSTANCE_ID || { rm -f "$candidate"; return 1; }
+    if [ -z "$LITERAL_VALUE" ]; then
+        value="$(generate_instance_id)" || { rm -f "$candidate"; return 1; }
+        [ -n "$value" ] && set_env_value_atomic "$candidate" HERDR_RELAY_INSTANCE_ID "$value" || { rm -f "$candidate"; return 1; }
+    fi
+    if [ -n "$cloudflared_config" ] && ! append_env_default "$candidate" CLOUDFLARED_CONFIG "$cloudflared_config"; then rm -f "$candidate"; return 1; fi
+    if ! remove_env_value_atomic "$candidate" GH_TOKEN || ! remove_env_value_atomic "$candidate" GITHUB_TOKEN || ! chmod 600 "$candidate"; then rm -f "$candidate"; return 1; fi
+    if [ -n "$token" ]; then
+        if ! persist_github_token "$file" "$token" "$candidate"; then rm -f "$candidate"; return 1; fi
+        rm -f "$candidate" || return 1
+    elif ! mv -f "$candidate" "$file"; then rm -f "$candidate"; return 1; fi
+    return 0
+}
 
-    if [ ! -f "$env_file" ]; then
-        umask 077
-        touch "$env_file"
-        echo "Created $env_file"
+# Native-only selected credential/policy admission. Never source selected text,
+# never merge ambient updater credentials, never construct an app/store here.
+native_installer_admit() {
+    set +x
+    local file="$1" runtime_file="${2:-$1}" key value index
+    local LC_ALL=C
+    export -n value
+    unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
+    NATIVE_SELECTED_TOKEN="" NATIVE_SELECTED_POINTER="" NATIVE_SIDECAR=""
+    export -n NATIVE_SELECTED_TOKEN NATIVE_SELECTED_POINTER NATIVE_SIDECAR
+    if [ -e "$file" ] || [ -L "$file" ]; then native_mutable_file_safe "$file" || return 1; fi
+    literal_env_scan "$file" || { echo 'Invalid literal native configuration.' >&2; return 1; }
+    case "$runtime_file" in /*) ;; *) echo 'Native runtime must be absolute.' >&2; return 1 ;; esac
+    # Only configuration namespaces are loadable. Shell/tool-routing internals
+    # (PATH, BASH_ENV, IFS, native_* etc.) cannot be selected-file assignments.
+    for ((index=0; index<${#LITERAL_KEYS[@]}; index++)); do
+        key="${LITERAL_KEYS[index]}" value="${LITERAL_VALUES[index]}"
+        case "$key" in
+            GH_TOKEN|GITHUB_TOKEN|HERDR_GITHUB_TOKEN_FILE) continue ;;
+            HERDR_RELAY_ENV) [ "$value" = "$runtime_file" ] || return 1; continue ;;
+            HERDR_PLUGIN_CONFIG_DIR) [ "$value" = "$(dirname "$runtime_file")" ] || return 1; continue ;;
+            HERDR_*|CLOUDFLARED_*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy) ;;
+            *) echo 'Unsupported native configuration assignment.' >&2; return 1 ;;
+        esac
+        printf -v "$key" '%s' "$value" || return 1
+        export "$key"
+    done
+    [ -z "${HERDR_RELAY_RUN_ID:-}${HERDR_RELAY_CONTROL_RUN_ID:-}${HERDR_RELAY_PAIRING_SOCKET:-}" ] || { echo 'Installed policy refuses foreground identities.' >&2; return 1; }
+    case "${HERDR_RELAY_REARM_BOOTSTRAP:-}" in ''|0|false|False|FALSE|f|F) ;; *) echo 'Installed policy refuses rearm.' >&2; return 1 ;; esac
+    [ -z "${HERDR_RELAY_TOKEN:-}" ] || [ "${#HERDR_RELAY_TOKEN}" -eq 32 ] || { echo 'Installed policy requires a 32-byte key.' >&2; return 1; }
+    case "${HERDR_RELAY_PORT:-8375}" in ''|*[!0-9]*) return 1 ;; esac
+    value="${HERDR_RELAY_PORT:-8375}"
+    [ "${#value}" -le 5 ] || return 1
+    [ "$((10#$value))" -gt 0 ] && [ "$((10#$value))" -le 65535 ] || return 1
+    # gateway_urls normally falls back to a sourced file. Here every selected
+    # assignment is already literal data: disable that fallback for this call.
+    TRANSPORT="$(HERDR_RELAY_ENV='' relay_service_transport_mode)" || return 1
+    case "$TRANSPORT" in cloudflare|gateway) ;; *) echo 'Unavailable background transport.' >&2; return 1 ;; esac
+    [ "$TRANSPORT" != gateway ] || validate_service_gateway_urls || return 1
+    [ ! -e "$(tailscale_session_file "$runtime_file")" ] && [ ! -e "$(tailscale_external_session_file "$runtime_file")" ] || return 1
+    literal_env_get HERDR_GITHUB_TOKEN_FILE; NATIVE_SELECTED_POINTER="$LITERAL_VALUE"
+    if [ -n "$NATIVE_SELECTED_POINTER" ]; then
+        case "$NATIVE_SELECTED_POINTER" in /*) ;; *) return 1 ;; esac
+        private_owned_file "$NATIVE_SELECTED_POINTER" || { echo 'Selected updater resource requires recovery.' >&2; return 1; }
+        native_selected_pointer_disjoint "$NATIVE_SELECTED_POINTER" "$runtime_file" "${3:-}" "${4:-}" || return 1
+    else
+        literal_env_get GH_TOKEN; NATIVE_SELECTED_TOKEN="$LITERAL_VALUE"
+        literal_env_get GITHUB_TOKEN
+        if [ -n "$NATIVE_SELECTED_TOKEN" ] && [ -n "$LITERAL_VALUE" ] && [ "$NATIVE_SELECTED_TOKEN" != "$LITERAL_VALUE" ]; then
+            echo 'Ambiguous selected updater credentials require recovery.' >&2; return 1
+        fi
+        NATIVE_SELECTED_TOKEN="${NATIVE_SELECTED_TOKEN:-$LITERAL_VALUE}"
+        if [ -n "$NATIVE_SELECTED_TOKEN" ]; then
+            NATIVE_SIDECAR="$(dirname "$runtime_file")/github-token" || return 1
+            [ "$(canonical_file_path "$NATIVE_SIDECAR")" != "$(canonical_file_path "$runtime_file")" ] || return 1
+            if [ -e "$NATIVE_SIDECAR" ] || [ -L "$NATIVE_SIDECAR" ]; then
+                native_mutable_file_safe "$NATIVE_SIDECAR" || return 1
+            fi
+        fi
     fi
+    # Relative ancestors/symlinks are not hidden runtime/credential selectors.
+    native_resource_parents_safe "$runtime_file" || return 1
+    [ -z "$NATIVE_SELECTED_POINTER" ] || native_resource_parents_safe "$NATIVE_SELECTED_POINTER" || return 1
+    [ -z "$NATIVE_SIDECAR" ] || native_resource_parents_safe "$NATIVE_SIDECAR" || return 1
+    return 0
+}
 
-    chmod 600 "$env_file"
-    if ! grep -q '^HERDR_RELAY_TOKEN=' "$env_file" || [ -z "$(env_file_value "$env_file" HERDR_RELAY_TOKEN)" ]; then
-        set_env_value_atomic "$env_file" HERDR_RELAY_TOKEN "$(generate_token)"
+native_mutable_file_safe() {
+    local identity owner mode links
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    identity="$(stat -c '%u:%a:%h' "$1" 2>/dev/null)" || identity="$(stat -f '%u:%Lp:%l' "$1" 2>/dev/null)" || return 1
+    IFS=: read -r owner mode links <<< "$identity"
+    [ "$owner" = "$(id -u)" ] && [ "$links" = 1 ] || return 1
+    case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+    [ "$((8#$mode & 0022))" -eq 0 ]
+}
+
+native_resource_parents_safe() {
+    local path="$1" parent
+    # Missing ancestors must not hide future aliases through mkdir + '..'.
+    # Require an absolute, unambiguous spelling before snapshot/publication.
+    case "$path" in /*) ;; *) return 1 ;; esac
+    case "/${path#/}/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
+    parent="$(dirname "$path")" || return 1
+    while [ "$parent" != / ] && [ "$parent" != . ]; do
+        [ ! -L "$parent" ] || return 1
+        parent="$(dirname "$parent")" || return 1
+    done
+    return 0
+}
+
+# A selected credential is read-only, not a mutable transaction destination.
+# Refuse overlapping roles rather than snapshotting and later destroying it.
+native_selected_pointer_disjoint() {
+    local pointer="$1" destination identity other
+    [ -n "$pointer" ] || return 0
+    native_resource_parents_safe "$pointer" && private_owned_file "$pointer" || return 1
+    identity="$(stat -c '%d:%i' "$pointer" 2>/dev/null)" ||
+        identity="$(stat -f '%d:%i' "$pointer" 2>/dev/null)" || return 1
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    shift
+    for destination in "$@"; do
+        [ -n "$destination" ] || continue
+        native_resource_parents_safe "$destination" || return 1
+        if [ "$pointer" = "$destination" ]; then
+            echo 'Selected updater resource overlaps native transaction destinations.' >&2
+            return 1
+        fi
+        if [ -e "$destination" ] || [ -L "$destination" ]; then
+            native_mutable_file_safe "$destination" || return 1
+            other="$(stat -c '%d:%i' "$destination" 2>/dev/null)" ||
+                other="$(stat -f '%d:%i' "$destination" 2>/dev/null)" || return 1
+            [[ "$other" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+            # Also catch differently spelled names on case-insensitive filesystems.
+            if [ "$identity" = "$other" ]; then
+                echo 'Selected updater resource overlaps native transaction destinations.' >&2
+                return 1
+            fi
+        fi
+    done
+    return 0
+}
+
+native_installer_candidate() {
+    umask 077
+    local file="$1" cloudflared_config="${2:-}" token="$NATIVE_SELECTED_TOKEN" pointer="$NATIVE_SELECTED_POINTER" sidecar="$NATIVE_SIDECAR"
+    local candidate="$native_recovery/candidate.env"
+    local LC_ALL=C
+    export -n token
+    [ "$TRANSPORT" = cloudflare ] || cloudflared_config=""
+    if [ -e "$file" ]; then cp -p "$file" "$candidate" || return 1; else : > "$candidate" || return 1; fi
+    if [ -n "$token" ]; then
+        printf '%s\n' "$token" > "$native_recovery/candidate.token" && chmod 600 "$native_recovery/candidate.token" || return 1
+        set_env_value_atomic "$candidate" HERDR_GITHUB_TOKEN_FILE "$sidecar" || return 1
     fi
-    if ! grep -q '^HERDR_RELAY_INSTANCE_ID=' "$env_file" || [ -z "$(env_file_value "$env_file" HERDR_RELAY_INSTANCE_ID)" ]; then
-        set_env_value_atomic "$env_file" HERDR_RELAY_INSTANCE_ID "$(generate_instance_id)"
+    set_env_value_atomic "$candidate" HERDR_RELAY_TRANSPORT "$TRANSPORT" || return 1
+    set_env_value_atomic "$candidate" HERDR_RELAY_PORT "${HERDR_RELAY_PORT:-8375}" || return 1
+    if [ "$TRANSPORT" = gateway ]; then
+        set_env_value_atomic "$candidate" HERDR_GATEWAY_URL "$HERDR_GATEWAY_URL" || return 1
+    elif [ -n "${CLOUDFLARED_BIN:-}" ]; then
+        set_env_value_atomic "$candidate" CLOUDFLARED_BIN "$CLOUDFLARED_BIN" || return 1
     fi
-    if [ -n "$cloudflared_config" ]; then
-        append_env_default "$env_file" CLOUDFLARED_CONFIG "$cloudflared_config"
+    ensure_relay_env "$candidate" "$cloudflared_config" '' || return 1
+    # Validate the ACTUAL candidate grammar and staged token before constructing
+    # the policy view. Never use the token candidate as executable shell data.
+    literal_env_scan "$candidate" || return 1
+    if [ -n "$token" ]; then
+        literal_env_get HERDR_GITHUB_TOKEN_FILE
+        [ "$LITERAL_VALUE" = "$sidecar" ] && private_owned_file "$native_recovery/candidate.token" || return 1
+        literal_env_read "$native_recovery/candidate.token" || return 1
+        [ "$LITERAL_TEXT" = "$token"$'\n' ] || return 1
     fi
-    persist_github_token "$env_file" "$release_token"
-    # Drop both legacy raw keys, including saved values whose callers already
-    # scrubbed the in-memory environment. Loading this file again must expose
-    # only the updater's private credential-file pointer, never a raw token.
-    remove_env_value_atomic "$env_file" GH_TOKEN
-    remove_env_value_atomic "$env_file" GITHUB_TOKEN
+    # A staged migration pointer is not live yet: policy validates all other
+    # generated defaults with the real runtime path, then retains that pointer.
+    cp -p "$candidate" "$native_recovery/admission.env" || return 1
+    if [ -n "$token" ]; then remove_env_value_atomic "$native_recovery/admission.env" HERDR_GITHUB_TOKEN_FILE || return 1; fi
+    native_installer_admit "$native_recovery/admission.env" "$file" "${native_definition:-}" "${native_legacy_definition:-}" || return 1
+    [ -n "${HERDR_RELAY_TOKEN:-}" ] && [ "${#HERDR_RELAY_TOKEN}" -eq 32 ] || return 1
+    NATIVE_SELECTED_POINTER="$pointer" NATIVE_SIDECAR="$sidecar"
+    return 0
 }
 
 load_relay_env() {

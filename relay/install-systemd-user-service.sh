@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
+set +x
 set -euo pipefail
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
 
 LABEL="herdr-mobile-relay.service"
 LEGACY_LABEL="herdr-remote.service"
@@ -17,26 +19,7 @@ require_user_service_context
 
 ENV_FILE="$(relay_service_env_file "$SCRIPT_DIR")" || exit 1
 
-load_relay_env "$ENV_FILE"
-unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
-TRANSPORT="$(relay_service_transport_mode)" || exit 1
-if [ "$TRANSPORT" = tailscale-cli ] && installed_legacy_relay_service_definition_present; then
-    echo "✗ CLI setup refuses a legacy relay service definition; it will not stop or remove it. Preserve it and resolve its route before migrating." >&2
-    exit 4
-fi
-if [ "$TRANSPORT" = tailscale-cli ] && [ "${HERDR_CLI_SETUP_NEW_SERVICE:-}" = 1 ] &&
-    installed_relay_service_definition_present; then
-    echo "✗ CLI setup refuses to replace a relay service definition that appeared during setup." >&2
-    exit 4
-fi
-if [ -e "$(tailscale_session_file "$ENV_FILE")" ] ||
-    [ -e "$(tailscale_external_session_file "$ENV_FILE")" ] ||
-    [ "$TRANSPORT" = tailscale ] ||
-    [ "$TRANSPORT" = tailscale-external ]; then
-    echo "✗ Background service installation is unsupported for foreground Tailscale Serve transports." >&2
-    echo "  Stop the pane and choose a background-compatible transport before installing a service." >&2
-    exit 1
-fi
+native_installer_admit "$ENV_FILE" "$ENV_FILE" "$UNIT_FILE" "$LEGACY_UNIT_FILE" || exit 1
 if ! command -v systemctl >/dev/null 2>&1; then
     echo "systemctl not found"
     exit 1
@@ -44,23 +27,8 @@ fi
 
 RELAY_BIN="$(relay_binary)"
 
-if [ "$TRANSPORT" = tailscale-cli ]; then
-    if [ "${HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START:-}" = 1 ]; then
-        "$RELAY_BIN" tailscale-cli activation-check >/dev/null || exit $?
-    else
-        tailscale_cli_registration_status "$ENV_FILE" >/dev/null || {
-            echo "✗ A verified CLI-backed registration is required before installing its user service." >&2
-            exit 1
-        }
-    fi
-    native_install_begin systemd "$UNIT_FILE" "$LEGACY_UNIT_FILE" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
-    mkdir -p "$(dirname "$ENV_FILE")"
-    ensure_relay_env "$ENV_FILE"
-elif [ "$TRANSPORT" = gateway ]; then
+if [ "$TRANSPORT" = gateway ]; then
     GATEWAY_APP_ORIGIN="$(gateway_install_phone_app_origin "$ENV_FILE")" || exit 1
-    native_install_begin systemd "$UNIT_FILE" "$LEGACY_UNIT_FILE" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
-    mkdir -p "$(dirname "$ENV_FILE")"
-    ensure_relay_env "$ENV_FILE"
 elif [ "$TRANSPORT" = cloudflare ]; then
     CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
     CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-$(command -v cloudflared || true)}"
@@ -74,13 +42,9 @@ elif [ "$TRANSPORT" = cloudflare ]; then
         echo "Create it first, or set CLOUDFLARED_CONFIG in $ENV_FILE."
         exit 1
     fi
-    native_install_begin systemd "$UNIT_FILE" "$LEGACY_UNIT_FILE" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL"
-    mkdir -p "$(dirname "$ENV_FILE")"
-    ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
-else
-    echo "Unsupported background transport." >&2
-    exit 1
 fi
+native_install_begin systemd "$UNIT_FILE" "$LEGACY_UNIT_FILE" "$ENV_FILE" "$LABEL" "$LEGACY_LABEL" "$NATIVE_SIDECAR" || exit 1
+native_installer_candidate "$ENV_FILE" "${CLOUDFLARED_CONFIG:-}" || exit 1
 RELEASE_ROOT="$(relay_release_root)"
 SERVICE_WRAPPER="$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh"
 if [ ! -x "$SERVICE_WRAPPER" ]; then
@@ -90,8 +54,7 @@ WORK_DIR="$RELEASE_ROOT/current"
 if [ ! -d "$WORK_DIR" ]; then
     WORK_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 fi
-chmod +x "$SERVICE_WRAPPER"
-mkdir -p "$UNIT_DIR"
+[ -x "$SERVICE_WRAPPER" ] || exit 1
 WORK_DIR_ESCAPED="$(systemd_quoted "$WORK_DIR")" || { echo "✗ Service work path contains unsupported control characters." >&2; exit 1; }
 ENVIRONMENT_ESCAPED="$(systemd_quoted "HERDR_RELAY_ENV=$ENV_FILE")" || { echo "✗ Service environment path contains unsupported control characters." >&2; exit 1; }
 SERVICE_WRAPPER_ESCAPED="$(systemd_quoted "$SERVICE_WRAPPER" exec)" || { echo "✗ Service executable path contains unsupported control characters." >&2; exit 1; }
@@ -110,31 +73,22 @@ Environment=$ENVIRONMENT_ESCAPED
 ExecStart=$SERVICE_WRAPPER_ESCAPED
 Restart=on-failure
 RestartSec=10
+# Unavailable/config refusal remains FAILED, not ready. Genuine child 69/78
+# also suppress restart while retaining the child's failure status.
+RestartPreventExitStatus=69 78
 
 [Install]
 WantedBy=default.target
 EOF
 
-chmod 600 "$STAGED_UNIT"
+chmod 600 "$STAGED_UNIT" || exit 1
 if command -v systemd-analyze >/dev/null 2>&1; then
-    systemd-analyze --user verify "$STAGED_UNIT"
+    systemd-analyze --user verify "$STAGED_UNIT" >/dev/null || exit 1
 fi
-native_changed=true
-native_stage="$(mktemp "$UNIT_DIR/.herdr-service.XXXXXX")"
-cp "$STAGED_UNIT" "$native_stage"
-chmod 600 "$native_stage"
-mv -f "$native_stage" "$UNIT_FILE"
-systemctl --user daemon-reload
-if [ "$TRANSPORT" != tailscale-cli ] && [ "$native_legacy_active" = true ]; then
-    systemctl --user stop "$LEGACY_LABEL"
-fi
-systemctl --user enable "$LABEL"
-systemctl --user restart "$LABEL"
+native_install_publish "$STAGED_UNIT" || exit 1
+native_install_activate || exit 1
 
-echo "Installed and started $LABEL"
-echo "Unit: $UNIT_FILE"
-echo "Env:  $ENV_FILE"
-echo "Logs: journalctl --user -u $LABEL -f"
+echo 'Replacement activation attempted; verifying readiness.'
 
 # ensure_relay_env generates the token and instance identity into the file
 # only, so read both back before the readiness gate compares identities.
@@ -144,7 +98,7 @@ INSTANCE="$(env_file_value "$ENV_FILE" HERDR_RELAY_INSTANCE_ID)"
 echo "Waiting for relay health on 127.0.0.1:$PORT..."
 if ! HEALTH="$(wait_for_relay_health "$PORT" 15 1 "$INSTANCE")"; then
     report_inventory_failure "$PORT"
-    echo "Replacement service did not become ready; restoring the previous installation."
+    echo "Replacement service did not become ready; attempting quiescence-gated rollback."
     echo "Inspect it with:"
     echo "  systemctl --user status $LABEL --no-pager"
     echo "  journalctl --user -u $LABEL -n 80 --no-pager"
@@ -155,5 +109,5 @@ if [ "$TRANSPORT" = gateway ]; then
 else
     verify_public_readiness "$ENV_FILE" "$HEALTH"
 fi
-native_install_commit
-echo "Relay readiness: $HEALTH"
+native_install_commit || exit 1
+echo "Installed and verified $LABEL"

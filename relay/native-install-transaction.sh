@@ -1,188 +1,321 @@
 #!/usr/bin/env bash
 
-native_systemd_state() {
-    local code
-    if systemctl --user "$1" --quiet "$2"; then
-        printf true
+# Finite label-specific observations. Controller failure is UNKNOWN, never
+# absence. No native output is forwarded. This is a cooperative manager-state
+# contract, not process discovery or adversarial same-user isolation.
+# Reject NUL and over-limit bytes BEFORE command substitution can erase them.
+# EOF (read status 1) within the byte bound is the only admitted termination.
+# This bounds captured bytes, not producer/filesystem completion time.
+native_install_read_bounded() {
+    local limit="$1" output="" code=0
+    local LC_ALL=C
+    case "$limit" in 4096|65536) ;; *) return 1 ;; esac
+    IFS= read -r -d '' -n "$((limit + 1))" output || code=$?
+    [ "$code" -eq 1 ] && [ "${#output}" -le "$limit" ] || return 1
+    printf '%s' "$output"
+}
+
+native_install_observe() {
+    local label="$1" output line load="" active="" enabled="" count=0 code=0 domain="gui/$UID" disabled probe_status
+    local LC_ALL=C
+    NATIVE_STATE=unknown NATIVE_ENABLED=unknown
+    if [ "$native_manager" = systemd ]; then
+        output="$(
+            LC_ALL=C systemctl --user show "$label" --property=LoadState --property=ActiveState --property=UnitFileState 2>/dev/null | native_install_read_bounded 4096
+            probe_status=( "${PIPESTATUS[@]}" )
+            [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+        )" || return 1
+        while IFS= read -r line; do
+            count=$((count + 1))
+            case "$line" in
+                LoadState=*) [ -z "$load" ] || return 1; load="${line#*=}" ;;
+                ActiveState=*) [ -z "$active" ] || return 1; active="${line#*=}" ;;
+                UnitFileState=*) [ -z "$enabled" ] || return 1; enabled="${line#*=}" ;;
+                *) return 1 ;;
+            esac
+        done <<< "$output"
+        [ "$count" -eq 3 ] || return 1
+        if [ "$load" = not-found ] && [ "$active" = inactive ] && [ -z "$enabled" ]; then
+            NATIVE_STATE=absent NATIVE_ENABLED=false; return 0
+        fi
+        [ "$load" = loaded ] || return 1
+        case "$active" in active|inactive) ;; *) return 1 ;; esac
+        case "$enabled" in enabled) enabled=true ;; disabled) enabled=false ;; *) return 1 ;; esac
+        NATIVE_STATE="$active" NATIVE_ENABLED="$enabled"
         return 0
-    else
-        code=$?
     fi
-    case "$1:$code" in
-        is-active:3|is-active:4|is-enabled:1|is-enabled:4) printf false ;;
-        *) echo "Cannot snapshot native service activation." >&2; return 1 ;;
-    esac
+    output="$(
+        LC_ALL=C launchctl print "$domain" 2>/dev/null | native_install_read_bounded 65536
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+    )" || return 1
+    output="$(
+        LC_ALL=C launchctl print "$domain/$label" 2>&1 | native_install_read_bounded 65536
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[1]}" -eq 0 ] || exit 1
+        # Frame genuine producer status separately, outside bounded text.
+        printf '\n%s' "${probe_status[0]}"
+    )" || return 1
+    code="${output##*$'\n'}"; output="${output%$'\n'*}"
+    # Preserve the original substitution's trailing-newline normalization,
+    # now only AFTER binary admission and producer-status separation.
+    while [ "${output%$'\n'}" != "$output" ]; do output="${output%$'\n'}"; done
+    if [ "$code" -ne 0 ]; then
+        # Only the exact label/domain not-found diagnostic is absence. A bad
+        # domain, malformed output or any other nonzero result remains unknown.
+        [ "$output" = "Could not find service \"$label\" in domain for user gui: $UID" ] || return 1
+        active=absent
+    else
+        case "$output" in "$domain/$label = {"$'\n'*|"$domain/$label = {}") ;; *) return 1 ;; esac
+        # A loaded waiting job can launch again: only bootout/observed absence
+        # establishes launchd quiescence, regardless of current PID/state.
+        active=loaded
+    fi
+    disabled="$(
+        LC_ALL=C launchctl print-disabled "$domain" 2>/dev/null | native_install_read_bounded 65536
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+    )" || return 1
+    case "$disabled" in "disabled services = {"*'}') ;; *) return 1 ;; esac
+    enabled=true
+    count=0
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in
+            "\"$label\" => true") enabled=false; count=$((count + 1)) ;;
+            "\"$label\" => false") enabled=true; count=$((count + 1)) ;;
+            *"\"$label\""*) return 1 ;;
+        esac
+    done <<< "$disabled"
+    [ "$count" -le 1 ] || return 1
+    NATIVE_STATE="$active" NATIVE_ENABLED="$enabled"
+    return 0
 }
 
 native_install_begin() {
-    native_manager="$1"
-    native_definition="$2"
-    native_legacy_definition="$3"
-    native_environment="$4"
-    native_label="$5"
-    native_legacy_label="$6"
-    native_active=false
-    native_enabled=false
-    native_legacy_active=false
-    native_legacy_enabled=false
-    native_changed=false
-    native_stage=""
-    native_committed=false
-    local recovery_root="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/recovery"
-    mkdir -p "$recovery_root" || return 1
-    chmod 700 "$recovery_root" || return 1
-    native_recovery="$(mktemp -d "$recovery_root/herdr-native-recovery.XXXXXX")" || return 1
-    chmod 700 "$native_recovery" || return 1
-    native_snapshot_complete=false
+    native_manager="$1" native_definition="$2" native_legacy_definition="$3" native_environment="$4"
+    native_label="$5" native_legacy_label="$6"
+    native_resources=("$native_definition" "$native_legacy_definition" "$native_environment")
+    [ -z "${7:-}" ] || native_resources+=("$7")
+    native_stage="" native_snapshot_complete=false native_published=false native_quiesced=false
+    native_activation_attempted=false native_committed=false native_previous_ready=false
+    native_active=false native_enabled=false native_legacy_active=false native_legacy_enabled=false
+    local root="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/recovery" file index=0 previous binary instance identifier
+    local identities=() identity_count=0 identity_index
+    native_selected_pointer_disjoint "${NATIVE_SELECTED_POINTER:-}" "${native_resources[@]}" || return 1
+    for file in "${native_resources[@]}"; do
+        identifier="$(canonical_file_path "$file")" || return 1
+        # Stock Bash 3.2 nounset cannot expand an empty array. Only read
+        # indices that the explicit count confirms have been assigned.
+        for ((identity_index=0; identity_index<identity_count; identity_index++)); do
+            [ "${identities[identity_index]}" != "$identifier" ] || return 1
+        done
+        identities[identity_count]="$identifier"
+        identity_count=$((identity_count + 1))
+    done
+    # No selected-file mutation until every snapshot and both state queries
+    # succeed. Existing directories/executables are not chmodded as a shortcut.
+    (umask 077; mkdir -p "$root") || return 1
+    native_recovery="$(mktemp -d "$root/herdr-native-recovery.XXXXXX")" || return 1
+    chmod 700 "$native_recovery" || { rm -rf "$native_recovery"; return 1; }
     trap native_install_exit EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    local index=0 file
-    for file in "$native_definition" "$native_legacy_definition" "$native_environment"; do
+    for file in "${native_resources[@]}"; do
+        native_resource_parents_safe "$file" || return 1
         if [ -e "$file" ] || [ -L "$file" ]; then
-            [ -f "$file" ] && [ ! -L "$file" ] || return 1
+            native_mutable_file_safe "$file" || return 1
             cp -p "$file" "$native_recovery/$index" || return 1
         fi
         index=$((index + 1))
     done
-    if [ "$native_manager" = systemd ]; then
-        systemctl --user show-environment >/dev/null || return 1
-        native_active="$(native_systemd_state is-active "$native_label")" || return 1
-        native_enabled="$(native_systemd_state is-enabled "$native_label")" || return 1
-        native_legacy_active="$(native_systemd_state is-active "$native_legacy_label")" || return 1
-        native_legacy_enabled="$(native_systemd_state is-enabled "$native_legacy_label")" || return 1
-    else
-        launchctl print "gui/$UID" >/dev/null 2>&1 || return 1
-        launchctl print "gui/$UID/$native_label" >/dev/null 2>&1 && native_active=true
-        launchctl print "gui/$UID/$native_legacy_label" >/dev/null 2>&1 && native_legacy_active=true
-    fi
-    printf 'definition=%s\nlegacy_definition=%s\nenvironment=%s\nactive=%s\nenabled=%s\nlegacy_active=%s\nlegacy_enabled=%s\n' \
-        "$native_definition" "$native_legacy_definition" "$native_environment" \
-        "$native_active" "$native_enabled" "$native_legacy_active" "$native_legacy_enabled" > "$native_recovery/state"
-    chmod 600 "$native_recovery/state"
+    native_install_observe "$native_label" || return 1
+    native_enabled="$NATIVE_ENABLED"
+    case "$NATIVE_STATE" in active|loaded) native_active=true ;; esac
+    native_install_observe "$native_legacy_label" || return 1
+    native_legacy_enabled="$NATIVE_ENABLED"
+    case "$NATIVE_STATE" in active|loaded) native_legacy_active=true ;; esac
+    index=0
+    for file in "${native_resources[@]}"; do
+        printf '%s=' "$index" && shell_quote_value "$file" || return 1
+        index=$((index + 1))
+    done > "$native_recovery/resources" || return 1
+    chmod 600 "$native_recovery/resources" || return 1
+    printf 'active=%s\nenabled=%s\nlegacy_active=%s\nlegacy_enabled=%s\n' \
+        "$native_active" "$native_enabled" "$native_legacy_active" "$native_legacy_enabled" > "$native_recovery/state" || return 1
+    chmod 600 "$native_recovery/state" || return 1
     native_snapshot_complete=true
-    native_previous_ready=false
-    native_previous_port="$(env_file_value "$native_environment" HERDR_RELAY_PORT)"
-    native_previous_port="${native_previous_port:-8375}"
+    literal_env_scan "$native_environment" || return 1
+    literal_env_get HERDR_RELAY_PORT; native_previous_port="${LITERAL_VALUE:-8375}"
+    literal_env_get HERDR_RELAY_INSTANCE_ID; instance="$LITERAL_VALUE"
     if [ "$native_active" = true ] || [ "$native_legacy_active" = true ]; then
-        local previous binary instance
         binary="$(relay_binary)" || return 1
-        instance="$(env_file_value "$native_environment" HERDR_RELAY_INSTANCE_ID)"
         if previous="$(curl -fsS --max-time 2 "http://127.0.0.1:$native_previous_port/readyz" 2>/dev/null)" &&
-           printf '%s\n' "$previous" | "$binary" verify-readiness "$instance" "" "" "" 2>/dev/null; then
-            printf '%s\n' "$previous" > "$native_recovery/previous-ready.json"
-            chmod 600 "$native_recovery/previous-ready.json"
+            printf '%s\n' "$previous" | "$binary" verify-readiness "$instance" '' '' '' >/dev/null 2>&1; then
+            printf '%s\n' "$previous" > "$native_recovery/previous-ready.json" || return 1
+            chmod 600 "$native_recovery/previous-ready.json" || return 1
             native_previous_ready=true
         fi
     fi
     return 0
 }
 
+native_install_label_quiet() {
+    native_install_observe "$1" || return 1
+    if [ "$native_manager" = launchd ]; then [ "$NATIVE_STATE" = absent ]; return $?; fi
+    case "$NATIVE_STATE" in absent|inactive) [ "$NATIVE_ENABLED" = false ] ;; *) return 1 ;; esac
+}
+
+native_install_quiesce() {
+    local label attempt
+    for label in "$native_label" "$native_legacy_label"; do
+        native_install_observe "$label" || return 1
+        if [ "$native_manager" = systemd ]; then
+            if [ "$NATIVE_STATE" != absent ]; then
+                systemctl --user stop "$label" >/dev/null 2>&1 || true
+                systemctl --user disable "$label" >/dev/null 2>&1 || true
+            fi
+        elif [ "$NATIVE_STATE" != absent ]; then
+            launchctl bootout "gui/$UID/$label" >/dev/null 2>&1 || true
+        fi
+        for ((attempt=0; attempt<10; attempt++)); do
+            native_install_observe "$label" || return 1
+            if native_install_label_quiet "$label"; then break; fi
+            [ "$attempt" -eq 9 ] || sleep 0.1 || return 1
+        done
+        [ "$attempt" -lt 10 ] || return 1
+    done
+    # Stop return codes are not authority. Re-observe BOTH affected labels.
+    native_install_label_quiet "$native_label" && native_install_label_quiet "$native_legacy_label"
+}
+
+native_install_replace() {
+    local source="$1" destination="$2" directory
+    directory="$(dirname "$destination")" || return 1
+    native_stage="$(mktemp "$directory/.herdr-service.XXXXXX")" || return 1
+    if ! cp -p "$source" "$native_stage" ||
+        ! native_install_label_quiet "$native_label" || ! native_install_label_quiet "$native_legacy_label" ||
+        ! mv -f "$native_stage" "$destination"; then
+        rm -f "$native_stage"; native_stage=""; return 1
+    fi
+    native_stage=""
+    return 0
+}
+
+native_install_publish() {
+    local definition_source="$1"
+    # Set before any stop attempt so even partial manager progress is handled.
+    native_quiesced=true
+    native_install_quiesce || return 1
+    (umask 077; mkdir -p "$(dirname "$native_environment")" "$(dirname "$native_definition")") || return 1
+    native_install_label_quiet "$native_label" && native_install_label_quiet "$native_legacy_label" || return 1
+    native_published=true
+    if [ -n "$NATIVE_SIDECAR" ]; then
+        native_install_replace "$native_recovery/candidate.token" "$NATIVE_SIDECAR" || return 1
+    fi
+    native_install_replace "$native_recovery/candidate.env" "$native_environment" || return 1
+    native_install_replace "$definition_source" "$native_definition" || return 1
+    return 0
+}
+
+native_install_activate() {
+    native_activation_attempted=true
+    native_install_label_quiet "$native_label" && native_install_label_quiet "$native_legacy_label" || return 1
+    if [ "$native_manager" = systemd ]; then
+        systemctl --user daemon-reload && systemctl --user enable "$native_label" && systemctl --user restart "$native_label" || return 1
+    else
+        launchctl enable "gui/$UID/$native_label" && launchctl bootstrap "gui/$UID" "$native_definition" || return 1
+    fi
+    native_install_observe "$native_label" || return 1
+    case "$NATIVE_STATE" in active|loaded) return 0 ;; *) return 1 ;; esac
+}
+
 native_install_restore_files() {
-    local index=0 file failed=false
-    for file in "$native_definition" "$native_legacy_definition" "$native_environment"; do
+    local file index=0
+    native_install_label_quiet "$native_label" && native_install_label_quiet "$native_legacy_label" || return 1
+    for file in "${native_resources[@]}"; do
+        native_install_label_quiet "$native_label" && native_install_label_quiet "$native_legacy_label" || return 1
         if [ -f "$native_recovery/$index" ]; then
-            cp -p "$native_recovery/$index" "$file" || failed=true
+            native_install_replace "$native_recovery/$index" "$file" || return 1
         else
-            rm -f "$file" || failed=true
+            rm -f "$file" || return 1
         fi
         index=$((index + 1))
     done
-    [ "$failed" = false ]
+    return 0
 }
 
 native_install_restore_activation() {
-    local failed=false label active enabled
-    if [ "$native_manager" = systemd ]; then
-        systemctl --user daemon-reload || failed=true
-        for label in "$native_label" "$native_legacy_label"; do
-            active="$native_active"
-            enabled="$native_enabled"
-            if [ "$label" = "$native_legacy_label" ]; then
-                active="$native_legacy_active"
-                enabled="$native_legacy_enabled"
-            fi
-            if [ "$enabled" = true ]; then
-                systemctl --user enable "$label" || failed=true
-            elif [ -f "$HOME/.config/systemd/user/$label" ]; then
-                systemctl --user disable "$label" || failed=true
-            fi
-            if [ "$active" = true ]; then
-                systemctl --user restart "$label" || failed=true
-            fi
-        done
-    else
-        if [ "$native_active" = true ] && ! launchctl print "gui/$UID/$native_label" >/dev/null 2>&1; then
-            launchctl bootstrap "gui/$UID" "$native_definition" || failed=true
+    local label enabled active previous
+    # Any restoration failure is handled by the caller BEFORE this function.
+    native_install_label_quiet "$native_label" && native_install_label_quiet "$native_legacy_label" || return 1
+    if [ "$native_manager" = systemd ]; then systemctl --user daemon-reload || return 1; fi
+    for label in "$native_label" "$native_legacy_label"; do
+        enabled="$native_enabled"; [ "$label" != "$native_legacy_label" ] || enabled="$native_legacy_enabled"
+        if [ "$native_manager" = systemd ]; then
+            if [ "$enabled" = true ]; then systemctl --user enable "$label" || return 1; fi
+        else
+            if [ "$enabled" = true ]; then launchctl enable "gui/$UID/$label" || return 1;
+            else launchctl disable "gui/$UID/$label" || return 1; fi
         fi
-        if [ "$native_legacy_active" = true ] && ! launchctl print "gui/$UID/$native_legacy_label" >/dev/null 2>&1; then
-            launchctl bootstrap "gui/$UID" "$native_legacy_definition" || failed=true
+    done
+    for label in "$native_label" "$native_legacy_label"; do
+        active="$native_active"; [ "$label" != "$native_legacy_label" ] || active="$native_legacy_active"
+        [ "$active" = true ] || continue
+        native_install_observe "$label" || return 1
+        if [ "$native_manager" = systemd ]; then
+            [ "$NATIVE_STATE" = inactive ] || return 1
+            systemctl --user restart "$label" || return 1
+        else
+            [ "$NATIVE_STATE" = absent ] || return 1
+            if [ "$label" = "$native_label" ]; then launchctl bootstrap "gui/$UID" "$native_definition" || return 1;
+            else launchctl bootstrap "gui/$UID" "$native_legacy_definition" || return 1; fi
         fi
+        native_install_observe "$label" || return 1
+        case "$NATIVE_STATE" in active|loaded) ;; *) return 1 ;; esac
+    done
+    if [ "$native_active" = true ] || [ "$native_legacy_active" = true ]; then
+        [ "$native_previous_ready" = true ] || return 1
+        previous="$(cat "$native_recovery/previous-ready.json")" || return 1
+        wait_for_relay_release_health "$native_previous_port" 15 1 \
+            "$(json_string_field "$previous" release_version)" "$(json_string_field "$previous" revision)" \
+            "$(json_string_field "$previous" bundle_hash)" "$(json_string_field "$previous" instance)" >/dev/null || return 1
     fi
-    [ "$failed" = false ]
+    return 0
 }
 
 native_install_exit() {
     local result=$? failed=false
-    trap - EXIT INT TERM
-    [ -z "$native_stage" ] || rm -f "$native_stage"
-    if [ "$native_snapshot_complete" = false ]; then
-        rm -rf "$native_recovery"
-        echo "Native installation was not started because the previous state could not be captured." >&2
-        exit 1
-    fi
-    if [ "$native_committed" = true ]; then
-        rm -rf "$native_recovery"
-        exit "$result"
-    fi
+    trap - EXIT
+    trap ':' INT TERM
     set +e
-    if [ "$native_changed" = true ]; then
-        if [ "$native_manager" = systemd ]; then
-            systemctl --user stop "$native_label" || failed=true
-            if [ "$native_enabled" = false ]; then systemctl --user disable "$native_label" || failed=true; fi
-        else
-            if launchctl print "gui/$UID/$native_label" >/dev/null 2>&1; then
-                launchctl bootout "gui/$UID" "$native_definition" || failed=true
-            fi
-        fi
-    fi
-    native_install_restore_files || failed=true
-    if [ "$native_changed" = true ]; then
-        native_install_restore_activation || failed=true
-        if [ "$native_active" = true ] || [ "$native_legacy_active" = true ]; then
-            if [ "$native_previous_ready" = true ]; then
-                local previous
-                previous="$(cat "$native_recovery/previous-ready.json")"
-                wait_for_relay_release_health "$native_previous_port" 15 1 \
-                    "$(json_string_field "$previous" release_version)" "$(json_string_field "$previous" revision)" \
-                    "$(json_string_field "$previous" bundle_hash)" "$(json_string_field "$previous" instance)" >/dev/null || failed=true
-            else
-                echo "Previous runtime readiness was unavailable; restored service identity cannot be confirmed." >&2
-                failed=true
-            fi
-        fi
+    [ -z "$native_stage" ] || rm -f "$native_stage"
+    if [ "$native_committed" = true ]; then rm -rf "$native_recovery"; exit "$result"; fi
+    if [ "$native_snapshot_complete" = true ] && [ "$native_quiesced" = true ]; then
+        # NO restore/remove/reactivate after active/unknown quiescence. A
+        # failed file restoration likewise forbids all prior reactivation.
+        if ! native_install_quiesce; then failed=true;
+        elif [ "$native_published" = true ] && ! native_install_restore_files; then failed=true;
+        elif ! native_install_restore_activation; then failed=true; fi
     fi
     if [ "$failed" = true ]; then
-        echo "Native installation rollback is incomplete. Private recovery files remain at $native_recovery; service state requires inspection." >&2
+        echo 'Native installation rollback is incomplete; current resources and private recovery evidence are retained.' >&2
     else
-        rm -rf "$native_recovery"
-        echo "Native installation failed; previous files and activation were restored." >&2
+        rm -rf "$native_recovery" || failed=true
+        echo 'Native installation failed; no replacement remains. Prior activation restoration requires the recorded readiness evidence.' >&2
     fi
     [ "$result" -ne 0 ] || result=1
     exit "$result"
 }
 
 native_install_commit() {
-    if [ "$native_manager" = systemd ]; then
-        if [ -f "$native_legacy_definition" ]; then
-            systemctl --user disable --now "$native_legacy_label" || return 1
-            rm -f "$native_legacy_definition" || return 1
-            systemctl --user daemon-reload || return 1
-        fi
-    else
-        rm -f "$native_legacy_definition" || return 1
-    fi
+    # Commit removes only a freshly observed inactive/disabled or absent
+    # legacy definition. It cannot infer safe removal from disable's status.
+    native_install_label_quiet "$native_legacy_label" || return 1
+    rm -f "$native_legacy_definition" || return 1
+    if [ "$native_manager" = systemd ]; then systemctl --user daemon-reload || return 1; fi
     native_committed=true
+    return 0
 }
 
 plist_text() {

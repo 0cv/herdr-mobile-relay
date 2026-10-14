@@ -30,11 +30,14 @@ printf '%s|%s|%s|%s' "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${HERDR_GITHUB_TOKEN_F
 sleep 1
 EOF
 chmod 700 "$WORK/relay" "$WORK/cloudflared"
+# Either essential child's unsolicited clean exit maps to supervisor failure 1.
+status=0
 GH_TOKEN=synthetic-ambient-token GITHUB_TOKEN=synthetic-ambient-token \
 HERDR_GITHUB_TOKEN_FILE="$WORK/ambient-pointer" HTTPS_PROXY=http://proxy.invalid \
 HERDR_RELAY_ENV="$WORK/relay.env" HERDR_RELAY_BIN="$WORK/relay" \
 CLOUDFLARED_BIN="$WORK/cloudflared" CLOUDFLARED_CONFIG="$WORK/tunnel.yml" \
-bash -x "$ROOT/relay/herdr-mobile-relay-service.sh" > "$WORK/output" 2>&1 || true
+bash -x "$ROOT/relay/herdr-mobile-relay-service.sh" > "$WORK/output" 2>&1 || status=$?
+test "$status" = 1
 test "$(<"$WORK/relay-environment")" = "||$WORK/private-token|http://proxy.invalid"
 test "$(<"$WORK/tunnel-environment")" = '|||http://proxy.invalid'
 if grep -E 'synthetic-(service|ambient|file)-token' "$WORK/output" >/dev/null; then
@@ -73,5 +76,49 @@ fi
     fi
     load_relay_env "$WORK/relay.env"
     test "$(/bin/sh -c 'printf "%s|%s|%s" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${HERDR_GITHUB_TOKEN_FILE:-}"')" = "||$WORK/private-token"
+)
+# Native selected-only migration stages bytes/pointer before scrubbing and
+# never uses an ambient installer credential. No manager or live publication.
+for key in GH_TOKEN GITHUB_TOKEN; do
+    (
+        . "$ROOT/relay/common.sh"
+        directory="$WORK/native-$key"
+        mkdir -m 700 "$directory"
+        directory="$(cd "$directory" && pwd -P)"
+        native_recovery="$directory/recovery"; mkdir -m 700 "$native_recovery"
+        file="$directory/relay.env"
+        printf 'HERDR_RELAY_TOKEN=0123456789abcdef0123456789abcdef\nHERDR_RELAY_TRANSPORT=cloudflare\n  export %s=\x27synthetic-native-selected-token\x27\n\t%s="synthetic-native-selected-token"\n' "$key" "$key" > "$file"
+        cp -p "$file" "$directory/before"
+        export GH_TOKEN=synthetic-ambient-native-token GITHUB_TOKEN=synthetic-distinct-native-token
+        export HERDR_GITHUB_TOKEN_FILE="$directory/ambient-pointer"
+        if native_installer_admit "$file" relative-runtime; then exit 1; fi
+        cmp "$file" "$directory/before"
+        set -x
+        native_installer_admit "$file"
+        test "$NATIVE_SELECTED_TOKEN" = synthetic-native-selected-token
+        native_installer_candidate "$file"
+        cmp "$file" "$directory/before"
+        test ! -e "$directory/github-token"
+        test "$(cat "$native_recovery/candidate.token")" = synthetic-native-selected-token
+        load_relay_env "$native_recovery/candidate.env"
+        test "$(/bin/sh -c 'printf "%s|%s|%s" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${HERDR_GITHUB_TOKEN_FILE:-}"')" = "||$directory/github-token"
+    ) > "$WORK/native-$key-output" 2>&1
+    if grep -E 'synthetic-(native-selected|ambient-native|distinct-native)-token' "$WORK/native-$key-output" >/dev/null; then
+        echo 'native selected credential tracing exposed a credential' >&2; exit 1
+    fi
+done
+# General callers retain explicit credential precedence; failed second-resource
+# publication restores an existing UNSELECTED destination's exact bytes/mode.
+(
+    . "$ROOT/relay/common.sh"
+    file="$WORK/persist-failure.env"; pointer="$WORK/github-token"
+    printf 'KEEP=untouched\n' > "$file"
+    printf 'prior-unselected-content\n' > "$pointer"; chmod 640 "$pointer"
+    cp -p "$file" "$file.before"; cp -p "$pointer" "$pointer.before"
+    mv() { [ "${!#}" != "$file" ] || return 2; command mv "$@"; }
+    if persist_github_token "$file" synthetic-explicit-contract-token; then exit 1; fi
+    cmp "$file" "$file.before"; cmp "$pointer" "$pointer.before"
+    mode="$(stat -c '%a' "$pointer" 2>/dev/null)" || mode="$(stat -f '%Lp' "$pointer")"
+    test "$mode" = 640
 )
 printf 'service credential boundaries passed\n'

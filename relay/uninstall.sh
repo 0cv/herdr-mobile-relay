@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Full uninstall: remove the relay binary, releases, config, cache, and service.
+set +x
 set -euo pipefail
+[ "$#" -eq 0 ] || { echo 'Invalid full-uninstall arguments.' >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -10,40 +12,127 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_ROOT="$(relay_release_root)"
 BIN_LINK="${HERDR_RELAY_BIN_DIR:-$HOME/.local/bin}/herdr-mobile-relay"
 
-# Resolve config/state directory from the environment the service actually uses.
-resolve_config_dir() {
-    local env_file=""
-    if [ -n "${HERDR_RELAY_ENV:-}" ]; then
-        env_file="$HERDR_RELAY_ENV"
-    elif [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
-        printf '%s\n' "$HERDR_PLUGIN_CONFIG_DIR"
-        return
-    else
-        env_file="$(installed_service_env_file)"
+# Controller routing and deletion bookkeeping are never loaded from config.
+shared_progress=false
+shared_attempted=false
+full_uninstall_fail() {
+    echo 'Full uninstall incomplete; remaining shared roots and recovery were retained.' >&2
+    if [ "$shared_progress" = true ]; then
+        echo 'Earlier verified shared-file batches completed; no restoration or activation was attempted.' >&2
     fi
-    if [ -n "$env_file" ] && [ -f "$env_file" ]; then
-        printf '%s\n' "$(dirname "$env_file")"
-        return
+    if [ "$shared_attempted" = true ]; then
+        echo 'Checked shared-file batch failed; partial shared effects are possible.' >&2
+    elif [ "$shared_progress" = false ]; then
+        echo 'Shared release/config/cache/link roots retained; native removal may be partial.' >&2
     fi
-    printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay"
+    exit "${1:-1}"
 }
-
-resolve_cache_dir() {
-    printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay"
+trap 'full_uninstall_fail 130' INT
+trap 'full_uninstall_fail 143' TERM
+require_user_service_context || full_uninstall_fail
+case "$(uname -s)" in
+    Linux) MANAGER=systemd; NATIVE_REMOVER="$SCRIPT_DIR/uninstall-systemd-user-service.sh" ;;
+    Darwin) MANAGER=launchd; NATIVE_REMOVER="$SCRIPT_DIR/uninstall-service.sh" ;;
+    *) echo 'Unsupported full-uninstall platform.' >&2; full_uninstall_fail ;;
+esac
+# The native delegate is required even with absent definitions. This is a
+# cooperative owned-source admission, not authentication against same-UID edits.
+service_removal_env_safe "$NATIVE_REMOVER" && [ -f "$NATIVE_REMOVER" ] || {
+    echo 'Native service remover is missing or unsafe.' >&2; full_uninstall_fail;
 }
+FALLBACK_ENV="${HERDR_RELAY_ENV:-${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay}/relay.env}"
+RELAY_ENV_FILE="$(HERDR_RELAY_ENV="$FALLBACK_ENV" service_environment_file "$SCRIPT_DIR")" || {
+    echo 'Full uninstall cannot safely select the service configuration.' >&2; full_uninstall_fail;
+}
+[ -z "${HERDR_RELAY_ENV:-}" ] || [ "$HERDR_RELAY_ENV" = "$RELAY_ENV_FILE" ] || full_uninstall_fail
+CONFIG_DIR="$(dirname "$RELAY_ENV_FILE")" || full_uninstall_fail
+[ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] || [ "$HERDR_PLUGIN_CONFIG_DIR" = "$CONFIG_DIR" ] || full_uninstall_fail
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay"
 
-CONFIG_DIR="$(resolve_config_dir)"
-CACHE_DIR="$(resolve_cache_dir)"
-RELAY_ENV_FILE="${HERDR_RELAY_ENV:-$CONFIG_DIR/relay.env}"
-[ ! -f "$RELAY_ENV_FILE" ] || load_relay_env "$RELAY_ENV_FILE"
+# Small caller-local data admission: finite transport/registration fields only.
+# The unchanged native delegate independently admits credential/resource roles.
+full_uninstall_admit() {
+    local index key mode ambient saved pointer label destination
+    service_removal_env_safe "$RELAY_ENV_FILE" && literal_env_scan "$RELAY_ENV_FILE" || return 1
+    for ((index=0; index<${#LITERAL_KEYS[@]}; index++)); do
+        key="${LITERAL_KEYS[index]}"
+        case "$key" in
+            HERDR_BIN|HERDR_BIN_PATH|HERDR_PLUTIL|HERDR_RELEASE_ROOT|HERDR_WEB_ROOT|HERDR_RELAY_BIN|HERDR_RELAY_BIN_DIR|HERDR_APP_DEPLOY_NPX|HERDR_APP_DEPLOY_NODE_DIR|HERDR_DEV_*|HERDR_CLI_*|HERDR_STABLE_*|HERDR_SETUP_*) return 1 ;;
+            HERDR_RELAY_ENV) [ "${LITERAL_VALUES[index]}" = "$RELAY_ENV_FILE" ] || return 1 ;;
+            HERDR_PLUGIN_CONFIG_DIR) [ "${LITERAL_VALUES[index]}" = "$CONFIG_DIR" ] || return 1 ;;
+            HERDR_*|CLOUDFLARED_*|TUNNEL_ORIGIN_CERT|GH_TOKEN|GITHUB_TOKEN|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy) ;;
+            *) return 1 ;;
+        esac
+    done
+    # Admit selected credential/configuration roles BEFORE explicit unpublish,
+    # without opening token content or granting a prior route disposition.
+    literal_env_get HERDR_GITHUB_TOKEN_FILE; pointer="$LITERAL_VALUE"
+    for label in $(service_removal_labels "$MANAGER"); do
+        destination="$(service_removal_path "$MANAGER" "$label")" || return 1
+        service_removal_selected_disjoint "$RELAY_ENV_FILE" "$destination" || return 1
+        native_selected_pointer_disjoint "$pointer" "$RELAY_ENV_FILE" "$destination" || return 1
+        for key in CLOUDFLARED_CONFIG TUNNEL_ORIGIN_CERT; do
+            literal_env_get "$key"
+            service_removal_selected_disjoint "$LITERAL_VALUE" "$destination" || return 1
+        done
+    done
+    literal_env_get HERDR_RELAY_TRANSPORT; mode="$LITERAL_VALUE"
+    mode="${mode#"${mode%%[![:space:]]*}"}"; mode="${mode%"${mode##*[![:space:]]}"}"
+    mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')" || return 1
+    ambient="${HERDR_RELAY_TRANSPORT:-}"
+    ambient="${ambient#"${ambient%%[![:space:]]*}"}"; ambient="${ambient%"${ambient##*[![:space:]]}"}"
+    ambient="$(printf '%s' "$ambient" | tr '[:upper:]' '[:lower:]')" || return 1
+    case "$mode" in ''|cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) ;; *) return 1 ;; esac
+    case "$ambient" in ''|cloudflare|gateway|tailscale|tailscale-cli|tailscale-external) ;; *) return 1 ;; esac
+    [ -z "$mode" ] || [ -z "$ambient" ] || [ "$mode" = "$ambient" ] || return 1
+    TRANSPORT="${mode:-$ambient}"
+    literal_env_get HERDR_GATEWAY_URL
+    if [ -n "$LITERAL_VALUE" ]; then
+        case "$TRANSPORT" in ''|gateway) TRANSPORT=gateway ;; *) return 1 ;; esac
+    fi
+    CLI_STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-registration}"
+    # Match tailscale-cli.sh: only the registration default follows XDG_STATE_HOME.
+    CLI_COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-$HOME/.local/state/herdr-mobile-relay/tailscale-cli-coordination}"
+    for key in HERDR_TAILSCALE_CLI_STATE_ROOT HERDR_TAILSCALE_CLI_COORDINATION_ROOT; do
+        literal_env_get "$key"; saved="$LITERAL_VALUE"
+        if [ "$LITERAL_FOUND" = true ]; then
+            case "$saved" in /|''|*[$'\001'-$'\037'$'\177']*) return 1 ;; /*) ;; *) return 1 ;; esac
+            service_removal_env_safe "$saved/registration-root-admission" || return 1
+            if [ "$key" = HERDR_TAILSCALE_CLI_STATE_ROOT ]; then
+                [ -z "${HERDR_TAILSCALE_CLI_STATE_ROOT:-}" ] || [ "$saved" = "$HERDR_TAILSCALE_CLI_STATE_ROOT" ] || return 1
+                CLI_STATE_ROOT="$saved"
+            else
+                [ -z "${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-}" ] || [ "$saved" = "$HERDR_TAILSCALE_CLI_COORDINATION_ROOT" ] || return 1
+                CLI_COORDINATION_ROOT="$saved"
+            fi
+        fi
+    done
+    for saved in "$CLI_STATE_ROOT" "$CLI_COORDINATION_ROOT"; do
+        case "$saved" in /|''|*[$'\001'-$'\037'$'\177']*) return 1 ;; /*) ;; *) return 1 ;; esac
+        service_removal_env_safe "$saved/registration-root-admission" || return 1
+    done
+    return 0
+}
+full_uninstall_admit || { echo 'Full uninstall configuration admission refused.' >&2; full_uninstall_fail; }
+# Pin selection through the delegate. No selected assignment is exported.
+export HERDR_RELAY_ENV="$RELAY_ENV_FILE"
+full_uninstall_quiet() {
+    local label
+    for label in $(service_removal_labels "$MANAGER"); do
+        service_removal_quiet "$MANAGER" "$label" || {
+            echo 'Fresh both-label quiescence is unavailable; shared removal stopped.' >&2; return 1;
+        }
+    done
+    return 0
+}
 TAILSCALE_SESSION_FILE="$CONFIG_DIR/tailscale-session.env"
 EXTERNAL_SESSION_FILE="$CONFIG_DIR/tailscale-external-session.env"
-if [ -e "$TAILSCALE_SESSION_FILE" ]; then
+if [ -e "$TAILSCALE_SESSION_FILE" ] || [ -L "$TAILSCALE_SESSION_FILE" ]; then
     echo "✗ A managed foreground Tailscale Serve session is recorded at $TAILSCALE_SESSION_FILE." >&2
     echo "  Stop that pane and verify managed cleanup before uninstalling." >&2
     exit 1
 fi
-if [ -e "$EXTERNAL_SESSION_FILE" ]; then
+if [ -e "$EXTERNAL_SESSION_FILE" ] || [ -L "$EXTERNAL_SESSION_FILE" ]; then
     echo "✗ An operator-owned HTTPS Serve relay is running at $EXTERNAL_SESSION_FILE." >&2
     echo "  Stop the Herdr pane before uninstalling; the operator-owned Tailscale ingress is not removed." >&2
     exit 1
@@ -58,9 +147,10 @@ canonicalize() {
         (cd "$target" && pwd -P)
     elif [ -e "$target" ]; then
         local dir base
-        dir="$(dirname "$target")"
-        base="$(basename "$target")"
-        printf '%s/%s\n' "$(cd "$dir" && pwd -P)" "$base"
+        dir="$(dirname "$target")" || return 1
+        base="$(basename "$target")" || return 1
+        dir="$(cd "$dir" && pwd -P)" || return 1
+        printf '%s/%s\n' "$dir" "$base"
     else
         printf '%s\n' "$target"
     fi
@@ -73,11 +163,11 @@ verify_removal_target() {
     local canonical="$1" label="$2"
     local canonical_home expected=""
 
-    canonical_home="$(canonicalize "$HOME")"
+    canonical_home="$(canonicalize "$HOME")" || return 1
     case "$label" in
-        releases) expected="$(canonicalize "$RELEASE_ROOT")" ;;
-        config/state) expected="$(canonicalize "$CONFIG_DIR")" ;;
-        cache) expected="$(canonicalize "$CACHE_DIR")" ;;
+        releases) expected="$(canonicalize "$RELEASE_ROOT")" || return 1 ;;
+        config/state) expected="$(canonicalize "$CONFIG_DIR")" || return 1 ;;
+        cache) expected="$(canonicalize "$CACHE_DIR")" || return 1 ;;
     esac
     case "$canonical" in
         "$canonical_home"/*) ;;
@@ -117,7 +207,9 @@ preflight_removal_target() {
     if [ -L "$target" ]; then
         return
     fi
-    verify_removal_target "$(canonicalize "$target")" "$label"
+    local canonical
+    canonical="$(canonicalize "$target")" || return 1
+    verify_removal_target "$canonical" "$label"
 }
 
 safe_remove_dir() {
@@ -127,19 +219,31 @@ safe_remove_dir() {
     fi
     # If target is a symlink, remove only the link, never the resolved target.
     if [ -L "$target" ]; then
-        rm -f "$target"
+        full_uninstall_quiet || return 1
+        shared_attempted=true
+        rm -f "$target" || return 1
+        shared_attempted=false
+        shared_progress=true
         echo "  Removed $label symlink: $target"
         return 0
     fi
     local canonical
-    canonical="$(canonicalize "$target")"
+    canonical="$(canonicalize "$target")" || return 1
     if ! verify_removal_target "$canonical" "$label"; then
         return 1
     fi
+    full_uninstall_quiet || return 1
+    shared_attempted=true
     if [ "$label" = "releases" ]; then
-        chmod -R u+w "$canonical"
+        chmod -R u+w "$canonical" || return 1
+        shared_attempted=false
+        shared_progress=true
+        full_uninstall_quiet || return 1
+        shared_attempted=true
     fi
-    rm -rf "$canonical"
+    rm -rf "$canonical" || return 1
+    shared_attempted=false
+    shared_progress=true
     echo "  Removed $label: $canonical"
 }
 
@@ -152,12 +256,16 @@ safe_remove_bin_link() {
     # regular file that is our binary (verified by name match).
     if [ -L "$target" ]; then
         local link_target
-        link_target="$(readlink -f "$target" 2>/dev/null || readlink "$target")"
+        link_target="$(readlink -f "$target" 2>/dev/null || readlink "$target")" || return 1
         local canonical_release
-        canonical_release="$(canonicalize "$RELEASE_ROOT")"
+        canonical_release="$(canonicalize "$RELEASE_ROOT")" || return 1
         case "$link_target" in
             "$canonical_release/"*)
-                rm -f "$target"
+                full_uninstall_quiet || return 1
+                shared_attempted=true
+                rm -f "$target" || return 1
+                shared_attempted=false
+                shared_progress=true
                 echo "  Removed binary symlink: $target -> $link_target"
                 return 0
                 ;;
@@ -170,27 +278,37 @@ safe_remove_bin_link() {
     local active_binary="$RELEASE_ROOT/current/herdr-mobile-relay"
     if [ -f "$active_binary" ] && [ ! -L "$active_binary" ] &&
        command -v cmp >/dev/null 2>&1 && cmp -s "$target" "$active_binary"; then
-        rm -f "$target"
+        full_uninstall_quiet || return 1
+        shared_attempted=true
+        rm -f "$target" || return 1
+        shared_attempted=false
+        shared_progress=true
         echo "  Removed binary: $target"
     else
         echo "  Skipping binary (not identical to the active owned release): $target" >&2
     fi
 }
 
+# Searchable nonsymlink ancestry is required before treating a target as absent.
+# Final symlinks retain the existing link-only removal policy.
+for target in "$RELEASE_ROOT" "$CONFIG_DIR" "$CACHE_DIR" "$BIN_LINK"; do
+    parent="$(dirname "$target")" || full_uninstall_fail
+    service_removal_env_safe "$parent/.herdr-full-uninstall-admission" || {
+        echo 'Full-uninstall target ancestry is unavailable or unsafe.' >&2; full_uninstall_fail;
+    }
+done
 # Validate every directory before stopping the service. A bad custom/XDG path
 # must fail without disrupting a healthy installation.
-preflight_removal_target "$RELEASE_ROOT" "releases"
-preflight_removal_target "$CONFIG_DIR" "config/state"
-preflight_removal_target "$CACHE_DIR" "cache"
+preflight_removal_target "$RELEASE_ROOT" "releases" || full_uninstall_fail
+preflight_removal_target "$CONFIG_DIR" "config/state" || full_uninstall_fail
+preflight_removal_target "$CACHE_DIR" "cache" || full_uninstall_fail
 
 CLI_ROUTE_DISPOSITION=""
-if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = tailscale-cli ]; then
-    CLI_STATE_ROOT="${HERDR_TAILSCALE_CLI_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-registration}"
-    CLI_COORDINATION_ROOT="${HERDR_TAILSCALE_CLI_COORDINATION_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/tailscale-cli-coordination}"
+if [ "$TRANSPORT" = tailscale-cli ]; then
     for registration_root in "$CLI_STATE_ROOT" "$CLI_COORDINATION_ROOT"; do
-        registration_root="$(canonicalize "$registration_root")"
+        registration_root="$(canonicalize "$registration_root")" || full_uninstall_fail
         for removable_root in "$CONFIG_DIR" "$CACHE_DIR" "$RELEASE_ROOT"; do
-            removable_root="$(canonicalize "$removable_root")"
+            removable_root="$(canonicalize "$removable_root")" || full_uninstall_fail
             case "$registration_root" in
                 "$removable_root"|"$removable_root"/*)
                     echo "✗ CLI registration root overlaps uninstall target $removable_root: $registration_root" >&2
@@ -208,7 +326,7 @@ if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = t
     done
     echo "The CLI-backed HTTPS Serve route persists independently of this service and uninstall."
     if [ -t 0 ]; then
-        read -r -p "Remove only the exact journaled route before uninstall? [y/N] " remove_route
+        read -r -p "Remove only the exact journaled route before uninstall? [y/N] " remove_route || full_uninstall_fail
     else
         remove_route="no"
     fi
@@ -222,7 +340,7 @@ if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = t
             ;;
         *)
             if [ -t 0 ]; then
-                read -r -p "Explicitly leave the route configured and preserve its journal? [y/N] " leave_route
+                read -r -p "Explicitly leave the route configured and preserve its journal? [y/N] " leave_route || full_uninstall_fail
             else
                 leave_route="no"
             fi
@@ -245,11 +363,11 @@ echo "  Releases:     $RELEASE_ROOT"
 echo "  Binary link:  $BIN_LINK"
 echo "  Config/state: $CONFIG_DIR"
 echo "  Cache:        $CACHE_DIR"
-if [ -f "$RELAY_ENV_FILE" ] && [ "$(relay_transport_mode "$RELAY_ENV_FILE")" = tailscale-external ]; then
+if [ "$TRANSPORT" = tailscale-external ]; then
     echo "  Operator-owned HTTPS Serve/Funnel ingress is not inspected or removed by this uninstall."
 fi
 echo ""
-read -r -p "Continue? [y/N] " choice
+read -r -p "Continue? [y/N] " choice || full_uninstall_fail
 case "$choice" in
     y|Y|yes|YES) ;;
     *) echo "Cancelled."; exit 0 ;;
@@ -257,104 +375,45 @@ esac
 
 echo ""
 
-# Stop and remove the service — must succeed before deleting files.
-service_stopped=false
-case "$(uname -s)" in
-    Darwin)
-        if [ -f "$SCRIPT_DIR/uninstall-service.sh" ]; then
-            if [ -n "$CLI_ROUTE_DISPOSITION" ]; then
-                uninstall_args=("--cli-route-disposition=$CLI_ROUTE_DISPOSITION")
-            else
-                uninstall_args=()
-            fi
-            if sh "$SCRIPT_DIR/uninstall-service.sh" "${uninstall_args[@]}"; then
-                service_stopped=true
-            fi
-        else
-            service_stopped=true
-        fi
-        ;;
-    Linux)
-        if [ -f "$SCRIPT_DIR/uninstall-systemd-user-service.sh" ]; then
-            if [ -n "$CLI_ROUTE_DISPOSITION" ]; then
-                uninstall_args=("--cli-route-disposition=$CLI_ROUTE_DISPOSITION")
-            else
-                uninstall_args=()
-            fi
-            if bash "$SCRIPT_DIR/uninstall-systemd-user-service.sh" "${uninstall_args[@]}"; then
-                service_stopped=true
-            fi
-        else
-            service_stopped=true
-        fi
-        ;;
-    *)
-        service_stopped=true
-        ;;
-esac
-
-if [ "$service_stopped" != "true" ]; then
-    echo "" >&2
-    echo "ERROR: Service uninstall failed. The relay may still be running." >&2
-    echo "Stop it manually before removing files:" >&2
-    echo "  systemctl --user stop herdr-mobile-relay.service" >&2
-    echo "  (or launchctl unload ~/Library/LaunchAgents/com.herdr-mobile-relay.service.plist)" >&2
-    echo "" >&2
-    read -r -p "Continue with file removal anyway? [y/N] " force_choice
-    case "$force_choice" in
-        y|Y|yes|YES) ;;
-        *) echo "Aborted. No files were removed."; exit 1 ;;
-    esac
+# Delegate failure can follow safe native partial progress, but cannot grant
+# shared-file authority. There is deliberately no force/extra-yes escape.
+service_removal_env_safe "$NATIVE_REMOVER" && [ -f "$NATIVE_REMOVER" ] || full_uninstall_fail
+native_status=0
+# Stock Bash 3.2 nounset cannot expand an empty array. Delegate with no
+# arguments, or with exactly the one explicit route disposition, instead.
+if [ -z "$CLI_ROUTE_DISPOSITION" ]; then
+    bash "$NATIVE_REMOVER" || native_status=$?
+else
+    bash "$NATIVE_REMOVER" "--cli-route-disposition=$CLI_ROUTE_DISPOSITION" || native_status=$?
 fi
+if [ "$native_status" -ne 0 ]; then
+    echo 'Native service removal did not complete.' >&2
+    full_uninstall_fail "$native_status"
+fi
+full_uninstall_quiet || full_uninstall_fail
 
-# Verify the service is actually stopped before removing its files.
-case "$(uname -s)" in
-    Linux)
-        if command -v systemctl >/dev/null 2>&1; then
-            for svc in herdr-mobile-relay.service herdr-remote.service; do
-                if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
-                    echo "" >&2
-                    echo "ERROR: $svc is still running." >&2
-                    echo "Stop it first: systemctl --user stop $svc" >&2
-                    exit 1
-                fi
-            done
-        fi
-        ;;
-    Darwin)
-        for label in com.herdr-mobile-relay com.herdr-remote; do
-            if launchctl list 2>/dev/null | grep -q "$label"; then
-                echo "" >&2
-                echo "ERROR: $label is still loaded." >&2
-                echo "Unload it first: launchctl bootout gui/$(id -u)/$label" >&2
-                exit 1
-            fi
-        done
-        ;;
-esac
+# Each existing destructive seam gates immediately before effects, even when
+# invoked conditionally. Observations are cooperative, not locks/deadlines.
+safe_remove_bin_link "$BIN_LINK" || full_uninstall_fail
+safe_remove_dir "$RELEASE_ROOT" "releases" || full_uninstall_fail
+safe_remove_dir "$CONFIG_DIR" "config/state" || full_uninstall_fail
+safe_remove_dir "$CACHE_DIR" "cache" || full_uninstall_fail
 
-# Remove the binary symlink (only if it points into our release root)
-safe_remove_bin_link "$BIN_LINK"
-
-# Remove all releases
-safe_remove_dir "$RELEASE_ROOT" "releases"
-
-# Remove config/state (push subscriptions, VAPID keys, tokens, update state)
-safe_remove_dir "$CONFIG_DIR" "config/state"
-
-# Remove cache and history
-safe_remove_dir "$CACHE_DIR" "cache"
-
-echo ""
-echo "Herdr Mobile Relay has been uninstalled."
 if command -v herdr >/dev/null 2>&1; then
+    full_uninstall_quiet || full_uninstall_fail
     echo "Removing Herdr plugin registration..."
+    shared_attempted=true
     if ! herdr plugin uninstall herdr-mobile-relay.events; then
         echo "Plugin registration remains; remove it with:" >&2
         echo "  herdr plugin uninstall herdr-mobile-relay.events" >&2
-        exit 1
+        full_uninstall_fail
     fi
+    shared_attempted=false
+    shared_progress=true
 else
     echo "Herdr is unavailable; remove plugin registration later with:"
     echo "  herdr plugin uninstall herdr-mobile-relay.events"
 fi
+full_uninstall_quiet || full_uninstall_fail
+echo ""
+echo "Herdr Mobile Relay has been uninstalled."

@@ -1,5 +1,23 @@
 #!/bin/sh
 set -eu
+# Admission precedes discovery, builds and temporary roots; never forge flags.
+[ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && [ "$(id -u)" -ne 0 ] || {
+    echo 'release fixtures require a genuine disposable non-root GitHub-hosted runner' >&2; exit 1;
+}
+umask 077
+check_release() {
+    python3 - "$REPO_DIR/scripts/check-installed-release.sh" "$@" <<'PY'
+import os, signal, subprocess, sys
+p = subprocess.Popen(sys.argv[1:], start_new_session=True)
+try:
+    status = p.wait(timeout=90)
+finally:
+    try: os.killpg(p.pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+    p.wait(timeout=2)
+sys.exit(status)
+PY
+}
 
 SCRIPT_DIR=${0%/*}
 if [ "$SCRIPT_DIR" = "$0" ]; then
@@ -31,7 +49,7 @@ ARCHIVE="$WORK_DIR/herdr-mobile-relay_0.0.0_${WRONG_OS}_${HOST_ARCH}.tar.gz"
 : > "$ARCHIVE"
 printf '%064d  %s\n' 0 "${ARCHIVE##*/}" > "$CHECKSUMS"
 if OUTPUT=$(
-    "$REPO_DIR/scripts/check-installed-release.sh" \
+    check_release \
         "$ARCHIVE" "$CHECKSUMS" 0.0.0 test-revision "$WRONG_OS/$HOST_ARCH" 2>&1
 ); then
     echo "installed-release check accepted a non-native archive" >&2
@@ -43,7 +61,7 @@ ARCHIVE="$WORK_DIR/herdr-mobile-relay_0.0.0_${HOST_OS}_${HOST_ARCH}.tar.gz"
 : > "$ARCHIVE"
 printf '%064d  %s\n' 0 "${ARCHIVE##*/}" > "$CHECKSUMS"
 if OUTPUT=$(
-    "$REPO_DIR/scripts/check-installed-release.sh" \
+    check_release \
         "$ARCHIVE" "$CHECKSUMS" 0.0.0 test-revision "$HOST_OS/$HOST_ARCH" 2>&1
 ); then
     echo "installed-release check accepted a checksum mismatch" >&2
@@ -53,7 +71,7 @@ printf '%s\n' "$OUTPUT" | grep -q "checksum mismatch"
 
 printf '%064d  %s  unexpected-field\n' 0 "${ARCHIVE##*/}" > "$CHECKSUMS"
 if OUTPUT=$(
-    "$REPO_DIR/scripts/check-installed-release.sh" \
+    check_release \
         "$ARCHIVE" "$CHECKSUMS" 0.0.0 test-revision "$HOST_OS/$HOST_ARCH" 2>&1
 ); then
     echo "installed-release check accepted a malformed checksum entry" >&2
@@ -112,7 +130,7 @@ else
 fi
 printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
 if OUTPUT=$(
-    "$REPO_DIR/scripts/check-installed-release.sh" \
+    check_release \
         "$ARCHIVE" "$CHECKSUMS" "$MANIFEST_VERSION" "$REVISION" "$HOST_TARGET" 2>&1
 ); then
     echo "installed-release check accepted a manifest/binary identity mismatch" >&2
@@ -147,5 +165,44 @@ printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
 mkdir "$WORK_DIR/physical-tmp"
 ln -s "$WORK_DIR/physical-tmp" "$WORK_DIR/logical-tmp"
 TMPDIR="$WORK_DIR/logical-tmp" \
-    "$REPO_DIR/scripts/check-installed-release.sh" \
+    check_release \
     "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET"
+
+# Synthetic altered wrappers are deliberately rebound to EACH manifest and
+# checksum: rejection must reach the CLI contract, not an unrelated hash gate.
+for CLI_FAULT in zero wrong-status missing-diagnostic activation cli server other ready-claim ready-assignment ready-mapping ready-json; do
+    CLI_WRAPPER="$RELEASE_DIR/relay/herdr-mobile-relay-service.sh"
+    printf '%s\n' '#!/bin/bash' 'set +x' > "$CLI_WRAPPER"
+    CLI_STATUS=69
+    CLI_DIAGNOSTIC='Installed-service CLI startup is disabled: unavailable/non-ready; no service was started.'
+    case "$CLI_FAULT" in
+        zero) CLI_STATUS=0 ;;
+        wrong-status) CLI_STATUS=23 ;;
+        missing-diagnostic) CLI_DIAGNOSTIC='Unavailable.' ;;
+        activation) printf '%s\n' '"$HERDR_RELAY_BIN" tailscale-cli activation-check || :' >> "$CLI_WRAPPER" ;;
+        cli) printf '%s\n' '"$HERDR_TAILSCALE_CLI_BIN" status || :' >> "$CLI_WRAPPER" ;;
+        server) printf '%s\n' '"$HERDR_RELAY_BIN" serve-installed || :' >> "$CLI_WRAPPER" ;;
+        other) printf '%s\n' '"$HERDR_RELAY_BIN" version || :' >> "$CLI_WRAPPER" ;;
+        ready-claim) printf '%s\n' 'echo "Service ready."' >> "$CLI_WRAPPER" ;;
+        ready-assignment) printf '%s\n' 'echo "ready=true"' >> "$CLI_WRAPPER" ;;
+        ready-mapping) printf '%s\n' 'echo "ready: true"' >> "$CLI_WRAPPER" ;;
+        ready-json) printf '%s\n' 'echo "{\"ready\":true}"' >> "$CLI_WRAPPER" ;;
+    esac
+    printf 'printf "%%s\\n" "%s"\nexit %s\n' "$CLI_DIAGNOSTIC" "$CLI_STATUS" >> "$CLI_WRAPPER"
+    chmod 755 "$CLI_WRAPPER"
+    "$RELEASE_DIR/herdr-mobile-relay" release-manifest \
+        "$RELEASE_DIR" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" >/dev/null
+    tar -C "$RELEASE_DIR" -czf "$ARCHIVE" .
+    if command -v sha256sum >/dev/null 2>&1; then
+        HASH=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+    else
+        HASH=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+    fi
+    printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
+    if OUTPUT=$(check_release "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" 2>&1); then
+        echo "installed-release check accepted CLI contract fault: $CLI_FAULT" >&2; exit 1
+    fi
+    printf '%s\n' "$OUTPUT" | grep -Fq 'extracted CLI service must be unavailable/non-ready (69) with zero command effects'
+done
+cp "$REPO_DIR/relay/herdr-mobile-relay-service.sh" "$CLI_WRAPPER"
+cmp "$REPO_DIR/relay/herdr-mobile-relay-service.sh" "$CLI_WRAPPER" >/dev/null
