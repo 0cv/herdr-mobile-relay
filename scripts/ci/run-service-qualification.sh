@@ -2,8 +2,16 @@
 # Service qualification driver for GitHub-hosted CI.
 #
 # Runs the nine service/installer suites that exercise the A1 repairs, in a
-# fixed order, each exactly as the Makefile's shell-check invokes it (suites 4
-# and 5 are not in the Makefile or any other workflow and live only here).
+# fixed order, each invoked the way the Makefile's shell-check invokes it.
+# Coverage elsewhere, stated precisely:
+#   * Suite 4 (tests/test_service_supervision.py) is in no Makefile target and
+#     no workflow; this job is the only place that runs it.
+#   * Suite 5 (tests/test_service_transport_dispatch.py) is not run directly by
+#     the Makefile or any workflow, but it runs transitively as a child of
+#     tests/test_native_install.sh, which is suite 3 here and is part of
+#     `make shell-check` (which check.yml runs). It therefore runs twice in
+#     this job by design: once directly, so it has its own exit status and
+#     timing, and once inside suite 3.
 # Invoked by .github/workflows/service-qualification.yml as:
 #
 #   /bin/bash scripts/ci/run-service-qualification.sh
@@ -33,19 +41,26 @@ set -eu
 SUITE_TIMEOUT_SECONDS=900
 HELPER_BUILD_TIMEOUT_SECONDS=180
 # Nine suites at their own bound could need far more than the workflow's
-# 60-minute job cap, which must also cover checkout, toolchain setup, the
-# summary and the artifact upload. The suites therefore share an aggregate
-# budget measured from script start, WITHOUT ever skipping a suite: every
-# suite that has not run yet keeps a reserved MIN_SUITE_SECONDS out of the
-# budget, and a suite may use at most what remains after those reservations
-# (never more than SUITE_TIMEOUT_SECONDS). While the budget is ample, suites
-# keep their full bound; after repeated timeouts, later suites still start
-# and get at least MIN_SUITE_SECONDS. In the worst case (every suite runs to
-# its limit) the total stays near TOTAL_BUDGET_SECONDS; the dispatch suite's
-# build and test phases can add at most one more MIN_SUITE_SECONDS. That is
-# about 48 minutes, leaving about 12 minutes of the 60-minute job cap for
-# checkout, toolchain setup, the summary and the upload.
-TOTAL_BUDGET_SECONDS=2700
+# 60-minute job cap (timeout-minutes), and that cap also covers the steps
+# before and after this script. The suites therefore share an aggregate budget,
+# TOTAL_BUDGET_SECONDS, measured from the FIRST step of the job: the workflow's
+# first step records the job start time in SERVICE_QUALIFICATION_JOB_STARTED,
+# and script_started is derived from it below, so checkout, provenance and
+# toolchain setup are inside the budget. The budget never skips a suite: every
+# suite that has not run yet keeps a reserved MIN_SUITE_SECONDS out of it, and
+# a suite may use at most what remains after those reservations (never more
+# than SUITE_TIMEOUT_SECONDS). While the budget is ample, suites keep their
+# full bound; after repeated timeouts, later suites still start and get at
+# least MIN_SUITE_SECONDS. If every suite runs to its limit they end about
+# TOTAL_BUDGET_SECONDS after the job start (the dispatch suite's build and
+# test phases can add at most one more MIN_SUITE_SECONDS), which leaves the
+# rest of the 60 minutes, at least about 7, for the summary, the upload and the
+# post-job steps, provided setup left room for the reservations.
+# Residual, stated plainly: this cannot prevent the cap from being reached if
+# the steps before the script consume most of it, or if the runner or Actions
+# hangs. The job is then cancelled by GitHub: a red job with a missing
+# artifact, never a pass.
+TOTAL_BUDGET_SECONDS=3000
 MIN_SUITE_SECONDS=150
 EXPECTED_SUITE_COUNT=9
 
@@ -81,6 +96,24 @@ PYTHON3=$(command -v python3 2>/dev/null) || refuse 'python3 was not found on PA
     refuse 'python3 3.11 or newer is required (service dispatch fixtures need tomllib)'
 GO_BIN=$(command -v go 2>/dev/null) || refuse 'go was not found on PATH'
 
+# The budget clock starts at the job's first step (see the budget comment
+# above). The variable is validated, not defaulted: a missing, malformed or
+# future start time refuses. A large elapsed time is NOT a refusal: the clamp
+# at MIN_SUITE_SECONDS in remaining_seconds() keeps every suite attempted.
+# run_closed forwards an explicit allowlist, so the suites never see it.
+job_started=${SERVICE_QUALIFICATION_JOB_STARTED:-}
+case "$job_started" in
+    '' | *[!0-9]*) refuse 'the job start time (SERVICE_QUALIFICATION_JOB_STARTED) is missing or not a number' ;;
+esac
+[ "${#job_started}" -le 12 ] || refuse 'the job start time (SERVICE_QUALIFICATION_JOB_STARTED) is not a plausible epoch time'
+job_now=$(date +%s) || refuse 'cannot read the clock'
+case "$job_now" in
+    '' | *[!0-9]*) refuse 'cannot read the clock' ;;
+esac
+job_elapsed=$((10#$job_now - 10#$job_started))
+[ "$job_elapsed" -ge 0 ] || refuse 'the job start time is in the future'
+script_started=$((SECONDS - job_elapsed))
+
 # ----------------------------------------------------------- bookkeeping ----
 
 summary_dir="$RUNNER_TEMP/service-qualification"
@@ -98,7 +131,6 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-script_started=$SECONDS
 GOTOOLCHAIN=${GOTOOLCHAIN:-local}
 overall=pass
 checkout_unchanged=1
