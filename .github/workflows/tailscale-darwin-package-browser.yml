@@ -27,7 +27,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Require the exact, first-attempt, task-only candidate
+      # The scope allowlist lives in exactly one place: the Darwin runner module,
+      # which is stdlib-only and import-inert. This step loads it and calls the
+      # same candidate_scope_allowed predicate the runner applies in phase 0.
+      - name: Require the exact first-attempt candidate within the reviewed scope
         shell: bash
         run: |
           set -euo pipefail
@@ -37,21 +40,20 @@ jobs:
           test "$GITHUB_REF" = refs/heads/ci/tailscale-native-preflight-ef9f843
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
-          python3 - <<'PY'
+          python3 -I -B - <<'PY'
+          import importlib.util
           import subprocess
-          expected = {
-              '.github/workflows/tailscale-darwin-package-browser.yml',
-              'tests/test_tailscale_darwin_package_browser.py',
-              'tests/test_tailscale_extracted_package_browser.py',
-              'tests/tailscale-package-browser.mjs',
-              'scripts/qualify-darwin-package-browser.py',
-          }
+          import sys
+          spec = importlib.util.spec_from_file_location(
+              'darwin_gate', 'tests/test_tailscale_darwin_package_browser.py')
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
           observed = subprocess.check_output([
-              'git', 'diff', '--name-only', 'cbacea6efe8916f2a040e6ca4927e221e9b6e15c',
-              'HEAD', '--',
+              'git', 'diff', '--name-only', module.SCOPE_BASE, 'HEAD', '--',
           ], timeout=10).decode().splitlines()
-          if set(observed) != expected or len(observed) != len(expected):
-              raise SystemExit('candidate is not the reviewed task-only tree')
+          if not module.candidate_scope_allowed(observed):
+              raise SystemExit('candidate is outside the reviewed scope')
           PY
       - uses: actions/setup-go@v7
         with:
@@ -88,7 +90,9 @@ jobs:
     name: Darwin arm64 extracted-package BYO browser
     needs: producer
     runs-on: macos-15
-    timeout-minutes: 25
+    # Job budget: the offline-controls step (10) plus the cell step (22) is 32
+    # minutes of this 40-minute cap, leaving 8 for checkout and toolchain setup.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
@@ -116,16 +120,36 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
-      # Frozen first-push grant projection. The runner binds the bounded push
-      # event before/after and sole candidate parent before ANY launcher/query,
-      # and revalidates those inputs at both launcher boundaries. Later pushes
-      # and reruns refuse; this is not a global nonce across forbidden resets.
-      # These are operational admission checks, NOT cryptographic authentication
-      # or a security boundary against a local caller forging environment/event.
-      # The parent grant permits max-two label-scoped read-only queries ONLY in
-      # this isolated hosted runner on the single first-fast-forward CI attempt
-      # from pinned 2230f96f. No local runtime or local launchctl is authorized,
-      # even if fabricated local inputs could satisfy the predicate.
+      # The offline negative controls and the qualification gate's own self-test run
+      # on the hosted runner BEFORE the cell, because they cannot be run locally and
+      # would otherwise stay unexecuted. They need no token and no producer input.
+      # A failure here is a finding to fix, never a reason to delete or weaken a control.
+      - name: Run the offline negative controls and the qualification self-test
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check parser
+          python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check archive
+          python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check phase-caps
+          python3 -I -B tests/test_tailscale_darwin_package_browser.py --offline-self-check cleanup
+          python3 -I -B scripts/qualify-darwin-package-browser.py --self-test
+      # Frozen fast-forward grant projection. The runner binds the bounded push
+      # event before/after, the sole candidate parent and two git ancestry facts
+      # (the scope base precedes `before`, and `before` precedes the candidate)
+      # before ANY launcher/query, and revalidates those inputs at both launcher
+      # boundaries. Any attempt-1, non-forced, linear fast-forward push to this
+      # branch whose `before` descends from the pinned scope base is admitted, so
+      # later pushes of the CI loop pass; reruns, redispatch, created or deleted
+      # refs, force pushes, merge-commit candidates and a `before` that is not an
+      # ancestor of the candidate refuse. This is not a global nonce across
+      # forbidden resets. These are operational admission checks, NOT cryptographic
+      # authentication or a security boundary against a local caller forging
+      # environment/event inputs. The grant permits max-two label-scoped read-only
+      # queries ONLY in this isolated hosted runner. No local runtime or local
+      # launchctl is authorized, even if fabricated local inputs could satisfy the
+      # predicate. This literal is a projection, not owner authority: no effect can
+      # occur before the owner approves the push that is its only trigger.
       # Consumer contract: this cell passes only if this step/job succeeds
       # (runner exit 0) AND its published receipt validates as pass for the exact
       # SHA/run/source/producer. A receipt alone never establishes pass. Command
@@ -150,7 +174,7 @@ jobs:
             --fresh-producer --producer-sha "$GITHUB_SHA" \
             --producer-run "$GITHUB_RUN_ID" --artifact-id "$PRODUCER_ARTIFACT_ID" \
             --artifact-zip-sha256 "${PRODUCER_ARTIFACT_DIGEST#sha256:}" \
-            --launchctl-query-grant '{"grantId":"q2-owner-launchctl-print-push-2230f96f-20261013","authorized":true,"pinnedParent":"2230f96fb61e1740c21154935a25c235bab71cf3","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of the first fast-forward push from 2230f96fb61e1740c21154935a25c235bab71cf3"}}' \
+            --launchctl-query-grant '{"grantId":"q3-roadmap-launchctl-print-ff-c77855cb-20261014","authorized":true,"pinnedParent":"c77855cb4e779c00a85d194f5bffe72ac3016554","scope":{"command":"launchctl print gui/$(id -u)/com.herdr-mobile-relay.service","mode":"read-only query; output discarded","maxQueries":2,"where":"isolated GitHub-hosted macos-15 Darwin runner only","when":"attempt 1 of a fast-forward push to refs/heads/ci/tailscale-native-preflight-ef9f843 whose before descends from c77855cb4e779c00a85d194f5bffe72ac3016554"}}' \
             --private-root "$RUNNER_TEMP/herdr-dpb-private" \
             --evidence "$RUNNER_TEMP/herdr-dpb-staging/darwin-package-browser.json" \
             --budget-seconds 1260 || runner_status=$?

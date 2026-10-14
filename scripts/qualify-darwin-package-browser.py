@@ -55,8 +55,14 @@ FILES = (
     "tests/test_tailscale_extracted_package_browser.py",
     "tests/tailscale-package-browser.mjs",
 )
-GRANT_ID = "q2-owner-launchctl-print-push-2230f96f-20261013"
-PINNED_PARENT = "2230f96fb61e1740c21154935a25c235bab71cf3"
+# The launchctl grant projection the runner stamps into its receipt, in lockstep with
+# LAUNCHCTL_GRANT_ID / LAUNCHCTL_PINNED_PARENT in the Darwin runner and the workflow's
+# --launchctl-query-grant literal. PINNED_PARENT keeps its receipt-key name but is the
+# grant's pinned scope base (the CI-branch tip the candidate descends from), not a
+# single parent. This is a projection, not owner authority: it takes effect only when
+# the owner approves the push that triggers the hosted run.
+GRANT_ID = "q3-roadmap-launchctl-print-ff-c77855cb-20261014"
+PINNED_PARENT = "c77855cb4e779c00a85d194f5bffe72ac3016554"
 PHASES = (90, 300, 210, 630, 30)
 TOTAL_SECONDS = 1260
 RAW_CAP = 2 * 1024 * 1024
@@ -840,6 +846,10 @@ def self_test():
         launchctl_query_grant_id="q2-owner-launchctl-print-push-dd608845-20261013"), "receipt_grant")
     receipt_case("reject_spent_dd6_parent", lambda r: r.update(
         launchctl_query_pinned_parent="dd608845b73c0323f5cbcfa140ad52affb28ec7f"), "receipt_grant")
+    receipt_case("reject_spent_2230_grant", lambda r: r.update(
+        launchctl_query_grant_id="q2-owner-launchctl-print-push-2230f96f-20261013"), "receipt_grant")
+    receipt_case("reject_spent_2230_parent", lambda r: r.update(
+        launchctl_query_pinned_parent="2230f96fb61e1740c21154935a25c235bab71cf3"), "receipt_grant")
     # A FAIL receipt carrying the runner's bucketed fake-operation diagnostics (incl. "other") is a
     # fixed non-qualifying verdict, never an exception and never qualified.
     diagnostic_fail = run(SELF_SHA, fixture_runs(), mutated(lambda r: (r.update(
