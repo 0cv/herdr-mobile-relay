@@ -1,0 +1,48 @@
+name: Service qualification
+
+on:
+  push:
+    branches: [ci/tailscale-native-preflight-ef9f843]
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+# A thin wrapper: every guard, suite, bound and fail-closed rule lives in
+# scripts/ci/run-service-qualification.sh. macOS runs the stock /bin/bash 3.2,
+# Ubuntu runs bash 5. No retries, no secrets, no continue-on-error.
+jobs:
+  service-qualification:
+    name: Service qualification (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Run the service and installer suites
+        run: /bin/bash scripts/ci/run-service-qualification.sh
+      - name: Upload sanitized service qualification summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: service-qualification-${{ matrix.runner }}-${{ github.sha }}
+          path: ${{ runner.temp }}/service-qualification/summary.json
+          if-no-files-found: error
+          retention-days: 1

@@ -51,6 +51,7 @@ jobs:
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           -shellcheck= -pyflakes= .github/workflows/check.yml
           .github/workflows/mobile-ci.yml .github/workflows/release.yml
+          .github/workflows/service-qualification.yml
           .github/workflows/tailscale-native-preflight.yml
       - run: go vet ./...
       - run: go test ./...
@@ -256,6 +257,7 @@ jobs:
           env -i \
             HOME="$HOME" TMPDIR="$RUNNER_TEMP" PATH="$go_bin_dir:$bun_bin_dir:$node_bin_dir:/usr/bin:/bin" \
             GOTOOLCHAIN=local GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             HERDR_TAILSCALE_LAUNCHER_CI=1 \
             HERDR_EXTERNAL_FIXTURE_EVIDENCE="$evidence" \
             BASH_ENV=/dev/null ENV=/dev/null \
