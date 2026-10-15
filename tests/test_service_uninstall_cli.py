@@ -216,6 +216,23 @@ def snapshot(q: Path) -> tuple:
     return ('directory', stat.S_IMODE(q.stat().st_mode), tuple((x.name, snapshot(x)) for x in sorted(q.iterdir())))
 
 
+INVOCATIONS = [0]
+
+
+def bounded_communicate(process, data=None):
+    # The same bound and the same failure as process.communicate(timeout=TIMEOUT).
+    # Evidence only: when the bound expires, show the tail of the traced invocation
+    # captured so far (the traceback alone omits it), then re-raise unchanged.
+    try:
+        return process.communicate(data, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired as expired:
+        tail = (expired.output or b'').splitlines()[-40:]
+        sys.stderr.write('removal fixture invocation exceeded %ds; trace tail:\n%s\n' % (
+            TIMEOUT, b'\n'.join(tail).decode('utf-8', 'replace')))
+        sys.stderr.flush()
+        raise
+
+
 def serialized_environment(env_file: Path, quoting: str, common: Path, environment: dict) -> str:
     commands = {
         'current': 'printf "Environment=%s" "$(systemd_quoted "HERDR_RELAY_ENV=$2")"',
@@ -289,6 +306,7 @@ class Fixture:
         script = self.relay / ('uninstall-systemd-user-service.sh' if self.model['platform'] == 'Linux' else 'uninstall-service.sh') if direct else self.relay / 'service.sh'
         if direct == 'opposite':
             script = self.relay / ('uninstall-service.sh' if self.model['platform'] == 'Linux' else 'uninstall-systemd-user-service.sh')
+        started = time.monotonic()
         argv = ['/bin/bash', '-x', str(script)] + list(args if not direct else args[1:])
         if conditional:
             operation = 'service_removal_quiet' if observation else 'service_removal_one'
@@ -324,8 +342,8 @@ class Fixture:
                     if not data: raise AssertionError('route prompt missing')
                     prefix.extend(data)
                 os.write(master, choice + b'\n')
-                output = bytes(prefix) + process.communicate(timeout=TIMEOUT)[0]
-            else: output = process.communicate(timeout=TIMEOUT)[0]
+                output = bytes(prefix) + bounded_communicate(process)[0]
+            else: output = bounded_communicate(process)[0]
             events = self.events()
             if bystander.poll() is not None: raise AssertionError('unrelated owned fixture bystander was disturbed')
             if any(row['op'] == 'forbidden' for row in events): raise AssertionError('forbidden fixture tool effect')
@@ -335,6 +353,9 @@ class Fixture:
                 if canary in output: raise AssertionError('tracing/output leaked a canary')
             return process.returncode, output, events
         finally:
+            INVOCATIONS[0] += 1
+            print('removal fixture invocation %d (%s model) took %.1fs' % (
+                INVOCATIONS[0], self.model['platform'], time.monotonic() - started), file=sys.stderr, flush=True)
             if master is not None: os.close(master)
             if process.poll() is None:
                 # Fallback containment targets only this invocation's group;

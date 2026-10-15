@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / 'tests'))
 # Reuse the reviewed finite inert controller DATA/source-copy patterns. This
 # executes only in the later admitted fixture phase, never at source authoring.
-from test_service_uninstall_cli import ADAPTER, Fixture, snapshot
+from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, snapshot
 REPO = Path(sys.argv[1]); TIMEOUT = 40
 PREFIX = r'''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
@@ -102,6 +102,7 @@ class FullFixture(Fixture):
         self.private_no_route = tuple((q.name, snapshot(q)) for q in sorted(self.private.iterdir()) if q.name != 'route')
 
     def invoke(self, answer=b'y\ny\n', requested_signal=None, tty=False):
+        started = time.monotonic()
         master = slave = None
         if tty: master, slave = pty.openpty()
         p = subprocess.Popen(['/bin/bash', '-x', str(self.relay / 'uninstall.sh')], env=self.environment,
@@ -118,7 +119,7 @@ class FullFixture(Fixture):
                     time.sleep(.01)
                 p.send_signal(requested_signal); (self.control / 'release').touch()
                 p.stdin.close(); p.stdin = None
-            output = p.communicate(None if tty or requested_signal else answer, timeout=TIMEOUT)[0]
+            output = bounded_communicate(p, None if tty or requested_signal else answer)[0]
             assert bystander.poll() is None
             assert all(canary not in output for canary in (b'private-source-canary', b'fixture-saved-canary', b'fixture-ambient-canary', b'fixture-ambient-github-canary'))
             events = self.events(); assert not any(e['op'] == 'forbidden' for e in events), events
@@ -126,6 +127,9 @@ class FullFixture(Fixture):
             assert not any(e.get('op') in ('restart', 'bootstrap', 'kickstart', 'enable') for e in events)
             return p.returncode, output, events
         finally:
+            INVOCATIONS[0] += 1
+            print('full uninstall fixture invocation %d took %.1fs' % (
+                INVOCATIONS[0], time.monotonic() - started), file=sys.stderr, flush=True)
             for child in (p, bystander):
                 try: os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError: pass
