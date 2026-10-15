@@ -71,11 +71,6 @@ type speechRequest struct {
 	cancel    context.CancelFunc
 }
 
-type serverDependencies struct {
-	geometryRunner  panesize.CommandRunner
-	speechLanguages func() []string
-}
-
 type Server struct {
 	cfg      *config.Config
 	version  string
@@ -164,14 +159,6 @@ type Server struct {
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
-	return newServerWithDependencies(cfg, version, revision, logger, serverDependencies{speechLanguages: speech.Languages})
-}
-
-func newServerWithDependencies(cfg *config.Config, version, revision string, logger *slog.Logger, dependencies serverDependencies) *Server {
-	if dependencies.speechLanguages == nil {
-		return &Server{initErr: errors.New("speech language discovery dependency is required")}
-	}
-	geometryRunner, socket := dependencies.geometryRunner, cfg.SocketPath
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
 	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
@@ -236,7 +223,7 @@ func newServerWithDependencies(cfg *config.Config, version, revision string, log
 		}
 	}
 
-	speechLanguages := dependencies.speechLanguages()
+	speechLanguages := speech.Languages()
 	logger.Info("speech synthesis available", "languages", strings.Join(speechLanguages, ","))
 	initialInventory := state.InventorySnapshot()
 
@@ -261,29 +248,29 @@ func newServerWithDependencies(cfg *config.Config, version, revision string, log
 		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
 		paneSizeM:           panesize.NewManager(herdrClient, logger),
-		buildDispatcher:     func(journal *activity.Journal) *coordinator.Dispatcher {
-			return coordinator.NewDispatcherWithPiScroll(herdrClient, state, journal, logger, socket, geometryRunner)
+		buildDispatcher: func(journal *activity.Journal) *coordinator.Dispatcher {
+			return coordinator.NewDispatcherWithPiScroll(herdrClient, state, journal, logger, cfg.SocketPath, nil)
 		},
-		profiles:            profResolver,
-		sessions:            sessResolver,
-		historyM:            histManager,
-		conversationM:       conversationReader,
-		conversationB:       conversationBrowser,
-		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
-		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
-		uploadM:             uploadManager,
-		deviceAuth:          deviceStore,
-		initErr:             deviceStoreErr,
-		startedAt:           time.Now(),
-		refreshClients:      make(map[string]bool),
-		paneWatches:         make(map[string]*paneWatch),
-		agentView:           cloneAgents(initialInventory.Agents),
-		workspaceView:       cloneWorkspaces(initialInventory.Workspaces),
-		inventoryView:       cloneStringMap(initialInventory.Status),
-		historyInflight:     make(map[string]bool),
-		historyLast:         make(map[string]time.Time),
-		historyActive:       make(map[string]bool),
-		pushTestLast:        make(map[string]time.Time),
+		profiles:        profResolver,
+		sessions:        sessResolver,
+		historyM:        histManager,
+		conversationM:   conversationReader,
+		conversationB:   conversationBrowser,
+		updateM:         relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
+		appDeployM:      appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
+		uploadM:         uploadManager,
+		deviceAuth:      deviceStore,
+		initErr:         deviceStoreErr,
+		startedAt:       time.Now(),
+		refreshClients:  make(map[string]bool),
+		paneWatches:     make(map[string]*paneWatch),
+		agentView:       cloneAgents(initialInventory.Agents),
+		workspaceView:   cloneWorkspaces(initialInventory.Workspaces),
+		inventoryView:   cloneStringMap(initialInventory.Status),
+		historyInflight: make(map[string]bool),
+		historyLast:     make(map[string]time.Time),
+		historyActive:   make(map[string]bool),
+		pushTestLast:    make(map[string]time.Time),
 	}
 }
 

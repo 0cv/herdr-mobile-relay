@@ -35,13 +35,6 @@ func (fixturePaneCommandRunner) Output(ctx context.Context, name string, args ..
 	return runFixtureCommand(ctx, name, "", args...)
 }
 
-func piScrollFixtureDependencies() serverDependencies {
-	return serverDependencies{
-		geometryRunner:  fixturePaneCommandRunner{},
-		speechLanguages: func() []string { return nil },
-	}
-}
-
 type measuredGridRunner struct {
 	calls        map[string]int
 	times        map[string]time.Duration
