@@ -217,20 +217,55 @@ def snapshot(q: Path) -> tuple:
 
 
 INVOCATIONS = [0]
+# Every synthetic credential sentinel the removal fixtures seed, including the full-uninstall
+# suite's source-checkout one. The no-leak checks compare output with these after a normal
+# return; the timeout diagnostic below must honour the same list.
+CANARIES = (b'fixture-saved-canary', b'fixture-ambient-canary', b'fixture-ambient-github-canary',
+            b'private-source-canary')
 
 
-def bounded_communicate(process, data=None):
+def bounded_communicate(process, data=None, timeout=None):
     # The same bound and the same failure as process.communicate(timeout=TIMEOUT).
     # Evidence only: when the bound expires, show the tail of the traced invocation
-    # captured so far (the traceback alone omits it), then re-raise unchanged.
+    # captured so far (the traceback alone omits it), then re-raise unchanged. The
+    # callers' canary check runs only after a NORMAL return, so this timeout path keeps
+    # its own guard: a line holding any fixture canary is withheld from the diagnostic,
+    # and a canary anywhere in the captured output fails exactly like the normal check.
+    timeout = TIMEOUT if timeout is None else timeout
     try:
-        return process.communicate(data, timeout=TIMEOUT)
+        return process.communicate(data, timeout=timeout)
     except subprocess.TimeoutExpired as expired:
-        tail = (expired.output or b'').splitlines()[-40:]
-        sys.stderr.write('removal fixture invocation exceeded %ds; trace tail:\n%s\n' % (
-            TIMEOUT, b'\n'.join(tail).decode('utf-8', 'replace')))
+        captured = expired.output or b''
+        tail = captured.splitlines()[-40:]
+        shown = [line for line in tail if not any(canary in line for canary in CANARIES)]
+        sys.stderr.write('removal fixture invocation exceeded %ds; trace tail (%d line(s) withheld):\n%s\n' % (
+            timeout, len(tail) - len(shown), b'\n'.join(shown).decode('utf-8', 'replace')))
         sys.stderr.flush()
+        if any(canary in captured for canary in CANARIES): raise AssertionError('tracing/output leaked a canary') from expired
         raise
+
+
+def timeout_diagnostics_control():
+    # The timeout diagnostic is evidence, not a leak path: an ordinary traced line is shown, a
+    # line holding a canary is never written and fails like the normal no-leak check. Each
+    # child prints once, flushes and then idles; it is killed by its own process group.
+    import contextlib, io
+    code = 'import sys, time; sys.stdout.write(sys.argv[1] + chr(10)); sys.stdout.flush(); time.sleep(30)'
+    for text, expected in (('ordinary-trace-line', subprocess.TimeoutExpired), ('GH_TOKEN=' + CANARIES[0].decode(), AssertionError)):
+        child = subprocess.Popen([sys.executable, '-c', code, text], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, start_new_session=True)
+        captured = io.StringIO()
+        try:
+            time.sleep(1)
+            with contextlib.redirect_stderr(captured):
+                try: bounded_communicate(child, timeout=1)
+                except expected: pass
+                else: raise AssertionError('timeout diagnostic control did not time out')
+        finally:
+            os.killpg(child.pid, signal.SIGKILL); child.wait(timeout=5)
+        written = captured.getvalue()
+        assert 'fixture-saved-canary' not in written, 'timeout diagnostic wrote a canary'
+        assert ('ordinary-trace-line' in written) == (expected is subprocess.TimeoutExpired)
 
 
 def serialized_environment(env_file: Path, quoting: str, common: Path, environment: dict) -> str:
@@ -386,6 +421,7 @@ def configuration_refusal(f, seams):
 
 def main():
     if os.getuid() == 0: raise SystemExit('removal fixtures must run as a non-root hosted user')
+    timeout_diagnostics_control()
     with tempfile.TemporaryDirectory(prefix='herdr-removal-') as temporary:
         parent = Path(temporary).resolve()
         for platform in ('Linux', 'Darwin'):

@@ -320,6 +320,39 @@ def native_origin_cases(parent, platform):
     result = run(f)
     assert result.returncode == 0 and "Native installation refused" not in result.stderr
     if platform == "systemd": assert not origin_queries(f)
+    native_origin_input_cases(parent, platform)
+
+
+def native_origin_input_cases(parent, platform):
+    # The adapter's NATIVE_ORIGIN input is a closed list. A variable that is PRESENT but
+    # malformed, including the empty string, must be a `forbidden` event and exit 99; it must
+    # never be treated as unset, or a malformed fault-injection cell would silently stop
+    # exercising its fault. Unset and every valid value must not be forbidden. The adapter is
+    # driven directly in its own fixture, because run() fails on any forbidden event.
+    tool, argv = ("systemctl", ["--user", "show-environment"]) if platform == "systemd" else (
+        "launchctl", ["print-disabled", "gui/" + str(os.getuid())])
+    systemd_only = ["dropin", "fail", "oversized"]
+    kinds = ["foreign", "empty", "duplicate"] + (systemd_only if platform == "systemd" else [])
+    valid = [role + ":" + kind for role in ("current", "legacy") for kind in kinds]
+    invalid = ["", " ", "foreign", "current", "current:", ":foreign", "current:bogus", "other:foreign",
+               "current:foreign:extra", "CURRENT:foreign", "current: foreign", "current:Foreign"]
+    if platform != "systemd":
+        invalid += [role + ":" + kind for role in ("current", "legacy") for kind in systemd_only]
+    f = d.Fixture(parent, f"origin-input-{platform}", "gateway", platform)
+
+    def invoke(value):
+        env = dict(f.env)
+        if value is not None: env["NATIVE_ORIGIN"] = value
+        before = sum(e["kind"] == "forbidden" for e in f.events())
+        proc = subprocess.run([str(f.bin / tool), *argv], env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=20)
+        return proc.returncode, sum(e["kind"] == "forbidden" for e in f.events()) - before
+
+    assert invoke(None) == (0, 0), platform + ": an unset NATIVE_ORIGIN must leave the adapter unchanged"
+    for value in valid:
+        assert invoke(value) == (0, 0), platform + ": a valid NATIVE_ORIGIN was forbidden: " + repr(value)
+    for value in invalid:
+        assert invoke(value) == (99, 1), platform + ": a malformed NATIVE_ORIGIN was not forbidden: " + repr(value)
 
 
 bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"], start_new_session=True)

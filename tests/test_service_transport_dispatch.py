@@ -219,10 +219,13 @@ if name in ("systemctl", "launchctl"):
     launch_labels = ("com.herdr-mobile-relay.service", "com.herdr-remote.service")
     targets = tuple(domain + "/" + label for label in launch_labels)
     # Optional NATIVE_ORIGIN, a closed list `<current|legacy>:<kind>`, injects a same-label
-    # service whose definition origin is NOT Herdr's own expected path. Unset (the default)
+    # service whose definition origin is NOT Herdr's own expected path. UNSET (the default)
     # changes nothing: every origin answer below then matches the expected Herdr definition.
+    # PRESENCE, not truthiness, selects validation: a variable that is set but empty (or
+    # otherwise malformed) is a forbidden input, never silently treated as unset, so a
+    # malformed fault-injection cell cannot quietly stop exercising its fault.
     origin_role, origin_kind = "", ""
-    if os.getenv("NATIVE_ORIGIN"):
+    if "NATIVE_ORIGIN" in os.environ:
         origin_role, _, origin_kind = os.environ["NATIVE_ORIGIN"].partition(":")
         known = (("foreign", "dropin", "empty", "duplicate", "fail", "oversized") if name == "systemctl"
                  else ("foreign", "empty", "duplicate"))
