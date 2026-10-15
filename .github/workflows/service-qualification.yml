@@ -13,16 +13,10 @@ env:
 # A thin wrapper: every guard, suite, bound and fail-closed rule lives in
 # scripts/ci/run-service-qualification.sh. macOS runs the stock /bin/bash 3.2,
 # Ubuntu runs bash 5. No retries, no secrets, no continue-on-error.
-# The first step records the job start time and the script measures its
-# aggregate time budget (inside this 60-minute job cap) from that moment. The
-# steps before the script are individually time-limited (22 minutes in total),
-# and the script refuses early, with a fixed message and exit 2, if more than
-# 25 minutes were used before it. Otherwise every suite is attempted with at
-# least a fixed minimum, the suites end about 53 minutes after the job start,
-# and at least about 7 minutes of the cap remain for the summary, the upload
-# and the post-job steps. The only residual: a runner or Actions infrastructure
-# hang outside any step's control makes GitHub cancel the job, a red job with a
-# missing artifact, never a pass.
+# The script bounds each suite with a fixed wall-clock limit; this workflow adds
+# only the 60-minute job cap. Nine suites at their bounds can exceed that cap:
+# GitHub then cancels a pathologically slow or hung run, which is a red job with
+# a missing artifact, never a pass.
 jobs:
   service-qualification:
     name: Service qualification (${{ matrix.runner }})
@@ -32,12 +26,8 @@ jobs:
       fail-fast: false
       matrix:
         runner: [macos-15, ubuntu-24.04]
-    # The sum of the step timeouts before the script (1 + 5 + 3 + 8 + 5 = 22
-    # minutes) must stay below the script's start-time guard (25 minutes).
+    # Each setup step has its own plain hang bound (timeout-minutes), nothing more.
     steps:
-      - name: Record the job start time
-        timeout-minutes: 1
-        run: echo "SERVICE_QUALIFICATION_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
         timeout-minutes: 5
         with:

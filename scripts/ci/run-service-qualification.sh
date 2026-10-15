@@ -29,44 +29,23 @@
 #     suite passes only by exiting 0. Nonzero, death by signal, a hosted-guard
 #     refusal, a wall-clock timeout and a suite that modifies the checkout all
 #     fail it.
-#   * The script exits nonzero unless every suite passed, and it always writes
-#     its summary before the workflow's job cap can end the job (see the time
-#     budget below).
+#   * The script exits nonzero unless every suite passed, and it writes a
+#     sanitized summary at the end of the run.
 #
 # This script runs project tests. It is meant to be run by CI only.
 set -eu
 
-# One suite may run at most SUITE_TIMEOUT_SECONDS in total; for the dispatch
-# suite that single bound covers the helper build AND the tests.
+# Fixed wall-clock bounds, and nothing else. Each suite may run at most
+# SUITE_TIMEOUT_SECONDS. The dispatch suite's helper build is bounded separately
+# by HELPER_BUILD_TIMEOUT_SECONDS, and its tests then get their own full
+# SUITE_TIMEOUT_SECONDS. There is no aggregate budget, no reservation and no
+# job-clock arithmetic. Residual, stated plainly: nine suites at their bounds can
+# need more than the workflow's 60-minute job cap (timeout-minutes). A
+# pathologically slow or hung run is then cancelled by GitHub at that cap, which
+# is a red job with a missing summary artifact, never a pass. Tune
+# SUITE_TIMEOUT_SECONDS from the first hosted run.
 SUITE_TIMEOUT_SECONDS=900
 HELPER_BUILD_TIMEOUT_SECONDS=180
-# Nine suites at their own bound could need far more than the workflow's
-# 60-minute job cap (timeout-minutes), and that cap also covers the steps
-# before and after this script. The suites therefore share an aggregate budget,
-# TOTAL_BUDGET_SECONDS, measured from the FIRST step of the job: the workflow's
-# first step records the job start time in SERVICE_QUALIFICATION_JOB_STARTED,
-# and script_started is derived from it below, so checkout, provenance and
-# toolchain setup are inside the budget.
-#   * The steps before this script are individually time-limited in the
-#     workflow (step-level timeout-minutes, 22 minutes in total).
-#   * This script refuses early (exit 2, fixed message) if more than 25 minutes
-#     of the job were already used before it: the budget that remains must
-#     cover (EXPECTED_SUITE_COUNT + 1) x MIN_SUITE_SECONDS, i.e. one reserve
-#     per suite plus one for the dispatch suite's second phase.
-#   * Otherwise every suite is attempted and never skipped: every suite that
-#     has not run yet keeps a reserved MIN_SUITE_SECONDS out of the budget, and
-#     a suite may use at most what remains after those reservations (never more
-#     than SUITE_TIMEOUT_SECONDS). While the budget is ample, suites keep their
-#     full bound; after repeated timeouts, later suites still start with at
-#     least MIN_SUITE_SECONDS. If every suite runs to its limit they end about
-#     53 minutes after the job start (about 3170 seconds in the worst case the
-#     guard admits), leaving at least about 7 minutes of the 60-minute cap for
-#     the summary, the upload and the post-job steps.
-# Only residual, stated plainly: a runner or Actions infrastructure hang
-# outside any step's control makes GitHub cancel the job. That is a red job
-# with a missing artifact, never a pass.
-TOTAL_BUDGET_SECONDS=3000
-MIN_SUITE_SECONDS=150
 EXPECTED_SUITE_COUNT=9
 
 refuse() {
@@ -101,32 +80,6 @@ PYTHON3=$(command -v python3 2>/dev/null) || refuse 'python3 was not found on PA
     refuse 'python3 3.11 or newer is required (service dispatch fixtures need tomllib)'
 GO_BIN=$(command -v go 2>/dev/null) || refuse 'go was not found on PATH'
 
-# The budget clock starts at the job's first step (see the budget comment
-# above). The variable is validated, not defaulted: a missing, malformed or
-# future start time refuses. Then the precondition the reservation scheme
-# assumes is enforced: the budget that remains at this point must cover one
-# MIN_SUITE_SECONDS reserve per suite plus one more for the dispatch suite's
-# second phase. With the current constants that is 1500 seconds, so the script
-# refuses if more than 25 minutes of the job were already used. The workflow
-# bounds the earlier steps to 22 minutes in total, so this is an invariant
-# check that the workflow makes unreachable, not a tuning knob. The suites never
-# see the variable: run_closed forwards an explicit allowlist.
-job_started=${SERVICE_QUALIFICATION_JOB_STARTED:-}
-case "$job_started" in
-    '' | *[!0-9]*) refuse 'the job start time (SERVICE_QUALIFICATION_JOB_STARTED) is missing or not a number' ;;
-esac
-[ "${#job_started}" -le 12 ] || refuse 'the job start time (SERVICE_QUALIFICATION_JOB_STARTED) is not a plausible epoch time'
-job_now=$(date +%s) || refuse 'cannot read the clock'
-case "$job_now" in
-    '' | *[!0-9]*) refuse 'cannot read the clock' ;;
-esac
-job_elapsed=$((10#$job_now - 10#$job_started))
-[ "$job_elapsed" -ge 0 ] || refuse 'the job start time is in the future'
-job_budget_floor=$(( (EXPECTED_SUITE_COUNT + 1) * MIN_SUITE_SECONDS ))
-[ "$(( TOTAL_BUDGET_SECONDS - job_elapsed ))" -ge "$job_budget_floor" ] ||
-    refuse 'too little of the job time budget remains to attempt every suite (the steps before this script took too long)'
-script_started=$((SECONDS - job_elapsed))
-
 # ----------------------------------------------------------- bookkeeping ----
 
 summary_dir="$RUNNER_TEMP/service-qualification"
@@ -160,12 +113,23 @@ baseline_state=$(checkout_state) || refuse 'cannot read the checkout state'
 
 # bounded SECONDS COMMAND [ARG...]
 #
-# Runs COMMAND in its own session/process group and enforces a wall-clock
-# bound without GNU timeout (absent on macOS). On timeout the whole process
-# group is killed. A group left behind after a normal exit is killed too, so
-# no suite can leak processes into the next one. Exit status: the command's
-# own status, 128+N when it died of signal N, 124 on timeout, 143/130 when this
-# supervisor itself is terminated. It is never 0 unless the command exited 0.
+# Enforces a wall-clock bound without GNU timeout (absent on macOS) and owns a
+# process group for the command. Ownership uses an ANCHOR: before the command
+# starts, a small helper process becomes the leader of a fresh process group
+# (same session, never holding the command's pipes) and the command joins that
+# group. The anchor is not reaped until the group has been signalled, so the group
+# id (the anchor's pid) cannot be recycled while the SIGKILL is sent, on every
+# path: normal exit, timeout, SIGTERM/SIGINT and a spawn failure. On timeout the
+# whole group is killed; a group left behind after a normal exit is killed too, so
+# no suite can leak processes into the next one. A suite that makes its own
+# session escapes the group kill exactly as it did before: the suites' fixtures do
+# so with start_new_session and kill those children by their own pids. None of the
+# nine suites relies on being its own session or group leader (they never call
+# getpgrp or getsid and never signal group 0 or -pgid; checked by reading).
+# Exit status: the command's own status, 128+N when it died of signal N, 124 on
+# timeout, 143/130 when this supervisor itself is terminated, and nonzero when the
+# command cannot be started. It is never 0 unless the command exited 0.
+# process_group needs Python 3.11, which the guards above already require.
 bounded() {
     bounded_limit=$1
     shift
@@ -187,8 +151,16 @@ signal.signal(signal.SIGTERM, terminated)
 signal.signal(signal.SIGINT, terminated)
 
 status = 1
-proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
+anchor = None
+proc = None
 try:
+    # The anchor only holds the group id. Its sleep is a leak backstop and exceeds
+    # the bound; it is always killed below.
+    anchor = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", "import time; time.sleep(%d)" % (limit + 60)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True, process_group=0)
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, process_group=anchor.pid)
     try:
         code = proc.wait(timeout=limit)
         status = code if code >= 0 else 128 - code
@@ -197,11 +169,17 @@ try:
               "killing its process group" % limit, file=sys.stderr, flush=True)
         status = 124
 finally:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    proc.wait()
+    # Signal the group while the anchor is alive and unreaped, THEN reap the
+    # command and the anchor.
+    if anchor is not None:
+        try:
+            os.killpg(anchor.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if proc is not None:
+        proc.wait()
+    if anchor is not None:
+        anchor.wait()
 sys.exit(status)
 PY
 }
@@ -236,24 +214,6 @@ banner() {
     printf '\n================================================================\n'
     printf 'SUITE %s\n' "$1"
     printf '================================================================\n'
-}
-
-# remaining_seconds CAP STARTED: sets limit_left to how long a command may still
-# run for the suite currently being run, which started at STARTED (a $SECONDS
-# value): the lesser of what is left of that suite's own CAP and what is left of
-# the aggregate budget after reserving MIN_SUITE_SECONDS for every suite that has
-# not run yet. The start guard above makes those reservations attainable, so the
-# budget share is clamped to at least MIN_SUITE_SECONDS only as protection
-# against small per-suite overhead drift (a few seconds per suite); it is not
-# what keeps the suites inside the job cap.
-remaining_seconds() {
-    suite_left=$(($1 - (SECONDS - $2)))
-    later_suites=$((EXPECTED_SUITE_COUNT - suite_count - 1))
-    [ "$later_suites" -ge 0 ] || later_suites=0
-    budget_left=$((TOTAL_BUDGET_SECONDS - (SECONDS - script_started) - later_suites * MIN_SUITE_SECONDS))
-    [ "$budget_left" -ge "$MIN_SUITE_SECONDS" ] || budget_left=$MIN_SUITE_SECONDS
-    limit_left=$suite_left
-    [ "$budget_left" -ge "$suite_left" ] || limit_left=$budget_left
 }
 
 # record_suite NAME EXIT SECONDS: appends to the table and the summary, and
@@ -291,8 +251,7 @@ run_suite() {
     banner "$suite_name"
     suite_started=$SECONDS
     suite_status=0
-    remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$suite_started"
-    run_closed "$limit_left" "$suite_extra" "$@" || suite_status=$?
+    run_closed "$SUITE_TIMEOUT_SECONDS" "$suite_extra" "$@" || suite_status=$?
     record_suite "$suite_name" "$suite_status" "$((SECONDS - suite_started))"
     check_checkout "$suite_name"
 }
@@ -306,32 +265,23 @@ run_suite tests/test_service_supervision.py '' "$PYTHON3" tests/test_service_sup
 # compiled relay used for strict JSON/origin commands. Only test_native_install.sh
 # builds it, and it runs this file as a child. To run it standalone, build the
 # same helper the same way (go build -o <helper> ./cmd/herdr-mobile-relay).
-# The build only compiles; it does not run the relay. A failed build fails the
-# suite without running it. The build and the tests share ONE suite bound
-# (SUITE_TIMEOUT_SECONDS, measured from dispatch_started): the build gets at
-# most HELPER_BUILD_TIMEOUT_SECONDS of it and the tests get whatever remains.
+# The build only compiles; it does not run the relay. A failed or timed-out build
+# fails the suite without running it. The build has its own fixed bound
+# (HELPER_BUILD_TIMEOUT_SECONDS) and the tests then get their own fixed
+# SUITE_TIMEOUT_SECONDS; nothing is subtracted between them.
 dispatch_name=tests/test_service_transport_dispatch.py
 helper="$work_dir/native-helper"
 dispatch_status=0
 banner "$dispatch_name"
 dispatch_started=$SECONDS
-remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$dispatch_started"
-build_limit=$limit_left
-[ "$build_limit" -le "$HELPER_BUILD_TIMEOUT_SECONDS" ] || build_limit=$HELPER_BUILD_TIMEOUT_SECONDS
 printf 'building the NATIVE_HELPER relay binary for this suite\n'
-run_closed "$build_limit" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
+run_closed "$HELPER_BUILD_TIMEOUT_SECONDS" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
     dispatch_status=$?
 if [ "$dispatch_status" -ne 0 ]; then
     printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
 else
-    remaining_seconds "$SUITE_TIMEOUT_SECONDS" "$dispatch_started"
-    if [ "$limit_left" -lt 1 ]; then
-        printf 'the suite bound was spent by the helper build; the suite is not run\n' >&2
-        dispatch_status=124
-    else
-        run_closed "$limit_left" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
-            dispatch_status=$?
-    fi
+    run_closed "$SUITE_TIMEOUT_SECONDS" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
+        dispatch_status=$?
 fi
 record_suite "$dispatch_name" "$dispatch_status" "$((SECONDS - dispatch_started))"
 check_checkout "$dispatch_name"
