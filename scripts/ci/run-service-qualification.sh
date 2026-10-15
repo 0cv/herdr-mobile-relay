@@ -134,9 +134,10 @@ baseline_state=$(checkout_state) || refuse 'cannot read the checkout state'
 # Exit status: the command's own status, 128+N when it died of signal N, 124 on
 # timeout, 143/130 when this supervisor itself is terminated, and nonzero when the
 # command cannot be started. It is never 0 unless the command exited 0: after the
-# cleanup the two signals are blocked, the kernel's pending set is read, the default
-# actions are restored and only then are the signals unblocked, so even a signal
-# that arrives on the way out kills the supervisor instead of turning into a pass.
+# cleanup the two signals are blocked while the default actions are restored. A
+# wakeup pipe retains signals caught before the block, even if their Python
+# callbacks never ran; signals held by the kernel terminate the supervisor when
+# unblocked. Signals arriving later also take the default nonzero termination.
 # process_group needs Python 3.11, which the guards above already require.
 bounded() {
     bounded_limit=$1
@@ -164,6 +165,15 @@ def terminated(signum, _frame):
         stop = signum
 
 
+# The C signal handler writes a byte before deferring the Python callback. Keep
+# that independent record through the final handler handoff below. Both pipe
+# descriptors are non-inheritable and Popen closes them in the children. Never
+# drain the pipe before the handoff: if it fills, an earlier byte still records
+# termination, so dropping further wakeups cannot turn a signal into success.
+signal_read, signal_write = os.pipe()
+os.set_blocking(signal_read, False)
+os.set_blocking(signal_write, False)
+signal.set_wakeup_fd(signal_write, warn_on_full_buffer=False)
 signal.signal(signal.SIGTERM, terminated)
 signal.signal(signal.SIGINT, terminated)
 
@@ -205,28 +215,29 @@ finally:
         proc.wait()
     if anchor is not None:
         anchor.wait()
-# Close the final check/exit race in the kernel, not with Python-level handlers.
-# Swapping a handler alone is not enough: CPython silently drops a signal that was
-# caught but whose callback had not run yet when its handler was swapped to the
-# default. So: (1) block the two signals; the calls that follow return through the
-# interpreter loop, which runs any handler whose signal was already caught while
-# ours is still installed, so `stop` is complete before the handlers are swapped;
-# (2) read what the kernel is holding (sigpending); (3) restore the default actions
-# while still blocked; (4) if any signal was seen, exit 128+N;
-# otherwise unblock, so a signal held since (1) or arriving later takes its default
-# action and kills this supervisor by that signal (a nonzero status for the
-# caller), and only then exit with the suite's status. The mask never reaches a
-# child: the suite and the anchor are already reaped here.
+# The supervisor is single-threaded. Block both signals before changing either
+# handler, then read the wakeup pipe while they remain blocked. Every signal
+# already consumed by the C trampoline has left a byte, independently of whether
+# its Python callback ran before the swap. One byte is sufficient; an empty pipe
+# raises BlockingIOError, while any other read failure fails closed.
+# Signals not consumed before the block stay pending in the kernel and terminate
+# us under SIG_DFL when unblocked; later signals also terminate us, including
+# during the final status check or interpreter shutdown. No signal can be lost
+# between the pipe read and exit. The mask cannot reach children: both are already
+# reaped. The pipe is kept open until process exit, which closes both descriptors.
 terminating = {signal.SIGTERM, signal.SIGINT}
 signal.pthread_sigmask(signal.SIG_BLOCK, terminating)
-held = sorted(int(number) for number in terminating & set(signal.sigpending()))
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
 signal.signal(signal.SIGINT, signal.SIG_DFL)
-if not stop and held:
-    stop = held[0]
+try:
+    caught = os.read(signal_read, 1)
+except BlockingIOError:
+    caught = b""
+if not stop and caught:
+    stop = caught[0]
+signal.pthread_sigmask(signal.SIG_UNBLOCK, terminating)
 if stop:
     sys.exit(128 + stop)
-signal.pthread_sigmask(signal.SIG_UNBLOCK, terminating)
 sys.exit(status)
 PY
 }
