@@ -228,7 +228,7 @@ if name in ("systemctl", "launchctl"):
     if "NATIVE_ORIGIN" in os.environ:
         origin_role, _, origin_kind = os.environ["NATIVE_ORIGIN"].partition(":")
         known = (("foreign", "dropin", "empty", "duplicate", "fail", "oversized") if name == "systemctl"
-                 else ("foreign", "empty", "duplicate"))
+                 else ("foreign", "empty", "duplicate", "malformed", "malformed-space", "malformed-tab"))
         if origin_role not in ("current", "legacy") or origin_kind not in known:
             event("forbidden", tool=name, point="native-origin-input"); raise SystemExit(99)
     def origin_for(role):
@@ -306,7 +306,8 @@ if name in ("systemctl", "launchctl"):
                 raise SystemExit(2)
             if args[1] == domain: native_capture("domain", "all", b"")
             kind = origin_for(key)
-            if state[key]["active"] or kind in ("foreign", "empty", "duplicate"):
+            malformed_paths = {"malformed": "\tpath=", "malformed-space": "\tpath =", "malformed-tab": "\tpath\t= "}
+            if state[key]["active"] or kind in ("foreign", "empty", "duplicate") or kind in malformed_paths:
                 # The loaded body carries ONE job-level, tab-indented `path =` line naming the
                 # expected Herdr plist; the NATIVE_ORIGIN kinds below are the only variants.
                 expected = str(root / "Library/LaunchAgents" / (args[1].rsplit("/", 1)[1] + ".plist"))
@@ -314,6 +315,11 @@ if name in ("systemctl", "launchctl"):
                 if kind == "foreign": body += "\tpath = /Library/LaunchAgents/" + args[1].rsplit("/", 1)[1] + ".plist\n"
                 elif kind != "empty": body += "\tpath = " + expected + "\n"
                 if kind == "duplicate": body += "\tpath = " + expected + "\n"
+                # F006: canonical expected record PLUS a conflicting malformed path key.
+                # Each spelling is a separate variant so no correctly parsed duplicate can
+                # mask acceptance of the malformed record under the old parser.
+                if kind in malformed_paths:
+                    body += malformed_paths[kind] + "/Library/LaunchAgents/" + args[1].rsplit("/", 1)[1] + ".plist\n"
                 native_capture("label", key, (body + "}\n").encode())
             payload = ('Could not find service "' + args[1].rsplit("/", 1)[1] + '" in domain for user gui: ' + str(os.getuid()) + "\n").encode()
             native_capture("label", key, payload, 113, stderr=True)

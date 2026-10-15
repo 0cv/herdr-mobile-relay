@@ -74,9 +74,10 @@ native_install_observe() {
         # establishes launchd quiescence, regardless of current PID/state.
         active=loaded
         # Origin evidence comes from this SAME captured text: no extra launchctl query.
-        # Grammar: exactly ONE job-level line, a single TAB then `path = <value>`. Any
-        # other line whose text starts with `path = ` (nested, indented differently or a
-        # duplicate) makes the origin ambiguous, so native_observed_origin stays empty. Observe
+        # Grammar: exactly ONE job-level line, a single TAB then `path = <value>`.
+        # Any other record naming `path` (keyword ends at EOF or a non-identifier
+        # character) is ambiguous, including path=, whitespace variants and nested
+        # records. Duplicates likewise leave native_observed_origin empty. Observe
         # stays as lenient as before (a loaded body without a path line is still loaded);
         # only native_install_origin_ok, called by native_install_begin, acts on it.
         while IFS= read -r line; do
@@ -84,7 +85,7 @@ native_install_observe() {
                 "${tab}path = "*) job_paths=$((job_paths + 1)); job_path="${line#"${tab}path = "}" ;;
                 *)
                     line="${line#"${line%%[![:space:]]*}"}"
-                    case "$line" in 'path = '*) job_ambiguous=true ;; esac ;;
+                    case "$line" in path|path[![:alnum:]_]*) job_ambiguous=true ;; esac ;;
             esac
         done <<< "$output"
         if [ "$job_paths" -eq 1 ] && [ "$job_ambiguous" = false ]; then native_observed_origin="$job_path"; fi

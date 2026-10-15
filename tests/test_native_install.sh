@@ -270,7 +270,8 @@ def native_origin_cases(parent, platform):
     # or publication, for both labels and both managers. Gateway transport only: every cell
     # runs a real installer and this suite shares one 900 s bound.
     mutating = ("stop", "disable", "enable", "restart", "bootout", "bootstrap", "kickstart", "daemon-reload")
-    kinds = ["foreign-bare", "foreign-file", "empty", "duplicate"] + (["dropin", "fail", "oversized"] if platform == "systemd" else [])
+    kinds = ["foreign-bare", "foreign-file", "empty", "duplicate"] + (
+        ["dropin", "fail", "oversized"] if platform == "systemd" else ["malformed", "malformed-space", "malformed-tab"])
 
     def label_of(role):
         return ("herdr-mobile-relay.service" if role == "current" else "herdr-remote.service") if platform == "systemd" else (
@@ -332,12 +333,13 @@ def native_origin_input_cases(parent, platform):
     tool, argv = ("systemctl", ["--user", "show-environment"]) if platform == "systemd" else (
         "launchctl", ["print-disabled", "gui/" + str(os.getuid())])
     systemd_only = ["dropin", "fail", "oversized"]
-    kinds = ["foreign", "empty", "duplicate"] + (systemd_only if platform == "systemd" else [])
+    launchd_only = ["malformed", "malformed-space", "malformed-tab"]
+    kinds = ["foreign", "empty", "duplicate"] + (systemd_only if platform == "systemd" else launchd_only)
     valid = [role + ":" + kind for role in ("current", "legacy") for kind in kinds]
     invalid = ["", " ", "foreign", "current", "current:", ":foreign", "current:bogus", "other:foreign",
                "current:foreign:extra", "CURRENT:foreign", "current: foreign", "current:Foreign"]
-    if platform != "systemd":
-        invalid += [role + ":" + kind for role in ("current", "legacy") for kind in systemd_only]
+    invalid += [role + ":" + kind for role in ("current", "legacy")
+                for kind in (launchd_only if platform == "systemd" else systemd_only)]
     f = d.Fixture(parent, f"origin-input-{platform}", "gateway", platform)
 
     def invoke(value):
