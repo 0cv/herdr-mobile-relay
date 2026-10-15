@@ -134,8 +134,9 @@ baseline_state=$(checkout_state) || refuse 'cannot read the checkout state'
 # Exit status: the command's own status, 128+N when it died of signal N, 124 on
 # timeout, 143/130 when this supervisor itself is terminated, and nonzero when the
 # command cannot be started. It is never 0 unless the command exited 0: after the
-# cleanup the default signal actions are restored before the final status check,
-# so even a signal that arrives on the way out cannot turn into a pass.
+# cleanup the two signals are blocked, the kernel's pending set is read, the default
+# actions are restored and only then are the signals unblocked, so even a signal
+# that arrives on the way out kills the supervisor instead of turning into a pass.
 # process_group needs Python 3.11, which the guards above already require.
 bounded() {
     bounded_limit=$1
@@ -204,16 +205,28 @@ finally:
         proc.wait()
     if anchor is not None:
         anchor.wait()
-# Close the check/exit race: from here on a termination signal takes its default
-# action, so a signal arriving after the check below kills this supervisor by that
-# signal (the caller then sees a nonzero status) instead of being lost behind a
-# successful suite status. A signal caught before this point is already recorded
-# in `stop`: each signal.signal() call returns through the interpreter loop, which
-# runs any handler whose signal was already caught, before `stop` is read.
+# Close the final check/exit race in the kernel, not with Python-level handlers.
+# Swapping a handler alone is not enough: CPython silently drops a signal that was
+# caught but whose callback had not run yet when its handler was swapped to the
+# default. So: (1) block the two signals; the calls that follow return through the
+# interpreter loop, which runs any handler whose signal was already caught while
+# ours is still installed, so `stop` is complete before the handlers are swapped;
+# (2) read what the kernel is holding (sigpending); (3) restore the default actions
+# while still blocked; (4) if any signal was seen, exit 128+N;
+# otherwise unblock, so a signal held since (1) or arriving later takes its default
+# action and kills this supervisor by that signal (a nonzero status for the
+# caller), and only then exit with the suite's status. The mask never reaches a
+# child: the suite and the anchor are already reaped here.
+terminating = {signal.SIGTERM, signal.SIGINT}
+signal.pthread_sigmask(signal.SIG_BLOCK, terminating)
+held = sorted(int(number) for number in terminating & set(signal.sigpending()))
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
 signal.signal(signal.SIGINT, signal.SIG_DFL)
+if not stop and held:
+    stop = held[0]
 if stop:
     sys.exit(128 + stop)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, terminating)
 sys.exit(status)
 PY
 }
