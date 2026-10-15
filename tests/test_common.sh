@@ -23,6 +23,9 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
         SUPERVISED_JOB_RECORDS="$fixture_record"
         [ -n "$fixture_record" ]
     }
+    # An unreadable record with absence NOT proven stays an unknown generation.
+    # The proven-absent (pruned signal-terminated child) cases follow below.
+    _supervised_child_spec_absent() { return 1; }
     wait() {
         test "$1" = 900 || return 99
         fixture_waits=$((fixture_waits + 1))
@@ -145,6 +148,7 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
     fixture_waits=0
     _supervised_child_capture_records() { SUPERVISED_JOB_RECORDS="$fixture_records"; }
     _child_job_long_record() { return 1; }
+    _supervised_child_spec_absent() { return 1; }  # unreadable, absence not proven
     wait() {
         test "$1" = 900 || return 99
         fixture_waits=$((fixture_waits + 1))
@@ -160,6 +164,54 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
     status=0
     supervised_child_observe %5 901 || status=$?
     test "$status" = 1
+    test "$fixture_waits" = 1
+)
+(
+    # Bash reports a signal-killed background job after the next forked command
+    # and deletes its entry, so jobs -l can fail for a captured, terminated child.
+    # Only the exact captured pair whose jobspec has no entry left is terminal;
+    # wait supplies the status. Mocks here are bounded: the real job table is in
+    # the hosted-only test_service_supervision.py.
+    fixture_waits=0
+    fixture_code=141
+    fixture_absent=1
+    _supervised_child_capture_records() { SUPERVISED_JOB_RECORDS='[7]+ 900 Running fixture'; }
+    _child_job_long_record() { return 1; }
+    _supervised_child_spec_absent() { return "$fixture_absent"; }
+    wait() {
+        test "$1" = 900 || return 99
+        fixture_waits=$((fixture_waits + 1))
+        return "$fixture_code"
+    }
+    supervised_child_capture 900
+    test "$SUPERVISED_JOB_SPEC:$SUPERVISED_JOB_STATE" = '%7:Running'
+    # Unreadable record, a live entry still answers: unknown, never waited.
+    status=0
+    supervised_child_observe %7 900 || status=$?
+    test "$status" = 1
+    test -z "$SUPERVISED_JOB_STATE"
+    test "$fixture_waits" = 0
+    # No entry left, but a pair that was never captured gains no authority.
+    fixture_absent=0
+    for fixture_pair in '%8 900' '%7 901' '%07 900'; do
+        status=0
+        # shellcheck disable=SC2086
+        supervised_child_observe $fixture_pair || status=$?
+        test "$status" = 1
+        test -z "$SUPERVISED_JOB_STATE"
+        test "$fixture_waits" = 0
+    done
+    # The exact captured pair with no entry left: terminal, status from wait.
+    status=0
+    supervised_child_observe %7 900 || status=$?
+    test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = '2:Terminal:141'
+    test "$fixture_waits" = 1
+    # The completion is cached: no second wait, and a live-looking entry or a
+    # reused generation of the same spec cannot change or repeat it.
+    fixture_absent=1
+    status=0
+    supervised_child_observe %7 900 || status=$?
+    test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = '2:Terminal:141'
     test "$fixture_waits" = 1
 )
 

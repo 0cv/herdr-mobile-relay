@@ -567,8 +567,59 @@ supervised_child_capture() {
     return "$record_status"
 }
 
+# A non-interactive Bash reports a background job that was killed by a signal
+# (never one that exited normally) after the NEXT forked foreground command,
+# then deletes its job-table entry, so a later jobs -l for that jobspec fails.
+# Bash keeps the pruned job's exit status for wait by PID. These helpers let
+# supervision accept that one situation without weakening identity checks.
+_supervised_child_captured() {
+    local job_spec="$1" expected_pid="$2" index
+    for ((index = 0; index < SUPERVISED_CAPTURED_COUNT; index++)); do
+        if [ "${SUPERVISED_CAPTURED_SPECS[index]}" = "$job_spec" ] &&
+            [ "${SUPERVISED_CAPTURED_PIDS[index]}" = "$expected_pid" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# True only when Bash holds NO entry at all for this exact jobspec: the pid-only
+# listing refuses it as well as the failed record read. A live entry that jobs -l
+# hides or contradicts is still answered by jobs -p, so it stays an unknown
+# identity. jobs -p neither prints a record nor marks one reported, so this probe
+# prunes nothing. Called directly in the owning shell: a subshell has a different
+# job table.
+_supervised_child_spec_absent() {
+    local job_spec="$1"
+    if LC_ALL=C jobs -p "$job_spec" >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+# Reached only after the record read failed. The exact captured jobspec/PID
+# pair must have no job entry left. Bash deletes an entry only once every
+# process in it has terminated, and supervision starts no asynchronous job
+# after its essential children, so the original process is dead and its PID
+# cannot belong to a live job of this shell: this wait cannot block. The status
+# comes from wait, never from a signal name. Nothing here can authorize a signal.
+_supervised_child_reap_absent() {
+    local job_spec="$1" expected_pid="$2" index
+    _supervised_child_captured "$job_spec" "$expected_pid" || return 1
+    _supervised_child_spec_absent "$job_spec" || return 1
+    SUPERVISED_JOB_STATE=Terminal
+    SUPERVISED_JOB_STATUS=0
+    wait "$expected_pid" 2>/dev/null || SUPERVISED_JOB_STATUS=$?
+    index=$SUPERVISED_REAPED_COUNT
+    SUPERVISED_REAPED_SPECS[index]="$job_spec"
+    SUPERVISED_REAPED_PIDS[index]="$expected_pid"
+    SUPERVISED_REAPED_STATUSES[index]="$SUPERVISED_JOB_STATUS"
+    SUPERVISED_REAPED_COUNT=$((SUPERVISED_REAPED_COUNT + 1))
+    return 2
+}
+
 supervised_child_observe() {
-    local job_spec="$1" expected_pid="$2" number
+    local job_spec="$1" expected_pid="$2" number absent_status=0
     SUPERVISED_JOB_STATE=""
     SUPERVISED_JOB_STATUS=""
     case "$job_spec" in %[0-9]*) number="${job_spec#%}" ;; *) return 1 ;; esac
@@ -578,7 +629,11 @@ supervised_child_observe() {
     if _supervised_child_cached "$job_spec" "$expected_pid"; then
         return 2
     fi
-    _child_job_long_record "$job_spec" || return 1
+    if ! _child_job_long_record "$job_spec"; then
+        # Unreadable is unknown unless the exact captured pair is provably gone.
+        _supervised_child_reap_absent "$job_spec" "$expected_pid" || absent_status=$?
+        return "$absent_status"
+    fi
     _supervised_child_record "$job_spec" "$expected_pid" "$CHILD_JOB_OUTPUT"
 }
 
