@@ -513,6 +513,55 @@ def listing_source_contract():
                 "the capture's own mktemp is not confined to the unprepared fallback")
         else:
             assert not forking(line), "the capture runs a forking command before its first jobs -l: " + line
+    # Positive pin, deliberately replacing the open-ended denylist above (which stays as an
+    # extra): any command that is not a builtin (touch, mkdir, ...) forks, and a fork before
+    # the first `jobs -l` lets Bash report and delete a signal-terminated child's job entry.
+    # So every code line before the listing is pinned exactly. Comments and blank lines stay
+    # free to change; any added, removed or reordered code line fails the suite. Brittle by
+    # design: a later edit of these preambles must update the pin with it.
+    pinned_capture = [
+        'local expected_pid="$1" token listed_pid state number record_status=0',
+        'local line candidate="" matches=0 index known_status',
+        'SUPERVISED_JOB_SPEC=""',
+        'SUPERVISED_JOB_STATE=""',
+        'SUPERVISED_JOB_STATUS=""',
+        """case "$expected_pid" in ''|*[!0-9]*) return 1 ;; esac""",
+    ]
+    pinned_listing = [
+        'local output_file line',
+        'SUPERVISED_JOB_RECORDS=""',
+        'if [ -n "$SUPERVISED_JOB_FILE" ]; then',
+        'output_file="$SUPERVISED_JOB_FILE"',
+        'SUPERVISED_JOB_FILE=""',
+        'else',
+        'output_file="$(mktemp "${TMPDIR:-/tmp}/herdr-supervised-jobs.XXXXXX")" || return 1',
+        'fi',
+    ]
+    assert before_listing == pinned_capture, (
+        "capture preamble changed; every line before the first jobs -l must be a pinned builtin: %r, expected %r"
+        % (before_listing, pinned_capture))
+    assert listing == pinned_listing, (
+        "listing preamble changed; every line before the first jobs -l must be a pinned builtin: %r, expected %r"
+        % (listing, pinned_listing))
+
+    def stop_line(header, stop):
+        first = next(i for i, line in enumerate(common) if line.startswith(header))
+        last = next(i for i in range(first, len(common)) if stop in common[i])
+        return common[last].strip()
+
+    def function_code(header):
+        first = next(i for i, line in enumerate(common) if line.startswith(header))
+        last = next(i for i in range(first + 1, len(common)) if common[i] == "}")
+        return [line.strip() for line in common[first + 1:last]
+                if line.strip() and not line.strip().startswith("#")]
+    # Seam: nothing may sit between the pinned preamble and the listing call, or between the
+    # listing function's preamble and the one line that carries the listing.
+    assert stop_line("supervised_child_capture() {", "_supervised_child_capture_records ||") == (
+        "_supervised_child_capture_records || return 1"), "the line after the capture preamble is not the listing call"
+    assert stop_line("_supervised_child_capture_records() {", "jobs -l >") == (
+        'if ! LC_ALL=C jobs -l > "$output_file" 2>/dev/null; then'), "the line carrying the first listing changed"
+    assert sum("jobs -l >" in line for line in function_code("_supervised_child_capture_records() {")) == 1, (
+        "the listing helper must contain exactly one jobs -l > line")
 
 
 def main():
