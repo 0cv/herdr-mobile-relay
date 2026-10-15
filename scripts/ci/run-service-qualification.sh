@@ -133,7 +133,9 @@ baseline_state=$(checkout_state) || refuse 'cannot read the checkout state'
 # reading).
 # Exit status: the command's own status, 128+N when it died of signal N, 124 on
 # timeout, 143/130 when this supervisor itself is terminated, and nonzero when the
-# command cannot be started. It is never 0 unless the command exited 0.
+# command cannot be started. It is never 0 unless the command exited 0: after the
+# cleanup the default signal actions are restored before the final status check,
+# so even a signal that arrives on the way out cannot turn into a pass.
 # process_group needs Python 3.11, which the guards above already require.
 bounded() {
     bounded_limit=$1
@@ -202,6 +204,14 @@ finally:
         proc.wait()
     if anchor is not None:
         anchor.wait()
+# Close the check/exit race: from here on a termination signal takes its default
+# action, so a signal arriving after the check below kills this supervisor by that
+# signal (the caller then sees a nonzero status) instead of being lost behind a
+# successful suite status. A signal caught before this point is already recorded
+# in `stop`: each signal.signal() call returns through the interpreter loop, which
+# runs any handler whose signal was already caught, before `stop` is read.
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.signal(signal.SIGINT, signal.SIG_DFL)
 if stop:
     sys.exit(128 + stop)
 sys.exit(status)
