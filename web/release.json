@@ -1,23 +1,23 @@
 {
   "schema": 1,
-  "version": "0.22.9",
-  "assets": 408,
-  "build": "749754e2d1d449538a8977afffd24136ebd0c54c8337a95c33eac9891378f5a6",
-  "entry": "/builds/0.22.9-408-749754e2d1d44953/index.html",
+  "version": "0.22.10",
+  "assets": 409,
+  "build": "721ce9d2da89110db1afba9e8447fb212062ce678dec769cf9a1fafbce85e186",
+  "entry": "/builds/0.22.10-409-721ce9d2da89110d/index.html",
   "files": {
     "entry": {
-      "path": "builds/0.22.9-408-749754e2d1d44953/index.html",
-      "sha256": "e570d965571a215d80bbb76b172ca54ff21ae3ed8e7658b3630b82873d5a0789",
-      "integrity": "sha256-5XDZZVcaIV2Au7drFyylT/Ia4+2OdlizYwuChz1aB4k=",
-      "brotli_sha256": "7fc816b5cca0d4ea2419d1299e823f16f1da8485108d402ee90f8ad42c3014de",
-      "brotli_integrity": "sha256-f8gWtcyg1OokGdEpnoI/FvHahIUQjUAu6Q+K1CwwFN4="
+      "path": "builds/0.22.10-409-721ce9d2da89110d/index.html",
+      "sha256": "820a532fb1be1c0151f8aa466a0ab43317cbab73d9d447363e42251c745f8bb4",
+      "integrity": "sha256-ggpTL7G+HAFR+KpGagq0MxfLq3PZ1Ec2PkIlHHRfi7Q=",
+      "brotli_sha256": "9ffe77d536ede89567b3ab985aad8cbaa491e40ad06f21f0e85a793639f78871",
+      "brotli_integrity": "sha256-n/531Tbt6JVns6uYWq2MuqSR5ArQbyHw6Fp5Njn3iHE="
     },
     "javascript": {
-      "path": "assets/app-0f7395c9e79a667ec3ade6d157d28bdcdab1b4ee66364efebbdbfd5318ca88ff.js",
-      "sha256": "0f7395c9e79a667ec3ade6d157d28bdcdab1b4ee66364efebbdbfd5318ca88ff",
-      "integrity": "sha256-D3OVyeeaZn7DrebRV9KL3NqxtO5mNk7+u9v9UxjKiP8=",
-      "brotli_sha256": "be0498e4667d3badd518d418b09e79c331a15fcb49f7ceb48b9d4e8668a64046",
-      "brotli_integrity": "sha256-vgSY5GZ9O63VGNQYsJ55wzGhX8tJ9860i51OhmimQEY="
+      "path": "assets/app-27a9ec7fb514f1d4ddff846a938f61ebb7f831a74fd5b5e0dc01db1e64f88e9c.js",
+      "sha256": "27a9ec7fb514f1d4ddff846a938f61ebb7f831a74fd5b5e0dc01db1e64f88e9c",
+      "integrity": "sha256-J6nsf7UU8dTd/4Rqk49h67f4MadP1bXg3AHbHmT4jpw=",
+      "brotli_sha256": "ae6da5e06488ed1844c92acf0abb31c0fb880ba44ea7c0dbe09105722465cc84",
+      "brotli_integrity": "sha256-rm2l4GSI7RhEySrPCrsxwPuIC6ROp8Db4JEFciRlzIQ="
     },
     "stylesheet": {
       "path": "assets/app-7558051c99dc9fbbb6f9594d1f8eb0249fa968927da315f6278f766f5f84b275.css",

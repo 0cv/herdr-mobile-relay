@@ -5,12 +5,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.10] - 2026-10-15
+
 ### Added
 
 - Read OpenCode 2.x conversation history. History, completion responses and
   activity extracts now work for OpenCode 2.x, on fresh installs and on stores
   upgraded from 1.x, where each session is read from whichever format holds
-  it. OpenCode 1.x stores keep working as before.
+  it. OpenCode 1.x stores keep working as before. Herdr reports OpenCode
+  sessions only with its OpenCode integration: run
+  `herdr integration install opencode` and restart OpenCode.
 
 ### Fixed
 
@@ -1708,7 +1712,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...HEAD
+[0.22.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.22.10
 [0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
 [0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8
 [0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7
