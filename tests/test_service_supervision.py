@@ -345,7 +345,13 @@ class Fixture:
     def complete(self, status, kinds=("relay", "cloudflared"), unknown=None):
         # All assertions precede fallback containment. wait-end plus PID absence
         # proves supervisor reaping, not just handler entry or harness cleanup.
-        assert self.proc.wait(timeout=DEADLINE) == status
+        observed = self.proc.wait(timeout=DEADLINE)
+        # Evidence only: the bare comparison gave a hosted log with no observed value. The
+        # assertion itself is unchanged; its message now names the case, both statuses and
+        # the bounded tails of the supervisor output and the parent-shell record (fixture data).
+        assert observed == status, "supervisor exit status %r, expected %r (case %s); output tail %r; shell tail %r" % (
+            observed, status, self.root.name,
+            self.output.read_text()[-600:] if self.output.exists() else "", self.shell()[-12:])
         self.stream.flush()
         assert (self.root / "relay.env").read_bytes() == self.before
         assert (self.root / "tunnel.yml").read_text() == "inert tunnel config\n"
