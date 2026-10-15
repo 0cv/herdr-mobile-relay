@@ -98,9 +98,23 @@ fixture_kill_count=0
 fixture_gate_used=0
 fixture_trace() { printf '%s\n' "$*" >> "$FIXTURE_ROOT/shell.events"; }
 fixture_gate() {
-    local name="$1" attempt
+    local name="$1" attempt deadline
     fixture_trace "gate $name"
     : > "$FIXTURE_ROOT/$name.held"
+    if [ "$name" = capture ]; then
+        # The capture gate holds the parent BEFORE its first job listing so a child
+        # can terminate first. A forked /bin/sleep here would make Bash report and
+        # delete a signal-terminated child's job entry while the gate waits, so the
+        # listing could never show the terminal record this gate exists to present
+        # (the product itself forks only a short mktemp before that listing). This
+        # loop forks nothing (builtins only, bounded by SECONDS), so the gate leaves
+        # the job table as an immediate capture would have found it.
+        deadline=$((SECONDS + 10))
+        while [ ! -f "$FIXTURE_ROOT/$name.release" ]; do
+            [ "$SECONDS" -lt "$deadline" ] || { fixture_trace "gate-timeout $name"; return 1; }
+        done
+        return 0
+    fi
     for ((attempt=0; attempt<1000; attempt++)); do
         [ ! -f "$FIXTURE_ROOT/$name.release" ] || return 0
         /bin/sleep 0.01
