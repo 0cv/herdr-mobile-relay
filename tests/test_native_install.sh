@@ -264,11 +264,70 @@ def native_capture_cases(parent, platform, transport):
                 assert result == expected and output == (data if expected == 0 else b"")
 
 
+def native_origin_cases(parent, platform):
+    # F001: a loaded same-label service whose definition origin is NOT Herdr's own expected
+    # path must be refused by native_install_begin BEFORE any quiesce, stop, disable, bootout
+    # or publication, for both labels and both managers. Gateway transport only: every cell
+    # runs a real installer and this suite shares one 900 s bound.
+    mutating = ("stop", "disable", "enable", "restart", "bootout", "bootstrap", "kickstart", "daemon-reload")
+    kinds = ["foreign-bare", "foreign-file", "empty", "duplicate"] + (["dropin", "fail", "oversized"] if platform == "systemd" else [])
+
+    def label_of(role):
+        return ("herdr-mobile-relay.service" if role == "current" else "herdr-remote.service") if platform == "systemd" else (
+            "com.herdr-mobile-relay.service" if role == "current" else "com.herdr-remote.service")
+
+    def origin_queries(f):
+        # systemd: the additive FragmentPath/DropInPaths query; launchd: the label print whose body
+        # carries the job-level path line (there is no second query on launchd).
+        if platform == "systemd":
+            return [e["argv"][2] for e in f.events() if e["kind"] == "manager" and e["command"] == "show"
+                    and "--property=FragmentPath" in e["argv"]]
+        return [e["argv"][1].rsplit("/", 1)[1] for e in f.events() if e["kind"] == "manager" and e["command"] == "print"
+                and e["argv"][1] != "gui/" + str(os.getuid())]
+
+    for role in ("current", "legacy"):
+        label = label_of(role)
+        refusal = ("Native installation refused: the loaded service for " + label + " was not established to be defined by "
+                   "Herdr's own definition path; no service or definition was changed.")
+        for kind in kinds:
+            f = d.Fixture(parent, f"origin-{platform}-{role}-{kind}", "gateway", platform, kind != "foreign-bare")
+            if kind == "foreign-bare":
+                # No Herdr definition exists anywhere: only a running, enabled foreign service
+                # holds the label, so a missing expected definition must stay missing.
+                d.write(f.root / "activation", json.dumps({k: dict(active=k == role, enabled=k == role) for k in ("current", "legacy")}))
+            f.env["NATIVE_ORIGIN"] = role + ":" + ("foreign" if kind.startswith("foreign") else kind)
+            before = snapshot(resources(f)); activation = state(f)
+            result = run(f)
+            events = f.events()
+            where = platform + " " + role + " " + kind
+            assert result.returncode != 0, where + ": a foreign or unverifiable origin was accepted"
+            assert refusal in result.stderr, where + ": the fixed origin refusal was not printed"
+            assert not any(e["kind"] == "manager" and e["command"] in mutating for e in events), where + ": the same-label service was acted on"
+            assert not any(e["kind"] == "filesystem" and e["live"] and e["tool"] in ("cp", "mv", "rm", "chmod") for e in events), where + ": a live resource was written"
+            assert snapshot(resources(f)) == before, where + ": a resource changed"
+            assert state(f) == activation, where + ": the manager state changed"
+            assert not recovery(f), where + ": a recovery directory remained after a refusal before any mutation"
+            assert not any(e["kind"] in ("http", "app", "dispatch", "relay", "tunnel", "cli-gate") for e in events), where
+            assert label in origin_queries(f), where + ": the origin evidence was never requested"
+            assert bystander.poll() is None
+    # Positive controls: matching origin proceeds (and the evidence is requested for BOTH labels);
+    # a fresh install has no loaded label, so it issues no systemd origin query at all.
+    f = d.Fixture(parent, f"origin-{platform}-match", "gateway", platform, True)
+    result = run(f)
+    assert result.returncode == 0 and "Native installation refused" not in result.stderr
+    assert set(origin_queries(f)) == {label_of("current"), label_of("legacy")}
+    f = d.Fixture(parent, f"origin-{platform}-fresh", "gateway", platform)
+    result = run(f)
+    assert result.returncode == 0 and "Native installation refused" not in result.stderr
+    if platform == "systemd": assert not origin_queries(f)
+
+
 bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"], start_new_session=True)
 try:
     for platform in ("systemd", "launchd"):
         for transport in ("gateway", "cloudflare"):
             native_capture_cases(parent, platform, transport)
+            if transport == "gateway": native_origin_cases(parent, platform)
             # Deterministic policy refusals precede all managers, HTTP/app,
             # relay/tunnel dispatch and credential/configuration mutation.
             for name, addition in (
