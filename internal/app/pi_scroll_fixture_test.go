@@ -9,140 +9,21 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
-	"github.com/0cv/herdr-mobile-relay/internal/ownedproc"
 	"github.com/0cv/herdr-mobile-relay/internal/p1fixture"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/pibridge"
 )
 
-const fixtureCommandStreamLimit = 64 * 1024
-const fixtureCommandWait = 200 * time.Millisecond
-
-var errFixtureCommandStreamLimit = errors.New("fixture command stream limit exceeded")
-
-type fixtureCommandStream struct {
-	mu       sync.Mutex
-	data     []byte
-	overflow bool
-	frozen   bool
-	cancel   context.CancelFunc
-}
-
-func (s *fixtureCommandStream) Write(data []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.frozen {
-		return len(data), nil
-	}
-	n := min(len(data), fixtureCommandStreamLimit-len(s.data))
-	s.data = append(s.data, data[:n]...)
-	if n != len(data) {
-		s.overflow = true
-		s.cancel()
-		return n, errFixtureCommandStreamLimit
-	}
-	return n, nil
-}
-
-func (s *fixtureCommandStream) snapshot() ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.frozen = true
-	data := append([]byte(nil), s.data...)
-	if s.overflow {
-		return data, errFixtureCommandStreamLimit
-	}
-	return data, nil
-}
-
-type fixtureCommandInspector struct {
-	ownedproc.Native
-	process *os.Process
-}
-
-func (i fixtureCommandInspector) Signal(pid int, force bool) error {
-	if pid <= 0 || pid != i.process.Pid {
-		return ownedproc.ErrIncomplete
-	}
-	signal := syscall.SIGTERM
-	if force {
-		signal = syscall.SIGKILL
-	}
-	return i.process.Signal(signal)
-}
-
-func waitFixtureCommand(wait <-chan error) (error, bool) {
-	timer := time.NewTimer(fixtureCommandWait)
-	defer timer.Stop()
-	select {
-	case err := <-wait:
-		return err, true
-	case <-timer.C:
-		return ownedproc.ErrIncomplete, false
-	}
-}
-
 func runFixtureCommand(ctx context.Context, name, input string, args ...string) ([]byte, error) {
-	if len(input) > fixtureCommandStreamLimit {
-		return nil, errFixtureCommandStreamLimit
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	command := childenv.Command(name, args...)
-	command.Stdin = strings.NewReader(input)
-	command.WaitDelay = fixtureCommandWait
-	stdout := &fixtureCommandStream{cancel: cancel}
-	stderr := &fixtureCommandStream{cancel: cancel}
-	command.Stdout, command.Stderr = stdout, stderr
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := command.Start(); err != nil {
-		return nil, err
-	}
-	inspectCtx, stopInspection := context.WithTimeout(context.Background(), ownedproc.InspectionBudget)
-	registry, ownershipErr := ownedproc.New(inspectCtx, fixtureCommandInspector{process: command.Process}, command.Process.Pid, os.Getpid())
-	stopInspection()
-	wait := make(chan error, 1)
-	go func() { wait <- command.Wait() }()
-	if ownershipErr != nil {
-		cancel()
-	}
-	var waitErr, cancelErr error
-	select {
-	case waitErr = <-wait:
-	case <-ctx.Done():
-		cancelErr = ctx.Err()
-		signal := func(force bool) error {
-			if ownershipErr != nil {
-				return ownedproc.ErrIncomplete
-			}
-			inspectCtx, stopInspection := context.WithTimeout(context.Background(), ownedproc.InspectionBudget)
-			defer stopInspection()
-			return registry.Signal(inspectCtx, command.Process.Pid, force)
-		}
-		cancelErr = errors.Join(cancelErr, signal(false))
-		var reaped bool
-		waitErr, reaped = waitFixtureCommand(wait)
-		if !reaped {
-			cancelErr = errors.Join(cancelErr, signal(true))
-			waitErr, _ = waitFixtureCommand(wait)
-		}
-	}
-	output, stdoutErr := stdout.snapshot()
-	_, stderrErr := stderr.snapshot()
-	return output, errors.Join(ownershipErr, waitErr, cancelErr, stdoutErr, stderrErr, ctx.Err())
+	return p1fixture.Run(ctx, name, input, args...)
 }
 
 type fixturePaneCommandRunner struct{}
@@ -156,15 +37,14 @@ func (fixturePaneCommandRunner) Output(ctx context.Context, name string, args ..
 
 func piScrollFixtureDependencies() serverDependencies {
 	return serverDependencies{
-		paneSizeRunner:  fixturePaneCommandRunner{},
 		geometryRunner:  fixturePaneCommandRunner{},
 		speechLanguages: func() []string { return nil },
 	}
 }
 
 type measuredGridRunner struct {
-	calls map[string]int
-	times map[string]time.Duration
+	calls        map[string]int
+	times        map[string]time.Duration
 	observations []p1fixture.CommandObservation
 }
 
@@ -187,28 +67,7 @@ func verifyDisposablePiFixture(t *testing.T, socket string) {
 	if err != nil || contract.SocketPath != socket {
 		t.Fatalf("owned fixture contract refused: %v", err)
 	}
-	input := os.Getenv("HERDR_P1_CONTRACT_JSON")
-	var identity struct {
-		SocketPath string `json:"socketPath"`
-	}
-	if err := json.Unmarshal([]byte(input), &identity); err != nil || identity.SocketPath != socket {
-		t.Fatal("missing exact shared fixture contract")
-	}
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("fixture contract source path unavailable")
-	}
-	module := filepath.Join(filepath.Dir(source), "../../tests/pi-scroll-qualification-ledger.mjs")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	output, err := runFixtureCommand(ctx, os.Getenv("HERDR_P1_CONTRACT_BUN"), input, "--no-env-file", "--no-install", module, "fixture")
-	var proof struct {
-		Verified   bool   `json:"verified"`
-		SocketPath string `json:"socket_path"`
-	}
-	if err != nil || json.Unmarshal(output, &proof) != nil || !proof.Verified || proof.SocketPath != socket {
-		t.Fatalf("shared fixture root/socket/process ownership refused: %v", err)
-	}
+
 }
 
 func fixtureHistoryMarkers(data []byte) ([]int, error) {
@@ -349,8 +208,14 @@ func captureFixtureBridgeWithhold(ctx context.Context, contract *p1fixture.Contr
 		defer stop()
 		windowStart := time.Now()
 		beforeWire, err := observer.Snapshot()
-		if err != nil { return nil, err }
-		select { case <-probe.Done(): return nil, probe.Err(); case <-time.After(25*time.Millisecond): }
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case <-probe.Done():
+			return nil, probe.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
 		unknown := dispatcher.ScrollState(probe, identity.Pane, "bridge-withhold", true)
 		if unknown == nil || unknown.Renderer != "unknown" || unknown.Available || unknown.Revision == "" {
 			return nil, errors.New("withheld native bridge did not derive an unknown dispatcher state")
@@ -359,10 +224,18 @@ func captureFixtureBridgeWithhold(ctx context.Context, contract *p1fixture.Contr
 		if result == nil || result.OK || result.Error == "" || result.Phase != "not_started" {
 			return nil, errors.New("unknown native bridge did not refuse the wheel intent before dispatch")
 		}
-		select { case <-probe.Done(): return nil, probe.Err(); case <-time.After(25*time.Millisecond): }
+		select {
+		case <-probe.Done():
+			return nil, probe.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
 		afterWire, err := observer.Snapshot()
-		if err != nil { return nil, err }
-		if len(afterWire) <= len(beforeWire) { return nil, errors.New("native bridge refusal lacks actual resolver unary observations") }
+		if err != nil {
+			return nil, err
+		}
+		if len(afterWire) <= len(beforeWire) {
+			return nil, errors.New("native bridge refusal lacks actual resolver unary observations")
+		}
 		records := afterWire[len(beforeWire):]
 		for _, record := range records {
 			if record.Method == "pane.send_text" || record.Method == "pane.send_keys" || record.Overflow || record.Error != "" {
@@ -405,7 +278,9 @@ func captureFixtureBridgeWithhold(ctx context.Context, contract *p1fixture.Contr
 		return errors.New("bridge state changed across withhold and restoration")
 	}
 	captureError := ""
-	if captureErr != nil { captureError = captureErr.Error() }
+	if captureErr != nil {
+		captureError = captureErr.Error()
+	}
 	saveErr := contract.Save("bridge-withhold-1.json", map[string]any{"schema_version": 1, "kind": "p1-bridge-withhold", "source_kind": "real", "complete": captureErr == nil, "truncated": false, "ambiguous": false, "skipped": false, "socketPath": socketPath, "holdingPath": holdingPath, "before": beforeRecord, "during": map[string]any{"originalAbsent": true, "queryError": refusal.Error()}, "restored": restoredRecord, "result": "unavailable-then-restored", "started": started, "ended": time.Now(), "beforeState": beforeState, "afterState": afterState, "refusalWindow": refusalWindow, "captureError": captureError, "sameUidInterferenceProvedAbsent": false})
 	return errors.Join(captureErr, saveErr)
 }
@@ -517,7 +392,7 @@ func TestDisposablePiScrollFoundation(t *testing.T) {
 		} else if evidence.Wheel != "unavailable" {
 			t.Fatal("regular mode enabled wheel input")
 		}
-		if time.Now().After(start.Add(500*time.Millisecond)) {
+		if time.Now().After(start.Add(500 * time.Millisecond)) {
 			t.Fatal("foundation acknowledgement exceeded 500ms")
 		}
 		if err := contract.Save(fmt.Sprintf("foundation-%02d.json", tick), map[string]any{"schema_version": 1, "kind": "p1-foundation-tick", "source_kind": "real", "complete": true, "truncated": false, "ambiguous": false, "skipped": false, "started": start, "grid": grid, "process_before": before, "process_after": after, "bridge": evidence, "phases": phase, "commands": runner.observations, "calls": runner.calls, "elapsed_ns": time.Since(start)}); err != nil {

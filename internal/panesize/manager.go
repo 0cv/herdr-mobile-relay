@@ -254,8 +254,6 @@ func newManager(
 	}
 }
 
-// Available reports whether this relay can resize panes at all. The relay
-// advertises Resize Session only when it is true.
 func (m *Manager) SetOnResize(callback func(string)) {
 	m.mu.Lock()
 	m.onResize = callback
@@ -271,6 +269,8 @@ func (m *Manager) notifyResize(paneID string) {
 	}
 }
 
+// Available reports whether this relay can resize panes at all. The relay
+// advertises Resize Session only when it is true.
 func (m *Manager) Available() bool {
 	return m != nil && m.available
 }

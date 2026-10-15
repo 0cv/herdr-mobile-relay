@@ -200,6 +200,9 @@ func TestDisposablePiRowLeaseScrollIntegration(t *testing.T) {
 		}
 		markers, err := p1Markers(text.Content)
 		if err != nil {
+			if saveErr := contract.Save("failed-viewport.json", map[string]any{"ansi": ansi.Content, "text": text.Content, "grid": grid}); saveErr != nil {
+				t.Error(saveErr)
+			}
 			t.Fatal(err)
 		}
 		current, err := client.SocketPaneProcessInfo(ctx, pane)
@@ -275,6 +278,12 @@ func TestDisposablePiRowLeaseScrollIntegration(t *testing.T) {
 				return before, after, expected
 			}
 			time.Sleep(50 * time.Millisecond)
+		}
+		if saveErr := contract.Save(id+"-failed-before.json", before); saveErr != nil {
+			t.Error(saveErr)
+		}
+		if saveErr := contract.Save(id+"-failed-after.json", capture(grid, snapshot)); saveErr != nil {
+			t.Error(saveErr)
 		}
 		t.Fatal("numbered viewport did not move in requested direction")
 		return p1Viewport{}, p1Viewport{}, ""

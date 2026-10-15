@@ -1,21 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "${HERDR_FULLSCREEN_C2_PRIVATE:-}" = 1 ]; then
-    PRIVATE_ROOT="${HERDR_C2_INVOCATION_ROOT:-}"
-    PRIVATE_CLI="$PRIVATE_ROOT/runtime/project/frontend/node_modules/@playwright/test/cli.js"
-    if [ -z "$PRIVATE_ROOT" ] || [ -z "${HERDR_C2_INVOCATION:-}" ] || [ ! -f "$PRIVATE_CLI" ]; then
-        echo "Private C2 Playwright route refused: bound invocation or selected shim is missing." >&2
-        exit 2
-    fi
-    if [ "${HERDR_C2_NATIVE_READY:-}" != 1 ]; then
-        echo "Private C2 Playwright route remains closed pending C3/C4 readiness." >&2
-        exit 2
-    fi
-    cd "$PRIVATE_ROOT/runtime/project/frontend"
-    exec node "$PRIVATE_CLI" test "$@"
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$FRONTEND_DIR/.." && pwd)"

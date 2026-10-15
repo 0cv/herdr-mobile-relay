@@ -72,7 +72,6 @@ type speechRequest struct {
 }
 
 type serverDependencies struct {
-	paneSizeRunner  panesize.CommandRunner
 	geometryRunner  panesize.CommandRunner
 	speechLanguages func() []string
 }

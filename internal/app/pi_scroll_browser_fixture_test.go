@@ -14,10 +14,16 @@ import (
 func p1OfflineEvidenceContract(t *testing.T) p1fixture.Contract {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil { t.Fatal(err) }
-	if err := os.Chmod(root, 0700); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
 	directory := filepath.Join(root, "evidence")
-	if err := os.Mkdir(directory, 0700); err != nil { t.Fatal(err) }
+	if err := os.Mkdir(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
 	return p1fixture.Contract{Root: root, UID: os.Getuid(), EvidenceDirectory: directory}
 }
 
@@ -27,7 +33,9 @@ func TestP1OfflineContractRejects(t *testing.T) {
 			t.Fatalf("invalid contract admitted: %q", input)
 		}
 	}
-	if _, err := p1fixture.Validate("{}", nil); err == nil { t.Fatal("nil environment admitted") }
+	if _, err := p1fixture.Validate("{}", nil); err == nil {
+		t.Fatal("nil environment admitted")
+	}
 }
 
 func TestP1OfflineContractEvidenceQuota(t *testing.T) {
@@ -47,14 +55,22 @@ func TestP1OfflineContractEvidenceQuota(t *testing.T) {
 		close(start)
 		writers.Wait()
 		close(results)
-		for err := range results { if err != nil { t.Fatal(err) } }
+		for err := range results {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 		entries, err := os.ReadDir(contract.EvidenceDirectory)
-		if err != nil || len(entries) != 12 { t.Fatalf("lost distinct writes: %d %v", len(entries), err) }
+		if err != nil || len(entries) != 12 {
+			t.Fatalf("lost distinct writes: %d %v", len(entries), err)
+		}
 	})
 	t.Run("distinct names competing for final capacity cannot both succeed", func(t *testing.T) {
 		contract := p1OfflineEvidenceContract(t)
 		for index := 0; index < 7; index++ {
-			if err := contract.Save(string(rune('a'+index))+".json", strings.Repeat("x", p1fixture.FileLimit-3)); err != nil { t.Fatal(err) }
+			if err := contract.Save(string(rune('a'+index))+".json", strings.Repeat("x", p1fixture.FileLimit-3)); err != nil {
+				t.Fatal(err)
+			}
 		}
 		start := make(chan struct{})
 		results := make(chan error, 2)
@@ -66,39 +82,69 @@ func TestP1OfflineContractEvidenceQuota(t *testing.T) {
 		}
 		close(start)
 		successes := 0
-		for index := 0; index < 2; index++ { if <-results == nil { successes++ } }
-		if successes != 1 { t.Fatalf("quota admitted %d competing writers", successes) }
+		for index := 0; index < 2; index++ {
+			if <-results == nil {
+				successes++
+			}
+		}
+		if successes != 1 {
+			t.Fatalf("quota admitted %d competing writers", successes)
+		}
 		entries, err := os.ReadDir(contract.EvidenceDirectory)
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		var total int64
 		for _, entry := range entries {
 			info, err := entry.Info()
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			total += info.Size()
 		}
-		if total > p1fixture.EvidenceLimit { t.Fatal("serialized accounting exceeded Go partition") }
+		if total > p1fixture.EvidenceLimit {
+			t.Fatal("serialized accounting exceeded Go partition")
+		}
 	})
 	t.Run("duplicate name retains original bytes", func(t *testing.T) {
 		contract := p1OfflineEvidenceContract(t)
-		if err := contract.Save("same.json", "original"); err != nil { t.Fatal(err) }
-		if err := contract.Save("same.json", "replacement"); err == nil { t.Fatal("exclusive evidence overwritten") }
+		if err := contract.Save("same.json", "original"); err != nil {
+			t.Fatal(err)
+		}
+		if err := contract.Save("same.json", "replacement"); err == nil {
+			t.Fatal("exclusive evidence overwritten")
+		}
 		data, err := os.ReadFile(filepath.Join(contract.EvidenceDirectory, "same.json"))
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		var value string
-		if err := json.Unmarshal(data, &value); err != nil || value != "original" { t.Fatal("original evidence changed") }
+		if err := json.Unmarshal(data, &value); err != nil || value != "original" {
+			t.Fatal("original evidence changed")
+		}
 	})
 	t.Run("oversized existing evidence fails accounting", func(t *testing.T) {
 		contract := p1OfflineEvidenceContract(t)
-		if err := os.WriteFile(filepath.Join(contract.EvidenceDirectory, "oversized.json"), []byte(strings.Repeat("x", p1fixture.FileLimit+1)), 0600); err != nil { t.Fatal(err) }
-		if err := contract.Save("next.json", "next"); err == nil { t.Fatal("oversized evidence ignored") }
+		if err := os.WriteFile(filepath.Join(contract.EvidenceDirectory, "oversized.json"), []byte(strings.Repeat("x", p1fixture.FileLimit+1)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := contract.Save("next.json", "next"); err == nil {
+			t.Fatal("oversized evidence ignored")
+		}
 	})
 	t.Run("foreign directory and unsafe lock refuse", func(t *testing.T) {
 		contract := p1OfflineEvidenceContract(t)
 		other := p1OfflineEvidenceContract(t)
 		contract.EvidenceDirectory = other.EvidenceDirectory
-		if err := contract.Save("foreign.json", "foreign"); err == nil { t.Fatal("foreign root admitted") }
+		if err := contract.Save("foreign.json", "foreign"); err == nil {
+			t.Fatal("foreign root admitted")
+		}
 		contract.EvidenceDirectory = filepath.Join(contract.Root, "evidence")
-		if err := os.Symlink(filepath.Join(other.Root, "lock"), contract.EvidenceDirectory+".lock"); err != nil { t.Fatal(err) }
-		if err := contract.Save("linked.json", "linked"); err == nil { t.Fatal("symlink accounting lock admitted") }
+		if err := os.Symlink(filepath.Join(other.Root, "lock"), contract.EvidenceDirectory+".lock"); err != nil {
+			t.Fatal(err)
+		}
+		if err := contract.Save("linked.json", "linked"); err == nil {
+			t.Fatal("symlink accounting lock admitted")
+		}
 	})
 }

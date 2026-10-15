@@ -1,10 +1,7 @@
 package p1fixture
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,13 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
-	"github.com/0cv/herdr-mobile-relay/internal/ownedproc"
 )
 
 const FileLimit = 512 * 1024
@@ -27,41 +24,12 @@ const EvidenceLimit = 4 * 1024 * 1024
 var ErrContract = errors.New("invalid P1 fixture contract")
 
 type Contract struct {
-	StageRoot string `json:"stageRoot"`
-	StageID string `json:"stageId"`
-	RunID string `json:"runId"`
-	AttemptID string `json:"attemptId"`
-	Root string `json:"root"`
-	SocketPath string `json:"socketPath"`
-	LockToken string `json:"lockToken"`
-	UID int `json:"uid"`
-	LaunchInputPath string `json:"launchInputPath"`
-	LaunchInputSHA256 string `json:"launchInputSha256"`
+	Root              string `json:"root"`
+	SocketPath        string `json:"socketPath"`
+	UID               int    `json:"uid"`
+	ServerPID         int    `json:"serverPid"`
+	ServerStart       string `json:"serverStart"`
 	EvidenceDirectory string `json:"evidenceDirectory"`
-}
-
-type stageIdentity struct {
-	StageRoot string `json:"stage_root"`
-	StageID string `json:"stage_id"`
-	RunID string `json:"run_id"`
-	AttemptID string `json:"attempt_id"`
-	Root string `json:"root_path"`
-	UID int `json:"uid"`
-	OwnerUID int `json:"owner_uid"`
-	Kind string `json:"kind"`
-	Seq int `json:"seq"`
-	Number int `json:"attempt_number"`
-	MaxAttempts int `json:"max_attempts"`
-	AllocationLimit int `json:"allocation_limit"`
-	Parent string `json:"fixture_root_parent"`
-	Prefix string `json:"fixture_root_prefix"`
-	Successor struct {
-		StageRoot string `json:"stageRoot"`
-		StageID string `json:"stageId"`
-		RunID string `json:"runId"`
-		DispositionPath string `json:"dispositionPath"`
-		DispositionSHA256 string `json:"dispositionSha256"`
-	} `json:"successor"`
 }
 
 func privatePathMode(path string, directory bool, uid int, mode os.FileMode) error {
@@ -129,90 +97,6 @@ func readPrivateMode(path string, uid int, mode os.FileMode) ([]byte, error) {
 	return data, nil
 }
 
-func readJSON(path string, uid int, target any) error {
-	data, err := ReadPrivate(path, uid)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, target)
-}
-
-func identityMatches(value stageIdentity, c Contract) bool {
-	return value.StageID == c.StageID && value.RunID == c.RunID && value.AttemptID == c.AttemptID && value.Root == c.Root
-}
-
-func digest(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-func validateSuccessorAuthority(owner stageIdentity, c Contract) error {
-	pin := owner.Successor
-	if pin.StageRoot == "" || pin.StageRoot == c.StageRoot || pin.StageID == "" || pin.StageID == c.StageID || pin.RunID == "" || pin.RunID == c.RunID {
-		return ErrContract
-	}
-	data, err := readPrivateMode(pin.DispositionPath, c.UID, 0400)
-	if err != nil || len(pin.DispositionSHA256) != 64 || digest(data) != pin.DispositionSHA256 {
-		return errors.Join(err, ErrContract)
-	}
-	var disposition struct {
-		Schema int `json:"schema_version"`
-		Kind string `json:"kind"`
-		HistoricalClosureProved *bool `json:"historicalClosureProved"`
-		Namespace map[string]json.RawMessage `json:"namespace"`
-		Decision struct {
-			Path string `json:"path"`
-			SHA256 string `json:"sha256"`
-		} `json:"decision"`
-	}
-	if err := json.Unmarshal(data, &disposition); err != nil || disposition.Schema != 1 || disposition.Kind != "successor-historical-disposition" || disposition.HistoricalClosureProved == nil || *disposition.HistoricalClosureProved {
-		return errors.Join(err, ErrContract)
-	}
-	for key, expected := range map[string]string{"stage": c.StageRoot, "fixture": c.Root, "home": filepath.Join(c.Root, "home"), "config": filepath.Join(c.Root, "config"), "tmp": filepath.Join(c.Root, "tmp"), "profiles": filepath.Join(c.Root, "profiles"), "cache": filepath.Join(c.Root, "cache"), "data": filepath.Join(c.Root, "data"), "state": filepath.Join(c.Root, "state"), "runtime": filepath.Join(c.Root, "runtime")} {
-		var actual string
-		if err := json.Unmarshal(disposition.Namespace[key], &actual); err != nil || actual != expected {
-			return errors.Join(err, ErrContract)
-		}
-	}
-	for key, expected := range map[string]int{"localAllocationLimit": 1, "historicalCount": 6, "cumulativeCount": 7} {
-		var actual int
-		if err := json.Unmarshal(disposition.Namespace[key], &actual); err != nil || actual != expected {
-			return errors.Join(err, ErrContract)
-		}
-	}
-	if disposition.Decision.Path == pin.DispositionPath {
-		return ErrContract
-	}
-	decisionBytes, err := readPrivateMode(disposition.Decision.Path, c.UID, 0400)
-	if err != nil || digest(decisionBytes) != disposition.Decision.SHA256 {
-		return errors.Join(err, ErrContract)
-	}
-	var decision struct {
-		Kind string `json:"kind"`
-		Phase string `json:"phase"`
-		SourceOnly *bool `json:"sourceOnly"`
-		StageID string `json:"stageId"`
-		RunID string `json:"runId"`
-		HistoricalClosureProved *bool `json:"historicalClosureProved"`
-		LocalAllocationLimit int `json:"localAllocationLimit"`
-		HistoricalCount int `json:"historicalCount"`
-		CumulativeCount int `json:"cumulativeCount"`
-		Namespace map[string]json.RawMessage `json:"namespace"`
-	}
-	if err := json.Unmarshal(decisionBytes, &decision); err != nil || decision.Kind != "p1-native-runtime-authority" || decision.Phase != "N" || decision.SourceOnly == nil || *decision.SourceOnly || decision.StageID != c.StageID || decision.RunID != c.RunID || decision.HistoricalClosureProved == nil || *decision.HistoricalClosureProved || decision.LocalAllocationLimit != 1 || decision.HistoricalCount != 6 || decision.CumulativeCount != 7 {
-		return errors.Join(err, ErrContract)
-	}
-	if len(decision.Namespace) != len(disposition.Namespace) {
-		return ErrContract
-	}
-	for key, value := range disposition.Namespace {
-		if !bytes.Equal(bytes.TrimSpace(decision.Namespace[key]), bytes.TrimSpace(value)) {
-			return ErrContract
-		}
-	}
-	return nil
-}
-
 func Validate(input string, getenv func(string) string) (*Contract, error) {
 	if len(input) == 0 || len(input) > FileLimit || getenv == nil {
 		return nil, ErrContract
@@ -226,164 +110,92 @@ func Validate(input string, getenv func(string) string) (*Contract, error) {
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return nil, ErrContract
 	}
-	if c.UID != os.Getuid() || c.StageID == "" || c.RunID == "" || c.AttemptID != "attempt-001" || c.LockToken == "" || c.SocketPath != filepath.Join(c.Root, "config/herdr/herdr.sock") || len(c.SocketPath) >= 104 || c.EvidenceDirectory != filepath.Join(c.Root, "evidence") {
-		return nil, ErrContract
-	}
-	for _, path := range []string{c.StageRoot, c.Root, filepath.Join(c.StageRoot, "attempts"), filepath.Join(c.StageRoot, "attempts", c.AttemptID), filepath.Join(c.StageRoot, "active.lock"), c.EvidenceDirectory} {
-		if err := privatePath(path, true, c.UID); err != nil {
-			return nil, err
-		}
-	}
-	paths := map[string]string{"HOME": "home", "XDG_CONFIG_HOME": "config", "XDG_CACHE_HOME": "cache", "XDG_DATA_HOME": "data", "XDG_STATE_HOME": "state", "XDG_RUNTIME_DIR": "runtime", "TMPDIR": "tmp", "NODE_COMPILE_CACHE": "cache/node"}
-	if getenv("BUN_RUNTIME_TRANSPILER_CACHE_PATH") != "0" {
-		return nil, fmt.Errorf("%w: Bun cache is not disabled", ErrContract)
-	}
-	for key, relative := range paths {
-		path := filepath.Join(c.Root, relative)
-		if getenv(key) != path {
-			return nil, fmt.Errorf("%w: %s does not match owned root", ErrContract, key)
-		}
-		if err := privatePath(path, true, c.UID); err != nil {
-			return nil, err
-		}
-	}
-	var owner stageIdentity
-	ownerPath := filepath.Join(c.StageRoot, "stage-owner.json")
-	ownerBytes, err := ReadPrivate(ownerPath, c.UID)
-	if err != nil || json.Unmarshal(ownerBytes, &owner) != nil || owner.StageRoot != c.StageRoot || owner.StageID != c.StageID || owner.RunID != c.RunID || owner.OwnerUID != c.UID || owner.MaxAttempts != 6 || owner.AllocationLimit != 1 || owner.Prefix != "herdr-scroll-p1-"+c.StageID+"-" || c.Root != filepath.Join(owner.Parent, owner.Prefix+c.AttemptID) {
-		return nil, errors.Join(err, ErrContract)
-	}
-	if err := validateSuccessorAuthority(owner, c); err != nil {
+	parent, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
 		return nil, err
 	}
-	var lock struct {
-		Token string `json:"token"`
-		RunID string `json:"run_id"`
+	if c.UID != os.Getuid() || filepath.Dir(c.Root) != parent || !strings.HasPrefix(filepath.Base(c.Root), "herdr-scroll-p1-") || c.SocketPath != filepath.Join(c.Root, "config/herdr/herdr.sock") || c.ServerPID <= 0 || c.ServerStart == "" || c.EvidenceDirectory != filepath.Join(c.Root, "evidence") {
+		return nil, ErrContract
 	}
-	if err := readJSON(filepath.Join(c.StageRoot, "active.lock/owner.json"), c.UID, &lock); err != nil || lock.Token != c.LockToken || lock.RunID != c.RunID {
-		return nil, errors.Join(err, ErrContract)
-	}
-	entries, err := os.ReadDir(filepath.Join(c.StageRoot, "active.lock"))
-	if err != nil || len(entries) != 1 || entries[0].Name() != "owner.json" {
-		return nil, errors.Join(err, ErrContract)
-	}
-	for _, path := range []string{filepath.Join(c.StageRoot, "attempts", c.AttemptID, "attempt-owner.json"), filepath.Join(c.StageRoot, "attempts", c.AttemptID, "root-created.json"), filepath.Join(c.Root, ".stage-owner.json")} {
-		var marker stageIdentity
-		if err := readJSON(path, c.UID, &marker); err != nil || !identityMatches(marker, c) {
-			return nil, errors.Join(err, ErrContract)
-		}
-		if filepath.Base(path) == ".stage-owner.json" && marker.UID != c.UID {
-			return nil, ErrContract
-		}
+	if err := privatePath(c.Root, true, c.UID); err != nil {
+		return nil, err
 	}
 	marker, err := ReadPrivate(filepath.Join(c.Root, "fixture-owner"), c.UID)
 	if err != nil || string(marker) != "disposable-scroll-fixture\n" {
 		return nil, errors.Join(err, ErrContract)
 	}
-	ledger, err := ReadPrivate(filepath.Join(c.StageRoot, "allocation-ledger.jsonl"), c.UID)
-	if err != nil || len(ledger) == 0 || ledger[len(ledger)-1] != '\n' {
-		return nil, errors.Join(err, ErrContract)
-	}
-	allocations := 0
-	for index, line := range bytes.Split(bytes.TrimSuffix(ledger, []byte{'\n'}), []byte{'\n'}) {
-		var record stageIdentity
-		if err := json.Unmarshal(line, &record); err != nil || record.Seq != index+1 || record.StageID != c.StageID || record.RunID != c.RunID {
-			return nil, errors.Join(err, ErrContract)
+	for key, relative := range map[string]string{"HOME": "home", "XDG_CONFIG_HOME": "config", "XDG_CACHE_HOME": "cache", "XDG_DATA_HOME": "data", "XDG_STATE_HOME": "state", "XDG_RUNTIME_DIR": "runtime", "TMPDIR": "tmp", "PI_CODING_AGENT_DIR": "pi"} {
+		path := filepath.Join(c.Root, relative)
+		if getenv(key) != path {
+			return nil, fmt.Errorf("%w: %s escaped fixture", ErrContract, key)
 		}
-		if record.Kind != "allocation" || !identityMatches(record, c) || record.Number != 1 {
-			return nil, ErrContract
-		}
-		allocations++
-	}
-	if allocations != 1 {
-		return nil, ErrContract
-	}
-	launchBytes, err := readPrivateMode(c.LaunchInputPath, c.UID, 0400)
-	if err != nil || len(c.LaunchInputSHA256) != 64 || digest(launchBytes) != c.LaunchInputSHA256 {
-		return nil, errors.Join(err, ErrContract)
-	}
-	var launch struct {
-		SchemaVersion int `json:"schema_version"`
-		SourceKind string `json:"source_kind"`
-		Complete bool `json:"complete"`
-		Truncated *bool `json:"truncated"`
-		Ambiguous *bool `json:"ambiguous"`
-		Skipped *bool `json:"skipped"`
-		Kind string `json:"kind"`
-		Phase string `json:"phase"`
-		Contract Contract `json:"contract"`
-		OwnerSHA256 string `json:"ownerSha256"`
-		AllocationSHA256 string `json:"allocationSha256"`
-		Environment map[string]string `json:"environment"`
-	}
-	launchDecoder := json.NewDecoder(bytes.NewReader(launchBytes))
-	launchDecoder.DisallowUnknownFields()
-	if err := launchDecoder.Decode(&launch); err != nil || launch.SchemaVersion != 1 || launch.SourceKind != "real" || !launch.Complete || launch.Truncated == nil || *launch.Truncated || launch.Ambiguous == nil || *launch.Ambiguous || launch.Skipped == nil || *launch.Skipped || launch.Kind != "p1-owned-native-launch" || launch.Phase != "N" || launch.Contract.StageRoot != c.StageRoot || launch.Contract.StageID != c.StageID || launch.Contract.RunID != c.RunID || launch.Contract.Root != c.Root || launch.Contract.AttemptID != c.AttemptID || launch.Contract.SocketPath != c.SocketPath || launch.Contract.LockToken != c.LockToken || launch.Contract.UID != c.UID || launch.Contract.EvidenceDirectory != c.EvidenceDirectory || launch.Contract.LaunchInputPath != c.LaunchInputPath || launch.Contract.LaunchInputSHA256 != "" || launch.OwnerSHA256 != digest(ownerBytes) || launch.AllocationSHA256 != digest(ledger) {
-		return nil, errors.Join(err, ErrContract)
-	}
-	if err := launchDecoder.Decode(new(any)); !errors.Is(err, io.EOF) || len(launch.Environment) != len(paths)+2 {
-		return nil, ErrContract
-	}
-	for key, relative := range paths {
-		if launch.Environment[key] != filepath.Join(c.Root, relative) {
-			return nil, ErrContract
-		}
-	}
-	for key, value := range launch.Environment {
-		if getenv(key) != value {
-			return nil, fmt.Errorf("%w: pinned launch environment %s changed", ErrContract, key)
-		}
-	}
-	if launch.Environment["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] != "0" || launch.Environment["HERDR_P1_CONTRACT_BUN"] == "" {
-		return nil, ErrContract
-	}
-	for _, path := range []string{c.SocketPath, filepath.Join(c.Root, "config/herdr/herdr-client.sock")} {
-		if err := privatePath(filepath.Dir(path), true, c.UID); err != nil {
+		if err := privatePath(path, true, c.UID); err != nil {
 			return nil, err
 		}
-		info, err := os.Lstat(path)
-		if err != nil {
-			return nil, err
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || int(stat.Uid) != c.UID || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 {
-			return nil, ErrContract
-		}
+	}
+	if getenv("HERDR_SOCKET_PATH") != c.SocketPath || getenv("HERDR_CONFIG_PATH") != filepath.Join(c.Root, "config/herdr/config.toml") {
+		return nil, ErrContract
+	}
+	info, err := os.Lstat(c.SocketPath)
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != c.UID || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 {
+		return nil, ErrContract
 	}
 	return &c, nil
 }
 
 func PrepareEnvironment() error {
-	input, supplied := os.LookupEnv("HERDR_P1_CONTRACT_JSON")
-	if supplied {
+	if input, supplied := os.LookupEnv("HERDR_P1_CONTRACT_JSON"); supplied {
 		_, err := Validate(input, os.Getenv)
 		return err
 	}
-	for _, key := range []string{"HERDR_P1_CONTRACT_BUN", "HERDR_SCROLL_FIXTURE_SOCKET", "HERDR_SCROLL_FIXTURE_PANE", "HERDR_SCROLL_FIXTURE_SESSION", "HERDR_SCROLL_FIXTURE_BIN", "HERDR_SCROLL_FIXTURE_MODE", "HERDR_ROW_FIXTURE_SOCKET", "HERDR_ROW_FIXTURE_PANE", "HERDR_ROW_FIXTURE_TERMINAL", "HERDR_ROW_FIXTURE_SESSION", "HERDR_ROW_FIXTURE_BIN", "HERDR_LATENCY_FIXTURE_SOCKET", "HERDR_LATENCY_FIXTURE_PANE", "HERDR_LATENCY_FIXTURE_TERMINAL", "HERDR_LATENCY_FIXTURE_SESSION", "HERDR_LATENCY_FIXTURE_BIN"} {
-		if _, supplied := os.LookupEnv(key); supplied {
-			return fmt.Errorf("%w: partial fixture environment", ErrContract)
+	for _, key := range os.Environ() {
+		if strings.HasPrefix(key, "HERDR_SCROLL_FIXTURE_") || strings.HasPrefix(key, "HERDR_ROW_FIXTURE_") || strings.HasPrefix(key, "HERDR_LATENCY_FIXTURE_") {
+			return ErrContract
 		}
 	}
-	if runtime.GOOS != "darwin" {
-		return nil
+	if runtime.GOOS == "darwin" {
+		path, err := filepath.EvalSymlinks("/tmp")
+		if err != nil {
+			return err
+		}
+		return os.Setenv("TMPDIR", path)
 	}
-	path, err := filepath.EvalSymlinks("/tmp")
-	if err != nil {
-		return err
-	}
-	return os.Setenv("TMPDIR", path)
+	return nil
 }
 
 func Current() (*Contract, error) {
-	return Validate(os.Getenv("HERDR_P1_CONTRACT_JSON"), os.Getenv)
+	c, err := Validate(os.Getenv("HERDR_P1_CONTRACT_JSON"), os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	birth, err := processStart(ctx, c.ServerPID)
+	if err != nil || birth != c.ServerStart {
+		return nil, errors.Join(err, ErrContract)
+	}
+	owners, err := Run(ctx, "lsof", "", "-n", "-P", "-a", "-p", strconv.Itoa(c.ServerPID), "-U", "-Fn")
+	if err != nil || !strings.Contains(string(owners), "\nn"+c.SocketPath+"\n") {
+		return nil, errors.Join(err, ErrContract)
+	}
+	return c, nil
+}
+
+func processStart(ctx context.Context, pid int) (string, error) {
+	out, err := childenv.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	return strings.Join(strings.Fields(string(out)), " "), err
 }
 
 type commandStream struct {
-	mu sync.Mutex
-	data []byte
+	mu       sync.Mutex
+	data     []byte
 	overflow bool
-	frozen bool
-	cancel context.CancelFunc
+	frozen   bool
+	cancel   context.CancelFunc
 }
 
 func (s *commandStream) Write(data []byte) (int, error) {
@@ -419,9 +231,8 @@ func Run(ctx context.Context, name, input string, args ...string) ([]byte, error
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	command := childenv.Command(name, args...)
-	command.Env = append(command.Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0")
 	command.Stdin = strings.NewReader(input)
-	command.WaitDelay = 200*time.Millisecond
+	command.WaitDelay = 200 * time.Millisecond
 	stdout, stderr := &commandStream{cancel: cancel}, &commandStream{cancel: cancel}
 	command.Stdout, command.Stderr = stdout, stderr
 	if err := ctx.Err(); err != nil {
@@ -430,58 +241,53 @@ func Run(ctx context.Context, name, input string, args ...string) ([]byte, error
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
-	inspection, stop := context.WithTimeout(context.Background(), ownedproc.InspectionBudget)
-	registry, ownershipErr := ownedproc.New(inspection, ownedproc.Native{}, command.Process.Pid, os.Getpid())
-	stop()
+	birth, birthErr := childBirth(command.Process.Pid)
 	wait := make(chan error, 1)
 	go func() { wait <- command.Wait() }()
-	if ownershipErr != nil {
-		cancel()
-	}
-	var waitErr, cancelErr error
+	var waitErr error
 	select {
 	case waitErr = <-wait:
 	case <-ctx.Done():
-		cancelErr = ctx.Err()
-		for _, force := range []bool{false, true} {
-			if ownershipErr != nil {
-				cancelErr = errors.Join(cancelErr, ownedproc.ErrIncomplete)
-			} else {
-				inspection, stop := context.WithTimeout(context.Background(), ownedproc.InspectionBudget)
-				cancelErr = errors.Join(cancelErr, registry.Signal(inspection, command.Process.Pid, force))
-				stop()
+		signal := func(value os.Signal) error {
+			current, err := childBirth(command.Process.Pid)
+			if birthErr != nil || birth == "" || err != nil || current != birth {
+				return errors.New("P1 child identity unavailable; no signal sent")
 			}
-			timer := time.NewTimer(200*time.Millisecond)
+			return command.Process.Signal(value)
+		}
+		waitErr = errors.Join(ctx.Err(), signal(syscall.SIGTERM))
+		select {
+		case err := <-wait:
+			waitErr = errors.Join(waitErr, err)
+		case <-time.After(200 * time.Millisecond):
+			waitErr = errors.Join(waitErr, signal(syscall.SIGKILL))
 			select {
-			case waitErr = <-wait:
-				timer.Stop()
-				output, stdoutErr := stdout.snapshot()
-				_, stderrErr := stderr.snapshot()
-				return output, errors.Join(ownershipErr, waitErr, cancelErr, stdoutErr, stderrErr)
-			case <-timer.C:
-				waitErr = ownedproc.ErrIncomplete
+			case err := <-wait:
+				waitErr = errors.Join(waitErr, err)
+			case <-time.After(200 * time.Millisecond):
+				waitErr = errors.Join(waitErr, errors.New("P1 child cleanup incomplete"))
 			}
 		}
 	}
 	output, stdoutErr := stdout.snapshot()
 	_, stderrErr := stderr.snapshot()
-	return output, errors.Join(ownershipErr, waitErr, cancelErr, stdoutErr, stderrErr, ctx.Err())
+	return output, errors.Join(waitErr, stdoutErr, stderrErr)
 }
 
 type CommandObservation struct {
-	Name string `json:"name"`
-	Args []string `json:"args"`
-	Output []byte `json:"output_base64"`
-	Started time.Time `json:"started"`
+	Name    string        `json:"name"`
+	Args    []string      `json:"args"`
+	Output  []byte        `json:"output_base64"`
+	Started time.Time     `json:"started"`
 	Elapsed time.Duration `json:"elapsed_ns"`
-	Error string `json:"error,omitempty"`
+	Error   string        `json:"error,omitempty"`
 }
 
 type Runner struct {
-	mu sync.Mutex
+	mu      sync.Mutex
 	records []CommandObservation
-	bytes int
-	failed bool
+	bytes   int
+	failed  bool
 }
 
 func (r *Runner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {

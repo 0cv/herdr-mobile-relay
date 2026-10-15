@@ -280,10 +280,20 @@ connections can use 10,000. The "older history" notice reports when rows beyond
 the served window exist. Use **Copy** for the latest response or
 **Conversation History** for clean, searchable earlier turns.
 
-Pi's **Scroll agent up** and **Scroll agent down** buttons send confirmed wheel
-input only when Pi reports its live fullscreen screen and the relay can verify
-the active pane and terminal. A reader can view the controls but cannot use
-them; ordinary terminals and unverified scroll states leave them disabled.
+**Pi buttons only:** in **Automatic**, **Scroll agent up/down** sends one wheel
+report when the relay verifies Pi's live fullscreen renderer, foreground owner
+and terminal size. **Local view** disables application input and lets you pan or
+select locally; if available, it shows the separately retained prior local-history
+snapshot. Automatic returns to the latest live screen. Readers cannot mutate
+either selection or scrolling. Regular or unverified Pi stays local. DOM scrolling,
+Jump to latest and Conversation History never send wheel input.
+
+These buttons move the shared laptop/Pi view too. Reports target the terminal's
+center cell: an open menu there may scroll instead of the transcript. Validation
+is best-effort, not atomic with Pi's input parser. A resize, renderer change or
+handoff after validation can ignore input, expose escape text or deliver it to a
+different input surface. Switch to Local view before incompatible screens. There
+are no gestures, automatic mouse enabling, key fallback or Codex/Claude controls.
 
 In **Settings → Agents → Default View**, choose **Terminal** or
 **Conversation** for new agent openings. Terminal is the initial default. In
