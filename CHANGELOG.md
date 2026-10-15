@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Read OpenCode 2.x conversation history. History, completion responses and
+  activity extracts now work for OpenCode 2.x, on fresh installs and on stores
+  upgraded from 1.x, where each session is read from whichever format holds
+  it. OpenCode 1.x stores keep working as before.
+
 ### Fixed
 
 - Show OpenCode conversation history, completion responses and activity
@@ -13,6 +20,9 @@ project follows [Semantic Versioning](https://semver.org/).
   resumes a session in its stored directory, so the relay now trusts the
   session ID Herdr reports for the pane instead of rejecting it as belonging
   to a different workspace (#61). Hermes keeps its workspace check.
+- Mark OpenCode shell commands that exit with a non-zero code as failed in
+  conversation history. OpenCode records them as completed and stores the
+  exit code separately.
 
 ## [0.22.9] - 2026-10-13
 
