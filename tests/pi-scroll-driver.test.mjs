@@ -19,7 +19,7 @@ async function predecessors(root, count) {
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true }); });
 
 describe('offline driver orchestration only; no Herdr/Pi or native qualification', () => {
-  test('charges existing six as seven, links predecessor and preserves original bytes', async () => {
+  test('charges existing six sequentially through nine, links predecessors and refuses ten', async () => {
     const root = await directory();
     await predecessors(root, 6);
     const before = await readFile(join(root, 'run-6/receipt.json'), 'utf8');
@@ -34,6 +34,12 @@ describe('offline driver orchestration only; no Herdr/Pi or native qualification
     const next = await allocateRun(root);
     expect(next.index).toBe(8);
     await next.release();
+    await preserveReceipt(next.directory, undefined, { result: 'failed', error: 'second setup failed' });
+    const last = await allocateRun(root);
+    expect(last.index).toBe(9);
+    expect(last.predecessor.path).toBe(join(root, 'run-8/receipt.json'));
+    expect(last.predecessor.sha256).toHaveLength(64);
+    await last.release();
     await expect(allocateRun(root)).rejects.toThrow('exhausted');
     expect(await readFile(join(root, 'run-6/receipt.json'), 'utf8')).toBe(before);
   });
@@ -55,9 +61,11 @@ describe('offline driver orchestration only; no Herdr/Pi or native qualification
       await expect(allocateRun(root)).rejects.toThrow();
       expect(await readdir(root)).not.toContain('.active');
     }
-    const root = await directory();
-    await predecessors(root, 9);
-    await expect(allocateRun(root)).rejects.toThrow('exhausted');
+    for (const count of [9, 10]) {
+      const root = await directory();
+      await predecessors(root, count);
+      await expect(allocateRun(root)).rejects.toThrow('exhausted');
+    }
   });
 
   test('parses actual Herdr response envelope and rejects old top-level/ambiguous shapes', () => {

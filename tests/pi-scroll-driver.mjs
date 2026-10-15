@@ -10,7 +10,7 @@ export async function allocateRun(output) {
     const names = (await readdir(output)).filter(name => name.startsWith('run-'));
     const numbers = names.map(name => Number(/^run-([1-9]\d*)$/.exec(name)?.[1])).sort((a, b) => a - b);
     if (numbers.some((number, index) => !Number.isSafeInteger(number) || number !== index + 1)) throw new Error('qualification allocations are not contiguous and unique');
-    if (numbers.length >= 8) throw new Error('eight real qualification runs exhausted');
+    if (numbers.length >= 9) throw new Error('nine real qualification runs exhausted');
     const index = numbers.length + 1;
     const directory = join(output, `run-${index}`);
     let predecessor = null;
