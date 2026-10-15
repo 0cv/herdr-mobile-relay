@@ -16,6 +16,9 @@ jobs:
   verify:
     name: Require successful check workflow
     runs-on: ubuntu-latest
+    # The script below waits up to 1800 seconds for check.yml; 45 minutes leaves
+    # headroom and stays under the 60-minute hosted-job ceiling.
+    timeout-minutes: 45
     steps:
       - name: Require successful check workflow
         env:
@@ -54,6 +57,8 @@ jobs:
   build:
     needs: verify
     runs-on: ubuntu-latest
+    # The same build and packaging steps carry a 30-minute cap in check.yml.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -98,6 +103,7 @@ jobs:
           - runner: macos-15
             target: darwin_arm64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -135,6 +141,7 @@ jobs:
     # publication too. Restore this dependency when mobile CI is re-enabled.
     needs: [verify, build, native-smoke]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: write

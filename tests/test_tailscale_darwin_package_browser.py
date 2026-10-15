@@ -179,6 +179,9 @@ ALLOWED = (
     ".github/workflows/check.yml",
     ".github/workflows/service-qualification.yml",
     "scripts/ci/run-service-qualification.sh",
+    # Hosted-job timeout caps (T004 review F002): the tag-triggered release workflow.
+    # Added only for that finding; check.yml above already covers the branch jobs.
+    ".github/workflows/release.yml",
     # This gate: the Darwin workflow, its runner and the qualification gate script.
     ".github/workflows/tailscale-darwin-package-browser.yml",
     "tests/test_tailscale_darwin_package_browser.py",
