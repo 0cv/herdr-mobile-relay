@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+type runnerCall struct {
+	name string
+	args []string
+}
+
 type readRunner struct {
 	calls []runnerCall
 	tty   string

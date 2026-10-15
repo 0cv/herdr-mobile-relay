@@ -7,8 +7,10 @@ import {
   defaultAgentView,
   paneAgentViewOverrides,
   setPaneAgentView,
+  setTerminalHeightLease,
   setTerminalHistoryLines,
   setTerminalRefreshInterval,
+  setTerminalResizeSession,
 } from '$lib/preferences';
 import { paneViewPreferenceKey } from '$lib/agent-view';
 import { closeCurrentView, currentView, initializeRouter, navigate } from '$lib/router';
@@ -110,6 +112,8 @@ describe('relay command store', () => {
   afterEach(() => {
     transportHijack.current = null;
     relayStore.destroy();
+    setTerminalResizeSession(false);
+    setTerminalHeightLease(false);
     relayStore.relayConfigs.set([]);
     defaultAgentView.set('terminal');
     paneAgentViewOverrides.set({});
@@ -937,7 +941,7 @@ describe('relay command store', () => {
   });
 
 
-  it('acquires and releases validated pane-size leases for capable relays', async () => {
+  function openPaneSizeRelay(capabilities: string[]) {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
@@ -945,95 +949,86 @@ describe('relay command store', () => {
       protocol: 3,
       version: 'abc123',
       host: 'fedora',
-      capabilities: ['pane_size_lease'],
+      capabilities,
       agent_profiles: [],
     });
     socket.message({
       type: 'agents',
       agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp', ...exactAgentFields() }],
     });
-    const agent = get(relayStore.agents)[0];
+    const sent = () => socket.sent.map((payload) => JSON.parse(payload));
+    return { socket, agent: get(relayStore.agents)[0], sent };
+  }
 
-    const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const acquire = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'lease_pane_size');
-    expect(acquire).toMatchObject({
-      type: 'lease_pane_size',
-      pane_id: 'w1:p1',
-      columns: 83,
-      protocol: 3,
-    });
-    expect(acquire.request_id).toBeTruthy();
-    expect(acquire).not.toHaveProperty('client_id');
-    // The relay does not advertise row support: rows must not be sent, and
-    // no applied height may be believed.
-    expect(acquire).not.toHaveProperty('rows');
-    socket.message({
-      type: 'command_result',
-      action: 'lease_pane_size',
-      request_id: acquire.request_id,
-      ok: true,
-      data: { columns: 83 },
-    });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 0 });
+  it('never leases against a relay that only advertises the legacy capability', async () => {
+    setTerminalResizeSession(true);
+    setTerminalHeightLease(true);
+    const { agent, sent } = openPaneSizeRelay(['pane_size_lease', 'pane_size_lease_rows']);
 
-    const release = relayStore.releasePaneSize(agent);
-    const releaseCommand = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'release_pane_size');
-    expect(releaseCommand).toMatchObject({
-      type: 'release_pane_size',
-      pane_id: 'w1:p1',
-      protocol: 3,
-    });
-    expect(releaseCommand.request_id).toBeTruthy();
-    expect(releaseCommand).not.toHaveProperty('client_id');
-    socket.message({
-      type: 'command_result',
-      action: 'release_pane_size',
-      request_id: releaseCommand.request_id,
-      ok: true,
-    });
-    await expect(release).resolves.toBeUndefined();
-    await expect(relayStore.leasePaneSize(agent, 39)).rejects.toThrow(/between 40 and 240/);
+    await expect(relayStore.leasePaneSize(agent, 83, 32)).rejects.toThrow(/unavailable on this relay/);
+    await expect(relayStore.leasePaneSize(agent, 80, 0)).rejects.toThrow(/unavailable on this relay/);
+    expect(sent().filter((message) => message.type === 'lease_pane_size')).toHaveLength(0);
   });
 
-  it('leases rows only when the relay advertises row support', async () => {
-    const socket = MockWebSocket.instances.at(-1)!;
-    socket.open();
-    socket.message({
-      type: 'push_config',
-      protocol: 3,
-      version: 'abc123',
-      host: 'fedora',
-      capabilities: ['pane_size_lease', 'pane_size_lease_rows'],
-      agent_profiles: [],
-    });
-    socket.message({
-      type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp', ...exactAgentFields() }],
-    });
-    const agent = get(relayStore.agents)[0];
+  it('does not lease while Resize Session is off, even on a capable relay', async () => {
+    const { agent, sent } = openPaneSizeRelay(['pane_size_opt_in', 'pane_size_opt_in_rows']);
+    await expect(relayStore.leasePaneSize(agent, 83, 32)).rejects.toThrow(/Resize Session is off/);
+    expect(sent().filter((message) => message.type === 'lease_pane_size')).toHaveLength(0);
+  });
+
+  it('leases with opt_in and releases immediately when Resize Session is turned off', async () => {
+    setTerminalResizeSession(true);
+    const { socket, agent, sent } = openPaneSizeRelay(['pane_size_opt_in', 'pane_size_opt_in_rows']);
 
     const lease = relayStore.leasePaneSize(agent, 83, 32);
-    const acquire = socket.sent.map((payload) => JSON.parse(payload))
-      .findLast((message) => message.type === 'lease_pane_size');
-    expect(acquire).toMatchObject({
-      type: 'lease_pane_size',
-      pane_id: 'w1:p1',
-      columns: 83,
-      rows: 32,
-      protocol: 3,
+    const leaseCommand = sent().findLast((message) => message.type === 'lease_pane_size');
+    expect(leaseCommand).toMatchObject({
+      type: 'lease_pane_size', pane_id: 'w1:p1', protocol: 3, columns: 83, rows: 32, opt_in: true,
     });
+    expect(leaseCommand).not.toHaveProperty('client_id');
     socket.message({
-      type: 'command_result',
-      action: 'lease_pane_size',
-      request_id: acquire.request_id,
-      ok: true,
-      // Another client holds a shorter lease: the applied height wins.
-      data: { columns: 83, rows: 30 },
+      type: 'command_result', action: 'lease_pane_size', request_id: leaseCommand.request_id,
+      ok: true, data: { columns: 83, rows: 32 },
     });
-    await expect(lease).resolves.toEqual({ columns: 83, rows: 30 });
-    await expect(relayStore.leasePaneSize(agent, 80, 9)).rejects.toThrow(/between 10 and 120/);
+    await expect(lease).resolves.toEqual({ columns: 83, rows: 32 });
+
+    // Leaving the terminal keeps the relay's navigation grace.
+    const release = relayStore.releasePaneSize(agent);
+    const graceRelease = sent().findLast((message) => message.type === 'release_pane_size');
+    expect(graceRelease).toMatchObject({ type: 'release_pane_size', pane_id: 'w1:p1', protocol: 3 });
+    expect(graceRelease).not.toHaveProperty('immediate');
+    expect(graceRelease).not.toHaveProperty('client_id');
+    socket.message({ type: 'command_result', action: 'release_pane_size', request_id: graceRelease.request_id, ok: true });
+    await expect(release).resolves.toBeUndefined();
+
+    // Turning the switch off ends that grace at once, view or no view.
+    setTerminalResizeSession(false);
+    const releases = sent().filter((message) => message.type === 'release_pane_size');
+    expect(releases).toHaveLength(2);
+    expect(releases[1]).toMatchObject({ type: 'release_pane_size', pane_id: 'w1:p1', immediate: true });
+    socket.message({ type: 'command_result', action: 'release_pane_size', request_id: releases[1].request_id, ok: true });
+
+    // Nothing is owned any more: turning it on and off again sends nothing.
+    setTerminalResizeSession(true);
+    setTerminalResizeSession(false);
+    expect(sent().filter((message) => message.type === 'release_pane_size')).toHaveLength(2);
+  });
+
+  it('ignores a lease reply that arrives after Resize Session was turned off', async () => {
+    setTerminalResizeSession(true);
+    const { socket, agent, sent } = openPaneSizeRelay(['pane_size_opt_in']);
+    const lease = relayStore.leasePaneSize(agent, 83, 32);
+    const leaseCommand = sent().findLast((message) => message.type === 'lease_pane_size');
+    expect(leaseCommand).not.toHaveProperty('rows');
+
+    setTerminalResizeSession(false);
+    const release = sent().findLast((message) => message.type === 'release_pane_size');
+    expect(release).toMatchObject({ pane_id: 'w1:p1', immediate: true });
+    socket.message({
+      type: 'command_result', action: 'lease_pane_size', request_id: leaseCommand.request_id,
+      ok: true, data: { columns: 83, rows: 40 },
+    });
+    await expect(lease).rejects.toThrow(/turned off/);
   });
 
   it('replaces a stale connecting attempt on revalidation but keeps a young one', () => {

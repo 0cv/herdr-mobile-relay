@@ -9,13 +9,14 @@ import {
   PUSH_ENABLED_KEY,
   TERMINAL_HISTORY_KEY,
   TERMINAL_REFRESH_KEY,
+  TERMINAL_RESIZE_SESSION_KEY,
 } from '$lib/config';
 import { currentView, navigate } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
-import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
+import { defaultAgentView, paneAgentViewOverrides, setTerminalResizeSession } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -87,6 +88,7 @@ describe('settings relay status', () => {
   afterEach(() => {
     transportHijack.current = null;
     relayStore.destroy();
+    setTerminalResizeSession(false);
     relayStore.relayConfigs.set([]);
     defaultAgentView.set('terminal');
     paneAgentViewOverrides.set({});
@@ -526,13 +528,55 @@ describe('settings relay status', () => {
     await user.click(refresh.getByRole('button', { name: '250 ms' }));
   });
 
-  it('does not expose removed terminal width choices', () => {
+  it('offers Resize Session as a disclosed opt-in with a subordinate height switch', async () => {
+    const user = userEvent.setup();
     render(SettingsView);
 
     expect(screen.queryByRole('group', { name: 'Terminal Width' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
-    expect(screen.getByText(/Resize Session automatically leases/)).toBeInTheDocument();
+    const resize = screen.getByRole('switch', { name: 'Resize Session' });
+    expect(resize).not.toBeChecked();
+    for (const disclosure of [
+      /Resizes the shared terminal to fit this phone while the phone has it open\./,
+      /the laptop and SSH views of that pane look garbled/,
+      /agents may leave narrow copies of their output in the scrollback/,
+      /Resizing may truncate scrollback and lose older output\./,
+      /previous size is restored when the phone leaves the pane, unless it was changed on the laptop meanwhile/,
+      /Unavailable on relays that do not support it\./,
+      /controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width\./,
+    ]) expect(resize).toHaveAccessibleDescription(disclosure);
+    const height = screen.getByRole('switch', { name: 'Lease Terminal Height' });
+    expect(height).toBeDisabled();
+
+    await user.click(resize);
+    expect(resize).toBeChecked();
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('true');
+    // No connected relay supports leasing the height yet.
+    expect(height).toBeDisabled();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.server({
+      type: 'push_config', protocol: 3, host: 'fedora', agent_profiles: [],
+      capabilities: ['pane_size_opt_in', 'pane_size_opt_in_rows'],
+    });
+    await waitFor(() => expect(height).toBeEnabled());
+    await user.click(height);
+    expect(height).toBeChecked();
+
+    await user.click(resize);
+    expect(resize).not.toBeChecked();
+    expect(height).toBeDisabled();
+    expect(height).toBeChecked();
+    expect(height).toHaveAccessibleDescription(/The checked preference is remembered but inactive while Resize Session is off\./);
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('false');
+
+    await user.click(resize);
+    expect(height).toBeEnabled();
+    expect(height).toBeChecked();
+    // Leave the shared preferences at their defaults for subsequent tests.
+    await user.click(height);
+    await user.click(resize);
   });
 
   it('keeps notification controls out of the way until push delivery is enabled', async () => {

@@ -5,6 +5,79 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Read OpenCode 2.x conversation history. History, completion responses and
+  activity extracts now work for OpenCode 2.x, on fresh installs and on stores
+  upgraded from 1.x, where each session is read from whichever format holds
+  it. OpenCode 1.x stores keep working as before.
+
+### Fixed
+
+- Show OpenCode conversation history, completion responses and activity
+  extracts when a session is resumed from a directory other than the one it
+  was created in, such as a subdirectory or another project folder. OpenCode
+  resumes a session in its stored directory, so the relay now trusts the
+  session ID Herdr reports for the pane instead of rejecting it as belonging
+  to a different workspace (#61). Hermes keeps its workspace check.
+- Mark OpenCode shell commands that exit with a non-zero code as failed in
+  conversation history. OpenCode records them as completed and stores the
+  exit code separately.
+
+## [0.22.9] - 2026-10-13
+
+### Fixed
+
+- Accept Cloudflare Pages' single same-origin HTTP 308 redirect from a
+  build-specific `index.html` to its directory during phone-app deployment
+  verification. This fixes the `canonical public resource must not redirect`
+  failure introduced in 0.22.6. Query-changing redirects, additional hops and
+  JavaScript/CSS redirects remain rejected; the entry's MIME type and exact
+  content digest are still checked. If the old verifier blocks a phone-driven
+  upgrade, update the deployment-owner relay manually first, then retry app
+  deployment without clearing phone storage or pairing again.
+
+## [0.22.8] - 2026-10-13
+
+### Changed
+
+- Resize Session is now a per-device opt-in, off by default. Settings states
+  the cost before you turn it on: while the phone has a pane open, the shared
+  terminal is resized to fit it, so the laptop and SSH views of that pane look
+  garbled until the phone lets go, and agents may leave narrow copies of their
+  output in the scrollback. Resizing may also truncate scrollback and lose
+  older output. Herdr has no API to resize a pane's grid and
+  terminal together, so this cannot be avoided. Restoration is requested
+  when the phone leaves (immediately when the switch is turned off), with
+  best-effort preservation of dimensions changed on the laptop meanwhile.
+  Lease Terminal Height stays a separate, remembered opt-in, inactive while
+  Resize Session is off. Linux and macOS relays only; when off or unsupported,
+  controllers keep the desktop width with horizontal scrolling and readers
+  wrap. Relays no longer advertise the capability that made apps up to 0.22.7
+  resize automatically, and refuse resize requests that do not carry the new
+  opt-in. ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
+
+### Fixed
+
+- Guard against resizing a closed or replaced terminal. Every resize and
+  restore now opens the TTY first and then re-checks the pane's Herdr terminal,
+  shell process and TTY before writing through the held descriptor, using
+  direct ioctls instead of `stty`. A closed or replaced pane is dropped without
+  a write instead of being retried every second forever, and a restore that
+  cannot be confirmed is retried at most five times within thirty seconds,
+  then logged once with advice to resize the pane locally.
+  ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
+
+## [0.22.7] - 2026-10-05
+
+### Fixed
+
+- List command and skill files up to 1 MiB in the slash-command palette. Skills
+  larger than 64 KiB were silently left out, and commands larger than 64 KiB
+  lost their frontmatter, so hidden and non-invocable commands were listed
+  without descriptions. Larger files are skipped.
+  ([#59](https://github.com/0cv/herdr-mobile-relay/issues/59))
+
 ## [0.22.6] - 2026-10-02
 
 Version 0.22.5 was withdrawn; this release skips its version and asset generation.
@@ -1635,7 +1708,10 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...HEAD
+[0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
+[0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8
+[0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7
 [0.22.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...v0.22.6
 [0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4
 [0.22.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...v0.22.3

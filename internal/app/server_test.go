@@ -2033,7 +2033,7 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
+func TestPreparePaneResponsePreservesHistoryForViewportOnlyRead(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",

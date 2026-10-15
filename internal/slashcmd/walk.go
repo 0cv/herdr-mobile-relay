@@ -80,8 +80,8 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 			walkDirBudget(fullPath, childNS, source, out, suppressed, budget, truncated)
 			continue
 		}
-		// A FIFO or socket named *.md would reach fileFrontmatter, whose
-		// os.ReadFile blocks on a pipe with no writer - a permanent hang in a
+		// A FIFO or socket named *.md would reach readCommandFile, whose
+		// os.Open blocks on a pipe with no writer - a permanent hang in a
 		// service that polls. Only regular files can be commands.
 		if !e.Type().IsRegular() {
 			continue
@@ -94,7 +94,11 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 			continue
 		}
 		*budget--
-		fm := fileFrontmatter(fullPath)
+		data, ok := readCommandFile(fullPath)
+		if !ok {
+			continue
+		}
+		fm, _ := parseFrontmatterBytes(data)
 		if isHidden(fm) {
 			continue
 		}
@@ -108,7 +112,7 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 		}
 		*out = append(*out, Command{
 			Command:      fullName,
-			Description:  descriptionFrom(fm, fullPath),
+			Description:  descriptionFrom(fm, data),
 			Source:       source,
 			ArgumentHint: compact(fm["argument-hint"], 120),
 		})
@@ -439,20 +443,11 @@ func skillCommandFromFile(path, fallbackName, source, format string, budget *int
 	}
 }
 
-func fileFrontmatter(path string) map[string]string {
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) > maxMetadataSize {
-		return map[string]string{}
-	}
-	fm, _ := parseFrontmatterBytes(data)
-	return fm
-}
-
-func descriptionFrom(fm map[string]string, path string) string {
+func descriptionFrom(fm map[string]string, data []byte) string {
 	if desc := fm["description"]; desc != "" {
 		return compact(desc, 120)
 	}
-	return extractFirstLine(path)
+	return extractFirstLineBytes(data)
 }
 
 func isHidden(fm map[string]string) bool {
@@ -462,14 +457,6 @@ func isHidden(fm map[string]string) bool {
 	default:
 		return false
 	}
-}
-
-func extractFirstLine(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) > maxMetadataSize {
-		return ""
-	}
-	return extractFirstLineBytes(data)
 }
 
 func extractFirstLineBytes(data []byte) string {

@@ -15,7 +15,7 @@ import (
 
 const defaultPaneWatchInterval = 250 * time.Millisecond
 
-// paneResizeSettleWindow bounds how long after an actual leased-width change
+// paneResizeSettleWindow bounds how long after an actual leased-size change
 // pane frames are marked resize_settling. Full-screen agents re-render their
 // transcript on SIGWINCH and can push redrawn rows into the scrollback for a
 // couple of seconds; observed up to ~2s for omp under load.
@@ -224,7 +224,7 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 
 func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatchFrame) {
 	message := watchMessage(watch)
-	s.applyPaneReadLease(message)
+	s.applyPaneReadLease(watch.client.ID(), message)
 	response := s.preparePaneResponse(message, s.dispatcher.HandleReadPane(watch.ctx, message))
 	response["target"] = watch.target
 	content, ok := successfulPaneContent(response)
@@ -371,18 +371,20 @@ func watchMessage(watch *paneWatch) map[string]any {
 	}
 }
 
-func (s *Server) applyPaneReadLease(message map[string]any) {
+// applyPaneReadLease never trusts a client-supplied read geometry. A client
+// that itself holds an active lease on the pane reads it at the leased size
+// (the viewport-only read path); every other client, including readers and
+// controllers with Resize Session off, reads the pane at Herdr's own size.
+func (s *Server) applyPaneReadLease(clientID string, message map[string]any) {
 	delete(message, "terminal_columns")
 	delete(message, "terminal_rows")
 	if s.paneSizeM == nil {
 		return
 	}
 	paneID, _ := message["pane_id"].(string)
-	if columns, ok := s.paneSizeM.ActiveColumns(paneID); ok {
+	if columns, rows, ok := s.paneSizeM.ReadGeometry(clientID, paneID); ok {
 		message["terminal_columns"] = columns
-		if rows, rowsOK := s.paneSizeM.ActiveRows(paneID); rowsOK {
-			message["terminal_rows"] = rows
-		}
+		message["terminal_rows"] = rows
 	}
 }
 

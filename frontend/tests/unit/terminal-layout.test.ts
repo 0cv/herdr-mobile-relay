@@ -28,9 +28,9 @@ describe('terminalResizeLayoutEngaged', () => {
     expect(terminalResizeLayoutEngaged(true, 0, 40)).toBe(false);
   });
 
-  // The regression: the relay advertises the lease capability unconditionally,
-  // so a pane shown before its lease lands has a session but no width. Wrapping
-  // then had no cap and broke every row mid-word at the container width.
+  // The regression: a pane shown before its lease lands has a session but no
+  // width. Wrapping then had no cap and broke every row mid-word at the
+  // container width.
   it('stays disengaged while the pane has no leased width', () => {
     expect(terminalResizeLayoutEngaged(true, 7.2, 0)).toBe(false);
   });

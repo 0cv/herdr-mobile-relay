@@ -7,9 +7,39 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/childenv"
 )
 
 const MaxCellDimension = 65535
+
+var ErrProcessUnavailable = errors.New("foreground process is unavailable")
+
+type CommandRunner interface {
+	Output(context.Context, string, ...string) ([]byte, error)
+}
+
+type execCommandRunner struct{}
+
+func (execCommandRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return childenv.CommandContext(ctx, name, args...).Output()
+}
+
+type terminalSize struct {
+	rows    int
+	columns int
+}
+
+func sttyDeviceFlag(goos string) (string, error) {
+	switch goos {
+	case "darwin":
+		return "-f", nil
+	case "linux":
+		return "-F", nil
+	default:
+		return "", ErrUnsupportedOS
+	}
+}
 
 type Grid struct {
 	TTY     string

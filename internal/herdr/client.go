@@ -654,6 +654,45 @@ func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProce
 	return &result.ProcessInfo, nil
 }
 
+// PaneGet asks the running Herdr server for one pane over a fresh socket
+// request. Unlike the agent inventory it also covers plain shell panes, and it
+// carries the terminal incarnation (terminal_id) a pane-size lease is bound to.
+func (c *Client) PaneGet(ctx context.Context, paneID string) (*Pane, error) {
+	var result struct {
+		Pane *Pane `json:"pane"`
+	}
+	if err := c.api.requestResult(ctx, "pane.get", map[string]any{"pane_id": paneID}, "pane_info", &result); err != nil {
+		return nil, fmt.Errorf("herdr pane get: %w", err)
+	}
+	if result.Pane == nil {
+		return nil, errors.New("herdr pane get: pane.get response has no pane")
+	}
+	return result.Pane, nil
+}
+
+// PaneProcessInfoFresh reads pane.process_info over a fresh socket request,
+// without the CLI process PaneProcessInfo spawns. Pane-size identity checks
+// call it before every terminal write, so a cached answer is never reused.
+func (c *Client) PaneProcessInfoFresh(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
+	var result struct {
+		ProcessInfo *PaneProcessInfo `json:"process_info"`
+	}
+	if err := c.api.requestResult(ctx, "pane.process_info", map[string]any{"pane_id": paneID}, "pane_process_info", &result); err != nil {
+		return nil, fmt.Errorf("herdr pane process info: %w", err)
+	}
+	if result.ProcessInfo == nil {
+		return nil, errors.New("herdr pane process info: response has no process_info")
+	}
+	return result.ProcessInfo, nil
+}
+
+// IsPaneNotFound reports Herdr's structured refusal for a pane that no longer
+// exists, from either the socket API or the CLI.
+func IsPaneNotFound(err error) bool {
+	var cliErr *CLIError
+	return errors.As(err, &cliErr) && cliErr != nil && cliErr.Code == "pane_not_found"
+}
+
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) (PaneRead, error) {
 	return c.readPane(ctx, paneID, lines, format, "recent-unwrapped")
 }

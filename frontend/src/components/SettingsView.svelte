@@ -46,11 +46,13 @@
     setHomeLayout,
     setInterfaceSize,
     setTerminalHeightLease,
+    setTerminalResizeSession,
     setTerminalHistoryLines,
     setTerminalRefreshInterval,
     setTerminalWakeLock,
     setTheme,
     terminalHeightLease,
+    terminalResizeSession,
     terminalWakeLock,
     terminalHistoryLines,
     terminalRefreshInterval,
@@ -204,6 +206,8 @@
     connection: $connections.get(relay.id),
   })));
   const connectedCount = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
+  const heightLeaseSupported = $derived([...$connections.values()].some((connection) =>
+    connection.status === 'connected' && connection.capabilities.includes('pane_size_opt_in_rows')));
   const degradedCount = $derived([...$connections.values()].filter(
     (connection) => connection.status === 'connected' && connection.inventory.state !== 'ready',
   ).length);
@@ -837,14 +841,23 @@
       {/each}
     </fieldset>
     <p class="hint">How often the relay checks the visible pane. 250 ms is balanced; faster refresh uses more computer and phone CPU during active output.</p>
-    <p class="hint">Resize Session automatically leases the shared terminal at the phone width while it is open, so the laptop view changes too. The previous width is restored when the terminal closes or disconnects.</p>
+    <AppSwitch
+      checked={$terminalResizeSession}
+      label="Resize Session"
+      descriptionId="resize-session-hint"
+      onchange={(value) => {
+        if (setTerminalResizeSession(value) === 'unavailable') relayStore.showToast('Resize Session preference could not be saved.');
+      }}
+    />
+    <p class="hint" id="resize-session-hint">Off by default, saved on this device. Resizes the shared terminal to fit this phone while the phone has it open. Until the phone lets go, the laptop and SSH views of that pane look garbled, and agents may leave narrow copies of their output in the scrollback. Resizing may truncate scrollback and lose older output. The previous size is restored when the phone leaves the pane, unless it was changed on the laptop meanwhile. Unavailable on relays that do not support it. When off, controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width.</p>
     <AppSwitch
       checked={$terminalHeightLease}
+      disabled={!$terminalResizeSession || !heightLeaseSupported}
       label="Lease Terminal Height"
       descriptionId="height-lease-hint"
       onchange={(value) => setTerminalHeightLease(value)}
     />
-    <p class="hint" id="height-lease-hint">Off by default. Also leases the terminal at the phone's height so full-screen agents redraw to fit the phone instead of serving a mostly empty desktop-sized grid. The shared pane physically shrinks on the computer, and inline agents such as omp or Claude Code can strand duplicate status bars in the scrollback each time the height changes.</p>
+    <p class="hint" id="height-lease-hint">Also fits the shared terminal's height to this phone. Requires Resize Session and a connected relay that supports it. The checked preference is remembered but inactive while Resize Session is off. Height changes can strand duplicate inline-agent status bars in the scrollback.</p>
     <AppSwitch
       checked={$terminalWakeLock}
       label="Keep Screen Awake"

@@ -261,7 +261,7 @@ func newServerWithDependencies(cfg *config.Config, version, revision string, log
 		speechRemove:        speech.Remove,
 		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
-		paneSizeM:           panesize.NewManagerWithRunner(herdrClient, dependencies.paneSizeRunner, logger),
+		paneSizeM:           panesize.NewManager(herdrClient, logger),
 		buildDispatcher:     func(journal *activity.Journal) *coordinator.Dispatcher {
 			return coordinator.NewDispatcherWithPiScroll(herdrClient, state, journal, logger, socket, geometryRunner)
 		},
@@ -677,11 +677,12 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.hybrid != nil {
 			s.hybrid.forgetClient(client.ID())
 		}
+		// A departing phone gives its panes back at once, without the
+		// navigation grace. Restores that cannot finish now continue in the
+		// manager's bounded cleanup.
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := s.paneSizeM.ReleaseClient(releaseCtx, client.ID()); err != nil {
-			s.logger.Warn("client pane size leases were not fully restored", "client_id", client.ID(), "error", err)
-		}
+		_ = s.paneSizeM.ReleaseClient(releaseCtx, client.ID())
 	})
 
 	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
@@ -811,31 +812,10 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
 			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
-		case "lease_pane_size":
-			columns, rows, leaseErr := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
-			if leaseErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "lease_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(
-				client,
-				inbound.RequestID,
-				"lease_pane_size",
-				true,
-				"completed",
-				"",
-				inbound.PaneID,
-				map[string]any{"columns": columns, "rows": rows},
-			)
-		case "release_pane_size":
-			leaseErr := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID)
-			if leaseErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "release_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(client, inbound.RequestID, "release_pane_size", true, "completed", "", inbound.PaneID, nil)
+		case "lease_pane_size", "release_pane_size":
+			s.handlePaneSizeCommand(client, inbound)
 		case "read_pane":
-			s.applyPaneReadLease(msg)
+			s.applyPaneReadLease(client.ID(), msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
 			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
 			if inbound.Target != nil {
@@ -1511,12 +1491,47 @@ func (s *Server) Run(ctx context.Context) error {
 	return runErr
 }
 
+// Resize Session is a per-device opt-in. A PTY resize Herdr does not perform
+// leaves its grid at the layout size while the application draws at the
+// leased one, so the desktop and SSH views of a leased pane look garbled
+// (issue 60); Herdr exposes no absolute rows/columns operation to avoid that.
+// Apps up to 0.22.7 leased automatically whenever the relay advertised
+// pane_size_lease, so only a request carrying opt_in is honoured: anything
+// else fails before any Herdr, process or TTY access. Release stays an
+// idempotent cleanup; immediate skips the navigation grace.
+func (s *Server) handlePaneSizeCommand(client *transport.ClientConn, inbound protocol.Inbound) {
+	if inbound.Type == "release_pane_size" {
+		if err := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID, inbound.Immediate); err != nil {
+			s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+			return
+		}
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, nil)
+		return
+	}
+	if !inbound.OptIn || !s.paneSizeM.Available() {
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.ErrUnavailable.Error(), inbound.PaneID, nil)
+		return
+	}
+	columns, rows, err := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
+	if err != nil {
+		s.logger.Debug("pane size lease failed", "pane_id", inbound.PaneID, "error", err)
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+		return
+	}
+	s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, map[string]any{"columns": columns, "rows": rows})
+}
+
 func (s *Server) effectiveCapabilities() []string {
 	return s.effectiveCapabilitiesFor(s.herdrC.CapabilityStatus())
 }
 
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
+	// Never the legacy pane_size_lease names: apps up to 0.22.7 lease
+	// automatically when they see them.
+	if s.paneSizeM.Available() {
+		capabilities = append(capabilities, protocol.PaneSizeOptInCapability, protocol.PaneSizeOptInRowsCapability)
+	}
 	if s.pushM != nil {
 		capabilities = append(capabilities, "typed_push", "push_policy")
 	}
@@ -2942,9 +2957,9 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 	}
 	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly &&
 		s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow) {
-		// The agent re-renders its transcript after a width change and can push
-		// a redrawn block into the scrollback for a while; the app must not
-		// commit rows from frames read inside this window as history.
+		// The agent re-renders its transcript after a size change and can
+		// push a redrawn block into the scrollback for a while; the app must
+		// not commit rows from frames read inside this window as history.
 		response["resize_settling"] = true
 	}
 	agentLower := strings.ToLower(agent)
