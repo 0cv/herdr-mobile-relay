@@ -158,6 +158,8 @@ native_install_origin_ok() {
         established=true
     fi
     if [ "$established" = true ]; then return 0; fi
+    # Only native_install_exit reads this: the refusal line below is then the single diagnostic.
+    native_origin_refused=true
     echo "Native installation refused: the loaded service for $label was not established to be defined by Herdr's own definition path; no service or definition was changed." >&2
     return 1
 }
@@ -168,6 +170,7 @@ native_install_begin() {
     native_resources=("$native_definition" "$native_legacy_definition" "$native_environment")
     [ -z "${7:-}" ] || native_resources+=("$7")
     native_stage="" native_snapshot_complete=false native_published=false native_quiesced=false
+    native_origin_refused=false
     native_activation_attempted=false native_committed=false native_previous_ready=false
     native_active=false native_enabled=false native_legacy_active=false native_legacy_enabled=false
     local root="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay/recovery" file index=0 previous binary instance identifier
@@ -381,7 +384,11 @@ native_install_exit() {
         echo 'Native installation rollback is incomplete; current resources and private recovery evidence are retained.' >&2
     else
         rm -rf "$native_recovery" || failed=true
-        echo 'Native installation failed; no replacement remains. Prior activation restoration requires the recorded readiness evidence.' >&2
+        # An origin refusal (before any mutation) has already printed its one fixed line; only
+        # that case, with recovery removed, omits this generic line. Every other failure keeps it.
+        if [ "$native_origin_refused" != true ] || [ "$failed" = true ]; then
+            echo 'Native installation failed; no replacement remains. Prior activation restoration requires the recorded readiness evidence.' >&2
+        fi
     fi
     [ "$result" -ne 0 ] || result=1
     exit "$result"

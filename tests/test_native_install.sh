@@ -303,6 +303,11 @@ def native_origin_cases(parent, platform):
             where = platform + " " + role + " " + kind
             assert result.returncode != 0, where + ": a foreign or unverifiable origin was accepted"
             assert refusal in result.stderr, where + ": the fixed origin refusal was not printed"
+            # The refusal is the SINGLE diagnostic: only the fixture's own leading `bash -x` trace
+            # of the installer's first `set +x` may accompany it (no second generic failure line).
+            lines = result.stderr.splitlines()
+            if lines and lines[0] == "+ set +x": lines = lines[1:]
+            assert lines == [refusal], where + ": stderr was not exactly the one fixed refusal line: " + repr(result.stderr)
             assert not any(e["kind"] == "manager" and e["command"] in mutating for e in events), where + ": the same-label service was acted on"
             assert not any(e["kind"] == "filesystem" and e["live"] and e["tool"] in ("cp", "mv", "rm", "chmod") for e in events), where + ": a live resource was written"
             assert snapshot(resources(f)) == before, where + ": a resource changed"
