@@ -562,6 +562,26 @@ def listing_source_contract():
         'if ! LC_ALL=C jobs -l > "$output_file" 2>/dev/null; then'), "the line carrying the first listing changed"
     assert sum("jobs -l >" in line for line in function_code("_supervised_child_capture_records() {")) == 1, (
         "the listing helper must contain exactly one jobs -l > line")
+    # Uniqueness guard. Bash runs the LAST definition of a function, but the checks above read
+    # the FIRST header they find. A second definition anywhere in relay/*.sh (written `name() {`,
+    # `name(){`, `name ()` with the brace on the next line, or `function name`) could shadow the
+    # pinned copy and add a fork before the first `jobs -l` while every pin still passes. So each
+    # helper must have exactly one definition across relay/*.sh. Comment lines are skipped; a
+    # call never has `()` after the name, so `name()` and `function name` are definitions.
+    # Brittle by design: an intentional move or redefinition of either helper must update this.
+    for helper in ("supervised_child_capture", "_supervised_child_capture_records"):
+        definition = re.compile(
+            r"(?<![\w-])(?:function[ \t]+" + re.escape(helper) + r"(?![\w-])"
+            r"|" + re.escape(helper) + r"[ \t]*\([ \t]*\))")
+        definitions = []
+        for path in sorted((REPO / "relay").glob("*.sh")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for number, line in enumerate(text.splitlines(), 1):
+                if not line.strip().startswith("#") and definition.search(line):
+                    definitions.append("relay/%s:%d" % (path.name, number))
+        assert len(definitions) == 1, (
+            "%s must have exactly one definition across relay/*.sh, found %d: %s"
+            % (helper, len(definitions), ", ".join(definitions) or "none"))
 
 
 def main():
