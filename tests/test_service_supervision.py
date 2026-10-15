@@ -18,6 +18,7 @@ if (os.environ.get("GITHUB_ACTIONS") != "true"
 import json
 import pathlib
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
@@ -115,9 +116,11 @@ fixture_gate() {
         # can terminate first. A forked /bin/sleep here would make Bash report and
         # delete a signal-terminated child's job entry while the gate waits, so the
         # listing could never show the terminal record this gate exists to present
-        # (the product itself forks only a short mktemp before that listing). This
-        # loop forks nothing (builtins only, bounded by SECONDS), so the gate leaves
-        # the job table as an immediate capture would have found it.
+        # (the product prepares its listing file BEFORE launching a child, so it forks
+        # nothing between a launch and that listing; listing_source_contract() pins
+        # that order in the source). This loop forks nothing (builtins only, bounded
+        # by SECONDS), so the gate leaves the job table as an immediate capture would
+        # have found it.
         deadline=$((SECONDS + 10))
         while [ ! -f "$FIXTURE_ROOT/$name.release" ]; do
             [ "$SECONDS" -lt "$deadline" ] || { fixture_trace "gate-timeout $name"; return 1; }
@@ -467,8 +470,54 @@ def restart_source_contract():
     assert plist["KeepAlive"] == dict(SuccessfulExit=False)
 
 
+def listing_source_contract():
+    # Source contract, no execution (like restart_source_contract). Bash reports and
+    # deletes the job entry of a signal-terminated child after the next FORKED command,
+    # so (1) the listing file must be prepared immediately BEFORE each essential child
+    # is launched and (2) only the PID assignment and a status reset may run between the
+    # launch and the capture, which itself may fork nothing before its first `jobs -l`.
+    # The runtime trace assertion in Fixture.complete() cannot see the launch, so a
+    # prepare moved after it, or a command inserted after it, is caught here.
+    service = (REPO / "relay/herdr-mobile-relay-service.sh").read_text().splitlines()
+    code = [line.strip() for line in service if line.strip() and not line.strip().startswith("#")]
+    for fragment, pid_var in (('"$RELAY_BIN" serve-installed', "RELAY_PID"),
+                              ('exec "$CLOUDFLARED_BIN" tunnel', "TUNNEL_PID")):
+        launches = [i for i, line in enumerate(code) if fragment in line and line.endswith("&")]
+        assert len(launches) == 1, "expected exactly one launch of " + pid_var
+        launch = launches[0]
+        assert launch > 0 and code[launch - 1].startswith("supervised_child_prepare || "), (
+            "listing file is not prepared immediately before the launch of " + pid_var)
+        captures = [i for i, line in enumerate(code)
+                    if i > launch and line.startswith('supervised_child_capture "$' + pid_var + '"')]
+        assert captures, "no capture follows the launch of " + pid_var
+        assert code[launch + 1:captures[0]] == [pid_var + "=$!", "capture_status=0"], (
+            "a command runs between the launch of " + pid_var + " and its first job listing")
+    common = (REPO / "relay/common.sh").read_text().splitlines()
+
+    def body(header, stop):
+        first = next(i for i, line in enumerate(common) if line.startswith(header))
+        last = next(i for i in range(first, len(common)) if stop in common[i])
+        return [line.strip() for line in common[first + 1:last]
+                if line.strip() and not line.strip().startswith("#")]
+    external = re.compile(r"(?<![\w-])(mktemp|rm|sleep|cat|sed|awk|grep|tr|date|stat)(?![\w-])")
+    forking = lambda line: "$(" in line or "`" in line or external.search(line) is not None
+    before_listing = body("supervised_child_capture() {", "_supervised_child_capture_records ||")
+    assert before_listing and not any(forking(line) for line in before_listing), (
+        "supervised_child_capture runs a forking command before its listing")
+    listing = body("_supervised_child_capture_records() {", "jobs -l >")
+    assert 'if [ -n "$SUPERVISED_JOB_FILE" ]; then' in listing
+    for index, line in enumerate(listing):
+        if "mktemp" in line:
+            # Only the fallback for callers that never prepared, in the else branch.
+            assert listing[index - 1] == "else" and "herdr-supervised-jobs" in line, (
+                "the capture's own mktemp is not confined to the unprepared fallback")
+        else:
+            assert not forking(line), "the capture runs a forking command before its first jobs -l: " + line
+
+
 def main():
     restart_source_contract()
+    listing_source_contract()
     with tempfile.TemporaryDirectory(prefix="herdr-service-supervision-") as tmp:
         parent = pathlib.Path(tmp)
         # Only the explicit producer argv adapts pre-child refusals. Child
