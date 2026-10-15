@@ -19,9 +19,9 @@ native_install_observe() {
     local label="$1" output line load="" active="" enabled="" count=0 code=0 domain="gui/$UID" disabled probe_status
     local tab=$'\t' job_path="" job_paths=0 job_ambiguous=false
     local LC_ALL=C
-    # NATIVE_ORIGIN is launchd-only evidence taken from this same observation; it is
+    # native_observed_origin is launchd-only evidence taken from this same observation; it is
     # empty (origin unknown) unless exactly one job-level path line is found below.
-    NATIVE_STATE=unknown NATIVE_ENABLED=unknown NATIVE_ORIGIN=""
+    NATIVE_STATE=unknown NATIVE_ENABLED=unknown native_observed_origin=""
     if [ "$native_manager" = systemd ]; then
         output="$(
             LC_ALL=C systemctl --user show "$label" --property=LoadState --property=ActiveState --property=UnitFileState 2>/dev/null | native_install_read_bounded 4096
@@ -76,7 +76,7 @@ native_install_observe() {
         # Origin evidence comes from this SAME captured text: no extra launchctl query.
         # Grammar: exactly ONE job-level line, a single TAB then `path = <value>`. Any
         # other line whose text starts with `path = ` (nested, indented differently or a
-        # duplicate) makes the origin ambiguous, so NATIVE_ORIGIN stays empty. Observe
+        # duplicate) makes the origin ambiguous, so native_observed_origin stays empty. Observe
         # stays as lenient as before (a loaded body without a path line is still loaded);
         # only native_install_origin_ok, called by native_install_begin, acts on it.
         while IFS= read -r line; do
@@ -87,7 +87,7 @@ native_install_observe() {
                     case "$line" in 'path = '*) job_ambiguous=true ;; esac ;;
             esac
         done <<< "$output"
-        if [ "$job_paths" -eq 1 ] && [ "$job_ambiguous" = false ]; then NATIVE_ORIGIN="$job_path"; fi
+        if [ "$job_paths" -eq 1 ] && [ "$job_ambiguous" = false ]; then native_observed_origin="$job_path"; fi
     fi
     disabled="$(
         LC_ALL=C launchctl print-disabled "$domain" 2>/dev/null | native_install_read_bounded 65536
@@ -144,16 +144,16 @@ native_install_origin_systemd() {
     [ -n "$fragment" ] && [ "$fragment" = "$expected" ] && [ -z "$overlays" ]
 }
 
-# launchd: NATIVE_ORIGIN, parsed by native_install_observe from the same label output
+# launchd: native_observed_origin, parsed by native_install_observe from the same label output
 # it already captures (no second launchctl query), must equal the expected plist path.
 # Call it immediately after native_install_observe for that label: it reads the
-# NATIVE_STATE and NATIVE_ORIGIN that observation just set.
+# NATIVE_STATE and native_observed_origin that observation just set.
 native_install_origin_ok() {
     local label="$1" expected="$2" established=false
     [ "$NATIVE_STATE" != absent ] || return 0
     if [ "$native_manager" = systemd ]; then
         if native_install_origin_systemd "$label" "$expected"; then established=true; fi
-    elif [ -n "$NATIVE_ORIGIN" ] && [ "$NATIVE_ORIGIN" = "$expected" ]; then
+    elif [ -n "$native_observed_origin" ] && [ "$native_observed_origin" = "$expected" ]; then
         established=true
     fi
     if [ "$established" = true ]; then return 0; fi
