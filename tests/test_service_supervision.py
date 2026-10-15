@@ -97,6 +97,15 @@ fixture_job_count=0
 fixture_kill_count=0
 fixture_gate_used=0
 fixture_trace() { printf '%s\n' "$*" >> "$FIXTURE_ROOT/shell.events"; }
+# mktemp is a forked command, so Bash may report and delete a signal-terminated
+# child's job entry after it. Record each use (template name only) in order with
+# the job observations, then run the real tool unchanged.
+mktemp() {
+    local last=""
+    for last; do :; done
+    fixture_trace "mktemp ${last##*/}"
+    command mktemp "$@"
+}
 fixture_gate() {
     local name="$1" attempt deadline
     fixture_trace "gate $name"
@@ -382,6 +391,15 @@ class Fixture:
             assert actual == set(kinds), "missing or unasserted essential sibling"
         assert not any(s.startswith("gate-timeout") for s in lines)
         assert all(s.split()[1] == "0" for s in lines if s.startswith("jobs ")), "subshell job observation"
+        # The first listing of a launched child must follow its launch with no forked
+        # command: the traced line before every capture listing (the exact call
+        # `jobs -l`) is the prepared-file mktemp that preceded the launch, never a
+        # mktemp of capture's own, which could let Bash prune a signal-killed child.
+        for index, line in enumerate(lines):
+            if line == "jobs 0 -l":
+                assert index > 0 and lines[index - 1] == "mktemp herdr-supervised-prepared.XXXXXX", (
+                    "a forked command ran between launching a child and its first job listing: %r"
+                    % (lines[max(0, index - 2):index + 1],))
         if sys.platform == "darwin" and BASH == "/bin/bash":
             assert any(s.startswith("bash 3.2.") for s in lines), "Darwin fixture did not use stock Bash 3.2"
         for kind in kinds:
