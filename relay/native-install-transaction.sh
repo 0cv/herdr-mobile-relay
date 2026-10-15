@@ -132,7 +132,13 @@ native_install_origin_systemd() {
         LC_ALL=C systemctl --user show "$label" --property=FragmentPath --property=DropInPaths 2>/dev/null | native_install_read_bounded 4096
         probe_status=( "${PIPESTATUS[@]}" )
         [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+        printf x
     )" || return 1
+    # Command substitution strips every trailing newline. The sentinel above preserved them, so a
+    # well-formed reply ends in EXACTLY one newline; any extra blank record survives as an empty
+    # line, which the parser below refuses.
+    output="${output%x}"
+    case "$output" in *$'\n') output="${output%$'\n'}" ;; *) return 1 ;; esac
     while IFS= read -r line; do
         count=$((count + 1))
         case "$line" in

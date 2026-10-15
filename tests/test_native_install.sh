@@ -271,7 +271,7 @@ def native_origin_cases(parent, platform):
     # runs a real installer and this suite shares one 900 s bound.
     mutating = ("stop", "disable", "enable", "restart", "bootout", "bootstrap", "kickstart", "daemon-reload")
     kinds = ["foreign-bare", "foreign-file", "empty", "duplicate"] + (
-        ["dropin", "fail", "oversized"] if platform == "systemd" else ["malformed", "malformed-space", "malformed-tab"])
+        ["dropin", "fail", "oversized", "blank"] if platform == "systemd" else ["malformed", "malformed-space", "malformed-tab"])
 
     def label_of(role):
         return ("herdr-mobile-relay.service" if role == "current" else "herdr-remote.service") if platform == "systemd" else (
@@ -337,7 +337,7 @@ def native_origin_input_cases(parent, platform):
     # driven directly in its own fixture, because run() fails on any forbidden event.
     tool, argv = ("systemctl", ["--user", "show-environment"]) if platform == "systemd" else (
         "launchctl", ["print-disabled", "gui/" + str(os.getuid())])
-    systemd_only = ["dropin", "fail", "oversized"]
+    systemd_only = ["dropin", "fail", "oversized", "blank"]
     launchd_only = ["malformed", "malformed-space", "malformed-tab"]
     kinds = ["foreign", "empty", "duplicate"] + (systemd_only if platform == "systemd" else launchd_only)
     valid = [role + ":" + kind for role in ("current", "legacy") for kind in kinds]

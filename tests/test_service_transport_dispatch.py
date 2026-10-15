@@ -227,7 +227,7 @@ if name in ("systemctl", "launchctl"):
     origin_role, origin_kind = "", ""
     if "NATIVE_ORIGIN" in os.environ:
         origin_role, _, origin_kind = os.environ["NATIVE_ORIGIN"].partition(":")
-        known = (("foreign", "dropin", "empty", "duplicate", "fail", "oversized") if name == "systemctl"
+        known = (("foreign", "dropin", "empty", "duplicate", "fail", "oversized", "blank") if name == "systemctl"
                  else ("foreign", "empty", "duplicate", "malformed", "malformed-space", "malformed-tab"))
         if origin_role not in ("current", "legacy") or origin_kind not in known:
             event("forbidden", tool=name, point="native-origin-input"); raise SystemExit(99)
@@ -272,7 +272,8 @@ if name in ("systemctl", "launchctl"):
                 if kind == "empty": fragment = ""
                 if kind == "oversized": fragment = "x" * 5000
                 lines = ["FragmentPath=" + fragment] + (["FragmentPath=" + fragment] if kind == "duplicate" else []) + ["DropInPaths=" + overlays]
-                sys.stdout.write("\n".join(lines) + "\n"); sys.stdout.flush()
+                # `blank` (systemd only): the otherwise-matching reply plus ONE extra newline, i.e. a trailing blank record.
+                sys.stdout.write("\n".join(lines) + "\n" + ("\n" if kind == "blank" else "")); sys.stdout.flush()
                 raise SystemExit(0)
             if os.getenv("NATIVE_FAILURE") == "query" or ((root / "replacement-active").exists() and os.getenv("NATIVE_FAILURE") in ("ready-unknown", "public-unknown")):
                 raise SystemExit(2)
