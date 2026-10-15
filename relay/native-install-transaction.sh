@@ -17,8 +17,11 @@ native_install_read_bounded() {
 
 native_install_observe() {
     local label="$1" output line load="" active="" enabled="" count=0 code=0 domain="gui/$UID" disabled probe_status
+    local tab=$'\t' job_path="" job_paths=0 job_ambiguous=false
     local LC_ALL=C
-    NATIVE_STATE=unknown NATIVE_ENABLED=unknown
+    # NATIVE_ORIGIN is launchd-only evidence taken from this same observation; it is
+    # empty (origin unknown) unless exactly one job-level path line is found below.
+    NATIVE_STATE=unknown NATIVE_ENABLED=unknown NATIVE_ORIGIN=""
     if [ "$native_manager" = systemd ]; then
         output="$(
             LC_ALL=C systemctl --user show "$label" --property=LoadState --property=ActiveState --property=UnitFileState 2>/dev/null | native_install_read_bounded 4096
@@ -70,6 +73,21 @@ native_install_observe() {
         # A loaded waiting job can launch again: only bootout/observed absence
         # establishes launchd quiescence, regardless of current PID/state.
         active=loaded
+        # Origin evidence comes from this SAME captured text: no extra launchctl query.
+        # Grammar: exactly ONE job-level line, a single TAB then `path = <value>`. Any
+        # other line whose text starts with `path = ` (nested, indented differently or a
+        # duplicate) makes the origin ambiguous, so NATIVE_ORIGIN stays empty. Observe
+        # stays as lenient as before (a loaded body without a path line is still loaded);
+        # only native_install_origin_ok, called by native_install_begin, acts on it.
+        while IFS= read -r line; do
+            case "$line" in
+                "${tab}path = "*) job_paths=$((job_paths + 1)); job_path="${line#"${tab}path = "}" ;;
+                *)
+                    line="${line#"${line%%[![:space:]]*}"}"
+                    case "$line" in 'path = '*) job_ambiguous=true ;; esac ;;
+            esac
+        done <<< "$output"
+        if [ "$job_paths" -eq 1 ] && [ "$job_ambiguous" = false ]; then NATIVE_ORIGIN="$job_path"; fi
     fi
     disabled="$(
         LC_ALL=C launchctl print-disabled "$domain" 2>/dev/null | native_install_read_bounded 65536
@@ -90,6 +108,57 @@ native_install_observe() {
     [ "$count" -le 1 ] || return 1
     NATIVE_STATE="$active" NATIVE_ENABLED="$enabled"
     return 0
+}
+
+# Origin of a LOADED same-label service. Observation by state alone cannot tell
+# Herdr's own definition from a vendor or other foreign one holding the same label,
+# and quiesce stops, disables or boots out whatever holds it. native_install_begin
+# therefore requires the loaded definition to be Herdr's own expected path BEFORE the
+# snapshot is marked complete and before any manager mutation. Anything unestablished
+# (unknown, empty, duplicate, malformed, NUL, over-limit, query failure) refuses.
+# No manager-reported text is ever forwarded. The uninstall path applies the same
+# FragmentPath/DropInPaths rule in relay/common.sh service_removal_systemd_configuration.
+#
+# systemd: one additive, bounded query, issued only for a label that is not absent.
+# Exactly the two lines FragmentPath= and DropInPaths=, each once and nothing else.
+# The fragment must equal the expected definition path and there must be no drop-ins
+# (a drop-in is foreign configuration of the same label). NeedDaemonReload is not
+# required: install runs daemon-reload itself and origin is the only concern here.
+native_install_origin_systemd() {
+    local label="$1" expected="$2" output line fragment="" overlays="" count=0 f=0 d=0 probe_status
+    local LC_ALL=C
+    output="$(
+        LC_ALL=C systemctl --user show "$label" --property=FragmentPath --property=DropInPaths 2>/dev/null | native_install_read_bounded 4096
+        probe_status=( "${PIPESTATUS[@]}" )
+        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
+    )" || return 1
+    while IFS= read -r line; do
+        count=$((count + 1))
+        case "$line" in
+            FragmentPath=*) f=$((f + 1)); fragment="${line#*=}" ;;
+            DropInPaths=*) d=$((d + 1)); overlays="${line#*=}" ;;
+            *) return 1 ;;
+        esac
+    done <<< "$output"
+    [ "$count:$f:$d" = 2:1:1 ] || return 1
+    [ -n "$fragment" ] && [ "$fragment" = "$expected" ] && [ -z "$overlays" ]
+}
+
+# launchd: NATIVE_ORIGIN, parsed by native_install_observe from the same label output
+# it already captures (no second launchctl query), must equal the expected plist path.
+# Call it immediately after native_install_observe for that label: it reads the
+# NATIVE_STATE and NATIVE_ORIGIN that observation just set.
+native_install_origin_ok() {
+    local label="$1" expected="$2" established=false
+    [ "$NATIVE_STATE" != absent ] || return 0
+    if [ "$native_manager" = systemd ]; then
+        if native_install_origin_systemd "$label" "$expected"; then established=true; fi
+    elif [ -n "$NATIVE_ORIGIN" ] && [ "$NATIVE_ORIGIN" = "$expected" ]; then
+        established=true
+    fi
+    if [ "$established" = true ]; then return 0; fi
+    echo "Native installation refused: the loaded service for $label was not established to be defined by Herdr's own definition path; no service or definition was changed." >&2
+    return 1
 }
 
 native_install_begin() {
@@ -130,9 +199,11 @@ native_install_begin() {
         index=$((index + 1))
     done
     native_install_observe "$native_label" || return 1
+    native_install_origin_ok "$native_label" "$native_definition" || return 1
     native_enabled="$NATIVE_ENABLED"
     case "$NATIVE_STATE" in active|loaded) native_active=true ;; esac
     native_install_observe "$native_legacy_label" || return 1
+    native_install_origin_ok "$native_legacy_label" "$native_legacy_definition" || return 1
     native_legacy_enabled="$NATIVE_ENABLED"
     case "$NATIVE_STATE" in active|loaded) native_legacy_active=true ;; esac
     index=0

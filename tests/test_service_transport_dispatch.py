@@ -218,10 +218,24 @@ if name in ("systemctl", "launchctl"):
     domain = "gui/" + str(os.getuid())
     launch_labels = ("com.herdr-mobile-relay.service", "com.herdr-remote.service")
     targets = tuple(domain + "/" + label for label in launch_labels)
+    # Optional NATIVE_ORIGIN, a closed list `<current|legacy>:<kind>`, injects a same-label
+    # service whose definition origin is NOT Herdr's own expected path. Unset (the default)
+    # changes nothing: every origin answer below then matches the expected Herdr definition.
+    origin_role, origin_kind = "", ""
+    if os.getenv("NATIVE_ORIGIN"):
+        origin_role, _, origin_kind = os.environ["NATIVE_ORIGIN"].partition(":")
+        known = (("foreign", "dropin", "empty", "duplicate", "fail", "oversized") if name == "systemctl"
+                 else ("foreign", "empty", "duplicate"))
+        if origin_role not in ("current", "legacy") or origin_kind not in known:
+            event("forbidden", tool=name, point="native-origin-input"); raise SystemExit(99)
+    def origin_for(role):
+        return origin_kind if origin_role == role else ""
     if name == "systemctl":
         valid = (args == ["--user", "show-environment"] or args == ["--user", "daemon-reload"]
                  or (len(args) == 6 and args[:2] == ["--user", "show"] and args[2] in labels
                      and args[3:] == ["--property=LoadState", "--property=ActiveState", "--property=UnitFileState"])
+                 or (len(args) == 5 and args[:2] == ["--user", "show"] and args[2] in labels
+                     and args[3:] == ["--property=FragmentPath", "--property=DropInPaths"])
                  or (len(args) == 3 and args[0] == "--user" and args[1] in ("enable", "disable", "restart", "stop") and args[2] in labels)
                  or (len(args) == 4 and args[0] == "--user" and args[1] in ("is-active", "is-enabled") and args[2] == "--quiet" and args[3] in labels)
                  or (len(args) == 4 and args[:3] == ["--user", "disable", "--now"] and args[3] in labels))
@@ -241,12 +255,31 @@ if name in ("systemctl", "launchctl"):
         key = "legacy" if label == "herdr-remote.service" else "current"
         if command == "show":
             key = "legacy" if args[2] == "herdr-remote.service" else "current"
+            if len(args) == 5:
+                # Additive origin query: its own exact shape, never a native_capture seam and
+                # never counted, so no existing per-seam counter or fault control can shift.
+                kind = origin_for(key)
+                if kind == "fail": raise SystemExit(2)
+                expected = root / ".config/systemd/user" / args[2]
+                fragment = str(expected) if expected.exists() else ""
+                overlays = ""
+                if kind in ("dropin", "duplicate"): fragment = str(expected)
+                if kind == "dropin": overlays = str(expected) + ".d/override.conf"
+                if kind == "foreign": fragment = "/usr/lib/systemd/user/" + args[2]
+                if kind == "empty": fragment = ""
+                if kind == "oversized": fragment = "x" * 5000
+                lines = ["FragmentPath=" + fragment] + (["FragmentPath=" + fragment] if kind == "duplicate" else []) + ["DropInPaths=" + overlays]
+                sys.stdout.write("\n".join(lines) + "\n"); sys.stdout.flush()
+                raise SystemExit(0)
             if os.getenv("NATIVE_FAILURE") == "query" or ((root / "replacement-active").exists() and os.getenv("NATIVE_FAILURE") in ("ready-unknown", "public-unknown")):
                 raise SystemExit(2)
             path = root / ".config/systemd/user" / args[2]
-            payload = ("LoadState=" + ("loaded" if path.exists() else "not-found") + "\n"
+            # A genuine foreign service is loaded even when no Herdr definition exists at the
+            # expected path; with NATIVE_ORIGIN unset this is exactly path.exists() as before.
+            loaded = path.exists() or origin_for(key) == "foreign"
+            payload = ("LoadState=" + ("loaded" if loaded else "not-found") + "\n"
                        + "ActiveState=" + ("active" if state[key]["active"] else "inactive") + "\n"
-                       + "UnitFileState=" + (("enabled" if state[key]["enabled"] else "disabled") if path.exists() else "") + "\n")
+                       + "UnitFileState=" + (("enabled" if state[key]["enabled"] else "disabled") if loaded else "") + "\n")
             native_capture("systemd", key, payload.encode())
         if command in ("is-active", "is-enabled"):
             value = state[key]["active" if command == "is-active" else "enabled"]
@@ -269,8 +302,16 @@ if name in ("systemctl", "launchctl"):
             if failure == "query" or ((root / "replacement-active").exists() and failure in ("ready-unknown", "public-unknown")):
                 raise SystemExit(2)
             if args[1] == domain: native_capture("domain", "all", b"")
-            if state[key]["active"]:
-                native_capture("label", key, (args[1] + " = {\n state = running\n}\n").encode())
+            kind = origin_for(key)
+            if state[key]["active"] or kind in ("foreign", "empty", "duplicate"):
+                # The loaded body carries ONE job-level, tab-indented `path =` line naming the
+                # expected Herdr plist; the NATIVE_ORIGIN kinds below are the only variants.
+                expected = str(root / "Library/LaunchAgents" / (args[1].rsplit("/", 1)[1] + ".plist"))
+                body = args[1] + " = {\n state = running\n"
+                if kind == "foreign": body += "\tpath = /Library/LaunchAgents/" + args[1].rsplit("/", 1)[1] + ".plist\n"
+                elif kind != "empty": body += "\tpath = " + expected + "\n"
+                if kind == "duplicate": body += "\tpath = " + expected + "\n"
+                native_capture("label", key, (body + "}\n").encode())
             payload = ('Could not find service "' + args[1].rsplit("/", 1)[1] + '" in domain for user gui: ' + str(os.getuid()) + "\n").encode()
             native_capture("label", key, payload, 113, stderr=True)
         if command == "print-disabled":
