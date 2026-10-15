@@ -171,7 +171,7 @@ func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID
 		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "opencode" {
-		return r.readOpenCodeFor(project.CWD, sessionID, before, limit)
+		return r.readOpenCode(sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
 		return r.readOMO(project.CWD, sessionID, before, limit)

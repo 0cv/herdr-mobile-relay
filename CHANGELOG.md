@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Show OpenCode conversation history, completion responses and activity
+  extracts when a session is resumed from a directory other than the one it
+  was created in, such as a subdirectory or another project folder. OpenCode
+  resumes a session in its stored directory, so the relay now trusts the
+  session ID Herdr reports for the pane instead of rejecting it as belonging
+  to a different workspace (#61). Hermes keeps its workspace check.
+
 ## [0.22.9] - 2026-10-13
 
 ### Fixed

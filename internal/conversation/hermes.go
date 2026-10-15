@@ -100,7 +100,7 @@ func (r *hermesReader) locateContext(ctx context.Context, cwd, sessionID string)
 		if len(rows) == 0 || rows[0].SessionID != sessionID {
 			continue
 		}
-		if cwd != "" && rows[0].CWD != "" && !sameOpenCodeDirectory(cwd, rows[0].CWD) {
+		if cwd != "" && rows[0].CWD != "" && !sameHermesDirectory(cwd, rows[0].CWD) {
 			return Location{}, "invalid_session"
 		}
 		return Location{Path: database, Root: filepath.Dir(database), Title: rows[0].Title}, ""
@@ -109,6 +109,12 @@ func (r *hermesReader) locateContext(ctx context.Context, cwd, sessionID string)
 		return Location{}, firstFailure
 	}
 	return Location{}, "invalid_session"
+}
+
+func sameHermesDirectory(cwd, directory string) bool {
+	realCwd, cwdErr := filepath.EvalSymlinks(filepath.Clean(cwd))
+	realDirectory, directoryErr := filepath.EvalSymlinks(filepath.Clean(directory))
+	return cwdErr == nil && directoryErr == nil && realCwd == realDirectory
 }
 
 func (r *hermesReader) readFrom(database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
@@ -468,7 +474,7 @@ func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) 
 	if code != "" {
 		return unavailableCode(code, "Hermes conversation history is unavailable."), nil
 	}
-	if cwd != "" && metadata.CWD != "" && !sameOpenCodeDirectory(cwd, metadata.CWD) {
+	if cwd != "" && metadata.CWD != "" && !sameHermesDirectory(cwd, metadata.CWD) {
 		return unavailableCode("invalid_session", "This conversation belongs to a different workspace."), nil
 	}
 	normalizeEntriesForResponse(entries)

@@ -112,7 +112,7 @@ INSERT INTO part VALUES('part-two','message-one','not-json');`, cwd)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
 	reader.openCode.binary = sqlite
-	page, err := reader.readOpenCodeFor(cwd, "ses_corrupt", "", defaultPageSize)
+	page, err := reader.readOpenCode("ses_corrupt", "", defaultPageSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,30 +145,76 @@ INSERT INTO message VALUES('m1','ses_bad1',1,'{"role":"unexpected"}');`, cwd)
 	t.Setenv(agentroots.OpenCodeListEnv, root)
 	reader := NewReader(t.TempDir())
 	reader.openCode.binary = sqlite
-	page, err := reader.readOpenCodeFor(cwd, "ses_bad1", "", 1)
+	page, err := reader.readOpenCode("ses_bad1", "", 1)
 	if err != nil || !page.Available || !page.SourceCorrupt || len(page.Entries) != 0 {
 		t.Fatalf("corrupt OpenCode page = %#v, err = %v", page, err)
 	}
 }
 
-func TestOpenCodeDirectoryBindingResolvesSymlinks(t *testing.T) {
-	realDirectory := filepath.Join(t.TempDir(), "project")
-	if err := os.MkdirAll(realDirectory, 0o700); err != nil {
+// OpenCode resumes a session in its stored directory from any launch
+// directory (#61), so the pane cwd must not hide the session Herdr reported.
+func TestOpenCodeSessionIsNotBoundToPaneDirectory(t *testing.T) {
+	sqlite, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	root := t.TempDir()
+	sessionDirectory := filepath.Join(root, "Code")
+	panes := map[string]string{
+		"subdirectory": filepath.Join(sessionDirectory, "helper"),
+		"parent":       root,
+		"sibling":      filepath.Join(root, "Other"),
+		"missing":      filepath.Join(root, "removed"),
+	}
+	for name, pane := range panes {
+		if name == "missing" {
+			continue
+		}
+		if err := os.MkdirAll(pane, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	database := filepath.Join(root, "opencode.db")
+	sql := fmt.Sprintf(`CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_updated INTEGER,agent TEXT);
+CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);
+CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);
+INSERT INTO session VALUES('ses_resumed','%s','Resumed',2,'opencode');
+INSERT INTO message VALUES('m1','ses_resumed',1,'{"role":"user"}');
+INSERT INTO part VALUES('p1','m1','{"type":"text","text":"older"}');
+INSERT INTO message VALUES('m2','ses_resumed',2,'{"role":"assistant"}');
+INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, sessionDirectory)
+	command := exec.Command(sqlite, database)
+	command.Stdin = strings.NewReader(sql)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create OpenCode database: %v: %s", err, output)
+	}
+	t.Setenv(agentroots.OpenCodeListEnv, root)
+	reader := NewReader(t.TempDir())
+	reader.openCode.binary = sqlite
+	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
+	if err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(t.TempDir(), "project-link")
-	if err := os.Symlink(realDirectory, link); err != nil {
-		t.Fatal(err)
+	defer browser.Close()
+	for name, pane := range panes {
+		t.Run(name, func(t *testing.T) {
+			page, err := reader.ReadWithProject("opencode", ProjectContext{CWD: pane}, "ses_resumed", "", defaultPageSize)
+			if err != nil || !page.Available || len(page.Entries) != 2 || page.Entries[1].Text != "newer" {
+				t.Fatalf("pane read = %#v, err = %v", page, err)
+			}
+			scope := BrowseScope{Provider: "opencode", CWD: pane, SessionID: "ses_resumed"}
+			latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
+			if err != nil || !latest.Available || latest.Mode != BrowseNative || len(latest.Entries) != 1 || latest.Entries[0].Text != "newer" || latest.NextCursor == "" {
+				t.Fatalf("browser latest page = %#v, err = %v", latest, err)
+			}
+			older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
+			if err != nil || !older.Available || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" {
+				t.Fatalf("browser older page = %#v, err = %v", older, err)
+			}
+		})
 	}
-	if !sameOpenCodeDirectory(link, realDirectory) {
-		t.Fatal("symlinked workspace did not match its real OpenCode directory")
-	}
-	other := filepath.Join(t.TempDir(), "other")
-	if err := os.MkdirAll(other, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if sameOpenCodeDirectory(other, realDirectory) {
-		t.Fatal("different workspace matched OpenCode session directory")
+	if page, err := reader.ReadWithProject("opencode", ProjectContext{CWD: panes["sibling"]}, "ses_absent", "", defaultPageSize); err != nil || page.Available || page.ReasonCode != "invalid_session" {
+		t.Fatalf("unknown session read = %#v, err = %v", page, err)
 	}
 }
 
