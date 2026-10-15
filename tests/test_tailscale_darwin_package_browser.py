@@ -1367,17 +1367,28 @@ def run_git_bounded(argv, *, cwd, env, stdout, stderr, timeout, check):
     # the child's process group is killed and reaped as soon as it exceeds that cap or the
     # deadline. A result longer than the cap is returned as GIT_OUTPUT_CAP + 1 bytes so the
     # caller refuses it by length; a deadline raises TimeoutExpired after the kill and reap.
-    # The group is killed on EVERY exit, including a normal return and a leader that has
-    # already exited: a descendant that inherited the stdout pipe (or kept running in the
-    # group) must not outlive the query. Only the one call shape git_candidate_identity
-    # uses is accepted.
+    # Only the one call shape git_candidate_identity uses is accepted.
+    #
+    # Race-free group ownership: before git starts, an ANCHOR process becomes the leader of
+    # a fresh process group (same session; it does not hold git's stdout pipe), and git joins
+    # that group. The anchor is never reaped until after the group has been signalled, so the
+    # group id (the anchor's pid) cannot be recycled by another process while the signal is
+    # sent, on EVERY path: a normal return, the cap, the deadline, a leader that already
+    # exited, and a spawn failure. The group is killed on every exit, so a descendant that
+    # inherited the stdout pipe or kept running must not outlive the query. The anchor's
+    # 30 s sleep is only a leak backstop. process_group needs Python 3.11 (CI pins 3.14.0).
     require(stdout == subprocess.PIPE and stderr == subprocess.DEVNULL and check is False
             and type(timeout) is int and timeout > 0, "launchctl_authority")
-    process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
     deadline = time.monotonic() + timeout
+    anchor = None
+    process = None
     data = bytearray()
     try:
+        anchor = subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(30)"],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, close_fds=True, process_group=0)
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, close_fds=True, process_group=anchor.pid)
         descriptor = process.stdout.fileno()
         os.set_blocking(descriptor, False)
         with selectors.DefaultSelector() as selector:
@@ -1398,17 +1409,18 @@ def run_git_bounded(argv, *, cwd, env, stdout, stderr, timeout, check):
         if len(data) <= GIT_OUTPUT_CAP:
             process.wait(timeout=max(deadline - time.monotonic(), 0.001))
     finally:
-        # Kill the whole process group, unconditionally. On the cap and deadline paths the
-        # leader has not been reaped yet (nothing above calls poll() or wait()), so its pid,
-        # which is the group id, cannot have been recycled. On the normal path the leader
-        # was reaped by the wait above; a pid cannot be recycled as a group id while any
-        # group member is alive, and with none alive the call is a no-op (ESRCH).
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        process.wait()
-        process.stdout.close()
+        # Signal the whole group while the anchor is still alive and unreaped, THEN reap git
+        # and the anchor. Reaping git first is harmless (it is not the group leader).
+        if anchor is not None:
+            try:
+                os.killpg(anchor.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if process is not None:
+            process.wait()
+            process.stdout.close()
+        if anchor is not None:
+            anchor.wait()
     return subprocess.CompletedProcess(argv, process.returncode, bytes(data))
 
 
@@ -5270,6 +5282,46 @@ def offline_check(group):
             finished, first, second = group_survivor_case(False)
             require(finished is not None and finished.returncode == 0 and finished.stdout == b"ok"
                     and first != b"" and first == second, "offline_bounded_git_descendant_after_exit_killed")
+            # The anchor mechanism itself (race-free group ownership). Popen is wrapped to RECORD
+            # the processes and keyword arguments run_git_bounded uses, and is restored in the
+            # finally. Checked: the anchor leads its own group (process_group=0) without holding
+            # git's stdout pipe (stdout=DEVNULL); git joins the anchor's group (process_group=
+            # anchor pid) and no longer starts a new session; the git child's real group id equals
+            # the anchor's pid and differs from this process's group; the anchor was killed and
+            # REAPED (returncode -SIGKILL) after the run; and a spawn failure still kills and
+            # reaps the anchor and propagates OSError.
+            real_popen = subprocess.Popen
+            launched = []
+            def recording_popen(*args, **kwargs):
+                spawned = real_popen(*args, **kwargs)
+                launched.append((spawned, kwargs))
+                return spawned
+            subprocess.Popen = recording_popen
+            try:
+                grouped = run_git_bounded(child("import os\nos.write(1,b'%d' % os.getpgrp())"), **options)
+                normal_run = list(launched)
+                del launched[:]
+                try:
+                    run_git_bounded(["/nonexistent-offline-binary"], **options)
+                except OSError:
+                    spawn_failed = True
+                else:
+                    spawn_failed = False
+                failed_run = list(launched)
+            finally:
+                subprocess.Popen = real_popen
+            require(len(normal_run) == 2 and grouped.returncode == 0 and grouped.stdout.isdigit(),
+                    "offline_bounded_git_anchor_launch")
+            (anchor, anchor_options), (git_child, git_options) = normal_run
+            require(anchor_options.get("process_group") == 0 and anchor_options.get("stdout") == subprocess.DEVNULL
+                    and not anchor_options.get("start_new_session")
+                    and git_options.get("process_group") == anchor.pid and not git_options.get("start_new_session")
+                    and git_options.get("stdout") == subprocess.PIPE, "offline_bounded_git_anchor_options")
+            require(int(grouped.stdout) == anchor.pid and anchor.pid != os.getpgrp()
+                    and anchor.returncode == -signal.SIGKILL and git_child.returncode == 0,
+                    "offline_bounded_git_anchor_group_killed_and_reaped")
+            require(spawn_failed and len(failed_run) == 1 and failed_run[0][0].returncode == -signal.SIGKILL,
+                    "offline_bounded_git_anchor_reaped_on_spawn_failure")
             try:
                 run_git_bounded(["/nonexistent-offline-binary"], **options)
             except OSError:
