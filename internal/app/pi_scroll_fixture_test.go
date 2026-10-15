@@ -119,7 +119,18 @@ func captureFixtureRegularHistory(ctx context.Context, contract *p1fixture.Contr
 	}
 	reads := []herdr.ScrollEvidenceRecord{}
 	for _, record := range records {
-		if record.Method == "pane.read" {
+		if record.Method != "pane.read" {
+			continue
+		}
+		var request struct {
+			Params struct {
+				PaneID string `json:"pane_id"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(record.Request, &request); err != nil {
+			return err
+		}
+		if request.Params.PaneID == pane {
 			reads = append(reads, record)
 		}
 	}
