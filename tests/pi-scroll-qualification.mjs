@@ -150,7 +150,7 @@ try {
   const pane = records[0].pane_id, terminal = records[0].terminal_id;
   assert(pane && terminal, 'missing pane/terminal identity');
   for (const mode of ['fullscreen', 'regular']) {
-    const launch = await herdr('agent', 'start', 'p1-scroll-fixture', '--kind', 'pi', '--pane', pane, '--timeout', '30000', '--', '--offline', '--tui-mode', mode, '--session', seed, '--extension', join(root, 'pi', 'evidence.mjs'), '--extension', join(root, 'pi', 'bridge.mjs'));
+    const launch = await herdr('agent', 'start', `p1-scroll-${mode}`, '--kind', 'pi', '--pane', pane, '--timeout', '30000', '--', '--offline', '--tui-mode', mode, '--session', seed, '--extension', join(root, 'pi', 'evidence.mjs'), '--extension', join(root, 'pi', 'bridge.mjs'));
     await writeFile(join(root, `launch-${mode}.json`), launch, { mode: 0o600 });
     const ready = await waitFile(join(root, `pi-${mode}.json`));
     activePi = { pid: ready.pid, birth: await identity(ready.pid) };
