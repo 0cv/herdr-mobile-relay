@@ -1,17 +1,21 @@
-import { chmod, copyFile, cp, mkdir, readFile, readdir, realpath, rename, stat, writeFile, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { chmod, copyFile, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { allocateRun, loggedCommand, parsePaneList, piLaunch, preserveReceipt, sessionSeed } from './pi-scroll-driver.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 
 const repo = resolve(import.meta.dir, '..');
+const moduleCache = process.env.GOMODCACHE || join(process.env.HOME, 'go/pkg/mod');
+const browserCache = process.env.PLAYWRIGHT_BROWSERS_PATH || join(process.env.HOME, process.platform === 'darwin' ? 'Library/Caches/ms-playwright' : '.cache/ms-playwright');
 const output = process.env.HERDR_P1_QUALIFICATION_OUTPUT;
 if (!output || !output.startsWith('/')) throw new Error('HERDR_P1_QUALIFICATION_OUTPUT must name the persistent review directory');
-await mkdir(output, { recursive: true, mode: 0o700 });
-await mkdir(join(output, '.active'), { mode: 0o700 });
-let root, runDirectory;
+const allocation = await allocateRun(output);
+const runDirectory = allocation.directory;
+await mkdir(join(runDirectory, 'commands'), { mode: 0o700 });
+let root;
 const receipt = { schema: 1, result: 'failed', root: '', versions: {}, isolation: { socket: '', liveSocketUntouched: 'Never queried or contacted; all Herdr commands use a fresh private socket and clean environment.' }, modes: [], tests: [], viewportMoved: { up: false, down: false }, retries: 0, processCleanup: [], browserEndToEnd: 'remaining-gap: encrypted paired browser → real relay → Pi not exercised; browser specs use an explicit mock.', sourceHashes: {} };
 const bins = Object.fromEntries(['herdr', 'pi', 'bun', 'go', 'node', 'lsof'].map(name => [name, Bun.which(name)]));
-if (Object.values(bins).some(value => !value)) throw new Error('installed tools unavailable');
-const path = [...new Set(Object.values(bins).map(value => value.slice(0, value.lastIndexOf('/')))), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+
+const path = [...new Set(Object.values(bins).filter(Boolean).map(value => value.slice(0, value.lastIndexOf('/')))), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
 let env = { PATH: path, LC_ALL: 'C' }, server, isolated = false, activePi;
 let sequence = 0;
 const sleep = ms => Bun.sleep(ms);
@@ -21,7 +25,7 @@ const normalize = value => value.trim().replace(/\s+/g, ' ');
 
 async function identity(pid) {
   assert(Number.isSafeInteger(pid) && pid > 0, 'invalid owned PID');
-  const result = Bun.spawnSync(['/bin/ps', '-p', String(pid), '-o', 'lstart=', '-o', 'uid='], { env, cwd: repo });
+  const result = await sync(['/bin/ps', '-p', String(pid), '-o', 'lstart=', '-o', 'uid='], 'process-identity');
   const fields = result.stdout.toString().trim().split(/\s+/);
   assert(result.exitCode === 0 && fields.length === 6 && Number(fields[5]) === process.getuid(), `process identity unavailable: ${pid}`);
   return fields.slice(0, 5).join(' ');
@@ -33,24 +37,19 @@ async function signalOwned(child, birth, signal) {
   child.kill(signal);
 }
 
+async function sync(args, label, choices = env) {
+  const base = join(runDirectory, 'commands', `${String(++sequence).padStart(4, '0')}-${label}`);
+  const record = { args, cwd: repo, env: choices, started: new Date().toISOString() };
+  await writeFile(base + '.command.json', JSON.stringify(record, null, 2), { mode: 0o600 });
+  const result = Bun.spawnSync(args, { env: choices, cwd: repo, stdin: 'ignore' });
+  await writeFile(base + '.stdout', result.stdout, { mode: 0o600 });
+  await writeFile(base + '.stderr', result.stderr, { mode: 0o600 });
+  await writeFile(base + '.command.json', JSON.stringify({ ...record, ended: new Date().toISOString(), exitCode: result.exitCode }, null, 2), { mode: 0o600 });
+  return result;
+}
+
 async function run(args, label, extra = {}, timeout = 30000) {
-  const log = join(root, 'logs', `${String(++sequence).padStart(3, '0')}-${label}.log`);
-  const child = Bun.spawn(args, { env: { ...env, ...extra }, cwd: repo, stdin: 'ignore', stdout: Bun.file(log), stderr: Bun.file(log + '.stderr') });
-  let birth;
-  try { birth = await identity(child.pid); } catch { if (child.exitCode === null) throw new Error(`could not bind ${label} child`); }
-  const deadline = Date.now() + timeout;
-  while (child.exitCode === null && Date.now() < deadline) await sleep(20);
-  if (child.exitCode === null) {
-    await signalOwned(child, birth, 'SIGTERM');
-    await sleep(200);
-    if (child.exitCode === null) await signalOwned(child, birth, 'SIGKILL');
-    await child.exited;
-    throw new Error(`${label} timed out; no retry (${log})`);
-  }
-  const code = await child.exited;
-  const text = await readFile(log, 'utf8');
-  assert(code === 0, `${label} exit ${code}: ${text.slice(-4000)} ${(await readFile(log + '.stderr', 'utf8')).slice(-4000)} (${log})`);
-  return text;
+  return loggedCommand(args, { directory: join(runDirectory, 'commands'), label: `${String(++sequence).padStart(4, '0')}-${label}`, env: { ...env, ...extra }, cwd: repo, timeout, identity, signalOwned });
 }
 
 async function proveIsolation() {
@@ -90,8 +89,28 @@ async function fixture(mode, pane, terminal, session) {
   for (const prefix of mode === 'fullscreen' ? ['SCROLL', 'LATENCY', 'ROW'] : ['SCROLL']) {
     for (const [key, value] of Object.entries({ SOCKET: env.HERDR_SOCKET_PATH, PANE: pane, TERMINAL: terminal, SESSION: session, BIN: bins.herdr, MODE: mode })) variables[`HERDR_${prefix}_FIXTURE_${key}`] = value;
   }
-  const output = await run([bins.go, 'test', '-p', '1', '-run', 'TestDisposablePi', './internal/app', './internal/coordinator', '-count=1', '-v'], `fixtures-${mode}`, variables, 180000);
-  receipt.tests.push({ name: `TestDisposablePi (${mode})`, status: 'passed', output });
+  if (mode === 'fullscreen') Object.assign(variables, { HERDR_P1_BROWSER_SCRIPT: join(repo, 'tests/pi-scroll-paired-browser.mjs'), HERDR_P1_WEB_ROOT: join(repo, 'frontend/dist') });
+  let finished = false;
+  const testing = run([bins.go, 'test', '-p', '1', '-run', 'TestDisposablePi', './internal/app', './internal/coordinator', '-count=1', '-v'], `fixtures-${mode}`, variables, 180000).finally(() => { finished = true; });
+  const observed = testing.then(value => ({ value }), error => ({ error }));
+  if (mode === 'fullscreen') {
+    let browserError;
+    try {
+      while (!finished && !await Bun.file(join(root, 'browser-ready.json')).exists()) await sleep(100);
+      assert(!finished, 'native relay fixture ended before browser readiness');
+      await run([bins.bun, join(repo, 'tests/pi-scroll-paired-browser.mjs')], 'paired-browser', { PLAYWRIGHT_BROWSERS_PATH: browserCache }, 60000);
+      receipt.browserEndToEnd = 'passed: Chromium enrolled a disposable controller over product encrypted WebSocket transport; actual frontend Up/Down moved real Pi; Local/Automatic used the same connection. WebKit focused mock suite remains separate.';
+    } catch (error) {
+      browserError = error;
+      await writeFile(join(root, 'browser-done.json'), JSON.stringify({ result: 'failed', error: String(error) }), { mode: 0o600 });
+    }
+    const result = await observed;
+    if (browserError) throw browserError;
+    if (result.error) throw result.error;
+  }
+  const result = await observed;
+  if (result.error) throw result.error;
+  receipt.tests.push({ name: `TestDisposablePi (${mode})`, status: 'passed', output: result.value });
   if (mode === 'fullscreen') {
     const row = await json(join(evidenceDirectory, 'row-lease.json'));
     receipt.viewportMoved.up = true;
@@ -104,19 +123,21 @@ async function fixture(mode, pane, terminal, session) {
 }
 
 try {
-  const existing = (await readdir(output)).filter(name => /^run-[1-6]$/.test(name));
-  const number = existing.length + 1;
-  assert(number <= 6, 'six real qualification runs exhausted');
-  runDirectory = join(output, `run-${number}`);
-  await mkdir(runDirectory, { mode: 0o700 });
-  const allocation = Bun.spawnSync(['/usr/bin/mktemp', '-d', '/tmp/herdr-scroll-p1-XXXXXX'], { env, cwd: repo });
-  assert(allocation.exitCode === 0, 'fixture allocation failed');
-  root = await realpath(allocation.stdout.toString().trim());
+  receipt.allocation = { index: allocation.index, predecessor: allocation.predecessor };
+  receipt.started = new Date().toISOString();
+  assert(Object.values(bins).every(Boolean), 'installed tools unavailable');
+  receipt.head = normalize((await sync(['git', 'rev-parse', 'HEAD'], 'tested-head')).stdout.toString());
+  const checkout = await sync(['git', 'status', '--porcelain=v1', '--untracked-files=all'], 'checkout');
+  assert(checkout.exitCode === 0 && checkout.stdout.length === 0, 'native qualification requires a clean committed checkout');
+  const allocated = await sync(['/usr/bin/mktemp', '-d', '/tmp/herdr-scroll-p1-XXXXXX'], 'allocate-root');
+  assert(allocated.exitCode === 0, 'fixture allocation failed');
+  root = await realpath(allocated.stdout.toString().trim());
   receipt.root = root;
+  await writeFile(join(runDirectory, 'setup.json'), JSON.stringify(receipt, null, 2), { mode: 0o600 });
   console.log(`qualification root: ${root}`);
   await writeFile(join(root, 'fixture-owner'), 'disposable-scroll-fixture\n', { mode: 0o600 });
   for (const dir of ['home', 'config', 'config/herdr', 'cache', 'data', 'state', 'runtime', 'tmp', 'pi', 'work', 'logs', 'evidence']) await mkdir(join(root, dir), { recursive: true, mode: 0o700 });
-  const modcache = Bun.spawnSync([bins.go, 'env', 'GOMODCACHE'], { env: { PATH: path, HOME: process.env.HOME }, cwd: repo }).stdout.toString().trim();
+  const modcache = await realpath(moduleCache);
   env = { ...env, HOME: join(root, 'home'), USER: 'p1-fixture', LOGNAME: 'p1-fixture', SHELL: '/bin/sh', TERM: 'xterm-256color', TMPDIR: join(root, 'tmp'), XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'), XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'), XDG_RUNTIME_DIR: join(root, 'runtime'), HERDR_CONFIG_PATH: join(root, 'config/herdr/config.toml'), HERDR_SOCKET_PATH: join(root, 'config/herdr/herdr.sock'), PI_CODING_AGENT_DIR: join(root, 'pi'), PI_OFFLINE: '1', HERDR_P1_FIXTURE_ROOT: root, GOMODCACHE: modcache, GOPROXY: 'off', GOSUMDB: 'off', GOTOOLCHAIN: 'local', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
   receipt.isolation.socket = env.HERDR_SOCKET_PATH;
   assert(env.HERDR_SOCKET_PATH.startsWith(root + '/') && !await Bun.file(env.HERDR_SOCKET_PATH).exists(), 'isolation-unavailable: socket is not fresh');
@@ -126,15 +147,17 @@ try {
     await copyFile(join(repo, source), join(root, 'pi', target));
     await chmod(join(root, 'pi', target), 0o600);
   }
-  await writeFile(join(root, 'pi', 'settings.json'), JSON.stringify({ tuiMode: 'regular', enabledModels: [], lastChangelogVersion: receipt.versions.pi }), { mode: 0o600 });
+  await writeFile(join(root, 'editor.sh'), `#!/bin/sh\nprintf active > '${join(root, 'editor-active')}'\n/bin/sleep 2\nprintf done > '${join(root, 'editor-done')}'\n`, { mode: 0o700 });
+  await writeFile(join(root, 'pi', 'settings.json'), JSON.stringify({ tuiMode: 'regular', externalEditor: join(root, 'editor.sh'), enabledModels: [], lastChangelogVersion: receipt.versions.pi }), { mode: 0o600 });
   const timestamp = new Date().toISOString(), session = randomUUID();
   const entries = [{ type: 'session', version: 3, id: session, timestamp, cwd: join(root, 'work') }];
   entries.push({ type: 'message', id: '00000001', parentId: null, timestamp, message: { role: 'user', content: Array.from({ length: 96 }, (_, i) => `P1 TEST USER [${String(i + 1).padStart(3, '0')}] generated test content`).join('\n'), timestamp: Date.now() } });
-  const sessionDirectory = join(root, 'pi', 'sessions', `--${join(root, 'work').slice(1).replaceAll('/', '-')}--`);
-  await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
-  const seed = join(sessionDirectory, `${timestamp.replaceAll(':', '-').replaceAll('.', '-')}_${session}.jsonl`);
+  const seed = sessionSeed(root, timestamp, session);
+  await mkdir(dirname(seed), { recursive: true, mode: 0o700 });
   await writeFile(seed, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n', { mode: 0o600 });
-  const child = Bun.spawn([bins.herdr, 'server'], { env, cwd: repo, stdin: 'ignore', stdout: Bun.file(join(root, 'logs', 'herdr-server.log')), stderr: Bun.file(join(root, 'logs', 'herdr-server.stderr')) });
+  const serverRecord = { args: [bins.herdr, 'server'], env, cwd: repo, started: new Date().toISOString(), stdout: join(root, 'logs', 'herdr-server.log'), stderr: join(root, 'logs', 'herdr-server.stderr') };
+  await writeFile(join(runDirectory, 'server-command.json'), JSON.stringify(serverRecord, null, 2), { mode: 0o600 });
+  const child = Bun.spawn(serverRecord.args, { env, cwd: repo, stdin: 'ignore', stdout: Bun.file(serverRecord.stdout), stderr: Bun.file(serverRecord.stderr) });
   server = { pid: child.pid, birth: await identity(child.pid), child };
   const deadline = Date.now() + 10000;
   while (!await Bun.file(env.HERDR_SOCKET_PATH).exists() && Date.now() < deadline && child.exitCode === null) await sleep(100);
@@ -144,13 +167,10 @@ try {
   await writeFile(join(root, 'workspace.json'), JSON.stringify(workspace), { mode: 0o600 });
   const panes = JSON.parse(await herdr('pane', 'list'));
   await writeFile(join(root, 'panes.json'), JSON.stringify(panes), { mode: 0o600 });
-  assert(panes.result?.type === 'pane_list', 'unexpected isolated pane-list response');
-  const records = panes.result.panes;
-  assert(records?.length === 1, 'isolated workspace must have exactly one pane');
-  const pane = records[0].pane_id, terminal = records[0].terminal_id;
-  assert(pane && terminal, 'missing pane/terminal identity');
+  const { pane_id: pane, terminal_id: terminal } = parsePaneList(JSON.stringify(panes));
   for (const mode of ['fullscreen', 'regular']) {
-    const launch = await herdr('agent', 'start', `p1-scroll-${mode}`, '--kind', 'pi', '--pane', pane, '--timeout', '30000', '--', '--offline', '--tui-mode', mode, '--session', seed, '--extension', join(root, 'pi', 'evidence.mjs'), '--extension', join(root, 'pi', 'bridge.mjs'));
+    await proveIsolation();
+    const launch = await run(piLaunch(bins.herdr, mode, pane, seed, root), `herdr-agent-start-${mode}`);
     await writeFile(join(root, `launch-${mode}.json`), launch, { mode: 0o600 });
     const ready = await waitFile(join(root, `pi-${mode}.json`));
     activePi = { pid: ready.pid, birth: await identity(ready.pid) };
@@ -190,7 +210,7 @@ try {
   }
   receipt.received = received;
   if (receipt.sgr) {
-    assert(received[0].sgr.includes(receipt.sgr.up) && received[0].sgr.includes(receipt.sgr.down) && received[0].sgr.length === 8, 'centered Up/Down bytes not received exactly once by real Pi');
+    assert(received[0].sgr.includes(receipt.sgr.up) && received[0].sgr.includes(receipt.sgr.down) && received[0].sgr.length === 10, 'centered Up/Down bytes not received exactly once by real Pi');
   }
   receipt.bracketedPasteEnabled = (await readFile(join(root, 'logs', 'pi-output.raw'))).includes(Buffer.from('\x1b[?2004h'));
   assert(receipt.bracketedPasteEnabled, 'Pi bracketed paste enable was not captured');
@@ -205,7 +225,7 @@ try {
       assert(await identity(activePi.pid) === activePi.birth, 'Pi identity changed; no signal sent');
       process.kill(activePi.pid, 'SIGTERM');
       receipt.processCleanup.push({ process: 'pi', pid: activePi.pid, start: activePi.birth, action: 'verified SIGTERM' });
-    } catch (error) { receipt.processCleanup.push({ process: 'pi', error: String(error) }); }
+    } catch (error) { receipt.processCleanup.push({ process: 'pi', error: String(error) }); receipt.result = 'failed'; process.exitCode = 1; }
   }
   if (server && isolated) {
     try {
@@ -220,19 +240,21 @@ try {
   }
   if (receipt.result !== 'passed') process.exitCode = 1;
   if (root) {
-    const files = Bun.spawnSync(['git', 'diff', '--name-only', 'f51e206a289610de849043822296c484338b92a0'], { env, cwd: repo }).stdout.toString().trim().split('\n');
+    const files = (await sync(['git', 'diff', '--name-only', 'f51e206a289610de849043822296c484338b92a0'], 'source-paths')).stdout.toString().trim().split('\n');
     for (const file of [...files, 'tests/pi-scroll-qualification.mjs']) {
       if (await Bun.file(join(repo, file)).exists()) receipt.sourceHashes[file] = createHash('sha256').update(await readFile(join(repo, file))).digest('hex');
     }
-    await writeFile(join(root, 'receipt.json.tmp'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });
-    await rename(join(root, 'receipt.json.tmp'), join(root, 'receipt.json'));
-    if (runDirectory) {
-      await copyFile(join(root, 'receipt.json'), join(runDirectory, 'receipt.json'));
-      for (const name of (await readdir(root)).filter(name => name === 'logs' || name.startsWith('evidence'))) {
-        if ((await stat(join(root, name))).isDirectory()) await cp(join(root, name), join(runDirectory, name), { recursive: true });
-      }
-    }
-    console.log(`receipt: ${runDirectory}/receipt.json`);
   }
-  await rm(join(output, '.active'), { recursive: true });
+  receipt.ended = new Date().toISOString();
+  if (server) {
+    receipt.serverExitCode = server.child.exitCode;
+    const file = join(runDirectory, 'server-command.json');
+    await writeFile(file, JSON.stringify({ ...await json(file), pid: server.pid, start: server.birth, ended: receipt.ended, exitCode: server.child.exitCode, cleanup: receipt.processCleanup.filter(item => item.process === 'herdr') }, null, 2), { mode: 0o600 });
+  }
+  try {
+    await preserveReceipt(runDirectory, root, receipt);
+    console.log(`receipt: ${runDirectory}/receipt.json`);
+  } finally {
+    await allocation.release();
+  }
 }

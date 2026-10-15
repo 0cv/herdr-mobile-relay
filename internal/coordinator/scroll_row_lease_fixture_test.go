@@ -311,11 +311,47 @@ func TestDisposablePiRowLeaseScrollIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	wide := capture(restoredGrid, restored)
+	width, height, err := leases.Acquire(ctx, "row-fixture", pane, panesize.MinColumns, measured.Rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrowGrid, err := reader.Read(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrow := readyState(measured.Rows)
+	if width != panesize.MinColumns || height != measured.Rows || narrowGrid.Columns != width || narrow.Columns != width || narrow.GeometryEpoch <= restored.GeometryEpoch || narrow.Revision == restored.Revision {
+		t.Fatal("width lease did not invalidate measured geometry")
+	}
+	staleCount = writeCount()
+	stale = d.Handle(ctx, command("width-stale", restored.Revision, "up"))
+	if stale.OK || stale.Phase != "not_started" || writeCount() != staleCount {
+		t.Fatal("old width admitted after reflow")
+	}
+	narrowFrame := capture(narrowGrid, narrow)
+	if len(narrowFrame.Markers) >= len(wide.Markers) {
+		t.Fatal("narrow real Pi viewport did not reflow the generated transcript")
+	}
+	if err := leases.ReleaseClient(ctx, "row-fixture"); err != nil {
+		t.Fatal(err)
+	}
+	widthRestoredGrid, err := reader.Read(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	widthRestored := readyState(measured.Rows)
+	if widthRestoredGrid != measured || widthRestored.Columns != measured.Columns || widthRestored.GeometryEpoch <= narrow.GeometryEpoch || notifications != 4 {
+		t.Fatal("width restoration did not invalidate measured geometry")
+	}
+	if err := contract.Save("width-lease.json", map[string]any{"wide": wide, "narrow": narrowFrame, "restored": capture(widthRestoredGrid, widthRestored), "stale": stale, "center_column": (narrow.Columns + 1) / 2, "center_row": (narrow.Rows + 1) / 2}); err != nil {
+		t.Fatal(err)
+	}
 	commands, err := runner.Observations()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := contract.Save("row-lease.json", map[string]any{"schema_version": 1, "kind": "p1-row-lease", "source_kind": "real", "complete": true, "truncated": false, "ambiguous": false, "skipped": false, "initial": initial, "leased": leased, "restored": restored, "native_process_info": info, "commands": commands, "resize_notifications": notifications, "stale_refusals": 2, "independent_up": upCenter, "independent_down": downCenter}); err != nil {
+	if err := contract.Save("row-lease.json", map[string]any{"schema_version": 1, "kind": "p1-row-lease", "source_kind": "real", "complete": true, "truncated": false, "ambiguous": false, "skipped": false, "initial": initial, "leased": leased, "restored": restored, "native_process_info": info, "commands": commands, "resize_notifications": notifications, "stale_refusals": 3, "independent_up": upCenter, "independent_down": downCenter}); err != nil {
 		t.Fatal(err)
 	}
 	records, err := observer.Snapshot()

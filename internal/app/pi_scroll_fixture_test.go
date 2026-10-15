@@ -406,6 +406,27 @@ func TestDisposablePiScrollFoundation(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if mode == "regular" {
+		state := coordinator.NewState(slog.Default())
+		state.CommitInventory([]*coordinator.AgentState{{PaneID: pane, TerminalID: os.Getenv("HERDR_SCROLL_FIXTURE_TERMINAL"), SessionID: session, Agent: "pi", Status: "idle"}}, 0)
+		dispatcher := coordinator.NewDispatcherWithPiScroll(client, state, nil, slog.Default(), socket, &p1fixture.Runner{})
+		defer func() {
+			closeCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+			defer stop()
+			if err := dispatcher.Close(closeCtx); err != nil {
+				t.Error(err)
+			}
+		}()
+		regular := dispatcher.ScrollState(ctx, pane, "regular-fixture", true)
+		if regular == nil || regular.Available || regular.Renderer != "regular" || regular.Presentation != "history" {
+			t.Fatalf("actual regular renderer incorrectly admitted: %+v", regular)
+		}
+		result := dispatcher.Handle(ctx, map[string]any{"action": "scroll_agent", "pane_id": pane, "request_id": "regular-native-refusal", "_scroll_owner": "regular-fixture", "state_revision": regular.Revision, "direction": "up"})
+		if result.OK || result.Phase != "not_started" {
+			t.Fatalf("actual regular renderer injected wheel: %+v", result)
+		}
+		if err := contract.Save("regular-refusal.json", map[string]any{"state": regular, "result": result}); err != nil {
+			t.Fatal(err)
+		}
 		if err := captureFixtureRegularHistory(ctx, contract, client, observer, pane, lastGrid); err != nil {
 			t.Fatal(err)
 		}

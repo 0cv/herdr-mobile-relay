@@ -15,6 +15,28 @@ export default function evidence(pi) {
     record({ event: 'input', base64: Buffer.from(data).toString('base64') });
   };
   let originalSetWidget;
+  let overlayTimer;
+  pi.registerCommand('p1-overlay', {
+    description: 'Owned qualification overlay',
+    handler: async (_args, ctx) => {
+      await ctx.ui.custom((_tui, _theme, _keys, done) => {
+        record({ event: 'overlay_started' });
+        overlayTimer = setTimeout(() => {
+          record({ event: 'overlay_ended' });
+          writeFileSync(join(root, 'overlay-done'), 'done', { mode: 0o600 });
+          done();
+        }, 3000);
+        return { render: () => ['P1 private overlay'], invalidate() {} };
+      }, { overlay: true, overlayOptions: { nonCapturing: true, width: 24 } });
+    },
+  });
+  pi.registerCommand('p1-remove-widget', {
+    description: 'Owned qualification widget baseline',
+    handler: async (_args, ctx) => {
+      ctx.ui.setWidget('herdr-mobile-relay:scroll-state', undefined);
+      record({ event: 'widget_removed' });
+    },
+  });
   pi.on('before_provider_request', () => {
     record({ event: 'forbidden_provider_request' });
     throw new Error('no model requests allowed in P1 qualification');
@@ -42,6 +64,7 @@ export default function evidence(pi) {
     writeFileSync(join(root, `pi-${mode}.json`), JSON.stringify({ pid: process.pid, session: ctx.sessionManager.getSessionId(), file: ctx.sessionManager.getSessionFile() }), { mode: 0o600 });
   });
   pi.on('session_shutdown', (event, ctx) => {
+    clearTimeout(overlayTimer);
     record({ event: 'shutdown', reason: event.reason });
     process.stdin.removeListener('data', input);
     if (originalSetWidget) ctx.ui.setWidget = originalSetWidget;
