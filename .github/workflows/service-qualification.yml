@@ -33,6 +33,13 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      # Python is pinned, not the runner image's ambient python3: the provenance step
+      # and the script's supervisor and suites all run under this exact version (the
+      # script itself requires 3.11 or newer, for process_group and tomllib).
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.14.0"
       - name: Verify event commit, clean state, modes, bytes, and source membership
         timeout-minutes: 3
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"

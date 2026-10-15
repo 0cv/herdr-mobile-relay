@@ -119,13 +119,18 @@ baseline_state=$(checkout_state) || refuse 'cannot read the checkout state'
 # (same session, never holding the command's pipes) and the command joins that
 # group. The anchor is not reaped until the group has been signalled, so the group
 # id (the anchor's pid) cannot be recycled while the SIGKILL is sent, on every
-# path: normal exit, timeout, SIGTERM/SIGINT and a spawn failure. On timeout the
-# whole group is killed; a group left behind after a normal exit is killed too, so
-# no suite can leak processes into the next one. A suite that makes its own
-# session escapes the group kill exactly as it did before: the suites' fixtures do
-# so with start_new_session and kill those children by their own pids. None of the
-# nine suites relies on being its own session or group leader (they never call
-# getpgrp or getsid and never signal group 0 or -pgid; checked by reading).
+# path: normal exit, timeout, SIGTERM/SIGINT and a spawn failure. A SIGTERM or
+# SIGINT only RECORDS its number; the supervisor acts on it at safe points (the
+# wait loop), never between creating a child and owning its handle and never during
+# cleanup, so the anchor and the suite are always killed and reaped before the
+# supervisor exits with 128+N, and no suite is started once a signal is recorded.
+# On timeout the whole group is killed; a group left behind after a normal exit is
+# killed too, so no suite can leak processes into the next one. A suite that makes
+# its own session escapes the group kill exactly as it did before: the suites'
+# fixtures do so with start_new_session and kill those children by their own pids.
+# None of the nine suites relies on being its own session or group leader (they
+# never call getpgrp or getsid and never signal group 0 or -pgid; checked by
+# reading).
 # Exit status: the command's own status, 128+N when it died of signal N, 124 on
 # timeout, 143/130 when this supervisor itself is terminated, and nonzero when the
 # command cannot be started. It is never 0 unless the command exited 0.
@@ -138,13 +143,22 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
 limit = int(sys.argv[1])
 command = sys.argv[2:]
 
+# A termination signal only records its number. It is acted on in the wait loop
+# below, never while a child is being created or while cleaning up, so the anchor
+# and the suite are always owned before they can be abandoned and the process group
+# is always killed and reaped before this supervisor exits with 128+N.
+stop = 0
+
 
 def terminated(signum, _frame):
-    raise SystemExit(128 + signum)
+    global stop
+    if not stop:
+        stop = signum
 
 
 signal.signal(signal.SIGTERM, terminated)
@@ -160,14 +174,22 @@ try:
         [sys.executable, "-I", "-B", "-c", "import time; time.sleep(%d)" % (limit + 60)],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True, process_group=0)
-    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, process_group=anchor.pid)
-    try:
-        code = proc.wait(timeout=limit)
-        status = code if code >= 0 else 128 - code
-    except subprocess.TimeoutExpired:
-        print("service qualification: suite exceeded its %ds wall-clock bound; "
-              "killing its process group" % limit, file=sys.stderr, flush=True)
-        status = 124
+    if not stop:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, process_group=anchor.pid)
+        deadline = time.monotonic() + limit
+        while True:
+            code = proc.poll()
+            if code is not None:
+                status = code if code >= 0 else 128 - code
+                break
+            if stop:
+                break
+            if time.monotonic() >= deadline:
+                print("service qualification: suite exceeded its %ds wall-clock bound; "
+                      "killing its process group" % limit, file=sys.stderr, flush=True)
+                status = 124
+                break
+            time.sleep(0.05)
 finally:
     # Signal the group while the anchor is alive and unreaped, THEN reap the
     # command and the anchor.
@@ -180,6 +202,8 @@ finally:
         proc.wait()
     if anchor is not None:
         anchor.wait()
+if stop:
+    sys.exit(128 + stop)
 sys.exit(status)
 PY
 }
