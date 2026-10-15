@@ -1367,7 +1367,10 @@ def run_git_bounded(argv, *, cwd, env, stdout, stderr, timeout, check):
     # the child's process group is killed and reaped as soon as it exceeds that cap or the
     # deadline. A result longer than the cap is returned as GIT_OUTPUT_CAP + 1 bytes so the
     # caller refuses it by length; a deadline raises TimeoutExpired after the kill and reap.
-    # Only the one call shape git_candidate_identity uses is accepted.
+    # The group is killed on EVERY exit, including a normal return and a leader that has
+    # already exited: a descendant that inherited the stdout pipe (or kept running in the
+    # group) must not outlive the query. Only the one call shape git_candidate_identity
+    # uses is accepted.
     require(stdout == subprocess.PIPE and stderr == subprocess.DEVNULL and check is False
             and type(timeout) is int and timeout > 0, "launchctl_authority")
     process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -1395,11 +1398,15 @@ def run_git_bounded(argv, *, cwd, env, stdout, stderr, timeout, check):
         if len(data) <= GIT_OUTPUT_CAP:
             process.wait(timeout=max(deadline - time.monotonic(), 0.001))
     finally:
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        # Kill the whole process group, unconditionally. On the cap and deadline paths the
+        # leader has not been reaped yet (nothing above calls poll() or wait()), so its pid,
+        # which is the group id, cannot have been recycled. On the normal path the leader
+        # was reaped by the wait above; a pid cannot be recycled as a group id while any
+        # group member is alive, and with none alive the call is a no-op (ESRCH).
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
         process.wait()
         process.stdout.close()
     return subprocess.CompletedProcess(argv, process.returncode, bytes(data))
@@ -5222,6 +5229,47 @@ def offline_check(group):
             require(times_out("import time\ntime.sleep(30)", 1)
                     and times_out("import os,time\nfor _ in range(100):\n    os.write(1,b'a')\n    time.sleep(0.2)", 1),
                     "offline_bounded_git_deadline_silent_and_dribble")
+            # A leader that EXITS while a descendant in its process group keeps running must not
+            # leave that descendant alive: (a) the descendant inherited the stdout pipe, so the
+            # runner waits for the deadline and then refuses; (b) the descendant detached its
+            # stdout, so the runner returns normally. In both cases the group is killed.
+            # The descendant writes a heartbeat counter (os.pwrite on one descriptor, so the
+            # file is never truncated); a frozen counter after the call means it is gone. The
+            # leader starts it, waits until it is demonstrably running, writes `ok` and exits.
+            # The descendant also stops by itself after 20 s, so a failed case cannot leak it.
+            descendant = ("import os,sys,time\n"
+                          "fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT,0o600)\n"
+                          "end=time.monotonic()+20\n"
+                          "n=0\n"
+                          "while time.monotonic()<end:\n"
+                          "    n+=1\n"
+                          "    os.pwrite(fd,b'%012d'%n,0)\n"
+                          "    time.sleep(0.05)\n")
+            def group_survivor_case(holds_pipe):
+                with tempfile.TemporaryDirectory() as directory:
+                    beat = os.path.join(directory, "beat")
+                    leader = ("import os,subprocess,sys,time\n"
+                              "subprocess.Popen([sys.executable,'-I','-B','-c',%r,%r]%s)\n"
+                              "end=time.monotonic()+3\n"
+                              "while time.monotonic()<end and (not os.path.exists(%r) or os.path.getsize(%r)==0):\n"
+                              "    time.sleep(0.01)\n"
+                              "sys.stdout.write('ok')\n"
+                              % (descendant, beat, "" if holds_pipe else ",stdout=subprocess.DEVNULL", beat, beat))
+                    try:
+                        finished = run_git_bounded(child(leader), **{**options, "timeout": 5})
+                    except subprocess.TimeoutExpired:
+                        finished = None
+                    time.sleep(0.5)
+                    first = Path(beat).read_bytes()
+                    time.sleep(0.5)
+                    second = Path(beat).read_bytes()
+                    return finished, first, second
+            finished, first, second = group_survivor_case(True)
+            require(finished is None and first != b"" and first == second,
+                    "offline_bounded_git_descendant_holding_pipe_killed")
+            finished, first, second = group_survivor_case(False)
+            require(finished is not None and finished.returncode == 0 and finished.stdout == b"ok"
+                    and first != b"" and first == second, "offline_bounded_git_descendant_after_exit_killed")
             try:
                 run_git_bounded(["/nonexistent-offline-binary"], **options)
             except OSError:
