@@ -51,10 +51,14 @@ def state(f):
     return json.loads((f.root / "activation").read_text())
 
 
+NATIVE_RUNS = [0]
+
+
 def run(f, conditional=""):
     # Ordinary cells use the REAL installer. Conditional cells call the REAL
     # transaction API with a conditional EXIT trap, not a conditional source
     # of the whole installer (which would mask unrelated public-gate errexit).
+    started = time.monotonic()
     command = ["/bin/bash", "-x", str(f.script)]
     if conditional:
         command = ["/bin/bash", "-x", "-c", NATIVE_EXIT_PROBE, str(f.script), str(f.script.parent), f.platform,
@@ -68,6 +72,11 @@ def run(f, conditional=""):
         assert canary not in stdout + stderr, "native credential exposed"
         return result
     finally:
+        # Progress evidence only: a suite that reaches its wall-clock bound otherwise
+        # leaves no trace of how many cells ran or how long each took.
+        NATIVE_RUNS[0] += 1
+        print("native installation fixture invocation %d (%s) took %.1fs" % (
+            NATIVE_RUNS[0], f.platform, time.monotonic() - started), file=sys.stderr, flush=True)
         # This fixture invocation group only, never native cleanup evidence.
         try: os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError: pass

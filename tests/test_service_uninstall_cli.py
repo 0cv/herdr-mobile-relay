@@ -31,6 +31,8 @@ root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
 model_path = control / 'model.json'; model = json.loads(model_path.read_text())
 name = pathlib.Path(sys.argv[0]).name; args = sys.argv[1:]
 events = control / 'events.jsonl'
+# Diagnostic only: one line per stub process, so a run can report how many it spawned.
+with (control / 'spawns.log').open('a') as stream: stream.write(name + '\n')
 def event(op, label='', **extra):
     row = dict(op=op, label=label, **extra)
     with events.open('a') as stream: stream.write(json.dumps(row) + '\n')
@@ -217,6 +219,22 @@ def snapshot(q: Path) -> tuple:
 
 
 INVOCATIONS = [0]
+
+
+def spawn_tally(control):
+    # Diagnostic only, never an assertion. Every systemctl, launchctl, uname, plutil, rm, sleep,
+    # wc, head and stat the product runs is a separate Python interpreter here, so the count
+    # times the hosted per-process cost explains a slow invocation.
+    counts = {}
+    try: entries = (Path(control) / 'spawns.log').read_text().splitlines()
+    except OSError: return counts
+    for entry in entries: counts[entry] = counts.get(entry, 0) + 1
+    return counts
+
+
+def spawn_report(before, after):
+    delta = {name: after[name] - before.get(name, 0) for name in sorted(after) if after[name] != before.get(name, 0)}
+    return 'stub spawns %d %s' % (sum(delta.values()), delta)
 # Every synthetic credential sentinel the removal fixtures seed, including the full-uninstall
 # suite's source-checkout one. The no-leak checks compare output with these after a normal
 # return; the timeout diagnostic below must honour the same list.
@@ -341,7 +359,7 @@ class Fixture:
         script = self.relay / ('uninstall-systemd-user-service.sh' if self.model['platform'] == 'Linux' else 'uninstall-service.sh') if direct else self.relay / 'service.sh'
         if direct == 'opposite':
             script = self.relay / ('uninstall-service.sh' if self.model['platform'] == 'Linux' else 'uninstall-systemd-user-service.sh')
-        started = time.monotonic()
+        started = time.monotonic(); spawns_before = spawn_tally(self.control)
         argv = ['/bin/bash', '-x', str(script)] + list(args if not direct else args[1:])
         if conditional:
             operation = 'service_removal_quiet' if observation else 'service_removal_one'
@@ -389,8 +407,9 @@ class Fixture:
             return process.returncode, output, events
         finally:
             INVOCATIONS[0] += 1
-            print('removal fixture invocation %d (%s model) took %.1fs' % (
-                INVOCATIONS[0], self.model['platform'], time.monotonic() - started), file=sys.stderr, flush=True)
+            print('removal fixture invocation %d (%s model) took %.1fs; %s' % (
+                INVOCATIONS[0], self.model['platform'], time.monotonic() - started,
+                spawn_report(spawns_before, spawn_tally(self.control))), file=sys.stderr, flush=True)
             if master is not None: os.close(master)
             if process.poll() is None:
                 # Fallback containment targets only this invocation's group;

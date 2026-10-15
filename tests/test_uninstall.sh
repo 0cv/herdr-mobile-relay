@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / 'tests'))
 # Reuse the reviewed finite inert controller DATA/source-copy patterns. This
 # executes only in the later admitted fixture phase, never at source authoring.
-from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, snapshot
+from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, snapshot, spawn_report, spawn_tally
 REPO = Path(sys.argv[1]); TIMEOUT = 40
 PREFIX = r'''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
@@ -102,7 +102,7 @@ class FullFixture(Fixture):
         self.private_no_route = tuple((q.name, snapshot(q)) for q in sorted(self.private.iterdir()) if q.name != 'route')
 
     def invoke(self, answer=b'y\ny\n', requested_signal=None, tty=False):
-        started = time.monotonic()
+        started = time.monotonic(); spawns_before = spawn_tally(self.control)
         master = slave = None
         if tty: master, slave = pty.openpty()
         p = subprocess.Popen(['/bin/bash', '-x', str(self.relay / 'uninstall.sh')], env=self.environment,
@@ -128,8 +128,9 @@ class FullFixture(Fixture):
             return p.returncode, output, events
         finally:
             INVOCATIONS[0] += 1
-            print('full uninstall fixture invocation %d took %.1fs' % (
-                INVOCATIONS[0], time.monotonic() - started), file=sys.stderr, flush=True)
+            print('full uninstall fixture invocation %d took %.1fs; %s' % (
+                INVOCATIONS[0], time.monotonic() - started,
+                spawn_report(spawns_before, spawn_tally(self.control))), file=sys.stderr, flush=True)
             for child in (p, bystander):
                 try: os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError: pass
