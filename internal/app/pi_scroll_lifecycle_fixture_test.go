@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +16,28 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/pibridge"
 )
+
+func p1WaitReloadReady(ctx context.Context, read func(context.Context) (herdr.PaneRead, error)) (herdr.PaneRead, error) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return herdr.PaneRead{}, err
+		}
+		screen, err := read(ctx)
+		if err != nil {
+			return screen, err
+		}
+		if bytes.Contains(screen.Content, []byte("Reloaded keybindings, extensions, skills, prompts, themes, and context files")) && !bytes.Contains(screen.Content, []byte("Reloading keybindings")) {
+			return screen, nil
+		}
+		select {
+		case <-ctx.Done():
+			return screen, fmt.Errorf("Pi reload did not restore input readiness: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
 
 func TestDisposablePiSettingsAndReload(t *testing.T) {
 	if os.Getenv("HERDR_SCROLL_FIXTURE_MODE") != "regular" {
@@ -137,6 +160,17 @@ func TestDisposablePiSettingsAndReload(t *testing.T) {
 	}
 	command("/reload")
 	widgetRestored := wait("fullscreen", initial.Incarnation)
+	reloadCtx, stopReload := context.WithTimeout(ctx, 2*time.Second)
+	defer stopReload()
+	reloadScreen, err := p1WaitReloadReady(reloadCtx, func(ctx context.Context) (herdr.PaneRead, error) {
+		return client.ReadScrollEvidencePane(ctx, pane, "visible", "text", grid.Rows)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.Save("reload-ready.json", reloadScreen.Content); err != nil {
+		t.Fatal(err)
+	}
 	gridCommands, err := gridRunner.Observations()
 	if err != nil {
 		t.Fatal(err)

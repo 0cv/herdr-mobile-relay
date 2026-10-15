@@ -19,6 +19,7 @@ import (
 )
 
 const FileLimit = 512 * 1024
+const EvidenceFileLimit = 3 * 1024 * 1024
 const EvidenceLimit = 4 * 1024 * 1024
 
 var ErrContract = errors.New("invalid P1 fixture contract")
@@ -374,7 +375,7 @@ func (c Contract) Save(name string, value any) error {
 		return err
 	}
 	data, err := json.Marshal(value)
-	if err != nil || len(data)+1 > FileLimit {
+	if err != nil || len(data)+1 > EvidenceFileLimit {
 		return errors.Join(err, errors.New("P1 evidence file limit exceeded"))
 	}
 	entries, err := os.ReadDir(c.EvidenceDirectory)
@@ -391,7 +392,7 @@ func (c Contract) Save(name string, value any) error {
 		if err != nil {
 			return err
 		}
-		if info.Size() > FileLimit {
+		if info.Size() > EvidenceFileLimit {
 			return errors.New("P1 existing evidence file limit exceeded")
 		}
 		total += info.Size()

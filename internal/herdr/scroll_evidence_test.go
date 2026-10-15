@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -88,6 +90,108 @@ func TestP1OfflineObserverNoninterference(t *testing.T) {
 			t.Fatal("late observer replacement admitted")
 		}
 	}
+}
+
+func TestP1OfflinePairedTracePersistence(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	contract := p1fixture.Contract{Root: root, UID: os.Getuid(), EvidenceDirectory: filepath.Join(root, "evidence")}
+	if err := os.Mkdir(contract.EvidenceDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	observer, err := NewScrollEvidence(2*1024*1024, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient("must-not-execute", filepath.Join(root, "offline.sock"))
+	defer client.Close()
+	if err := client.SetScrollEvidence(observer); err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Repeat("P1 TEST ASSISTANT [096] "+strings.Repeat("x", 90)+"\n", 4096)
+	var connections []*p1MemoryConn
+	client.api.unaryDial = func(context.Context, string, string) (net.Conn, error) {
+		result := map[string]any{"type": "ok"}
+		if len(connections) < 4 {
+			result = map[string]any{"type": "pane_read", "read": map[string]any{"text": text, "truncated": false}}
+		}
+		response, err := json.Marshal(map[string]any{"id": fmt.Sprintf("mobile-relay-api-%d", len(connections)+1), "result": result})
+		if err != nil {
+			return nil, err
+		}
+		conn := &p1MemoryConn{response: bytes.NewReader(append(response, '\n'))}
+		connections = append(connections, conn)
+		return conn, nil
+	}
+	for index := 0; index < 4; index++ {
+		read, err := client.ReadScrollEvidencePane(context.Background(), "w1:p1", "recent", "text", 4096)
+		if err != nil || string(read.Content) != text {
+			t.Fatalf("bounded history read: %v", err)
+		}
+	}
+	for _, report := range []string{"\x1b[<64;60;20M", "\x1b[<65;60;20M"} {
+		if err := client.SendRawText(context.Background(), "w1:p1", report); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := observer.Snapshot()
+	if err != nil || len(records) != 6 {
+		t.Fatalf("bounded observer snapshot: %d %v", len(records), err)
+	}
+	for index, record := range records {
+		if record.Overflow || record.Error != "" || record.WriteCalls != 1 || len(connections[index].writes) != 1 || !bytes.Equal(record.Request, connections[index].writes[0]) {
+			t.Fatalf("lost wire record %d: %+v", index, record)
+		}
+	}
+	serialized, err := json.Marshal(records)
+	if err != nil || len(serialized)+1 <= p1fixture.FileLimit || len(serialized)+1 > p1fixture.EvidenceFileLimit {
+		t.Fatalf("trace serialization size=%d error=%v", len(serialized)+1, err)
+	}
+	if err := contract.Save("paired-browser-wire.json", records); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(contract.EvidenceDirectory, "paired-browser-wire.json")
+	persisted, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(persisted, append(serialized, '\n')) {
+		t.Fatal("full serialized trace not preserved")
+	}
+	var decoded []ScrollEvidenceRecord
+	if err := json.Unmarshal(persisted, &decoded); err != nil || len(decoded) != len(records) {
+		t.Fatalf("persisted trace decode: %v", err)
+	}
+	for index := range records {
+		if !bytes.Equal(decoded[index].Request, records[index].Request) || !bytes.Equal(decoded[index].Response, records[index].Response) {
+			t.Fatalf("raw bytes changed in record %d", index)
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("persisted trace permissions: %v", err)
+	}
+	remaining := p1fixture.EvidenceLimit - len(persisted)
+	if err := contract.Save("other-evidence.json", strings.Repeat("x", remaining-3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.Save("overflow.json", nil); err == nil {
+		t.Fatal("actual trace not charged to aggregate quota")
+	}
+	if err := contract.Save("paired-browser-wire.json", records); err == nil {
+		t.Fatal("duplicate trace admitted")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, persisted) {
+		t.Fatal("rejected save changed trace")
+	}
+	entries, err := os.ReadDir(contract.EvidenceDirectory)
+	if err != nil || len(entries) != 2 {
+		t.Fatal("rejected save created evidence")
+	}
+	t.Logf("persisted %d full observer records, %d serialized bytes, aggregate exactly %d bytes", len(records), len(persisted), p1fixture.EvidenceLimit)
 }
 
 func TestP1OfflineObserverPreuse(t *testing.T) {
