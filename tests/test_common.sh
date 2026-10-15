@@ -2050,7 +2050,13 @@ printf "HERDR_GATEWAY_URL='wss://gw.example.test'\nHERDR_GATEWAY_SELECTION='late
     > "$STABLE_SWITCH_ENV"
 export STABLE_SWITCH_MARKER
 export STABLE_SWITCH_EXPECTED_ENV="$STABLE_SWITCH_ENV"
+# The action is started from a clean plugin shell: only the gateway inputs below
+# are inherited. An earlier top-level set_gateway_url/set_relay_transport call in
+# THIS test shell exports HERDR_RELAY_TRANSPORT=cloudflare, which would otherwise
+# leak into the action as an ambient transport and hide the saved gateway. Scope
+# the removal to this one invocation's subshell; later sections are unchanged.
 STABLE_SWITCH_OUTPUT="$(
+    unset HERDR_RELAY_TRANSPORT
     HERDR_RELAY_ENV="$STABLE_SWITCH_ENV" HERDR_GATEWAY_URL="wss://inherited.example.test" \
         HERDR_GATEWAY_SELECTION=latency HERDR_TAILSCALE_ORIGIN=https://stale.example.test \
         HERDR_EXTERNAL_HTTPS_ORIGIN=https://stale.example.test \
