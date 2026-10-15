@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { allocateRun, loggedCommand, parsePaneList, piLaunch, preserveReceipt, sessionSeed } from './pi-scroll-driver.mjs';
+import { allocateRun, browserSetupURL, loggedCommand, parsePaneList, piLaunch, piSettings, preserveReceipt, sessionSeed } from './pi-scroll-driver.mjs';
 
 const roots = [];
 async function directory() {
@@ -76,9 +76,21 @@ describe('offline driver orchestration only; no Herdr/Pi or native qualification
     for (const args of [full, regular]) {
       expect(args[args.indexOf('--session') + 1]).toBe(seed);
       expect(args).toContain('--offline');
-      expect(args.filter(value => value === '--extension')).toHaveLength(2);
+      expect(args.filter(value => value === '--extension')).toHaveLength(3);
+      expect(args).toContain(`${root}/pi/herdr-agent-state.ts`);
     }
     expect(() => piLaunch('herdr', 'unknown', 'pane', seed, root)).toThrow();
+  });
+
+  test('paired setup uses a bare socket origin and suppresses duplicate exit transcripts in the private seed settings', () => {
+    const url = new URL(browserSetupURL('http://127.0.0.1:12345', 'x'.repeat(32)));
+    const params = new URLSearchParams(url.hash.slice(1));
+    expect(params.get('relay')).toBe('ws://127.0.0.1:12345');
+    expect(new URL(params.get('relay')).pathname).toBe('/');
+    expect(params.get('setup')).toBe('x'.repeat(32));
+    expect(params.get('label')).toBe('P1 native');
+    expect(() => browserSetupURL('http://127.0.0.1:12345/ws', 'secret')).toThrow();
+    expect(piSettings('/private/fixture', '1.2.0')).toEqual({ tuiMode: 'regular', fullscreenExitOutput: 'resume-hint', externalEditor: '/private/fixture/editor.sh', enabledModels: [], lastChangelogVersion: '1.2.0' });
   });
 
   test('real Bun stdio is separate and full command/env/status/output are durable', async () => {

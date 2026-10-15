@@ -54,6 +54,16 @@ func TestDisposablePiPairedBrowser(t *testing.T) {
 	if err := s.herdrC.SetScrollEvidence(observer); err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		records, err := observer.Snapshot()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := contract.Save("paired-browser-wire.json", records); err != nil {
+			t.Error(err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx) }()
@@ -80,6 +90,9 @@ func TestDisposablePiPairedBrowser(t *testing.T) {
 	}
 	if !ready {
 		t.Fatal("owned relay did not become inventory-ready")
+	}
+	if err := contract.Save("paired-inventory.json", s.state.InventorySnapshot()); err != nil {
+		t.Fatal(err)
 	}
 	payload, err := json.Marshal(map[string]any{"url": url, "token": cfg.Token, "pane": os.Getenv("HERDR_SCROLL_FIXTURE_PANE")})
 	if err != nil {
@@ -113,8 +126,5 @@ func TestDisposablePiPairedBrowser(t *testing.T) {
 	}
 	if writes != 2 {
 		t.Fatalf("paired browser raw writes = %d, want two", writes)
-	}
-	if err := contract.Save("paired-browser-wire.json", records); err != nil {
-		t.Fatal(err)
 	}
 }

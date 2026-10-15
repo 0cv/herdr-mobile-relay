@@ -88,6 +88,9 @@ func captureFixtureRegularHistory(ctx context.Context, contract *p1fixture.Contr
 	if err != nil {
 		return err
 	}
+	if err := contract.Save("herdr-history-raw.json", map[string]any{"recent": recent, "visible": visible, "grid": grid}); err != nil {
+		return err
+	}
 	historyMarkers, err := fixtureHistoryMarkers(recent.Content)
 	if err != nil {
 		return err
@@ -308,6 +311,16 @@ func TestDisposablePiScrollFoundation(t *testing.T) {
 	if err := client.SetScrollEvidence(observer); err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		records, err := observer.Snapshot()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := contract.Save("foundation-all-wire.json", map[string]any{"failed": t.Failed(), "records": records}); err != nil {
+			t.Error(err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	status := client.RefreshCapabilities(ctx)

@@ -1,6 +1,7 @@
 import { chromium, expect } from '../frontend/node_modules/@playwright/test/index.mjs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { browserSetupURL } from './pi-scroll-driver.mjs';
 
 const root = process.env.HERDR_P1_FIXTURE_ROOT;
 if (!root || process.env.PI_OFFLINE !== '1') throw new Error('owned offline qualification required');
@@ -21,7 +22,7 @@ await context.route('**/*', route => {
   return target.hostname === '127.0.0.1' || target.hostname === 'localhost' ? route.continue() : route.abort('blockedbyclient');
 });
 try {
-  await page.goto(`${url}/#setup=${token}&label=P1%20native&relay=${encodeURIComponent(url.replace('http:', 'ws:') + '/ws')}`);
+  await page.goto(browserSetupURL(url, token));
   await expect(page.getByRole('button', { name: /^Open .* on P1 native$/ }).first()).toBeVisible();
   await page.getByRole('button', { name: /^Open .* on P1 native$/ }).first().click();
   const output = page.getByRole('log', { name: 'Agent terminal output' });

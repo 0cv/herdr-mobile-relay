@@ -1,9 +1,10 @@
 import { chmod, copyFile, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { allocateRun, loggedCommand, parsePaneList, piLaunch, preserveReceipt, sessionSeed } from './pi-scroll-driver.mjs';
+import { allocateRun, loggedCommand, parsePaneList, piLaunch, piSettings, preserveReceipt, sessionSeed } from './pi-scroll-driver.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 
 const repo = resolve(import.meta.dir, '..');
+const installedIntegration = join(process.env.HOME, '.pi/agent/extensions/herdr-agent-state.ts');
 const moduleCache = process.env.GOMODCACHE || join(process.env.HOME, 'go/pkg/mod');
 const browserCache = process.env.PLAYWRIGHT_BROWSERS_PATH || join(process.env.HOME, process.platform === 'darwin' ? 'Library/Caches/ms-playwright' : '.cache/ms-playwright');
 const output = process.env.HERDR_P1_QUALIFICATION_OUTPUT;
@@ -147,8 +148,12 @@ try {
     await copyFile(join(repo, source), join(root, 'pi', target));
     await chmod(join(root, 'pi', target), 0o600);
   }
+  const integration = await readFile(installedIntegration);
+  assert(integration.includes(Buffer.from('HERDR_INTEGRATION_ID=pi')), 'installed Herdr Pi integration unavailable');
+  receipt.installedIntegration = { path: installedIntegration, sha256: createHash('sha256').update(integration).digest('hex') };
+  await writeFile(join(root, 'pi', 'herdr-agent-state.ts'), integration, { mode: 0o600 });
   await writeFile(join(root, 'editor.sh'), `#!/bin/sh\nprintf active > '${join(root, 'editor-active')}'\n/bin/sleep 2\nprintf done > '${join(root, 'editor-done')}'\n`, { mode: 0o700 });
-  await writeFile(join(root, 'pi', 'settings.json'), JSON.stringify({ tuiMode: 'regular', externalEditor: join(root, 'editor.sh'), enabledModels: [], lastChangelogVersion: receipt.versions.pi }), { mode: 0o600 });
+  await writeFile(join(root, 'pi', 'settings.json'), JSON.stringify(piSettings(root, receipt.versions.pi)), { mode: 0o600 });
   const timestamp = new Date().toISOString(), session = randomUUID();
   const entries = [{ type: 'session', version: 3, id: session, timestamp, cwd: join(root, 'work') }];
   entries.push({ type: 'message', id: '00000001', parentId: null, timestamp, message: { role: 'user', content: Array.from({ length: 96 }, (_, i) => `P1 TEST USER [${String(i + 1).padStart(3, '0')}] generated test content`).join('\n'), timestamp: Date.now() } });
@@ -163,7 +168,7 @@ try {
   while (!await Bun.file(env.HERDR_SOCKET_PATH).exists() && Date.now() < deadline && child.exitCode === null) await sleep(100);
   await proveIsolation();
   receipt.serverStatus = JSON.parse(await herdr('status', 'server', '--json'));
-  const workspace = JSON.parse(await herdr('workspace', 'create', '--cwd', join(root, 'work'), '--label', 'p1-scroll-fixture', '--no-focus', '--env', `PI_CODING_AGENT_DIR=${env.PI_CODING_AGENT_DIR}`, '--env', 'PI_OFFLINE=1', '--env', `HERDR_P1_FIXTURE_ROOT=${root}`, '--env', `NODE_OPTIONS=--import=${join(root, 'pi', 'capture.mjs')}`));
+  const workspace = JSON.parse(await herdr('workspace', 'create', '--cwd', join(root, 'work'), '--label', 'p1-scroll-fixture', '--no-focus', '--env', `PI_CODING_AGENT_DIR=${env.PI_CODING_AGENT_DIR}`, '--env', 'PI_OFFLINE=1', '--env', 'HERDR_ENV=1', '--env', `HERDR_P1_FIXTURE_ROOT=${root}`, '--env', `NODE_OPTIONS=--import=${join(root, 'pi', 'capture.mjs')}`));
   await writeFile(join(root, 'workspace.json'), JSON.stringify(workspace), { mode: 0o600 });
   const panes = JSON.parse(await herdr('pane', 'list'));
   await writeFile(join(root, 'panes.json'), JSON.stringify(panes), { mode: 0o600 });

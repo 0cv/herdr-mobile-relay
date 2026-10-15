@@ -38,9 +38,19 @@ export function sessionSeed(root, timestamp, session) {
   return join(root, 'pi', 'sessions', `--${join(root, 'work').slice(1).replaceAll('/', '-')}--`, `${timestamp.replaceAll(':', '-').replaceAll('.', '-')}_${session}.jsonl`);
 }
 
+export function browserSetupURL(origin, token) {
+  const url = new URL(origin);
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/' || url.search || url.hash) throw new Error('bare localhost relay origin required');
+  return `${url.origin}/#${new URLSearchParams({ setup: token, label: 'P1 native', relay: url.origin.replace('http:', 'ws:') })}`;
+}
+
+export function piSettings(root, version) {
+  return { tuiMode: 'regular', fullscreenExitOutput: 'resume-hint', externalEditor: join(root, 'editor.sh'), enabledModels: [], lastChangelogVersion: version };
+}
+
 export function piLaunch(bin, mode, pane, seed, root) {
   if (!['fullscreen', 'regular'].includes(mode)) throw new Error('explicit qualification mode required');
-  return [bin, 'agent', 'start', `p1-scroll-${mode}`, '--kind', 'pi', '--pane', pane, '--timeout', '30000', '--', '--offline', '--tui-mode', mode, '--session', seed, '--extension', join(root, 'pi', 'evidence.mjs'), '--extension', join(root, 'pi', 'bridge.mjs')];
+  return [bin, 'agent', 'start', `p1-scroll-${mode}`, '--kind', 'pi', '--pane', pane, '--timeout', '30000', '--', '--offline', '--tui-mode', mode, '--session', seed, '--extension', join(root, 'pi', 'evidence.mjs'), '--extension', join(root, 'pi', 'bridge.mjs'), '--extension', join(root, 'pi', 'herdr-agent-state.ts')];
 }
 
 export async function loggedCommand(args, { directory, label, env, cwd, timeout = 30000, identity, signalOwned, spawn = Bun.spawn, sleep = Bun.sleep }) {
