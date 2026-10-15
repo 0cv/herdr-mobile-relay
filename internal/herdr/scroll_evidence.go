@@ -12,30 +12,30 @@ import (
 const scrollEvidenceFileLimit = 512 * 1024
 
 type ScrollEvidenceRecord struct {
-	Kind string `json:"kind"`
-	Method string `json:"method,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	SocketPath string `json:"socket_path"`
-	Started time.Time `json:"started"`
-	Duration time.Duration `json:"duration_ns"`
-	Request []byte `json:"request_base64,omitempty"`
-	Response []byte `json:"response_base64,omitempty"`
-	WriteCalls int `json:"write_calls"`
-	Written int `json:"written"`
-	Wrote bool `json:"wrote"`
-	Error string `json:"error,omitempty"`
-	Status *ServerStatus `json:"selected_status,omitempty"`
-	Decision *FeatureEvidence `json:"decision,omitempty"`
-	Overflow bool `json:"overflow"`
+	Kind       string           `json:"kind"`
+	Method     string           `json:"method,omitempty"`
+	RequestID  string           `json:"request_id,omitempty"`
+	SocketPath string           `json:"socket_path"`
+	Started    time.Time        `json:"started"`
+	Duration   time.Duration    `json:"duration_ns"`
+	Request    []byte           `json:"request_base64,omitempty"`
+	Response   []byte           `json:"response_base64,omitempty"`
+	WriteCalls int              `json:"write_calls"`
+	Written    int              `json:"written"`
+	Wrote      bool             `json:"wrote"`
+	Error      string           `json:"error,omitempty"`
+	Status     *ServerStatus    `json:"selected_status,omitempty"`
+	Decision   *FeatureEvidence `json:"decision,omitempty"`
+	Overflow   bool             `json:"overflow"`
 }
 
 type ScrollEvidence struct {
-	mu sync.Mutex
+	mu      sync.Mutex
 	records []ScrollEvidenceRecord
-	bytes int
-	limit int
-	count int
-	failed atomic.Bool
+	bytes   int
+	limit   int
+	count   int
+	failed  atomic.Bool
 }
 
 func NewScrollEvidence(byteLimit, recordLimit int) (*ScrollEvidence, error) {
@@ -151,8 +151,8 @@ func (c *Client) ReadScrollEvidencePane(ctx context.Context, pane, source, forma
 	}
 	var result struct {
 		Read struct {
-			Text string `json:"text"`
-			Truncated bool `json:"truncated"`
+			Text      string `json:"text"`
+			Truncated bool   `json:"truncated"`
 		} `json:"read"`
 	}
 	if err := decodeSocketResult(raw, "pane_read", &result); err != nil {
