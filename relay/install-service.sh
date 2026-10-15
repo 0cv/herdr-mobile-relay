@@ -70,7 +70,7 @@ cat > "$STAGED_PLIST" <<EOF
     <true/>
     <key>KeepAlive</key>
     <dict>
-        <!-- Explicit pre-child --launchd refusal exits zero/non-ready. -->
+        <!-- Explicit pre-child launchd refusal exits zero/non-ready. -->
         <key>SuccessfulExit</key>
         <false/>
     </dict>
