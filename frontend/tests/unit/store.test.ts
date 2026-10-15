@@ -1494,9 +1494,33 @@ describe('relay command store', () => {
       lines: 500,
       format: 'ansi',
       content_fingerprint: '',
+      frame_revision: '',
       ...exactWireScope('w1:p1', relayId),
     });
     setTerminalHistoryLines(1_000);
+  });
+
+  it.each(['regular', 'unknown'])('retains prior %s history separately through fullscreen frames, deltas and Local selection', renderer => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = { relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', ...exactAgentFields(), pane_id: `${relayId}::w1:p1`, agent: 'pi' };
+    relayStore.watchPane(agent);
+    const scope = exactWireScope('w1:p1', relayId);
+    const regular = { selection: 'auto', renderer, wheel: 'unavailable', source: renderer === 'regular' ? 'pi_runtime' : 'unknown', route: 'local', presentation: 'history', available: false, reason: 'pi_regular', rows: 30, columns: 80, geometry_epoch: 1, revision: 'a'.repeat(64) };
+    socket.message({ type: 'pane_content', pane_id: 'w1:p1', content: 'Genuine prior transcript\n', format: 'ansi', viewport_only: true, scrolling: regular, ...scope });
+    const fullscreen = { ...regular, renderer: 'fullscreen', source: 'pi_runtime', wheel: 'sgr_cell', route: 'application', presentation: 'live_screen', available: true, reason: 'pi_fullscreen', revision: 'b'.repeat(64) };
+    socket.message({ type: 'pane_content', pane_id: 'w1:p1', content: 'Live viewport one\n', format: 'ansi', viewport_only: true, content_fingerprint: 'live-1', scrolling: fullscreen, ...scope });
+    socket.message({ type: 'pane_delta', pane_id: 'w1:p1', format: 'ansi', viewport_only: true, base_fingerprint: 'live-1', content_fingerprint: 'live-2', segments: [{ text: 'Live viewport two\n' }], scrolling: fullscreen, ...scope });
+    let frame = get(relayStore.terminalFrames).get(agent.pane_id)!;
+    expect(frame.content).toBe('Live viewport two\n');
+    expect(frame.localHistory?.content).toBe('Genuine prior transcript\n');
+    const local = { ...fullscreen, selection: 'local', route: 'local', available: false, reason: 'local_view', revision: 'c'.repeat(64) };
+    socket.message({ type: 'pane_content', pane_id: 'w1:p1', content: 'Live viewport three\n', format: 'ansi', viewport_only: true, scrolling: local, ...scope });
+    frame = get(relayStore.terminalFrames).get(agent.pane_id)!;
+    expect(frame.content).toBe('Live viewport three\n');
+    expect(frame.localHistory?.content).toBe('Genuine prior transcript\n');
+    expect(frame.scrolling?.selection).toBe('local');
   });
 
   it('applies acknowledged terminal deltas and resynchronizes mismatched bases', () => {

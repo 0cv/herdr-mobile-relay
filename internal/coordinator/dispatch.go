@@ -13,6 +13,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/piscroll"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
@@ -54,6 +55,9 @@ type Dispatcher struct {
 	readMu           sync.Mutex
 	topologyMu       sync.Mutex
 	reads            map[string]*paneRead
+	scroll           *piscroll.Manager
+	piResolver       *piscroll.PiResolver
+	piCatalogSlots   chan struct{}
 	watcherMu        sync.Mutex
 	watcherCtx       context.Context
 	watcherCancel    context.CancelFunc
@@ -281,6 +285,10 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleText(ctx, receivedAt, requestID, paneID, message)
 	case "send_filter_text":
 		return d.handleFilterText(ctx, receivedAt, requestID, paneID, message)
+	case "scroll_agent":
+		return d.handleScroll(ctx, receivedAt, requestID, paneID, message)
+	case "set_scroll_selection":
+		return d.handleScrollSelection(ctx, receivedAt, requestID, paneID, message)
 	case "send_input":
 		return d.handleInput(ctx, receivedAt, requestID, paneID, message)
 	case "send_secret":
@@ -1187,7 +1195,18 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	defer cancel()
 	generation := d.state.Generation(paneID)
 	revision := d.state.ContentRevision(paneID)
-	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d", paneID, lines, format, terminalColumns, generation)
+	ownerID := stringValue(message, "_scroll_owner")
+	scroll := d.ScrollState(readCtx, paneID, ownerID, true)
+	shapeRevision := ""
+	liveScreen := scroll != nil && scroll.Presentation == "live_screen"
+	if scroll != nil {
+		shapeRevision = scroll.Revision
+	}
+	if liveScreen {
+		format = "ansi"
+		lines = max(1, min(1000, scroll.Rows))
+	}
+	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d\x00%s", paneID, lines, format, terminalColumns, generation, shapeRevision)
 	d.readMu.Lock()
 	call := d.reads[key]
 	owner := call == nil
@@ -1197,7 +1216,11 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	}
 	d.readMu.Unlock()
 	if owner {
-		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format, terminalColumns > 0)
+		if liveScreen {
+			call.read, call.err = d.herdr.ReadPaneVisible(readCtx, paneID, lines, format)
+		} else {
+			call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format, terminalColumns > 0)
+		}
 		d.readMu.Lock()
 		delete(d.reads, key)
 		close(call.done)
@@ -1219,11 +1242,25 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	if d.state.ContentRevision(paneID) != revision {
 		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent state changed while the pane was being read"}
 	}
+	if scroll != nil {
+		current := d.ScrollState(readCtx, paneID, ownerID, false)
+		if current == nil || current.Revision != shapeRevision {
+			return map[string]any{"type": "pane_content", "pane_id": paneID, "error": "Scroll presentation changed during read"}
+		}
+	}
 	content := capPaneContentLines(read.Content, lines)
 	response := map[string]any{
 		"type": "pane_content", "pane_id": paneID, "content": string(content),
 		"format": format, "truncated": read.Truncated, "viewport_only": terminalColumns > 0,
 		"interaction": nil, "question_layout": false,
+	}
+	if scroll != nil {
+		response["scrolling"] = scroll
+	}
+	if liveScreen {
+		response["viewport_only"] = true
+		response["viewport_rows"] = scroll.Rows
+		return response
 	}
 	if terminalRows := intValue(message["terminal_rows"], 0); terminalRows > 0 {
 		response["viewport_rows"] = terminalRows

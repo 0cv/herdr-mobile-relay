@@ -50,6 +50,8 @@ import {
   stabilizeBlockedSnapshot,
 } from './agents';
 import { reportAppAnomaly } from './crash-banner';
+import { normalizeScrollState } from './pi-scroll';
+import { retainPaneHistory, type RetainedPaneHistory } from './terminal-history';
 import {
   parseActionReceipt,
   parseApiError,
@@ -172,6 +174,8 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   send_keys: true,
   send_text: true,
   send_input: true,
+  scroll_agent: true,
+  set_scroll_selection: true,
   send_filter_text: true,
   send_secret: true,
   agent_start: true,
@@ -551,6 +555,7 @@ class RelayStore {
   private workspacesValue: RelayWorkspace[] = [];
   private activitiesValue: Activity[] = [];
   private terminalFramesValue = new Map<string, TerminalFrame>();
+  private paneHistoryValue = new Map<string, RetainedPaneHistory>();
   private respondingValue = new Set<string>();
   private devicesValue = new Map<string, DeviceSummary[]>();
   private pushPoliciesValue = new Map<string, DevicePushPolicy>();
@@ -759,6 +764,7 @@ class RelayStore {
     this.pendingSlashCommands.clear();
     this.pendingPaneReads.clear();
     this.paneContentFingerprints.clear();
+    this.paneHistoryValue.clear();
     clearConversationPreviews();
     this.watchedPanes.clear();
     this.paneWatchesStarted.clear();
@@ -1629,7 +1635,7 @@ class RelayStore {
       }
       this.paneContentFingerprints.set(paneId, message.content_fingerprint);
       const deltaNoEcho = typeof message.no_echo === 'boolean' ? message.no_echo : frame?.noEcho;
-      this.terminalFramesValue.set(paneId, {
+      const nextFrame: TerminalFrame = {
         paneId,
         content: nextContent,
         format: String(message.format || frame?.format || 'plain'),
@@ -1641,10 +1647,14 @@ class RelayStore {
           ? typeof message.no_echo_prompt === 'string' ? message.no_echo_prompt : frame?.noEchoPrompt
           : undefined,
         resizeSettling: message.resize_settling === true,
-      });
+        frameRevision: typeof message.frame_revision === 'string' ? message.frame_revision : undefined,
+        scrolling: normalizeScrollState(message.scrolling),
+      };
+      this.attachPaneHistory(nextFrame, paneMessageTarget(message));
+      this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
-      if (watched) this.acknowledgePaneFrame(watched, message.content_fingerprint);
+      if (watched) this.acknowledgePaneFrame(watched, message.content_fingerprint, message.frame_revision);
       return;
     }
     if (message.type === 'pane_content') {
@@ -1658,6 +1668,8 @@ class RelayStore {
         paneId,
         content: typeof message.content === 'string' ? message.content : '(empty)',
         format: String(message.format || 'plain'),
+        frameRevision: typeof message.frame_revision === 'string' ? message.frame_revision : undefined,
+        scrolling: normalizeScrollState(message.scrolling),
       };
       if (message.truncated === true) nextFrame.truncated = true;
       if (message.viewport_only === true) nextFrame.viewportOnly = true;
@@ -1667,6 +1679,7 @@ class RelayStore {
         if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
       }
       if (message.resize_settling === true) nextFrame.resizeSettling = true;
+      this.attachPaneHistory(nextFrame, paneMessageTarget(message));
       this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -1675,19 +1688,27 @@ class RelayStore {
         ? message.content_fingerprint
         : '';
       if (watched && message.ack_required && contentFingerprint) {
-        this.acknowledgePaneFrame(watched, contentFingerprint);
+        this.acknowledgePaneFrame(watched, contentFingerprint, message.frame_revision);
       }
       this.startPaneWatch(paneId);
     }
   }
 
-  private acknowledgePaneFrame(agent: Agent, contentFingerprint: string): void {
+  private attachPaneHistory(frame: TerminalFrame, target: FrontendTargetRef | null): void {
+    const retained = retainPaneHistory(this.paneHistoryValue.get(frame.paneId), target, frame);
+    if (retained) this.paneHistoryValue.set(frame.paneId, retained);
+    else this.paneHistoryValue.delete(frame.paneId);
+    if (frame.scrolling?.presentation === 'live_screen' && retained) frame.localHistory = retained.snapshot;
+  }
+
+  private acknowledgePaneFrame(agent: Agent, contentFingerprint: string, frameRevision?: string): void {
     const identity = this.agentTargetPayload(agent);
     if (!identity) return;
     this.sendRaw(agent.relay_id, {
       type: 'pane_applied',
       pane_id: agent.raw_pane_id,
       content_fingerprint: contentFingerprint,
+      frame_revision: frameRevision,
       ...identity,
     });
   }
@@ -2027,6 +2048,34 @@ class RelayStore {
       pane_id: agent.raw_pane_id,
       ...identity,
     }, timeoutMs, false, signal);
+  }
+
+  private async scrollCommand(agent: Agent, payload: Record<string, unknown>, revision: string): Promise<void> {
+    if (this.deviceCredential(agent.relay_id)?.role !== 'controller') throw new CommandError('Scroll controls require a controller');
+    const update = (data: Record<string, unknown> | undefined) => {
+      const state = normalizeScrollState(data?.scrolling);
+      const current = this.terminalFramesValue.get(agent.pane_id);
+      const target = targetRefForAgent(agent);
+      const liveAgent = this.agentsValue.find(a => a.pane_id === agent.pane_id);
+      if (!state || !target || !liveAgent || !targetRefMatchesAgent(target, liveAgent) || current?.scrolling?.revision !== revision) return;
+      this.terminalFramesValue.set(agent.pane_id, { ...current, scrolling: state });
+      this.terminalFrames.set(new Map(this.terminalFramesValue));
+    };
+    try {
+      const result = await this.sendToAgent(agent, { ...payload, state_revision: revision }, 1_000);
+      update(result.data);
+    } catch (error) {
+      if (error instanceof CommandError) update(error.data);
+      throw error;
+    }
+  }
+
+  scrollAgent(agent: Agent, direction: 'up' | 'down', revision: string): Promise<void> {
+    return this.scrollCommand(agent, { type: 'scroll_agent', direction }, revision);
+  }
+
+  setScrollSelection(agent: Agent, selection: 'auto' | 'local', revision: string): Promise<void> {
+    return this.scrollCommand(agent, { type: 'set_scroll_selection', selection }, revision);
   }
 
   speakToAgent(agent: Agent, text: string, language: string): SpeechRequest {
@@ -2500,6 +2549,7 @@ class RelayStore {
       lines: this.paneBudget(agent.relay_id).lines,
       format: 'ansi',
       content_fingerprint: force ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
+      frame_revision: force ? '' : this.terminalFramesValue.get(agent.pane_id)?.frameRevision,
       ...identity,
     });
     if (sent) this.pendingPaneReads.set(readKey, Date.now());
@@ -2547,6 +2597,7 @@ class RelayStore {
       interval_ms: budget.intervalMs,
       format: 'ansi',
       content_fingerprint: contentFingerprint,
+      frame_revision: this.terminalFramesValue.get(paneId)?.frameRevision,
       ...identity,
     });
     if (sent) this.paneWatchesStarted.add(paneId);

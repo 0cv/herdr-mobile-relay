@@ -258,6 +258,11 @@ connections can use 10,000. The "older history" notice reports when rows beyond
 the served window exist. Use **Copy** for the latest response or
 **Conversation History** for clean, searchable earlier turns.
 
+Pi's **Scroll agent up** and **Scroll agent down** buttons send confirmed wheel
+input only when Pi reports its live fullscreen screen and the relay can verify
+the active pane and terminal. A reader can view the controls but cannot use
+them; ordinary terminals and unverified scroll states leave them disabled.
+
 In **Settings → Agents → Default View**, choose **Terminal** or
 **Conversation** for new agent openings. Terminal is the initial default. In
 **Manage agent → Default View**, choose **Use default** or set a preference for

@@ -71,6 +71,12 @@ type speechRequest struct {
 	cancel    context.CancelFunc
 }
 
+type serverDependencies struct {
+	paneSizeRunner  panesize.CommandRunner
+	geometryRunner  panesize.CommandRunner
+	speechLanguages func() []string
+}
+
 type Server struct {
 	cfg      *config.Config
 	version  string
@@ -112,6 +118,7 @@ type Server struct {
 	speechRequests   map[string]*speechRequest
 	copyMu           sync.Mutex
 	paneSizeM        *panesize.Manager
+	buildDispatcher  func(*activity.Journal) *coordinator.Dispatcher
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
 	appDeployM       *appdeploy.Manager
@@ -120,10 +127,11 @@ type Server struct {
 	deviceAuth       *deviceauth.Store
 	initErr          error
 
-	mu        sync.RWMutex
-	ready     bool
-	startedAt time.Time
-	errors    []string
+	mu         sync.RWMutex
+	runStarted bool
+	ready      bool
+	startedAt  time.Time
+	errors     []string
 
 	activityMu   sync.RWMutex
 	activityView []activity.Entry
@@ -157,6 +165,14 @@ type Server struct {
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
+	return newServerWithDependencies(cfg, version, revision, logger, serverDependencies{speechLanguages: speech.Languages})
+}
+
+func newServerWithDependencies(cfg *config.Config, version, revision string, logger *slog.Logger, dependencies serverDependencies) *Server {
+	if dependencies.speechLanguages == nil {
+		return &Server{initErr: errors.New("speech language discovery dependency is required")}
+	}
+	geometryRunner, socket := dependencies.geometryRunner, cfg.SocketPath
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
 	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
@@ -221,7 +237,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		}
 	}
 
-	speechLanguages := speech.Languages()
+	speechLanguages := dependencies.speechLanguages()
 	logger.Info("speech synthesis available", "languages", strings.Join(speechLanguages, ","))
 	initialInventory := state.InventorySnapshot()
 
@@ -245,7 +261,10 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		speechRemove:        speech.Remove,
 		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
-		paneSizeM:           panesize.NewManager(herdrClient, logger),
+		paneSizeM:           panesize.NewManagerWithRunner(herdrClient, dependencies.paneSizeRunner, logger),
+		buildDispatcher:     func(journal *activity.Journal) *coordinator.Dispatcher {
+			return coordinator.NewDispatcherWithPiScroll(herdrClient, state, journal, logger, socket, geometryRunner)
+		},
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
@@ -542,12 +561,39 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	agent.Session = title
 }
 
+func (s *Server) beginRun() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runStarted {
+		return errors.New("relay server has already started")
+	}
+	s.runStarted = true
+	return nil
+}
+
+func (s *Server) initializeDispatcher() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.runStarted || s.dispatcher != nil {
+		return errors.New("relay dispatcher construction is unavailable")
+	}
+	dispatcher := s.buildDispatcher(s.journal)
+	dispatcher.SetProfiles(s.profiles)
+	dispatcher.SetBroadcast(s.broadcastCommitted)
+	dispatcher.SetWakePoll(func() { s.poller.Wake() })
+	s.dispatcher = dispatcher
+	return nil
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	if s.initErr != nil {
 		if s.conversationB != nil {
 			_ = s.conversationB.Close()
 		}
 		return s.initErr
+	}
+	if err := s.beginRun(); err != nil {
+		return err
 	}
 	if s.conversationB != nil {
 		defer s.conversationB.Close()
@@ -603,10 +649,13 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	})
 
-	s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, s.journal, s.logger)
-	s.dispatcher.SetProfiles(s.profiles)
-	s.dispatcher.SetBroadcast(s.broadcastCommitted)
-	s.dispatcher.SetWakePoll(func() { s.poller.Wake() })
+	if err := s.initializeDispatcher(); err != nil {
+		return err
+	}
+	s.paneSizeM.SetOnResize(func(pane string) {
+		s.dispatcher.InvalidateScrollGeometry(pane)
+		s.refreshPaneWatches(pane)
+	})
 	// The handshake has no "profiles loading" state. Resolve integrations
 	// before accepting the first WebSocket.
 	_ = s.profiles.Profiles()
@@ -621,6 +670,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
 		s.stopPaneWatch(client.ID(), "")
+		s.dispatcher.ForgetScrollOwner(client.ID())
 		if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
 			s.pushM.SetViewedPane(identity.DeviceID, nil)
 		}
@@ -683,7 +733,16 @@ func (s *Server) Run(ctx context.Context) error {
 			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
 			return
 		}
-		_, authenticated := client.Identity()
+		identity, authenticated := client.Identity()
+		if inbound.Type == "scroll_agent" || inbound.Type == "set_scroll_selection" {
+			if !authenticated || identity.Role != string(protocol.RoleController) || inbound.Target == nil || inbound.RequestID == "" || inbound.StateRevision == "" ||
+				inbound.Text != "" || len(inbound.Keys) > 0 || inbound.Columns != 0 || inbound.Rows != 0 {
+				admitted()
+				s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(protocol.ErrorInvalidRequest, nil)))
+				return
+			}
+		}
+		msg["_scroll_owner"] = client.ID()
 		if targetErr := validateExactPaneTarget(s.state, inbound, authenticated); targetErr != nil {
 			admitted()
 			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *targetErr))
@@ -699,7 +758,10 @@ func (s *Server) Run(ctx context.Context) error {
 			admitted()
 		}
 
-		commandCtx := herdr.WithDispatchCheck(ctx, func() error {
+		commandCtx := herdr.WithDispatchCheck(client.Context(), func() error {
+			if err := client.Context().Err(); err != nil {
+				return err
+			}
 			if s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID) != nil {
 				return errors.New("device is no longer authorized")
 			}
@@ -788,6 +850,7 @@ func (s *Server) Run(ctx context.Context) error {
 			s.startPaneWatch(client, msg)
 		case "unwatch_pane":
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
+			s.dispatcher.ForgetScrollOwner(client.ID())
 		case "pane_applied":
 			s.handlePaneApplied(client, msg)
 		case "get_conversation_history":
@@ -1005,7 +1068,7 @@ func (s *Server) Run(ctx context.Context) error {
 			)
 			if slashcmd.IsPi(profileID, agent) && !suppressNative && commandFormat == "" {
 				catalog.Status = "partial"
-				if runtime, err := runtimePiCatalog(client.Context(), s.herdrC, s.cfg.SocketPath, paneID, activeAgent.SessionID); err == nil {
+				if runtime, err := s.dispatcher.PiCatalog(client.Context(), paneID); err == nil {
 					if runtime.Status == "available" || runtime.Status == "partial" {
 						catalog = runtime
 					} else {
@@ -1236,6 +1299,11 @@ func (s *Server) Run(ctx context.Context) error {
 				s.recordWriteAudit(client, msg, result)
 			}
 			s.hub.Send(client, commandResultMessage(result))
+			if action == "set_scroll_selection" {
+				s.refreshScrollWatch(client.ID(), inbound.PaneID)
+			} else {
+				s.refreshPaneWatchesAfterInput(action, inbound.PaneID, result)
+			}
 		}
 	})
 
@@ -2848,6 +2916,7 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 	if secret {
 		response["no_echo_prompt"] = prompt
 	}
+	response["frame_revision"] = paneFrameFingerprint(response)
 	return response
 }
 
@@ -2926,6 +2995,9 @@ func paneFrameFingerprint(response map[string]any) string {
 		response["options"],
 		response["interaction"],
 		response["question_layout"],
+		response["scrolling"],
+		response["no_echo"],
+		response["no_echo_prompt"],
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -2942,7 +3014,8 @@ func unchangedPaneResponse(message, response map[string]any) map[string]any {
 	fingerprint := paneFingerprint(content)
 	response["content_fingerprint"] = fingerprint
 	known, _ := message["content_fingerprint"].(string)
-	if known == "" || known != fingerprint {
+	knownFrame, _ := message["frame_revision"].(string)
+	if known == "" || known != fingerprint || knownFrame == "" || knownFrame != response["frame_revision"] {
 		return nil
 	}
 	paneID, _ := response["pane_id"].(string)

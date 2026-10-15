@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
@@ -26,6 +27,7 @@ type paneWatchFrame struct {
 	frameFingerprint    string
 	classificationAgent string
 	resizeSettling      bool
+	scrollRevision      string
 }
 
 type paneWatch struct {
@@ -37,11 +39,13 @@ type paneWatch struct {
 	interval time.Duration
 	ctx      context.Context
 	cancel   context.CancelFunc
+	refresh  chan struct{}
 
 	mu               sync.Mutex
 	acknowledged     *paneWatchFrame
 	pending          *paneWatchFrame
 	probeFingerprint string
+	forceRefresh     bool
 }
 
 func (s *Server) startPaneWatch(client *transport.ClientConn, message map[string]any) {
@@ -74,6 +78,7 @@ func (s *Server) startPaneWatch(client *transport.ClientConn, message map[string
 		interval: interval,
 		ctx:      ctx,
 		cancel:   cancel,
+		refresh:  make(chan struct{}, 1),
 	}
 
 	s.paneWatchMu.Lock()
@@ -148,6 +153,8 @@ func (s *Server) runPaneWatch(watch *paneWatch, knownFingerprint string) {
 			return
 		case <-ticker.C:
 			s.pollPaneWatch(watch)
+		case <-watch.refresh:
+			s.pollPaneWatch(watch)
 		}
 	}
 }
@@ -156,10 +163,21 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 	if !s.paneWatchCurrent(watch) {
 		return
 	}
+	state := s.dispatcher.ScrollState(watch.ctx, watch.paneID, watch.client.ID(), true)
 	watch.mu.Lock()
+	force := watch.forceRefresh
+	watch.forceRefresh = false
+	current := watch.acknowledged
 	if watch.pending != nil {
+		current = watch.pending
+	}
+	stateChanged := state != nil && (current == nil || current.scrollRevision != state.Revision)
+	if watch.pending != nil && !stateChanged && !force {
 		watch.mu.Unlock()
 		return
+	}
+	if stateChanged || force {
+		watch.pending = nil
 	}
 	previousProbe := watch.probeFingerprint
 	acknowledged := watch.acknowledged
@@ -177,6 +195,7 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 		probeFingerprint,
 		acknowledged,
 		classificationAgentID,
+		stateChanged || force,
 	) {
 		return
 	}
@@ -223,6 +242,7 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 		frameFingerprint:    frameFingerprint,
 		classificationAgent: classificationAgentID,
 		resizeSettling:      resizeSettling,
+		scrollRevision:      scrollRevision(response),
 	}
 }
 
@@ -230,7 +250,11 @@ func paneWatchNeedsFrameRead(
 	previousProbe, probeFingerprint string,
 	acknowledged *paneWatchFrame,
 	classificationAgentID string,
+	stateChanged bool,
 ) bool {
+	if stateChanged {
+		return true
+	}
 	if previousProbe == "" || probeFingerprint != previousProbe {
 		return true
 	}
@@ -239,7 +263,64 @@ func paneWatchNeedsFrameRead(
 			acknowledged.classificationAgent != classificationAgentID)
 }
 
+func scrollRevision(response map[string]any) string {
+	if state, ok := response["scrolling"].(*protocol.ScrollState); ok && state != nil {
+		return state.Revision
+	}
+	return ""
+}
+
+func (s *Server) refreshScrollWatch(owner, pane string) {
+	s.paneWatchMu.Lock()
+	watch := s.paneWatches[owner]
+	s.paneWatchMu.Unlock()
+	if watch == nil || watch.paneID != pane {
+		return
+	}
+	queuePaneWatchRefresh(watch)
+}
+
+func paneInputChangesScreen(action string) bool {
+	switch action {
+	case "submit_prompt", "send_text", "send_filter_text", "send_keys", "send_input", "send_secret", "respond", "answer_question", "clarify_question", "navigate_question", "scroll_agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) refreshPaneWatchesAfterInput(action, pane string, result *coordinator.CommandResult) {
+	if result != nil && (result.OK || result.Phase == "dispatched_unknown") && paneInputChangesScreen(action) {
+		s.refreshPaneWatches(pane)
+	}
+}
+
+func (s *Server) refreshPaneWatches(pane string) {
+	s.paneWatchMu.Lock()
+	defer s.paneWatchMu.Unlock()
+	for _, watch := range s.paneWatches {
+		if watch.paneID == pane {
+			queuePaneWatchRefresh(watch)
+		}
+	}
+}
+
+func queuePaneWatchRefresh(watch *paneWatch) {
+	watch.mu.Lock()
+	watch.forceRefresh = true
+	watch.mu.Unlock()
+	select {
+	case watch.refresh <- struct{}{}:
+	default:
+	}
+}
+
 func (s *Server) paneWatchCurrent(watch *paneWatch) bool {
+	if watch.target.TerminalID != "" && validateExactPaneTarget(s.state, protocol.Inbound{PaneID: watch.paneID, Target: &watch.target}, true) != nil {
+		watch.cancel()
+		s.dispatcher.ForgetScrollOwner(watch.client.ID())
+		return false
+	}
 	s.paneWatchMu.Lock()
 	defer s.paneWatchMu.Unlock()
 	return s.paneWatches[watch.client.ID()] == watch
@@ -248,6 +329,7 @@ func (s *Server) paneWatchCurrent(watch *paneWatch) bool {
 func (s *Server) handlePaneApplied(client *transport.ClientConn, message map[string]any) {
 	paneID, _ := message["pane_id"].(string)
 	fingerprint, _ := message["content_fingerprint"].(string)
+	frameRevision, _ := message["frame_revision"].(string)
 	s.paneWatchMu.Lock()
 	watch := s.paneWatches[client.ID()]
 	s.paneWatchMu.Unlock()
@@ -255,13 +337,13 @@ func (s *Server) handlePaneApplied(client *transport.ClientConn, message map[str
 		return
 	}
 	watch.mu.Lock()
-	if watch.pending != nil && watch.pending.contentFingerprint == fingerprint {
+	if watch.pending != nil && watch.pending.contentFingerprint == fingerprint && watch.pending.frameFingerprint == frameRevision {
 		watch.acknowledged = watch.pending
 		watch.pending = nil
 		watch.mu.Unlock()
 		return
 	}
-	if watch.acknowledged != nil && watch.acknowledged.contentFingerprint == fingerprint {
+	if watch.acknowledged != nil && watch.acknowledged.contentFingerprint == fingerprint && watch.acknowledged.frameFingerprint == frameRevision {
 		watch.mu.Unlock()
 		return
 	}
@@ -281,10 +363,11 @@ func requestedPaneWatchInterval(value any) time.Duration {
 
 func watchMessage(watch *paneWatch) map[string]any {
 	return map[string]any{
-		"pane_id": watch.paneID,
-		"lines":   watch.lines,
-		"format":  watch.format,
-		"target":  watch.target,
+		"pane_id":       watch.paneID,
+		"lines":         watch.lines,
+		"format":        watch.format,
+		"target":        watch.target,
+		"_scroll_owner": watch.client.ID(),
 	}
 }
 

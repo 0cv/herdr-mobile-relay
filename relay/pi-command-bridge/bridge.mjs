@@ -171,7 +171,32 @@ export async function instanceIdentity(socketPath) {
   return createHash('sha256').update(`${path}\n${stat.dev}\n${stat.ino}`).digest('hex');
 }
 
-export async function startBridge({ instance, pane, session, pid = process.pid, directory, catalog }) {
+export function createScrollState() {
+  let reference;
+  return {
+    widget(tui) {
+      const component = {
+        render: () => [],
+        invalidate() {},
+        dispose() { if (reference?.component === component) reference = undefined; },
+      };
+      reference = { tui, component };
+      return component;
+    },
+    clear() { reference = undefined; },
+    query() {
+      const mode = reference?.tui.mode;
+      const renderer = mode === 'fullscreen' || mode === 'regular' ? mode : 'unknown';
+      return {
+        renderer,
+        wheel: renderer === 'fullscreen' ? 'sgr_cell' : 'unavailable',
+        reason: renderer === 'fullscreen' ? 'pi_fullscreen' : renderer === 'regular' ? 'pi_regular' : 'ui_unavailable',
+      };
+    },
+  };
+}
+
+export async function startBridge({ instance, pane, session, sessionFile, pid = process.pid, directory, catalog, scrollState = () => ({ renderer: 'unknown', wheel: 'unavailable', reason: 'ui_unavailable' }) }) {
   await mkdir(directory, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
   return listen();
   async function listen() {
@@ -210,19 +235,27 @@ export async function startBridge({ instance, pane, session, pid = process.pid, 
       async function respond() {
         const request = JSON.parse(input);
         if (!request || typeof request !== 'object' || Array.isArray(request)
-          || busy || request.instance !== instance || request.pane !== pane || request.session !== session
-          || request.pid !== pid || !/^[a-f0-9]{32}$/.test(request.challenge)) { socket.destroy(); return; }
-        busy = true;
+          || request.instance !== instance || request.pane !== pane
+          || (request.session !== session && (!sessionFile || request.session !== sessionFile))
+          || request.pid !== pid || !/^[a-f0-9]{32}$/.test(request.challenge)
+          || !['catalog', 'scroll_state'].includes(request.operation)
+          || (request.operation === 'catalog' && busy)) { socket.destroy(); return; }
+        const isCatalog = request.operation === 'catalog';
+        if (isCatalog) busy = true;
         try {
-          const result = await abortable(Promise.resolve().then(() => catalog(controller.signal)), controller.signal);
+          const result = isCatalog
+            ? await abortable(Promise.resolve().then(() => catalog(controller.signal)), controller.signal)
+            : scrollState();
           if (closed || socket.destroyed) return;
-          const response = { ...result, instance, pane, session, pid, incarnation, challenge: request.challenge };
-          response.revision = createHash('sha256').update(JSON.stringify([response.status, response.truncated, response.commands])).digest('hex');
+          const response = { ...result, instance, pane, session: request.session, pid, incarnation, challenge: request.challenge };
+          response.revision = createHash('sha256').update(JSON.stringify(isCatalog
+            ? [response.status, response.truncated, response.commands]
+            : [response.renderer, response.wheel, response.reason])).digest('hex');
           const payload = JSON.stringify(response);
           if (Buffer.byteLength(payload) >= maxBytes) { socket.destroy(); return; }
           socket.end(`${payload}\n`);
         } catch { socket.destroy(); }
-        finally { busy = false; }
+        finally { if (isCatalog) busy = false; }
       }
     });
     await new Promise((resolve, reject) => {
@@ -248,32 +281,45 @@ export default function commandBridge(pi) {
   let provider;
   let discovering = false;
   let ready = false;
+  let ui;
+  const scroll = createScrollState();
+  const widgetKey = 'herdr-mobile-relay:scroll-state';
   pi.on('resources_discover', () => { discovering = true; });
   pi.on('session_start', async (_event, ctx) => {
     if (ctx.mode !== 'tui' || !process.stdin.isTTY || globalThis[ownerKey]) return;
     const pane = process.env.HERDR_PANE_ID;
     const socketPath = process.env.HERDR_SOCKET_PATH;
     const session = ctx.sessionManager.getSessionId();
+    const sessionFile = ctx.sessionManager.getSessionFile();
     if (!pane || pane.length > 160 || !socketPath || !session) return;
     owner = {};
     globalThis[ownerKey] = owner;
     try {
       const instance = await instanceIdentity(socketPath);
+      ui = ctx.ui;
+      ui.setWidget(widgetKey, tui => scroll.widget(tui), { placement: 'belowEditor' });
       ctx.ui.addAutocompleteProvider(current => {
         provider = current;
         if (discovering) ready = true;
         return current;
       });
       const directory = `/tmp/herdr-pi-${process.getuid()}-${instance.slice(0, 16)}`;
-      close = await startBridge({ instance, pane, session, directory,
+      close = await startBridge({ instance, pane, session, sessionFile, directory,
         catalog: createCatalog(() => pi.getCommands(), () => ready ? provider : undefined),
+        scrollState: () => scroll.query(),
       });
     } catch {
+      scroll.clear();
+      ui?.setWidget(widgetKey, undefined);
+      ui = undefined;
       if (globalThis[ownerKey] === owner) delete globalThis[ownerKey];
     }
   });
   pi.on('session_shutdown', async () => {
     ready = false;
+    scroll.clear();
+    ui?.setWidget(widgetKey, undefined);
+    ui = undefined;
     await close?.();
     close = undefined;
     if (owner && globalThis[ownerKey] === owner) delete globalThis[ownerKey];

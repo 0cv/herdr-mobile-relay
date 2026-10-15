@@ -92,7 +92,7 @@ reopen the palette or use its refresh button after changing command resources.
 
 ## Pi runtime commands
 
-For Pi 0.87.0, install the relay-owned metadata integration into the selected
+For Pi 1.0.0, install the relay-owned metadata integration into the selected
 **agent directory** (not the directory containing it):
 
 ```bash
@@ -136,9 +136,13 @@ precedence over runtime discovery.
 The bridge starts only in an interactive TUI session inside Herdr, with
 `HERDR_PANE_ID` and `HERDR_SOCKET_PATH` present. Endpoint identity includes the
 Herdr socket's canonical path and inode, pane, exact Pi session, PID, and process
-incarnation. The relay independently checks Herdr's foreground process-group
-leader and Unix peer credentials, and rechecks the process and session after
-discovery. Nested sessions cannot replace the root registration. Missing or
+incarnation. A native session reference may name Pi's current session ID or its
+current session file; the bridge matches the actual session manager value and
+rejects unrelated IDs or paths. The relay independently checks Herdr's whole foreground
+process group and Unix peer credentials, and rechecks the process and session
+after discovery. A shell foreground, missing shell identity, or any additional
+foreground process (including an inherited-stdio editor) makes discovery
+unavailable; merely finding the group leader is insufficient. Nested sessions cannot replace the root registration. Missing or
 ambiguous identity is not guessed from a working directory.
 
 Sockets are mode 0600 inside user-owned mode 0700 directories under
@@ -152,6 +156,68 @@ without launching more autocomplete work. Skill discovery resumes when that
 call settles; restart Pi if it never does. Shutdown, reload, and replacement close owned sockets. A stale
 socket is rejected rather than taken over. The integration requires no Node
 packages beyond Pi's own runtime; it ships in the relay release archive.
+
+### Internal scroll-state query
+
+The bridge also exposes a separate, read-only `scroll_state` query for Pi 1.0.0.
+It reads the live TUI reference supplied to an invisible `belowEditor` widget,
+not saved `tuiMode` or the extension context's mode. The widget renders no rows
+and handles no input; disposal clears readiness. Only the observed fullscreen
+renderer reports SGR cell wheel support. Regular or unavailable UI never does.
+This query does not enumerate commands or wait for autocomplete.
+
+P1 wires connection-scoped Automatic/Local selection, controller-only Scroll
+agent up/down buttons, revision-bearing visible-screen frames, and socket-only
+dispatch. Each intent reads foreground ownership before and after fresh geometry
+and live renderer evidence. Writes must start within 250 ms of receipt, with at
+most another 250 ms for acknowledgement; uncertain writes are never retried.
+Selection requests are deduplicated and revision-checked under the state lock.
+Matching in-flight wheel retries attach to the original outcome before busy
+admission. Cancelling pending clicks does not discard a fresh eligible click
+made while the active request drains; follow-up still requires confirmed success.
+Lease resizes and restoration invalidate geometry and refresh pane viewers.
+Concurrent display discovery can refuse a click as busy; there is no automatic
+retry or guarantee that every click is delivered under load.
+Wheel capability requires selected-socket schema evidence matching the observed
+server version/protocol and qualifying the referenced request parameters and
+success responses for raw send, process ownership and visible ANSI reads.
+Unrecognized schema constraints refuse capability. Protocol 22 is an observed
+fixture version, not a runtime pin. Read-only catalog discovery shares
+ownership resolution without requiring wheel capability. Ordinary output/pane
+revisions do not invalidate measured geometry; identity and known resize changes
+do. Rejected wheels do not trigger all-viewer screen refreshes.
+
+The browser retains one genuine prior local-history snapshot separately from
+fullscreen viewport frames. Local view displays that snapshot when available;
+Automatic returns to the latest live screen. Fullscreen redraws are not appended
+to history, and the retained snapshot is not application-history harvesting.
+Ordinary unknown-renderer history can supply the initial snapshot. Unknown
+renderer evidence cannot replace an existing snapshot or capture history after
+a live screen has been observed; confirmed regular history resumes updates.
+
+Disposable offline Pi 1.0.0 fixtures have exercised actual Chromium/WebKit
+buttons on Darwin, including Local view, resize without a height lease, reload,
+foreground editor handoff, process/mode replacement, reconnect, and Conversation
+History. This is browser qualification, not physical-phone or non-Darwin runtime
+qualification. A separate disposable actual-PTY regression applies and restores
+an existing row lease and checks measured rows, state revision/epoch and center
+reports. Current expanded reruns also recorded startup/selection failures and
+250 ms admission refusals; they have not requalified the complete matrix.
+Recovery now records monotonic per-phase timings for both ownership reads,
+geometry, bridge, instance/target checks and dispatch/acknowledgement. Read-only
+measurements are not button qualification. CLI cancellation now tracks native process birth identities and verified parent
+edges per invocation, with individually checked child-first cancellation and
+bounded pipe/wait cleanup. Missing identity or broken provenance reports
+incomplete cleanup without authorizing an input retry. The installed Playwright
+launcher still has no supported replacement for its process-group forced cleanup,
+so browser qualification paths remain quarantined rather than forced through it.
+Independent acceptance is still pending.
+No swipe support, Codex/Claude adapter, automatic mouse enabling, key fallback
+or application-history harvesting is provided. Pi buttons affect the shared
+laptop view, and a center wheel can target a menu rather
+than the transcript. Process, renderer and geometry checks are best-effort:
+changes after validation can ignore input, expose literal escape text or route
+it to a different input surface.
 
 ### Runtime states and troubleshooting
 

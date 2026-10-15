@@ -1,0 +1,672 @@
+{
+  "selectedPackage": "@playwright/test",
+  "selectedVersion": "1.62.1",
+  "repositoryRoot": "/Users/christophe.vidal/Development/misc/herdr-mobile-relay",
+  "installedSources": [
+    {
+      "path": "frontend/node_modules/playwright/lib/runner/index.js",
+      "sha256": "6dcf135a144b0f243848128bb68e0a25898b8ad764a34326f36ab45d9a9e1685"
+    },
+    {
+      "path": "frontend/node_modules/playwright/lib/common/index.js",
+      "sha256": "8f2588ccdb7ce2d245fdbe3222ba67817293799dff1ba2e58303f0d558b6526f"
+    },
+    {
+      "path": "frontend/node_modules/@playwright/test/cli.js",
+      "sha256": "79e23e6a249176295b8490567daa7717448a75866d6ea6f6b296ff3d23305c69"
+    },
+    {
+      "path": "frontend/node_modules/@playwright/test/package.json",
+      "sha256": "be51f784a5742a1aa075e0173f5f04f189a791cc30c40e3bb18be584f696764e"
+    }
+  ],
+  "revision06PriorCaseCount": 67,
+  "revision06InvocationJournal": {
+    "programId": "1ad22fd0-dd89-45d5-be90-cc685cbe62a9",
+    "root": "/tmp/herdr-retention-v3-accounting-1ad22fd0-dd89-45d5-be90-cc685cbe62a9",
+    "manifest": "JOURNAL.json",
+    "records": "invocations.ndjson",
+    "maxEntries": 128,
+    "maxBytes": 4194304,
+    "recoveryManifest": "controller-recovery.json"
+  },
+  "controllerGateRecovery": {
+    "programId": "1ad22fd0-dd89-45d5-be90-cc685cbe62a9",
+    "command": "bun frontend/scripts/private-qualification/check.mjs --phase completion",
+    "shellCallsitePrefix": "shell/callsite%3A842%3A865/",
+    "expectedShellResults": 2,
+    "journalPath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/journal.json",
+    "workflowPath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/workflow.js",
+    "taskStatePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/tasks/T001/steps/0004.json",
+    "maxJournalBytes": 16777216,
+    "maxWorkflowBytes": 262144,
+    "maxTaskStateBytes": 8388608,
+    "maxEntries": 4096,
+    "maxShellOutputBytes": 10485760,
+    "expectedControllerAssociations": 2,
+    "evidenceBoundAmendment": {
+      "recordedBeforeNextCompletionCommand": true,
+      "previousMaxJournalBytes": 8388608,
+      "suppliedObservedJournalBytes": 8622774,
+      "suppliedExcessBytesOverPreviousLimit": 234166,
+      "observationSource": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/program/recovery-6.json",
+      "suppliedObservationClassification": "Controller-supplied size metadata; not a fresh hash or size observation for the next read.",
+      "failedInvocationId": "fa914510-0111-41c8-84fb-a875aff079f9",
+      "failedStage": "controller-gate-recovery",
+      "reason": "The fixed 8 MiB journal input ceiling was implementation-selected and excluded the exact configured journal needed for C5 association recovery; the mandate does not set that ceiling.",
+      "newMaxJournalBytes": 16777216,
+      "classification": "Finite exact-input evidence bound; not a source-output, engine, or storage allowance.",
+      "nextReadObservation": null,
+      "recordActualBytesAndSHA256OnSuccessfulRead": true,
+      "automaticWidening": false
+    }
+  },
+  "causalAllowanceAmendment": {
+    "recordedBeforeReplacementExecution": true,
+    "originalProposal": {
+      "batches": 8,
+      "classification": "proposal only; not a completed allowance, enforced ceiling, or measured actual",
+      "source": "Owner-supplied original eight-batch proposal carried into this T001 continuation"
+    },
+    "historicalAttemptSource": "/tmp/herdr-scroll-p1-output-retention-completion-v2/failure-history.json",
+    "historicalCompletionAttempts": [
+      { "attempt": "attempt-01", "outcome": "failed timeout at 30 seconds", "passedCases": 25, "completedCases": 25, "lastStartedCase": "C26", "summaryPresent": false },
+      { "attempt": "attempt-02", "outcome": "passed", "passedCases": 45, "completedCases": 45 },
+      { "attempt": "attempt-03", "outcome": "passed", "passedCases": 50, "completedCases": 50 },
+      { "attempt": "attempt-04", "outcome": "passed", "passedCases": 52, "completedCases": 52 },
+      { "attempt": "attempt-05", "outcome": "passed final baseline", "passedCases": 53, "completedCases": 53 }
+    ],
+    "historicalConsumedCounters": {
+      "classification": "Step-4/worker-turn-2 snapshot retained as history; enginePasses is not evidence of actual engine usage.",
+      "taskStep": 4,
+      "workerTurns": 2,
+      "enginePasses": 4,
+      "reviews": 6,
+      "reviewLimit": 12,
+      "repairRounds": 2,
+      "verificationFailures": 0,
+      "audits": 0,
+      "auditLimit": 2,
+      "countersReset": false,
+      "capsRaised": false
+    },
+    "historicalStep9Counters": {
+      "sourcePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/tasks/T001/steps/0009.json",
+      "sourceClassification": "Historical controller-owned T001 leaf-state snapshot supplied with recovery-3; not live admission state and no engine usage is inferred.",
+      "taskStep": 9,
+      "workerTurns": 5,
+      "reviews": 6,
+      "reviewLimit": 12,
+      "repairRounds": 2,
+      "verificationFailures": 2,
+      "interventions": 1,
+      "interventionLimit": 1,
+      "audits": 0,
+      "auditLimit": 2,
+      "engineUsageEvidence": "unknown-not-inferred",
+      "countersReset": false,
+      "capsRaised": false
+    },
+    "recovery5CausalAmendment": {
+      "recordedBeforeNextCompletionCommand": true,
+      "sourcePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/program/recovery-5.json",
+      "classification": "Controller-supplied state and conditional projection; not a recovered shell association or measured next total.",
+      "currentControllerConsumption": {
+        "sourcePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/program/recovery-5.json",
+        "sourceClassification": "Controller-supplied current T001 consumption snapshot; not live admission state and no engine usage is inferred.",
+        "taskStep": 13,
+        "workerTurns": 7,
+        "reviews": 6,
+        "reviewLimit": 12,
+        "repairRounds": 2,
+        "verificationFailures": 4,
+        "interventions": 1,
+        "interventionLimit": 1,
+        "audits": 0,
+        "auditLimit": 2,
+        "engineUsageEvidence": "unknown-not-inferred",
+        "countersReset": false,
+        "capsRaised": false
+      },
+      "retainedRevision06Snapshot": {
+        "rootedInvocations": 18,
+        "passed": 8,
+        "failed": 10,
+        "recordedCases": 936,
+        "unexecutedCases": 300,
+        "unrootedFailedCommandEvents": 2,
+        "unrootedUnexecutedCaseSlots": 150,
+        "classification": "Supplied retained-ledger projection before controller associations are reconciled."
+      },
+      "expectedControllerAssociations": 2,
+      "conditionalProjection": {
+        "condition": "Both shell events validate as distinct; one associates with an already-counted root and one contributes a new root.",
+        "newRootsFromControllerAssociations": 1,
+        "rootedAfterControllerAssociation": 19,
+        "nextCompletionExecutionAddsRoot": 1,
+        "rootedAfterNextCompletion": 20,
+        "commandAttemptsAfterNextCompletion": 22,
+        "rootedAfterSeparateControllerGate": 21,
+        "commandAttemptsAfterSeparateControllerGate": 23,
+        "notVerifiedTotals": true,
+        "countersReset": false,
+        "capsRaised": false
+      },
+      "additionalCaseIds": [],
+      "additionalVariants": 0
+    },
+    "recovery6CausalAmendment": {
+      "recordedBeforeNextCompletionCommand": true,
+      "sourcePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/program/recovery-6.json",
+      "classification": "Controller-supplied state and conditional projection; not a fresh workflow-journal read or measured next total.",
+      "currentControllerConsumption": {
+        "sourcePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/program/recovery-6.json",
+        "sourceClassification": "Controller-supplied current T001 consumption; no engine usage is inferred and counters are not reset.",
+        "taskStep": 15,
+        "workerTurns": 8,
+        "reviews": 6,
+        "reviewLimit": 12,
+        "repairRounds": 2,
+        "verificationFailures": 5,
+        "interventions": 1,
+        "interventionLimit": 1,
+        "audits": 0,
+        "auditLimit": 2,
+        "engineUsageEvidence": "unknown-not-inferred",
+        "countersReset": false,
+        "capsRaised": false
+      },
+      "retainedRevision06Snapshot": {
+        "rootedInvocations": 19,
+        "passed": 8,
+        "failed": 11,
+        "recordedCases": 936,
+        "unexecutedCases": 375,
+        "unrootedFailedCommandEvents": 2,
+        "unrootedUnexecutedCaseSlots": 150,
+        "classification": "Controller-supplied fa914510 post-run accounting; controller associations remain unverified."
+      },
+      "expectedControllerAssociations": 2,
+      "conditionalProjection": {
+        "condition": "Both historical shell associations validate; one maps to an already-counted root and one appends a new root.",
+        "rootedBeforeControllerAssociations": 19,
+        "newRootsFromControllerAssociations": 1,
+        "rootedAfterControllerAssociations": 20,
+        "commandAttemptsAfterControllerAssociations": 22,
+        "nextCompletionExecutionAddsRoot": 1,
+        "rootedAfterNextCompletion": 21,
+        "commandAttemptsAfterNextCompletion": 23,
+        "separateControllerGateAddsRoot": 1,
+        "rootedAfterSeparateControllerGate": 22,
+        "commandAttemptsAfterSeparateControllerGate": 24,
+        "notVerifiedTotals": true,
+        "countersReset": false,
+        "capsRaised": false
+      },
+      "additionalCaseIds": [],
+      "additionalVariants": 0
+    },
+    "review3CausalAmendment": {
+      "recordedBeforeRepairExecution": true,
+      "sourceClassification": "Supplied combined reviewer batch, round 3, workflow step 18, worker turn 9; three provenance-bound independent reports and no blockers.",
+      "reports": [
+        { "reviewerIndex": 1, "verdict": "clean", "findingCount": 0, "ret2": { "RET2-R1-1": "resolved", "RET2-R1-2": "resolved", "RET2-R3-1": "resolved", "RET2-R3-2": "resolved" } },
+        { "reviewerIndex": 2, "verdict": "clean", "findingCount": 0, "ret2": { "RET2-R1-1": "resolved", "RET2-R1-2": "resolved", "RET2-R3-1": "resolved", "RET2-R3-2": "resolved" } },
+        { "reviewerIndex": 3, "verdict": "findings", "findingIds": ["F009", "F010", "F011"], "ret2": { "RET2-R1-1": "open", "RET2-R1-2": "open", "RET2-R3-1": "supported", "RET2-R3-2": "supported" } }
+      ],
+      "reviewAccounting": { "workerTurn": 9, "reviewsConsumed": 9, "reviewLimit": 12, "auditsConsumed": 0, "blockerCount": 0, "engineUsageEvidence": "unknown-not-inferred", "countersReset": false, "capsRaised": false },
+      "accountingAssessments": [
+        { "reviewerIndex": 1, "F006": "resolved", "F007": "resolved", "F008": "resolved" },
+        { "reviewerIndex": 2, "F006": "resolved", "F007": "resolved", "F008": "resolved" },
+        { "reviewerIndex": 3, "F006": "resolved", "F007": "resolved", "F008": "resolved" }
+      ],
+      "priorObservedRun": "a0870891-de61-44e0-b349-34a03d90bf8f",
+      "separateControllerRun": "35236f06-4d33-409d-964a-e89b1bc70d42",
+      "findings": [
+        { "id": "F009", "title": "[P1] Dispatcher.run can remain pending after an active worker’s incomplete stop outcome", "cause": "Dispatcher.run remains pending when an active job survives an incomplete enrolled-worker stop and late exit signaling is rejected after the frozen host result.", "repair": "Settle the exact active job from its associated worker's bounded incomplete stop outcome; keep the host result frozen." },
+        { "id": "F010", "title": "[P1] The owned graceful-stop sender is a repeatable IPC-cutoff bypass", "cause": "The owned graceful-stop exception was an ordinary repeatable instance method.", "repair": "Make the special sender a class-private method reachable only from the once-guarded stop implementation." },
+        { "id": "F011", "title": "[P1] Reporter and LastRun receive a stale passing status before incompleteness is applied", "cause": "finishTaskRun publishes its pre-join passed status to reporters and LastRun before applying terminalStatus.", "repair": "Apply joined terminal status before onEnd and reapply it after reporter status modification." }
+      ],
+      "additionalCaseIds": ["C76", "C77", "C78"],
+      "additionalVariants": 3,
+      "projectedCases": 78,
+      "projectedVariants": 79,
+      "priorObservedAccounting": { "rootedInvocations": 22, "commandAttempts": 24, "classification": "Supplied controller/reviewer evidence; not reset or a new live measurement." },
+      "conditionalProjection": { "nextCompletionAddsRoot": 1, "rootedAfterNextCompletion": 23, "commandAttemptsAfterNextCompletion": 25, "separateControllerGateAddsRoot": 1, "rootedAfterSeparateControllerGate": 24, "commandAttemptsAfterSeparateControllerGate": 26, "notVerifiedTotals": true, "engineUsageInferred": false, "capsRaised": false, "countersReset": false }
+    },
+    "revision06BeforeReplacement": {
+      "invocations": 17,
+      "passed": 8,
+      "failed": 9,
+      "recordedCases": 936,
+      "unexecutedCases": 225,
+      "unreconciledControllerGatesExcluded": 2,
+      "includesFailedRun": "e025841b-05de-4ced-a721-bc294b267791",
+      "preservedPriorSuccess": "276bbd18-5112-4df9-85d9-0a3879e82fdc"
+    },
+    "caseAmendment": {
+      "additionalCaseId": "C75",
+      "reason": "Exercise historical pre-ledger receipt validation and explicit omission accounting",
+      "additionalCases": 1,
+      "additionalVariants": 1,
+      "priorCases": 74,
+      "projectedCases": 75,
+      "priorVariants": 75,
+      "projectedVariants": 76
+    },
+    "projection": {
+      "classification": "Historical 20/21 projection recorded before the unrooted pre-scope failure was carried; not an actual invocation or command-attempt total.",
+      "condition": "Both missing controller gates validate as distinct invocations",
+      "replacementWorkerExecution": 1,
+      "separatelyConfiguredControllerExecution": 1,
+      "projectedInvocationsAfterReplacement": 20,
+      "projectedInvocationsAfterSubsequentController": 21,
+      "notVerifiedTotals": true,
+      "noEngineOrReviewCapIncrease": true
+    },
+    "subsequentCausalAmendment": {
+      "recordedBeforeCompletionGateExecution": true,
+      "reason": "Carry the observed pre-scope command failure separately while preserving receipt-root invocation counts and the prior projection.",
+      "unrootedCommandEvent": {
+        "identity": "controller-event:1ad22fd0-dd89-45d5-be90-cc685cbe62a9:T001:step-0009:worker-turn-5:completion-module-parse-failure",
+        "classification": "controller-qualified-unrooted-command-event",
+        "command": "bun frontend/scripts/private-qualification/check.mjs --phase completion",
+        "status": "failed",
+        "stage": "module-parse-before-check-entry",
+        "diagnostic": "frontend/scripts/private-qualification/tests.mjs:511:7: Expected \u0022;\u0022 but found \u0022$\u0022",
+        "executedCases": 0,
+        "unexecutedCaseSlots": 75,
+        "receiptRootAllocated": false,
+        "runId": null,
+        "beginReceipt": false,
+        "evidenceClassification": "Worker-reported from the retained T001 step-0009 record; not independently reproduced as execution evidence.",
+        "evidencePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/tasks/T001/steps/0009.json"
+      },
+      "priorProjection": {
+        "replacementRootedInvocations": 20,
+        "afterSubsequentControllerRootedInvocations": 21,
+        "classification": "Historical projection retained above, not an actual total."
+      },
+      "projection": {
+        "condition": "Both unreconciled controller gates validate as distinct; the current replacement and separately configured later controller gate each execute once.",
+        "rootedInvocationsBeforeRecovery": 17,
+        "unrootedFailedCommandEvents": 1,
+        "unreconciledControllerGates": 2,
+        "replacementRootedInvocations": 20,
+        "replacementTotalCommandAttempts": 21,
+        "afterSubsequentControllerRootedInvocations": 21,
+        "afterSubsequentControllerTotalCommandAttempts": 22,
+        "notVerifiedTotals": true,
+        "engineUsageInferred": false,
+        "capsRaised": false,
+        "countersReset": false
+      }
+    },
+    "latestCausalAmendment": {
+      "recordedAfterCompletionCommandFailure": true,
+      "classification": "New pre-scope failure retained separately; no receipt-root identity is fabricated.",
+      "additionalUnrootedCommandEvent": {
+        "identity": "controller-event:1ad22fd0-dd89-45d5-be90-cc685cbe62a9:T001:recovery-3:worker-turn-6:completion-baseline-parse-failure",
+        "classification": "controller-qualified-unrooted-command-event",
+        "command": "bun frontend/scripts/private-qualification/check.mjs --phase completion",
+        "status": "failed",
+        "stage": "baseline-parse-before-check-entry",
+        "diagnostic": "frontend/scripts/private-qualification/generate.mjs:7:31: SyntaxError: JSON Parse error: Expected '}'",
+        "executedCases": 0,
+        "unexecutedCaseSlots": 75,
+        "receiptRootAllocated": false,
+        "runId": null,
+        "beginReceipt": false,
+        "evidenceClassification": "Observed exact completion-command output in worker turn 6; no receipt-root invocation was created or independently re-executed.",
+        "evidenceSource": "Current T001 recovery-3 worker command result"
+      },
+      "priorProjection": {
+        "replacementRootedInvocations": 20,
+        "replacementTotalCommandAttempts": 21,
+        "afterSubsequentControllerRootedInvocations": 21,
+        "afterSubsequentControllerTotalCommandAttempts": 22,
+        "classification": "Historical projection before this second unrooted failure; not an actual total."
+      },
+      "projection": {
+        "condition": "Both exact controller gates validate as distinct; one replacement and one subsequent controller command execute once each.",
+        "rootedInvocationsBeforeRecovery": 17,
+        "unrootedFailedCommandEvents": 2,
+        "unreconciledControllerGates": 2,
+        "replacementRootedInvocations": 20,
+        "replacementTotalCommandAttempts": 22,
+        "afterSubsequentControllerRootedInvocations": 21,
+        "afterSubsequentControllerTotalCommandAttempts": 23,
+        "notVerifiedTotals": true,
+        "engineUsageInferred": false,
+        "capsRaised": false,
+        "countersReset": false
+      }
+    },
+    "continuationCausalAmendment": {
+      "recordedBeforeReplacementExecution": true,
+      "sourceClassification": "Supplied program-coordinator recovery guidance at workflow step 20 based on retained step-19 receipts; projection only, not a new measurement.",
+      "sourcePath": "/Users/christophe.vidal/.pi/workflows/projects/herdr-mobile-relay-8c5d7f53c701/sessions/01a0fd10-fe99-772d-b993-10054f3b02b5/runs/1ad22fd0-dd89-45d5-be90-cc685cbe62a9/orchestration/program/recovery-7.json",
+      "preservedFailure": {
+        "runId": "9d120cce-a0fe-42f4-bec0-163cf73199d1",
+        "stage": "case-ledger-validation",
+        "cases": 76,
+        "passed": 75,
+        "failed": 1,
+        "failedCase": "C76",
+        "failedCaseDurationMs": 1002.55,
+        "unexecutedCaseIds": ["C77", "C78"],
+        "classification": "Retained failure; not retried, relabelled, or included as a pass."
+      },
+      "suppliedAccounting": {
+        "rootedInvocations": 23,
+        "passedInvocations": 11,
+        "failedInvocations": 12,
+        "recordedOutcomes": 1232,
+        "failedCases": 45,
+        "unexecutedRootedSlots": 377,
+        "unrootedFailedAttempts": 2,
+        "unrootedUnexecutedSlots": 150,
+        "revision05AttemptsSeparate": true,
+        "classification": "Coordinator-supplied retained accounting; actual future totals must be derived from the validated union."
+      },
+      "consumption": {
+        "taskStep": 19,
+        "workerTurns": 10,
+        "reviews": 9,
+        "reviewLimit": 12,
+        "repairs": 3,
+        "verificationFailures": 6,
+        "interventions": 1,
+        "audits": 0,
+        "engineUsageEvidence": "unknown-not-inferred",
+        "countersReset": false,
+        "capsRaised": false
+      },
+      "preservedPriorProjection": {
+        "rootedAfterNextCompletion": 23,
+        "commandAttemptsAfterNextCompletion": 25,
+        "rootedAfterSeparateControllerGate": 24,
+        "commandAttemptsAfterSeparateControllerGate": 26,
+        "classification": "Prior step-18 projection retained as historical, not actual."
+      },
+      "revisedProjection": {
+        "replacementRootedInvocations": 24,
+        "replacementTotalCommandAttempts": 26,
+        "afterSubsequentControllerRootedInvocations": 25,
+        "afterSubsequentControllerTotalCommandAttempts": 27,
+        "notVerifiedTotals": true,
+        "engineUsageInferred": false,
+        "capsRaised": false,
+        "countersReset": false
+      },
+      "caseLedger": { "cases": 78, "variants": 79, "additionalCaseIds": [], "additionalVariants": 0 }
+    },
+    "review4CausalAmendment": {
+      "recordedBeforeRepairExecution": true,
+      "sourceClassification": "Supplied combined reviewer batch, round 4, workflow step 22, worker turn 11; reports preserved with per-reviewer finding assessments, RET2 dispositions, and blocker status.",
+      "reports": [
+        {
+          "reviewerIndex": 1,
+          "verdict": "findings",
+          "findingIds": [],
+          "assessments": { "F009": "resolved", "F010": "resolved", "F011": "open", "F012": "not assessed in this report" },
+          "F011Evidence": "Actual Multiplexer.onEnd passes the same mutable result to reporters in order. An earlier reporter can return passed before LastRunReporter receives it; the C78 mock called LastRun before returning passed and did not reproduce that ordering.",
+          "ret2": { "RET2-R1-1": "supported resolved", "RET2-R1-2": "supported resolved", "RET2-R3-1": "supported resolved", "RET2-R3-2": "supported resolved" },
+          "blocker": null
+        },
+        {
+          "reviewerIndex": 2,
+          "verdict": "findings",
+          "findingIds": ["F012"],
+          "assessments": { "F009": "resolved", "F010": "resolved", "F011": "resolved", "F012": "open" },
+          "F012": {
+            "title": "[P1] Worker admission can fork after the parent deadline",
+            "evidence": "WorkerHost.start() accepts a fulfilled admission promise and calls startRunner() without rechecking the unchanged parent deadline. If admission settles at the deadline before the queued timeout callback runs, startRunner() can fork after the deadline.",
+            "repair": "Recheck the parent deadline immediately before startRunner and settle the admitted job as failed without forking; retain the admitted path and verify it through the actual Dispatcher caller."
+          },
+          "ret2": { "assessment": "No separate RET2 disposition recorded in the supplied reviewer-2 summary." },
+          "blocker": null
+        },
+        {
+          "reviewerIndex": 3,
+          "verdict": "clean",
+          "findingIds": [],
+          "assessments": { "F009": "resolved", "F010": "resolved", "F011": "resolved", "F012": "not assessed in this report" },
+          "ret2": { "RET2-R1-1": "supported resolved", "RET2-R1-2": "supported resolved", "RET2-R3-1": "supported resolved", "RET2-R3-2": "supported resolved" },
+          "blocker": null
+        }
+      ],
+      "reviewAccounting": { "workerTurn": 11, "reviewsConsumed": 12, "reviewLimit": 12, "auditsConsumed": 0, "auditLimit": 2, "blockerCount": 0, "engineUsageEvidence": "unknown-not-inferred", "countersReset": false, "capsRaised": false },
+      "priorObservedRun": "a4e0ad69-eb89-4013-b23d-d33a5e36906e",
+      "priorObservedAccounting": { "rootedInvocations": 25, "commandAttempts": 27, "classification": "Supplied reviewer and controller-gate accounting; retained as the measured pre-repair totals." },
+      "preservedPriorSuccess": "7abd59a5-3864-44b0-b667-371f15211777",
+      "preservedPriorFailure": { "runId": "9d120cce-a0fe-42f4-bec0-163cf73199d1", "cases": 76, "passed": 75, "failed": 1, "failedCase": "C76", "classification": "Retained unchanged; not reclassified or counted as a pass." },
+      "additionalCaseIds": ["C79"],
+      "additionalVariants": 1,
+      "projectedCases": 79,
+      "projectedVariants": 80,
+      "conditionalProjection": { "nextCompletionAddsRoot": 1, "rootedAfterNextCompletion": 26, "commandAttemptsAfterNextCompletion": 28, "separateControllerGateAddsRoot": 1, "rootedAfterSeparateControllerGate": 27, "commandAttemptsAfterSeparateControllerGate": 29, "notVerifiedTotals": true, "engineUsageInferred": false, "capsRaised": false, "countersReset": false }
+    },
+    "sourceCheckAttemptAmendment": {
+      "recordedAfterAttempt": true,
+      "classification": "Worker-local source-check command failure before the prescribed completion gate; no receipt-root invocation was allocated and no completion attempt identity is inferred.",
+      "command": "bun --check frontend/scripts/private-qualification/runner-edits.mjs && bun --check frontend/scripts/private-qualification/generate.mjs && bun --check frontend/scripts/private-qualification/check.mjs && bun --check frontend/scripts/private-qualification/tests.mjs && bun --check frontend/scripts/private-qualification/receipts.mjs",
+      "status": "failed",
+      "stage": "check.mjs command-line phase guard before scope allocation",
+      "diagnostic": "Only --phase completion is supported (Bun executed check.mjs instead of performing a syntax-only check).",
+      "completedPrefix": ["bun --check frontend/scripts/private-qualification/runner-edits.mjs", "bun --check frontend/scripts/private-qualification/generate.mjs"],
+      "notExecutedSuffix": ["bun --check frontend/scripts/private-qualification/tests.mjs", "bun --check frontend/scripts/private-qualification/receipts.mjs"],
+      "receiptRootAllocated": false,
+      "runId": null,
+      "includedInCompletionCommandAttemptAccounting": false
+    },
+    "pointerRepairAmendment": {
+      "recordedBeforeFollowupExecution": true,
+      "sourceClassification": "Post-run inspection of the fresh C01-C79 receipt found the compact completion pointer still carried the preserved round-3 projection instead of the round-4 projection.",
+      "priorRun": {
+        "runId": "79c44309-8608-4327-855a-f6e983e27eac",
+        "root": "/tmp/herdr-retention-v3-79c44309-8608-4327-855a-f6e983e27eac",
+        "status": "passed",
+        "cases": 79,
+        "variants": 80,
+        "summarySHA256": "eb37d846864e1f5d2fc69489b22521bd1355281fa6ad3cd837a543bcaf640e86",
+        "completionReceiptSHA256": "5a04c41df1bfe1d872048a21cd96dc974d109d11314fd8d6c70e6f1340c6fdcd"
+      },
+      "observedAccounting": { "rootedInvocations": 26, "commandAttempts": 28, "ledgerSequence": 11, "classification": "Measured in the prior fresh completion pointer." },
+      "defect": "check.mjs preflight and terminal pointers both referenced continuationCausalAmendment.revisedProjection, which is historical after round-4 reconciliation.",
+      "additionalCaseIds": [],
+      "additionalVariants": 0,
+      "conditionalProjection": { "nextCompletionAddsRoot": 1, "rootedAfterNextCompletion": 27, "commandAttemptsAfterNextCompletion": 29, "separateControllerGateAddsRoot": 1, "rootedAfterSeparateControllerGate": 28, "commandAttemptsAfterSeparateControllerGate": 30, "notVerifiedTotals": true, "engineUsageInferred": false, "capsRaised": false, "countersReset": false }
+    }
+  },
+  "revision05": {
+    "root": "/tmp/herdr-scroll-p1-output-retention-completion-v2",
+    "runnerPatch": {
+      "path": "revision-05/runner.patch",
+      "sha256": "7386786cc73599895fa901fdef033869a5d0947002b639d06ffe295c3ba9a386"
+    },
+    "runnerDerived": {
+      "path": "revision-05/runner.derived.cjs",
+      "sha256": "a9dd33433a8c067e8aebf386afe604c2df797a0aac747c3e2327efc340c84124"
+    },
+    "support": {
+      "path": "revision-05/privateCompletion.cjs",
+      "sha256": "f124925c1ea3a35797fbe5e837a40296574970ad3bfe503df88354c5f6a4b169"
+    },
+    "tests": {
+      "path": "tests.mjs",
+      "sha256": "a64175c419bd3f599be2c7aff9ae90e8fd7b15774ecc6c46b5b68c11693dea03"
+    },
+    "caseCount": 53,
+    "attempt05Receipt": {
+      "path": "attempt-05.ndjson",
+      "sha256": "4c298d1ab49b6b595c13804d9879a538403d6ab2a19e7b7c0c93d4cf73f1c93a"
+    },
+    "attempt05Summary": {
+      "path": "attempt-05.summary.json",
+      "sha256": "711683da7b09eb2210f99f5f7de228e433b3808b981ee845f3c8834498a16d3f"
+    },
+    "failureHistory": {
+      "path": "failure-history.json",
+      "sha256": "022d98cfb9c9394c0244836b8349ae84b54ae9b0f422f2889a46fcdd7afe678f"
+    }
+  },
+  "repositoryInputs": [
+    "frontend/scripts/private-qualification/baseline.json",
+    "frontend/scripts/private-qualification/runner-edits.mjs",
+    "frontend/scripts/private-qualification/privateCompletion.cjs",
+    "frontend/scripts/private-qualification/tests.mjs",
+    "frontend/scripts/private-qualification/receipts.mjs",
+    "frontend/scripts/private-qualification/generate.mjs",
+    "frontend/scripts/private-qualification/check.mjs"
+  ],
+  "newVariants": [
+    {
+      "id": "C54",
+      "finding": "RET2-R1-1 / RET2-R3-1",
+      "description": "Actual Dispatcher.run handles synchronous worker admission refusal, settles failed test/slot/hash count and consumes incomplete host without retention"
+    },
+    {
+      "id": "C55",
+      "finding": "RET2-R1-1 / RET2-R3-1",
+      "description": "Actual Dispatcher.run handles asynchronous worker admission rejection, settles failed test/slot/hash count and consumes incomplete host without retention"
+    },
+    {
+      "id": "C56",
+      "finding": "RET2-R1-1 / RET2-R3-1",
+      "description": "Actual Dispatcher.run handles synchronous fork failure after admission and consumes retained incomplete host"
+    },
+    {
+      "id": "C57",
+      "finding": "RET2-R1-1 / RET2-R3-1",
+      "description": "Actual Dispatcher.run consumes a returned asynchronous startup error"
+    },
+    {
+      "id": "C58",
+      "finding": "RET2-R1-1 / RET2-R3-1",
+      "description": "Stop during pending admission prevents a late fork, joins successful admission and retains owned partials"
+    },
+    {
+      "id": "C59",
+      "finding": "RET2-R1-1",
+      "description": "Synchronous failure before WorkerHost construction settles the job without inventing a host result"
+    },
+    {
+      "id": "C60",
+      "finding": "RET2-R3-1",
+      "description": "Late exit from an enrolled replaced worker cannot clear a different Dispatcher slot owner"
+    },
+    {
+      "id": "C61",
+      "finding": "RET2-R1-2",
+      "description": "Loader cutoff precedes parent deadline; actual finally path sends one owned graceful stop, keeps general sends closed and preserves incomplete outcome"
+    },
+    {
+      "id": "C62",
+      "finding": "RET2-R1-2",
+      "description": "Expired-parent C32 variant explicitly proves no graceful stop is sent"
+    },
+    {
+      "id": "C63",
+      "finding": "RET2-R1-2",
+      "description": "Disconnected loader refuses the owned stop send and retains incomplete evidence"
+    },
+    {
+      "id": "C64",
+      "finding": "RET2-R1-2",
+      "description": "Owned stop callback error is consumed and remains sticky"
+    },
+    {
+      "id": "C65",
+      "finding": "RET2-R1-2",
+      "description": "Repeated OutOfProcessLoaderHost.stop returns one finalization promise and sends one cache request, one owned stop, and no promoted frozen outcome"
+    },
+    {
+      "id": "C66",
+      "finding": "RET2-R3-2",
+      "description": "Actual loadFileSuites preserves exact primary and finalization error identities and consumes cleanup"
+    },
+    {
+      "id": "C67",
+      "finding": "RET2-R1-1 / RET2-R3-1",
+      "description": "Successful worker admission resolving after a frozen incomplete stop still retains owned partials without promoting the outcome or starting a child"
+    },
+    {
+      "id": "C68",
+      "finding": "RET2-R1-1",
+      "description": "Actual Dispatcher.stop bounds never-settling admission, prevents late fork, settles the job and releases its hash count while preserving the incomplete host outcome"
+    },
+    {
+      "id": "C69",
+      "finding": "RET2-R3-1",
+      "description": "Actual WorkerHost exit after frozen stop retains an admitted path without changing its frozen incomplete outcome"
+    },
+    {
+      "id": "C70",
+      "finding": "F003",
+      "description": "A real watchdog timer firing makes the shared test harness stop before starting any later case"
+    },
+    {
+      "id": "C71",
+      "finding": "F007 / RET2-R3-2",
+      "description": "Actual loadFileSuites preserves the original returned loader-start error when loader cleanup also fails"
+    },
+    {
+      "id": "C72",
+      "finding": "F008",
+      "description": "Completion-gate recovery extracts the outer invocation identity without treating nested prior-history runs as shell invocations"
+    },
+    {
+      "id": "C73",
+      "finding": "F008",
+      "description": "Completion-gate recovery deduplicates exact invocation records and refuses conflicting duplicate identities"
+    },
+    {
+      "id": "C74",
+      "finding": "F006 / F008",
+      "description": "Final stdout emits a compact traceable pointer while the full summary remains a separately identified receipt"
+    },
+    {
+      "id": "C75",
+      "finding": "F008",
+      "description": "Validated historical completion receipts reconstruct append-only accounting and explicitly record absent ledgers or fields"
+    },
+    {
+      "id": "C76",
+      "finding": "F009 / RET2-R1-1",
+      "description": "Actual Dispatcher retains exact job-to-worker identity and settles/reports the active job from an incomplete stop outcome even after an earlier exit listener clears slot.worker and pending listeners exhaust event admission; a later exit cannot change the frozen host result"
+    },
+    {
+      "id": "C77",
+      "finding": "F010 / RET2-R1-2",
+      "description": "The owned graceful-stop sender is not externally callable and repeated/direct attempts cannot bypass its once-only stop guard"
+    },
+    {
+      "id": "C78",
+      "finding": "F011",
+      "description": "Actual finishTaskRun and Multiplexer preserve joined failure between an earlier status-modifying reporter and the extracted LastRunReporter"
+    },
+    {
+      "id": "C79",
+      "finding": "F012",
+      "description": "Actual Dispatcher prevents fork when successful worker admission resolves at the parent deadline before its queued timeout callback, preserving failed settlement and admitted-path retention"
+    }
+  ],
+  "revision06PriorInvocations": [
+    { "runId": "25ac4f18-dabe-4715-ae66-47d75911c9d7", "root": "/tmp/herdr-retention-v3-25ac4f18-dabe-4715-ae66-47d75911c9d7", "status": "failed", "stage": "source-generation" },
+    { "runId": "b67f5f11-ad3c-46d3-8fd8-6cefcc9e19ba", "root": "/tmp/herdr-retention-v3-b67f5f11-ad3c-46d3-8fd8-6cefcc9e19ba", "status": "failed", "stage": "case-ledger-validation" },
+    { "runId": "486312c1-4876-491c-8f35-a3d65c1356d9", "root": "/tmp/herdr-retention-v3-486312c1-4876-491c-8f35-a3d65c1356d9", "status": "failed", "stage": "case-ledger-validation" },
+    { "runId": "a2c5a1ba-64c8-4772-96b2-557b65b42055", "root": "/tmp/herdr-retention-v3-a2c5a1ba-64c8-4772-96b2-557b65b42055", "status": "failed", "stage": "test-receipt-validation" },
+    { "runId": "7dbc1d0c-4ccc-493e-bb69-e0b9f8011130", "root": "/tmp/herdr-retention-v3-7dbc1d0c-4ccc-493e-bb69-e0b9f8011130", "status": "failed", "stage": "case-ledger-validation" },
+    { "runId": "29ef4196-686a-4f35-874f-67244e3240f0", "root": "/tmp/herdr-retention-v3-29ef4196-686a-4f35-874f-67244e3240f0", "status": "failed", "stage": "case-ledger-validation" },
+    { "runId": "20653f72-3ce1-4048-b876-4adb3e38ebeb", "root": "/tmp/herdr-retention-v3-20653f72-3ce1-4048-b876-4adb3e38ebeb", "status": "failed", "stage": "case-ledger-validation" },
+    { "runId": "df023aa6-f69e-4544-85c9-fd07517db249", "root": "/tmp/herdr-retention-v3-df023aa6-f69e-4544-85c9-fd07517db249", "status": "passed", "stage": "completion" },
+    { "runId": "8e6890b4-43b7-4b27-ad68-de221ef19adc", "root": "/tmp/herdr-retention-v3-8e6890b4-43b7-4b27-ad68-de221ef19adc", "status": "passed", "stage": "completion" },
+    { "runId": "fd9972be-1208-43e7-b849-08e0ac1e8628", "root": "/tmp/herdr-retention-v3-fd9972be-1208-43e7-b849-08e0ac1e8628", "status": "passed", "stage": "completion" },
+    { "runId": "4350af6b-8389-42d7-a37a-a64363d6e702", "root": "/tmp/herdr-retention-v3-4350af6b-8389-42d7-a37a-a64363d6e702", "status": "passed", "stage": "completion" },
+    { "runId": "4d8c0266-2aa5-4374-aae8-c5e998d3538c", "root": "/tmp/herdr-retention-v3-4d8c0266-2aa5-4374-aae8-c5e998d3538c", "status": "passed", "stage": "completion", "expectedCases": 69 },
+    { "runId": "4f391581-72fd-452a-a976-cd124193ef87", "root": "/tmp/herdr-retention-v3-4f391581-72fd-452a-a976-cd124193ef87", "status": "failed", "stage": "test-receipt-validation", "expectedCases": 70 },
+    { "runId": "38f3f4e1-d7a3-4990-bd66-81398e0a075c", "root": "/tmp/herdr-retention-v3-38f3f4e1-d7a3-4990-bd66-81398e0a075c", "status": "passed", "stage": "completion", "expectedCases": 70 },
+    { "runId": "6de24edb-cc93-43ad-8191-e06557ade340", "root": "/tmp/herdr-retention-v3-6de24edb-cc93-43ad-8191-e06557ade340", "status": "passed", "stage": "completion", "expectedCases": 70 }
+  ]
+}

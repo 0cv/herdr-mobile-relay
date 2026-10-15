@@ -588,8 +588,32 @@ export interface NotificationTarget {
   notification_id: string;
 }
 
+export interface ScrollState {
+  selection: 'auto' | 'local';
+  renderer: 'regular' | 'fullscreen' | 'unknown';
+  wheel: 'sgr_cell' | 'unavailable' | 'unknown';
+  source: 'pi_runtime' | 'unknown';
+  route: 'application' | 'local';
+  presentation: 'history' | 'live_screen';
+  available: boolean;
+  reason: string;
+  rows: number;
+  columns: number;
+  geometry_epoch: number;
+  revision: string;
+}
+
+export interface TerminalHistory {
+  content: string;
+  format: string;
+  truncated?: boolean;
+}
+
 export interface TerminalFrame {
+  localHistory?: TerminalHistory;
   paneId: string;
+  frameRevision?: string;
+  scrolling?: ScrollState;
   content: string;
   format: string;
   truncated?: boolean;

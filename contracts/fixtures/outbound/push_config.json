@@ -21,6 +21,7 @@
     "conversation_history",
     "pane_size_lease",
     "pane_size_lease_rows",
+    "pi_scroll_buttons",
     "workspace_inspection",
     "semantic_input",
     "secret_input",

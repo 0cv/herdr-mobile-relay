@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/ownedproc"
 )
 
 const (
@@ -170,13 +174,20 @@ func (e *OutcomeError) Unwrap() error {
 }
 
 type limitedBuffer struct {
+	mu        sync.Mutex
+	frozen    bool
 	buf       bytes.Buffer
 	limit     int
 	truncated bool
 }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	original := len(p)
+	if b.frozen {
+		return original, nil
+	}
 	remaining := b.limit - b.buf.Len()
 	if remaining <= 0 {
 		b.truncated = true
@@ -190,15 +201,22 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return original, err
 }
 
-func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
-func (b *limitedBuffer) String() string { return b.buf.String() }
+func (b *limitedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
+}
+func (b *limitedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.buf.String() }
+func (b *limitedBuffer) freeze()        { b.mu.Lock(); defer b.mu.Unlock(); b.frozen = true }
 
 type Client struct {
-	bin          string
-	socketPath   string
-	sem          chan struct{}
-	api          *socketAPIClient
-	capabilities *capabilityManager
+	processInspector ownedproc.Inspector
+	commandStarted   func(*ownedproc.Registry)
+	bin              string
+	socketPath       string
+	sem              chan struct{}
+	api              *socketAPIClient
+	capabilities     *capabilityManager
 }
 
 func NewClient(bin, socketPath string) *Client {
@@ -857,10 +875,6 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 		}
 	}
 	cmd.Env = append(environment, "HERDR_SOCKET_PATH="+c.socketPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// Process-group termination owns cancellation. WaitDelay is the final
-	// backstop for inherited stdout/stderr descriptors held by a descendant
-	// that escaped the group before cancellation.
 	cmd.WaitDelay = waitDelay
 
 	stdout := &limitedBuffer{limit: maxOutputBytes}
@@ -872,18 +886,33 @@ func (c *Client) runCommand(parent context.Context, args ...string) ([]byte, err
 		return nil, &OutcomeError{Started: false, Err: fmt.Errorf("start: %w", err)}
 	}
 
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-
-	select {
-	case err := <-waitCh:
-		return commandResult(stdout, stderr, err)
-	case <-ctx.Done():
-		terminateProcessGroup(cmd.Process.Pid, waitCh)
-		return nil, &OutcomeError{Started: true, Err: ctx.Err()}
+	inspector := c.processInspector
+	if inspector == nil {
+		inspector = ownedproc.Native{}
 	}
+	inspector = commandInspector{Inspector: inspector, root: cmd.Process}
+	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), ownedproc.InspectionBudget)
+	registry, _ := ownedproc.New(inspectCtx, inspector, cmd.Process.Pid, os.Getpid())
+	inspectCancel()
+	if c.commandStarted != nil {
+		c.commandStarted(registry)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	waitErr, cancelled, cleanupErr := waitOwnedCommand(ctx, registry, waitCh)
+	stdout.freeze()
+	stderr.freeze()
+	if cleanupErr != nil {
+		slog.Warn("Herdr command cleanup incomplete", "error", cleanupErr)
+	}
+	if cancelled {
+		return nil, &OutcomeError{Started: true, Err: errors.Join(ctx.Err(), cleanupErr)}
+	}
+	output, resultErr := commandResult(stdout, stderr, waitErr)
+	if cleanupErr != nil {
+		return nil, &OutcomeError{Started: true, Err: errors.Join(resultErr, cleanupErr)}
+	}
+	return output, resultErr
 }
 
 func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error) {
@@ -920,31 +949,47 @@ func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error)
 	return nil, &OutcomeError{Started: true, Err: fmt.Errorf("command failed: %s", diagnostic)}
 }
 
-func terminateProcessGroup(pgid int, waitCh <-chan error) {
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	timer := time.NewTimer(termGrace)
-	defer timer.Stop()
-	leaderDone := false
-	select {
-	case <-waitCh:
-		leaderDone = true
-		if !GroupAlive(pgid) {
-			return
-		}
-		<-timer.C
-	case <-timer.C:
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+type commandInspector struct {
+	ownedproc.Inspector
+	root *os.Process
+}
 
-	if !leaderDone {
-		select {
-		case <-waitCh:
-		case <-time.After(2 * time.Second):
-		}
+func (i commandInspector) Signal(pid int, force bool) error {
+	if pid != i.root.Pid {
+		return i.Inspector.Signal(pid, force)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for GroupAlive(pgid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	signal := syscall.SIGTERM
+	if force {
+		signal = syscall.SIGKILL
+	}
+	return i.root.Signal(signal)
+}
+
+func waitOwnedCommand(ctx context.Context, registry *ownedproc.Registry, waitCh <-chan error) (error, bool, error) {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-waitCh:
+			inspectCtx, cancel := context.WithTimeout(context.Background(), ownedproc.InspectionBudget)
+			cleanupErr := registry.Finish(inspectCtx)
+			cancel()
+			return err, false, cleanupErr
+		case <-ctx.Done():
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), termGrace+2*time.Second)
+			cleanupErr := registry.Cancel(cleanupCtx, termGrace)
+			cancel()
+			timer := time.NewTimer(2 * time.Second)
+			defer timer.Stop()
+			select {
+			case err := <-waitCh:
+				return err, true, cleanupErr
+			case <-timer.C:
+				return nil, true, errors.Join(cleanupErr, fmt.Errorf("%w: command wait/pipe join deadline", ownedproc.ErrIncomplete))
+			}
+		case <-ticker.C:
+			_ = registry.Sample(ctx)
+		}
 	}
 }
 
@@ -967,10 +1012,4 @@ func shellQuote(value string) string {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-// GroupAlive is exported only for process-boundary tests and diagnostics.
-func GroupAlive(pgid int) bool {
-	err := syscall.Kill(-pgid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }

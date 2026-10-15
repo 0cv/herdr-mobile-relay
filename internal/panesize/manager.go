@@ -58,7 +58,7 @@ type ProcessInfoProvider interface {
 	PaneProcessInfo(context.Context, string) (*herdr.PaneProcessInfo, error)
 }
 
-type commandRunner interface {
+type CommandRunner interface {
 	Output(context.Context, string, ...string) ([]byte, error)
 }
 
@@ -89,7 +89,7 @@ type paneState struct {
 type Manager struct {
 	mu       sync.Mutex
 	provider ProcessInfoProvider
-	runner   commandRunner
+	runner   CommandRunner
 	goos     string
 	ttl      time.Duration
 	grace    time.Duration
@@ -97,15 +97,24 @@ type Manager struct {
 	logger   *slog.Logger
 	panes    map[string]*paneState
 	closed   bool
+	onResize func(string)
+	resized  map[string]struct{}
 }
 
 func NewManager(provider ProcessInfoProvider, logger *slog.Logger) *Manager {
-	return newManager(provider, execCommandRunner{}, runtime.GOOS, LeaseTTL, ReleaseGrace, time.Now, logger)
+	return NewManagerWithRunner(provider, nil, logger)
+}
+
+func NewManagerWithRunner(provider ProcessInfoProvider, runner CommandRunner, logger *slog.Logger) *Manager {
+	if runner == nil {
+		runner = execCommandRunner{}
+	}
+	return newManager(provider, runner, runtime.GOOS, LeaseTTL, ReleaseGrace, time.Now, logger)
 }
 
 func newManager(
 	provider ProcessInfoProvider,
-	runner commandRunner,
+	runner CommandRunner,
 	goos string,
 	ttl time.Duration,
 	grace time.Duration,
@@ -127,6 +136,30 @@ func newManager(
 	}
 }
 
+func (m *Manager) SetOnResize(callback func(string)) {
+	m.mu.Lock()
+	m.onResize = callback
+	m.mu.Unlock()
+}
+
+func (m *Manager) noteResize(paneID string) {
+	if m.resized == nil {
+		m.resized = make(map[string]struct{})
+	}
+	m.resized[paneID] = struct{}{}
+}
+
+func (m *Manager) unlockAndNotifyResizes() {
+	callback, resized := m.onResize, m.resized
+	m.resized = nil
+	m.mu.Unlock()
+	if callback != nil {
+		for paneID := range resized {
+			callback(paneID)
+		}
+	}
+}
+
 func (m *Manager) Acquire(
 	ctx context.Context,
 	clientID, paneID string,
@@ -143,7 +176,7 @@ func (m *Manager) Acquire(
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockAndNotifyResizes()
 	if m.closed {
 		return 0, 0, ErrClosed
 	}
@@ -173,9 +206,11 @@ func (m *Manager) Acquire(
 		// restore point, per dimension.
 		if current.columns != state.appliedColumns {
 			state.baselineColumns = current.columns
+			m.noteResize(paneID)
 		}
 		if current.rows != state.appliedRows {
 			state.baselineRows = current.rows
+			m.noteResize(paneID)
 		}
 	}
 	if ctx.Err() != nil {
@@ -216,6 +251,7 @@ func (m *Manager) Acquire(
 			return 0, 0, err
 		}
 		state.resizedAt = now
+		m.noteResize(paneID)
 	}
 	state.appliedColumns = targetColumns
 	state.appliedRows = targetRows
@@ -310,7 +346,7 @@ func (m *Manager) Release(ctx context.Context, clientID, paneID string) error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockAndNotifyResizes()
 	if m.closed {
 		return nil
 	}
@@ -340,7 +376,7 @@ func (m *Manager) ReleaseClient(ctx context.Context, clientID string) error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockAndNotifyResizes()
 	if m.closed {
 		return nil
 	}
@@ -364,7 +400,7 @@ func (m *Manager) ReleaseClient(ctx context.Context, clientID string) error {
 
 func (m *Manager) SweepExpired(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockAndNotifyResizes()
 	if m.closed {
 		return nil
 	}
@@ -408,7 +444,7 @@ func (m *Manager) Run(ctx context.Context) {
 
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockAndNotifyResizes()
 	m.closed = true
 
 	var result error
@@ -479,24 +515,7 @@ type terminalSize struct {
 }
 
 func (m *Manager) readSize(ctx context.Context, tty string) (terminalSize, error) {
-	flag, err := sttyDeviceFlag(m.goos)
-	if err != nil {
-		return terminalSize{}, err
-	}
-	output, err := m.runner.Output(ctx, "stty", flag, tty, "size")
-	if err != nil {
-		return terminalSize{}, ErrSizeUnavailable
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) != 2 {
-		return terminalSize{}, ErrSizeUnavailable
-	}
-	rows, rowErr := strconv.Atoi(fields[0])
-	columns, columnErr := strconv.Atoi(fields[1])
-	if rowErr != nil || columnErr != nil || rows < 1 || columns < 1 {
-		return terminalSize{}, ErrSizeUnavailable
-	}
-	return terminalSize{rows: rows, columns: columns}, nil
+	return readTTYSize(ctx, m.runner, m.goos, tty)
 }
 
 func (m *Manager) setSize(ctx context.Context, tty string, columns, rows int) error {
@@ -535,7 +554,10 @@ func ttyPath(output []byte) (string, error) {
 		return "", ErrTTYUnavailable
 	}
 	clean := filepath.Clean(tty)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+	if clean != tty || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") ||
+		strings.IndexFunc(tty, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '/' || c == '_' || c == '-')
+		}) != -1 {
 		return "", ErrTTYUnavailable
 	}
 	return filepath.Join("/dev", clean), nil
@@ -599,6 +621,7 @@ func (m *Manager) reconcile(ctx context.Context, paneID string, state *paneState
 		return err
 	}
 	state.resizedAt = m.now()
+	m.noteResize(paneID)
 	state.appliedColumns = target
 	state.appliedRows = targetRows
 	return nil
@@ -612,6 +635,9 @@ func (m *Manager) restore(ctx context.Context, paneID string, state *paneState) 
 	}
 	if err := m.setSize(ctx, state.tty, state.baselineColumns, sttyRows); err != nil {
 		return err
+	}
+	if state.appliedColumns != state.baselineColumns || state.appliedRows != state.baselineRows {
+		m.noteResize(paneID)
 	}
 	state.appliedColumns = state.baselineColumns
 	state.appliedRows = state.baselineRows

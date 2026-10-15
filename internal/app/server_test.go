@@ -2017,10 +2017,10 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 		t.Fatal("resize settling state did not change the pane frame fingerprint")
 	}
 
-	if !paneWatchNeedsFrameRead("probe-1", "probe-1", acknowledged, "") {
+	if !paneWatchNeedsFrameRead("probe-1", "probe-1", acknowledged, "", false) {
 		t.Fatal("settling pane frame would not be re-read after an unchanged probe")
 	}
-	if paneWatchNeedsFrameRead("probe-1", "probe-1", current, "") {
+	if paneWatchNeedsFrameRead("probe-1", "probe-1", current, "", false) {
 		t.Fatal("settled pane frame would be re-read after an unchanged probe")
 	}
 	update := paneWatchUpdate(settledResponse, acknowledged, current)
@@ -3408,8 +3408,9 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 		},
 	}
 	fingerprint := paneFingerprint("unchanged output")
+	response["frame_revision"] = paneFrameFingerprint(response)
 	unchanged := unchangedPaneResponse(
-		map[string]any{"content_fingerprint": fingerprint},
+		map[string]any{"content_fingerprint": fingerprint, "frame_revision": response["frame_revision"]},
 		response,
 	)
 	if unchanged == nil {

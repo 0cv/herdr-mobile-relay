@@ -143,6 +143,8 @@ var actionCatalog = map[string]ActionMetadata{
 	"respond":                  mutateAction("respond", true, true),
 	"send_keys":                mutateAction("send_keys", true, true),
 	"send_input":               mutateAction("send_input", true, true),
+	"scroll_agent":             mutateAction("scroll_agent", true, true),
+	"set_scroll_selection":     mutateAction("set_scroll_selection", false, false),
 	"send_filter_text":         mutateAction("send_filter_text", true, true),
 	"send_secret":              mutateAction("send_secret", true, true),
 	"reset_devices":            mutateAction("reset_devices", false, true),
@@ -215,6 +217,9 @@ type Inbound struct {
 	OtherSelected        bool            `json:"other_selected,omitempty"`
 	OtherText            string          `json:"other_text,omitempty"`
 	Direction            string          `json:"direction,omitempty"`
+	Selection            string          `json:"selection,omitempty"`
+	StateRevision        string          `json:"state_revision,omitempty"`
+	FrameRevision        string          `json:"frame_revision,omitempty"`
 	Lines                int             `json:"lines,omitempty"`
 	Before               string          `json:"before,omitempty"`
 	Cursor               string          `json:"cursor,omitempty"`
@@ -437,6 +442,21 @@ func DecodeFailureResponse(raw map[string]any) map[string]any {
 	return ErrorResponse(requestID, NewApiError(ErrorInvalidRequest, nil))
 }
 
+type ScrollState struct {
+	Selection     string `json:"selection"`
+	Renderer      string `json:"renderer"`
+	Wheel         string `json:"wheel"`
+	Source        string `json:"source"`
+	Route         string `json:"route"`
+	Presentation  string `json:"presentation"`
+	Available     bool   `json:"available"`
+	Reason        string `json:"reason"`
+	Rows          int    `json:"rows"`
+	Columns       int    `json:"columns"`
+	GeometryEpoch uint64 `json:"geometry_epoch"`
+	Revision      string `json:"revision"`
+}
+
 type HerdrFeatureStatus struct {
 	State      string `json:"state"`
 	Reason     string `json:"reason"`
@@ -498,6 +518,7 @@ var Capabilities = []string{
 	"conversation_history",
 	"pane_size_lease",
 	"pane_size_lease_rows",
+	"pi_scroll_buttons",
 	"workspace_inspection",
 	"semantic_input",
 	"secret_input",

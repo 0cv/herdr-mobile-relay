@@ -14,7 +14,9 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/pibridge"
+	"github.com/0cv/herdr-mobile-relay/internal/piscroll"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
+	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -57,7 +59,7 @@ func TestSlashCatalogTargetRecheck(t *testing.T) {
 
 func TestReaderCanDiscoverButCannotSubmitPiCommands(t *testing.T) {
 	identity := transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}
-	for _, operation := range []string{"list_slash_commands", "submit_prompt", "send_keys"} {
+	for _, operation := range []string{"list_slash_commands", "submit_prompt", "send_keys", "scroll_agent", "set_scroll_selection"} {
 		action, exists := protocol.ClassifyAction(operation)
 		if !exists {
 			t.Fatalf("unknown operation %s", operation)
@@ -74,11 +76,24 @@ func TestForegroundRootRejectsAmbiguousAndShell(t *testing.T) {
 		nil, {PaneID: "other"}, {PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 1},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 3}}},
 		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 2}}},
+		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 3, Name: "vim"}}},
+		{PaneID: "pane", ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}}},
+		{PaneID: "pane", ShellPID: 1, ForegroundProcessGroupID: 2, ForegroundProcesses: []herdr.PaneProcess{{PID: 2}, {PID: 0}}},
 	} {
 		if _, err := foregroundRoot(info, "pane"); err == nil {
 			t.Fatalf("accepted ambiguous root: %+v", info)
 		}
 	}
+}
+
+func runtimePiCatalog(ctx context.Context, reader *fixtureProcesses, socket, pane, session string) (slashcmd.Catalog, error) {
+	target := piscroll.Target{Ref: protocol.TargetRef{PaneID: pane, TerminalID: "fixture-terminal", AgentSessionID: session, Generation: 1, ServerSessionID: "primary"}, Agent: "pi"}
+	resolver := &piscroll.PiResolver{Process: reader.PaneProcessInfo, Catalog: pibridge.Query, Instance: func() (string, error) { return pibridge.Instance(socket) }, Supported: func() bool { return true }, Current: func(got piscroll.Target) bool { return got == target }}
+	response, err := resolver.ResolveCatalog(ctx, target)
+	if err != nil {
+		return slashcmd.Catalog{}, err
+	}
+	return slashcmd.MergePiRuntime(response.Commands, response.Status, response.Truncated), nil
 }
 
 func TestRuntimePiCatalogAcrossBunSocket(t *testing.T) {

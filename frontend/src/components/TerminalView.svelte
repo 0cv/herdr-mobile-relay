@@ -42,6 +42,7 @@
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
+  import { PiScrollQueue } from '$lib/pi-scroll';
   import {
     latestCompletedResponse,
     renderedRowShift,
@@ -116,6 +117,15 @@
   let noEchoDraftTainted = false;
   let draftPersistenceWarning = $state('');
   let historyTruncated = $state(false);
+  let scrollFeedback = $state('');
+  let scrollSelectionPending = $state(false);
+  const scrollState = $derived(frame?.paneId === agent.pane_id ? frame.scrolling : undefined);
+  const localHistoryActive = $derived(scrollState?.selection === 'local' && scrollState.presentation === 'live_screen' && Boolean(frame?.localHistory));
+  const displayFrame = $derived(localHistoryActive && frame ? { ...frame, ...frame.localHistory, viewportOnly: false, resizeSettling: false } : frame);
+  const scrollEnabled = $derived(!readOnly && !scrollSelectionPending
+    && $connections.get(agent.relay_id)?.status === 'connected'
+    && scrollState?.available === true && scrollState.route === 'application');
+  const scrollQueue = new PiScrollQueue(error => { scrollFeedback = error instanceof Error ? error.message : 'Wheel input was not confirmed'; });
   // Pre-resize frame kept only to suppress display of transient frames while
   // the agent repaints at the new width.
   // Raw state: the effect compares frame identity, which a deep proxy breaks.
@@ -328,7 +338,7 @@
     );
   });
   const relaySpeechLanguages = $derived($connections.get(agent.relay_id)?.speechLanguages ?? []);
-  const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
+  const terminalCopyText = $derived(latestCompletedResponse(displayFrame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
     // Every width is emitted in px of the measured probe cell, never in ch:
     // Safari's Core Text port resolves 1ch against different font metrics
@@ -378,6 +388,34 @@
         : '';
   });
 
+  const scrollQueueIdentity = $derived(JSON.stringify([scrollState?.revision, slashCatalogIdentity, scrollEnabled]));
+
+  $effect(() => {
+    void scrollQueueIdentity;
+    untrack(() => scrollQueue.cancel());
+  });
+
+  onDestroy(() => scrollQueue.cancel());
+
+  function scrollAgent(direction: 'up' | 'down') {
+    if (!scrollEnabled || !scrollState) return;
+    const target = agent;
+    const revision = scrollState.revision;
+    scrollFeedback = '';
+    scrollQueue.offer({ revision, target: slashCatalogIdentity, run: () => relayStore.scrollAgent(target, direction, revision) });
+  }
+
+  async function selectScroll(event: Event) {
+    const selection = (event.currentTarget as HTMLSelectElement).value;
+    if (readOnly || $connections.get(agent.relay_id)?.status !== 'connected' || !scrollState || (selection !== 'auto' && selection !== 'local')) return;
+    scrollQueue.cancel();
+    scrollSelectionPending = true;
+    scrollFeedback = '';
+    try { await relayStore.setScrollSelection(agent, selection, scrollState.revision); }
+    catch (error) { scrollFeedback = error instanceof Error ? error.message : 'Selection was not changed'; }
+    finally { scrollSelectionPending = false; }
+  }
+
   $effect(() => {
     if (secretMode) return;
     untrack(() => { secretValue = ''; });
@@ -413,7 +451,7 @@
     void $theme;
     untrack(() => {
       if (!lastContent) return;
-      const next = frame;
+      const next = displayFrame;
       if (!next || next.paneId !== agent.pane_id) return;
       lastContent = '';
       void applyFrame(next, lastPreserveLayout, lastPreserveLineEnds);
@@ -421,7 +459,7 @@
   });
 
   $effect(() => {
-    const next = frame;
+    const next = displayFrame;
     const matchingFrame = next?.paneId === agent.pane_id ? next : undefined;
     const preserve = true;
     // Keyed to the session, not to resizeLayoutActive, on purpose: a relay that
@@ -434,7 +472,7 @@
     // the phone's last stable frame painted until the new stable frame lands,
     // but never past the deadline: a relay that keeps flagging frames would
     // otherwise freeze this pane on a screen that is minutes old.
-    const waitingForResizedFrame = resizeSessionActive
+    const waitingForResizedFrame = !localHistoryActive && resizeSessionActive
       && !paneSizeLeaseError
       && !resizeWaitExpired
       && (lastLeasedColumns === 0
@@ -2133,6 +2171,20 @@
     </div>
   {/if}
   <div class:hidden={questionMode} class="terminal-view term">
+  {#if scrollState}
+    <section class="terminal-find" aria-label="Pi scrolling">
+      <label>View
+        <select aria-label="Pi scroll selection" value={scrollState.selection} disabled={readOnly || scrollSelectionPending || $connections.get(agent.relay_id)?.status !== 'connected'} onchange={selectScroll}>
+          <option value="auto">Automatic</option>
+          <option value="local">Local view</option>
+        </select>
+      </label>
+      <button type="button" disabled={!scrollEnabled} onclick={() => scrollAgent('up')}>Scroll agent up</button>
+      <button type="button" disabled={!scrollEnabled} onclick={() => scrollAgent('down')}>Scroll agent down</button>
+      <span role="status">{scrollState.source === 'pi_runtime' ? 'Pi runtime' : 'Unknown'} · {scrollFeedback || scrollState.reason.replaceAll('_', ' ')}</span>
+      {#if localHistoryActive}<span role="status">Prior local history · retained snapshot</span>{/if}
+    </section>
+  {/if}
   {#if findOpen}
     <section class="terminal-find" aria-label="Find in terminal">
       <input
