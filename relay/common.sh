@@ -424,10 +424,42 @@ _supervised_child_cached() {
     return 1
 }
 
+# Listing file created BEFORE an essential child is launched. A non-interactive
+# Bash reports and deletes the job entry of a signal-terminated background child
+# after the next forked foreground command, so any fork between launching a child
+# and its first jobs -l (even a mktemp) could lose a child that already died by
+# signal, leaving no jobspec to capture. With the file ready, the launch is
+# followed by builtins only up to the first listing, which then shows the
+# terminal record. Call directly in the owning shell, never in $(...).
+SUPERVISED_JOB_FILE=""
+
+supervised_child_prepare() {
+    supervised_child_release_prepared
+    SUPERVISED_JOB_FILE="$(mktemp "${TMPDIR:-/tmp}/herdr-supervised-prepared.XXXXXX")" || {
+        SUPERVISED_JOB_FILE=""
+        return 1
+    }
+}
+
+# Remove an unused prepared file (shutdown before the capture consumed it).
+supervised_child_release_prepared() {
+    local prepared="$SUPERVISED_JOB_FILE"
+    SUPERVISED_JOB_FILE=""
+    [ -z "$prepared" ] || rm -f -- "$prepared"
+    return 0
+}
+
 _supervised_child_capture_records() {
     local output_file line
     SUPERVISED_JOB_RECORDS=""
-    output_file="$(mktemp "${TMPDIR:-/tmp}/herdr-supervised-jobs.XXXXXX")" || return 1
+    if [ -n "$SUPERVISED_JOB_FILE" ]; then
+        # Consumed by this one listing, so the next launch must prepare again.
+        output_file="$SUPERVISED_JOB_FILE"
+        SUPERVISED_JOB_FILE=""
+    else
+        # Callers that did not prepare accept the fork before the listing.
+        output_file="$(mktemp "${TMPDIR:-/tmp}/herdr-supervised-jobs.XXXXXX")" || return 1
+    fi
     # %+ need not select a just-completed child when other jobs are Running.
     # Read the owning parent's table, not process discovery or a subshell copy.
     if ! LC_ALL=C jobs -l > "$output_file" 2>/dev/null; then

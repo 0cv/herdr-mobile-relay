@@ -238,6 +238,7 @@ finish() {
     elif [ "$cleanup_failed" -ne 0 ] && [ "$status" -eq 0 ]; then
         status=1
     fi
+    supervised_child_release_prepared
     exit "$status"
 }
 trap 'finish "$?"' EXIT
@@ -269,6 +270,9 @@ check_child() {
 }
 
 echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
+# The listing file is made BEFORE the launch: no forked command may run between
+# launching a child and its first jobs -l (see supervised_child_prepare).
+supervised_child_prepare || { echo "herdr relay owned-job listing file is unavailable" >&2; exit 1; }
 HERDR_GITHUB_TOKEN_FILE="$RELAY_UPDATER_TOKEN_FILE" "$RELAY_BIN" serve-installed &
 RELAY_PID=$!
 capture_status=0
@@ -286,6 +290,7 @@ check_child "herdr relay" "$RELAY_JOB" "$RELAY_PID"
 
 if [ "$TRANSPORT" = cloudflare ]; then
     echo "Starting cloudflared"
+    supervised_child_prepare || { echo "cloudflared owned-job listing file is unavailable" >&2; exit 1; }
     (unset HERDR_GITHUB_TOKEN_FILE; exec "$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run) &
     TUNNEL_PID=$!
     capture_status=0

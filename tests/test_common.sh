@@ -214,6 +214,43 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
     test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = '2:Terminal:141'
     test "$fixture_waits" = 1
 )
+(
+    # A child killed by a signal can be reported and pruned by the next FORKED
+    # command, so the first listing must follow its launch with no fork, not even
+    # a mktemp. A prepared listing file lets capture run no mktemp before jobs -l;
+    # only a caller that did not prepare keeps that fork. mktemp and jobs are
+    # mocked/recorded here; the real job table is in test_service_supervision.py.
+    fixture_count="$WORK_DIR/capture-mktemp.count"
+    : > "$fixture_count"
+    mktemp() { printf '%s\n' "${1##*/}" >> "$fixture_count"; command mktemp "$@"; }
+    jobs() { printf '%s\n' '[7]+ 900 Running fixture'; }
+    supervised_child_prepare
+    fixture_prepared="$SUPERVISED_JOB_FILE"
+    test -n "$fixture_prepared"
+    test -f "$fixture_prepared"
+    test "$(cat "$fixture_count")" = 'herdr-supervised-prepared.XXXXXX'
+    _supervised_child_capture_records
+    test "$SUPERVISED_JOB_RECORDS" = $'[7]+ 900 Running fixture\n'
+    test "$(cat "$fixture_count")" = 'herdr-supervised-prepared.XXXXXX'  # capture forked no mktemp
+    test -z "$SUPERVISED_JOB_FILE"
+    test ! -e "$fixture_prepared"
+    # Not prepared: the listing still works and keeps its own mktemp.
+    _supervised_child_capture_records
+    test "$SUPERVISED_JOB_RECORDS" = $'[7]+ 900 Running fixture\n'
+    test "$(cat "$fixture_count")" = $'herdr-supervised-prepared.XXXXXX\nherdr-supervised-jobs.XXXXXX'
+    # An unused prepared file is removed on release, and a failed mktemp leaves none.
+    supervised_child_prepare
+    fixture_prepared="$SUPERVISED_JOB_FILE"
+    test -f "$fixture_prepared"
+    supervised_child_release_prepared
+    test -z "$SUPERVISED_JOB_FILE"
+    test ! -e "$fixture_prepared"
+    mktemp() { return 1; }
+    status=0
+    supervised_child_prepare || status=$?
+    test "$status" = 1
+    test -z "$SUPERVISED_JOB_FILE"
+)
 
 # Literal normalization and failure propagation are tested inside conditionals:
 # no helper may depend on set -e to protect original bytes/mode/absence.
