@@ -2505,9 +2505,7 @@ func (b *Browser) readOpenCodeNative(ctx context.Context, request BrowseRequest,
 	if code != "" {
 		return nativeFailure(code, "OpenCode conversation history is unavailable."), nil
 	}
-	if request.Scope.CWD != "" && !sameOpenCodeDirectory(request.Scope.CWD, metadata.Directory) {
-		return browseUnavailable("invalid_session", "This conversation belongs to a different workspace."), nil
-	}
+	// The session ID is authoritative for OpenCode; see readOpenCode.
 	revision := nativeOpenCodeRevision(metadata)
 	if cursor.Revision != "" && cursor.Revision != revision {
 		return browseFailure(true, "source_changed", "The OpenCode database changed while history was being browsed.", browseErrorFor("source_changed", "The OpenCode database changed while history was being browsed.", false)), nil
@@ -2536,7 +2534,7 @@ func (b *Browser) readHermesNative(ctx context.Context, request BrowseRequest, c
 	if code != "" {
 		return nativeFailure(code, "Hermes conversation history is unavailable."), nil
 	}
-	if request.Scope.CWD != "" && metadata.CWD != "" && !sameOpenCodeDirectory(request.Scope.CWD, metadata.CWD) {
+	if request.Scope.CWD != "" && metadata.CWD != "" && !sameHermesDirectory(request.Scope.CWD, metadata.CWD) {
 		return browseUnavailable("invalid_session", "This conversation belongs to a different workspace."), nil
 	}
 	revision := nativeHermesRevision(location.Path, metadata)

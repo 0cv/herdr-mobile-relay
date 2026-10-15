@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -246,11 +245,12 @@ func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, 
 	return rows, hasMore, ""
 }
 
+// readOpenCode reads a session by the ID Herdr reported for the pane. It does
+// not bind the session to the pane cwd: OpenCode sessions own their stored
+// directory, and `opencode -s` resumes them there from any launch directory,
+// so the pane cwd is not evidence of ownership. Codex and Pi likewise resolve
+// by session ID alone.
 func (r *Reader) readOpenCode(sessionID, before string, limit int) (Page, error) {
-	return r.readOpenCodeFor("", sessionID, before, limit)
-}
-
-func (r *Reader) readOpenCodeFor(cwd, sessionID, before string, limit int) (Page, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if limit < 1 {
 		limit = defaultPageSize
@@ -262,9 +262,6 @@ func (r *Reader) readOpenCodeFor(cwd, sessionID, before string, limit int) (Page
 	if code != "" {
 		return unavailableCode(code, "OpenCode conversation history is unavailable."), nil
 	}
-	if cwd != "" && !sameOpenCodeDirectory(cwd, metadata.Directory) {
-		return unavailableCode("invalid_session", "This conversation belongs to a different workspace."), nil
-	}
 	normalizeEntriesForResponse(entries)
 	return Page{
 		Available: true, Entries: append([]Entry(nil), entries...),
@@ -272,11 +269,6 @@ func (r *Reader) readOpenCodeFor(cwd, sessionID, before string, limit int) (Page
 	}, nil
 }
 
-func sameOpenCodeDirectory(cwd, directory string) bool {
-	realCwd, cwdErr := filepath.EvalSymlinks(filepath.Clean(cwd))
-	realDirectory, directoryErr := filepath.EvalSymlinks(filepath.Clean(directory))
-	return cwdErr == nil && directoryErr == nil && realCwd == realDirectory
-}
 func validOpenCodeSessionID(value string) bool {
 	if !strings.HasPrefix(value, "ses_") || len(value) < 8 || len(value) > 128 {
 		return false
