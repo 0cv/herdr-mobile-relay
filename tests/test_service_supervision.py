@@ -53,6 +53,21 @@ def tail_lines(path, count):
     return tail_bytes(path).decode("utf-8", errors="replace").splitlines()[-count:]
 
 
+def process_state(pid):
+    # Evidence only, for a fixture PID: the kernel's one-letter state (T means stopped).
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as handle:
+            return handle.read(512).decode("ascii", errors="replace").rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        pass
+    try:
+        result = subprocess.run(["/bin/ps", "-o", "state=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return result.stdout.strip()[:8] or "gone"
+
+
 CHILD = r'''
 import json, os, pathlib, signal, sys, time
 root = pathlib.Path(os.environ["FIXTURE_ROOT"])
@@ -391,6 +406,17 @@ class Fixture:
         # ordering. The actual owned signal plus terminal wait is the proof.
         return "signal -CONT %" + token.strip("[]+-") in self.shell()
 
+    def child_states(self, kinds):
+        # Evidence only: the kernel state of each fixture child. Bash lists a child as Running
+        # in the record; this tells a child that is really stopped (T) from one that is running.
+        states = {}
+        for kind in kinds or ("relay", "cloudflared"):
+            try:
+                states[kind] = process_state(self.pid(kind))
+            except Exception:
+                states[kind] = "unknown"
+        return states
+
     def complete(self, status, kinds=("relay", "cloudflared"), unknown=None):
         # All assertions precede fallback containment. wait-end plus PID absence
         # proves supervisor reaping, not just handler entry or harness cleanup.
@@ -401,9 +427,10 @@ class Fixture:
             # with no case name and no tail (hosted run 38825734282). It still fails the case;
             # the message adds the same bounded fixture data as the comparison below, with a
             # longer parent-shell tail to show where it is blocked (an open wait-begin).
-            raise AssertionError("supervisor still running after %ds (case %s); output tail %r; shell tail %r" % (
+            raise AssertionError("supervisor still running after %ds (case %s); output tail %r; shell tail %r; child states %r" % (
                 DEADLINE, self.root.name,
-                tail_text(self.output, 600), tail_lines(self.root / "shell.events", 30))) from None
+                tail_text(self.output, 600), tail_lines(self.root / "shell.events", 30),
+                self.child_states(kinds))) from None
         # Evidence only: the bare comparison gave a hosted log with no observed value. The
         # assertion itself is unchanged; its message now names the case, both statuses and
         # the bounded tails of the supervisor output and the parent-shell record (fixture data).
