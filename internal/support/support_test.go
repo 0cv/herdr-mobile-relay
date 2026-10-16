@@ -23,6 +23,10 @@ func supportFixture(t *testing.T) (string, []byte) {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil { t.Fatal("fixture path unavailable") }
+	// t.TempDir() makes this directory with the process umask (0755 on the hosted runners),
+	// but the reader's contract is a PRIVATE selected directory; the explicit "public
+	// directory" case below still chmods 0755 to prove the refusal.
+	if err := os.Chmod(dir, 0o700); err != nil { t.Fatal("fixture directory mode failed") }
 	snapshot := Snapshot{
 		GeneratedAt: "2001-02-03T04:05:06.123456789+02:00", Version: "1.2.3", Revision: "abc123", Protocol: 2,
 		ReleaseDirectory: "/private/path-canary", WebHash: "private-hash-canary", WebVersion: "web-version",
@@ -72,6 +76,7 @@ func supportClosed(t *testing.T, files []*os.File) {
 
 func TestWriteAndLoadPrivateSnapshot(t *testing.T) {
 	dir, err := filepath.EvalSymlinks(t.TempDir()); if err != nil { t.Fatal("fixture path unavailable") }
+	if err := os.Chmod(dir, 0o700); err != nil { t.Fatal("fixture directory mode failed") }
 	snapshot := Snapshot{Version: "1.2.3", Revision: "abc123", Protocol: 2, Readiness: "ready",
 		Inventory: map[string]any{"state": "ready"}, Components: map[string]string{"http": "running"}, RecentErrors: []string{"safe error"}}
 	if err := Write(dir, snapshot); err != nil { t.Fatal("fixture writer failed") }
@@ -81,7 +86,7 @@ func TestWriteAndLoadPrivateSnapshot(t *testing.T) {
 	before := supportTree(t, dir)
 	loaded, err := Load(dir)
 	if runtime.GOOS != "linux" { supportError(t, loaded, err); if err != errSupportUnavailable { t.Fatal("native writer safety was guessed") } } else {
-		if err != nil || !reflect.DeepEqual(loaded, expected) || loaded.GeneratedAt == "" { t.Fatal("legitimate writer/reader round trip failed") }
+		if err != nil || !reflect.DeepEqual(loaded, expected) || loaded.GeneratedAt == "" { t.Fatalf("legitimate writer/reader round trip failed: load error %v", err) }
 	}
 	if before != supportTree(t, dir) { t.Fatal("Load changed the writer's bytes/modes/inventory") }
 }
