@@ -1102,9 +1102,30 @@ printf 'Linux'
     cli_uninstall_bin = cli_uninstall_root / "bin"
     cli_uninstall_bin.mkdir(mode=0o700)
     uninstall_systemctl_record = cli_uninstall_root / "systemctl-record"
+    # The A1 removal admission (relay/common.sh service_removal_systemd_configuration and
+    # service_removal_observe) refuses anything but the exact `systemctl --user show` property lines.
+    # The installed unit is inactive and disabled, so no stop or disable is needed; the answer follows
+    # whether the unit file still exists, so a later show reports it removed. Same record line and
+    # is-active exit as before; every other call exits 0.
     (cli_uninstall_bin / "systemctl").write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$UNINSTALL_SYSTEMCTL_RECORD\"\n"
-        "case \"$*\" in *is-active*) exit 1 ;; esac\nexit 0\n",
+        r"""#!/bin/sh
+printf '%s\n' "$*" >> "$UNINSTALL_SYSTEMCTL_RECORD"
+case "$*" in *is-active*) exit 1 ;; esac
+if [ "$2" = show ]; then
+    label=$3
+    unit="$HOME/.config/systemd/user/$label"
+    if [ -f "$unit" ]; then
+        load=loaded; enabled=disabled; fragment=$unit
+    else
+        load=not-found; enabled=; fragment=
+    fi
+    case "$*" in
+        *--all*) printf 'Id=%s\nLoadState=%s\nActiveState=inactive\nUnitFileState=%s\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\n' "$label" "$load" "$enabled" "$fragment" ;;
+        *) printf 'LoadState=%s\nActiveState=inactive\nUnitFileState=%s\n' "$load" "$enabled" ;;
+    esac
+fi
+exit 0
+""",
         encoding="utf-8",
     )
     (cli_uninstall_bin / "systemctl").chmod(0o700)
