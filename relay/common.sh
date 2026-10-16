@@ -650,8 +650,23 @@ _supervised_child_reap_absent() {
     return 2
 }
 
+# A non-interactive Bash (job control off) never learns that a child was stopped: it waits
+# without WUNTRACED, so jobs -l keeps listing a SIGSTOPped child as Running. Only after jobs -l
+# produced an exact-pid Running record, ask the process table about that same owned, still
+# unreaped pid: state letter T (Linux and macOS) means stopped. This observes the process
+# table, not the job table, so a command substitution is fine here. It can never classify a
+# terminal child and grants no wait or signal authority (signals still go only to the validated
+# jobspec). Any doubt (no ps, empty or failing output, any other state) leaves it Running.
+_supervised_child_kernel_stopped() {
+    local expected_pid="$1" kernel_state=""
+    kernel_state="$(LC_ALL=C ps -o stat= -p "$expected_pid" 2>/dev/null)" || return 1
+    kernel_state="${kernel_state#"${kernel_state%%[![:space:]]*}"}"
+    case "$kernel_state" in T*) return 0 ;; esac
+    return 1
+}
+
 supervised_child_observe() {
-    local job_spec="$1" expected_pid="$2" number absent_status=0
+    local job_spec="$1" expected_pid="$2" number absent_status=0 record_status=0
     SUPERVISED_JOB_STATE=""
     SUPERVISED_JOB_STATUS=""
     case "$job_spec" in %[0-9]*) number="${job_spec#%}" ;; *) return 1 ;; esac
@@ -666,7 +681,12 @@ supervised_child_observe() {
         _supervised_child_reap_absent "$job_spec" "$expected_pid" || absent_status=$?
         return "$absent_status"
     fi
-    _supervised_child_record "$job_spec" "$expected_pid" "$CHILD_JOB_OUTPUT"
+    _supervised_child_record "$job_spec" "$expected_pid" "$CHILD_JOB_OUTPUT" || record_status=$?
+    if [ "$record_status" -eq 0 ] && [ "$SUPERVISED_JOB_STATE" = Running ] &&
+        _supervised_child_kernel_stopped "$expected_pid"; then
+        SUPERVISED_JOB_STATE=Stopped
+    fi
+    return "$record_status"
 }
 
 relay_release_root() {

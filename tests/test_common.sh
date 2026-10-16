@@ -31,6 +31,8 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
         fixture_waits=$((fixture_waits + 1))
         return "$fixture_code"
     }
+    # The kernel state of a Running record's pid is mocked: not stopped here.
+    ps() { printf '%s\n' S; }
     supervised_child_capture 900
     test "$SUPERVISED_JOB_SPEC:$SUPERVISED_JOB_STATE" = '%7:Running'
     fixture_record='[7]+ 900 Stopped (signal) fixture'
@@ -85,6 +87,7 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
         fixture_waits=$((fixture_waits + 1))
         return "$fixture_code"
     }
+    ps() { printf '%s\n' S; }  # the kernel state of a Running record's pid: not stopped here
     status=0
     _child_job_record_state 900 7 '[7]+ 900 Broken pipe fixture' || status=$?
     test "$status" = 1  # No change to the foreground parser contract.
@@ -212,6 +215,85 @@ trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
     status=0
     supervised_child_observe %7 900 || status=$?
     test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = '2:Terminal:141'
+    test "$fixture_waits" = 1
+)
+(
+    # A non-interactive Bash lists a SIGSTOPped child as Running. After an exact-pid Running
+    # record, supervised_child_observe asks the process table (ps -o stat= -p PID) about that same
+    # pid: T means Stopped; any other answer, an empty one and a failing ps leave it Running.
+    # Capture, terminal, mismatched and hidden records never consult it and gain no wait or signal
+    # authority. jobs, wait and ps are mocked here; the real job table and a real SIGSTOP are in the
+    # hosted-only test_service_supervision.py.
+    fixture_record='[7]+ 900 Running fixture'
+    fixture_waits=0
+    fixture_ps_state=T
+    fixture_ps_calls="$WORK_DIR/ps-calls"
+    : > "$fixture_ps_calls"
+    _child_job_long_record() {
+        CHILD_JOB_OUTPUT="$fixture_record"
+        [ -n "$fixture_record" ]
+    }
+    _supervised_child_capture_records() {
+        SUPERVISED_JOB_RECORDS="$fixture_record"
+        [ -n "$fixture_record" ]
+    }
+    _supervised_child_spec_absent() { return 1; }
+    wait() {
+        test "$1" = 900 || return 99
+        fixture_waits=$((fixture_waits + 1))
+        return 0
+    }
+    ps() {
+        printf '%s\n' "$*" >> "$fixture_ps_calls"
+        test "$fixture_ps_state" != fail || return 1
+        printf '%s\n' "$fixture_ps_state"
+    }
+    # Capture classifies the record and never asks the process table.
+    supervised_child_capture 900
+    test "$SUPERVISED_JOB_SPEC:$SUPERVISED_JOB_STATE" = '%7:Running'
+    test ! -s "$fixture_ps_calls"
+    # A Running record whose pid is kernel-stopped is Stopped: same pid, no wait, not terminal.
+    for fixture_ps_state in T 'T+' TN ' T'; do
+        : > "$fixture_ps_calls"
+        status=0
+        supervised_child_observe %7 900 || status=$?
+        test "$status:$SUPERVISED_JOB_STATE" = '0:Stopped'
+        test "$(cat "$fixture_ps_calls")" = '-o stat= -p 900'
+        test "$fixture_waits" = 0
+    done
+    # Any other state, an empty answer and a failing ps stay Running.
+    for fixture_ps_state in S R D Z 'S+' Ss t '' fail; do
+        : > "$fixture_ps_calls"
+        status=0
+        supervised_child_observe %7 900 || status=$?
+        test "$status:$SUPERVISED_JOB_STATE" = '0:Running'
+        test "$(cat "$fixture_ps_calls")" = '-o stat= -p 900'
+        test "$fixture_waits" = 0
+    done
+    # A Stopped record from Bash itself is kept without consulting the process table.
+    fixture_ps_state=S
+    : > "$fixture_ps_calls"
+    fixture_record='[7]+ 900 Stopped (signal) fixture'
+    supervised_child_observe %7 900
+    test "$SUPERVISED_JOB_STATE" = Stopped
+    test ! -s "$fixture_ps_calls"
+    # A mismatched generation, another jobspec and a hidden record stay refused (status 1, no
+    # state, no wait) and never consult the process table, whatever it would say.
+    fixture_ps_state=T
+    for fixture_record in '[7]+ 901 Running bystander' '[8]+ 900 Running reused-spec' ''; do
+        status=0
+        supervised_child_observe %7 900 || status=$?
+        test "$status" = 1
+        test -z "$SUPERVISED_JOB_STATE"
+        test ! -s "$fixture_ps_calls"
+        test "$fixture_waits" = 0
+    done
+    # A terminal record is still waited once with the wait status; the process table is not asked.
+    fixture_record='[7]+ 900 Done fixture'
+    status=0
+    supervised_child_observe %7 900 || status=$?
+    test "$status:$SUPERVISED_JOB_STATE:$SUPERVISED_JOB_STATUS" = '2:Terminal:0'
+    test ! -s "$fixture_ps_calls"
     test "$fixture_waits" = 1
 )
 (
