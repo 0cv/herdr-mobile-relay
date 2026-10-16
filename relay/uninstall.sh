@@ -212,6 +212,19 @@ preflight_removal_target() {
     verify_removal_target "$canonical" "$label"
 }
 
+# Refuse an unowned release inode before route, native, link or shared effects.
+# find defaults to -P: a current/release symlink is never followed. A failed
+# traversal or unsupported link-count predicate is uncertainty, not absence.
+preflight_release_links() {
+    local canonical="$1" linked
+    [ -d "$canonical" ] && [ ! -L "$canonical" ] || return 1
+    linked="$(find -P "$canonical" -type f -links +1 -print -quit)" || return 1
+    if [ -n "$linked" ]; then
+        echo '  REFUSING to remove releases with multiply-linked files.' >&2
+        return 1
+    fi
+}
+
 safe_remove_dir() {
     local target="$1" label="$2"
     if [ ! -e "$target" ] && [ ! -L "$target" ]; then
@@ -235,7 +248,10 @@ safe_remove_dir() {
     full_uninstall_quiet || return 1
     shared_attempted=true
     if [ "$label" = "releases" ]; then
-        chmod -R u+w "$canonical" || return 1
+        preflight_release_links "$canonical" || return 1
+        # Only directory permissions are needed to unlink sealed release
+        # contents. Never chmod a file: its inode may have an outside link.
+        find -P "$canonical" -type d -exec chmod u+w {} + || return 1
         shared_attempted=false
         shared_progress=true
         full_uninstall_quiet || return 1
@@ -302,6 +318,12 @@ done
 preflight_removal_target "$RELEASE_ROOT" "releases" || full_uninstall_fail
 preflight_removal_target "$CONFIG_DIR" "config/state" || full_uninstall_fail
 preflight_removal_target "$CACHE_DIR" "cache" || full_uninstall_fail
+# This must precede even the optional exact-route disposition and the native
+# delegate. Refusal leaves the service, journal and all shared roots untouched.
+if [ -d "$RELEASE_ROOT" ] && [ ! -L "$RELEASE_ROOT" ]; then
+    release_canonical="$(canonicalize "$RELEASE_ROOT")" || full_uninstall_fail
+    preflight_release_links "$release_canonical" || full_uninstall_fail
+fi
 
 CLI_ROUTE_DISPOSITION=""
 if [ "$TRANSPORT" = tailscale-cli ]; then

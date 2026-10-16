@@ -36,7 +36,11 @@ shared = model['shared']
 if name in ('rm', 'chmod', 'herdr'):
     batch = None
     if name == 'herdr' and args == ['plugin', 'uninstall', 'herdr-mobile-relay.events']: batch = 'registration'
-    if name == 'chmod' and args == ['-R', 'u+w', shared['release']]: batch = 'release-mode'
+    if name == 'chmod' and len(args) >= 2 and args[0] == 'u+w':
+        release = pathlib.Path(shared['release'])
+        if all(pathlib.Path(p) == release or release in pathlib.Path(p).parents for p in args[1:]):
+            if all(pathlib.Path(p).is_dir() and not pathlib.Path(p).is_symlink() for p in args[1:]):
+                batch = 'release-mode'
     if name == 'rm' and len(args) == 2 and args[0] in ('-f', '-rf'):
         batch = next((key for key, value in shared.items() if value == args[1]), None)
     if batch:
@@ -228,6 +232,34 @@ with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-') as temporary:
         for sig in (signal.SIGINT, signal.SIGTERM):
             f = FullFixture(parent, platform, fault='pause-stop'); status, out, events = f.invoke(requested_signal=sig)
             assert status == (130 if sig == signal.SIGINT else 143); f.retained(out, events)
+        # Refuse both a nested and an active-release outside hard link BEFORE
+        # route disposition or native removal, on each hosted platform. Mode,
+        # bytes and inode of the outside name (not just its path) must survive.
+        for mode in ('cloudflare', 'tailscale-cli'):
+            for inside in ('nested', 'active'):
+                f = FullFixture(parent, platform, mode=mode)
+                outside = f.home / 'outside-release-file'
+                outside.write_bytes(b'outside inode must not change\n')
+                outside.chmod(0o400)
+                linked = (f.release / 'releases/sealed/web/index.html' if inside == 'nested'
+                          else f.release / 'current/herdr-mobile-relay')
+                if inside == 'nested': linked.parent.chmod(0o755)
+                linked.unlink(); os.link(outside, linked)
+                if inside == 'nested': linked.parent.chmod(0o555)
+                f.before = tuple(snapshot(q) for q in f.roots)
+                before_stat = outside.stat()
+                before_bytes = outside.read_bytes()
+                status, out, events = f.invoke(b'y\ny\n', tty=(mode == 'tailscale-cli'))
+                after_stat = outside.stat()
+                assert status == 1 and b'REFUSING to remove releases with multiply-linked files' in out
+                assert (before_stat.st_dev, before_stat.st_ino, stat.S_IMODE(before_stat.st_mode), before_stat.st_nlink) == (
+                    after_stat.st_dev, after_stat.st_ino, stat.S_IMODE(after_stat.st_mode), after_stat.st_nlink)
+                assert outside.read_bytes() == before_bytes and linked.samefile(outside)
+                f.retained(out, events)
+                assert all(q.exists() for q in f.definitions)
+                assert not any(e['op'] in ('unpublish', 'native-delegate', 'stop', 'disable', 'bootout',
+                                          'remove', 'shared-attempt') for e in events)
+                assert f.private_no_route == tuple((q.name, snapshot(q)) for q in sorted(f.private.iterdir()) if q.name != 'route')
         for batch in ('link', 'release-mode', 'release', 'config', 'cache', 'registration'):
             f = FullFixture(parent, platform); f.model['batch_failure'] = batch; f.save()
             status, out, events = f.invoke(); assert status != 0 and b'has been uninstalled.' not in out
