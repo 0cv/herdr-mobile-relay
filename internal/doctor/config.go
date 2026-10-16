@@ -208,8 +208,9 @@ func readConfigWithHost(path string, uid int, goos string,
 
 // ParseConfig parses a complete bounded literal assignment format. It is not a
 // shell interpreter. Supported legacy values are simple unquoted literals and
-// non-expanding double quotes. Generated single-quote concatenation (including
-// '\” apostrophes) is supported exactly; no multiline or executable suffixes.
+// non-expanding double quotes. Generated single-quote concatenation (a closing
+// quote, a backslash-escaped apostrophe, then a reopening quote) is supported
+// exactly; no multiline or executable suffixes.
 func ParseConfig(r io.Reader) Inspection {
 	if absent(r) {
 		return refusedConfig(ConfigInvalid)
