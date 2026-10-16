@@ -116,64 +116,100 @@ func readPackageIdentityWithHost(root, version, revision, target, goos string,
 // duplicate keys at any depth are refused rather than silently last-wins.
 func packageIdentity(data []byte, version, revision, target string) BuildIdentity {
 	manifest, ok := projectPackageManifest(data, version, revision, target)
-	if !ok { return BuildIdentity{} }
+	if !ok {
+		return BuildIdentity{}
+	}
 	return manifest.build
 }
 
 // Private, per-acquisition projection. It has no exported mutable map, paths in
 // errors or serialization surface. Metadata recognition intentionally does NOT
 // enforce the complete public-content policy used by the bundle verifier.
-type packageManifest struct { build BuildIdentity; files map[string]string }
-func (packageManifest) String() string { return "private package metadata" }
+type packageManifest struct {
+	build BuildIdentity
+	files map[string]string
+}
+
+func (packageManifest) String() string   { return "private package metadata" }
 func (packageManifest) GoString() string { return "private package metadata" }
-func (packageManifest) MarshalJSON() ([]byte, error) { return nil, errors.New("diagnostic metadata is not serializable") }
+func (packageManifest) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("diagnostic metadata is not serializable")
+}
 
 func packageObject(data []byte) (map[string]any, bool) {
-	if len(data) > maxPackageMetadata || !utf8.Valid(data) { return nil, false }
+	if len(data) > maxPackageMetadata || !utf8.Valid(data) {
+		return nil, false
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	nodes := 0
 	value, ok := packageValue(decoder, 0, &nodes)
-	if !ok { return nil, false }
-	if _, err := decoder.Token(); err != io.EOF { return nil, false }
+	if !ok {
+		return nil, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false
+	}
 	object, ok := value.(map[string]any)
 	return object, ok
 }
 
 func projectPackageManifest(data []byte, version, revision, target string) (packageManifest, bool) {
 	object, ok := packageObject(data)
-	if !ok { return packageManifest{}, false }
+	if !ok {
+		return packageManifest{}, false
+	}
 	schema, ok := localInteger(object["schema"])
-	if !ok || schema != 1 { return packageManifest{}, false }
+	if !ok || schema != 1 {
+		return packageManifest{}, false
+	}
 	v, vOK := object["version"].(string)
 	r, rOK := object["revision"].(string)
 	t, tOK := object["target"].(string)
 	web, wOK := object["web_hash"].(string)
 	build := BuildIdentity{v, r, web, t}
-	if !vOK || !rOK || !tOK || !wOK || !validBuild(build) || v != version || r != revision || t != target { return packageManifest{}, false }
+	if !vOK || !rOK || !tOK || !wOK || !validBuild(build) || v != version || r != revision || t != target {
+		return packageManifest{}, false
+	}
 	values, ok := object["files"].(map[string]any)
-	if !ok || len(values) == 0 || len(values) > maxPackageFiles { return packageManifest{}, false }
+	if !ok || len(values) == 0 || len(values) > maxPackageFiles {
+		return packageManifest{}, false
+	}
 	files := make(map[string]string, len(values))
 	for name, value := range values {
 		hash, ok := value.(string)
-		if !ok || !packagePath(name) || !hexField(hash, 64) { return packageManifest{}, false }
+		if !ok || !packagePath(name) || !hexField(hash, 64) {
+			return packageManifest{}, false
+		}
 		files[name] = hash
 	}
-	if files["herdr-mobile-relay"] == "" || files["web/index.html"] == "" || files["release-manifest.json"] != "" { return packageManifest{}, false }
+	if files["herdr-mobile-relay"] == "" || files["web/index.html"] == "" || files["release-manifest.json"] != "" {
+		return packageManifest{}, false
+	}
 	for _, key := range []string{"app_transports", "relay_transports"} {
 		if value, present := object[key]; present {
 			list, ok := value.([]any)
-			if !ok || len(list) == 0 || len(list) > 16 { return packageManifest{}, false }
+			if !ok || len(list) == 0 || len(list) > 16 {
+				return packageManifest{}, false
+			}
 			seen := make(map[string]bool)
 			for _, item := range list {
 				text, ok := item.(string)
-				if !ok || len(text) == 0 || len(text) > 128 || seen[text] { return packageManifest{}, false }
-				for _, b := range []byte(text) { if b < 0x21 || b > 0x7e { return packageManifest{}, false } }
+				if !ok || len(text) == 0 || len(text) > 128 || seen[text] {
+					return packageManifest{}, false
+				}
+				for _, b := range []byte(text) {
+					if b < 0x21 || b > 0x7e {
+						return packageManifest{}, false
+					}
+				}
 				seen[text] = true
 			}
 		}
 	}
-	if packageWebHash(files) != web { return packageManifest{}, false }
+	if packageWebHash(files) != web {
+		return packageManifest{}, false
+	}
 	return packageManifest{build, files}, true
 }
 
@@ -181,18 +217,30 @@ func projectPackageManifest(data []byte, version, revision, target string) (pack
 // The caller decides whether the hashes are metadata or actual acquired bytes.
 func packageWebHash(files map[string]string) string {
 	keys := make([]string, 0)
-	for name := range files { if strings.HasPrefix(name, "web/") { keys = append(keys, name) } }
-	if len(keys) == 0 { return "" }
+	for name := range files {
+		if strings.HasPrefix(name, "web/") {
+			keys = append(keys, name)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
 	sort.Strings(keys)
 	hasher := sha256.New()
-	for _, name := range keys { fmt.Fprintf(hasher, "%s\x00%s\n", name, files[name]) }
+	for _, name := range keys {
+		fmt.Fprintf(hasher, "%s\x00%s\n", name, files[name])
+	}
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func packagePath(name string) bool {
-	if len(name) == 0 || len(name) > 512 || path.IsAbs(name) || path.Clean(name) != name || name == "." || name == ".." || strings.HasPrefix(name, "../") { return false }
+	if len(name) == 0 || len(name) > 512 || path.IsAbs(name) || path.Clean(name) != name || name == "." || name == ".." || strings.HasPrefix(name, "../") {
+		return false
+	}
 	for _, b := range []byte(name) {
-		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || strings.ContainsRune("/._@+-", rune(b)) { continue }
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || strings.ContainsRune("/._@+-", rune(b)) {
+			continue
+		}
 		return false
 	}
 	return true
@@ -200,9 +248,13 @@ func packagePath(name string) bool {
 
 func packageValue(d *json.Decoder, depth int, nodes *int) (any, bool) {
 	*nodes = *nodes + 1
-	if depth > 16 || *nodes > 8192 { return nil, false }
+	if depth > 16 || *nodes > 8192 {
+		return nil, false
+	}
 	token, err := d.Token()
-	if err != nil { return nil, false }
+	if err != nil {
+		return nil, false
+	}
 	switch token := token.(type) {
 	case string:
 		return token, len(token) <= 2048
@@ -215,10 +267,16 @@ func packageValue(d *json.Decoder, depth int, nodes *int) (any, bool) {
 			for d.More() {
 				key, err := d.Token()
 				name, ok := key.(string)
-				if err != nil || !ok || len(name) > 2048 || len(object) >= maxPackageFiles { return nil, false }
-				if _, duplicate := object[name]; duplicate { return nil, false }
+				if err != nil || !ok || len(name) > 2048 || len(object) >= maxPackageFiles {
+					return nil, false
+				}
+				if _, duplicate := object[name]; duplicate {
+					return nil, false
+				}
 				value, ok := packageValue(d, depth+1, nodes)
-				if !ok { return nil, false }
+				if !ok {
+					return nil, false
+				}
 				object[name] = value
 			}
 			end, err := d.Token()
@@ -226,15 +284,21 @@ func packageValue(d *json.Decoder, depth int, nodes *int) (any, bool) {
 		case '[':
 			items := make([]any, 0)
 			for d.More() {
-				if len(items) >= 64 { return nil, false }
+				if len(items) >= 64 {
+					return nil, false
+				}
 				value, ok := packageValue(d, depth+1, nodes)
-				if !ok { return nil, false }
+				if !ok {
+					return nil, false
+				}
 				items = append(items, value)
 			}
 			end, err := d.Token()
 			return items, err == nil && end == json.Delim(']')
-		default: return nil, false
+		default:
+			return nil, false
 		}
-	default: return token, true // required scalar types are checked in projection
+	default:
+		return token, true // required scalar types are checked in projection
 	}
 }

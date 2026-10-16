@@ -13,15 +13,24 @@ func herdrPathSafetyAvailable() bool { return true }
 // extra response bytes beyond 64 KiB. No EOF wait or future-output guarantee.
 func herdrBufferedEvidence(conn *net.UnixConn) Evidence {
 	raw, err := conn.SyscallConn()
-	if err != nil { return EvidenceUnavailable }
+	if err != nil {
+		return EvidenceUnavailable
+	}
 	evidence := EvidenceUnavailable
 	err = raw.Control(func(fd uintptr) {
 		queued, err := unix.IoctlGetInt(int(fd), unix.TIOCINQ)
-		if err != nil || queued < 0 { return }
-		if queued > 0 { evidence = EvidenceMalformed; return }
+		if err != nil || queued < 0 {
+			return
+		}
+		if queued > 0 {
+			evidence = EvidenceMalformed
+			return
+		}
 		evidence = EvidenceHerdrPing
 	})
-	if err != nil { return EvidenceUnavailable }
+	if err != nil {
+		return EvidenceUnavailable
+	}
 	return evidence
 }
 
@@ -29,7 +38,9 @@ func herdrBufferedEvidence(conn *net.UnixConn) Evidence {
 // authority from peer credentials. Path policy is separately checked first.
 func herdrPeer(conn *net.UnixConn) bool {
 	raw, err := conn.SyscallConn()
-	if err != nil { return false }
+	if err != nil {
+		return false
+	}
 	allowed := false
 	err = raw.Control(func(fd uintptr) {
 		credential, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)

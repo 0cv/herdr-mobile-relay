@@ -14,8 +14,8 @@ const CallBudget = 3 * time.Second
 // Options deliberately has no URL, command, environment or authority override.
 type Options struct {
 	ProbeIngress bool
-	Budget time.Duration // zero uses GlobalBudget; values above it are refused
-	PerCall time.Duration // zero uses CallBudget; values above it are refused
+	Budget       time.Duration // zero uses GlobalBudget; values above it are refused
+	PerCall      time.Duration // zero uses CallBudget; values above it are refused
 }
 
 // LocalTarget carries private selected routing, expected package identity and
@@ -23,13 +23,13 @@ type Options struct {
 // value with its construction snapshot before I/O; ports/instance alone cannot
 // bind a reloaded configuration or a different package. It grants no authority.
 type LocalTarget struct {
-	mode Mode
+	mode             Mode
 	port, pluginPort int
-	instance string
-	herdrSocket string
-	build BuildIdentity
-	gateways [MaxGateways]string
-	gatewayCount int
+	instance         string
+	herdrSocket      string
+	build            BuildIdentity
+	gateways         [MaxGateways]string
+	gatewayCount     int
 }
 
 // Value copies prevent slice aliasing across config reloads. Count plus array
@@ -41,22 +41,27 @@ func selectedLocalTarget(cfg Inspection, build BuildIdentity) LocalTarget {
 	copy(t.gateways[:], cfg.gateways)
 	return t
 }
-func (t LocalTarget) Mode() Mode { return t.mode }
-func (t LocalTarget) Port() int { return t.port }
+func (t LocalTarget) Mode() Mode      { return t.mode }
+func (t LocalTarget) Port() int       { return t.port }
 func (t LocalTarget) PluginPort() int { return t.pluginPort }
-func (LocalTarget) String() string { return "private local diagnostic target" }
-func (LocalTarget) GoString() string { return "private local diagnostic target" }
-func (LocalTarget) MarshalJSON() ([]byte, error) { return nil, errors.New("diagnostic target is not serializable") }
+func (LocalTarget) String() string    { return "private local diagnostic target" }
+func (LocalTarget) GoString() string  { return "private local diagnostic target" }
+func (LocalTarget) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("diagnostic target is not serializable")
+}
 
 // IngressTarget can only be constructed by mode policy from validated selected
 // configuration. Origin is for trusted read-only adapters, not shared output.
 // An adapter must use fixed allowed GETs, ordinary TLS trust, no redirects or
 // auth/synthetic-phone requests, bounded bodies and complete exact identity.
-type IngressTarget struct { origin string }
+type IngressTarget struct{ origin string }
+
 func (t IngressTarget) Origin() string { return t.origin }
-func (IngressTarget) String() string { return "private configured ingress target" }
+func (IngressTarget) String() string   { return "private configured ingress target" }
 func (IngressTarget) GoString() string { return "private configured ingress target" }
-func (IngressTarget) MarshalJSON() ([]byte, error) { return nil, errors.New("diagnostic target is not serializable") }
+func (IngressTarget) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("diagnostic target is not serializable")
+}
 
 type HostQueries interface {
 	Bundle(context.Context, LocalTarget, BuildIdentity) Datum
@@ -70,7 +75,7 @@ type TransportQueries interface {
 	Cloudflare(context.Context, LocalTarget) Datum
 	Gateway(context.Context, LocalTarget) Datum
 	ManagedStatus(context.Context, LocalTarget) Datum // no activate/admit/watch creation
-	CLIStatus(context.Context, LocalTarget) Datum // NEVER dispatched without a bound workflow; none in this slice
+	CLIStatus(context.Context, LocalTarget) Datum     // NEVER dispatched without a bound workflow; none in this slice
 }
 
 type IngressQueries interface {
@@ -79,9 +84,9 @@ type IngressQueries interface {
 }
 
 type Dependencies struct {
-	Host HostQueries
+	Host      HostQueries
 	Transport TransportQueries
-	Ingress IngressQueries
+	Ingress   IngressQueries
 }
 
 func policy(cfg Inspection, opt Options) map[CheckID]Check {
@@ -97,16 +102,22 @@ func policy(cfg Inspection, opt Options) map[CheckID]Check {
 	selected := CheckID("")
 	if cfg.code == ConfigValid {
 		switch cfg.mode {
-		case ModeCloudflare: selected = CheckCloudflare
-		case ModeGateway: selected = CheckGateway
-		case ModeManaged: selected = CheckManaged
-		case ModeCLI: selected = CheckCLI
+		case ModeCloudflare:
+			selected = CheckCloudflare
+		case ModeGateway:
+			selected = CheckGateway
+		case ModeManaged:
+			selected = CheckManaged
+		case ModeCLI:
+			selected = CheckCLI
 		}
 	}
 	if selected != "" {
 		c := checks[selected]
 		c.Applicable, c.Required, c.State, c.Evidence = true, true, Unknown, EvidenceUnavailable
-		if selected == CheckCLI { c.Evidence = EvidenceDisabled }
+		if selected == CheckCLI {
+			c.Evidence = EvidenceDisabled
+		}
 		checks[selected] = c
 	}
 	if opt.ProbeIngress {
@@ -130,7 +141,9 @@ func Run(ctx context.Context, cfg Inspection, build BuildIdentity, opt Options, 
 }
 
 func absent(value any) bool {
-	if value == nil { return true }
+	if value == nil {
+		return true
+	}
 	v := reflect.ValueOf(value)
 	switch v.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
@@ -141,7 +154,9 @@ func absent(value any) bool {
 }
 
 func contextEnded(ctx context.Context) bool {
-	if ctx.Err() != nil { return true }
+	if ctx.Err() != nil {
+		return true
+	}
 	deadline, bounded := ctx.Deadline()
 	return bounded && !time.Now().Before(deadline)
 }
@@ -149,10 +164,16 @@ func contextEnded(ctx context.Context) bool {
 func run(parent context.Context, cfg Inspection, build BuildIdentity, opt Options, deps Dependencies, now func() time.Time) Report {
 	checks := policy(cfg, opt)
 	invalid := opt.Budget < 0 || opt.Budget > GlobalBudget || opt.PerCall < 0 || opt.PerCall > CallBudget || absent(parent)
-	if invalid { return finalize(cfg, build, now(), true, checks) }
+	if invalid {
+		return finalize(cfg, build, now(), true, checks)
+	}
 	budget, callBudget := opt.Budget, opt.PerCall
-	if budget == 0 { budget = GlobalBudget }
-	if callBudget == 0 { callBudget = CallBudget }
+	if budget == 0 {
+		budget = GlobalBudget
+	}
+	if callBudget == 0 {
+		callBudget = CallBudget
+	}
 	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	exhausted := false
@@ -164,10 +185,14 @@ func run(parent context.Context, cfg Inspection, build BuildIdentity, opt Option
 			checks[id] = c
 			return
 		}
-		if query == nil { return }
+		if query == nil {
+			return
+		}
 		child := ctx
 		stop := func() {}
-		if !completeBundle { child, stop = context.WithTimeout(ctx, callBudget) }
+		if !completeBundle {
+			child, stop = context.WithTimeout(ctx, callBudget)
+		}
 		start := now()
 		result := query(child)
 		end := now()
@@ -194,11 +219,16 @@ func run(parent context.Context, cfg Inspection, build BuildIdentity, opt Option
 		var query func(context.Context) Datum
 		if !absent(deps.Host) {
 			switch id {
-			case CheckBundle: query = func(ctx context.Context) Datum { return deps.Host.Bundle(ctx, target, safeBuild(build)) }
-			case CheckService: query = func(ctx context.Context) Datum { return deps.Host.Service(ctx, target) }
-			case CheckRelay: query = func(ctx context.Context) Datum { return deps.Host.Relay(ctx, target) }
-			case CheckHerdr: query = func(ctx context.Context) Datum { return deps.Host.Herdr(ctx, target) }
-			case CheckPairing: query = func(ctx context.Context) Datum { return deps.Host.Pairing(ctx, target) }
+			case CheckBundle:
+				query = func(ctx context.Context) Datum { return deps.Host.Bundle(ctx, target, safeBuild(build)) }
+			case CheckService:
+				query = func(ctx context.Context) Datum { return deps.Host.Service(ctx, target) }
+			case CheckRelay:
+				query = func(ctx context.Context) Datum { return deps.Host.Relay(ctx, target) }
+			case CheckHerdr:
+				query = func(ctx context.Context) Datum { return deps.Host.Herdr(ctx, target) }
+			case CheckPairing:
+				query = func(ctx context.Context) Datum { return deps.Host.Pairing(ctx, target) }
 			}
 		}
 		call(id, id == CheckBundle, query)
@@ -210,29 +240,43 @@ func run(parent context.Context, cfg Inspection, build BuildIdentity, opt Option
 	switch cfg.mode {
 	case ModeCloudflare:
 		id = CheckCloudflare
-		if !absent(deps.Transport) { query = func(ctx context.Context) Datum { return deps.Transport.Cloudflare(ctx, target) } }
+		if !absent(deps.Transport) {
+			query = func(ctx context.Context) Datum { return deps.Transport.Cloudflare(ctx, target) }
+		}
 	case ModeGateway:
 		id = CheckGateway
-		if !absent(deps.Transport) { query = func(ctx context.Context) Datum { return deps.Transport.Gateway(ctx, target) } }
+		if !absent(deps.Transport) {
+			query = func(ctx context.Context) Datum { return deps.Transport.Gateway(ctx, target) }
+		}
 	case ModeManaged:
 		id = CheckManaged
-		if !absent(deps.Transport) { query = func(ctx context.Context) Datum { return deps.Transport.ManagedStatus(ctx, target) } }
+		if !absent(deps.Transport) {
+			query = func(ctx context.Context) Datum { return deps.Transport.ManagedStatus(ctx, target) }
+		}
 	}
-	if id != "" { call(id, false, query) }
+	if id != "" {
+		call(id, false, query)
+	}
 	if opt.ProbeIngress && cfg.mode != ModeCLI {
 		healthOrigin, appOrigin := cfg.relayOrigin, cfg.appOrigin
 		if cfg.mode == ModeGateway && len(cfg.gateways) > 0 {
 			// Only trusted HTTPS gateway GETs are admissible here, not a WSS
 			// registration or insecure loopback WS synthetic phone challenge.
-			if strings.HasPrefix(cfg.gateways[0], "wss://") { healthOrigin = strings.Replace(cfg.gateways[0], "wss://", "https://", 1) }
+			if strings.HasPrefix(cfg.gateways[0], "wss://") {
+				healthOrigin = strings.Replace(cfg.gateways[0], "wss://", "https://", 1)
+			}
 		}
-		if appOrigin == "" && (cfg.mode == ModeBYO || cfg.mode == ModeManaged) { appOrigin = cfg.relayOrigin }
+		if appOrigin == "" && (cfg.mode == ModeBYO || cfg.mode == ModeManaged) {
+			appOrigin = cfg.relayOrigin
+		}
 		var health, bundle func(context.Context) Datum
 		if !absent(deps.Ingress) && healthOrigin != "" {
 			health = func(ctx context.Context) Datum { return deps.Ingress.Health(ctx, IngressTarget{healthOrigin}) }
 		}
 		if !absent(deps.Ingress) && appOrigin != "" && validBuild(build) {
-			bundle = func(ctx context.Context) Datum { return deps.Ingress.CompleteBundle(ctx, IngressTarget{appOrigin}, build) }
+			bundle = func(ctx context.Context) Datum {
+				return deps.Ingress.CompleteBundle(ctx, IngressTarget{appOrigin}, build)
+			}
 		}
 		call(CheckIngress, false, health)
 		call(CheckIngressBundle, true, bundle)
@@ -241,6 +285,8 @@ func run(parent context.Context, cfg Inspection, build BuildIdentity, opt Option
 }
 
 func safeBuild(b BuildIdentity) BuildIdentity {
-	if validBuild(b) { return b }
+	if validBuild(b) {
+		return b
+	}
 	return BuildIdentity{"unknown", "unknown", "unknown", "unknown"}
 }

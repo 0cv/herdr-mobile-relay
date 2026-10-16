@@ -45,7 +45,7 @@ func installedCommandEnv(t *testing.T, mode string) string {
 	for key, value := range map[string]string{
 		"HOME": root, "XDG_CONFIG_HOME": filepath.Join(root, "config"),
 		"XDG_CACHE_HOME": filepath.Join(root, "cache"), "XDG_DATA_HOME": filepath.Join(root, "data"),
-		"HERDR_RELAY_ENV": filepath.Join(root, "runtime", "relay.env"),
+		"HERDR_RELAY_ENV":    filepath.Join(root, "runtime", "relay.env"),
 		"HERDR_RELEASE_ROOT": filepath.Join(root, "release"), "HERDR_WEB_ROOT": filepath.Join(root, "web"),
 		"HERDR_BIN": filepath.Join(root, "absent-herdr"), "HERDR_SOCKET_PATH": filepath.Join(root, "absent-socket"),
 		"HERDR_RELAY_TOKEN": strings.Repeat("k", 32), "HERDR_RELAY_INSTANCE_ID": "installed-command-fixture",
@@ -81,7 +81,7 @@ func TestInstalledCommandUsesRealNonArmingConstructor(t *testing.T) {
 						t.Fatal(err)
 					}
 					var disk struct {
-						Invitation json.RawMessage `json:"invitation"`
+						Invitation  json.RawMessage         `json:"invitation"`
 						Credentials []deviceauth.Credential `json:"credentials"`
 					}
 					if err := json.Unmarshal(data, &disk); err != nil {
@@ -133,10 +133,10 @@ func fmtCommandArgs(args []string) string {
 
 func TestInstalledCommandRefusesBeforeConstructionOrOwnership(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		args []string
-		key string
-		value string
+		name     string
+		args     []string
+		key      string
+		value    string
 		wantCode int
 	}{
 		{name: "extra arguments", args: []string{"serve-installed", "extra"}, wantCode: 2},

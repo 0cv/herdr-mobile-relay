@@ -2880,7 +2880,7 @@ func TestInstalledStartupPreservesAuthenticationState(t *testing.T) {
 					after := installedAuthBytes(t, cfg)
 					if before == nil {
 						var disk struct {
-							Invitation  json.RawMessage        `json:"invitation"`
+							Invitation  json.RawMessage         `json:"invitation"`
 							Credentials []deviceauth.Credential `json:"credentials"`
 						}
 						if err := json.Unmarshal(after, &disk); err != nil {

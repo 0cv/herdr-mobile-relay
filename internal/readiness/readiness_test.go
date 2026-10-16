@@ -107,7 +107,7 @@ func TestVerifyReadinessRejectsOverLimitValidPrefix(t *testing.T) {
 		t.Fatal("refused a valid readiness body at the size boundary")
 	}
 	for name, body := range map[string]string{
-		"one byte over":           atLimit + " ",
+		"one byte over":            atLimit + " ",
 		"invalid after truncation": atLimit + " !",
 		"much larger valid prefix": atLimit + strings.Repeat(" ", limit) + "!",
 	} {
