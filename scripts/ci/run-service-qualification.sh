@@ -8,10 +8,13 @@
 #     no workflow; this job is the only place that runs it.
 #   * Suite 5 (tests/test_service_transport_dispatch.py) is not run directly by
 #     the Makefile or any workflow, but it runs transitively as a child of
-#     tests/test_native_install.sh, which is suite 3 here and is part of
-#     `make shell-check` (which check.yml runs). It therefore runs twice in
-#     this job by design: once directly, so it has its own exit status and
-#     timing, and once inside suite 3.
+#     tests/test_native_install.sh, which is part of `make shell-check` (which
+#     check.yml runs). In this job it runs once, directly as suite 5, so it has
+#     its own exit status and timing: suite 3 is started with
+#     HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH=1, which makes
+#     tests/test_native_install.sh skip its nested copy (the nested copy used
+#     most of suite 3's wall-clock bound at 95a1b381, so the native cells could
+#     not finish). check.yml's shell job and a developer run keep the nested run.
 # Invoked by .github/workflows/service-qualification.yml as:
 #
 #   /bin/bash scripts/ci/run-service-qualification.sh
@@ -316,7 +319,7 @@ run_suite() {
 
 run_suite tests/test_common.sh '' /bin/bash tests/test_common.sh
 run_suite tests/test_service_credentials.sh '' /bin/bash tests/test_service_credentials.sh
-run_suite tests/test_native_install.sh '' /bin/bash tests/test_native_install.sh
+run_suite tests/test_native_install.sh HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH=1 /bin/bash tests/test_native_install.sh
 run_suite tests/test_service_supervision.py '' "$PYTHON3" tests/test_service_supervision.py
 
 # test_service_transport_dispatch.py requires NATIVE_HELPER at import time: the

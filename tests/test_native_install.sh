@@ -16,11 +16,19 @@ subprocess.run(["go", "build", "-o", sys.argv[1], sys.argv[2]], check=True, time
 PY
 # Existing production-dispatch, diagnostic and navigation suites remain wired;
 # they retain their separate acceptance boundaries and their own hosted guards.
+# The service qualification harness sets HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH=1 for this
+# suite only, because it runs the dispatch suite as its own qualification suite (its own exit
+# status and timing; run twice, the nested copy used most of this suite's wall-clock bound and
+# the native cells below could not finish). Without the variable (the check.yml shell job, a
+# developer run) the nested execution is unchanged.
 python3 - "$REPO_DIR" <<'PY'
-import pathlib, subprocess, sys
+import os, pathlib, subprocess, sys
 repo = pathlib.Path(sys.argv[1])
 for name, timeout in (("test_service_transport_dispatch.py", 900),
                       ("test_plugin_doctor.py", 120), ("test_setup_menu.py", 180)):
+    if name == "test_service_transport_dispatch.py" and os.environ.get("HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH") == "1":
+        print("test_service_transport_dispatch.py runs as its own qualification suite; not nested here", flush=True)
+        continue
     subprocess.run([sys.executable, str(repo / "tests" / name)], check=True, timeout=timeout)
 PY
 
