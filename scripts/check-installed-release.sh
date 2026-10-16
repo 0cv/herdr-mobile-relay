@@ -97,6 +97,11 @@ mkdir -p "$RELEASE_DIR" "$CONFIG_HOME" "$CACHE_HOME" "$DATA_HOME"
 # physical path. Use the same canonical directory for extraction, execution,
 # and support-state verification.
 RELEASE_DIR=$(CDPATH='' cd "$RELEASE_DIR" && pwd -P)
+# `relay support` reads the support state through the configuration directory without following
+# symlinks and refuses (support snapshot refused) a path with a symlink component, e.g. a logical
+# TMPDIR that points elsewhere. The running relay wrote the state through the same directory, so
+# serve, wait and `support` all use its physical path.
+CONFIG_HOME=$(CDPATH='' cd "$CONFIG_HOME" && pwd -P)
 tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
 
 RELAY="$RELEASE_DIR/herdr-mobile-relay"
