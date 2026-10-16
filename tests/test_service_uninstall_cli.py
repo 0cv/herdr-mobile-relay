@@ -206,15 +206,18 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 # control/model.json with the read builtin, and ANY doubt delegates to the unchanged Python adapter
 # installed beside it in bin/.python (the same file name, so the adapter sees the same tool name):
 # a model fault or alias that could change the adapter's answer, an argument form outside the
-# adapter's stat allowlist (the adapter then refuses and records its 'forbidden' event), or head and
-# wc under a read-fail fault. Otherwise it appends the same tool name to spawns.log, so the spawn
-# diagnostic stays truthful, and execs the real tool exactly as the adapter does.
+# adapter's stat allowlist (the adapter then refuses and records its 'forbidden' event), head and
+# wc under a read-fail fault, and a control model that is missing, unreadable, empty or not a JSON
+# object at all (the adapter then aborts, so the stub never turns a broken fixture into a run of the
+# real host tool). Otherwise it appends the same tool name to spawns.log, so the spawn diagnostic
+# stays truthful, and execs the real tool exactly as the adapter does.
 FAST_TOOLS = ('stat', 'head', 'wc')
 FAST_STUB = r"""#!/bin/sh
 name=${0##*/}
 delegate() { exec "$FIXTURE_ROOT/bin/.python/$name" "$@"; }
 model=
 IFS= read -r model < "$FIXTURE_ROOT/control/model.json" || :
+case "$model" in '{'*'}') ;; *) delegate "$@" ;; esac
 case "$name" in
     stat)
         case "$model" in
@@ -338,7 +341,9 @@ def fast_stub_equivalence_control(adapter=None):
     # Hosted-only control, not a product assertion. On the same model, the fast stat/head/wc stub and
     # the Python adapter must give the same stdout, exit status, events and spawn tally: every stat
     # format of this host's family on a fixture file, argument forms the adapter refuses, each model
-    # fault and alias that changes its answer, and head and wc with and without read-fail.
+    # fault and alias that changes its answer, and head and wc with and without read-fail. A control
+    # model that is missing, empty or not a JSON object must fail closed in BOTH implementations: a
+    # nonzero status, no output, no event and no spawn record, never a run of the real tool.
     adapter = ADAPTER if adapter is None else adapter
     with tempfile.TemporaryDirectory(prefix='herdr-fast-stub-') as temporary:
         base = Path(temporary).resolve()
@@ -358,12 +363,15 @@ def fast_stub_equivalence_control(adapter=None):
         cases += [('stat', identity, dict(plain, identity_aliases={str(subject): str(alias)}))]
         for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)])):
             cases += [(tool, args, plain), (tool, args, dict(plain, fault='read-fail'))]
+        for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)]), ('stat', [flag, formats[0], str(subject)])):
+            cases += [(tool, args, None), (tool, args, ''), (tool, args, 'not json')]
         for index, (tool, args, model) in enumerate(cases):
             results = []
+            broken = model is None or isinstance(model, str)
             for fast in (True, False):
                 root = base / ('case-%d-%s' % (index, 'fast' if fast else 'python'))
                 (root / 'control').mkdir(parents=True); (root / 'bin').mkdir()
-                (root / 'control' / 'model.json').write_text(json.dumps(model))
+                if model is not None: (root / 'control' / 'model.json').write_text(model if broken else json.dumps(model))
                 install_stub(root / 'bin', tool, adapter, fast=fast)
                 done = subprocess.run([str(root / 'bin' / tool)] + args, env={'FIXTURE_ROOT': str(root), 'PATH': '/usr/bin:/bin'},
                                       stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
@@ -371,6 +379,10 @@ def fast_stub_equivalence_control(adapter=None):
                     try: return (root / 'control' / name).read_text()
                     except OSError: return ''
                 results.append((done.returncode, done.stdout, done.stderr.replace(b'/usr/bin/', b''), read('events.jsonl'), read('spawns.log')))
+            if broken:
+                for status, output, _, events, spawns in results:
+                    assert status != 0 and output == b'' and events == '' and spawns == '', 'broken control model did not fail closed for %s: %r' % (tool, results)
+                continue
             assert results[0] == results[1], 'fast stub differs from the Python adapter for %s %r: %r != %r' % (tool, args, results[0], results[1])
     print('fast stat/head/wc stubs match the Python adapter on %d cases' % len(cases), file=sys.stderr, flush=True)
 
