@@ -371,7 +371,16 @@ class Fixture:
     def complete(self, status, kinds=("relay", "cloudflared"), unknown=None):
         # All assertions precede fallback containment. wait-end plus PID absence
         # proves supervisor reaping, not just handler entry or harness cleanup.
-        observed = self.proc.wait(timeout=DEADLINE)
+        try:
+            observed = self.proc.wait(timeout=DEADLINE)
+        except subprocess.TimeoutExpired:
+            # Evidence only: a supervisor that outlives the deadline gave a bare TimeoutExpired
+            # with no case name and no tail (hosted run 38825734282). It still fails the case;
+            # the message adds the same bounded fixture data as the comparison below, with a
+            # longer parent-shell tail to show where it is blocked (an open wait-begin).
+            raise AssertionError("supervisor still running after %ds (case %s); output tail %r; shell tail %r" % (
+                DEADLINE, self.root.name,
+                self.output.read_text()[-600:] if self.output.exists() else "", self.shell()[-30:])) from None
         # Evidence only: the bare comparison gave a hosted log with no observed value. The
         # assertion itself is unchanged; its message now names the case, both statuses and
         # the bounded tails of the supervisor output and the parent-shell record (fixture data).
