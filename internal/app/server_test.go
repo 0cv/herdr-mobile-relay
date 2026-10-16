@@ -3394,10 +3394,13 @@ func TestServerHealthProbeStalledResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	accepted := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
-	probeDone := make(chan error, 1)
+	type probeResult struct {
+		status int
+		err    error
+	}
+	probeDone := make(chan probeResult, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer func() {
 		cancel()
@@ -3421,34 +3424,30 @@ func TestServerHealthProbeStalledResponse(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		close(accepted)
+		if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+			return
+		}
+		// A parsed 200 response proves Accept and this write preceded the body timeout.
+		if _, err := io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n"); err != nil {
+			return
+		}
 		<-release
 	}()
 	go func() {
 		defer close(probeDone)
-		_, _, probeErr := probeLifecycleHealth(ctx, ln.Addr().String())
-		select {
-		case <-accepted:
-			probeDone <- probeErr
-		default:
-			probeDone <- fmt.Errorf("probe finished before accept: %v", probeErr)
-		}
+		status, _, probeErr := probeLifecycleHealth(ctx, ln.Addr().String())
+		probeDone <- probeResult{status, probeErr}
 	}()
+	// Only a parsed 200 can prove this probe passed the Accept and header write.
+	var result probeResult
 	select {
-	case <-accepted:
-	case err := <-probeDone:
-		t.Fatalf("stalled probe finished before accept: %v", err)
+	case result = <-probeDone:
 	case <-ctx.Done():
-		t.Fatal("stalled listener did not accept within 1s")
-	}
-	select {
-	case err = <-probeDone:
-	case <-ctx.Done():
-		t.Fatal("accepted stalled probe did not finish within 1s")
+		t.Fatal("stalled probe did not finish within 1s")
 	}
 	var timeout net.Error
-	if !errors.As(err, &timeout) || !timeout.Timeout() {
-		t.Fatalf("stalled response = %v, want timeout", err)
+	if result.status != http.StatusOK || !errors.As(result.err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("stalled body response = %d, %v, want 200 and timeout", result.status, result.err)
 	}
 }
 
