@@ -889,8 +889,6 @@ printf 'Linux'
         "HERDR_RELAY_TRANSPORT=tailscale-cli\n"
         "HERDR_RELAY_TOKEN=0123456789abcdef0123456789abcdef\n"
         "HERDR_RELAY_INSTANCE_ID=fixture-installation\n"
-        "HERDR_RELAY_CONTROL_RUN_ID=fixture-control\n"
-        f"HERDR_RELAY_PAIRING_SOCKET={shlex.quote(str(cli_install_root / 'control.sock'))}\n"
         "HERDR_RELAY_HOST=127.0.0.1\nHERDR_RELAY_PORT=18577\nHERDR_RELAY_PLUGIN_PORT=18578\n"
         f"HERDR_TAILSCALE_CLI_BIN={shlex.quote(str(cli))}\nHERDR_TAILSCALE_CLI_SCOPE=development\n"
         f"HERDR_TAILSCALE_CLI_ORIGIN=https://relay.fixture.invalid:9443\n"
@@ -898,6 +896,14 @@ printf 'Linux'
         f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={shlex.quote(str(cli_install_coordination))}\n"
         f"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT={shlex.quote(str(cli_install_root))}\n"
         "HERDR_TAILSCALE_CLI_HTTPS_PORT=9443\nHERDR_REACHABILITY_PORT_MAPPING=0\n",
+        encoding="utf-8",
+    )
+    # The same environment plus the saved foreground identities the installed policy refuses.
+    cli_install_foreground_env = cli_install_root / "foreground.env"
+    cli_install_foreground_env.write_text(
+        "HERDR_RELAY_CONTROL_RUN_ID=fixture-control\n"
+        f"HERDR_RELAY_PAIRING_SOCKET={shlex.quote(str(cli_install_root / 'control.sock'))}\n"
+        + cli_install_env.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     install_env = dict(env)
@@ -916,51 +922,41 @@ printf 'Linux'
     })
     for name in ("CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG", "GH_TOKEN", "SUDO_USER"):
         install_env.pop(name, None)
-    installed = subprocess.run(
-        [str(cli_install_scripts / "install-systemd-user-service.sh")],
-        env=install_env, cwd=root, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
-    )
-    setup_installed = subprocess.run(
-        [str(cli_install_scripts / "install-systemd-user-service.sh")],
-        env={**install_env, "HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START": "1"}, cwd=root,
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
-    )
+    # A1: the installed service never accepts the tailscale-cli transport. The installer refuses it
+    # before it writes a unit, runs systemctl or calls the relay: an installed-form environment is
+    # 'Unavailable background transport.', one that still carries the saved foreground identities is
+    # 'Installed policy refuses foreground identities.' (relay/common.sh native_installer_admit),
+    # with and without the setup opt-in variable.
     unit = cli_install_home / ".config" / "systemd" / "user" / "herdr-mobile-relay.service"
-    if installed.returncode != 0 or setup_installed.returncode != 0 or not unit.is_file():
-        raise AssertionError(
-            f"CLI service installer failed with only named fixtures: "
-            f"{installed.stdout + installed.stderr + setup_installed.stdout + setup_installed.stderr!r}"
-        )
-    unit_text = unit.read_text(encoding="utf-8")
-    manager_events = manager_record.read_text(encoding="utf-8").splitlines()
-    system_events = systemctl_record.read_text(encoding="utf-8").splitlines()
-    systemd_quote = lambda value: '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
-    expected_unit_lines = {
-        "ExecStart=" + systemd_quote(str(cli_install_scripts / "herdr-mobile-relay-service.sh")),
-        "WorkingDirectory=" + systemd_quote(os.path.realpath(cli_install_root)),
-        "Environment=" + systemd_quote("HERDR_RELAY_ENV=" + str(cli_install_env)),
-        "Restart=on-failure",
-        "RestartSec=10",
-    }
-    if (not expected_unit_lines.issubset(set(unit_text.splitlines())) or
-        "Description=Herdr Mobile Relay tailscale-cli" not in unit_text or
-        "CLOUDFLARED_CONFIG" in unit_text or not manager_events or
-        not manager_events[0].startswith("tailscale-cli assert-ready ") or
-        manager_events.count("tailscale-cli activation-check") != 1 or
-        any("serve" in event or "publish" in event or "unpublish" in event for event in manager_events) or
-        not system_events or not cli_service_record.is_file() or sentinel.exists()):
-        raise AssertionError(f"CLI installer touched an unexpected boundary: manager={manager_events!r}, system={system_events!r}, expected_unit={expected_unit_lines!r}, unit={unit_text!r}")
+    for variant, selected_env, fixed_message in (
+        ("installed-form", cli_install_env, b"Unavailable background transport."),
+        ("foreground-identities", cli_install_foreground_env, b"Installed policy refuses foreground identities."),
+    ):
+        for extra in ({}, {"HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START": "1"}):
+            refused = subprocess.run(
+                [str(cli_install_scripts / "install-systemd-user-service.sh")],
+                env={**install_env, "HERDR_RELAY_ENV": str(selected_env), **extra}, cwd=root,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
+            )
+            if refused.returncode == 0 or fixed_message not in refused.stdout + refused.stderr:
+                raise AssertionError(
+                    f"CLI service installer ({variant}, {sorted(extra)}) did not refuse with its fixed message: "
+                    f"{refused.returncode!r} {refused.stdout + refused.stderr!r}"
+                )
+    if unit.exists() or systemctl_record.exists() or manager_record.exists() or sentinel.exists():
+        raise AssertionError("refused CLI service installer wrote a unit, ran systemctl, called the relay or contacted the CLI")
+    manager_events = manager_record.read_text(encoding="utf-8").splitlines() if manager_record.exists() else []
     stopped = subprocess.run(
         [str(cli_install_scripts / "service.sh"), "stop"],
         env=install_env, cwd=root, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
     )
     if (stopped.returncode != 0 or
-        systemctl_record.read_text(encoding="utf-8").splitlines()[-1] != "--user stop herdr-mobile-relay.service" or
-        manager_record.read_text(encoding="utf-8").splitlines() != manager_events or sentinel.exists()):
+        systemctl_record.read_text(encoding="utf-8").splitlines() != ["--user stop herdr-mobile-relay.service"] or
+        (manager_record.read_text(encoding="utf-8").splitlines() if manager_record.exists() else []) != manager_events or
+        sentinel.exists()):
         raise AssertionError("CLI service stop mutated registration or escaped the fake service manager")
-    print("PASS CLI user-service lifecycle fixture: exact-route gate, Cloudflare-free install, route-preserving stop")
+    print("PASS CLI user-service fixture: the installed policy refuses the tailscale-cli transport and saved foreground identities with no unit, manager or systemctl effect; stop is route-preserving")
 
     # macOS launchd acceptance also uses only named fixtures; launchctl/curl are
     # shadowed and the CLI route verifier is read-only and synthetic.
@@ -1030,8 +1026,7 @@ printf 'Linux'
     mac_env = mac_fixture / "relay.env"
     mac_env.write_text(
         "HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_TOKEN=0123456789abcdef0123456789abcdef\n"
-        "HERDR_RELAY_INSTANCE_ID=mac-fixture-instance\nHERDR_RELAY_CONTROL_RUN_ID=mac-fixture-control\n"
-        f"HERDR_RELAY_PAIRING_SOCKET={shlex.quote(str(mac_fixture / 'control.sock'))}\n"
+        "HERDR_RELAY_INSTANCE_ID=mac-fixture-instance\n"
         "HERDR_RELAY_HOST=127.0.0.1\nHERDR_RELAY_PORT=18577\nHERDR_RELAY_PLUGIN_PORT=18578\n"
         f"HERDR_TAILSCALE_CLI_BIN={cli}\nHERDR_TAILSCALE_CLI_SCOPE=development\n"
         "HERDR_TAILSCALE_CLI_ORIGIN=https://relay.fixture.invalid:9443\n"
@@ -1039,6 +1034,14 @@ printf 'Linux'
         f"HERDR_TAILSCALE_CLI_COORDINATION_ROOT={shlex.quote(str(mac_coordination))}\n"
         f"HERDR_TAILSCALE_CLI_DEVELOPMENT_ROOT={shlex.quote(str(mac_fixture))}\n"
         "HERDR_TAILSCALE_CLI_HTTPS_PORT=9443\nHERDR_REACHABILITY_PORT_MAPPING=0\n",
+        encoding="utf-8",
+    )
+    # The same environment plus the saved foreground identities the installed policy refuses.
+    mac_foreground_env = mac_fixture / "foreground.env"
+    mac_foreground_env.write_text(
+        "HERDR_RELAY_CONTROL_RUN_ID=mac-fixture-control\n"
+        f"HERDR_RELAY_PAIRING_SOCKET={shlex.quote(str(mac_fixture / 'control.sock'))}\n"
+        + mac_env.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     mac_env_settings = dict(env)
@@ -1056,35 +1059,36 @@ printf 'Linux'
     })
     for name in ("CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG", "GH_TOKEN", "SUDO_USER"):
         mac_env_settings.pop(name, None)
-    mac_installed = subprocess.run(
-        [str(mac_scripts / "install-service.sh")], env=mac_env_settings, cwd=root,
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False,
-    )
+    # A1: the launchd installer refuses the same two environments before it writes a plist, calls
+    # launchctl or the relay, exactly like the systemd installer above.
     plist = mac_home / "Library" / "LaunchAgents" / "com.herdr-mobile-relay.service.plist"
-    if mac_installed.returncode != 0 or not plist.is_file():
-        raise AssertionError(f"macOS CLI service fixture failed: {mac_installed.stdout + mac_installed.stderr!r}")
-    plist_text = plist.read_text(encoding="utf-8")
-    mac_manager_events = mac_manager_record.read_text(encoding="utf-8").splitlines()
-    launchctl_events = launchctl_record.read_text(encoding="utf-8").splitlines()
-    if ("com.herdr-mobile-relay.service" not in plist_text or "&amp;" not in plist_text or "CLOUDFLARED_CONFIG" in plist_text or
-        "<key>KeepAlive</key>" not in plist_text or "<key>SuccessfulExit</key>\n        <false/>" not in plist_text or
-        "<key>ThrottleInterval</key>\n    <integer>10</integer>" not in plist_text or
-        not mac_manager_events or not mac_manager_events[0].startswith("tailscale-cli assert-ready ") or
-        any("publish" in event or "unpublish" in event for event in mac_manager_events) or
-        not any(event.startswith("bootstrap ") for event in launchctl_events) or
-        not any(event.startswith("kickstart ") for event in launchctl_events) or sentinel.exists() or
+    for variant, selected_env, fixed_message in (
+        ("installed-form", mac_env, b"Unavailable background transport."),
+        ("foreground-identities", mac_foreground_env, b"Installed policy refuses foreground identities."),
+    ):
+        mac_refused = subprocess.run(
+            [str(mac_scripts / "install-service.sh")], env={**mac_env_settings, "HERDR_RELAY_ENV": str(selected_env)}, cwd=root,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False,
+        )
+        if mac_refused.returncode == 0 or fixed_message not in mac_refused.stdout + mac_refused.stderr:
+            raise AssertionError(
+                f"macOS CLI service installer ({variant}) did not refuse with its fixed message: "
+                f"{mac_refused.returncode!r} {mac_refused.stdout + mac_refused.stderr!r}"
+            )
+    if (plist.exists() or launchctl_record.exists() or mac_manager_record.exists() or sentinel.exists() or
         mac_systemctl_record.exists()):
-        raise AssertionError(f"macOS service fixture escaped its fake boundaries: manager={mac_manager_events!r}, launchctl={launchctl_events!r}")
+        raise AssertionError("refused macOS CLI service installer wrote a plist, called launchctl or the relay, or contacted the CLI")
+    mac_manager_events = mac_manager_record.read_text(encoding="utf-8").splitlines() if mac_manager_record.exists() else []
     mac_stopped = subprocess.run(
         [str(mac_scripts / "service.sh"), "stop"], env=mac_env_settings, cwd=root,
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
     )
     if (mac_stopped.returncode != 0 or
         launchctl_record.read_text(encoding="utf-8").splitlines()[-1].startswith("bootout gui/") is False or
-        mac_manager_record.read_text(encoding="utf-8").splitlines() != mac_manager_events or sentinel.exists() or
-        mac_systemctl_record.exists()):
+        (mac_manager_record.read_text(encoding="utf-8").splitlines() if mac_manager_record.exists() else []) != mac_manager_events or
+        sentinel.exists() or mac_systemctl_record.exists()):
         raise AssertionError("macOS CLI service stop mutated registration or escaped fake launchd")
-    print("PASS macOS CLI user-service fixture: launchd install/health/stop, exact-route gate, no route mutation")
+    print("PASS macOS CLI user-service fixture: the launchd installer refuses the tailscale-cli transport and saved foreground identities with no plist, launchctl or manager effect; stop is route-preserving")
 
     # Uninstall explicitly preserves a route only after a second affirmative
     # prompt and retains the private registration journal outside removed roots.
