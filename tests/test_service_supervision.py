@@ -136,6 +136,7 @@ fixture_job_count=0
 fixture_kill_count=0
 fixture_gate_used=0
 fixture_transient_used=0
+fixture_transient_probe_used=0
 fixture_trace() { printf '%s\n' "$*" >> "$FIXTURE_ROOT/shell.events"; }
 # mktemp is a forked command, so Bash may report and delete a signal-terminated
 # child's job entry after it. Record each use (template name only) in order with
@@ -150,7 +151,9 @@ fixture_gate() {
     local name="$1" attempt deadline post_signal_fork
     fixture_trace "gate $name"
     : > "$FIXTURE_ROOT/$name.held"
-    if [ "$name" = capture ]; then
+    if [ "$name" = capture ] || [ "$name" = transient ]; then
+        # Capture holds the parent before listing; transient holds it before the
+        # first post-miss jobs -p probe. Neither may fork while the child exits.
         # The capture gate holds the parent BEFORE its first job listing so a child
         # can terminate first. A forked /bin/sleep here would make Bash report and
         # delete a signal-terminated child's job entry while the gate waits, so the
@@ -223,6 +226,15 @@ jobs() {
         fixture_trace "transient-record-unavailable ${RELAY_PID:-}"
         return 1
     fi
+    # The first hidden long record has already returned. Hold the first
+    # captured-spec probe using builtins only: the child must receive genuine
+    # SIGPIPE BEFORE this observation and before the next long-record retry.
+    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+        [ "$fixture_transient_used" = 1 ] && [ "$fixture_transient_probe_used" = 0 ] &&
+        [ -f "$FIXTURE_ROOT/transient-record" ]; then
+        fixture_transient_probe_used=1
+        fixture_gate transient || return 1
+    fi
     # In completion gates, preserve and return the ACTUAL terminal builtin
     # record on its FIRST terminal observation. Do not prune it and reread.
     for ((attempt=0; attempt<1000; attempt++)); do
@@ -254,6 +266,10 @@ jobs() {
         return "$rc"
     fi
     fixture_trace "record $token $pid $state"
+    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+        [ "$fixture_transient_used" = 1 ] && [ -f "$FIXTURE_ROOT/transient-record" ]; then
+        fixture_trace "transient-spec-check $rc $line"
+    fi
     # Narrow corruption seam, armed only AFTER both captures: a current spec
     # mapped to another actual fixture job, or a missing/pruned record. Neither
     # is signal authority for the original captured child.
@@ -785,20 +801,35 @@ def main():
             f.held("poll")
             write(f.root / "transient-record", "armed\n")
             f.release("poll")
-            until(lambda: any(s.startswith("transient-record-unavailable " + str(f.pid("relay")))
-                              for s in f.shell()), "first relay record was not hidden", f.proc)
+            f.held("transient")
             lines = f.shell()
-            marker = next(i for i, s in enumerate(lines) if s.startswith("transient-record-unavailable "))
+            pid = f.pid("relay")
             spec = "%" + next(s.split()[2] for s in lines if s.startswith("capture 1 ")).strip("[]+-")
-            until(lambda: "jobs 0 -l " + spec in f.shell()[marker + 1:],
-                  "live captured record was not retried", f.proc)
+            assert sum(s == "transient-record-unavailable " + str(pid) for s in lines) == 1
+            assert "jobs 0 -p " + spec in lines, "first unreadable record did not probe captured spec"
+            assert not any(s.startswith("transient-spec-check ") for s in lines), (
+                "spec was observed before the signal gate")
             f.signal_child("relay", signal.SIGPIPE)
+            until(lambda: not alive(pid), "SIGPIPE child did not finish before spec probe")
+            f.release("transient")
             f.complete_signal("relay", signal.SIGPIPE)
             lines = f.shell()
-            assert sum(s.startswith("transient-record-unavailable " + str(f.pid("relay")))
-                       for s in lines) == 1
-            assert "jobs 0 -p " + spec in lines[marker:], "live spec was not checked before retry"
-            assert sum(s == "wait-end " + str(f.pid("relay")) + " 141" for s in lines) == 1
+            probes = [i for i, s in enumerate(lines) if s.startswith("transient-spec-check ")]
+            assert probes and lines[probes[0]] == "transient-spec-check 0 " + str(pid), (
+                "first probe proved absence rather than exercising the retry: %r" %
+                [lines[i] for i in probes])
+            wait_at = next(i for i, s in enumerate(lines) if s == "wait-begin " + str(pid))
+            after_probe = lines[probes[0] + 1:wait_at]
+            assert "jobs 0 -l " + spec in after_probe, (
+                "captured spec was not re-observed after the terminated-child probe")
+            terminal_record = any(len(parts := s.split()) >= 4 and parts[0] == "record" and
+                                  parts[1].strip("[]+-") == spec[1:] and parts[2] == str(pid) and
+                                  parts[3] not in ("Running", "Stopped") for s in after_probe)
+            proven_absence = any(s.startswith("transient-spec-check ") and
+                                 s.split()[1] != "0" for s in after_probe)
+            assert terminal_record or proven_absence, (
+                "retry neither validated a terminal record nor proved spec absence")
+            assert sum(s == "wait-end " + str(pid) + " 141" for s in lines) == 1
         run_case(parent, "transient-record-signal-relay", transient_signal_record)
 
         def pruned_signal_record(f):
