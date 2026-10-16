@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / 'tests'))
 # Reuse the reviewed finite inert controller DATA/source-copy patterns. This
 # executes only in the later admitted fixture phase, never at source authoring.
-from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, snapshot, spawn_report, spawn_tally
+from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, fast_stub_equivalence_control, install_stub, snapshot, spawn_report, spawn_tally
 REPO = Path(sys.argv[1]); TIMEOUT = 40
 PREFIX = r'''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
@@ -93,7 +93,7 @@ class FullFixture(Fixture):
         for i in present: self.write_definition(i, self.env_file)
         self.save()
         for name in ('systemctl', 'launchctl', 'uname', 'plutil', 'rm', 'sleep', 'wc', 'head', 'stat', 'herdr', 'chmod', 'bash'):
-            q = self.bin / name; q.write_text('#!' + sys.executable + '\n' + FULL_ADAPTER); q.chmod(0o700)
+            install_stub(self.bin, name, FULL_ADAPTER)
         self.source = self.home / 'source-checkout'; self.source.mkdir(mode=0o700)
         (self.source / '.env').write_text("GH_TOKEN='private-source-canary'\n")
         self.roots = (self.release, self.config, self.cache, self.link)
@@ -143,6 +143,8 @@ class FullFixture(Fixture):
         assert b'has been uninstalled.' not in output and b'Continue with file removal anyway' not in output
         assert self.protected_before == (snapshot(self.private), snapshot(self.source))
 
+# The fast stat/head/wc stubs delegate to FULL_ADAPTER for every fault; this proves they agree with it.
+fast_stub_equivalence_control(FULL_ADAPTER)
 with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-') as temporary:
     parent = Path(temporary).resolve()
     for platform in ('Linux', 'Darwin'):

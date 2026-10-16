@@ -199,6 +199,54 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 '''
 
 
+# Fast path for the three tools that make up 90-98% of all stub spawns (hosted run 38837569325:
+# 880 of the 903 spawns of one macOS removal invocation were stat). Each Python adapter pays an
+# interpreter start plus the json, pathlib and plistlib imports (about 30-43 ms hosted) only to exec
+# the real tool. This POSIX sh stub forks nothing before its exec: it reads the first line of
+# control/model.json with the read builtin, and ANY doubt delegates to the unchanged Python adapter
+# installed beside it in bin/.python (the same file name, so the adapter sees the same tool name):
+# a model fault or alias that could change the adapter's answer, an argument form outside the
+# adapter's stat allowlist (the adapter then refuses and records its 'forbidden' event), or head and
+# wc under a read-fail fault. Otherwise it appends the same tool name to spawns.log, so the spawn
+# diagnostic stays truthful, and execs the real tool exactly as the adapter does.
+FAST_TOOLS = ('stat', 'head', 'wc')
+FAST_STUB = r"""#!/bin/sh
+name=${0##*/}
+delegate() { exec "$FIXTURE_ROOT/bin/.python/$name" "$@"; }
+model=
+IFS= read -r model < "$FIXTURE_ROOT/control/model.json" || :
+case "$name" in
+    stat)
+        case "$model" in
+            *stat-fail*|*stat-malformed*|*role-identity*|*identity_aliases*|*role_identity_fault_path*) delegate "$@" ;;
+        esac
+        [ "$#" -eq 3 ] || delegate "$@"
+        case "$1" in
+            -c) case "$2" in '%u:%a:%h'|'%d:%i:%s:%Y'|'%d:%i') ;; *) delegate "$@" ;; esac ;;
+            -f) case "$2" in '%u:%Lp:%l'|'%d:%i:%z:%m'|'%d:%i') ;; *) delegate "$@" ;; esac ;;
+            *) delegate "$@" ;;
+        esac ;;
+    *)
+        case "$model" in *read-fail*) delegate "$@" ;; esac ;;
+esac
+printf '%s\n' "$name" >> "$FIXTURE_ROOT/control/spawns.log"
+exec "/usr/bin/$name" "$@"
+"""
+
+
+def install_stub(bin_dir, name, adapter, fast=None):
+    # Every stub is the Python adapter, except that stat, head and wc get FAST_STUB in front of it,
+    # with the unchanged adapter beside it in bin/.python for the delegation.
+    fast = name in FAST_TOOLS if fast is None else fast
+    python_stub = '#!' + sys.executable + '\n' + adapter
+    if fast:
+        hidden = bin_dir / '.python'; hidden.mkdir(mode=0o700, exist_ok=True)
+        (hidden / name).write_text(python_stub); (hidden / name).chmod(0o700)
+        (bin_dir / name).write_text(FAST_STUB); (bin_dir / name).chmod(0o700)
+    else:
+        (bin_dir / name).write_text(python_stub); (bin_dir / name).chmod(0o700)
+
+
 def effects(events):
     # Read-only admission is allowed before route disposition. Unexpected
     # effects remain visible, including forbidden calls with swallowed stderr.
@@ -286,6 +334,47 @@ def timeout_diagnostics_control():
         assert ('ordinary-trace-line' in written) == (expected is subprocess.TimeoutExpired)
 
 
+def fast_stub_equivalence_control(adapter=None):
+    # Hosted-only control, not a product assertion. On the same model, the fast stat/head/wc stub and
+    # the Python adapter must give the same stdout, exit status, events and spawn tally: every stat
+    # format of this host's family on a fixture file, argument forms the adapter refuses, each model
+    # fault and alias that changes its answer, and head and wc with and without read-fail.
+    adapter = ADAPTER if adapter is None else adapter
+    with tempfile.TemporaryDirectory(prefix='herdr-fast-stub-') as temporary:
+        base = Path(temporary).resolve()
+        subject = base / 'subject.txt'; subject.write_text('fast stub subject\n'); subject.chmod(0o600)
+        alias = base / 'alias.txt'; alias.write_text('fast stub alias\n'); alias.chmod(0o600)
+        darwin = sys.platform == 'darwin'
+        flag = '-f' if darwin else '-c'
+        formats = ('%u:%Lp:%l', '%d:%i:%z:%m', '%d:%i') if darwin else ('%u:%a:%h', '%d:%i:%s:%Y', '%d:%i')
+        plain = {'platform': 'Linux', 'fault': '', 'files': {}, 'states': {}, 'fault_label': '', 'shared': {}}
+        identity = [flag, '%d:%i', str(subject)]
+        cases = [('stat', [flag, fmt, str(subject)], plain) for fmt in formats]
+        cases += [('stat', [flag, '%U', str(subject)], plain), ('stat', [flag, formats[0]], plain),
+                  ('stat', [flag, formats[2], str(subject), 'extra'], plain)]
+        cases += [('stat', [flag, formats[0], str(subject)], dict(plain, fault=fault)) for fault in ('stat-fail', 'stat-malformed')]
+        cases += [('stat', identity, dict(plain, fault=fault, role_identity_fault_path=str(subject)))
+                  for fault in ('role-identity-fail', 'role-identity-malformed')]
+        cases += [('stat', identity, dict(plain, identity_aliases={str(subject): str(alias)}))]
+        for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)])):
+            cases += [(tool, args, plain), (tool, args, dict(plain, fault='read-fail'))]
+        for index, (tool, args, model) in enumerate(cases):
+            results = []
+            for fast in (True, False):
+                root = base / ('case-%d-%s' % (index, 'fast' if fast else 'python'))
+                (root / 'control').mkdir(parents=True); (root / 'bin').mkdir()
+                (root / 'control' / 'model.json').write_text(json.dumps(model))
+                install_stub(root / 'bin', tool, adapter, fast=fast)
+                done = subprocess.run([str(root / 'bin' / tool)] + args, env={'FIXTURE_ROOT': str(root), 'PATH': '/usr/bin:/bin'},
+                                      stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+                def read(name):
+                    try: return (root / 'control' / name).read_text()
+                    except OSError: return ''
+                results.append((done.returncode, done.stdout, done.stderr.replace(b'/usr/bin/', b''), read('events.jsonl'), read('spawns.log')))
+            assert results[0] == results[1], 'fast stub differs from the Python adapter for %s %r: %r != %r' % (tool, args, results[0], results[1])
+    print('fast stat/head/wc stubs match the Python adapter on %d cases' % len(cases), file=sys.stderr, flush=True)
+
+
 def serialized_environment(env_file: Path, quoting: str, common: Path, environment: dict) -> str:
     commands = {
         'current': 'printf "Environment=%s" "$(systemd_quoted "HERDR_RELAY_ENV=$2")"',
@@ -332,7 +421,7 @@ class Fixture:
         self.save()
         for name in ('systemctl', 'launchctl', 'uname', 'plutil', 'rm', 'sleep', 'wc', 'head', 'stat',
                      'curl', 'cloudflared', 'tailscale', 'herdr-mobile-relay', 'herdr', 'open', 'ssh', 'sudo'):
-            q = self.bin / name; q.write_text('#!' + sys.executable + '\n' + ADAPTER); q.chmod(0o700)
+            install_stub(self.bin, name, ADAPTER)
         route = self.relay / 'tailscale-cli.sh'
         route.write_text('#!' + sys.executable + '\n' + ADAPTER.replace("name = pathlib.Path(sys.argv[0]).name", "name = 'route-adapter'")); route.chmod(0o700)
         for i in present: self.write_definition(i, self.env_file, quoting)
@@ -441,6 +530,7 @@ def configuration_refusal(f, seams):
 def main():
     if os.getuid() == 0: raise SystemExit('removal fixtures must run as a non-root hosted user')
     timeout_diagnostics_control()
+    fast_stub_equivalence_control()
     with tempfile.TemporaryDirectory(prefix='herdr-removal-') as temporary:
         parent = Path(temporary).resolve()
         for platform in ('Linux', 'Darwin'):
