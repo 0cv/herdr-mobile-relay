@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 HELPER = os.environ.get("NATIVE_HELPER", "")
@@ -33,14 +34,53 @@ def require(condition, message):
         raise AssertionError(message)
 
 
-def diagnostic_tail(text, *private):
+CAPTURE_LIMIT = 64 * 1024
+TAIL_READ = 8 * 1024
+
+
+def redactions():
+    return ((globals().get("root", ""), "<fixture-root>"), (REPO, "<repo>"),
+            (os.environ.get("HOME", ""), "<home>"))
+
+
+def file_tail(handle, limit=TAIL_READ):
+    # At most the last `limit` bytes of a file-backed capture; the file is never read whole.
+    handle.seek(0, os.SEEK_END)
+    handle.seek(max(0, handle.tell() - limit))
+    return handle.read(limit)
+
+
+def diagnostic_tail(raw, *private):
     # Evidence only, never an assertion: a failing check names what the real helper printed.
-    # Bounded to the last 40 lines and 4 KiB; each fixture path in `private` is replaced by a
-    # label first. run_wrapper has already refused any output that carries a canary string.
+    # `raw` is an already bounded byte tail (file_tail). Each fixture path in `private` is
+    # replaced by a label, then the last 40 lines and at most 4096 BYTES are kept.
+    text = raw.decode("utf-8", errors="replace")
     for value, label in private:
         if str(value):
             text = text.replace(str(value), label)
-    return "\n".join(text.splitlines()[-40:])[-4096:]
+    tail = "\n".join(text.splitlines()[-40:]).encode("utf-8")[-4096:]
+    return tail.decode("utf-8", errors="replace")
+
+
+def run_bounded(argv, env):
+    # Same call as run_wrapper's subprocess.run (same 10 s bound), but stdout and stderr go to
+    # unlinked temp files, so a verbose or runaway helper cannot fill this process's memory. Only
+    # a head of CAPTURE_LIMIT bytes (for the unchanged checks) and a bounded tail are read back.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=10)
+        captured = []
+        for handle in (out, err):
+            handle.seek(0)
+            head = handle.read(CAPTURE_LIMIT + 1)
+            captured.append((head, file_tail(handle)))
+    (out_head, out_tail), (err_head, err_tail) = captured
+    require(len(out_head) <= CAPTURE_LIMIT and len(err_head) <= CAPTURE_LIMIT,
+            "helper output exceeded %d bytes; stdout tail %r; stderr tail %r" % (
+                CAPTURE_LIMIT, diagnostic_tail(out_tail, *redactions()), diagnostic_tail(err_tail, *redactions())))
+    return SimpleNamespace(returncode=process.returncode,
+                           stdout=out_head.decode("utf-8", errors="replace"),
+                           stderr=err_head.decode("utf-8", errors="replace"),
+                           stdout_tail=out_tail, stderr_tail=err_tail)
 
 
 def write_binary(path):
@@ -60,9 +100,12 @@ raise SystemExit(code)
     path.chmod(0o700)
 
 
-def run_wrapper(script, env, args=(), code=3):
-    result = subprocess.run(["/bin/bash", str(script), *args], env=env,
-                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+def run_wrapper(script, env, args=(), code=3, bounded=False):
+    argv = ["/bin/bash", str(script), *args]
+    if bounded:
+        result = run_bounded(argv, env)
+    else:
+        result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
     require(result.returncode == code, "wrapper did not propagate chosen exit")
     require("Press Enter" not in result.stdout, "noninteractive wrapper paused")
     require(not any(x in result.stdout + result.stderr for x in
@@ -234,11 +277,11 @@ with tempfile.TemporaryDirectory(prefix="herdr-doctor-fixtures-") as directory:
     require(json.loads(result.stdout)["schema_version"] == 1, "real compiled command dispatch missing")
     require(not result.stderr, "real valid JSON report gained wrapper stderr")
     require(json.loads(result.stdout)["relay_build"]["version"] == "unknown", "unstamped helper invented package identity")
-    concise = run_wrapper(source, actual_env, ["--concise"])
+    concise = run_wrapper(source, actual_env, ["--concise"], bounded=True)
     require(concise.stdout.startswith("selected_transport=tailscale-cli status=unknown exit=3") and not concise.stderr,
             "real concise status not the finite selected-transport report; stdout tail %r; stderr tail %r" % (
-                diagnostic_tail(concise.stdout, (root, "<fixture-root>"), (REPO, "<repo>"), (os.environ.get("HOME", ""), "<home>")),
-                diagnostic_tail(concise.stderr, (root, "<fixture-root>"), (REPO, "<repo>"), (os.environ.get("HOME", ""), "<home>"))))
+                diagnostic_tail(concise.stdout_tail, *redactions()),
+                diagnostic_tail(concise.stderr_tail, *redactions())))
     concise_json = run_wrapper(source, actual_env, ["--concise", "--json"])
     require(json.loads(concise_json.stdout)["selected_transport"] == "tailscale-cli" and not concise_json.stderr,
             "real concise JSON disagreed on selected transport")
