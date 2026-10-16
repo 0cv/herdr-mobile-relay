@@ -135,6 +135,7 @@ fixture_capture_count=0
 fixture_job_count=0
 fixture_kill_count=0
 fixture_gate_used=0
+fixture_transient_used=0
 fixture_trace() { printf '%s\n' "$*" >> "$FIXTURE_ROOT/shell.events"; }
 # mktemp is a forked command, so Bash may report and delete a signal-terminated
 # child's job entry after it. Record each use (template name only) in order with
@@ -167,6 +168,9 @@ fixture_gate() {
     fi
     for ((attempt=0; attempt<1000; attempt++)); do
         [ ! -f "$FIXTURE_ROOT/$name.release" ] || return 0
+        if [ "$name" = poll ] && [ -f "$FIXTURE_ROOT/prune-after-signal" ]; then
+            fixture_trace "post-signal-fork"
+        fi
         /bin/sleep 0.01
     done
     fixture_trace "gate-timeout $name"
@@ -207,6 +211,15 @@ jobs() {
         fixture_gate_used=1
         fixture_gate poll || return 1
         [ "${POLL_TERMINAL:-0}" != 1 ] || terminal_gate=1
+    fi
+    # Hide one post-capture record without reading/pruning the real job table.
+    # The next product observation must still validate the actual jobspec/PID;
+    # this seam never supplies a forged terminal record or an exit status.
+    if [ "$1" = -l ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+        [ "$fixture_transient_used" = 0 ] && [ -f "$FIXTURE_ROOT/transient-record" ]; then
+        fixture_transient_used=1
+        fixture_trace "transient-record-unavailable ${RELAY_PID:-}"
+        return 1
     fi
     # In completion gates, preserve and return the ACTUAL terminal builtin
     # record on its FIRST terminal observation. Do not prune it and reread.
@@ -436,7 +449,7 @@ class Fixture:
         # the bounded tails of the supervisor output and the parent-shell record (fixture data).
         assert observed == status, "supervisor exit status %r, expected %r (case %s); output tail %r; shell tail %r" % (
             observed, status, self.root.name,
-            tail_text(self.output, 600), tail_lines(self.root / "shell.events", 12))
+            tail_text(self.output, 600), tail_lines(self.root / "shell.events", 36))
         self.stream.flush()
         assert (self.root / "relay.env").read_bytes() == self.before
         assert (self.root / "tunnel.yml").read_text() == "inert tunnel config\n"
@@ -762,6 +775,46 @@ def main():
             f.complete_signal("relay", signal.SIGPIPE, ("relay", "cloudflared"))
             assert "wait-end " + str(f.pid("cloudflared")) + " 0" in f.shell()
         run_case(parent, "peer-signal-during-tunnel-capture", peer_signal_during_capture, CAPTURE_GATE="2")
+
+        def transient_signal_record(f):
+            f.ready()
+            f.captured()
+            write(f.root / "arm-poll", "armed\n")
+            f.held("poll")
+            write(f.root / "transient-record", "armed\n")
+            f.release("poll")
+            until(lambda: any(s.startswith("transient-record-unavailable " + str(f.pid("relay")))
+                              for s in f.shell()), "first relay record was not hidden", f.proc)
+            lines = f.shell()
+            marker = next(i for i, s in enumerate(lines) if s.startswith("transient-record-unavailable "))
+            spec = "%" + next(s.split()[2] for s in lines if s.startswith("capture 1 ")).strip("[]+-")
+            until(lambda: "jobs 0 -l " + spec in f.shell()[marker + 1:],
+                  "live captured record was not retried", f.proc)
+            f.signal_child("relay", signal.SIGPIPE)
+            f.complete_signal("relay", signal.SIGPIPE)
+            lines = f.shell()
+            assert sum(s.startswith("transient-record-unavailable " + str(f.pid("relay")))
+                       for s in lines) == 1
+            assert "jobs 0 -p " + spec in lines[marker:], "live spec was not checked before retry"
+            assert sum(s == "wait-end " + str(f.pid("relay")) + " 141" for s in lines) == 1
+        run_case(parent, "transient-record-signal-relay", transient_signal_record)
+
+        def pruned_signal_record(f):
+            f.ready()
+            f.captured()
+            write(f.root / "arm-poll", "armed\n")
+            f.held("poll")
+            f.signal_child("relay", signal.SIGPIPE)
+            until(lambda: not alive(f.pid("relay")), "SIGPIPE child did not finish before poll")
+            write(f.root / "prune-after-signal", "armed\n")
+            until(lambda: "post-signal-fork" in f.shell(),
+                  "poll did not fork after SIGPIPE", f.proc)
+            # Bash may prune the terminal record on the gate's real fork.
+            f.release("poll")
+            f.complete_signal("relay", signal.SIGPIPE)
+            spec = "%" + next(s.split()[2] for s in f.shell() if s.startswith("capture 1 ")).strip("[]+-")
+            assert "jobs 0 -p " + spec in f.shell(), "pruned status did not use captured-spec absence"
+        run_case(parent, "pruned-signal-relay", pruned_signal_record)
 
         def peer_terminal_with_capture_refusal(f):
             f.held("capture")

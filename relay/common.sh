@@ -666,7 +666,7 @@ _supervised_child_kernel_stopped() {
 }
 
 supervised_child_observe() {
-    local job_spec="$1" expected_pid="$2" number absent_status=0 record_status=0
+    local job_spec="$1" expected_pid="$2" number absent_status=0 record_status=0 attempt
     SUPERVISED_JOB_STATE=""
     SUPERVISED_JOB_STATUS=""
     case "$job_spec" in %[0-9]*) number="${job_spec#%}" ;; *) return 1 ;; esac
@@ -676,17 +676,29 @@ supervised_child_observe() {
     if _supervised_child_cached "$job_spec" "$expected_pid"; then
         return 2
     fi
-    if ! _child_job_long_record "$job_spec"; then
-        # Unreadable is unknown unless the exact captured pair is provably gone.
+    # The hosted Darwin SIGPIPE case returned unknown, then cleanup obtained
+    # wait's real 141. If a captured spec has a transient unreadable record
+    # but jobs -p still answers, a later observation can establish the exact
+    # terminal record or prove absence. Retry only that unreadable state, with
+    # no wait or signal on an
+    # unknown/mismatched identity; every retry revalidates the original pair.
+    for ((attempt = 0; attempt < 3; attempt++)); do
+        if _child_job_long_record "$job_spec"; then
+            _supervised_child_record "$job_spec" "$expected_pid" "$CHILD_JOB_OUTPUT" || record_status=$?
+            if [ "$record_status" -eq 0 ] && [ "$SUPERVISED_JOB_STATE" = Running ] &&
+                _supervised_child_kernel_stopped "$expected_pid"; then
+                SUPERVISED_JOB_STATE=Stopped
+            fi
+            return "$record_status"
+        fi
+        # A nonempty but unreadable/malformed record cannot prove absence.
+        [ "$CHILD_JOB_RECORD_PRESENT" != true ] || return 1
+        absent_status=0
         _supervised_child_reap_absent "$job_spec" "$expected_pid" || absent_status=$?
-        return "$absent_status"
-    fi
-    _supervised_child_record "$job_spec" "$expected_pid" "$CHILD_JOB_OUTPUT" || record_status=$?
-    if [ "$record_status" -eq 0 ] && [ "$SUPERVISED_JOB_STATE" = Running ] &&
-        _supervised_child_kernel_stopped "$expected_pid"; then
-        SUPERVISED_JOB_STATE=Stopped
-    fi
-    return "$record_status"
+        [ "$absent_status" -eq 1 ] || return "$absent_status"
+        _supervised_child_captured "$job_spec" "$expected_pid" || return 1
+    done
+    return 1
 }
 
 relay_release_root() {
