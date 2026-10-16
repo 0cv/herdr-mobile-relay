@@ -27,6 +27,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
+	"github.com/andybalholm/brotli"
 )
 
 func installedCommandEnv(t *testing.T, mode string) string {
@@ -793,6 +794,78 @@ func TestVerifyReleaseIdentity(t *testing.T) {
 	}
 }
 
+// stampedWebCopy copies the tracked web tree into a test-owned directory and stamps the
+// copy's version.json with release_version and revision, as scripts/stamp-web-version.mjs
+// does when a release is packaged. The tracked version.json carries only `version`: the
+// packaged identity does not exist until packaging, so the fixture must not read it from
+// the tracked tree. The tracked files are never modified.
+func stampedWebCopy(t *testing.T, source string) string {
+	t.Helper()
+	destination := filepath.Join(t.TempDir(), "web")
+	err := filepath.Walk(source, func(name string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, name)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("web fixture contains a non-regular file: " + relative)
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionPath := filepath.Join(destination, "version.json")
+	data, err := os.ReadFile(versionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["version"] == nil {
+		t.Fatal("tracked web version metadata has no version")
+	}
+	metadata["release_version"] = metadata["version"]
+	revision, err := json.Marshal("0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata["revision"] = revision
+	stamped, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamped = append(stamped, '\n')
+	if err := os.WriteFile(versionPath, stamped, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var compressed bytes.Buffer
+	encoder := brotli.NewWriterLevel(&compressed, 11)
+	if _, err := encoder.Write(stamped); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(versionPath+".br", compressed.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return destination
+}
+
 // A fresh subprocess keeps the trust pool independent of other unit tests.
 // A run-owned root stands in for OS trust on both hosted platforms; the actual
 // command still uses default verified TLS, never an insecure client. The only
@@ -802,10 +875,11 @@ func TestVerifyPublicExactTrustedGatewayApp(t *testing.T) {
 	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		t.Skip("exact trusted app subprocess fixture is hosted-only")
 	}
-	webRoot, err := filepath.Abs(filepath.Join("..", "..", "web"))
+	sourceRoot, err := filepath.Abs(filepath.Join("..", "..", "web"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	webRoot := stampedWebCopy(t, sourceRoot)
 	hash, err := release.WebHashFS(os.DirFS(webRoot))
 	if err != nil {
 		t.Fatal(err)
