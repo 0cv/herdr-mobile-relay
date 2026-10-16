@@ -33,6 +33,16 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def diagnostic_tail(text, *private):
+    # Evidence only, never an assertion: a failing check names what the real helper printed.
+    # Bounded to the last 40 lines and 4 KiB; each fixture path in `private` is replaced by a
+    # label first. run_wrapper has already refused any output that carries a canary string.
+    for value, label in private:
+        if str(value):
+            text = text.replace(str(value), label)
+    return "\n".join(text.splitlines()[-40:])[-4096:]
+
+
 def write_binary(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!" + sys.executable + "\n" + '''import json, os, sys
@@ -226,7 +236,9 @@ with tempfile.TemporaryDirectory(prefix="herdr-doctor-fixtures-") as directory:
     require(json.loads(result.stdout)["relay_build"]["version"] == "unknown", "unstamped helper invented package identity")
     concise = run_wrapper(source, actual_env, ["--concise"])
     require(concise.stdout.startswith("selected_transport=tailscale-cli status=unknown exit=3") and not concise.stderr,
-            "real concise status not the finite selected-transport report")
+            "real concise status not the finite selected-transport report; stdout tail %r; stderr tail %r" % (
+                diagnostic_tail(concise.stdout, (root, "<fixture-root>"), (REPO, "<repo>"), (os.environ.get("HOME", ""), "<home>")),
+                diagnostic_tail(concise.stderr, (root, "<fixture-root>"), (REPO, "<repo>"), (os.environ.get("HOME", ""), "<home>"))))
     concise_json = run_wrapper(source, actual_env, ["--concise", "--json"])
     require(json.loads(concise_json.stdout)["selected_transport"] == "tailscale-cli" and not concise_json.stderr,
             "real concise JSON disagreed on selected transport")
