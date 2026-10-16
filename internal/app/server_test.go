@@ -3394,10 +3394,26 @@ func TestServerHealthProbeStalledResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
 	accepted := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
+	probeDone := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer func() {
+		cancel()
+		close(release)
+		_ = ln.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("stalled accept goroutine did not stop")
+		}
+		select {
+		case <-probeDone:
+		case <-time.After(time.Second):
+			t.Error("stalled probe goroutine did not stop")
+		}
+	}()
 	go func() {
 		defer close(done)
 		conn, err := ln.Accept()
@@ -3408,20 +3424,27 @@ func TestServerHealthProbeStalledResponse(t *testing.T) {
 		close(accepted)
 		<-release
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, _, err = probeLifecycleHealth(ctx, ln.Addr().String())
-	close(release)
-	_ = ln.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("stalled accept goroutine did not stop")
-	}
+	go func() {
+		defer close(probeDone)
+		_, _, probeErr := probeLifecycleHealth(ctx, ln.Addr().String())
+		select {
+		case <-accepted:
+			probeDone <- probeErr
+		default:
+			probeDone <- fmt.Errorf("probe finished before accept: %v", probeErr)
+		}
+	}()
 	select {
 	case <-accepted:
-	default:
-		t.Fatal("stalled listener did not accept the probe")
+	case err := <-probeDone:
+		t.Fatalf("stalled probe finished before accept: %v", err)
+	case <-ctx.Done():
+		t.Fatal("stalled listener did not accept within 1s")
+	}
+	select {
+	case err = <-probeDone:
+	case <-ctx.Done():
+		t.Fatal("accepted stalled probe did not finish within 1s")
 	}
 	var timeout net.Error
 	if !errors.As(err, &timeout) || !timeout.Timeout() {
