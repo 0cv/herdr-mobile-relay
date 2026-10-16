@@ -80,6 +80,7 @@ type Server struct {
 	hostname string
 	home     string
 	logger   *slog.Logger
+	listen   func(network, address string) (net.Listener, error) // nil uses net.Listen
 
 	state          *coordinator.State
 	hub            *transport.Hub
@@ -1681,7 +1682,11 @@ func (s *Server) Run(ctx context.Context) error {
 		// initialize immutable handler dependencies before Serve can accept.
 		s.hybrid = s.startHybridTransport(ctx)
 	}
-	ln, err := net.Listen("tcp", s.cfg.Addr())
+	listen := s.listen
+	if listen == nil {
+		listen = net.Listen
+	}
+	ln, err := listen("tcp", s.cfg.Addr())
 	if err != nil {
 		if s.udp != nil {
 			_ = s.udp.Close()

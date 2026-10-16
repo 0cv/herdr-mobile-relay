@@ -3240,7 +3240,49 @@ func TestRearmedLaunchStartsWithoutStrandedDevices(t *testing.T) {
 	}
 }
 
+// probeLifecycleHealth bounds both header and body reads, including an accepted
+// connection that never answers. A fresh transport cannot reuse a foreign socket.
+func probeLifecycleHealth(ctx context.Context, addr string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/health", nil)
+	if err != nil {
+		return 0, "", err
+	}
+	client := &http.Client{Timeout: 250 * time.Millisecond, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16))
+	return resp.StatusCode, string(body), err
+}
+
 func TestServerRunAndShutdown(t *testing.T) {
+	runServerLifecycle(t)
+}
+
+func TestServerRunAndShutdownConcurrentIsolation(t *testing.T) {
+	for _, name := range []string{"first", "second"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			runServerLifecycle(t)
+		})
+	}
+}
+
+func runServerLifecycle(t *testing.T) {
+	t.Helper()
+	owned, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+	// An independently owned listener must never be used as a readiness oracle.
+	foreign, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer foreign.Close()
 	root := t.TempDir()
 	webRoot := filepath.Join(root, "web")
 	if err := os.MkdirAll(webRoot, 0o700); err != nil {
@@ -3251,7 +3293,7 @@ func TestServerRunAndShutdown(t *testing.T) {
 	}
 	cfg := &config.Config{
 		Host:        "127.0.0.1",
-		Port:        18999,
+		Port:        owned.Addr().(*net.TCPAddr).Port,
 		InstanceID:  "shutdown-test",
 		WebRoot:     webRoot,
 		RuntimeDir:  filepath.Join(root, "runtime"),
@@ -3261,31 +3303,68 @@ func TestServerRunAndShutdown(t *testing.T) {
 	}
 	s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
+	used := false
+	s.listen = func(network, address string) (net.Listener, error) {
+		if network != "tcp" || address != cfg.Addr() || used {
+			return nil, fmt.Errorf("unexpected listener handoff: %s %s", network, address)
+		}
+		used = true
+		return owned, nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	joined := false
+	// Run's ordinary path calls Shutdown with a five-second bound, closes the
+	// Serve listener, then drains background work. Always join even on Fatal.
+	defer func() {
+		cancel()
+		_ = owned.Close() // also unblocks Serve if cancellation raced startup
+		if !joined {
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				t.Error("Run did not stop after cancellation and listener close")
+			}
+		}
+	}()
 	go func() { done <- s.Run(ctx) }()
 
-	// One second of polling is not a startup budget on a loaded CI runner under
-	// -race, and a server that died immediately should say so instead of timing
-	// out with a connection refused.
-	deadline := time.Now().Add(15 * time.Second)
-	var resp *http.Response
-	var err error
-	for time.Now().Before(deadline) {
+	probeCtx, stopProbe := context.WithTimeout(ctx, 15*time.Second)
+	defer stopProbe()
+	var status int
+	var body string
+	for probeCtx.Err() == nil {
 		select {
 		case runErr := <-done:
+			joined = true
 			t.Fatalf("Run returned before the server answered: %v", runErr)
 		default:
 		}
-		if resp, err = http.Get("http://127.0.0.1:18999/health"); err == nil {
+		status, body, err = probeLifecycleHealth(probeCtx, owned.Addr().String())
+		if err == nil {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-probeCtx.Done():
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	if err != nil {
 		t.Fatalf("server did not answer /health within 15s: %v", err)
 	}
-	resp.Body.Close()
+	if status != http.StatusOK || body != "ok\n" {
+		t.Fatalf("/health = %d %q, want 200 ok", status, body)
+	}
+	foreignTCP := foreign.(*net.TCPListener)
+	if err := foreignTCP.SetDeadline(time.Now().Add(10 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := foreignTCP.Accept(); err == nil {
+		conn.Close()
+		t.Fatal("readiness probe contacted foreign listener")
+	} else if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("foreign listener accept: %v", err)
+	}
 
 	pid, err := os.ReadFile(filepath.Join(cfg.RuntimeDir, "relay.pid"))
 	if err != nil || strings.TrimSpace(string(pid)) != strconv.Itoa(os.Getpid()) {
@@ -3293,11 +3372,60 @@ func TestServerRunAndShutdown(t *testing.T) {
 	}
 
 	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("Run returned error: %v", err)
+	select {
+	case err := <-done:
+		joined = true
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not stop within 15s")
+	}
+	if !used {
+		t.Fatal("Run did not take the owned listener")
 	}
 	if _, err := os.Stat(filepath.Join(cfg.RuntimeDir, "relay.pid")); !os.IsNotExist(err) {
 		t.Fatalf("relay.pid survives shutdown: %v", err)
+	}
+}
+
+func TestServerHealthProbeStalledResponse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		close(accepted)
+		<-release
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _, err = probeLifecycleHealth(ctx, ln.Addr().String())
+	close(release)
+	_ = ln.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stalled accept goroutine did not stop")
+	}
+	select {
+	case <-accepted:
+	default:
+		t.Fatal("stalled listener did not accept the probe")
+	}
+	var timeout net.Error
+	if !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("stalled response = %v, want timeout", err)
 	}
 }
 
