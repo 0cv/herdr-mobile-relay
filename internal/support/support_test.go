@@ -74,6 +74,44 @@ func supportClosed(t *testing.T, files []*os.File) {
 	for _, file := range files { if _, err := file.Stat(); err == nil { t.Fatal("support content descriptor retained") } }
 }
 
+// supportDiagnostics is evidence only, never an assertion: when a positive Linux load
+// fails it names the finite load error and describes each ancestor of the fixture
+// directory with the loader's own predicates (supportDirectory, supportFilesystemType).
+// It prints depth indexes, modes, owner classes and verdicts, never path names or ids.
+func supportDiagnostics(dir string, loadErr error) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "load error: %v", loadErr)
+	parts := append([]string{""}, strings.Split(strings.TrimPrefix(dir, "/"), "/")...)
+	current := ""
+	for i, part := range parts {
+		if i != 0 {
+			current += "/" + part
+		}
+		path := current
+		if path == "" {
+			path = "/"
+		}
+		var st unix.Stat_t
+		if err := unix.Stat(path, &st); err != nil {
+			fmt.Fprintf(&out, "; depth %d: stat failed", i)
+			continue
+		}
+		var fsStat unix.Statfs_t
+		fsKnown := unix.Statfs(path, &fsStat) == nil
+		fsType := uint64(fsStat.Type)
+		owner := "other"
+		if st.Uid == uint32(os.Geteuid()) {
+			owner = "euid"
+		} else if st.Uid == 0 {
+			owner = "root"
+		}
+		fmt.Fprintf(&out, "; depth %d: mode %04o owner %s directory-ok %t filesystem %#x ok %t",
+			i, uint32(st.Mode)&0o7777, owner, supportDirectory(&st, i == len(parts)-1),
+			fsType, fsKnown && supportFilesystemType(fsType))
+	}
+	return out.String()
+}
+
 func TestWriteAndLoadPrivateSnapshot(t *testing.T) {
 	dir, err := filepath.EvalSymlinks(t.TempDir()); if err != nil { t.Fatal("fixture path unavailable") }
 	if err := os.Chmod(dir, 0o700); err != nil { t.Fatal("fixture directory mode failed") }
@@ -86,7 +124,7 @@ func TestWriteAndLoadPrivateSnapshot(t *testing.T) {
 	before := supportTree(t, dir)
 	loaded, err := Load(dir)
 	if runtime.GOOS != "linux" { supportError(t, loaded, err); if err != errSupportUnavailable { t.Fatal("native writer safety was guessed") } } else {
-		if err != nil || !reflect.DeepEqual(loaded, expected) || loaded.GeneratedAt == "" { t.Fatalf("legitimate writer/reader round trip failed: load error %v", err) }
+		if err != nil || !reflect.DeepEqual(loaded, expected) || loaded.GeneratedAt == "" { t.Fatalf("legitimate writer/reader round trip failed: %s", supportDiagnostics(dir, err)) }
 	}
 	if before != supportTree(t, dir) { t.Fatal("Load changed the writer's bytes/modes/inventory") }
 }
@@ -113,7 +151,7 @@ func TestLoadHistoricalCompletePrivateSnapshotAndAdjacentCanaries(t *testing.T) 
 			if runtime.GOOS != "linux" {
 				supportError(t, loaded, err); if err != errSupportUnavailable || len(files) != 0 || len(reads) != 0 { t.Fatal("unsupported native policy acquired content") }
 			} else {
-				if err != nil || !reflect.DeepEqual(loaded, expected) || loaded.GeneratedAt != expected.GeneratedAt { t.Fatal("historical snapshot or opaque metrics changed") }
+				if err != nil || !reflect.DeepEqual(loaded, expected) || loaded.GeneratedAt != expected.GeneratedAt { t.Fatal("historical snapshot or opaque metrics changed; " + supportDiagnostics(dir, err)) }
 				if !strings.Contains(loaded.RecentErrors[0], "secret-canary") { t.Fatal("private Snapshot was falsely scrubbed/redacted") }
 				if len(files) != 1 || len(reads) != 2 || reads[0] != int64(len(data)) || reads[1] != int64(len(data)) { t.Fatal("reader opened adjacent content or omitted complete EOF") }
 			}
