@@ -147,7 +147,7 @@ mktemp() {
     command mktemp "$@"
 }
 fixture_gate() {
-    local name="$1" attempt deadline
+    local name="$1" attempt deadline post_signal_fork
     fixture_trace "gate $name"
     : > "$FIXTURE_ROOT/$name.held"
     if [ "$name" = capture ]; then
@@ -168,10 +168,12 @@ fixture_gate() {
     fi
     for ((attempt=0; attempt<1000; attempt++)); do
         [ ! -f "$FIXTURE_ROOT/$name.release" ] || return 0
+        post_signal_fork=0
         if [ "$name" = poll ] && [ -f "$FIXTURE_ROOT/prune-after-signal" ]; then
-            fixture_trace "post-signal-fork"
+            post_signal_fork=1
         fi
         /bin/sleep 0.01
+        [ "$post_signal_fork" = 0 ] || fixture_trace "post-signal-fork"
     done
     fixture_trace "gate-timeout $name"
     return 1
