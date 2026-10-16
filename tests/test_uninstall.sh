@@ -67,6 +67,10 @@ if label in model['states'] and model.get('native_done'):
 FULL_ADAPTER = PREFIX + ADAPTER.replace("if op == 'disable': s['enabled'] = False", "if op == 'disable' and not fault(label, 'disable-noop'): s['enabled'] = False").replace(
     "pathlib.Path(args[2]).unlink(missing_ok=True); raise SystemExit(0)",
     "pathlib.Path(args[2]).unlink(missing_ok=True)\n    if all(not pathlib.Path(q).exists() for q in model['files'].values()): model['native_done'] = True; save()\n    raise SystemExit(0)")
+# The model keys, besides 'fault', that FULL_ADAPTER indexes on EVERY call, stat, head and wc included: the
+# PREFIX reads model['shared'] and model['states'] unconditionally and model['files'] until native_done is
+# set. The fast stat/head/wc stubs refuse (delegate for) a model without them, so the adapter fails as before.
+FULL_MODEL_KEYS = ('files', 'shared', 'states')
 
 class FullFixture(Fixture):
     def __init__(self, parent, platform, present=(0, 1), mode='cloudflare', fault='', fault_index=0):
@@ -93,7 +97,7 @@ class FullFixture(Fixture):
         for i in present: self.write_definition(i, self.env_file)
         self.save()
         for name in ('systemctl', 'launchctl', 'uname', 'plutil', 'rm', 'sleep', 'wc', 'head', 'stat', 'herdr', 'chmod', 'bash'):
-            install_stub(self.bin, name, FULL_ADAPTER)
+            install_stub(self.bin, name, FULL_ADAPTER, model_keys=FULL_MODEL_KEYS)
         self.source = self.home / 'source-checkout'; self.source.mkdir(mode=0o700)
         (self.source / '.env').write_text("GH_TOKEN='private-source-canary'\n")
         self.roots = (self.release, self.config, self.cache, self.link)
@@ -144,7 +148,7 @@ class FullFixture(Fixture):
         assert self.protected_before == (snapshot(self.private), snapshot(self.source))
 
 # The fast stat/head/wc stubs delegate to FULL_ADAPTER for every fault; this proves they agree with it.
-fast_stub_equivalence_control(FULL_ADAPTER)
+fast_stub_equivalence_control(FULL_ADAPTER, FULL_MODEL_KEYS)
 with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-') as temporary:
     parent = Path(temporary).resolve()
     for platform in ('Linux', 'Darwin'):
