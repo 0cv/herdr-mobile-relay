@@ -175,6 +175,9 @@ ALLOWED = (
     "tests/test_service_uninstall_cli.py",
     "tests/test_tailscale_cli_setup_failure.py",
     "tests/test_uninstall.sh",
+    # Consumer of the repaired installed-service CLI contract (exit 69, zero effects); it
+    # ran the old contract and failed the check workflow's Shell job at a233ef50 and 655df021.
+    "tests/test_dev_tailscale.py",
     # T001 CI wiring: the service-qualification job and the check.yml edits.
     ".github/workflows/check.yml",
     ".github/workflows/service-qualification.yml",

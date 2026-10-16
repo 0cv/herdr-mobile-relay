@@ -754,8 +754,9 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         raise AssertionError(f"accepted CLI unpublish did not pass exact narrow consent: {accepted_output!r} {accepted_events!r}")
     print("PASS CLI shell unpublish fixture: decline is non-mutating; acceptance authorizes only the journaled exact route")
 
-    # Installed-service CLI startup remains explicitly disabled even if a
-    # synthetic relay reports activation-check success.
+    # Installed-service CLI startup is unavailable/non-ready (exit 69, one fixed
+    # diagnostic) and runs nothing: no config, no CLI and no relay command, not even
+    # activation-check, so every relay call by this synthetic relay is an effect.
     cli_service_home = base / "cli-service-home"
     cli_service_home.mkdir(mode=0o700)
     cli_service_env = base / "cli-service.env"
@@ -774,7 +775,6 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
     cli_service_relay.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$HERDR_CLI_SERVICE_RECORD\"\n"
-        "case \"$*\" in 'tailscale-cli activation-check') exit 0 ;; esac\n"
         "echo unexpected service relay command >&2; exit 97\n",
         encoding="utf-8",
     )
@@ -785,18 +785,19 @@ with tempfile.TemporaryDirectory(prefix="herdr-dev-tailscale-") as tmp:
         "HERDR_RELAY_BIN": str(cli_service_relay),
         "HERDR_CLI_SERVICE_RECORD": str(cli_service_record),
     })
+    fixed_diagnostic = b"Installed-service CLI startup is disabled: unavailable/non-ready; no service was started.\n"
     for entrypoint in ("herdr-mobile-relay-service.sh", "tailscale-cli-service.sh"):
         result = subprocess.run(
             [str(cli_service_scripts / entrypoint)], env=service_env, cwd=root,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False,
         )
-        if (result.returncode != 0 or
-            b"Installed-service CLI startup is disabled" not in result.stderr):
-            raise AssertionError(f"{entrypoint} did not remain disabled: {result.stdout + result.stderr!r}")
-    service_events = cli_service_record.read_text(encoding="utf-8").splitlines()
-    if service_events != ["tailscale-cli activation-check", "tailscale-cli activation-check"] or sentinel.exists():
-        raise AssertionError(f"disabled installed-service entrypoint contacted CLI or started relay: {service_events!r}")
-    print("PASS CLI service fixture: direct and generic installed-service entrypoints stop before CLI execution and relay startup")
+        if result.returncode != 69 or result.stdout != b"" or result.stderr != fixed_diagnostic:
+            raise AssertionError(
+                f"{entrypoint} was not unavailable/non-ready (exit 69 and the one fixed diagnostic): "
+                f"{result.returncode!r} {result.stdout + result.stderr!r}")
+    if cli_service_record.exists() or sentinel.exists():
+        raise AssertionError("unavailable installed-service entrypoint contacted CLI or ran a relay command")
+    print("PASS CLI service fixture: direct and generic installed-service entrypoints are unavailable/non-ready (69) with zero CLI or relay effects")
 
     # A named user-service fixture admits only a fake exact-route verifier and
     # fake systemctl/curl. It never reaches the host service manager, Tailscale,
