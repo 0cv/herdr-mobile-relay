@@ -29,6 +29,29 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("SERVICE_TEST_BASH", "/bin/bash")
 assert pathlib.Path(BASH).is_absolute(), "fixture Bash must be explicitly absolute"
 DEADLINE = 20
+TAIL_LIMIT = 64 * 1024
+
+
+def tail_bytes(path, limit=TAIL_LIMIT):
+    # Evidence only: read at most the last `limit` bytes of a fixture log, never the
+    # whole file. A runaway supervisor may still be growing it while a failure message
+    # is built, before fixture containment runs. A missing file reads as empty.
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - limit))
+            return handle.read(limit)
+    except OSError:
+        return b""
+
+
+def tail_text(path, chars):
+    return tail_bytes(path).decode("utf-8", errors="replace")[-chars:]
+
+
+def tail_lines(path, count):
+    return tail_bytes(path).decode("utf-8", errors="replace").splitlines()[-count:]
+
 
 CHILD = r'''
 import json, os, pathlib, signal, sys, time
@@ -380,13 +403,13 @@ class Fixture:
             # longer parent-shell tail to show where it is blocked (an open wait-begin).
             raise AssertionError("supervisor still running after %ds (case %s); output tail %r; shell tail %r" % (
                 DEADLINE, self.root.name,
-                self.output.read_text()[-600:] if self.output.exists() else "", self.shell()[-30:])) from None
+                tail_text(self.output, 600), tail_lines(self.root / "shell.events", 30))) from None
         # Evidence only: the bare comparison gave a hosted log with no observed value. The
         # assertion itself is unchanged; its message now names the case, both statuses and
         # the bounded tails of the supervisor output and the parent-shell record (fixture data).
         assert observed == status, "supervisor exit status %r, expected %r (case %s); output tail %r; shell tail %r" % (
             observed, status, self.root.name,
-            self.output.read_text()[-600:] if self.output.exists() else "", self.shell()[-12:])
+            tail_text(self.output, 600), tail_lines(self.root / "shell.events", 12))
         self.stream.flush()
         assert (self.root / "relay.env").read_bytes() == self.before
         assert (self.root / "tunnel.yml").read_text() == "inert tunnel config\n"
