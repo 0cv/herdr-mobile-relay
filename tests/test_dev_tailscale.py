@@ -933,15 +933,15 @@ printf 'Linux'
         ("foreground-identities", cli_install_foreground_env, b"Installed policy refuses foreground identities."),
     ):
         for extra in ({}, {"HERDR_TAILSCALE_CLI_ALLOW_UNREGISTERED_START": "1"}):
-            refused = subprocess.run(
+            installer_refusal = subprocess.run(
                 [str(cli_install_scripts / "install-systemd-user-service.sh")],
                 env={**install_env, "HERDR_RELAY_ENV": str(selected_env), **extra}, cwd=root,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False,
             )
-            if refused.returncode == 0 or fixed_message not in refused.stdout + refused.stderr:
+            if installer_refusal.returncode == 0 or fixed_message not in installer_refusal.stdout + installer_refusal.stderr:
                 raise AssertionError(
                     f"CLI service installer ({variant}, {sorted(extra)}) did not refuse with its fixed message: "
-                    f"{refused.returncode!r} {refused.stdout + refused.stderr!r}"
+                    f"{installer_refusal.returncode!r} {installer_refusal.stdout + installer_refusal.stderr!r}"
                 )
     if unit.exists() or systemctl_record.exists() or manager_record.exists() or sentinel.exists():
         raise AssertionError("refused CLI service installer wrote a unit, ran systemctl, called the relay or contacted the CLI")
