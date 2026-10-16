@@ -41,7 +41,14 @@ jobs:
           go-version: 1.27.1
           cache: true
       - name: Format
-        run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
+        run: |
+          unformatted="$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
+          if [ -n "$unformatted" ]; then
+            echo 'gofmt reports unformatted Go files:'
+            echo "$unformatted"
+            printf '%s\n' "$unformatted" | xargs gofmt -d | head -n 200 || true
+            exit 1
+          fi
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - name: Lint CLI lifecycle shell scripts
