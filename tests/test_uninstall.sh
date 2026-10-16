@@ -67,10 +67,15 @@ if label in model['states'] and model.get('native_done'):
 FULL_ADAPTER = PREFIX + ADAPTER.replace("if op == 'disable': s['enabled'] = False", "if op == 'disable' and not fault(label, 'disable-noop'): s['enabled'] = False").replace(
     "pathlib.Path(args[2]).unlink(missing_ok=True); raise SystemExit(0)",
     "pathlib.Path(args[2]).unlink(missing_ok=True)\n    if all(not pathlib.Path(q).exists() for q in model['files'].values()): model['native_done'] = True; save()\n    raise SystemExit(0)")
-# The model keys, besides 'fault', that FULL_ADAPTER indexes on EVERY call, stat, head and wc included: the
-# PREFIX reads model['shared'] and model['states'] unconditionally and model['files'] until native_done is
-# set. The fast stat/head/wc stubs refuse (delegate for) a model without them, so the adapter fails as before.
-FULL_MODEL_KEYS = ('files', 'shared', 'states')
+# What FULL_ADAPTER's PREFIX dereferences on EVERY call, stat, head and wc included: model['shared'] and
+# model['states'] unconditionally (the gate's `label in model['states']`), and model['files'].values() and each
+# state's s['queries'] >= 4 in the native_done arming block until native_done is set. The fast stat/head/wc
+# stubs cache only a model of this shape and delegate for any other, so the adapter fails as before instead of
+# the stub running the real tool. One expression of `model`, baked into the validator by install_stub.
+FULL_MODEL_SHAPE = ("isinstance(model.get('files'), dict) and all(isinstance(path, str) for path in model['files'].values())"
+                    " and isinstance(model.get('shared'), dict)"
+                    " and isinstance(model.get('states'), dict)"
+                    " and all(isinstance(state, dict) and isinstance(state.get('queries'), (int, float)) for state in model['states'].values())")
 
 class FullFixture(Fixture):
     def __init__(self, parent, platform, present=(0, 1), mode='cloudflare', fault='', fault_index=0):
@@ -97,7 +102,7 @@ class FullFixture(Fixture):
         for i in present: self.write_definition(i, self.env_file)
         self.save()
         for name in ('systemctl', 'launchctl', 'uname', 'plutil', 'rm', 'sleep', 'wc', 'head', 'stat', 'herdr', 'chmod', 'bash'):
-            install_stub(self.bin, name, FULL_ADAPTER, model_keys=FULL_MODEL_KEYS)
+            install_stub(self.bin, name, FULL_ADAPTER, model_shape=FULL_MODEL_SHAPE)
         self.source = self.home / 'source-checkout'; self.source.mkdir(mode=0o700)
         (self.source / '.env').write_text("GH_TOKEN='private-source-canary'\n")
         self.roots = (self.release, self.config, self.cache, self.link)
@@ -148,7 +153,7 @@ class FullFixture(Fixture):
         assert self.protected_before == (snapshot(self.private), snapshot(self.source))
 
 # The fast stat/head/wc stubs delegate to FULL_ADAPTER for every fault; this proves they agree with it.
-fast_stub_equivalence_control(FULL_ADAPTER, FULL_MODEL_KEYS)
+fast_stub_equivalence_control(FULL_ADAPTER, FULL_MODEL_SHAPE)
 with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-') as temporary:
     parent = Path(temporary).resolve()
     for platform in ('Linux', 'Darwin'):
