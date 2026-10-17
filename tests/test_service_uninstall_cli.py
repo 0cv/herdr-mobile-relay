@@ -322,6 +322,39 @@ def snapshot(q: Path) -> tuple:
 
 INVOCATIONS = [0]
 
+# Opt-in hosted evidence. One aggregate per finite cell and at most 128 sampled
+# ordinal cases (not fixture paths); no per-spawn timing/I/O. Time includes
+# tracing, assertions, bystander setup and stub logging, so is NOT tool CPU time.
+_PROFILE = {'schema': 1, 'perturbation': 'instrumented_wall_includes_fixture_and_tracing',
+            'sample_limit': 128, 'cases_seen': 0, 'cases_sampled': [], 'cells': {}}
+
+
+def profile_record(platform, fault, wall_ns, before, after):
+    path = os.environ.get('HERDR_DIAG_PROFILE_FILE')
+    if not path: return
+    if platform not in ('Linux', 'Darwin'): raise AssertionError('unknown profile platform')
+    category = 'ordinary' if not fault else 'adverse'
+    label = platform.lower() + '_' + category
+    cell = _PROFILE['cells'].setdefault(label, {'count': 0, 'wall_ns': 0, 'stub_spawns': 0})
+    delta = sum(max(0, after.get(name, 0) - before.get(name, 0)) for name in after)
+    cell['count'] += 1; cell['wall_ns'] += max(0, wall_ns); cell['stub_spawns'] += delta
+    _PROFILE['cases_seen'] += 1
+    if len(_PROFILE['cases_sampled']) < 128:
+        _PROFILE['cases_sampled'].append({'case': _PROFILE['cases_seen'], 'os': platform,
+                                           'class': category, 'wall_ns': max(0, wall_ns),
+                                           'stub_spawns': delta})
+
+
+def profile_flush():
+    path = os.environ.get('HERDR_DIAG_PROFILE_FILE')
+    if not path: return
+    target = Path(path); parent = Path(os.environ.get('RUNNER_TEMP', ''))
+    if (target.parent != parent or target.name not in ('service.json', 'full.json')
+            or parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.getuid()
+            or stat.S_IMODE(parent.stat().st_mode) != 0o700 or target.exists() or target.is_symlink()):
+        raise AssertionError('untrusted diagnostic profile destination')
+    target.write_text(json.dumps(_PROFILE, sort_keys=True) + '\n')
+
 
 def spawn_tally(control):
     # Diagnostic only, never an assertion. Every systemctl, launchctl, uname, plutil, rm, sleep,
@@ -675,9 +708,11 @@ class Fixture:
             return process.returncode, output, events
         finally:
             INVOCATIONS[0] += 1
+            spawns_after = spawn_tally(self.control)
+            profile_record(self.model['platform'], self.model['fault'], int((time.monotonic() - started) * 1e9), spawns_before, spawns_after)
             print('removal fixture invocation %d (%s model) took %.1fs; %s' % (
                 INVOCATIONS[0], self.model['platform'], time.monotonic() - started,
-                spawn_report(spawns_before, spawn_tally(self.control))), file=sys.stderr, flush=True)
+                spawn_report(spawns_before, spawns_after)), file=sys.stderr, flush=True)
             if master is not None: os.close(master)
             if process.poll() is None:
                 # Fallback containment targets only this invocation's group;
@@ -1139,4 +1174,6 @@ def main():
     print('PASS actual service-removal fixture source: NUL-safe lifecycle capture, effective configuration, identities, labels, ancestors, once-decoding, quiescence and cancellation')
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    try: main()
+    finally: profile_flush()

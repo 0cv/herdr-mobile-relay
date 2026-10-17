@@ -8,12 +8,13 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 python3 - "$REPO_DIR" <<'PY'
 import os, sys
 if sys.version_info < (3, 11): raise SystemExit('uninstall fixtures require Python >=3.11')
-import hashlib, json, pty, shutil, signal, stat, subprocess, tempfile, time
+import atexit, hashlib, json, pty, shutil, signal, stat, subprocess, tempfile, time
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / 'tests'))
 # Reuse the reviewed finite inert controller DATA/source-copy patterns. This
 # executes only in the later admitted fixture phase, never at source authoring.
-from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, fast_stub_equivalence_control, install_stub, snapshot, spawn_report, spawn_tally
+from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, fast_stub_equivalence_control, install_stub, snapshot, spawn_report, spawn_tally, profile_record, profile_flush
+atexit.register(profile_flush)
 REPO = Path(sys.argv[1]); TIMEOUT = 40
 PREFIX = r'''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
@@ -137,9 +138,11 @@ class FullFixture(Fixture):
             return p.returncode, output, events
         finally:
             INVOCATIONS[0] += 1
+            spawns_after = spawn_tally(self.control)
+            profile_record(self.model['platform'], self.model['fault'], int((time.monotonic() - started) * 1e9), spawns_before, spawns_after)
             print('full uninstall fixture invocation %d took %.1fs; %s' % (
                 INVOCATIONS[0], time.monotonic() - started,
-                spawn_report(spawns_before, spawn_tally(self.control))), file=sys.stderr, flush=True)
+                spawn_report(spawns_before, spawns_after)), file=sys.stderr, flush=True)
             for child in (p, bystander):
                 try: os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError: pass

@@ -1,0 +1,67 @@
+name: Tailscale diagnostic source lane (not product qualification)
+
+on:
+  push:
+    branches: [ci/tailscale-diagnostics-ef9f843-v8]
+
+permissions:
+  contents: read
+
+# PROSPECTIVE ONLY: do not publish this branch or execute the workflow until
+# separate exact authorization for the reviewed commit AND runner effects.
+# GitHub-hosted disposable users only. The Linux driver creates one private
+# $RUNNER_TEMP/owned-* scratch root with ordinary/, link -> ordinary/, alias/.
+# Its only elevated effects are sudo -n /usr/bin/mount --bind ordinary alias
+# and sudo -n /usr/bin/umount alias (10s each), in a finally block; failed
+# umount fails red and preserves the scratch root for runner disposal, never
+# recursive deletion into a live mount. No mount on macOS: stock alias facility
+# unsupported, NOT a passing negative. No Tailscale, service managers, secrets,
+# home modification, global mount-table artifact, retries or hosted dispatch.
+# Each product fixture retains its internal 40s invocation bound; this driver
+# gives each suite 900s. One diagnostic run per pushed SHA, job <=60m.
+# Independent reviewers must inspect EVERY changed byte of this YAML even
+# though YAML is outside the declared source deliverable list.
+jobs:
+  observe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: '3.14.0'
+      - name: Verify checkout provenance before diagnostics
+        timeout-minutes: 3
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - name: Hosted diagnostic source controls
+        timeout-minutes: 3
+        run: python3 tests/test_tailscale_diagnostics.py
+      - name: Hosted finite scratch controls and two unchanged fixture suites
+        timeout-minutes: 38
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            python3 scripts/ci/tailscale-diagnostics.py --linux-bind
+          elif [ "$RUNNER_OS" = macOS ]; then
+            python3 scripts/ci/tailscale-diagnostics.py
+          else
+            exit 1
+          fi
+      - name: Upload bounded sanitized evidence (missing is failure)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tailscale-diagnostics-${{ matrix.runner }}-${{ github.sha }}
+          path: ${{ runner.temp }}/tailscale-diagnostics/summary.json
+          if-no-files-found: error
+          retention-days: 1
