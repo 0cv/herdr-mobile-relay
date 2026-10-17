@@ -45,12 +45,13 @@ static int decode(char *s) {
 }
 
 static int inventory(const char *root, const char *alias, dev_t device,
+                     const char *cross_path, dev_t cross_device,
                      int *count, int *alias_match) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
     if (!f) return 0;
     char line[8192], mountpoint[4096], id[64], parent[64], majmin[64], source[4096];
-    int ok = 1, root_device_seen = 0, matched_alias = 0;
-    size_t total = 0, longest = 0;
+    int ok = 1, root_device_seen = 0, cross_device_seen = 0, matched_alias = 0;
+    size_t total = 0, longest = 0, cross_longest = 0;
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
         total += n;
@@ -63,13 +64,20 @@ static int inventory(const char *root, const char *alias, dev_t device,
         size_t m = strlen(mountpoint);
         int covers = (m == 1 && mountpoint[0] == '/') ||
             (m <= strlen(root) && !strncmp(root, mountpoint, m) && (root[m] == '/' || root[m] == 0));
-        if (!covers && strcmp(mountpoint, alias)) continue;
+        int covers_cross = cross_path && ((m == 1 && mountpoint[0] == '/') ||
+            (m <= strlen(cross_path) && !strncmp(cross_path, mountpoint, m) &&
+             (cross_path[m] == '/' || cross_path[m] == 0)));
+        if (!covers && !covers_cross && strcmp(mountpoint, alias)) continue;
         unsigned major_id, minor_id;
         char extra;
         if (sscanf(majmin, "%u:%u%c", &major_id, &minor_id, &extra) != 2) { ok = 0; break; }
         if (covers && m >= longest) {
             longest = m;
             root_device_seen = major(device) == major_id && minor(device) == minor_id;
+        }
+        if (covers_cross && m >= cross_longest) {
+            cross_longest = m;
+            cross_device_seen = major(cross_device) == major_id && minor(cross_device) == minor_id;
         }
         if (strcmp(mountpoint, alias) == 0 && major(device) == major_id && minor(device) == minor_id) matched_alias++;
     }
@@ -78,7 +86,8 @@ static int inventory(const char *root, const char *alias, dev_t device,
     /* A covering mountinfo device is required, not just a successful read.
      * Duplicate/ambiguous exact alias entries are NOT a passing negative. */
     *alias_match = matched_alias == 1;
-    return ok && *count > 0 && longest && root_device_seen;
+    return ok && *count > 0 && longest && root_device_seen &&
+           (!cross_path || (cross_longest && cross_device_seen));
 }
 #else
 static int inventory(const fsid_t *fsid, int *count) {
@@ -102,7 +111,7 @@ static int inventory(const fsid_t *fsid, int *count) {
 #endif
 
 int main(int argc, char **argv) {
-    if (argc != 2 || geteuid() == 0 || !getenv("GITHUB_ACTIONS") ||
+    if ((argc != 2 && argc != 3) || geteuid() == 0 || !getenv("GITHUB_ACTIONS") ||
         strcmp(getenv("GITHUB_ACTIONS"), "true") || !getenv("RUNNER_ENVIRONMENT") ||
         strcmp(getenv("RUNNER_ENVIRONMENT"), "github-hosted")) return 2;
     const char *root = argv[1];
@@ -125,6 +134,24 @@ int main(int argc, char **argv) {
     int symlink_refused = linkfd < 0 && S_ISLNK(l.st_mode) && l.st_uid == geteuid() &&
                           stat(link, &lp) == 0 && same_inode(&a, &lp);
     int fd_path = same_inode(&a, &p);
+    int cross = 2; /* no stock writable second filesystem: unsupported */
+#ifndef __APPLE__
+    dev_t cross_device = 0;
+    if (argc == 3) {
+        const char *q = argv[2];
+        if (strncmp(q, "/dev/shm/herdr-diagnostic-", 26) || !q[26] ||
+            strlen(q) > 240 || strchr(q + 26, '/')) return 2;
+        int crossfd = open(q, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        struct stat child_fd, child_path;
+        if (crossfd < 0 || fstat(crossfd, &child_fd) || stat(q, &child_path)) return 2;
+        cross_device = child_fd.st_dev;
+        cross = S_ISDIR(child_fd.st_mode) && child_fd.st_uid == geteuid() &&
+                same_inode(&child_fd, &child_path) && child_fd.st_dev != a.st_dev;
+        close(crossfd);
+    }
+#else
+    if (argc != 2) return 2;
+#endif
     int entries = 0, available, alias_ok = 0;
 #ifdef __APPLE__
     struct statfs fd_fs, path_fs;
@@ -135,13 +162,14 @@ int main(int argc, char **argv) {
      * There is no stock nullfs alias assumed here; alias stays unsupported. */
 #else
     struct stat b, bp;
-    available = inventory(root, alias, r.st_dev, &entries, &alias_ok);
+    available = inventory(root, alias, r.st_dev, argc == 3 ? argv[2] : NULL,
+                          cross_device, &entries, &alias_ok);
     if (fstat(aliasfd, &b) || stat(alias, &bp)) return 2;
     alias_ok = alias_ok && same_inode(&a, &b) && same_inode(&b, &bp);
 #endif
     if (entries > 4096) return 2;
-    printf("ordinary=%d symlink_refused=%d fd_path=%d inventory=%d alias=%d entries=%d\n",
-           ordinary_ok, symlink_refused, fd_path, available, alias_ok, entries);
+    printf("ordinary=%d symlink_refused=%d fd_path=%d inventory=%d alias=%d cross=%d entries=%d\n",
+           ordinary_ok, symlink_refused, fd_path, available, alias_ok, cross, entries);
     close(rootfd); close(dirfd); close(aliasfd);
     return 0;
 }

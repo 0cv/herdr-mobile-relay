@@ -16,6 +16,7 @@ if (os.environ.get('GITHUB_ACTIONS') != 'true' or
 
 import json
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -42,6 +43,14 @@ def summary_cell(walls, top_level_spawns, inner_spawns):
     return {'samples': len(walls), 'wall_ns_total': sum(walls),
             'top_level_processes': top_level_spawns, 'known_inner_processes': inner_spawns,
             'attribution': 'end_to_end_only'}
+
+
+def inner_per_sample(cell):
+    # FAST_STUB's missing model.valid short-circuits cmp: rewrite forks only
+    # .model-ok. Direct/delegate fork cmp; exec replaces the stub, not a fork.
+    topology = {'cmp_unchanged': 0, 'model_check_rewrite': 1,
+                'fast_direct': 1, 'strict_delegate': 1, 'real_tool': 0}
+    return topology[cell]
 
 
 def status_for_control(available, complete, expected):
@@ -73,16 +82,24 @@ def admitted():
     return workspace, scratch, sha
 
 
-def timed(argv, env, cwd, limit=40):
+def timed(argv, env, cwd, limit=40, suite=False):
     start = time.monotonic_ns()
     # All output discarded, including errors; fixed labels only in evidence.
     with subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                           start_new_session=True) as p:
         try:
-            code = p.wait(timeout=limit)
+            code = p.wait(timeout=limit - 10 if suite else limit)
         except subprocess.TimeoutExpired:
-            os.killpg(p.pid, __import__('signal').SIGKILL)
+            if suite:
+                # The opt-in fixture TERM handler owns its separately-sessioned
+                # process groups. Allow its finally blocks to finish WITHIN the
+                # existing 900s bound. Do not reap the suite group leader before
+                # the final kill: its PID pins the group's identity.
+                os.killpg(p.pid, signal.SIGTERM)
+                time.sleep(8)
+            try: os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
             p.wait(timeout=2)
             raise RuntimeError('bounded diagnostic child timeout')
     return code, time.monotonic_ns() - start
@@ -131,10 +148,8 @@ def microprofile(workspace, root):
                 if (code == 0) != (cell != 'strict_delegate'):
                     raise RuntimeError('microprofile control mismatch')
                 walls.append(ns)
-            # Known topology from FAST_STUB: one cmp each stub invocation,
-            # one validator on rewrite, then either direct exec or delegate.
-            groups[cell] = summary_cell(walls, MAX_SAMPLES,
-                                        MAX_SAMPLES * (2 if cell == 'model_check_rewrite' else 1 if cell in ('fast_direct', 'strict_delegate') else 0))
+            # Exec of the real tool or adapter does not add a process.
+            groups[cell] = summary_cell(walls, MAX_SAMPLES, MAX_SAMPLES * inner_per_sample(cell))
         results[tool] = groups
     return results
 
@@ -145,9 +160,17 @@ def mount_control(workspace, root, linux_bind):
     alias = root / 'alias'; alias.mkdir()
     mounted = False
     attempted = False
+    cross_dir = None
     result = {'alias': 'unsupported', 'cross_device': 'unsupported',
               'inventory': 'inconclusive', 'limit': '4096_entries_1MiB_linux_4096_entries_darwin'}
     try:
+        if sys.platform == 'linux':
+            # Optional stock tmpfs only: metadata of /dev/shm and a generated
+            # owned 0700 directory. Never inspect other entries or mount it.
+            shm = Path('/dev/shm')
+            if (not shm.is_symlink() and shm.is_dir() and shm.stat().st_uid == 0
+                    and stat.S_IMODE(shm.stat().st_mode) == 0o1777):
+                cross_dir = Path(tempfile.mkdtemp(prefix='herdr-diagnostic-', dir=shm))
         if sys.platform == 'linux' and linux_bind:
             # Future hosted-only effect requiring its OWN prospective approval.
             # Only the generated alias is a mount target; sudo -n cannot prompt.
@@ -163,27 +186,36 @@ def mount_control(workspace, root, linux_bind):
                          str(workspace / 'scripts/ci/tailscale-mount-observe.c')],
                         {'PATH': '/usr/bin:/bin'}, root, 30)
         if code: raise RuntimeError('observer compile failed')
-        completed = subprocess.run([str(binary), str(root)], cwd=root,
+        completed = subprocess.run([str(binary), str(root)] + ([str(cross_dir)] if cross_dir else []), cwd=root,
                                    env={'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'},
                                    capture_output=True, timeout=10, check=False)
         # Strict, bounded finite output contract: no arbitrary compiler/probe text.
         if completed.returncode or len(completed.stdout) > 512 or completed.stderr:
             raise RuntimeError('observer refused or exceeded evidence bound')
         line = completed.stdout.decode('ascii').strip()
-        match = re.fullmatch(r'ordinary=(0|1) symlink_refused=(0|1) fd_path=(0|1) inventory=(0|1) alias=(0|1) entries=([0-9]{1,4})', line)
+        match = re.fullmatch(r'ordinary=(0|1) symlink_refused=(0|1) fd_path=(0|1) inventory=(0|1) alias=(0|1) cross=(0|1|2) entries=([0-9]{1,4})', line)
         if not match: raise RuntimeError('observer evidence shape mismatch')
-        ordinary_ok, link_ok, fd_ok, inventory_ok, alias_ok, count = map(int, match.groups())
+        ordinary_ok, link_ok, fd_ok, inventory_ok, alias_ok, cross_ok, count = map(int, match.groups())
         result['inventory'] = status_for_control(True, bool(inventory_ok), bool(ordinary_ok and link_ok and fd_ok))
         result['entries'] = count
         if result['inventory'] != 'observed': raise RuntimeError('required ordinary control failed')
         if mounted:
             result['alias'] = status_for_control(True, True, bool(alias_ok))
             if result['alias'] != 'observed': raise RuntimeError('required alias control failed')
+        if cross_dir:
+            result['cross_device'] = status_for_control(True, True, cross_ok == 1)
+            if result['cross_device'] != 'observed': raise RuntimeError('required cross-device control failed')
+        elif cross_ok != 2: raise RuntimeError('unrequested cross-device observation')
         # Darwin APFS firmlinks and f_mntonname path spelling are not guaranteed
         # to equal the path used to open a file. An fsid match is not a complete
         # mount inventory mapping. No nullfs/stock alias facility is assumed.
         return result
     finally:
+        cross_error = False
+        if cross_dir is not None:
+            # This generated empty directory is independent of the bind target.
+            try: cross_dir.rmdir()
+            except OSError: cross_error = True
         if attempted:
             try:
                 code, _ = timed(['sudo', '-n', '/usr/bin/umount', str(alias)],
@@ -193,6 +225,7 @@ def mount_control(workspace, root, linux_bind):
                 # Same-device bind mounts defeat Path.is_mount(). Even an
                 # uncertain timeout must preserve the whole runner scratch.
                 raise ScratchMounted('scratch unmount unverified') from exc
+        if cross_error: raise RuntimeError('scratch cross-device cleanup failed')
 
 
 def suites(workspace, root):
@@ -205,7 +238,7 @@ def suites(workspace, root):
                'HERDR_DIAG_PROFILE_FILE': str(profile)}
         timed_out = False
         try:
-            code, wall = timed(argv, env, workspace, 900)
+            code, wall = timed(argv, env, workspace, 900, suite=True)
         except RuntimeError:
             code, wall, timed_out = 124, 0, True
         results[name] = {'exit': code, 'wall_ns': wall, 'profile': 'missing'}
@@ -229,9 +262,8 @@ def suites(workspace, root):
                                for key in ('case', 'wall_ns', 'stub_spawns')) for row in samples)):
                 raise RuntimeError('profile evidence invalid')
             results[name]['profile'] = data
-        # The fixtures may own separately sessioned bystanders; if a suite
-        # hangs, its cases are incomplete and this runner must not start the
-        # next suite while an orphan could still be alive. Fail red instead.
+        # If TERM+grace failed, cases are incomplete; do not start the next
+        # suite. The job fails red instead of counting a timeout as evidence.
         if timed_out: break
     return results
 

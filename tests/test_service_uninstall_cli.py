@@ -322,6 +322,42 @@ def snapshot(q: Path) -> tuple:
 
 INVOCATIONS = [0]
 
+# Only the opt-in diagnostic suite installs this handler. The outer supervisor
+# sends TERM with 10s remaining in its 900s bound. Record each separately
+# sessioned fixture group before unblocking TERM; the unreaped Popen leader
+# pins its PGID while cleanup signals it. Never scan other runner processes.
+_OWNED_GROUPS = {}
+
+
+def install_profile_termination():
+    if not os.environ.get('HERDR_DIAG_PROFILE_FILE'): return
+    def terminate(_signum, _frame):
+        for child in tuple(_OWNED_GROUPS.values()):
+            if child.poll() is None:
+                try: os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+                try: child.wait(timeout=2)
+                except subprocess.TimeoutExpired: pass  # continue to every owned group
+        raise SystemExit(143)
+    signal.signal(signal.SIGTERM, terminate)
+
+
+def spawn_owned_session(argv, **kwargs):
+    if not os.environ.get('HERDR_DIAG_PROFILE_FILE'):
+        return subprocess.Popen(argv, start_new_session=True, **kwargs)
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        child = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        _OWNED_GROUPS[child.pid] = child
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
+    return child
+
+
+def forget_owned_session(child):
+    _OWNED_GROUPS.pop(child.pid, None)
+
+
 # Opt-in hosted evidence. One aggregate per finite cell and at most 128 sampled
 # ordinal cases (not fixture paths); no per-spawn timing/I/O. Time includes
 # tracing, assertions, bystander setup and stub logging, so is NOT tool CPU time.
@@ -405,8 +441,8 @@ def timeout_diagnostics_control():
     import contextlib, io
     code = 'import sys, time; sys.stdout.write(sys.argv[1] + chr(10)); sys.stdout.flush(); time.sleep(30)'
     for text, expected in (('ordinary-trace-line', subprocess.TimeoutExpired), ('GH_TOKEN=' + CANARIES[0].decode(), AssertionError)):
-        child = subprocess.Popen([sys.executable, '-c', code, text], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 stdin=subprocess.DEVNULL, start_new_session=True)
+        child = spawn_owned_session([sys.executable, '-c', code, text], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL)
         captured = io.StringIO()
         try:
             time.sleep(1)
@@ -415,7 +451,8 @@ def timeout_diagnostics_control():
                 except expected: pass
                 else: raise AssertionError('timeout diagnostic control did not time out')
         finally:
-            os.killpg(child.pid, signal.SIGKILL); child.wait(timeout=5)
+            if child.poll() is None: os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5); forget_owned_session(child)
         written = captured.getvalue()
         assert 'fixture-saved-canary' not in written, 'timeout diagnostic wrote a canary'
         assert ('ordinary-trace-line' in written) == (expected is subprocess.TimeoutExpired)
@@ -671,12 +708,12 @@ class Fixture:
         master = slave = None
         if choice is not None: master, slave = pty.openpty()
         bystander = None
-        process = subprocess.Popen(argv, env=self.environment, cwd=self.root, stdin=slave if slave is not None else subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        process = spawn_owned_session(argv, env=self.environment, cwd=self.root, stdin=slave if slave is not None else subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if slave is not None: os.close(slave)
         try:
-            bystander = subprocess.Popen([sys.executable, '-c', f'import time; time.sleep({3 * TIMEOUT})'], env=self.environment,
-                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            bystander = spawn_owned_session([sys.executable, '-c', f'import time; time.sleep({3 * TIMEOUT})'], env=self.environment,
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if requested_signal is not None:
                 deadline = time.monotonic() + TIMEOUT
                 while not (self.control / 'ready').exists():
@@ -720,6 +757,8 @@ class Fixture:
                 os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=2)
             if bystander is not None and bystander.poll() is None:
                 os.killpg(bystander.pid, signal.SIGTERM); bystander.wait(timeout=2)
+            forget_owned_session(process)
+            if bystander is not None: forget_owned_session(bystander)
 
     def unchanged(self, allow_route=False):
         if allow_route:
@@ -1175,5 +1214,6 @@ def main():
 
 
 if __name__ == '__main__':
+    install_profile_termination()
     try: main()
     finally: profile_flush()

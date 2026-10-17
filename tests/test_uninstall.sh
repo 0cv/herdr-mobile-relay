@@ -13,7 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / 'tests'))
 # Reuse the reviewed finite inert controller DATA/source-copy patterns. This
 # executes only in the later admitted fixture phase, never at source authoring.
-from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, fast_stub_equivalence_control, install_stub, snapshot, spawn_report, spawn_tally, profile_record, profile_flush
+from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, fast_stub_equivalence_control, install_stub, snapshot, spawn_report, spawn_tally, profile_record, profile_flush, install_profile_termination, spawn_owned_session, forget_owned_session
+install_profile_termination()
 atexit.register(profile_flush)
 REPO = Path(sys.argv[1]); TIMEOUT = 40
 PREFIX = r'''import json, os, pathlib, sys, time
@@ -115,10 +116,10 @@ class FullFixture(Fixture):
         started = time.monotonic(); spawns_before = spawn_tally(self.control)
         master = slave = None
         if tty: master, slave = pty.openpty()
-        p = subprocess.Popen(['/bin/bash', '-x', str(self.relay / 'uninstall.sh')], env=self.environment,
-            stdin=slave if tty else subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        p = spawn_owned_session(['/bin/bash', '-x', str(self.relay / 'uninstall.sh')], env=self.environment,
+            stdin=slave if tty else subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if slave is not None: os.close(slave)
-        bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], start_new_session=True)
+        bystander = spawn_owned_session([sys.executable, '-c', 'import time; time.sleep(120)'])
         try:
             if tty: os.write(master, answer)
             if requested_signal:
@@ -147,6 +148,7 @@ class FullFixture(Fixture):
                 try: os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError: pass
                 child.wait(timeout=2)
+                forget_owned_session(child)
             if master is not None: os.close(master)
 
     def retained(self, output, events):

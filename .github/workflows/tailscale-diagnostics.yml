@@ -11,11 +11,14 @@ permissions:
 # separate exact authorization for the reviewed commit AND runner effects.
 # GitHub-hosted disposable users only. The Linux driver creates one private
 # $RUNNER_TEMP/owned-* scratch root with ordinary/, link -> ordinary/, alias/.
+# If stock root-owned sticky /dev/shm exists, it also creates and removes one
+# empty private /dev/shm/herdr-diagnostic-* cross-device control (no elevation).
 # Its only elevated effects are sudo -n /usr/bin/mount --bind ordinary alias
 # and sudo -n /usr/bin/umount alias (10s each), in a finally block; failed
 # umount fails red and preserves the scratch root for runner disposal, never
 # recursive deletion into a live mount. No mount on macOS: stock alias facility
-# unsupported, NOT a passing negative. No Tailscale, service managers, secrets,
+# unsupported, NOT a passing negative. Darwin cross-device remains unsupported
+# without a verified stock writable second filesystem. No Tailscale, managers, secrets,
 # home modification, global mount-table artifact, retries or hosted dispatch.
 # Each product fixture retains its internal 40s invocation bound; this driver
 # gives each suite 900s. One diagnostic run per pushed SHA, job <=60m.
@@ -30,12 +33,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 commit at source review
         timeout-minutes: 5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 commit at source review
         timeout-minutes: 5
         with:
           python-version: '3.14.0'
@@ -59,7 +62,7 @@ jobs:
           fi
       - name: Upload bounded sanitized evidence (missing is failure)
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7 commit at source review
         with:
           name: tailscale-diagnostics-${{ matrix.runner }}-${{ github.sha }}
           path: ${{ runner.temp }}/tailscale-diagnostics/summary.json

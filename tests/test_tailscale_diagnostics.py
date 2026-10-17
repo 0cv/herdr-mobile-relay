@@ -30,6 +30,15 @@ class SourceControls(unittest.TestCase):
         for walls, outer, inner in (([], 0, 0), ([1] * 4, 4, 0), ([1], 2, 0), ([1], 1, 3)):
             with self.assertRaises(ValueError): module.summary_cell(walls, outer, inner)
 
+    def test_rewrite_short_circuits_cmp_not_model_check(self):
+        self.assertEqual(module.inner_per_sample('model_check_rewrite'), 1)
+        self.assertEqual(module.inner_per_sample('fast_direct'), 1)
+        self.assertEqual(module.inner_per_sample('strict_delegate'), 1)
+        self.assertEqual(module.inner_per_sample('cmp_unchanged'), 0)
+        self.assertEqual(module.inner_per_sample('real_tool'), 0)
+        cell = module.summary_cell([3, 4, 5], 3, 3 * module.inner_per_sample('model_check_rewrite'))
+        self.assertEqual(cell['known_inner_processes'], 3)
+
     def test_missing_alias_never_becomes_negative_pass(self):
         self.assertEqual(module.status_for_control(False, True, True), 'unsupported')
         self.assertEqual(module.status_for_control(True, False, True), 'inconclusive')
