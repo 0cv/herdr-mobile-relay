@@ -207,20 +207,31 @@ while [ ! -s "$SUPPORT_STATE" ]; do
     sleep 0.05
 done
 
-XDG_CONFIG_HOME="$CONFIG_HOME" \
-XDG_CACHE_HOME="$CACHE_HOME" \
-XDG_DATA_HOME="$DATA_HOME" \
-"$RELAY" support >"$WORK_DIR/support.json"
-grep -q '"protocol": 3' "$WORK_DIR/support.json" || {
-    echo "installed relay support output does not report protocol 3" >&2
-    sed -n '1,120p' "$WORK_DIR/support.json" >&2
-    exit 1
+# Only this fresh, private synthetic fixture may supply installed identity.
+# Capture exact top-level scalars without ever printing either private value.
+FIXTURE_PROTOCOL=$("$RELAY" json-field number protocol < "$SUPPORT_STATE" 2>/dev/null) || {
+    echo 'installed support fixture protocol unavailable' >&2; exit 1;
 }
-grep -qF "\"release_directory\": \"$RELEASE_DIR\"" "$WORK_DIR/support.json" || {
-    echo "installed relay support output does not report the canonical release directory" >&2
-    sed -n '1,120p' "$WORK_DIR/support.json" >&2
-    exit 1
+FIXTURE_RELEASE=$("$RELAY" json-field string release_directory < "$SUPPORT_STATE" 2>/dev/null) || {
+    echo 'installed support fixture release identity unavailable' >&2; exit 1;
 }
+[ "$FIXTURE_PROTOCOL" = 3 ] && [ "$FIXTURE_RELEASE" = "$RELEASE_DIR" ] || {
+    echo 'installed support fixture protocol or canonical release identity mismatch' >&2; exit 1;
+}
+if XDG_CONFIG_HOME="$CONFIG_HOME" XDG_CACHE_HOME="$CACHE_HOME" XDG_DATA_HOME="$DATA_HOME" \
+    "$RELAY" support >"$WORK_DIR/support.json" 2>/dev/null; then
+    [ "$HOST_OS" = linux ] && grep -q '"protocol": 3' "$WORK_DIR/support.json" &&
+        grep -q '"schema": "support-public-v1"' "$WORK_DIR/support.json" &&
+        grep -q '"source": "persisted_snapshot"' "$WORK_DIR/support.json" &&
+        ! grep -q '"release_directory"' "$WORK_DIR/support.json" &&
+        ! grep -qF "$RELEASE_DIR" "$WORK_DIR/support.json" || {
+        echo 'installed public support schema, protocol or privacy mismatch' >&2; exit 1;
+    }
+else
+    [ "$HOST_OS" = darwin ] && [ ! -s "$WORK_DIR/support.json" ] || {
+        echo 'installed support acquisition failed or disclosed private state' >&2; exit 1;
+    }
+fi
 
 kill -INT "$RELAY_PID"
 wait "$RELAY_PID"

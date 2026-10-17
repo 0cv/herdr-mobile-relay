@@ -36,6 +36,62 @@ type Snapshot struct {
 	RecentErrors     []string          `json:"recent_errors"`
 }
 
+// PublicSupport is a finite historical projection, never current health,
+// process ownership, installed-package identity, or admission evidence. Only
+// these typed fields may be serialized by the support command.
+type PublicSupport struct {
+	Schema            string  `json:"schema"`
+	Source            string  `json:"source"`
+	Meaning           string  `json:"meaning"`
+	Protocol          *int    `json:"protocol,omitempty"`
+	RecordedReadiness string  `json:"recorded_readiness"`
+	RecordedInventory string  `json:"recorded_inventory"`
+	ActivityFailures  *uint64 `json:"activity_failures,omitempty"`
+	TopologyRetries   *uint64 `json:"topology_retries,omitempty"`
+	PollFailures      *int    `json:"poll_failures,omitempty"`
+	RecentErrorCount  *int    `json:"recent_error_count,omitempty"`
+}
+
+// PublicProjection does not traverse or encode opaque snapshot fields. A
+// missing/invalid protocol cannot turn absent numeric data into asserted zeros.
+// Counts beyond the exact JSON integer range are unknown, not rounded.
+func PublicProjection(s Snapshot) PublicSupport {
+	p := PublicSupport{
+		Schema: "support-public-v1", Source: "persisted_snapshot",
+		Meaning:           "historical_only_not_current_health_or_admission",
+		RecordedReadiness: "unknown", RecordedInventory: "unknown",
+	}
+	if s.Protocol != 3 {
+		return p
+	}
+	p.Protocol = &s.Protocol
+	switch s.Readiness {
+	case "starting", "ready":
+		p.RecordedReadiness = s.Readiness
+	}
+	if state, ok := s.Inventory["state"].(string); ok {
+		switch state {
+		case "starting", "ready", "error":
+			p.RecordedInventory = state
+		}
+	}
+	const maxExactCount = 1<<53 - 1
+	if s.ActivityFailures <= maxExactCount {
+		p.ActivityFailures = &s.ActivityFailures
+	}
+	if s.TopologyRetries <= maxExactCount {
+		p.TopologyRetries = &s.TopologyRetries
+	}
+	if s.PollFailures >= 0 && uint64(s.PollFailures) <= maxExactCount {
+		p.PollFailures = &s.PollFailures
+	}
+	if s.RecentErrors != nil && len(s.RecentErrors) <= 256 {
+		count := len(s.RecentErrors)
+		p.RecentErrorCount = &count
+	}
+	return p
+}
+
 func Path(runtimeDir string) string {
 	return filepath.Join(runtimeDir, "support-state.json")
 }
@@ -86,8 +142,8 @@ func Write(runtimeDir string, snapshot Snapshot) error {
 
 // Load acquires only selected persisted historical support data. Returned
 // Snapshot fields (especially operational metadata/RecentErrors) remain private,
-// untrusted and NOT redacted or current health/admission authority. Callers need
-// a separate privacy-safe projection; this does not fix public support output.
+// untrusted and NOT redacted or current health/admission authority. Public
+// callers must use PublicProjection, never serialize the private Snapshot.
 // Relative/unclean paths and unsupported permission models are unavailable or
 // refused, never normalized into another selected root or repaired.
 func Load(runtimeDir string) (Snapshot, error) {

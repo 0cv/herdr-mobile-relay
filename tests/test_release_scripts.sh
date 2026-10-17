@@ -168,6 +168,25 @@ TMPDIR="$WORK_DIR/logical-tmp" \
     check_release \
     "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET"
 
+# The installed checker must retain both fixture identity comparisons even
+# though release_directory is forbidden in public support output. Exercise the
+# packaged exact-scalar extractor with a nested decoy and a mismatched path.
+grep -Fq '[ "$FIXTURE_PROTOCOL" = 3 ] && [ "$FIXTURE_RELEASE" = "$RELEASE_DIR" ]' \
+    "$REPO_DIR/scripts/check-installed-release.sh" || {
+    echo 'installed checker lost private-fixture identity oracle' >&2; exit 1;
+}
+FIXTURE_JSON="$WORK_DIR/identity-fixture.json"
+printf '%s\n' '{"protocol":3,"release_directory":"/fixture/release","nested":{"release_directory":"wrong"}}' > "$FIXTURE_JSON"
+IDENTITY=$("$RELEASE_DIR/herdr-mobile-relay" json-field string release_directory < "$FIXTURE_JSON")
+[ "$IDENTITY" = /fixture/release ] || {
+    echo 'packaged scalar extractor lost exact release identity' >&2; exit 1;
+}
+printf '%s\n' '{"protocol":3,"release_directory":"/fixture/foreign"}' > "$FIXTURE_JSON"
+IDENTITY=$("$RELEASE_DIR/herdr-mobile-relay" json-field string release_directory < "$FIXTURE_JSON")
+[ "$IDENTITY" != /fixture/release ] || {
+    echo 'foreign fixture identity accepted' >&2; exit 1;
+}
+
 # Synthetic altered wrappers are deliberately rebound to EACH manifest and
 # checksum: rejection must reach the CLI contract, not an unrelated hash gate.
 for CLI_FAULT in zero wrong-status missing-diagnostic activation cli server other ready-claim ready-assignment ready-mapping ready-json; do

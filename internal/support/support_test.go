@@ -17,6 +17,70 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type forbiddenPublicMarshaler struct{ called *bool }
+
+func (m forbiddenPublicMarshaler) MarshalJSON() ([]byte, error) {
+	*m.called = true
+	return nil, errors.New("private marshaler invoked")
+}
+
+func TestPublicProjectionFiniteSchemaAndNonmutation(t *testing.T) {
+	called := false
+	const secret = "private-projection-canary"
+	s := Snapshot{
+		GeneratedAt: secret, Version: secret, Revision: secret, Protocol: 3,
+		ReleaseDirectory: secret, WebHash: secret, WebVersion: secret, Readiness: "ready",
+		Inventory:  map[string]any{"state": "ready", secret: map[string]any{secret: forbiddenPublicMarshaler{&called}}},
+		Components: map[string]string{secret: secret}, Scheduler: forbiddenPublicMarshaler{&called},
+		Transport: forbiddenPublicMarshaler{&called}, UDP: forbiddenPublicMarshaler{&called},
+		ActivityFailures: 7, TopologyRetries: 0, PollFailures: 2, RecentErrors: []string{secret},
+	}
+	p := PublicProjection(s)
+	data, err := json.Marshal(p)
+	if err != nil || len(data) > 4096 || called || len(s.Inventory) != 2 || len(s.Inventory[secret].(map[string]any)) != 1 {
+		t.Fatal("public projection visited or changed private payload, or exceeded bound")
+	}
+	want := `{"schema":"support-public-v1","source":"persisted_snapshot","meaning":"historical_only_not_current_health_or_admission","protocol":3,"recorded_readiness":"ready","recorded_inventory":"ready","activity_failures":7,"topology_retries":0,"poll_failures":2,"recent_error_count":1}`
+	if string(data) != want || bytes.Contains(data, []byte(secret)) {
+		t.Fatal("public schema differs from exact allowed historical fields")
+	}
+	// Deliberately never JSON-encode s: its opaque marshalers must remain untouched.
+	if s.GeneratedAt != secret || s.Components[secret] != secret || s.RecentErrors[0] != secret {
+		t.Fatal("private snapshot mutated")
+	}
+}
+
+func TestPublicProjectionUnknownsAndBound(t *testing.T) {
+	for _, s := range []Snapshot{{}, {Protocol: -1, Readiness: "ready", PollFailures: 0},
+		{Protocol: 3, Readiness: "private-canary", Inventory: map[string]any{"state": 42},
+			ActivityFailures: ^uint64(0), TopologyRetries: ^uint64(0), PollFailures: -1,
+			RecentErrors: make([]string, 257)}} {
+		data, err := json.Marshal(PublicProjection(s))
+		if err != nil || len(data) > 4096 || bytes.Contains(data, []byte("private-canary")) ||
+			bytes.Contains(data, []byte(`"activity_failures"`)) || bytes.Contains(data, []byte(`"poll_failures"`)) ||
+			bytes.Contains(data, []byte(`"recent_error_count"`)) ||
+			!bytes.Contains(data, []byte(`"recorded_readiness":"unknown"`)) ||
+			!bytes.Contains(data, []byte(`"recorded_inventory":"unknown"`)) {
+			t.Fatal("invalid or missing recorded evidence was represented as valid")
+		}
+		if s.Protocol != 3 && bytes.Contains(data, []byte(`"protocol"`)) {
+			t.Fatal("invalid protocol asserted")
+		}
+	}
+	called := false
+	p := PublicProjection(Snapshot{Protocol: 3, Inventory: map[string]any{"state": forbiddenPublicMarshaler{&called}}})
+	if called || p.RecordedInventory != "unknown" || p.RecentErrorCount != nil ||
+		p.ActivityFailures == nil || *p.ActivityFailures != 0 {
+		t.Fatal("opaque inventory or nil errors became a claimed recorded value")
+	}
+	for _, state := range []string{"starting", "error"} {
+		p := PublicProjection(Snapshot{Protocol: 3, Inventory: map[string]any{"state": state}})
+		if p.RecordedInventory != state {
+			t.Fatal("finite inventory state lost")
+		}
+	}
+}
+
 // Authored only: every reader/writer/race/special-file operation below is on
 // disposable fixtures for later authorized hosted execution, never user state.
 func supportFixture(t *testing.T) (string, []byte) {

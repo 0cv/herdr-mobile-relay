@@ -222,7 +222,7 @@ func runWithServerRunner(args []string, runner func(*app.Server, context.Context
 		if err != nil {
 			return 1, err
 		}
-		encoded, err := json.MarshalIndent(snapshot, "", "  ")
+		encoded, err := json.MarshalIndent(support.PublicProjection(snapshot), "", "  ")
 		if err != nil {
 			return 1, err
 		}

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/support"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscalecli"
 	"github.com/andybalholm/brotli"
 )
@@ -61,6 +63,60 @@ func installedCommandEnv(t *testing.T, mode string) string {
 	prior := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prior) })
 	return root
+}
+
+func TestSupportCommandProjectsLoadedPrivateState(t *testing.T) {
+	root := installedCommandEnv(t, config.TransportCloudflare)
+	if err := os.MkdirAll(filepath.Join(root, "config", "herdr-mobile-relay"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Join(root, "config", "herdr-mobile-relay"))
+	if err != nil || os.Chmod(filepath.Dir(dir), 0o700) != nil || os.Chmod(dir, 0o700) != nil {
+		t.Fatal("private fixture path unavailable")
+	}
+	const secret = "command-private-canary"
+	if err := support.Write(dir, support.Snapshot{
+		Version: secret, Revision: secret, Protocol: 3, ReleaseDirectory: secret,
+		WebHash: secret, WebVersion: secret, Readiness: "ready",
+		Inventory:  map[string]any{"state": "ready", secret: map[string]any{secret: secret}},
+		Components: map[string]string{secret: secret}, Scheduler: map[string]any{secret: secret},
+		Transport: map[string]any{secret: secret}, UDP: map[string]any{secret: secret},
+		RecentErrors: []string{secret}, ActivityFailures: 4, PollFailures: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(support.Path(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, runErr, output := captureRunStdout(t, []string{"support"})
+	if runtime.GOOS != "linux" {
+		if code != 1 || runErr == nil || len(output) != 0 {
+			t.Fatal("unsupported native acquisition returned a document")
+		}
+	} else {
+		if code != 0 || runErr != nil || len(output) > 4096 || bytes.Contains(output, []byte(secret)) ||
+			!bytes.Contains(output, []byte(`"protocol": 3`)) ||
+			!bytes.Contains(output, []byte(`"activity_failures": 4`)) ||
+			bytes.Contains(output, []byte(`"release_directory"`)) {
+			t.Fatal("real support command did not emit only bounded historical projection")
+		}
+	}
+	after, err := os.ReadFile(support.Path(dir))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("support command mutated private fixture")
+	}
+	if err := os.WriteFile(support.Path(dir), []byte(`{"recent_errors":["`+secret+`"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, runErr, output = captureRunStdout(t, []string{"support"})
+	if code != 1 || runErr == nil || len(output) != 0 || strings.Contains(runErr.Error(), secret) {
+		t.Fatal("failed acquisition emitted private output")
+	}
+	code, runErr, output = captureRunStdout(t, []string{"support", "extra"})
+	if code != 2 || runErr == nil || len(output) != 0 {
+		t.Fatal("support usage failure emitted a document")
+	}
 }
 
 func TestInstalledCommandUsesRealNonArmingConstructor(t *testing.T) {
