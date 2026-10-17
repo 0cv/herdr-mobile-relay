@@ -8,9 +8,13 @@ if (os.environ.get('GITHUB_ACTIONS') != 'true' or
 
 import importlib.util
 import json
+import select
+import signal
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SOURCE = Path(__file__).resolve().parents[1] / 'scripts/ci/tailscale-diagnostics.py'
 spec = importlib.util.spec_from_file_location('tailscale_diagnostics', SOURCE)
@@ -44,6 +48,67 @@ class SourceControls(unittest.TestCase):
         self.assertEqual(module.status_for_control(True, False, True), 'inconclusive')
         self.assertEqual(module.status_for_control(True, True, False), 'red')
         self.assertEqual(module.status_for_control(True, True, True), 'observed')
+
+    def test_profile_child_receives_term_without_losing_parent_mask(self):
+        # This suite is guarded before fixture import; no service/product fixture runs.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_service_uninstall_cli as fixture
+        saved_profile = os.environ.get('HERDR_DIAG_PROFILE_FILE')
+        # Opt in to the ownership path without writing a profile or running main().
+        os.environ['HERDR_DIAG_PROFILE_FILE'] = 'hosted-mask-control'
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+        parent_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        owned_before = dict(fixture._OWNED_GROUPS)
+        child = None
+        try:
+            real_popen = subprocess.Popen
+
+            def checked_popen(*args, **kwargs):
+                self.assertIn(signal.SIGTERM, signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+                return real_popen(*args, **kwargs)
+
+            code = 'import os, signal; os.write(1, b"ready\\n"); signal.pause()'
+            with mock.patch.object(fixture.subprocess, 'Popen', side_effect=checked_popen):
+                child = fixture.spawn_owned_session(
+                    [sys.executable, '-c', code], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), parent_mask)
+            self.assertIs(fixture._OWNED_GROUPS.get(child.pid), child)
+            self.assertEqual(owned_before.keys(), fixture._OWNED_GROUPS.keys() - {child.pid})
+            ready, _, _ = select.select([child.stdout], [], [], 5)
+            self.assertTrue(ready, 'owned child did not become ready')
+            self.assertEqual(os.read(child.stdout.fileno(), 6), b'ready\n')
+            os.killpg(child.pid, signal.SIGTERM)
+            # A timeout or SIGKILL is never a passing TERM-delivery oracle.
+            self.assertEqual(child.wait(timeout=5), -signal.SIGTERM)
+
+            def failed_popen(*args, **kwargs):
+                self.assertIn(signal.SIGTERM, signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+                raise OSError('controlled spawn failure')
+
+            with mock.patch.object(fixture.subprocess, 'Popen', side_effect=failed_popen):
+                with self.assertRaisesRegex(OSError, 'controlled spawn failure'):
+                    fixture.spawn_owned_session([sys.executable, '-c', code])
+            self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), parent_mask)
+            self.assertIs(fixture._OWNED_GROUPS.get(child.pid), child)
+            self.assertEqual(fixture._OWNED_GROUPS.keys(), owned_before.keys() | {child.pid})
+        finally:
+            try:
+                if child is not None:
+                    try:
+                        if child.poll() is None:
+                            try: os.killpg(child.pid, signal.SIGKILL)
+                            except ProcessLookupError: pass
+                        child.wait(timeout=5)
+                    finally:
+                        child.stdout.close()
+                        fixture.forget_owned_session(child)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+                if saved_profile is None: os.environ.pop('HERDR_DIAG_PROFILE_FILE', None)
+                else: os.environ['HERDR_DIAG_PROFILE_FILE'] = saved_profile
+        self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), prior)
+        self.assertEqual(fixture._OWNED_GROUPS, owned_before)
 
     def test_profile_aggregation_is_finite_and_redacted(self):
         # Import the guarded fixture only after hosted admission. No fixture is

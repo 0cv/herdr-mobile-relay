@@ -345,9 +345,18 @@ def install_profile_termination():
 def spawn_owned_session(argv, **kwargs):
     if not os.environ.get('HERDR_DIAG_PROFILE_FILE'):
         return subprocess.Popen(argv, start_new_session=True, **kwargs)
+    # Popen.restore_signals resets ignored dispositions, NOT the inherited mask.
+    # Hosted POSIX callers (main/Fixture.run and the full fixture) are single-
+    # threaded and pass argv lists for /bin/bash or sys.executable.
+    # Exec a fresh interpreter (not preexec_fn in a forked child) to unblock TERM
+    # before the requested program starts; exec keeps the owned session/PGID/PID.
+    unmask_and_exec = ('import os, signal, sys; '
+                       'signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM}); '
+                       'os.execvpe(sys.argv[1], sys.argv[1:], os.environ)')
     old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
-        child = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        child = subprocess.Popen([sys.executable, '-c', unmask_and_exec, *argv],
+                                 start_new_session=True, **kwargs)
         _OWNED_GROUPS[child.pid] = child
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, old)
