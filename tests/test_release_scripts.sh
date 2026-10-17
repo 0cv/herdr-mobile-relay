@@ -162,6 +162,58 @@ else
 fi
 printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
 
+# Rebind a synthetic archive to a delegating relay: real serve/verify-release
+# still run, while selected scalar or support acquisitions are corrupted.
+# Exercise the installed checker's decisions, not a copied comparison.
+cp "$ARCHIVE" "$WORK_DIR/positive.tar.gz"
+FAULT_CHECKSUMS="$WORK_DIR/fault-checksums"
+cp "$RELEASE_DIR/herdr-mobile-relay" "$RELEASE_DIR/native-relay"
+cat > "$RELEASE_DIR/herdr-mobile-relay" <<'EOF'
+#!/bin/sh
+if [ "$1" = json-field ]; then
+    case "$HERDR_RELEASE_FAULT:$2:$3" in
+        protocol:number:protocol) printf '2\n'; exit 0 ;;
+        identity:string:release_directory) printf '%s\n' '/fixture-private-canary'; exit 0 ;;
+    esac
+fi
+if [ "$1" = support ]; then
+    case "$HERDR_RELEASE_FAULT" in
+        empty) exit 97 ;;
+        payload) printf '%s\n' 'fixture-private-canary'; exit 97 ;;
+        signal) kill -TERM "$$" ;;
+    esac
+fi
+exec "$(dirname "$0")/native-relay" "$@"
+EOF
+chmod 755 "$RELEASE_DIR/herdr-mobile-relay"
+"$RELEASE_DIR/herdr-mobile-relay" release-manifest \
+    "$RELEASE_DIR" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" >/dev/null
+tar -C "$RELEASE_DIR" -czf "$ARCHIVE" .
+if command -v sha256sum >/dev/null 2>&1; then
+    HASH=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+else
+    HASH=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+fi
+printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$FAULT_CHECKSUMS"
+for FAULT in identity protocol empty payload signal; do
+    if OUTPUT=$(HERDR_RELEASE_FAULT="$FAULT" check_release \
+        "$ARCHIVE" "$FAULT_CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" 2>&1); then
+        echo "installed checker accepted $FAULT support fault" >&2; exit 1
+    fi
+    case "$FAULT" in
+        identity|protocol) EXPECTED='installed support fixture protocol or canonical release identity mismatch' ;;
+        *) EXPECTED='installed support acquisition failed or disclosed private state' ;;
+    esac
+    printf '%s\n' "$OUTPUT" | grep -Fq "$EXPECTED" || {
+        echo "installed checker did not reach $FAULT rejection" >&2; exit 1;
+    }
+    if printf '%s\n' "$OUTPUT" | grep -Fq 'fixture-private-canary'; then
+        echo 'installed checker disclosed private fixture data' >&2; exit 1
+    fi
+done
+cp "$RELEASE_DIR/native-relay" "$RELEASE_DIR/herdr-mobile-relay"
+rm "$RELEASE_DIR/native-relay"
+cp "$WORK_DIR/positive.tar.gz" "$ARCHIVE"
 mkdir "$WORK_DIR/physical-tmp"
 ln -s "$WORK_DIR/physical-tmp" "$WORK_DIR/logical-tmp"
 TMPDIR="$WORK_DIR/logical-tmp" \

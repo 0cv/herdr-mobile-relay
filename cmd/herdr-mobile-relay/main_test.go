@@ -67,10 +67,10 @@ func installedCommandEnv(t *testing.T, mode string) string {
 
 func TestSupportCommandProjectsLoadedPrivateState(t *testing.T) {
 	root := installedCommandEnv(t, config.TransportCloudflare)
-	if err := os.MkdirAll(filepath.Join(root, "config", "herdr-mobile-relay"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	dir, err := filepath.EvalSymlinks(filepath.Join(root, "config", "herdr-mobile-relay"))
+	dir, err := filepath.EvalSymlinks(filepath.Join(root, "runtime"))
 	if err != nil || os.Chmod(filepath.Dir(dir), 0o700) != nil || os.Chmod(dir, 0o700) != nil {
 		t.Fatal("private fixture path unavailable")
 	}

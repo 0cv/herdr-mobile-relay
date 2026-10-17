@@ -220,7 +220,7 @@ FIXTURE_RELEASE=$("$RELAY" json-field string release_directory < "$SUPPORT_STATE
 }
 if XDG_CONFIG_HOME="$CONFIG_HOME" XDG_CACHE_HOME="$CACHE_HOME" XDG_DATA_HOME="$DATA_HOME" \
     "$RELAY" support >"$WORK_DIR/support.json" 2>/dev/null; then
-    [ "$HOST_OS" = linux ] && grep -q '"protocol": 3' "$WORK_DIR/support.json" &&
+    grep -q '"protocol": 3' "$WORK_DIR/support.json" &&
         grep -q '"schema": "support-public-v1"' "$WORK_DIR/support.json" &&
         grep -q '"source": "persisted_snapshot"' "$WORK_DIR/support.json" &&
         ! grep -q '"release_directory"' "$WORK_DIR/support.json" &&
@@ -228,9 +228,8 @@ if XDG_CONFIG_HOME="$CONFIG_HOME" XDG_CACHE_HOME="$CACHE_HOME" XDG_DATA_HOME="$D
         echo 'installed public support schema, protocol or privacy mismatch' >&2; exit 1;
     }
 else
-    [ "$HOST_OS" = darwin ] && [ ! -s "$WORK_DIR/support.json" ] || {
-        echo 'installed support acquisition failed or disclosed private state' >&2; exit 1;
-    }
+    echo 'installed support acquisition failed or disclosed private state' >&2
+    exit 1
 fi
 
 kill -INT "$RELAY_PID"
