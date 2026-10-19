@@ -175,6 +175,13 @@ ALLOWED = (
     "tests/test_service_uninstall_cli.py",
     "tests/test_tailscale_cli_setup_failure.py",
     "tests/test_uninstall.sh",
+    # Follow-ups d757d6f5 (installer) and 75cd2e9f (Linux mount guard):
+    # listing these paths is not a review of runtime behavior.
+    "install.sh",
+    "tests/test_install.sh",
+    "internal/uninstallmount/guard_darwin.go",
+    "internal/uninstallmount/guard_linux.go",
+    "internal/uninstallmount/guard_linux_test.go",
     # Consumer of the repaired installed-service CLI contract (exit 69, zero effects); it
     # ran the old contract and failed the check workflow's Shell job at a233ef50 and 655df021.
     "tests/test_dev_tailscale.py",
