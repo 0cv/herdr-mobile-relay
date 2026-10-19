@@ -221,7 +221,8 @@ validate_legacy_root() {
     legacy_root=$1
     root_kind=$2
     [ -d "$legacy_root" ] && [ ! -L "$legacy_root" ] || return 1
-    [ -z "$(find "$legacy_root" -type l -print -quit)" ] || return 1
+    legacy_links=$(find "$legacy_root" -type l -print -quit) || return 1
+    [ -z "$legacy_links" ] || return 1
     found=false
     cache_state=false
     cache_waiter_script=false
@@ -259,6 +260,103 @@ private_owned_file() {
     [ "$file_identity" = "$(id -u):600:1" ]
 }
 
+# Admission runs in subshells: the legacy validator and sentinel helpers use
+# shell globals, which must not overwrite the caller's paths or entry loop.
+physical_install_path() (
+    candidate=$1
+    case "$candidate" in /*) ;; *) return 1 ;; esac
+    case "$candidate/" in //|*//*|*/./*|*/../*) return 1 ;; esac
+    ancestor=$candidate
+    suffix=
+    while [ ! -e "$ancestor" ]; do
+        [ ! -L "$ancestor" ] || return 1
+        suffix="/${ancestor##*/}$suffix"
+        ancestor=${ancestor%/*}
+        [ -n "$ancestor" ] || ancestor=/
+    done
+    [ -d "$ancestor" ] || return 1
+    physical=$(CDPATH='' cd "$ancestor" && pwd -P) || return 1
+    [ "$physical" != / ] || physical=
+    printf '%s%s\n' "$physical" "$suffix"
+)
+
+admit_install_root() (
+    candidate=$1
+    kind=$2
+    [ ! -L "$candidate" ] || return 1
+    [ ! -e "$candidate" ] && return 0
+    [ -d "$candidate" ] || return 1
+    owner=$(stat -c '%u' "$candidate" 2>/dev/null) ||
+        owner=$(stat -f '%u' "$candidate" 2>/dev/null) || return 1
+    [ "$owner" = "$(id -u)" ] || return 1
+    # Even a marked cache must be enumerable before migration starts: the
+    # destination check must not fail after release/config sentinels are written.
+    root_entries=$(find "$candidate" -mindepth 1 -maxdepth 1 -print -quit) || {
+        info "migration root enumeration refused: $kind"
+        return 1
+    }
+    marker="$candidate/.herdr-mobile-relay-installation"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+        private_owned_file "$marker" || return 1
+        canonical=$(CDPATH='' cd "$candidate" && pwd -P) || return 1
+        grep -Fx 'product=herdr-mobile-relay' "$marker" >/dev/null &&
+            grep -Fx "root=$canonical" "$marker" >/dev/null
+        return $?
+    fi
+    [ -z "$root_entries" ] && return 0
+    case "$kind" in
+        config|cache) validate_legacy_root "$candidate" "$kind" ;;
+        *) return 1 ;;
+    esac
+)
+
+paths_overlap() {
+    case "$1/" in "$2/"*) return 0 ;; esac
+    case "$2/" in "$1/"*) return 0 ;; esac
+    return 1
+}
+
+admit_install_roots() (
+    release=$(physical_install_path "$1") || return 1
+    config=$(physical_install_path "$2") || return 1
+    cache=$(physical_install_path "$3") || return 1
+    source=$(physical_install_path "$4") || return 1
+    paths_overlap "$release" "$config" && return 1
+    paths_overlap "$release" "$cache" && return 1
+    paths_overlap "$config" "$cache" && return 1
+    paths_overlap "$release" "$source" && return 1
+    paths_overlap "$config" "$source" && return 1
+    if [ "$3" != "$4" ]; then
+        paths_overlap "$cache" "$source" && return 1
+    fi
+    admit_install_root "$1" new || return 1
+    admit_install_root "$2" config || return 1
+    admit_install_root "$3" cache || return 1
+    [ ! -L "$4" ] || return 1
+    [ -e "$4" ] || return 0
+    [ -d "$4" ] || return 1
+    # A separately owned old cache is not a source for this migration.
+    [ "$3" != "$4" ] || return 0
+    marker="$4/.herdr-mobile-relay-installation"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+        admit_install_root "$4" cache || return 1
+        return 0
+    fi
+    owner=$(stat -c '%u' "$4" 2>/dev/null) ||
+        owner=$(stat -f '%u' "$4" 2>/dev/null) || return 1
+    [ "$owner" = "$(id -u)" ] || return 1
+    validate_legacy_root "$4" cache || return 1
+    # Check every destination before moving even the first source entry.
+    for entry in "$4"/* "$4"/.[!.]* "$4"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        name=${entry##*/}
+        [ ! -e "$3/$name" ] && [ ! -L "$3/$name" ] || {
+            info "migration entry collision: $name"
+            return 1
+        }
+    done
+)
+
 write_install_sentinel() {
     sentinel_root=$1
     root_kind=${2:-new}
@@ -272,10 +370,13 @@ write_install_sentinel() {
             fatal "installation root has a mismatched ownership sentinel: $sentinel_root"
         return
     fi
+    [ ! -e "$sentinel" ] || fatal "installation ownership sentinel is not a regular file"
     if [ -e "$sentinel_root" ]; then
         [ -d "$sentinel_root" ] ||
             fatal "installation root is not a directory: $sentinel_root"
-        if [ -n "$(find "$sentinel_root" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+        root_entries=$(find "$sentinel_root" -mindepth 1 -maxdepth 1 -print -quit) ||
+            fatal "cannot enumerate installation root: $sentinel_root"
+        if [ -n "$root_entries" ]; then
             case "$root_kind" in
                 config|cache)
                     validate_legacy_root "$sentinel_root" "$root_kind" ||
@@ -306,28 +407,29 @@ prepare_install_roots() {
     cache_root=$3
     legacy_cache="$HOME/.cache/herdr-mobile-relay"
 
+    admit_install_roots "$release_root" "$config_root" "$cache_root" "$legacy_cache" ||
+        fatal "migration admission refused: invalid root, source, sentinel, alias or entry collision"
     write_install_sentinel "$release_root" new
     write_install_sentinel "$config_root" config
 
     if [ "$cache_root" != "$legacy_cache" ] &&
        [ -d "$legacy_cache" ] &&
-       [ ! -e "$legacy_cache/.herdr-mobile-relay-installation" ]; then
+       [ ! -e "$legacy_cache/.herdr-mobile-relay-installation" ] &&
+       [ ! -L "$legacy_cache/.herdr-mobile-relay-installation" ]; then
         validate_legacy_root "$legacy_cache" cache ||
             fatal "legacy Python cache has unexpected contents: $legacy_cache"
+        # Admission already enumerated and validated the destination, whether
+        # marked or a legacy layout; do not rediscover a deterministic refusal
+        # after persisting release/config sentinels.
         if [ -e "$cache_root" ]; then
             [ -d "$cache_root" ] || fatal "cache destination is not a directory: $cache_root"
-            if [ -n "$(find "$cache_root" -mindepth 1 -maxdepth 1 -print -quit)" ] &&
-               [ ! -f "$cache_root/.herdr-mobile-relay-installation" ]; then
-                validate_legacy_root "$cache_root" cache ||
-                    fatal "cannot migrate the Python cache into unowned destination: $cache_root"
-            fi
         else
             mkdir -p "$cache_root"
         fi
         for legacy_entry in "$legacy_cache"/* "$legacy_cache"/.[!.]* "$legacy_cache"/..?*; do
-            [ -e "$legacy_entry" ] || continue
+            [ -e "$legacy_entry" ] || [ -L "$legacy_entry" ] || continue
             legacy_name=${legacy_entry##*/}
-            [ ! -e "$cache_root/$legacy_name" ] ||
+            [ ! -e "$cache_root/$legacy_name" ] && [ ! -L "$cache_root/$legacy_name" ] ||
                 fatal "legacy Python cache entry already exists at destination: $legacy_name"
             mv "$legacy_entry" "$cache_root/$legacy_name" ||
                 fatal "could not migrate legacy Python cache entry: $legacy_name"

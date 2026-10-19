@@ -3,7 +3,7 @@ set -eu
 
 REPO_DIR=$(CDPATH='' cd "${0%/*}/.." && pwd)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/herdr-install-test.XXXXXX")
-trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT INT TERM
+trap 'status=$?; trap - EXIT INT TERM; chmod -R u+rwx "$WORK_DIR" && rm -rf "$WORK_DIR" || exit 1; exit "$status"' EXIT INT TERM
 
 # Load the installer functions without executing main.
 sed '$d' "$REPO_DIR/install.sh" > "$WORK_DIR/install-functions.sh"
@@ -273,5 +273,235 @@ run_signal_install wget commits
 run_signal_install wget archive
 run_signal_install curl commits
 run_signal_install curl archive
+
+# Exercise the public main entrypoint with a synthetic, privately staged
+# package. The real checksum, tag/manifest and offline verification call path
+# remains in install.sh; only the fixture's download and package executable are
+# replaced. No ambient HOME, token, installed service or network is used.
+package_fixture="$WORK_DIR/package-fixture"
+mkdir -p "$package_fixture/bin" "$package_fixture/release" "$package_fixture/tmp"
+fixture_revision=0123456789abcdef0123456789abcdef01234567
+fixture_archive="herdr-mobile-relay_1.2.3_$(detect_os)_$(detect_arch).tar.gz"
+printf '{\n  "schema": 1,\n  "version": "1.2.3",\n  "revision": "%s",\n  "target": "%s"\n}\n' \
+    "$fixture_revision" "$(detect_os)/$(detect_arch)" > "$package_fixture/release/release-manifest.json"
+printf 'fixture package\n' > "$package_fixture/release/fixture-marker"
+cat > "$package_fixture/release/herdr-mobile-relay" <<'EOF'
+#!/bin/sh
+set -eu
+case "$1" in
+    verify-release)
+        [ "$2" = --target ] && [ "$3" = "$TEST_TARGET" ] &&
+            [ -f "$4/fixture-marker" ] &&
+            grep -Fx '  "version": "1.2.3",' "$4/release-manifest.json" >/dev/null &&
+            grep -Fx '  "revision": "0123456789abcdef0123456789abcdef01234567",' "$4/release-manifest.json" >/dev/null || exit 1
+        case "$4" in */release) printf 'stage-verified\n' >> "$TEST_GATE_LOG" ;; esac
+        ;;
+    seal-release|prune-releases) printf '%s\n' "$1" >> "$TEST_GATE_LOG" ;;
+    activate-release)
+        printf 'activate-release\n' >> "$TEST_GATE_LOG"
+        ln -s "releases/${3##*/}" "$2/current"
+        ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod 700 "$package_fixture/release/herdr-mobile-relay"
+tar -czf "$package_fixture/$fixture_archive" -C "$package_fixture/release" .
+sha256_file "$package_fixture/$fixture_archive" |
+    awk -v name="$fixture_archive" '{print $1 "  " name}' > "$package_fixture/checksums.txt"
+cat > "$package_fixture/bin/curl" <<'EOF'
+#!/bin/sh
+set -eu
+output=-
+url=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output) output=$2; shift 2; continue ;;
+        *) url=$1 ;;
+    esac
+    shift
+done
+case "$url" in
+    */commits/v1.2.3)
+        [ "$output" = - ] || exit 1
+        printf '{"sha":"0123456789abcdef0123456789abcdef01234567"}\n'
+        ;;
+    */checksums.txt) cp "$TEST_PACKAGE/checksums.txt" "$output" ;;
+    */*.tar.gz) cp "$TEST_PACKAGE/${url##*/}" "$output" ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod 700 "$package_fixture/bin/curl"
+# Only the unreadable-cache case denies enumeration, including when run with
+# elevated test privileges that would otherwise bypass mode 0300. All other
+# fixture find calls delegate to the host binary; production PATH is untouched.
+cat > "$package_fixture/bin/find" <<'EOF'
+#!/bin/sh
+if [ -n "${TEST_REFUSE_FIND_ROOT:-}" ] && [ "$1" = "$TEST_REFUSE_FIND_ROOT" ]; then
+    printf 'fixture: cache enumeration unavailable\n' >&2
+    exit 1
+fi
+exec /usr/bin/find "$@"
+EOF
+chmod 700 "$package_fixture/bin/find"
+
+# Capture complete fixture trees, including links (even dangling ones), file
+# hashes and all modes. The package, downloader output and gate log live outside
+# each case tree so a before/after mismatch identifies a persistent mutation.
+fixture_snapshot() (
+    locked_root=${2:-}
+    if [ -n "$locked_root" ]; then
+        # Record the actual mode before temporary read access. Restore that
+        # same observed mode even if enumeration/hashing fails; an installer
+        # chmod between snapshots remains visible rather than being reset.
+        locked_identity=$(stat -c '%a:%u' "$locked_root" 2>/dev/null) ||
+            locked_identity=$(stat -f '%Lp:%u' "$locked_root") || return 1
+        trap 'snapshot_status=$?; chmod "${locked_identity%%:*}" "$locked_root" || exit 1; exit "$snapshot_status"' EXIT
+        chmod u+rx "$locked_root" || return 1
+    fi
+    snapshot_paths=$(find "$1" -print) || return 1
+    printf '%s\n' "$snapshot_paths" | LC_ALL=C sort | while IFS= read -r path; do
+        if [ -L "$path" ]; then
+            kind="link:$(readlink "$path")"
+        elif [ -f "$path" ]; then
+            kind="file:$(sha256_file "$path")"
+        elif [ -d "$path" ]; then
+            kind=directory
+        else
+            kind=other
+        fi
+        if [ "$path" = "$locked_root" ]; then
+            mode=$locked_identity
+        else
+            mode=$(stat -c '%a:%u' "$path" 2>/dev/null) ||
+                mode=$(stat -f '%Lp:%u' "$path")
+        fi
+        printf '%s %s %s\n' "$path" "$mode" "$kind"
+    done
+)
+
+run_fixture_install() {
+    case_root=$1
+    gate_log=$2
+    output_log=$3
+    : > "$gate_log"
+    /usr/bin/env -i PATH="$package_fixture/bin:/usr/bin:/bin" \
+        HOME="$case_root/home" TMPDIR="$package_fixture/tmp" VERSION=1.2.3 \
+        XDG_CACHE_HOME="$case_root/xdg-cache" \
+        INSTALL_ROOT="$case_root/release-root" \
+        HERDR_PLUGIN_CONFIG_DIR="$case_root/config-root" \
+        BIN_DIR="$case_root/shim" \
+        TEST_PACKAGE="$package_fixture" TEST_GATE_LOG="$gate_log" \
+        TEST_REFUSE_FIND_ROOT=${4:-} \
+        TEST_TARGET="$(detect_os)/$(detect_arch)" \
+        /bin/sh "$REPO_DIR/install.sh" > "$output_log" 2>&1
+}
+
+# A source with a forbidden top-level entry, an unowned destination layout,
+# and a late collision (after the earlier migratable claude-history entry).
+# All three must reach package verification before migration admission refuses.
+for scenario in invalid-source invalid-source-absent foreign-target late-collision unreadable-marked-cache; do
+    case_root="$WORK_DIR/main-$scenario"
+    source_cache="$case_root/home/.cache/herdr-mobile-relay"
+    target_cache="$case_root/xdg-cache/herdr-mobile-relay"
+    mkdir -p "$source_cache/claude-history" "$case_root/config-root/push"
+    printf 'source history\n' > "$source_cache/claude-history/pane.json"
+    printf 'HERDR_RELAY_TOKEN=fixture\n' > "$case_root/config-root/relay.env"
+    printf 'push state\n' > "$case_root/config-root/push/subscriptions.json"
+    printf 'app setting\n' > "$case_root/config-root/phone-app-origin"
+    case "$scenario" in
+        invalid-source|invalid-source-absent)
+            printf 'unrelated source\n' > "$source_cache/not-a-cache-entry"
+            ;;
+        foreign-target)
+            mkdir -p "$target_cache"
+            printf 'foreign data\n' > "$target_cache/unrelated"
+            chmod 751 "$target_cache"
+            ;;
+        late-collision)
+            mkdir -p "$source_cache/uploads" "$target_cache"
+            printf 'later source\n' > "$source_cache/uploads/photo"
+            # Mark the otherwise admissible target BEFORE adding the link;
+            # an unmarked linked target would fail layout validation earlier.
+            write_install_sentinel "$target_cache" cache
+            # A dangling link is occupied, even though -e reports it absent.
+            ln -s missing-upload "$target_cache/uploads"
+            chmod 710 "$target_cache"
+            ;;
+        unreadable-marked-cache)
+            mkdir -p "$target_cache"
+            write_install_sentinel "$target_cache" cache
+            printf 'cache bytes\n' > "$target_cache/keep"
+            chmod 300 "$target_cache"
+            ;;
+    esac
+    # Preserve an existing owned release sentinel/current/shim, or prove an
+    # absent release and shim stay absent on the second invalid-source case.
+    if [ "$scenario" != invalid-source-absent ] && [ "$scenario" != unreadable-marked-cache ]; then
+        mkdir -p "$case_root/release-root" "$case_root/shim"
+        write_install_sentinel "$case_root/release-root"
+        ln -s absent-release "$case_root/release-root/current"
+        ln -s "$case_root/release-root/current/herdr-mobile-relay" "$case_root/shim/herdr-mobile-relay"
+    elif [ "$scenario" = unreadable-marked-cache ]; then
+        mkdir -p "$case_root/shim"
+        ln -s missing-binary "$case_root/shim/herdr-mobile-relay"
+    fi
+    refuse_find=
+    [ "$scenario" != unreadable-marked-cache ] || refuse_find=$target_cache
+    before=$(fixture_snapshot "$case_root" "$refuse_find")
+    gate_log="$WORK_DIR/gate-$scenario.log"
+    output_log="$WORK_DIR/output-$scenario.log"
+    if run_fixture_install "$case_root" "$gate_log" "$output_log" "$refuse_find"; then
+        echo "main accepted $scenario" >&2
+        exit 1
+    fi
+    grep -F 'stage-verified' "$gate_log" >/dev/null || {
+        echo "main did not reach offline package verification for $scenario" >&2
+        exit 1
+    }
+    grep -F 'migration admission refused' "$output_log" >/dev/null || {
+        echo "main failed before migration admission for $scenario" >&2
+        exit 1
+    }
+    test "$(cat "$gate_log")" = stage-verified
+    if [ "$scenario" = late-collision ]; then
+        grep -F 'migration entry collision: uploads' "$output_log" >/dev/null || {
+            echo 'late collision did not reach the source-entry collision check' >&2
+            exit 1
+        }
+    fi
+    if [ "$scenario" = unreadable-marked-cache ]; then
+        grep -F 'migration root enumeration refused: cache' "$output_log" >/dev/null || {
+            echo 'marked unreadable cache did not fail during admission' >&2
+            exit 1
+        }
+    fi
+    after=$(fixture_snapshot "$case_root" "$refuse_find")
+    test "$before" = "$after" || {
+        echo "main changed persistent fixture state on $scenario refusal" >&2
+        exit 1
+    }
+done
+
+# Preserve the existing valid merge: an already admissible legacy destination
+# retains its own entries while the source migrates and receives its sentinel.
+positive_root="$WORK_DIR/main-valid"
+positive_source="$positive_root/home/.cache/herdr-mobile-relay"
+positive_target="$positive_root/xdg-cache/herdr-mobile-relay"
+mkdir -p "$positive_source/claude-history" "$positive_target" "$positive_root/config-root/push"
+printf 'history\n' > "$positive_source/claude-history/pane.json"
+printf 'waiter\n' > "$positive_target/post-install.log"
+printf '#!/bin/sh\n' > "$positive_target/post-install.sh"
+printf 'HERDR_RELAY_TOKEN=fixture\n' > "$positive_root/config-root/relay.env"
+printf 'push\n' > "$positive_root/config-root/push/subscriptions.json"
+run_fixture_install "$positive_root" "$WORK_DIR/gate-valid.log" "$WORK_DIR/output-valid.log" || {
+    echo 'valid main-entrypoint migration failed' >&2
+    exit 1
+}
+test ! -e "$positive_source"
+test "$(cat "$positive_target/claude-history/pane.json")" = history
+test "$(cat "$positive_target/post-install.log")" = waiter
+test -f "$positive_target/.herdr-mobile-relay-installation"
+test -L "$positive_root/release-root/current"
+test -L "$positive_root/shim/herdr-mobile-relay"
 
 echo "install shell tests passed"
