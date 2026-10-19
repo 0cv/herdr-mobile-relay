@@ -41,6 +41,25 @@ repo, parent = map(pathlib.Path, sys.argv[1:])
 spec = importlib.util.spec_from_file_location("dispatch_fixture", repo / "tests/test_service_transport_dispatch.py")
 d = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(d)
+# These finite adapters use only the standard library. Avoid site initialization
+# on EVERY tool invocation, and import signal only for the long-lived worker.
+# subprocess is unused in FAKE. All controller/filesystem/fault logic stays exact;
+# standalone dispatch fixtures keep their original adapter and interpreter.
+imports = "import json, os, pathlib, signal, subprocess, sys, time"
+assert d.FAKE.count(imports) == 1 and d.FAKE.count("def worker(kind):") == 1
+assert "subprocess." not in d.FAKE
+d.FAKE = d.FAKE.replace(imports, "import json, os, pathlib, sys, time", 1).replace(
+    "def worker(kind):", "def worker(kind):\n    import signal", 1)
+dispatch_write = d.write
+
+
+def native_fixture_write(path, text, executable=False):
+    if executable and text == "#!" + sys.executable + "\n" + d.FAKE:
+        text = text.replace("\n", " -S\n", 1)
+    dispatch_write(path, text, executable)
+
+
+d.write = native_fixture_write
 canary = "fixture-native-selected-secret"
 
 

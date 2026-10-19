@@ -75,11 +75,21 @@ FULL_ADAPTER = PREFIX + ADAPTER.replace("if op == 'disable': s['enabled'] = Fals
 # model['states'] unconditionally (the gate's `label in model['states']`), and model['files'].values() and each
 # state's s['queries'] >= 4 in the native_done arming block until native_done is set. The fast stat/head/wc
 # stubs cache only a model of this shape and delegate for any other, so the adapter fails as before instead of
-# the stub running the real tool. One expression of `model`, baked into the validator by install_stub.
+# the stub running the real tool. The LAST clause is that arming block's own condition, negated: a model the
+# prefix would arm (no model file exists, every state queried 4 times, native_done unset) is never cached, so
+# the stub delegates it and the adapter arms and STORES native_done on this very call, exactly as for every
+# other tool. A cached model cannot become armable behind the stub's back: model files leave existence only
+# through the adapter's rm, which stores native_done itself once the last one is gone, and a state's queries
+# only grow in an adapter's observe(), which rewrites model.json (so the cached copy no longer matches and the
+# model is revalidated). One expression of `model`, baked into the validator by install_stub.
+# The fast_stub_equivalence_control below compares the final model.json of both implementations as well.
+ARMING_DONE = ("(model.get('native_done') or not (all(not pathlib.Path(q).exists() for q in model['files'].values())"
+               " and all(s['queries'] >= 4 for s in model['states'].values())))")
 FULL_MODEL_SHAPE = ("isinstance(model.get('files'), dict) and all(isinstance(path, str) for path in model['files'].values())"
                     " and isinstance(model.get('shared'), dict)"
                     " and isinstance(model.get('states'), dict)"
-                    " and all(isinstance(state, dict) and isinstance(state.get('queries'), (int, float)) for state in model['states'].values())")
+                    " and all(isinstance(state, dict) and isinstance(state.get('queries'), (int, float)) for state in model['states'].values())"
+                    " and " + ARMING_DONE)
 
 class FullFixture(Fixture):
     def __init__(self, parent, platform, present=(0, 1), mode='cloudflare', fault='', fault_index=0):

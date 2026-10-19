@@ -26,7 +26,7 @@ ESCAPED_ENV_NAME = "relay\\x%%.env"
 DOUBLE_DECODED_ENV_NAME = "relayx%.env"
 
 # Strict finite synthetic controller/tool. No host service/network access.
-ADAPTER = r'''import json, os, pathlib, plistlib, sys, time
+ADAPTER = r'''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
 model_path = control / 'model.json'; model = json.loads(model_path.read_text())
 name = pathlib.Path(sys.argv[0]).name; args = sys.argv[1:]
@@ -109,6 +109,7 @@ if name == 'sleep':
     if args != ['0.1']: refuse()
     event('poll-delay'); raise SystemExit(0)
 if name == 'plutil':
+    import plistlib  # imported here only: every other stub spawn skips its start-up cost
     if len(args) != 6 or args[0] != '-extract' or args[1] not in ('Label', 'EnvironmentVariables.HERDR_RELAY_ENV') or args[2:5] != ['raw', '-o', '-']: refuse()
     if model['fault'] == 'decode-fail' and args[1] != 'Label': raise SystemExit(1)
     if model['fault'] == 'label-decode-fail' and args[1] == 'Label': raise SystemExit(1)
@@ -122,7 +123,9 @@ if name == 'plutil':
 if name in ('head', 'wc', 'stat'):
     if name == 'stat':
         formats = {('-c', '%u:%a:%h'), ('-f', '%u:%Lp:%l'), ('-c', '%d:%i:%s:%Y'), ('-f', '%d:%i:%z:%m'), ('-c', '%d:%i'), ('-f', '%d:%i')}
-        if len(args) != 3 or tuple(args[:2]) not in formats: refuse()
+        # Only this combined form may name several paths (one spawn for an ancestor walk); every other form takes exactly one.
+        batch = {('-c', '%d:%i:%s:%Y:%u:%a:%h'), ('-f', '%d:%i:%z:%m:%u:%Lp:%l')}
+        if len(args) < 3 or tuple(args[:2]) not in formats | batch or (len(args) > 3 and tuple(args[:2]) not in batch): refuse()
         if model['fault'] == 'stat-fail': raise SystemExit(1)
         if model['fault'] == 'stat-malformed': print('invalid identity'); raise SystemExit(0)
         if args[1] == '%d:%i':
@@ -203,7 +206,10 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 # 880 of the 903 spawns of one macOS removal invocation were stat). Each Python adapter pays an
 # interpreter start plus the json, pathlib and plistlib imports (about 30-43 ms hosted) only to exec
 # the real tool. On the steady path this POSIX sh stub forks only one small /usr/bin/cmp before its
-# exec (not a Python interpreter), and ANY doubt delegates to the unchanged Python adapter installed
+# exec (not a Python interpreter; install_stub runs it with /bin/dash when present, since macOS's /bin/sh is
+# bash 3.2 at twice the start-up cost), and a stat call may name SEVERAL paths in the combined
+# '%d:%i:%s:%Y:%u:%a:%h' ('%d:%i:%z:%m:%u:%Lp:%l' on BSD) form only, so one ancestor walk is one spawn
+# (every other form takes exactly one path, or it is delegated and refused). ANY doubt delegates to the unchanged Python adapter installed
 # beside it in bin/.python (the same file name, so the adapter sees the same tool name): a model fault
 # or alias that could change the adapter's answer, an argument form outside the adapter's stat
 # allowlist (the adapter then refuses and records its 'forbidden' event), head and wc under a
@@ -264,10 +270,10 @@ case "$name" in
         case "$model" in
             *stat-fail*|*stat-malformed*|*role-identity*|*identity_aliases*|*role_identity_fault_path*) delegate "$@" ;;
         esac
-        [ "$#" -eq 3 ] || delegate "$@"
+        [ "$#" -ge 3 ] || delegate "$@"
         case "$1" in
-            -c) case "$2" in '%u:%a:%h'|'%d:%i:%s:%Y'|'%d:%i') ;; *) delegate "$@" ;; esac ;;
-            -f) case "$2" in '%u:%Lp:%l'|'%d:%i:%z:%m'|'%d:%i') ;; *) delegate "$@" ;; esac ;;
+            -c) case "$2" in '%u:%a:%h'|'%d:%i:%s:%Y'|'%d:%i') [ "$#" -eq 3 ] || delegate "$@" ;; '%d:%i:%s:%Y:%u:%a:%h') ;; *) delegate "$@" ;; esac ;;
+            -f) case "$2" in '%u:%Lp:%l'|'%d:%i:%z:%m'|'%d:%i') [ "$#" -eq 3 ] || delegate "$@" ;; '%d:%i:%z:%m:%u:%Lp:%l') ;; *) delegate "$@" ;; esac ;;
             *) delegate "$@" ;;
         esac ;;
     *)
@@ -296,7 +302,7 @@ def install_stub(bin_dir, name, adapter, fast=None, model_shape='True'):
         check = MODEL_CHECK.replace('def shape(model): return True', 'def shape(model): return ' + model_shape, 1)
         (hidden / '.model-ok').write_text('#!' + sys.executable + '\n' + check); (hidden / '.model-ok').chmod(0o700)
         (bin_dir.parent / 'control' / 'model.valid').unlink(missing_ok=True)
-        (bin_dir / name).write_text(FAST_STUB); (bin_dir / name).chmod(0o700)
+        (bin_dir / name).write_text(FAST_STUB.replace('#!/bin/sh', '#!/bin/dash', 1) if os.access('/bin/dash', os.X_OK) else FAST_STUB); (bin_dir / name).chmod(0o700)
     else:
         (bin_dir / name).write_text(python_stub); (bin_dir / name).chmod(0o700)
 
@@ -324,9 +330,9 @@ INVOCATIONS = [0]
 
 
 def spawn_tally(control):
-    # Diagnostic only, never an assertion. Every systemctl, launchctl, uname, plutil, rm, sleep,
-    # wc, head and stat the product runs is a separate Python interpreter here, so the count
-    # times the hosted per-process cost explains a slow invocation.
+    # Diagnostic only, never an assertion. One record per requested tool process,
+    # whether FAST_STUB execs it or the Python adapter handles it. Validator/cmp
+    # overhead is additional; this is not a count of all underlying OS processes.
     counts = {}
     try: entries = (Path(control) / 'spawns.log').read_text().splitlines()
     except OSError: return counts
@@ -410,18 +416,29 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
         alias = base / 'alias.txt'; alias.write_text('fast stub alias\n'); alias.chmod(0o600)
         darwin = sys.platform == 'darwin'
         flag = '-f' if darwin else '-c'
-        formats = ('%u:%Lp:%l', '%d:%i:%z:%m', '%d:%i') if darwin else ('%u:%a:%h', '%d:%i:%s:%Y', '%d:%i')
+        formats = ('%u:%Lp:%l', '%d:%i:%z:%m', '%d:%i', '%d:%i:%z:%m:%u:%Lp:%l') if darwin else ('%u:%a:%h', '%d:%i:%s:%Y', '%d:%i', '%d:%i:%s:%Y:%u:%a:%h')
         plain = {'platform': 'Linux', 'fault': '', 'files': {}, 'states': {}, 'fault_label': '', 'shared': {}}
+        # FULL_ADAPTER's prefix arms and STORES native_done on every call, stat, head and wc included, once all model
+        # files are absent and every state was queried 4 times (this empty model is that case). The shape check bakes
+        # the same condition in, so the stub delegates such a model and the adapter arms it. `settled` is the model
+        # already armed: it stays fast-path eligible. The final model.json is compared too, not only the output.
+        settled = dict(plain, native_done=True) if model_shape != 'True' else plain
         identity = [flag, '%d:%i', str(subject)]
         cases = [('stat', [flag, fmt, str(subject)], plain) for fmt in formats]
         cases += [('stat', [flag, '%U', str(subject)], plain), ('stat', [flag, formats[0]], plain),
                   ('stat', [flag, formats[2], str(subject), 'extra'], plain)]
         cases += [('stat', [flag, formats[0], str(subject)], dict(plain, fault=fault)) for fault in ('stat-fail', 'stat-malformed')]
+        # The combined form may name several paths (an ancestor walk); with a fault it must still fail like the adapter.
+        fixed = base / 'fixed'; fixed.mkdir()  # a directory nothing else touches, so both runs see the same size and mtime
+        walk = [flag, formats[3], str(subject), str(alias), str(fixed)]
+        cases += [('stat', walk, plain), ('stat', walk + [str(base / 'missing')], plain)]
+        cases += [('stat', walk, dict(plain, fault=fault)) for fault in ('stat-fail', 'stat-malformed')]
         cases += [('stat', identity, dict(plain, fault=fault, role_identity_fault_path=str(subject)))
                   for fault in ('role-identity-fail', 'role-identity-malformed')]
         cases += [('stat', identity, dict(plain, identity_aliases={str(subject): str(alias)}))]
         for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)])):
             cases += [(tool, args, plain), (tool, args, dict(plain, fault='read-fail'))]
+        if settled is not plain: cases += [(tool, args, settled) for tool, args, model in cases if model is plain]
         broken_models = (None, '', 'not json', '{broken}', '{not json}', '{"fault": "",}',
                          '{"fault": ""}{"fault": ""}', '{"fault": ""}\ntrailing', json.dumps(plain) + '\0')
         for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)]), ('stat', [flag, formats[0], str(subject)])):
@@ -439,9 +456,9 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
                 def read(name):
                     try: return (root / 'control' / name).read_text()
                     except OSError: return ''
-                results.append((done.returncode, done.stdout, done.stderr.replace(b'/usr/bin/', b''), read('events.jsonl'), read('spawns.log')))
+                results.append((done.returncode, done.stdout, done.stderr.replace(b'/usr/bin/', b''), read('events.jsonl'), read('spawns.log'), read('model.json')))
             if broken:
-                for status, output, _, events, spawns in results:
+                for status, output, _, events, spawns, _ in results:
                     assert status != 0 and output == b'' and events == '' and spawns == '', 'broken control model did not fail closed for %s: %r' % (tool, results)
                 continue
             assert results[0] == results[1], 'fast stub differs from the Python adapter for %s %r: %r != %r' % (tool, args, results[0], results[1])
@@ -451,13 +468,13 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
                 # 'fault' is a different VALID model: the stub must re-validate it and delegate, so the adapter
                 # records its own spawn before it fails. The other two abort before any spawn record.
                 if kind == 'broken': rewritten, spawned = b'{broken}', 1
-                elif kind == 'nul': rewritten, spawned = json.dumps(plain).encode() + b'\x00', 1
-                else: rewritten, spawned = json.dumps(dict(plain, fault='stat-fail' if tool == 'stat' else 'read-fail')).encode(), 2
+                elif kind == 'nul': rewritten, spawned = json.dumps(settled).encode() + b'\x00', 1
+                else: rewritten, spawned = json.dumps(dict(settled, fault='stat-fail' if tool == 'stat' else 'read-fail')).encode(), 2
                 results = []
                 for fast in (True, False):
                     root = base / ('stale-%s-%s-%s' % (tool, kind, 'fast' if fast else 'python'))
                     (root / 'control').mkdir(parents=True); (root / 'bin').mkdir()
-                    model_path = root / 'control' / 'model.json'; model_path.write_text(json.dumps(plain))
+                    model_path = root / 'control' / 'model.json'; model_path.write_text(json.dumps(settled))
                     install_stub(root / 'bin', tool, adapter, fast=fast, model_shape=model_shape)
                     calls = []
                     for data in (None, rewritten):
@@ -472,7 +489,7 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
                     assert first[0] == 0, 'valid model did not run the real %s: %r' % (tool, calls)
                     assert second[0] != 0 and second[1] == b'', 'a model rewritten as %s after a valid call did not fail closed for %s: %r' % (kind, tool, calls)
                     assert control_text('events.jsonl') == '' and control_text('spawns.log') == (tool + '\n') * spawned, 'second call left an event or an unexpected spawn record for %s (%s)' % (tool, kind)
-                    results.append((first, second[:2], control_text('events.jsonl'), control_text('spawns.log')))
+                    results.append((first, second[:2], control_text('events.jsonl'), control_text('spawns.log'), control_text('model.json')))
                 assert results[0] == results[1], 'fast stub differs from the Python adapter after a model was rewritten as %s for %s: %r != %r' % (kind, tool, results[0], results[1])
         # Spellings that are valid JSON but not canonical json.dumps text, built from the same plain model.
         # The adapter decides faults from the DECODED model; the stub's raw-text globs see ASCII tokens only,
@@ -485,26 +502,26 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
             text = json.dumps(model, separators=separators)
             for token in tokens: text = text.replace(token, ''.join('\\u%04x' % ord(c) if c in '-_' else c for c in token))
             return text
-        canonical = json.dumps(plain)
+        canonical = json.dumps(settled)
         stat_args = [flag, formats[0], str(subject)]
         tools = (('stat', stat_args), ('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)]))
         fault_of = {'stat': 'stat-fail', 'head': 'read-fail', 'wc': 'read-fail'}
         strict = model_shape != 'True'  # a FULL_ADAPTER-style shape check is in force
-        spelled = [('stat', stat_args, escaped(dict(plain, fault='stat-malformed'), 'stat-malformed'), 'differs')]
-        spelled += [('stat', identity, escaped(dict(plain, fault=fault, role_identity_fault_path=str(subject)), *tokens), expect)
+        spelled = [('stat', stat_args, escaped(dict(settled, fault='stat-malformed'), 'stat-malformed'), 'differs')]
+        spelled += [('stat', identity, escaped(dict(settled, fault=fault, role_identity_fault_path=str(subject)), *tokens), expect)
                     for fault, expect in (('role-identity-fail', 'fail'), ('role-identity-malformed', 'differs'))
                     for tokens in ((fault,), (fault, 'role_identity_fault_path'))]
-        spelled += [('stat', identity, escaped(dict(plain, identity_aliases={str(subject): str(alias)}), 'identity_aliases'), 'differs')]
+        spelled += [('stat', identity, escaped(dict(settled, identity_aliases={str(subject): str(alias)}), 'identity_aliases'), 'differs')]
         for tool, args in tools:
             fault = fault_of[tool]
-            spelled += [(tool, args, escaped(dict(plain, fault=fault), fault), 'fail'),
-                        (tool, args, escaped(dict(plain, fault=fault), fault, separators=(',', ':')), 'fail'),
+            spelled += [(tool, args, escaped(dict(settled, fault=fault), fault), 'fail'),
+                        (tool, args, escaped(dict(settled, fault=fault), fault, separators=(',', ':')), 'fail'),
                         (tool, args, canonical[:-1] + ', "fault": "%s"}' % fault, 'fail'),
                         (tool, args, '{"fault": "%s", ' % fault + canonical[1:], 'same'),
-                        (tool, args, json.dumps(plain, separators=(',', ':')), 'same'),
+                        (tool, args, json.dumps(settled, separators=(',', ':')), 'same'),
                         (tool, args, ' ' + canonical, 'same'),
-                        (tool, args, json.dumps(dict(reversed(list(plain.items())))), 'same'),
-                        (tool, args, json.dumps(dict(reversed(list(dict(plain, fault=fault).items())))), 'fail'),
+                        (tool, args, json.dumps(dict(reversed(list(settled.items())))), 'same'),
+                        (tool, args, json.dumps(dict(reversed(list(dict(settled, fault=fault).items())))), 'fail'),
                         (tool, args, '{"fault": ""}', 'crash' if strict else 'same')]
         # Structures the FULL_ADAPTER prefix dereferences on every call. With the shape check in force the
         # prefix raises before its own spawn record ('crash') and the stub must delegate, not run the tool;
@@ -518,6 +535,17 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
             spelled += [(tool, args, json.dumps(dict(plain, shared=[])), 'same'),
                         (tool, args, json.dumps(dict(plain, files={'fixture.service': str(subject)},
                                                      states={'fixture.service': {'state': 'active', 'enabled': True, 'queries': 0}})), 'same')]
+        if strict:
+            # The prefix's one mutation on a stat, head or wc call. Armed when no model file exists and every state was
+            # queried 4 times and native_done is unset: the stub must delegate so the adapter arms and stores it.
+            # Any other model leaves model.json byte for byte as written, on the fast path as well.
+            def arming(queries=4, present=False, **extra):
+                path = str(subject) if present else str(base / 'absent.service')
+                return json.dumps(dict(plain, files={'fixture.service': path}, **extra,
+                                       states={'fixture.service': {'state': 'absent', 'enabled': False, 'queries': queries}}))
+            for tool, args in tools:
+                spelled += [(tool, args, arming(), 'armed')]
+            spelled += [('stat', stat_args, text, 'untouched') for text in (arming(3), arming(present=True), arming(native_done=True))]
         def scrub(data, root):
             # A traceback names its script: the delegated copy sits in bin/.python, the other in bin, each
             # under its own root. Scrubbed, the two tracebacks are the same text.
@@ -539,7 +567,7 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
                 def read(name):
                     try: return (root / 'control' / name).read_text()
                     except OSError: return ''
-                results.append((done.returncode, done.stdout, scrub(done.stderr, root), read('events.jsonl'), read('spawns.log')))
+                results.append((done.returncode, done.stdout, scrub(done.stderr, root), read('events.jsonl'), read('spawns.log'), read('model.json')))
             # The adapter on the same model is the oracle: the COMPLETE result tuples, stderr included, must agree.
             assert results[0] == results[1], 'fast stub differs from the Python adapter for %s on %s: %r != %r' % (tool, text, results[0], results[1])
             # Whichever path is taken, fast or delegated, exactly one spawn is recorded, unless the adapter's
@@ -551,6 +579,8 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
             else:
                 assert results[0][0] == 0, 'the real %s did not run for %s: %r' % (tool, text, results)
             if expect == 'differs': assert results[0][1] != real_output(tool, args), 'the real %s answered where the adapter answers differently, for %s' % (tool, text)
+            if expect == 'armed': assert all(json.loads(r[5]).get('native_done') is True for r in results), 'native_done was not armed and stored for %s on %s: %r' % (tool, text, results)
+            if expect == 'untouched': assert all(r[5] == text for r in results), 'model.json changed for %s on %s: %r' % (tool, text, results)
     print('fast stat/head/wc stubs match the Python adapter on %d cases' % (len(cases) + 3 * len(stale) + len(spelled)), file=sys.stderr, flush=True)
 
 
@@ -706,10 +736,40 @@ def configuration_refusal(f, seams):
         assert tuple(snapshot(q) for q in f.definitions) == before; f.unchanged()
 
 
+def metadata_batch_control():
+    # Read-only product helpers, through the same counted/strict stat adapter.
+    # Two acquisitions must both stat afresh, even without a destructive seam.
+    with tempfile.TemporaryDirectory(prefix='herdr-metadata-batch-') as temporary:
+        f = Fixture(Path(temporary).resolve(), 'Linux')
+        subject = f.root / 'subject'; subject.write_text('metadata control\n'); subject.chmod(0o600)
+        link = f.root / 'link'; link.symlink_to(subject)
+        hard = f.root / 'hard'; hard.write_text('multiply linked\n'); hard.chmod(0o600)
+        os.link(hard, f.root / 'hard-other')
+        unsafe = f.root / 'unsafe'; unsafe.write_text('unsafe mode\n'); unsafe.chmod(0o622)
+        closed = f.root / 'closed'; closed.mkdir(); (closed / 'file').write_text('unsearchable\n'); closed.chmod(0o600)
+        command = '. "$1"; service_removal_resource "$2" || exit 1; first=$SERVICE_REMOVAL_RESOURCE_ID; service_removal_resource "$2" || exit 1; [ "$first" = "$SERVICE_REMOVAL_RESOURCE_ID" ] || exit 98; printf "%s" "$first"'
+        try:
+            for path, accepted in ((subject, True), (f.root / 'missing', True), (link, False),
+                                   (hard, False), (unsafe, False), (f.root, False), (closed / 'file', False)):
+                before = spawn_tally(f.control)
+                done = subprocess.run(['/bin/bash', '-eu', '-c', command, '_', str(f.relay / 'common.sh'), str(path)],
+                                      env=f.environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=TIMEOUT)
+                assert (done.returncode == 0) == accepted, (path.name, done.returncode, done.stderr)
+                if not accepted: continue
+                info = subject.stat()
+                expected = '%d:%d:%d:%d' % (info.st_dev, info.st_ino, info.st_size, int(info.st_mtime)) if path == subject else 'absent'
+                assert done.stdout == expected.encode()
+                # GNU: two calls. BSD: one initial rejected -c, then two -f.
+                assert spawn_tally(f.control)['stat'] - before.get('stat', 0) == (3 if sys.platform == 'darwin' else 2)
+            assert not f.events(); f.unchanged()
+        finally: closed.chmod(0o700)
+
+
 def main():
     if os.getuid() == 0: raise SystemExit('removal fixtures must run as a non-root hosted user')
     timeout_diagnostics_control()
     fast_stub_equivalence_control()
+    metadata_batch_control()
     with tempfile.TemporaryDirectory(prefix='herdr-removal-') as temporary:
         parent = Path(temporary).resolve()
         for platform in ('Linux', 'Darwin'):

@@ -5,9 +5,10 @@ set +x
 private_owned_file() {
     local file_identity
     [ -f "$1" ] && [ ! -L "$1" ] || return 1
-    file_identity=$(stat -c '%u:%a:%h' "$1" 2>/dev/null) ||
-        file_identity=$(stat -f '%u:%Lp:%l' "$1" 2>/dev/null) || return 1
-    [ "$file_identity" = "$(id -u):600:1" ]
+    service_removal_stat '%u:%a:%h' '%u:%Lp:%l' "$1" || return 1
+    file_identity="$SERVICE_REMOVAL_STAT"
+    # $EUID is what `id -u` prints (the effective uid), without a process spawn.
+    [ "$file_identity" = "$EUID:600:1" ]
 }
 
 # Rollback calls these helpers from EXIT traps, where Bash gives a bare
@@ -1596,26 +1597,67 @@ service_removal_path() {
     esac
 }
 
+# ONE stat spawn for any number of paths, its lines left in SERVICE_REMOVAL_STAT: GNU `-c` first, else BSD `-f`,
+# exactly as every single-path caller always did; a failure for ANY path fails the call. A macOS shell remembers
+# that `-c` failed where `-f` answered, so it stops spawning a doomed `stat -c` per call. That caches which
+# dialect the tool speaks, never a file's identity.
+SERVICE_REMOVAL_STAT_DIALECT=
+service_removal_stat() {
+    local gnu="$1" bsd="$2"
+    shift 2
+    SERVICE_REMOVAL_STAT=""
+    export -n SERVICE_REMOVAL_STAT
+    if [ "$SERVICE_REMOVAL_STAT_DIALECT" != bsd ]; then
+        SERVICE_REMOVAL_STAT="$(stat -c "$gnu" "$@" 2>/dev/null)" && return 0
+    fi
+    SERVICE_REMOVAL_STAT="$(stat -f "$bsd" "$@" 2>/dev/null)" || return 1
+    case "$OSTYPE" in darwin*) SERVICE_REMOVAL_STAT_DIALECT=bsd ;; esac
+    return 0
+}
+
+# Every ancestor of FILE and FILE itself (when present) are answered by ONE stat spawn: per path
+# "dev:inode:size:mtime:owner:mode:links". The same checks as ever are made on the same objects: each existing
+# ancestor is a searchable non-symlink directory with numeric dev:inode, FILE is a regular non-symlink readable
+# file passing native_mutable_identity_ok. A failure of any of them refuses. FILE's own stat line stays in
+# SERVICE_REMOVAL_FILE_STAT for service_removal_resource.
 service_removal_env_safe() {
-    local file="$1" parent identity
+    local file="$1" parent line owner mode links count=0 ancestors paths=()
+    SERVICE_REMOVAL_FILE_STAT=""
+    export -n SERVICE_REMOVAL_FILE_STAT
     case "$file" in ''|*[$'\001'-$'\037'$'\177']*) return 1 ;; esac
     native_resource_parents_safe "$file" || return 1
     # Negative -e/-L below an unsearchable or non-directory ancestor do
     # NOT establish absence. Walk all ancestors, even after a negative
     # predicate, until each existing prefix (including /) is checked.
-    parent="$(dirname "$file")" || return 1
+    # FILE is absolute with no empty, . or .. component and no control byte, so ${x%/*} is exactly its dirname.
+    parent="${file%/*}"
     while :; do
+        [ -n "$parent" ] || parent=/
         if [ "$parent" = / ] || [ -e "$parent" ] || [ -L "$parent" ]; then
             [ -d "$parent" ] && [ ! -L "$parent" ] && [ -x "$parent" ] || return 1
-            identity="$(stat -c '%d:%i' "$parent" 2>/dev/null)" ||
-                identity="$(stat -f '%d:%i' "$parent" 2>/dev/null)" || return 1
-            [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+            paths+=("$parent")
         fi
         [ "$parent" != / ] || break
-        parent="$(dirname "$parent")" || return 1
+        parent="${parent%/*}"
     done
+    ancestors=${#paths[@]}
     if [ -e "$file" ] || [ -L "$file" ]; then
-        native_mutable_file_safe "$file" && [ -r "$file" ] || return 1
+        [ -f "$file" ] && [ ! -L "$file" ] || return 1
+        paths+=("$file")
+    fi
+    service_removal_stat '%d:%i:%s:%Y:%u:%a:%h' '%d:%i:%z:%m:%u:%Lp:%l' "${paths[@]}" || return 1
+    while IFS= read -r line; do
+        count=$((count + 1))
+        if [ "$count" -le "$ancestors" ]; then
+            [[ "$line" =~ ^[0-9]+:[0-9]+:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*$ ]] || return 1
+        else
+            SERVICE_REMOVAL_FILE_STAT="$line"
+        fi
+    done <<< "$SERVICE_REMOVAL_STAT"
+    [ "$count" -eq "${#paths[@]}" ] || return 1
+    if [ "$count" -gt "$ancestors" ]; then
+        IFS=: read -r _ _ _ _ owner mode links <<< "$SERVICE_REMOVAL_FILE_STAT"
+        native_mutable_identity_ok "$owner" "$mode" "$links" && [ -r "$file" ] || return 1
     fi
     return 0
 }
@@ -1628,12 +1670,12 @@ service_removal_selected_disjoint() {
     service_removal_env_safe "$selected" && service_removal_env_safe "$destination" || return 1
     [ "$selected" != "$destination" ] || return 1
     [ -e "$selected" ] || return 0
-    identity="$(stat -c '%d:%i' "$selected" 2>/dev/null)" ||
-        identity="$(stat -f '%d:%i' "$selected" 2>/dev/null)" || return 1
+    service_removal_stat '%d:%i' '%d:%i' "$selected" || return 1
+    identity="$SERVICE_REMOVAL_STAT"
     [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
     if [ -e "$destination" ]; then
-        other="$(stat -c '%d:%i' "$destination" 2>/dev/null)" ||
-            other="$(stat -f '%d:%i' "$destination" 2>/dev/null)" || return 1
+        service_removal_stat '%d:%i' '%d:%i' "$destination" || return 1
+        other="$SERVICE_REMOVAL_STAT"
         [[ "$other" =~ ^[0-9]+:[0-9]+$ ]] || return 1
         [ "$identity" != "$other" ] || return 1
     fi
@@ -1651,15 +1693,17 @@ service_removal_plist_label() {
 }
 
 service_removal_resource() {
-    local file="$1" identity
+    local file="$1" dev ino size mtime identity
     SERVICE_REMOVAL_RESOURCE_ID=unknown
     export -n SERVICE_REMOVAL_RESOURCE_ID
     service_removal_env_safe "$file" || return 1
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
         SERVICE_REMOVAL_RESOURCE_ID=absent; return 0
     fi
-    identity="$(stat -c '%d:%i:%s:%Y' "$file" 2>/dev/null)" ||
-        identity="$(stat -f '%d:%i:%z:%m' "$file" 2>/dev/null)" || return 1
+    # Its dev:inode:size:mtime come from the same stat spawn that just admitted the file (a file that appeared
+    # after that spawn has no line, so it is refused rather than guessed).
+    IFS=: read -r dev ino size mtime _ <<< "$SERVICE_REMOVAL_FILE_STAT"
+    identity="$dev:$ino:$size:$mtime"
     [[ "$identity" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
     SERVICE_REMOVAL_RESOURCE_ID="$identity"
     return 0
@@ -2708,9 +2752,17 @@ native_installer_admit() {
 native_mutable_file_safe() {
     local identity owner mode links
     [ -f "$1" ] && [ ! -L "$1" ] || return 1
-    identity="$(stat -c '%u:%a:%h' "$1" 2>/dev/null)" || identity="$(stat -f '%u:%Lp:%l' "$1" 2>/dev/null)" || return 1
+    service_removal_stat '%u:%a:%h' '%u:%Lp:%l' "$1" || return 1
+    identity="$SERVICE_REMOVAL_STAT"
     IFS=: read -r owner mode links <<< "$identity"
-    [ "$owner" = "$(id -u)" ] && [ "$links" = 1 ] || return 1
+    native_mutable_identity_ok "$owner" "$mode" "$links"
+}
+
+# The owner/link-count/mode judgement of native_mutable_file_safe, on already stat'ed OWNER MODE LINKS. $EUID is
+# what `id -u` prints (the effective uid), without a process spawn.
+native_mutable_identity_ok() {
+    local owner="$1" mode="$2" links="$3"
+    [ "$owner" = "$EUID" ] && [ "$links" = 1 ] || return 1
     case "$mode" in ''|*[!0-7]*) return 1 ;; esac
     [ "$((8#$mode & 0022))" -eq 0 ]
 }
@@ -2721,10 +2773,22 @@ native_resource_parents_safe() {
     # Require an absolute, unambiguous spelling before snapshot/publication.
     case "$path" in /*) ;; *) return 1 ;; esac
     case "/${path#/}/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
-    parent="$(dirname "$path")" || return 1
-    while [ "$parent" != / ] && [ "$parent" != . ]; do
+    # Here PATH is absolute with no empty, . or .. component, so ${x%/*} is exactly dirname's answer: the same
+    # parents are tested in the same order without a process per parent. Only a newline, which command
+    # substitution would strip from a parent's name, keeps the original dirname walk.
+    case "$path" in
+        *$'\n'*)
+            parent="$(dirname "$path")" || return 1
+            while [ "$parent" != / ] && [ "$parent" != . ]; do
+                [ ! -L "$parent" ] || return 1
+                parent="$(dirname "$parent")" || return 1
+            done
+            return 0 ;;
+    esac
+    parent="${path%/*}"
+    while [ -n "$parent" ]; do
         [ ! -L "$parent" ] || return 1
-        parent="$(dirname "$parent")" || return 1
+        parent="${parent%/*}"
     done
     return 0
 }
@@ -2735,8 +2799,8 @@ native_selected_pointer_disjoint() {
     local pointer="$1" destination identity other
     [ -n "$pointer" ] || return 0
     native_resource_parents_safe "$pointer" && private_owned_file "$pointer" || return 1
-    identity="$(stat -c '%d:%i' "$pointer" 2>/dev/null)" ||
-        identity="$(stat -f '%d:%i' "$pointer" 2>/dev/null)" || return 1
+    service_removal_stat '%d:%i' '%d:%i' "$pointer" || return 1
+    identity="$SERVICE_REMOVAL_STAT"
     [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
     shift
     for destination in "$@"; do
@@ -2748,8 +2812,8 @@ native_selected_pointer_disjoint() {
         fi
         if [ -e "$destination" ] || [ -L "$destination" ]; then
             native_mutable_file_safe "$destination" || return 1
-            other="$(stat -c '%d:%i' "$destination" 2>/dev/null)" ||
-                other="$(stat -f '%d:%i' "$destination" 2>/dev/null)" || return 1
+            service_removal_stat '%d:%i' '%d:%i' "$destination" || return 1
+            other="$SERVICE_REMOVAL_STAT"
             [[ "$other" =~ ^[0-9]+:[0-9]+$ ]] || return 1
             # Also catch differently spelled names on case-insensitive filesystems.
             if [ "$identity" = "$other" ]; then
