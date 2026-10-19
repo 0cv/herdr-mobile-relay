@@ -672,17 +672,64 @@ _supervised_child_spec_absent() {
     [ "$pid_count" -eq 0 ]                    # no conflicting PID mapping
 }
 
-# Reached only after an empty record read. The exact captured jobspec/PID
+# jobs -l SPEC listed a DIFFERENT well-formed PID: Bash pruned the captured
+# child's entry and gave its jobspec to a later generation. Only this exact shape
+# may attempt the reuse proof below; a malformed or same-PID record never does.
+_supervised_child_other_generation() {
+    local number="$1" expected_pid="$2" job_output="$3" token listed_pid state
+    case "$job_output" in *$'\n'*) return 1 ;; esac
+    IFS=$' \t' read -r token listed_pid state _ <<< "$job_output"
+    case "$token" in "[$number]"|"[$number]+"|"[$number]-") ;; *) return 1 ;; esac
+    case "$listed_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -n "$state" ] && [ "$listed_pid" != "$expected_pid" ]
+}
+
+# Reuse proof: the complete parent-shell inventory must be well formed, list the
+# jobspec exactly once (its current generation), and list the captured PID in NO
+# entry under any jobspec, live or terminal. Never rely on jobs -p here: it names
+# the other generation. A conflicting PID mapping refuses, so a PID that may still
+# be a live job is never waited. Returns 0 when proven, 3 when the other
+# generation left the table meanwhile (observe again), 1 for any other doubt.
+_supervised_child_spec_reused() {
+    local job_spec="$1" expected_pid="$2" output_file line token listed_pid state number reused=0
+    output_file="$(mktemp "${TMPDIR:-/tmp}/herdr-supervised-reuse.XXXXXX")" || return 1
+    if ! LC_ALL=C jobs -l > "$output_file" 2>/dev/null; then
+        rm -f "$output_file"
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        IFS=$' \t' read -r token listed_pid state _ <<< "$line"
+        number=""
+        case "$token" in \[*\]|\[*\]+|\[*\]-) number="${token#\[}"; number="${number%%\]*}" ;; esac
+        case "$number" in ''|*[!0-9]*) reused=-1; break ;; esac
+        case "$listed_pid" in ''|*[!0-9]*) reused=-1; break ;; esac
+        [ -n "$state" ] && [ "$listed_pid" != "$expected_pid" ] || { reused=-1; break; }
+        if [ "%$number" = "$job_spec" ]; then
+            [ "$reused" -eq 0 ] || { reused=-1; break; }
+            reused=1
+        fi
+    done < "$output_file"
+    rm -f "$output_file" || return 1
+    case "$reused" in 1) return 0 ;; 0) return 3 ;; *) return 1 ;; esac
+}
+
+# Reached only after an empty record read (or, with a third argument "reused",
+# after jobs -l SPEC listed another generation). The exact captured jobspec/PID
 # pair must have no job entry left in the complete parent-shell inventory.
 # Bash deletes an entry only once every process in it has terminated, and
 # supervision starts no asynchronous job
 # after its essential children, so the original process is dead and its PID
 # cannot belong to a live job of this shell: this wait cannot block. The status
-# comes from wait, never from a signal name. Nothing here can authorize a signal.
+# comes from wait, never from a signal name. Nothing here can authorize a signal,
+# and a reused jobspec belongs to its current generation, never to this PID.
 _supervised_child_reap_absent() {
-    local job_spec="$1" expected_pid="$2" index absence_status=0
+    local job_spec="$1" expected_pid="$2" reused="${3:-}" index absence_status=0
     _supervised_child_captured "$job_spec" "$expected_pid" || return 1
-    _supervised_child_spec_absent "$job_spec" "$expected_pid" || absence_status=$?
+    if [ "$reused" = reused ]; then
+        _supervised_child_spec_reused "$job_spec" "$expected_pid" || absence_status=$?
+    else
+        _supervised_child_spec_absent "$job_spec" "$expected_pid" || absence_status=$?
+    fi
     [ "$absence_status" -eq 0 ] || return "$absence_status"
     SUPERVISED_JOB_STATE=Terminal
     SUPERVISED_JOB_STATUS=0
@@ -731,7 +778,19 @@ supervised_child_observe() {
     # unknown/mismatched identity; every retry revalidates the original pair.
     for ((attempt = 0; attempt < 3; attempt++)); do
         if _child_job_long_record "$job_spec"; then
+            record_status=0
             _supervised_child_record "$job_spec" "$expected_pid" "$CHILD_JOB_OUTPUT" || record_status=$?
+            # A non-interactive Bash prunes a signal-terminated child and then
+            # reuses its jobspec for the next launch (the tunnel after an
+            # immediate relay SIGPIPE). Only a proven absence of the captured
+            # PID from the complete inventory reaps it, by PID, never by spec.
+            if [ "$record_status" -eq 1 ] &&
+                _supervised_child_other_generation "$number" "$expected_pid" "$CHILD_JOB_OUTPUT"; then
+                absent_status=0
+                _supervised_child_reap_absent "$job_spec" "$expected_pid" reused || absent_status=$?
+                [ "$absent_status" -eq 3 ] || return "$absent_status"
+                continue
+            fi
             if [ "$record_status" -eq 0 ] && [ "$SUPERVISED_JOB_STATE" = Running ] &&
                 _supervised_child_kernel_stopped "$expected_pid"; then
                 SUPERVISED_JOB_STATE=Stopped

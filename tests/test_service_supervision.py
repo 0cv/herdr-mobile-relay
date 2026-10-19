@@ -144,6 +144,15 @@ fixture_trace() { printf '%s\n' "$*" >> "$FIXTURE_ROOT/shell.events"; }
 mktemp() {
     local last=""
     for last; do :; done
+    # TUNNEL_PREPARE_GATE=1 parks the parent, builtins only, in the TUNNEL's prepared-file
+    # mktemp: after the relay was captured, before the tunnel launch (RELAY_PID is set only
+    # then). A relay killed meanwhile is reaped by the parent waiting on this command
+    # substitution, which then prunes its job entry, so the tunnel is launched into the
+    # relay's jobspec. Traced before the mktemp line to keep it directly before `jobs -l`.
+    if [ "${last##*/}" = herdr-supervised-prepared.XXXXXX ] && [ -n "${RELAY_PID:-}" ] &&
+        [ "${TUNNEL_PREPARE_GATE:-0}" = 1 ]; then
+        fixture_gate prepare || return 1
+    fi
     fixture_trace "mktemp ${last##*/}"
     command mktemp "$@"
 }
@@ -151,9 +160,10 @@ fixture_gate() {
     local name="$1" attempt deadline post_signal_fork
     fixture_trace "gate $name"
     : > "$FIXTURE_ROOT/$name.held"
-    if [ "$name" = capture ] || [ "$name" = transient ]; then
+    if [ "$name" = capture ] || [ "$name" = transient ] || [ "$name" = prepare ]; then
         # Capture holds the parent before listing; transient holds it before the
-        # first post-miss jobs -p probe. Neither may fork while the child exits.
+        # first post-miss jobs -p probe; prepare holds it before the tunnel's mktemp.
+        # None may fork while the child exits.
         # The capture gate holds the parent BEFORE its first job listing so a child
         # can terminate first. A forked /bin/sleep here would make Bash report and
         # delete a signal-terminated child's job entry while the gate waits, so the
@@ -700,6 +710,11 @@ def listing_source_contract():
         'if ! LC_ALL=C jobs -l > "$output_file" 2>/dev/null; then'), "the line carrying the first listing changed"
     assert sum("jobs -l >" in line for line in function_code("_supervised_child_capture_records() {")) == 1, (
         "the listing helper must contain exactly one jobs -l > line")
+    # The jobspec-reuse helpers only classify and prove: no signal, no wait (the one wait
+    # sits in _supervised_child_reap_absent, after the proof, by original PID).
+    for helper in ("_supervised_child_other_generation() {", "_supervised_child_spec_reused() {"):
+        assert not re.search(r"(?<![\w-])(kill|wait)(?![\w-])", "\n".join(function_code(helper))), (
+            helper + " must neither signal nor wait")
     # Uniqueness guard. Bash runs the LAST definition of a function, but the checks above read
     # the FIRST header they find. A second definition anywhere in relay/*.sh (written `name() {`,
     # `name(){`, `name ()` with the brace on the next line, or `function name`) could shadow the
@@ -976,6 +991,59 @@ def main():
                            for s in lines)
         run_case(parent, "post-capture-other-spec-same-pid-refusal", different_spec_same_pid)
 
+        def reused_jobspec(f):
+            # Deterministic jobspec reuse. The parent is parked (builtins only) after the
+            # relay's capture and before the tunnel launch; the relay dies from a real SIGPIPE
+            # there, Bash prunes its entry, and the tunnel is launched into the SAME jobspec.
+            # The supervisor must report the relay's genuine wait status by its original PID.
+            f.ready(("relay",))
+            f.held("prepare")
+            relay = f.pid("relay")
+            f.signal_child("relay", signal.SIGPIPE)
+            until(lambda: not alive(relay), "relay did not die while the parent was parked", f.proc)
+            f.release("prepare")
+            f.complete_signal("relay", signal.SIGPIPE)
+            lines = f.shell()
+            captures = [s.split() for s in lines if s.startswith("capture ")]
+            assert len(captures) == 2 and captures[1][3] != str(relay) and (
+                captures[0][2].strip("[]+-") == captures[1][2].strip("[]+-")), (
+                "fixture did not exercise jobspec reuse: %r" % captures)
+            tunnel = captures[1][3]
+            wait_at = lines.index("wait-begin " + str(relay))
+            observed = lines[lines.index(" ".join(captures[1])) + 1:wait_at]
+            assert any(s.startswith("record ") and s.split()[2] == tunnel and
+                       s.split()[1].strip("[]+-") == captures[0][2].strip("[]+-") for s in observed), (
+                "the relay's jobspec did not list the tunnel generation")
+            assert "mktemp herdr-supervised-reuse.XXXXXX" in observed, "reuse was not proven from the inventory"
+            assert any(s.startswith("inventory ") and s.split()[2] == tunnel for s in observed)
+            assert not any(s.startswith("inventory ") and s.split()[2] == str(relay) for s in observed)
+            assert not any(s.startswith("signal ") for s in lines[:wait_at]), "signal before the relay's status was read"
+            assert "identity is unavailable" not in f.output.read_text()
+        run_case(parent, "reused-jobspec-after-immediate-signal-relay", reused_jobspec, TUNNEL_PREPARE_GATE="1")
+
+        def reused_spec_other_spec_same_pid(f):
+            # Another generation under the relay's jobspec proves nothing while the captured PID
+            # is still listed under a different jobspec: refused, no wait and no signal.
+            f.ready()
+            f.captured()
+            write(f.root / "arm-poll", "armed\n")
+            f.held("poll")
+            write(f.root / "mismatch", "armed\n")
+            write(f.root / "collision", "armed\n")
+            f.release("poll")
+            f.complete(1, unknown="relay")
+            lines = f.shell()
+            pid = f.pid("relay")
+            spec = "%" + next(s.split()[2] for s in lines if s.startswith("capture 1 ")).strip("[]+-")
+            bystander_number = (f.root / "bystander.record").read_text().split()[0].strip("[]+-")
+            assert "mktemp herdr-supervised-reuse.XXXXXX" in lines, "mismatch did not reach the reuse proof"
+            assert any(s.startswith("inventory ") and s.split()[1].strip("[]+-") == bystander_number
+                       and s.split()[2] == str(pid) for s in lines), "test did not map the PID under the other jobspec"
+            assert not any(s.startswith("wait-begin " + str(pid)) for s in lines)
+            assert not any(s == "signal -TERM " + spec or s == "signal -KILL " + spec for s in lines)
+            assert not any(e["action"] == "term" for e in f.events("relay"))
+        run_case(parent, "post-capture-reused-spec-other-spec-same-pid-refusal", reused_spec_other_spec_same_pid)
+
         def peer_terminal_with_capture_refusal(f):
             f.held("capture")
             f.ready()
@@ -1007,6 +1075,11 @@ def main():
                 # Despite relay uncertainty, the sibling was cleaned/reaped.
                 assert any(e["action"] == "term" for e in f.events("cloudflared"))
                 assert not any(e["action"] == "term" for e in f.events("relay"))
+                if corrupt == "mismatch":
+                    # The reuse proof was tried and refused: the live relay is still listed.
+                    assert "mktemp herdr-supervised-reuse.XXXXXX" in f.shell()
+                    assert any(s.startswith("inventory ") and s.split()[2] == str(f.pid("relay"))
+                               for s in f.shell())
             run_case(parent, "identity-" + corrupt, identity, WITH_GENERATIONS="1")
 
         for primary in (23, 130, 143):
