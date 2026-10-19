@@ -189,11 +189,16 @@ signal_child() {
 }
 
 stop_child() {
-    local job="$1" pid="$2" attempt observed
+    local job="$1" pid="$2" attempt observed deadline
     [ -n "$job" ] || return 1
     # Resume stopped children before TERM, including ones that stop again while
-    # shutting down. Fifty 100ms rounds bound the graceful observation phase.
-    for ((attempt = 0; attempt < 50; attempt++)); do
+    # shutting down. The graceful observation phase ends after fifty 100ms rounds
+    # or about five seconds, whichever comes first. A round also costs forks (jobs
+    # file, ps), so on a slow host the round count alone let two sequential phases
+    # outlast a supervisor's completion bound. SECONDS counts whole seconds (a
+    # phase of four to five real seconds); the round cap bounds a clock that jumps.
+    deadline=$((SECONDS + 5))
+    for ((attempt = 0; attempt < 50 && SECONDS < deadline; attempt++)); do
         observed=0
         supervised_child_observe "$job" "$pid" || observed=$?
         [ "$observed" -ne 2 ] || return 0

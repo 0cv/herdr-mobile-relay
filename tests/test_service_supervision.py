@@ -508,6 +508,17 @@ class Fixture:
                 states[kind] = "unknown"
         return states
 
+    def shutdown_evidence(self):
+        # Evidence only, from the bounded tail of the parent-shell record. A supervisor that never
+        # ran its request trap (a lost SIGINT) shows no signal to any child and no child "term";
+        # one inside a slow shutdown shows TERM/CONT rounds and whether KILL was already sent.
+        lines = tail_lines(self.root / "shell.events", 4000)
+        sent = [s.split()[1] for s in lines if s.startswith("signal ")]
+        return dict(supervisor=process_state(self.proc.pid), observations=sum(s.startswith("jobs ") for s in lines),
+                    signals={name: sent.count(name) for name in sorted(set(sent))},
+                    waits=sum(s.startswith("wait-end ") for s in lines),
+                    term_events={k: sum(e["action"] == "term" for e in self.events(k)) for k in ("relay", "cloudflared")})
+
     def complete(self, status, kinds=("relay", "cloudflared"), unknown=None):
         # All assertions precede fallback containment. wait-end plus PID absence
         # proves supervisor reaping, not just handler entry or harness cleanup.
@@ -518,10 +529,10 @@ class Fixture:
             # with no case name and no tail (hosted run 38825734282). It still fails the case;
             # the message adds the same bounded fixture data as the comparison below, with a
             # longer parent-shell tail to show where it is blocked (an open wait-begin).
-            raise AssertionError("supervisor still running after %ds (case %s); output tail %r; shell tail %r; child states %r" % (
+            raise AssertionError("supervisor still running after %ds (case %s); output tail %r; shell tail %r; child states %r; shutdown evidence %r" % (
                 DEADLINE, self.root.name,
                 tail_text(self.output, 600), tail_lines(self.root / "shell.events", 30),
-                self.child_states(kinds))) from None
+                self.child_states(kinds), self.shutdown_evidence())) from None
         # Evidence only: the bare comparison gave a hosted log with no observed value. The
         # assertion itself is unchanged; its message now names the case, both statuses and
         # the bounded tails of the supervisor output and the parent-shell record (fixture data).
@@ -743,9 +754,23 @@ def listing_source_contract():
             % (helper, len(definitions), ", ".join(definitions) or "none"))
 
 
+def shutdown_bound_source_contract():
+    # Source contract, no execution. On a slow host every graceful round costs forks (jobs file,
+    # ps), and two sequential fifty-round phases outlasted the 20s bound on hosted macOS. The
+    # graceful phase must therefore also end by elapsed time; the round cap stays as the bound
+    # for a clock that moves. Brittle by design: change this pin together with that loop.
+    service = (REPO / "relay/herdr-mobile-relay-service.sh").read_text()
+    body = service.split("\nstop_child() {\n", 1)[1].split("\n}\n", 1)[0]
+    code = [line.strip() for line in body.splitlines() if line.strip() and not line.strip().startswith("#")]
+    assert "deadline=$((SECONDS + 5))" in code, "the graceful phase has no five-second deadline"
+    assert "for ((attempt = 0; attempt < 50 && SECONDS < deadline; attempt++)); do" in code, (
+        "the graceful phase is not bounded by both fifty rounds and its elapsed-time deadline")
+
+
 def main():
     restart_source_contract()
     listing_source_contract()
+    shutdown_bound_source_contract()
     with tempfile.TemporaryDirectory(prefix="herdr-service-supervision-") as tmp:
         parent = pathlib.Path(tmp)
         # Only the explicit producer argv adapts pre-child refusals. Child
@@ -1188,8 +1213,12 @@ def main():
             def both_resist(f, sig=sig):
                 f.ready()
                 f.captured()
+                sent = time.monotonic()
                 f.proc.send_signal(sig)
                 f.complete(128 + sig)
+                # Evidence only: the hosted log records the margin under the completion bound.
+                print("both-resist-%d: supervisor exited %.1fs after the signal (bound %ds)" % (
+                    sig, time.monotonic() - sent, DEADLINE), flush=True)
                 for kind in ("relay", "cloudflared"):
                     assert "wait-end " + str(f.pid(kind)) + " 137" in f.shell()
             run_case(parent, "both-resist-" + str(sig), both_resist,
