@@ -880,6 +880,9 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 	if (role != "user" && role != "assistant") || record["isSidechain"] == true {
 		return "", ""
 	}
+	if role == "user" && (record["isMeta"] == true || record["isCompactSummary"] == true) {
+		return "", ""
+	}
 	message, ok := record["message"].(map[string]any)
 	if !ok {
 		return "", ""
@@ -918,10 +921,20 @@ func humanClaudeText(raw string) string {
 			return ""
 		}
 	}
-	if strings.HasPrefix(trimmed, "<command-name>") {
-		name := innerTag(trimmed, "command-name")
-		arguments := innerTag(trimmed, "command-args")
-		return strings.TrimSpace(name + " " + arguments)
+	// A bash row is nothing but its own tags, and an interrupt row is the whole
+	// sentinel; a prompt that merely starts with either keeps its text.
+	if trimmed == "[Request interrupted by user]" || trimmed == "[Request interrupted by user for tool use]" {
+		return ""
+	}
+	for _, tag := range []string{"bash-input", "bash-stdout", "bash-stderr"} {
+		if strings.HasPrefix(trimmed, "<"+tag+">") && strings.HasSuffix(trimmed, "</"+tag+">") && strings.Count(trimmed, "<"+tag+">") == 1 {
+			return ""
+		}
+	}
+	if strings.HasPrefix(trimmed, "<command-name>") || strings.HasPrefix(trimmed, "<command-message>") {
+		if name := innerTag(trimmed, "command-name"); name != "" {
+			return strings.TrimSpace(name + " " + innerTag(trimmed, "command-args"))
+		}
 	}
 	return raw
 }

@@ -467,3 +467,49 @@ func TestClaudeConversationReadForRejectsProjectDirectoryEscape(t *testing.T) {
 		t.Fatalf("page = %#v, want an escaping project symlink rejected", page)
 	}
 }
+
+func TestClaudeConversationHidesHarnessGeneratedUserRows(t *testing.T) {
+	reader, home := testReader(t)
+	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")
+	user := func(id string, extra map[string]any, content any) map[string]any {
+		row := map[string]any{"type": "user", "uuid": id, "message": map[string]any{"content": content}}
+		for key, value := range extra {
+			row[key] = value
+		}
+		return row
+	}
+	writeRows(t, path,
+		user("u1", nil, "real question"),
+		user("u2", map[string]any{"isMeta": true}, []any{map[string]any{"type": "text", "text": "Base directory for this skill: /x\n\n# Skill body"}}),
+		user("u3", map[string]any{"isMeta": true}, "Another Claude session sent a message:\n<cross-session-message>hi</cross-session-message>"),
+		user("u4", map[string]any{"isCompactSummary": true}, "This session is being continued from a previous conversation..."),
+		user("u5", nil, "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>5m check</command-args>"),
+		user("u6", nil, "[Request interrupted by user]"),
+		user("u7", nil, "<bash-input>ls</bash-input>"),
+		user("u8", nil, "<bash-stdout>a b</bash-stdout>"),
+		user("u9", nil, "<bash-stderr></bash-stderr>"),
+		user("u10", nil, "[Request interrupted by user] why does this keep happening?"),
+		user("u11", nil, "<bash-input>ls</bash-input> explain this output"),
+		user("u12", nil, "<command-message>hello</command-message> explain this tag"),
+		user("u13", nil, []any{map[string]any{"type": "text", "text": "[Request interrupted by user] block form"}}),
+	)
+
+	page, err := reader.Read("claude", testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(page.Entries))
+	for _, entry := range page.Entries {
+		got = append(got, entry.Text)
+	}
+	want := []string{
+		"real question", "/loop 5m check",
+		"[Request interrupted by user] why does this keep happening?",
+		"<bash-input>ls</bash-input> explain this output",
+		"<command-message>hello</command-message> explain this tag",
+		"[Request interrupted by user] block form",
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("visible turns = %q, want %q", got, want)
+	}
+}
