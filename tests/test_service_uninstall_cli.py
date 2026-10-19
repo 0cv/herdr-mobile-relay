@@ -17,6 +17,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -350,6 +351,84 @@ CANARIES = (b'fixture-saved-canary', b'fixture-ambient-canary', b'fixture-ambien
             b'private-source-canary')
 
 
+def group_rows(pid):
+    # One bounded ps: the invocation's group and its members' descendants as bytes fields pid ppid pgid stat uid [command].
+    listing = subprocess.run(['/bin/ps', 'axww', '-o', 'pid=,ppid=,pgid=,stat=,uid=,command='], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5).stdout
+    rows = [f for f in (line.split(None, 5) for line in listing.splitlines()) if len(f) >= 5 and all(x.isdigit() for x in f[:3])]
+    members = {str(pid).encode()}
+    while True:
+        grown = members | {r[0] for r in rows if r[1] in members or r[2] in members}
+        if grown == members: break
+        members = grown
+    return [r for r in rows if r[0] in members]
+
+
+def group_states(pid):
+    # Timeout evidence, never the environment: pid ppid pgid stat uid and command of the invocation's group and of its
+    # members' descendants. A row holding a fixture canary is withheld like a trace line; an unusable ps is reported
+    # and changes nothing.
+    try: mine = group_rows(pid)
+    except (OSError, subprocess.SubprocessError) as error: return 'process states unavailable (%s)\n' % type(error).__name__
+    shown = [r for r in mine if not any(canary in b' '.join(r) for canary in CANARIES)]
+    return 'invocation group %d states, pid ppid pgid stat uid command (%d row(s) withheld):\n%s\n' % (
+        pid, len(mine) - len(shown), '\n'.join(b' '.join(r[:5] + [r[5][:160] if len(r) > 5 else b'']).decode('utf-8', 'replace') for r in shown))
+
+
+def failure_states(process):
+    # Called first in each invocation's finally: whatever failure is propagating (a timeout, a handshake or prompt
+    # deadline, a failed assertion), the group's states are recorded before the master is released or anything is
+    # signalled. A normal return records nothing.
+    if sys.exc_info()[0] is not None: sys.stderr.write(group_states(process.pid)); sys.stderr.flush()
+
+
+def contain(process, bystander=False):
+    # Fallback containment of one invocation's own group, run whether or not its leader is still alive (a descendant can
+    # outlive the leader and hold the output pipe); never a pass and never counted as manager cleanup. macOS answers
+    # killpg with EPERM while the leader is still exiting (ps state E) and ESRCH once nothing is left. A refusal is
+    # reported instead of aborting the suite: every listed member is then signalled by pid, the leader is reaped within
+    # the same 2s bound, survivors are reported, and the failure in flight (a timeout, a failed assertion) keeps
+    # propagating unchanged. A bystander is meant to be live here, so only its refusals are reported.
+    live = process.poll() is None; failing = sys.exc_info()[0] is not None; problem = live and not bystander; note = 'killpg ok'
+    refused = False; left = []
+    try: os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError: note = 'killpg ESRCH (group already gone)'
+    except PermissionError:
+        note = 'killpg EPERM (leader still exiting?)'; problem = refused = True
+        try: pids = [int(r[0]) for r in group_rows(process.pid)]
+        except (OSError, subprocess.SubprocessError): pids = []
+        for pid in {process.pid, *pids}:
+            try: os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError) as error: note += '; kill %d %s' % (pid, type(error).__name__)
+    try: process.wait(timeout=2)
+    except subprocess.TimeoutExpired: note += '; NOT reaped within 2s'; problem = True
+    deadline = time.monotonic() + 2
+    while refused:
+        try: left = [r[0].decode() for r in group_rows(process.pid) if not r[3].startswith(b'Z')]
+        except (OSError, subprocess.SubprocessError): break
+        if not left or time.monotonic() > deadline: break
+        time.sleep(.05)
+    if left: note += '; still listed: ' + ','.join(left); problem = True
+    if problem or failing: sys.stderr.write('removal fixture containment of group %d (leader %s): %s\n' % (
+        process.pid, 'still running' if live else 'already reaped', note)); sys.stderr.flush()
+
+
+def drain_pty(master):
+    # The answer written to a PTY master is echoed by the slave's line discipline into a queue nobody reads. On macOS
+    # the reader's LAST close of the slave then blocks inside its exit (ps state E, stdout already at EOF, wait() not
+    # returning, killpg answering EPERM) until that queue is read or the master closes. Read and discard it: prompts
+    # and output travel on the stdout pipe and nothing asserts on the echo. Returns the stop-and-join callable.
+    stop = threading.Event()
+    def pump():
+        while not stop.is_set():
+            try:
+                if select.select([master], [], [], .05)[0] and not os.read(master, 4096): return
+            except OSError: return
+    thread = threading.Thread(target=pump, daemon=True); thread.start()
+    def finish(): stop.set(); thread.join()
+    return finish
+
+
 def bounded_communicate(process, data=None, timeout=None):
     # The same bound and the same failure as process.communicate(timeout=TIMEOUT).
     # Evidence only: when the bound expires, show the tail of the traced invocation
@@ -366,6 +445,7 @@ def bounded_communicate(process, data=None, timeout=None):
         shown = [line for line in tail if not any(canary in line for canary in CANARIES)]
         sys.stderr.write('removal fixture invocation exceeded %ds; trace tail (%d line(s) withheld):\n%s\n' % (
             timeout, len(tail) - len(shown), b'\n'.join(shown).decode('utf-8', 'replace')))
+        sys.stderr.write(group_states(process.pid))
         sys.stderr.flush()
         if any(canary in captured for canary in CANARIES): raise AssertionError('tracing/output leaked a canary') from expired
         raise
@@ -671,6 +751,7 @@ class Fixture:
         process = subprocess.Popen(argv, env=self.environment, cwd=self.root, stdin=slave if slave is not None else subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
         if slave is not None: os.close(slave)
+        stop_drain = drain_pty(master) if master is not None else None
         try:
             bystander = subprocess.Popen([sys.executable, '-c', f'import time; time.sleep({3 * TIMEOUT})'], env=self.environment,
                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -708,11 +789,12 @@ class Fixture:
             print('removal fixture invocation %d (%s model) took %.1fs; %s' % (
                 INVOCATIONS[0], self.model['platform'], time.monotonic() - started,
                 spawn_report(spawns_before, spawn_tally(self.control))), file=sys.stderr, flush=True)
+            failure_states(process)
+            if stop_drain is not None: stop_drain()
             if master is not None: os.close(master)
-            if process.poll() is None:
-                # Fallback containment targets only this invocation's group;
-                # it is never counted as manager cleanup or a passing result.
-                os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=2)
+            # Fallback containment targets only this invocation's group;
+            # it is never counted as manager cleanup or a passing result.
+            contain(process)
             if bystander is not None and bystander.poll() is None:
                 os.killpg(bystander.pid, signal.SIGTERM); bystander.wait(timeout=2)
 
