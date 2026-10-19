@@ -485,6 +485,102 @@ class Fixture:
                 assert not {"SuccessExitStatus", "RemainAfterExit"} & unit.keys()
         return result
 
+    def hang_evidence(self, proc, expired, termination, redelivered=0):
+        # Evidence only, for a supervisor that outlived TIMEOUT (hosted macOS, a SIGINT case, gave a
+        # bare TimeoutExpired). A supervisor that never ran its request trap shows only child "start"
+        # events and keeps polling; one inside a slow shutdown shows "stop" events or a TERMed child.
+        def state(pid):
+            try:
+                result = subprocess.run(["ps", "-o", "state=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                return "unknown"
+            return result.stdout.strip()[:8] or "gone"
+        partial = getattr(expired, "output", None) or b""
+        partial = partial.decode("utf-8", errors="replace") if isinstance(partial, bytes) else partial
+        for canary in CANARIES:
+            partial = partial.replace(canary, "<canary>")
+        events = self.events()
+        pids = {e["kind"]: e["pid"] for e in events if e["kind"] in ("relay", "tunnel") and e["action"] == "start"}
+        return "supervisor still running after %ds (case %s, signal %r, redelivered %d); output tail %r; events %r; supervisor state %r; child states %r" % (
+            TIMEOUT, self.root.name, termination, redelivered, partial[-600:],
+            [(e["kind"], e.get("action")) for e in events[-12:]], state(proc.pid),
+            {kind: state(pid) for kind, pid in pids.items()})
+
+    def in_normal_loop(self, proc, deadline):
+        # Positive evidence that the supervisor sits in its main-loop idle wait: a DIRECT child `sleep 1`
+        # (the loop's only one; every shutdown round sleeps 0.1). Sampled for about 1.2 s, one loop pass is
+        # about a second of sleep plus a short observation. A supervisor in startup, capture or finish never
+        # shows it, so those stalls are never mistaken for a lost signal. Sampling stops at `deadline`.
+        for _ in range(8):
+            if proc.poll() is not None or time.monotonic() >= deadline:
+                return False
+            try:
+                listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,command="], stdin=subprocess.DEVNULL,
+                                         capture_output=True, text=True,
+                                         timeout=min(5, deadline - time.monotonic())).stdout
+            except (OSError, subprocess.SubprocessError):
+                return False
+            for line in listing.splitlines():
+                parts = line.split(None, 2)
+                words = parts[2].split() if len(parts) == 3 and parts[1] == str(proc.pid) else []
+                # The loop's own argv: exactly `sleep 1`, or, for this fixture's fake `sleep` script (it shadows the
+                # real one on the service PATH), a Python interpreter, that script and `1`. A shell child whose
+                # command merely ENDS in `sleep 1` is not the loop.
+                name = [os.path.basename(word) for word in words[:2]]
+                if (len(words) == 2 and name[0] == "sleep" and words[1] == "1") or (
+                        len(words) == 3 and name[0].lower().startswith("python") and name[1] == "sleep" and words[2] == "1"):
+                    return True
+            time.sleep(.15)
+        return False
+
+    def lost_sigint(self, proc, mark, deadline):
+        # The known Bash 3.2 loss signature, nothing broader: the supervisor is alive and still in its normal
+        # loop (in_normal_loop), every fixture child started is alive, and no child has logged stop/exit since
+        # the SIGINT was sent (events after index `mark`). A supervisor that shows any shutdown step, or is
+        # anywhere but its main loop, is never given a second signal.
+        events = self.events()
+        if proc.poll() is not None or any(e["kind"] in ("relay", "tunnel") and e["action"] in ("stop", "exit")
+                                          for e in events[mark:]):
+            return False
+        pids = [e["pid"] for e in events if e["kind"] in ("relay", "tunnel") and e["action"] == "start"]
+        try:
+            for pid in pids:
+                os.kill(pid, 0)  # fixture PID only, observation, never product authority
+        except ProcessLookupError:
+            return False
+        return bool(pids) and self.in_normal_loop(proc, deadline)
+
+    def await_exit(self, proc, termination, mark, sent):
+        # One TIMEOUT deadline from the first send (`sent`); completion after it is a failure. Stock macOS Bash 3.2 can silently
+        # drop a SIGINT that lands in a forked-subshell wait window (hosted adapter-signal-True-gateway-2;
+        # SIGTERM is never lost), so ONLY a SIGINT under Bash < 4 is redelivered, at most twice, and only on the
+        # loss signature above. Every other stall, SIGTERM, and Bash >= 4 stay single-delivery and fail at the deadline.
+        deadline = sent + TIMEOUT
+        version = bash_version() if termination == signal.SIGINT else ""
+        redelivered = 0
+        expired = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(self.hang_evidence(proc, expired, termination, redelivered)) from None
+            try:
+                output = proc.communicate(timeout=min(3, remaining))[0]
+                # communicate's timeout is relative to this call: a late return still must not pass.
+                if time.monotonic() >= deadline:
+                    raise AssertionError("supervisor finished only after the %ds deadline (case %s)" % (TIMEOUT, self.root.name))
+                return output
+            except subprocess.TimeoutExpired as caught:
+                expired = caught
+                # The margin leaves room for the (about 1.2 s) loop sampling; the last clause re-checks the deadline
+                # AFTER the sampling, so a slow `ps` can never turn into a redelivery past the deadline.
+                if (redelivered < 2 and version[:1].isdigit() and int(version.split(".")[0]) < 4
+                        and deadline - time.monotonic() > 4 and self.lost_sigint(proc, mark, deadline)
+                        and time.monotonic() < deadline):
+                    redelivered += 1
+                    print("SIGINT redelivered (%d) under Bash %s (case %s)" % (redelivered, version, self.root.name), flush=True)
+                    proc.send_signal(signal.SIGINT)
+
     def wrapper(self, child="relay", code=23, termination=None, launchd=False):
         self.env.update(EXIT_CHILD="" if termination else child, CHILD_CODE=str(code),
                         GH_TOKEN=CANARIES[0], GITHUB_TOKEN=CANARIES[0])
@@ -496,11 +592,13 @@ class Fixture:
                                 stderr=subprocess.STDOUT, text=True, start_new_session=True)
         try:
             expected = {"relay", "tunnel"} if self.transport == "cloudflare" else {"relay"}
+            mark, sent = 0, time.monotonic()
             deadline = time.monotonic() + 5
             while proc.poll() is None:
                 started_kinds = {e["kind"] for e in self.events()
                                  if e["kind"] in ("relay", "tunnel") and e["action"] == "start"}
                 if started_kinds == expected:
+                    mark, sent = len(self.events()), time.monotonic()
                     if termination:
                         proc.send_signal(termination)
                     else:
@@ -508,7 +606,7 @@ class Fixture:
                     break
                 assert time.monotonic() < deadline, "essential children never started"
                 time.sleep(.02)
-            output, _ = proc.communicate(timeout=TIMEOUT)
+            output = self.await_exit(proc, termination, mark, sent)
             self.check_safe(output)
             events = self.events()
             started = [e for e in events if e["kind"] in ("relay", "tunnel") and e["action"] == "start"]
@@ -530,6 +628,16 @@ class Fixture:
             except ProcessLookupError:
                 pass
             proc.wait(timeout=5)
+
+
+def bash_version(bash="/bin/bash"):
+    # "major.minor" of the Bash that runs the service, or "" when it cannot be read (never redeliver then).
+    try:
+        result = subprocess.run([bash, "-c", 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def launchd_arguments(relay):
