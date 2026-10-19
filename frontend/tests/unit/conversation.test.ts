@@ -184,3 +184,77 @@ describe('ConversationMessage tool cards', () => {
     expect(screen.getByRole('button', { expanded: true, name: 'Show less' })).toBeInTheDocument();
   });
 });
+
+describe('parseAskUserQuestion', () => {
+  const input = JSON.stringify({ questions: [{ question: 'Pick one?', header: 'Pick', multiSelect: false, options: [{ label: 'A', description: 'first' }, { label: 'B', description: '' }] }] });
+
+  it('structures the question and pairs it with the recorded answer', async () => {
+    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+    const [item] = parseAskUserQuestion(input, 'The user answered: "Pick one?"="B". Read the answers carefully.')!;
+    expect(item.options.map((option) => option.label)).toEqual(['A', 'B']);
+    expect(item.answer).toBe('B');
+  });
+
+  it('ignores other tool payloads', async () => {
+    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+    expect(parseAskUserQuestion('{"command":"ls"}')).toBeNull();
+    expect(parseAskUserQuestion('not json')).toBeNull();
+  });
+});
+
+describe('conversationEntries keeps agent questions', () => {
+  it('shows an AskUserQuestion exchange even when the turn has no prose, and still drops other tools', () => {
+    const entries = [
+      { id: 'u1', role: 'user', text: 'go', timestamp: '' },
+      { id: 'a1', role: 'assistant', text: '', timestamp: '', tools: [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '' }, { id: 'b', name: 'Bash', input: '{}', output: '' }] },
+    ] as ConversationEntry[];
+    const kept = conversationEntries(entries);
+    expect(kept.map((entry) => entry.id)).toEqual(['u1', 'a1']);
+    expect(kept[1].tools?.map((tool) => tool.name)).toEqual(['AskUserQuestion']);
+  });
+});
+
+describe('AskUserQuestion hardening', () => {
+  const ask = (questions: unknown) => JSON.stringify({ questions });
+  const q = { question: 'Q', header: '', multiSelect: false, options: [{ label: 'A', description: '' }, { label: 'A', description: '' }] };
+
+  it('keeps a question when the assistant continues with prose', () => {
+    const entries = [
+      { id: 'u1', role: 'user', text: 'go', timestamp: '' },
+      { id: 'a1', role: 'assistant', text: '', timestamp: '', tools: [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '' }] },
+      { id: 'a2', role: 'assistant', text: 'Thanks, doing it.', timestamp: '' },
+    ] as ConversationEntry[];
+    expect(conversationEntries(entries).map((entry) => entry.id)).toEqual(['u1', 'a1', 'a2']);
+  });
+
+  it('keeps earlier prose when a question-only turn follows it', () => {
+    const entries = [
+      { id: 'u1', role: 'user', text: 'go', timestamp: '' },
+      { id: 'a1', role: 'assistant', text: 'Here is the answer.', timestamp: '' },
+      { id: 'a2', role: 'assistant', text: '', timestamp: '', tools: [{ id: 't', name: 'AskUserQuestion', input: '{}', output: '' }] },
+    ] as ConversationEntry[];
+    expect(conversationEntries(entries).map((entry) => entry.id)).toEqual(['u1', 'a1', 'a2']);
+  });
+
+  it('does not attribute answers when question text repeats', async () => {
+    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+    const dup = JSON.stringify({ questions: [{ question: 'Q', options: [] }, { question: 'Q', options: [] }] });
+    const result = parseAskUserQuestion(dup, 'The user answered: "Q"="A", "Q"="B". Read the answers carefully.')!;
+    expect(result.map((item) => item.answer)).toEqual([undefined, undefined]);
+  });
+
+  it('only trusts a complete answered envelope', async () => {
+    const { parseAskUserQuestion } = await import('../../src/lib/conversation');
+    expect(parseAskUserQuestion(ask([q]), 'The user answered: "Q"="A". Read the answers carefully.')![0].answer).toBe('A');
+    expect(parseAskUserQuestion(ask([q]), 'Error: expected "Q"="A"')![0].answer).toBeUndefined();
+    expect(parseAskUserQuestion(ask([q]), 'The user answered: "Q"="use "=" here"')![0].answer).toBeUndefined();
+  });
+
+  it('renders duplicate questions and labels without throwing, and keeps raw output for errors', () => {
+    const tool = { id: 't', name: 'AskUserQuestion', input: ask([q, q]), output: 'Error: denied', error: true } as ConversationTool;
+    const { container } = render(ConversationMessage, { messageId: 'dup', text: '', tools: [tool] });
+    expect(container.querySelectorAll('.conversation-question')).toHaveLength(2);
+    expect(container.textContent).toContain('Error: denied');
+    expect(container.textContent).not.toContain('Answered:');
+  });
+});
