@@ -201,7 +201,8 @@ fixture_bystander_pid=$!
 builtin jobs -l %+ > "$FIXTURE_ROOT/bystander.record"
 fixture_trace "bystander $fixture_bystander_pid"
 jobs() {
-    local rc=0 line token pid state rest attempt terminal_gate=0 corrupt_pid expected_pid
+    local rc=0 line token pid state rest attempt terminal_gate=0 corrupt_pid expected_pid capture_limit=2
+    [ "${TRANSPORT:-}" != gateway ] || capture_limit=1
     fixture_job_count=$((fixture_job_count+1))
     fixture_trace "jobs $BASH_SUBSHELL $*"
     if [ "$*" = '-l' ]; then
@@ -252,20 +253,53 @@ jobs() {
     if [ "$*" = '-l' ]; then
         while IFS= read -r line; do
             IFS=' ' read -r token pid state rest <<< "$line"
-            fixture_trace "record $token $pid $state"
-            if [ "$pid" = "$expected_pid" ]; then
-                fixture_trace "capture $fixture_capture_count $token $pid $state"
-                if [ "${CAPTURE_MISMATCH:-0}" = "$fixture_capture_count" ]; then
-                    printf '%s %s Running unrelated-generation\n' "$token" "$fixture_bystander_pid"
-                    continue
+            if [ "$fixture_capture_count" -gt "$capture_limit" ]; then
+                # This is the absence proof, not an essential capture (gateway
+                # still needs its first listing traced as capture 1).
+                # Only the collision case projects a conflicting inventory:
+                # no extra job is launched and the real builtin is still read.
+                if [ -f "$FIXTURE_ROOT/collision" ]; then
+                    if [ "$pid" = "${RELAY_PID:-}" ]; then
+                        fixture_trace "inventory-hidden $token $pid"
+                        continue
+                    fi
+                    if [ "$pid" = "$fixture_bystander_pid" ]; then
+                        fixture_trace "inventory $token ${RELAY_PID:-} Running"
+                        printf '%s %s Running conflicting-generation\n' "$token" "$RELAY_PID"
+                        continue
+                    fi
                 fi
-                [ "${CAPTURE_UNKNOWN:-0}" != "$fixture_capture_count" ] || continue
+                fixture_trace "inventory $token $pid $state"
+            else
+                fixture_trace "record $token $pid $state"
+                if [ "$pid" = "$expected_pid" ]; then
+                    fixture_trace "capture $fixture_capture_count $token $pid $state"
+                    if [ "${CAPTURE_MISMATCH:-0}" = "$fixture_capture_count" ]; then
+                        printf '%s %s Running unrelated-generation\n' "$token" "$fixture_bystander_pid"
+                        continue
+                    fi
+                    [ "${CAPTURE_UNKNOWN:-0}" != "$fixture_capture_count" ] || continue
+                fi
             fi
             printf '%s\n' "$line"
         done < "$FIXTURE_ROOT/job.record"
         return "$rc"
     fi
     fixture_trace "record $token $pid $state"
+    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+        [ -f "$FIXTURE_ROOT/empty-live-pid" ]; then
+        # Force a 0/empty result with a REAL live captured job still listed in
+        # the complete inventory; an ambiguous observation must not wait.
+        fixture_trace "empty-live-pid $rc $line"
+        return 0
+    fi
+    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+        [ -f "$FIXTURE_ROOT/empty-pruned-pid" ] && [ -z "$line" ]; then
+        # On either stock Bash, emulate Darwin's observed successful EMPTY pid
+        # probe only after the genuine builtin returns no PID. Never hide a PID.
+        fixture_trace "empty-pruned-pid $rc"
+        return 0
+    fi
     if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
         [ "$fixture_transient_used" = 1 ] && [ -f "$FIXTURE_ROOT/transient-record" ]; then
         fixture_trace "transient-spec-check $rc $line"
@@ -393,8 +427,15 @@ class Fixture:
         return path.read_text().splitlines() if path.exists() else []
 
     def ready(self, kinds=("relay", "cloudflared")):
-        until(lambda: all(any(e["action"] == "start" for e in self.events(k)) for k in kinds),
-              "children did not start", self.proc)
+        try:
+            until(lambda: all(any(e["action"] == "start" for e in self.events(k)) for k in kinds),
+                  "children did not start", self.proc)
+        except AssertionError as error:
+            # Failure evidence only; preserve the readiness/exit and five-second
+            # assertions. The hosted log must identify an early supervisor exit.
+            raise AssertionError("%s (case %s); output tail %r; shell tail %r" % (
+                error, self.root.name, tail_text(self.output, 600),
+                tail_lines(self.root / "shell.events", 30))) from None
 
     def captured(self, count=2):
         until(lambda: sum(s.startswith("capture ") for s in self.shell()) >= count,
@@ -488,8 +529,10 @@ class Fixture:
         # command: the traced line before every capture listing (the exact call
         # `jobs -l`) is the prepared-file mktemp that preceded the launch, never a
         # mktemp of capture's own, which could let Bash prune a signal-killed child.
+        capture_listings = 0
         for index, line in enumerate(lines):
-            if line == "jobs 0 -l":
+            if line == "jobs 0 -l" and capture_listings < sum(s.startswith("capture ") for s in lines):
+                capture_listings += 1
                 assert index > 0 and lines[index - 1] == "mktemp herdr-supervised-prepared.XXXXXX", (
                     "a forked command ran between launching a child and its first job listing: %r"
                     % (lines[max(0, index - 2):index + 1],))
@@ -848,6 +891,85 @@ def main():
             spec = "%" + next(s.split()[2] for s in f.shell() if s.startswith("capture 1 ")).strip("[]+-")
             assert "jobs 0 -p " + spec in f.shell(), "pruned status did not use captured-spec absence"
         run_case(parent, "pruned-signal-relay", pruned_signal_record)
+
+        def empty_pruned_pid(f):
+            f.ready()
+            f.captured()
+            write(f.root / "arm-poll", "armed\n")
+            f.held("poll")
+            f.signal_child("relay", signal.SIGPIPE)
+            until(lambda: not alive(f.pid("relay")), "SIGPIPE child did not finish before poll")
+            write(f.root / "prune-after-signal", "armed\n")
+            until(lambda: "post-signal-fork" in f.shell(),
+                  "poll did not fork after SIGPIPE", f.proc)
+            write(f.root / "empty-pruned-pid", "armed\n")
+            f.release("poll")
+            f.complete_signal("relay", signal.SIGPIPE)
+            lines = f.shell()
+            pid = f.pid("relay")
+            spec = "%" + next(s.split()[2] for s in lines if s.startswith("capture 1 ")).strip("[]+-")
+            assert "jobs 0 -l " + spec in lines
+            assert "jobs 0 -p " + spec in lines
+            assert any(s.startswith("empty-pruned-pid ") for s in lines), (
+                "the real pid probe did not return empty after capture/prune")
+            inventories = [i for i, s in enumerate(lines) if s == "jobs 0 -l"]
+            assert len(inventories) >= 3, "no complete owning-shell inventory after the empty pid listing"
+            wait_at = lines.index("wait-begin " + str(pid))
+            assert inventories[2] < wait_at
+            last_inventory = max(i for i in inventories if i < wait_at)
+            assert not any(s.startswith("inventory [" + spec[1:] + "]")
+                           for s in lines[last_inventory + 1:wait_at]), (
+                "captured jobspec was still in the final job-table inventory")
+        run_case(parent, "post-capture-pruned-empty-pid", empty_pruned_pid)
+
+        def empty_live_pid(f):
+            f.ready()
+            f.captured()
+            write(f.root / "arm-poll", "armed\n")
+            f.held("poll")
+            write(f.root / "unknown", "armed\n")
+            write(f.root / "empty-live-pid", "armed\n")
+            f.release("poll")
+            f.complete(1, unknown="relay")
+            lines = f.shell()
+            pid = f.pid("relay")
+            spec = "%" + next(s.split()[2] for s in lines if s.startswith("capture 1 ")).strip("[]+-")
+            assert any(s.startswith("empty-live-pid 0 " + str(pid)) for s in lines)
+            assert any(s.startswith("inventory [" + spec[1:] + "]") and
+                       s.split()[2] == str(pid) for s in lines), (
+                "the live captured generation was not visible in the full inventory")
+            assert not any(s.startswith("wait-begin " + str(pid)) for s in lines)
+            assert not any(s == "signal -TERM " + spec or s == "signal -KILL " + spec
+                           for s in lines)
+        run_case(parent, "post-capture-live-empty-pid-refusal", empty_live_pid)
+
+        def different_spec_same_pid(f):
+            f.ready()
+            f.captured()
+            write(f.root / "arm-poll", "armed\n")
+            f.held("poll")
+            write(f.root / "unknown", "armed\n")
+            write(f.root / "empty-live-pid", "armed\n")
+            write(f.root / "collision", "armed\n")
+            f.release("poll")
+            # The parent must refuse the ambiguous PID, not block waiting for
+            # the still-live relay. Fallback containment cannot satisfy this.
+            f.complete(1, unknown="relay")
+            lines = f.shell()
+            pid = f.pid("relay")
+            spec = "%" + next(s.split()[2] for s in lines if s.startswith("capture 1 ")).strip("[]+-")
+            bystander_number = (f.root / "bystander.record").read_text().split()[0].strip("[]+-")
+            assert any(s == "empty-live-pid 0 " + str(pid) for s in lines)
+            assert any(s.startswith("inventory-hidden ") and
+                       s.split()[1].strip("[]+-") == spec[1:] and s.split()[2] == str(pid)
+                       for s in lines), "test did not hide the captured jobspec"
+            assert any(s.startswith("inventory ") and s.split()[1].strip("[]+-") == bystander_number
+                       and s.split()[2] == str(pid) and s.split()[3] == "Running"
+                       for s in lines), "test did not map the PID under the other jobspec"
+            assert not any(s.startswith("wait-begin " + str(pid)) for s in lines)
+            assert not any(s == "signal -TERM " + spec or s == "signal -KILL " + spec
+                           for s in lines)
+        run_case(parent, "post-capture-other-spec-same-pid-refusal", different_spec_same_pid)
 
         def peer_terminal_with_capture_refusal(f):
             f.held("capture")

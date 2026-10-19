@@ -36,6 +36,7 @@ PY
 # label-specific controllers. No duplicated/hand-copied production policy.
 python3 - "$REPO_DIR" "$WORK_DIR" <<'PY'
 import importlib.util, json, os, pathlib, signal, stat, subprocess, sys, time
+from contextlib import contextmanager
 repo, parent = map(pathlib.Path, sys.argv[1:])
 spec = importlib.util.spec_from_file_location("dispatch_fixture", repo / "tests/test_service_transport_dispatch.py")
 d = importlib.util.module_from_spec(spec)
@@ -60,6 +61,66 @@ def state(f):
 
 
 NATIVE_RUNS = [0]
+interrupted = [0]
+
+
+def record_interrupt(signum, _frame):
+    if not interrupted[0]: interrupted[0] = signum
+
+
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, record_interrupt)
+
+
+@contextmanager
+def owned_process(command, limit, **options):
+    # The anchor has no child pipes. Keep it unreaped until its group is
+    # signalled, even if Popen fails or the command leader exits first.
+    anchor = proc = None
+    try:
+        if interrupted[0]: raise SystemExit(128 + interrupted[0])
+        anchor = subprocess.Popen([sys.executable, "-I", "-B", "-c",
+                                   f"import time; time.sleep({limit + 60})"],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, close_fds=True, process_group=0)
+        if interrupted[0]: raise SystemExit(128 + interrupted[0])
+        proc = subprocess.Popen(command, process_group=anchor.pid, **options)
+        yield proc
+    finally:
+        if anchor is not None:
+            try:
+                os.killpg(anchor.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                try:
+                    if proc is not None:
+                        try:
+                            # collect() already bounded the required output. On
+                            # failure discard any unfinished pipes after killing
+                            # the group rather than wait on inherited writers.
+                            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                                if stream is not None and not stream.closed: stream.close()
+                        finally:
+                            proc.wait(timeout=5)
+                finally:
+                    anchor.wait(timeout=5)
+    if interrupted[0]: raise SystemExit(128 + interrupted[0])
+
+
+def collect(proc, limit, data=None):
+    deadline = time.monotonic() + limit
+    while True:
+        if interrupted[0]: raise SystemExit(128 + interrupted[0])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise subprocess.TimeoutExpired(proc.args, limit)
+        try:
+            # Short waits allow recorded cancellation to reach owned cleanup;
+            # Popen retains partial output/input between communicate retries.
+            return proc.communicate(input=data, timeout=min(.25, remaining))
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline: raise subprocess.TimeoutExpired(proc.args, limit)
+            data = None
 
 
 def run(f, conditional=""):
@@ -71,24 +132,20 @@ def run(f, conditional=""):
     if conditional:
         command = ["/bin/bash", "-x", "-c", NATIVE_EXIT_PROBE, str(f.script), str(f.script.parent), f.platform,
                    str(f.definition), str(f.legacy), conditional]
-    proc = subprocess.Popen(command, env=f.env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        stdout, stderr = proc.communicate(timeout=40)
-        result = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
-        f.check_safe(stdout + stderr)
-        assert canary not in stdout + stderr, "native credential exposed"
-        return result
+        with owned_process(command, 40, env=f.env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+            stdout, stderr = collect(proc, 40)
+            result = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+            f.check_safe(stdout + stderr)
+            assert canary not in stdout + stderr, "native credential exposed"
+            return result
     finally:
         # Progress evidence only: a suite that reaches its wall-clock bound otherwise
         # leaves no trace of how many cells ran or how long each took.
         NATIVE_RUNS[0] += 1
         print("native installation fixture invocation %d (%s) took %.1fs" % (
             NATIVE_RUNS[0], f.platform, time.monotonic() - started), file=sys.stderr, flush=True)
-        # This fixture invocation group only, never native cleanup evidence.
-        try: os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError: pass
-        proc.wait(timeout=5)
 
 
 # F006: actual transaction-local acquisition and actual native_install_exit.
@@ -156,16 +213,11 @@ exit "$result"
 def probe(f, label, invocation, expectation="unknown", data=None, limit=4096):
     argument = str(limit) if invocation == "reader" else expectation
     command = ["/bin/bash", "-c", NATIVE_PROBE, "native-probe", str(f.script.parent), f.platform, label, invocation, argument]
-    proc = subprocess.Popen(command, env=f.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, start_new_session=True)
-    try:
-        stdout, stderr = proc.communicate(input=data, timeout=20)
+    with owned_process(command, 20, env=f.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE) as proc:
+        stdout, stderr = collect(proc, 20, data)
         f.check_safe((stdout + stderr).decode())
         return proc.returncode, stdout
-    finally:
-        try: os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError: pass
-        proc.wait(timeout=5)
 
 
 def capture_control(f, seam, role, payload, status=0, when="initial", at=1):
@@ -433,6 +485,12 @@ try:
                     if (failure == "reload" and platform == "launchd") or (failure == "stop" and initial != "active"): continue
                     if failure == "prior-unready" and initial != "active": continue
                     f = d.Fixture(parent, f"{platform}-{transport}-{initial}-{failure or 'ok'}", transport, platform, initial != "fresh")
+                    if initial == "fresh" and failure == "snapshot":
+                        # The snapshot fault seam fails cp of resource 0 (the current
+                        # definition). A wholly absent fresh definition has no cp /0;
+                        # keep both labels inactive but supply a dormant owned file
+                        # so this cell actually reaches the snapshot failure.
+                        d.write(f.definition, "previous definition\n")
                     if initial == "inactive":
                         d.write(f.root / "activation", json.dumps({k: dict(active=False, enabled=False) for k in ("current", "legacy")}))
                     # Identical saved raw values and supported shell-quoted
@@ -463,7 +521,10 @@ try:
                         assert "GH_TOKEN=" not in f.envfile.read_text() and "GITHUB_TOKEN=" not in f.envfile.read_text()
                         assert state(f)["current"]["active"] and not state(f)["legacy"]["active"]
                     else:
-                        assert result.returncode != 0
+                        assert result.returncode != 0, (platform, transport, initial, failure, result.returncode)
+                        if failure == "snapshot":
+                            assert any(e["kind"] == "fault" and e["point"] == "snapshot" for e in f.events()), (
+                                "snapshot fault injection was not exercised", platform, transport, initial)
                         if failure in ("ready-stop-fail", "ready-still-active", "ready-unknown", "ready-restore", "public-stop-fail", "public-unknown"):
                             assert recovery(f), "unsafe/failed rollback discarded private recovery"
                             assert "rollback is incomplete" in result.stderr
@@ -558,24 +619,22 @@ try:
                 f = d.Fixture(parent, f"{platform}-{transport}-cancel-{sig}", transport, platform, True)
                 before = snapshot(resources(f)); activation = state(f)
                 f.env["NATIVE_FAILURE"] = "cancel"
-                proc = subprocess.Popen(["/bin/bash", "-x", str(f.script)], env=f.env, stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
-                try:
+                command = ["/bin/bash", "-x", str(f.script)]
+                with owned_process(command, 20, env=f.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
                     deadline = time.monotonic() + 15
                     while not (f.root / "cancel-gate").exists():
+                        if interrupted[0]: raise SystemExit(128 + interrupted[0])
                         assert proc.poll() is None and time.monotonic() < deadline, "did not reach postactivation cancellation gate"
                         time.sleep(.02)
                     proc.send_signal(sig); (f.root / "cancel-release").touch()
-                    stdout, stderr = proc.communicate(timeout=20)
+                    stdout, stderr = collect(proc, 20)
                     f.check_safe(stdout + stderr)
                     assert proc.returncode == 128 + sig
                     assert snapshot(resources(f)) == before and state(f) == activation
                     assert bystander.poll() is None
-                finally:
-                    if proc.poll() is None:
-                        # Owned fallback containment, not supervisor evidence.
-                        os.killpg(proc.pid, signal.SIGKILL); proc.communicate(timeout=5)
 finally:
     bystander.terminate(); bystander.wait(timeout=5)
+if interrupted[0]: raise SystemExit(128 + interrupted[0])
 print("hosted native admission/resource/rollback fixture source exercised")
 PY

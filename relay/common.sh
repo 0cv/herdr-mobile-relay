@@ -615,30 +615,75 @@ _supervised_child_captured() {
     return 1
 }
 
-# True only when Bash holds NO entry at all for this exact jobspec: the pid-only
-# listing refuses it as well as the failed record read. A live entry that jobs -l
-# hides or contradicts is still answered by jobs -p, so it stays an unknown
-# identity. jobs -p neither prints a record nor marks one reported, so this probe
-# prunes nothing. Called directly in the owning shell: a subshell has a different
-# job table.
+# A successful jobs -p may print NOTHING for a pruned spec (Darwin Bash 3.2
+# does this after a signal). Its exit code alone is not evidence of a live job.
+# Check its entire output, then inventory the owning shell's job table. An
+# exact PID mapping and exact inventory record permit only a bounded retry;
+# a conflicting or malformed inventory entry refuses the wait. No asynchronous
+# job is launched between this inventory and its wait, even when the tunnel is
+# launched later; a missing spec cannot become a new generation in that gap.
+# Never run jobs in $(...), which would
+# inspect a subshell's copied table.
 _supervised_child_spec_absent() {
-    local job_spec="$1"
-    if LC_ALL=C jobs -p "$job_spec" >/dev/null 2>&1; then
+    local job_spec="$1" expected_pid="$2" output_file line token listed_pid state number
+    local pid_count=0 found=0 record_status=0
+    output_file="$(mktemp "${TMPDIR:-/tmp}/herdr-supervised-absence.XXXXXX")" || return 1
+    # PID output is not by itself a terminal or live proof. A different PID,
+    # multiple lines or a blank line refuses even if the builtin returned 0.
+    LC_ALL=C jobs -p "$job_spec" > "$output_file" 2>/dev/null || true
+    while IFS= read -r line || [ -n "$line" ]; do
+        pid_count=$((pid_count + 1))
+        [ "$pid_count" -eq 1 ] && [ "$line" = "$expected_pid" ] || {
+            rm -f "$output_file"; return 1;
+        }
+    done < "$output_file"
+    if ! LC_ALL=C jobs -l > "$output_file" 2>/dev/null; then
+        rm -f "$output_file"
         return 1
     fi
-    return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        IFS=$' \t' read -r token listed_pid state _ <<< "$line"
+        case "$token" in
+            \[*\]|\[*\]+|\[*\]-) number="${token#\[}"; number="${number%%\]*}" ;;
+            *) rm -f "$output_file"; return 1 ;;
+        esac
+        case "$number" in ''|*[!0-9]*) rm -f "$output_file"; return 1 ;; esac
+        case "$listed_pid" in ''|*[!0-9]*) rm -f "$output_file"; return 1 ;; esac
+        [ -n "$state" ] || { rm -f "$output_file"; return 1; }
+        # The captured PID under ANY other jobspec is conflicting ownership,
+        # even when this jobspec is absent. Never wait by that numeric PID.
+        if [ "$listed_pid" = "$expected_pid" ] && [ "%$number" != "$job_spec" ]; then
+            rm -f "$output_file"
+            return 1
+        fi
+        [ "%$number" = "$job_spec" ] || continue
+        [ "$found" -eq 0 ] && [ "$listed_pid" = "$expected_pid" ] || {
+            rm -f "$output_file"; return 1;
+        }
+        # Only this freshly validated exact generation may be re-observed.
+        _supervised_child_record_state "$expected_pid" "$number" "$line" || record_status=$?
+        [ "$record_status" -eq 0 ] || [ "$record_status" -eq 2 ] || {
+            rm -f "$output_file"; return 1;
+        }
+        found=1
+    done < "$output_file"
+    rm -f "$output_file" || return 1
+    if [ "$found" -eq 1 ]; then return 3; fi # exact live/terminal record: retry
+    [ "$pid_count" -eq 0 ]                    # no conflicting PID mapping
 }
 
-# Reached only after the record read failed. The exact captured jobspec/PID
-# pair must have no job entry left. Bash deletes an entry only once every
-# process in it has terminated, and supervision starts no asynchronous job
+# Reached only after an empty record read. The exact captured jobspec/PID
+# pair must have no job entry left in the complete parent-shell inventory.
+# Bash deletes an entry only once every process in it has terminated, and
+# supervision starts no asynchronous job
 # after its essential children, so the original process is dead and its PID
 # cannot belong to a live job of this shell: this wait cannot block. The status
 # comes from wait, never from a signal name. Nothing here can authorize a signal.
 _supervised_child_reap_absent() {
-    local job_spec="$1" expected_pid="$2" index
+    local job_spec="$1" expected_pid="$2" index absence_status=0
     _supervised_child_captured "$job_spec" "$expected_pid" || return 1
-    _supervised_child_spec_absent "$job_spec" || return 1
+    _supervised_child_spec_absent "$job_spec" "$expected_pid" || absence_status=$?
+    [ "$absence_status" -eq 0 ] || return "$absence_status"
     SUPERVISED_JOB_STATE=Terminal
     SUPERVISED_JOB_STATUS=0
     wait "$expected_pid" 2>/dev/null || SUPERVISED_JOB_STATUS=$?
@@ -677,9 +722,11 @@ supervised_child_observe() {
         return 2
     fi
     # The hosted Darwin SIGPIPE case returned unknown, then cleanup obtained
-    # wait's real 141. If a captured spec has a transient unreadable record
-    # but jobs -p still answers, a later observation can establish the exact
-    # terminal record or prove absence. Retry only that unreadable state, with
+    # wait's real 141: jobs -l %2 was empty while jobs -p %2 may have returned
+    # success with empty output. A complete inventory can prove absence even
+    # then. If a captured spec has a transient unreadable record while a live
+    # PID mapping remains, a later observation can establish the exact terminal
+    # record or prove absence. Retry only that unreadable state, with
     # no wait or signal on an
     # unknown/mismatched identity; every retry revalidates the original pair.
     for ((attempt = 0; attempt < 3; attempt++)); do
@@ -695,8 +742,7 @@ supervised_child_observe() {
         [ "$CHILD_JOB_RECORD_PRESENT" != true ] || return 1
         absent_status=0
         _supervised_child_reap_absent "$job_spec" "$expected_pid" || absent_status=$?
-        [ "$absent_status" -eq 1 ] || return "$absent_status"
-        _supervised_child_captured "$job_spec" "$expected_pid" || return 1
+        [ "$absent_status" -eq 3 ] || return "$absent_status"
     done
     return 1
 }
