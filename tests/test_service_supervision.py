@@ -137,6 +137,7 @@ fixture_kill_count=0
 fixture_gate_used=0
 fixture_transient_used=0
 fixture_transient_probe_used=0
+fixture_reuse_used=0
 fixture_trace() { printf '%s\n' "$*" >> "$FIXTURE_ROOT/shell.events"; }
 # mktemp is a forked command, so Bash may report and delete a signal-terminated
 # child's job entry after it. Record each use (template name only) in order with
@@ -144,15 +145,6 @@ fixture_trace() { printf '%s\n' "$*" >> "$FIXTURE_ROOT/shell.events"; }
 mktemp() {
     local last=""
     for last; do :; done
-    # TUNNEL_PREPARE_GATE=1 parks the parent, builtins only, in the TUNNEL's prepared-file
-    # mktemp: after the relay was captured, before the tunnel launch (RELAY_PID is set only
-    # then). A relay killed meanwhile is reaped by the parent waiting on this command
-    # substitution, which then prunes its job entry, so the tunnel is launched into the
-    # relay's jobspec. Traced before the mktemp line to keep it directly before `jobs -l`.
-    if [ "${last##*/}" = herdr-supervised-prepared.XXXXXX ] && [ -n "${RELAY_PID:-}" ] &&
-        [ "${TUNNEL_PREPARE_GATE:-0}" = 1 ]; then
-        fixture_gate prepare || return 1
-    fi
     fixture_trace "mktemp ${last##*/}"
     command mktemp "$@"
 }
@@ -160,10 +152,10 @@ fixture_gate() {
     local name="$1" attempt deadline post_signal_fork
     fixture_trace "gate $name"
     : > "$FIXTURE_ROOT/$name.held"
-    if [ "$name" = capture ] || [ "$name" = transient ] || [ "$name" = prepare ]; then
+    if [ "$name" = capture ] || [ "$name" = transient ] || [ "$name" = reuse ]; then
         # Capture holds the parent before listing; transient holds it before the
-        # first post-miss jobs -p probe; prepare holds it before the tunnel's mktemp.
-        # None may fork while the child exits.
+        # first post-miss jobs -p probe; reuse holds it after the relay's first
+        # post-capture observation. None may fork while the child exits.
         # The capture gate holds the parent BEFORE its first job listing so a child
         # can terminate first. A forked /bin/sleep here would make Bash report and
         # delete a signal-terminated child's job entry while the gate waits, so the
@@ -316,6 +308,20 @@ jobs() {
     if [ "${1:-}" = -p ] && [ "${2:-}" = "${RELAY_JOB:-}" ] &&
         [ "$fixture_transient_used" = 1 ] && [ -f "$FIXTURE_ROOT/transient-record" ]; then
         fixture_trace "transient-spec-check $rc $line"
+    fi
+    # REUSE_PARK=1: the first observation of the relay's jobspec after its capture, before any
+    # tunnel exists, has just read its real Running record. Park (builtins only) while the relay
+    # dies of a genuine SIGPIPE and is reaped, then fork foreground commands that START after its
+    # death. Hosted runs showed a fork DURING the death prunes nothing (fe36b89d) while forks after
+    # it do (the post-signal-fork cases): Bash reports and deletes the entry, and the tunnel
+    # launched next is numbered into the relay's jobspec. Nothing here is forged.
+    if [ "${REUSE_PARK:-0}" = 1 ] && [ "${1:-}" = -l ] && [ -n "${RELAY_JOB:-}" ] &&
+        [ "${2:-}" = "$RELAY_JOB" ] && [ -z "${TUNNEL_PID:-}" ] && [ "$fixture_reuse_used" = 0 ]; then
+        fixture_reuse_used=1
+        fixture_gate reuse || return 1
+        /bin/sleep 0.01
+        /bin/sleep 0.01
+        fixture_trace "reuse-prune-forks"
     fi
     # Narrow corruption seam, armed only AFTER both captures: a current spec
     # mapped to another actual fixture job, or a missing/pruned record. Neither
@@ -992,34 +998,37 @@ def main():
         run_case(parent, "post-capture-other-spec-same-pid-refusal", different_spec_same_pid)
 
         def reused_jobspec(f):
-            # Deterministic jobspec reuse. The parent is parked (builtins only) after the
-            # relay's capture and before the tunnel launch; the relay dies from a real SIGPIPE
-            # there, Bash prunes its entry, and the tunnel is launched into the SAME jobspec.
-            # The supervisor must report the relay's genuine wait status by its original PID.
+            # Natural jobspec reuse, not simulated: REUSE_PARK parks the parent (builtins only) just
+            # after the relay's first post-capture observation and before the tunnel exists. The
+            # relay dies of a real SIGPIPE there and is reaped; the hook's forks then start AFTER
+            # its death (a fork DURING it pruned nothing on hosted macOS and Ubuntu, fe36b89d), so
+            # Bash deletes the entry and the tunnel is launched into the relay's jobspec. The
+            # supervisor must report the relay's genuine wait status by its original PID.
             f.ready(("relay",))
-            f.held("prepare")
+            f.held("reuse")
             relay = f.pid("relay")
             f.signal_child("relay", signal.SIGPIPE)
             until(lambda: not alive(relay), "relay did not die while the parent was parked", f.proc)
-            f.release("prepare")
+            f.release("reuse")
             f.complete_signal("relay", signal.SIGPIPE)
             lines = f.shell()
             captures = [s.split() for s in lines if s.startswith("capture ")]
+            first = next((i for i, s in enumerate(lines) if s.startswith("capture 1 ")), 0)
             assert len(captures) == 2 and captures[1][3] != str(relay) and (
                 captures[0][2].strip("[]+-") == captures[1][2].strip("[]+-")), (
-                "fixture did not exercise jobspec reuse: %r" % captures)
+                "fixture did not exercise jobspec reuse: captures %r; shell events %r" % (captures, lines[first:first + 30]))
             tunnel = captures[1][3]
             wait_at = lines.index("wait-begin " + str(relay))
             observed = lines[lines.index(" ".join(captures[1])) + 1:wait_at]
             assert any(s.startswith("record ") and s.split()[2] == tunnel and
                        s.split()[1].strip("[]+-") == captures[0][2].strip("[]+-") for s in observed), (
-                "the relay's jobspec did not list the tunnel generation")
+                "the relay's jobspec did not list the tunnel generation; shell events %r" % (lines[first:wait_at + 1],))
             assert "mktemp herdr-supervised-reuse.XXXXXX" in observed, "reuse was not proven from the inventory"
             assert any(s.startswith("inventory ") and s.split()[2] == tunnel for s in observed)
             assert not any(s.startswith("inventory ") and s.split()[2] == str(relay) for s in observed)
             assert not any(s.startswith("signal ") for s in lines[:wait_at]), "signal before the relay's status was read"
             assert "identity is unavailable" not in f.output.read_text()
-        run_case(parent, "reused-jobspec-after-immediate-signal-relay", reused_jobspec, TUNNEL_PREPARE_GATE="1")
+        run_case(parent, "reused-jobspec-after-immediate-signal-relay", reused_jobspec, REUSE_PARK="1")
 
         def reused_spec_other_spec_same_pid(f):
             # Another generation under the relay's jobspec proves nothing while the captured PID
