@@ -205,6 +205,9 @@ jobs() {
     [ "${TRANSPORT:-}" != gateway ] || capture_limit=1
     fixture_job_count=$((fixture_job_count+1))
     fixture_trace "jobs $BASH_SUBSHELL $*"
+    # The initial capture calls jobs -l with ONE argument. Under the service's
+    # set -u, an unguarded $2 exits Bash before builtin jobs can run; its
+    # redirected stderr hides the nounset diagnostic from fixture output.
     if [ "$*" = '-l' ]; then
         fixture_capture_count=$((fixture_capture_count+1))
         expected_pid="${RELAY_PID:-}"
@@ -212,7 +215,7 @@ jobs() {
         if [ "${CAPTURE_GATE:-0}" = "$fixture_capture_count" ]; then
             fixture_gate capture || return 1
         fi
-    elif [ "$1" = -l ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+    elif [ "${1:-}" = -l ] && [ "${2:-}" = "${RELAY_JOB:-}" ] &&
         [ "$fixture_gate_used" = 0 ] && [ -f "$FIXTURE_ROOT/arm-poll" ]; then
         fixture_gate_used=1
         fixture_gate poll || return 1
@@ -221,7 +224,7 @@ jobs() {
     # Hide one post-capture record without reading/pruning the real job table.
     # The next product observation must still validate the actual jobspec/PID;
     # this seam never supplies a forged terminal record or an exit status.
-    if [ "$1" = -l ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+    if [ "${1:-}" = -l ] && [ "${2:-}" = "${RELAY_JOB:-}" ] &&
         [ "$fixture_transient_used" = 0 ] && [ -f "$FIXTURE_ROOT/transient-record" ]; then
         fixture_transient_used=1
         fixture_trace "transient-record-unavailable ${RELAY_PID:-}"
@@ -230,7 +233,7 @@ jobs() {
     # The first hidden long record has already returned. Hold the first
     # captured-spec probe using builtins only: the child must receive genuine
     # SIGPIPE BEFORE this observation and before the next long-record retry.
-    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+    if [ "${1:-}" = -p ] && [ "${2:-}" = "${RELAY_JOB:-}" ] &&
         [ "$fixture_transient_used" = 1 ] && [ "$fixture_transient_probe_used" = 0 ] &&
         [ -f "$FIXTURE_ROOT/transient-record" ]; then
         fixture_transient_probe_used=1
@@ -286,21 +289,21 @@ jobs() {
         return "$rc"
     fi
     fixture_trace "record $token $pid $state"
-    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+    if [ "${1:-}" = -p ] && [ "${2:-}" = "${RELAY_JOB:-}" ] &&
         [ -f "$FIXTURE_ROOT/empty-live-pid" ]; then
         # Force a 0/empty result with a REAL live captured job still listed in
         # the complete inventory; an ambiguous observation must not wait.
         fixture_trace "empty-live-pid $rc $line"
         return 0
     fi
-    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+    if [ "${1:-}" = -p ] && [ "${2:-}" = "${RELAY_JOB:-}" ] &&
         [ -f "$FIXTURE_ROOT/empty-pruned-pid" ] && [ -z "$line" ]; then
         # On either stock Bash, emulate Darwin's observed successful EMPTY pid
         # probe only after the genuine builtin returns no PID. Never hide a PID.
         fixture_trace "empty-pruned-pid $rc"
         return 0
     fi
-    if [ "$1" = -p ] && [ "$2" = "${RELAY_JOB:-}" ] &&
+    if [ "${1:-}" = -p ] && [ "${2:-}" = "${RELAY_JOB:-}" ] &&
         [ "$fixture_transient_used" = 1 ] && [ -f "$FIXTURE_ROOT/transient-record" ]; then
         fixture_trace "transient-spec-check $rc $line"
     fi
@@ -611,6 +614,8 @@ def listing_source_contract():
     # launch and the capture, which itself may fork nothing before its first `jobs -l`.
     # The runtime trace assertion in Fixture.complete() cannot see the launch, so a
     # prepare moved after it, or a command inserted after it, is caught here.
+    jobs_hook = BUILTINS.split("\njobs() {\n", 1)[1].split("\nkill() {\n", 1)[0]
+    assert '"$2"' not in jobs_hook, "unary jobs -l must not expand unset $2 under service nounset"
     service = (REPO / "relay/herdr-mobile-relay-service.sh").read_text().splitlines()
     code = [line.strip() for line in service if line.strip() and not line.strip().startswith("#")]
     for fragment, pid_var in (('"$RELAY_BIN" serve-installed', "RELAY_PID"),
