@@ -734,9 +734,9 @@ export class AndroidEnvironmentMeasurement {
             }
           } catch (cleanupError) {
             const cleanupResult = cleanupError instanceof BoundedCommandError ? cleanupError.result : undefined;
+            this.gmsObservations.temporaryEvidenceCleanup = 'pending';
             if (!cleanupResult?.childExited || !cleanupResult.ownedProcessesExited || !cleanupResult.stdioClosed) {
               this.gmsObservations.persistenceRetirement = 'pending-temporary-write';
-              this.gmsObservations.temporaryEvidenceCleanup = 'pending';
             }
             this.failGmsPersistence(entry, 'GMS temporary observation evidence could not be removed');
           }

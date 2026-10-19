@@ -9,7 +9,7 @@ import { join, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assessAndroidEnvironment, environmentLeaves, readEnvironmentInputs, type AndroidEnvironmentSnapshot, type AndroidPackageIdentity, type AndroidPlannedTermination, type EnvironmentInputBytes } from '../android-environment';
 import { AndroidEnvironmentMeasurement, type AndroidMeasurementIO } from '../android-measurement';
-import { boundedCommand as runBoundedCommand } from '../support/bounded-process';
+import { BoundedCommandError, boundedCommand as runBoundedCommand } from '../support/bounded-process';
 import { PhaseBudget } from '../support/budget';
 import type { OwnedProcess, RetirementEvidence } from '../support/owned-process';
 import { AndroidProductRecorder, androidProductImpact, publicMobileSummary, validateProductObservations, type ProductObservations } from '../support/android-product';
@@ -302,6 +302,7 @@ class MeasurementCollectorMock implements OwnedProcess {
 export const measurementFailureCases = ['none', 'begin-snapshot', 'begin-marker', 'close', 'transport', 'log', 'collector', 'identity', 'check', 'completion', 'end-snapshot'] as const;
 export async function measurementControl(failure: typeof measurementFailureCases[number]): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'sm59-measurement-'));
+  const diagnostics = await import('./android-environment').catch(() => undefined);
   const trace: string[] = [];
   const original = new Error(`injected-${failure}`), cleanup = new Error('injected-cleanup');
   const child = new MeasurementCollectorMock();
@@ -326,6 +327,24 @@ export async function measurementControl(failure: typeof measurementFailureCases
         return { stdout, stderr: '', code: 0, durationMs: 1, timedOut: false, outputLimitExceeded: false, aborted: false,
           childExited: true, targetCloseObserved: true, ownedProcessesExited: true, stdioClosed: true, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0,
           stdoutRetainedBytes: Buffer.byteLength(stdout), stderrRetainedBytes: 0, stdoutSha256: hash(stdout), stderrSha256: hash('') };
+      }
+      if (args.includes('--android-measurement-mkdir') && diagnostics) {
+        const observer = (() => {
+          try { return diagnostics.createBoundedSupervisorObserver(directory, 'mkdir-supervisor'); } catch { return undefined; }
+        })();
+        try {
+          return await runBoundedCommand(binary, args, timeout, observer ? { ...options, observerSupervisor: observer.stream } : options);
+        } catch (error) {
+          if (observer && error instanceof BoundedCommandError) {
+            await Promise.resolve().then(() => process.stderr.write(`SM59_MKDIR_FAILURE ${redactText(JSON.stringify({
+              failure, trace, launchError: error.result.launchError ?? null,
+              details: diagnostics.boundedCommandFailureDetails(error.result, observer.records(), true),
+            }))}\n`)).catch(() => undefined);
+          }
+          throw error;
+        } finally {
+          await observer?.close().catch(() => undefined);
+        }
       }
       return runBoundedCommand(binary, args, timeout, options);
     },

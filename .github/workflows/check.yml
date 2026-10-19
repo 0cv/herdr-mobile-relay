@@ -148,6 +148,7 @@ jobs:
         with:
           name: release-bundles
           path: dist/release/
+          overwrite: true
           retention-days: 1
 
   release-native-smoke:
@@ -389,6 +390,19 @@ jobs:
           test "$(go env GOTOOLCHAIN)" = local
           tar --version | grep -q '^tar (GNU tar)'
           xmllint --version >/dev/null 2>&1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: mobile-unit-cache
+        with:
+          path: |
+            frontend/node_modules
+            tests/mobile/node_modules
+          key: mobile-unit-${{ runner.os }}-node-24.21.0-bun-1.4.2-${{ hashFiles('frontend/bun.lock', 'tests/mobile/bun.lock') }}
+      - name: Install mobile unit dependencies
+        id: install-test-dependencies
+        if: steps.mobile-unit-cache.outputs.cache-hit != 'true'
+        run: |
+          bun install --frozen-lockfile --cwd frontend
+          bun install --frozen-lockfile --cwd tests/mobile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: always()
         with:

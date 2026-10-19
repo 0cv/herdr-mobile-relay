@@ -3063,6 +3063,8 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
     let errors = '';
     child.stderr!.on('data', chunk => { errors += chunk.toString(); });
     let done = false;
+    let statusWaitEnd: Record<string, unknown> | undefined;
+    let closeResult: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     let assertionsPassed = false;
     let initialRaceFirstFailure: unknown;
     let firstFailureObservation: Record<string, unknown> | undefined;
@@ -3109,7 +3111,11 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       assert.match(result.observedNs, /^\d{1,24}$/u);
       assert.ok(BigInt(result.observedNs) >= BigInt(budget.startedNs) && BigInt(result.observedNs) < BigInt(budget.endNs), 'fixture prerequisite: acknowledgment decision exceeded local budget');
     };
-    const exited = new Promise<void>(resolve => child.on('close', () => { done = true; resolve(); }));
+    const exited = new Promise<void>(resolve => child.on('close', (code, signal) => {
+      done = true;
+      if (mode === 'status-forged-markers' || mode === 'status-noisy-first-failure') closeResult = { code, signal };
+      resolve();
+    }));
     let witness: TerminalSession | undefined;
     let witnessFailure: unknown;
     if (witnessBuild) {
@@ -3314,6 +3320,8 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       if (mode === 'status-forged-markers') {
         const forbidden = ['status-opaque-secret', 'status-password-sentinel', 'https://status.private.example'];
         while (!done && Date.now() < deadline && !existsSync(join(state, 'wda-status.json'))) await pause();
+        statusWaitEnd = { done, deadlineReached: Date.now() >= deadline, statusPresent: existsSync(join(state, 'wda-status.json')),
+          exitCode: child.exitCode, signalCode: child.signalCode };
         const unfinishedOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8')) as { status?: { statusCode?: number; bytes?: number; body?: Record<string, unknown> } };
         const unfinishedPrivateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8')) as { status?: { statusCode?: number; bytes?: number; body?: Record<string, unknown> } };
         const unfinishedStatus = JSON.parse(await readFile(join(state, 'wda-status.json'), 'utf8')) as { statusCode?: number; bytes?: number; body?: Record<string, unknown> };
@@ -4607,6 +4615,23 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       } else if (mode === 'listener-pending-invalid-pid') {
         pendingInvalidFailure = {error, diagnostic: 'unavailable'};
       } else {
+        if (mode === 'status-forged-markers' || mode === 'status-noisy-first-failure') {
+          await Promise.resolve().then(() => {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            let owner: unknown;
+            try {
+              const view = listenerOwnerProjection(readListenerRecord(root, 'state/owner.json', 1_048_576), child.pid);
+              owner = { ownerRead: view.ownerRead, ready: view.ready, ended: view.ended, firstFailurePresent: view.firstFailurePresent,
+                statusPublished: view.statusPublished, firstFailure: view.firstFailure };
+            } catch { owner = { unavailable: true }; }
+            process.stderr.write(`XCTEST_STATUS_WAIT ${JSON.stringify({
+              mode, waitEnd: statusWaitEnd ?? 'not-reached', done, exitCode: child.exitCode, signalCode: child.signalCode, closeResult: closeResult ?? null,
+              statusFilePresent: existsSync(join(state, 'wda-status.json')),
+              errorCode: typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/u.test(code) ? code : 'other',
+              supervisorStderrBytes: Buffer.byteLength(errors), owner,
+            })}\n`);
+          }).catch(() => undefined);
+        }
         if (witnessBuild) { witnessFailure = error; terminalFailure(root); }
         throw error;
       }

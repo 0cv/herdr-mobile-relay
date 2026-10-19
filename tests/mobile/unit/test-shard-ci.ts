@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { BoundedCommandError, boundedCommand, type BoundedCommandOptions, type BoundedCommandResult } from '../support/bounded-process';
 import { PhaseBudget } from '../support/budget';
+import { redactText } from '../support/diagnostics';
 import { generateUnitTestShardManifest, validateUnitTestShardManifest, type UnitTestInventory, type UnitTestShard, type UnitTestShardManifest } from './test-shards';
 import { createUnitTestOutputContract, expectedUnitTestSuccessMultiplicity, hasForbiddenUnitTestOutputCharacter, validateUnitTestOutput, type UnitTestOutputAssessment } from './test-output';
 
@@ -21,6 +22,11 @@ const HASH_PATTERN = /^[0-9a-f]{64}$/u;
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const POSITIVE_INTEGER_PATTERN = /^[1-9][0-9]*$/u;
 const GROUP_ID_PATTERN = /^group-[0-9]{3}$/u;
+const FAILURE_MESSAGE_LIMIT = 2_500;
+const FAILURE_FRAME_LIMIT = 300;
+const LISTING_STDERR_LIMIT = 1_000;
+const STACK_LINE_PREFIX = '    at ';
+const REPOSITORY_FRAME_PATTERN = /(tests\/mobile\/[^\s():]+:\d+:\d+)/u;
 
 type RunIdentity = { sourceSha: string; runId: string; attempt: string };
 export type UnitCiGroup = { id: string; shardIds: string[] };
@@ -314,6 +320,53 @@ export function createUnitShardReceipt(
     },
     accounting: testOutputAccounting(inventory, shard.selection, stdout, stderr, result, command.rejected === true),
   };
+}
+
+export function unitShardFailureReport(receipt: UnitShardReceipt, rawStdout: string, rawStderr: string): string[] {
+  if (receipt.accounting.accepted && !receipt.command.rejected && !receipt.command.launchError) return [];
+  const titles = Object.keys(receipt.accounting.expectedSuccesses);
+  const failed = new Set<string>();
+  for (const line of `${rawStdout}\n${rawStderr}`.split(/\r?\n/u)) {
+    if (!line.startsWith('not ok - ')) continue;
+    const title = sourceDerivedTitle(titles, line.slice('not ok - '.length));
+    if (title !== undefined) failed.add(title);
+  }
+  const result = receipt.command.result;
+  return [
+    `unit shard ${receipt.shardId} failed: exitCode=${result?.code ?? 'none'} signal=${result?.signal ?? 'none'}`
+      + ` timedOut=${result?.timedOut ?? 'none'} durationMs=${result?.durationMs ?? 'none'} launchError=${Boolean(receipt.command.launchError)}`,
+    ...[...failed].map((title) => `  not ok: ${title}`),
+    ...receipt.accounting.missingSuccesses.filter((title) => !failed.has(title)).map((title) => `  missing: ${title}`),
+  ];
+}
+
+function sourceDerivedTitle(titles: readonly string[], reported: string): string | undefined {
+  return titles.filter((candidate) => reported === candidate || reported.startsWith(`${candidate}: `))
+    .sort((left, right) => right.length - left.length)[0];
+}
+
+export function unitShardFailureExcerpts(titles: readonly string[], rawStdout: string, rawStderr: string): string[] {
+  const records = new Map<string, string[]>();
+  for (const stream of [rawStdout, rawStderr]) {
+    let current: string[] | undefined;
+    for (const line of stream.split(/\r?\n/u)) {
+      if (line.startsWith('not ok - ')) {
+        const title = sourceDerivedTitle(titles, line.slice('not ok - '.length));
+        current = title !== undefined && !records.has(title) ? [] : undefined;
+        if (title !== undefined && current) records.set(title, current);
+      } else if (line.startsWith('ok - ')) current = undefined;
+      if (current) current.push(line);
+    }
+  }
+  const excerpts: string[] = [];
+  for (const [title, lines] of records) {
+    const stackStart = lines.findIndex((line) => line.startsWith(STACK_LINE_PREFIX));
+    const message = redactText(lines.slice(0, stackStart < 0 ? lines.length : stackStart).join('\n')).slice(0, FAILURE_MESSAGE_LIMIT);
+    excerpts.push(`  failure message for ${title}:`, message.replace(/^/gmu, '    '));
+    const frame = lines.filter((line) => line.startsWith(STACK_LINE_PREFIX)).map((line) => REPOSITORY_FRAME_PATTERN.exec(line)?.[1]).find(Boolean);
+    if (frame) excerpts.push(`  first repository frame: ${redactText(frame).slice(0, FAILURE_FRAME_LIMIT)}`);
+  }
+  return excerpts;
 }
 
 export function unitShardCommandArgs(selection: readonly string[]): string[] {
@@ -671,14 +724,18 @@ async function readReceiptArtifact(root: string, artifactName: string, expectedG
   return { artifactName, group, receipts };
 }
 
-async function aggregateArtifacts(
+export async function aggregateArtifacts(
   artifactRoot: string,
   identity: RunIdentity,
   preparationResult: string,
   groupsResult: string,
   runner: CommandRunner,
+  report: (line: string) => void = (line) => { process.stderr.write(`${line}\n`); },
 ): Promise<UnitCiAggregateResult> {
-  const { inventory: authoritativeInventory } = await runAuthoritativeInventory(runner);
+  const { inventory: authoritativeInventory } = await runAuthoritativeInventory(runner).catch((error: unknown) => {
+    if (error instanceof BoundedCommandError) report(`authoritative listing stderr: ${redactText(error.result.stderr).slice(0, LISTING_STDERR_LIMIT)}`);
+    throw error;
+  });
   const manifest = validateUnitTestShardManifest(generateUnitTestShardManifest(authoritativeInventory), authoritativeInventory);
   const inventoryBytes = Buffer.from(jsonText(authoritativeInventory));
   const manifestBytes = Buffer.from(jsonText(manifest));
@@ -737,6 +794,7 @@ export async function executeUnitCiGroup(
   receiptDirectory: string,
   identity: RunIdentity,
   runner: CommandRunner = boundedCommand,
+  report: (line: string) => void = (line) => { process.stderr.write(`${line}\n`); },
 ): Promise<{ group: UnitCiGroupReceipt; accepted: boolean }> {
   const groupStart = performance.now();
   const startedAt = new Date().toISOString();
@@ -771,6 +829,11 @@ export async function executeUnitCiGroup(
     const filename = join(receiptDirectory, `receipt-${shard.id}.json`);
     const bytes = await writeExclusiveJson(filename, receipt);
     receiptDigests.push({ shardId: shard.id, sha256: sha256(bytes) });
+    const failureReport = unitShardFailureReport(receipt, command.result?.stdout || '', command.result?.stderr || '');
+    for (const line of failureReport) report(line);
+    if (failureReport.length) {
+      for (const line of unitShardFailureExcerpts(Object.keys(receipt.accounting.expectedSuccesses), command.result?.stdout || '', command.result?.stderr || '')) report(line);
+    }
     accepted &&= receipt.accounting.accepted && !command.launchError;
   }
   const groupReceipt: UnitCiGroupReceipt = {

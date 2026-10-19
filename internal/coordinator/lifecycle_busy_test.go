@@ -7,6 +7,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -176,7 +177,22 @@ func TestAgentStartKeepsTheTargetWhenHerdrKeepsRefusing(t *testing.T) {
 		t.Fatal("Start() succeeded, want the persistent refusal to surface")
 	}
 	if !herdr.IsRefused(err) {
-		t.Fatalf("Start() error = %v, want the refusal preserved for a safe-retry classification", err)
+		outcomeStarted := "none"
+		var outcome *herdr.OutcomeError
+		if errors.As(err, &outcome) {
+			outcomeStarted = strconv.FormatBool(outcome.Started)
+		}
+		recorded, _ := os.ReadFile(record)
+		startCount := 0
+		for _, line := range strings.Split(string(recorded), "\n") {
+			if strings.HasPrefix(line, "agent start ") {
+				startCount++
+			}
+		}
+		t.Fatalf("Start() error = %v, want the refusal preserved for a safe-retry classification"+
+			" (not_started=%t dispatched_unknown=%t deadline_exceeded=%t outcome_started=%s agent_start_invocations=%d)",
+			err, errors.Is(err, herdr.ErrNotStarted), errors.Is(err, herdr.ErrDispatchedUnknown),
+			errors.Is(err, context.DeadlineExceeded), outcomeStarted, startCount)
 	}
 	if result.PaneID != "pane-new" {
 		t.Fatalf("Start() pane_id = %q, want the kept target pane-new", result.PaneID)

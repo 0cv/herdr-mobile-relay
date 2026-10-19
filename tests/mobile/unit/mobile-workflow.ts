@@ -106,7 +106,7 @@ function auditUnitShardWorkflow(check: any, source: string): void {
   assert.equal(preparation.outputs.matrix, '${{ steps.prepare.outputs.matrix }}');
   assert.equal(aggregate.if, 'always()');
   assert.deepEqual(aggregate.needs, ['mobile-unit-prepare', 'mobile-unit-shards']);
-  for (const job of [preparation, shards]) {
+  for (const job of [preparation, shards, aggregate]) {
     const cache = job.steps.find((step: any) => step.id === 'mobile-unit-cache');
     assert.ok(cache?.uses?.startsWith('actions/cache@'));
     assert.equal(cache.with.path, 'frontend/node_modules\ntests/mobile/node_modules\n');
@@ -115,6 +115,8 @@ function auditUnitShardWorkflow(check: any, source: string): void {
     assert.equal(install.if, "steps.mobile-unit-cache.outputs.cache-hit != 'true'");
     assert.ok(install.run.includes('bun install --frozen-lockfile --cwd frontend'));
     assert.ok(install.run.includes('bun install --frozen-lockfile --cwd tests/mobile'));
+    const unitCommand = job.steps.findIndex((step: any) => step.run?.includes('tests/mobile/unit/test-shard-ci.ts'));
+    assert.ok(job.steps.indexOf(cache) < job.steps.indexOf(install) && job.steps.indexOf(install) < unitCommand);
   }
   for (const [name, job] of Object.entries({ preparation, shards, aggregate }) as Array<[string, any]>) {
     assert.equal(job['timeout-minutes'], 20);
@@ -166,6 +168,10 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
   const jobs = workflow.jobs;
   auditUnitShardWorkflow(check, shardSource);
   for (const name of needed) assert.ok(jobs[name], name);
+  for (const [job, name] of [[check.jobs.release, 'release-bundles'], [jobs.prepare, 'mobile-bundles-android'], [jobs.prepare, 'mobile-bundles-ios'], [jobs.prepare, 'mobile-bundles-current']] as const) {
+    const upload = job.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@') && step.with?.name === name);
+    assert.equal(upload?.with.overwrite, true, `${name} must overwrite its artifact when a run is rerun`);
+  }
   validateNativePath(action.runs.steps, 'inputs'); validateNativePath(jobs.device.steps, 'matrix');
   for (const name of ['smoke', 'device']) assert.equal(jobs[name].strategy['fail-fast'], false);
   const validators = Object.entries(jobs).flatMap(([job, value]: [string, any]) => (value.steps || []).filter((step: any) => step.run?.includes('bun tests/mobile/validate-evidence.ts')).map((step: any) => ({ job, step })));
@@ -275,7 +281,7 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
   }
   return completed;
 }
-export const workflowMutationNames = ['strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always'] as const;
+export const workflowMutationNames = ['strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
   ['mobile workflow SM59 10 ordinary and strict aggregation', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
@@ -379,6 +385,10 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
       if (mutation === 'unit-source-ref') k.jobs['mobile-unit-shards'].steps.find((step: any) => step.uses?.startsWith('actions/checkout@')).with.ref = 'main';
       if (mutation === 'unit-weak-aggregate') k.jobs['mobile-unit-aggregate'].steps.find((step: any) => step.run?.includes('test-shard-ci.ts aggregate')).run = 'echo accepted';
       if (mutation === 'unit-admission-always') k.jobs.mobile.if = 'always()';
+      if (mutation === 'unit-aggregate-test-dependencies') {
+        k.jobs['mobile-unit-aggregate'].steps = k.jobs['mobile-unit-aggregate'].steps.filter((step: any) => step.id !== 'install-test-dependencies');
+      }
+      if (mutation === 'upload-overwrite') delete k.jobs.release.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@') && step.with?.name === 'release-bundles').with.overwrite;
       assert.throws(() => audit(w, a, r, k, source), mutation);
     }
     for (const unsupported of ['contains(inputs.suite, \'release\')', 'needs.*.result', 'inputs.suite + 1', 'failure()']) assert.throws(() => expression(unsupported, { needs: {}, inputs: { suite: 'release' } }));

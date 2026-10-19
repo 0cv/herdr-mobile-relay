@@ -9,6 +9,7 @@ import { repositoryRoot } from '../support/paths';
 import { stableTestIdentities } from './test-registry';
 import { createUnitTestOutputContract } from './test-output';
 import {
+  aggregateArtifacts,
   createUnitCiExecutionPlan,
   createUnitShardReceipt,
   executeUnitCiGroup,
@@ -17,6 +18,8 @@ import {
   groupUnitTestShards,
   prepareUnitCiArtifacts,
   unitShardCommandArgs,
+  unitShardFailureExcerpts,
+  unitShardFailureReport,
   validateUnitCiAggregate,
   validateUnitCiExecutionPlan,
   type UnitCiArtifactGroup,
@@ -600,7 +603,8 @@ export const testShardCiTests: Array<[string, () => Promise<void>]> = [
         const prep = await prepareUnitCiArtifacts(prepared, identity, runner);
         assert.equal(JSON.parse(prep.matrix).include.length, prep.plan.groups.length);
         const groupId = prep.plan.groups[0]!.id;
-        const result = await executeUnitCiGroup(prepared, groupId, receipts, identity, runner);
+        const reports: string[] = [];
+        const result = await executeUnitCiGroup(prepared, groupId, receipts, identity, runner, (line) => reports.push(line));
         const shardFiles = (await readdir(receipts)).filter((name) => name.startsWith('receipt-'));
         assert.equal(shardFiles.length, prep.plan.groups[0]!.shardIds.length);
         const firstShardId = prep.plan.groups[0]!.shardIds[0]!;
@@ -611,6 +615,13 @@ export const testShardCiTests: Array<[string, () => Promise<void>]> = [
         assert.equal(raw.command.rejected, outcome === 'rejected-success-shaped', `${outcome} rejection evidence`);
         if (outcome === 'rejected-success-shaped') assert.match(raw.command.result!.stdout, /ok - Android fixture alpha/u);
         assert.equal(result.accepted, outcome === 'success', `${outcome} group acceptance`);
+        assert.equal(reports[0]?.startsWith(`unit shard ${firstShardId} failed: `) ?? false, outcome !== 'success', `${outcome} job log report`);
+        const rejectedShards: string[] = [];
+        for (const shardId of prep.plan.groups[0]!.shardIds) {
+          const shardReceipt = JSON.parse(await readFile(join(receipts, `receipt-${shardId}.json`), 'utf8')) as UnitShardReceipt;
+          if (!shardReceipt.accounting.accepted) rejectedShards.push(shardReceipt.shardId);
+        }
+        assert.deepEqual(reports.filter((line) => line.startsWith('unit shard ')).map((line) => line.split(' ')[2]), rejectedShards, `${outcome} job log report`);
         const groupReceipt = JSON.parse(await readFile(join(receipts, 'group.json'), 'utf8'));
         assert.equal(groupReceipt.result, outcome === 'success' ? 'success' : 'failure');
       }
@@ -618,6 +629,123 @@ export const testShardCiTests: Array<[string, () => Promise<void>]> = [
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  }],
+  ['unit CI failure reports name only source-derived failed and missing titles with the shard lifecycle', async () => {
+    const names = ['Android fixture alpha', 'Android fixture beta', 'Android fixture beta: nested', 'Android fixture gamma', wrapperName];
+    const current = fixture(makeInventory(names));
+    const ids = Object.fromEntries(current.inventory.cases.map(({ id, name }) => [name, id]));
+    const shard = { ...current.manifest.shards[0]!, selection: names.slice(0, 4).map((name) => ids[name]!) };
+    const groupId = current.plan.groups[0]!.id;
+    const args = unitShardCommandArgs(shard.selection);
+    const secret = 'token=PRIVATE_SENTINEL device emulator-5554';
+    const stdout = 'ok - Android fixture alpha\n';
+    const stderr = `not ok - Android fixture beta: nested: Error: ${secret}\n    at ${secret}\nnot ok - Android fixture unknown: ${secret}\n`;
+    const receipt = createUnitShardReceipt(current.inventory, current.manifest, current.plan, groupId, shard,
+      { binary: process.execPath, args, result: resultFor(stdout, { stderr, code: 1, durationMs: 7 }) }, '2026-01-01T00:00:00.000Z', 8);
+    const report = unitShardFailureReport(receipt, stdout, stderr);
+    assert.deepEqual(report, [
+      `unit shard ${shard.id} failed: exitCode=1 signal=none timedOut=false durationMs=7 launchError=false`,
+      '  not ok: Android fixture beta: nested',
+      '  missing: Android fixture beta',
+      '  missing: Android fixture gamma',
+    ]);
+    assert.ok(report.every((line) => !line.includes('PRIVATE_SENTINEL') && !line.includes('emulator-5554') && !line.includes('unknown')));
+    const timedOut = createUnitShardReceipt(current.inventory, current.manifest, current.plan, groupId, shard,
+      { binary: process.execPath, args, result: resultFor('', { code: 1, timedOut: true, signal: 'SIGKILL', durationMs: 9 }), rejected: true },
+      '2026-01-01T00:00:00.000Z', 10);
+    assert.deepEqual(unitShardFailureReport(timedOut, '', ''), [
+      `unit shard ${shard.id} failed: exitCode=1 signal=SIGKILL timedOut=true durationMs=9 launchError=false`,
+      ...names.slice(0, 4).map((name) => `  missing: ${name}`),
+    ]);
+    const passing = shardOutput(current.inventory, shard.selection);
+    const accepted = createUnitShardReceipt(current.inventory, current.manifest, current.plan, groupId, shard,
+      { binary: process.execPath, args, result: resultFor(passing) }, '2026-01-01T00:00:00.000Z', 6);
+    assert.equal(accepted.accounting.accepted, true);
+    assert.deepEqual(unitShardFailureReport(accepted, passing, ''), []);
+  }],
+  ['unit CI failure excerpts redact secrets, strip absolute paths, emit the first repository frame and stay bounded', async () => {
+    const titles = ['Android fixture alpha', 'Android fixture beta', 'Android fixture beta: nested', wrapperName];
+    const stderr = [
+      'not ok - Android fixture beta: nested: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
+      "+ 'pending'",
+      "- 'removed-after-failure'",
+      '  detail https://relay.example/?token=PRIVATE_SENTINEL',
+      '    at assert (node:internal/assert:1:1)',
+      '    at fixture (/home/runner/work/herdr/herdr/tests/mobile/unit/android-environment.ts:8159:16)',
+      '    at /home/runner/work/herdr/herdr/tests/mobile/unit/run.ts:2594:7',
+      'not ok - Android fixture unknown: PRIVATE_UNKNOWN',
+      '    at /home/runner/work/herdr/herdr/tests/mobile/unit/unknown.ts:1:1',
+      'not ok - Android fixture alpha: Error: no stack',
+      'ok - Android fixture beta',
+      'unrelated diagnostic after a passing test',
+      '',
+    ].join('\n');
+    assert.deepEqual(unitShardFailureExcerpts(titles, 'ok - Android fixture beta\n', stderr), [
+      '  failure message for Android fixture beta: nested:',
+      [
+        '    not ok - Android fixture beta: nested: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
+        "    + 'pending'",
+        "    - 'removed-after-failure'",
+        '      detail https://relay.example/?token=[REDACTED]',
+      ].join('\n'),
+      '  first repository frame: tests/mobile/unit/android-environment.ts:8159:16',
+      '  failure message for Android fixture alpha:',
+      '    not ok - Android fixture alpha: Error: no stack',
+    ]);
+    assert.deepEqual(unitShardFailureExcerpts(titles, '', 'ok - Android fixture alpha\n'), []);
+    const long = [
+      `not ok - Android fixture alpha: ${'m'.repeat(4_000)}`,
+      `    at ${'/home/runner/work/herdr/herdr/'}tests/mobile/${'d/'.repeat(300)}file.ts:1:1`,
+      '',
+    ].join('\n');
+    const [, message, frame] = unitShardFailureExcerpts(titles, '', long);
+    assert.equal(message!.length, 4 + 2_500);
+    assert.equal(frame!.length, '  first repository frame: '.length + 300);
+    assert.ok(frame!.startsWith('  first repository frame: tests/mobile/d/'));
+  }],
+  ['unit CI group execution prints failure excerpts to the job log while receipts stay redacted', async () => {
+    const inventory = makeInventory();
+    const root = await mkdtemp(join(tmpdir(), 'herdr-unit-ci-excerpt-'));
+    try {
+      const prepared = join(root, 'prepared');
+      const receipts = join(root, 'receipts');
+      const listing = syntheticListingRunner(inventory);
+      const prep = await prepareUnitCiArtifacts(prepared, identity, listing);
+      const sentinel = '?token=PRIVATE_SENTINEL';
+      const runner = async (binary: string, args: string[], timeout: number): Promise<BoundedCommandResult> => {
+        if (args.includes('--list-tests')) return listing(binary, args, timeout);
+        const stderr = args.at(-1)!.split(',').map((id) => inventory.cases.find((entry) => entry.id === id)!)
+          .filter((entry) => entry.scope === 'outer')
+          .map((entry) => `not ok - ${entry.name}: Error: ${sentinel}\n    at /ci/work/tests/mobile/unit/fixture.ts:5:9\n`).join('');
+        return resultFor('', { stderr, code: 1 });
+      };
+      const reports: string[] = [];
+      await executeUnitCiGroup(prepared, prep.plan.groups[0]!.id, receipts, identity, runner, (line) => reports.push(line));
+      assert.ok(reports.includes('  first repository frame: tests/mobile/unit/fixture.ts:5:9'));
+      assert.ok(reports.some((line) => line.includes('?token=[REDACTED]')));
+      assert.ok(reports.every((line) => !line.includes('PRIVATE_SENTINEL') && !line.includes('/ci/work')));
+      for (const name of (await readdir(receipts)).filter((entry) => entry.startsWith('receipt-'))) {
+        const receiptText = await readFile(join(receipts, name), 'utf8');
+        assert.ok(!receiptText.includes('PRIVATE_SENTINEL') && !receiptText.includes('fixture.ts'), name);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }],
+  ['unit CI aggregate prints a redacted bounded listing stderr excerpt before a bounded listing failure', async () => {
+    const stderr = `error: Cannot find module 'jsdom' ?token=PRIVATE_SENTINEL ${'x'.repeat(2_000)}`;
+    const lines: string[] = [];
+    await assert.rejects(() => aggregateArtifacts('/nonexistent-artifacts', identity, 'success', 'success',
+      async (binary, args) => { throw new BoundedCommandError(binary, args, resultFor('', { stderr, code: 1 })); },
+      (line) => lines.push(line)), /BOUNDED_COMMAND_FAILED/u);
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0]!.startsWith("authoritative listing stderr: error: Cannot find module 'jsdom' ?token=[REDACTED]"));
+    assert.ok(lines[0]!.length <= 'authoritative listing stderr: '.length + 1_000);
+    assert.ok(!lines[0]!.includes('PRIVATE_SENTINEL'));
+    const unrelated: string[] = [];
+    await assert.rejects(() => aggregateArtifacts('/nonexistent-artifacts', identity, 'success', 'success',
+      async () => resultFor('', { stderr, code: 1 }), (line) => unrelated.push(line)), /did not complete successfully/u);
+    assert.deepEqual(unrelated, []);
   }],
   ['unit CI execution clears selector overrides and rejects invalid group selection', async () => {
     const inventory = makeInventory();

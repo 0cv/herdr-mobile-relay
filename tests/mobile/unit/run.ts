@@ -692,7 +692,6 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
     fixtureCreate: { stage: 'fixture-create', logExists: existsSync(log), fixturePathCategory: 'expected-owned-path' },
     children: [],
   };
-  await writeFile(diagnostic, JSON.stringify(initialDiagnostic));
   const adb = join(binDirectory, 'adb');
   await writeFile(adb, `#!${process.execPath}
 import { basename, dirname } from 'node:path';
@@ -767,6 +766,12 @@ try {
   await writeFile(join(root, 'avd', 'herdr-mobile-ci-fixture.avd', 'config.ini'), 'image.sysdir.1=system-images/android-35/google_apis/x86_64/\ntag.id=google_apis\nabi.type=x86_64\n');
   await writeFile(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64', 'source.properties'), 'Pkg.Revision=12\nAndroidVersion.ApiLevel=35\nSystemImage.TagId=google_apis\nSystemImage.Abi=x86_64\n');
   await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nif [ "$*" != "-no-window -version" ]; then\n  printf "qemu-system-x86_64: error while loading shared libraries: libpulse.so.0\\n" >&2\n  exit 127\nfi\nprintf "Android emulator version 35.0.2.0\\n"\n', { mode: 0o700 });
+  // macOS scans a newly written executable on its first launch, which can exceed the short adb timeouts these tests use.
+  // The warm-up runs before the diagnostic file exists and without a log path, so it records nothing.
+  for (const [tool, args] of [[adb, ['version']], [join(binDirectory, 'emulator'), ['-no-window', '-version']]] as const) {
+    spawnSync(tool, args, { env: { PATH: process.env.PATH || '' }, stdio: 'ignore', timeout: 30_000 });
+  }
+  await writeFile(diagnostic, JSON.stringify(initialDiagnostic));
   const properties = {
     'ro.build.fingerprint': 'fixture/fingerprint',
     'ro.build.id': 'AP4A',
