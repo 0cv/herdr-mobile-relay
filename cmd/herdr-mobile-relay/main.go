@@ -28,6 +28,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/stablestate"
 	"github.com/0cv/herdr-mobile-relay/internal/support"
 	"github.com/0cv/herdr-mobile-relay/internal/tailscale"
+	"github.com/0cv/herdr-mobile-relay/internal/uninstallmount"
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
 )
 
@@ -61,6 +62,16 @@ func runWithServerRunner(args []string, runner func(*app.Server, context.Context
 	switch command {
 	case "supervise":
 		return runSupervise(args, os.Stdin, os.Stdout, os.Stderr)
+	case "__private-uninstall-mount-guard":
+		if len(args) != 3 {
+			return 2, errors.New("private uninstall mount guard requires exactly three roots")
+		}
+		// This read-only candidate is deliberately not wired into uninstall.
+		// Never expose a pathname, mount table, or syscall error through the CLI.
+		if err := uninstallmount.Check(os.Getenv("HOME"), args[0], args[1], args[2]); err != nil {
+			return 1, errors.New("uninstall mount guard refused")
+		}
+		return 0, nil
 	case "__private-process-anchor":
 		if len(args) != 0 {
 			return 2, errors.New("private process anchor accepts no arguments")

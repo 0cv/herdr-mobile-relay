@@ -166,6 +166,146 @@ printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
 # still run, while selected scalar or support acquisitions are corrupted.
 # Exercise the installed checker's decisions, not a copied comparison.
 cp "$ARCHIVE" "$WORK_DIR/positive.tar.gz"
+# Exercise the real command from an extracted native archive, not a checkout
+# binary or a parser test. This does not invoke uninstall or authorize deletion.
+GUARD_EXTRACT="$WORK_DIR/guard-extract"
+GUARD_HOME="$WORK_DIR/guard-home"
+mkdir -p "$GUARD_EXTRACT" "$GUARD_HOME/releases" "$GUARD_HOME/config" "$GUARD_HOME/cache"
+GUARD_HOME=$(CDPATH='' cd "$GUARD_HOME" && pwd -P)
+tar -C "$GUARD_EXTRACT" -xzf "$WORK_DIR/positive.tar.gz"
+GUARD_RELAY="$GUARD_EXTRACT/herdr-mobile-relay"
+# Classify the complete namespace independently; never use the guard verdict.
+# fdinfo mnt_id is the descriptor-bound ID also returned by statx.
+GUARD_SUPPORTED=false
+if [ "$HOST_OS" = linux ] && python3 - "$GUARD_HOME" <<'PY'
+import os, re, sys
+try:
+    def number(raw):
+        if not raw or not raw.isdigit(): raise ValueError()
+        value = int(raw)
+        if value > (1 << 64) - 1: raise ValueError()
+        return value
+    def path(raw):
+        if re.search(rb'\\(?!040|011|012|134)', raw): raise ValueError()
+        for code, char in ((b'040', b' '), (b'011', b'\t'), (b'012', b'\n'), (b'134', b'\\')):
+            raw = raw.replace(b'\\' + code, char)
+        if not raw.startswith(b'/') or raw != os.path.normpath(raw) or b'//' in raw or \
+                any(c in raw for c in (b'\x00', b'\r', b'\t', b'\n', b'\\')): raise ValueError()
+        return raw
+    def under(child, parent):
+        return child == parent or parent == b'/' and child.startswith(b'/') or child.startswith(parent + b'/')
+    def mounted(pathname):
+        fd = os.open(pathname, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            with open(f'/proc/self/fdinfo/{fd}', encoding='ascii') as info:
+                ids = [line[7:].strip() for line in info if line.startswith('mnt_id:')]
+            if len(ids) != 1: raise ValueError()
+            dev = os.fstat(fd).st_dev
+            return number(ids[0].encode('ascii')), (os.major(dev), os.minor(dev))
+        finally:
+            os.close(fd)
+    home = path(os.fsencode(sys.argv[1]))
+    base_id, base_dev = mounted('/')
+    selected_id, selected_dev = mounted(sys.argv[1])
+    with open('/proc/self/mountinfo', 'rb') as inventory:
+        data = inventory.read((4 << 20) + 1)
+    if not data or len(data) > 4 << 20 or not data.endswith(b'\n') or b'\x00' in data:
+        raise ValueError()
+    mounts, points = {}, set()
+    for line in data.splitlines():
+        fields = line.split()
+        if len(line) > 4096 or len(mounts) >= 16384 or len(fields) < 10 or \
+                fields.count(b'-') != 1 or b' '.join(fields) != line: raise ValueError()
+        sep = fields.index(b'-')
+        if sep < 6 or len(fields) - sep != 4 or fields[sep+1] == b'autofs' or \
+                any(not field for field in (fields[5], fields[sep+1], fields[sep+2], fields[sep+3])):
+            raise ValueError()
+        if any(re.search(rb'\\(?!040|011|012|134)', field) for field in fields): raise ValueError()
+        for tag in fields[6:sep]:
+            if tag == b'unbindable': continue
+            key, _, value = tag.partition(b':')
+            if key not in (b'shared', b'master', b'propagate_from') or number(value) == 0:
+                raise ValueError()
+        ident, parent = number(fields[0]), number(fields[1])
+        major, minor = (number(part) for part in fields[2].split(b':'))
+        origin, point = path(fields[3]), path(fields[4])
+        if ident == 0 or ident == parent or ident in mounts or point in points: raise ValueError()
+        mounts[ident] = (parent, (major, minor), origin, point)
+        points.add(point)
+    base = mounts.get(base_id)
+    if base is None or base[2:] != (b'/', b'/') or base[1] != base_dev or \
+            selected_id != base_id or selected_dev != base_dev or len(mounts) != len(points):
+        raise ValueError()
+    roots = tuple(home + b'/' + name for name in (b'releases', b'config', b'cache'))
+    for ident, (parent, dev, origin, point) in mounts.items():
+        if ident == base_id: continue
+        ancestor = mounts.get(parent)
+        if ancestor is None or point == ancestor[3] or not under(point, ancestor[3]): raise ValueError()
+        for root in roots:
+            if under(root, point) or under(point, root) or \
+                    dev == base_dev and (under(root, origin) or under(origin, root)):
+                raise ValueError()
+except (OSError, ValueError, IndexError, UnicodeError, AttributeError):
+    sys.exit(1)
+PY
+then
+    GUARD_SUPPORTED=true
+fi
+printf '%s\n' fixture-private-canary > "$GUARD_HOME/config/keep"
+GUARD_BEFORE=$(find "$GUARD_HOME" -print | sort)
+GUARD_MODES=$(ls -ld "$GUARD_HOME" "$GUARD_HOME"/* "$GUARD_HOME/config/keep")
+if [ "$GUARD_SUPPORTED" = true ]; then
+    if ! OUTPUT=$(HOME="$GUARD_HOME" "$GUARD_RELAY" __private-uninstall-mount-guard \
+        "$GUARD_HOME/releases" "$GUARD_HOME/config" "$GUARD_HOME/cache" 2>&1); then
+        echo 'supported Linux base-mount fixture refused' >&2; exit 1
+    fi
+    [ -z "$OUTPUT" ] || { echo 'mount guard emitted data on success' >&2; exit 1; }
+else
+    if OUTPUT=$(HOME="$GUARD_HOME" "$GUARD_RELAY" __private-uninstall-mount-guard \
+        "$GUARD_HOME/releases" "$GUARD_HOME/config" "$GUARD_HOME/cache" 2>&1); then
+        echo 'unsupported mount topology or Darwin claimed safe' >&2; exit 1
+    fi
+    [ "$OUTPUT" = 'herdr-mobile-relay: uninstall mount guard refused' ] || {
+        echo 'unsupported topology or Darwin disclosed data' >&2; exit 1;
+    }
+fi
+if OUTPUT=$(HOME="$GUARD_HOME" "$GUARD_RELAY" __private-uninstall-mount-guard \
+    "$GUARD_HOME/releases" "$GUARD_HOME/config" "$GUARD_HOME/cache" fixture-private-canary 2>&1); then
+    echo 'mount guard accepted extra root' >&2; exit 1
+fi
+[ "$OUTPUT" = 'herdr-mobile-relay: private uninstall mount guard requires exactly three roots' ] || {
+    echo 'mount guard disclosed argument or used wrong arity' >&2; exit 1;
+}
+if OUTPUT=$(HOME="$GUARD_HOME" "$GUARD_RELAY" __private-uninstall-mount-guard \
+    "$GUARD_HOME/releases" "$GUARD_HOME/config" '/fixture-private-canary' 2>&1); then
+    echo 'mount guard accepted a foreign root' >&2; exit 1
+fi
+[ "$OUTPUT" = 'herdr-mobile-relay: uninstall mount guard refused' ] || {
+    echo 'mount guard disclosed a selected path' >&2; exit 1;
+}
+[ "$(ls -ld "$GUARD_HOME" "$GUARD_HOME"/* "$GUARD_HOME/config/keep")" = "$GUARD_MODES" ] &&
+    [ "$(cat "$GUARD_HOME/config/keep")" = fixture-private-canary ] &&
+    [ "$(find "$GUARD_HOME" -print | sort)" = "$GUARD_BEFORE" ] || {
+    echo 'mount guard changed fixture tree' >&2; exit 1;
+}
+# Snapshot the complete private tree and its link inode immediately before
+# rejection; merely recreating a symlink with the same target must not pass.
+rmdir "$GUARD_HOME/cache"
+ln -s config "$GUARD_HOME/cache"
+GUARD_LINK_TREE=$(find "$GUARD_HOME" -print | sort)
+GUARD_LINK_STAT=$(ls -ldi "$GUARD_HOME" "$GUARD_HOME"/* "$GUARD_HOME/config/keep")
+cp "$GUARD_HOME/config/keep" "$WORK_DIR/guard-keep-before"
+if OUTPUT=$(HOME="$GUARD_HOME" "$GUARD_RELAY" __private-uninstall-mount-guard \
+    "$GUARD_HOME/releases" "$GUARD_HOME/config" "$GUARD_HOME/cache" 2>&1); then
+    echo 'mount guard admitted selected symlink root' >&2; exit 1
+fi
+[ "$OUTPUT" = 'herdr-mobile-relay: uninstall mount guard refused' ] &&
+    [ "$(find "$GUARD_HOME" -print | sort)" = "$GUARD_LINK_TREE" ] &&
+    [ "$(ls -ldi "$GUARD_HOME" "$GUARD_HOME"/* "$GUARD_HOME/config/keep")" = "$GUARD_LINK_STAT" ] &&
+    [ -L "$GUARD_HOME/cache" ] && [ "$(readlink "$GUARD_HOME/cache")" = config ] &&
+    cmp -s "$WORK_DIR/guard-keep-before" "$GUARD_HOME/config/keep" || {
+    echo 'symlink-root refusal disclosed data or changed fixture' >&2; exit 1;
+}
 FAULT_CHECKSUMS="$WORK_DIR/fault-checksums"
 cp "$RELEASE_DIR/herdr-mobile-relay" "$RELEASE_DIR/native-relay"
 cat > "$RELEASE_DIR/herdr-mobile-relay" <<'EOF'
