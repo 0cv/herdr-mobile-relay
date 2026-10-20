@@ -1,10 +1,11 @@
-import { existsSync, renameSync, rmSync } from 'node:fs';
+import { renameSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { validateMeasurementIdentity, type MeasurementIdentity } from './support/mobile-result';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Writable } from 'node:stream';
+import { ANDROID_GMS_OBSERVATION_FILE, checkedTemporaryFile } from './android-measurement-cleanup';
 import { ANDROID_LOG_LIMIT, androidMeasurementMarker, parseAndroidProcesses, assessAndroidEnvironment, readEnvironmentInputs, type AndroidEnvironmentCheck, type AndroidPlannedTermination, type AndroidGmsComponentState } from './android-environment';
 import { command } from './support/process';
 import { BoundedCommandError, boundedCommand, type BoundedCommandResult } from './support/bounded-process';
@@ -59,7 +60,6 @@ const ANDROID_GMS_TOTAL_BYTES_LIMIT = ANDROID_GMS_DUMP_LIMIT * ANDROID_GMS_OBSER
 const ANDROID_GMS_TOTAL_TIME_LIMIT_MS = ANDROID_GMS_STAGE_TIMEOUT_MS * ANDROID_GMS_OBSERVATION_STAGES.length;
 const ANDROID_GMS_TOTAL_PERSISTENCE_LIMIT_MS = ANDROID_GMS_PERSISTENCE_TIMEOUT_MS * (ANDROID_GMS_OBSERVATION_STAGES.length + 1);
 const ANDROID_GMS_HASH_ENCODING = 'sha256-hex-dot-separated-v1' as const;
-const ANDROID_GMS_OBSERVATION_FILE = 'android-environment-gms-observations.json';
 const ANDROID_GMS_OBSERVATION_FILE_LIMIT = 8_000_000;
 const ANDROID_MEASUREMENT_JSON_FILES = new Set(['android-environment-collector.json', 'android-environment-completion.json',
   'android-environment-identity.json', 'android-environment-check.json']);
@@ -719,7 +719,7 @@ export class AndroidEnvironmentMeasurement {
         else {
           try {
             const cleanup = await this.io.boundedCommand(process.execPath,
-              [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), '--gms-diagnostic-cleanup'], cleanupTimeout, {
+              [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--gms-diagnostic-cleanup'], cleanupTimeout, {
                 label: 'remove GMS diagnostic temporary evidence',
                 maxBytes: 512,
                 maxBytesPerStream: 256,
@@ -812,7 +812,7 @@ export class AndroidEnvironmentMeasurement {
 
   private async cleanupOwnedTemporary(temporary: string, target: string): Promise<void> {
     const result = await this.io.boundedCommand(process.execPath,
-      [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), '--android-measurement-cleanup-file'], 200, {
+      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-cleanup-file'], 200, {
         label: 'remove retired Android measurement temporary file',
         maxBytes: 256,
         maxBytesPerStream: 128,
@@ -824,7 +824,7 @@ export class AndroidEnvironmentMeasurement {
 
   private async invalidateCollectorSummary(): Promise<void> {
     const result = await this.io.boundedCommand(process.execPath,
-      [fileURLToPath(new URL('./android-measurement.ts', import.meta.url)), '--android-measurement-invalidate-collector'], 200, {
+      [fileURLToPath(new URL('./android-measurement-cleanup.ts', import.meta.url)), '--android-measurement-invalidate-collector'], 200, {
         label: 'invalidate unconfirmed Android collector summary',
         maxBytes: 256,
         maxBytesPerStream: 128,
@@ -1394,18 +1394,6 @@ async function runAndroidMeasurementOperations(): Promise<void> {
   process.stdout.write('BEGIN_OK\n');
 }
 
-function checkedTemporaryFile(directory: string, target: string, temporary: string): string {
-  const resolvedDirectory = resolve(directory);
-  const resolvedTarget = resolve(target);
-  const resolvedTemporary = resolve(temporary);
-  if (dirname(resolvedTarget) !== resolvedDirectory || dirname(resolvedTemporary) !== resolvedDirectory
-    || !basename(resolvedTemporary).startsWith(`.${basename(resolvedTarget)}.`)
-    || !/^[a-f0-9-]{36}\.pending$/u.test(basename(resolvedTemporary).slice(basename(resolvedTarget).length + 2))) {
-    throw new Error('Android measurement persistence paths are malformed');
-  }
-  return resolvedTemporary;
-}
-
 async function runAndroidMeasurementPersistence(mode: 'json' | 'text', stallAfterPublication = false): Promise<void> {
   const request = JSON.parse((await readBoundedStdin(ANDROID_LOG_LIMIT * 2 + 16_384)).toString('utf8')) as {
     directory?: string; target?: string; temporary?: string; contents?: string; expectedBytes?: number; expectedSha256?: string;
@@ -1445,26 +1433,6 @@ async function runAndroidMeasurementPersistence(mode: 'json' | 'text', stallAfte
   process.stdout.write(`${JSON.stringify({ byteLength: staged.byteLength, sha256: expectedSha256 })}\n`);
 }
 
-async function runAndroidMeasurementInvalidateCollector(): Promise<void> {
-  const request = JSON.parse((await readBoundedStdin(4_096)).toString('utf8')) as { directory?: string; target?: string };
-  if (!request.directory || !request.target || dirname(resolve(request.target)) !== resolve(request.directory)
-    || basename(resolve(request.target)) !== 'android-environment-collector.json') {
-    throw new Error('Android collector invalidation request is malformed');
-  }
-  rmSync(resolve(request.target), { force: true });
-  process.stdout.write(`${JSON.stringify({ removed: !existsSync(resolve(request.target)) })}\n`);
-}
-
-async function runAndroidMeasurementCleanup(): Promise<void> {
-  const request = JSON.parse((await readBoundedStdin(4_096)).toString('utf8')) as {
-    directory?: string; target?: string; temporary?: string;
-  };
-  if (!request.directory || !request.target || !request.temporary) throw new Error('Android measurement cleanup request is malformed');
-  const temporary = checkedTemporaryFile(request.directory, request.target, request.temporary);
-  rmSync(temporary, { force: true });
-  process.stdout.write('{"removed":true}\n');
-}
-
 async function runGmsDiagnosticPersistence(stallAfterPublication = false): Promise<void> {
   const progress = (step: string, detail = '') => {
     process.stderr.write(`GMS_WRITER_PROGRESS ${step} ${Math.round(process.uptime() * 1_000)}${detail}\n`);
@@ -1502,19 +1470,6 @@ async function runGmsDiagnosticPersistence(stallAfterPublication = false): Promi
     return;
   }
   process.stdout.write(`${JSON.stringify({ byteLength: staged.byteLength, sha256: expectedSha256 })}\n`);
-}
-
-async function runGmsDiagnosticCleanup(): Promise<void> {
-  const request = JSON.parse((await readBoundedStdin(4_096)).toString('utf8')) as {
-    directory?: string; temporary?: string; target?: string;
-  };
-  if (!request.directory || !request.target || !request.temporary || basename(resolve(request.target)) !== ANDROID_GMS_OBSERVATION_FILE
-    || dirname(resolve(request.target)) !== resolve(request.directory)) {
-    throw new Error('GMS cleanup request is malformed');
-  }
-  const temporary = checkedTemporaryFile(request.directory, request.target, request.temporary);
-  rmSync(temporary, { force: true });
-  process.stdout.write('{"removed":true}\n');
 }
 
 async function runAndroidTransportObservation(): Promise<void> {
@@ -1576,14 +1531,11 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
     '--android-measurement-persist-json': () => runAndroidMeasurementPersistence('json'),
     '--android-measurement-persist-json-stall-after-publication': () => runAndroidMeasurementPersistence('json', true),
     '--android-measurement-persist-text': () => runAndroidMeasurementPersistence('text'),
-    '--android-measurement-invalidate-collector': runAndroidMeasurementInvalidateCollector,
-    '--android-measurement-cleanup-file': runAndroidMeasurementCleanup,
     '--android-transport-observation': runAndroidTransportObservation,
     '--android-transport-observation-trigger': runAndroidTransportObservationTrigger,
     '--gms-diagnostic-ownership': () => runGmsDiagnosticOwnership(process.argv[3] || ''),
     '--gms-diagnostic-persist': runGmsDiagnosticPersistence,
     '--gms-diagnostic-persist-stall-after-publication': () => runGmsDiagnosticPersistence(true),
-    '--gms-diagnostic-cleanup': runGmsDiagnosticCleanup,
   };
   const operation = modes[process.argv[2]];
   if (operation) {

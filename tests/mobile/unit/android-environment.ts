@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { constants as osConstants, tmpdir } from 'node:os';
 import { closeSync, createWriteStream, existsSync, openSync, readdirSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -164,6 +164,8 @@ export function boundedCommandFailureDetails(result: BoundedCommandError['result
     result: result ? {
       timedOut: result.timedOut, aborted: result.aborted, outputLimitExceeded: result.outputLimitExceeded,
       code: result.code, signal: result.signal ?? null, launchError: Boolean(result.launchError), durationMs: result.durationMs,
+      stdoutBytes: result.stdoutBytes, stderrBytes: result.stderrBytes,
+      stdoutRetainedBytes: result.stdoutRetainedBytes, stderrRetainedBytes: result.stderrRetainedBytes,
       targetPID: result.targetPID ?? null, targetCloseObserved: result.targetCloseObserved, childExited: result.childExited,
       ownedProcessesExited: result.ownedProcessesExited, stdioClosed: result.stdioClosed,
       targetStdoutNaturalEnd: result.targetStdoutNaturalEnd, targetStdoutCloseObserved: result.targetStdoutCloseObserved,
@@ -4677,7 +4679,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         const details = JSON.stringify({ failure, stage: {
           ownershipChildExited: stage.ownershipChildExited, ownershipProcessesExited: stage.ownershipProcessesExited,
           ownershipStdioClosed: stage.ownershipStdioClosed,
-        }, command: boundedCommandFailureDetails(ownershipFailure?.result, observer?.records()) });
+        }, command: boundedCommandFailureDetails(ownershipFailure?.result, observer?.records(), true) });
         const requests = existsSync(fixture.log) ? await readFile(fixture.log, 'utf8') : '';
         assert.equal(requests.split('\n').filter(line => line.includes('shell dumpsys package com.google.android.gms')).length, 0, failure);
         assert.equal(observations.totalCommandOutputBytes, 0, failure);
@@ -6070,7 +6072,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(dispatches, 0);
       assert.deepEqual(endpoint.completed, ['guest-clock']);
       assert.equal(existsSync(transportFixture.acquisitionLogFile), false);
-      assert.equal(outcome.assessment?.collection.status, 'PASS');
+      assert.equal(outcome.assessment?.collection.status, 'PASS', outcome.assessment?.collection.status === 'PASS' ? undefined
+        : redactText(JSON.stringify({ errors: outcome.errors, collection: outcome.assessment?.collection }))
+          .split(fixture.root).join('<root>').slice(0, 8192));
     } finally {
       await writeFile(endPath, 'end');
       await measurement.finish().catch(() => undefined);
@@ -7494,6 +7498,35 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await stage?.catch(() => undefined);
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);
+    }
+  });
+  test('cleanup workers redact filesystem errors without acknowledging removal', async () => {
+    const fixture = await harness.createFixture();
+    const secret = 'cleanup-error-private-sentinel';
+    const directory = join(fixture.root, `?token=${secret}`);
+    const cases = [
+      ['--gms-diagnostic-cleanup', 'android-environment-gms-observations.json'],
+      ['--android-measurement-cleanup-file', 'android-environment-completion.json'],
+      ['--android-measurement-invalidate-collector', 'android-environment-collector.json'],
+    ] as const;
+    for (const [mode, filename] of cases) {
+      const target = join(directory, filename);
+      const temporary = join(directory, `.${filename}.12345678-1234-1234-1234-123456789abc.pending`);
+      const rejectedPath = mode === '--android-measurement-invalidate-collector' ? target : temporary;
+      await mkdir(rejectedPath, { recursive: true });
+      const retained = join(rejectedPath, 'retained');
+      await writeFile(retained, 'keep');
+      const result = spawnSync(process.execPath, [repositoryPath('tests/mobile/android-measurement-cleanup.ts'), mode], {
+        input: JSON.stringify({ directory, target, temporary }), encoding: 'utf8', timeout: 5_000,
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.ok(result.stderr.length <= 501);
+      assert.match(result.stderr, /\[REDACTED\]/u);
+      assert.ok(!result.stderr.includes(secret));
+      assert.equal(await readFile(retained, 'utf8'), 'keep');
     }
   });
   test('GMS names altered by redaction are withheld without a collected success', async () => {

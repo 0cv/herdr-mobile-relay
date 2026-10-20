@@ -852,6 +852,14 @@ lsof)
         printf '%s\n' 22222
         exit 0
       fi
+      case "$mode" in
+        listener-pending-*)
+          if ! wait_for_fixture_pid "$root/xcode.pid" || [ "$fixture_pid" != "$pending_runner_pid" ]; then
+            printf '%s\n' 'pending listener launch acknowledgement failed' >&2
+            exit 2
+          fi
+          ;;
+      esac
       printf '%s/%s\n' "$pending_wda_count" 1 >> "$root/pending-observations"
       printf '%s\n' "$pending_runner_pid"
       exit 0
@@ -3398,7 +3406,11 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         const raceOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
         const racePrivateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
         assert.equal(raceOwner.firstFailure.stage, initialRaceStages[mode]);
-        assert.equal(raceOwner.firstFailure.phase, 'initial');
+        assert.equal(raceOwner.firstFailure.phase, 'initial', raceOwner.firstFailure.phase === 'initial' ? undefined
+          : pendingPinSnapshot(root, testMode, child, {
+            exit: 'initial-race-failure', elapsedMs: Date.now() - supervisorStarted,
+            startupRemainingMs: Math.max(0, deadline - Date.now()),
+          }, ''));
         assert.equal(raceOwner.firstFailure.frozenOwner, false);
         assert.equal(raceOwner.initialCandidateDiagnostic.phase, 'initial-diagnostic');
         assert.equal(raceOwner.initialCandidateDiagnostic.schema, 1);
