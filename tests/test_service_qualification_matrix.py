@@ -31,6 +31,7 @@ CLI_CELLS = {c["id"]: c for c in m.enumerate_cells(CLI_SOURCE, cli=True)}
 CLI_INVENTORY = list(CLI_CELLS)
 CLI_FAST_IDS = set(m.load_fast(CLI_FAST, CLI_INVENTORY))
 TEXTS = {"native": (SOURCE, FAST), "uninstall-cli": (CLI_SOURCE, CLI_FAST)}
+FAST_N, FULL_N = m.SHARD_COUNTS["fast"], m.SHARD_COUNTS["full"]
 
 
 def program(body):
@@ -136,20 +137,64 @@ class Selection(unittest.TestCase):
             self.assertLess(max(loads) / min(loads), 1.02)
             for shard in shards:
                 self.assertEqual({m.classify(i).get("platform") for i in shard} - {None}, {"systemd", "launchd"})
-        self.assertEqual(m.SHARD_COUNTS, {"fast": 2, "full": 8})
+        self.assertEqual(m.SHARD_COUNTS, {"fast": 5, "full": 28})
+
+    def test_the_cost_model_prices_every_class_once_and_never_passes_a_projection_off_as_a_measurement(self):
+        classes = {m.cost_class(m.classify(i)) for i in INVENTORY}
+        self.assertEqual(set(m.CLASS_SECONDS) | set(m.MODELED_SECONDS), classes)
+        self.assertEqual(set(m.CLASS_SECONDS) & set(m.MODELED_SECONDS), set())
+        self.assertEqual(set(m.MODELED_SECONDS), {"probe", "valid", "cancel", "parity"})  # no invocation line times a cell of these classes
+        self.assertEqual({m.cost_class(m.classify(i)) for i in INVENTORY if CELLS[i]["runs"]}, set(m.CLASS_SECONDS))  # the measured classes are the timed ones
+        self.assertTrue(all(v > 0 for pair in m.CLASS_SECONDS.values() for v in pair) and m.MACOS_FACTOR > 1 and m.SHARD_OVERHEAD > 0)
+        for i in INVENTORY:
+            a = m.classify(i)
+            name = m.cost_class(a)
+            if name in m.CLASS_SECONDS:
+                self.assertEqual(m.cost(i), m.CLASS_SECONDS[name][a.get("platform") == "launchd"])
+            else:
+                seconds, launchd = m.MODELED_SECONDS[name]
+                self.assertAlmostEqual(m.cost(i), seconds * (launchd if a.get("platform") == "launchd" else 1.0) * m.MACOS_FACTOR, 2)
+        self.assertGreaterEqual(pathlib.Path(m.__file__).read_text().count("never a measured hosted time"), 3)  # the disclaimer stays where the values live
+
+    def test_counts_are_the_smallest_whose_modeled_macos_shards_stay_within_60_percent_of_the_suite_bound(self):
+        self.assertEqual((m.SUITE_BOUND, m.PROJECTION_LIMIT), (900, .6 * 900))
+        driver = pathlib.Path(ROOT / "scripts/ci/run-service-qualification.sh").read_text()
+        self.assertIn("SUITE_TIMEOUT_SECONDS=%d\n" % m.SUITE_BOUND, driver)  # the bound was not raised to make a count fit
+        for tier in ("fast", "full"):
+            ids = INVENTORY if tier == "full" else [i for i in INVENTORY if i in FAST_IDS]
+            count = m.SHARD_COUNTS[tier]
+            projected = m.projection(ids, count)
+            self.assertEqual(len(projected), count)
+            self.assertLessEqual(max(projected), m.PROJECTION_LIMIT, tier)
+            self.assertEqual(projected, [round(load + m.SHARD_OVERHEAD, 1) for load in m.assign(ids, count)[1]])
+            for smaller in range(1, count):
+                self.assertGreater(max(m.projection(ids, smaller)), m.PROJECTION_LIMIT, "%s would fit in %d shards" % (tier, smaller))
+        # back-test: for the two-shard fast layout it was calibrated on, the model projects no less than the slowest hosted macOS shard (843 s)
+        self.assertGreaterEqual(min(m.projection([i for i in INVENTORY if i in FAST_IDS], 2)), 843)
+
+    def test_list_prints_the_modeled_shard_seconds_of_the_tiers_count(self):
+        for tier, count in (("fast", FAST_N), ("full", FULL_N)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(m.main(["list", "--tier", tier]), 0)
+            listed = json.loads(out.getvalue())["modeled_shard_seconds"]
+            self.assertEqual(len(listed), count)
+            self.assertLessEqual(max(listed), m.PROJECTION_LIMIT)
 
     def test_plan_defaults_to_full_and_refuses_invalid_requests(self):
         whole = m.plan(SOURCE, FAST, {})
         self.assertEqual((whole["tier"], whole["selected"], whole["inventory"]), ("full", INVENTORY, INVENTORY))
-        one = m.plan(SOURCE, FAST, {"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_SHARD": "2/2"})
+        one = m.plan(SOURCE, FAST, {"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_SHARD": "%d/%d" % (FAST_N, FAST_N)})
         self.assertTrue(set(one["selected"]) <= FAST_IDS)
         self.assertEqual(m.plan(SOURCE, FAST, {"HERDR_NATIVE_INSTALL_CELL": INVENTORY[7]})["selected"], [INVENTORY[7]])
-        foreign = next(i for i in m.assign(INVENTORY, 8)[0][1])
+        foreign = next(i for i in m.assign(INVENTORY, FULL_N)[0][1])
+        self.assertEqual(m.plan(SOURCE, FAST, {"HERDR_NATIVE_INSTALL_SHARD": "%d/%d" % (FULL_N, FULL_N)})["shard_count"], FULL_N)  # a two-digit shard is valid
         bad = [{"HERDR_NATIVE_INSTALL_TIER": "all"}, {"HERDR_NATIVE_INSTALL_TIER": "FAST"},
-               {"HERDR_NATIVE_INSTALL_SHARD": "1/8", "HERDR_NATIVE_INSTALL_TIER": "fast"}, {"HERDR_NATIVE_INSTALL_SHARD": "1/2"},
-               {"HERDR_NATIVE_INSTALL_SHARD": "0/8"}, {"HERDR_NATIVE_INSTALL_SHARD": "9/8"}, {"HERDR_NATIVE_INSTALL_SHARD": "01/8"},
-               {"HERDR_NATIVE_INSTALL_SHARD": "1/8/1"}, {"HERDR_NATIVE_INSTALL_SHARD": " 1/8"}, {"HERDR_NATIVE_INSTALL_CELL": "nope"},
-               {"HERDR_NATIVE_INSTALL_SHARD": "1/8", "HERDR_NATIVE_INSTALL_CELL": foreign},
+               {"HERDR_NATIVE_INSTALL_SHARD": "1/%d" % FULL_N, "HERDR_NATIVE_INSTALL_TIER": "fast"}, {"HERDR_NATIVE_INSTALL_SHARD": "1/%d" % FAST_N},
+               {"HERDR_NATIVE_INSTALL_SHARD": "0/%d" % FULL_N}, {"HERDR_NATIVE_INSTALL_SHARD": "%d/%d" % (FULL_N + 1, FULL_N)},
+               {"HERDR_NATIVE_INSTALL_SHARD": "01/%d" % FULL_N}, {"HERDR_NATIVE_INSTALL_SHARD": "1/%d/1" % FULL_N},
+               {"HERDR_NATIVE_INSTALL_SHARD": " 1/%d" % FULL_N}, {"HERDR_NATIVE_INSTALL_CELL": "nope"},
+               {"HERDR_NATIVE_INSTALL_SHARD": "1/%d" % FULL_N, "HERDR_NATIVE_INSTALL_CELL": foreign},
                {"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_CELL": next(i for i in INVENTORY if i not in FAST_IDS)},
                {"HERDR_NATIVE_INSTALL_TIER": ""}, {"HERDR_NATIVE_INSTALL_SHARD": ""}, {"HERDR_NATIVE_INSTALL_CELL": ""}]  # set but empty: not "unset"
         for env in bad:
@@ -361,6 +406,21 @@ class Evidence(unittest.TestCase):
         for tier in ("fast", "full"):
             self.gate(tier)
 
+    def test_the_aggregate_accepts_exactly_the_current_shard_counts(self):
+        previous = {"fast": 2, "full": 8}  # the layout before the counts were sized from hosted measurements
+        for tier in ("fast", "full"):
+            for other in (previous[tier], m.SHARD_COUNTS[tier] - 1, m.SHARD_COUNTS[tier] + 1):
+                with self.subTest("%s artifacts of a %d-shard layout" % (tier, other)), tempfile.TemporaryDirectory() as tmp:
+                    with mock.patch.dict(m.SHARD_COUNTS, {tier: other}):
+                        self.tree(pathlib.Path(tmp), tier)
+                    with self.assertRaisesRegex(m.Refusal, "artifact set differs"):
+                        m.gate(tier, SHA, RUN, ATTEMPT, tmp, TEXTS)
+            with self.subTest(tier + " one shard of the next index"), self.assertRaisesRegex(m.Refusal, "artifact set differs"):
+                def extra(root, _tier):
+                    first = root / ("service-native-%s-ubuntu-24.04-s1-%s" % (tier, SHA))
+                    shutil.copytree(first, root / ("service-native-%s-ubuntu-24.04-s%d-%s" % (tier, m.SHARD_COUNTS[tier] + 1, SHA)))
+                self.gate(tier, extra)
+
     def test_incomplete_stale_or_cross_group_evidence_fails_the_aggregate(self):
         def shard(root, tier, runner="ubuntu-24.04", index=1):
             return root / ("service-native-%s-%s-s%d-%s" % (tier, runner, index, SHA)) / "native-shard-evidence.json"
@@ -495,7 +555,7 @@ class Evidence(unittest.TestCase):
             self.assertTrue(all(control not in m.shard_expectation("full", "%d/3" % n, SHA, RUN, ATTEMPT, "Linux", CLI_SOURCE, CLI_FAST, m.CLI)["ids"] for n in (2, 3)))
 
     def test_failed_empty_or_partial_cell_records_never_become_passing_evidence(self):
-        want = m.shard_expectation("fast", "1/2", SHA, RUN, "1", "Linux", SOURCE, FAST)
+        want = m.shard_expectation("fast", "1/%d" % FAST_N, SHA, RUN, "1", "Linux", SOURCE, FAST)
         every = "".join(i + "\n" for i in want["ids"])
         self.assertEqual(m.shard_evidence(want, every, 0)["result"], "pass")
         for cells, code in ((every, 1), (every, 124), ("", 0), (every[:-1 - len(want["ids"][-1])], 0), (every + want["ids"][0] + "\n", 0),
@@ -511,12 +571,12 @@ class Evidence(unittest.TestCase):
         identity = ["--sha", SHA, "--run-id", RUN, "--run-attempt", ATTEMPT]
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stderr(io.StringIO()):
             tmp = pathlib.Path(directory)
-            with mock.patch.dict(os.environ, {"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_SHARD": "1/2"}):
+            with mock.patch.dict(os.environ, {"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_SHARD": "1/%d" % FAST_N}):
                 self.assertEqual(m.main(["plan", *files, "--output", str(tmp / "plan.json")]), 0)
                 self.assertEqual(m.main(["plan", *files, "--output", str(tmp / "plan.json")]), 1)  # never overwrites
             selected = json.loads((tmp / "plan.json").read_text())["selected"]
             (tmp / "cells").write_text("".join(i + "\n" for i in selected))
-            shard = ["evidence", *files, *identity, "--tier", "fast", "--shard", "1/2", "--runner-os", "Linux", "--cells", str(tmp / "cells")]
+            shard = ["evidence", *files, *identity, "--tier", "fast", "--shard", "1/%d" % FAST_N, "--runner-os", "Linux", "--cells", str(tmp / "cells")]
             self.assertEqual(m.main([*shard, "--suite-exit", "0", "--output", str(tmp / "pass.json")]), 0)
             self.assertEqual(m.main([*shard, "--suite-exit", "1", "--output", str(tmp / "fail.json")]), 1)
             self.assertEqual([json.loads((tmp / n).read_text())["result"] for n in ("pass.json", "fail.json")], ["pass", "fail"])
@@ -560,10 +620,16 @@ class Wiring(unittest.TestCase):
         run.add("tests/test_service_transport_dispatch.py")
         self.assertEqual(run, set(m.SUITES))
         self.assertIn("EXPECTED_SUITE_COUNT=%d" % len(m.SUITES), driver)
+        self.assertIn("%d fast, %d full," % (m.SHARD_COUNTS["fast"], m.SHARD_COUNTS["full"]), " ".join(driver.replace("#", " ").split()))  # its usage comment names the counts
         for tier, name in (("fast", "service-qualification"), ("full", "service-full-qualification")):
             workflow, count = self.text(".github/workflows/%s.yml" % name), m.SHARD_COUNTS[tier]
             self.assertIn("shard: [%s]" % ", ".join(map(str, range(1, count + 1))), workflow)
             self.assertIn("native %s ${{ matrix.shard }}/%d" % (tier, count), workflow)
+            self.assertIn("name: Native install, %s (${{ matrix.runner }}, shard ${{ matrix.shard }}/%d)" % (tier, count), workflow)
+            self.assertIn("%d shards per OS" % count, " ".join(workflow.split()))  # the header comment names the count
+            macos_jobs = 1 + count + m.CLI.counts[tier]  # the suites job, the native shards and the uninstall CLI shards, on macos-15
+            self.assertIn("macOS jobs per %s: %d (" % ("push" if tier == "fast" else "run", macos_jobs), workflow)
+            self.assertIn("| native %d, uninstall CLI %d |" % (count, m.CLI.counts[tier]), self.text("docs/ci-test-tiers.md"))
             self.assertIn("shard: [%s]" % ", ".join(map(str, range(1, m.CLI.counts[tier] + 1))), workflow)
             self.assertIn("uninstall-cli %s ${{ matrix.shard }}/%d" % (tier, m.CLI.counts[tier]), workflow)
             self.assertIn("service-uninstall-cli-%s-${{ matrix.runner }}-s${{ matrix.shard }}-${{ github.sha }}" % tier, workflow)

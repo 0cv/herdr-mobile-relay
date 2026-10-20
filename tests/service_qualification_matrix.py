@@ -22,7 +22,12 @@ import sys
 from types import SimpleNamespace
 
 SCHEMA = 1
-SHARD_COUNTS = {"fast": 2, "full": 8}
+# Fixed shard counts per tier and runner OS, sized from hosted measurements (task-l-evidence/calibration.json): the smallest count whose
+# largest MODELED hosted-macOS shard (cost() balanced by assign(), plus SHARD_OVERHEAD) stays within PROJECTION_LIMIT. A modeled shard is a
+# projection, never a measured hosted time; changing a count is a deliberate edit of this line, the workflows and the docs together.
+SHARD_COUNTS = {"fast": 5, "full": 28}
+SUITE_BOUND = 900  # seconds; the driver's unchanged SUITE_TIMEOUT_SECONDS (the suite is killed, and its shard fails closed, at this bound)
+PROJECTION_LIMIT = 540.0  # seconds; 60% of SUITE_BOUND: room for run-to-run variance (hosted macOS ran one shard up to 1.4x slower than another run)
 RUNNER_OS = {"macos-15": "Darwin", "ubuntu-24.04": "Linux"}
 NATIVE = "tests/test_native_install.sh"
 UNINSTALL_CLI = "tests/test_service_uninstall_cli.py"
@@ -364,13 +369,25 @@ def classify(cell_id):
     return dict(m.groupdict(), family=family)
 
 
-# Modeled Ubuntu seconds per cell after the shim change, and the launchd multiplier: the hosted per-class median
-# of native-install-count_cells.txt divided by the measured CPU ratio (pre-shim hosted logs; probes, cancellation and
-# parity are local-weight estimates). Used only to balance shards and to project; never a measured hosted time.
-CLASS_SECONDS = {"capture-initial": (.29, 1.0), "capture-fresh": (1.15, 1.06), "capture-ready": (3.05, 1.25),
-                 "capture-public": (2.12, 1.4), "install-ok": (1.5, 1.24), "early": (.41, 1.54), "quiesce": (3.54, 1.54),
-                 "public": (3.48, 1.54), "ready": (4.75, 1.54), "refusal": (.1, 1.0), "origin-refusal": (.32, 1.0),
-                 "probe": (.17, 1.16), "valid": (2.4, 1.3), "cancel": (4.75, 1.75), "parity": (8.0, 1.0)}
+# Modeled hosted macos-15 seconds per native cell: the bottleneck runner balances the shards and sizes their count. Calibrated in
+# task-l-evidence/calibration.json (task-l-measure/calibrate.py) from the suite's own `native installation fixture invocation N (platform)
+# took Xs` lines of six hosted fast-tier jobs (three runs, commits 1bb8723f 0598331f 6304e405, two shards each); no full-tier shard has
+# ever run hosted. A modeled value is a PROJECTION used to balance shards and to size their count, never a measured hosted time.
+#   CLASS_SECONDS   MEASURED classes, (systemd, launchd): the largest mean seconds of one timed installer invocation of the class over the
+#                   six jobs, rounded up. The full tier's capture-ready and capture-public classes (1152 of 2331 cells) are priced from the
+#                   24 cells of each the fast tier holds.
+#   MODELED_SECONDS the classes no invocation line times (probes, validation, cancellation, parity): the older local Ubuntu-equivalent
+#                   estimate (seconds, launchd multiplier) times MACOS_FACTOR, the ratio of the measured seconds above to those estimates
+#                   over the timed fast-tier cells.
+#   SHARD_OVERHEAD  the largest suite time outside a timed invocation (suite seconds minus the invocation sum) of those jobs, added to
+#                   every shard. It already holds the real cost of the modeled classes, which cost() prices again per cell: deliberately
+#                   conservative, since the measurements cannot split it into a fixed part and a per-cell part.
+CLASS_SECONDS = {"capture-initial": (1.08, .5), "capture-fresh": (2.94, 1.95), "capture-ready": (6.0, 7.89), "capture-public": (7.87, 8.27),
+                 "install-ok": (4.27, 3.99), "early": (1.32, .89), "quiesce": (7.86, 10.7), "public": (8.48, 10.4), "ready": (8.99, 11.12),
+                 "refusal": (.33, .15), "origin-refusal": (1.35, .53)}
+MODELED_SECONDS = {"probe": (.17, 1.16), "valid": (2.4, 1.3), "cancel": (4.75, 1.75), "parity": (8.0, 1.0)}
+MACOS_FACTOR = 2.11
+SHARD_OVERHEAD = 127.0
 EARLY = ("read", "query", "snapshot", "candidate", "chmod", "token")
 
 
@@ -388,8 +405,11 @@ def cost_class(a):
 
 def cost(cell_id):
     a = classify(cell_id)
-    seconds, launchd = CLASS_SECONDS[cost_class(a)]
-    return round(seconds * (launchd if a.get("platform") == "launchd" else 1.0), 3)
+    name, launchd = cost_class(a), a.get("platform") == "launchd"
+    if name in CLASS_SECONDS:
+        return CLASS_SECONDS[name][launchd]
+    seconds, multiplier = MODELED_SECONDS[name]
+    return round(seconds * (multiplier if launchd else 1.0) * MACOS_FACTOR, 3)
 
 
 # Uninstall CLI ids are manager/family/parameters (manager: the model, systemd or launchd) or control/name. Each family lists its
@@ -445,8 +465,8 @@ def cost_cli(cell_id, runs=1):
 
 
 class Profile:
-    """One sharded suite: where its cells come from, how many shards a tier has, what it records and which cells are pinned to
-    shard 1 (the uninstall CLI's controls run in exactly one shard per runner and tier)."""
+    """One sharded suite: where its cells come from, how many shards a tier has, what it records, which cells are pinned to
+    shard 1 (the uninstall CLI's controls run in exactly one shard per runner and tier) and the modeled seconds each shard adds."""
 
     def __init__(self, **fields):
         self.__dict__.update(fields)
@@ -454,7 +474,8 @@ class Profile:
 
 NATIVE_P = Profile(name="native", source=NATIVE, fast="tests/native_install_fast_cases.json", counts=SHARD_COUNTS, cli=False,
                    frozen=FROZEN, env="HERDR_NATIVE_INSTALL", kind="native-install-shard", artifact="native",
-                   evidence="native-shard-evidence.json", classify=classify, cost=lambda i, runs=1: cost(i), pin=lambda i: False)
+                   evidence="native-shard-evidence.json", classify=classify, cost=lambda i, runs=1: cost(i), pin=lambda i: False,
+                   overhead=SHARD_OVERHEAD)
 # The uninstall CLI inventory enumerated from the gated suite: 1032 cells holding the 1657 Fixture.run invocations the unchanged 0598331f
 # suite makes (checked invocation by invocation against that source in task-j-evidence/baseline-inventory.json) and its 3 controls. The
 # digest of the ids and the digest of every cell's own id/run count freeze it exactly as FROZEN does for the native suite; the
@@ -465,7 +486,8 @@ CLI_FROZEN = {"cells": 1032, "runs": 1657, "probes": 0, "cancels": 0,
               "invocation_digest": "712209c922ad95c7ff23d3a0fb746e11991d50b6c10441b38d3f97b4e65eb466"}
 CLI = Profile(name="uninstall-cli", source=UNINSTALL_CLI, fast="tests/uninstall_cli_fast_cases.json", counts={"fast": 1, "full": 3},
               cli=True, frozen=CLI_FROZEN, env="HERDR_UNINSTALL_CLI", kind="uninstall-cli-shard", artifact="uninstall-cli",
-              evidence="uninstall-cli-shard-evidence.json", classify=classify_cli, cost=cost_cli, pin=lambda i: i.startswith("control/"))
+              evidence="uninstall-cli-shard-evidence.json", classify=classify_cli, cost=cost_cli, pin=lambda i: i.startswith("control/"),
+              overhead=0.0)
 PROFILES = (NATIVE_P, CLI)
 
 
@@ -499,6 +521,13 @@ def assign(ids, count, suite=None, runs=None):
         loads[target] += price(cell_id)
     order = {cell_id: n for n, cell_id in enumerate(ids)}
     return [sorted(shard, key=order.get) for shard in shards], loads
+
+
+def projection(ids, count, suite=None, runs=None):
+    """The modeled seconds of each shard of `ids` at `count` shards: its balanced cell cost plus the suite's per-shard overhead. Native:
+    hosted macOS. A projection to size the shard count, never a measured hosted time."""
+    suite = suite or NATIVE_P
+    return [round(load + suite.overhead, 1) for load in assign(ids, count, suite, runs)[1]]
 
 
 @functools.lru_cache(maxsize=8)
@@ -733,8 +762,9 @@ def main(argv):
             ids = inventory if args.tier == "full" else load_fast(fast(), inventory)
             counts = {c["id"]: c for c in cells}
             runs = sum(counts[i]["runs"] for i in ids)
+            modeled = projection(ids, suite.counts[args.tier], suite, {i: c["runs"] for i, c in counts.items()}) if args.tier in suite.counts else None
             print(json.dumps({"tier": args.tier, "totals": totals(cells), "selected": {"cells": len(ids), "runs": runs,
-                  "cancels": sum("-cancel-" in i for i in ids), "digest": digest(ids)},
+                  "cancels": sum("-cancel-" in i for i in ids), "digest": digest(ids)}, "modeled_shard_seconds": modeled,
                   "cells": [{k: v for k, v in c.items() if k != "calls"} for c in cells]}, indent=1))
         elif args.command == "plan":
             document = plan(source, fast(), os.environ, suite)

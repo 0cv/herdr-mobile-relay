@@ -1,9 +1,12 @@
 name: Service qualification
 
 # FAST per-push tier: the unsharded service suites plus the explicit fast subsets of the native-install cells
-# (tests/native_install_fast_cases.json, 2 shards per OS) and of the uninstall CLI cells (tests/uninstall_cli_fast_cases.json,
+# (tests/native_install_fast_cases.json, 5 shards per OS) and of the uninstall CLI cells (tests/uninstall_cli_fast_cases.json,
 # 1 shard per OS). A green run here is NEVER full qualification: the exhaustive native and uninstall CLI matrices are
 # "Full service qualification" (service-full-qualification.yml), which release requires.
+# macOS jobs per push: 7 (the suites job, 5 native shards, 1 uninstall CLI shard), and as many on Ubuntu. The native shard count is
+# sized so that every MODELED macOS shard stays within 60% of the 900 s suite bound (docs/ci-test-tiers.md); hosted macOS runs only a
+# few jobs at once, so a push queues for runners (a constraint of the account's plan, not a time this file promises).
 # The required check to name in branch rules is the gate job below; configuring hosting rules is a separate
 # administrative step this file does not establish (docs/ci-test-tiers.md).
 on:
@@ -65,14 +68,14 @@ jobs:
           overwrite: true
 
   native:
-    name: Native install, fast (${{ matrix.runner }}, shard ${{ matrix.shard }}/2)
+    name: Native install, fast (${{ matrix.runner }}, shard ${{ matrix.shard }}/5)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         runner: [macos-15, ubuntu-24.04]
-        shard: [1, 2]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
         timeout-minutes: 5
@@ -92,7 +95,7 @@ jobs:
           go-version: 1.27.1
           cache: false
       - name: Run the native-install fast shard (the suite keeps its 900s bound)
-        run: /bin/bash scripts/ci/run-service-qualification.sh native fast ${{ matrix.shard }}/2
+        run: /bin/bash scripts/ci/run-service-qualification.sh native fast ${{ matrix.shard }}/5
       - name: Upload sanitized shard summary and completed-cell evidence
         if: always()
         uses: actions/upload-artifact@v7

@@ -10,8 +10,8 @@ way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is nev
 
 | Workflow (required check) | Events | Sharded suites' cells | Shards per OS (macos-15, ubuntu-24.04) |
 | --- | --- | --- | --- |
-| `service-qualification.yml` (**Service qualification gate (fast)**) | push to `main`, `dev`, the CI branch | native: the explicit fast subset, 592 cells (353 installer runs + 8 cancellations); uninstall CLI: the explicit fast subset, 345 cells (550 invocations + 3 controls) | native 2, uninstall CLI 1 |
-| `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch | native: all 2331 cells; uninstall CLI: all 1032 cells (1657 invocations + 3 controls) | native 8, uninstall CLI 3 |
+| `service-qualification.yml` (**Service qualification gate (fast)**) | push to `main`, `dev`, the CI branch | native: the explicit fast subset, 592 cells (353 installer runs + 8 cancellations); uninstall CLI: the explicit fast subset, 345 cells (550 invocations + 3 controls) | native 5, uninstall CLI 1 |
+| `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch | native: all 2331 cells; uninstall CLI: all 1032 cells (1657 invocations + 3 controls) | native 28, uninstall CLI 3 |
 | `check.yml` (Shell job) | push to `main`, `dev`, the CI branch; `pull_request` | none: runs `make shell-check-ci-complement` | - |
 | `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes); none found fails closed; the existing 1800 s window | - |
 | `resume-benchmark.yml` | `workflow_dispatch` only (was a per-push `check.yml` job) | - | - |
@@ -44,9 +44,10 @@ cancellation cell. Given up (full only): the second transport of probes, positiv
 (transport is not read there), and cross-combinations of shape x phase x caller context x prior state x transport. Fast has
 361 installer executions against the audit's ~190 hypothesis: the coverage above needs more, and nothing was cut to hit 190.
 
-Shards are assigned by `assign()`: longest-processing-time balancing over modeled per-class cost (hosted class medians,
-launchd multipliers), identical on both OSes, so every shard mixes systemd and launchd cells and each OS covers both
-inventories across its aggregate.
+Shards are assigned by `assign()`: longest-processing-time balancing over the modeled hosted-macOS cost of each cell (below),
+the same assignment on both OSes, so every shard mixes systemd and launchd cells and each OS covers both inventories across
+its aggregate. The shard counts are fixed (`SHARD_COUNTS`): native 5 fast and 28 full; changing one is a deliberate edit of the
+helper, both workflows and this page.
 
 ### Uninstall CLI cells
 
@@ -88,14 +89,53 @@ attempt. `tests/test_service_qualification_matrix.py` demonstrates each case off
 Uninstall CLI: measured locally (Task G, complete run of the unchanged suite): 602.6 s of process-tree CPU over 1657
 invocations; **modeled** hosted macOS cost = 1.38 hosted seconds per local CPU second (Task G calibration over 1062 hosted
 invocations): about 913 s for the whole suite, 304 s per full shard (3 shards) and 359 s for the one fast shard including the
-controls (45 s). No hosted run of any shard exists; a shard over its unchanged 900 s bound fails closed.
+controls (45 s). No hosted run of any uninstall CLI shard exists; a shard over its unchanged 900 s bound fails closed.
 
-Measured (hosted Ubuntu, before the shim change): 251 of 1864 invocations in 900 s; per-class medians in the audit.
-No macOS native cell has ever completed on a hosted run. Everything else is **modeled**: the class costs and launchd
-multipliers in `CLASS_SECONDS`, about 4949 s of Ubuntu-equivalent work in total, so about 619 s per full shard and 402 s
-per fast shard plus build and import overhead. macOS may be slower; a full shard that exceeds the unchanged 900 s
-bound fails closed (no retry, no pass-on-timeout) and the remedy is a larger fixed shard count, a deliberate edit. No
-total wall-clock, queue or 15-minute figure is promised. Hosted measurements are required before trusting these numbers.
+### Native install: measured, derived and modeled
+
+Source: the six hosted fast-tier jobs of each runner OS (three runs, commits `1bb8723f`, `0598331f`, `6304e405`, two shards
+each; suite and fast-case file unchanged across them), whose `native installation fixture invocation N (platform) took Xs`
+lines time every one of the 353 installer runs (81 to 87% of the suite seconds). Each line was mapped to its cell (the shard's cell order and run
+counts; platform sequence and per-invocation stub-spawn tally agree in all twelve jobs) and the statistic is deliberately
+conservative. The full calibration is `task-l-evidence/calibration.json` (tool `task-l-measure/calibrate.py`).
+
+| What | Basis | Value used |
+| --- | --- | --- |
+| Seconds per timed invocation, per class and manager model (`CLASS_SECONDS`, macos-15) | **measured**: the largest per-job class mean of the six jobs, rounded up | e.g. capture-ready 6.0 / 7.89 s, capture-public 7.87 / 8.27 s, ready 8.99 / 11.12 s (systemd / launchd) |
+| Per-shard overhead (`SHARD_OVERHEAD`) | **measured**: the largest suite seconds minus the invocation sum (66 to 127 s over the six macOS jobs) | 127 s on every shard |
+| Probe, validation, cancellation and parity cells (`MODELED_SECONDS`) | **modeled**: the older local Ubuntu-equivalent estimates times `MACOS_FACTOR` (measured macOS seconds over those estimates for the timed cells) | factor 2.11 |
+| Projected shard seconds, every count | **modeled**: balanced cell cost plus overhead; **never a measured hosted time** | below |
+
+The overhead already contains the real cost of the modeled classes, which are priced again per cell: the projection is deliberately
+generous (counting them once would make the fast tier 4 shards, not 5), because the six jobs cannot split the overhead into a fixed
+and a per-cell part. The model back-tests above every hosted observation of the layout it was measured on (projected 978 / 972 s
+against 843 / 723 s observed on macOS for two fast shards). Hosted run-to-run variance was up to 1.44x on the same shard (macOS
+501 to 723 s).
+
+The counts are the smallest for which every modeled macOS shard stays within **60% of the unchanged 900 s suite bound (540 s)**;
+the suite bound, the 40 s invocation bound and the 180 s helper-build bound are not raised, no cell is dropped or retried:
+
+| Tier (cells) | Shards per OS | Modeled macOS shard (max) | Margin to 540 s / 900 s | Modeled Ubuntu shard (max) |
+| --- | ---: | ---: | ---: | ---: |
+| fast (592) | 5 | 466 s | 74 s / 434 s | 270 s |
+| full (2331) | 28 | 539 s | 1 s / 361 s | 315 s |
+
+`python3 -I -B tests/service_qualification_matrix.py list --tier full` prints the modeled macOS seconds of every shard (`modeled_shard_seconds`). The
+full tier's capture-ready and capture-public cells (1152 of 2331, 78% of its modeled macOS work) are priced from the 24 of each in the
+fast subset, whose transport mix (two cloudflare cells per gateway cell) is slower than the full tier's even mix: that errs high
+(pricing each transport at its own maximum would give 27 shards). **No full-tier native shard has run on a hosted runner**, and the
+projections are not measurements: a shard over its unchanged 900 s bound fails closed (no retry, no pass-on-timeout) and the
+remedy is a larger fixed count. The suite seconds exclude the job's checkout and toolchain setup.
+
+### Cost and queueing
+
+Jobs per event (each also runs on Ubuntu; the gate job is Ubuntu only): **a push runs 7 macOS jobs** (suites, 5 native shards, 1 uninstall
+CLI shard; it ran 4 with 2 native shards) and **a full run 32** (suites, 28 native shards, 3 uninstall CLI shards; it ran 12 with 8).
+GitHub caps how many macOS jobs a plan runs at once on standard hosted runners (its documentation lists 5 for the Free, Pro and Team
+plans and 50 for Enterprise Cloud; this repository's plan was not inspected, so verify it): with 5, a full run needs at least seven
+successive groups of macOS jobs and a push at least two, and pushes, pull requests and the nightly run queue behind each other. That
+is a constraint, not a prediction: no wall-clock, queue or 15-minute figure is promised. `release.yml` (unchanged) waits at most 1800 s
+for a still-running Full run, so dispatch it and let it finish before tagging.
 
 ## Local use
 

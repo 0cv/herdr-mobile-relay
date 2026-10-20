@@ -8,7 +8,8 @@
 #                        (own exit status, timing and bound), so one doctor failure can no
 #                        longer hide the native cells
 #   native TIER I/N      one shard of tests/test_native_install.sh (TIER fast|full; N is the
-#                        tier's fixed shard count in tests/service_qualification_matrix.py) and
+#                        tier's fixed shard count in tests/service_qualification_matrix.py:
+#                        5 fast, 28 full, from modeled hosted-macOS shard times) and
 #                        the SHA/tier/OS/shard-bound evidence of the cells it COMPLETED
 #   uninstall-cli TIER I/N  the same for tests/test_service_uninstall_cli.py (its controls run in
 #                        shard 1 of the tier only)
@@ -20,7 +21,8 @@
 # Invoked by the service workflows as:
 #
 #   /bin/bash scripts/ci/run-service-qualification.sh suites
-#   /bin/bash scripts/ci/run-service-qualification.sh native fast 1/2
+#   /bin/bash scripts/ci/run-service-qualification.sh native fast 1/5
+#   /bin/bash scripts/ci/run-service-qualification.sh native full 28/28
 #   /bin/bash scripts/ci/run-service-qualification.sh uninstall-cli full 3/3
 #
 # so that macOS runs the stock /bin/bash 3.2 and Linux runs bash 5. This file
