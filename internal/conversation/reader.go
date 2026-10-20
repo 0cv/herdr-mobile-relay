@@ -914,6 +914,11 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 	return role, textBlocks(content)
 }
 
+var (
+	bashOutputRow     = regexp.MustCompile(`(?s)^<bash-stdout>.*</bash-stdout><bash-stderr>.*</bash-stderr>$`)
+	bashOutputElement = regexp.MustCompile(`(?s)<bash-stdout>.*?</bash-stdout>|<bash-stderr>.*?</bash-stderr>`)
+)
+
 var commandTags = regexp.MustCompile(`(?s)<command-(?:message|name|args)>.*?</command-(?:message|name|args)>`)
 
 func humanClaudeText(raw string) string {
@@ -923,12 +928,15 @@ func humanClaudeText(raw string) string {
 			return ""
 		}
 	}
-	// Shell rows: stdout and stderr arrive together as one row made only of those
-	// elements, so a row that opens with one and closes with one is output, even
-	// when the output itself contains tag text. The command row shows as "! cmd".
-	if (strings.HasPrefix(trimmed, "<bash-stdout>") || strings.HasPrefix(trimmed, "<bash-stderr>")) &&
-		(strings.HasSuffix(trimmed, "</bash-stdout>") || strings.HasSuffix(trimmed, "</bash-stderr>")) {
-		return ""
+	// Shell output rows: Claude Code writes stdout and stderr together as one
+	// row, and output may itself contain tag text, so the genuine adjacent pair is
+	// recognised first. Otherwise every output element is removed and whatever
+	// text is left over is kept, so a prompt never loses words and output never leaks.
+	if strings.HasPrefix(trimmed, "<bash-stdout>") || strings.HasPrefix(trimmed, "<bash-stderr>") {
+		if bashOutputRow.MatchString(trimmed) {
+			return ""
+		}
+		return strings.TrimSpace(bashOutputElement.ReplaceAllString(trimmed, ""))
 	}
 	if strings.HasPrefix(trimmed, "<bash-input>") && strings.HasSuffix(trimmed, "</bash-input>") {
 		return "! " + strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "<bash-input>"), "</bash-input>"))
