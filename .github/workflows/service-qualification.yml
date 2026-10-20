@@ -1,8 +1,13 @@
 name: Service qualification
 
+# FAST per-push tier: the non-native service suites plus the explicit fast subset of the native-install cells
+# (tests/native_install_fast_cases.json), 2 shards per OS. A green run here is NEVER full qualification: the exhaustive
+# native matrix is "Full service qualification" (service-full-qualification.yml), which release requires.
+# The required check to name in branch rules is the gate job below; configuring hosting rules is a separate
+# administrative step this file does not establish (docs/ci-test-tiers.md).
 on:
   push:
-    branches: [ci/tailscale-native-preflight-ef9f843]
+    branches: [main, dev, ci/tailscale-native-preflight-ef9f843]
 
 permissions:
   contents: read
@@ -10,32 +15,26 @@ permissions:
 env:
   GOTOOLCHAIN: local
 
-# A thin wrapper: every guard, suite, bound and fail-closed rule lives in
-# scripts/ci/run-service-qualification.sh. macOS runs the stock /bin/bash 3.2,
-# Ubuntu runs bash 5. No retries, no secrets, no continue-on-error.
-# The script bounds each suite with a fixed wall-clock limit; this workflow adds
-# only the 60-minute job cap. Nine suites at their bounds can exceed that cap:
-# GitHub then cancels a pathologically slow or hung run, which is a red job with
-# a missing artifact, never a pass.
+# Thin wrappers: every guard, suite, bound and fail-closed rule lives in scripts/ci/run-service-qualification.sh.
+# macOS runs the stock /bin/bash 3.2, Ubuntu runs bash 5. No retries, no secrets, no continue-on-error. Each suite
+# keeps its fixed wall-clock bound; the job caps below are the existing 60 minutes (a hung run is cancelled by
+# GitHub, which is red, never a pass).
 jobs:
-  service-qualification:
-    name: Service qualification (${{ matrix.runner }})
+  suites:
+    name: Service suites (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         runner: [macos-15, ubuntu-24.04]
-    # Each setup step has its own plain hang bound (timeout-minutes), nothing more.
     steps:
       - uses: actions/checkout@v7
         timeout-minutes: 5
         with:
           fetch-depth: 1
           persist-credentials: false
-      # Python is pinned, not the runner image's ambient python3: the provenance step
-      # and the script's supervisor and suites all run under this exact version (the
-      # script itself requires 3.11 or newer, for process_group and tomllib).
+      # Python is pinned, not the runner image's ambient python3 (the script requires 3.11 or newer).
       - uses: actions/setup-python@v6
         timeout-minutes: 5
         with:
@@ -52,13 +51,86 @@ jobs:
         timeout-minutes: 5
         with:
           bun-version: 1.4.0
-      - name: Run the service and installer suites
-        run: /bin/bash scripts/ci/run-service-qualification.sh
-      - name: Upload sanitized service qualification summary
+      - name: Run the non-native service and installer suites
+        run: /bin/bash scripts/ci/run-service-qualification.sh suites
+      - name: Upload sanitized service suites summary
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: service-qualification-${{ matrix.runner }}-${{ github.sha }}
+          name: service-suites-fast-${{ matrix.runner }}-${{ github.sha }}
           path: ${{ runner.temp }}/service-qualification/summary.json
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
+
+  native:
+    name: Native install, fast (${{ matrix.runner }}, shard ${{ matrix.shard }}/2)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        timeout-minutes: 3
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/setup-go@v7
+        timeout-minutes: 8
+        with:
+          go-version: 1.27.1
+          cache: false
+      - name: Run the native-install fast shard (the suite keeps its 900s bound)
+        run: /bin/bash scripts/ci/run-service-qualification.sh native fast ${{ matrix.shard }}/2
+      - name: Upload sanitized shard summary and completed-cell evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: service-native-fast-${{ matrix.runner }}-s${{ matrix.shard }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/service-qualification/summary.json
+            ${{ runner.temp }}/service-qualification/native-shard-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # Always runs. Green only if every dependency succeeded AND every expected artifact (both runners; all suites;
+  # every shard) is present, current for this run and candidate, and lists exactly the shard's cells as completed.
+  gate:
+    name: Service qualification gate (fast)
+    needs: [suites, native]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HERDR_NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - name: Require every dependency to have succeeded
+        run: python3 -I -B tests/service_qualification_matrix.py needs suites native
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: service-*-fast-*-${{ github.sha }}
+          path: service-evidence
+      - name: Verify exact-once, SHA-bound completed-cell evidence for every shard and runner
+        run: >-
+          python3 -I -B tests/service_qualification_matrix.py gate --tier fast --sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --artifacts service-evidence

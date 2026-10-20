@@ -16,7 +16,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel dev-tailscale dev-tailscale-cli stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release resume-benchmark-pilot relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel dev-tailscale dev-tailscale-cli stable-setup stable-teardown gateway check go-check backend-check shell-check shell-check-ci-complement shell-check-service-suites production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release resume-benchmark-pilot relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
@@ -111,7 +111,18 @@ go-check:
 
 backend-check: go-check shell-check production-path-audit
 
-shell-check:
+# `shell-check` is the complete default and still runs everything below. check.yml's Shell job runs only
+# `shell-check-ci-complement`, because the three suites in `shell-check-service-suites` (native install with its
+# nested dispatch, doctor and setup-menu children, full uninstall, uninstall CLI) are required runs of the Service
+# qualification workflows on every event check.yml runs on (docs/ci-test-tiers.md).
+shell-check: shell-check-ci-complement shell-check-service-suites
+
+shell-check-service-suites:
+	bash tests/test_native_install.sh
+	bash tests/test_uninstall.sh
+	python3 tests/test_service_uninstall_cli.py
+
+shell-check-ci-complement:
 	shellcheck --severity=warning -x -P relay relay/dev-tailscale-cli.sh relay/tailscale-cli.sh
 	bun test tests/pi-command-bridge.test.mjs
 	bash tests/test_pi_commands.sh
@@ -127,10 +138,7 @@ shell-check:
 	bash tests/test_tailscale.sh
 	HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_dev_tailscale.py
 	sh tests/test_plugin_recovery.sh
-	bash tests/test_native_install.sh
 	sh tests/test_release_scripts.sh
-	bash tests/test_uninstall.sh
-	python3 tests/test_service_uninstall_cli.py
 	HERDR_TAILSCALE_LAUNCHER_CI=1 python3 tests/test_tailscale_cli_setup_failure.py
 	bash tests/test_speech_voices.sh
 	tests/test_stable_setup.sh

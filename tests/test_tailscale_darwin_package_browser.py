@@ -189,6 +189,14 @@ ALLOWED = (
     ".github/workflows/check.yml",
     ".github/workflows/service-qualification.yml",
     "scripts/ci/run-service-qualification.sh",
+    # Native-install tiers, shards and CI coverage graph (the new paths of that change only).
+    ".github/workflows/resume-benchmark.yml",
+    ".github/workflows/service-full-qualification.yml",
+    "Makefile",
+    "docs/ci-test-tiers.md",
+    "tests/native_install_fast_cases.json",
+    "tests/service_qualification_matrix.py",
+    "tests/test_service_qualification_matrix.py",
     # Hosted-job timeout caps (T004 review F002): the tag-triggered release workflow.
     # Added only for that finding; check.yml above already covers the branch jobs.
     ".github/workflows/release.yml",

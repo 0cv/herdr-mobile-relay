@@ -9,6 +9,12 @@ python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 2
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-native-test.XXXXXX")"
 trap 'status=$?; rm -rf "$WORK_DIR"; exit $status' EXIT
+# Cell selection. The default is the whole exhaustive suite. HERDR_NATIVE_INSTALL_TIER=fast|full, _SHARD=i/n and _CELL=<id>
+# narrow it; an invalid value refuses here, before any build or fixture. HERDR_NATIVE_INSTALL_EVIDENCE=<new file> receives one
+# line per COMPLETED cell. The plan is a pure text enumeration of this file (tests/service_qualification_matrix.py).
+python3 -I -B "$REPO_DIR/tests/service_qualification_matrix.py" plan --source "$REPO_DIR/tests/test_native_install.sh" \
+    --fast-cases "$REPO_DIR/tests/native_install_fast_cases.json" --output "$WORK_DIR/selection.json" || exit 2
+export NATIVE_SELECTION="$WORK_DIR/selection.json"
 export NATIVE_HELPER="$WORK_DIR/helper"
 python3 - "$NATIVE_HELPER" "$REPO_DIR/cmd/herdr-mobile-relay" <<'PY'
 import subprocess, sys
@@ -16,18 +22,18 @@ subprocess.run(["go", "build", "-o", sys.argv[1], sys.argv[2]], check=True, time
 PY
 # Existing production-dispatch, diagnostic and navigation suites remain wired;
 # they retain their separate acceptance boundaries and their own hosted guards.
-# The service qualification harness sets HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH=1 for this
-# suite only, because it runs the dispatch suite as its own qualification suite (its own exit
-# status and timing; run twice, the nested copy used most of this suite's wall-clock bound and
-# the native cells below could not finish). Without the variable (the check.yml shell job, a
-# developer run) the nested execution is unchanged.
+# The service qualification harness sets HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN=1 because it runs all three as their
+# own required suites (own exit status, timing and bound; nested, one doctor failure hid the native cells and the nested
+# dispatch copy used most of this suite's wall-clock bound). Without the variable (`make shell-check`, a developer run)
+# the nested execution is unchanged.
 python3 - "$REPO_DIR" <<'PY'
 import os, pathlib, subprocess, sys
 repo = pathlib.Path(sys.argv[1])
+assert os.environ.get("HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN") in (None, "1"), "SKIP_NESTED_CHILDREN must be unset or 1"
 for name, timeout in (("test_service_transport_dispatch.py", 900),
                       ("test_plugin_doctor.py", 120), ("test_setup_menu.py", 180)):
-    if name == "test_service_transport_dispatch.py" and os.environ.get("HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH") == "1":
-        print("test_service_transport_dispatch.py runs as its own qualification suite; not nested here", flush=True)
+    if os.environ.get("HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN") == "1":
+        print(name + " runs as its own qualification suite; not nested here", flush=True)
         continue
     subprocess.run([sys.executable, str(repo / "tests" / name)], check=True, timeout=timeout)
 PY
@@ -159,6 +165,28 @@ def record_interrupt(signum, _frame):
 
 for sig in (signal.SIGINT, signal.SIGTERM):
     signal.signal(sig, record_interrupt)
+
+# Cell selection (see `plan` above). Every cell starts with `cell(id)`. Reaching the next gate proves every assertion of
+# the open cell passed, so only then is it recorded as completed; a failing cell raises and is never recorded. The ids
+# reached, selected or not, must equal the statically enumerated inventory: the loops cannot drift from it unnoticed.
+selection = json.loads(pathlib.Path(os.environ["NATIVE_SELECTION"]).read_text())
+selected, reached, completed, open_cell = set(selection["selected"]), [], [], [None]
+evidence = open(os.environ["HERDR_NATIVE_INSTALL_EVIDENCE"], "x", buffering=1) if os.environ.get("HERDR_NATIVE_INSTALL_EVIDENCE") else None
+
+
+def close_cell():
+    if open_cell[0] is not None:
+        completed.append(open_cell[0])
+        if evidence: print(open_cell[0], file=evidence, flush=True)
+        open_cell[0] = None
+
+
+def cell(cell_id):
+    close_cell()
+    reached.append(cell_id)
+    if cell_id not in selected: return False
+    open_cell[0] = cell_id
+    return True
 
 
 @contextmanager
@@ -351,7 +379,9 @@ def native_capture_cases(parent, platform, transport):
             faults = capture_faults(seam, payload, status, part, limit)
             for name, data, code in faults:
                 for invocation in ("observe-if", "observe-or", "quiet-if", "quiet-or"):
-                    f = d.Fixture(parent, f"capture-probe-{platform}-{transport}-{role}-{seam}-{name}-{invocation}", transport, platform)
+                    cell_id = f"capture-probe-{platform}-{transport}-{role}-{seam}-{name}-{invocation}"
+                    if not cell(cell_id): continue
+                    f = d.Fixture(parent, cell_id, transport, platform)
                     before = snapshot(resources(f)); capture_control(f, seam, role, data, code)
                     result, output = probe(f, label, invocation)
                     assert result == 1 and output == b"unknown:unknown\n"
@@ -368,7 +398,9 @@ def native_capture_cases(parent, platform, transport):
                           for name, data, code in faults[:6]
                           for conditional in ("", "if", "or")]
                 for phase, at, name, data, code, conditional in cells:
-                    f = d.Fixture(parent, f"capture-exit-{platform}-{transport}-{role}-{seam}-{initial}-{phase}-{at}-{name}-{conditional}", transport, platform, initial)
+                    cell_id = f"capture-exit-{platform}-{transport}-{role}-{seam}-{initial}-{phase}-{at}-{name}-{conditional}"
+                    if not cell(cell_id): continue
+                    f = d.Fixture(parent, cell_id, transport, platform, initial)
                     d.write(f.root / "config/github-token", "prior-unselected-sidecar\n")
                     (f.root / "config/github-token").chmod(0o640)
                     with f.envfile.open("a") as out: out.write("GH_TOKEN='" + canary + "'\n")
@@ -413,7 +445,9 @@ def native_capture_cases(parent, platform, transport):
                             assert [p.read_bytes().hex() if p.is_file() else None, stat.S_IMODE(p.stat().st_mode)] == value
         # Supported absent/inactive quiet EOF, exact nonzero absence, loaded
         # header EOF (not quiet), and actual reader byte-bound controls.
-        f = d.Fixture(parent, f"capture-valid-{platform}-{transport}-{role}", transport, platform)
+        cell_id = f"capture-valid-{platform}-{transport}-{role}"
+        if not cell(cell_id): continue
+        f = d.Fixture(parent, cell_id, transport, platform)
         result, output = probe(f, label, "quiet-if", "supported")
         assert result == 0 and output in (b"absent:false\n", b"inactive:false\n")
         for seam, payload, code, part, limit in frames:
@@ -458,7 +492,9 @@ def native_origin_cases(parent, platform):
         refusal = ("Native installation refused: the loaded service for " + label + " was not established to be defined by "
                    "Herdr's own definition path; no service or definition was changed.")
         for kind in kinds:
-            f = d.Fixture(parent, f"origin-{platform}-{role}-{kind}", "gateway", platform, kind != "foreign-bare")
+            cell_id = f"origin-{platform}-{role}-{kind}"
+            if not cell(cell_id): continue
+            f = d.Fixture(parent, cell_id, "gateway", platform, kind != "foreign-bare")
             if kind == "foreign-bare":
                 # No Herdr definition exists anywhere: only a running, enabled foreign service
                 # holds the label, so a missing expected definition must stay missing.
@@ -485,15 +521,17 @@ def native_origin_cases(parent, platform):
             assert bystander.poll() is None
     # Positive controls: matching origin proceeds (and the evidence is requested for BOTH labels);
     # a fresh install has no loaded label, so it issues no systemd origin query at all.
-    f = d.Fixture(parent, f"origin-{platform}-match", "gateway", platform, True)
-    result = run(f)
-    assert result.returncode == 0 and "Native installation refused" not in result.stderr
-    assert set(origin_queries(f)) == {label_of("current"), label_of("legacy")}
-    f = d.Fixture(parent, f"origin-{platform}-fresh", "gateway", platform)
-    result = run(f)
-    assert result.returncode == 0 and "Native installation refused" not in result.stderr
-    if platform == "systemd": assert not origin_queries(f)
-    native_origin_input_cases(parent, platform)
+    if cell(f"origin-{platform}-match"):
+        f = d.Fixture(parent, f"origin-{platform}-match", "gateway", platform, True)
+        result = run(f)
+        assert result.returncode == 0 and "Native installation refused" not in result.stderr
+        assert set(origin_queries(f)) == {label_of("current"), label_of("legacy")}
+    if cell(f"origin-{platform}-fresh"):
+        f = d.Fixture(parent, f"origin-{platform}-fresh", "gateway", platform)
+        result = run(f)
+        assert result.returncode == 0 and "Native installation refused" not in result.stderr
+        if platform == "systemd": assert not origin_queries(f)
+    if cell(f"origin-input-{platform}"): native_origin_input_cases(parent, platform)
 
 
 def native_origin_input_cases(parent, platform):
@@ -594,7 +632,7 @@ def native_shim_parity():
 
 bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"], start_new_session=True)
 try:
-    native_shim_parity()
+    if cell("shim-parity"): native_shim_parity()
     for platform in ("systemd", "launchd"):
         for transport in ("gateway", "cloudflare"):
             native_capture_cases(parent, platform, transport)
@@ -612,7 +650,9 @@ try:
                 ("routing", "PATH=/forbidden\n"),
                 ("raw-distinct", "GH_TOKEN=one\nGITHUB_TOKEN=two\n"),
                 ("pointer-relative", "HERDR_GITHUB_TOKEN_FILE=relative\n")):
-                f = d.Fixture(parent, f"{platform}-{transport}-refuse-{name}", transport, platform, True)
+                cell_id = f"{platform}-{transport}-refuse-{name}"
+                if not cell(cell_id): continue
+                f = d.Fixture(parent, cell_id, transport, platform, True)
                 with f.envfile.open("a") as out: out.write(addition)
                 before = snapshot(resources(f)); activation = state(f)
                 assert run(f).returncode != 0
@@ -621,15 +661,19 @@ try:
                 assert not any(e["kind"] in ("manager", "http", "app", "dispatch", "cli-gate", "relay", "tunnel") for e in f.events())
             # An absent ancestor plus '..' must not mask an existing resource
             # until mkdir/publication. Refuse before touching either spelling.
-            f = d.Fixture(parent, f"{platform}-{transport}-future-alias", transport, platform, True)
-            before = snapshot(resources(f)); activation = state(f)
-            f.env["HERDR_RELAY_ENV"] = str(f.root / "uncreated/../config/relay.env")
-            assert run(f).returncode != 0
-            assert snapshot(resources(f)) == before and state(f) == activation
-            assert not (f.root / "uncreated").exists() and not recovery(f)
-            assert not any(e["kind"] in ("manager", "http", "app", "dispatch", "cli-gate", "relay", "tunnel") for e in f.events())
+            cell_id = f"{platform}-{transport}-future-alias"
+            if cell(cell_id):
+                f = d.Fixture(parent, cell_id, transport, platform, True)
+                before = snapshot(resources(f)); activation = state(f)
+                f.env["HERDR_RELAY_ENV"] = str(f.root / "uncreated/../config/relay.env")
+                assert run(f).returncode != 0
+                assert snapshot(resources(f)) == before and state(f) == activation
+                assert not (f.root / "uncreated").exists() and not recovery(f)
+                assert not any(e["kind"] in ("manager", "http", "app", "dispatch", "cli-gate", "relay", "tunnel") for e in f.events())
             for raw_key in ("short", "x" * 33, "z" * 32, "é" * 16):
-                f = d.Fixture(parent, f"{platform}-{transport}-key-{len(raw_key)}", transport, platform)
+                cell_id = f"{platform}-{transport}-key-{len(raw_key)}"
+                if not cell(cell_id): continue
+                f = d.Fixture(parent, cell_id, transport, platform)
                 d.write(f.envfile, f.envfile.read_text().replace("0123456789abcdef0123456789abcdef", raw_key))
                 before = snapshot(resources(f))
                 result = run(f)
@@ -638,7 +682,9 @@ try:
             for number, spelling in enumerate(("0", "false", "False", "FALSE", "f", "F")):
                 # The number keeps the directories distinct on a case-insensitive volume (the Darwin runner's default),
                 # where false-False and false-FALSE would otherwise be one directory and the second mkdir an error.
-                f = d.Fixture(parent, f"{platform}-{transport}-false-{number}-{spelling}", transport, platform)
+                cell_id = f"{platform}-{transport}-false-{number}-{spelling}"
+                if not cell(cell_id): continue
+                f = d.Fixture(parent, cell_id, transport, platform)
                 with f.envfile.open("a") as out: out.write("HERDR_RELAY_REARM_BOOTSTRAP=" + spelling + "\n")
                 assert run(f).returncode == 0
 
@@ -648,7 +694,9 @@ try:
                                 "public-stop-fail", "public-unknown", "public-safe", "prior-unready"):
                     if (failure == "reload" and platform == "launchd") or (failure == "stop" and initial != "active"): continue
                     if failure == "prior-unready" and initial != "active": continue
-                    f = d.Fixture(parent, f"{platform}-{transport}-{initial}-{failure or 'ok'}", transport, platform, initial != "fresh")
+                    cell_id = f"{platform}-{transport}-{initial}-{failure or 'ok'}"
+                    if not cell(cell_id): continue
+                    f = d.Fixture(parent, cell_id, transport, platform, initial != "fresh")
                     if initial == "fresh" and failure == "snapshot":
                         # The snapshot fault seam fails cp of resource 0 (the current
                         # definition). A wholly absent fresh definition has no cp /0;
@@ -730,18 +778,21 @@ try:
 
             # F001: the real installer has set -u and starts identity tracking
             # empty. /bin/bash is stock 3.2 on the admitted Darwin runner.
-            f = d.Fixture(parent, f"{platform}-{transport}-empty-identities", transport, platform)
-            result = run(f)
-            assert result.returncode == 0 and "unbound variable" not in result.stderr
-            assert state(f)["current"]["active"] and not f.legacy.exists() and not recovery(f)
+            cell_id = f"{platform}-{transport}-empty-identities"
+            if cell(cell_id):
+                f = d.Fixture(parent, cell_id, transport, platform)
+                result = run(f)
+                assert result.returncode == 0 and "unbound variable" not in result.stderr
+                assert state(f)["current"]["active"] and not f.legacy.exists() and not recovery(f)
 
             # F002: private metadata does not make a selected credential safe
             # to overwrite/remove as a transaction destination. With false
             # activation, launchd labels are absent even when files exist.
             for role in ("environment", "current", "legacy"):
                 for prior_active in (False, True):
-                    f = d.Fixture(parent, f"{platform}-{transport}-pointer-overlap-{role}-{prior_active}",
-                                  transport, platform, prior_active)
+                    cell_id = f"{platform}-{transport}-pointer-overlap-{role}-{prior_active}"
+                    if not cell(cell_id): continue
+                    f = d.Fixture(parent, cell_id, transport, platform, prior_active)
                     pointer = {"environment": f.envfile, "current": f.definition, "legacy": f.legacy}[role]
                     if role != "environment": d.write(pointer, "synthetic-selected-credential\n")
                     with f.envfile.open("a") as out:
@@ -755,18 +806,22 @@ try:
 
             # A valid saved private pointer wins over contradictory raw keys;
             # neither its target nor an unselected destination is rewritten.
-            f = d.Fixture(parent, f"{platform}-{transport}-pointer", transport, platform)
-            pointer = f.root / "private-selected"
-            d.write(pointer, "selected-pointer-content\n")
-            with f.envfile.open("a") as out:
-                out.write(f"HERDR_GITHUB_TOKEN_FILE='{pointer}'\nGH_TOKEN=one\nGITHUB_TOKEN=two\n")
-            before = snapshot([pointer, f.root / "config/github-token"])
-            assert run(f).returncode == 0
-            assert snapshot(map(pathlib.Path, before)) == before
-            assert "GH_TOKEN=" not in f.envfile.read_text() and "GITHUB_TOKEN=" not in f.envfile.read_text()
+            cell_id = f"{platform}-{transport}-pointer"
+            if cell(cell_id):
+                f = d.Fixture(parent, cell_id, transport, platform)
+                pointer = f.root / "private-selected"
+                d.write(pointer, "selected-pointer-content\n")
+                with f.envfile.open("a") as out:
+                    out.write(f"HERDR_GITHUB_TOKEN_FILE='{pointer}'\nGH_TOKEN=one\nGITHUB_TOKEN=two\n")
+                before = snapshot([pointer, f.root / "config/github-token"])
+                assert run(f).returncode == 0
+                assert snapshot(map(pathlib.Path, before)) == before
+                assert "GH_TOKEN=" not in f.envfile.read_text() and "GITHUB_TOKEN=" not in f.envfile.read_text()
 
             for missing in ("file", "key", "instance"):
-                f = d.Fixture(parent, f"{platform}-{transport}-defaults-{missing}", transport, platform)
+                cell_id = f"{platform}-{transport}-defaults-{missing}"
+                if not cell(cell_id): continue
+                f = d.Fixture(parent, cell_id, transport, platform)
                 if missing == "file":
                     f.envfile.unlink()
                     f.env.update(HERDR_RELAY_TRANSPORT=transport, HERDR_RELAY_PORT="18375")
@@ -780,7 +835,9 @@ try:
                 assert lines["HERDR_RELAY_INSTANCE_ID"].strip("'")
 
             for sig in (signal.SIGINT, signal.SIGTERM):
-                f = d.Fixture(parent, f"{platform}-{transport}-cancel-{sig}", transport, platform, True)
+                cell_id = f"{platform}-{transport}-cancel-{sig}"
+                if not cell(cell_id): continue
+                f = d.Fixture(parent, cell_id, transport, platform, True)
                 before = snapshot(resources(f)); activation = state(f)
                 f.env["NATIVE_FAILURE"] = "cancel"
                 command = ["/bin/bash", "-x", str(f.script)]
@@ -797,6 +854,11 @@ try:
                     assert proc.returncode == 128 + sig
                     assert snapshot(resources(f)) == before and state(f) == activation
                     assert bystander.poll() is None
+    close_cell()
+    assert reached == selection["inventory"], "the cells reached differ from the enumerated inventory"
+    assert sorted(completed) == sorted(selected), "the completed cells differ from the selected cells"
+    print("native cells completed: %d of %d (tier %s, shard %s/%s)" % (len(completed), len(reached), selection["tier"],
+          selection["shard_index"], selection["shard_count"]), flush=True)
 finally:
     bystander.terminate(); bystander.wait(timeout=5)
 if interrupted[0]: raise SystemExit(128 + interrupted[0])

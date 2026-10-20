@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "name": "adapter-model-parity",
+      "rationale": "Replays the native shim prelude against the shared adapter (status, output, events, file tree): adapter/model parity. One cell, independent of OS and manager.",
+      "ids": [
+        "shim-parity"
+      ]
+    },
+    {
+      "name": "parser-seam-probes",
+      "rationale": "Every manager capture/parser seam (systemd show; launchd domain, label, disabled) x label/role x every malformed shape/boundary (NUL at middle/prefix/suffix, oversize, controller failure, partial, empty) x all four caller contexts (observe and quiet, under if and ||). Gateway only: the probe never reads the transport, so the cloudflare copies are repeated pairings.",
+      "ids": [
+        "capture-probe-systemd-gateway-current-systemd-middle-nul-observe-if", "capture-probe-systemd-gateway-current-systemd-middle-nul-observe-or", "capture-probe-systemd-gateway-current-systemd-middle-nul-quiet-if",
+        "capture-probe-systemd-gateway-current-systemd-middle-nul-quiet-or", "capture-probe-systemd-gateway-current-systemd-prefix-nul-observe-if", "capture-probe-systemd-gateway-current-systemd-prefix-nul-observe-or",
+        "capture-probe-systemd-gateway-current-systemd-prefix-nul-quiet-if", "capture-probe-systemd-gateway-current-systemd-prefix-nul-quiet-or", "capture-probe-systemd-gateway-current-systemd-suffix-nul-observe-if",
+        "capture-probe-systemd-gateway-current-systemd-suffix-nul-observe-or", "capture-probe-systemd-gateway-current-systemd-suffix-nul-quiet-if", "capture-probe-systemd-gateway-current-systemd-suffix-nul-quiet-or",
+        "capture-probe-systemd-gateway-current-systemd-oversized-observe-if", "capture-probe-systemd-gateway-current-systemd-oversized-observe-or", "capture-probe-systemd-gateway-current-systemd-oversized-quiet-if",
+        "capture-probe-systemd-gateway-current-systemd-oversized-quiet-or", "capture-probe-systemd-gateway-current-systemd-failed-observe-if", "capture-probe-systemd-gateway-current-systemd-failed-observe-or",
+        "capture-probe-systemd-gateway-current-systemd-failed-quiet-if", "capture-probe-systemd-gateway-current-systemd-failed-quiet-or", "capture-probe-systemd-gateway-current-systemd-partial-observe-if",
+        "capture-probe-systemd-gateway-current-systemd-partial-observe-or", "capture-probe-systemd-gateway-current-systemd-partial-quiet-if", "capture-probe-systemd-gateway-current-systemd-partial-quiet-or",
+        "capture-probe-systemd-gateway-current-systemd-empty-observe-if", "capture-probe-systemd-gateway-current-systemd-empty-observe-or", "capture-probe-systemd-gateway-current-systemd-empty-quiet-if",
+        "capture-probe-systemd-gateway-current-systemd-empty-quiet-or", "capture-probe-systemd-gateway-legacy-systemd-middle-nul-observe-if", "capture-probe-systemd-gateway-legacy-systemd-middle-nul-observe-or",
+        "capture-probe-systemd-gateway-legacy-systemd-middle-nul-quiet-if", "capture-probe-systemd-gateway-legacy-systemd-middle-nul-quiet-or", "capture-probe-systemd-gateway-legacy-systemd-prefix-nul-observe-if",
+        "capture-probe-systemd-gateway-legacy-systemd-prefix-nul-observe-or", "capture-probe-systemd-gateway-legacy-systemd-prefix-nul-quiet-if", "capture-probe-systemd-gateway-legacy-systemd-prefix-nul-quiet-or",
+        "capture-probe-systemd-gateway-legacy-systemd-suffix-nul-observe-if", "capture-probe-systemd-gateway-legacy-systemd-suffix-nul-observe-or", "capture-probe-systemd-gateway-legacy-systemd-suffix-nul-quiet-if",
+        "capture-probe-systemd-gateway-legacy-systemd-suffix-nul-quiet-or", "capture-probe-systemd-gateway-legacy-systemd-oversized-observe-if", "capture-probe-systemd-gateway-legacy-systemd-oversized-observe-or",
+        "capture-probe-systemd-gateway-legacy-systemd-oversized-quiet-if", "capture-probe-systemd-gateway-legacy-systemd-oversized-quiet-or", "capture-probe-systemd-gateway-legacy-systemd-failed-observe-if",
+        "capture-probe-systemd-gateway-legacy-systemd-failed-observe-or", "capture-probe-systemd-gateway-legacy-systemd-failed-quiet-if", "capture-probe-systemd-gateway-legacy-systemd-failed-quiet-or",
+        "capture-probe-systemd-gateway-legacy-systemd-partial-observe-if", "capture-probe-systemd-gateway-legacy-systemd-partial-observe-or", "capture-probe-systemd-gateway-legacy-systemd-partial-quiet-if",
+        "capture-probe-systemd-gateway-legacy-systemd-partial-quiet-or", "capture-probe-systemd-gateway-legacy-systemd-empty-observe-if", "capture-probe-systemd-gateway-legacy-systemd-empty-observe-or",
+        "capture-probe-systemd-gateway-legacy-systemd-empty-quiet-if", "capture-probe-systemd-gateway-legacy-systemd-empty-quiet-or", "capture-probe-launchd-gateway-current-domain-middle-nul-observe-if",
+        "capture-probe-launchd-gateway-current-domain-middle-nul-observe-or", "capture-probe-launchd-gateway-current-domain-middle-nul-quiet-if", "capture-probe-launchd-gateway-current-domain-middle-nul-quiet-or",
+        "capture-probe-launchd-gateway-current-domain-prefix-nul-observe-if", "capture-probe-launchd-gateway-current-domain-prefix-nul-observe-or", "capture-probe-launchd-gateway-current-domain-prefix-nul-quiet-if",
+        "capture-probe-launchd-gateway-current-domain-prefix-nul-quiet-or", "capture-probe-launchd-gateway-current-domain-suffix-nul-observe-if", "capture-probe-launchd-gateway-current-domain-suffix-nul-observe-or",
+        "capture-probe-launchd-gateway-current-domain-suffix-nul-quiet-if", "capture-probe-launchd-gateway-current-domain-suffix-nul-quiet-or", "capture-probe-launchd-gateway-current-domain-oversized-observe-if",
+        "capture-probe-launchd-gateway-current-domain-oversized-observe-or", "capture-probe-launchd-gateway-current-domain-oversized-quiet-if", "capture-probe-launchd-gateway-current-domain-oversized-quiet-or",
+        "capture-probe-launchd-gateway-current-domain-failed-observe-if", "capture-probe-launchd-gateway-current-domain-failed-observe-or", "capture-probe-launchd-gateway-current-domain-failed-quiet-if",
+        "capture-probe-launchd-gateway-current-domain-failed-quiet-or", "capture-probe-launchd-gateway-current-domain-partial-observe-if", "capture-probe-launchd-gateway-current-domain-partial-observe-or",
+        "capture-probe-launchd-gateway-current-domain-partial-quiet-if", "capture-probe-launchd-gateway-current-domain-partial-quiet-or", "capture-probe-launchd-gateway-current-domain-empty-observe-if",
+        "capture-probe-launchd-gateway-current-domain-empty-observe-or", "capture-probe-launchd-gateway-current-domain-empty-quiet-if", "capture-probe-launchd-gateway-current-domain-empty-quiet-or",
+        "capture-probe-launchd-gateway-current-label-middle-nul-observe-if", "capture-probe-launchd-gateway-current-label-middle-nul-observe-or", "capture-probe-launchd-gateway-current-label-middle-nul-quiet-if",
+        "capture-probe-launchd-gateway-current-label-middle-nul-quiet-or", "capture-probe-launchd-gateway-current-label-prefix-nul-observe-if", "capture-probe-launchd-gateway-current-label-prefix-nul-observe-or",
+        "capture-probe-launchd-gateway-current-label-prefix-nul-quiet-if", "capture-probe-launchd-gateway-current-label-prefix-nul-quiet-or", "capture-probe-launchd-gateway-current-label-suffix-nul-observe-if",
+        "capture-probe-launchd-gateway-current-label-suffix-nul-observe-or", "capture-probe-launchd-gateway-current-label-suffix-nul-quiet-if", "capture-probe-launchd-gateway-current-label-suffix-nul-quiet-or",
+        "capture-probe-launchd-gateway-current-label-oversized-observe-if", "capture-probe-launchd-gateway-current-label-oversized-observe-or", "capture-probe-launchd-gateway-current-label-oversized-quiet-if",
+        "capture-probe-launchd-gateway-current-label-oversized-quiet-or", "capture-probe-launchd-gateway-current-label-failed-observe-if", "capture-probe-launchd-gateway-current-label-failed-observe-or",
+        "capture-probe-launchd-gateway-current-label-failed-quiet-if", "capture-probe-launchd-gateway-current-label-failed-quiet-or", "capture-probe-launchd-gateway-current-label-partial-observe-if",
+        "capture-probe-launchd-gateway-current-label-partial-observe-or", "capture-probe-launchd-gateway-current-label-partial-quiet-if", "capture-probe-launchd-gateway-current-label-partial-quiet-or",
+        "capture-probe-launchd-gateway-current-label-empty-observe-if", "capture-probe-launchd-gateway-current-label-empty-observe-or", "capture-probe-launchd-gateway-current-label-empty-quiet-if",
+        "capture-probe-launchd-gateway-current-label-empty-quiet-or", "capture-probe-launchd-gateway-current-disabled-middle-nul-observe-if", "capture-probe-launchd-gateway-current-disabled-middle-nul-observe-or",
+        "capture-probe-launchd-gateway-current-disabled-middle-nul-quiet-if", "capture-probe-launchd-gateway-current-disabled-middle-nul-quiet-or", "capture-probe-launchd-gateway-current-disabled-prefix-nul-observe-if",
+        "capture-probe-launchd-gateway-current-disabled-prefix-nul-observe-or", "capture-probe-launchd-gateway-current-disabled-prefix-nul-quiet-if", "capture-probe-launchd-gateway-current-disabled-prefix-nul-quiet-or",
+        "capture-probe-launchd-gateway-current-disabled-suffix-nul-observe-if", "capture-probe-launchd-gateway-current-disabled-suffix-nul-observe-or", "capture-probe-launchd-gateway-current-disabled-suffix-nul-quiet-if",
+        "capture-probe-launchd-gateway-current-disabled-suffix-nul-quiet-or", "capture-probe-launchd-gateway-current-disabled-oversized-observe-if", "capture-probe-launchd-gateway-current-disabled-oversized-observe-or",
+        "capture-probe-launchd-gateway-current-disabled-oversized-quiet-if", "capture-probe-launchd-gateway-current-disabled-oversized-quiet-or", "capture-probe-launchd-gateway-current-disabled-failed-observe-if",
+        "capture-probe-launchd-gateway-current-disabled-failed-observe-or", "capture-probe-launchd-gateway-current-disabled-failed-quiet-if", "capture-probe-launchd-gateway-current-disabled-failed-quiet-or",
+        "capture-probe-launchd-gateway-current-disabled-partial-observe-if", "capture-probe-launchd-gateway-current-disabled-partial-observe-or", "capture-probe-launchd-gateway-current-disabled-partial-quiet-if",
+        "capture-probe-launchd-gateway-current-disabled-partial-quiet-or", "capture-probe-launchd-gateway-current-disabled-empty-observe-if", "capture-probe-launchd-gateway-current-disabled-empty-observe-or",
+        "capture-probe-launchd-gateway-current-disabled-empty-quiet-if", "capture-probe-launchd-gateway-current-disabled-empty-quiet-or", "capture-probe-launchd-gateway-legacy-domain-middle-nul-observe-if",
+        "capture-probe-launchd-gateway-legacy-domain-middle-nul-observe-or", "capture-probe-launchd-gateway-legacy-domain-middle-nul-quiet-if", "capture-probe-launchd-gateway-legacy-domain-middle-nul-quiet-or",
+        "capture-probe-launchd-gateway-legacy-domain-prefix-nul-observe-if", "capture-probe-launchd-gateway-legacy-domain-prefix-nul-observe-or", "capture-probe-launchd-gateway-legacy-domain-prefix-nul-quiet-if",
+        "capture-probe-launchd-gateway-legacy-domain-prefix-nul-quiet-or", "capture-probe-launchd-gateway-legacy-domain-suffix-nul-observe-if", "capture-probe-launchd-gateway-legacy-domain-suffix-nul-observe-or",
+        "capture-probe-launchd-gateway-legacy-domain-suffix-nul-quiet-if", "capture-probe-launchd-gateway-legacy-domain-suffix-nul-quiet-or", "capture-probe-launchd-gateway-legacy-domain-oversized-observe-if",
+        "capture-probe-launchd-gateway-legacy-domain-oversized-observe-or", "capture-probe-launchd-gateway-legacy-domain-oversized-quiet-if", "capture-probe-launchd-gateway-legacy-domain-oversized-quiet-or",
+        "capture-probe-launchd-gateway-legacy-domain-failed-observe-if", "capture-probe-launchd-gateway-legacy-domain-failed-observe-or", "capture-probe-launchd-gateway-legacy-domain-failed-quiet-if",
+        "capture-probe-launchd-gateway-legacy-domain-failed-quiet-or", "capture-probe-launchd-gateway-legacy-domain-partial-observe-if", "capture-probe-launchd-gateway-legacy-domain-partial-observe-or",
+        "capture-probe-launchd-gateway-legacy-domain-partial-quiet-if", "capture-probe-launchd-gateway-legacy-domain-partial-quiet-or", "capture-probe-launchd-gateway-legacy-domain-empty-observe-if",
+        "capture-probe-launchd-gateway-legacy-domain-empty-observe-or", "capture-probe-launchd-gateway-legacy-domain-empty-quiet-if", "capture-probe-launchd-gateway-legacy-domain-empty-quiet-or",
+        "capture-probe-launchd-gateway-legacy-label-middle-nul-observe-if", "capture-probe-launchd-gateway-legacy-label-middle-nul-observe-or", "capture-probe-launchd-gateway-legacy-label-middle-nul-quiet-if",
+        "capture-probe-launchd-gateway-legacy-label-middle-nul-quiet-or", "capture-probe-launchd-gateway-legacy-label-prefix-nul-observe-if", "capture-probe-launchd-gateway-legacy-label-prefix-nul-observe-or",
+        "capture-probe-launchd-gateway-legacy-label-prefix-nul-quiet-if", "capture-probe-launchd-gateway-legacy-label-prefix-nul-quiet-or", "capture-probe-launchd-gateway-legacy-label-suffix-nul-observe-if",
+        "capture-probe-launchd-gateway-legacy-label-suffix-nul-observe-or", "capture-probe-launchd-gateway-legacy-label-suffix-nul-quiet-if", "capture-probe-launchd-gateway-legacy-label-suffix-nul-quiet-or",
+        "capture-probe-launchd-gateway-legacy-label-oversized-observe-if", "capture-probe-launchd-gateway-legacy-label-oversized-observe-or", "capture-probe-launchd-gateway-legacy-label-oversized-quiet-if",
+        "capture-probe-launchd-gateway-legacy-label-oversized-quiet-or", "capture-probe-launchd-gateway-legacy-label-failed-observe-if", "capture-probe-launchd-gateway-legacy-label-failed-observe-or",
+        "capture-probe-launchd-gateway-legacy-label-failed-quiet-if", "capture-probe-launchd-gateway-legacy-label-failed-quiet-or", "capture-probe-launchd-gateway-legacy-label-partial-observe-if",
+        "capture-probe-launchd-gateway-legacy-label-partial-observe-or", "capture-probe-launchd-gateway-legacy-label-partial-quiet-if", "capture-probe-launchd-gateway-legacy-label-partial-quiet-or",
+        "capture-probe-launchd-gateway-legacy-label-empty-observe-if", "capture-probe-launchd-gateway-legacy-label-empty-observe-or", "capture-probe-launchd-gateway-legacy-label-empty-quiet-if",
+        "capture-probe-launchd-gateway-legacy-label-empty-quiet-or", "capture-probe-launchd-gateway-legacy-disabled-middle-nul-observe-if", "capture-probe-launchd-gateway-legacy-disabled-middle-nul-observe-or",
+        "capture-probe-launchd-gateway-legacy-disabled-middle-nul-quiet-if", "capture-probe-launchd-gateway-legacy-disabled-middle-nul-quiet-or", "capture-probe-launchd-gateway-legacy-disabled-prefix-nul-observe-if",
+        "capture-probe-launchd-gateway-legacy-disabled-prefix-nul-observe-or", "capture-probe-launchd-gateway-legacy-disabled-prefix-nul-quiet-if", "capture-probe-launchd-gateway-legacy-disabled-prefix-nul-quiet-or",
+        "capture-probe-launchd-gateway-legacy-disabled-suffix-nul-observe-if", "capture-probe-launchd-gateway-legacy-disabled-suffix-nul-observe-or", "capture-probe-launchd-gateway-legacy-disabled-suffix-nul-quiet-if",
+        "capture-probe-launchd-gateway-legacy-disabled-suffix-nul-quiet-or", "capture-probe-launchd-gateway-legacy-disabled-oversized-observe-if", "capture-probe-launchd-gateway-legacy-disabled-oversized-observe-or",
+        "capture-probe-launchd-gateway-legacy-disabled-oversized-quiet-if", "capture-probe-launchd-gateway-legacy-disabled-oversized-quiet-or", "capture-probe-launchd-gateway-legacy-disabled-failed-observe-if",
+        "capture-probe-launchd-gateway-legacy-disabled-failed-observe-or", "capture-probe-launchd-gateway-legacy-disabled-failed-quiet-if", "capture-probe-launchd-gateway-legacy-disabled-failed-quiet-or",
+        "capture-probe-launchd-gateway-legacy-disabled-partial-observe-if", "capture-probe-launchd-gateway-legacy-disabled-partial-observe-or", "capture-probe-launchd-gateway-legacy-disabled-partial-quiet-if",
+        "capture-probe-launchd-gateway-legacy-disabled-partial-quiet-or", "capture-probe-launchd-gateway-legacy-disabled-empty-observe-if", "capture-probe-launchd-gateway-legacy-disabled-empty-observe-or",
+        "capture-probe-launchd-gateway-legacy-disabled-empty-quiet-if", "capture-probe-launchd-gateway-legacy-disabled-empty-quiet-or"
+      ]
+    },
+    {
+      "name": "parser-positive-controls",
+      "rationale": "Supported absent/inactive/loaded observations and the 4096/65536-byte reader bounds per platform and label; gateway only (the transport is not read).",
+      "ids": [
+        "capture-valid-systemd-gateway-current", "capture-valid-systemd-gateway-legacy", "capture-valid-launchd-gateway-current", "capture-valid-launchd-gateway-legacy"
+      ]
+    },
+    {
+      "name": "rollback-capture-initial",
+      "rationale": "An unknown observation during begin refuses before any mutation: every seam x label/role x all seven malformed shapes; (transport, prior state) rotate through all four combinations.",
+      "ids": [
+        "capture-exit-systemd-gateway-current-systemd-False-initial-1-middle-nul-", "capture-exit-systemd-gateway-current-systemd-True-initial-1-prefix-nul-", "capture-exit-systemd-cloudflare-current-systemd-False-initial-1-suffix-nul-",
+        "capture-exit-systemd-cloudflare-current-systemd-True-initial-1-oversized-", "capture-exit-systemd-gateway-current-systemd-False-initial-1-failed-", "capture-exit-systemd-gateway-current-systemd-True-initial-1-partial-",
+        "capture-exit-systemd-cloudflare-current-systemd-False-initial-1-empty-", "capture-exit-systemd-gateway-legacy-systemd-False-initial-1-middle-nul-", "capture-exit-systemd-gateway-legacy-systemd-True-initial-1-prefix-nul-",
+        "capture-exit-systemd-cloudflare-legacy-systemd-False-initial-1-suffix-nul-", "capture-exit-systemd-cloudflare-legacy-systemd-True-initial-1-oversized-", "capture-exit-systemd-gateway-legacy-systemd-False-initial-1-failed-",
+        "capture-exit-systemd-gateway-legacy-systemd-True-initial-1-partial-", "capture-exit-systemd-cloudflare-legacy-systemd-False-initial-1-empty-", "capture-exit-launchd-gateway-current-domain-False-initial-1-middle-nul-",
+        "capture-exit-launchd-gateway-current-domain-True-initial-1-prefix-nul-", "capture-exit-launchd-cloudflare-current-domain-False-initial-1-suffix-nul-", "capture-exit-launchd-cloudflare-current-domain-True-initial-1-oversized-",
+        "capture-exit-launchd-gateway-current-domain-False-initial-1-failed-", "capture-exit-launchd-gateway-current-domain-True-initial-1-partial-", "capture-exit-launchd-cloudflare-current-domain-False-initial-1-empty-",
+        "capture-exit-launchd-gateway-legacy-domain-False-initial-1-middle-nul-", "capture-exit-launchd-gateway-legacy-domain-True-initial-1-prefix-nul-", "capture-exit-launchd-cloudflare-legacy-domain-False-initial-1-suffix-nul-",
+        "capture-exit-launchd-cloudflare-legacy-domain-True-initial-1-oversized-", "capture-exit-launchd-gateway-legacy-domain-False-initial-1-failed-", "capture-exit-launchd-gateway-legacy-domain-True-initial-1-partial-",
+        "capture-exit-launchd-cloudflare-legacy-domain-False-initial-1-empty-", "capture-exit-launchd-gateway-current-label-False-initial-1-middle-nul-", "capture-exit-launchd-gateway-current-label-True-initial-1-prefix-nul-",
+        "capture-exit-launchd-cloudflare-current-label-False-initial-1-suffix-nul-", "capture-exit-launchd-cloudflare-current-label-True-initial-1-oversized-", "capture-exit-launchd-gateway-current-label-False-initial-1-failed-",
+        "capture-exit-launchd-gateway-current-label-True-initial-1-partial-", "capture-exit-launchd-cloudflare-current-label-False-initial-1-empty-", "capture-exit-launchd-gateway-legacy-label-False-initial-1-middle-nul-",
+        "capture-exit-launchd-gateway-legacy-label-True-initial-1-prefix-nul-", "capture-exit-launchd-cloudflare-legacy-label-False-initial-1-suffix-nul-", "capture-exit-launchd-cloudflare-legacy-label-True-initial-1-oversized-",
+        "capture-exit-launchd-gateway-legacy-label-False-initial-1-failed-", "capture-exit-launchd-gateway-legacy-label-True-initial-1-partial-", "capture-exit-launchd-cloudflare-legacy-label-False-initial-1-empty-",
+        "capture-exit-launchd-gateway-current-disabled-False-initial-1-middle-nul-", "capture-exit-launchd-gateway-current-disabled-True-initial-1-prefix-nul-", "capture-exit-launchd-cloudflare-current-disabled-False-initial-1-suffix-nul-",
+        "capture-exit-launchd-cloudflare-current-disabled-True-initial-1-oversized-", "capture-exit-launchd-gateway-current-disabled-False-initial-1-failed-", "capture-exit-launchd-gateway-current-disabled-True-initial-1-partial-",
+        "capture-exit-launchd-cloudflare-current-disabled-False-initial-1-empty-", "capture-exit-launchd-gateway-legacy-disabled-False-initial-1-middle-nul-", "capture-exit-launchd-gateway-legacy-disabled-True-initial-1-prefix-nul-",
+        "capture-exit-launchd-cloudflare-legacy-disabled-False-initial-1-suffix-nul-", "capture-exit-launchd-cloudflare-legacy-disabled-True-initial-1-oversized-", "capture-exit-launchd-gateway-legacy-disabled-False-initial-1-failed-",
+        "capture-exit-launchd-gateway-legacy-disabled-True-initial-1-partial-", "capture-exit-launchd-cloudflare-legacy-disabled-False-initial-1-empty-"
+      ]
+    },
+    {
+      "name": "rollback-capture-polling",
+      "rationale": "An unknown observation during the forward flow (observation 2, 3 and 4): every seam x label/role x observation index; (transport, prior state) rotate.",
+      "ids": [
+        "capture-exit-systemd-cloudflare-current-systemd-True-fresh-2-middle-nul-", "capture-exit-systemd-gateway-current-systemd-False-fresh-3-middle-nul-", "capture-exit-systemd-gateway-current-systemd-True-fresh-4-middle-nul-",
+        "capture-exit-systemd-cloudflare-legacy-systemd-True-fresh-2-middle-nul-", "capture-exit-systemd-gateway-legacy-systemd-False-fresh-3-middle-nul-", "capture-exit-systemd-gateway-legacy-systemd-True-fresh-4-middle-nul-",
+        "capture-exit-launchd-cloudflare-current-domain-True-fresh-2-middle-nul-", "capture-exit-launchd-gateway-current-domain-False-fresh-3-middle-nul-", "capture-exit-launchd-gateway-current-domain-True-fresh-4-middle-nul-",
+        "capture-exit-launchd-cloudflare-legacy-domain-True-fresh-2-middle-nul-", "capture-exit-launchd-gateway-legacy-domain-False-fresh-3-middle-nul-", "capture-exit-launchd-gateway-legacy-domain-True-fresh-4-middle-nul-",
+        "capture-exit-launchd-cloudflare-current-label-True-fresh-2-middle-nul-", "capture-exit-launchd-gateway-current-label-False-fresh-3-middle-nul-", "capture-exit-launchd-gateway-current-label-True-fresh-4-middle-nul-",
+        "capture-exit-launchd-cloudflare-legacy-label-True-fresh-2-middle-nul-", "capture-exit-launchd-gateway-legacy-label-False-fresh-3-middle-nul-", "capture-exit-launchd-gateway-legacy-label-True-fresh-4-middle-nul-",
+        "capture-exit-launchd-cloudflare-current-disabled-True-fresh-2-middle-nul-", "capture-exit-launchd-gateway-current-disabled-False-fresh-3-middle-nul-", "capture-exit-launchd-gateway-current-disabled-True-fresh-4-middle-nul-",
+        "capture-exit-launchd-cloudflare-legacy-disabled-True-fresh-2-middle-nul-", "capture-exit-launchd-gateway-legacy-disabled-False-fresh-3-middle-nul-", "capture-exit-launchd-gateway-legacy-disabled-True-fresh-4-middle-nul-"
+      ]
+    },
+    {
+      "name": "rollback-capture-ready",
+      "rationale": "EXIT rollback after a readiness failure meets an unknown observation: every seam x label/role x all three caller contexts (plain trap, if, ||); shapes rotate so every shape occurs in this phase on at least one role of each seam.",
+      "ids": [
+        "capture-exit-systemd-cloudflare-current-systemd-False-ready-1-middle-nul-", "capture-exit-systemd-cloudflare-current-systemd-True-ready-1-prefix-nul-if", "capture-exit-systemd-gateway-current-systemd-False-ready-1-suffix-nul-or",
+        "capture-exit-systemd-cloudflare-legacy-systemd-False-ready-1-oversized-if", "capture-exit-systemd-cloudflare-legacy-systemd-True-ready-1-failed-or", "capture-exit-systemd-gateway-legacy-systemd-False-ready-1-partial-",
+        "capture-exit-launchd-cloudflare-current-domain-False-ready-1-middle-nul-or", "capture-exit-launchd-cloudflare-current-domain-True-ready-1-prefix-nul-", "capture-exit-launchd-gateway-current-domain-False-ready-1-suffix-nul-if",
+        "capture-exit-launchd-cloudflare-legacy-domain-False-ready-1-oversized-", "capture-exit-launchd-cloudflare-legacy-domain-True-ready-1-failed-if", "capture-exit-launchd-gateway-legacy-domain-False-ready-1-partial-or",
+        "capture-exit-launchd-cloudflare-current-label-False-ready-1-middle-nul-if", "capture-exit-launchd-cloudflare-current-label-True-ready-1-prefix-nul-or", "capture-exit-launchd-gateway-current-label-False-ready-1-suffix-nul-",
+        "capture-exit-launchd-cloudflare-legacy-label-False-ready-1-oversized-or", "capture-exit-launchd-cloudflare-legacy-label-True-ready-1-failed-", "capture-exit-launchd-gateway-legacy-label-False-ready-1-partial-if",
+        "capture-exit-launchd-cloudflare-current-disabled-False-ready-1-middle-nul-", "capture-exit-launchd-cloudflare-current-disabled-True-ready-1-prefix-nul-if", "capture-exit-launchd-gateway-current-disabled-False-ready-1-suffix-nul-or",
+        "capture-exit-launchd-cloudflare-legacy-disabled-False-ready-1-oversized-if", "capture-exit-launchd-cloudflare-legacy-disabled-True-ready-1-failed-or", "capture-exit-launchd-gateway-legacy-disabled-False-ready-1-partial-"
+      ]
+    },
+    {
+      "name": "rollback-capture-public",
+      "rationale": "EXIT rollback after a public/app failure meets an unknown observation: every seam x label/role x all three caller contexts; the complementary shapes of the ready group; both transports occur (the public gate is transport-specific).",
+      "ids": [
+        "capture-exit-systemd-gateway-current-systemd-True-public-1-oversized-", "capture-exit-systemd-cloudflare-current-systemd-False-public-1-failed-if", "capture-exit-systemd-cloudflare-current-systemd-True-public-1-partial-or",
+        "capture-exit-systemd-gateway-legacy-systemd-True-public-1-middle-nul-if", "capture-exit-systemd-cloudflare-legacy-systemd-False-public-1-prefix-nul-or", "capture-exit-systemd-cloudflare-legacy-systemd-True-public-1-suffix-nul-",
+        "capture-exit-launchd-gateway-current-domain-True-public-1-oversized-or", "capture-exit-launchd-cloudflare-current-domain-False-public-1-failed-", "capture-exit-launchd-cloudflare-current-domain-True-public-1-partial-if",
+        "capture-exit-launchd-gateway-legacy-domain-True-public-1-middle-nul-", "capture-exit-launchd-cloudflare-legacy-domain-False-public-1-prefix-nul-if", "capture-exit-launchd-cloudflare-legacy-domain-True-public-1-suffix-nul-or",
+        "capture-exit-launchd-gateway-current-label-True-public-1-oversized-if", "capture-exit-launchd-cloudflare-current-label-False-public-1-failed-or", "capture-exit-launchd-cloudflare-current-label-True-public-1-partial-",
+        "capture-exit-launchd-gateway-legacy-label-True-public-1-middle-nul-or", "capture-exit-launchd-cloudflare-legacy-label-False-public-1-prefix-nul-", "capture-exit-launchd-cloudflare-legacy-label-True-public-1-suffix-nul-if",
+        "capture-exit-launchd-gateway-current-disabled-True-public-1-oversized-", "capture-exit-launchd-cloudflare-current-disabled-False-public-1-failed-if", "capture-exit-launchd-cloudflare-current-disabled-True-public-1-partial-or",
+        "capture-exit-launchd-gateway-legacy-disabled-True-public-1-middle-nul-if", "capture-exit-launchd-cloudflare-legacy-disabled-False-public-1-prefix-nul-or", "capture-exit-launchd-cloudflare-legacy-disabled-True-public-1-suffix-nul-"
+      ]
+    },
+    {
+      "name": "origin-refusals-and-controls",
+      "rationale": "F001 origin refusals for every platform x label x origin kind (nothing mutated, one fixed diagnostic), the matching/fresh positive controls, and the adapter closed-list input cells. Complete; nothing moved to full.",
+      "ids": [
+        "origin-systemd-current-foreign-bare", "origin-systemd-current-foreign-file", "origin-systemd-current-empty", "origin-systemd-current-duplicate", "origin-systemd-current-dropin", "origin-systemd-current-fail",
+        "origin-systemd-current-oversized", "origin-systemd-current-blank", "origin-systemd-legacy-foreign-bare", "origin-systemd-legacy-foreign-file", "origin-systemd-legacy-empty", "origin-systemd-legacy-duplicate",
+        "origin-systemd-legacy-dropin", "origin-systemd-legacy-fail", "origin-systemd-legacy-oversized", "origin-systemd-legacy-blank", "origin-systemd-match", "origin-systemd-fresh", "origin-input-systemd",
+        "origin-launchd-current-foreign-bare", "origin-launchd-current-foreign-file", "origin-launchd-current-empty", "origin-launchd-current-duplicate", "origin-launchd-current-malformed", "origin-launchd-current-malformed-space",
+        "origin-launchd-current-malformed-tab", "origin-launchd-legacy-foreign-bare", "origin-launchd-legacy-foreign-file", "origin-launchd-legacy-empty", "origin-launchd-legacy-duplicate", "origin-launchd-legacy-malformed",
+        "origin-launchd-legacy-malformed-space", "origin-launchd-legacy-malformed-tab", "origin-launchd-match", "origin-launchd-fresh", "origin-input-launchd"
+      ]
+    },
+    {
+      "name": "unsafe-path-credential-policy",
+      "rationale": "Deterministic policy refusals (run/control/pairing/rearm/conflict/expansion/routing/credential/pointer), future-alias path, key byte bounds, boolean spellings, empty-identities (Bash 3.2 nounset), pointer overlaps and defaults, on BOTH installers (systemd and launchd scripts). Gateway only, plus the cloudflare defaults (the generated environment differs by transport): native_installer_admit refuses before either installer branches on the transport, and every transport is installed end to end by the success controls.",
+      "ids": [
+        "systemd-gateway-refuse-run", "systemd-gateway-refuse-control", "systemd-gateway-refuse-pairing", "systemd-gateway-refuse-rearm", "systemd-gateway-refuse-rearm-invalid", "systemd-gateway-refuse-conflict",
+        "systemd-gateway-refuse-expansion", "systemd-gateway-refuse-routing", "systemd-gateway-refuse-raw-distinct", "systemd-gateway-refuse-pointer-relative", "systemd-gateway-future-alias", "systemd-gateway-key-5", "systemd-gateway-key-33",
+        "systemd-gateway-key-32", "systemd-gateway-key-16", "systemd-gateway-false-0-0", "systemd-gateway-false-1-false", "systemd-gateway-false-2-False", "systemd-gateway-false-3-FALSE", "systemd-gateway-false-4-f",
+        "systemd-gateway-false-5-F", "systemd-gateway-empty-identities", "systemd-gateway-pointer-overlap-environment-False", "systemd-gateway-pointer-overlap-environment-True", "systemd-gateway-pointer-overlap-current-False",
+        "systemd-gateway-pointer-overlap-current-True", "systemd-gateway-pointer-overlap-legacy-False", "systemd-gateway-pointer-overlap-legacy-True", "systemd-gateway-pointer", "systemd-gateway-defaults-file", "systemd-gateway-defaults-key",
+        "systemd-gateway-defaults-instance", "launchd-gateway-refuse-run", "launchd-gateway-refuse-control", "launchd-gateway-refuse-pairing", "launchd-gateway-refuse-rearm", "launchd-gateway-refuse-rearm-invalid",
+        "launchd-gateway-refuse-conflict", "launchd-gateway-refuse-expansion", "launchd-gateway-refuse-routing", "launchd-gateway-refuse-raw-distinct", "launchd-gateway-refuse-pointer-relative", "launchd-gateway-future-alias",
+        "launchd-gateway-key-5", "launchd-gateway-key-33", "launchd-gateway-key-32", "launchd-gateway-key-16", "launchd-gateway-false-0-0", "launchd-gateway-false-1-false", "launchd-gateway-false-2-False", "launchd-gateway-false-3-FALSE",
+        "launchd-gateway-false-4-f", "launchd-gateway-false-5-F", "launchd-gateway-empty-identities", "launchd-gateway-pointer-overlap-environment-False", "launchd-gateway-pointer-overlap-environment-True",
+        "launchd-gateway-pointer-overlap-current-False", "launchd-gateway-pointer-overlap-current-True", "launchd-gateway-pointer-overlap-legacy-False", "launchd-gateway-pointer-overlap-legacy-True", "launchd-gateway-pointer",
+        "launchd-gateway-defaults-file", "launchd-gateway-defaults-key", "launchd-gateway-defaults-instance", "systemd-cloudflare-defaults-file", "systemd-cloudflare-defaults-key", "systemd-cloudflare-defaults-instance",
+        "launchd-cloudflare-defaults-file", "launchd-cloudflare-defaults-key", "launchd-cloudflare-defaults-instance"
+      ]
+    },
+    {
+      "name": "transaction-fault-matrix",
+      "rationale": "Every fault injection point (read, query, snapshot, candidate, chmod, token, rename, commit, reload, start, stop, every ready-* and public-* rollback outcome, prior-unready) on both managers x every applicable prior state (active, inactive, fresh); the transport alternates so each fault and each prior state meets both transports (the public-* gate is transport-specific).",
+      "ids": [
+        "systemd-gateway-active-read", "systemd-cloudflare-inactive-read", "systemd-gateway-fresh-read", "systemd-cloudflare-active-query", "systemd-gateway-inactive-query", "systemd-cloudflare-fresh-query", "systemd-gateway-active-snapshot",
+        "systemd-cloudflare-inactive-snapshot", "systemd-gateway-fresh-snapshot", "systemd-cloudflare-active-candidate", "systemd-gateway-inactive-candidate", "systemd-cloudflare-fresh-candidate", "systemd-gateway-active-chmod",
+        "systemd-cloudflare-inactive-chmod", "systemd-gateway-fresh-chmod", "systemd-cloudflare-active-token", "systemd-gateway-inactive-token", "systemd-cloudflare-fresh-token", "systemd-gateway-active-rename",
+        "systemd-cloudflare-inactive-rename", "systemd-gateway-fresh-rename", "systemd-cloudflare-active-commit", "systemd-gateway-inactive-commit", "systemd-cloudflare-fresh-commit", "systemd-gateway-active-reload",
+        "systemd-cloudflare-inactive-reload", "systemd-gateway-fresh-reload", "systemd-cloudflare-active-start", "systemd-gateway-inactive-start", "systemd-cloudflare-fresh-start", "systemd-gateway-active-stop",
+        "systemd-cloudflare-active-ready-stop-fail", "systemd-gateway-inactive-ready-stop-fail", "systemd-cloudflare-fresh-ready-stop-fail", "systemd-gateway-active-ready-still-active", "systemd-cloudflare-inactive-ready-still-active",
+        "systemd-gateway-fresh-ready-still-active", "systemd-cloudflare-active-ready-unknown", "systemd-gateway-inactive-ready-unknown", "systemd-cloudflare-fresh-ready-unknown", "systemd-gateway-active-ready-restore",
+        "systemd-cloudflare-inactive-ready-restore", "systemd-gateway-fresh-ready-restore", "systemd-cloudflare-active-ready-safe", "systemd-gateway-inactive-ready-safe", "systemd-cloudflare-fresh-ready-safe",
+        "systemd-gateway-active-public-stop-fail", "systemd-cloudflare-inactive-public-stop-fail", "systemd-gateway-fresh-public-stop-fail", "systemd-cloudflare-active-public-unknown", "systemd-gateway-inactive-public-unknown",
+        "systemd-cloudflare-fresh-public-unknown", "systemd-gateway-active-public-safe", "systemd-cloudflare-inactive-public-safe", "systemd-gateway-fresh-public-safe", "systemd-cloudflare-active-prior-unready", "launchd-gateway-active-read",
+        "launchd-cloudflare-inactive-read", "launchd-gateway-fresh-read", "launchd-cloudflare-active-query", "launchd-gateway-inactive-query", "launchd-cloudflare-fresh-query", "launchd-gateway-active-snapshot",
+        "launchd-cloudflare-inactive-snapshot", "launchd-gateway-fresh-snapshot", "launchd-cloudflare-active-candidate", "launchd-gateway-inactive-candidate", "launchd-cloudflare-fresh-candidate", "launchd-gateway-active-chmod",
+        "launchd-cloudflare-inactive-chmod", "launchd-gateway-fresh-chmod", "launchd-cloudflare-active-token", "launchd-gateway-inactive-token", "launchd-cloudflare-fresh-token", "launchd-gateway-active-rename",
+        "launchd-cloudflare-inactive-rename", "launchd-gateway-fresh-rename", "launchd-cloudflare-active-commit", "launchd-gateway-inactive-commit", "launchd-cloudflare-fresh-commit", "launchd-gateway-active-start",
+        "launchd-cloudflare-inactive-start", "launchd-gateway-fresh-start", "launchd-gateway-active-stop", "launchd-gateway-active-ready-stop-fail", "launchd-cloudflare-inactive-ready-stop-fail", "launchd-gateway-fresh-ready-stop-fail",
+        "launchd-cloudflare-active-ready-still-active", "launchd-gateway-inactive-ready-still-active", "launchd-cloudflare-fresh-ready-still-active", "launchd-gateway-active-ready-unknown", "launchd-cloudflare-inactive-ready-unknown",
+        "launchd-gateway-fresh-ready-unknown", "launchd-cloudflare-active-ready-restore", "launchd-gateway-inactive-ready-restore", "launchd-cloudflare-fresh-ready-restore", "launchd-gateway-active-ready-safe",
+        "launchd-cloudflare-inactive-ready-safe", "launchd-gateway-fresh-ready-safe", "launchd-cloudflare-active-public-stop-fail", "launchd-gateway-inactive-public-stop-fail", "launchd-cloudflare-fresh-public-stop-fail",
+        "launchd-gateway-active-public-unknown", "launchd-cloudflare-inactive-public-unknown", "launchd-gateway-fresh-public-unknown", "launchd-cloudflare-active-public-safe", "launchd-gateway-inactive-public-safe",
+        "launchd-cloudflare-fresh-public-safe", "launchd-cloudflare-active-prior-unready"
+      ]
+    },
+    {
+      "name": "success-controls",
+      "rationale": "Positive controls: a clean install from each prior state (active, inactive, fresh) for each manager and transport.",
+      "ids": [
+        "systemd-gateway-active-ok", "systemd-gateway-inactive-ok", "systemd-gateway-fresh-ok", "systemd-cloudflare-active-ok", "systemd-cloudflare-inactive-ok", "systemd-cloudflare-fresh-ok", "launchd-gateway-active-ok",
+        "launchd-gateway-inactive-ok", "launchd-gateway-fresh-ok", "launchd-cloudflare-active-ok", "launchd-cloudflare-inactive-ok", "launchd-cloudflare-fresh-ok"
+      ]
+    },
+    {
+      "name": "cancellation",
+      "rationale": "All eight cancellation cells (SIGINT and SIGTERM after activation, each manager and transport) keep their full coverage.",
+      "ids": [
+        "systemd-gateway-cancel-2", "systemd-gateway-cancel-15", "systemd-cloudflare-cancel-2", "systemd-cloudflare-cancel-15", "launchd-gateway-cancel-2", "launchd-gateway-cancel-15", "launchd-cloudflare-cancel-2",
+        "launchd-cloudflare-cancel-15"
+      ]
+    }
+  ]
+}

@@ -14,16 +14,20 @@ env:
 
 jobs:
   verify:
-    name: Require successful check workflow
+    name: Require successful check and full service qualification
     runs-on: ubuntu-latest
-    # The script below waits up to 1800 seconds for check.yml; 45 minutes leaves
+    # The script below waits up to 1800 seconds for both workflows; 45 minutes leaves
     # headroom and stays under the 60-minute hosted-job ceiling.
     timeout-minutes: 45
     steps:
-      - name: Require successful check workflow
+      - name: Require successful check workflow and full service qualification
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The fast per-push Service qualification is NOT accepted here. Full service qualification must have
+          # succeeded for exactly this commit, from a run that tested the commit's own bytes (workflow_dispatch
+          # or the nightly schedule: a pull_request run tested a merge commit, not this one). None found is a
+          # failure, not a wait: dispatch "Full service qualification" for the commit, then re-run this job.
           deadline=$((SECONDS + 1800))
           while (( SECONDS < deadline )); do
             state="$(
@@ -40,18 +44,39 @@ jobs:
                   end
                 '
             )"
+            full="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow service-full-qualification.yml \
+                --commit "$GITHUB_SHA" \
+                --limit 20 \
+                --json status,conclusion,event \
+                --jq '
+                  map(select(.event == "workflow_dispatch" or .event == "schedule")) as $runs
+                  | if any($runs[]; .conclusion == "success") then "success"
+                    elif any($runs[]; .status != "completed") then "pending"
+                    else "failed"
+                    end
+                '
+            )"
             case "$state" in
-              success)
-                exit 0
-                ;;
               failed)
                 echo "Tagged commit $GITHUB_SHA has no successful check.yml run." >&2
                 exit 1
                 ;;
             esac
+            case "$full" in
+              failed)
+                echo "Tagged commit $GITHUB_SHA has no successful Full service qualification run (dispatch or nightly)." >&2
+                exit 1
+                ;;
+            esac
+            if [ "$state" = success ] && [ "$full" = success ]; then
+              exit 0
+            fi
             sleep 15
           done
-          echo "Timed out waiting for check.yml on tagged commit $GITHUB_SHA." >&2
+          echo "Timed out waiting for check.yml and Full service qualification on tagged commit $GITHUB_SHA." >&2
           exit 1
 
   build:

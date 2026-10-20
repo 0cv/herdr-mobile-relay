@@ -59,6 +59,8 @@ jobs:
           -shellcheck= -pyflakes= .github/workflows/check.yml
           .github/workflows/mobile-ci.yml .github/workflows/release.yml
           .github/workflows/service-qualification.yml
+          .github/workflows/service-full-qualification.yml
+          .github/workflows/resume-benchmark.yml
           .github/workflows/tailscale-native-preflight.yml
       - run: go vet ./...
       - run: go test ./...
@@ -252,6 +254,10 @@ jobs:
           cache: true
       # Makefile's PATH assignment is an ordinary makefile variable and can
       # otherwise reintroduce host tools/adapters after a clean step env.
+      # shell-check-ci-complement is `make shell-check` minus the native-install (with its nested dispatch, doctor
+      # and setup-menu suites), full-uninstall and uninstall-CLI suites. Those are required runs of the Service
+      # qualification workflows on every event this workflow runs on (fast on pushes, full on pull requests; see
+      # docs/ci-test-tiers.md), so they are not repeated here. The complete default stays `make shell-check`.
       - name: Run shell checks with a closed tool environment
         shell: bash
         run: |
@@ -271,7 +277,7 @@ jobs:
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
             /usr/bin/make PATH="$go_bin_dir:$bun_bin_dir:$node_bin_dir:/usr/bin:/bin" \
               --eval='assert-shell-tools: ; @test "$$(command -v bash)" = /usr/bin/bash && test "$$(command -v sed)" = /usr/bin/sed' \
-              assert-shell-tools shell-check production-path-audit
+              assert-shell-tools shell-check-ci-complement production-path-audit
       - name: Upload sanitized operator-owned Serve behavioral evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -316,58 +322,6 @@ jobs:
           --grep 'paint composition preflight$' --retries=0 --workers=1
       - run: make frontend-check
       - run: make web-release-check
-
-  # Statistical evidence is kept apart from functional tests so that neither
-  # is mistaken for the other. This bounded pilot measures the shipped web/
-  # bundle of this exact commit against the in-page synthetic relay, keeps
-  # every attempted epoch, and plans a later confirmatory experiment. It is
-  # not p95 acceptance and supports no performance claim.
-  resume-benchmark-pilot:
-    needs: provenance
-    name: Resume benchmark pilot (synthetic, hosted; not a functional test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.0
-      - run: bun install --frozen-lockfile --cwd frontend
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
-      - run: cd frontend && bun x playwright install --with-deps chromium webkit
-      - name: Preflight supported resume paint composition (not pilot epochs)
-        run: >-
-          cd frontend && HERDR_WEB_ROOT="$GITHUB_WORKSPACE/web"
-          bun x playwright test tests/browser/resume.spec.ts
-          --grep 'paint composition preflight$' --retries=0 --workers=1
-      - name: Run the preregistered pilot on the exact checkout and analyze every attempted epoch
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          evidence="$RUNNER_TEMP/resume-benchmark"
-          make resume-benchmark-pilot RESUME_BENCHMARK_SHA="$GITHUB_SHA" RESUME_BENCHMARK_DIR="$evidence"
-          cat "$evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload sanitized pilot evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: resume-benchmark-pilot-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/resume-benchmark/preregistration.json
-            ${{ runner.temp }}/resume-benchmark/evidence.json
-            ${{ runner.temp }}/resume-benchmark/analysis.json
-            ${{ runner.temp }}/resume-benchmark/summary.md
-          if-no-files-found: warn
-          retention-days: 1
 
   # Bundles are one of the things this workflow checks, not something it
   # publishes, so they no longer wait behind the test jobs: a red run fails on

@@ -1,23 +1,23 @@
 #!/bin/bash
 # Service qualification driver for GitHub-hosted CI.
 #
-# Runs the nine service/installer suites that exercise the A1 repairs, in a
-# fixed order, each invoked the way the Makefile's shell-check invokes it.
-# Coverage elsewhere, stated precisely:
-#   * Suite 4 (tests/test_service_supervision.py) is in no Makefile target and
-#     no workflow; this job is the only place that runs it.
-#   * Suite 5 (tests/test_service_transport_dispatch.py) is not run directly by
-#     the Makefile or any workflow, but it runs transitively as a child of
-#     tests/test_native_install.sh, which is part of `make shell-check` (which
-#     check.yml runs). In this job it runs once, directly as suite 5, so it has
-#     its own exit status and timing: suite 3 is started with
-#     HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH=1, which makes
-#     tests/test_native_install.sh skip its nested copy (the nested copy used
-#     most of suite 3's wall-clock bound at 95a1b381, so the native cells could
-#     not finish). check.yml's shell job and a developer run keep the nested run.
-# Invoked by .github/workflows/service-qualification.yml as:
+# Modes (anything else refuses with exit 2):
+#   suites               the ten non-native suites, each invoked the way the Makefile's
+#                        shell-check invokes it. The dispatch, doctor and setup-menu suites that
+#                        tests/test_native_install.sh nests are each their own required run here
+#                        (own exit status, timing and bound), so one doctor failure can no
+#                        longer hide the native cells
+#   native TIER I/N      one shard of tests/test_native_install.sh (TIER fast|full; N is the
+#                        tier's fixed shard count in tests/service_qualification_matrix.py) and
+#                        the SHA/tier/OS/shard-bound evidence of the cells it COMPLETED
+#   all (the default)    suites, then the whole exhaustive native suite in one process
+# CI runs `suites` and `native` as separate jobs. The suite file lists the cells; this driver only
+# bounds, records and verifies them. tests/test_service_supervision.py is in no Makefile target and
+# no other workflow; this driver is the only place that runs it.
+# Invoked by the service workflows as:
 #
-#   /bin/bash scripts/ci/run-service-qualification.sh
+#   /bin/bash scripts/ci/run-service-qualification.sh suites
+#   /bin/bash scripts/ci/run-service-qualification.sh native fast 1/2
 #
 # so that macOS runs the stock /bin/bash 3.2 and Linux runs bash 5. This file
 # therefore avoids associative arrays, mapfile/readarray, case-conversion
@@ -42,19 +42,38 @@ set -eu
 # SUITE_TIMEOUT_SECONDS. The dispatch suite's helper build is bounded separately
 # by HELPER_BUILD_TIMEOUT_SECONDS, and its tests then get their own full
 # SUITE_TIMEOUT_SECONDS. There is no aggregate budget, no reservation and no
-# job-clock arithmetic. Residual, stated plainly: nine suites at their bounds can
+# job-clock arithmetic. Residual, stated plainly: ten suites at their bounds can
 # need more than the workflow's 60-minute job cap (timeout-minutes). A
 # pathologically slow or hung run is then cancelled by GitHub at that cap, which
 # is a red job with a missing summary artifact, never a pass. Tune
 # SUITE_TIMEOUT_SECONDS from the first hosted run.
 SUITE_TIMEOUT_SECONDS=900
 HELPER_BUILD_TIMEOUT_SECONDS=180
-EXPECTED_SUITE_COUNT=9
 
 refuse() {
     printf 'service qualification refused: %s\n' "$1" >&2
     exit 2
 }
+
+# ---------------------------------------------------------------- mode ----
+
+mode=${1:-all}
+native_tier=full
+native_shard=''
+case "$mode" in
+    all | suites) [ "$#" -le 1 ] || refuse 'unexpected arguments' ;;
+    native)
+        [ "$#" -eq 3 ] || refuse 'usage: native TIER I/N'
+        native_tier=$2
+        native_shard=$3
+        case "$native_tier" in fast | full) ;; *) refuse 'unknown native tier' ;; esac
+        case "$native_shard" in
+            [1-9]/[1-9] | [1-9]/[1-9][0-9] | [1-9][0-9]/[1-9] | [1-9][0-9]/[1-9][0-9]) ;;
+            *) refuse 'malformed native shard' ;;
+        esac
+        ;;
+    *) refuse 'unknown mode' ;;
+esac
 
 # ---------------------------------------------------------------- guards ----
 
@@ -131,7 +150,7 @@ baseline_state=$(checkout_state) || refuse 'cannot read the checkout state'
 # killed too, so no suite can leak processes into the next one. A suite that makes
 # its own session escapes the group kill exactly as it did before: the suites'
 # fixtures do so with start_new_session and kill those children by their own pids.
-# None of the nine suites relies on being its own session or group leader (they
+# None of the suites relies on being its own session or group leader (they
 # never call getpgrp or getsid and never signal group 0 or -pgid; checked by
 # reading).
 # Exit status: the command's own status, 128+N when it died of signal N, 124 on
@@ -317,42 +336,94 @@ run_suite() {
     check_checkout "$suite_name"
 }
 
-run_suite tests/test_common.sh '' /bin/bash tests/test_common.sh
-run_suite tests/test_service_credentials.sh '' /bin/bash tests/test_service_credentials.sh
-run_suite tests/test_native_install.sh HERDR_NATIVE_INSTALL_SKIP_NESTED_DISPATCH=1 /bin/bash tests/test_native_install.sh
-run_suite tests/test_service_supervision.py '' "$PYTHON3" tests/test_service_supervision.py
+run_service_suites() {
+    run_suite tests/test_common.sh '' /bin/bash tests/test_common.sh
+    run_suite tests/test_service_credentials.sh '' /bin/bash tests/test_service_credentials.sh
+    run_suite tests/test_service_supervision.py '' "$PYTHON3" tests/test_service_supervision.py
 
-# test_service_transport_dispatch.py requires NATIVE_HELPER at import time: the
-# compiled relay used for strict JSON/origin commands. Only test_native_install.sh
-# builds it, and it runs this file as a child. To run it standalone, build the
-# same helper the same way (go build -o <helper> ./cmd/herdr-mobile-relay).
-# The build only compiles; it does not run the relay. A failed or timed-out build
-# fails the suite without running it. The build has its own fixed bound
-# (HELPER_BUILD_TIMEOUT_SECONDS) and the tests then get their own fixed
-# SUITE_TIMEOUT_SECONDS; nothing is subtracted between them.
-dispatch_name=tests/test_service_transport_dispatch.py
-helper="$work_dir/native-helper"
-dispatch_status=0
-banner "$dispatch_name"
-dispatch_started=$SECONDS
-printf 'building the NATIVE_HELPER relay binary for this suite\n'
-run_closed "$HELPER_BUILD_TIMEOUT_SECONDS" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
-    dispatch_status=$?
-if [ "$dispatch_status" -ne 0 ]; then
-    printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
-else
-    run_closed "$SUITE_TIMEOUT_SECONDS" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
-        dispatch_status=$?
-fi
-record_suite "$dispatch_name" "$dispatch_status" "$((SECONDS - dispatch_started))"
-check_checkout "$dispatch_name"
+    # The dispatch, doctor and setup-menu suites require NATIVE_HELPER at import time: the compiled
+    # relay used for strict JSON/origin commands (the native suite builds its own the same way:
+    # go build -o <helper> ./cmd/herdr-mobile-relay). The build only compiles; it does not run the
+    # relay. It has its own bound (HELPER_BUILD_TIMEOUT_SECONDS) and each suite then gets its own
+    # bound, the dispatch suite's time including the build; nothing is subtracted between them. A
+    # failed or timed-out build fails all three without running them.
+    dispatch_name=tests/test_service_transport_dispatch.py
+    helper="$work_dir/native-helper"
+    helper_status=0
+    banner "$dispatch_name"
+    dispatch_started=$SECONDS
+    printf 'building the NATIVE_HELPER relay binary for the dispatch, doctor and setup-menu suites\n'
+    run_closed "$HELPER_BUILD_TIMEOUT_SECONDS" '' "$GO_BIN" build -o "$helper" ./cmd/herdr-mobile-relay ||
+        helper_status=$?
+    dispatch_status=$helper_status
+    if [ "$helper_status" -ne 0 ]; then
+        printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
+    else
+        run_closed "$SUITE_TIMEOUT_SECONDS" "NATIVE_HELPER=$helper" "$PYTHON3" "$dispatch_name" ||
+            dispatch_status=$?
+    fi
+    record_suite "$dispatch_name" "$dispatch_status" "$((SECONDS - dispatch_started))"
+    check_checkout "$dispatch_name"
 
-run_suite tests/test_service_uninstall_cli.py '' "$PYTHON3" tests/test_service_uninstall_cli.py
-run_suite tests/test_uninstall.sh '' /bin/bash tests/test_uninstall.sh
-# The launcher-admission variable is set for this one suite only, as in the Makefile.
-run_suite tests/test_tailscale_cli_setup_failure.py HERDR_TAILSCALE_LAUNCHER_CI=1 \
-    "$PYTHON3" tests/test_tailscale_cli_setup_failure.py
-run_suite tests/test_release_scripts.sh '' /bin/sh tests/test_release_scripts.sh
+    # The doctor and setup-menu suites keep the bounds they had nested in the native suite (120s, 180s).
+    run_helper_suite tests/test_plugin_doctor.py 120
+    run_helper_suite tests/test_setup_menu.py 180
+
+    run_suite tests/test_service_uninstall_cli.py '' "$PYTHON3" tests/test_service_uninstall_cli.py
+    run_suite tests/test_uninstall.sh '' /bin/bash tests/test_uninstall.sh
+    # The launcher-admission variable is set for this one suite only, as in the Makefile.
+    run_suite tests/test_tailscale_cli_setup_failure.py HERDR_TAILSCALE_LAUNCHER_CI=1 \
+        "$PYTHON3" tests/test_tailscale_cli_setup_failure.py
+    run_suite tests/test_release_scripts.sh '' /bin/sh tests/test_release_scripts.sh
+}
+
+# run_helper_suite NAME SECONDS: a Python suite that needs the NATIVE_HELPER built above.
+run_helper_suite() {
+    banner "$1"
+    helper_suite_started=$SECONDS
+    helper_suite_status=$helper_status
+    if [ "$helper_status" -ne 0 ]; then
+        printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
+    else
+        run_closed "$2" "NATIVE_HELPER=$helper" "$PYTHON3" "$1" || helper_suite_status=$?
+    fi
+    record_suite "$1" "$helper_suite_status" "$((SECONDS - helper_suite_started))"
+    check_checkout "$1"
+}
+
+# The native suite runs the cells selected by TIER and SHARD (the whole exhaustive suite when there is no
+# shard) with its nested children skipped: they are the required suites above. The suite appends one line per
+# COMPLETED cell to the cell record; the evidence below is written only from that record, bound to this
+# candidate, run, tier, runner OS and shard, and is `pass` only if the suite exited 0 and its completed cells are
+# exactly the shard's cells. A failed, partial, timed-out or empty shard still gets a (failing) record.
+run_native_suite() {
+    native_name=tests/test_native_install.sh
+    native_cells="$summary_dir/native-cells.txt"
+    if [ -n "$native_shard" ]; then
+        native_name="$native_name#$native_tier-${native_shard%/*}of${native_shard#*/}"
+    fi
+    run_suite "$native_name" HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN=1 \
+        "HERDR_NATIVE_INSTALL_TIER=$native_tier" ${native_shard:+"HERDR_NATIVE_INSTALL_SHARD=$native_shard"} \
+        "HERDR_NATIVE_INSTALL_EVIDENCE=$native_cells" /bin/bash tests/test_native_install.sh
+    [ -n "$native_shard" ] || return 0
+    native_exit=$suite_status
+    evidence_status=0
+    "$PYTHON3" -I -B tests/service_qualification_matrix.py evidence --tier "$native_tier" --shard "$native_shard" \
+        --sha "$candidate_sha" --run-id "${GITHUB_RUN_ID:-}" --run-attempt "${GITHUB_RUN_ATTEMPT:-}" \
+        --runner-os "$(uname -s)" --suite-exit "$native_exit" --cells "$native_cells" \
+        --output "$summary_dir/native-shard-evidence.json" || evidence_status=$?
+    if [ "$evidence_status" -ne 0 ]; then
+        overall=fail
+        printf 'service qualification: the shard did not produce passing evidence\n' >&2
+    fi
+}
+
+EXPECTED_SUITE_COUNT=0
+case "$mode" in
+    suites) EXPECTED_SUITE_COUNT=10; run_service_suites ;;
+    native) EXPECTED_SUITE_COUNT=1; run_native_suite ;;
+    *) EXPECTED_SUITE_COUNT=11; run_service_suites; run_native_suite ;;
+esac
 
 # --------------------------------------------------------------- results ----
 
@@ -388,20 +459,24 @@ python_version=$("$PYTHON3" -c 'import platform; print(platform.python_version()
     python_version=unknown
 summary_status=0
 "$PYTHON3" - "$summary_dir/summary.json" "$candidate_sha" "$(uname -s)" "$(uname -m)" \
-    "$BASH_VERSION" "$python_version" "$checkout_unchanged" "$overall" "$records" <<'PY' || summary_status=$?
+    "$BASH_VERSION" "$python_version" "$checkout_unchanged" "$overall" "$records" \
+    "$mode" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" <<'PY' || summary_status=$?
 import json
 import os
 import sys
 
 (path, candidate_sha, runner_os, runner_arch, bash_version, python_version,
- checkout_unchanged, result, records) = sys.argv[1:10]
+ checkout_unchanged, result, records, mode, run_id, run_attempt) = sys.argv[1:13]
 suites = []
 for line in records.splitlines():
     name, code, seconds = line.rsplit(" ", 2)
     suites.append({"name": name, "exit": int(code), "seconds": int(seconds)})
 document = {
-    "schema_version": 1,
+    "schema_version": 2,
     "candidate_sha": candidate_sha,
+    "mode": mode,
+    "run_id": run_id,
+    "run_attempt": run_attempt,
     "runner": {"os": runner_os, "arch": runner_arch},
     "bash_version": bash_version,
     "python_version": python_version,
