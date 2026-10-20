@@ -499,6 +499,12 @@ export interface RelayConnectionView {
   speechCacheDir: string;
   speechEngineInstalled: boolean;
   agentProfiles: AgentProfile[];
+  /**
+   * Hermes Agent profiles (`hermes -p <name>`) the selected relay offers for a
+   * launch, Default first. Empty until a relay reports it, which is what a
+   * stale relay build does; the launch form then falls back to `default`.
+   */
+  hermesProfiles: string[];
   directoryBrowser: DirectoryListing | null;
   directoryLoading: boolean;
   directoryError: string;

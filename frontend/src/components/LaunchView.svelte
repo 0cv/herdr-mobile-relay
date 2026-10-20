@@ -27,6 +27,7 @@
 
   let relayId = $state('');
   let profileId = $state('');
+  let hermesProfile = $state('default');
   let cwd = $state('');
   let name = $state('');
   let prompt = $state('');
@@ -54,6 +55,12 @@
   }));
   const connection = $derived($connections.get(relayId));
   const profiles = $derived(connection?.agentProfiles || []);
+  const isHermes = $derived(profileId === 'hermes');
+  // A relay that predates the picker reports nothing, and Default is always
+  // startable, so the form never has to show an empty select.
+  const hermesProfiles = $derived(
+    connection?.hermesProfiles?.length ? connection.hermesProfiles : ['default'],
+  );
   const targetWorkspace = $derived(
     $workspaces.find((workspace) => (
       workspace.relay_id === relayId && workspace.workspace_id === workspaceId
@@ -72,6 +79,10 @@
         : connectedRelays[0]?.id || '';
     }
     if (!profiles.some((profile) => profile.id === profileId)) profileId = profiles[0]?.id || '';
+    // A profile can disappear from the relay (renamed, or the connection moved
+    // to another computer), so the picker falls back instead of submitting a
+    // name the start validation would reject.
+    if (!hermesProfiles.includes(hermesProfile)) hermesProfile = hermesProfiles[0];
     if (relayId && relayId !== loadedRelay) {
       loadedRelay = relayId;
       directoryRelayId = '';
@@ -126,6 +137,10 @@
         cwd: launchCwd,
         prompt,
         workspace_id: targetWorkspace?.workspace_id || '',
+        // Always sent for a Hermes launch, `default` included: the form's
+        // selection is the intent, and an omitted field would silently start
+        // the default profile on a computer that has several.
+        ...(isHermes ? { hermes_profile: hermesProfile } : {}),
       });
       const warning = String(result.data?.warning || '');
       status = warning || 'Agent started.';
@@ -180,6 +195,14 @@
         {#if !profiles.length}<option value="">No agent profiles available</option>{/if}
         {#each profiles as profile (profile.id)}<option value={profile.id}>{profile.label || profile.id}</option>{/each}
       </select>
+
+      {#if isHermes}
+        <label for="launch-hermes-profile">Hermes profile</label>
+        <select id="launch-hermes-profile" bind:value={hermesProfile}>
+          {#each hermesProfiles as profile (profile)}<option value={profile}>{profile}</option>{/each}
+        </select>
+        <p class="hint">Starts hermes with -p for this named profile on the computer.</p>
+      {/if}
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>
       <div bind:this={directoryBrowser} class:open={directoryOpen} class="directory-browser" aria-labelledby="launch-cwd-label">
