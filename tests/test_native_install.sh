@@ -35,7 +35,7 @@ PY
 # Reuse the actual-copy fixture, strict compiled helper and dynamic, inert
 # label-specific controllers. No duplicated/hand-copied production policy.
 python3 - "$REPO_DIR" "$WORK_DIR" <<'PY'
-import importlib.util, json, os, pathlib, signal, stat, subprocess, sys, time
+import collections, hashlib, importlib.util, json, os, pathlib, re, signal, stat, subprocess, sys, time
 from contextlib import contextmanager
 repo, parent = map(pathlib.Path, sys.argv[1:])
 spec = importlib.util.spec_from_file_location("dispatch_fixture", repo / "tests/test_service_transport_dispatch.py")
@@ -52,10 +52,80 @@ d.FAKE = d.FAKE.replace(imports, "import json, os, pathlib, sys, time", 1).repla
     "def worker(kind):", "def worker(kind):\n    import signal", 1)
 dispatch_write = d.write
 
+# Process cost. A cell starts the Python adapter ~140 times (about 25 ms each, most of it the interpreter), and
+# three of its branches only append ONE event and exec the real tool (or stand in for sleep). A bash prelude answers
+# exactly those calls; every other call (each fault name, any live-resource destination, any other argv) runs the
+# adapter itself, unchanged. The prelude mirrors the adapter text pinned below, so editing those branches fails here
+# until the prelude is re-derived, and native_shim_parity replays representative calls through both.
+ADAPTERS = parent / "native-shims"
+FAST_TOOLS = ("sleep", "cp", "mv", "rm", "chmod", "mktemp", "cat", "head", "herdr-mobile-relay")
+FAST_SHIM = r'''#!/bin/bash
+name="${0##*/}"
+adapter="@ADAPTERS@/$name"
+[ -n "${FIXTURE_ROOT-}" ] || exec "$adapter" "$@"
+is_live() {
+    case "$1" in
+        "$FIXTURE_ROOT/config/relay.env"|"$FIXTURE_ROOT/config/github-token"|\
+        "$FIXTURE_ROOT/.config/systemd/user/herdr-mobile-relay.service"|"$FIXTURE_ROOT/.config/systemd/user/herdr-remote.service"|\
+        "$FIXTURE_ROOT/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"|\
+        "$FIXTURE_ROOT/Library/LaunchAgents/com.herdr-remote.service.plist") return 0 ;;
+    esac
+    return 1
+}
+case "$name" in
+    sleep)
+        case "$#:${1-}" in
+            1:1|1:0.1) exec /bin/sleep 0.05 ;;
+            1:0) exit 0 ;;
+        esac ;;
+    herdr-mobile-relay)
+        case "${1-}" in
+            json-field|normalize-origin|verify-readiness|verify-gateway-health)
+                [ -n "${NATIVE_HELPER-}" ] && printf '{"kind": "query", "command": "%s"}\n' "$1" >> "$FIXTURE_ROOT/events" &&
+                    exec "$NATIVE_HELPER" "$@" ;;
+            version)
+                if [ "$#:${2-}" = 2:--json ]; then printf '%s\n' '{"version":"version","revision":"revision"}'; exit 0; fi ;;
+        esac ;;
+    *)
+        case "${NATIVE_FAILURE-}" in candidate|snapshot|chmod|token|rename|commit|ready-restore|read) exec "$adapter" "$@" ;; esac
+        live=false
+        last=
+        for last in "$@"; do :; done
+        case "$name" in
+            rm|chmod) for argument in "$@"; do if is_live "$argument"; then live=true; fi; done ;;
+            *) if [ "$#" -gt 0 ] && is_live "$last"; then live=true; fi ;;
+        esac
+        case "$name" in cp|mv|rm|chmod) [ "$live" = false ] || exec "$adapter" "$@" ;; esac
+        case "$name" in mktemp|head) tool=/usr/bin/$name ;; *) tool=/bin/$name ;; esac
+        printf '{"kind": "filesystem", "tool": "%s", "live": %s}\n' "$name" "$live" >> "$FIXTURE_ROOT/events" &&
+            exec -a "$name" "$tool" "$@" ;;
+esac
+exec "$adapter" "$@"
+'''
+
+
+def adapter_branch(start, end):
+    first = d.FAKE.index(start)
+    return d.FAKE[first:d.FAKE.index(end, first)]
+
+
+assert hashlib.sha256("".join((
+    adapter_branch('if name == "herdr-mobile-relay":', 'if name == "cloudflared":'),
+    adapter_branch('if name == "sleep":', 'if name == "id":'),
+    adapter_branch('if name in ("cp", "mv", "rm", "chmod", "mktemp", "cat", "head"):', 'if name == "plutil":'))).encode()
+).hexdigest() == "69d5841de2e35feb31937409d63adb0b815ec6a274f0122f9c5c6f253e918909", (
+    "the shared adapter changed: re-derive FAST_SHIM in tests/test_native_install.sh")
+
 
 def native_fixture_write(path, text, executable=False):
     if executable and text == "#!" + sys.executable + "\n" + d.FAKE:
         text = text.replace("\n", " -S\n", 1)
+        if path.name in FAST_TOOLS:
+            # The adapter itself (the very text written above) is kept once for the whole suite, where the prelude
+            # hands back every call it does not answer; the fixture's own copy of the tool is the prelude.
+            if not (ADAPTERS / path.name).exists():
+                dispatch_write(ADAPTERS / path.name, text, True)
+            text = FAST_SHIM.replace("@ADAPTERS@", str(ADAPTERS))
     dispatch_write(path, text, executable)
 
 
@@ -161,10 +231,19 @@ def run(f, conditional=""):
             return result
     finally:
         # Progress evidence only: a suite that reaches its wall-clock bound otherwise
-        # leaves no trace of how many cells ran or how long each took.
+        # leaves no trace of how many cells ran or how long each took. The tally counts the
+        # adapter calls the fixture logged (one event kind per call; sleep is not logged), by tool.
         NATIVE_RUNS[0] += 1
-        print("native installation fixture invocation %d (%s) took %.1fs" % (
-            NATIVE_RUNS[0], f.platform, time.monotonic() - started), file=sys.stderr, flush=True)
+        try:
+            logged = f.events()
+        except ValueError:
+            logged = []
+        named = {"http": "curl", "query": "relay", "app": "relay", "cli-gate": "relay"}
+        spawns = collections.Counter(named.get(e["kind"]) or e["tool"] for e in logged
+                                     if e["kind"] in ("manager", "filesystem", *named))
+        print("native installation fixture invocation %d (%s) took %.1fs; stub spawns %d %s" % (
+            NATIVE_RUNS[0], f.platform, time.monotonic() - started, sum(spawns.values()), dict(sorted(spawns.items()))),
+            file=sys.stderr, flush=True)
 
 
 # F006: actual transaction-local acquisition and actual native_install_exit.
@@ -450,8 +529,72 @@ def native_origin_input_cases(parent, platform):
         assert invoke(value) == (99, 1), platform + ": a malformed NATIVE_ORIGIN was not forbidden: " + repr(value)
 
 
+def native_shim_parity():
+    # The bash prelude must be indistinguishable from the adapter it shortcuts. Replay representative calls, including
+    # each condition it must hand back (fault names, live destinations, other argv), through the prelude in one fixture
+    # and through the shared adapter itself in an identical one: status, output, new events and the file tree (path, mode, size and content digest) must match.
+    fast, slow = (d.Fixture(parent, "shim-parity-" + variant) for variant in ("fast", "adapter"))
+    assert all((f.bin / "cp").read_bytes().startswith(b"#!/bin/bash") for f in (fast, slow))
+    live, plain, relay = ".config/systemd/user/herdr-mobile-relay.service", "{r}/config/copy", "{r}/config/relay.env"
+    resources = (live, ".config/systemd/user/herdr-remote.service", "Library/LaunchAgents/com.herdr-mobile-relay.service.plist",
+                 "Library/LaunchAgents/com.herdr-remote.service.plist", "config/relay.env", "config/github-token")
+    calls = [("sleep", [a], {}, False) for a in ("1", "0.1", "0", "0.01")] + [
+        ("sleep", ["0.3", "x"], {}, False), ("sleep", ["x"], {}, False), ("sleep", [], {}, False),
+        ("herdr-mobile-relay", ["version", "--json"], {}, False), ("herdr-mobile-relay", ["version"], {}, False),
+        ("herdr-mobile-relay", [], {}, False), ("herdr-mobile-relay", ["unknown"], {}, False),
+        ("herdr-mobile-relay", ["json-field", "string", "key"], {}, False),
+        ("cat", ["{r}/config/devices.json"], {}, False), ("cat", [relay], {}, False), ("cat", ["{r}/absent"], {}, False),
+        ("head", ["-c", "4", relay], {}, False), ("head", ["-c", "262145", relay], {"NATIVE_FAILURE": "read"}, False),
+        ("mktemp", ["{r}/config/t.XXXXXX"], {}, False), ("mktemp", ["-d", "{r}/config/t.XXXXXX"], {}, False),
+        ("cp", ["-p", "{r}/config/devices.json", plain], {}, False),
+        ("cp", ["-p", "{r}/config/devices.json", "{r}/config/candidate.env"], {"NATIVE_FAILURE": "candidate"}, False),
+        ("cp", ["-p", "{r}/config/devices.json", "{r}/" + live], {}, False),
+        ("cp", ["-p", "{r}/config/devices.json", "{r}/" + live], {}, True),
+        ("chmod", ["600", plain], {}, False), ("chmod", ["600", relay], {}, False),
+        ("chmod", ["600", "{r}/config/.relay-env.x"], {"NATIVE_FAILURE": "chmod"}, False),
+        ("mv", ["-f", plain, "{r}/config/moved"], {}, False), ("mv", ["-f", "{r}/config/moved", relay], {"NATIVE_FAILURE": "rename"}, False),
+        ("rm", ["-f", "{r}/config/moved"], {}, False), ("rm", ["-f", "{r}/" + live], {}, False),
+        ("rm", ["-f", "{r}/config/herdr-remote.x"], {"NATIVE_FAILURE": "commit"}, False),
+        ("cp", ["-p", "{r}/config/devices.json", "{r}/config/0"], {"NATIVE_FAILURE": "snapshot"}, False),
+        ("chmod", ["600", "{r}/config/candidate.token"], {"NATIVE_FAILURE": "token"}, False),
+        ("cp", ["-p", "{r}/config/0", "{r}/config/restore"], {"NATIVE_FAILURE": "ready-restore"}, False),
+        ("rm", ["-f", "{r}/" + live], {"NATIVE_FAILURE": "ready-restore"}, False)]
+    # With the manager active the adapter's quiescence assertion must still run: for each of the six live resources, for every tool
+    # that can write one (live not last for rm and for chmod); and relay calls that only resemble an answered one must still reach the adapter.
+    calls += [("chmod", ["600", "{r}/" + path], {}, True) for path in resources] + [
+        ("mv", ["-f", plain, relay], {}, True), ("rm", ["-f", "{r}/" + live, "{r}/config/moved"], {}, True),
+        ("chmod", ["600", "{r}/" + live, plain], {}, True),
+        ("herdr-mobile-relay", ["version", "--json", "x"], {}, False), ("herdr-mobile-relay", ["version", "x"], {}, False),
+        ("herdr-mobile-relay", ["verify-public", "x"], {}, False), ("herdr-mobile-relay", ["tailscale-cli", "activation-check"], {"ACTIVATION_RESULT": "3"}, False)]
+    # Every fault name the prelude hands back must be replayed in a call on which the adapter really injects it.
+    handed_back = set(re.search(r'case "\$\{NATIVE_FAILURE-\}" in ([a-z|-]+)\)', FAST_SHIM).group(1).split("|"))
+    injected, offsets = set(), {}
+    for tool, argv, extra, active in calls:
+        observed = []
+        for f, via_prelude in ((fast, True), (slow, False)):
+            program = ADAPTERS / tool
+            if via_prelude:
+                program = f.root / "releases/current" / tool if tool == "herdr-mobile-relay" else f.bin / tool
+            d.write(f.root / "activation", json.dumps({k: dict(active=active, enabled=active) for k in ("current", "legacy")}))
+            (f.root / "injected").unlink(missing_ok=True)
+            done = subprocess.run([str(program), *[a.replace("{r}", str(f.root)) for a in argv]], input=b'{"key":"value"}',
+                                  env=dict(f.env, **extra), capture_output=True, timeout=20)
+            events = (f.root / "events").read_text() if (f.root / "events").exists() else ""
+            tree = sorted((str(p.relative_to(f.root)), stat.S_IMODE(p.stat().st_mode), p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest())
+                          for p in f.root.rglob("*") if p.is_file() and p.relative_to(f.root).parts[0] not in (".local", "releases", "events"))
+            normal = lambda text: re.sub(r"t\.\w{6}", "t.XXXXXX", str(text).replace(str(f.root), "<root>"))
+            observed.append((done.returncode, normal(done.stdout), normal(done.stderr), normal(events[offsets.get(f.root, 0):]), normal(tree)))
+            offsets[f.root] = len(events)
+        assert observed[0] == observed[1], (tool, argv, extra, active, observed)
+        if '"kind": "fault"' in observed[1][3] or "partial-private" in observed[1][1]:
+            injected.add(extra["NATIVE_FAILURE"])
+    assert offsets[fast.root] and offsets[fast.root] == offsets[slow.root], "parity replay recorded no events"
+    assert injected == handed_back, ("fault names without a replayed injection", sorted(handed_back ^ injected))
+
+
 bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"], start_new_session=True)
 try:
+    native_shim_parity()
     for platform in ("systemd", "launchd"):
         for transport in ("gateway", "cloudflare"):
             native_capture_cases(parent, platform, transport)
@@ -492,8 +635,10 @@ try:
                 result = run(f)
                 assert (result.returncode == 0) == (len(raw_key.encode()) == 32), "key is bytes, not hex"
                 if result.returncode: assert snapshot(resources(f)) == before and not recovery(f)
-            for spelling in ("0", "false", "False", "FALSE", "f", "F"):
-                f = d.Fixture(parent, f"{platform}-{transport}-false-{spelling}", transport, platform)
+            for number, spelling in enumerate(("0", "false", "False", "FALSE", "f", "F")):
+                # The number keeps the directories distinct on a case-insensitive volume (the Darwin runner's default),
+                # where false-False and false-FALSE would otherwise be one directory and the second mkdir an error.
+                f = d.Fixture(parent, f"{platform}-{transport}-false-{number}-{spelling}", transport, platform)
                 with f.envfile.open("a") as out: out.write("HERDR_RELAY_REARM_BOOTSTRAP=" + spelling + "\n")
                 assert run(f).returncode == 0
 
