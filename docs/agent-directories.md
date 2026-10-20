@@ -82,6 +82,7 @@ Every other case needs to be named explicitly:
 | `HERDR_HERMES_DATA_DIRS` | `~/.hermes` | `HERMES_HOME` |
 | `HERDR_OMO_CONFIG_DIRS` | `~/.senpi/agent` plus supported `~/.omo` layouts | `OMO_CODING_AGENT_DIR`, `SENPI_CODING_AGENT_DIR`, `PI_CODING_AGENT_DIR` |
 | `HERDR_CURSOR_PROJECTS_DIRS` | `~/.cursor/projects` | none |
+
 Three things to get right:
 
 - The home default is always searched. Setting a list *adds* profiles; it
@@ -90,7 +91,9 @@ Three things to get right:
   relay appends the right leaf itself. Use the same value you'd put in that
   row's own "Agent's own directory variable": a full config directory for
   Claude, Qoder, and Codex, but already the *agent* directory for Pi and Oh My
-  Pi, since that is what `PI_CODING_AGENT_DIR` takes.
+  Pi, since that is what `PI_CODING_AGENT_DIR` takes. Cursor is the
+  exception: it has no such variable, and its entry is already the projects
+  directory (see below).
 - What you configure is searched before what the relay discovered, and the home
   default is searched last.
 
