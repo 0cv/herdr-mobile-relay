@@ -880,6 +880,9 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 	if (role != "user" && role != "assistant") || record["isSidechain"] == true {
 		return "", ""
 	}
+	if role == "user" && (record["isMeta"] == true || record["isCompactSummary"] == true) {
+		return "", ""
+	}
 	message, ok := record["message"].(map[string]any)
 	if !ok {
 		return "", ""
@@ -911,6 +914,13 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 	return role, textBlocks(content)
 }
 
+var (
+	bashOutputRow     = regexp.MustCompile(`(?s)^<bash-stdout>.*</bash-stdout><bash-stderr>.*</bash-stderr>$`)
+	bashOutputElement = regexp.MustCompile(`(?s)<bash-stdout>.*?</bash-stdout>|<bash-stderr>.*?</bash-stderr>`)
+)
+
+var commandTags = regexp.MustCompile(`(?s)<command-(?:message|name|args)>.*?</command-(?:message|name|args)>`)
+
 func humanClaudeText(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	for _, envelope := range []string{"<system-reminder>", "<local-command-caveat>", "<task-notification>", "<local-command-stdout>"} {
@@ -918,10 +928,31 @@ func humanClaudeText(raw string) string {
 			return ""
 		}
 	}
-	if strings.HasPrefix(trimmed, "<command-name>") {
-		name := innerTag(trimmed, "command-name")
-		arguments := innerTag(trimmed, "command-args")
-		return strings.TrimSpace(name + " " + arguments)
+	// Shell output rows: Claude Code writes stdout and stderr together as one
+	// row, and output may itself contain tag text, so the genuine adjacent pair is
+	// recognised first. A row made only of output elements is hidden too; a
+	// prompt that also carries other text keeps all of it.
+	if strings.HasPrefix(trimmed, "<bash-stdout>") || strings.HasPrefix(trimmed, "<bash-stderr>") {
+		if bashOutputRow.MatchString(trimmed) || strings.TrimSpace(bashOutputElement.ReplaceAllString(trimmed, "")) == "" {
+			return ""
+		}
+		return raw
+	}
+	// A shell command row is exactly one bash-input element; a prompt holding
+	// several keeps its text.
+	if strings.HasPrefix(trimmed, "<bash-input>") && strings.HasSuffix(trimmed, "</bash-input>") && strings.Count(trimmed, "<bash-input>") == 1 {
+		return "! " + strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "<bash-input>"), "</bash-input>"))
+	}
+	// A slash-command row is nothing but command-* elements; a prompt that also
+	// carries other text keeps all of it. A row without a command name is noise.
+	if strings.HasPrefix(trimmed, "<command-name>") || strings.HasPrefix(trimmed, "<command-message>") {
+		if strings.TrimSpace(commandTags.ReplaceAllString(trimmed, "")) == "" {
+			name := innerTag(trimmed, "command-name")
+			if name == "" {
+				return ""
+			}
+			return strings.TrimSpace(name + " " + innerTag(trimmed, "command-args"))
+		}
 	}
 	return raw
 }
