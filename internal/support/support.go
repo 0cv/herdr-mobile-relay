@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/darwinacl"
 	"golang.org/x/sys/unix"
 )
 
@@ -186,8 +187,24 @@ var (
 
 // Private deterministic fixture seam; production passes nil. No executor,
 // filesystem override, permission-policy bypass, retry or abandoned goroutine.
+// acl scripts the descriptor ACL evidence so fixtures can exercise the macOS
+// policy on any host; production passes nil: the kernel route on macOS, and no
+// evidence (POSIX mask policy only) on Linux.
 type supportLoadHooks struct {
 	event func(stage string, file *os.File)
+	acl   func(fd int) (darwinacl.ACL, error)
+}
+
+// inspector is the descriptor ACL evidence the policy needs: macOS has the
+// kernel route; Linux POSIX ACLs are covered by the mode and mask policy below.
+func (h *supportLoadHooks) inspector() func(int) (darwinacl.ACL, error) {
+	if h != nil && h.acl != nil {
+		return h.acl
+	}
+	if runtime.GOOS == "darwin" {
+		return darwinacl.Inspect
+	}
+	return nil
 }
 
 func (h *supportLoadHooks) call(stage string, file *os.File) {
@@ -195,10 +212,14 @@ func (h *supportLoadHooks) call(stage string, file *os.File) {
 		h.event(stage, file)
 	}
 }
+
+// Darwin ACLs can grant access absent from mode bits, so macOS reads only with
+// descriptor ACL evidence (internal/darwinacl). No other host has a bounded
+// native descriptor-safe ACL inspector: they refuse BEFORE reads.
+func supportHost(goos string) bool { return goos == "linux" || goos == "darwin" }
+
 func loadSnapshot(dir string, hooks *supportLoadHooks) (Snapshot, error) {
-	// Darwin ACLs can grant access absent from mode bits. No bounded native
-	// descriptor-safe ACL inspector is implemented here: refuse BEFORE reads.
-	if runtime.GOOS != "linux" {
+	if !supportHost(runtime.GOOS) {
 		return Snapshot{}, errSupportUnavailable
 	}
 	if !supportSelectedPath(dir) {
@@ -246,8 +267,12 @@ func supportIOError(err error) error {
 // privileged attackers and hostile same-owner edit/restore are NOT excluded.
 // Do not assume these rules on arbitrary remote/FUSE/rich-ACL filesystems. Only
 // the following local Linux POSIX filesystem types are admitted; all others are
-// unavailable. This is a private finite reader policy, not a platform adapter.
+// unavailable. On macOS only apfs and hfs volumes that advertise ACL support are
+// admitted (darwinacl). This is a private finite reader policy, not a platform adapter.
 func supportFilesystem(fd int) bool {
+	if runtime.GOOS == "darwin" {
+		return darwinacl.Filesystem(fd) == nil
+	}
 	var st unix.Statfs_t
 	if unix.Fstatfs(fd, &st) != nil {
 		return false
@@ -274,6 +299,30 @@ func supportDirectory(st *unix.Stat_t, private bool) bool {
 func supportRegular(st *unix.Stat_t) bool {
 	return st.Mode&unix.S_IFMT == unix.S_IFREG && st.Uid == uint32(os.Geteuid()) && st.Nlink == 1 && st.Mode&0o7077 == 0 && st.Mode&0o0400 != 0 && st.Size >= 0
 }
+
+// supportACL is the descriptor ACL policy where evidence exists (inspect is nil
+// elsewhere). Deny entries remove rights and grant none, and real home folders
+// carry "everyone deny delete", so an ancestor may have no ACL or a fully parsed
+// deny-only one. The private selected directory and the file must have none.
+// Unverifiable evidence is unavailable, a grant or an empty ACL is refused, and
+// the cause (a GUID, right or identity) is never returned.
+func supportACL(inspect func(int) (darwinacl.ACL, error), fd int, ancestor bool) error {
+	if inspect == nil {
+		return nil
+	}
+	acl, err := inspect(fd)
+	if err != nil {
+		return errSupportUnavailable
+	}
+	if (ancestor && acl.DirectoryOK()) || (!ancestor && acl.FileOK()) {
+		return nil
+	}
+	return errSupportRefused
+}
+
+// A file on another device than its directory is a mount or alias, not a child.
+func supportSameDevice(file, directory *unix.Stat_t) bool { return file.Dev == directory.Dev }
+
 func supportIdentity(a, b *unix.Stat_t) bool {
 	return a.Dev == b.Dev && a.Ino == b.Ino && a.Mode == b.Mode && a.Uid == b.Uid && a.Gid == b.Gid
 }
@@ -285,7 +334,7 @@ func supportStable(a, b *unix.Stat_t) bool {
 // records bind every named parent during the final no-follow walk. Ancestor
 // siblings may change without invalidating identity/permission checks; changes
 // in the private selected directory itself must invalidate acquisition.
-func supportParent(dir string) (int, []unix.Stat_t, error) {
+func supportParent(dir string, inspect func(int) (darwinacl.ACL, error)) (int, []unix.Stat_t, error) {
 	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
 	fd, err := unix.Open("/", flags, 0)
 	if err != nil {
@@ -319,12 +368,17 @@ func supportParent(dir string) (int, []unix.Stat_t, error) {
 			_ = unix.Close(fd)
 			return -1, nil, errSupportUnavailable
 		}
+		if err := supportACL(inspect, fd, i != len(parts)-1); err != nil {
+			_ = unix.Close(fd)
+			return -1, nil, err
+		}
 		records = append(records, st)
 	}
 	return fd, records, nil
 }
 func readSupport(dir string, hooks *supportLoadHooks) (data []byte, result error) {
-	parent, ancestors, err := supportParent(dir)
+	inspect := hooks.inspector()
+	parent, ancestors, err := supportParent(dir, inspect)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +392,7 @@ func readSupport(dir string, hooks *supportLoadHooks) (data []byte, result error
 	if err := unix.Fstatat(parent, base, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return nil, supportIOError(err)
 	}
-	if !supportRegular(&named) {
+	if !supportRegular(&named) || (inspect != nil && !supportSameDevice(&named, &ancestors[len(ancestors)-1])) {
 		return nil, errSupportRefused
 	}
 	if named.Size > maxSupportBytes {
@@ -365,6 +419,9 @@ func readSupport(dir string, hooks *supportLoadHooks) (data []byte, result error
 	}
 	if !supportFilesystem(fd) {
 		return nil, errSupportUnavailable
+	}
+	if err := supportACL(inspect, fd, false); err != nil {
+		return nil, err
 	}
 	hooks.call("open", file)
 	var buffer bytes.Buffer
@@ -395,7 +452,10 @@ func readSupport(dir string, hooks *supportLoadHooks) (data []byte, result error
 		unix.Fstatat(parent, base, &currentNamed, unix.AT_SYMLINK_NOFOLLOW) != nil || !supportStable(&opened, &currentNamed) {
 		return nil, errSupportRefused
 	}
-	current, finalAncestors, err := supportParent(dir)
+	if err := supportACL(inspect, fd, false); err != nil { // again after the read
+		return nil, err
+	}
+	current, finalAncestors, err := supportParent(dir, inspect)
 	if err != nil {
 		return nil, err
 	}

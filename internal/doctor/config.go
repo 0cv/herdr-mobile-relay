@@ -2,7 +2,6 @@
 package doctor
 
 import (
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -15,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/darwinacl"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"golang.org/x/sys/unix"
 )
@@ -153,113 +153,8 @@ func privateRegular(st *unix.Stat_t, uid int) bool {
 		st.Mode&0o077 == 0 && st.Mode&0o7000 == 0 && st.Mode&0o400 != 0 && st.Nlink == 1
 }
 
-// Darwin descriptor ACL evidence. The layouts come from the public XNU headers
-// and were confirmed against the bytes a real macOS kernel returns:
-//   - sys/attr.h: fgetattrlist(2) with ATTR_CMN_RETURNED_ATTRS and
-//     ATTR_CMN_EXTENDED_SECURITY returns a u32 length, a 20-byte attribute_set_t
-//     and, only when the object has an ACL, an attrreference (int32 offset from
-//     the reference, u32 length) to a kauth_filesec;
-//   - sys/kauth.h: kauth_filesec is the magic, owner and group GUIDs, entrycount
-//     and flags (44 bytes) followed by entrycount 24-byte kauth_ace (GUID, flags,
-//     rights).
+// Descriptor ACL evidence is the shared internal/darwinacl inspector.
 //
-// An object without an ACL has the security attribute omitted from the returned
-// set; that proves "no ACL" only on a volume that advertises
-// VOL_CAP_INT_EXTENDED_SECURITY. The NOACL entrycount sentinel was never
-// observed on this route and stays unverifiable. A zero-entry ACL (what
-// chmod -a leaves behind) is refused: sys/kauth.h notes that Windows reads an
-// empty ACL as "deny all", so its meaning is not assumed.
-const (
-	darwinReturnedAttrs    = 0x80000000 // ATTR_CMN_RETURNED_ATTRS
-	darwinExtendedSecurity = 0x00400000 // ATTR_CMN_EXTENDED_SECURITY
-	darwinFilesecMagic     = 0x012cc16d // KAUTH_FILESEC_MAGIC
-	darwinFilesecHeader    = 44
-	darwinACESize          = 24
-	darwinMaxACEs          = 128   // KAUTH_ACL_MAX_ENTRIES
-	darwinACEKindMask      = 0xf   // KAUTH_ACE_KINDMASK
-	darwinACEDeny          = 2     // KAUTH_ACE_DENY
-	darwinACEInherit       = 0x1f0 // KAUTH_ACE_INHERITED through KAUTH_ACE_ONLY_INHERIT
-	darwinACLBuffer        = 4096  // length, returned set, reference and 128 entries
-	darwinVolumeLength     = 36    // u32 length, vol_capabilities_attr_t
-	darwinVolumeInterfaces = 8     // capabilities[VOL_CAPABILITIES_INTERFACES]
-	darwinVolumeValid      = 24    // valid[VOL_CAPABILITIES_INTERFACES]
-	darwinVolumeACLBit     = 0x400 // VOL_CAP_INT_EXTENDED_SECURITY
-)
-
-// darwinACL keeps nothing but counts: never a GUID, a right or an identity.
-type darwinACL struct {
-	absent   bool // the kernel omitted the security attribute
-	denyOnly bool // 1..128 entries, every one a DENY entry, no unknown flags
-	entries  int
-	denies   int
-}
-
-// A regular file must have no ACL at all. A directory may also carry a fully
-// parsed deny-only ACL: deny entries remove rights and can grant none.
-func (a darwinACL) fileOK() bool      { return a.absent }
-func (a darwinACL) directoryOK() bool { return a.absent || a.denyOnly }
-
-func parseDarwinSecurity(buf []byte) (darwinACL, error) {
-	bad := errors.New("unverifiable descriptor ACL") // never includes private metadata
-	if len(buf) < 32 {
-		return darwinACL{}, bad
-	}
-	length := int(binary.NativeEndian.Uint32(buf))
-	if length < 24 || length > len(buf) { // FSOPT_REPORT_FULLSIZE reports the untruncated length
-		return darwinACL{}, bad
-	}
-	for i := 8; i < 24; i += 4 { // volume, directory, file and fork groups were not requested
-		if binary.NativeEndian.Uint32(buf[i:]) != 0 {
-			return darwinACL{}, bad
-		}
-	}
-	switch binary.NativeEndian.Uint32(buf[4:]) {
-	case darwinReturnedAttrs: // no security object: nothing, or an all-zero reference, follows
-		if (length != 24 && length != 32) ||
-			(length == 32 && (binary.NativeEndian.Uint32(buf[24:]) != 0 || binary.NativeEndian.Uint32(buf[28:]) != 0)) {
-			return darwinACL{}, bad
-		}
-		return darwinACL{absent: true}, nil
-	case darwinReturnedAttrs | darwinExtendedSecurity:
-	default:
-		return darwinACL{}, bad
-	}
-	// The reference is relative to itself; every real answer puts the object
-	// right behind it (offset 8), so any other offset is noncanonical.
-	offset := int(int32(binary.NativeEndian.Uint32(buf[24:])))
-	refLen := int(binary.NativeEndian.Uint32(buf[28:]))
-	start := 24 + offset
-	if offset != 8 || refLen < darwinFilesecHeader ||
-		(refLen-darwinFilesecHeader)%darwinACESize != 0 || start+refLen != length {
-		return darwinACL{}, bad
-	}
-	entries := (refLen - darwinFilesecHeader) / darwinACESize
-	sec := buf[start:length]
-	// The stored count must equal the size-derived count, so NOACL never matches.
-	if entries > darwinMaxACEs || binary.NativeEndian.Uint32(sec) != darwinFilesecMagic ||
-		int(binary.NativeEndian.Uint32(sec[36:])) != entries {
-		return darwinACL{}, bad
-	}
-	acl := darwinACL{entries: entries, denyOnly: entries > 0 && binary.NativeEndian.Uint32(sec[40:]) == 0}
-	for i := 0; i < entries; i++ {
-		flags := binary.NativeEndian.Uint32(sec[darwinFilesecHeader+darwinACESize*i+16:])
-		if flags&darwinACEKindMask == darwinACEDeny {
-			acl.denies++
-		}
-		if flags&darwinACEKindMask != darwinACEDeny || flags&^(darwinACEKindMask|darwinACEInherit) != 0 {
-			acl.denyOnly = false // permit, audit, alarm, unknown kinds or flags
-		}
-	}
-	return acl, nil
-}
-
-// darwinVolumeHasACLs reads ATTR_VOL_CAPABILITIES: the volume must advertise,
-// as valid, that it implements extended security (ACLs).
-func darwinVolumeHasACLs(buf []byte) bool {
-	return len(buf) >= darwinVolumeLength && binary.NativeEndian.Uint32(buf) == darwinVolumeLength &&
-		binary.NativeEndian.Uint32(buf[darwinVolumeInterfaces:])&binary.NativeEndian.Uint32(buf[darwinVolumeValid:])&darwinVolumeACLBit != 0
-}
-
 // Package-metadata acquisition (package_identity.go) still has no ACL evidence,
 // so it keeps refusing every Darwin host. Only the selected configuration
 // reader has a descriptor ACL route (configHostCannotProveACL).
@@ -295,7 +190,7 @@ func configAncestor(st *unix.Stat_t, uid int) bool {
 // rewalk can prove none was replaced.
 type ancestorChain struct {
 	uid     int
-	inspect func(int) (darwinACL, error)
+	inspect func(int) (darwinacl.ACL, error)
 	dirs    []unix.Stat_t
 }
 
@@ -311,7 +206,7 @@ func (c *ancestorChain) visit(fd int) error {
 	if err != nil {
 		return errAncestorUnknown
 	}
-	if !acl.directoryOK() {
+	if !acl.DirectoryOK() {
 		return errAncestorUnsafe
 	}
 	c.dirs = append(c.dirs, st)
@@ -341,12 +236,12 @@ func refusedParent(err error) Inspection {
 }
 
 // fileACLCode is ConfigValid only when the selected file's descriptor has no ACL.
-func fileACLCode(fd int, inspect func(int) (darwinACL, error)) ConfigCode {
+func fileACLCode(fd int, inspect func(int) (darwinacl.ACL, error)) ConfigCode {
 	acl, err := inspect(fd)
 	if err != nil {
 		return ConfigUnavailable
 	}
-	if !acl.fileOK() {
+	if !acl.FileOK() {
 		return ConfigUnsafe
 	}
 	return ConfigValid
@@ -367,12 +262,12 @@ func readConfigWithHost(path string, uid int, goos string,
 	if configHostCannotProveACL(goos) {
 		return refusedConfig(ConfigUnavailable)
 	}
-	return readConfigWithACL(path, uid, goos, acquireParent, openContent, read, darwinInspectACL)
+	return readConfigWithACL(path, uid, goos, acquireParent, openContent, read, darwinacl.Inspect)
 }
 
 func readConfigWithACL(path string, uid int, goos string,
 	acquireParent func(string, func(int) error) (int, string, error), openContent func(int, string) (int, error),
-	read func(io.Reader) ([]byte, error), inspect func(int) (darwinACL, error),
+	read func(io.Reader) ([]byte, error), inspect func(int) (darwinacl.ACL, error),
 ) Inspection {
 	var chain *ancestorChain // nil off Darwin
 	var visit func(int) error

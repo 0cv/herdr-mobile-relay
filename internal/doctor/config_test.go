@@ -3,7 +3,6 @@ package doctor
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0cv/herdr-mobile-relay/internal/darwinacl"
 	"golang.org/x/sys/unix"
 )
 
@@ -234,11 +234,11 @@ func hostedDarwin() bool {
 }
 
 type aclAnswer struct {
-	acl darwinACL
+	acl darwinacl.ACL
 	err error
 }
 
-var noACL = aclAnswer{acl: darwinACL{absent: true}}
+var noACL = aclAnswer{acl: darwinacl.ACL{Absent: true}}
 
 // fakeACL scripts descriptor ACL evidence. Directories (the ancestor walk)
 // answer by call number; the selected regular file answers by its own call
@@ -250,7 +250,7 @@ type fakeACL struct {
 	dirCalls, fileCalls int
 }
 
-func (f *fakeACL) inspect(fd int) (darwinACL, error) {
+func (f *fakeACL) inspect(fd int) (darwinacl.ACL, error) {
 	var st unix.Stat_t
 	if unix.Fstat(fd, &st) != nil {
 		f.t.Fatal("ACL inspection received an invalid descriptor")
@@ -316,7 +316,7 @@ func TestDarwinConfigAcquisitionRequiresDescriptorACLEvidence(t *testing.T) {
 		},
 		func(parent int, base string) (int, error) { contentOpens++; return openSelectedFile(parent, base) },
 		func(r io.Reader) ([]byte, error) { reads++; return io.ReadAll(r) },
-		func(fd int) (darwinACL, error) { inspections++; return darwinACL{}, unix.ENOTSUP })
+		func(fd int) (darwinacl.ACL, error) { inspections++; return darwinacl.ACL{}, unix.ENOTSUP })
 	if cfg.Code() != ConfigUnavailable || cfg.Mode() != ModeUnknown || cfg.tokenPresent || cfg.tokenValid ||
 		cfg.port != 0 || cfg.pluginPort != 0 || len(cfg.gateways) != 0 || cfg.appOrigin != "" ||
 		cfg.relayOrigin != "" || cfg.instance != "" || cfg.herdrSocket != "" {
@@ -372,8 +372,8 @@ func TestDarwinConfigAcquisitionRequiresDescriptorACLEvidence(t *testing.T) {
 
 func TestDarwinDescriptorACLBeforeAndAfterRead(t *testing.T) {
 	_, path := privateFixture(t)
-	denyOnly := aclAnswer{acl: darwinACL{denyOnly: true, entries: 1, denies: 1}}
-	granting := aclAnswer{acl: darwinACL{entries: 1}}
+	denyOnly := aclAnswer{acl: darwinacl.ACL{DenyOnly: true, Entries: 1, Denies: 1}}
+	granting := aclAnswer{acl: darwinacl.ACL{Entries: 1}}
 	unknown := aclAnswer{err: unix.ENOTSUP}
 	for _, tc := range []struct {
 		name   string
@@ -449,8 +449,8 @@ func TestDarwinAncestorEvidenceRefusesBeforeContent(t *testing.T) {
 		t.Fatal("fixture ancestor chain was too short")
 	}
 	last := len(chain.dirs) - 1
-	denyOnly := aclAnswer{acl: darwinACL{denyOnly: true, entries: 1, denies: 1}}
-	granting := aclAnswer{acl: darwinACL{entries: 1}}
+	denyOnly := aclAnswer{acl: darwinacl.ACL{DenyOnly: true, Entries: 1, Denies: 1}}
+	granting := aclAnswer{acl: darwinacl.ACL{Entries: 1}}
 	at := func(call int, answer aclAnswer) func(int) aclAnswer {
 		return func(n int) aclAnswer {
 			if n == call {
@@ -522,7 +522,7 @@ func TestDarwinWritableAncestorRefusedBeforeContent(t *testing.T) {
 }
 
 func TestDarwinAncestorsRewalkedAfterRead(t *testing.T) {
-	granting := aclAnswer{acl: darwinACL{entries: 1}}
+	granting := aclAnswer{acl: darwinacl.ACL{Entries: 1}}
 	for _, tc := range []struct {
 		name   string
 		mutate func(t *testing.T, root string)
@@ -619,134 +619,6 @@ func TestDarwinAncestorModePolicy(t *testing.T) {
 	}
 }
 
-func TestDarwinACLResponseFailClosed(t *testing.T) {
-	put := func(b []byte, offset int, value uint32) { binary.NativeEndian.PutUint32(b[offset:], value) }
-	// Real bytes: a security object is a 32-byte header, a 44-byte kauth_filesec
-	// and 24 bytes per entry, in a larger fixed buffer.
-	filesec := func(count, flags uint32, aces ...uint32) []byte {
-		b := make([]byte, darwinACLBuffer)
-		size := darwinFilesecHeader + darwinACESize*len(aces)
-		put(b, 0, uint32(32+size))
-		put(b, 4, darwinReturnedAttrs|darwinExtendedSecurity)
-		put(b, 24, 8)
-		put(b, 28, uint32(size))
-		put(b, 32, darwinFilesecMagic)
-		put(b, 68, count)
-		put(b, 72, flags)
-		for i, ace := range aces {
-			put(b, 76+24*i+16, ace)
-		}
-		return b
-	}
-	omitted := func(length, reference uint32) []byte { // security attribute not returned
-		b := make([]byte, darwinACLBuffer)
-		put(b, 0, length)
-		put(b, 4, darwinReturnedAttrs)
-		put(b, 28, reference)
-		return b
-	}
-	modify := func(b []byte, offset int, value uint32) []byte { put(b, offset, value); return b }
-	many := func(n int, flags uint32) []uint32 {
-		aces := make([]uint32, n)
-		for i := range aces {
-			aces[i] = flags
-		}
-		return aces
-	}
-	const deny, permit = darwinACEDeny, 1
-	padded := func() []byte { // a well-formed object, but 4 bytes behind the reference
-		b := filesec(1, 0, deny)
-		copy(b[36:], b[32:100])
-		put(b, 32, 0)
-		put(b, 24, 12)
-		put(b, 0, 104)
-		return b
-	}
-	for _, tc := range []struct {
-		name string
-		blob []byte
-		want darwinACL
-		fail bool
-	}{
-		{"no ACL, reference placeholder", omitted(32, 0), darwinACL{absent: true}, false},
-		{"no ACL, no placeholder", omitted(24, 0), darwinACL{absent: true}, false},
-		{"home folder deny entry", filesec(1, 0, deny), darwinACL{denyOnly: true, entries: 1, denies: 1}, false},
-		{"deny entries with inheritance bits", filesec(2, 0, deny|darwinACEInherit, deny|0x10), darwinACL{denyOnly: true, entries: 2, denies: 2}, false},
-		{"maximum entries", filesec(128, 0, many(128, deny)...), darwinACL{denyOnly: true, entries: 128, denies: 128}, false},
-		{"too many entries", filesec(129, 0, many(129, deny)...), darwinACL{}, true},
-		{"permit entry", filesec(1, 0, permit), darwinACL{entries: 1}, false},
-		{"deny then permit", filesec(2, 0, deny, permit), darwinACL{entries: 2, denies: 1}, false},
-		{"audit entry", filesec(1, 0, 3), darwinACL{entries: 1}, false},
-		{"alarm entry", filesec(1, 0, 4), darwinACL{entries: 1}, false},
-		{"unknown kind", filesec(1, 0, 5), darwinACL{entries: 1}, false},
-		{"deny with audit flag", filesec(1, 0, deny|0x200), darwinACL{entries: 1, denies: 1}, false},
-		{"ACL flags", filesec(1, 1<<16, deny), darwinACL{entries: 1, denies: 1}, false},
-		{"empty ACL", filesec(0, 0), darwinACL{}, false},
-		{"NOACL sentinel is unverified", filesec(^uint32(0), 0), darwinACL{}, true},
-		{"count differs from size", filesec(2, 0, deny), darwinACL{}, true},
-		{"truncated", modify(filesec(1, 0, deny), 0, darwinACLBuffer+1), darwinACL{}, true},
-		{"short buffer", filesec(1, 0, deny)[:60], darwinACL{}, true},
-		{"bad magic", modify(filesec(1, 0, deny), 32, 0), darwinACL{}, true},
-		{"size not a whole number of entries", modify(modify(filesec(1, 0, deny), 28, 50), 0, 82), darwinACL{}, true},
-		{"reference past the response", modify(filesec(1, 0, deny), 24, 4000), darwinACL{}, true},
-		{"negative offset", modify(filesec(1, 0, deny), 24, ^uint32(0)), darwinACL{}, true},
-		{"padded reference offset", padded(), darwinACL{}, true},
-		{"security attribute only", modify(filesec(1, 0, deny), 4, darwinExtendedSecurity), darwinACL{}, true},
-		{"nothing returned", modify(filesec(1, 0, deny), 4, 0), darwinACL{}, true},
-		{"another attribute group", modify(filesec(1, 0, deny), 12, 1), darwinACL{}, true},
-		{"omitted with a placeholder offset", modify(omitted(32, 0), 24, 8), darwinACL{}, true},
-		{"omitted with an offset and no length", modify(omitted(32, 0), 24, ^uint32(0)), darwinACL{}, true},
-		{"omitted with data", omitted(32, 4), darwinACL{}, true},
-		{"omitted with offset and data", modify(omitted(32, 4), 24, 8), darwinACL{}, true},
-		{"omitted with odd length", omitted(28, 0), darwinACL{}, true},
-	} {
-		got, err := parseDarwinSecurity(tc.blob)
-		if (err != nil) != tc.fail || got != tc.want {
-			t.Fatalf("%s: descriptor ACL response verdict changed", tc.name)
-		}
-		if err != nil && err.Error() != "unverifiable descriptor ACL" {
-			t.Fatalf("%s: error was not the fixed label", tc.name)
-		}
-	}
-	for _, tc := range []struct {
-		acl        darwinACL
-		file, dirs bool
-	}{
-		{darwinACL{absent: true}, true, true},
-		{darwinACL{denyOnly: true, entries: 1, denies: 1}, false, true},
-		{darwinACL{entries: 1}, false, false},
-		{darwinACL{}, false, false},
-	} {
-		if tc.acl.fileOK() != tc.file || tc.acl.directoryOK() != tc.dirs {
-			t.Fatal("file and directory ACL policy changed")
-		}
-	}
-}
-
-func TestDarwinVolumeMustAdvertiseACLs(t *testing.T) {
-	volume := func(length, capabilities, valid uint32) []byte {
-		b := make([]byte, darwinVolumeLength)
-		binary.NativeEndian.PutUint32(b, length)
-		binary.NativeEndian.PutUint32(b[darwinVolumeInterfaces:], capabilities)
-		binary.NativeEndian.PutUint32(b[darwinVolumeValid:], valid)
-		return b
-	}
-	for name, tc := range map[string]struct {
-		blob []byte
-		want bool
-	}{
-		"advertised":            {volume(36, 0x1af6fc7, 0x1ffffff), true},
-		"not advertised":        {volume(36, 0x1af6bc7, 0x1ffffff), false},
-		"advertised, not valid": {volume(36, 0x1af6fc7, 0x1fffbff), false},
-		"wrong length":          {volume(40, 0x1af6fc7, 0x1ffffff), false},
-		"short":                 {volume(36, 0x1af6fc7, 0x1ffffff)[:20], false},
-	} {
-		if darwinVolumeHasACLs(tc.blob) != tc.want {
-			t.Fatalf("%s: volume ACL capability verdict changed", name)
-		}
-	}
-}
-
 // Plain private objects: the real descriptor route, with no ACL operation.
 func TestDarwinRealNoACL(t *testing.T) {
 	if runtime.GOOS != "darwin" {
@@ -758,13 +630,13 @@ func TestDarwinRealNoACL(t *testing.T) {
 		if err != nil {
 			t.Fatal("plain fixture could not be opened")
 		}
-		acl, err := darwinInspectACL(fd)
+		acl, err := darwinacl.Inspect(fd)
 		_ = unix.Close(fd)
-		if err != nil || acl != (darwinACL{absent: true}) {
+		if err != nil || acl != (darwinacl.ACL{Absent: true}) {
 			t.Fatal("plain private object did not report absent ACL evidence")
 		}
 	}
-	if _, err := darwinInspectACL(-1); err == nil {
+	if _, err := darwinacl.Inspect(-1); err == nil {
 		t.Fatal("an invalid descriptor produced ACL evidence")
 	}
 	if cfg := ReadConfig(path); cfg.Code() != ConfigValid {
@@ -789,14 +661,14 @@ func darwinChainSummary(path string) string {
 			owner = "self"
 		}
 		kind := "error"
-		if acl, err := darwinInspectACL(fd); err == nil {
+		if acl, err := darwinacl.Inspect(fd); err == nil {
 			kind = "other"
-			if acl.absent {
+			if acl.Absent {
 				kind = "absent"
-			} else if acl.denyOnly {
+			} else if acl.DenyOnly {
 				kind = "deny-only"
 			}
-			kind += "/" + strconv.Itoa(acl.entries)
+			kind += "/" + strconv.Itoa(acl.Entries)
 		}
 		chain = append(chain, owner+":"+strconv.FormatUint(uint64(st.Mode&0o7777), 8)+":"+kind)
 		return nil

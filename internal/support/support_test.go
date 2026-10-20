@@ -8,12 +8,14 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/0cv/herdr-mobile-relay/internal/darwinacl"
 	"golang.org/x/sys/unix"
 )
 
@@ -202,7 +204,7 @@ func supportDiagnostics(dir string, loadErr error) string {
 			continue
 		}
 		var fsStat unix.Statfs_t
-		fsKnown := unix.Statfs(path, &fsStat) == nil
+		_ = unix.Statfs(path, &fsStat)
 		fsType := uint64(fsStat.Type)
 		owner := "other"
 		if st.Uid == uint32(os.Geteuid()) {
@@ -210,11 +212,38 @@ func supportDiagnostics(dir string, loadErr error) string {
 		} else if st.Uid == 0 {
 			owner = "root"
 		}
-		fmt.Fprintf(&out, "; depth %d: mode %04o owner %s directory-ok %t filesystem %#x ok %t",
+		fmt.Fprintf(&out, "; depth %d: mode %04o owner %s directory-ok %t filesystem %#x %s",
 			i, uint32(st.Mode)&0o7777, owner, supportDirectory(&st, i == len(parts)-1),
-			fsType, fsKnown && supportFilesystemType(fsType))
+			fsType, supportDescriptorVerdict(path))
 	}
 	return out.String()
+}
+
+// supportDescriptorVerdict reports the loader's own descriptor predicates (the
+// filesystem model and the ACL kind, where the host has ACL evidence) for one
+// directory, without a path, uid, GUID or right.
+func supportDescriptorVerdict(path string) string {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "model unknown"
+	}
+	defer unix.Close(fd)
+	verdict := fmt.Sprintf("model ok %t", supportFilesystem(fd))
+	inspect := (*supportLoadHooks)(nil).inspector()
+	if inspect == nil {
+		return verdict
+	}
+	acl, err := inspect(fd)
+	if err != nil {
+		return verdict + " acl unknown"
+	}
+	kind := "other"
+	if acl.Absent {
+		kind = "absent"
+	} else if acl.DenyOnly {
+		kind = "deny-only"
+	}
+	return fmt.Sprintf("%s acl %s/%d", verdict, kind, acl.Entries)
 }
 
 func TestWriteAndLoadPrivateSnapshot(t *testing.T) {
@@ -244,7 +273,7 @@ func TestWriteAndLoadPrivateSnapshot(t *testing.T) {
 	}
 	before := supportTree(t, dir)
 	loaded, err := Load(dir)
-	if runtime.GOOS != "linux" {
+	if !supportHost(runtime.GOOS) {
 		supportError(t, loaded, err)
 		if err != errSupportUnavailable {
 			t.Fatal("native writer safety was guessed")
@@ -296,7 +325,7 @@ func TestLoadHistoricalCompletePrivateSnapshotAndAdjacentCanaries(t *testing.T) 
 				}
 			}}
 			loaded, err := loadSnapshot(dir, hooks)
-			if runtime.GOOS != "linux" {
+			if !supportHost(runtime.GOOS) {
 				supportError(t, loaded, err)
 				if err != errSupportUnavailable || len(files) != 0 || len(reads) != 0 {
 					t.Fatal("unsupported native policy acquired content")
@@ -320,8 +349,14 @@ func TestLoadHistoricalCompletePrivateSnapshotAndAdjacentCanaries(t *testing.T) 
 	}
 }
 func TestLoadUnsupportedNativePermissionModelBeforeAcquisition(t *testing.T) {
+	for goos, want := range map[string]bool{"linux": true, "darwin": true, "": false, "freebsd": false, "openbsd": false,
+		"netbsd": false, "windows": false, "solaris": false, "illumos": false, "aix": false, "android": false, "ios": false} {
+		if supportHost(goos) != want {
+			t.Fatal("support host matrix changed")
+		}
+	}
 	dir, _ := supportFixture(t)
-	if runtime.GOOS == "linux" {
+	if supportHost(runtime.GOOS) {
 		return
 	} // actual native refusal requires the native host matrix
 	before := supportTree(t, dir)
@@ -341,22 +376,9 @@ func TestLoadUnsupportedNativePermissionModelBeforeAcquisition(t *testing.T) {
 	}
 }
 func TestLoadMissingUnsafePathsSpecialFilesAndPrivateModes(t *testing.T) {
-	for _, kind := range []string{"missing", "missing directory", "relative", "unclean", "control", "file symlink", "parent symlink", "ancestor symlink", "hardlink", "directory", "fifo", "socket", "public file", "writable file", "unreadable file", "special bits", "public directory", "unreadable directory", "oversized"} {
+	for _, kind := range []string{"missing", "missing directory", "relative", "unclean", "control", "file symlink", "parent symlink", "ancestor symlink", "hardlink", "directory", "fifo", "public file", "writable file", "unreadable file", "special bits", "public directory", "unreadable directory", "oversized"} {
 		t.Run(kind, func(t *testing.T) {
-			dir, data := supportFixture(t)
-			if kind == "socket" {
-				// Short owned fixture path avoids native Unix socket name limits.
-				short, err := os.MkdirTemp("", "ss-")
-				if err != nil {
-					t.Fatal("short fixture unavailable")
-				}
-				t.Cleanup(func() { _ = os.RemoveAll(short) })
-				dir, err = filepath.EvalSymlinks(short)
-				if err != nil {
-					t.Fatal("short fixture unavailable")
-				}
-				supportPut(t, dir, data, 0o600)
-			}
+			dir, _ := supportFixture(t)
 			root := dir
 			selected := dir
 			switch kind {
@@ -372,7 +394,7 @@ func TestLoadMissingUnsafePathsSpecialFilesAndPrivateModes(t *testing.T) {
 				selected = dir + "/../" + filepath.Base(dir)
 			case "control":
 				selected = dir + "/path-canary\x1b"
-			case "file symlink", "hardlink", "directory", "fifo", "socket":
+			case "file symlink", "hardlink", "directory", "fifo":
 				if err := os.Rename(Path(dir), filepath.Join(dir, "private-original")); err != nil {
 					t.Fatal("fixture replacement failed")
 				}
@@ -393,13 +415,6 @@ func TestLoadMissingUnsafePathsSpecialFilesAndPrivateModes(t *testing.T) {
 					if err := unix.Mkfifo(Path(dir), 0o600); err != nil {
 						t.Fatal("fixture FIFO failed")
 					}
-				case "socket":
-					// Owned temporary socket only; no dial, request or real service.
-					listener, err := net.Listen("unix", Path(dir))
-					if err != nil {
-						t.Fatal("fixture socket failed")
-					}
-					defer listener.Close()
 				}
 			case "parent symlink", "ancestor symlink":
 				physical := filepath.Join(dir, "physical")
@@ -430,8 +445,12 @@ func TestLoadMissingUnsafePathsSpecialFilesAndPrivateModes(t *testing.T) {
 					t.Fatal("fixture mode failed")
 				}
 			case "special bits":
-				if err := os.Chmod(Path(dir), 0o600|os.ModeSetuid); err != nil {
+				if err := os.Chmod(Path(dir), 0o600|os.ModeSetuid|os.ModeSetgid); err != nil {
 					t.Fatal("fixture mode failed")
+				}
+				var st unix.Stat_t
+				if unix.Stat(Path(dir), &st) != nil || st.Mode&0o6000 == 0 {
+					t.Skip("this kernel stores no setuid or setgid bit on an unprivileged fixture; the mode predicate test covers them")
 				}
 			case "public directory":
 				if err := os.Chmod(dir, 0o755); err != nil {
@@ -479,16 +498,18 @@ func TestLoadMissingUnsafePathsSpecialFilesAndPrivateModes(t *testing.T) {
 			if opened {
 				t.Fatal("unsafe object content was opened")
 			}
-			if runtime.GOOS == "linux" {
+			if supportHost(runtime.GOOS) {
 				want := errSupportRefused
-				if kind == "missing" || kind == "missing directory" || kind == "oversized" {
+				// An unsearchable directory cannot be opened (EACCES) unless root opens it and the mode policy refuses.
+				if kind == "missing" || kind == "missing directory" || kind == "oversized" ||
+					(kind == "unreadable directory" && os.Geteuid() != 0) {
 					want = errSupportUnavailable
 				}
-				if kind != "unreadable directory" && err != want {
+				if err != want {
 					t.Fatal("missing/unsafe/oversize finite distinction changed")
 				}
 			}
-			if runtime.GOOS != "linux" && err != errSupportUnavailable {
+			if !supportHost(runtime.GOOS) && err != errSupportUnavailable {
 				t.Fatal("native permission model inferred from modes")
 			}
 			if unreadable {
@@ -505,6 +526,34 @@ func TestLoadMissingUnsafePathsSpecialFilesAndPrivateModes(t *testing.T) {
 				t.Fatal("refusal mutated fixture tree")
 			}
 		})
+	}
+}
+func TestLoadSocketRefused(t *testing.T) {
+	// Short owned fixture path avoids native Unix socket name limits.
+	short, err := os.MkdirTemp("", "ss-")
+	if err != nil {
+		t.Fatal("short fixture unavailable")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	dir, err := filepath.EvalSymlinks(short)
+	if err != nil {
+		t.Fatal("short fixture unavailable")
+	}
+	// Owned temporary socket only; no dial, request or real service.
+	listener, err := net.Listen("unix", Path(dir))
+	if err != nil {
+		t.Fatal("fixture socket failed")
+	}
+	defer listener.Close()
+	before, opened := supportTree(t, dir), false
+	loaded, err := loadSnapshot(dir, &supportLoadHooks{event: func(stage string, _ *os.File) { opened = opened || stage == "open" }})
+	supportError(t, loaded, err)
+	want := errSupportRefused
+	if !supportHost(runtime.GOOS) {
+		want = errSupportUnavailable
+	}
+	if opened || err != want || before != supportTree(t, dir) {
+		t.Fatal("socket content was opened, or its refusal changed or mutated the fixture")
 	}
 }
 func TestSupportPrivateMetadataOwnershipAndACLMaskPolicy(t *testing.T) {
@@ -543,6 +592,20 @@ func TestSupportPrivateMetadataOwnershipAndACLMaskPolicy(t *testing.T) {
 	if supportRegular(&st) {
 		t.Fatal("ACL-mask foreign writing allowed")
 	}
+	st.Mode &^= 0o020
+	st.Mode |= 0o4000
+	if supportRegular(&st) {
+		t.Fatal("setuid file allowed")
+	}
+	st.Mode ^= 0o6000 // setgid only
+	if supportRegular(&st) {
+		t.Fatal("setgid file allowed")
+	}
+	st.Mode ^= 0o3000 // sticky only
+	if supportRegular(&st) {
+		t.Fatal("sticky file allowed")
+	}
+	st.Mode &^= 0o1000
 	dir := unix.Stat_t{Mode: unix.S_IFDIR | 0o700, Uid: uint32(os.Geteuid())}
 	if !supportDirectory(&dir, true) {
 		t.Fatal("private directory rejected")
@@ -629,7 +692,7 @@ func TestLoadChangingReplacementReadBoundsAndDescriptorClosure(t *testing.T) {
 			loaded, err := loadSnapshot(dir, hooks)
 			supportError(t, loaded, err)
 			supportClosed(t, files)
-			if runtime.GOOS != "linux" {
+			if !supportHost(runtime.GOOS) {
 				if mutated || len(files) != 0 || before != supportTree(t, base) {
 					t.Fatal("native refusal acquired or mutated")
 				}
@@ -811,7 +874,7 @@ func TestLoadStrictParserCapsErrorsAndNonmutation(t *testing.T) {
 			}
 			loaded, err := Load(dir)
 			supportError(t, loaded, err)
-			if runtime.GOOS == "linux" && err != want {
+			if supportHost(runtime.GOOS) && err != want {
 				t.Fatal("malformed/over-budget snapshot finite distinction changed")
 			}
 			if before != supportTree(t, dir) {
@@ -897,7 +960,7 @@ func TestLoadCompleteByteBoundaryAndLimitPlusOne(t *testing.T) {
 					positions = append(positions, pos)
 				}
 			}})
-			if runtime.GOOS != "linux" {
+			if !supportHost(runtime.GOOS) {
 				supportError(t, loaded, err)
 				if len(files) != 0 || err != errSupportUnavailable {
 					t.Fatal("native unavailable policy read input")
@@ -928,6 +991,192 @@ func TestLoadCompleteByteBoundaryAndLimitPlusOne(t *testing.T) {
 			supportClosed(t, files)
 			if before != supportTree(t, dir) {
 				t.Fatal("bounded read changed fixture")
+			}
+		})
+	}
+}
+
+type supportACLAnswer struct {
+	acl darwinacl.ACL
+	err error
+}
+
+// supportACLScript scripts descriptor ACL evidence: directories answer by call
+// number across both walks, the selected file by its own call number.
+type supportACLScript struct {
+	t                   *testing.T
+	dirs                func(call int) supportACLAnswer
+	files               []supportACLAnswer
+	dirCalls, fileCalls int
+}
+
+func (s *supportACLScript) inspect(fd int) (darwinacl.ACL, error) {
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil {
+		s.t.Fatal("ACL inspection received an invalid descriptor")
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+		answer := supportACLAnswer{acl: darwinacl.ACL{Absent: true}}
+		if s.dirs != nil {
+			answer = s.dirs(s.dirCalls)
+		}
+		s.dirCalls++
+		return answer.acl, answer.err
+	case unix.S_IFREG:
+		answer := s.files[min(s.fileCalls, len(s.files)-1)]
+		s.fileCalls++
+		return answer.acl, answer.err
+	}
+	s.t.Fatal("ACL inspection received neither a directory nor a regular file")
+	return darwinacl.ACL{}, nil
+}
+
+// The macOS policy on every host through the scripted evidence seam: ancestors
+// need no ACL or a deny-only one, the private selected directory and the file
+// need none, nothing is opened or read below unproven evidence, and the file and
+// every directory are proven again after the read.
+func TestLoadDescriptorACLPolicyOnAnyHost(t *testing.T) {
+	absent := supportACLAnswer{acl: darwinacl.ACL{Absent: true}}
+	denyOnly := supportACLAnswer{acl: darwinacl.ACL{DenyOnly: true, Entries: 1, Denies: 1}}
+	granting := supportACLAnswer{acl: darwinacl.ACL{Entries: 1}}
+	empty := supportACLAnswer{}
+	unknown := supportACLAnswer{err: errors.New("acl-canary path-canary raw evidence cause")}
+	// one answer for one directory call; a walk has n directories, the rewalk calls n..2n-1
+	one := func(call func(n int) int, answer supportACLAnswer) func(int) map[int]supportACLAnswer {
+		return func(n int) map[int]supportACLAnswer { return map[int]supportACLAnswer{call(n): answer} }
+	}
+	first := func(int) int { return 0 }
+	lastAncestor := func(n int) int { return n - 2 }
+	selected := func(n int) int { return n - 1 }
+	rewalkAncestor := func(n int) int { return n + 1 }
+	rewalkFirst := func(n int) int { return n }
+	rewalkSelected := func(n int) int { return 2*n - 1 }
+	homeLike := func(n int) map[int]supportACLAnswer { // every ancestor of both walks, not the selected directory
+		answers := map[int]supportACLAnswer{}
+		for call := 0; call < 2*n; call++ {
+			if call%n != n-1 {
+				answers[call] = denyOnly
+			}
+		}
+		return answers
+	}
+	for _, tc := range []struct {
+		name            string
+		dirs            func(n int) map[int]supportACLAnswer
+		files           []supportACLAnswer
+		want            error
+		opens, fileCall int
+	}{
+		{"no ACL anywhere", nil, []supportACLAnswer{absent, absent}, nil, 1, 2},
+		{"home-like deny-only ancestors", homeLike, []supportACLAnswer{absent, absent}, nil, 1, 2},
+		{"granting root", one(first, granting), []supportACLAnswer{absent}, errSupportRefused, 0, 0},
+		{"granting ancestor", one(func(int) int { return 1 }, granting), []supportACLAnswer{absent}, errSupportRefused, 0, 0},
+		{"granting last ancestor", one(lastAncestor, granting), []supportACLAnswer{absent}, errSupportRefused, 0, 0},
+		{"empty ACL ancestor", one(func(int) int { return 1 }, empty), []supportACLAnswer{absent}, errSupportRefused, 0, 0},
+		{"unknown root", one(first, unknown), []supportACLAnswer{absent}, errSupportUnavailable, 0, 0},
+		{"unknown last ancestor", one(lastAncestor, unknown), []supportACLAnswer{absent}, errSupportUnavailable, 0, 0},
+		{"deny-only selected directory", one(selected, denyOnly), []supportACLAnswer{absent}, errSupportRefused, 0, 0},
+		{"granting selected directory", one(selected, granting), []supportACLAnswer{absent}, errSupportRefused, 0, 0},
+		{"empty ACL selected directory", one(selected, empty), []supportACLAnswer{absent}, errSupportRefused, 0, 0},
+		{"unknown selected directory", one(selected, unknown), []supportACLAnswer{absent}, errSupportUnavailable, 0, 0},
+		{"granting file", nil, []supportACLAnswer{granting}, errSupportRefused, 0, 1},
+		{"deny-only file", nil, []supportACLAnswer{denyOnly}, errSupportRefused, 0, 1},
+		{"empty ACL file", nil, []supportACLAnswer{empty}, errSupportRefused, 0, 1},
+		{"unknown file", nil, []supportACLAnswer{unknown}, errSupportUnavailable, 0, 1},
+		{"file ACL appears during the read", nil, []supportACLAnswer{absent, granting}, errSupportRefused, 1, 2},
+		{"file ACL unknown after the read", nil, []supportACLAnswer{absent, unknown}, errSupportUnavailable, 1, 2},
+		{"ancestor ACL appears on the rewalk", one(rewalkAncestor, granting), []supportACLAnswer{absent}, errSupportRefused, 1, 2},
+		{"selected directory ACL appears on the rewalk", one(rewalkSelected, granting), []supportACLAnswer{absent}, errSupportRefused, 1, 2},
+		{"evidence unknown on the rewalk", one(rewalkFirst, unknown), []supportACLAnswer{absent}, errSupportUnavailable, 1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, data := supportFixture(t)
+			var expected Snapshot
+			if json.Unmarshal(data, &expected) != nil {
+				t.Fatal("fixture JSON invalid")
+			}
+			n := strings.Count(dir, "/") + 1 // the root and every component
+			script := &supportACLScript{t: t, files: tc.files}
+			if tc.dirs != nil {
+				answers := tc.dirs(n)
+				script.dirs = func(call int) supportACLAnswer {
+					if answer, ok := answers[call]; ok {
+						return answer
+					}
+					return absent
+				}
+			}
+			opens, reads, files := 0, 0, []*os.File{}
+			before := supportTree(t, dir)
+			loaded, err := loadSnapshot(dir, &supportLoadHooks{acl: script.inspect, event: func(stage string, file *os.File) {
+				switch stage {
+				case "open":
+					opens++
+					files = append(files, file)
+				case "read":
+					reads++
+				}
+			}})
+			supportClosed(t, files)
+			if err != tc.want || opens != tc.opens || script.fileCalls != tc.fileCall || (opens == 0) != (reads == 0) {
+				t.Fatalf("%s: descriptor ACL evidence did not fail closed at the correct boundary", tc.name)
+			}
+			if tc.want == nil {
+				if !reflect.DeepEqual(loaded, expected) || script.dirCalls != 2*n {
+					t.Fatalf("%s: proven private snapshot was not returned, or a directory was not proven twice", tc.name)
+				}
+			} else {
+				supportError(t, loaded, err)
+			}
+			if before != supportTree(t, dir) {
+				t.Fatal("ACL refusal mutated the fixture")
+			}
+		})
+	}
+}
+
+func TestSupportDescriptorEvidenceBoundaries(t *testing.T) {
+	// macOS always has the kernel route (a nil seam is production); Linux never
+	// requires evidence, so its policy is unchanged.
+	if ((*supportLoadHooks)(nil).inspector() != nil) != (runtime.GOOS == "darwin") ||
+		((&supportLoadHooks{}).inspector() != nil) != (runtime.GOOS == "darwin") ||
+		supportACL(nil, -1, true) != nil || supportACL(nil, -1, false) != nil {
+		t.Fatal("descriptor ACL evidence is not exactly the macOS route")
+	}
+	file, directory, foreign := unix.Stat_t{Dev: 7}, unix.Stat_t{Dev: 7}, unix.Stat_t{Dev: 8}
+	if !supportSameDevice(&file, &directory) || supportSameDevice(&foreign, &directory) {
+		t.Fatal("a file on another device than its directory was admitted")
+	}
+}
+
+// Real ACLs through the production inspector: disposable hosted macOS runners only.
+func TestLoadDarwinHostedRealACL(t *testing.T) {
+	if runtime.GOOS != "darwin" || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("real ACLs are confined to disposable hosted Darwin runners")
+	}
+	for _, tc := range []struct {
+		name, target, acl string
+		want              error
+	}{
+		{"file allow entry", "file", "group:everyone allow read", errSupportRefused},
+		{"selected directory allow entry", "directory", "user:nobody allow add_file,delete_child", errSupportRefused},
+		{"ancestor home-like deny only", "ancestor", "group:everyone deny delete", nil},
+		{"ancestor allow entry", "ancestor", "user:nobody allow add_file,delete_child", errSupportRefused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := supportFixture(t)
+			target := map[string]string{"file": Path(dir), "directory": dir, "ancestor": filepath.Dir(dir)}[tc.target]
+			t.Cleanup(func() { _ = exec.Command("/bin/chmod", "-N", target).Run() }) // deny delete blocks removal
+			if err := exec.Command("/bin/chmod", "+a", tc.acl, target).Run(); err != nil {
+				t.Fatal("hosted ACL fixture creation failed")
+			}
+			loaded, err := Load(dir)
+			if err != tc.want {
+				t.Fatal("actual descriptor ACL verdict changed")
+			}
+			if tc.want != nil {
+				supportError(t, loaded, err)
 			}
 		})
 	}
