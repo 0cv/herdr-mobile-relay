@@ -930,15 +930,17 @@ func humanClaudeText(raw string) string {
 	}
 	// Shell output rows: Claude Code writes stdout and stderr together as one
 	// row, and output may itself contain tag text, so the genuine adjacent pair is
-	// recognised first. Otherwise every output element is removed and whatever
-	// text is left over is kept, so a prompt never loses words and output never leaks.
+	// recognised first. A row made only of output elements is hidden too; a
+	// prompt that also carries other text keeps all of it.
 	if strings.HasPrefix(trimmed, "<bash-stdout>") || strings.HasPrefix(trimmed, "<bash-stderr>") {
-		if bashOutputRow.MatchString(trimmed) {
+		if bashOutputRow.MatchString(trimmed) || strings.TrimSpace(bashOutputElement.ReplaceAllString(trimmed, "")) == "" {
 			return ""
 		}
-		return strings.TrimSpace(bashOutputElement.ReplaceAllString(trimmed, ""))
+		return raw
 	}
-	if strings.HasPrefix(trimmed, "<bash-input>") && strings.HasSuffix(trimmed, "</bash-input>") {
+	// A shell command row is exactly one bash-input element; a prompt holding
+	// several keeps its text.
+	if strings.HasPrefix(trimmed, "<bash-input>") && strings.HasSuffix(trimmed, "</bash-input>") && strings.Count(trimmed, "<bash-input>") == 1 {
 		return "! " + strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "<bash-input>"), "</bash-input>"))
 	}
 	// A slash-command row is nothing but command-* elements; a prompt that also
