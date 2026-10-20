@@ -1129,34 +1129,82 @@ def metadata_batch_control():
         finally: closed.chmod(0o700)
 
 
+# Cell selection. main() opens every control and every fixture group with cell(id) (ids are manager/family/parameters; the pure helper
+# tests/service_qualification_matrix.py enumerates them from THIS FILE's text without running it). With no HERDR_UNINSTALL_CLI_* variable
+# every cell is selected: the whole suite, unsharded, exactly as before. TIER=fast|full, SHARD=i/n and CELL=<id> narrow it, and an invalid
+# request refuses before any control or fixture. EVIDENCE=<new file> receives one line per COMPLETED cell: reaching the next gate proves
+# the open cell's assertions passed, so only then is it recorded. The ids reached (selected or not) and each cell's Fixture.run count must
+# equal that enumeration, so the loops cannot drift from it unnoticed.
+SELECTION = {}
+
+
+def select_cells():
+    import service_qualification_matrix as matrix  # here, so the modules that import this one never need it
+    try:
+        plan = matrix.plan(Path(__file__).read_text(), (REPO / 'tests' / 'uninstall_cli_fast_cases.json').read_text(), os.environ, matrix.CLI)
+        path = os.environ.get('HERDR_UNINSTALL_CLI_EVIDENCE')
+        SELECTION.update(plan=plan, selected=set(plan['selected']), reached=[], completed=[], open=None, start=0, evidence=open(path, 'x', buffering=1) if path else None)
+    except (matrix.Refusal, OSError) as error: raise SystemExit('service removal cell selection refused: %s' % error)
+
+
+def close_cell():
+    cell_id = SELECTION['open']
+    if cell_id is None: return
+    ran, expected = INVOCATIONS[0] - SELECTION['start'], SELECTION['plan']['runs'][cell_id]
+    assert ran == expected, 'cell %s ran %d invocations; the enumeration says %d' % (cell_id, ran, expected)
+    SELECTION['completed'].append(cell_id); SELECTION['open'] = None
+    if SELECTION['evidence']: print(cell_id, file=SELECTION['evidence'], flush=True)
+
+
+def cell(cell_id):
+    close_cell(); SELECTION['reached'].append(cell_id)
+    if cell_id not in SELECTION['selected']: return False
+    SELECTION['open'], SELECTION['start'] = cell_id, INVOCATIONS[0]
+    return True
+
+
+def finish_cells():
+    close_cell(); plan = SELECTION['plan']
+    assert SELECTION['reached'] == plan['inventory'], 'the cells reached differ from the enumerated inventory'
+    assert sorted(SELECTION['completed']) == sorted(plan['selected']), 'the completed cells differ from the selected cells'
+    print('uninstall CLI cells completed: %d of %d (tier %s, shard %d/%d)' % (len(plan['selected']), len(plan['inventory']), plan['tier'], plan['shard_index'], plan['shard_count']), flush=True)
+
+
 def main():
     if os.getuid() == 0: raise SystemExit('removal fixtures must run as a non-root hosted user')
-    timeout_diagnostics_control()
-    fast_stub_equivalence_control()
-    metadata_batch_control()
+    select_cells()
+    if cell('control/timeout-diagnostics'): timeout_diagnostics_control()
+    if cell('control/fast-stub-equivalence'): fast_stub_equivalence_control()
+    if cell('control/metadata-batch'): metadata_batch_control()
     with tempfile.TemporaryDirectory(prefix='herdr-removal-') as temporary:
         parent = Path(temporary).resolve()
         for platform in ('Linux', 'Darwin'):
+            manager = 'systemd' if platform == 'Linux' else 'launchd'
             for present in ((), (0,), (1,), (0, 1)):
+                if not cell(f"{manager}/present/{''.join(str(i) for i in present) or 'none'}"): continue
                 f = Fixture(parent, platform, present=present)
                 status, output, events = f.run()
                 assert status == 0 and all(not q.exists() for q in f.definitions)
                 f.unchanged()
             for initial in (('inactive',) if platform == 'Linux' else ('absent',)):
+                if not cell(f'{manager}/initial/{initial}'): continue
                 f = Fixture(parent, platform)
                 for s in f.model['states'].values(): s.update(state=initial, enabled=True)
                 f.save(); assert f.run()[0] == 0; f.unchanged()
             for fault in ('', 'query-fail'):
+                if not cell(f"{manager}/direct/{fault or 'none'}"): continue
                 f = Fixture(parent, platform, fault=fault)
                 assert f.run(direct=True)[0] == (1 if fault else 0); f.unchanged()
-            f = Fixture(parent, platform)
-            definitions_before = tuple(snapshot(q) for q in f.definitions)
-            assert f.run(direct='opposite')[0] == 1 and not f.events()
-            assert tuple(snapshot(q) for q in f.definitions) == definitions_before; f.unchanged()
+            if cell(f'{manager}/opposite'):
+                f = Fixture(parent, platform)
+                definitions_before = tuple(snapshot(q) for q in f.definitions)
+                assert f.run(direct='opposite')[0] == 1 and not f.events()
+                assert tuple(snapshot(q) for q in f.definitions) == definitions_before; f.unchanged()
             faults = ['query-fail', 'malformed', 'reactivate', 'replace-file', 'rm-fail', 'disable-fail', 'delayed', 'stop-noop']
             faults += ['stop-fail', 'duplicate', 'missing', 'unknown', 'contradictory', 'unsupported-enable', 'reload-fail'] if platform == 'Linux' else ['bootout-fail', 'wrong-label', 'domain-fail', 'domain-malformed', 'disabled-fail', 'disabled-malformed', 'disabled-duplicate', 'disabled-missing']
             for bad_index in (0, 1):
                 for fault in faults:
+                    if not cell(f'{manager}/fault/{bad_index}/{fault}'): continue
                     f = Fixture(parent, platform, fault=fault, fault_index=bad_index)
                     original_definition = snapshot(f.definitions[bad_index])
                     status, output, events = f.run(); f.unchanged()
@@ -1195,8 +1243,10 @@ def main():
                     limit = 4096 if platform == 'Linux' else 65536
                     failures = ((binary, code), ('\x00' + text, code), (text + '\x00', code),
                                 (text + 'X' * (limit + 1), code), (text[:-1] if seam == 'label-absent' else text, 1), ('', code))
-                    for payload, status_code in failures:
+                    for form, (payload, status_code) in zip(('middle-nul', 'leading-nul', 'trailing-nul', 'oversize', 'status-1', 'empty'), failures):
                         for action in ('uninstall', 'direct', 'assert-stopped', 'rollback-cli-setup', 'if', 'or', 'observe-if', 'observe-or'):
+                            if action == 'rollback-cli-setup' and index == 1: continue  # current-only authority
+                            if not cell(f'{manager}/capture/{index}/{seam}/{form}/{action}'): continue
                             f = Fixture(parent, platform, fault='lifecycle-output', fault_index=index)
                             # Safe sibling for assert-stopped, nonquiet target
                             # for the normalized quiet-claim counterexample.
@@ -1207,7 +1257,6 @@ def main():
                                            lifecycle_stderr=seam == 'label-absent')
                             f.save(); f.environment['HERDR_CLI_SETUP_ROLLBACK'] = '1'
                             before = tuple(snapshot(q) for q in f.definitions)
-                            if action == 'rollback-cli-setup' and index == 1: continue  # current-only authority
                             conditional = 'or' if action.endswith('or') else True if action.endswith('if') else False
                             args = (action,) if action in ('assert-stopped', 'rollback-cli-setup') else ('uninstall',)
                             result, output, events = f.run(args=args, direct=action == 'direct', conditional=conditional,
@@ -1224,6 +1273,7 @@ def main():
             for index in (0, 1):
                 for count in (2, 3, 4):
                     for action in ('uninstall', 'direct', 'if', 'or'):
+                        if not cell(f'{manager}/late/{index}/{count}/{action}'): continue
                         f = Fixture(parent, platform, fault='lifecycle-output', fault_index=index)
                         text = 'LoadState=loaded\nActiveState=inac\x00tive\nUnitFileState=disabled' if platform == 'Linux' else 'Could not find serv\x00ice "' + f.labels[index] + '" in domain for user gui: ' + str(os.getuid())
                         f.model.update(lifecycle_seam='systemd' if platform == 'Linux' else 'label', lifecycle_text=text,
@@ -1239,6 +1289,7 @@ def main():
             if platform == 'Darwin':
                 for size in (65535, 65536):
                     for action in ('uninstall', 'assert-stopped'):
+                        if not cell(f'{manager}/bound/{size}/{action}'): continue
                         f = Fixture(parent, platform, fault='lifecycle-output')
                         for state in f.model['states'].values(): state.update(state='absent', enabled=False)
                         prefix = 'gui/' + str(os.getuid()) + ' = {\n'
@@ -1246,6 +1297,7 @@ def main():
                         f.model.update(lifecycle_seam='domain', lifecycle_text=text, lifecycle_status=0); f.save()
                         assert f.run(args=(action,))[0] == 0; f.unchanged()
             for shape in ('symlink', 'directory', 'hardlink', 'writable', 'unreadable'):
+                if not cell(f'{manager}/definition/{shape}'): continue
                 f = Fixture(parent, platform); q = f.definitions[0]
                 if shape == 'symlink': q.unlink(); q.symlink_to(f.env_file)
                 if shape == 'directory': q.unlink(); q.mkdir()
@@ -1256,9 +1308,11 @@ def main():
                 assert status == 1 and not events and snapshot(q) == before; f.unchanged()
             # F003: genuinely missing ancestors remain distinct from existing
             # unsearchable ones. Restore traversal only AFTER each invocation.
-            f = Fixture(parent, platform, present=()); f.definitions[0].parent.rmdir()
-            assert f.run()[0] == 0; f.unchanged()
+            if cell(f'{manager}/ancestor-absent'):
+                f = Fixture(parent, platform, present=()); f.definitions[0].parent.rmdir()
+                assert f.run()[0] == 0; f.unchanged()
             for higher in (False, True):
+                if not cell(f"{manager}/ancestor-unsearchable/{'grandparent' if higher else 'parent'}"): continue
                 f = Fixture(parent, platform)
                 for s in f.model['states'].values(): s.update(state='absent', enabled=False)
                 f.save(); definitions_before = tuple(snapshot(q) for q in f.definitions)
@@ -1274,9 +1328,11 @@ def main():
                 finally: ancestor.chmod(mode_before)
                 assert tuple(snapshot(q) for q in f.definitions) == definitions_before; f.unchanged()
             for text in ("  export HERDR_RELAY_TRANSPORT='TaIlsCaLe-ClI'\n", 'HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_TRANSPORT=tailscale-cli\n'):
+                if not cell(f"{manager}/route-spelling/{'export' if 'export' in text else 'duplicate'}"): continue
                 f = Fixture(parent, platform, mode='tailscale-cli'); f.env_file.write_text(text); f.original = f.protected_snapshot()
                 assert f.run(choice=b'k')[0] == 0; f.unchanged()
             for choice in (b'k', b'r', b'c', None):
+                if not cell(f"{manager}/route-choice/{choice.decode() if choice else 'none'}"): continue
                 f = Fixture(parent, platform, mode='tailscale-cli')
                 status, output, events = f.run(choice=choice)
                 assert status == (0 if choice in (b'k', b'r') else 1)
@@ -1285,33 +1341,40 @@ def main():
                 if choice == b'r': assert effects(events)[0]['op'] == 'unpublish' and routes[0]['env'] == str(f.env_file)
                 if choice in (None, b'c'): assert not effects(events)
                 f.unchanged(allow_route=choice == b'r')
-            f = Fixture(parent, platform, mode='tailscale-cli'); f.model['route_status'] = 23; f.save()
-            status, _, events = f.run(choice=b'r'); assert status == 1 and [e['op'] for e in effects(events)] == ['unpublish']; f.unchanged()
+            if cell(f'{manager}/route-failure'):
+                f = Fixture(parent, platform, mode='tailscale-cli'); f.model['route_status'] = 23; f.save()
+                status, _, events = f.run(choice=b'r'); assert status == 1 and [e['op'] for e in effects(events)] == ['unpublish']; f.unchanged()
             for prior in ('retained', 'removed'):
+                if not cell(f'{manager}/route-prior/{prior}'): continue
                 f = Fixture(parent, platform, mode='tailscale-cli')
                 assert f.run(args=('uninstall', '--cli-route-disposition=' + prior))[0] == 0; f.unchanged()
             for args in (('uninstall', ''), ('uninstall', '--unknown'), ('uninstall', '--cli-route-disposition=retained', '--cli-route-disposition=retained'), ('assert-stopped', 'extra'), ('rollback-cli-setup', 'extra'), ('--unknown',)):
+                if not cell(f"{manager}/usage/{'+'.join(a or 'empty' for a in args).replace('--', '')}"): continue
                 f = Fixture(parent, platform); assert f.run(args=args)[0] == 2 and not f.events(); f.unchanged()
             for text in ('HERDR_RELAY_TRANSPORT=bad\n', 'HERDR_RELAY_TRANSPORT=tailscale-cli\nHERDR_RELAY_TRANSPORT=cloudflare\n', 'HERDR_RELAY_TRANSPORT=$(touch canary)\n', 'GH_TOKEN=`touch canary`\n', 'HERDR_RELAY_TRANSPORT=cloudflare; touch canary\n', 'PATH=/untrusted\n', 'SERVICE_REMOVAL_STATE=absent\n'):
+                if not cell(f"{manager}/env-text/{''.join(c if c.isalnum() else '_' for c in text.strip())}"): continue
                 f = Fixture(parent, platform); f.env_file.write_text(text); f.original = f.protected_snapshot()
                 assert f.run(args=('uninstall', '--cli-route-disposition=retained'))[0] == 1 and not effects(f.events())
                 assert not (f.root / 'canary').exists(); f.unchanged()
             for key in ('HERDR_RELEASE_ROOT', 'HERDR_RELAY_BIN', 'HERDR_RELAY_BIN_DIR', 'HERDR_PLUTIL', 'HERDR_WEB_ROOT', 'HERDR_CLI_SETUP_ROLLBACK'):
                 for value in ('', '/untrusted'):
+                    if not cell(f"{manager}/env-key/{key}/{'empty' if not value else 'untrusted'}"): continue
                     f = Fixture(parent, platform, mode='tailscale-cli'); f.environment[key] = value
                     f.env_file.write_text('HERDR_RELAY_TRANSPORT=tailscale-cli\n' + key + '="' + value + '"\n'); f.original = f.protected_snapshot()
                     assert f.run(args=('uninstall', '--cli-route-disposition=retained'))[0] == 1 and not effects(f.events()); f.unchanged()
             for role in ('HERDR_GITHUB_TOKEN_FILE', 'CLOUDFLARED_CONFIG', 'TUNNEL_ORIGIN_CERT'):
                 for index in (0, 1):
+                    if not cell(f'{manager}/role-selected/{role}/{index}'): continue
                     f = Fixture(parent, platform)
                     f.env_file.write_text('HERDR_RELAY_TRANSPORT=cloudflare\n' + role + '="' + str(f.definitions[index]) + '"\n')
                     f.original = f.protected_snapshot()
                     for action in ('uninstall', 'rollback-cli-setup'):
                         f.environment['HERDR_CLI_SETUP_ROLLBACK'] = '1'
                         assert f.run(args=(action,))[0] == 1 and not effects(f.events()); f.unchanged()
-                f = Fixture(parent, platform); alias = f.root / 'selected-alias'; alias.symlink_to(f.definitions[0])
-                f.env_file.write_text('HERDR_RELAY_TRANSPORT=cloudflare\n' + role + '="' + str(alias) + '"\n'); f.original = f.protected_snapshot()
-                assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()
+                if cell(f'{manager}/role-alias/{role}'):
+                    f = Fixture(parent, platform); alias = f.root / 'selected-alias'; alias.symlink_to(f.definitions[0])
+                    f.env_file.write_text('HERDR_RELAY_TRANSPORT=cloudflare\n' + role + '="' + str(alias) + '"\n'); f.original = f.protected_snapshot()
+                    assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()
             # F001: an alternate uppercase spelling with the same checked
             # device/inode must refuse before effects. The adapter also makes
             # this cell meaningful on case-sensitive hosted filesystems; it
@@ -1320,6 +1383,7 @@ def main():
                 for index in (0, 1):
                     for fault, side in (('', 'selected'), ('role-identity-fail', 'selected'), ('role-identity-malformed', 'selected'),
                                         ('role-identity-fail', 'destination'), ('role-identity-malformed', 'destination')):
+                        if not cell(f"{manager}/identity-alias/{role}/{index}/{fault or 'none'}/{side}"): continue
                         f = Fixture(parent, platform, fault=fault, fault_index=index)
                         alias = f.definitions[index].with_name(f.definitions[index].name.upper())
                         if not alias.exists(): alias.write_bytes(f.definitions[index].read_bytes()); alias.chmod(0o600)
@@ -1337,6 +1401,7 @@ def main():
             # effect is permitted, including internal and conditional seams.
             for index in (0, 1) if platform == 'Darwin' else ():
                 for kind in ('wrong', 'missing', 'empty', 'number', 'array', 'malformed'):
+                    if not cell(f'{manager}/plist-label/{index}/{kind}'): continue
                     f = Fixture(parent, platform, mode='tailscale-cli')
                     for s in f.model['states'].values(): s.update(state='absent', enabled=False)
                     f.model['states']['com.unrelated.fixture'] = {'state': 'loaded', 'enabled': True, 'queries': 0}; f.save()
@@ -1354,11 +1419,14 @@ def main():
                     assert tuple(snapshot(q) for q in f.definitions) == definitions_before
                     assert json.loads((f.control / 'model.json').read_text())['states']['com.unrelated.fixture'] == {'state': 'loaded', 'enabled': True, 'queries': 0}
             for fault in ('stat-fail', 'stat-malformed', 'read-fail', 'decode-fail', 'label-decode-fail', 'label-malformed-output') if platform == 'Darwin' else ('stat-fail', 'stat-malformed', 'read-fail'):
+                if not cell(f'{manager}/tool-fault/{fault}'): continue
                 f = Fixture(parent, platform, fault=fault); assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()
                 if fault in ('stat-fail', 'stat-malformed'): assert not f.events()
-            f = Fixture(parent, platform, present=(1,), mode='tailscale-cli')
-            assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()  # surviving legacy selection
+            if cell(f'{manager}/legacy-selection'):
+                f = Fixture(parent, platform, present=(1,), mode='tailscale-cli')
+                assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()  # surviving legacy selection
             for bad in ('missing-config', 'different-config', 'ambiguous-definition'):
+                if not cell(f'{manager}/config-input/{bad}'): continue
                 f = Fixture(parent, platform)
                 if bad == 'missing-config': f.env_file.unlink()
                 elif bad == 'different-config':
@@ -1368,6 +1436,7 @@ def main():
                 f.original = f.protected_snapshot(); assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()
             for args in (('assert-stopped',), ('rollback-cli-setup',)):
                 for state in ('active', 'unknown', 'absent-loaded', 'quiet'):
+                    if not cell(f'{manager}/stopped/{args[0]}/{state}'): continue
                     f = Fixture(parent, platform, present=() if state == 'absent-loaded' else (0, 1))
                     if state == 'absent-loaded':
                         f.model['states'][f.labels[0]].update(state='active' if platform == 'Linux' else 'loaded', enabled=True)
@@ -1382,10 +1451,11 @@ def main():
                     expected = 0 if state == 'quiet' or (args[0] == 'rollback-cli-setup' and state == 'active') else 1
                     assert status == expected and snapshot(f.definitions[1]) == legacy
                     if args[0] == 'assert-stopped': assert all(e['op'] == 'observe' for e in events)
-            f = Fixture(parent, platform); assert f.run(args=('rollback-cli-setup',))[0] == 2 and not f.events(); f.unchanged()
+            if cell(f'{manager}/rollback-unauthorized'): f = Fixture(parent, platform); assert f.run(args=('rollback-cli-setup',))[0] == 2 and not f.events(); f.unchanged()
             for requested in (signal.SIGINT, signal.SIGTERM):
                 for seam in ('pause-stop', 'pause-observe'):
                     for index in (0, 1):
+                        if not cell(f'{manager}/signal/{int(requested)}/{seam}/{index}'): continue
                         f = Fixture(parent, platform, fault=seam, fault_index=index)
                         status, _, events = f.run(requested_signal=requested)
                         assert status == 128 + requested and not any(e['op'] == 'remove' and e['label'] == f.labels[index] for e in events)
@@ -1393,12 +1463,16 @@ def main():
                         f.unchanged()
             for fault in ('rm-fail', 'query-fail'):
                 for conditional in (True, 'or'):
+                    if not cell(f"{manager}/caller/{fault}/{'or' if conditional == 'or' else 'if'}"): continue
                     f = Fixture(parent, platform, fault=fault); assert f.run(conditional=conditional)[0] == 1; f.unchanged()
-            f = Fixture(parent, platform, present=()); f.env_file.unlink(); f.original = f.protected_snapshot()
-            assert f.run()[0] == 0; f.unchanged()  # genuinely absent fallback differs from installed missing input
-            f = Fixture(parent, platform); f.env_file.write_text('HERDR_RELAY_TRANSPORT=\n'); f.environment['HERDR_RELAY_TRANSPORT'] = 'tailscale-cli'; f.original = f.protected_snapshot()
-            assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()
+            if cell(f'{manager}/config-absent'):
+                f = Fixture(parent, platform, present=()); f.env_file.unlink(); f.original = f.protected_snapshot()
+                assert f.run()[0] == 0; f.unchanged()  # genuinely absent fallback differs from installed missing input
+            if cell(f'{manager}/ambient-transport'):
+                f = Fixture(parent, platform); f.env_file.write_text('HERDR_RELAY_TRANSPORT=\n'); f.environment['HERDR_RELAY_TRANSPORT'] = 'tailscale-cli'; f.original = f.protected_snapshot()
+                assert f.run()[0] == 1 and not effects(f.events()); f.unchanged()
             for q in ('current', 'legacy') if platform == 'Linux' else ():
+                if not cell(f'{manager}/quoted-route/{q}'): continue
                 f = Fixture(parent, platform, mode='tailscale-cli', quoting=q)
                 status, _, events = f.run(choice=b'r'); assert status == 0
                 assert [e['env'] for e in events if e['op'] == 'unpublish'] == [str(f.env_file)]; f.unchanged(allow_route=True)
@@ -1408,6 +1482,7 @@ def main():
         for quoting in ('current', 'legacy'):
             for index in (0, 1):
                 for unsupported in (False, True):
+                    if not cell(f"systemd/percent-specifier/{quoting}/{index}/{'unsupported' if unsupported else 'escaped'}"): continue
                     f = Fixture(parent, 'Linux', mode='tailscale-cli', quoting=quoting)
                     literal_dir = f.root / 'selected-%u'; literal_dir.mkdir(mode=0o700)
                     expanded_dir = f.root / 'selected-fixture-user'; expanded_dir.mkdir(mode=0o700)
@@ -1454,6 +1529,7 @@ def main():
                     # Test a hidden directive on either side of the admitted
                     # assignment, not just the first Environment occurrence.
                     for before in (False, True) if directive in (directives[0], directives[6]) else (False,):
+                        if not cell(f"systemd/override/{quoting}/{index}/{directives.index(directive)}/{'before' if before else 'after'}"): continue
                         f = Fixture(parent, 'Linux', mode='cloudflare', quoting=quoting)
                         literal_dir = f.root / 'override-%u'; literal_dir.mkdir(mode=0o700)
                         expanded_dir = f.root / 'override-fixture-user'; expanded_dir.mkdir(mode=0o700)
@@ -1476,6 +1552,7 @@ def main():
                 # A supported encoding outside [Service] is not a manager
                 # environment assignment and cannot establish its selection.
                 for section in ('', '[Unit]\n', '[Install]\n'):
+                    if not cell(f"systemd/section/{quoting}/{index}/{section.strip().strip('[]').lower() or 'none'}"): continue
                     f = Fixture(parent, 'Linux', mode='cloudflare', quoting=quoting)
                     q = f.definitions[index]; q.write_text(section + q.read_text().removeprefix('[Service]\n'))
                     f.environment['HERDR_CLI_SETUP_ROLLBACK'] = '1'
@@ -1493,6 +1570,7 @@ def main():
         for index in (0, 1):
             for present in ((0, 1), (index,)):  # includes legacy-only survivors
                 for location in ('user', 'runtime', 'system', 'vendor', 'hierarchical'):
+                    if not cell(f'systemd/overlay/{index}/{len(present)}/{location}'): continue
                     f = Fixture(parent, 'Linux', present=present, mode='cloudflare')
                     cli = f.root / 'effective-cli.env'; cli.write_text('HERDR_RELAY_TRANSPORT=tailscale-cli\n'); cli.chmod(0o600)
                     directory = (f.definitions[index].parent / (f.labels[index] + '.d') if location == 'user' else
@@ -1509,35 +1587,43 @@ def main():
             for present in ((0, 1), ()):
                 for field in ('Id', 'LoadState', 'ActiveState', 'UnitFileState', 'FragmentPath', 'DropInPaths', 'NeedDaemonReload'):
                     for fault in ('meta-missing', 'meta-duplicate'):
+                        if not cell(f'systemd/metadata-field/{index}/{len(present)}/{field}/{fault}'): continue
                         f = Fixture(parent, 'Linux', present=present, fault=fault, fault_index=index)
                         f.model['metadata_field'] = field; f.save()
                         configuration_refusal(f, seams)
             for fault in ('meta-query-fail', 'meta-partial-fail', 'meta-malformed', 'meta-extra', 'meta-oversize', 'meta-nul'):
+                if not cell(f'systemd/metadata-fault/{index}/{fault}'): continue
                 f = Fixture(parent, 'Linux', fault=fault, fault_index=index)
                 configuration_refusal(f, seams)
             for override in ({'Id': 'unrelated.service'}, {'LoadState': 'masked'}, {'ActiveState': 'mystery'},
                              {'UnitFileState': 'enabled-runtime'}, {'NeedDaemonReload': 'yes'}, {'NeedDaemonReload': ''},
                              {'FragmentPath': ''}, {'FragmentPath': 'relative.service'}, {'LoadState': 'not-found'}):
+                if not cell(f"systemd/metadata-override/{index}/{'+'.join(k + '=' + v for k, v in override.items()).replace('/', '_')}"): continue
                 f = Fixture(parent, 'Linux'); f.model['metadata_overrides'] = {f.labels[index]: override}; f.save()
                 configuration_refusal(f, seams)
-            f = Fixture(parent, 'Linux')
-            f.model['metadata_overrides'] = {f.labels[index]: {'FragmentPath': str(f.private / 'bystander')}}; f.save()
-            configuration_refusal(f, all_seams)  # never inspect the arbitrary fragment
-            f = Fixture(parent, 'Linux'); f.definitions[index].unlink()
-            configuration_refusal(f, all_seams)  # cached loaded unit is NOT fresh absence
+            if cell(f'systemd/fragment-bystander/{index}'):
+                f = Fixture(parent, 'Linux')
+                f.model['metadata_overrides'] = {f.labels[index]: {'FragmentPath': str(f.private / 'bystander')}}; f.save()
+                configuration_refusal(f, all_seams)  # never inspect the arbitrary fragment
+            if cell(f'systemd/cached-unit/{index}'):
+                f = Fixture(parent, 'Linux'); f.definitions[index].unlink()
+                configuration_refusal(f, all_seams)  # cached loaded unit is NOT fresh absence
             for override in ({'FragmentPath': '/fixture/cached.service'}, {'DropInPaths': '/fixture/runtime/override.conf'},
                              {'LoadState': 'loaded'}, {'ActiveState': 'active'}, {'UnitFileState': 'enabled'}, {'NeedDaemonReload': 'yes'}):
+                if not cell(f"systemd/absent-override/{index}/{'+'.join(k + '=' + v for k, v in override.items()).replace('/', '_')}"): continue
                 f = Fixture(parent, 'Linux', present=())
                 f.model['metadata_overrides'] = {f.labels[index]: override}; f.save()
                 configuration_refusal(f, seams)
             # Explicit not-found enablement is also a coherent absence control.
-            f = Fixture(parent, 'Linux', present=())
-            f.model['metadata_overrides'] = {f.labels[index]: {'UnitFileState': 'not-found'}}; f.save()
-            assert f.run()[0] == 0 and not effects(f.events()); f.unchanged()
+            if cell(f'systemd/absent-not-found/{index}'):
+                f = Fixture(parent, 'Linux', present=())
+                f.model['metadata_overrides'] = {f.labels[index]: {'UnitFileState': 'not-found'}}; f.save()
+                assert f.run()[0] == 0 and not effects(f.events()); f.unchanged()
             # Drift at initial removal admission or either existing fresh
             # resource/quiet seam refuses, with honest label-local progress.
             for at in (2, 3, 4):
                 for field in ('FragmentPath', 'DropInPaths', 'NeedDaemonReload'):
+                    if not cell(f'systemd/drift/{index}/{at}/{field}'): continue
                     f = Fixture(parent, 'Linux')
                     overlay = f.root / 'drift.conf'; overlay.write_text('[Service]\nEnvironment=HERDR_RELAY_ENV=/fixture/cli.env\n'); overlay.chmod(0o600)
                     f.protected.append(overlay); f.original = f.protected_snapshot()
@@ -1553,6 +1639,7 @@ def main():
         # if/|| callers where errexit cannot supply the safety contract.
         for fault in ('meta-query-fail', 'meta-partial-fail', 'meta-nul', 'meta-oversize'):
             for conditional in (True, 'or'):
+                if not cell(f"systemd/meta-caller/{fault}/{'or' if conditional == 'or' else 'if'}"): continue
                 f = Fixture(parent, 'Linux', fault=fault)
                 before = tuple(snapshot(q) for q in f.definitions)
                 status, _, events = f.run(conditional=conditional)
@@ -1560,6 +1647,7 @@ def main():
                 assert tuple(snapshot(q) for q in f.definitions) == before; f.unchanged()
         # No-overlay once-decoding and genuine absence remain positive controls
         # above. Configuration counters must never advance lifecycle polling.
+    finish_cells()
     print('PASS actual service-removal fixture source: NUL-safe lifecycle capture, effective configuration, identities, labels, ancestors, once-decoding, quiescence and cancellation')
 
 

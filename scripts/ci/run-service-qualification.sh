@@ -2,7 +2,7 @@
 # Service qualification driver for GitHub-hosted CI.
 #
 # Modes (anything else refuses with exit 2):
-#   suites               the ten non-native suites, each invoked the way the Makefile's
+#   suites               the nine unsharded suites, each invoked the way the Makefile's
 #                        shell-check invokes it. The dispatch, doctor and setup-menu suites that
 #                        tests/test_native_install.sh nests are each their own required run here
 #                        (own exit status, timing and bound), so one doctor failure can no
@@ -10,14 +10,18 @@
 #   native TIER I/N      one shard of tests/test_native_install.sh (TIER fast|full; N is the
 #                        tier's fixed shard count in tests/service_qualification_matrix.py) and
 #                        the SHA/tier/OS/shard-bound evidence of the cells it COMPLETED
-#   all (the default)    suites, then the whole exhaustive native suite in one process
-# CI runs `suites` and `native` as separate jobs. The suite file lists the cells; this driver only
-# bounds, records and verifies them. tests/test_service_supervision.py is in no Makefile target and
-# no other workflow; this driver is the only place that runs it.
+#   uninstall-cli TIER I/N  the same for tests/test_service_uninstall_cli.py (its controls run in
+#                        shard 1 of the tier only)
+#   all (the default)    suites, then the whole exhaustive native suite and the whole uninstall
+#                        CLI suite, each in one process
+# CI runs `suites`, `native` and `uninstall-cli` as separate jobs. The suite files list the cells;
+# this driver only bounds, records and verifies them. tests/test_service_supervision.py is in no
+# Makefile target and no other workflow; this driver is the only place that runs it.
 # Invoked by the service workflows as:
 #
 #   /bin/bash scripts/ci/run-service-qualification.sh suites
 #   /bin/bash scripts/ci/run-service-qualification.sh native fast 1/2
+#   /bin/bash scripts/ci/run-service-qualification.sh uninstall-cli full 3/3
 #
 # so that macOS runs the stock /bin/bash 3.2 and Linux runs bash 5. This file
 # therefore avoids associative arrays, mapfile/readarray, case-conversion
@@ -58,18 +62,18 @@ refuse() {
 # ---------------------------------------------------------------- mode ----
 
 mode=${1:-all}
-native_tier=full
-native_shard=''
+shard_tier=full
+shard_spec=''
 case "$mode" in
     all | suites) [ "$#" -le 1 ] || refuse 'unexpected arguments' ;;
-    native)
-        [ "$#" -eq 3 ] || refuse 'usage: native TIER I/N'
-        native_tier=$2
-        native_shard=$3
-        case "$native_tier" in fast | full) ;; *) refuse 'unknown native tier' ;; esac
-        case "$native_shard" in
+    native | uninstall-cli)
+        [ "$#" -eq 3 ] || refuse "usage: $mode TIER I/N"
+        shard_tier=$2
+        shard_spec=$3
+        case "$shard_tier" in fast | full) ;; *) refuse 'unknown tier' ;; esac
+        case "$shard_spec" in
             [1-9]/[1-9] | [1-9]/[1-9][0-9] | [1-9][0-9]/[1-9] | [1-9][0-9]/[1-9][0-9]) ;;
-            *) refuse 'malformed native shard' ;;
+            *) refuse 'malformed shard' ;;
         esac
         ;;
     *) refuse 'unknown mode' ;;
@@ -369,7 +373,6 @@ run_service_suites() {
     run_helper_suite tests/test_plugin_doctor.py 120
     run_helper_suite tests/test_setup_menu.py 180
 
-    run_suite tests/test_service_uninstall_cli.py '' "$PYTHON3" tests/test_service_uninstall_cli.py
     run_suite tests/test_uninstall.sh '' /bin/bash tests/test_uninstall.sh
     # The launcher-admission variable is set for this one suite only, as in the Makefile.
     run_suite tests/test_tailscale_cli_setup_failure.py HERDR_TAILSCALE_LAUNCHER_CI=1 \
@@ -391,38 +394,56 @@ run_helper_suite() {
     check_checkout "$1"
 }
 
-# The native suite runs the cells selected by TIER and SHARD (the whole exhaustive suite when there is no
-# shard) with its nested children skipped: they are the required suites above. The suite appends one line per
-# COMPLETED cell to the cell record; the evidence below is written only from that record, bound to this
-# candidate, run, tier, runner OS and shard, and is `pass` only if the suite exited 0 and its completed cells are
-# exactly the shard's cells. A failed, partial, timed-out or empty shard still gets a (failing) record.
-run_native_suite() {
-    native_name=tests/test_native_install.sh
-    native_cells="$summary_dir/native-cells.txt"
-    if [ -n "$native_shard" ]; then
-        native_name="$native_name#$native_tier-${native_shard%/*}of${native_shard#*/}"
+# A sharded suite runs the cells selected by TIER and SHARD (the whole exhaustive suite when there is no shard), the native one
+# with its nested children skipped: they are the required suites above. The suite appends one line per COMPLETED cell to the cell
+# record; the evidence below is written only from that record, bound to this candidate, run, tier, runner OS and shard, and is
+# `pass` only if the suite exited 0 and its completed cells are exactly the shard's cells. A failed, partial, timed-out or empty
+# shard still gets a (failing) record.
+# run_cell_suite KIND FILE ENV_PREFIX EVIDENCE_FILE EXTRA COMMAND [ARG...]
+run_cell_suite() {
+    cell_kind=$1
+    cell_file=$2
+    cell_prefix=$3
+    cell_evidence=$4
+    cell_extra=$5
+    shift 5
+    cell_name=$cell_file
+    cell_record="$summary_dir/$cell_kind-cells.txt"
+    if [ -n "$shard_spec" ]; then
+        cell_name="$cell_name#$shard_tier-${shard_spec%/*}of${shard_spec#*/}"
     fi
-    run_suite "$native_name" HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN=1 \
-        "HERDR_NATIVE_INSTALL_TIER=$native_tier" ${native_shard:+"HERDR_NATIVE_INSTALL_SHARD=$native_shard"} \
-        "HERDR_NATIVE_INSTALL_EVIDENCE=$native_cells" /bin/bash tests/test_native_install.sh
-    [ -n "$native_shard" ] || return 0
-    native_exit=$suite_status
+    run_suite "$cell_name" "$cell_extra" \
+        "${cell_prefix}_TIER=$shard_tier" ${shard_spec:+"${cell_prefix}_SHARD=$shard_spec"} \
+        "${cell_prefix}_EVIDENCE=$cell_record" "$@"
+    [ -n "$shard_spec" ] || return 0
+    cell_exit=$suite_status
     evidence_status=0
-    "$PYTHON3" -I -B tests/service_qualification_matrix.py evidence --tier "$native_tier" --shard "$native_shard" \
+    "$PYTHON3" -I -B tests/service_qualification_matrix.py evidence --suite "$cell_kind" --tier "$shard_tier" --shard "$shard_spec" \
         --sha "$candidate_sha" --run-id "${GITHUB_RUN_ID:-}" --run-attempt "${GITHUB_RUN_ATTEMPT:-}" \
-        --runner-os "$(uname -s)" --suite-exit "$native_exit" --cells "$native_cells" \
-        --output "$summary_dir/native-shard-evidence.json" || evidence_status=$?
+        --runner-os "$(uname -s)" --suite-exit "$cell_exit" --cells "$cell_record" \
+        --output "$summary_dir/$cell_evidence" || evidence_status=$?
     if [ "$evidence_status" -ne 0 ]; then
         overall=fail
         printf 'service qualification: the shard did not produce passing evidence\n' >&2
     fi
 }
 
+run_native_suite() {
+    run_cell_suite native tests/test_native_install.sh HERDR_NATIVE_INSTALL native-shard-evidence.json \
+        HERDR_NATIVE_INSTALL_SKIP_NESTED_CHILDREN=1 /bin/bash tests/test_native_install.sh
+}
+
+run_uninstall_cli_suite() {
+    run_cell_suite uninstall-cli tests/test_service_uninstall_cli.py HERDR_UNINSTALL_CLI uninstall-cli-shard-evidence.json \
+        '' "$PYTHON3" tests/test_service_uninstall_cli.py
+}
+
 EXPECTED_SUITE_COUNT=0
 case "$mode" in
-    suites) EXPECTED_SUITE_COUNT=10; run_service_suites ;;
+    suites) EXPECTED_SUITE_COUNT=9; run_service_suites ;;
     native) EXPECTED_SUITE_COUNT=1; run_native_suite ;;
-    *) EXPECTED_SUITE_COUNT=11; run_service_suites; run_native_suite ;;
+    uninstall-cli) EXPECTED_SUITE_COUNT=1; run_uninstall_cli_suite ;;
+    *) EXPECTED_SUITE_COUNT=11; run_service_suites; run_native_suite; run_uninstall_cli_suite ;;
 esac
 
 # --------------------------------------------------------------- results ----

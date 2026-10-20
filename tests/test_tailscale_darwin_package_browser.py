@@ -198,6 +198,7 @@ ALLOWED = (
     "Makefile",
     "docs/ci-test-tiers.md",
     "tests/native_install_fast_cases.json",
+    "tests/uninstall_cli_fast_cases.json",
     "tests/service_qualification_matrix.py",
     "tests/test_service_qualification_matrix.py",
     # Hosted-job timeout caps (T004 review F002): the tag-triggered release workflow.

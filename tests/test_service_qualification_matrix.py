@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hermetic tests of tests/service_qualification_matrix.py. They read repository text and write only under a fresh
 temporary directory: no suite, installer, relay, manager, network, HOME or hosted variable is touched."""
+import ast
 import contextlib
 import copy
 import io
@@ -24,6 +25,12 @@ SHA, RUN, ATTEMPT = "a" * 40, "4242", "2"  # attempt 2: attempt 1 artifacts of t
 CELLS = {c["id"]: c for c in m.enumerate_cells(SOURCE)}
 INVENTORY = list(CELLS)
 FAST_IDS = set(m.load_fast(FAST, INVENTORY))
+CLI_SOURCE = (ROOT / m.UNINSTALL_CLI).read_text()
+CLI_FAST = (ROOT / "tests/uninstall_cli_fast_cases.json").read_text()
+CLI_CELLS = {c["id"]: c for c in m.enumerate_cells(CLI_SOURCE, cli=True)}
+CLI_INVENTORY = list(CLI_CELLS)
+CLI_FAST_IDS = set(m.load_fast(CLI_FAST, CLI_INVENTORY))
+TEXTS = {"native": (SOURCE, FAST), "uninstall-cli": (CLI_SOURCE, CLI_FAST)}
 
 
 def program(body):
@@ -143,10 +150,185 @@ class Selection(unittest.TestCase):
                {"HERDR_NATIVE_INSTALL_SHARD": "0/8"}, {"HERDR_NATIVE_INSTALL_SHARD": "9/8"}, {"HERDR_NATIVE_INSTALL_SHARD": "01/8"},
                {"HERDR_NATIVE_INSTALL_SHARD": "1/8/1"}, {"HERDR_NATIVE_INSTALL_SHARD": " 1/8"}, {"HERDR_NATIVE_INSTALL_CELL": "nope"},
                {"HERDR_NATIVE_INSTALL_SHARD": "1/8", "HERDR_NATIVE_INSTALL_CELL": foreign},
-               {"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_CELL": next(i for i in INVENTORY if i not in FAST_IDS)}]
+               {"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_CELL": next(i for i in INVENTORY if i not in FAST_IDS)},
+               {"HERDR_NATIVE_INSTALL_TIER": ""}, {"HERDR_NATIVE_INSTALL_SHARD": ""}, {"HERDR_NATIVE_INSTALL_CELL": ""}]  # set but empty: not "unset"
         for env in bad:
             with self.subTest(env), self.assertRaises(m.Refusal):
                 m.plan(SOURCE, FAST, env)
+
+
+def cli_projection(ids, family, *keep):
+    return {tuple(a.get(k) for k in keep) for a in map(m.classify_cli, ids) if a["family"] == family}
+
+
+class UninstallCli(unittest.TestCase):
+    def test_inventory_is_frozen_complete_and_classified(self):
+        self.assertEqual(m.totals(list(CLI_CELLS.values())), m.CLI_FROZEN)
+        self.assertEqual((m.CLI_FROZEN["cells"], m.CLI_FROZEN["runs"]), (1032, 1657))  # the 1657 Fixture.run invocations of the unchanged suite
+        self.assertEqual([i for i in CLI_INVENTORY if CLI_CELLS[i]["runs"] == 0], ["control/" + n for n in m.CLI_CONTROLS])
+        self.assertEqual({m.classify_cli(i)["family"] for i in CLI_INVENTORY} - {"control"}, set(m.CLI_FAMILIES))
+        self.assertEqual({m.classify_cli(i).get("platform") for i in CLI_INVENTORY}, {None, "systemd", "launchd"})
+        for bad in ("systemd/nonesuch", "sparc/present/0", "systemd/present", "systemd/present/0/1", "systemd/present/", "control/other", "present/0"):
+            with self.subTest(bad), self.assertRaises(m.Refusal):
+                m.classify_cli(bad)
+
+    def test_enumerator_refuses_what_it_cannot_prove_for_the_cli(self):
+        gate = "def main():\n    for n in (1, 2):\n        if not cell(f'systemd/present/{n}'): continue\n"
+        cases = {"duplicate id": "def main():\n    for n in (1, 2):\n        if not cell('x'): continue\n        f.run()\n",
+                 "unresolvable loop": "def main():\n    for n in unknown():\n        if not cell(f'x/{n}'): continue\n        f.run()\n",
+                 "run outside a cell": "def main():\n    f.run()\n", "ungated cell call": "def main():\n    x = cell('x')\n",
+                 "a cell without a run": gate + "        pass\n", "a control with a run": "def main():\n    if cell('control/x'): f.run()\n",
+                 "unresolvable condition": "def main():\n    if unknown():\n        if not cell('x'): pass\n",
+                 "while with cells": "def main():\n    while True:\n        f.run()\n"}
+        for name, body in cases.items():
+            with self.subTest(name), self.assertRaises(m.Refusal):
+                m.enumerate_cells(body, cli=True)
+        cells = m.enumerate_cells(gate + "        f.run(); f.run()\n", cli=True)
+        self.assertEqual([(c["id"], c["runs"]) for c in cells], [("systemd/present/1", 2), ("systemd/present/2", 2)])
+        helper = "def helper(f):\n    for n in (1, 2):\n        f.run()\ndef main():\n    if cell('systemd/present/0'): helper(f)\n"
+        self.assertEqual([c["runs"] for c in m.enumerate_cells(helper, cli=True)], [2])
+        for text in ("def main():\n    subprocess.run(['x'])\n", "def main():\n    g.run()\n"):  # only f.run is the entrypoint
+            self.assertEqual(m.enumerate_cells(text, cli=True), [])
+        with self.assertRaises(m.Refusal):
+            m.enumerate_cells(CLI_SOURCE, legacy=True, cli=True)
+
+    def test_every_entrypoint_run_sits_behind_a_cell_gate_and_a_removed_gate_is_caught(self):
+        def undominated(source):
+            main = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "main")
+            parents = {child: node for node in ast.walk(main) for child in ast.iter_child_nodes(node)}
+            opens = lambda n: any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "cell" for c in ast.walk(n.test))
+            skips = lambda n: isinstance(n, ast.If) and opens(n) and isinstance(n.test, ast.UnaryOp) and [type(x) for x in n.body] == [ast.Continue]
+            entry = lambda n: isinstance(n, ast.Call) and (getattr(n.func, "id", "") == "configuration_refusal" or (
+                isinstance(n.func, ast.Attribute) and n.func.attr == "run" and getattr(n.func.value, "id", "") == "f"))
+            found = []
+            for call in filter(entry, ast.walk(main)):
+                node, covered = call, False
+                while node in parents and not covered:  # inside `if cell(id): ...`, or after `if not cell(id): continue` in a loop body
+                    parent = parents[node]
+                    covered = isinstance(parent, ast.If) and opens(parent) and not skips(parent) and node in parent.body
+                    covered = covered or isinstance(parent, ast.For) and node in parent.body and any(skips(x) for x in parent.body[:parent.body.index(node)])
+                    node = parent
+                found += [] if covered else [call.lineno]
+            return found
+        self.assertEqual(undominated(CLI_SOURCE), [])
+        gate = "                if not cell(f'{manager}/definition/{shape}'): continue\n"
+        self.assertEqual(CLI_SOURCE.count(gate), 1)
+        broken = CLI_SOURCE.replace(gate, "")
+        self.assertEqual(len(undominated(broken)), 1)  # that run now belongs to the previous cell's scope only by accident
+        with self.assertRaises(m.Refusal):
+            m.inventory_of(broken, m.CLI)  # and the frozen digests refuse the changed inventory
+        self.assertEqual(CLI_SOURCE.rpartition("def main():")[2].count("for platform in ('Linux', 'Darwin'):"), 1)  # the Task G harness splices main()'s one loop
+
+    def test_the_frozen_inventory_binds_every_invocation_call_fixture_parameters_and_order(self):
+        base = m.totals(m.enumerate_cells(CLI_SOURCE, cli=True))
+        self.assertEqual(base, m.CLI_FROZEN)
+        direct = "                f = Fixture(parent, platform, fault=fault)\n                assert f.run(direct=True)[0] == (1 if fault else 0); f.unchanged()\n"
+        prior = "            for prior in ('retained', 'removed'):\n"
+        mutations = {"another argument of the same run": (direct, direct.replace("direct=True", "direct=False")),
+                     "another Fixture under the same run": (direct, direct.replace("fault=fault", "fault_index=1, fault=fault")),
+                     "two cells swapped in order": (prior, prior.replace("('retained', 'removed')", "('removed', 'retained')"))}
+        for name, (old, new) in mutations.items():
+            self.assertEqual(CLI_SOURCE.count(old), 1, name)
+            mutated = CLI_SOURCE.replace(old, new)
+            seen = m.totals(m.enumerate_cells(mutated, cli=True))
+            self.assertNotEqual(seen["invocation_digest"], base["invocation_digest"], name)
+            with self.subTest(name), self.assertRaises(m.Refusal):
+                m.inventory_of(mutated, m.CLI)
+        swapped = m.totals(m.enumerate_cells(CLI_SOURCE.replace(prior, prior.replace("('retained', 'removed')", "('removed', 'retained')")), cli=True))
+        self.assertEqual({k: v for k, v in swapped.items() if k != "invocation_digest"}, {k: v for k, v in base.items() if k != "invocation_digest"})  # only the order digest sees it
+
+    def test_fast_subset_is_explicit_and_covers_every_distinct_seam(self):
+        self.assertEqual(len(CLI_FAST_IDS), sum(len(g["ids"]) for g in json.loads(CLI_FAST)["groups"]))
+        self.assertEqual((len(CLI_FAST_IDS), sum(CLI_CELLS[i]["runs"] for i in CLI_FAST_IDS)), (345, 550))
+        self.assertTrue({"control/" + n for n in m.CLI_CONTROLS} <= CLI_FAST_IDS and CLI_FAST_IDS <= set(CLI_INVENTORY))
+        covered = lambda family, *keep: self.assertEqual(cli_projection(CLI_INVENTORY, family, *keep), cli_projection(CLI_FAST_IDS, family, *keep), (family, keep))
+        for family in m.CLI_FAMILIES:
+            covered(family, "platform")  # every family on every model that has it
+        complete = ("present", "initial", "direct", "opposite", "bound", "definition", "ancestor-absent", "ancestor-unsearchable", "route-spelling",
+                    "route-choice", "route-failure", "route-prior", "usage", "env-text", "role-alias", "tool-fault", "legacy-selection", "config-input",
+                    "stopped", "rollback-unauthorized", "config-absent", "ambient-transport", "quoted-route")
+        for family in complete:  # every positive state and every safety-critical refusal class: all cells, both models
+            self.assertEqual({i for i in CLI_INVENTORY if m.classify_cli(i).get("family") == family},
+                             {i for i in CLI_FAST_IDS if m.classify_cli(i).get("family") == family}, family)
+        covered("fault", "platform", "fault")
+        for kind in ("query-fail", "stop-fail", "bootout-fail", "rm-fail", "reactivate"):  # direction-specific progress: both labels
+            self.assertEqual({a["index"] for a in map(m.classify_cli, CLI_FAST_IDS) if a["family"] == "fault" and a["fault"] == kind}, {"0", "1"}, kind)
+        for keep in (("seam", "form"), ("seam", "action"), ("seam", "index")):
+            covered("capture", "platform", *keep)  # payload shape, caller context and label on every seam
+        for keep in (("count",), ("action",), ("index",)):
+            covered("late", "platform", *keep)  # observation-time branch
+        covered("env-key", "platform", "key")
+        self.assertEqual({a["value"] for a in map(m.classify_cli, CLI_FAST_IDS) if a["family"] == "env-key"}, {"empty", "untrusted"})  # both values, each key once per model
+        for keep in (("role",), ("index",)):
+            covered("role-selected", "platform", *keep)
+        for keep in (("fault", "side"), ("role",), ("index",)):
+            covered("identity-alias", "platform", *keep)
+        covered("plist-label", "kind"); covered("plist-label", "index")
+        for keep in (("signal", "seam"), ("index",), ("signal",)):
+            covered("signal", "platform", *keep)
+        covered("caller", "platform", "fault"); covered("caller", "platform", "caller"); covered("caller", "fault", "caller")
+        covered("percent-specifier", "quoting", "form"); covered("percent-specifier", "index", "form")
+        covered("override", "directive", "side"); covered("override", "quoting"); covered("override", "index")
+        for keep in (("section",), ("quoting",), ("index",)):
+            covered("section", *keep)
+        for keep in (("location",), ("index",), ("present",)):
+            covered("overlay", *keep)
+        covered("metadata-field", "field", "fault"); covered("metadata-field", "present"); covered("metadata-field", "index")
+        covered("metadata-fault", "fault"); covered("metadata-fault", "index"); covered("metadata-override", "override")
+        covered("absent-override", "override"); covered("drift", "at", "field"); covered("drift", "index")  # every drift point with every property
+        covered("meta-caller", "fault"); covered("meta-caller", "caller")
+        for family in ("fragment-bystander", "cached-unit", "absent-not-found"):
+            self.assertTrue(cli_projection(CLI_FAST_IDS, family, "index"), family)
+
+    def test_cli_fast_file_refuses_duplicates_unknown_ids_and_wrong_shapes(self):
+        document = json.loads(CLI_FAST)
+        for mutate in (lambda d: d["groups"][0]["ids"].append(d["groups"][0]["ids"][0]),
+                       lambda d: d["groups"][0]["ids"].append("systemd/present/9"),
+                       lambda d: d["groups"][1]["ids"].append(d["groups"][0]["ids"][0]),
+                       lambda d: d["groups"][0].pop("rationale"), lambda d: d.update(schema_version=2),
+                       lambda d: d["groups"][0].update(ids="x")):
+            broken = copy.deepcopy(document)
+            mutate(broken)
+            with self.assertRaises(m.Refusal):
+                m.load_fast(json.dumps(broken), CLI_INVENTORY)
+
+    def test_shards_partition_each_tier_pin_the_controls_balance_and_stay_under_the_bound(self):
+        runs = m.runs_of(CLI_SOURCE, m.CLI)
+        controls = ["control/" + n for n in m.CLI_CONTROLS]
+        self.assertEqual(m.CLI.counts, {"fast": 1, "full": 3})
+        for tier in ("fast", "full"):
+            ids = CLI_INVENTORY if tier == "full" else [i for i in CLI_INVENTORY if i in CLI_FAST_IDS]
+            shards, loads = m.assign(ids, m.CLI.counts[tier], m.CLI, runs)
+            self.assertEqual(shards, m.assign(ids, m.CLI.counts[tier], m.CLI, runs)[0])
+            self.assertEqual(sorted(sum(shards, [])), sorted(ids))
+            self.assertEqual([[i for i in shard if i in controls] for shard in shards], [controls] + [[]] * (len(shards) - 1))  # exactly one shard
+            self.assertLess(max(loads) / min(loads), 1.02)
+            self.assertLessEqual(max(loads), .6 * 900, "a modeled shard must stay within 60% of the unchanged 900 s bound")
+            for shard in shards:
+                self.assertEqual({m.classify_cli(i).get("platform") for i in shard} - {None}, {"systemd", "launchd"})
+        self.assertAlmostEqual(sum(m.assign(CLI_INVENTORY, 3, m.CLI, runs)[1]), 912.6, 1)  # modeled hosted-macOS seconds of the whole suite
+
+    def test_plan_defaults_to_full_and_refuses_invalid_requests(self):
+        plan = lambda env: m.plan(CLI_SOURCE, CLI_FAST, env, m.CLI)
+        whole = plan({})
+        self.assertEqual((whole["tier"], whole["selected"], whole["inventory"]), ("full", CLI_INVENTORY, CLI_INVENTORY))
+        self.assertEqual(plan({"HERDR_NATIVE_INSTALL_TIER": "fast", "HERDR_NATIVE_INSTALL_SHARD": "9/9"})["selected"], CLI_INVENTORY)  # the native variables are not ours
+        self.assertEqual(plan({"HERDR_UNINSTALL_CLI_TIER": "fast", "HERDR_UNINSTALL_CLI_SHARD": "1/1"})["selected"], [i for i in CLI_INVENTORY if i in CLI_FAST_IDS])
+        self.assertEqual(plan({"HERDR_UNINSTALL_CLI_CELL": CLI_INVENTORY[7]})["selected"], [CLI_INVENTORY[7]])
+        foreign = m.assign(CLI_INVENTORY, 3, m.CLI, m.runs_of(CLI_SOURCE, m.CLI))[0][1][0]
+        bad = [{"TIER": "all"}, {"TIER": "FAST"}, {"TIER": "fast", "SHARD": "1/3"}, {"SHARD": "1/1"}, {"SHARD": "0/3"}, {"SHARD": "4/3"},
+               {"SHARD": "01/3"}, {"SHARD": "1/3/1"}, {"SHARD": " 1/3"}, {"SHARD": "1/2"}, {"CELL": "nope"}, {"SHARD": "1/3", "CELL": foreign},
+               {"TIER": "fast", "CELL": next(i for i in CLI_INVENTORY if i not in CLI_FAST_IDS)},
+               {"TIER": ""}, {"SHARD": ""}, {"CELL": ""}, {"TIER": "full", "SHARD": "1/3", "CELL": ""}]  # a variable that is set but empty is refused; unset is the default
+        for env in bad:
+            with self.subTest(env), self.assertRaises(m.Refusal):
+                plan({"HERDR_UNINSTALL_CLI_" + k: v for k, v in env.items()})
+
+    def test_a_cell_is_the_one_semantic_id_not_a_counter(self):
+        self.assertEqual(len(m.SUITES), 9)
+        self.assertNotIn(m.UNINSTALL_CLI, m.SUITES)  # it is its own sharded job now
+        self.assertEqual(len({i.lower() for i in CLI_INVENTORY}), len(CLI_INVENTORY))
+        self.assertNotRegex(" ".join(CLI_INVENTORY), r"invocation|counter|INVOCATIONS")
 
 
 class Evidence(unittest.TestCase):
@@ -155,25 +337,25 @@ class Evidence(unittest.TestCase):
         path.write_text(value if isinstance(value, str) else json.dumps(value))
 
     def tree(self, root, tier, mutate=None):
-        count = m.SHARD_COUNTS[tier]
         for runner, runner_os in m.RUNNER_OS.items():
             def summary(mode, names):
                 return {"schema_version": 2, "candidate_sha": SHA, "mode": mode, "run_id": RUN, "run_attempt": ATTEMPT,
                         "runner": {"os": runner_os, "arch": "x"}, "bash_version": "b", "python_version": "p",
                         "suites": [{"name": n, "exit": 0, "seconds": 1} for n in names], "checkout_unchanged": True, "result": "pass"}
             self.write(root / ("service-suites-%s-%s-%s" % (tier, runner, SHA)) / "summary.json", summary("suites", m.SUITES))
-            for index in range(1, count + 1):
-                want = m.shard_expectation(tier, "%d/%d" % (index, count), SHA, RUN, ATTEMPT, runner_os, SOURCE, FAST)
-                base = root / ("service-native-%s-%s-s%d-%s" % (tier, runner, index, SHA))
-                self.write(base / "native-shard-evidence.json", m.shard_evidence(want, "".join(i + "\n" for i in want["ids"]), 0))
-                self.write(base / "summary.json", summary("native", ["%s#%s-%dof%d" % (m.NATIVE, tier, index, count)]))
+            for suite in m.PROFILES:
+                for index in range(1, suite.counts[tier] + 1):
+                    want = m.shard_expectation(tier, "%d/%d" % (index, suite.counts[tier]), SHA, RUN, ATTEMPT, runner_os, *TEXTS[suite.name], suite)
+                    base = root / ("service-%s-%s-%s-s%d-%s" % (suite.artifact, tier, runner, index, SHA))
+                    self.write(base / suite.evidence, m.shard_evidence(want, "".join(i + "\n" for i in want["ids"]), 0))
+                    self.write(base / "summary.json", summary(suite.name, ["%s#%s-%dof%d" % (suite.source, tier, index, suite.counts[tier])]))
         if mutate:
             mutate(root, tier)
 
     def gate(self, tier, mutate=None, run_id=RUN, attempt=ATTEMPT):
         with tempfile.TemporaryDirectory() as tmp:
             self.tree(pathlib.Path(tmp), tier, mutate)
-            m.gate(tier, SHA, run_id, attempt, tmp, SOURCE, FAST)
+            m.gate(tier, SHA, run_id, attempt, tmp, TEXTS)
 
     def test_complete_fast_and_full_success_for_every_shard_and_os_group(self):
         for tier in ("fast", "full"):
@@ -265,6 +447,53 @@ class Evidence(unittest.TestCase):
         with self.assertRaisesRegex(m.Refusal, "run_attempt"):
             self.gate("fast", attempt="1")
 
+    def test_uninstall_cli_evidence_failures_and_control_placement_fail_the_aggregate(self):
+        def path(root, tier, runner="ubuntu-24.04", index=1):
+            return root / ("service-uninstall-cli-%s-%s-s%d-%s" % (tier, runner, index, SHA)) / "uninstall-cli-shard-evidence.json"
+
+        def edit(change, index=1, runner="ubuntu-24.04"):
+            def apply(root, tier):
+                target = path(root, tier, runner, min(index, m.CLI.counts[tier]))
+                document = json.loads(target.read_text())
+                change(document)
+                target.write_text(json.dumps(document))
+            return apply
+
+        def move(cell_id):  # the cell runs in shard 2 instead of the shard that owns it: the first shard misses it, the second has one too many
+            def apply(root, tier):
+                first, second = (path(root, tier, "ubuntu-24.04", n) for n in (1, 2))
+                for target, change in ((first, -1), (second, 1)):
+                    document = json.loads(target.read_text())
+                    document["completed"] = [c for c in document["completed"] if c != cell_id] if change < 0 else document["completed"] + [cell_id]
+                    document["completed_count"] += change
+                    target.write_text(json.dumps(document))
+            return apply
+        control = "control/fast-stub-equivalence"
+        cases = {"missing shard": (lambda r, t: shutil.rmtree(path(r, t).parent), "artifact set differs"),
+                 "evidence of the native suite": (lambda r, t: path(r, t).write_text(next(r.glob("service-native-%s-ubuntu-24.04-s1-*/native-shard-evidence.json" % t)).read_text()), "differs from the expected"),
+                 "duplicate cell": (edit(lambda d: d["completed"].append(d["completed"][0])), "duplicate completed"),
+                 "unexpected cell": (edit(lambda d: d["completed"].append("systemd/nonesuch")), "unexpected completed"),
+                 "partial shard": (edit(lambda d: (d["completed"].pop(), d.update(completed_count=d["completed_count"] - 1))), "missing completed"),
+                 "no control completed": (edit(lambda d: (d["completed"].remove(control), d.update(completed_count=d["completed_count"] - 1))), "missing completed"),
+                 "control completed twice": (edit(lambda d: d["completed"].append(control)), "duplicate completed"),
+                 "stale candidate": (edit(lambda d: d.update(candidate_sha="b" * 40)), "candidate_sha"),
+                 "prior attempt": (edit(lambda d: d.update(run_attempt="1")), "run_attempt"),
+                 "other tier": (edit(lambda d: d.update(tier="full" if d["tier"] == "fast" else "fast")), "expected tier"),
+                 "other runner": (edit(lambda d: d.update(runner_os="Darwin")), "runner_os"),
+                 "stale inventory": (edit(lambda d: d.update(inventory_digest="0" * 64)), "inventory_digest"),
+                 "failed shard": (edit(lambda d: d.update(suite_exit=1, result="fail")), "did not pass"),
+                 "wrong kind": (edit(lambda d: d.update(kind="native-install-shard")), "kind")}
+        for tier in ("fast", "full"):
+            for name, (mutate, reason) in cases.items():
+                with self.subTest(tier + " " + name), self.assertRaisesRegex(m.Refusal, reason):
+                    self.gate(tier, mutate)
+        with self.subTest("a control run in a shard that does not own it"):
+            first_shard = json.loads(json.dumps(m.shard_expectation("full", "1/3", SHA, RUN, ATTEMPT, "Linux", CLI_SOURCE, CLI_FAST, m.CLI)["ids"]))
+            self.assertIn(control, first_shard)  # the controls are in shard 1 and in no other
+            with self.assertRaisesRegex(m.Refusal, "completed cell"):
+                self.gate("full", move(control))
+            self.assertTrue(all(control not in m.shard_expectation("full", "%d/3" % n, SHA, RUN, ATTEMPT, "Linux", CLI_SOURCE, CLI_FAST, m.CLI)["ids"] for n in (2, 3)))
+
     def test_failed_empty_or_partial_cell_records_never_become_passing_evidence(self):
         want = m.shard_expectation("fast", "1/2", SHA, RUN, "1", "Linux", SOURCE, FAST)
         every = "".join(i + "\n" for i in want["ids"])
@@ -277,6 +506,8 @@ class Evidence(unittest.TestCase):
 
     def test_command_line_round_trip_plan_evidence_needs_and_gate(self):
         files = ["--source", str(ROOT / m.NATIVE), "--fast-cases", str(ROOT / "tests/native_install_fast_cases.json")]
+        gate_files = ["--native-source", files[1], "--native-fast-cases", files[3],
+                      "--uninstall-cli-source", str(ROOT / m.UNINSTALL_CLI), "--uninstall-cli-fast-cases", str(ROOT / "tests/uninstall_cli_fast_cases.json")]
         identity = ["--sha", SHA, "--run-id", RUN, "--run-attempt", ATTEMPT]
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stderr(io.StringIO()):
             tmp = pathlib.Path(directory)
@@ -291,13 +522,23 @@ class Evidence(unittest.TestCase):
             self.assertEqual([json.loads((tmp / n).read_text())["result"] for n in ("pass.json", "fail.json")], ["pass", "fail"])
             with mock.patch.dict(os.environ, {"HERDR_NEEDS_JSON": json.dumps({"a": {"result": "success"}})}):
                 self.assertEqual((m.main(["needs", "a"]), m.main(["needs", "a", "b"])), (0, 1))
+            cli = ["--suite", "uninstall-cli", "--source", gate_files[5], "--fast-cases", gate_files[7]]  # the uninstall CLI, a full run of one shard
+            with mock.patch.dict(os.environ, {"HERDR_UNINSTALL_CLI_TIER": "full", "HERDR_UNINSTALL_CLI_SHARD": "1/3"}):
+                self.assertEqual(m.main(["plan", *cli, "--output", str(tmp / "cli-plan.json")]), 0)
+            plan = json.loads((tmp / "cli-plan.json").read_text())
+            self.assertEqual((plan["shard_index"], plan["shard_count"], plan["runs"]), (1, 3, m.runs_of(CLI_SOURCE, m.CLI)))
+            (tmp / "cli-cells").write_text("".join(i + "\n" for i in plan["selected"]))
+            shard = ["evidence", *cli, *identity, "--tier", "full", "--shard", "1/3", "--runner-os", "Linux", "--cells", str(tmp / "cli-cells")]
+            self.assertEqual(m.main([*shard, "--suite-exit", "0", "--output", str(tmp / "cli-pass.json")]), 0)
+            self.assertEqual(m.main([*shard, "--suite-exit", "1", "--output", str(tmp / "cli-fail.json")]), 1)
+            self.assertEqual(json.loads((tmp / "cli-pass.json").read_text())["kind"], "uninstall-cli-shard")
             self.tree(tmp / "artifacts", "fast")
-            self.assertEqual(m.main(["gate", *files, *identity, "--tier", "fast", "--artifacts", str(tmp / "artifacts")]), 0)
-            self.assertEqual(m.main(["gate", *files, "--sha", SHA, "--run-id", "9", "--run-attempt", ATTEMPT, "--tier", "fast",
+            self.assertEqual(m.main(["gate", *gate_files, *identity, "--tier", "fast", "--artifacts", str(tmp / "artifacts")]), 0)
+            self.assertEqual(m.main(["gate", *gate_files, "--sha", SHA, "--run-id", "9", "--run-attempt", ATTEMPT, "--tier", "fast",
                                      "--artifacts", str(tmp / "artifacts")]), 1)
 
     def test_dependency_results_must_all_be_success(self):
-        names = ("candidate", "suites", "native")
+        names = ("candidate", "suites", "native", "uninstall_cli")
         good = {n: {"result": "success", "outputs": {}} for n in names}
         m.check_needs(json.dumps(good), names)
         for result in ("failure", "cancelled", "skipped", ""):
@@ -323,9 +564,15 @@ class Wiring(unittest.TestCase):
             workflow, count = self.text(".github/workflows/%s.yml" % name), m.SHARD_COUNTS[tier]
             self.assertIn("shard: [%s]" % ", ".join(map(str, range(1, count + 1))), workflow)
             self.assertIn("native %s ${{ matrix.shard }}/%d" % (tier, count), workflow)
+            self.assertIn("shard: [%s]" % ", ".join(map(str, range(1, m.CLI.counts[tier] + 1))), workflow)
+            self.assertIn("uninstall-cli %s ${{ matrix.shard }}/%d" % (tier, m.CLI.counts[tier]), workflow)
+            self.assertIn("service-uninstall-cli-%s-${{ matrix.runner }}-s${{ matrix.shard }}-${{ github.sha }}" % tier, workflow)
+            self.assertIn("uninstall-cli-shard-evidence.json", workflow)
+            self.assertRegex(workflow, r"needs: \[(candidate, )?suites, native, uninstall_cli\]")
+            self.assertIn(" suites native uninstall_cli" if tier == "fast" else " candidate suites native uninstall_cli", workflow)
             self.assertIn("--tier %s" % tier, workflow)
             self.assertIn("if: ${{ always() }}", workflow)
-            self.assertEqual(sorted(re.findall(r"runner: \[(.*)\]", workflow)), ["macos-15, ubuntu-24.04"] * 2)
+            self.assertEqual(sorted(re.findall(r"runner: \[(.*)\]", workflow)), ["macos-15, ubuntu-24.04"] * 3)
             code = "\n".join(line for line in workflow.lower().splitlines() if not line.lstrip().startswith("#"))
             for forbidden in ("continue-on-error", "retry", "rerun"):
                 self.assertNotIn(forbidden, code)

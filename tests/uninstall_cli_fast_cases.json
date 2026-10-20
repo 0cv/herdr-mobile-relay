@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "name": "controls",
+      "rationale": "The three controls (timeout diagnostics, fast-stub/model-stub equivalence, metadata batch) check the stubs and containment every fixture group depends on. They run in exactly one designated shard per runner and tier (shard 1 of the tier, pinned by assign()); the aggregate gate requires each exactly once per runner.",
+      "ids": [
+        "control/timeout-diagnostics", "control/fast-stub-equivalence", "control/metadata-batch"
+      ]
+    },
+    {
+      "name": "positive-states",
+      "rationale": "Successful removal from every definition state (neither, current only, legacy only, both) and from an already quiet manager state, on both manager models. The positive controls: nothing here is a refusal.",
+      "ids": [
+        "systemd/present/none", "systemd/present/0", "systemd/present/1", "systemd/present/01", "launchd/present/none", "launchd/present/0",
+        "launchd/present/1", "launchd/present/01", "systemd/initial/inactive", "launchd/initial/absent"
+      ]
+    },
+    {
+      "name": "direct-and-opposite-entrypoints",
+      "rationale": "The per-manager uninstall script run directly (success, and a manager query failure) and the OTHER manager's script, which must refuse before any effect: the entrypoint dispatch seam, both models.",
+      "ids": [
+        "systemd/direct/none", "launchd/direct/none", "systemd/direct/query-fail", "launchd/direct/query-fail", "systemd/opposite", "launchd/opposite"
+      ]
+    },
+    {
+      "name": "lifecycle-faults",
+      "rationale": "Every distinct lifecycle fault kind on each manager model (15 systemd, 16 launchd) on at least one label (non-progress kinds alternate the label); the five faults whose assertion is label-direction specific (query failure, stop/bootout failure, removal failure, reactivation) on both labels. Dropped: the other label of each remaining kind.",
+      "ids": [
+        "systemd/fault/0/query-fail", "systemd/fault/1/query-fail", "systemd/fault/1/malformed", "systemd/fault/0/reactivate", "systemd/fault/1/reactivate",
+        "systemd/fault/1/replace-file", "systemd/fault/0/rm-fail", "systemd/fault/1/rm-fail", "systemd/fault/1/disable-fail", "systemd/fault/0/delayed",
+        "systemd/fault/1/stop-noop", "systemd/fault/0/stop-fail", "systemd/fault/1/stop-fail", "systemd/fault/1/duplicate", "systemd/fault/0/missing",
+        "systemd/fault/1/unknown", "systemd/fault/0/contradictory", "systemd/fault/1/unsupported-enable", "systemd/fault/0/reload-fail",
+        "launchd/fault/0/query-fail", "launchd/fault/1/query-fail", "launchd/fault/1/malformed", "launchd/fault/0/reactivate", "launchd/fault/1/reactivate",
+        "launchd/fault/1/replace-file", "launchd/fault/0/rm-fail", "launchd/fault/1/rm-fail", "launchd/fault/1/disable-fail", "launchd/fault/0/delayed",
+        "launchd/fault/1/stop-noop", "launchd/fault/0/bootout-fail", "launchd/fault/1/bootout-fail", "launchd/fault/1/wrong-label",
+        "launchd/fault/0/domain-fail", "launchd/fault/1/domain-malformed", "launchd/fault/0/disabled-fail", "launchd/fault/1/disabled-malformed",
+        "launchd/fault/0/disabled-duplicate", "launchd/fault/1/disabled-missing"
+      ]
+    },
+    {
+      "name": "lifecycle-capture-shapes-and-callers",
+      "rationale": "Every capture seam (systemd show; launchd domain, label-absent, label-loaded, disabled) x every payload shape (NUL at middle/prefix/suffix, oversize, controller failure, empty) x every caller context (uninstall, direct, assert-stopped, rollback-cli-setup, under if, under ||, observation under if, observation under ||) x both labels: each pair of (seam, shape), (seam, caller) and (seam, label) at least once. Dropped: the cross-product (shape x caller x label) of the rest.",
+      "ids": [
+        "systemd/capture/0/systemd/middle-nul/uninstall", "systemd/capture/1/systemd/leading-nul/direct",
+        "systemd/capture/0/systemd/trailing-nul/assert-stopped", "systemd/capture/0/systemd/oversize/rollback-cli-setup",
+        "systemd/capture/0/systemd/status-1/if", "systemd/capture/1/systemd/empty/or", "systemd/capture/0/systemd/middle-nul/observe-if",
+        "systemd/capture/1/systemd/leading-nul/observe-or", "launchd/capture/0/domain/middle-nul/uninstall", "launchd/capture/1/domain/leading-nul/direct",
+        "launchd/capture/0/domain/trailing-nul/assert-stopped", "launchd/capture/0/domain/oversize/rollback-cli-setup", "launchd/capture/0/domain/status-1/if",
+        "launchd/capture/1/domain/empty/or", "launchd/capture/0/domain/middle-nul/observe-if", "launchd/capture/1/domain/leading-nul/observe-or",
+        "launchd/capture/1/label-absent/leading-nul/uninstall", "launchd/capture/0/label-absent/trailing-nul/direct",
+        "launchd/capture/1/label-absent/oversize/assert-stopped", "launchd/capture/0/label-absent/status-1/rollback-cli-setup",
+        "launchd/capture/1/label-absent/empty/if", "launchd/capture/0/label-absent/middle-nul/or", "launchd/capture/1/label-absent/leading-nul/observe-if",
+        "launchd/capture/0/label-absent/trailing-nul/observe-or", "launchd/capture/0/label-loaded/trailing-nul/uninstall",
+        "launchd/capture/1/label-loaded/oversize/direct", "launchd/capture/0/label-loaded/status-1/assert-stopped",
+        "launchd/capture/0/label-loaded/empty/rollback-cli-setup", "launchd/capture/0/label-loaded/middle-nul/if",
+        "launchd/capture/1/label-loaded/leading-nul/or", "launchd/capture/0/label-loaded/trailing-nul/observe-if",
+        "launchd/capture/1/label-loaded/middle-nul/observe-or", "launchd/capture/1/disabled/oversize/uninstall", "launchd/capture/0/disabled/status-1/direct",
+        "launchd/capture/1/disabled/empty/assert-stopped", "launchd/capture/0/disabled/middle-nul/rollback-cli-setup",
+        "launchd/capture/1/disabled/leading-nul/if", "launchd/capture/0/disabled/trailing-nul/or", "launchd/capture/1/disabled/middle-nul/observe-if",
+        "launchd/capture/0/disabled/leading-nul/observe-or"
+      ]
+    },
+    {
+      "name": "observation-time-branches",
+      "rationale": "A binary quiet claim arising only AFTER a supported initial state (at the poll and at both fresh seams, queries 2, 3, 4), with every caller context and both labels across the six cells per model. Dropped: the other caller x count x label pairings.",
+      "ids": [
+        "systemd/late/0/2/uninstall", "systemd/late/1/2/or", "systemd/late/0/3/direct", "systemd/late/1/3/if", "systemd/late/0/4/if",
+        "systemd/late/1/4/uninstall", "launchd/late/0/2/uninstall", "launchd/late/1/2/or", "launchd/late/0/3/direct", "launchd/late/1/3/if",
+        "launchd/late/0/4/if", "launchd/late/1/4/uninstall"
+      ]
+    },
+    {
+      "name": "launchd-acquisition-bound",
+      "rationale": "Genuine EOF at the launchd acquisition bound stays supported: both sizes, both entrypoint kinds.",
+      "ids": [
+        "launchd/bound/65535/uninstall", "launchd/bound/65535/assert-stopped", "launchd/bound/65536/uninstall", "launchd/bound/65536/assert-stopped"
+      ]
+    },
+    {
+      "name": "unsafe-definition-shapes-and-ancestors",
+      "rationale": "Unsafe definition files (symlink, directory, hard link, group/world writable, unreadable) and the missing versus unsearchable ancestor directories (one level up and two), on both models.",
+      "ids": [
+        "systemd/definition/symlink", "systemd/definition/directory", "systemd/definition/hardlink", "systemd/definition/writable",
+        "systemd/definition/unreadable", "launchd/definition/symlink", "launchd/definition/directory", "launchd/definition/hardlink",
+        "launchd/definition/writable", "launchd/definition/unreadable", "systemd/ancestor-absent", "launchd/ancestor-absent",
+        "systemd/ancestor-unsearchable/parent", "systemd/ancestor-unsearchable/grandparent", "launchd/ancestor-unsearchable/parent",
+        "launchd/ancestor-unsearchable/grandparent"
+      ]
+    },
+    {
+      "name": "route-disposition",
+      "rationale": "The Tailscale CLI route disposition: transport spellings, every interactive choice (keep, remove, cancel, end of input), a failing route removal and the two prior-disposition flags, on both models.",
+      "ids": [
+        "systemd/route-spelling/export", "systemd/route-spelling/duplicate", "launchd/route-spelling/export", "launchd/route-spelling/duplicate",
+        "systemd/route-choice/k", "systemd/route-choice/r", "systemd/route-choice/c", "systemd/route-choice/none", "launchd/route-choice/k",
+        "launchd/route-choice/r", "launchd/route-choice/c", "launchd/route-choice/none", "systemd/route-failure", "launchd/route-failure",
+        "systemd/route-prior/retained", "systemd/route-prior/removed", "launchd/route-prior/retained", "launchd/route-prior/removed"
+      ]
+    },
+    {
+      "name": "argument-refusals",
+      "rationale": "Every refused argument shape (exit 2, no effect), on both models.",
+      "ids": [
+        "systemd/usage/uninstall+empty", "systemd/usage/uninstall+unknown",
+        "systemd/usage/uninstall+cli-route-disposition=retained+cli-route-disposition=retained", "systemd/usage/assert-stopped+extra",
+        "systemd/usage/rollback-cli-setup+extra", "systemd/usage/unknown", "launchd/usage/uninstall+empty", "launchd/usage/uninstall+unknown",
+        "launchd/usage/uninstall+cli-route-disposition=retained+cli-route-disposition=retained", "launchd/usage/assert-stopped+extra",
+        "launchd/usage/rollback-cli-setup+extra", "launchd/usage/unknown"
+      ]
+    },
+    {
+      "name": "configuration-text-and-environment-refusals",
+      "rationale": "Every refused relay.env text (bad transport, conflicting transports, command substitution, backticks, injection after a value, PATH and SERVICE_REMOVAL_STATE overrides) and every protected environment key (release root, relay binary and directory, plutil, web root, rollback flag) on both models; the empty versus untrusted value alternates per key and per model, so each key meets both values across the two models. Dropped: the other value of each key on each model.",
+      "ids": [
+        "systemd/env-text/HERDR_RELAY_TRANSPORT_bad", "systemd/env-text/HERDR_RELAY_TRANSPORT_tailscale_cli_HERDR_RELAY_TRANSPORT_cloudflare",
+        "systemd/env-text/HERDR_RELAY_TRANSPORT___touch_canary_", "systemd/env-text/GH_TOKEN__touch_canary_",
+        "systemd/env-text/HERDR_RELAY_TRANSPORT_cloudflare__touch_canary", "systemd/env-text/PATH__untrusted", "systemd/env-text/SERVICE_REMOVAL_STATE_absent",
+        "launchd/env-text/HERDR_RELAY_TRANSPORT_bad", "launchd/env-text/HERDR_RELAY_TRANSPORT_tailscale_cli_HERDR_RELAY_TRANSPORT_cloudflare",
+        "launchd/env-text/HERDR_RELAY_TRANSPORT___touch_canary_", "launchd/env-text/GH_TOKEN__touch_canary_",
+        "launchd/env-text/HERDR_RELAY_TRANSPORT_cloudflare__touch_canary", "launchd/env-text/PATH__untrusted", "launchd/env-text/SERVICE_REMOVAL_STATE_absent",
+        "systemd/env-key/HERDR_RELEASE_ROOT/empty", "systemd/env-key/HERDR_RELAY_BIN/untrusted", "systemd/env-key/HERDR_RELAY_BIN_DIR/empty",
+        "systemd/env-key/HERDR_PLUTIL/untrusted", "systemd/env-key/HERDR_WEB_ROOT/empty", "systemd/env-key/HERDR_CLI_SETUP_ROLLBACK/untrusted",
+        "launchd/env-key/HERDR_RELEASE_ROOT/untrusted", "launchd/env-key/HERDR_RELAY_BIN/empty", "launchd/env-key/HERDR_RELAY_BIN_DIR/untrusted",
+        "launchd/env-key/HERDR_PLUTIL/empty", "launchd/env-key/HERDR_WEB_ROOT/untrusted", "launchd/env-key/HERDR_CLI_SETUP_ROLLBACK/empty"
+      ]
+    },
+    {
+      "name": "credential-role-files-and-identities",
+      "rationale": "A credential role file (token, cloudflared config, origin cert) that IS a service definition, or an alias or alternate spelling of one: every role at least once per model with a rotating label, every symlink alias, and every identity check outcome (equal, query failure, malformed answer) on the selected and the destination side, with the BSD and GNU stat forms (one per model). Dropped: role x label x outcome pairings.",
+      "ids": [
+        "systemd/role-selected/HERDR_GITHUB_TOKEN_FILE/0", "systemd/role-selected/CLOUDFLARED_CONFIG/1", "systemd/role-selected/TUNNEL_ORIGIN_CERT/0",
+        "launchd/role-selected/HERDR_GITHUB_TOKEN_FILE/1", "launchd/role-selected/CLOUDFLARED_CONFIG/0", "launchd/role-selected/TUNNEL_ORIGIN_CERT/1",
+        "systemd/role-alias/HERDR_GITHUB_TOKEN_FILE", "systemd/role-alias/CLOUDFLARED_CONFIG", "systemd/role-alias/TUNNEL_ORIGIN_CERT",
+        "launchd/role-alias/HERDR_GITHUB_TOKEN_FILE", "launchd/role-alias/CLOUDFLARED_CONFIG", "launchd/role-alias/TUNNEL_ORIGIN_CERT",
+        "systemd/identity-alias/CLOUDFLARED_CONFIG/0/none/selected", "systemd/identity-alias/TUNNEL_ORIGIN_CERT/0/role-identity-fail/selected",
+        "systemd/identity-alias/CLOUDFLARED_CONFIG/1/role-identity-malformed/selected",
+        "systemd/identity-alias/TUNNEL_ORIGIN_CERT/1/role-identity-fail/destination",
+        "systemd/identity-alias/CLOUDFLARED_CONFIG/0/role-identity-malformed/destination", "launchd/identity-alias/TUNNEL_ORIGIN_CERT/1/none/selected",
+        "launchd/identity-alias/CLOUDFLARED_CONFIG/1/role-identity-fail/selected",
+        "launchd/identity-alias/TUNNEL_ORIGIN_CERT/0/role-identity-malformed/selected",
+        "launchd/identity-alias/CLOUDFLARED_CONFIG/0/role-identity-fail/destination",
+        "launchd/identity-alias/TUNNEL_ORIGIN_CERT/1/role-identity-malformed/destination"
+      ]
+    },
+    {
+      "name": "launchd-plist-labels",
+      "rationale": "A definition whose Label is not the expected Herdr label (wrong, missing, empty, number, array, not a plist): every kind once, alternating labels; the conditional caller contexts run on the current label's cells.",
+      "ids": [
+        "launchd/plist-label/0/wrong", "launchd/plist-label/1/missing", "launchd/plist-label/0/empty", "launchd/plist-label/1/number",
+        "launchd/plist-label/0/array", "launchd/plist-label/1/malformed"
+      ]
+    },
+    {
+      "name": "tool-faults",
+      "rationale": "Failing or malformed stat, read, plist decode and label decode tools: every fault of each model.",
+      "ids": [
+        "systemd/tool-fault/stat-fail", "systemd/tool-fault/stat-malformed", "systemd/tool-fault/read-fail", "launchd/tool-fault/stat-fail",
+        "launchd/tool-fault/stat-malformed", "launchd/tool-fault/read-fail", "launchd/tool-fault/decode-fail", "launchd/tool-fault/label-decode-fail",
+        "launchd/tool-fault/label-malformed-output"
+      ]
+    },
+    {
+      "name": "configuration-inputs",
+      "rationale": "Surviving legacy selection, missing/different/ambiguous configuration or definition, genuine absence of the configuration and an ambient transport, on both models.",
+      "ids": [
+        "systemd/legacy-selection", "launchd/legacy-selection", "systemd/config-input/missing-config", "systemd/config-input/different-config",
+        "systemd/config-input/ambiguous-definition", "launchd/config-input/missing-config", "launchd/config-input/different-config",
+        "launchd/config-input/ambiguous-definition", "systemd/config-absent", "launchd/config-absent", "systemd/ambient-transport",
+        "launchd/ambient-transport"
+      ]
+    },
+    {
+      "name": "stopped-assertions-and-rollback-authority",
+      "rationale": "assert-stopped and rollback-cli-setup in every manager state (active, unknown, absent but loaded, quiet), and a rollback without its authority, on both models.",
+      "ids": [
+        "systemd/stopped/assert-stopped/active", "systemd/stopped/assert-stopped/unknown", "systemd/stopped/assert-stopped/absent-loaded",
+        "systemd/stopped/assert-stopped/quiet", "systemd/stopped/rollback-cli-setup/active", "systemd/stopped/rollback-cli-setup/unknown",
+        "systemd/stopped/rollback-cli-setup/absent-loaded", "systemd/stopped/rollback-cli-setup/quiet", "launchd/stopped/assert-stopped/active",
+        "launchd/stopped/assert-stopped/unknown", "launchd/stopped/assert-stopped/absent-loaded", "launchd/stopped/assert-stopped/quiet",
+        "launchd/stopped/rollback-cli-setup/active", "launchd/stopped/rollback-cli-setup/unknown", "launchd/stopped/rollback-cli-setup/absent-loaded",
+        "launchd/stopped/rollback-cli-setup/quiet", "systemd/rollback-unauthorized", "launchd/rollback-unauthorized"
+      ]
+    },
+    {
+      "name": "cancellation-signals",
+      "rationale": "SIGINT and SIGTERM during a manager stop and during an observation, with both labels (the label decides the partial progress the suite asserts): every (signal, seam) pair and both labels twice per model. Dropped: the other label of each pair.",
+      "ids": [
+        "systemd/signal/2/pause-stop/0", "systemd/signal/2/pause-observe/1", "systemd/signal/15/pause-stop/1", "systemd/signal/15/pause-observe/0",
+        "launchd/signal/2/pause-stop/0", "launchd/signal/2/pause-observe/1", "launchd/signal/15/pause-stop/1", "launchd/signal/15/pause-observe/0"
+      ]
+    },
+    {
+      "name": "callers-under-faults",
+      "rationale": "A removal or query failure under an if and under a || caller, where errexit cannot supply the safety contract: each fault once per model, with the caller alternating between the models.",
+      "ids": [
+        "systemd/caller/rm-fail/if", "systemd/caller/query-fail/or", "launchd/caller/rm-fail/or", "launchd/caller/query-fail/if"
+      ]
+    },
+    {
+      "name": "systemd-serialization",
+      "rationale": "Both unit serializers (current, legacy) with the escaped literal specifier %u accepted and an unescaped %u refused (each serializer, each label).",
+      "ids": [
+        "systemd/quoted-route/current", "systemd/quoted-route/legacy", "systemd/percent-specifier/current/0/escaped",
+        "systemd/percent-specifier/legacy/1/escaped", "systemd/percent-specifier/current/1/unsupported", "systemd/percent-specifier/legacy/0/unsupported"
+      ]
+    },
+    {
+      "name": "systemd-hidden-directives",
+      "rationale": "Every manager-significant hidden unit directive (spaced or tabbed Environment/EnvironmentFile, resets, key split by continuation, PassEnvironment, UnsetEnvironment), the first and the last spelling on either side of the admitted assignment, and a supported encoding outside [Service] (no header, [Unit], [Install]); the serializer and the label rotate. Each cell runs the three entrypoints. Dropped: serializer x label x directive pairings.",
+      "ids": [
+        "systemd/override/current/0/0/before", "systemd/override/legacy/0/0/after", "systemd/override/current/1/1/after", "systemd/override/legacy/1/2/after",
+        "systemd/override/current/0/3/after", "systemd/override/legacy/0/4/after", "systemd/override/current/1/5/after", "systemd/override/legacy/1/6/before",
+        "systemd/override/current/0/6/after", "systemd/override/legacy/0/7/after", "systemd/override/current/1/8/after", "systemd/override/legacy/1/9/after",
+        "systemd/override/current/0/10/after", "systemd/override/legacy/0/11/after", "systemd/override/current/1/12/after", "systemd/section/current/0/none",
+        "systemd/section/legacy/1/unit", "systemd/section/current/1/install"
+      ]
+    },
+    {
+      "name": "systemd-effective-overlays",
+      "rationale": "A drop-in overlay under each of the five search locations (user, runtime, system, vendor, hierarchical), with both labels, both labels present and a single surviving definition (current only, legacy only). Dropped: the location x label x survivor pairings.",
+      "ids": [
+        "systemd/overlay/0/2/user", "systemd/overlay/1/1/runtime", "systemd/overlay/0/1/system", "systemd/overlay/1/2/vendor",
+        "systemd/overlay/0/2/hierarchical"
+      ]
+    },
+    {
+      "name": "systemd-effective-metadata",
+      "rationale": "The strict effective-configuration query: every required property missing and duplicated (7 x 2), every query failure shape (failure, partial output, malformed, extra property, oversize, NUL), every bad property override (9) and every cached or stale answer for an absent unit (6), an arbitrary fragment that must not be inspected, a cached unit, explicit not-found enablement, every drift point (admission, either fresh seam) with every drifting property, and the metadata failures under if and ||; the label rotates. Dropped: label x property x position pairings.",
+      "ids": [
+        "systemd/metadata-field/0/2/Id/meta-missing", "systemd/metadata-field/1/2/Id/meta-duplicate", "systemd/metadata-field/1/2/LoadState/meta-missing",
+        "systemd/metadata-field/0/2/LoadState/meta-duplicate", "systemd/metadata-field/0/2/ActiveState/meta-missing",
+        "systemd/metadata-field/1/2/ActiveState/meta-duplicate", "systemd/metadata-field/1/2/UnitFileState/meta-missing",
+        "systemd/metadata-field/0/2/UnitFileState/meta-duplicate", "systemd/metadata-field/0/0/FragmentPath/meta-missing",
+        "systemd/metadata-field/1/0/FragmentPath/meta-duplicate", "systemd/metadata-field/1/0/DropInPaths/meta-missing",
+        "systemd/metadata-field/0/0/DropInPaths/meta-duplicate", "systemd/metadata-field/0/2/NeedDaemonReload/meta-missing",
+        "systemd/metadata-field/1/2/NeedDaemonReload/meta-duplicate", "systemd/metadata-fault/0/meta-query-fail", "systemd/metadata-fault/1/meta-partial-fail",
+        "systemd/metadata-fault/0/meta-malformed", "systemd/metadata-fault/1/meta-extra", "systemd/metadata-fault/0/meta-oversize",
+        "systemd/metadata-fault/1/meta-nul", "systemd/metadata-override/0/Id=unrelated.service", "systemd/metadata-override/1/LoadState=masked",
+        "systemd/metadata-override/0/ActiveState=mystery", "systemd/metadata-override/1/UnitFileState=enabled-runtime",
+        "systemd/metadata-override/0/NeedDaemonReload=yes", "systemd/metadata-override/1/NeedDaemonReload=", "systemd/metadata-override/0/FragmentPath=",
+        "systemd/metadata-override/1/FragmentPath=relative.service", "systemd/metadata-override/0/LoadState=not-found", "systemd/fragment-bystander/1",
+        "systemd/cached-unit/0", "systemd/absent-override/0/FragmentPath=_fixture_cached.service",
+        "systemd/absent-override/1/DropInPaths=_fixture_runtime_override.conf", "systemd/absent-override/0/LoadState=loaded",
+        "systemd/absent-override/1/ActiveState=active", "systemd/absent-override/0/UnitFileState=enabled", "systemd/absent-override/1/NeedDaemonReload=yes",
+        "systemd/absent-not-found/1", "systemd/drift/0/2/FragmentPath", "systemd/drift/1/2/DropInPaths", "systemd/drift/0/2/NeedDaemonReload",
+        "systemd/drift/1/3/FragmentPath", "systemd/drift/0/3/DropInPaths", "systemd/drift/1/3/NeedDaemonReload", "systemd/drift/0/4/FragmentPath",
+        "systemd/drift/1/4/DropInPaths", "systemd/drift/0/4/NeedDaemonReload", "systemd/meta-caller/meta-query-fail/if",
+        "systemd/meta-caller/meta-partial-fail/or", "systemd/meta-caller/meta-nul/if", "systemd/meta-caller/meta-oversize/or"
+      ]
+    }
+  ]
+}

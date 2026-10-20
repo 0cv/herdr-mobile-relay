@@ -1,7 +1,8 @@
 name: Full service qualification
 
-# FULL tier: the same non-native suites plus EVERY native-install cell (the exhaustive matrix, 1864 installer
-# invocations and 8 cancellation cells), 8 shards per OS. It is the only workflow whose success release.yml accepts as
+# FULL tier: the same unsharded suites plus EVERY native-install cell (the exhaustive matrix, 1864 installer
+# invocations and 8 cancellation cells; 8 shards per OS) and EVERY uninstall CLI cell (all 1657 Fixture.run invocations and
+# the 3 controls; 3 shards per OS). It is the only workflow whose success release.yml accepts as
 # service qualification. It runs on demand for an exact candidate (workflow_dispatch; set candidate_sha to assert the
 # commit), on every pull request before merge, and nightly on the default branch after merge. The required check to
 # name in branch rules is the gate job below; configuring hosting rules is a separate administrative step this file
@@ -127,11 +128,53 @@ jobs:
           retention-days: 1
           overwrite: true
 
+  uninstall_cli:
+    needs: candidate
+    name: Uninstall CLI, full (${{ matrix.runner }}, shard ${{ matrix.shard }}/3)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        timeout-minutes: 3
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/setup-go@v7  # the driver's guards require go on PATH; this suite builds nothing
+        timeout-minutes: 8
+        with:
+          go-version: 1.27.1
+          cache: false
+      - name: Run the uninstall CLI full shard (the suite keeps its 900s bound)
+        run: /bin/bash scripts/ci/run-service-qualification.sh uninstall-cli full ${{ matrix.shard }}/3
+      - name: Upload sanitized shard summary and completed-cell evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: service-uninstall-cli-full-${{ matrix.runner }}-s${{ matrix.shard }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/service-qualification/summary.json
+            ${{ runner.temp }}/service-qualification/uninstall-cli-shard-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
   # Always runs. Green only if every dependency succeeded AND every expected artifact (both runners; all suites;
   # every shard) is present, current for this run and candidate, and lists exactly the shard's cells as completed.
   gate:
     name: Full service qualification gate
-    needs: [candidate, suites, native]
+    needs: [candidate, suites, native, uninstall_cli]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -148,7 +191,7 @@ jobs:
       - name: Verify event commit, clean state, modes, bytes, and source membership
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
       - name: Require every dependency to have succeeded
-        run: python3 -I -B tests/service_qualification_matrix.py needs candidate suites native
+        run: python3 -I -B tests/service_qualification_matrix.py needs candidate suites native uninstall_cli
       - uses: actions/download-artifact@v8
         with:
           pattern: service-*-full-*-${{ github.sha }}

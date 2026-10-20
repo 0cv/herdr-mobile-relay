@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Pure inventory, selection and evidence helper for service qualification.
 
-It reads tests/test_native_install.sh as TEXT and enumerates the suite's cells by static
-interpretation of its control flow (loops, conditions, f-string cell ids). Everything else is
+It reads tests/test_native_install.sh and tests/test_service_uninstall_cli.py as TEXT and enumerates each suite's
+cells by static interpretation of its control flow (loops, conditions, f-string cell ids). Everything else is
 skipped or evaluated as expressions over a whitelist of pure builtins: it never imports or runs a suite,
 builds or starts anything, touches HOME, the network or a manager, and has no import-time effects.
-A cell is one semantic id (the fixture name); the full tier is every cell, the fast tier the
-explicit subset in tests/native_install_fast_cases.json. Shards, evidence and the aggregate gate
+A cell is one semantic id (native: the fixture name; uninstall CLI: manager/family/parameters, one fixture group of
+one or more Fixture.run invocations, or a control); the full tier is every cell, the fast tier the explicit subset in
+tests/native_install_fast_cases.json or tests/uninstall_cli_fast_cases.json. Shards, evidence and the aggregate gate
 are computed from those ids only, never from an invocation counter or a line number.
 """
 import argparse
@@ -24,10 +25,11 @@ SCHEMA = 1
 SHARD_COUNTS = {"fast": 2, "full": 8}
 RUNNER_OS = {"macos-15": "Darwin", "ubuntu-24.04": "Linux"}
 NATIVE = "tests/test_native_install.sh"
+UNINSTALL_CLI = "tests/test_service_uninstall_cli.py"
+# The suites job: the nine suites that run unsharded (the native install and the uninstall CLI are their own sharded jobs).
 SUITES = ("tests/test_common.sh", "tests/test_service_credentials.sh", "tests/test_service_supervision.py",
           "tests/test_service_transport_dispatch.py", "tests/test_plugin_doctor.py", "tests/test_setup_menu.py",
-          "tests/test_service_uninstall_cli.py", "tests/test_uninstall.sh",
-          "tests/test_tailscale_cli_setup_failure.py", "tests/test_release_scripts.sh")
+          "tests/test_uninstall.sh", "tests/test_tailscale_cli_setup_failure.py", "tests/test_release_scripts.sh")
 # The exhaustive inventory enumerated from the committed suite at 9ad13cba (baseline-inventory.json): the totals, the
 # digest of the ids and the digest of every cell's own id/run/probe record (a run or probe moved between cells changes
 # it). A suite edit that changes any of them must change these numbers deliberately; nothing adjusts them silently.
@@ -90,11 +92,12 @@ def suite_program(text):
 
 class Enumerator:
     """legacy=False: a cell starts at each `cell(id)` gate. legacy=True: at each `d.Fixture(parent, id, ...)`
-    (the pre-gate source); gates, when present, are evaluated as always taken and record nothing."""
+    (the pre-gate source); gates, when present, are evaluated as always taken and record nothing. cli=True: the
+    uninstall CLI, whose cells hold any number of `f.run(...)` invocations and are enumerated from main()."""
 
-    def __init__(self, program, legacy):
-        self.tree = ast.parse(program)
-        self.legacy = legacy
+    def __init__(self, program, legacy, cli=False):
+        self.tree, self.source, self.fixture, self.texts = ast.parse(program), program, None, {}
+        self.legacy, self.cli = legacy, cli
         self.functions = {n.name: n for n in self.tree.body if isinstance(n, ast.FunctionDef)}
         self.cells, self.cell, self.codes, self.marks, self.sums = [], None, {}, {}, {}
         self.relevant = set()
@@ -121,7 +124,21 @@ class Enumerator:
             return False
         if isinstance(n.func, ast.Name):
             return n.func.id in ("run", "probe", "cell") or n.func.id in self.relevant
-        return self.legacy and isinstance(n.func, ast.Attribute) and n.func.attr == "Fixture"
+        return self.fixture_run(n) or self.legacy and isinstance(n.func, ast.Attribute) and n.func.attr == "Fixture"
+
+    def text(self, node):  # the node's own source text, found once
+        if id(node) not in self.texts:
+            self.texts[id(node)] = ast.get_source_segment(self.source, node)
+        return self.texts[id(node)]
+
+    def invocation(self, node, frame):
+        """What one `f.run(...)` runs and with which parameters: its source text, the text of the Fixture it runs on and every scalar
+        in scope (the loop variables that parameterize the case). Only a digest is kept; it is part of what the inventory freezes."""
+        scalars = sorted((k, repr(v)) for k, v in frame.items() if isinstance(v, (str, int, bool, tuple, type(None))) and not k.startswith("_"))
+        return hashlib.sha256(repr((self.text(node), self.fixture, scalars)).encode()).hexdigest()[:16]
+
+    def fixture_run(self, n):  # the uninstall CLI invokes its entrypoint only as `f.run(...)` (not subprocess.run)
+        return self.cli and isinstance(n.func, ast.Attribute) and n.func.attr == "run" and isinstance(n.func.value, ast.Name) and n.func.value.id == "f"
 
     def value(self, node, frame):
         code = self.codes.get(id(node))
@@ -159,22 +176,23 @@ class Enumerator:
                 self.count("probes")
             elif node.func.id == "cell":
                 raise Refusal("cell() is only allowed as an if gate")
+        elif self.fixture_run(node):
+            self.count("runs")
+            self.cell.setdefault("calls", []).append(self.invocation(node, frame))
         elif self.legacy and isinstance(node.func, ast.Attribute) and node.func.attr == "Fixture":
             self.open(self.need(node.args[1], frame, "a fixture name"))
 
     def bind(self, target, value, frame):
-        names = [target.id] if isinstance(target, ast.Name) else (
-            [e.id for e in target.elts if isinstance(e, ast.Name)] if isinstance(target, (ast.Tuple, ast.List)) else [])
-        try:
-            items = [value] if isinstance(target, ast.Name) else list(value)
-            require(len(items) == len(names) == len(getattr(target, "elts", names)), "shape")
-        except Exception:
-            items = [MISSING] * len(names)
-        for name, item in zip(names, items):
-            if item is MISSING:
-                frame.pop(name, None)
-            else:
-                frame[name] = item
+        if isinstance(target, ast.Name):
+            frame.pop(target.id, None) if value is MISSING else frame.__setitem__(target.id, value)
+        elif isinstance(target, (ast.Tuple, ast.List)):  # nested targets bind recursively; a wrong shape or an unknown value binds nothing
+            try:
+                items = list(value)
+                require(len(items) == len(target.elts), "shape")
+            except Exception:
+                items = [MISSING] * len(target.elts)
+            for element, item in zip(target.elts, items):
+                self.bind(element, item, frame)
 
     def invoke(self, call, frame):
         function = self.functions[call.func.id]
@@ -208,6 +226,8 @@ class Enumerator:
         kind = type(node)
         if kind is ast.Assign:
             self.calls(node.value, frame)
+            if self.cli and isinstance(node.value, ast.Call) and getattr(node.value.func, "id", "") == "Fixture":
+                self.fixture = self.text(node.value)
             value = self.value(node.value, frame)
             for target in node.targets:
                 self.bind(target, value, frame)
@@ -281,13 +301,17 @@ class Enumerator:
                 break
 
 
-def enumerate_cells(text, legacy=False):
+def enumerate_cells(text, legacy=False, cli=False):
     """Ordered cells [{id, runs, probes}] of a suite source text; refuses anything it cannot resolve."""
-    walker = Enumerator(suite_program(text), legacy)
-    walker.block(walker.tree.body, {})
+    require(not (cli and legacy), "the uninstall CLI has no pre-gate enumeration")
+    walker = Enumerator(text if cli else suite_program(text), legacy, cli)
+    walker.block(walker.functions["main"].body if cli else walker.tree.body, {})
     ids = [cell["id"] for cell in walker.cells]
     require(len(ids) == len(set(ids)) == len({i.lower() for i in ids}), "cell ids must be unique, even on a case-insensitive volume")
-    require(all(c["runs"] <= 1 for c in walker.cells), "a cell runs the installer at most once")
+    if cli:  # a control runs no entrypoint; every other cell runs it at least once
+        require(all((c["runs"] == 0) == c["id"].startswith("control/") for c in walker.cells), "a cell and its entrypoint runs disagree")
+    else:
+        require(all(c["runs"] <= 1 for c in walker.cells), "a cell runs the installer at most once")
     return walker.cells
 
 
@@ -297,9 +321,12 @@ def digest(ids):
 
 def totals(cells):
     records = sorted("%s %d %d" % (c["id"], c["runs"], c["probes"]) for c in cells)  # every cell's own run and probe count
-    return {"cells": len(cells), "runs": sum(c["runs"] for c in cells), "probes": sum(c["probes"] for c in cells),
-            "cancels": sum("-cancel-" in c["id"] for c in cells), "digest": digest([c["id"] for c in cells]),
-            "cell_digest": hashlib.sha256(("\n".join(records) + "\n").encode()).hexdigest()}
+    found = {"cells": len(cells), "runs": sum(c["runs"] for c in cells), "probes": sum(c["probes"] for c in cells),
+             "cancels": sum("-cancel-" in c["id"] for c in cells), "digest": digest([c["id"] for c in cells]),
+             "cell_digest": hashlib.sha256(("\n".join(records) + "\n").encode()).hexdigest()}
+    if any("calls" in c for c in cells):  # the uninstall CLI: every invocation's call, fixture and parameters, IN ORDER
+        found["invocation_digest"] = hashlib.sha256("\n".join("%s %s" % (c["id"], d) for c in cells for d in c.get("calls", [])).encode()).hexdigest()
+    return found
 
 
 # ------------------------------------------------------------------ classification ----
@@ -365,6 +392,83 @@ def cost(cell_id):
     return round(seconds * (launchd if a.get("platform") == "launchd" else 1.0), 3)
 
 
+# Uninstall CLI ids are manager/family/parameters (manager: the model, systemd or launchd) or control/name. Each family lists its
+# parameters, so an id that matches no family, or has a different parameter count, is refused. The Fixture.run entrypoint cost is the
+# measured process-tree CPU of Task G's complete local run of the unchanged suite (retry3-work-cli.json) per run, systemd and
+# launchd, times 1.38 hosted macOS seconds per local CPU second (Task G calibration over 1062 hosted invocations): a PROJECTION used
+# to balance shards, never a hosted time. The controls and the per-fixture construction are modeled the same way.
+CLI_FAMILIES = {
+    "present": ("tag",), "initial": ("state",), "direct": ("fault",), "opposite": (), "fault": ("index", "fault"),
+    "capture": ("index", "seam", "form", "action"), "late": ("index", "count", "action"), "bound": ("size", "action"),
+    "definition": ("shape",), "ancestor-absent": (), "ancestor-unsearchable": ("depth",), "route-spelling": ("spelling",),
+    "route-choice": ("choice",), "route-failure": (), "route-prior": ("prior",), "usage": ("args",), "env-text": ("text",),
+    "env-key": ("key", "value"), "role-selected": ("role", "index"), "role-alias": ("role",),
+    "identity-alias": ("role", "index", "fault", "side"), "plist-label": ("index", "kind"), "tool-fault": ("fault",),
+    "legacy-selection": (), "config-input": ("bad",), "stopped": ("action", "state"), "rollback-unauthorized": (),
+    "signal": ("signal", "seam", "index"), "caller": ("fault", "caller"), "config-absent": (), "ambient-transport": (),
+    "quoted-route": ("quoting",), "percent-specifier": ("quoting", "index", "form"),
+    "override": ("quoting", "index", "directive", "side"), "section": ("quoting", "index", "section"),
+    "overlay": ("index", "present", "location"), "metadata-field": ("index", "present", "field", "fault"),
+    "metadata-fault": ("index", "fault"), "metadata-override": ("index", "override"), "fragment-bystander": ("index",),
+    "cached-unit": ("index",), "absent-override": ("index", "override"), "absent-not-found": ("index",),
+    "drift": ("index", "at", "field"), "meta-caller": ("fault", "caller")}
+CLI_CONTROLS = {"timeout-diagnostics": 4.0, "fast-stub-equivalence": 45.0, "metadata-batch": 0.5}  # modeled seconds
+CLI_FIXTURE = 0.03
+CLI_RUN = {  # modeled hosted-macOS seconds per Fixture.run: (systemd model, launchd model)
+    "absent-not-found": (1.25, 1.25), "absent-override": (.22, .22), "ambient-transport": (.49, .28), "ancestor-absent": (1.33, .76),
+    "ancestor-unsearchable": (.06, .05), "bound": (1.41, 1.41), "cached-unit": (.17, .17), "caller": (.58, .46), "capture": (.62, .53),
+    "config-absent": (1.08, .5), "config-input": (.3, .21), "definition": (.11, .09), "direct": (1.75, 1.31), "drift": (1.36, 1.36),
+    "env-key": (.41, .28), "env-text": (.45, .28), "fault": (1.98, 1.72), "fragment-bystander": (.23, .23), "identity-alias": (1.13, .73),
+    "initial": (1.82, 1.31), "late": (1.24, 1.13), "legacy-selection": (.66, .49), "meta-caller": (.13, .13), "metadata-fault": (.21, .21),
+    "metadata-field": (.2, .2), "metadata-override": (.23, .23), "opposite": (.11, .09), "overlay": (.22, .22), "override": (.2, .2),
+    "percent-specifier": (.58, .58), "plist-label": (.17, .17), "present": (1.56, 1.08), "quoted-route": (1.62, 1.62), "role-alias": (.44, .28),
+    "role-selected": (.53, .33), "rollback-unauthorized": (.13, .07), "route-choice": (1.3, .88), "route-failure": (.89, .68),
+    "route-prior": (1.72, 1.13), "route-spelling": (1.27, .85), "section": (.2, .2), "signal": (1.48, 1.17), "stopped": (.53, .65),
+    "tool-fault": (.18, .15), "usage": (.01, .01)}
+
+
+def classify_cli(cell_id):
+    parts = cell_id.split("/")
+    if parts[0] == "control":
+        require(len(parts) == 2 and parts[1] in CLI_CONTROLS, "cell id matches no control: " + cell_id)
+        return {"family": "control", "name": parts[1]}
+    require(len(parts) >= 2 and parts[0] in ("systemd", "launchd") and parts[1] in CLI_FAMILIES
+            and len(parts) == 2 + len(CLI_FAMILIES[parts[1]]) and all(parts), "cell id matches no family: " + cell_id)
+    return dict(zip(CLI_FAMILIES[parts[1]], parts[2:]), family=parts[1], platform=parts[0])
+
+
+def cost_cli(cell_id, runs=1):
+    a = classify_cli(cell_id)
+    if a["family"] == "control":
+        return CLI_CONTROLS[a["name"]]
+    return round(CLI_FIXTURE + runs * CLI_RUN[a["family"]][a["platform"] == "launchd"], 3)
+
+
+class Profile:
+    """One sharded suite: where its cells come from, how many shards a tier has, what it records and which cells are pinned to
+    shard 1 (the uninstall CLI's controls run in exactly one shard per runner and tier)."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+NATIVE_P = Profile(name="native", source=NATIVE, fast="tests/native_install_fast_cases.json", counts=SHARD_COUNTS, cli=False,
+                   frozen=FROZEN, env="HERDR_NATIVE_INSTALL", kind="native-install-shard", artifact="native",
+                   evidence="native-shard-evidence.json", classify=classify, cost=lambda i, runs=1: cost(i), pin=lambda i: False)
+# The uninstall CLI inventory enumerated from the gated suite: 1032 cells holding the 1657 Fixture.run invocations the unchanged 0598331f
+# suite makes (checked invocation by invocation against that source in task-j-evidence/baseline-inventory.json) and its 3 controls. The
+# digest of the ids and the digest of every cell's own id/run count freeze it exactly as FROZEN does for the native suite; the
+# invocation digest also freezes, in order, what each of the 1657 invocations is (its call, its Fixture and its loop variables).
+CLI_FROZEN = {"cells": 1032, "runs": 1657, "probes": 0, "cancels": 0,
+              "digest": "3933b90d3589f14462492b8c225e8b4b33526f854daa9412f9c41ebe9927f0f1",
+              "cell_digest": "b8e2a4a3a49caaff3afc7fca5119bd4f35e7beda718b0578eb16bbc64d877158",
+              "invocation_digest": "712209c922ad95c7ff23d3a0fb746e11991d50b6c10441b38d3f97b4e65eb466"}
+CLI = Profile(name="uninstall-cli", source=UNINSTALL_CLI, fast="tests/uninstall_cli_fast_cases.json", counts={"fast": 1, "full": 3},
+              cli=True, frozen=CLI_FROZEN, env="HERDR_UNINSTALL_CLI", kind="uninstall-cli-shard", artifact="uninstall-cli",
+              evidence="uninstall-cli-shard-evidence.json", classify=classify_cli, cost=cost_cli, pin=lambda i: i.startswith("control/"))
+PROFILES = (NATIVE_P, CLI)
+
+
 # ------------------------------------------------------------------ tiers, shards, plan ----
 
 def load_fast(text, inventory):
@@ -382,54 +486,67 @@ def load_fast(text, inventory):
     return [i for i in inventory if i in set(ids)]
 
 
-def assign(ids, count):
-    """Longest-processing-time balancing by modeled cost class; deterministic, shards disjoint and complete."""
-    shards, loads = [[] for _ in range(count)], [0.0] * count
-    for cell_id in sorted(ids, key=lambda i: (-cost(i), i)):
+def assign(ids, count, suite=None, runs=None):
+    """Longest-processing-time balancing by modeled cost; deterministic, shards disjoint and complete. A pinned cell (the
+    uninstall CLI's controls) goes to shard 1 first and its cost counts toward that shard's load."""
+    suite, runs = suite or NATIVE_P, runs or {}
+    price = lambda i: suite.cost(i, runs.get(i, 1))
+    shards, loads = [[i for i in ids if suite.pin(i)]] + [[] for _ in range(count - 1)], [0.0] * count
+    loads[0] = sum(price(i) for i in shards[0])
+    for cell_id in sorted((i for i in ids if not suite.pin(i)), key=lambda i: (-price(i), i)):
         target = loads.index(min(loads))
         shards[target].append(cell_id)
-        loads[target] += cost(cell_id)
+        loads[target] += price(cell_id)
     order = {cell_id: n for n, cell_id in enumerate(ids)}
     return [sorted(shard, key=order.get) for shard in shards], loads
 
 
 @functools.lru_cache(maxsize=8)
-def _inventory(source_text):
-    cells = enumerate_cells(source_text)
+def _inventory(source_text, suite):
+    cells = enumerate_cells(source_text, cli=suite.cli)
     seen = totals(cells)
-    require(seen == FROZEN, "the suite inventory differs from the frozen baseline: %s != %s" % (seen, FROZEN))
-    return tuple(c["id"] for c in cells)
+    require(seen == suite.frozen, "the suite inventory differs from the frozen baseline: %s != %s" % (seen, suite.frozen))
+    return tuple((c["id"], c["runs"]) for c in cells)
 
 
-def inventory_of(source_text):
-    return list(_inventory(source_text))
+def inventory_of(source_text, suite=None):
+    return [i for i, _ in _inventory(source_text, suite or NATIVE_P)]
 
 
-def tier_ids(tier, source_text, fast_text):
-    require(tier in SHARD_COUNTS, "unknown tier")
-    inventory = inventory_of(source_text)
+def runs_of(source_text, suite=None):
+    return dict(_inventory(source_text, suite or NATIVE_P))
+
+
+def tier_ids(tier, source_text, fast_text, suite=None):
+    suite = suite or NATIVE_P
+    require(tier in suite.counts, "unknown tier")
+    inventory = inventory_of(source_text, suite)
     return inventory, (inventory if tier == "full" else load_fast(fast_text, inventory))
 
 
-def shard_ids(tier, shard, inventory, ids):
+def shard_ids(tier, shard, inventory, ids, suite=None, runs=None):
     """(index, count, ids) for SHARD 'i/n' (n must be the tier's fixed count); None selects the whole tier."""
+    suite = suite or NATIVE_P
     if not shard:
         return 0, 0, list(ids)
     m = re.fullmatch(r"([1-9][0-9]?)/([1-9][0-9]?)", shard)
-    require(m and int(m[2]) == SHARD_COUNTS[tier] and 1 <= int(m[1]) <= int(m[2]), "invalid shard for this tier")
-    return int(m[1]), int(m[2]), assign(ids, int(m[2]))[0][int(m[1]) - 1]
+    require(m and int(m[2]) == suite.counts[tier] and 1 <= int(m[1]) <= int(m[2]), "invalid shard for this tier")
+    return int(m[1]), int(m[2]), assign(ids, int(m[2]), suite, runs)[0][int(m[1]) - 1]
 
 
-def plan(source_text, fast_text, env):
-    tier = env.get("HERDR_NATIVE_INSTALL_TIER") or "full"
-    inventory, ids = tier_ids(tier, source_text, fast_text)
-    index, count, selected = shard_ids(tier, env.get("HERDR_NATIVE_INSTALL_SHARD") or "", inventory, ids)
-    only = env.get("HERDR_NATIVE_INSTALL_CELL")
-    if only:
-        require(only in selected, "unknown or unselected cell id")
-        selected = [only]
+def plan(source_text, fast_text, env, suite=None):
+    suite = suite or NATIVE_P
+    chosen = {name: env.get(suite.env + "_" + name) for name in ("TIER", "SHARD", "CELL")}  # None: not set
+    require(all(value != "" for value in chosen.values()), "a selection variable that is set must not be empty (unset it for the default)")
+    tier = chosen["TIER"] or "full"
+    inventory, ids = tier_ids(tier, source_text, fast_text, suite)
+    runs = runs_of(source_text, suite)
+    index, count, selected = shard_ids(tier, chosen["SHARD"] or "", inventory, ids, suite, runs)
+    if chosen["CELL"] is not None:
+        require(chosen["CELL"] in selected, "unknown or unselected cell id")
+        selected = [chosen["CELL"]]
     return {"schema_version": SCHEMA, "tier": tier, "shard_index": index, "shard_count": count,
-            "inventory": inventory, "selected": selected}
+            "inventory": inventory, "selected": selected, "runs": runs}
 
 
 # ------------------------------------------------------------------ evidence and gate ----
@@ -452,11 +569,12 @@ def json_load(text):
         raise Refusal("malformed JSON") from error
 
 
-def shard_expectation(tier, shard, sha, run_id, attempt, runner_os, source_text, fast_text):
-    inventory, ids = tier_ids(tier, source_text, fast_text)
-    index, count, mine = shard_ids(tier, shard, inventory, ids)
+def shard_expectation(tier, shard, sha, run_id, attempt, runner_os, source_text, fast_text, suite=None):
+    suite = suite or NATIVE_P
+    inventory, ids = tier_ids(tier, source_text, fast_text, suite)
+    index, count, mine = shard_ids(tier, shard, inventory, ids, suite, runs_of(source_text, suite))
     require(count, "a shard is required")
-    return {"schema_version": SCHEMA, "kind": "native-install-shard", "candidate_sha": sha, "run_id": run_id,
+    return {"schema_version": SCHEMA, "kind": suite.kind, "candidate_sha": sha, "run_id": run_id,
             "run_attempt": attempt, "tier": tier, "runner_os": runner_os, "shard_index": index, "shard_count": count,
             "inventory_digest": digest(ids), "shard_digest": digest(mine), "expected_count": len(mine), "ids": mine}
 
@@ -531,31 +649,31 @@ def read_artifact(directory, name, files):
     return out
 
 
-def gate(tier, sha, run_id, attempt, directory, source_text, fast_text):
-    """Every shard of every runner, plus the non-native suites, must be present, current and complete."""
+def gate(tier, sha, run_id, attempt, directory, texts):
+    """Every shard of every sharded suite on every runner, plus the unsharded suites, must be present, current and complete.
+    texts maps a profile name to its (source text, fast-cases text)."""
     require(re.fullmatch(r"[0-9a-f]{40}", sha) and run_id.isdigit() and attempt.isdigit(), "malformed run identity")
     names, wanted = {}, {}
     for runner, runner_os in RUNNER_OS.items():
-        names["service-suites-%s-%s-%s" % (tier, runner, sha)] = ("suites", runner_os, None)
-        for shard in range(1, SHARD_COUNTS[tier] + 1):
-            spec = "%d/%d" % (shard, SHARD_COUNTS[tier])
-            names["service-native-%s-%s-s%d-%s" % (tier, runner, shard, sha)] = ("native", runner_os, spec)
+        names["service-suites-%s-%s-%s" % (tier, runner, sha)] = (None, runner_os, None)
+        for suite in PROFILES:
+            for shard in range(1, suite.counts[tier] + 1):
+                names["service-%s-%s-%s-s%d-%s" % (suite.artifact, tier, runner, shard, sha)] = (suite, runner_os, "%d/%d" % (shard, suite.counts[tier]))
     require(os.path.isdir(directory) and sorted(os.listdir(directory)) == sorted(names), "artifact set differs from the expected shards")
-    for name, (mode, runner_os, spec) in sorted(names.items()):
-        if mode == "suites":
+    for name, (suite, runner_os, spec) in sorted(names.items(), key=lambda item: item[0]):
+        if suite is None:
             check_summary(read_artifact(directory, name, ["summary.json"])["summary.json"], "suites", SUITES, runner_os, sha, run_id, attempt)
             continue
-        want = shard_expectation(tier, spec, sha, run_id, attempt, runner_os, source_text, fast_text)
-        files = read_artifact(directory, name, ["native-shard-evidence.json", "summary.json"])
-        doc = files["native-shard-evidence.json"]
+        want = shard_expectation(tier, spec, sha, run_id, attempt, runner_os, *texts[suite.name], suite)
+        files = read_artifact(directory, name, [suite.evidence, "summary.json"])
+        doc = files[suite.evidence]
         check_shard(doc, want)  # exactly this attempt: an artifact kept from an earlier attempt of the run is stale
-        check_summary(files["summary.json"], "native", ["%s#%s-%dof%d" % (NATIVE, tier, want["shard_index"], want["shard_count"])],
+        check_summary(files["summary.json"], suite.name, ["%s#%s-%dof%d" % (suite.source, tier, want["shard_index"], want["shard_count"])],
                       runner_os, sha, run_id, attempt)
-        wanted.setdefault(runner_os, []).extend(doc["completed"])
-    ids = tier_ids(tier, source_text, fast_text)[1]
-    for runner_os, completed in wanted.items():
-        require(sorted(completed) == sorted(ids), "the %s shards do not cover the tier exactly once" % runner_os)
-        kinds = {classify(c)["platform"] for c in completed if "platform" in classify(c)}
+        wanted.setdefault((suite, runner_os), []).extend(doc["completed"])
+    for (suite, runner_os), completed in wanted.items():  # exactly once per runner: every cell, the controls included, in the shard that owns it
+        require(sorted(completed) == sorted(tier_ids(tier, *texts[suite.name], suite)[1]), "the %s %s shards do not cover the tier exactly once" % (suite.name, runner_os))
+        kinds = {suite.classify(c)["platform"] for c in completed if "platform" in suite.classify(c)}
         require(kinds == {"systemd", "launchd"}, "a runner lacks the systemd or launchd inventory")
 
 
@@ -571,8 +689,14 @@ def main(argv):
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("plan", "list", "evidence", "gate"):
         p = sub.add_parser(name)
-        p.add_argument("--source", default=NATIVE)
-        p.add_argument("--fast-cases", default="tests/native_install_fast_cases.json")
+        if name != "gate":
+            p.add_argument("--suite", choices=[suite.name for suite in PROFILES], default="native")
+            p.add_argument("--source")
+            p.add_argument("--fast-cases")
+        else:  # the gate reads every sharded suite
+            for suite in PROFILES:
+                p.add_argument("--%s-source" % suite.name, default=suite.source)
+                p.add_argument("--%s-fast-cases" % suite.name, default=suite.fast)
         if name == "list":
             p.add_argument("--legacy", action="store_true")
             p.add_argument("--tier", default="full")
@@ -596,30 +720,34 @@ def main(argv):
     try:
         if args.command == "needs":
             check_needs(os.environ.get("HERDR_NEEDS_JSON", ""), args.names)
-        elif args.command == "list":
-            text = read(args.source)
-            cells = enumerate_cells(text, args.legacy)
+        elif args.command == "gate":
+            texts = {suite.name: (read(getattr(args, "%s_source" % suite.name.replace("-", "_"))),
+                                  read(getattr(args, "%s_fast_cases" % suite.name.replace("-", "_")))) for suite in PROFILES}
+            gate(args.tier, args.sha, args.run_id, args.run_attempt, args.artifacts, texts)
+        else:
+            suite = next(suite for suite in PROFILES if suite.name == args.suite)
+            source, fast = read(args.source or suite.source), lambda: read(args.fast_cases or suite.fast)
+        if args.command == "list":
+            cells = enumerate_cells(source, args.legacy, suite.cli)
             inventory = [c["id"] for c in cells]
-            ids = inventory if args.tier == "full" else load_fast(read(args.fast_cases), inventory)
+            ids = inventory if args.tier == "full" else load_fast(fast(), inventory)
             counts = {c["id"]: c for c in cells}
             runs = sum(counts[i]["runs"] for i in ids)
             print(json.dumps({"tier": args.tier, "totals": totals(cells), "selected": {"cells": len(ids), "runs": runs,
-                  "cancels": sum("-cancel-" in i for i in ids), "digest": digest(ids)}, "cells": cells}, indent=1))
+                  "cancels": sum("-cancel-" in i for i in ids), "digest": digest(ids)},
+                  "cells": [{k: v for k, v in c.items() if k != "calls"} for c in cells]}, indent=1))
         elif args.command == "plan":
-            document = plan(read(args.source), read(args.fast_cases), os.environ)
+            document = plan(source, fast(), os.environ, suite)
             with open(args.output, "x", encoding="utf-8") as stream:
                 json.dump(document, stream)
         elif args.command == "evidence":
-            want = shard_expectation(args.tier, args.shard, args.sha, args.run_id, args.run_attempt, args.runner_os,
-                                     read(args.source), read(args.fast_cases))
+            want = shard_expectation(args.tier, args.shard, args.sha, args.run_id, args.run_attempt, args.runner_os, source, fast(), suite)
             cells = read(args.cells) if os.path.exists(args.cells) else ""
             document = shard_evidence(want, cells, args.suite_exit)
             with open(args.output, "x", encoding="utf-8") as stream:
                 json.dump(document, stream, indent=1)
                 stream.write("\n")
             require(document["result"] == "pass", "the shard did not complete its cells exactly once")
-        else:
-            gate(args.tier, args.sha, args.run_id, args.run_attempt, args.artifacts, read(args.source), read(args.fast_cases))
     except (Refusal, OSError) as error:
         print("service qualification matrix: " + str(error), file=sys.stderr)
         return 1
