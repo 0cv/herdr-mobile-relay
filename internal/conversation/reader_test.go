@@ -486,8 +486,11 @@ func TestClaudeConversationHidesHarnessGeneratedUserRows(t *testing.T) {
 		user("u5", nil, "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>5m check</command-args>"),
 		user("u6", nil, "[Request interrupted by user]"),
 		user("u7", nil, "<bash-input>ls</bash-input>"),
-		user("u8", nil, "<bash-stdout>a b</bash-stdout>"),
-		user("u9", nil, "<bash-stderr></bash-stderr>"),
+		user("u8", nil, "<bash-stdout>file1\nfile2</bash-stdout><bash-stderr></bash-stderr>"),
+		user("u9", nil, "<bash-stdout></bash-stdout><bash-stderr>zsh: command not found</bash-stderr>"),
+		user("u14", nil, "<bash-stdout>cat: <bash-stdout>x</bash-stdout> and </bash-stderr></bash-stdout><bash-stderr></bash-stderr>"),
+		user("u15", nil, "<command-message>x</command-message> what does <command-name>/foo</command-name> mean?"),
+		user("u16", nil, "<command-message></command-message><command-name></command-name><command-args></command-args>"),
 		user("u10", nil, "[Request interrupted by user] why does this keep happening?"),
 		user("u11", nil, "<bash-input>ls</bash-input> explain this output"),
 		user("u12", nil, "<command-message>hello</command-message> explain this tag"),
@@ -504,6 +507,9 @@ func TestClaudeConversationHidesHarnessGeneratedUserRows(t *testing.T) {
 	}
 	want := []string{
 		"real question", "/loop 5m check",
+		"[Request interrupted by user]",
+		"! ls",
+		"<command-message>x</command-message> what does <command-name>/foo</command-name> mean?",
 		"[Request interrupted by user] why does this keep happening?",
 		"<bash-input>ls</bash-input> explain this output",
 		"<command-message>hello</command-message> explain this tag",

@@ -914,6 +914,8 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 	return role, textBlocks(content)
 }
 
+var commandTags = regexp.MustCompile(`(?s)<command-(?:message|name|args)>.*?</command-(?:message|name|args)>`)
+
 func humanClaudeText(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	for _, envelope := range []string{"<system-reminder>", "<local-command-caveat>", "<task-notification>", "<local-command-stdout>"} {
@@ -921,18 +923,24 @@ func humanClaudeText(raw string) string {
 			return ""
 		}
 	}
-	// A bash row is nothing but its own tags, and an interrupt row is the whole
-	// sentinel; a prompt that merely starts with either keeps its text.
-	if trimmed == "[Request interrupted by user]" || trimmed == "[Request interrupted by user for tool use]" {
+	// Shell rows: stdout and stderr arrive together as one row made only of those
+	// elements, so a row that opens with one and closes with one is output, even
+	// when the output itself contains tag text. The command row shows as "! cmd".
+	if (strings.HasPrefix(trimmed, "<bash-stdout>") || strings.HasPrefix(trimmed, "<bash-stderr>")) &&
+		(strings.HasSuffix(trimmed, "</bash-stdout>") || strings.HasSuffix(trimmed, "</bash-stderr>")) {
 		return ""
 	}
-	for _, tag := range []string{"bash-input", "bash-stdout", "bash-stderr"} {
-		if strings.HasPrefix(trimmed, "<"+tag+">") && strings.HasSuffix(trimmed, "</"+tag+">") && strings.Count(trimmed, "<"+tag+">") == 1 {
-			return ""
-		}
+	if strings.HasPrefix(trimmed, "<bash-input>") && strings.HasSuffix(trimmed, "</bash-input>") {
+		return "! " + strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "<bash-input>"), "</bash-input>"))
 	}
+	// A slash-command row is nothing but command-* elements; a prompt that also
+	// carries other text keeps all of it. A row without a command name is noise.
 	if strings.HasPrefix(trimmed, "<command-name>") || strings.HasPrefix(trimmed, "<command-message>") {
-		if name := innerTag(trimmed, "command-name"); name != "" {
+		if strings.TrimSpace(commandTags.ReplaceAllString(trimmed, "")) == "" {
+			name := innerTag(trimmed, "command-name")
+			if name == "" {
+				return ""
+			}
 			return strings.TrimSpace(name + " " + innerTag(trimmed, "command-args"))
 		}
 	}
