@@ -604,21 +604,34 @@ class Fixture:
                     else:
                         write(self.root / ("exit-" + child), "release\n")
                     break
-                assert time.monotonic() < deadline, "essential children never started"
+                assert time.monotonic() < deadline, (
+                    "essential children never started (case %s, expected kinds %r, started kinds %r)"
+                    % (self.root.name, sorted(expected), sorted(started_kinds)))
                 time.sleep(.02)
             output = self.await_exit(proc, termination, mark, sent)
             self.check_safe(output)
             events = self.events()
             started = [e for e in events if e["kind"] in ("relay", "tunnel") and e["action"] == "start"]
             ended = [e for e in events if e["kind"] in ("relay", "tunnel") and e["action"] in ("stop", "exit")]
-            assert len(started) == len(ended), "supervisor left a fixture child running"
+            assert len(started) == len(ended), (
+                "supervisor left a fixture child running (case %s, started kinds %r, ended kind/action %r)"
+                % (self.root.name, sorted(e["kind"] for e in started), sorted((e["kind"], e["action"]) for e in ended)))
             dispatch = [e for e in events if e["kind"] == "dispatch"]
-            assert len(dispatch) == sum(e["kind"] == "relay" for e in started)
-            assert all(e["command"] == "serve-installed" for e in dispatch)
+            assert len(dispatch) == sum(e["kind"] == "relay" for e in started), (
+                "dispatch events %d, relay starts %d (case %s)"
+                % (len(dispatch), len([e for e in started if e["kind"] == "relay"]), self.root.name))
+            assert all(e["command"] == "serve-installed" for e in dispatch), (
+                "dispatch command is not serve-installed (case %s, commands %r)"
+                % (self.root.name, sorted(e["command"] for e in dispatch)))
             for entry in started:
-                assert entry["raw"] == "" and entry["internal_pointer"] == ""
-                assert entry["rearm"] == "", "restart rearmed bootstrap"
-                assert entry["pointer"] == (str(self.root / "pointer") if entry["kind"] == "relay" else "")
+                # Booleans only: the raw and pointer values themselves can carry CANARIES or paths.
+                assert entry["raw"] == "" and entry["internal_pointer"] == "", (
+                    "credential-bearing value reached a fixture child (case %s, kind %s, raw empty %s, internal pointer empty %s)"
+                    % (self.root.name, entry["kind"], entry["raw"] == "", entry["internal_pointer"] == ""))
+                assert entry["rearm"] == "", "restart rearmed bootstrap (case %s, kind %s)" % (self.root.name, entry["kind"])
+                assert entry["pointer"] == (str(self.root / "pointer") if entry["kind"] == "relay" else ""), (
+                    "unexpected updater pointer for a fixture child (case %s, kind %s, pointer set %s)"
+                    % (self.root.name, entry["kind"], entry["pointer"] != ""))
             return proc.returncode, started
         finally:
             # Failure containment is strictly this disposable fixture process
@@ -1333,8 +1346,11 @@ def main():
                     fixture.env["CLOUDFLARED_BIN"] = str(fixture.root / "absent-cloudflared")
                     fixture.env["CLOUDFLARED_CONFIG"] = str(fixture.root / "absent-config")
                     code, started = fixture.wrapper(code=child_code)
-                    assert code == (child_code or 1) and [e["kind"] for e in started] == ["relay"]
-                    assert (fixture.root / "config/tunnel.yml").read_text() == "hostname: relay.example.test\n"
+                    assert code == (child_code or 1) and [e["kind"] for e in started] == ["relay"], (
+                        "case %s: mode %s, child exit %d: exit code %r, expected %d; started kinds %r, expected ['relay']"
+                        % (fixture.root.name, mode, child_code, code, child_code or 1, [e["kind"] for e in started]))
+                    assert (fixture.root / "config/tunnel.yml").read_text() == "hostname: relay.example.test\n", (
+                        "case %s: tunnel config content changed" % fixture.root.name)
             for key, value in (("HERDR_RELAY_RUN_ID", "foreground"),
                                ("HERDR_RELAY_CONTROL_RUN_ID", "foreground"),
                                ("HERDR_RELAY_PAIRING_SOCKET", "/fixture/control"),
@@ -1343,22 +1359,31 @@ def main():
                 fixture = Fixture(parent, "policy-" + key + "-" + value.rsplit("/", 1)[-1])
                 fixture.env[key] = value
                 code, started = fixture.wrapper()
-                assert code == 78 and not started
+                assert code == 78 and not started, (
+                    "case %s: exit code %r, expected 78; started kinds %r, expected none"
+                    % (fixture.root.name, code, sorted(e["kind"] for e in started)))
             for mode in ("gateway", "cloudflare"):
                 for sig in (signal.SIGTERM, signal.SIGINT):
                     fixture = Fixture(parent, "signal-" + mode + "-" + str(sig), mode)
                     code, started = fixture.wrapper(termination=sig)
-                    assert code == 128 + sig and len(started) == (2 if mode == "cloudflare" else 1)
+                    assert code == 128 + sig and len(started) == (2 if mode == "cloudflare" else 1), (
+                        "case %s: mode %s, signal %s (%d): exit code %r, expected %d; started kinds %r, expected count %d"
+                        % (fixture.root.name, mode, sig.name, int(sig), code, 128 + sig,
+                           sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1))
             for child in ("relay", "tunnel"):
                 for child_code in (0, 23):
                     fixture = Fixture(parent, "cloudflare-exit-" + child + "-" + str(child_code), "cloudflare")
                     code, started = fixture.wrapper(child, child_code)
-                    assert code == (child_code or 1) and sorted(e["kind"] for e in started) == ["relay", "tunnel"]
+                    assert code == (child_code or 1) and sorted(e["kind"] for e in started) == ["relay", "tunnel"], (
+                        "case %s: exiting child %s, child exit %d: exit code %r, expected %d; started kinds %r, expected ['relay', 'tunnel']"
+                        % (fixture.root.name, child, child_code, code, child_code or 1, sorted(e["kind"] for e in started)))
             for missing in ("binary", "config"):
                 fixture = Fixture(parent, "cloudflare-missing-" + missing, "cloudflare")
                 fixture.env["CLOUDFLARED_BIN" if missing == "binary" else "CLOUDFLARED_CONFIG"] = str(fixture.root / "absent")
                 code, started = fixture.wrapper()
-                assert code == 78 and not started
+                assert code == 78 and not started, (
+                    "case %s: missing %s: exit code %r, expected 78; started kinds %r, expected none"
+                    % (fixture.root.name, missing, code, sorted(e["kind"] for e in started)))
             # Reserved child failures are NOT launchd admission refusals.
             for launchd in (False, True):
                 for mode in ("gateway", "cloudflare"):
@@ -1366,11 +1391,19 @@ def main():
                         for child_code in (0, 23, 69, 78):
                             fixture = Fixture(parent, f"adapter-child-{launchd}-{mode}-{child}-{child_code}", mode)
                             code, started = fixture.wrapper(child, child_code, launchd=launchd)
-                            assert code == (child_code or 1) and len(started) == (2 if mode == "cloudflare" else 1)
+                            assert code == (child_code or 1) and len(started) == (2 if mode == "cloudflare" else 1), (
+                                "case %s: launchd %s, mode %s, exiting child %s, child exit %d: exit code %r, expected %d; "
+                                "started kinds %r, expected count %d"
+                                % (fixture.root.name, launchd, mode, child, child_code, code, child_code or 1,
+                                   sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1))
                     for sig in (signal.SIGINT, signal.SIGTERM):
                         fixture = Fixture(parent, f"adapter-signal-{launchd}-{mode}-{sig}", mode)
                         code, started = fixture.wrapper(termination=sig, launchd=launchd)
-                        assert code == 128 + sig and len(started) == (2 if mode == "cloudflare" else 1)
+                        assert code == 128 + sig and len(started) == (2 if mode == "cloudflare" else 1), (
+                            "case %s: launchd %s, mode %s, signal %s (%d): exit code %r, expected %d; "
+                            "started kinds %r, expected count %d"
+                            % (fixture.root.name, launchd, mode, sig.name, int(sig), code, 128 + sig,
+                               sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1))
             assert stranger.poll() is None, "cleanup killed a bystander"
 
             for platform in ("systemd", "launchd"):
