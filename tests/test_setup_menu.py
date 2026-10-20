@@ -13,6 +13,7 @@ if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONM
 import json
 from pathlib import Path
 import pty
+import re
 import select
 import shutil
 import signal
@@ -166,6 +167,78 @@ def read_until(process, master, output, marker, deadline):
         require(process.poll() is None or marker in output, "menu ended before required state")
 
 
+def transcript_tail(output, fixture, limit=1200):
+    """Bounded PTY transcript tail for failure output: fixed labels only; no paths, canaries or token-like runs."""
+    text = bytes(output).decode("utf-8", "replace").replace("\r\n", "\n")
+    for value, label in [(str(fixture.scripts), "<scripts>"), (str(fixture.root), "<fixture>")]:
+        text = text.replace(value, label)
+    for canary in CANARIES:
+        text = text.replace(canary, "<redacted>")
+    text = re.sub(r"[A-Za-z0-9+/=_-]{32,}", "<redacted>", text)
+    text = re.sub(r"(?<![\w<>.])/\S[^\n]*", "<path>", text)  # to end of line: a path may contain spaces
+    return "".join(c if c == "\n" or " " <= c <= "~" else "\\u%04x" % ord(c) for c in text)[-limit:]
+
+
+def report_failure(case, phase, process, output, fixture, started):
+    """Best effort: a diagnostics fault must never replace the case's own failure."""
+    try:
+        state = "running" if process.poll() is None else "exited rc=%s" % process.returncode
+        print("%s FAILED in phase '%s' after %.1fs; menu %s; %d transcript bytes; sanitized tail:\n%s\n--- end of tail ---"
+              % (case, phase, time.monotonic()-started, state, len(output), transcript_tail(output, fixture)),
+              file=sys.stderr, flush=True)
+    except Exception:
+        print("%s FAILED; transcript diagnostics unavailable" % case, file=sys.stderr, flush=True)
+
+
+def wait_exit(process, master, output, deadline):
+    """Wait for the menu to exit while still reading its PTY. On macOS a session leader that ran an exec'd child
+    can stay in exit (unreapable, and killpg returns EPERM) while its PTY output is unread, until the master reads or
+    closes it. Reading must not stop at the last marker. Same absolute deadline as every other step; the
+    transcript is complete (post-exit drain included) when this returns."""
+    while process.poll() is None:
+        require(time.monotonic() < deadline, "PTY menu did not exit before the deadline")
+        if not select.select([master], [], [], 0.1)[0]:
+            continue
+        try:
+            data = os.read(master, 8192)
+        except OSError:
+            data = b""
+        if not data:
+            process.wait(timeout=max(0.1, deadline-time.monotonic()))
+            break
+        output.extend(data)
+    # Drain finite fixture output left after exit: the exit can race the last read. Bounded to 2 s.
+    drained_by = time.monotonic()+2
+    while time.monotonic() < drained_by and select.select([master], [], [], 0.1)[0]:
+        try:
+            block = os.read(master, 8192)
+        except OSError:
+            break
+        if not block:
+            break
+        output.extend(block)
+
+
+def contain(process, master):
+    """Bounded, non-raising teardown of one fixture-owned session; it cannot mask the case's own failure. SIGKILL
+    goes only to this new session's group. macOS answers EPERM for a leader that is already exiting; closing the
+    master (hangup) is what releases it, so the master is closed before the bounded wait."""
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)  # solely this fixture-owned new session
+        except OSError:
+            pass  # ESRCH: already gone; EPERM: exiting macOS leader, released by the master close below
+    try:
+        os.close(master)
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print("containment incomplete: fixture session leader not reaped 5s after SIGKILL and master close",
+              file=sys.stderr, flush=True)
+
+
 def terminal_case(fixture, doctor=False, eof=False, interrupt=False):
     before = fixture.snapshot()
     master, slave = pty.openpty()
@@ -175,7 +248,9 @@ def terminal_case(fixture, doctor=False, eof=False, interrupt=False):
                                stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True)
     os.close(slave)
     output = bytearray()
+    started = time.monotonic()
     deadline = time.monotonic()+25
+    phase = "awaiting the main prompt"
     try:
         read_until(process, master, output, b"Choice [1 opens Cloudflare]: ", deadline)
         if eof:
@@ -183,23 +258,18 @@ def terminal_case(fixture, doctor=False, eof=False, interrupt=False):
         else:
             os.write(master, b"6\n" if doctor else b"4\n")
             if interrupt:
+                phase = "awaiting the interruptible child"
                 read_until(process, master, output, b"FIXTURE_CHILD_WAIT_INT", deadline)
                 actions = fixture.actions()
                 require(len(actions) == 1 and not actions[0]["interrupt_ignored"], "child inherited SIG_IGN")
                 os.kill(process.pid, signal.SIGINT)  # parent's installed handler must survive
                 os.kill(actions[0]["pid"], signal.SIGINT)  # only the just-recorded owned child
+            phase = "awaiting the return pause"
             read_until(process, master, output, b"Press Enter to return to the menu.", deadline)
             os.write(master, b"\x04" if interrupt else b"\nq\n")
-        process.wait(timeout=max(0.1, deadline-time.monotonic()))
-        # Drain finite fixture output after exit.
-        while select.select([master], [], [], 0.1)[0]:
-            try:
-                block = os.read(master, 8192)
-            except OSError:
-                break
-            if not block:
-                break
-            output.extend(block)
+        phase = "awaiting menu exit (PTY still read)"
+        wait_exit(process, master, output, deadline)
+        phase = "checking the transcript"
         text = output.decode()
         require(process.returncode == 0, "menu did not survive child refusal/EOF")
         require(text.count("Press Enter to return to the menu.") == (0 if eof else 1), "wrong interactive return pause count")
@@ -208,11 +278,46 @@ def terminal_case(fixture, doctor=False, eof=False, interrupt=False):
             require("Action did not complete (exit 130)" in text, "interrupted child reported success/lost status")
         fixture.safe_output(text)
         require(before == fixture.snapshot(), "PTY navigation mutated state")
+    except Exception:
+        report_failure("terminal_case(doctor=%s, eof=%s, interrupt=%s)" % (doctor, eof, interrupt), phase, process, output, fixture, started)
+        raise
     finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)  # solely this fixture-owned new session
-            process.wait(timeout=5)
-        os.close(master)
+        contain(process, master)
+
+
+def inplace_update_case(f):
+    # In-place update/deleted cwd: only the named replacement directory is used.
+    master, slave = pty.openpty()
+    child = subprocess.Popen(["/bin/bash", str(f.scripts / "plugin-setup-menu.sh")], stdin=slave, stdout=slave,
+                             stderr=slave, env=f.env, start_new_session=True)
+    os.close(slave)
+    output = bytearray()
+    started = time.monotonic()
+    deadline = time.monotonic()+25
+    phase = "awaiting the main prompt"
+    try:
+        read_until(child, master, output, b"Choice [1 opens Cloudflare]: ", deadline)
+        old = f.root / "old-owned-scripts"
+        f.scripts.rename(old)
+        f.scripts.mkdir()
+        shutil.copy2(old / "plugin-status.sh", f.scripts / "plugin-status.sh")
+        shutil.copy2(old / "plugin-setup-link.sh", f.scripts / "plugin-setup-link.sh")
+        shutil.rmtree(old)  # exact disposable fixture directory only
+        os.write(master, b"4\n")
+        phase = "awaiting the return pause"
+        read_until(child, master, output, b"Press Enter to return to the menu.", deadline)
+        os.write(master, b"\nq\n")
+        phase = "awaiting menu exit (PTY still read)"
+        wait_exit(child, master, output, deadline)
+        phase = "checking the transcript"
+        require(child.returncode == 0 and len(f.actions()) == 1 and f.actions()[0]["cwd"] == str(f.scripts), "action used deleted cwd")
+        require(not any(word in output.decode() for word in ["getcwd", "cannot access parent directories", "chdir:"]), "replaced directory leaked loader error")
+        f.safe_output(output.decode())
+    except Exception:
+        report_failure("inplace_update_case", phase, child, output, f, started)
+        raise
+    finally:
+        contain(child, master)
 
 
 with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
@@ -310,33 +415,6 @@ with tempfile.TemporaryDirectory(prefix="herdr-setup-menu-") as directory:
     terminal_case(fresh(), eof=True)
     terminal_case(fresh(), interrupt=True)
 
-    # In-place update/deleted cwd: only the named replacement directory is used.
-    f = fresh()
-    master, slave = pty.openpty()
-    child = subprocess.Popen(["/bin/bash", str(f.scripts / "plugin-setup-menu.sh")], stdin=slave, stdout=slave,
-                             stderr=slave, env=f.env, start_new_session=True)
-    os.close(slave)
-    output = bytearray()
-    deadline = time.monotonic()+25
-    try:
-        read_until(child, master, output, b"Choice [1 opens Cloudflare]: ", deadline)
-        old = f.root / "old-owned-scripts"
-        f.scripts.rename(old)
-        f.scripts.mkdir()
-        shutil.copy2(old / "plugin-status.sh", f.scripts / "plugin-status.sh")
-        shutil.copy2(old / "plugin-setup-link.sh", f.scripts / "plugin-setup-link.sh")
-        shutil.rmtree(old)  # exact disposable fixture directory only
-        os.write(master, b"4\n")
-        read_until(child, master, output, b"Press Enter to return to the menu.", deadline)
-        os.write(master, b"\nq\n")
-        child.wait(timeout=max(0.1, deadline-time.monotonic()))
-        require(child.returncode == 0 and len(f.actions()) == 1 and f.actions()[0]["cwd"] == str(f.scripts), "action used deleted cwd")
-        require(not any(word in output.decode() for word in ["getcwd", "cannot access parent directories", "chdir:"]), "replaced directory leaked loader error")
-        f.safe_output(output.decode())
-    finally:
-        if child.poll() is None:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait(timeout=5)
-        os.close(master)
+    inplace_update_case(fresh())
 
 print("hosted navigation/header fixtures passed (not downstream lifecycle/package/phone qualification)")
