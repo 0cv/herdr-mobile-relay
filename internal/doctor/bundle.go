@@ -48,6 +48,8 @@ type PackageQueries struct {
 	hooks  *bundleHooks // package-private synchronized fixtures only; nil in production
 }
 type bundleHooks struct {
+	// Stages: component (root walk, between a component's named stat and open;
+	// name is the component, file nil), inventory, before_open, open, read, final.
 	event          func(stage, name string, file *os.File)
 	filesystemType func(fd int) (uint64, error) // owned fixtures; production uses Fstatfs
 }
@@ -222,6 +224,14 @@ func bundleRegular(st *unix.Stat_t, name string) bool {
 func sameBundleStat(a, b *unix.Stat_t) bool {
 	return samePackageStat(a, b) && a.Mtim == b.Mtim && a.Ctim == b.Ctim
 }
+
+// Ancestors of the package root compare by identity only. Their link count, size
+// and times change whenever any entry in them is created or removed (shared temp
+// or $HOME) and say nothing about the package; the next component is resolved
+// no-follow from the held descriptor, re-checked, and the chain rewalked at the end.
+func sameBundleAncestor(a, b *unix.Stat_t) bool {
+	return a.Dev == b.Dev && a.Ino == b.Ino && a.Mode == b.Mode && a.Uid == b.Uid && a.Gid == b.Gid
+}
 func bundleRootPath(root string) bool {
 	return len(root) > 0 && len(root) <= 4096 && filepath.IsAbs(root) && filepath.Clean(root) == root && root != "/" &&
 		len(strings.Split(root, "/")) <= 64 && utf8.ValidString(root) && strings.IndexFunc(root, unicode.IsControl) < 0
@@ -231,7 +241,8 @@ const bundleDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix
 
 // No-follow absolute ancestry is validated at acquisition and rewalked at the
 // end. An ancestor changing inode/mode/owner is unknown, even if the old root fd
-// remains readable. Ancestor timestamps are not proof of package content.
+// remains readable. Ancestor timestamps are not proof of package content, so
+// ancestors compare by identity only; the root itself keeps the full comparison.
 func (q *PackageQueries) openBundleRoot(ctx context.Context, root string) (int, []unix.Stat_t, bool) {
 	if !bundleRootPath(root) || contextEnded(ctx) {
 		return -1, nil, false
@@ -243,20 +254,24 @@ func (q *PackageQueries) openBundleRoot(ctx context.Context, root string) (int, 
 	chain := make([]unix.Stat_t, 0)
 	parts := strings.Split(strings.TrimPrefix(root, "/"), "/")
 	for i, part := range parts {
+		ancestor := i != len(parts)-1 // the last component is the package root itself
 		var parent, named, opened unix.Stat_t
 		if contextEnded(ctx) || unix.Fstat(fd, &parent) != nil || !bundleDirectory(&parent, true) || !q.bundleFilesystem(fd) ||
-			unix.Fstatat(fd, part, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || !bundleDirectory(&named, i != len(parts)-1) {
+			unix.Fstatat(fd, part, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || !bundleDirectory(&named, ancestor) {
 			unix.Close(fd)
 			return -1, nil, false
 		}
 		chain = append(chain, parent)
+		// Fixture seam between the named stat and the open; no-op without hooks.
+		q.event("component", part, nil)
 		next, err := unix.Openat(fd, part, bundleDirFlags, 0)
 		unix.Close(fd)
 		if err != nil {
 			return -1, nil, false
 		}
 		fd = next
-		if contextEnded(ctx) || unix.Fstat(fd, &opened) != nil || !sameBundleStat(&named, &opened) || !q.bundleFilesystem(fd) {
+		if contextEnded(ctx) || unix.Fstat(fd, &opened) != nil ||
+			(ancestor && !sameBundleAncestor(&named, &opened)) || (!ancestor && !sameBundleStat(&named, &opened)) || !q.bundleFilesystem(fd) {
 			unix.Close(fd)
 			return -1, nil, false
 		}
@@ -746,7 +761,7 @@ func (q *PackageQueries) inspectBundle(ctx context.Context) (state State, eviden
 	}
 	for i, old := range chain {
 		now := currentChain[i]
-		if old.Dev != now.Dev || old.Ino != now.Ino || old.Mode != now.Mode || old.Uid != now.Uid || old.Gid != now.Gid {
+		if !sameBundleAncestor(&old, &now) {
 			return Unknown, EvidenceUnavailable
 		}
 	}

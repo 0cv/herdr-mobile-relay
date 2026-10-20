@@ -1143,7 +1143,8 @@ func TestInstalledBundleFilesystemRevalidationAndUnavailableMetadata(t *testing.
 			}
 			state, evidence := q.inspectBundle(context.Background())
 			if !refused || state != Unknown || evidence != EvidenceUnavailable || readsAfterRefusal != 0 {
-				t.Fatal("failed/revoked model produced a complete verdict or further reads")
+				t.Fatalf("failed/revoked model produced a complete verdict or further reads: refused=%t state=%s evidence=%s reads=%d",
+					refused, state, evidence, readsAfterRefusal)
 			}
 			if (stage == "initial" || stage == "inventory" || stage == "before_open") && len(opened) != 0 {
 				t.Fatal("unavailable model opened content")
@@ -1178,6 +1179,196 @@ func TestInstalledBundleFilesystemRevalidationAndUnavailableMetadata(t *testing.
 		}
 		if got != state || evidence != wantEvidence || opened < len(bundleRequiredFiles()) {
 			t.Fatal("admitted model bypassed complete hashing or stable nonexecutable contradiction")
+		}
+	}
+}
+
+// The package lives at <holder>/<unique name>: holder is a private ancestor
+// whose entries the "component" seam changes between named stat and open.
+func newBundleAncestorFixture(t *testing.T) (*bundleFixture, string) {
+	t.Helper()
+	f := newBundleFixture(t, "linux/amd64")
+	holder := f.root + ".ancestor"
+	t.Cleanup(func() { _ = os.RemoveAll(holder); _ = os.RemoveAll(holder + ".old") })
+	nested := filepath.Join(holder, filepath.Base(f.root))
+	if err := os.Mkdir(holder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(holder, 0o755); err != nil { // independent of the umask
+		t.Fatal(err)
+	}
+	if err := os.Rename(f.root, nested); err != nil {
+		t.Fatal(err)
+	}
+	f.root = nested
+	return f, holder
+}
+
+// An old mtime makes any later entry change alter Mtim, whatever the clock granularity.
+func bundleAgeDirectory(t *testing.T, path string) {
+	t.Helper()
+	old := time.Unix(1_000_000_000, 0)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+func bundleLstat(t *testing.T, path string) unix.Stat_t {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Lstat(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// Runs the genuine inspector over an admitted synthetic model, calling mutate(n)
+// at the nth "component" stage of the named component (1 acquisition walk, 2
+// final rewalk). Returns the verdict and how often each stage fired.
+func inspectWithComponentHook(t *testing.T, f *bundleFixture, component string, mutate func(call int)) (State, Evidence, map[string]int) {
+	t.Helper()
+	q, _ := f.query()
+	stages, calls := map[string]int{}, 0
+	q.hooks = &bundleHooks{
+		filesystemType: func(int) (uint64, error) { return 0xef53, nil },
+		event: func(stage, name string, _ *os.File) {
+			stages[stage]++
+			if stage == "component" && name == component {
+				calls++
+				mutate(calls)
+			}
+		},
+	}
+	state, evidence := q.inspectBundle(context.Background())
+	return state, evidence, stages
+}
+
+func TestInstalledBundleAncestorEntryChangesAreNotUnknown(t *testing.T) {
+	for _, kind := range []string{"create file", "create directory", "remove file", "remove directory"} {
+		t.Run(kind, func(t *testing.T) {
+			f, holder := newBundleAncestorFixture(t)
+			sibling := func(n int) string { return filepath.Join(holder, fmt.Sprintf("sibling-%d", n)) }
+			create := func(n int) error {
+				if strings.HasSuffix(kind, "directory") {
+					return os.Mkdir(sibling(n), 0o700)
+				}
+				return os.WriteFile(sibling(n), []byte("x"), 0o600)
+			}
+			removing := strings.HasPrefix(kind, "remove")
+			for n := 1; removing && n <= 8; n++ {
+				if err := create(n); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bundleAgeDirectory(t, holder)
+			calls := 0
+			state, evidence, stages := inspectWithComponentHook(t, f, filepath.Base(holder), func(call int) {
+				calls = call
+				before := bundleLstat(t, holder)
+				var err error
+				if removing {
+					err = os.Remove(sibling(call))
+				} else {
+					err = create(call)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Prove the fixture really changes what the old full comparison
+				// rejected (Mtim at least) while the ancestor identity is intact.
+				after := bundleLstat(t, holder)
+				if call == 1 && (sameBundleStat(&before, &after) || !sameBundleAncestor(&before, &after)) {
+					t.Fatal("fixture did not make a benign ancestor-only metadata change")
+				}
+			})
+			if state != OK || evidence != EvidenceHealthy || calls < 2 || stages["open"] < len(bundleRequiredFiles()) {
+				t.Fatalf("ancestor %s: state=%s evidence=%s walks=%d stages=%v, want the complete healthy verdict", kind, state, evidence, calls, stages)
+			}
+		})
+	}
+}
+
+func TestInstalledBundleAncestorIdentityChangeStillRefused(t *testing.T) {
+	for _, kind := range []string{"replaced directory", "mode change"} {
+		t.Run(kind, func(t *testing.T) {
+			f, holder := newBundleAncestorFixture(t)
+			state, evidence, stages := inspectWithComponentHook(t, f, filepath.Base(holder), func(call int) {
+				if call != 1 {
+					return
+				}
+				var err error
+				if kind == "mode change" {
+					err = os.Chmod(holder, 0o750) // still a permitted ancestor: only identity can refuse
+				} else { // same path and intact valid package, but a different directory
+					err = os.Rename(holder, holder+".old")
+					if err == nil {
+						err = os.Mkdir(holder, 0o755)
+					}
+					if err == nil {
+						err = os.Chmod(holder, 0o755)
+					}
+					if err == nil {
+						err = os.Rename(filepath.Join(holder+".old", filepath.Base(f.root)), f.root)
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+			if state != Unknown || evidence != EvidenceUnavailable || stages["before_open"]+stages["open"]+stages["read"] != 0 {
+				t.Fatalf("changed ancestor %s: state=%s evidence=%s stages=%v, want refusal before any content open", kind, state, evidence, stages)
+			}
+		})
+	}
+}
+
+// The package root keeps the full comparison: a transient root entry leaves the
+// inventory unchanged but alters timestamps, which must still refuse.
+func TestInstalledBundleAncestorRootComponentKeepsFullComparison(t *testing.T) {
+	f := newBundleFixture(t, "linux/amd64")
+	bundleAgeDirectory(t, f.root)
+	state, evidence, stages := inspectWithComponentHook(t, f, filepath.Base(f.root), func(call int) {
+		if call != 1 {
+			return
+		}
+		before, scratch := bundleLstat(t, f.root), filepath.Join(f.root, "scratch")
+		if err := os.WriteFile(scratch, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(scratch); err != nil {
+			t.Fatal(err)
+		}
+		if after := bundleLstat(t, f.root); sameBundleStat(&before, &after) || !sameBundleAncestor(&before, &after) {
+			t.Fatal("fixture did not make a timestamp-only root change")
+		}
+	})
+	if state != Unknown || evidence != EvidenceUnavailable || stages["before_open"]+stages["open"]+stages["read"] != 0 {
+		t.Fatalf("root timestamp change: state=%s evidence=%s stages=%v, want refusal before any content open", state, evidence, stages)
+	}
+}
+
+// Ancestors: identity (device, inode, mode, owner, group) only. Link count, size
+// and times never matter there, and the full comparison stays strict.
+func TestInstalledBundleAncestorIdentityPredicate(t *testing.T) {
+	base := unix.Stat_t{Dev: 1, Ino: 2, Mode: unix.S_IFDIR | 0o755, Uid: 3, Gid: 4}
+	for _, test := range []struct {
+		name     string
+		change   func(*unix.Stat_t)
+		identity bool
+	}{
+		{"device", func(s *unix.Stat_t) { s.Dev++ }, false},
+		{"inode", func(s *unix.Stat_t) { s.Ino++ }, false},
+		{"mode", func(s *unix.Stat_t) { s.Mode ^= 0o020 }, false},
+		{"owner", func(s *unix.Stat_t) { s.Uid++ }, false},
+		{"group", func(s *unix.Stat_t) { s.Gid++ }, false},
+		{"link count", func(s *unix.Stat_t) { s.Nlink++ }, true},
+		{"size", func(s *unix.Stat_t) { s.Size++ }, true},
+		{"mtime", func(s *unix.Stat_t) { s.Mtim.Sec++ }, true},
+		{"ctime", func(s *unix.Stat_t) { s.Ctim.Sec++ }, true},
+	} {
+		changed := base
+		test.change(&changed)
+		if sameBundleAncestor(&base, &changed) != test.identity || sameBundleStat(&base, &changed) || !sameBundleAncestor(&base, &base) || !sameBundleStat(&base, &base) {
+			t.Fatalf("%s: ancestor identity/full comparison policy diverged", test.name)
 		}
 	}
 }
