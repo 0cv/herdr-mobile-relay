@@ -224,6 +224,7 @@ type herdrServerResult struct {
 type herdrServerFixture struct {
 	path, dir string
 	listener  *net.UnixListener
+	accepted  chan struct{}
 	done      chan herdrServerResult
 	stop      chan struct{}
 	once      sync.Once
@@ -242,7 +243,7 @@ func newHerdrServer(t *testing.T, response string, stall bool) *herdrServerFixtu
 		os.RemoveAll(dir)
 		t.Fatal("fixture physical selection unavailable")
 	}
-	s := &herdrServerFixture{dir: physical, path: filepath.Join(physical, "herdr.sock"), done: make(chan herdrServerResult, 1), stop: make(chan struct{})}
+	s := &herdrServerFixture{dir: physical, path: filepath.Join(physical, "herdr.sock"), accepted: make(chan struct{}), done: make(chan herdrServerResult, 1), stop: make(chan struct{})}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: s.path, Net: "unix"})
 	if err != nil {
 		os.RemoveAll(physical)
@@ -270,6 +271,7 @@ func newHerdrServer(t *testing.T, response string, stall bool) *herdrServerFixtu
 			return
 		}
 		result.accepted = true
+		close(s.accepted)
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(CallBudget + time.Second))
 		reader := bufio.NewReaderSize(conn, 1024)
@@ -693,6 +695,20 @@ func TestHerdrReplacementCancellationAndOwnedConnectionClosure(t *testing.T) {
 				dials++
 				return (&net.Dialer{}).DialContext(ctx, "unix", path)
 			}, event: func(stage string, conn *net.UnixConn) {
+				// Dial can complete before the server's AcceptUnix. For the
+				// no-request/EOF cases, wait for that accept before closing or
+				// cancelling the client; otherwise finish may close the listener
+				// first and report a false missing EOF.
+				if stage == "connected" && (scenario == "connected-replace" || scenario == "connected-peer-unavailable" || scenario == "before-send-cancel") {
+					select {
+					case <-server.accepted:
+					case <-time.After(CallBudget + 2*time.Second):
+						t.Error("owned socket actor did not accept connected client")
+						cancel()
+						_ = conn.Close()
+						return
+					}
+				}
 				if (scenario == "before-dial-replace" && stage == "before-dial") || (scenario == "connected-replace" && stage == "connected") {
 					if os.Rename(server.path, server.path+".old") != nil || os.WriteFile(server.path, []byte("secret-canary"), 0o600) != nil {
 						t.Error("replacement fixture unavailable")
@@ -731,7 +747,7 @@ func TestHerdrReplacementCancellationAndOwnedConnectionClosure(t *testing.T) {
 					t.Fatal("replacement retried or connected before validated path")
 				}
 				if scenario == "connected-replace" || scenario == "connected-peer-unavailable" || scenario == "before-send-cancel" {
-					if result.request != "" || !result.closed {
+					if !result.accepted || result.request != "" || !result.closed {
 						t.Fatal("unsafe peer/path/cancellation sent request or left connection")
 					}
 				}

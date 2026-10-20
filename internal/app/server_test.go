@@ -3240,14 +3240,26 @@ func TestRearmedLaunchStartsWithoutStrandedDevices(t *testing.T) {
 	}
 }
 
+// lifecycleProbeTimeout is this test helper's Client.Timeout, not a production timeout.
+const lifecycleProbeTimeout = 250 * time.Millisecond
+
+func newLifecycleProbeTransport() *http.Transport {
+	return &http.Transport{DisableKeepAlives: true}
+}
+
 // probeLifecycleHealth bounds both header and body reads, including an accepted
 // connection that never answers. A fresh transport cannot reuse a foreign socket.
 func probeLifecycleHealth(ctx context.Context, addr string) (int, string, error) {
+	return probeLifecycleHealthVia(ctx, addr, newLifecycleProbeTransport())
+}
+
+// probeLifecycleHealthVia is the shared probe; tests replace only the transport.
+func probeLifecycleHealthVia(ctx context.Context, addr string, rt http.RoundTripper) (int, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/health", nil)
 	if err != nil {
 		return 0, "", err
 	}
-	client := &http.Client{Timeout: 250 * time.Millisecond, Transport: &http.Transport{DisableKeepAlives: true}}
+	client := &http.Client{Timeout: lifecycleProbeTimeout, Transport: rt}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, "", err
@@ -3389,67 +3401,104 @@ func runServerLifecycle(t *testing.T) {
 	}
 }
 
-func TestServerHealthProbeStalledResponse(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+// stalledHealth is a wholly in-memory RoundTripper for an accepted peer that
+// stalls. It replaces only the socket: http.Client still installs its real
+// Client.Timeout on the request context and the helper still reads the body.
+// sendHeaders returns a parsed 200 synchronously (it cannot lose a race with the
+// timer) and stalls only the body; otherwise RoundTrip stalls before any response.
+// A stall ends when the request context ends, or when the test releases it.
+type stalledHealth struct {
+	t           *testing.T
+	sendHeaders bool
+	lower       time.Time // taken before the probe starts
+	release     chan struct{}
+	ctx         context.Context
+	began       atomic.Bool
+	closed      atomic.Int32
+	endErr      error // request-context error that ended the stall
+}
+
+const stalledHealthAddr = "192.0.2.1:8375" // never dialed
+
+func (s *stalledHealth) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.ctx = req.Context()
+	deadline, bounded := s.ctx.Deadline()
+	if req.Method != http.MethodGet || req.URL.String() != "http://"+stalledHealthAddr+"/health" || !bounded ||
+		deadline.Before(s.lower.Add(lifecycleProbeTimeout)) || deadline.After(time.Now().Add(lifecycleProbeTimeout)) {
+		s.t.Errorf("unexpected probe %s %s, request deadline %v (bounded=%t)", req.Method, req.URL, deadline, bounded)
 	}
-	release := make(chan struct{})
-	done := make(chan struct{})
-	type probeResult struct {
-		status int
-		err    error
+	if !s.sendHeaders {
+		return nil, s.stall()
 	}
-	probeDone := make(chan probeResult, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	return &http.Response{StatusCode: http.StatusOK, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1, Header: http.Header{}, ContentLength: 16, Body: s, Request: req}, nil
+}
+
+func (s *stalledHealth) Read([]byte) (int, error) { return 0, s.stall() }
+func (s *stalledHealth) Close() error             { s.closed.Add(1); return nil }
+
+func (s *stalledHealth) stall() error {
+	s.began.Store(true)
+	select {
+	case <-s.ctx.Done():
+		s.endErr = s.ctx.Err()
+		return s.endErr
+	case <-s.release:
+		return errors.New("stall released before the client deadline")
+	}
+}
+
+func runStalledHealthProbe(t *testing.T, sendHeaders bool) {
+	t.Helper()
+	fresh := newLifecycleProbeTransport()
+	if fresh == newLifecycleProbeTransport() || http.RoundTripper(fresh) == http.DefaultTransport || !fresh.DisableKeepAlives {
+		t.Fatal("lifecycle probe must use a fresh transport that never reuses connections")
+	}
+	s := &stalledHealth{t: t, sendHeaders: sendHeaders, lower: time.Now(), release: make(chan struct{})}
+	// No parent deadline: only the helper's Client.Timeout can expire the request.
+	ctx, cancel := context.WithCancel(context.Background())
+	exited := make(chan struct{})
+	var status int
+	var err error
+	go func() {
+		defer close(exited)
+		status, _, err = probeLifecycleHealthVia(ctx, stalledHealthAddr, s)
+	}()
+	const watchdog = 5 * time.Second // failure bound only; never decides a passing run
 	defer func() {
 		cancel()
-		close(release)
-		_ = ln.Close()
+		close(s.release)
 		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Error("stalled accept goroutine did not stop")
-		}
-		select {
-		case <-probeDone:
-		case <-time.After(time.Second):
+		case <-exited:
+		case <-time.After(watchdog):
 			t.Error("stalled probe goroutine did not stop")
 		}
 	}()
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
-			return
-		}
-		// A parsed 200 response proves Accept and this write preceded the body timeout.
-		if _, err := io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n"); err != nil {
-			return
-		}
-		<-release
-	}()
-	go func() {
-		defer close(probeDone)
-		status, _, probeErr := probeLifecycleHealth(ctx, ln.Addr().String())
-		probeDone <- probeResult{status, probeErr}
-	}()
-	// Only a parsed 200 can prove this probe passed the Accept and header write.
-	var result probeResult
 	select {
-	case result = <-probeDone:
-	case <-ctx.Done():
-		t.Fatal("stalled probe did not finish within 1s")
+	case <-exited:
+	case <-time.After(watchdog):
+		t.Fatal("client deadline did not end the stalled probe")
+	}
+	wantStatus, wantClosed := 0, int32(0)
+	if sendHeaders {
+		wantStatus, wantClosed = http.StatusOK, 1
 	}
 	var timeout net.Error
-	if result.status != http.StatusOK || !errors.As(result.err, &timeout) || !timeout.Timeout() {
-		t.Fatalf("stalled body response = %d, %v, want 200 and timeout", result.status, result.err)
+	if status != wantStatus || !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("stalled probe = %d, %v, want %d and timeout", status, err, wantStatus)
+	}
+	if !s.began.Load() || !errors.Is(s.endErr, context.DeadlineExceeded) || time.Since(s.lower) < lifecycleProbeTimeout {
+		t.Fatalf("stall began=%t ended by %v after %v, want the client's %v deadline", s.began.Load(), s.endErr, time.Since(s.lower), lifecycleProbeTimeout)
+	}
+	if got := s.closed.Load(); got != wantClosed {
+		t.Fatalf("response bodies closed = %d, want %d", got, wantClosed)
 	}
 }
+
+// A parsed 200 whose body never arrives must end in the client deadline's timeout.
+func TestServerHealthProbeStalledResponse(t *testing.T) { runStalledHealthProbe(t, true) }
+
+// Headers that never arrive must end in the same deadline with no response.
+func TestServerHealthProbeStalledHeaders(t *testing.T) { runStalledHealthProbe(t, false) }
 
 func TestArmBootstrapInvitationPairsOneMoreDevice(t *testing.T) {
 	token := strings.Repeat("k", 32)
