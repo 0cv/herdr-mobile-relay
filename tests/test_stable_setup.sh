@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TUNNEL_UUID="11111111-2222-4333-8444-555555555555"
+# The installed service accepts only a 32-character relay token, the shape
+# generate_token produces (openssl rand -hex 16).
+TEST_TOKEN="00112233445566778899aabbccddeeff"
 CASES=""
 TEST_COUNT=0
 TEST_BIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-stable-bin.XXXXXX")"
@@ -63,9 +66,53 @@ EOF
 #!/bin/sh
 exit 0
 EOF
+    # The installed-service transaction queries unit state before and after
+    # every change. A unit file under ~/.config/systemd/user is "loaded";
+    # enable and restart leave markers that show reports back.
     cat > "$BIN/systemctl" <<'EOF'
 #!/bin/sh
 printf 'systemctl %s\n' "$*" >> "$STUB_LOG"
+command="${2:-}"
+label="${3:-}"
+unit="$HOME/.config/systemd/user/$label"
+state="$(dirname "$STUB_LOG")/systemd"
+mkdir -p "$state"
+if [ -f "$unit" ]; then
+    load=loaded
+    fragment="$unit"
+    if [ -f "$state/$label.enabled" ]; then enabled=enabled; else enabled=disabled; fi
+    if [ -f "$state/$label.active" ]; then active=active; else active=inactive; fi
+else
+    load=not-found
+    fragment=''
+    enabled=''
+    active=inactive
+fi
+case "$command" in
+    show)
+        for property in "$@"; do
+            case "$property" in
+                --property=Id) printf 'Id=%s\n' "$label" ;;
+                --property=LoadState) printf 'LoadState=%s\n' "$load" ;;
+                --property=ActiveState) printf 'ActiveState=%s\n' "$active" ;;
+                --property=UnitFileState) printf 'UnitFileState=%s\n' "$enabled" ;;
+                --property=FragmentPath) printf 'FragmentPath=%s\n' "$fragment" ;;
+                --property=DropInPaths) printf 'DropInPaths=\n' ;;
+                --property=NeedDaemonReload) printf 'NeedDaemonReload=no\n' ;;
+            esac
+        done
+        ;;
+    enable)
+        [ -f "$unit" ] || exit 1
+        : > "$state/$label.enabled"
+        ;;
+    restart)
+        [ -f "$unit" ] || exit 1
+        : > "$state/$label.active"
+        ;;
+    disable) rm -f "$state/$label.enabled" ;;
+    stop) rm -f "$state/$label.active" ;;
+esac
 exit 0
 EOF
     cat > "$BIN/cloudflared" <<'EOF'
@@ -278,6 +325,16 @@ new_case() {
     unset STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL STUB_ROUTE_NAME
     unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME
+    # Installed-service admission refuses foreground identities and rearm and
+    # reads transport, gateway and updater selections from the environment. A
+    # port, token or instance a case's env file does not set would otherwise
+    # fall back to the caller's value, so nothing from the caller running this
+    # suite may reach the installer.
+    unset HERDR_RELAY_RUN_ID HERDR_RELAY_CONTROL_RUN_ID HERDR_RELAY_PAIRING_SOCKET
+    unset HERDR_RELAY_REARM_BOOTSTRAP HERDR_RELAY_TRANSPORT HERDR_GATEWAY_URL
+    unset HERDR_TAILSCALE_REQUEST GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
+    unset HERDR_RELAY_PORT HERDR_RELAY_TOKEN HERDR_RELAY_INSTANCE_ID CLOUDFLARED_BIN
+    unset TUNNEL_ORIGIN_CERT HERDR_PLUGIN_CONFIG_DIR
 }
 
 run_setup() {
@@ -315,7 +372,7 @@ ingress:
   - service: http_status:404
 EOF
     cat > "$HERDR_RELAY_ENV" <<EOF
-HERDR_RELAY_TOKEN=test-token
+HERDR_RELAY_TOKEN=$TEST_TOKEN
 HERDR_RELAY_INSTANCE_ID=instance-a
 HERDR_RELAY_PORT=$port
 CLOUDFLARED_CONFIG=$config
@@ -325,14 +382,14 @@ EOF
 
 test_success_and_alternate_port() {
     new_case
-    printf 'HERDR_RELAY_PORT=8399\nHERDR_RELAY_TOKEN=fake-token\n' > "$HERDR_RELAY_ENV"
+    printf 'HERDR_RELAY_PORT=8399\nHERDR_RELAY_TOKEN=%s\n' "$TEST_TOKEN" > "$HERDR_RELAY_ENV"
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup success"; }
     assert_contains "$HOME/cloudflared/config.yml" 'service: http://127.0.0.1:8399'
     assert_contains "$HERDR_RELAY_ENV" 'HERDR_RELAY_INSTANCE_ID='
     assert_contains "$OUTPUT" 'Stable relay verified'
     assert_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
-    assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$OUTPUT" "https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=$TEST_TOKEN"
     assert_contains "$HOME/phone-app-origin-configured" 'https://relay-workstation.example.test'
     MODE="$(stat -c '%a' "$HOME/phone-app-origin-configured" 2>/dev/null || stat -f '%Lp' "$HOME/phone-app-origin-configured")"
     [ "$MODE" = 600 ] \
@@ -344,11 +401,11 @@ test_success_and_alternate_port() {
 
 test_existing_phone_app_origin() {
     new_case
-    printf 'HERDR_RELAY_TOKEN=fake-token\n' > "$HERDR_RELAY_ENV"
+    printf 'HERDR_RELAY_TOKEN=%s\n' "$TEST_TOKEN" > "$HERDR_RELAY_ENV"
     export HERDR_PHONE_APP_URL="https://app.example.test"
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with existing phone app"; }
-    assert_contains "$OUTPUT" 'https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$OUTPUT" "https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=$TEST_TOKEN"
     assert_contains "$OUTPUT" 'Direct browser fallback:'
     assert_contains "$HOME/phone-app-origin-configured" 'https://app.example.test'
     pass "guided setup records an existing installed app origin without baking it into the project"
@@ -356,14 +413,14 @@ test_existing_phone_app_origin() {
 
 test_deployed_phone_app_origin() {
     new_case
-    cat > "$HERDR_RELAY_ENV" <<'EOF'
-HERDR_RELAY_TOKEN=fake-token
+    cat > "$HERDR_RELAY_ENV" <<EOF
+HERDR_RELAY_TOKEN=$TEST_TOKEN
 HERDR_APP_DEPLOY_ORIGIN=https://app.example.test
 EOF
     printf 'https://relay-workstation.example.test\n' > "$HOME/phone-app-origin"
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with deployed phone app"; }
-    assert_contains "$OUTPUT" 'https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$OUTPUT" "https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=$TEST_TOKEN"
     assert_contains "$HOME/phone-app-origin-configured" 'https://app.example.test'
     assert_contains "$HOME/phone-app-origin" 'https://relay-workstation.example.test'
     pass "stable setup reuses the configured deployment origin"
@@ -371,14 +428,14 @@ EOF
 
 test_discovered_phone_app_origin() {
     new_case
-    printf 'HERDR_RELAY_TOKEN=fake-token\n' > "$HERDR_RELAY_ENV"
+    printf 'HERDR_RELAY_TOKEN=%s\n' "$TEST_TOKEN" > "$HERDR_RELAY_ENV"
     write_origin_cert zone-old
     export STUB_APP_ORIGIN="https://herdr.example.test"
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with discovered phone app"; }
-    assert_contains "$OUTPUT" 'https://herdr.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$OUTPUT" "https://herdr.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=$TEST_TOKEN"
     assert_contains "$OUTPUT" 'Direct browser fallback:'
-    assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$OUTPUT" "https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=$TEST_TOKEN"
     assert_contains "$HOME/phone-app-origin-configured" 'https://herdr.example.test'
     pass "stable setup discovers the shared phone app without changing the relay endpoint"
 }
@@ -605,7 +662,11 @@ test_separate_readiness_timeouts() {
     run_setup
     [ "$STATUS" -ne 0 ] || fail "HTTP timeout should fail"
     assert_contains "$OUTPUT" 'public endpoint is unavailable'
-    assert_contains "$OUTPUT" 'previous files and activation were restored'
+    # The native installer rolls back and reports it with its own fixed line.
+    assert_contains "$OUTPUT" 'Native installation failed; no replacement remains'
+    assert_not_contains "$OUTPUT" 'rollback is incomplete'
+    [ ! -e "$HOME/.config/systemd/user/herdr-mobile-relay.service" ] || fail "failed install left its replacement unit"
+    assert_not_contains "$HERDR_RELAY_ENV" 'HERDR_RELAY_TRANSPORT='
     assert_not_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
     pass "DNS and HTTPS readiness use independent waits and both suppress QR on timeout"
 }

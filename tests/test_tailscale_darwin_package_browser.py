@@ -185,6 +185,9 @@ ALLOWED = (
     # Consumer of the repaired installed-service CLI contract (exit 69, zero effects); it
     # ran the old contract and failed the check workflow's Shell job at a233ef50 and 655df021.
     "tests/test_dev_tailscale.py",
+    # Fixture repair for the installed 32-byte key policy; it failed the check workflow's
+    # Shell job (stable setup success) at 1bb8723f.
+    "tests/test_stable_setup.sh",
     # T001 CI wiring: the service-qualification job and the check.yml edits.
     ".github/workflows/check.yml",
     ".github/workflows/service-qualification.yml",
