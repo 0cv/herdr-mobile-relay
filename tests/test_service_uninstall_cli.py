@@ -8,6 +8,7 @@ import sys
 if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
     raise SystemExit("service-removal fixtures require a genuine disposable GitHub-hosted runner")
 
+import hashlib
 import json
 import plistlib
 import pty
@@ -26,6 +27,15 @@ TIMEOUT = 40  # Finite invocation containment including repeated configuration/m
 ESCAPED_ENV_NAME = "relay\\x%%.env"
 DOUBLE_DECODED_ENV_NAME = "relayx%.env"
 
+# MODEL_CHECK's whole acceptance test (see the FAST_STUB comment): ONE text, shared by the validator and by the adapters' save().
+# `text` is canonical json.dumps of an object with a 'fault' key, holds no newline but one optional trailing one, and passes the
+# shape check that install_stub bakes in as model_shape in place of the placeholder on the first line.
+ACCEPTABLE = r'''def shape(model): return True
+def acceptable(text):
+    model = json.loads(text); body = text[:-1] if text.endswith('\n') else text
+    return isinstance(model, dict) and 'fault' in model and '\n' not in body and text == json.dumps(model) and shape(model)
+'''
+
 # Strict finite synthetic controller/tool. No host service/network access.
 ADAPTER = r'''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
@@ -37,7 +47,14 @@ with (control / 'spawns.log').open('a') as stream: stream.write(name + '\n')
 def event(op, label='', **extra):
     row = dict(op=op, label=label, **extra)
     with events.open('a') as stream: stream.write(json.dumps(row) + '\n')
-def save(): model_path.write_text(json.dumps(model))
+''' + ACCEPTABLE + r'''def save():
+    # What was just written is the exact copy the fast stat/head/wc/uname stubs may trust (control/model.valid) IF MODEL_CHECK's own
+    # test holds for these very bytes, so the next fast call need not re-run MODEL_CHECK. Otherwise model.valid stays as it was, no
+    # longer equal to model.json, and that call runs MODEL_CHECK exactly as after a foreign rewrite.
+    text = json.dumps(model); model_path.write_text(text)
+    try:
+        if acceptable(text): (control / 'model.valid').write_text(text)
+    except Exception: pass
 def refuse(): event('forbidden', tool=name); raise SystemExit(97)
 def fault(label, *kinds): return label == model['fault_label'] and model['fault'] in kinds
 def pause(label):
@@ -203,12 +220,12 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 '''
 
 
-# Fast path for the three tools that make up 90-98% of all stub spawns (hosted run 38837569325:
-# 880 of the 903 spawns of one macOS removal invocation were stat). Each Python adapter pays an
+# Fast path for the tools that make up 98% of all stub spawns (hosted run 38837569325: 880 of the 903
+# spawns of one macOS removal invocation were stat; then uname, systemctl and launchctl). Each Python adapter pays an
 # interpreter start plus the json, pathlib and plistlib imports (about 30-43 ms hosted) only to exec
-# the real tool. On the steady path this POSIX sh stub forks only one small /usr/bin/cmp before its
-# exec (not a Python interpreter; install_stub runs it with /bin/dash when present, since macOS's /bin/sh is
-# bash 3.2 at twice the start-up cost), and a stat call may name SEVERAL paths in the combined
+# the real tool, or to answer from the model. On the steady path this bash stub forks nothing before its exec (not a Python
+# interpreter, and no cmp: it compares the two files itself, see below; it was a dash script plus one /usr/bin/cmp, one
+# process more per call, of which a macOS hosted runner pays about 5 ms), and a stat call may name SEVERAL paths in the combined
 # '%d:%i:%s:%Y:%u:%a:%h' ('%d:%i:%z:%m:%u:%Lp:%l' on BSD) form only, so one ancestor walk is one spawn
 # (every other form takes exactly one path, or it is delegated and refused). ANY doubt delegates to the unchanged Python adapter installed
 # beside it in bin/.python (the same file name, so the adapter sees the same tool name): a model fault
@@ -234,37 +251,61 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 # still canonical, decodes identically, and the globs do not depend on order. Every legitimate writer
 # (the adapters' save(), Fixture.save, the FULL_ADAPTER prefix's store() and this control) writes plain
 # json.dumps(model). The stub takes the
-# shell path only when `cmp -s` finds model.json byte-identical to that non-empty copy, and then reads
+# shell path only when model.json is byte-identical to that non-empty copy (the stub reads both with `read -d ''`, which answers 0
+# at a NUL and 1 at the end of the file, so two files are equal iff neither holds a NUL and the strings are equal; a model of
+# more than 4096 bytes, which bash would read byte by byte, takes cmp and cat instead), and then reads
 # the fault substrings from the copy, never from model.json. Any other model (missing, unreadable,
 # empty, malformed, with trailing data or a NUL byte, or rewritten since: the adapters rewrite it on
 # every observe) runs MODEL_CHECK once; if that rejects it, or the copy cannot be read, the stub
 # delegates, and the adapter aborts before it spawns anything, so a broken fixture never becomes a run
-# of the real host tool. A missing cmp only makes every call run MODEL_CHECK (slower, never unsafe).
+# of the real host tool. A missing model.big only makes a big model read slowly; the marker never decides what a stub answers.
 # Otherwise the stub appends the same tool name to spawns.log, so the spawn diagnostic stays truthful
 # (MODEL_CHECK and cmp runs are not tool spawns and are not counted), and execs the real tool exactly
-# as the adapter does.
-FAST_TOOLS = ('stat', 'head', 'wc')
+# as the adapter does. MODEL_CHECK does not run after every observation any more: the adapters' save() and the sh
+# answers below leave control/model.valid equal to the model.json they have just written, under the very test MODEL_CHECK
+# applies (ACCEPTABLE; a model a FULL adapter's stat call would ARM is not refreshed), and a foreign rewrite still is not trusted.
+# uname answers the platform of the canonical first key (a plain token) for exactly `-s`. systemctl and launchctl answer, from
+# canonical two-label models only, one observation of a label, a systemd configuration query, stop, disable, bootout,
+# daemon-reload, `launchctl print DOMAIN` and `print-disabled DOMAIN`: the head of the model is parsed in sh and REBUILT from
+# what was parsed (a text that is not exactly its rebuild, or whose head holds an escape, is the adapter's), only a model without
+# a fault of that label (or any fault, for the calls on no label) is answered, and everything else, such as effective-configuration
+# extras, a native_done gate, other labels, other argument forms and every fault, is the adapter's. These answers mirror
+# the adapter text: model_stub_control pins it by digest, runs chains of calls through both implementations and compares
+# every output, event, tally and model byte.
+MIRRORED = {'c476dcb2143220e7ee5b363b952c7e951bf15e6d7401f1cee69da7ce2d37544f', '7ec0920fc45fc3516bb482bd6955416f9296fe5f6e9f7edcf24473b2292390ff'}
+FAST_TOOLS = ('stat', 'head', 'wc', 'uname', 'systemctl', 'launchctl', 'plutil')
 MODEL_CHECK = r'''import json, pathlib, sys
-def shape(model): return True
-try:
+''' + ACCEPTABLE + r'''try:
     control = pathlib.Path(sys.argv[1]); raw = (control / 'model.json').read_bytes()
-    text = raw.decode('utf-8'); model = json.loads(text)
-    body = text[:-1] if text.endswith('\n') else text
-    ok = (isinstance(model, dict) and 'fault' in model and '\n' not in body
-          and text == json.dumps(model) and shape(model))
+    ok = acceptable(raw.decode('utf-8'))
     if ok: (control / 'model.valid').write_bytes(raw)
+    if len(raw) > 4096: (control / 'model.big').write_bytes(b'')   # speed only (see FAST_STUB): the marker never decides what a stub answers
+    else: (control / 'model.big').unlink(missing_ok=True)
 except Exception: ok = False
 sys.exit(0 if ok else 1)
 '''
-FAST_STUB = r"""#!/bin/sh
+FAST_STUB = r"""#!/bin/bash
 name=${0##*/}
 delegate() { exec "$FIXTURE_ROOT/bin/.python/$name" "$@"; }
 control=$FIXTURE_ROOT/control
-if [ ! -s "$control/model.valid" ] || ! /usr/bin/cmp -s "$control/model.json" "$control/model.valid" 2>/dev/null; then
-    "$FIXTURE_ROOT/bin/.python/.model-ok" "$control" || delegate "$@"
+domain=@DOMAIN@
+full=@FULL@
+case "$name:$#:$1" in
+    systemctl:2:--user|systemctl:3:--user|systemctl:7:--user|systemctl:12:--user|launchctl:2:*) ;;
+    systemctl:*|launchctl:*|plutil:[!6]*) delegate "$@" ;;
+esac
+model=; now=
+if [ -f "$control/model.big" ]; then   # bash reads a long line byte by byte (26 ms for 65 KB), cmp and cat do not
+    { [ -s "$control/model.valid" ] && /usr/bin/cmp -s "$control/model.json" "$control/model.valid" 2>/dev/null; } || "$FIXTURE_ROOT/bin/.python/.model-ok" "$control" || delegate "$@"
+    model=$(/bin/cat "$control/model.valid")
+else   # the two files are the same bytes iff both read to their end without meeting a NUL (read -d '' answers 0 at a NUL, 1 at the end) and are equal
+    IFS= read -r -d '' model 2>/dev/null < "$control/model.valid"; copy=$?
+    IFS= read -r -d '' now 2>/dev/null < "$control/model.json"; live=$?
+    if [ "$copy" -ne 1 ] || [ "$live" -ne 1 ] || [ "$now" != "$model" ]; then
+        "$FIXTURE_ROOT/bin/.python/.model-ok" "$control" || delegate "$@"
+        model=; IFS= read -r -d '' model < "$control/model.valid" || :
+    fi
 fi
-model=
-IFS= read -r model < "$control/model.valid" || :
 [ -n "$model" ] || delegate "$@"
 case "$name" in
     stat)
@@ -277,6 +318,113 @@ case "$name" in
             -f) case "$2" in '%u:%Lp:%l'|'%d:%i:%z:%m'|'%d:%i') [ "$#" -eq 3 ] || delegate "$@" ;; '%d:%i:%z:%m:%u:%Lp:%l') ;; *) delegate "$@" ;; esac ;;
             *) delegate "$@" ;;
         esac ;;
+    uname)
+        [ "$#" -eq 1 ] && [ "$1" = -s ] || delegate "$@"
+        platform=${model#'{"platform": "'}
+        [ "$platform" != "$model" ] || delegate "$@"
+        platform=${platform%%\"*}
+        case "$platform" in ''|*[!A-Za-z0-9._-]*) delegate "$@" ;; esac
+        printf '%s\n' "$name" >> "$FIXTURE_ROOT/control/spawns.log"
+        printf '%s\n' "$platform"; exit 0 ;;
+    plutil)
+        # `plutil -extract Label|EnvironmentVariables.HERDR_RELAY_ENV raw -o - FILE` on a definition that is, byte for byte, plistlib's
+        # dump of {Label, EnvironmentVariables: {HERDR_RELAY_ENV}} (the template is plistlib's own, cut at the two values by install_stub):
+        # the values are cut out of the file, the template is REBUILT around them and `cmp` proves the file is exactly that text.
+        case "$model" in *decode-fail*|*label-malformed-output*) delegate "$@" ;; esac
+        [ "$#" -eq 6 ] && [ "$1" = -extract ] || delegate "$@"
+        [ "$2" = Label ] || [ "$2" = EnvironmentVariables.HERDR_RELAY_ENV ] || delegate "$@"
+        [ "$3:$4:$5" = raw:-o:- ] && [ -f "$6" ] && [ -r "$6" ] || delegate "$@"
+        t1='@T1@'; t2='@T2@'; t3='@T3@'; c=
+        while IFS= read -r line; do c=$c$line'
+'; done < "$6"
+        v=${c#"$t1"}; one=${v%%"$t2"*}; v=${v#*"$t2"}; two=${v%%"$t3"*}
+        case "$one$two" in ''|*[!A-Za-z0-9._/+=@:,~%-]*) delegate "$@" ;; esac
+        printf '%s' "$t1$one$t2$two$t3" > "$control/plist.expect"
+        /usr/bin/cmp -s "$6" "$control/plist.expect" || delegate "$@"
+        printf '%s\n' "$name" >> "$control/spawns.log"
+        if [ "$2" = @FIRST@ ]; then printf '%s\n' "$one"; else printf '%s\n' "$two"; fi; exit 0 ;;
+    systemctl|launchctl)
+        # The canonical two-label head is parsed here and REBUILT from the parsed values: a text that is not exactly the rebuilt
+        # head, or whose head holds a backslash (any JSON escape), is the adapter's. Whatever follows the head stays opaque ($rest).
+        build() {
+            XA=; [ -z "$CA" ] || XA=', "configuration_queries": '$CA; XB=; [ -z "$CB" ] || XB=', "configuration_queries": '$CB
+            head='{"platform": "'$P'", "files": {"'$LA'": "'$FA'", "'$LB'": "'$FB'"}, "fault": "'$X'", "fault_label": "'$FL'", "route_status": '$R', "states": {"'$LA'": {"state": "'$SA'", "enabled": '$EA', "queries": '$QA$XA'}, "'$LB'": {"state": "'$SB'", "enabled": '$EB', "queries": '$QB$XB'}}'
+        }
+        close='}'; cq=', "configuration_queries": '; CA=; CB=
+        r=${model#'{"platform": "'}; P=${r%%\"*}
+        r=${r#*'", "files": {"'}; LA=${r%%\"*}; r=${r#*'": "'}; FA=${r%%\"*}
+        r=${r#*'", "'}; LB=${r%%\"*}; r=${r#*'": "'}; FB=${r%%\"*}
+        r=${r#*'"}, "fault": "'}; X=${r%%\"*}; r=${r#*'", "fault_label": "'}; FL=${r%%\"*}
+        r=${r#*'", "route_status": '}; R=${r%%,*}
+        r=${r#*', "states": {"'}; r=${r#*'": {"state": "'}; SA=${r%%\"*}
+        r=${r#*'", "enabled": '}; EA=${r%%,*}; r=${r#*', "queries": '}; QA=${r%%"$close"*}
+        case "$QA" in *"$cq"*) CA=${QA#*"$cq"}; QA=${QA%%,*} ;; esac
+        r=${r#*'}, "'}; r=${r#*'": {"state": "'}; SB=${r%%\"*}
+        r=${r#*'", "enabled": '}; EB=${r%%,*}; r=${r#*', "queries": '}; QB=${r%%"$close"*}
+        case "$QB" in *"$cq"*) CB=${QB#*"$cq"}; QB=${QB%%,*} ;; esac
+        build
+        case "$head" in *\\*) delegate "$@" ;; esac
+        case "$model" in "$head"*) rest=${model#"$head"} ;; *) delegate "$@" ;; esac
+        for v in "$EA" "$EB"; do case "$v" in true|false) ;; *) delegate "$@" ;; esac; done
+        for v in "$QA" "$QB"; do case "$v" in ''|*[!0-9]*) delegate "$@" ;; esac; done
+        for v in "$CA" "$CB"; do case "$v" in *[!0-9]*) delegate "$@" ;; esac; done
+        L=; op=
+        if [ "$name" = systemctl ]; then
+            L=$3
+            case "$#:$2" in
+                7:show) [ "$4" = --property=LoadState ] && [ "$5" = --property=ActiveState ] && [ "$6" = --property=UnitFileState ] && [ "$7" = --no-pager ] && op=observe ;;
+                12:show) [ "$4" = --all ] && [ "$5" = --property=Id ] && [ "$6" = --property=LoadState ] && [ "$7" = --property=ActiveState ] && [ "$8" = --property=UnitFileState ] &&
+                         [ "$9" = --property=FragmentPath ] && [ "${10}" = --property=DropInPaths ] && [ "${11}" = --property=NeedDaemonReload ] && [ "${12}" = --no-pager ] && op=config ;;
+                3:stop|3:disable) op=$2 ;;
+                2:daemon-reload) op=reload ;;
+            esac
+        else
+            case "$1:$2" in
+                print:"$domain") op=domain ;;
+                print-disabled:"$domain") op=disabled ;;
+                print:"$domain"/*|bootout:"$domain"/*|disable:"$domain"/*) L=${2#"$domain/"}; op=$1; [ "$op" != print ] || op=observe ;;
+            esac
+        fi
+        [ -n "$op" ] || delegate "$@"
+        # Nothing may apply to the call: no fault at all for the calls on no label, none of this label's own otherwise (a fault of
+        # the other label does not touch it), no effective-configuration extras for a configuration query, no native_done gate for
+        # an observation under a FULL adapter (full=1). Every doubt is the adapter's.
+        case "$op" in
+            domain|disabled|reload) [ -z "$X" ] || delegate "$@" ;;
+            *) [ -z "$X" ] || [ "$FL" != "$L" ] || delegate "$@"
+               if [ "$L" = "$LA" ]; then S=$SA; E=$EA; F=$FA; Q=$QA; C=$CA; elif [ "$L" = "$LB" ]; then S=$SB; E=$EB; F=$FB; Q=$QB; C=$CB; else delegate "$@"; fi ;;
+        esac
+        case "$op:$full:$rest" in observe:1:*native_done*) delegate "$@" ;; config:*:*overlays*|config:*:*metadata_overrides*|config:*:*configuration_drift*) delegate "$@" ;; esac
+        printf '%s\n' "$name" >> "$control/spawns.log"
+        event=
+        case "$op" in
+            domain) printf '%s = {}\n' "$domain"; exit 0 ;;
+            disabled)
+                printf 'disabled services = {\n'
+                for row in "$LA:$EA" "$LB:$EB"; do if [ "${row#*:}" = true ]; then v=false; else v=true; fi; printf '    "%s" => %s\n' "${row%:*}" "$v"; done
+                printf '}\n'; exit 0 ;;
+            reload) printf '{"op": "reload", "label": ""}\n' >> "$control/events.jsonl"; exit 0 ;;
+            observe) Q=$((Q + 1)); event='{"op": "observe", "label": "'$L'", "state": "'$S'", "enabled": '$E'}' ;;
+            config) C=$((${C:-0} + 1)); event='{"op": "configuration-observe", "label": "'$L'", "query": '$C'}' ;;
+            disable) E=false; event='{"op": "disable", "label": "'$L'"}' ;;
+            *) if [ "$P" = Linux ]; then S=inactive; else S=absent; fi; event='{"op": "'$op'", "label": "'$L'"}' ;;
+        esac
+        if [ "$L" = "$LA" ]; then SA=$S; EA=$E; QA=$Q; CA=$C; else SB=$S; EB=$E; QB=$Q; CB=$C; fi
+        build
+        printf '%s' "$head$rest" > "$control/model.json"
+        # the copy the other fast stubs trust follows, unless a FULL adapter's stat call would now ARM this model
+        if [ "$full" = 0 ] || [ "$op" != observe ] || [ "$QA" -lt 4 ] || [ "$QB" -lt 4 ] || [ -e "$FA" ] || [ -e "$FB" ]; then printf '%s' "$head$rest" > "$control/model.valid"; fi
+        printf '%s\n' "$event" >> "$control/events.jsonl"
+        if [ -f "$F" ] || [ "$S" != absent ]; then loaded=loaded; if [ "$E" = true ]; then unit=enabled; else unit=disabled; fi; frag=$F; else loaded=not-found; unit=; frag=; fi
+        if [ "$S" = absent ]; then active=inactive; else active=$S; fi
+        case "$op:$name" in
+            observe:systemctl) printf 'LoadState=%s\nActiveState=%s\nUnitFileState=%s\n' "$loaded" "$active" "$unit" ;;
+            config:*) printf 'Id=%s\nLoadState=%s\nActiveState=%s\nUnitFileState=%s\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\n' "$L" "$loaded" "$active" "$unit" "$frag" ;;
+            observe:launchctl)
+                if [ "$S" = absent ]; then printf 'Could not find service "%s" in domain for user gui: %s\n' "$L" "${domain#gui/}"; exit 113; fi
+                printf '%s/%s = {\n    state = waiting\n}\n' "$domain" "$L" ;;
+        esac
+        exit 0 ;;
     *)
         case "$model" in *read-fail*) delegate "$@" ;; esac ;;
 esac
@@ -286,8 +434,8 @@ exec "/usr/bin/$name" "$@"
 
 
 def install_stub(bin_dir, name, adapter, fast=None, model_shape='True'):
-    # Every stub is the Python adapter, except that stat, head and wc get FAST_STUB in front of it,
-    # with the unchanged adapter and the MODEL_CHECK validator beside it in bin/.python. model_shape is
+    # Every stub is the Python adapter, except that the FAST_TOOLS get FAST_STUB in front of it,
+    # with the adapter and the MODEL_CHECK validator beside it in bin/.python. model_shape is
     # one Python expression of `model` (a decoded JSON object) that must hold for the validator to cache a
     # model: it states what this adapter dereferences for stat, head and wc beyond 'fault'. 'True' for
     # ADAPTER; the FULL_ADAPTER of tests/test_uninstall.sh passes the structure of files, shared and
@@ -295,15 +443,23 @@ def install_stub(bin_dir, name, adapter, fast=None, model_shape='True'):
     # fails as before instead of the stub running the real tool. A cached control/model.valid was
     # validated by the previously installed validator, so it is dropped.
     fast = name in FAST_TOOLS if fast is None else fast
-    python_stub = '#!' + sys.executable + '\n' + adapter
+    assert 'def shape(model): return True' in MODEL_CHECK and '\n' not in model_shape
+    # -S: the adapters import only the standard library, so the interpreter skips the site module (about 6 ms of 29 locally).
+    # Every adapter bakes the same shape check into the save() that keeps control/model.valid in step.
+    python_stub = '#!' + sys.executable + ' -S\n' + adapter.replace('def shape(model): return True', 'def shape(model): return ' + model_shape, 1)
     if fast:
         hidden = bin_dir / '.python'; hidden.mkdir(mode=0o700, exist_ok=True)
         (hidden / name).write_text(python_stub); (hidden / name).chmod(0o700)
-        assert 'def shape(model): return True' in MODEL_CHECK and '\n' not in model_shape
         check = MODEL_CHECK.replace('def shape(model): return True', 'def shape(model): return ' + model_shape, 1)
-        (hidden / '.model-ok').write_text('#!' + sys.executable + '\n' + check); (hidden / '.model-ok').chmod(0o700)
+        if not (hidden / '.model-ok').exists() or (hidden / '.model-ok').read_text() != '#!' + sys.executable + ' -S\n' + check:   # once per bin directory
+            (hidden / '.model-ok').write_text('#!' + sys.executable + ' -S\n' + check); (hidden / '.model-ok').chmod(0o700)
         (bin_dir.parent / 'control' / 'model.valid').unlink(missing_ok=True)
-        (bin_dir / name).write_text(FAST_STUB.replace('#!/bin/sh', '#!/bin/dash', 1) if os.access('/bin/dash', os.X_OK) else FAST_STUB); (bin_dir / name).chmod(0o700)
+        dumped = plistlib.dumps({'Label': '@L@', 'EnvironmentVariables': {'HERDR_RELAY_ENV': '@E@'}}).decode()   # plistlib sorts the keys: its order is the template's
+        template = dumped.replace('@L@', '\0').replace('@E@', '\0').split('\0')
+        stub = FAST_STUB.replace('@DOMAIN@', 'gui/%d' % os.getuid()).replace('@FULL@', '0' if model_shape == 'True' else '1')
+        stub = stub.replace('@FIRST@', 'Label' if dumped.index('@L@') < dumped.index('@E@') else 'EnvironmentVariables.HERDR_RELAY_ENV')
+        for number, text in enumerate(template, 1): stub = stub.replace('@T%d@' % number, text)
+        (bin_dir / name).write_text(stub); (bin_dir / name).chmod(0o700)
     else:
         (bin_dir / name).write_text(python_stub); (bin_dir / name).chmod(0o700)
 
@@ -490,6 +646,10 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
     # by the validator and delegated, so the stub never answers from raw text where the adapter decodes
     # a fault; a reordered but canonical model may take the fast path and only has to agree.
     adapter = ADAPTER if adapter is None else adapter
+    def scrub(data, root):
+        # A traceback names its script: the delegated copy sits in bin/.python, the other in bin, each
+        # under its own root. Scrubbed, the two tracebacks are the same text.
+        return data.replace(str(root).encode(), b'ROOT').replace(b'/bin/.python/', b'/bin/').replace(b'/usr/bin/', b'')
     with tempfile.TemporaryDirectory(prefix='herdr-fast-stub-') as temporary:
         base = Path(temporary).resolve()
         subject = base / 'subject.txt'; subject.write_text('fast stub subject\n'); subject.chmod(0o600)
@@ -518,10 +678,30 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
         cases += [('stat', identity, dict(plain, identity_aliases={str(subject): str(alias)}))]
         for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)])):
             cases += [(tool, args, plain), (tool, args, dict(plain, fault='read-fail'))]
+        # uname answers the decoded model's platform for exactly `-s`; the adapter refuses every other argument form and ignores faults.
+        cases += [('uname', args, plain) for args in (['-s'], ['-a'], [], ['-s', '-s'], ['-m'], ['-s', 'extra'], ['--', '-s'])]
+        cases += [('uname', ['-s'], dict(plain, platform=value)) for value in ('Darwin', 'Unsupported')]
+        cases += [('uname', ['-s'], dict(plain, fault='read-fail'))]
         if settled is not plain: cases += [(tool, args, settled) for tool, args, model in cases if model is plain]
+        cases += [(tool, args, dict(settled, extra='X' * 70000)) for tool, args in (('stat', [flag, formats[0], str(subject)]), ('uname', ['-s']), ('head', ['-n', '1', str(subject)]))]  # read with cat
+        # plutil: a definition that is exactly plistlib's dump of the two values is answered by the stub, every other file, key, argument
+        # form and fault is the adapter's (the stub cuts the values out, rebuilds the dump around them and proves it with cmp).
+        plists = base / 'plists'; plists.mkdir()
+        def dump(label='com.herdr-mobile-relay.service', env='/p/relay.env', **options): return plistlib.dumps({'Label': label, 'EnvironmentVariables': {'HERDR_RELAY_ENV': env}}, **options)
+        good = dump()
+        variants = [good, dump(label='com herdr'), dump(env='/a&b'), dump(env='/p/\u00e9'), good[:-1], good + b'\n', good + b'\0', good + b' ', b'', b'not a plist', dump(fmt=plistlib.FMT_BINARY),
+                    plistlib.dumps({'Label': 'com.herdr-mobile-relay.service'}), plistlib.dumps({'Label': 7, 'EnvironmentVariables': {'HERDR_RELAY_ENV': '/x'}}),
+                    plistlib.dumps({'EnvironmentVariables': {'HERDR_RELAY_ENV': '/p/relay.env'}, 'Label': 'com.herdr-mobile-relay.service'}), dump(label='\u00e9')]
+        for number, data in enumerate(variants): (plists / str(number)).write_bytes(data)
+        extract = ['-extract', 'Label', 'raw', '-o', '-']
+        cases += [('plutil', ['-extract', key, 'raw', '-o', '-', str(plists / str(number))], settled) for number in range(len(variants)) for key in ('Label', 'EnvironmentVariables.HERDR_RELAY_ENV')[:2 if number in (0, 13) else 1]]
+        cases += [('plutil', extract + [str(plists / '0')], dict(settled, fault=fault)) for fault in ('decode-fail', 'label-decode-fail', 'label-malformed-output')]
+        cases += [('plutil', args, settled) for args in (['-extract', 'Other', 'raw', '-o', '-', str(plists / '0')], ['-extract', 'Label', 'xml1', '-o', '-', str(plists / '0')], extract,
+                                                         extract + [str(plists / 'missing')], extract + [str(plists)], extract + [str(plists / '0'), 'extra'],
+                                                         ['-remove', 'Label', 'raw', '-o', '-', str(plists / '0')])]
         broken_models = (None, '', 'not json', '{broken}', '{not json}', '{"fault": "",}',
                          '{"fault": ""}{"fault": ""}', '{"fault": ""}\ntrailing', json.dumps(plain) + '\0')
-        for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)]), ('stat', [flag, formats[0], str(subject)])):
+        for tool, args in (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)]), ('stat', [flag, formats[0], str(subject)]), ('uname', ['-s'])):
             cases += [(tool, args, text) for text in broken_models]
         for index, (tool, args, model) in enumerate(cases):
             results = []
@@ -536,25 +716,28 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
                 def read(name):
                     try: return (root / 'control' / name).read_text()
                     except OSError: return ''
-                results.append((done.returncode, done.stdout, done.stderr.replace(b'/usr/bin/', b''), read('events.jsonl'), read('spawns.log'), read('model.json')))
+                results.append((done.returncode, done.stdout, scrub(done.stderr, root), read('events.jsonl'), read('spawns.log'), read('model.json')))
             if broken:
                 for status, output, _, events, spawns, _ in results:
                     assert status != 0 and output == b'' and events == '' and spawns == '', 'broken control model did not fail closed for %s: %r' % (tool, results)
                 continue
             assert results[0] == results[1], 'fast stub differs from the Python adapter for %s %r: %r != %r' % (tool, args, results[0], results[1])
-        stale = (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)]), ('stat', [flag, formats[0], str(subject)]))
+        stale = (('head', ['-n', '1', str(subject)]), ('wc', ['-c', str(subject)]), ('stat', [flag, formats[0], str(subject)]), ('uname', ['-s']))
         for tool, args in stale:
-            for kind in ('broken', 'nul', 'fault'):
+            for kind in ('broken', 'nul', 'fault', 'big'):
                 # 'fault' is a different VALID model: the stub must re-validate it and delegate, so the adapter
-                # records its own spawn before it fails. The other two abort before any spawn record.
+                # records its own spawn before it fails. The other two abort before any spawn record. 'big' is 'fault' on a model of
+                # more than 4096 bytes, which the stub compares with cmp instead of in bash.
+                initial = dict(settled, extra='X' * 70000) if kind == 'big' else settled
                 if kind == 'broken': rewritten, spawned = b'{broken}', 1
                 elif kind == 'nul': rewritten, spawned = json.dumps(settled).encode() + b'\x00', 1
-                else: rewritten, spawned = json.dumps(dict(settled, fault='stat-fail' if tool == 'stat' else 'read-fail')).encode(), 2
+                elif tool == 'uname': rewritten, spawned = json.dumps({k: v for k, v in initial.items() if k != 'platform'}).encode(), 2  # uname ignores faults
+                else: rewritten, spawned = json.dumps(dict(initial, fault='stat-fail' if tool == 'stat' else 'read-fail')).encode(), 2
                 results = []
                 for fast in (True, False):
                     root = base / ('stale-%s-%s-%s' % (tool, kind, 'fast' if fast else 'python'))
                     (root / 'control').mkdir(parents=True); (root / 'bin').mkdir()
-                    model_path = root / 'control' / 'model.json'; model_path.write_text(json.dumps(settled))
+                    model_path = root / 'control' / 'model.json'; model_path.write_text(json.dumps(initial))
                     install_stub(root / 'bin', tool, adapter, fast=fast, model_shape=model_shape)
                     calls = []
                     for data in (None, rewritten):
@@ -603,12 +786,23 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
                         (tool, args, json.dumps(dict(reversed(list(settled.items())))), 'same'),
                         (tool, args, json.dumps(dict(reversed(list(dict(settled, fault=fault).items())))), 'fail'),
                         (tool, args, '{"fault": ""}', 'crash' if strict else 'same')]
+        # uname: the platform is read from the raw text only when it is the canonical first key holding a plain token, and decoded
+        # by the adapter otherwise (a value with a quote, backslash, space, newline or non-ASCII, a number, null, a list, a different
+        # key order, an escaped spelling, a duplicate key); a model without a platform fails in both after the spawn record.
+        def named(value): return json.dumps(dict(settled, platform=value))
+        spelled += [('uname', ['-s'], text, 'same') for text in (
+            [named(value) for value in ('Linux', 'Darwin', 'Unsupported', '', 'a b', 'Lin"ux', 'Lin\\ux', 'x\ny', '\u00dcn\u00efx', 5, None, ['Linux'])]
+            + [canonical.replace('"Linux"', '"Lin\\u0075x"'), canonical[:-1] + ', "platform": "Darwin"}', ' ' + canonical,
+               json.dumps(settled, separators=(',', ':')), json.dumps(dict(reversed(list(settled.items())))),
+               json.dumps(dict(settled, fault='read-fail')), json.dumps(dict(settled, fault='stat-fail'))])]
+        spelled += [('uname', ['-s'], json.dumps({k: v for k, v in settled.items() if k != 'platform'}), 'fail')]
         # Structures the FULL_ADAPTER prefix dereferences on every call. With the shape check in force the
         # prefix raises before its own spawn record ('crash') and the stub must delegate, not run the tool;
         # for the plain ADAPTER they are irrelevant and both run the real tool. A shared object of the wrong
         # type is delegated conservatively although the prefix does not dereference it for these tools,
         # and a realistic non-empty model must still be accepted.
-        for tool, args in tools:
+        every = tools + (('uname', ['-s']),)  # uname takes the same shape check and the same arming rule
+        for tool, args in every:
             spelled += [(tool, args, json.dumps(model), 'crash' if strict else 'same') for model in (
                             dict(plain, files=[]), dict(plain, states={'fixture': {}}),
                             dict(plain, states={'fixture': {'queries': '4'}}), dict(plain, files={'fixture': 5}))]
@@ -623,13 +817,10 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
                 path = str(subject) if present else str(base / 'absent.service')
                 return json.dumps(dict(plain, files={'fixture.service': path}, **extra,
                                        states={'fixture.service': {'state': 'absent', 'enabled': False, 'queries': queries}}))
-            for tool, args in tools:
+            for tool, args in every:
                 spelled += [(tool, args, arming(), 'armed')]
-            spelled += [('stat', stat_args, text, 'untouched') for text in (arming(3), arming(present=True), arming(native_done=True))]
-        def scrub(data, root):
-            # A traceback names its script: the delegated copy sits in bin/.python, the other in bin, each
-            # under its own root. Scrubbed, the two tracebacks are the same text.
-            return data.replace(str(root).encode(), b'ROOT').replace(b'/bin/.python/', b'/bin/').replace(b'/usr/bin/', b'')
+            spelled += [(tool, args, text, 'untouched') for tool, args in (('stat', stat_args), ('uname', ['-s']))
+                        for text in (arming(3), arming(present=True), arming(native_done=True))]
         real = {}
         def real_output(tool, args):
             if (tool, tuple(args)) not in real:
@@ -661,7 +852,98 @@ def fast_stub_equivalence_control(adapter=None, model_shape='True'):
             if expect == 'differs': assert results[0][1] != real_output(tool, args), 'the real %s answered where the adapter answers differently, for %s' % (tool, text)
             if expect == 'armed': assert all(json.loads(r[5]).get('native_done') is True for r in results), 'native_done was not armed and stored for %s on %s: %r' % (tool, text, results)
             if expect == 'untouched': assert all(r[5] == text for r in results), 'model.json changed for %s on %s: %r' % (tool, text, results)
-    print('fast stat/head/wc stubs match the Python adapter on %d cases' % (len(cases) + 3 * len(stale) + len(spelled)), file=sys.stderr, flush=True)
+    print('fast stat/head/wc/uname/plutil stubs match the Python adapter on %d cases' % (len(cases) + 4 * len(stale) + len(spelled)), file=sys.stderr, flush=True)
+    model_stub_control(adapter, model_shape)
+
+
+def model_stub_control(adapter, model_shape):
+    # Hosted-only control for the systemctl/launchctl calls the sh stub answers itself (observation, configuration query, stop,
+    # disable, bootout, daemon-reload, launchctl print DOMAIN and print-disabled DOMAIN). Each model gets a CHAIN of calls run
+    # through the stub and through the adapter alone, from the same bytes; after EVERY call stdout, status, stderr, events, spawn
+    # tally and model.json must be equal (the chain makes each call see the state the last one left), and a model.valid either
+    # implementation leaves (the stub, or the adapter's save()) must be one MODEL_CHECK accepts, never an armable model of a FULL
+    # adapter. Delegations are counted by a wrapper around the adapter beside the stub: a plain model delegates only the chain's
+    # deliberately bad calls (a dead fast path would pass everything else), while a fault of a label,
+    # effective-configuration extras, a native_done gate, an escape, a non-canonical text or any shape but the canonical two labels
+    # must delegate what it touches. The adapter text the stub mirrors is pinned by digest: edit it and this fails until the stub is
+    # re-derived.
+    assert hashlib.sha256(adapter.encode()).hexdigest() in MIRRORED, 'the adapter the sh stub mirrors has changed (digest %s): re-derive FAST_STUB, then update MIRRORED' % hashlib.sha256(adapter.encode()).hexdigest()
+    full = model_shape != 'True'; domain = 'gui/%d' % os.getuid(); steps = 0
+    with tempfile.TemporaryDirectory(prefix='herdr-model-stub-') as temporary:
+        base = Path(temporary).resolve(); exists = base / 'exists.txt'; exists.write_text('exists\n')
+        for platform in ('Linux', 'Darwin'):
+            labels = ['herdr-mobile-relay.service', 'herdr-remote.service'] if platform == 'Linux' else ['com.herdr-mobile-relay.service', 'com.herdr-remote.service']
+            on, off = ('active', 'inactive') if platform == 'Linux' else ('loaded', 'absent')
+            def make(states=((on, True), (on, True)), queries=(0, 0), present=(True, True), fault='', fault_label=1, **extra):
+                files = {label: str(exists if here else base / 'absent' / label) for label, here in zip(labels, present)}
+                model = dict(platform=platform, files=files, fault=fault, fault_label=labels[fault_label], route_status=0,
+                             states={label: dict(state=st, enabled=en, queries=q) for label, (st, en), q in zip(labels, states, queries)})
+                if full: model['shared'] = dict(release='/r', config='/c', cache='/k', link='/l')
+                model.update(extra); return model
+            if platform == 'Linux':
+                shows = [['--user', 'show', label, '--property=LoadState', '--property=ActiveState', '--property=UnitFileState', '--no-pager'] for label in labels]
+                alls = [['--user', 'show', label, '--all', '--property=Id', '--property=LoadState', '--property=ActiveState', '--property=UnitFileState', '--property=FragmentPath',
+                         '--property=DropInPaths', '--property=NeedDaemonReload', '--no-pager'] for label in labels]
+                good = [shows[0], shows[1], alls[0], alls[1], ['--user', 'stop', labels[1]], ['--user', 'disable', labels[0]], ['--user', 'daemon-reload'], shows[0], shows[1]]
+                bad = [['--user', 'show', labels[0]], ['--user', 'show', 'other.service'] + shows[0][3:]]
+                cross = [('launchctl', ['bootout', domain + '/' + labels[1]]), ('launchctl', ['print', domain + '/' + labels[0]])]
+            else:
+                good = [['print', domain + '/' + labels[0]], ['print', domain + '/' + labels[1]], ['print', domain], ['print-disabled', domain], ['bootout', domain + '/' + labels[1]],
+                        ['disable', domain + '/' + labels[0]], ['print', domain + '/' + labels[0]], ['print', domain + '/' + labels[1]]]
+                bad = [['print', 'gui/0'], ['disable', domain], ['print', domain + '/']]
+                cross = [('systemctl', ['--user', 'stop', labels[1]]), ('systemctl', ['--user', 'show', labels[0], '--property=LoadState', '--property=ActiveState', '--property=UnitFileState', '--no-pager'])]
+            tool = 'systemctl' if platform == 'Linux' else 'launchctl'
+            chain = [(tool, args) for args in good + bad]
+            def pick(*indexes): return [chain[i] for i in indexes]
+            odd = dict(reversed(list(make().items()))); third = make(); third['states']['x.service'] = dict(state=on, enabled=True, queries=0)
+            single = make(); single['states'].popitem(); queued = make(); queued['states'][labels[1]].update(remaining=2, desired=off)
+            counted = make(); [state.update(configuration_queries=1) for state in counted['states'].values()]; extras = [3] if platform == 'Linux' else []
+            # (model or its text, delegated calls expected: 0 = only the deliberately bad ones of the full chain, 1 = more than those, calls)
+            models = [(make(), 0, chain), (make(), 0, cross), (make(states=((off, False), (off, False)), present=(False, False), queries=(3, 3)), 1 if full else 0, pick(0, 1, 0, 1)),  # a FULL adapter ARMS it at (4, 4)
+                      (make(queries=(3, 4), present=(False, False), states=((on, True), (off, False))), 1 if full else 0, pick(0, 1, 4, 0)), (counted, 0, pick(*([2, 3, 2] if extras else [0, 4]))),
+                      (make(fault='query-fail', fault_label=0), 1, pick(0, 1, 2, 3)), (make(fault='stop-noop'), 1, pick(4, 1, 0)),
+                      (make(fault='lifecycle-output', lifecycle_seam='systemd', lifecycle_text='X' * 70000, lifecycle_status=0), 1, pick(0, 1, 2)),
+                      (make(lifecycle_text='X' * 70000), 0, pick(0, 1, 2, 3)),   # a big model is read with cat
+                      (make(fault='domain-fail' if platform == 'Darwin' else 'reload-fail'), 1, pick(0, 2, 3, 6)), (make(fault='disabled-missing', fault_label=0), 1, pick(3, 0, 1)),
+                      (make(native_done=True, late_label=labels[0], late_at=1, late_kind='active'), 1 if full else 0, pick(0, 1, 4)),
+                      (odd, 1, pick(0, 1, 2)), (third, 1, pick(0, 1, 2)), (single, 1, pick(0, 1, 2)), (queued, 1, pick(0, 1, 2)), (make(platform='Odd\\x'), 1, pick(0, 1, 2)),
+                      (json.dumps(make()).replace(', ', ','), 1, pick(0, 1)), (json.dumps(make()).replace('"fault": ""', '"fault":  ""'), 1, pick(0, 1))]
+            if platform == 'Linux':   # effective-configuration extras are read by a systemd configuration query only
+                models += [(make(overlays={labels[0]: '/o'}), 1, pick(2, 3, 0)), (make(metadata_overrides={labels[1]: dict(FragmentPath='')}), 1, pick(2, 3, 0)),
+                           (make(configuration_drift_label=labels[0], configuration_drift_at=2, configuration_drift=dict(NeedDaemonReload='yes')), 1, pick(2, 3, 0))]
+            roots = {}; checked = {}   # one fixture per implementation and platform; each model resets the control files
+            for fast in (True, False):
+                root = roots[fast] = base / ('chain-%s-%s' % (platform, 'fast' if fast else 'python')); (root / 'control').mkdir(parents=True); (root / 'bin').mkdir()
+                for name in ('systemctl', 'launchctl'): install_stub(root / 'bin', name, adapter, fast=fast, model_shape=model_shape)
+                install_stub(root / 'bin', 'uname', adapter, model_shape=model_shape)   # its .python/.model-ok is the validator the soundness check below runs
+                for name in ('systemctl', 'launchctl') if fast else ():   # the adapter keeps its name (it reads argv[0]) one directory down
+                    hidden = root / 'bin' / '.python'; (hidden / 'counted').mkdir(exist_ok=True); (hidden / name).rename(hidden / 'counted' / name)
+                    (hidden / name).write_text('#!/bin/sh\nprintf d >> "$FIXTURE_ROOT/control/delegated"\nexec "$FIXTURE_ROOT/bin/.python/counted/' + name + '" "$@"\n'); (hidden / name).chmod(0o700)
+            for index, (model, delegating, calls) in enumerate(models):
+                results = []
+                for fast in (True, False):
+                    root = roots[fast]; hidden = root / 'bin' / '.python'
+                    for name in ('events.jsonl', 'spawns.log', 'delegated', 'model.valid'): (root / 'control' / name).unlink(missing_ok=True)
+                    checked.pop(fast, None)
+                    (root / 'control' / 'model.json').write_text(model if isinstance(model, str) else json.dumps(model))
+                    def read(name):
+                        try: return (root / 'control' / name).read_text()
+                        except OSError: return ''
+                    run = []
+                    for name, args in calls:
+                        done = subprocess.run([str(root / 'bin' / name)] + args, env={'FIXTURE_ROOT': str(root), 'PATH': '/usr/bin:/bin'}, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+                        run.append((done.returncode, done.stdout, done.stderr.replace(str(root).encode(), b'ROOT').replace(b'/bin/.python/counted/', b'/bin/').replace(b'/bin/.python/', b'/bin/'),
+                                    read('events.jsonl'), read('spawns.log'), read('model.json')))
+                        if read('model.valid') == read('model.json') != '' and read('model.json') != checked.get(fast):   # a copy left by the stub, or by the adapter's own save(), is trusted by the others
+                            checked[fast] = read('model.json')
+                            assert subprocess.run([str(hidden / '.model-ok'), str(root / 'control')], stdin=subprocess.DEVNULL, timeout=30).returncode == 0, 'unsound model.valid after %s %r' % (name, args)
+                    results.append((run, len(read('delegated'))))
+                steps += len(calls)
+                for step, (a, b) in enumerate(zip(results[0][0], results[1][0])):
+                    assert a == b, 'the sh stub differs from the adapter on %s model %d call %d %r: %r != %r' % (platform, index, step, calls[step], a, b)
+                expected = len(bad) if len(calls) == len(chain) else 0
+                assert (results[0][1] > expected) if delegating else (results[0][1] == expected), '%s model %d: %d calls delegated, %d expected%s' % (platform, index, results[0][1], expected, ' or more' if delegating else '')
+    print('sh answers for systemctl/launchctl match the adapter on %d chained calls' % steps, file=sys.stderr, flush=True)
 
 
 def serialized_environment(env_file: Path, quoting: str, common: Path, environment: dict) -> str:
