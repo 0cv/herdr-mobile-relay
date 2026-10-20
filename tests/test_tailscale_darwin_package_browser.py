@@ -128,6 +128,8 @@ ALLOWED = (
     "internal/doctor/bundle.go",
     "internal/doctor/bundle_test.go",
     "internal/doctor/config.go",
+    "internal/doctor/config_acl_darwin.go",
+    "internal/doctor/config_acl_other.go",
     "internal/doctor/config_test.go",
     "internal/doctor/doctor.go",
     "internal/doctor/doctor_test.go",

@@ -2,6 +2,7 @@
 package doctor
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -95,16 +96,23 @@ func refusedConfig(code ConfigCode) Inspection {
 // ReadConfig reads only the explicitly selected file. No HOME/env merge,
 // directory creation, chmod, sourcing, token-file dereference or store opening.
 // Directory traversal is no-follow, and special files are refused before read.
-// Darwin acquisition is unavailable because mode bits do not account for ACL
-// grants. OS file reads can still stall on a noncooperative filesystem; this is
-// a byte and scheduling bound, not a hard filesystem wall-clock bound.
+// On Darwin, mode bits alone are insufficient: the opened descriptors' ACL
+// evidence must prove that nothing but the owner and root can write the file or
+// any directory above it, before and after the read. OS file reads can still
+// stall on a noncooperative filesystem; this is a byte and scheduling bound,
+// not a hard filesystem wall-clock bound.
 func ReadConfig(path string) Inspection {
 	return readConfig(path, os.Geteuid(), func(r io.Reader) ([]byte, error) {
 		return io.ReadAll(io.LimitReader(r, MaxConfigBytes+1))
 	})
 }
 
-func openParent(path string) (int, string, error) {
+func openParent(path string) (int, string, error) { return openParentWalk(path, nil) }
+
+// openParentWalk is openParent plus an optional inspection of every directory
+// descriptor on the no-follow walk (the root, each ancestor and the parent),
+// made on the opened descriptor before the walk descends further.
+func openParentWalk(path string, visit func(int) error) (int, string, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || len(path) > 4096 {
 		return -1, "", errors.New("invalid selection")
 	}
@@ -117,6 +125,12 @@ func openParent(path string) (int, string, error) {
 	if err != nil {
 		return -1, "", err
 	}
+	if visit != nil {
+		if err := visit(fd); err != nil {
+			_ = unix.Close(fd)
+			return -1, "", err
+		}
+	}
 	for _, component := range parts[:len(parts)-1] {
 		next, err := unix.Openat(fd, component, flags, 0)
 		_ = unix.Close(fd)
@@ -124,6 +138,12 @@ func openParent(path string) (int, string, error) {
 			return -1, "", err
 		}
 		fd = next
+		if visit != nil {
+			if err := visit(fd); err != nil {
+				_ = unix.Close(fd)
+				return -1, "", err
+			}
+		}
 	}
 	return fd, parts[len(parts)-1], nil
 }
@@ -133,31 +153,241 @@ func privateRegular(st *unix.Stat_t, uid int) bool {
 		st.Mode&0o077 == 0 && st.Mode&0o7000 == 0 && st.Mode&0o400 != 0 && st.Nlink == 1
 }
 
+// Darwin descriptor ACL evidence. The layouts come from the public XNU headers
+// and were confirmed against the bytes a real macOS kernel returns:
+//   - sys/attr.h: fgetattrlist(2) with ATTR_CMN_RETURNED_ATTRS and
+//     ATTR_CMN_EXTENDED_SECURITY returns a u32 length, a 20-byte attribute_set_t
+//     and, only when the object has an ACL, an attrreference (int32 offset from
+//     the reference, u32 length) to a kauth_filesec;
+//   - sys/kauth.h: kauth_filesec is the magic, owner and group GUIDs, entrycount
+//     and flags (44 bytes) followed by entrycount 24-byte kauth_ace (GUID, flags,
+//     rights).
+//
+// An object without an ACL has the security attribute omitted from the returned
+// set; that proves "no ACL" only on a volume that advertises
+// VOL_CAP_INT_EXTENDED_SECURITY. The NOACL entrycount sentinel was never
+// observed on this route and stays unverifiable. A zero-entry ACL (what
+// chmod -a leaves behind) is refused: sys/kauth.h notes that Windows reads an
+// empty ACL as "deny all", so its meaning is not assumed.
+const (
+	darwinReturnedAttrs    = 0x80000000 // ATTR_CMN_RETURNED_ATTRS
+	darwinExtendedSecurity = 0x00400000 // ATTR_CMN_EXTENDED_SECURITY
+	darwinFilesecMagic     = 0x012cc16d // KAUTH_FILESEC_MAGIC
+	darwinFilesecHeader    = 44
+	darwinACESize          = 24
+	darwinMaxACEs          = 128   // KAUTH_ACL_MAX_ENTRIES
+	darwinACEKindMask      = 0xf   // KAUTH_ACE_KINDMASK
+	darwinACEDeny          = 2     // KAUTH_ACE_DENY
+	darwinACEInherit       = 0x1f0 // KAUTH_ACE_INHERITED through KAUTH_ACE_ONLY_INHERIT
+	darwinACLBuffer        = 4096  // length, returned set, reference and 128 entries
+	darwinVolumeLength     = 36    // u32 length, vol_capabilities_attr_t
+	darwinVolumeInterfaces = 8     // capabilities[VOL_CAPABILITIES_INTERFACES]
+	darwinVolumeValid      = 24    // valid[VOL_CAPABILITIES_INTERFACES]
+	darwinVolumeACLBit     = 0x400 // VOL_CAP_INT_EXTENDED_SECURITY
+)
+
+// darwinACL keeps nothing but counts: never a GUID, a right or an identity.
+type darwinACL struct {
+	absent   bool // the kernel omitted the security attribute
+	denyOnly bool // 1..128 entries, every one a DENY entry, no unknown flags
+	entries  int
+	denies   int
+}
+
+// A regular file must have no ACL at all. A directory may also carry a fully
+// parsed deny-only ACL: deny entries remove rights and can grant none.
+func (a darwinACL) fileOK() bool      { return a.absent }
+func (a darwinACL) directoryOK() bool { return a.absent || a.denyOnly }
+
+func parseDarwinSecurity(buf []byte) (darwinACL, error) {
+	bad := errors.New("unverifiable descriptor ACL") // never includes private metadata
+	if len(buf) < 32 {
+		return darwinACL{}, bad
+	}
+	length := int(binary.NativeEndian.Uint32(buf))
+	if length < 24 || length > len(buf) { // FSOPT_REPORT_FULLSIZE reports the untruncated length
+		return darwinACL{}, bad
+	}
+	for i := 8; i < 24; i += 4 { // volume, directory, file and fork groups were not requested
+		if binary.NativeEndian.Uint32(buf[i:]) != 0 {
+			return darwinACL{}, bad
+		}
+	}
+	switch binary.NativeEndian.Uint32(buf[4:]) {
+	case darwinReturnedAttrs: // no security object: nothing, or an all-zero reference, follows
+		if (length != 24 && length != 32) ||
+			(length == 32 && (binary.NativeEndian.Uint32(buf[24:]) != 0 || binary.NativeEndian.Uint32(buf[28:]) != 0)) {
+			return darwinACL{}, bad
+		}
+		return darwinACL{absent: true}, nil
+	case darwinReturnedAttrs | darwinExtendedSecurity:
+	default:
+		return darwinACL{}, bad
+	}
+	// The reference is relative to itself; every real answer puts the object
+	// right behind it (offset 8), so any other offset is noncanonical.
+	offset := int(int32(binary.NativeEndian.Uint32(buf[24:])))
+	refLen := int(binary.NativeEndian.Uint32(buf[28:]))
+	start := 24 + offset
+	if offset != 8 || refLen < darwinFilesecHeader ||
+		(refLen-darwinFilesecHeader)%darwinACESize != 0 || start+refLen != length {
+		return darwinACL{}, bad
+	}
+	entries := (refLen - darwinFilesecHeader) / darwinACESize
+	sec := buf[start:length]
+	// The stored count must equal the size-derived count, so NOACL never matches.
+	if entries > darwinMaxACEs || binary.NativeEndian.Uint32(sec) != darwinFilesecMagic ||
+		int(binary.NativeEndian.Uint32(sec[36:])) != entries {
+		return darwinACL{}, bad
+	}
+	acl := darwinACL{entries: entries, denyOnly: entries > 0 && binary.NativeEndian.Uint32(sec[40:]) == 0}
+	for i := 0; i < entries; i++ {
+		flags := binary.NativeEndian.Uint32(sec[darwinFilesecHeader+darwinACESize*i+16:])
+		if flags&darwinACEKindMask == darwinACEDeny {
+			acl.denies++
+		}
+		if flags&darwinACEKindMask != darwinACEDeny || flags&^(darwinACEKindMask|darwinACEInherit) != 0 {
+			acl.denyOnly = false // permit, audit, alarm, unknown kinds or flags
+		}
+	}
+	return acl, nil
+}
+
+// darwinVolumeHasACLs reads ATTR_VOL_CAPABILITIES: the volume must advertise,
+// as valid, that it implements extended security (ACLs).
+func darwinVolumeHasACLs(buf []byte) bool {
+	return len(buf) >= darwinVolumeLength && binary.NativeEndian.Uint32(buf) == darwinVolumeLength &&
+		binary.NativeEndian.Uint32(buf[darwinVolumeInterfaces:])&binary.NativeEndian.Uint32(buf[darwinVolumeValid:])&darwinVolumeACLBit != 0
+}
+
+// Package-metadata acquisition (package_identity.go) still has no ACL evidence,
+// so it keeps refusing every Darwin host. Only the selected configuration
+// reader has a descriptor ACL route (configHostCannotProveACL).
 func earlyReaderHostRefusesModeOnlyAcquisition(goos string) bool { return goos == "darwin" }
+
+// A simulated Darwin host cannot supply real descriptor ACL evidence.
+func configHostCannotProveACL(goos string) bool { return goos == "darwin" && runtime.GOOS != "darwin" }
+
+var (
+	errAncestorUnsafe  = errors.New("unsafe configuration ancestor")
+	errAncestorUnknown = errors.New("unverifiable configuration ancestor")
+)
+
+// configAncestor mirrors bundleDirectory(st, ancestor=true) for every directory
+// above a selected file, with the caller's uid: owned by root or the user, no
+// setuid/setgid, no group or other writers except a root-owned sticky directory
+// such as /private/tmp.
+func configAncestor(st *unix.Stat_t, uid int) bool {
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR || (st.Uid != 0 && int(st.Uid) != uid) ||
+		st.Mode&0o400 == 0 || st.Mode&0o100 == 0 || st.Mode&0o6000 != 0 {
+		return false
+	}
+	if st.Mode&0o022 == 0 {
+		return st.Mode&0o1000 == 0
+	}
+	return st.Uid == 0 && st.Mode&0o1000 != 0
+}
+
+// ancestorChain inspects every directory descriptor of one no-follow walk (the
+// root, each ancestor and the parent) as the walk opens it, before it descends
+// further: ownership and mode policy, then ACL evidence. The directories checked
+// are exactly the directories traversed. Their identities are kept so the final
+// rewalk can prove none was replaced.
+type ancestorChain struct {
+	uid     int
+	inspect func(int) (darwinACL, error)
+	dirs    []unix.Stat_t
+}
+
+func (c *ancestorChain) visit(fd int) error {
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil {
+		return errAncestorUnknown
+	}
+	if !configAncestor(&st, c.uid) {
+		return errAncestorUnsafe
+	}
+	acl, err := c.inspect(fd)
+	if err != nil {
+		return errAncestorUnknown
+	}
+	if !acl.directoryOK() {
+		return errAncestorUnsafe
+	}
+	c.dirs = append(c.dirs, st)
+	return nil
+}
+
+// Ancestors compare by identity only (as sameBundleAncestor does): their times
+// change whenever any entry is created or removed and say nothing about writers.
+// An empty chain proves nothing and never matches.
+func (c *ancestorChain) same(o *ancestorChain) bool {
+	if len(c.dirs) == 0 || len(c.dirs) != len(o.dirs) {
+		return false
+	}
+	for i := range c.dirs {
+		if !sameBundleAncestor(&c.dirs[i], &o.dirs[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func refusedParent(err error) Inspection {
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EACCES) || errors.Is(err, errAncestorUnknown) {
+		return refusedConfig(ConfigUnavailable)
+	}
+	return refusedConfig(ConfigUnsafe)
+}
+
+// fileACLCode is ConfigValid only when the selected file's descriptor has no ACL.
+func fileACLCode(fd int, inspect func(int) (darwinACL, error)) ConfigCode {
+	acl, err := inspect(fd)
+	if err != nil {
+		return ConfigUnavailable
+	}
+	if !acl.fileOK() {
+		return ConfigUnsafe
+	}
+	return ConfigValid
+}
 
 func openSelectedFile(parent int, base string) (int, error) {
 	return unix.Openat(parent, base, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 }
 
 func readConfig(path string, uid int, read func(io.Reader) ([]byte, error)) Inspection {
-	return readConfigWithHost(path, uid, runtime.GOOS, openParent, openSelectedFile, read)
+	return readConfigWithHost(path, uid, runtime.GOOS, openParentWalk, openSelectedFile, read)
 }
 
 func readConfigWithHost(path string, uid int, goos string,
-	acquireParent func(string) (int, string, error), openContent func(int, string) (int, error),
+	acquireParent func(string, func(int) error) (int, string, error), openContent func(int, string) (int, error),
 	read func(io.Reader) ([]byte, error),
 ) Inspection {
-	if earlyReaderHostRefusesModeOnlyAcquisition(goos) {
+	if configHostCannotProveACL(goos) {
 		return refusedConfig(ConfigUnavailable)
 	}
-	parent, base, err := acquireParent(path)
+	return readConfigWithACL(path, uid, goos, acquireParent, openContent, read, darwinInspectACL)
+}
+
+func readConfigWithACL(path string, uid int, goos string,
+	acquireParent func(string, func(int) error) (int, string, error), openContent func(int, string) (int, error),
+	read func(io.Reader) ([]byte, error), inspect func(int) (darwinACL, error),
+) Inspection {
+	var chain *ancestorChain // nil off Darwin
+	var visit func(int) error
+	if goos == "darwin" {
+		chain = &ancestorChain{uid: uid, inspect: inspect}
+		visit = chain.visit
+	}
+	parent, base, err := acquireParent(path, visit)
 	if err != nil {
-		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EACCES) {
-			return refusedConfig(ConfigUnavailable)
-		}
-		return refusedConfig(ConfigUnsafe)
+		return refusedParent(err)
 	}
 	defer unix.Close(parent)
+	if chain != nil && len(chain.dirs) == 0 { // the walk must have been inspected
+		return refusedConfig(ConfigUnsafe)
+	}
 	var before unix.Stat_t
 	if err := unix.Fstatat(parent, base, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return refusedConfig(ConfigUnavailable)
@@ -176,6 +406,11 @@ func readConfigWithHost(path string, uid int, goos string,
 		opened.Dev != before.Dev || opened.Ino != before.Ino {
 		return refusedConfig(ConfigUnsafe)
 	}
+	if goos == "darwin" {
+		if code := fileACLCode(fd, inspect); code != ConfigValid {
+			return refusedConfig(code)
+		}
+	}
 	initial, err := file.Stat()
 	if err != nil {
 		return refusedConfig(ConfigUnavailable)
@@ -189,9 +424,20 @@ func readConfigWithHost(path string, uid int, goos string,
 		initial.Mode() != final.Mode() || !initial.ModTime().Equal(final.ModTime()) {
 		return refusedConfig(ConfigUnsafe)
 	}
+	if goos == "darwin" {
+		if code := fileACLCode(fd, inspect); code != ConfigValid {
+			return refusedConfig(code)
+		}
+	}
 	// Rewalk the named path without following symlinks, detecting replacements
 	// of either the file or a parent while the selected descriptor was read.
-	currentParent, currentBase, err := acquireParent(path)
+	var again *ancestorChain
+	visit = nil
+	if chain != nil {
+		again = &ancestorChain{uid: uid, inspect: inspect}
+		visit = again.visit
+	}
+	currentParent, currentBase, err := acquireParent(path, visit)
 	if err != nil {
 		return refusedConfig(ConfigUnsafe)
 	}
@@ -200,8 +446,9 @@ func readConfigWithHost(path string, uid int, goos string,
 	if unix.Fstatat(currentParent, currentBase, &named, unix.AT_SYMLINK_NOFOLLOW) != nil ||
 		unix.Fstat(fd, &after) != nil || !privateRegular(&named, uid) || !privateRegular(&after, uid) ||
 		named.Dev != opened.Dev || named.Ino != opened.Ino || named.Size != after.Size ||
-		after.Dev != opened.Dev || after.Ino != opened.Ino {
-		return refusedConfig(ConfigUnsafe)
+		after.Dev != opened.Dev || after.Ino != opened.Ino ||
+		(chain != nil && (!sameConfigCTime(&opened, &after) || !sameConfigCTime(&named, &after) || !chain.same(again))) {
+		return refusedConfig(ConfigUnsafe) // Darwin: every directory is re-proven and none was replaced
 	}
 	return ParseConfig(strings.NewReader(string(data)))
 }

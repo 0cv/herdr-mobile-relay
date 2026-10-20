@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1211,20 +1210,6 @@ func TestLocalSelectedPrivateConfigAndQueriesDoNotMutateFiles(t *testing.T) {
 		t.Fatal("platform-independent literal parser did not bind instance")
 	}
 	cfg := ReadConfig(path)
-	if runtime.GOOS == "darwin" {
-		if cfg.Code() != ConfigUnavailable || cfg.Mode() != ModeUnknown || cfg.instance != "" || cfg.tokenPresent || cfg.tokenValid {
-			t.Fatal("actual Darwin config refusal retained selected private input")
-		}
-		refused := Run(context.Background(), cfg, BuildIdentity{}, Options{ProbeIngress: true}, Dependencies{})
-		if refused.ExitCode() != 3 || findCheck(t, refused, CheckConfig).State != Unknown || !findCheck(t, refused, CheckConfig).Required ||
-			findCheck(t, refused, CheckBuild).State != Unknown || findCheck(t, refused, CheckBundle).State != Unknown || findCheck(t, refused, CheckRelay).State != Unknown {
-			t.Fatal("actual Darwin config refusal weakened required report composition")
-		}
-		assertLocalPrivacy(t, localUnknown(), refused)
-		// This injected supported-host fixture exercises selected-file parsing
-		// only; it does not claim native Linux execution on Darwin.
-		cfg = readConfigOnLinuxFixture(path)
-	}
 	if cfg.Code() != ConfigValid || cfg.instance != localPrivateInstance {
 		t.Fatal("selected literal reader did not bind instance")
 	}

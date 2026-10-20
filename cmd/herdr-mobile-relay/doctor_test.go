@@ -538,7 +538,7 @@ func TestDiagnosticInvalidUnavailableConfigAndNonmutation(t *testing.T) {
 		})
 	}
 }
-func TestDarwinEarlyReaderRefusalKeepsRequiredReportUnknown(t *testing.T) {
+func TestDarwinSelectedConfigAndRequiredBundleUnknown(t *testing.T) {
 	if goruntime.GOOS != "darwin" {
 		return
 	}
@@ -548,19 +548,23 @@ func TestDarwinEarlyReaderRefusalKeepsRequiredReportUnknown(t *testing.T) {
 	var out bytes.Buffer
 	code, err := runDoctorWithRuntime(context.Background(), []string{"--json", "--config", selected}, false, &out, runtime)
 	if err != nil || code != 3 {
-		t.Fatal("Darwin early-reader refusal became healthy or invocation-invalid")
+		t.Fatal("Darwin selected config became healthy, invalid or invocation-invalid")
 	}
 	document := diagnosticDocument(t, out.String())
-	if diagnosticWireCheck(t, document, doctor.CheckConfig)["evidence_code"] != string(doctor.EvidenceConfigMissing) ||
-		diagnosticWireCheck(t, document, doctor.CheckBuild)["evidence_code"] != string(doctor.EvidenceBuildInvalid) {
-		t.Fatal("Darwin config or package metadata refusal was not reflected as unavailable")
+	config, build := diagnosticWireCheck(t, document, doctor.CheckConfig), diagnosticWireCheck(t, document, doctor.CheckBuild)
+	// A plain private 0600 config in private directories is admitted by
+	// descriptor evidence; package metadata has none yet and stays refused.
+	if document["exit_code"] != float64(3) || document["selected_transport"] != "cloudflare" ||
+		config["state"] != "warn" || config["required"] != true || config["evidence_code"] != string(doctor.EvidenceTokenMissing) ||
+		build["state"] != "unknown" || build["required"] != true || build["evidence_code"] != string(doctor.EvidenceBuildInvalid) {
+		t.Fatal("Darwin config was not admitted exactly, or package metadata refusal changed")
 	}
 	bundle := diagnosticWireCheck(t, document, doctor.CheckBundle)
 	if bundle["state"] != "unknown" || bundle["required"] != true || bundle["evidence_code"] != string(doctor.EvidenceUnavailable) {
-		t.Fatal("Darwin early-reader refusal weakened required Bundle unavailability")
+		t.Fatal("Darwin selected config weakened required Bundle unavailability")
 	}
 	if before != diagnosticInventory(t, filepath.Dir(selected)) {
-		t.Fatal("Darwin diagnostic refusal mutated package or config")
+		t.Fatal("Darwin diagnostic mutated package or config")
 	}
 	diagnosticPrivacy(t, out.String())
 }

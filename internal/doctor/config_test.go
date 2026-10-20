@@ -3,13 +3,16 @@ package doctor
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -221,11 +224,68 @@ func privateFixture(t *testing.T) (string, string) {
 	return root, path
 }
 func readConfigOnLinuxFixture(path string) Inspection {
-	return readConfigWithHost(path, os.Geteuid(), "linux", openParent, openSelectedFile, func(r io.Reader) ([]byte, error) {
+	return readConfigWithHost(path, os.Geteuid(), "linux", openParentWalk, openSelectedFile, func(r io.Reader) ([]byte, error) {
 		return io.ReadAll(io.LimitReader(r, MaxConfigBytes+1))
 	})
 }
-func TestDarwinConfigAcquisitionRefusesBeforeFilesystemOpen(t *testing.T) {
+func hostedDarwin() bool {
+	return runtime.GOOS == "darwin" && os.Getenv("GITHUB_ACTIONS") == "true" &&
+		os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted"
+}
+
+type aclAnswer struct {
+	acl darwinACL
+	err error
+}
+
+var noACL = aclAnswer{acl: darwinACL{absent: true}}
+
+// fakeACL scripts descriptor ACL evidence. Directories (the ancestor walk)
+// answer by call number; the selected regular file answers by its own call
+// number and must be the private regular-file descriptor.
+type fakeACL struct {
+	t                   *testing.T
+	dirs                func(call int) aclAnswer
+	files               []aclAnswer
+	dirCalls, fileCalls int
+}
+
+func (f *fakeACL) inspect(fd int) (darwinACL, error) {
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil {
+		f.t.Fatal("ACL inspection received an invalid descriptor")
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
+		f.dirCalls++
+		answer := noACL
+		if f.dirs != nil {
+			answer = f.dirs(f.dirCalls - 1)
+		}
+		return answer.acl, answer.err
+	}
+	if !privateRegular(&st, os.Geteuid()) {
+		f.t.Fatal("ACL inspection did not receive the selected regular-file descriptor")
+	}
+	answer := f.files[min(f.fileCalls, len(f.files)-1)]
+	f.fileCalls++
+	return answer.acl, answer.err
+}
+
+func readDarwinFixture(path string, f *fakeACL, during func()) (Inspection, int) {
+	reads := 0
+	cfg := readConfigWithACL(path, os.Geteuid(), "darwin", openParentWalk, openSelectedFile,
+		func(r io.Reader) ([]byte, error) {
+			reads++
+			data, err := io.ReadAll(r)
+			if during != nil {
+				during()
+			}
+			return data, err
+		}, f.inspect)
+	return cfg, reads
+}
+
+func TestDarwinConfigAcquisitionRequiresDescriptorACLEvidence(t *testing.T) {
 	root, path := privateFixture(t)
 	contents := "HERDR_RELAY_TOKEN='" + strings.Repeat("s", 32) + "'\nHERDR_RELAY_INSTANCE_ID=private-data-canary\n"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
@@ -248,18 +308,23 @@ func TestDarwinConfigAcquisitionRefusesBeforeFilesystemOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	parentOpens, contentOpens, reads := 0, 0, 0
-	cfg := readConfigWithHost(path, os.Geteuid(), "darwin",
-		func(path string) (int, string, error) { parentOpens++; return openParent(path) },
+	parentOpens, contentOpens, reads, inspections := 0, 0, 0, 0
+	cfg := readConfigWithACL(path, os.Geteuid(), "darwin",
+		func(path string, visit func(int) error) (int, string, error) {
+			parentOpens++
+			return openParentWalk(path, visit)
+		},
 		func(parent int, base string) (int, error) { contentOpens++; return openSelectedFile(parent, base) },
-		func(r io.Reader) ([]byte, error) { reads++; return io.ReadAll(r) })
+		func(r io.Reader) ([]byte, error) { reads++; return io.ReadAll(r) },
+		func(fd int) (darwinACL, error) { inspections++; return darwinACL{}, unix.ENOTSUP })
 	if cfg.Code() != ConfigUnavailable || cfg.Mode() != ModeUnknown || cfg.tokenPresent || cfg.tokenValid ||
 		cfg.port != 0 || cfg.pluginPort != 0 || len(cfg.gateways) != 0 || cfg.appOrigin != "" ||
 		cfg.relayOrigin != "" || cfg.instance != "" || cfg.herdrSocket != "" {
 		t.Fatal("Darwin config refusal retained private input or returned a nonfixed result")
 	}
-	if parentOpens != 0 || contentOpens != 0 || reads != 0 {
-		t.Fatal("Darwin config refusal crossed an acquisition boundary")
+	// The walk stops at its first directory (the root), so no content is opened.
+	if parentOpens != 1 || contentOpens != 0 || inspections != 1 || reads != 0 {
+		t.Fatal("Darwin ACL uncertainty read private input or skipped descriptor inspection")
 	}
 	if cfg.String() != "private diagnostic configuration" || cfg.GoString() != cfg.String() {
 		t.Fatal("Darwin refusal reflected private input")
@@ -267,8 +332,13 @@ func TestDarwinConfigAcquisitionRefusesBeforeFilesystemOpen(t *testing.T) {
 	if _, err := json.Marshal(cfg); err == nil || strings.Contains(err.Error(), "private-data-canary") {
 		t.Fatal("Darwin refusal exposed private configuration")
 	}
-	if runtime.GOOS == "darwin" && ReadConfig(path).Code() != ConfigUnavailable {
-		t.Fatal("production host policy did not refuse Darwin config")
+	if runtime.GOOS != "darwin" && readConfigWithHost(path, os.Geteuid(), "darwin",
+		func(string, func(int) error) (int, string, error) {
+			t.Fatal("simulated production Darwin opened parent")
+			return -1, "", nil
+		},
+		openSelectedFile, func(io.Reader) ([]byte, error) { t.Fatal("simulated production Darwin read"); return nil, nil }).Code() != ConfigUnavailable {
+		t.Fatal("simulated production Darwin admitted mode-only acquisition")
 	}
 
 	report := Run(context.Background(), cfg, BuildIdentity{}, Options{}, Dependencies{})
@@ -297,6 +367,487 @@ func TestDarwinConfigAcquisitionRefusesBeforeFilesystemOpen(t *testing.T) {
 	if !bytes.Equal(beforeBytes, afterBytes) || !os.SameFile(beforeInfo, afterInfo) || beforeInfo.Mode() != afterInfo.Mode() ||
 		!beforeInfo.ModTime().Equal(afterInfo.ModTime()) || !reflect.DeepEqual(beforeEntries, afterEntries) {
 		t.Fatal("Darwin config refusal mutated fixture bytes, metadata or directory inventory")
+	}
+}
+
+func TestDarwinDescriptorACLBeforeAndAfterRead(t *testing.T) {
+	_, path := privateFixture(t)
+	denyOnly := aclAnswer{acl: darwinACL{denyOnly: true, entries: 1, denies: 1}}
+	granting := aclAnswer{acl: darwinACL{entries: 1}}
+	unknown := aclAnswer{err: unix.ENOTSUP}
+	for _, tc := range []struct {
+		name   string
+		files  []aclAnswer
+		want   ConfigCode
+		reads  int
+		checks int
+	}{
+		{"absent", []aclAnswer{noACL, noACL}, ConfigValid, 1, 2},
+		{"present", []aclAnswer{granting, noACL}, ConfigUnsafe, 0, 1},
+		{"empty ACL", []aclAnswer{{}, noACL}, ConfigUnsafe, 0, 1},
+		{"deny-only is for directories, not the file", []aclAnswer{denyOnly, noACL}, ConfigUnsafe, 0, 1},
+		{"appeared", []aclAnswer{noACL, granting}, ConfigUnsafe, 1, 2},
+		{"unknown before", []aclAnswer{unknown}, ConfigUnavailable, 0, 1},
+		{"unknown after", []aclAnswer{noACL, unknown}, ConfigUnavailable, 1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeACL{t: t, files: tc.files}
+			cfg, reads := readDarwinFixture(path, f, nil)
+			if cfg.Code() != tc.want || reads != tc.reads || f.fileCalls != tc.checks {
+				t.Fatal("descriptor ACL guard did not fail closed at the correct read boundary")
+			}
+		})
+	}
+}
+
+func TestDarwinDescriptorSymlinkAndReplacementRefused(t *testing.T) {
+	root, path := privateFixture(t)
+	link := filepath.Join(root, "selected-link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal("symlink fixture failed")
+	}
+	read := func(r io.Reader) ([]byte, error) { return io.ReadAll(r) }
+	plain := (&fakeACL{t: t, files: []aclAnswer{noACL}}).inspect
+	if cfg := readConfigWithACL(link, os.Geteuid(), "darwin", openParentWalk, openSelectedFile, read, plain); cfg.Code() != ConfigUnsafe {
+		t.Fatal("Darwin selection followed symlink")
+	}
+	cfg := readConfigWithACL(path, os.Geteuid(), "darwin", openParentWalk, openSelectedFile,
+		func(r io.Reader) ([]byte, error) {
+			data, err := io.ReadAll(r)
+			if err != nil {
+				return nil, err
+			}
+			if err := os.Rename(path, path+".old"); err != nil {
+				t.Fatal("replacement fixture failed")
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal("replacement fixture failed")
+			}
+			return data, nil
+		}, plain)
+	if cfg.Code() != ConfigUnsafe {
+		t.Fatal("Darwin selection accepted replaced named file")
+	}
+}
+
+// walkChain walks path with every directory plain and returns the inspected chain.
+func walkChain(t *testing.T, path string) *ancestorChain {
+	t.Helper()
+	chain := &ancestorChain{uid: os.Geteuid(), inspect: (&fakeACL{t: t}).inspect}
+	fd, _, err := openParentWalk(path, chain.visit)
+	if err != nil {
+		t.Fatal("fixture ancestor chain was not walkable")
+	}
+	_ = unix.Close(fd)
+	return chain
+}
+
+func TestDarwinAncestorEvidenceRefusesBeforeContent(t *testing.T) {
+	_, path := privateFixture(t)
+	chain := walkChain(t, path)
+	if len(chain.dirs) < 3 {
+		t.Fatal("fixture ancestor chain was too short")
+	}
+	last := len(chain.dirs) - 1
+	denyOnly := aclAnswer{acl: darwinACL{denyOnly: true, entries: 1, denies: 1}}
+	granting := aclAnswer{acl: darwinACL{entries: 1}}
+	at := func(call int, answer aclAnswer) func(int) aclAnswer {
+		return func(n int) aclAnswer {
+			if n == call {
+				return answer
+			}
+			return noACL
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		dirs func(int) aclAnswer
+		want ConfigCode
+	}{
+		{"home-like deny-only ACLs everywhere", func(int) aclAnswer { return denyOnly }, ConfigValid},
+		{"granting root", at(0, granting), ConfigUnsafe},
+		{"granting middle", at(1, granting), ConfigUnsafe},
+		{"granting parent", at(last, granting), ConfigUnsafe},
+		{"empty ACL", at(1, aclAnswer{}), ConfigUnsafe},
+		{"unknown root", at(0, aclAnswer{err: unix.ENOTSUP}), ConfigUnavailable},
+		{"unknown parent", at(last, aclAnswer{err: unix.ENOTSUP}), ConfigUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeACL{t: t, dirs: tc.dirs, files: []aclAnswer{noACL}}
+			opens := 0
+			cfg := readConfigWithACL(path, os.Geteuid(), "darwin", openParentWalk,
+				func(parent int, base string) (int, error) { opens++; return openSelectedFile(parent, base) },
+				func(r io.Reader) ([]byte, error) { return io.ReadAll(r) }, f.inspect)
+			if cfg.Code() != tc.want {
+				t.Fatal("ancestor ACL evidence produced the wrong verdict")
+			}
+			if tc.want == ConfigValid && f.dirCalls != 2*len(chain.dirs) {
+				t.Fatal("ancestors were not proven before and after the read")
+			}
+			if tc.want != ConfigValid && (opens != 0 || f.fileCalls != 0) {
+				t.Fatal("private content was opened below an unproven ancestor")
+			}
+		})
+	}
+}
+
+func TestDarwinWritableAncestorRefusedBeforeContent(t *testing.T) {
+	parent := func(root string) string { return root }
+	grandparent := func(root string) string { return filepath.Dir(root) }
+	for _, tc := range []struct {
+		name  string
+		which func(string) string
+		mode  os.FileMode
+	}{
+		{"group writable parent", parent, 0o775},
+		{"other writable parent", parent, 0o757},
+		{"group writable grandparent", grandparent, 0o770},
+		{"user owned sticky world writable grandparent", grandparent, 0o777 | os.ModeSticky},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, path := privateFixture(t)
+			if err := os.Chmod(tc.which(root), tc.mode); err != nil {
+				t.Fatal("ancestor mode fixture failed")
+			}
+			opens := 0
+			cfg := readConfigWithACL(path, os.Geteuid(), "darwin", openParentWalk,
+				func(parent int, base string) (int, error) { opens++; return openSelectedFile(parent, base) },
+				func(r io.Reader) ([]byte, error) { return io.ReadAll(r) },
+				(&fakeACL{t: t, files: []aclAnswer{noACL}}).inspect)
+			if cfg.Code() != ConfigUnsafe || opens != 0 {
+				t.Fatal("a writable ancestor was accepted or its content was opened")
+			}
+		})
+	}
+}
+
+func TestDarwinAncestorsRewalkedAfterRead(t *testing.T) {
+	granting := aclAnswer{acl: darwinACL{entries: 1}}
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, root string)
+		later  aclAnswer // the parent directory's evidence on the final rewalk
+		want   ConfigCode
+	}{
+		{"unchanged", func(*testing.T, string) {}, noACL, ConfigValid},
+		{"ancestor replaced by an identical directory", func(t *testing.T, root string) {
+			base := filepath.Dir(root)
+			t.Cleanup(func() { _ = os.RemoveAll(base + ".old") })
+			if os.Rename(base, base+".old") != nil || os.Mkdir(base, 0o700) != nil ||
+				os.Rename(filepath.Join(base+".old", filepath.Base(root)), root) != nil {
+				t.Fatal("ancestor replacement fixture failed")
+			}
+		}, noACL, ConfigUnsafe},
+		{"ancestor became group writable", func(t *testing.T, root string) {
+			if os.Chmod(filepath.Dir(root), 0o770) != nil {
+				t.Fatal("ancestor mode fixture failed")
+			}
+		}, noACL, ConfigUnsafe},
+		{"ancestor gained a granting ACL", func(*testing.T, string) {}, granting, ConfigUnsafe},
+		{"ancestor evidence became unknown", func(*testing.T, string) {}, aclAnswer{err: unix.ENOTSUP}, ConfigUnsafe},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, path := privateFixture(t)
+			final := 2*len(walkChain(t, path).dirs) - 1 // second walk, last directory
+			f := &fakeACL{t: t, files: []aclAnswer{noACL}, dirs: func(call int) aclAnswer {
+				if call == final {
+					return tc.later
+				}
+				return noACL
+			}}
+			cfg, _ := readDarwinFixture(path, f, func() { tc.mutate(t, root) })
+			if cfg.Code() != tc.want {
+				t.Fatal("final ancestor rewalk did not prove the directory chain unchanged")
+			}
+		})
+	}
+}
+
+func TestDarwinAncestorInspectionCannotBeBypassed(t *testing.T) {
+	_, path := privateFixture(t)
+	opens := 0
+	cfg := readConfigWithACL(path, os.Geteuid(), "darwin",
+		func(path string, _ func(int) error) (int, string, error) { return openParentWalk(path, nil) },
+		func(parent int, base string) (int, error) { opens++; return openSelectedFile(parent, base) },
+		func(r io.Reader) ([]byte, error) { return io.ReadAll(r) },
+		(&fakeACL{t: t, files: []aclAnswer{noACL}}).inspect)
+	if cfg.Code() != ConfigUnsafe || opens != 0 {
+		t.Fatal("a parent walk that skipped the ancestor inspection was accepted")
+	}
+}
+
+func ancestorStat(mode, uid uint32) *unix.Stat_t {
+	st := &unix.Stat_t{Uid: uid}
+	reflect.ValueOf(st).Elem().FieldByName("Mode").SetUint(uint64(mode)) // its width differs per OS
+	return st
+}
+
+func TestDarwinAncestorModePolicy(t *testing.T) {
+	const me = 501
+	for _, tc := range []struct {
+		name string
+		mode uint32
+		uid  uint32
+		want bool
+	}{
+		{"private", unix.S_IFDIR | 0o700, me, true},
+		{"readable", unix.S_IFDIR | 0o755, me, true},
+		{"root owned", unix.S_IFDIR | 0o755, 0, true},
+		{"root sticky temporary directory", unix.S_IFDIR | 0o1777, 0, true},
+		{"group writable", unix.S_IFDIR | 0o775, me, false},
+		{"other writable", unix.S_IFDIR | 0o757, me, false},
+		{"root owned group writable", unix.S_IFDIR | 0o775, 0, false},
+		{"user owned sticky world writable", unix.S_IFDIR | 0o1777, me, false},
+		{"setgid", unix.S_IFDIR | 0o2755, me, false},
+		{"setuid", unix.S_IFDIR | 0o4755, me, false},
+		{"foreign owner", unix.S_IFDIR | 0o755, me + 1, false},
+		{"unsearchable", unix.S_IFDIR | 0o600, me, false},
+		{"not a directory", unix.S_IFREG | 0o755, me, false},
+	} {
+		if configAncestor(ancestorStat(tc.mode, tc.uid), me) != tc.want {
+			t.Fatalf("%s: ancestor policy verdict changed", tc.name)
+		}
+	}
+	// Identical to the established bundle policy for ancestors, for every owner.
+	for _, mode := range []uint32{0o700, 0o755, 0o775, 0o757, 0o1777, 0o1700, 0o2755, 0o4755, 0o600, 0o300} {
+		for _, uid := range []uint32{0, uint32(os.Geteuid()), uint32(os.Geteuid()) + 1} {
+			st := ancestorStat(unix.S_IFDIR|mode, uid)
+			if configAncestor(st, os.Geteuid()) != bundleDirectory(st, true) {
+				t.Fatalf("mode %o owner class %d diverged from bundleDirectory", mode, min(uid, 2))
+			}
+		}
+	}
+}
+
+func TestDarwinACLResponseFailClosed(t *testing.T) {
+	put := func(b []byte, offset int, value uint32) { binary.NativeEndian.PutUint32(b[offset:], value) }
+	// Real bytes: a security object is a 32-byte header, a 44-byte kauth_filesec
+	// and 24 bytes per entry, in a larger fixed buffer.
+	filesec := func(count, flags uint32, aces ...uint32) []byte {
+		b := make([]byte, darwinACLBuffer)
+		size := darwinFilesecHeader + darwinACESize*len(aces)
+		put(b, 0, uint32(32+size))
+		put(b, 4, darwinReturnedAttrs|darwinExtendedSecurity)
+		put(b, 24, 8)
+		put(b, 28, uint32(size))
+		put(b, 32, darwinFilesecMagic)
+		put(b, 68, count)
+		put(b, 72, flags)
+		for i, ace := range aces {
+			put(b, 76+24*i+16, ace)
+		}
+		return b
+	}
+	omitted := func(length, reference uint32) []byte { // security attribute not returned
+		b := make([]byte, darwinACLBuffer)
+		put(b, 0, length)
+		put(b, 4, darwinReturnedAttrs)
+		put(b, 28, reference)
+		return b
+	}
+	modify := func(b []byte, offset int, value uint32) []byte { put(b, offset, value); return b }
+	many := func(n int, flags uint32) []uint32 {
+		aces := make([]uint32, n)
+		for i := range aces {
+			aces[i] = flags
+		}
+		return aces
+	}
+	const deny, permit = darwinACEDeny, 1
+	padded := func() []byte { // a well-formed object, but 4 bytes behind the reference
+		b := filesec(1, 0, deny)
+		copy(b[36:], b[32:100])
+		put(b, 32, 0)
+		put(b, 24, 12)
+		put(b, 0, 104)
+		return b
+	}
+	for _, tc := range []struct {
+		name string
+		blob []byte
+		want darwinACL
+		fail bool
+	}{
+		{"no ACL, reference placeholder", omitted(32, 0), darwinACL{absent: true}, false},
+		{"no ACL, no placeholder", omitted(24, 0), darwinACL{absent: true}, false},
+		{"home folder deny entry", filesec(1, 0, deny), darwinACL{denyOnly: true, entries: 1, denies: 1}, false},
+		{"deny entries with inheritance bits", filesec(2, 0, deny|darwinACEInherit, deny|0x10), darwinACL{denyOnly: true, entries: 2, denies: 2}, false},
+		{"maximum entries", filesec(128, 0, many(128, deny)...), darwinACL{denyOnly: true, entries: 128, denies: 128}, false},
+		{"too many entries", filesec(129, 0, many(129, deny)...), darwinACL{}, true},
+		{"permit entry", filesec(1, 0, permit), darwinACL{entries: 1}, false},
+		{"deny then permit", filesec(2, 0, deny, permit), darwinACL{entries: 2, denies: 1}, false},
+		{"audit entry", filesec(1, 0, 3), darwinACL{entries: 1}, false},
+		{"alarm entry", filesec(1, 0, 4), darwinACL{entries: 1}, false},
+		{"unknown kind", filesec(1, 0, 5), darwinACL{entries: 1}, false},
+		{"deny with audit flag", filesec(1, 0, deny|0x200), darwinACL{entries: 1, denies: 1}, false},
+		{"ACL flags", filesec(1, 1<<16, deny), darwinACL{entries: 1, denies: 1}, false},
+		{"empty ACL", filesec(0, 0), darwinACL{}, false},
+		{"NOACL sentinel is unverified", filesec(^uint32(0), 0), darwinACL{}, true},
+		{"count differs from size", filesec(2, 0, deny), darwinACL{}, true},
+		{"truncated", modify(filesec(1, 0, deny), 0, darwinACLBuffer+1), darwinACL{}, true},
+		{"short buffer", filesec(1, 0, deny)[:60], darwinACL{}, true},
+		{"bad magic", modify(filesec(1, 0, deny), 32, 0), darwinACL{}, true},
+		{"size not a whole number of entries", modify(modify(filesec(1, 0, deny), 28, 50), 0, 82), darwinACL{}, true},
+		{"reference past the response", modify(filesec(1, 0, deny), 24, 4000), darwinACL{}, true},
+		{"negative offset", modify(filesec(1, 0, deny), 24, ^uint32(0)), darwinACL{}, true},
+		{"padded reference offset", padded(), darwinACL{}, true},
+		{"security attribute only", modify(filesec(1, 0, deny), 4, darwinExtendedSecurity), darwinACL{}, true},
+		{"nothing returned", modify(filesec(1, 0, deny), 4, 0), darwinACL{}, true},
+		{"another attribute group", modify(filesec(1, 0, deny), 12, 1), darwinACL{}, true},
+		{"omitted with a placeholder offset", modify(omitted(32, 0), 24, 8), darwinACL{}, true},
+		{"omitted with an offset and no length", modify(omitted(32, 0), 24, ^uint32(0)), darwinACL{}, true},
+		{"omitted with data", omitted(32, 4), darwinACL{}, true},
+		{"omitted with offset and data", modify(omitted(32, 4), 24, 8), darwinACL{}, true},
+		{"omitted with odd length", omitted(28, 0), darwinACL{}, true},
+	} {
+		got, err := parseDarwinSecurity(tc.blob)
+		if (err != nil) != tc.fail || got != tc.want {
+			t.Fatalf("%s: descriptor ACL response verdict changed", tc.name)
+		}
+		if err != nil && err.Error() != "unverifiable descriptor ACL" {
+			t.Fatalf("%s: error was not the fixed label", tc.name)
+		}
+	}
+	for _, tc := range []struct {
+		acl        darwinACL
+		file, dirs bool
+	}{
+		{darwinACL{absent: true}, true, true},
+		{darwinACL{denyOnly: true, entries: 1, denies: 1}, false, true},
+		{darwinACL{entries: 1}, false, false},
+		{darwinACL{}, false, false},
+	} {
+		if tc.acl.fileOK() != tc.file || tc.acl.directoryOK() != tc.dirs {
+			t.Fatal("file and directory ACL policy changed")
+		}
+	}
+}
+
+func TestDarwinVolumeMustAdvertiseACLs(t *testing.T) {
+	volume := func(length, capabilities, valid uint32) []byte {
+		b := make([]byte, darwinVolumeLength)
+		binary.NativeEndian.PutUint32(b, length)
+		binary.NativeEndian.PutUint32(b[darwinVolumeInterfaces:], capabilities)
+		binary.NativeEndian.PutUint32(b[darwinVolumeValid:], valid)
+		return b
+	}
+	for name, tc := range map[string]struct {
+		blob []byte
+		want bool
+	}{
+		"advertised":            {volume(36, 0x1af6fc7, 0x1ffffff), true},
+		"not advertised":        {volume(36, 0x1af6bc7, 0x1ffffff), false},
+		"advertised, not valid": {volume(36, 0x1af6fc7, 0x1fffbff), false},
+		"wrong length":          {volume(40, 0x1af6fc7, 0x1ffffff), false},
+		"short":                 {volume(36, 0x1af6fc7, 0x1ffffff)[:20], false},
+	} {
+		if darwinVolumeHasACLs(tc.blob) != tc.want {
+			t.Fatalf("%s: volume ACL capability verdict changed", name)
+		}
+	}
+}
+
+// Plain private objects: the real descriptor route, with no ACL operation.
+func TestDarwinRealNoACL(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("descriptor ACL evidence is Darwin only")
+	}
+	root, path := privateFixture(t)
+	for _, name := range []string{root, path} {
+		fd, err := unix.Open(name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal("plain fixture could not be opened")
+		}
+		acl, err := darwinInspectACL(fd)
+		_ = unix.Close(fd)
+		if err != nil || acl != (darwinACL{absent: true}) {
+			t.Fatal("plain private object did not report absent ACL evidence")
+		}
+	}
+	if _, err := darwinInspectACL(-1); err == nil {
+		t.Fatal("an invalid descriptor produced ACL evidence")
+	}
+	if cfg := ReadConfig(path); cfg.Code() != ConfigValid {
+		t.Fatalf("plain private config in plain private directories was not admitted; ancestors (owner:mode:acl): %s", darwinChainSummary(path))
+	}
+}
+
+// darwinChainSummary lists each ancestor as owner class, mode bits and ACL kind
+// with entry count: enough to diagnose a refused chain on a runner without a
+// path, uid, GUID or ACL identity.
+func darwinChainSummary(path string) string {
+	var chain []string
+	fd, _, err := openParentWalk(path, func(fd int) error {
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) != nil {
+			return errAncestorUnknown
+		}
+		owner := "other"
+		if st.Uid == 0 {
+			owner = "root"
+		} else if int(st.Uid) == os.Geteuid() {
+			owner = "self"
+		}
+		kind := "error"
+		if acl, err := darwinInspectACL(fd); err == nil {
+			kind = "other"
+			if acl.absent {
+				kind = "absent"
+			} else if acl.denyOnly {
+				kind = "deny-only"
+			}
+			kind += "/" + strconv.Itoa(acl.entries)
+		}
+		chain = append(chain, owner+":"+strconv.FormatUint(uint64(st.Mode&0o7777), 8)+":"+kind)
+		return nil
+	})
+	if err == nil {
+		_ = unix.Close(fd)
+	}
+	return strings.Join(chain, " ")
+}
+
+func TestDarwinHostedRealACLGrant(t *testing.T) {
+	if !hostedDarwin() {
+		t.Skip("real ACL grant is confined to disposable hosted Darwin runners")
+	}
+	_, path := privateFixture(t) // benign contents in isolated scratch, no owner configuration
+	t.Cleanup(func() { _ = exec.Command("/bin/chmod", "-N", path).Run() })
+	// chmod(1)'s documented +a syntax *creates* the grant; the only ACL
+	// inspection below is the production descriptor route, never ls/shell.
+	if err := exec.Command("/bin/chmod", "+a", "group:everyone allow read", path).Run(); err != nil {
+		t.Fatal("hosted ACL fixture creation failed")
+	}
+	var st unix.Stat_t
+	if unix.Stat(path, &st) != nil || !privateRegular(&st, os.Geteuid()) {
+		t.Fatal("ACL fixture changed ordinary private mode/identity")
+	}
+	if cfg := ReadConfig(path); cfg.Code() != ConfigUnsafe || cfg.Mode() != ModeUnknown {
+		t.Fatal("actual descriptor ACL grant was not refused")
+	}
+}
+
+func TestDarwinHostedRealDirectoryACL(t *testing.T) {
+	if !hostedDarwin() {
+		t.Skip("real directory ACLs are confined to disposable hosted Darwin runners")
+	}
+	for _, tc := range []struct {
+		name, acl string
+		want      ConfigCode
+	}{
+		{"home-like deny only", "group:everyone deny delete", ConfigValid},
+		{"allow entry", "user:nobody allow add_file,delete_child", ConfigUnsafe},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, path := privateFixture(t)
+			t.Cleanup(func() { _ = exec.Command("/bin/chmod", "-N", root).Run() }) // deny delete blocks removal
+			if err := exec.Command("/bin/chmod", "+a", tc.acl, root).Run(); err != nil {
+				t.Fatal("hosted ACL fixture creation failed")
+			}
+			if cfg := ReadConfig(path); cfg.Code() != tc.want {
+				t.Fatal("actual directory ACL verdict changed")
+			}
+		})
 	}
 }
 
@@ -377,10 +928,10 @@ func TestSelectedFileRefusesUnsafePathsAndMetadata(t *testing.T) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if readConfigWithHost(path, os.Geteuid()+1, "linux", openParent, openSelectedFile, func(io.Reader) ([]byte, error) { t.Fatal("foreign owner read"); return nil, nil }).Code() != ConfigUnsafe {
+	if readConfigWithHost(path, os.Geteuid()+1, "linux", openParentWalk, openSelectedFile, func(io.Reader) ([]byte, error) { t.Fatal("foreign owner read"); return nil, nil }).Code() != ConfigUnsafe {
 		t.Fatal("owner mismatch accepted")
 	}
-	if readConfigWithHost(path, os.Geteuid(), "linux", openParent, openSelectedFile, func(io.Reader) ([]byte, error) { return nil, errors.New("raw-error-canary") }).Code() != ConfigUnavailable {
+	if readConfigWithHost(path, os.Geteuid(), "linux", openParentWalk, openSelectedFile, func(io.Reader) ([]byte, error) { return nil, errors.New("raw-error-canary") }).Code() != ConfigUnavailable {
 		t.Fatal("read failure not unavailable")
 	}
 }
@@ -408,7 +959,7 @@ func TestSelectedFileDoesNotDereferenceSecretsOrAcceptHardlinks(t *testing.T) {
 
 func TestSelectedFileDetectsReplacementAndOversize(t *testing.T) {
 	_, path := privateFixture(t)
-	cfg := readConfigWithHost(path, os.Geteuid(), "linux", openParent, openSelectedFile, func(r io.Reader) ([]byte, error) {
+	cfg := readConfigWithHost(path, os.Geteuid(), "linux", openParentWalk, openSelectedFile, func(r io.Reader) ([]byte, error) {
 		data, err := io.ReadAll(r)
 		if err != nil {
 			return nil, err
