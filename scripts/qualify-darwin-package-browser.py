@@ -315,10 +315,13 @@ def check_trust(trust):
                 "receipt_python_tls")
         for tool in ("curl", "packaged_go"):
             entry = control[tool]
-            require(is_exact(entry, ("category", "exit_code")) and entry["category"] == expected
+            require(is_exact(entry, ("category", "exit_code") + (("proof",) if tool == "packaged_go" else ()))
+                    and entry["category"] == expected
                     and is_int(entry["exit_code"], -2147483648, 2147483647), "receipt_tls_tool")
+        # The packaged Go control proves the trusted origin accepted, or an untrusted one refused (main's exit 1); never the category.
+        require(control["packaged_go"]["proof"] == ("accepted" if expected == "positive" else "refusal_only"), "receipt_tls_proof")
         curl, golang = control["curl"]["exit_code"], control["packaged_go"]["exit_code"]
-        require((curl == 0 and golang == 0) if expected == "positive" else (curl == 60 and golang != 0),
+        require((curl == 0 and golang == 0) if expected == "positive" else (curl == 60 and golang == 1),
                 "receipt_tls_exit")
 
 
@@ -631,7 +634,8 @@ def fixture_receipt(sha=SELF_SHA, run=SELF_RUNS["darwin"]):
     refused = sum(c for (_, o), c in pairs.items() if o == "refused_expected")
     control = lambda category, python, curl, golang: {"category": category,
         "python": {"category": category, "verify_code": python},
-        "curl": {"category": category, "exit_code": curl}, "packaged_go": {"category": category, "exit_code": golang}}
+        "curl": {"category": category, "exit_code": curl}, "packaged_go": {"category": category, "exit_code": golang,
+                                                                                                     "proof": "accepted" if category == "positive" else "refusal_only"}}
     observation = lambda ordinal: {"ordinal": ordinal, "private_plist_before_absent": True,
         "private_plist_after_absent": True, "setup_ready_seconds": 4.25, "loaded_service": False,
         "proof_kind": "source_bound_wrapper_continued", "query_exit_zero": False, "numeric_query_exit_observed": False}
@@ -898,6 +902,12 @@ def self_test():
         verify_code=99), "receipt_python_tls")
     receipt_case("reject_go_unknown_ca_accepted", lambda r: r["trust_controls"]["python_curl_packaged_go"][1][
         "packaged_go"].update(exit_code=0), "receipt_tls_exit")
+    receipt_case("reject_go_proof_missing", lambda r: r["trust_controls"]["python_curl_packaged_go"][1]["packaged_go"].pop("proof"),
+                 "receipt_tls_tool")
+    receipt_case("reject_go_proof_wrong", lambda r: r["trust_controls"]["python_curl_packaged_go"][2]["packaged_go"].update(
+        proof="accepted"), "receipt_tls_proof")
+    receipt_case("reject_go_unknown_ca_other_exit", lambda r: r["trust_controls"]["python_curl_packaged_go"][1][
+        "packaged_go"].update(exit_code=2), "receipt_tls_exit")
     receipt_case("reject_curl_wrong_host", lambda r: r["trust_controls"]["python_curl_packaged_go"][2]["curl"].update(
         exit_code=0), "receipt_tls_exit")
     receipt_case("reject_numeric_query_observed", lambda r: r["service_guard"]["observations"][0].update(

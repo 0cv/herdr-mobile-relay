@@ -512,7 +512,7 @@ OFFLINE = MappingProxyType({
                "wrong_platform", "missing_case", "duplicate_case", "extra_case",
                "exit_disagreement", "invalid_producer", "invalid_budget_or_paths",
                "sensitive_receipt_fields", "missing_probe_category_receipt",
-               "launcher_exit_before_link_receipt"),
+               "launcher_exit_before_link_receipt", "go_tls_receipt_contract"),
     "archive": ("valid_archive", "traversal", "absolute", "duplicate", "ambiguous",
                 "symlink", "hardlink", "special_member", "zip_digest", "tar_digest",
                 "checksum", "manifest_target_or_version", "zip_count", "tar_count",
@@ -522,7 +522,9 @@ OFFLINE = MappingProxyType({
                    "receipt_cap", "dependency_storage_cap", "hydration_stream_cap",
                    "immutable_production_limits", "injected_operations_refuse_real_effects",
                    "verifier_requests_admitted", "missing_probe_near_misses_refused",
-                   "missing_probe_forwarded_by_relay", "launcher_exit_before_link_refused"),
+                   "missing_probe_forwarded_by_relay", "launcher_exit_before_link_refused",
+                   "go_tls_negative_control_sanitized_refusal", "go_tls_controls_end_to_end",
+                   "go_tls_category_proof_stays_in_python_and_curl", "go_tls_refusal_bound_to_main_source"),
     "cleanup": ("ordered_success", "failure_cleanup", "handled_signal_cleanup",
                 "bounded_escalation_and_reap", "unowned_ids_refused",
                 "surviving_children_fail", "surviving_listener_fail", "closure_error_fails",
@@ -688,7 +690,9 @@ def browser_result(data, mode, exit_code):
 SAFE_FAILURES = frozenset({"unexpected_exception", "fixture_refused", "command_failed", "phase_deadline",
     "owned_operation_allowlist", "cleanup_uncertain", "receipt_validation", "cap_raw", "cap_dependencies",
     "cap_stdin", "cap_result", "cap_receipt", "launchctl_authority", "service_guard_query_cap",
-    "launcher_exit_before_link"})
+    "launcher_exit_before_link", "go_tls_exit", "go_tls_unreadable", "go_tls_empty", "go_tls_http_status", "go_tls_redirect",
+    "go_tls_descriptor_or_identity", "go_tls_representation", "go_tls_canonical_probe", "go_tls_local_input", "go_tls_other",
+    "go_tls_listener"})
 SAFE_EXCEPTION_TYPES = frozenset({"Unknown", "Refusal", "CleanupFailure", "GateFailure", "SystemExit",
     "KeyboardInterrupt", "OSError", "FileNotFoundError", "PermissionError", "FileExistsError", "TimeoutError",
     "ConnectionError", "ConnectionRefusedError", "ConnectionResetError", "BrokenPipeError", "ConnectionAbortedError",
@@ -801,7 +805,7 @@ def receipt_values_safe(value):
             "source_guard_sha256": digest, "source_launcher_sha256": digest, "observations": (guard_observation, 2)},
         "trust_controls": {"python_curl_packaged_go": ({"category": tls_category,
             "python": {"category": tls_category, "verify_code": nullable(integer(1000))},
-            "curl": tls_tool, "packaged_go": tls_tool}, 3),
+            "curl": tls_tool, "packaged_go": {**tls_tool, "proof": enum("accepted", "refusal_only")}}, 3),
             "browser": {"ok": boolean, "argv_ok": boolean, "contexts_closed": boolean,
                 "version": enum("151.0.7922.34"), "observations": (enum("empty_profile_refuses_ca",
                     "trusted_profile_accepts_ip", "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"), 4)}},
@@ -1049,13 +1053,15 @@ def receipt_policy(data, candidate, source_hashes, producer_identity):
         require(control["category"] == expected, "receipt_tls_category")
         shape(control["python"], ("category", "verify_code"))
         for tool in ("curl", "packaged_go"):
-            shape(control[tool], ("category", "exit_code"))
+            shape(control[tool], ("category", "exit_code") + (("proof",) if tool == "packaged_go" else ()))
             require(control[tool]["category"] == expected and type(control[tool]["exit_code"]) is int, "receipt_tls_tool")
+        # Go proves the trusted origin accepted, or an untrusted one refused with main's one failure exit (status() -> 1); never the category.
+        require(control["packaged_go"]["proof"] == ("accepted" if expected == "positive" else "refusal_only"), "receipt_tls_proof")
         require(control["python"]["category"] == expected and (
             control["python"]["verify_code"] is None if expected == "positive" else
             control["python"]["verify_code"] in ({20, 21} if expected == "unknown_ca" else {64})), "receipt_python_tls")
         require((control["curl"]["exit_code"] == 0 and control["packaged_go"]["exit_code"] == 0) if expected == "positive"
-                else (control["curl"]["exit_code"] == 60 and control["packaged_go"]["exit_code"] != 0), "receipt_tls_exit")
+                else (control["curl"]["exit_code"] == 60 and control["packaged_go"]["exit_code"] == 1), "receipt_tls_exit")
     guard = value["service_guard"]
     shape(guard, ("uid", "label", "starts", "command", "launchctl_path", "launchctl_sha256",
                   "source_guard_sha256", "source_launcher_sha256", "observations"))
@@ -3241,11 +3247,92 @@ async function check(context, port, refusal) {
 '''
 
 
+# Main's appdeploy.VerifyPublic shows no cause for a failed fetch: publicResourceFetchError.Error() is exactly
+# "fetch public app resource /<resource> failed" for any transport failure, x509 included (internal/appdeploy/
+# worker.go:704-711), retried (:1128-1141) until publicVerificationTimeout (:40, 2 minutes), then wrapped by
+# verifyPublicWith (:751-781); release.json is fetched first (:1046), reportError prints "herdr-mobile-relay: %v\n"
+# (cmd/herdr-mobile-relay/logging.go:36-39) and status() exits 1 (main.go:173, :736-741). A verifier refused by an
+# untrusted origin prints exactly this line: REFUSAL only. The category is proved per origin by Python and curl.
+GO_VERIFY_TRANSPORT_REFUSAL = re.compile(
+    rb"herdr-mobile-relay: public app did not publish the expected bundle before timeout: "
+    rb"fetch public app resource /release\.json failed\n?")
+# Forms main prints for a DIFFERENT failure class (status, redirect, identity, representation, probe, local input).
+GO_VERIFY_OTHER_CLASSES = (
+    ("http_status", re.compile(rb"HTTP [0-9]{3}|returned HTTP")),
+    ("redirect", re.compile(rb"redirect", re.I)),
+    ("descriptor_or_identity", re.compile(rb"descriptor|identity|metadata|does not match", re.I)),
+    ("representation", re.compile(rb"Content-(?:Type|Encoding)|Cache-Control|decode|exceeds", re.I)),
+    ("canonical_probe", re.compile(rb"canonical|missing", re.I)),
+    ("local_input", re.compile(rb"local web|origin must be|usage:|read local|parse local", re.I)))
+
+
+def go_verify_failure_class(stderr):
+    """Class of a packaged verify-public failure from its stderr alone; only "transport_refusal" is a TLS refusal."""
+    if type(stderr) is not bytes:
+        return "unreadable"
+    if not stderr.strip():
+        return "empty"
+    for name, pattern in GO_VERIFY_OTHER_CLASSES:
+        if pattern.search(stderr):
+            return name
+    return "transport_refusal" if GO_VERIFY_TRANSPORT_REFUSAL.fullmatch(stderr) is not None else "other"
+
+
+def go_tls_refusal_failure(go):
+    """None for a refusal (main's failure exit, exactly the sanitized line), else a fixed failure code, never its output."""
+    code = getattr(go, "returncode", None)
+    if type(code) is not int or code != 1:
+        return "go_tls_exit"
+    kind = go_verify_failure_class(getattr(go, "stderr", None))
+    return None if kind == "transport_refusal" else "go_tls_" + kind
+
+
+def python_tls_refusal_category(expected, verify_code):
+    return expected != "positive" and ((expected == "wrong_host" and verify_code == 64)
+                                       or (expected == "unknown_ca" and verify_code in {20, 21}))
+
+
+def curl_tls_refusal_category(expected, stderr):
+    curl_pattern = (rb"unable to get local issuer|self.signed certificate|unable to verify|invalid certificate chain|certificate chain is not trusted" if expected == "unknown_ca"
+                    else rb"no alternative certificate subject name matches|does not match target|IP address mismatch")
+    return re.search(curl_pattern, stderr, re.I) is not None
+
+
+def proxy_tls_counts(proxy):
+    with proxy.lock:
+        return {key: proxy.counts.get(key, 0) for key in ("tls_refused", "http_get", "websocket")}
+
+
+def proxy_drained(proxy, seconds=10):
+    """True once every connection this proxy already accepted is finished, so its counters hold no stale earlier event."""
+    end = time.monotonic() + seconds
+    while True:
+        with proxy.lock:
+            if not any(worker.is_alive() for worker in proxy.workers):
+                return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+
+
+def go_refused_at_listener(before, after):
+    # The line cannot tell a TLS refusal from a closed port: the origin's own listener refused it and it never reached HTTP.
+    return (after["tls_refused"] > before["tls_refused"] and after["http_get"] == before["http_get"]
+            and after["websocket"] == before["websocket"])
+
+
+def tls_control_record(expected, python_code, curl, go):
+    return {"category": expected,
+        "python": {"category": expected, "verify_code": python_code},
+        "curl": {"category": expected, "exit_code": curl.returncode},
+        "packaged_go": {"category": expected, "exit_code": go.returncode, "proof": "accepted" if expected == "positive" else "refusal_only"}}
+
+
 def packaged_go_tls_control(root, operations, binary, version, revision, origin, category):
     require(category in {"positive", "unknown_ca", "wrong_host"}, "tls_category")
     # Production appdeploy.verifyPublic retries TLS errors until its two-minute
-    # context expires. A ten-second wrapper deadline cannot observe that exit
-    # or its categorized certificate error. Allow ten seconds of startup/exit
+    # publicVerificationTimeout (worker.go:40) expires. A ten-second wrapper
+    # deadline cannot observe that exit. Allow ten seconds of startup/exit
     # margin for negative controls; Operations.capture still clamps this to the
     # unchanged phase/global remainder. Never count a wrapper timeout as refusal.
     timeout = 10 if category == "positive" else 130
@@ -3253,9 +3340,11 @@ def packaged_go_tls_control(root, operations, binary, version, revision, origin,
                                str(root / "release/web"), "--version", version, "--revision", revision], timeout)
 
 
-def tls_controls(root, operations, binary, version, revision, candidate):
+def tls_controls(root, operations, binary, version, revision, candidate, proxies):
     outcomes = []
-    for port, expected in ((8443, "positive"), (18444, "unknown_ca"), (18445, "wrong_host")):
+    require(len(proxies) == 3, "tls_proxy_identity")
+    for proxy, (port, expected) in zip(proxies, ((8443, "positive"), (18444, "unknown_ca"), (18445, "wrong_host"))):
+        require(proxy.server_port == port, "tls_proxy_identity")
         origin = f"https://127.0.0.1:{port}"
         context = ssl.create_default_context(cafile=str(root / "ca.pem"))
         python_code = None
@@ -3265,25 +3354,22 @@ def tls_controls(root, operations, binary, version, revision, candidate):
                     require(expected == "positive", "python_tls_negative_accepted")
         except ssl.SSLCertVerificationError as error:
             python_code = error.verify_code
-            require(expected != "positive" and ((expected == "wrong_host" and error.verify_code == 64)
-                    or (expected == "unknown_ca" and error.verify_code in {20, 21})), "python_tls_refusal")
+            require(python_tls_refusal_category(expected, error.verify_code), "python_tls_refusal")
         curl = operations.capture(["curl", "--noproxy", "*", "--fail", "--silent", "--show-error",
                                    "--max-time", "5", "--max-redirs", "0", origin + "/healthz"], 6)
+        # Python's and curl's own refusals are recorded by worker threads: let them finish so only the verifier's remain.
+        require(expected == "positive" or proxy_drained(proxy), "tls_proxy_drain")
+        refused_before = proxy_tls_counts(proxy)
         go = packaged_go_tls_control(root, operations, binary, version, revision, origin, expected)
         if expected == "positive":
             require(curl.returncode == 0 and go.returncode == 0, "tls_positive")
         else:
             require(curl.returncode == 60 and go.returncode != 0, "tls_negative_exit")
-            pattern = rb"unknown authority" if expected == "unknown_ca" else rb"certificate.*(?:IP|127\.0\.0\.1)|IP.*certificate"
-            require(re.search(pattern, go.stderr, re.I) is not None
-                    and (expected != "wrong_host" or b"unknown authority" not in go.stderr.lower()), "go_tls_refusal_category")
-            curl_pattern = (rb"unable to get local issuer|self.signed certificate|unable to verify|invalid certificate chain|certificate chain is not trusted" if expected == "unknown_ca"
-                            else rb"no alternative certificate subject name matches|does not match target|IP address mismatch")
-            require(re.search(curl_pattern, curl.stderr, re.I) is not None, "curl_tls_refusal_category")
-        outcomes.append({"category": expected,
-            "python": {"category": expected, "verify_code": python_code},
-            "curl": {"category": expected, "exit_code": curl.returncode},
-            "packaged_go": {"category": expected, "exit_code": go.returncode}})
+            failure = go_tls_refusal_failure(go)
+            require(failure is None, failure)
+            require(go_refused_at_listener(refused_before, proxy_tls_counts(proxy)), "go_tls_listener")
+            require(curl_tls_refusal_category(expected, curl.stderr), "curl_tls_refusal_category")
+        outcomes.append(tls_control_record(expected, python_code, curl, go))
     script = root / "trust-controls.cjs"
     script.write_text(TRUST_SCRIPT)
     # Playwright owns detached browser groups, not the Node parent's group.
@@ -3540,7 +3626,8 @@ def runtime(args):
                 return child, setup
             launcher, link = start_launcher()
             operations.effects.effect("browser")
-            receipt["trust_controls"] = tls_controls(root, operations, binary, version, args.producer_sha, candidate)
+            receipt["trust_controls"] = tls_controls(root, operations, binary, version, args.producer_sha, candidate,
+                                                     proxy_servers)
             dev_url, dev_origin = helper.development_setup_link(root / "bin/dev-printer.test", link, ORIGIN,
                 relay_https_origin=ORIGIN, temporary_parent=root / "tmp")
             browser_input = {"fixture_platform": PLATFORM, "setup_url": link, "dev_setup_url": dev_url,
@@ -3804,7 +3891,7 @@ def offline_check(group):
                 "python_curl_packaged_go": [{"category": category,
                     "python": {"category": category, "verify_code": code},
                     "curl": {"category": category, "exit_code": 0 if category == "positive" else 60},
-                    "packaged_go": {"category": category, "exit_code": 0 if category == "positive" else 1}}
+                    "packaged_go": {"category": category, "exit_code": 0 if category == "positive" else 1, "proof": "accepted" if category == "positive" else "refusal_only"}}
                     for category, code in (("positive", None), ("unknown_ca", 20), ("wrong_host", 64))]},
             "service_guard": {"uid": 501, "label": "com.herdr-mobile-relay.service", "starts": 2,
                 "command": "launchctl_print_gui_label", "launchctl_path": "/bin/launchctl",
@@ -4682,6 +4769,32 @@ def offline_check(group):
                 require(rejects(lambda: receipt_policy(encode({**failed, "failure_detail": {**detail, "exit_code": bad}}),
                         BASE, sources, producer_id)), "offline_launcher_exit_status_refused")
             return True
+        def go_tls_receipt_contract():
+            # Production-builder records: Go proves refusal only and says so in a fixed, strictly validated proof; cell and qualify agree.
+            spec = importlib.util.spec_from_file_location("qualify_gate", Path(__file__).resolve().parents[1] / QUALIFY_GATE)
+            gate = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(gate)
+            build = lambda category, python, curl, go: tls_control_record(
+                category, python, SimpleNamespace(returncode=curl), SimpleNamespace(returncode=go))
+            records = [build("positive", None, 0, 0), build("unknown_ca", 20, 60, 1), build("wrong_host", 64, 60, 1)]
+            trust = valid_receipt["trust_controls"]
+            require(records == trust["python_curl_packaged_go"], "offline_go_tls_record_builder")
+            gate.check_trust({"python_curl_packaged_go": records, "browser": trust["browser"]})
+            path = ("trust_controls", "python_curl_packaged_go")
+            for index in (1, 2):
+                for bad in (0, 2, 255, -9, True, False, None, "1", 1.0):
+                    require(receipt_reject((*path, index, "packaged_go", "exit_code"), bad), "offline_go_tls_exit_strict")
+            require(receipt_reject((*path, 0, "packaged_go", "exit_code"), 1), "offline_go_tls_positive_exit_strict")
+            for index, bad in ((0, "refusal_only"), (1, "accepted"), (2, "category"), (1, None), (2, True), (1, "Refusal_Only"), (0, ""), (1, ...)):
+                marked = [dict(record) for record in records]
+                marked[index]["packaged_go"] = {k: v for k, v in {**records[index]["packaged_go"], "proof": bad}.items() if v is not ...}
+                try:
+                    gate.check_trust({"python_curl_packaged_go": marked, "browser": trust["browser"]})
+                    gate_refuses = False
+                except gate.Refusal:
+                    gate_refuses = True
+                require(receipt_reject((*path, index, "packaged_go"), marked[index]["packaged_go"]) and gate_refuses, "offline_go_tls_proof_strict")
+            return True
         operations = {
             "valid_result": lambda: browser_result(encode(valid), "enroll", 0)["ok"]
                 and receipt_policy(encode(valid_receipt), BASE, sources, producer_id)
@@ -4714,6 +4827,7 @@ def offline_check(group):
                 and sensitive_failures() and socket_privacy(),
             "missing_probe_category_receipt": missing_probe_receipts,
             "launcher_exit_before_link_receipt": launcher_exit_receipts,
+            "go_tls_receipt_contract": go_tls_receipt_contract,
         }
     elif group == "archive":
         valid_entries = [Entry(".", "directory", 0), Entry("web", "directory", 0),
@@ -6639,6 +6753,166 @@ def offline_check(group):
                 require(rejects(lambda: launcher_started(bad, failed)) and failed == ["unknown", exit_code],
                         "offline_launcher_exit_fail_closed")
             return True
+        sanitized_line = (b"herdr-mobile-relay: public app did not publish the expected bundle before timeout: "
+                          b"fetch public app resource /release.json failed\n")
+        def go_verdict(category, returncode, stderr):
+            # The real command boundary with an inert capture: never the binary, a subprocess or a TLS connection.
+            timeouts = []
+            def capture(argv, timeout):
+                timeouts.append(timeout)
+                return SimpleNamespace(returncode=returncode, stdout=b"", stderr=stderr, seconds=120.0)
+            go = packaged_go_tls_control(Path("/must-not-be-accessed"), SimpleNamespace(capture=capture),
+                                         Path("/must-not-execute"), "v", "r", "https://127.0.0.1:18444", category)
+            return timeouts == [130] and go_tls_refusal_failure(go) is None
+        def go_tls_negative_control_sanitized_refusal():
+            # Exactly the sanitized line with main's failure exit, for both negative origins alike, and nothing else.
+            line, relay = sanitized_line, b"herdr-mobile-relay: "
+            wrapper = line[:-len(b"fetch public app resource /release.json failed\n")]
+            for category in ("unknown_ca", "wrong_host"):
+                require(go_verdict(category, 1, line) and go_verdict(category, 1, line[:-1]), "offline_go_negative_accepts_sanitized")
+            refused = (  # (exit code, stderr, class main's text shows)
+                (0, line, "transport_refusal"), (2, line, "transport_refusal"), (-9, line, "transport_refusal"),
+                (True, line, "transport_refusal"), (1, b"", "empty"), (1, b"\n", "empty"), (1, line.decode(), "unreadable"),
+                (1, None, "unreadable"), (1, relay + b"verify public app: HTTP 403\n", "http_status"),
+                (1, wrapper + b"verify public app: HTTP 404\n", "http_status"),
+                (1, relay + b"missing canonical public asset /assets/herdr-missing-" + b"0" * 32 + b".js returned HTTP 200\n", "http_status"),
+                (1, wrapper + b"public release descriptor identity does not match the verified local target\n", "descriptor_or_identity"),
+                (1, wrapper + b"public web bundle identity: public version metadata is invalid\n", "descriptor_or_identity"),
+                (1, wrapper + b"public javascript digest does not match the verified local target\n", "descriptor_or_identity"),
+                (1, relay + b"fetch public app resource /release.json: public version check redirected to another origin\n", "redirect"),
+                (1, relay + b"fetch public app resource /release.json: canonical public resource must not redirect\n", "redirect"),
+                (1, relay + b"public app origin must be a valid HTTPS origin without credentials, a path, query, or fragment\n", "local_input"),
+                (1, line.replace(b"/release.json", b"/version.json"), "other"), (1, line + line, "other"),
+                (1, wrapper + b"fetch public app resource /release.json: x509: certificate signed by unknown authority\n", "other"))
+            for code, stderr, kind in refused:
+                failure = "go_tls_exit" if kind == "transport_refusal" else "go_tls_" + kind
+                require(go_verify_failure_class(stderr) == kind and failure in SAFE_FAILURES and not any(
+                    go_verdict(category, code, stderr) for category in ("unknown_ca", "wrong_host"))
+                    and go_tls_refusal_failure(SimpleNamespace(returncode=code, stderr=stderr)) == failure,
+                    "offline_go_negative_refusals")
+            require(go_verify_failure_class(line) == go_verify_failure_class(line[:-1]) == "transport_refusal",
+                    "offline_go_failure_classes")
+            # The line cannot tell a TLS refusal from a closed port: the origin's listener must also refuse its handshakes.
+            def listener(**after):
+                proxy = SimpleNamespace(lock=threading.RLock(), counts={"tls_refused": 2, "tls_accepted": 1})
+                before = proxy_tls_counts(proxy)
+                proxy.counts.update(after)
+                return go_refused_at_listener(before, proxy_tls_counts(proxy))
+            require(listener(tls_refused=28) and listener(tls_refused=3, client_aborted=1) and not listener()
+                    and not listener(tls_refused=2) and not listener(tls_refused=28, http_get=1)
+                    and not listener(tls_refused=28, websocket=1), "offline_go_listener_refusal")
+            return True
+        def go_tls_controls_end_to_end():
+            # tls_controls itself with inert Python/curl/Go/Node operations and listener counters: no socket, process or TLS.
+            browser = {"ok": True, "contexts_closed": True, "argv_ok": True, "version": "151.0.7922.34",
+                       "observations": ["empty_profile_refuses_ca", "trusted_profile_accepts_ip",
+                                        "trusted_profile_refuses_unknown_ca", "trusted_profile_refuses_wrong_host"]}
+            @contextmanager
+            def inert(*_args, **_kwargs):
+                yield object()
+            def run(go_code=1, go_stderr=sanitized_line, refusals=28, python=(None, 20, 64), ports=(8443, 18444, 18445), curl_code=60,
+                    late=False, stuck=False,
+                    curl=(b"", b"SSL certificate problem: unable to get local issuer certificate",
+                          b"SSL: no alternative certificate subject name matches target host name")):
+                proxies = [SimpleNamespace(server_port=port, lock=threading.RLock(), counts={}, workers=[]) for port in ports]
+                codes, curls, gos, pending, clock = iter(python), [], [], [], [0.0]
+                def settle():
+                    while pending:
+                        pending.pop(0)()
+                def sleep(seconds):
+                    settle()
+                    clock[0] += seconds
+                def wrap_socket(plain, server_hostname=None):
+                    code = next(codes)
+                    if code is None:
+                        return inert()
+                    error = ssl.SSLCertVerificationError(1, "inert")
+                    error.verify_code = code
+                    raise error
+                def capture(argv, timeout, data=b"", **_):
+                    if argv[0] == "node":
+                        return SimpleNamespace(returncode=0, stdout=json.dumps(browser).encode())
+                    seen = curls if argv[0] == "curl" else gos
+                    seen.append(timeout)
+                    index = len(seen) - 1
+                    if argv[0] == "curl":
+                        if index and (late or stuck):  # curl's server-side worker has not recorded its refusal yet
+                            done, counts = [], proxies[index].counts
+                            proxies[index].workers.append(SimpleNamespace(is_alive=lambda done=done: stuck or not done))
+                            pending.append(lambda done=done, counts=counts: (done.append(1), counts.update(tls_refused=counts.get("tls_refused", 0) + 1)))
+                        return SimpleNamespace(returncode=curl_code if index else 0, stdout=b"", stderr=curl[index])
+                    settle()  # without the drain a stale event would land here, inside the verifier's window
+                    if index:
+                        proxies[index].counts["tls_refused"] = proxies[index].counts.get("tls_refused", 0) + refusals
+                    return SimpleNamespace(returncode=go_code if index else 0, stdout=b"", stderr=go_stderr if index else b"")
+                real = {"socket": socket, "ssl": ssl, "time": time}
+                with tempfile.TemporaryDirectory() as directory:
+                    globals().update(time=SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep),
+                                     socket=SimpleNamespace(create_connection=inert), ssl=SimpleNamespace(
+                        create_default_context=lambda **_: SimpleNamespace(wrap_socket=wrap_socket),
+                        SSLCertVerificationError=ssl.SSLCertVerificationError))
+                    try:
+                        return tls_controls(Path(directory), SimpleNamespace(capture=capture, cleanup=SimpleNamespace(
+                            error=lambda code: None)), Path("/must-not-execute"), "v", "r", Path("/candidate"), proxies)
+                    finally:
+                        globals().update(real)
+            expected = [tls_control_record(category, python, SimpleNamespace(returncode=curl), SimpleNamespace(returncode=go))
+                        for category, python, curl, go in (("positive", None, 0, 0), ("unknown_ca", 20, 60, 1), ("wrong_host", 64, 60, 1))]
+            require(run() == {"python_curl_packaged_go": expected, "browser": browser}, "offline_tls_controls_accepts_sanitized")
+            require(run(late=True) == {"python_curl_packaged_go": expected, "browser": browser}, "offline_tls_controls_drains_stale_refusal")
+            for override in ({"go_code": 0}, {"go_code": 2}, {"curl_code": 35}, {"go_stderr": b"herdr-mobile-relay: verify public app: HTTP 403\n"},
+                             {"go_stderr": b""}, {"go_stderr": b"x509: certificate signed by unknown authority"}, {"refusals": 0},
+                             {"late": True, "refusals": 0}, {"stuck": True},
+                             {"python": (None, 64, 64)}, {"python": (None, 20, 20)}, {"ports": (8443, 18445, 18444)},
+                             {"curl": (b"", b"no alternative certificate subject name matches", b"unable to get local issuer")}):
+                require(rejects(lambda: run(**override)), "offline_tls_controls_refusals")
+            return True
+        def go_tls_category_proof_stays_in_python_and_curl():
+            # The per-origin category comes from Python's verify_code and curl's own text, never from the Go line.
+            accepted = {("unknown_ca", 20), ("unknown_ca", 21), ("wrong_host", 64)}
+            require(all(python_tls_refusal_category(kind, code) == ((kind, code) in accepted) for kind in ("positive", "unknown_ca",
+                    "wrong_host") for code in (None, 0, 18, 20, 21, 62, 64, True)), "offline_python_category")
+            unknown = (b"curl: (60) SSL certificate problem: unable to get local issuer certificate\n",
+                       b"curl: (60) SSL certificate problem: self signed certificate in certificate chain\n",
+                       b"curl: (60) SSL certificate problem: unable to verify the first certificate\n")
+            wrong = (b"curl: (60) SSL: no alternative certificate subject name matches target host name '127.0.0.1'\n",
+                     b"curl: (60) SSL: certificate subject name 'x' does not match target host name '127.0.0.1'\n")
+            require(all(curl_tls_refusal_category("unknown_ca", text) for text in unknown)
+                    and all(curl_tls_refusal_category("wrong_host", text) for text in wrong)
+                    and not any(curl_tls_refusal_category("unknown_ca", text) for text in (*wrong, b"", sanitized_line))
+                    and not any(curl_tls_refusal_category("wrong_host", text) for text in (*unknown, b"", sanitized_line)),
+                    "offline_curl_category")
+            require(go_verdict("unknown_ca", 1, sanitized_line) and go_verdict("wrong_host", 1, sanitized_line),
+                    "offline_go_cannot_categorize")  # one Go line for both origins: it can never stand in for a category
+            return True
+        def go_tls_refusal_bound_to_main_source():
+            # Derive the accepted line from main's own source: a changed message fails here, not after the 30-minute cell.
+            root = Path(__file__).resolve().parents[1]
+            worker = (root / "internal/appdeploy/worker.go").read_text()
+            main = (root / "cmd/herdr-mobile-relay/main.go").read_text()
+            report = (root / "cmd/herdr-mobile-relay/logging.go").read_text()
+            def one(pattern, text):
+                found = re.findall(pattern, text, re.S)
+                require(len(found) == 1, "offline_go_source_binding")
+                return found[0]
+            fetch = one(r'func \(e \*publicResourceFetchError\) Error\(\) string \{.*?return fmt\.Sprintf\("([^"]*)", e\.resource\)\n\}', worker)
+            wrapper = one(r'fmt\.Errorf\("(public app did not publish the expected bundle before timeout): %w", lastErr\)', worker)
+            prefix = one(r'fmt\.Fprintf\(stderr, "(herdr-mobile-relay): %v\\n", err\)', report)
+            first = one(r'func checkPublicBundle\(.*?fetchPublicResource\(ctx, client, job\.Origin, "([^"]+)"', worker)
+            minutes = int(one(r'publicVerificationTimeout\s*=\s*([0-9]+) \* time\.Minute', worker))
+            one(r'response, err := client\.Do\(request\)\n\tif err != nil \{\n\t\treturn nil, nil, &publicResourceFetchError\{resource: resource, cause: err\}', worker)
+            one(r'func publicErrorRetryable\(err error\) bool \{.*?\n\treturn true\n\}', worker)
+            one(r'func status\(err error\) \(int, error\) \{\n\tif err != nil \{\n\t\treturn 1, err', main)
+            one(r'return status\(appdeploy\.VerifyPublic\(context\.Background\(\)', main)
+            require(fetch == "fetch public app resource /%s failed" and first == "release.json", "offline_go_source_text")
+            line = f"{prefix}: {wrapper}: {fetch % first}\n".encode()
+            seen = []
+            packaged_go_tls_control(Path("/x"), SimpleNamespace(capture=lambda argv, timeout: seen.append(timeout)),
+                                    Path("/y"), "v", "r", ORIGIN, "unknown_ca")
+            require(line == sanitized_line and GO_VERIFY_TRANSPORT_REFUSAL.fullmatch(line) is not None
+                    and go_verify_failure_class(line) == "transport_refusal", "offline_go_source_line")
+            require(seen == [130] and seen[0] >= minutes * 60 + 10, "offline_go_negative_deadline_exceeds_main")
+            return True
         operations = {"within_limits": within, "per_phase_deadline": lambda: deadline(90),
             "global_deadline": global_deadline, "stop_before_next_phase": lambda: deadline(90, True),
             "stdin_cap": lambda: rejects(lambda: cap("stdin", 65537)),
@@ -6655,7 +6929,11 @@ def offline_check(group):
             "verifier_requests_admitted": verifier_requests_admitted,
             "missing_probe_near_misses_refused": missing_probe_near_misses_refused,
             "missing_probe_forwarded_by_relay": missing_probe_forwarded_by_relay,
-            "launcher_exit_before_link_refused": launcher_exit_before_link_refused}
+            "launcher_exit_before_link_refused": launcher_exit_before_link_refused,
+            "go_tls_negative_control_sanitized_refusal": go_tls_negative_control_sanitized_refusal,
+            "go_tls_controls_end_to_end": go_tls_controls_end_to_end,
+            "go_tls_category_proof_stays_in_python_and_curl": go_tls_category_proof_stays_in_python_and_curl,
+            "go_tls_refusal_bound_to_main_source": go_tls_refusal_bound_to_main_source}
     else:
         def cleanup_case(survive=False, listener_survives=False, error=False, handled=False, escalation=False):
             owner, child, listener = Cleanup(), InertChild(survive, escalation), InertListener(listener_survives, error)
