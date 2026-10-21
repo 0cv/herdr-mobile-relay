@@ -10,8 +10,10 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -634,10 +636,10 @@ class Wiring(unittest.TestCase):
             self.assertIn("uninstall-cli %s ${{ matrix.shard }}/%d" % (tier, m.CLI.counts[tier]), workflow)
             self.assertIn("service-uninstall-cli-%s-${{ matrix.runner }}-s${{ matrix.shard }}-${{ github.sha }}" % tier, workflow)
             self.assertIn("uninstall-cli-shard-evidence.json", workflow)
-            self.assertRegex(workflow, r"needs: \[(candidate, )?suites, native, uninstall_cli\]")
-            self.assertIn(" suites native uninstall_cli" if tier == "fast" else " candidate suites native uninstall_cli", workflow)
+            self.assertRegex(workflow, r"needs: \[(decide, candidate, )?suites, native, uninstall_cli\]")
+            self.assertIn(" suites native uninstall_cli" if tier == "fast" else " decide candidate suites native uninstall_cli", workflow)
             self.assertIn("--tier %s" % tier, workflow)
-            self.assertIn("if: ${{ always() }}", workflow)
+            self.assertIn("if: ${{ always() }}" if tier == "fast" else "if: ${{ always() && needs.decide.outputs.run != 'false' }}", workflow)
             self.assertEqual(sorted(re.findall(r"runner: \[(.*)\]", workflow)), ["macos-15, ubuntu-24.04"] * 3)
             code = "\n".join(line for line in workflow.lower().splitlines() if not line.lstrip().startswith("#"))
             for forbidden in ("continue-on-error", "retry", "rerun"):
@@ -645,6 +647,59 @@ class Wiring(unittest.TestCase):
         self.assertIn("workflow_dispatch", self.text(".github/workflows/service-full-qualification.yml"))
         self.assertIn("pull_request", self.text(".github/workflows/service-full-qualification.yml"))
         self.assertIn("schedule", self.text(".github/workflows/service-full-qualification.yml"))
+
+    @staticmethod
+    def blocks(text, indent):  # {key: its text} for the mapping entries at exactly this indent (comments before the first entry are dropped)
+        return {re.match(r"\s*([\w-]+):", b).group(1): b for b in re.split(r"(?m)^(?=%s[\w-]+:)" % (" " * indent), text) if b.lstrip()[:1] not in ("#", "")}
+
+    def test_full_triggers_are_the_three_existing_ones_plus_a_push_to_the_ci_branch_only(self):
+        triggers = self.blocks(self.text(".github/workflows/service-full-qualification.yml").split("\non:\n", 1)[1].split("\npermissions:", 1)[0], 2)
+        self.assertEqual(sorted(triggers), ["pull_request", "push", "schedule", "workflow_dispatch"])
+        self.assertEqual(triggers["push"], "  push:\n    branches: [ci/tailscale-native-preflight-ef9f843]\n")  # no other branch, tag, path or filter
+        self.assertEqual(triggers["pull_request"], "  pull_request:\n")
+        self.assertEqual(triggers["schedule"], '  schedule:\n    - cron: "17 3 * * *"\n')
+        self.assertEqual(triggers["workflow_dispatch"], "  workflow_dispatch:\n    inputs:\n      candidate_sha:\n        description: Optional full commit SHA the selected ref "
+                         "must be at (the run fails otherwise)\n        required: false\n        type: string\n")
+
+    def test_the_marker_decision_gates_every_job_and_a_skipped_push_run_neither_fails_nor_qualifies(self):
+        workflow = self.text(".github/workflows/service-full-qualification.yml")
+        jobs, marker = self.blocks(workflow.split("\njobs:\n", 1)[1], 2), "[full-qualification]"
+        needs = {"decide": [], "candidate": ["decide"], "suites": ["decide", "candidate"], "native": ["decide", "candidate"],
+                 "uninstall_cli": ["decide", "candidate"], "gate": ["decide", "candidate", "suites", "native", "uninstall_cli"]}
+        self.assertEqual(sorted(jobs), sorted(needs))
+        for name, job in jobs.items():
+            found = re.search(r"(?m)^    needs: \[?([^\]\n]*)\]?$", job)
+            self.assertEqual(found.group(1).split(", ") if found else [], needs[name], name)
+            condition = ["${{ always() && needs.decide.outputs.run != 'false' }}" if name == "gate" else "${{ needs.decide.outputs.run == 'true' }}"]
+            self.assertEqual(re.findall(r"(?m)^    if: (.*)$", job), [] if name == "decide" else condition, name)  # decide always runs
+        for name in ("suites", "native", "uninstall_cli", "gate"):  # a push is bound to github.sha exactly like a dispatch
+            self.assertIn('--expected-sha "$GITHUB_SHA"', jobs[name])
+        self.assertIn('--sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"', " ".join(jobs["gate"].split()))
+        self.assertIn("needs decide candidate suites native uninstall_cli", jobs["gate"])  # a skipped or failed dependency (decide too) refuses
+        decide = jobs["decide"]
+        self.assertIn("run: ${{ steps.decide.outputs.run }}", decide)
+        self.assertIn("HEAD_MESSAGE: ${{ github.event.head_commit.message }}", decide)
+        script = textwrap.dedent(decide.split("        run: |\n", 1)[1])
+        self.assertNotIn("${{", script)  # the commit message reaches the script only as data
+        self.assertEqual(script.count('>> "$GITHUB_OUTPUT"'), 1)
+        probe = script.replace('>> "$GITHUB_OUTPUT"', "")  # the same script with its one output line printed instead of appended: nothing is written
+
+        def decided(event, message):  # the real script, as hosted bash runs it, with the event's name and head message
+            done = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", probe], capture_output=True, text=True,
+                                  env={"PATH": "/usr/bin:/bin", "EVENT_NAME": event, "HEAD_MESSAGE": message})
+            self.assertEqual(done.returncode, 0, done.stderr)  # the skip path exits 0: never a red run
+            return [line for line in done.stdout.splitlines() if line.startswith("run=")]
+        for event in ("workflow_dispatch", "pull_request", "schedule"):  # these ignore the marker and always run
+            for message in ("", "no marker", marker):
+                self.assertEqual(decided(event, message), ["run=true"], (event, message))
+        self.assertEqual(decided("push", "ci: x\n\nbody\n%s trailing\n" % marker), ["run=true"])
+        for message in ("", "ci: x", "[full-qualification", "full-qualification", "[Full-Qualification]", "[full-qualification ]", "[ full-qualification]", "[full qualification]"):
+            self.assertEqual(decided("push", message), ["run=false"], message)
+        release, docs = self.text(".github/workflows/release.yml"), self.text("docs/ci-test-tiers.md")
+        self.assertIn('select(.event == "workflow_dispatch" or .event == "schedule")', release)  # a push run, skipped or not, is never accepted
+        self.assertNotIn('"push"', release)
+        for text in (marker, "A skipped push run is not qualification"):
+            self.assertIn(text, " ".join(docs.split()))
 
     def test_check_release_and_makefile_keep_every_event_covered(self):
         check, release, make = (self.text(p) for p in (".github/workflows/check.yml", ".github/workflows/release.yml", "Makefile"))

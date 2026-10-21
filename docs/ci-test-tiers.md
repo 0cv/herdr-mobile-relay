@@ -11,9 +11,9 @@ way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is nev
 | Workflow (required check) | Events | Sharded suites' cells | Shards per OS (macos-15, ubuntu-24.04) |
 | --- | --- | --- | --- |
 | `service-qualification.yml` (**Service qualification gate (fast)**) | push to `main`, `dev`, the CI branch | native: the explicit fast subset, 592 cells (353 installer runs + 8 cancellations); uninstall CLI: the explicit fast subset, 345 cells (550 invocations + 3 controls) | native 5, uninstall CLI 1 |
-| `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch | native: all 2331 cells; uninstall CLI: all 1032 cells (1657 invocations + 3 controls) | native 28, uninstall CLI 3 |
+| `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch, push to the CI branch **only with `[full-qualification]` in the head commit message** (below) | native: all 2331 cells; uninstall CLI: all 1032 cells (1657 invocations + 3 controls) | native 28, uninstall CLI 3 |
 | `check.yml` (Shell job) | push to `main`, `dev`, the CI branch; `pull_request` | none: runs `make shell-check-ci-complement` | - |
-| `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes); none found fails closed; the existing 1800 s window | - |
+| `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes, and a push run is never accepted); none found fails closed; the existing 1800 s window | - |
 | `resume-benchmark.yml` | `workflow_dispatch` only (was a per-push `check.yml` job) | - | - |
 
 Both service workflows also run the nine unsharded suites on both runners: common, credentials, supervision, dispatch,
@@ -28,6 +28,19 @@ uninstall-CLI suites, which the service workflows cover on every event `check.ym
 
 Branch rules must name the two gate jobs above (and `check`); that hosting configuration is a separate administrative
 prerequisite that no YAML here establishes.
+
+### Running the full tier on the CI branch
+
+Pull requests, `workflow_dispatch` and the nightly cron always run the full tier and ignore the marker. A push to the CI branch
+(`ci/tailscale-native-preflight-ef9f843`, the only branch the `push` trigger names) runs it **only when the head commit message of
+the push contains the exact, case-sensitive text `[full-qualification]`**: put it in that commit's message, push, and the run
+qualifies exactly that commit (`github.sha`), with the same SHA/run/attempt-bound evidence and exact-once gate as a dispatch run.
+Earlier commits of the same push are not read. The `decide` job (Ubuntu, seconds, no checkout) computes this from the event and
+gates every other job, the gate included. Without the marker `decide` passes, every other job is **skipped** and the run
+shows no failure, yet no cell ran: **A skipped push run is not qualification**, and hosting rules may display its skipped gate
+as passing. Only an explicit "no marker" decision skips the gate: a failed or cancelled `decide` still runs it, and it refuses.
+`release.yml` accepts only `workflow_dispatch` and `schedule` runs, so even a marked push run is not release qualification: after
+the merge, dispatch the Full run (or take the nightly one) for the tagged commit.
 
 ## Cells, the fast subset and shards
 
@@ -77,7 +90,7 @@ The uninstall CLI shards: 1 per OS in the fast tier, 3 in the full tier (modeled
 
 The suite appends a cell id to its record only after that cell's assertions passed. The driver turns the record into
 `native-shard-evidence.json` bound to the candidate SHA, run, tier, runner OS, shard and inventory digest; it is `pass` only
-for exit 0 and exactly the shard's cells. The `gate` job runs with `always()`, requires every dependency job to be
+for exit 0 and exactly the shard's cells. The `gate` job runs with `always()` (unless `decide` explicitly skipped the run), requires every dependency job, `decide` included, to be
 `success`, downloads the artifacts and recomputes the expected inventory itself. It fails on a missing, empty, duplicate,
 unexpected, stale (SHA, run, or any attempt but the current one), cross-tier, cross-OS, cross-shard, malformed, partial, failed, timed-out or extra
 artifact, and on any OS whose shards do not cover the tier exactly once with both managers. Evidence and summaries must carry

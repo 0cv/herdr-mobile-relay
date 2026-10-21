@@ -4,7 +4,10 @@ name: Full service qualification
 # invocations and 8 cancellation cells; 28 shards per OS) and EVERY uninstall CLI cell (all 1657 Fixture.run invocations and
 # the 3 controls; 3 shards per OS). It is the only workflow whose success release.yml accepts as
 # service qualification. It runs on demand for an exact candidate (workflow_dispatch; set candidate_sha to assert the
-# commit), on every pull request before merge, and nightly on the default branch after merge. The required check to
+# commit), on every pull request before merge, and nightly on the default branch after merge. A push to the CI branch (the
+# only branch named below) runs it ONLY when the head commit message contains [full-qualification]: the decide job turns that
+# into the output every other job, the gate included, is gated on. Without the marker every other job is skipped, which is NOT
+# qualification (release.yml accepts only dispatch and schedule runs). The required check to
 # name in branch rules is the gate job below; configuring hosting rules is a separate administrative step this file
 # does not establish (docs/ci-test-tiers.md). No cell, assertion or timeout is dropped or weakened relative to the
 # fast tier: the fast tier is a subset of this one.
@@ -13,6 +16,8 @@ name: Full service qualification
 # few jobs at once, so a run queues for runners (a constraint of the account's plan, not a time this file promises). No full-tier
 # native shard has run hosted yet: the first run measures them.
 on:
+  push:
+    branches: [ci/tailscale-native-preflight-ef9f843]
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -32,7 +37,34 @@ env:
 # Thin wrappers over scripts/ci/run-service-qualification.sh, exactly as in service-qualification.yml. No retries, no
 # secrets, no continue-on-error, unchanged 900s suite / 40s invocation / 180s helper-build bounds and 60-minute job caps.
 jobs:
+  # The only job that always runs. Dispatch, pull_request and schedule ignore the marker and always qualify; a push qualifies
+  # only with the marker in its head commit message (an exact, case-sensitive substring). The message reaches the script only
+  # through the environment. Anything but a marker-less push yields run=true: the only way to skip is the explicit run=false.
+  decide:
+    name: Decide whether this run qualifies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        name: Run unless this is a push without the opt-in marker
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          run=true
+          if [ "$EVENT_NAME" = push ]; then
+            case "$HEAD_MESSAGE" in
+              *'[full-qualification]'*) ;;
+              *) run=false; echo "::notice::No [full-qualification] marker in the head commit message: every job is skipped and this run is NOT qualification." ;;
+            esac
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   candidate:
+    needs: decide
+    if: ${{ needs.decide.outputs.run == 'true' }}
     name: Verify the requested candidate
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -47,7 +79,8 @@ jobs:
           fi
 
   suites:
-    needs: candidate
+    needs: [decide, candidate]
+    if: ${{ needs.decide.outputs.run == 'true' }}
     name: Service suites (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -91,7 +124,8 @@ jobs:
           overwrite: true
 
   native:
-    needs: candidate
+    needs: [decide, candidate]
+    if: ${{ needs.decide.outputs.run == 'true' }}
     name: Native install, full (${{ matrix.runner }}, shard ${{ matrix.shard }}/28)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -133,7 +167,8 @@ jobs:
           overwrite: true
 
   uninstall_cli:
-    needs: candidate
+    needs: [decide, candidate]
+    if: ${{ needs.decide.outputs.run == 'true' }}
     name: Uninstall CLI, full (${{ matrix.runner }}, shard ${{ matrix.shard }}/3)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -174,12 +209,14 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  # Always runs. Green only if every dependency succeeded AND every expected artifact (both runners; all suites;
-  # every shard) is present, current for this run and candidate, and lists exactly the shard's cells as completed.
+  # Always runs, except when decide explicitly said run=false (a push without the marker). A failed or cancelled decide
+  # leaves the output empty, so the gate runs and refuses. Green only if every dependency succeeded AND every expected
+  # artifact (both runners; all suites; every shard) is present, current for this run and candidate, and lists exactly
+  # the shard's cells as completed.
   gate:
     name: Full service qualification gate
-    needs: [candidate, suites, native, uninstall_cli]
-    if: ${{ always() }}
+    needs: [decide, candidate, suites, native, uninstall_cli]
+    if: ${{ always() && needs.decide.outputs.run != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -195,7 +232,7 @@ jobs:
       - name: Verify event commit, clean state, modes, bytes, and source membership
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
       - name: Require every dependency to have succeeded
-        run: python3 -I -B tests/service_qualification_matrix.py needs candidate suites native uninstall_cli
+        run: python3 -I -B tests/service_qualification_matrix.py needs decide candidate suites native uninstall_cli
       - uses: actions/download-artifact@v8
         with:
           pattern: service-*-full-*-${{ github.sha }}
