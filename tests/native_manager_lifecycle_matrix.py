@@ -26,6 +26,21 @@ ENUM = {"manager_pre": ("available", "unavailable", "unknown"), "manager_post": 
         "trust_negative": ("refused", "accepted", "unknown"), "trust_positive": ("accepted", "refused", "unknown"),
         "linger_initial": ("yes", "no", "unknown", "not-applicable"), "linger_changed": ("yes", "no", "unknown", "not-applicable"),
         "cleanup": ("pass", "fail", "unknown")}
+# Probe diagnostics (Q1D): EVIDENCE of where a probe stopped, validated strictly and read by no verdict (probe_passes and failure_phase never look at them; check_probe refuses a PASSING receipt whose diagnostics record a failed stage). Each is a fixed enum, an integer
+# in a range, or text restricted to a sanitized character class, and `not-run` / `none` is what a stage that did not run, or a fact the driver did not write, becomes.
+DIAG_ENUM = {"gui_nul": ("clean", "nul", "not-run"),
+             "disabled_admission": ("pass", "over-limit", "nul", "header", "trailer", "empty", "not-run"),
+             "baseline_failed": ("none", "path-conf", "path-release", "path-cache", "path-definition", "path-legacy-definition", "path-curlrc", "path-shim", "manager-path-unread",
+                                 "command-provenance", "label-active", "legacy-active", "hosts", "not-run")}
+DIAG_NUMBER = {"gui_print_status": 255, "disabled_status": 255, "gui_bytes": 10 ** 12, "disabled_bytes": 10 ** 12}  # an integer 0..limit (an exit status, a size), or `not-run`
+HINT = r'[A-Za-z0-9 ={}"<>()._:/-]{1,64}'  # a launchctl answer line reduced to this class (and to known words, numbers and punctuation: hint_ok), `none` for nothing (scripts/ci/native-lifecycle-host.py shape_hint)
+DIAG_HINT = ("disabled_head", "disabled_tail", "gui_print_err", "disabled_err")
+STATE = r"not-run|[a-z-]{1,24}"  # the observer's `active` value at the baseline, or `not-run`
+DIAG_STATE = ("baseline_label_state", "baseline_legacy_state")
+DIAG_KEYS = tuple(DIAG_ENUM) + tuple(DIAG_NUMBER) + DIAG_HINT + DIAG_STATE
+BASELINE_PASS = {"baseline_failed": "none", "baseline_label_state": "absent", "baseline_legacy_state": "absent"}  # what the baseline records when it passes (baseline_note none absent absent)
+GUI_PASS = {"gui_print_status": 0, "gui_nul": "clean", "disabled_status": 0, "disabled_admission": "pass"}  # macOS: the stages whose success makes the manager available
+GUI_SIZES = ("gui_bytes", "disabled_bytes")  # at most the product's 65536 bytes (the driver fails a larger listing, the helper refuses a larger table), or not measured
 
 
 class Refusal(Exception):
@@ -63,6 +78,47 @@ def text(value, pattern=r"[A-Za-z0-9._/:,>+ -]{1,160}"):
     return type(value) is str and re.fullmatch(pattern, value) is not None
 
 
+WORDS = frozenset("""a an and are as at bad be boot-out bootout bootstrap busy by can cannot code command connection could denied directory disabled does domain domain-target enabled engaged enough
+    error errors exit expected fail failed failure false file find for found from gui has have in inactive info input integrity invalid is it kickstart label launchctl launchd list load loaded login
+    manager many no none not note of ok on open operation option or output path permission permitted plist print print-disabled privileges process protection read request requires
+    running service service-target services session signal specified specifier state status such success support supported system target the time timed to too true try type unavailable unknown
+    unload unloaded unrecognized unsupported usage user warn warning was while with write yes""".split())  # the ONLY words a hint may hold (the helper keeps the same set); no account-like word (root, admin, ...) is in it
+NONPATH = r"Input/output|(?:gui|user|pid)/[0-9]{1,6}"
+
+
+def pathlike(token):
+    """The helper's rule (native-lifecycle-host.py pathlike): a blank-delimited token with a `/` that is not `Input/output` or a launchd domain such as `gui/501`. A hint holding one is refused (a
+    private path is not evidence)."""
+    return "/" in token and re.fullmatch(NONPATH, token) is None
+
+
+def safe(token):
+    """The helper's rule (native-lifecycle-host.py safe): at most 32 characters and only punctuation, a WORDS word (any case) or a number of at most six digits (with that punctuation around it), a
+    non-path spelling, or the markers `<x>` / `<path>`. A name, host, label, encoded or joined text is not evidence a receipt may hold."""
+    core = token.strip('{}=()<>"._:-')
+    ok = token in ("<x>", "<path>") or core == "" or core.lower() in WORDS or re.fullmatch("[0-9]{1,6}", core) is not None
+    return len(token) <= 32 and (ok or re.fullmatch(NONPATH, token) is not None)
+
+
+def hint_ok(value):
+    """The sanitized class, every token safe, no path-like token, and nothing after a `<path>`: the helper replaces everything from a path's first token to the end of the line (a path may hold
+    blanks) and every token that is not a known word, number or punctuation by `<x>`."""
+    if not text(value, HINT):
+        return False
+    tokens = value.split(" ")
+    return all(safe(token) and not pathlike(token) for token in tokens) and "<path>" not in tokens[:-1]
+
+
+def diagnostics_agree(doc, os_name):
+    """A passing probe passed every stage its diagnostics record, as the driver fails closed on each: the baseline clean, on macOS the gui print, the NUL check and print-disabled admitted by the product's
+    framing with each size within its bound (or unmeasured), on Linux no gui stage ran. Hints are not read (a warning on stderr is not a failure)."""
+    if any(doc[k] != v for k, v in BASELINE_PASS.items()):
+        return False
+    if os_name == "Linux":
+        return all(doc[k] == "not-run" for k in tuple(GUI_PASS) + GUI_SIZES)
+    return all(doc[k] == v for k, v in GUI_PASS.items()) and all(doc[k] == "not-run" or doc[k] <= 65536 for k in GUI_SIZES)
+
+
 def sha256(path):
     with open(path, "rb") as stream:
         return hashlib.sha256(stream.read()).hexdigest()
@@ -85,7 +141,13 @@ def check_ident(doc, kind, ident, os_name, keys):
 
 
 PROBE_KEYS = ("schema", "kind", "candidate_sha", "run_id", "run_attempt", "runner_os", "runner_uid", "exit", "result",
-              "failure_phase", "curl_backend") + tuple(ENUM)
+              "failure_phase", "curl_backend") + tuple(ENUM) + DIAG_KEYS
+
+
+def number(value, high):
+    """The integer a fact string spells canonically (no sign, blank or leading zero) when it is within 0..high, else None."""
+    ok = type(value) is str and re.fullmatch(r"0|[1-9][0-9]{0,12}", value) is not None and int(value) <= high
+    return int(value) if ok else None
 
 
 def probe_passes(doc, os_name):
@@ -106,6 +168,14 @@ def probe_receipt(facts, code, ident, os_name, uid):
     for key, allowed in ENUM.items():
         doc[key] = seen.get(key) if seen.get(key) in allowed else "unknown"
     doc["curl_backend"] = seen.get("curl_backend") if text(seen.get("curl_backend"), r"[A-Za-z0-9._/ -]{1,80}") else "unknown"
+    for key, allowed in DIAG_ENUM.items():
+        doc[key] = seen.get(key) if seen.get(key) in allowed else "not-run"
+    for key, high in DIAG_NUMBER.items():
+        doc[key] = "not-run" if number(seen.get(key), high) is None else number(seen.get(key), high)
+    for key in DIAG_HINT:
+        doc[key] = seen.get(key) if hint_ok(seen.get(key)) else "none"
+    for key in DIAG_STATE:
+        doc[key] = seen.get(key) if text(seen.get(key), STATE) else "not-run"
     phase = seen.get("phase") if text(seen.get("phase"), r"[a-z0-9-]{1,40}") else "unknown"
     doc["result"] = "pass" if probe_passes(doc, os_name) else "fail"
     doc["failure_phase"] = "none" if doc["result"] == "pass" else phase
@@ -117,8 +187,12 @@ def check_probe(doc, ident, os_name):
     require(type(doc["runner_uid"]) is int and doc["runner_uid"] > 0, "malformed runner uid")
     require(all(doc[k] in allowed for k, allowed in ENUM.items()) and text(doc["failure_phase"], r"[a-z0-9-]{1,40}")
             and text(doc["curl_backend"], r"[A-Za-z0-9._/ -]{1,80}"), "malformed probe fields")
+    require(all(type(doc[k]) is str and doc[k] in allowed for k, allowed in DIAG_ENUM.items())
+            and all(doc[k] == "not-run" or (type(doc[k]) is int and 0 <= doc[k] <= high) for k, high in DIAG_NUMBER.items())
+            and all(hint_ok(doc[k]) for k in DIAG_HINT) and all(text(doc[k], STATE) for k in DIAG_STATE), "malformed probe diagnostics")  # evidence: validated, never part of the verdict
     require(doc["result"] == ("pass" if probe_passes(doc, os_name) else "fail"), "probe result contradicts its facts")
     require((doc["result"] == "pass") == (doc["failure_phase"] == "none"), "probe failure_phase contradicts its result")  # a pass names no failure phase, a failure names one
+    require(doc["result"] != "pass" or diagnostics_agree(doc, os_name), "probe diagnostics contradict a passing result")  # a pass that records a failed stage is not evidence
     require(doc["result"] == "pass", "the capability probe failed (%s)" % doc["failure_phase"])
 
 

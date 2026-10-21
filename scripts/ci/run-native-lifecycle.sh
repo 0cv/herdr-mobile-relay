@@ -298,11 +298,59 @@ tls_up() {  # $1: upstream port (0 = probe-only static body); $2 probe: also pro
 }
 
 probe_gui() {  # macOS: ONE captured listing of the gui domain; a failed query is unavailable, never a zero-byte listing within the bound
-    local size
+    local size avail=no rc gs=not-run gn=not-run gb=not-run ge=none ds=not-run db=not-run da=not-run dh=none dt=none de=none
     # Both answers are written to files with their own statuses and then admitted by the helper as the product admits them (relay/native-install-transaction.sh): no NUL (a shell substitution would drop
     # it), and for the table at most 65536 bytes and the text starting with the header and ending with `}`. A failed, NUL-bearing, over-limit, header-only or truncated answer is unavailable;
-    # the size of the domain listing is measured below.
-    if launchctl print "gui/$SUID" > "$EV/gui.txt" 2> /dev/null && OX nul-free --path "$EV/gui.txt" && launchctl print-disabled "gui/$SUID" > "$EV/disabled.txt" 2> /dev/null && OX table-ok --path "$EV/disabled.txt"; then
+    # the size of the domain listing is measured below. The stages run in this order and a stage that is not reached stays `not-run`, as the earlier `&&` chain stopped at the first refusal.
+    # Diagnostics (Q1D): each stage's status, size and shape is recorded further down as evidence for the receipt, whatever the result; only the statuses and helper answers here decide.
+    # Each query's stdout goes to its file as before; its STDERR goes through a capture that writes at most 4096 bytes to the evidence file and drains (never writes) the rest, so a runaway stream can neither
+    # fill the runner nor kill the query with SIGPIPE; the query's own status is the first PIPESTATUS element. A stderr file that cannot be written is diagnostic-only (the hint is `none`; the query's
+    # status and the verdict are untouched); a STDOUT file that cannot be opened is the fail-closed case: the group's redirect fails, the status is 1 and the manager is unavailable, as the old redirect failed.
+    rc=1
+    {
+        launchctl print "gui/$SUID" 2>&1 1>&3 3>&- \
+            | { /usr/bin/head -c 4096 > "$EV/gui.err"; /bin/cat > /dev/null; } 3>&-
+        rc=${PIPESTATUS[0]}
+    } 3> "$EV/gui.txt" || rc=$?
+    gs=$rc
+    if [ "$gs" -eq 0 ]; then
+        rc=0
+        OX nul-free --path "$EV/gui.txt" || rc=$?
+        case "$rc" in 0) gn=clean ;; 1) gn=nul ;; esac  # any other status (unreadable) is recorded as not-run and is unavailable like a NUL
+    fi
+    if [ "$gn" = clean ]; then
+        rc=1
+        {
+            launchctl print-disabled "gui/$SUID" 2>&1 1>&3 3>&- \
+                | { /usr/bin/head -c 4096 > "$EV/disabled.err"; /bin/cat > /dev/null; } 3>&-
+            rc=${PIPESTATUS[0]}
+        } 3> "$EV/disabled.txt" || rc=$?
+        ds=$rc
+        if [ "$ds" -eq 0 ] && OX table-ok --path "$EV/disabled.txt"; then avail=yes; fi
+    fi
+    # Evidence only: read-only helper answers over the captured files (each read bounded by the helper, each hint reduced to the sanitized class with every path-like token replaced); a helper that fails
+    # leaves the stage's `not-run` / `none`. The table's frame is judged on the captured bytes whatever its status was (the status is its own fact); a stage that never ran has no files to read.
+    gb=$(OX shape --path "$EV/gui.txt" --field bytes 2> /dev/null || echo not-run)
+    ge=$(OX shape --path "$EV/gui.err" --field head 2> /dev/null || echo none)
+    if [ "$ds" != not-run ]; then
+        db=$(OX shape --path "$EV/disabled.txt" --field bytes 2> /dev/null || echo not-run)
+        da=$(OX table-reason --path "$EV/disabled.txt" 2> /dev/null || echo not-run)
+        dh=$(OX shape --path "$EV/disabled.txt" --field head 2> /dev/null || echo none)
+        dt=$(OX shape --path "$EV/disabled.txt" --field tail 2> /dev/null || echo none)
+        de=$(OX shape --path "$EV/disabled.err" --field head 2> /dev/null || echo none)
+    fi
+    fact gui_print_status "$gs"
+    fact gui_nul "$gn"
+    fact gui_bytes "$gb"
+    fact gui_print_err "$ge"
+    fact disabled_status "$ds"
+    fact disabled_bytes "$db"
+    fact disabled_admission "$da"
+    fact disabled_head "$dh"
+    fact disabled_tail "$dt"
+    fact disabled_err "$de"
+    printf 'gui probe: status=%s nul=%s bytes=%s err=[%s]; table: status=%s bytes=%s admission=%s head=[%s] tail=[%s] err=[%s]\n' "$gs" "$gn" "$gb" "$ge" "$ds" "$db" "$da" "$dh" "$dt" "$de"
+    if [ "$avail" = yes ]; then
         fact manager_pre available
         size=$(wc -c < "$EV/gui.txt") || fail 'cannot measure the gui domain listing'  # wc's own status, not a pipeline's; padding blanks are dropped below
         size=${size//[[:space:]]/}
@@ -324,7 +372,7 @@ probe_main() {
     phase stage
     stage_base
     phase baseline
-    baseline_clean || fail 'a product definition, release or mapping already exists on this runner'
+    baseline_clean || fail "a product definition, release or mapping already exists on this runner (baseline sub-check: ${BASEFAIL:-unknown})"
     tls_up 0 probe
     phase manager-post
     if [ "$OS" = Darwin ]; then
@@ -346,18 +394,31 @@ stage_base() {
         stage_put "$EV/shim.$t" "$([ "$t" = curl ] && echo "$SHIMDIR/curl" || echo "$S/bin/$t")" 700
     done
 }
+state_fact() {  # KEY VALUE: a manager `active` value as a diagnostic fact: only [a-z-] is kept (LC_ALL=C: bytes, never a locale's ranges), at most 24 characters, `unknown` for nothing; `not-run` stays itself
+    local LC_ALL=C v
+    v=${2//[!a-z-]/}
+    v=${v:0:24}
+    fact "$1" "${v:-unknown}"
+}
+baseline_note() {  # FIRST-FAILING-SUB-CHECK|none LABEL-STATE LEGACY-STATE: the three diagnostic facts of ONE baseline_clean outcome (evidence only; the return status of baseline_clean decides)
+    BASEFAIL=$1
+    fact baseline_failed "$1"
+    state_fact baseline_label_state "$2"
+    state_fact baseline_legacy_state "$3"
+}
 baseline_clean() {
-    local mpath p
+    local mpath p la ll i=0 names=(conf release cache definition legacy-definition curlrc shim)  # names, in order, of the seven paths below
     for p in "$CONF" "$REL" "$THOME/.cache/herdr-mobile-relay" "$DEF" "$LDEF" "$THOME/.curlrc" "$SHIMDIR/herdr-mobile-relay"; do
-        sgone "$p" || return 1  # absent only on a definite ENOENT/ENOTDIR (a symlink, even a dangling one, exists); an uninspectable path fails the baseline
+        sgone "$p" || { baseline_note "path-${names[i]}" not-run not-run; return 1; }  # absent only on a definite ENOENT/ENOTDIR (a symlink, even a dangling one, exists); an uninspectable path fails the baseline
+        i=$((i + 1))
     done
     # The service inherits its manager's PATH and the wrapper (relay/herdr-mobile-relay-service.sh) appends it to its own list, so read it
     # from the manager: a failed query fails the baseline (an unobserved PATH is not an empty one). systemd's built-in default adds /usr/local/sbin.
     if [ "$OS" = Linux ]; then
-        mpath=$(as_subject systemctl --user show-environment) || { echo 'baseline: cannot read the user manager environment' >&2; return 1; }
+        mpath=$(as_subject systemctl --user show-environment) || { echo 'baseline: cannot read the user manager environment' >&2; baseline_note manager-path-unread not-run not-run; return 1; }
         mpath="$(printf '%s\n' "$mpath" | sed -n 's/^PATH=//p'):/usr/local/sbin"
     else
-        mpath=$(as_subject launchctl getenv PATH) || { echo 'baseline: cannot read the launchd PATH' >&2; return 1; }
+        mpath=$(as_subject launchctl getenv PATH) || { echo 'baseline: cannot read the launchd PATH' >&2; baseline_note manager-path-unread not-run not-run; return 1; }
     fi
     # Rebuild the wrapper's own PATH as the subject (its list, the inherited PATH, then every per-tool bin directory), then require on it:
     # (1) no real `herdr`, so the wrapper exports no Herdr CLI and the socket fixture stays the only Herdr the relay can see; (2) the manager
@@ -367,8 +428,13 @@ baseline_clean() {
         [ -z "$2" ] || P="$P:$2"
         for d in "$HOME"/.[!.]*/bin; do [ ! -d "$d" ] || P="$P:$d"; done
         PATH=$P
-        [ -z "$(command -v herdr)" ] && [ "$(command -v "${1##*/}")" = "$1" ]' _ "$MGRPATH" "$mpath" || return 1
-    [ "$(snap | jget active)" = absent ] && [ "$(snap_of "$LEGACY" "$LDEF" | jget active)" = absent ] && absent herdr-nlt- /etc/hosts
+        [ -z "$(command -v herdr)" ] && [ "$(command -v "${1##*/}")" = "$1" ]' _ "$MGRPATH" "$mpath" || { baseline_note command-provenance not-run not-run; return 1; }
+    la=$(snap | jget active)  # the value of the earlier `[ "$(snap | jget active)" = absent ]`: nothing (a failed observation) is not `absent`
+    [ "$la" = absent ] || { baseline_note label-active "$la" not-run; return 1; }
+    ll=$(snap_of "$LEGACY" "$LDEF" | jget active)
+    [ "$ll" = absent ] || { baseline_note legacy-active "$la" "$ll"; return 1; }
+    absent herdr-nlt- /etc/hosts || { baseline_note hosts "$la" "$ll"; return 1; }
+    baseline_note none "$la" "$ll"
 }
 
 snap_of() { HX observe --manager "$MGR" --label "$1" --definition "$2" --release "$REL" "${@:3}"; }
@@ -664,7 +730,7 @@ lifecycle_main() {
     phase setup
     [ "$OS" = Darwin ] || user_up
     stage_base
-    baseline_clean || fail 'a product definition, release or mapping already exists on this runner'
+    baseline_clean || fail "a product definition, release or mapping already exists on this runner (baseline sub-check: ${BASEFAIL:-unknown})"
     RB0=$(OX tree --paths "$HOME/.local/bin") && [ -n "$RB0" ] || fail 'cannot digest the Actions user ~/.local/bin'  # its own ~/.local/bin: nothing here may touch it
     stage_release
     tls_up "$CHILD_PORT"

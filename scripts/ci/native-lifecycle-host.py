@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Host-side fixtures of the native-manager lifecycle workflow (hosted disposable runners only): run (bounded; run it as the uid owning the command, root for sudo operations), tls-front, herdr-socket, cloudflared, curl (strict shim), herdr (unregister-only adapter), observe, tree, exists, table-ok, nul-free, counts, ident, resolve, stop; `--name value` options, then `--` and any argv."""
+"""Host-side fixtures of the native-manager lifecycle workflow (hosted disposable runners only): run (bounded; run it as the uid owning the command, root for sudo operations), tls-front, herdr-socket, cloudflared, curl (strict shim), herdr (unregister-only adapter), observe, tree, exists, table-ok, table-reason, shape, nul-free, counts, ident, resolve, stop; `--name value` options, then `--` and any argv."""
 import hashlib
 import http.client
 import http.server
 import json
 import os
+import pwd
 import re
 import selectors
 import signal
@@ -449,10 +450,120 @@ def table_ok(o, rest):
 
 
 def nul_free(o, rest):
-    """Exit 0 only for a file that holds no NUL byte; nothing is printed. At most LIMIT + 1 bytes are read: the caller bounds the size itself (a longer file fails there), and the product's
-    bounded reader refuses a NUL before it parses anything, where a shell substitution would drop it."""
-    with open(o["path"], "rb") as stream:
-        return 1 if b"\x00" in stream.read(LIMIT + 1) else 0
+    """Exit 0 only for a file that holds no NUL byte, 1 for one that does, 2 for one that cannot be read; nothing is printed. At most LIMIT + 1 bytes are read: the caller bounds the size
+    itself (a longer file fails there), and the product's bounded reader refuses a NUL before it parses anything, where a shell substitution would drop it."""
+    try:
+        with open(o["path"], "rb") as stream:
+            return 1 if b"\x00" in stream.read(LIMIT + 1) else 0
+    except OSError:
+        return 2  # neither clean nor NUL-bearing; every nonzero status is still an unavailable manager to the caller
+
+
+def table_reason(raw):
+    """Why the product would refuse a launchctl disabled table, or `pass`: EVIDENCE for the probe's diagnostics, never an admission (table_ok decides, unchanged). `raw` is at most the first
+    LIMIT + 1 bytes of the file. The product's own checks (native-install-transaction.sh) in its order: the size bound, no NUL, then the framing of framed_table: the text, trailing newlines
+    dropped, starts with `disabled services = {` (header) and ends with `}` (trailer). `empty`: nothing but newlines. `pass` exactly when table_ok exits 0."""
+    if len(raw) > LIMIT:
+        return "over-limit"
+    text = raw.decode("utf-8", "replace")
+    if "\x00" in text:
+        return "nul"
+    if framed_table(text):
+        return "pass"
+    body = text.rstrip("\n")
+    return "empty" if not body else "trailer" if body.startswith("disabled services = {") else "header"
+
+
+def table_why(o, rest):
+    """Print the table_reason of a captured disabled table; reads at most LIMIT + 1 bytes. Read-only evidence."""
+    try:
+        with open(o["path"], "rb") as stream:
+            print(table_reason(stream.read(LIMIT + 1)))
+    except OSError:
+        return 1
+    return 0
+
+
+WORDS = frozenset("""a an and are as at bad be boot-out bootout bootstrap busy by can cannot code command connection could denied directory disabled does domain domain-target enabled engaged enough
+    error errors exit expected fail failed failure false file find for found from gui has have in inactive info input integrity invalid is it kickstart label launchctl launchd list load loaded login
+    manager many no none not note of ok on open operation option or output path permission permitted plist print print-disabled privileges process protection read request requires
+    running service service-target services session signal specified specifier state status such success support supported system target the time timed to too true try type unavailable unknown
+    unload unloaded unrecognized unsupported usage user warn warning was while with write yes""".split())  # the ONLY words a hint keeps (the receipt gate holds the same set); no account-like word (root, admin, ...) is in it
+NONPATH = r"Input/output|(?:gui|user|pid)/[0-9]{1,6}"
+
+
+def pathlike(token):
+    """A blank-delimited token that may name a filesystem or URL path: it holds a `/` and is not one of the two non-path spellings launchd prints, `Input/output` and a domain such as `gui/501`.
+    A hint never keeps one, and never keeps anything that follows one (see shape_hint)."""
+    return "/" in token and re.fullmatch(NONPATH, token) is None
+
+
+def safe(token):
+    """A token a hint may keep, of at most 32 characters: only punctuation (`{}=()<>"._:-`), a word of WORDS (any case) or a number of at most six digits, either with that punctuation around it,
+    a non-path spelling (NONPATH), or one of the two markers `<x>` (redacted) and `<path>`. Anything else (a name, host, label, encoded or joined text) is not identifying evidence."""
+    core = token.strip('{}=()<>"._:-')
+    ok = token in ("<x>", "<path>") or core == "" or core.lower() in WORDS or re.fullmatch("[0-9]{1,6}", core) is not None
+    return len(token) <= 32 and (ok or re.fullmatch(NONPATH, token) is not None)
+
+
+def identities():
+    """The names this process knows and a hint must never keep, whatever the vocabulary says (a user or host named like a vocabulary word): the real and effective user, `USER` / `LOGNAME`, the
+    home directory's name and the host name, each whole and by `.` `-` `_` part, in lowercase. A source that cannot be read adds nothing: hints are evidence, never a verdict."""
+    names = set()
+    for read in (lambda: pwd.getpwuid(os.getuid()).pw_name, lambda: pwd.getpwuid(os.geteuid()).pw_name, lambda: os.path.basename(pwd.getpwuid(os.geteuid()).pw_dir), lambda: os.environ["USER"],
+                 lambda: os.environ["LOGNAME"], lambda: os.path.basename(os.environ["HOME"].rstrip("/")), socket.gethostname):
+        try:
+            names.add(read().lower())
+        except (KeyError, OSError):
+            pass
+    return frozenset(part for name in names for part in [name] + re.split(r"[.\-_]", name) if part)
+
+
+def named(token, names):
+    """Whether a token is one of `names` (case-insensitively, punctuation around it ignored) or, for a name of three characters or more, contains one."""
+    low = token.lower()
+    return any(low.strip('{}=()<>"._:-') == n or (len(n) >= 3 and n in low) for n in names)
+
+
+def shape_hint(raw, last, names=()):
+    """The first (or last) line of a launchctl answer that keeps a visible character, as a bounded hint for the probe's receipt: only [A-Za-z0-9 ={}"<>()._:/-] is kept (every other
+    character, tab and CR included, is dropped, so a hint can neither carry a control character nor break a facts line). Then, per blank-delimited token: everything from the FIRST path-like
+    token (a private home or temp path, which may hold blanks) to the end of the line is replaced by one `<path>`, and every token that is not `safe` (a name, host, label, `%2F`-style or joined text:
+    anything that is not a known word, a number or punctuation) is replaced by `<x>`. At most 64 characters, cut between tokens only (a cut word could be a fragment of a name), `none` for
+    nothing. Lines split on LF only. A token that is one of `names` (identities(): this host's user, home and host names) is `<x>` even when it is a known word. The receipt gate keeps the same
+    rule except for the names, which only the producing host knows: every token safe, nothing after a `<path>`."""
+    names = [n.lower() for n in names if n]
+    lines = (re.sub(r'[^A-Za-z0-9 ={}"<>()._:/-]', "", l) for l in raw.decode("utf-8", "replace").split("\n"))
+
+    def bounded(line):
+        out = []
+        for token in line.split(" "):
+            token = "<path>" if pathlike(token) else token if safe(token) and not named(token, names) else "<x>"
+            if len(" ".join(out + [token])) > 64:
+                break
+            out.append(token)
+            if token == "<path>":
+                break
+        return " ".join(out)
+    kept = [b for b in (bounded(c) for c in lines if c.strip()) if b.strip()]
+    return (kept[-1] if last else kept[0]) if kept else "none"
+
+
+def shape(o, rest):
+    """Print one read-only fact about a captured launchctl answer (probe diagnostics, evidence only): `bytes` (its size from fstat; nothing is read), or `head` / `tail` (shape_hint of the
+    first / last line within the first LIMIT + 1 bytes, the only bytes ever read)."""
+    field = o.get("field")
+    if field not in ("bytes", "head", "tail"):
+        sys.exit("native lifecycle host: unknown shape field")
+    try:
+        with open(o["path"], "rb") as stream:
+            if field == "bytes":
+                print(os.fstat(stream.fileno()).st_size)
+            else:
+                print(shape_hint(stream.read(LIMIT + 1), field == "tail", identities()))
+    except OSError:
+        return 1
+    return 0
 
 
 def lf_lines(text):
@@ -642,7 +753,7 @@ def main(argv):
         return 0
     o, rest = opts(argv[2:])
     table = {"run": run_bounded, "tls-front": tls_front, "herdr-socket": herdr_socket, "cloudflared": cloudflared, "curl": curl_shim,
-             "herdr": herdr_adapter, "observe": observe, "counts": counts, "stop": stop, "tree": tree, "exists": exists, "table-ok": table_ok, "nul-free": nul_free}
+             "herdr": herdr_adapter, "observe": observe, "counts": counts, "stop": stop, "tree": tree, "exists": exists, "table-ok": table_ok, "table-reason": table_why, "shape": shape, "nul-free": nul_free}
     if argv[1] not in table:
         sys.exit("native lifecycle host: unknown command")
     return table[argv[1]](o, rest) or 0

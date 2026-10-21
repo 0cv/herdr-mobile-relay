@@ -205,6 +205,15 @@ absence check had a definite answer (an unreadable `/etc/hosts` or keychain list
 The baseline refuses a real `herdr` on the service wrapper's search path and a manager other than the system one; a refusal case counts only with a known snapshot and a
 product exit that is neither 0 nor a timeout (124, 125, 137).
 
+The probe also records **diagnostic facts** so a failed run names its cause: for each real macOS manager query its status, size and a sanitized shape hint (`gui_print_status`, `gui_nul`, `gui_bytes`,
+`gui_print_err` for `launchctl print gui/UID`; `disabled_status`, `disabled_bytes`, `disabled_admission`, `disabled_head`, `disabled_tail`, `disabled_err` for `launchctl print-disabled`, whose admission
+reason is `pass`, `over-limit`, `nul`, `header`, `trailer` or `empty`, the product's own framing), and the first failing baseline sub-check (`baseline_failed`: a `path-*` name, `manager-path-unread`,
+`command-provenance`, `label-active`, `legacy-active`, `hosts` or `none`) with the observed `baseline_label_state` and `baseline_legacy_state`. A stage that was not reached is `not-run`; a hint keeps only
+`[A-Za-z0-9 ={}"<>()._:/-]`, and of that only known launchd words, numbers of at most six digits and punctuation (every other token, a name, host, label or encoded text, becomes `<x>`, and so does a token that is or contains a name the producing host knows, its user, home directory and host names, even when it is a known word), with everything from the first path-like
+token (a private home or temp path, which may hold blanks) to the end of the line replaced by one `<path>`, at most 64 characters cut between tokens (`none` for nothing); each query's stderr is captured through a cap of 4096 bytes
+(the rest is drained, never written) and every read of a captured answer is bounded. These facts are **evidence, not admission**: the gate validates each strictly (an enum,
+an integer range or the sanitized pattern, a hint holding a token that is no known word, number or punctuation, a path-like token or text after a `<path>` included; a missing, extra or malformed key is refused), but the pass rule and the failure phase never read them, so they cannot turn a failed probe into a pass. The gate also refuses a *passing* receipt whose diagnostics record a failed stage, because the driver fails closed on each: a baseline sub-check other than `none` or a baseline state other than `absent`; on macOS a status other than 0, a NUL answer, an admission other than `pass` or a size over 65536 bytes for either query, and on Linux any recorded gui stage.
+
 Every case records before and after definition hash, mode, origin (`path =` or `FragmentPath` plus `DropInPaths`), state, release revision,
 owned process digest and manager generation, the readiness identity, the Herdr socket counts and matched HTTPS hits of THAT case (deltas against the counters at its start, never cumulative values), `default.target` observed active after the Linux login-style restart, and a bystander digest. The
 `gate` job (`tests/native_manager_lifecycle_matrix.py`, partial Q1) requires every dependency to succeed and exactly one probe per OS, one

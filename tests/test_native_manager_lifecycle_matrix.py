@@ -9,6 +9,8 @@ import json
 import os
 import pathlib
 import hashlib
+import random
+import itertools
 import re
 import shlex
 import shutil
@@ -88,7 +90,13 @@ def facts(os_name, **over):
     base = {"manager_pre": "available", "manager_post": "available", "trust_negative": "refused", "trust_positive": "accepted", "cleanup": "pass",
             "curl_backend": "curl 8.5 OpenSSL/3.0", "phase": "complete", "isolated_uid": "available" if linux else "not-applicable",
             "default_target": "active" if linux else "not-applicable", "linger_initial": "no" if linux else "not-applicable", "linger_changed": "no" if linux else "not-applicable"}
+    base.update({k: DIAG[k] for k in m.BASELINE_PASS} if linux else DIAG)  # the diagnostics the driver writes for a pass: the clean baseline everywhere, the gui stages on macOS only
     return "".join("%s=%s\n" % kv for kv in dict(base, **over).items())
+
+
+DIAG = {"gui_print_status": "0", "gui_nul": "clean", "gui_bytes": "1234", "gui_print_err": "none", "disabled_status": "0", "disabled_bytes": "321", "disabled_admission": "pass",
+        "disabled_head": "disabled services = {", "disabled_tail": "}", "disabled_err": "none", "baseline_failed": "none", "baseline_label_state": "absent", "baseline_legacy_state": "absent"}
+HINT_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ={}"<>()._:/-'  # the sanitized hint class, written out
 
 
 def good():
@@ -250,6 +258,122 @@ class Matrix(unittest.TestCase):
         for contradiction in (dict(good_probe, failure_phase="manager"), dict(good_probe, failure_phase="unknown"), dict(failed, failure_phase="none")):
             with self.assertRaisesRegex(m.Refusal, "failure_phase contradicts its result"):
                 m.check_probe(contradiction, IDENT, "Linux")
+
+    def test_probe_diagnostics_are_strictly_validated_evidence_and_never_the_verdict(self):
+        mac = lambda code=0, **over: m.probe_receipt(facts("Darwin", **dict(DIAG, **over)), code, IDENT, "Darwin", 501)
+        # Well-formed diagnostics: integers for statuses and sizes, strings for the rest, every key exactly once; the gate accepts them.
+        doc = mac()
+        self.assertEqual(set(doc), set(m.PROBE_KEYS))
+        self.assertTrue(set(m.DIAG_KEYS) < set(m.PROBE_KEYS) and len(m.DIAG_KEYS) == 13)
+        self.assertEqual([doc[k] for k in ("gui_print_status", "gui_bytes", "disabled_status", "disabled_bytes")], [0, 1234, 0, 321])
+        self.assertEqual([doc[k] for k in ("gui_nul", "disabled_admission", "disabled_head", "disabled_tail", "gui_print_err", "disabled_err", "baseline_failed", "baseline_label_state")],
+                         ["clean", "pass", "disabled services = {", "}", "none", "none", "none", "absent"])
+        m.check_probe(doc, IDENT, "Darwin")
+        # A passing Linux probe runs no gui stage (those are `not-run`, every hint `none`) and records its clean baseline; a probe that stopped before its first stage records nothing and fails.
+        bare = m.probe_receipt(facts("Linux"), 0, IDENT, "Linux", 1001)
+        self.assertEqual({k: bare[k] for k in m.DIAG_KEYS}, dict({k: "not-run" for k in m.DIAG_KEYS}, **{k: "none" for k in m.DIAG_HINT}, **m.BASELINE_PASS))
+        m.check_probe(bare, IDENT, "Linux")
+        self.assertEqual({k: m.probe_receipt("", 2, IDENT, "Linux", 1001)[k] for k in m.DIAG_KEYS}, dict({k: "not-run" for k in m.DIAG_KEYS}, **{k: "none" for k in m.DIAG_HINT}))
+        self.assertFalse(set(m.DIAG_KEYS) & (set(m.CASES_KEYS) | set(m.CASE_KEYS)))  # the lifecycle receipt does not share them
+        # Every value domain at its edges, built from FACTS: a recognised value is kept, anything else becomes the stage default (a failed probe still yields a valid receipt).
+        edge = [("gui_print_status", v, w) for v, w in (("0", 0), ("1", 1), ("113", 113), ("255", 255), ("256", "not-run"), ("-1", "not-run"), ("007", "not-run"), ("+1", "not-run"), (" 1", "not-run"),
+                                                          ("1.0", "not-run"), ("", "not-run"), ("\u0661", "not-run"), ("not-run", "not-run"), ("x", "not-run"))]
+        edge += [("disabled_status", "255", 255), ("disabled_status", "256", "not-run")]
+        edge += [("gui_bytes", v, w) for v, w in (("0", 0), ("65537", 65537), ("1000000000000", 10 ** 12), ("1000000000001", "not-run"), ("9" * 14, "not-run"), ("-5", "not-run"), ("1e3", "not-run"))]
+        edge += [("disabled_bytes", "0", 0), ("disabled_bytes", "1000000000001", "not-run")]
+        edge += [("gui_nul", v, v if v in ("clean", "nul", "not-run") else "not-run") for v in ("clean", "nul", "not-run", "unknown", "Clean", "", "clean ")]
+        edge += [("disabled_admission", v, v if v != "bogus" else "not-run") for v in ("pass", "over-limit", "nul", "header", "trailer", "empty", "not-run", "bogus")]
+        edge += [("baseline_failed", v, v) for v in m.DIAG_ENUM["baseline_failed"]] + [("baseline_failed", "path-other", "not-run"), ("baseline_failed", "path-conf ", "not-run"), ("baseline_failed", "", "not-run")]
+        for key_ in m.DIAG_HINT:
+            edge += [(key_, v, v) for v in ("none", "disabled services = {", "<x> => true", "<>()._:-", " ", "}", "Input/output error", "gui/501", "user/501", "pid/12", "<path>", "cannot read <path>",
+                                          "Could not find domain for user gui: 501", "Bootstrap failed: 5: Input/output error", "  could", "COULD NOT 501)", "could " * 10, "{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{")]
+            edge += [(key_, v, "none") for v in ("", "x" * 65, "a;b", "a\tb", "a,b", "caf\u00e9", "a'b", "a\\b", "[x]", "a\x00b", "%2FUsers%2Frunner")]  # (a CR or other line separator would end the facts line itself)
+            edge += [(key_, v, "none") for v in ("/", "/etc/passwd", "x/y/z", "a/", "a /b", "denied /Users/r/x", "../x", "./x", "https://h/x", "-/-", "<>()._:/-", "a//b", "gui/501/x", "a/b", "input/output", "gui/", "gui/5x")]  # a path is not evidence
+            edge += [(key_, v, "none") for v in ("<path> denied", "x <path> y", "<path> <path>", "/Users/John Smith/x", "Smith/x", "My Docs/x", "Library/Application Support/x")]  # nor is anything after a path's first token
+            edge += [(key_, v, "none") for v in ('"com.apple.x" => true', "x" * 64, HINT_CHARS[:64], "2FUsers2Frunner2Fsecret", "launchctl error 2FUsers2Frunner2Fsecret", "host john-macbook.local denied",
+                                                 "user john", "john", "Users", "x", "<x", "<xx>", "<x>:", "gui/1234567", "could " * 11, "{" * 33, "Couldnot", "could.not", "domain-targets", "gui/501:")]  # nor a name, host, encoding or joined word
+        for key_ in m.DIAG_STATE:
+            edge += [(key_, v, v) for v in ("absent", "unknown", "loaded", "active", "not-run", "a" * 24)] + [(key_, v, "not-run") for v in ("", "a" * 25, "Active", "a b", "a1", "a_b", "loaded;")]
+        for name, value, want in edge:
+            got = mac(**{name: value})[name]
+            self.assertEqual((type(got), got), (type(want), want), (name, value))
+        # The gate REFUSES anything outside a domain: a typed value of the wrong type or range (bool is not an integer), an enum or hint outside its class, a missing or an extra key.
+        good_probe = mac()
+        bad = {k: ["unknown", "", None, 1, True, ["clean"], "Clean", "clean "] for k in m.DIAG_ENUM}
+        bad.update({k: [256, -1, True, False, 1.5, "1", "", None, [], {}, "unknown"] for k in ("gui_print_status", "disabled_status")})
+        bad.update({k: [10 ** 12 + 1, -1, True, 2.0, "5", "", None, "none"] for k in ("gui_bytes", "disabled_bytes")})
+        bad.update({k: ["", "x" * 65, "a;b", "a\nb", "a\tb", "caf\u00e9", None, 1, ["none"], "a\x00b", "a\r", "/PRIVATE/HOME/Library/LaunchAgents/private.plist: denied", "a/b/c", "x /y", "./x", "a/", "<path> denied", "x <path> y", "Smith/x", "a/b",
+                          "2FUsers2Frunner2Fsecret", "launchctl error 2FUsers2Frunner2Fsecret", "host john-macbook.local denied", "x" * 64, '"com.apple.x" => true', "{" * 33] for k in m.DIAG_HINT})
+        bad.update({k: ["", "a" * 25, "Active", "a b", None, 1, ["absent"], "a\n"] for k in m.DIAG_STATE})
+        self.assertEqual(set(bad), set(m.DIAG_KEYS))
+        for name, values in bad.items():
+            for value in values:
+                with self.assertRaisesRegex(m.Refusal, "malformed probe diagnostics", msg=(name, value)):
+                    m.check_probe(dict(good_probe, **{name: value}), IDENT, "Darwin")
+        for name in m.DIAG_KEYS:  # a missing key and an extra key are refused as any other receipt key is
+            with self.assertRaisesRegex(m.Refusal, "wrong keys"):
+                m.check_probe({k: v for k, v in good_probe.items() if k != name}, IDENT, "Darwin")
+        with self.assertRaisesRegex(m.Refusal, "wrong keys"):
+            m.check_probe(dict(good_probe, gui_extra="x"), IDENT, "Darwin")
+        # The verdict is the unchanged rule over the unchanged facts. Diagnostics that look perfect rescue no failing probe; alarming ones fail no passing probe (the existing result/facts and
+        # failure_phase contradictions are still refused, with diagnostics present).
+        for extra in ({"manager_pre": "unavailable"}, {"manager_post": "unavailable"}, {"manager_post": "unknown"}, {"cleanup": "fail"}, {"trust_negative": "accepted"}, {"trust_positive": "refused"}):
+            failing = mac(**extra)
+            self.assertEqual((failing["result"], failing["failure_phase"]), ("fail", "complete"), extra)
+            with self.assertRaisesRegex(m.Refusal, "the capability probe failed"):
+                m.check_probe(failing, IDENT, "Darwin")
+            with self.assertRaisesRegex(m.Refusal, "contradicts its facts"):
+                m.check_probe(dict(failing, result="pass", failure_phase="none"), IDENT, "Darwin")
+        self.assertEqual(mac(1)["result"], "fail")  # a nonzero driver exit
+        # A PASSING receipt that records a failed stage is a contradiction the gate REFUSES (the driver fails closed on each stage; the builder's verdict is unchanged, check_probe is what refuses it).
+        alarming = dict(gui_print_status="113", gui_nul="nul", disabled_admission="header", baseline_failed="label-active", baseline_label_state="loaded", disabled_err="Could not find domain", disabled_head="x")
+        stages = [(k, v) for k in ("gui_print_status", "disabled_status") for v in ("1", "113", "255", "not-run")] + [("gui_nul", v) for v in ("nul", "not-run")]
+        stages += [("disabled_admission", v) for v in m.DIAG_ENUM["disabled_admission"][1:]] + [("gui_bytes", "65537"), ("disabled_bytes", "65537")]
+        stages += [("baseline_failed", v) for v in m.DIAG_ENUM["baseline_failed"][1:]] + [(k, v) for k in m.DIAG_STATE for v in ("loaded", "unknown", "not-run")]
+        for name, value in stages + [("combined", alarming)]:
+            over = value if name == "combined" else {name: value}
+            passing = mac(**over)
+            self.assertEqual((passing["result"], passing["failure_phase"]), ("pass", "none"), over)
+            with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=over):
+                m.check_probe(passing, IDENT, "Darwin")
+            with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=over):
+                run_gate(mutated(lambda d: d.__setitem__(key("probe", "macos-15"), ("probe.json", passing))))
+        for gui_stage in ("gui_print_status", "gui_nul", "gui_bytes", "disabled_status", "disabled_bytes", "disabled_admission"):  # Linux runs no gui stage: any recorded value is a contradiction
+            with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=gui_stage):
+                m.check_probe(m.probe_receipt(facts("Linux", **{gui_stage: DIAG[gui_stage]}), 0, IDENT, "Linux", 1001), IDENT, "Linux")
+        for name, value in (("baseline_failed", "hosts"), ("baseline_label_state", "loaded"), ("baseline_legacy_state", "not-run")):
+            with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=name):
+                m.check_probe(m.probe_receipt(facts("Linux", **{name: value}), 0, IDENT, "Linux", 1001), IDENT, "Linux")
+        for ok in ({"gui_bytes": "not-run"}, {"disabled_bytes": "not-run"}, {"gui_bytes": "65536", "disabled_bytes": "65536"}, {"gui_print_err": "warn: <x>", "disabled_err": "bad request", "disabled_head": "}", "disabled_tail": "x"}):
+            m.check_probe(mac(**ok), IDENT, "Darwin")  # unmeasured sizes, sizes at the bound and any valid hint are no failed stage
+        with self.assertRaisesRegex(m.Refusal, r"the capability probe failed \(complete\)"):
+            m.check_probe(mac(manager_pre="unavailable", **alarming), IDENT, "Darwin")  # a failing probe with failed stages is still refused as a failure (the diagnostics explain it)
+        original = lambda d, linux: (d["exit"] == 0 and d["manager_post"] == "available" and (linux or d["manager_pre"] == "available") and d["cleanup"] == "pass" and d["trust_negative"] == "refused"
+                                     and d["trust_positive"] == "accepted" and (d["isolated_uid"], d["default_target"]) == (("available", "active") if linux else ("not-applicable",) * 2))
+        sample = itertools.product((0, 1), ("available", "unavailable", "unknown"), ("available", "unknown"), ("pass", "fail"), ("refused", "accepted"), ("accepted", "refused"), (True, False))
+        for exit_code, pre, post, cleanup, negative, positive, applicable in sample:
+            for os_name in ("Linux", "Darwin"):
+                base = {"exit": exit_code, "manager_pre": pre, "manager_post": post, "cleanup": cleanup, "trust_negative": negative, "trust_positive": positive,
+                        "isolated_uid": "available" if (os_name == "Linux") == applicable else "not-applicable", "default_target": "active" if (os_name == "Linux") == applicable else "not-applicable"}
+                for diag in ({}, {k: v for k, v in doc.items() if k in m.DIAG_KEYS}, {k: "not-run" for k in m.DIAG_KEYS}):
+                    self.assertEqual(m.probe_passes(dict(base, **diag), os_name), original(base, os_name == "Linux"), (base, diag))
+
+    def test_gate_accepts_well_formed_probe_diagnostics_and_refuses_malformed_or_extra_ones(self):
+        mac, fresh = key("probe", "macos-15"), lambda **over: m.probe_receipt(facts("Darwin", **dict(DIAG, **over)), 0, IDENT, "Darwin", 501)
+        self.assertTrue(run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", fresh())))))
+        self.assertTrue(run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", fresh(disabled_head="}", gui_print_err="Could not find domain for user gui: 501"))))))  # hints are evidence, never a failed stage
+        for name, edit in {"out-of-range status": lambda x: x.update(gui_print_status=300), "boolean size": lambda x: x.update(gui_bytes=True), "free-text enum": lambda x: x.update(gui_nul="maybe"),
+                           "unsanitized hint": lambda x: x.update(disabled_head="a;b"), "encoded path hint": lambda x: x.update(gui_print_err="launchctl error 2FUsers2Frunner2Fsecret"),
+                           "host name hint": lambda x: x.update(disabled_err="host john-macbook.local denied"), "overlong hint": lambda x: x.update(disabled_tail="x" * 65), "empty state": lambda x: x.update(baseline_label_state=""),
+                           "missing key": lambda x: x.pop("baseline_failed"), "extra key": lambda x: x.update(extra="x"),
+                           "string status": lambda x: x.update(disabled_status="0")}.items():
+            doc = fresh()
+            edit(doc)
+            with self.subTest(name), self.assertRaises(m.Refusal):
+                run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", doc))))
+        failed = m.probe_receipt(facts("Darwin", **dict(DIAG, manager_pre="unavailable")), 1, IDENT, "Darwin", 501)  # all-clean diagnostics, a failed probe: the gate still refuses it
+        with self.assertRaisesRegex(m.Refusal, r"the capability probe failed \(complete\)"):
+            run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", failed))))
 
     def test_producer_receipt_binds_archives_checksums_and_revision(self):
         m.check_producer(PROD, IDENT)
@@ -1085,9 +1209,335 @@ class Wiring(unittest.TestCase):
                 code, log, err = self.run_cleanup(stub + wc + "\nprobe_gui", {"EV": ev, "SUID": "501", "LD_FILE": ev + "/served", "LD_RC": "0"}, extra=("probe_gui",))
             self.assertEqual((code, "fail cannot measure" in log), (want, want == 1), (wc, log, err))
         probe = self.text("scripts/ci/run-native-lifecycle.sh").split("probe_gui() {", 1)[1].split("\n}\n", 1)[0]
-        self.assertTrue('launchctl print "gui/$SUID" > "$EV/gui.txt" 2> /dev/null && OX nul-free --path "$EV/gui.txt" && launchctl print-disabled' in probe)  # the listing is admitted before the table is asked for
-        self.assertTrue('launchctl print-disabled "gui/$SUID" > "$EV/disabled.txt" 2> /dev/null && OX table-ok --path "$EV/disabled.txt"' in probe)  # its own status, then the helper's admission of the file
+        # The earlier `a && b && c && d` chain (the Q1 pins named its `2> /dev/null` redirects) is now four guarded statements in the same order, each keeping its own status (the first PIPESTATUS element of
+        # its stderr capture, which writes at most 4096 bytes to the evidence file); a capture that cannot be opened stays status 1.
+        self.assertTrue('    rc=1\n    {\n        launchctl print "gui/$SUID" 2>&1 1>&3 3>&- \\\n            | { /usr/bin/head -c 4096 > "$EV/gui.err"; /bin/cat > /dev/null; } 3>&-\n'
+                        '        rc=${PIPESTATUS[0]}\n    } 3> "$EV/gui.txt" || rc=$?\n    gs=$rc\n    if [ "$gs" -eq 0 ]; then\n        rc=0\n        OX nul-free --path "$EV/gui.txt" || rc=$?' in probe
+                        and probe.index("OX nul-free") < probe.index("launchctl print-disabled"))  # the listing is admitted (its status, then the NUL check) before the table is asked for
+        self.assertTrue('if [ "$gn" = clean ]; then\n        rc=1\n        {\n            launchctl print-disabled "gui/$SUID" 2>&1 1>&3 3>&- \\\n'
+                        '                | { /usr/bin/head -c 4096 > "$EV/disabled.err"; /bin/cat > /dev/null; } 3>&-\n            rc=${PIPESTATUS[0]}\n        } 3> "$EV/disabled.txt" || rc=$?\n        ds=$rc\n'
+                        '        if [ "$ds" -eq 0 ] && OX table-ok --path "$EV/disabled.txt"; then avail=yes; fi\n    fi' in probe)  # its own status, then the helper's admission of the file
+        self.assertIn('    if [ "$avail" = yes ]; then\n        fact manager_pre available\n', probe)  # the only way to `available`: those two deciders and nothing recorded as evidence
         self.assertTrue('size=$(wc -c < "$EV/gui.txt") || fail' in probe and "$(" not in probe.split("OX table-ok", 1)[0].split("print-disabled", 1)[1] and not any("|" in l.replace("||", "").replace("&&", "") for l in probe.splitlines() if "print" in l or "wc" in l))  # no pipeline anywhere in the measurements
+
+    def test_table_reason_names_the_first_framing_defect_and_agrees_with_table_ok_and_the_product(self):
+        host, header = self.load_host(), "disabled services = {\n"
+        frames = {
+            "pass": [header + "}\n", header + '\t"x" => true\n}\n', "disabled services = {}\n", header + "}\n\n\n", "disabled services = {junk\n}\n", header + "\u00e9" * 20000 + "\n}\n",
+                     header + "x" * (65536 - len(header) - 3) + "\n}\n"],  # the last: exactly the 65536-byte bound
+            "over-limit": [header + "x" * (65536 - len(header) - 2) + "\n}\n", header + "x" * 70000 + "\n}\n", "x" * 65537, header + "\u00e9" * 40000 + "\n}\n", header + "\x00" + "x" * 70000 + "}"],
+            "nul": [header + "\x00}\n", "\x00" + header + "}\n", header + "x\x00\n}\n", "\x00"],
+            "header": ["something else\n}\n", "\n" + header + "}\n", " " + header + "}\n", "not " + header + "}\n", "}\n", "x", "Disabled services = {\n}\n", "disabled services = \n}\n"],
+            "trailer": [header, header.rstrip("\n"), header + '\t"x" => true\n', header + "} \n", header + "}\r\n", header + "}\nextra", "disabled services = {\n}\n}x"],
+            "empty": ["", "\n", "\n\n\n"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "table")
+            for want, texts in frames.items():
+                for text in texts:
+                    raw, where = text.encode(), (want, text[:40], len(text.encode()))
+                    pathlib.Path(path).write_bytes(raw)
+                    self.assertEqual(host.table_reason(raw[:65537]), want, where)
+                    with contextlib.redirect_stdout(io.StringIO()) as out:
+                        self.assertEqual(host.table_why({"path": path}, []), 0)  # the op prints the reason of the file's first LIMIT + 1 bytes
+                    self.assertEqual(out.getvalue(), want + "\n", where)
+                    self.assertEqual(host.table_ok({"path": path}, []) == 0, want == "pass", where)  # the admission itself, unchanged: `pass` exactly when table-ok admits
+                    self.assertEqual(self.product_enabled(0, text, "com.x") != "unknown", want == "pass", where)  # and exactly when the product's own observer admits the table
+        with contextlib.redirect_stdout(io.StringIO()) as out, tempfile.TemporaryDirectory() as tmp:
+            pathlib.Path(tmp, "t").write_bytes(b"\xff" + header.encode() + b"}\n")
+            self.assertEqual((host.main(["h", "table-reason", "--path", tmp + "/t"]), out.getvalue()), (0, "header\n"))  # invalid UTF-8 is decoded as table-ok decodes it
+            self.assertEqual(host.table_why({"path": tmp + "/missing"}, []), 1)  # an unreadable file prints nothing: the driver records not-run
+
+    def test_diagnostic_helper_ops_read_at_most_limit_plus_one_bytes_and_print_only_sanitized_text(self):
+        host = self.load_host()
+        junk = bytes(c for c in range(1, 128) if chr(c) not in HINT_CHARS and c != 10)  # every ASCII character the class drops (LF splits lines)
+        for raw, head, tail in ((b"", "none", "none"), (b"\n\n  \n\t\r\n", "none", "none"), (b'disabled services = {\n\t"com.x" => true\n}\n', "disabled services = {", "}"),
+                                (b"\n\n  could\nmiddle\nfound  \n\n", "  could", "found  "), (b"\n\n  first\nmiddle\nlast  \n\n", "  <x>", "<x>  "), (b"a\r\nb\r\n", "a", "<x>"), (b"only", "<x>", "<x>"),
+                                (HINT_CHARS.replace("/", "").encode(), '<x> ={}"<>()._:-', '<x> ={}"<>()._:-'), (("x" * 200 + "\nend").encode(), "<x>", "<x>"), (("y" * 64).encode(), "<x>", "<x>"),
+                                (b";;;\n!!\n", "none", "none"), ("\u00e9\u0661\n".encode(), "none", "none"), (b"a\x00b\nc\x1b[31md\n", "<x>", "<x>"),
+                                (b"Bad request.\nUsage: launchctl print <domain-target> | <service-target>\n", "Bad request.", "Usage: launchctl print <domain-target>  <service-target>"),
+                                (b"user root denied\n", "user <x> denied", "user <x> denied"),
+                                (junk + b"ok\n" + junk + b"\n", "ok", "ok"), (junk + b"\n", "none", "none"), (b"\xff\xfe" + b"ok", "ok", "ok")):
+            self.assertEqual((host.shape_hint(raw, False), host.shape_hint(raw, True)), (head, tail), raw[:40])
+            for hint in (head, tail):
+                self.assertRegex(hint, "^[A-Za-z0-9 ={}\"<>()._:/-]{1,64}$")  # exactly the receipt's pattern: what the helper prints is what the gate accepts
+                self.assertTrue(m.hint_ok(hint), hint)
+        self.assertEqual(sum(1 for c in junk if chr(c) in HINT_CHARS), 0)
+        for name, status in (("clean", 0), ("with-nul", 1)):
+            with tempfile.TemporaryDirectory() as tmp:
+                pathlib.Path(tmp, "f").write_bytes(b"ab" if status == 0 else b"a\x00b")
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual((host.nul_free({"path": tmp + "/f"}, []), out.getvalue()), (status, ""), name)  # 0 clean, 1 NUL, nothing printed
+                    self.assertEqual([host.nul_free({"path": tmp + "/missing"}, []), host.nul_free({"path": tmp}, [])], [2, 2])  # unreadable: neither clean nor NUL-bearing
+        class Spy:
+            def __init__(self, real):
+                self.real, self.asked = real, []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.real.close()
+
+            def fileno(self):
+                return self.real.fileno()
+
+            def read(self, size=-1):
+                self.asked.append(size)
+                return self.real.read(size)
+        with tempfile.TemporaryDirectory() as tmp:
+            big = b"could\n" + b"no " * 40000 + b"\nfound\n"  # known words, so the hints show which line they came from
+            pathlib.Path(tmp, "big").write_bytes(big)
+            o = {"path": tmp + "/big"}
+            for name, call, want in (("table-ok", lambda: host.table_ok(o, []), None), ("nul-free", lambda: host.nul_free(o, []), None), ("table-reason", lambda: host.table_why(o, []), "over-limit\n"),
+                                     ("shape head", lambda: host.shape(dict(o, field="head"), []), "could\n"), ("shape tail", lambda: host.shape(dict(o, field="tail"), []), "no " * 20 + "no\n")):
+                spies = []
+
+                def opener(path, mode="r", spies=spies):
+                    spies.append(Spy(open(path, mode)))
+                    return spies[-1]
+                with unittest.mock.patch.object(host, "open", opener, create=True), contextlib.redirect_stdout(io.StringIO()) as out:
+                    call()
+                self.assertEqual([spy.asked for spy in spies], [[host.LIMIT + 1]], name)  # one read, of at most LIMIT + 1 bytes, however large the file
+                self.assertTrue(want is None or out.getvalue() == want, (name, out.getvalue()))  # the tail is the last line WITHIN that window, never a later one
+            spies.clear()
+            with unittest.mock.patch.object(host, "open", opener, create=True), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(host.shape(dict(o, field="bytes"), []), 0)
+            self.assertEqual(([spy.asked for spy in spies], out.getvalue()), ([[]], "%d\n" % len(big)))  # the size comes from fstat: nothing is read
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(host.main(["h", "shape", "--path", tmp + "/big", "--field", "head"]), 0)
+                self.assertEqual(host.shape(dict(o, path=tmp + "/missing", field="head"), []), 1)
+            self.assertEqual(out.getvalue(), "could\n")
+            with self.assertRaises(SystemExit):
+                host.shape(dict(o, field="body"), [])  # an unknown field, or none
+
+    def gui_probe(self, print_rc=0, listing=b"gui/501 = {\n}\n", print_err="", dis_rc=0, table=b"disabled services = {\n}\n", dis_err="", shell="", after=""):
+        """probe_gui as written in the driver, with `launchctl` a function stub serving these bytes, statuses and stderr and the helper's ops running for real over the captured files.
+        Returns (exit status, [(fact, value)] in the order recorded, log)."""
+        stub = r"""launchctl() { case "$1" in print) cat "$LP_FILE"; printf '%s' "$LP_ERR" >&2; return "$LP_RC" ;; print-disabled) cat "$LD_FILE"; printf '%s' "$LD_ERR" >&2; return "$LD_RC" ;; esac; }
+"""
+        with tempfile.TemporaryDirectory() as ev:
+            pathlib.Path(ev, "listing").write_bytes(listing)
+            pathlib.Path(ev, "table").write_bytes(table)
+            env = {"EV": ev, "SUID": "501", "LP_FILE": ev + "/listing", "LP_RC": str(print_rc), "LP_ERR": print_err, "LD_FILE": ev + "/table", "LD_RC": str(dis_rc), "LD_ERR": dis_err}
+            code, log, err = self.run_cleanup(stub + shell + 'probe_gui >> "$LOG"' + after, env, extra=("probe_gui",))  # the function's own output joins the log (fact lines start with `fact `)
+        return code, [tuple(line[5:].split(" ", 1)) for line in log.splitlines() if line.startswith("fact ")], log
+
+    GUI_FACTS = ("gui_print_status", "gui_nul", "gui_bytes", "gui_print_err", "disabled_status", "disabled_bytes", "disabled_admission", "disabled_head", "disabled_tail", "disabled_err")
+
+    def test_gui_probe_records_every_diagnostic_fact_on_the_passing_and_every_failing_path(self):
+        host, header = self.load_host(), "disabled services = {\n"
+        table = '\t"com.x" => true\n}\n'.join((header, "")).encode()
+        none = {"disabled_status": "not-run", "disabled_bytes": "not-run", "disabled_admission": "not-run", "disabled_head": "none", "disabled_tail": "none", "disabled_err": "none"}
+        scenarios = (
+            (dict(listing=b"gui/501 = {\n}\n", table=table, print_err="warn: x\n"), 0, "available", {
+                "gui_print_status": "0", "gui_nul": "clean", "gui_bytes": "14", "gui_print_err": "warn: <x>", "disabled_status": "0", "disabled_bytes": str(len(table)), "disabled_admission": "pass",
+                "disabled_head": "disabled services = {", "disabled_tail": "}", "disabled_err": "none"}),
+            (dict(print_rc=113, listing=b"", print_err="Could not find domain for user gui: 501\n"), 0, "unavailable", dict(none, gui_print_status="113", gui_nul="not-run", gui_bytes="0",
+                                                                                                                                gui_print_err="Could not find domain for user gui: 501")),
+            (dict(print_rc=127, listing=b"", print_err=""), 0, "unavailable", dict(none, gui_print_status="127", gui_nul="not-run", gui_bytes="0", gui_print_err="none")),
+            (dict(listing=b"gui/501 = {\n\x00}\n"), 0, "unavailable", dict(none, gui_print_status="0", gui_nul="nul", gui_bytes="15", gui_print_err="none")),
+            (dict(dis_rc=2, table=b"", dis_err="Could not\x01 find domain; x\n"), 0, "unavailable", {
+                "gui_print_status": "0", "gui_nul": "clean", "gui_bytes": "14", "gui_print_err": "none", "disabled_status": "2", "disabled_bytes": "0", "disabled_admission": "empty",
+                "disabled_head": "none", "disabled_tail": "none", "disabled_err": "Could not find domain <x>"}),
+            (dict(dis_rc=1, table=table), 0, "unavailable", {  # a complete table and a failing producer: the frame is fine, the status refuses it
+                "gui_print_status": "0", "gui_nul": "clean", "gui_bytes": "14", "gui_print_err": "none", "disabled_status": "1", "disabled_bytes": str(len(table)), "disabled_admission": "pass",
+                "disabled_head": "disabled services = {", "disabled_tail": "}", "disabled_err": "none"}),
+            (dict(listing=b"x" * 65537), 1, "available", dict(none, gui_print_status="0", gui_nul="clean", gui_bytes="65537", gui_print_err="none", disabled_status="0", disabled_bytes="24",  # the size failure
+                                                              disabled_admission="pass", disabled_head="disabled services = {", disabled_tail="}")))
+        for kwargs, want_exit, manager_pre, want in scenarios:
+            code, pairs, log = self.gui_probe(**kwargs)
+            self.assertEqual(sorted(k for k, _ in pairs), sorted(self.GUI_FACTS + ("manager_pre",)), log)  # every diagnostic fact, and the verdict fact, exactly once: whatever the outcome
+            self.assertEqual(dict(pairs), dict(want, manager_pre=manager_pre), log)
+            self.assertEqual((code, "fail the gui domain listing exceeds" in log), (want_exit, want_exit == 1), log)
+        # Every table frame: the recorded admission is the helper's reason, and only `pass` is available. A hint carries nothing outside the sanitized class and at most 64 characters.
+        for text, reason in (("something else\n}\n", "header"), (header, "trailer"), ("\n\n", "empty"), (header + "\x00}\n", "nul"), (header + "x" * 70000 + "\n}\n", "over-limit"), (header + "}\n", "pass")):
+            code, pairs, log = self.gui_probe(table=text.encode())
+            self.assertEqual((dict(pairs)["disabled_admission"], dict(pairs)["manager_pre"]), (reason, "available" if reason == "pass" else "unavailable"), reason)
+            for name in ("disabled_head", "disabled_tail"):
+                self.assertRegex(dict(pairs)[name], "^[A-Za-z0-9 ={}\"<>()._:/-]{1,64}$")
+        # Parity with the earlier `&&` chain, evaluated here independently: manager_pre is `available` ONLY for a successful, NUL-free listing, a successful table and a framed table within the bound.
+        old_available = lambda print_rc, listing, dis_rc, table: (print_rc == 0 and b"\x00" not in listing[:65537] and dis_rc == 0 and len(table[:65537]) <= 65536
+                                                                  and host.framed_table(table[:65537].decode("utf-8", "replace")))
+        tables = (table, b"nope\n}\n", header.encode(), b"", header.encode() + b"\x00}", b"x" * 65537)
+        runs = [(rc, b"gui/501 = {\n}\n", 0, table) for rc in (1, 113, 127)] + [(0, b"x\x00y", 0, table)] + [(0, b"gui/501 = {\n}\n", rc, t) for rc in (0, 3) for t in tables]
+        for print_rc, listing, dis_rc, text in runs:
+            code, pairs, log = self.gui_probe(print_rc=print_rc, listing=listing, dis_rc=dis_rc, table=text)
+            got = dict(pairs)
+            self.assertEqual(got["manager_pre"] == "available", old_available(print_rc, listing, dis_rc, text), (print_rc, listing[:8], dis_rc, text[:20], log))
+            stage = [got["gui_print_status"], got["gui_nul"], got["disabled_status"], got["disabled_admission"]]
+            self.assertEqual(stage[:2], [str(print_rc), "not-run" if print_rc else ("nul" if b"\x00" in listing else "clean")])
+            self.assertEqual(stage[2:] == ["not-run", "not-run"], print_rc != 0 or b"\x00" in listing)  # a stage that is not reached is `not-run`, exactly where the chain stopped
+            self.assertTrue(stage[2:] == ["not-run", "not-run"] or (stage[2] == str(dis_rc) and stage[3] == host.table_reason(text[:65537])), (stage, log))
+            self.assertEqual(code, 0, log)
+        # The evidence helpers decide nothing: with `shape` and `table-reason` failing, the verdict and the deciding facts are those of the real helper, and the evidence falls back to `not-run` / `none`.
+        evidence_down = 'OX() { case "$1" in shape | table-reason) return 1 ;; esac; "$PYO" -I -B "$HOSTPY" "$@"; }\n'
+        fallback = {"gui_bytes": "not-run", "gui_print_err": "none", "disabled_bytes": "not-run", "disabled_admission": "not-run", "disabled_head": "none", "disabled_tail": "none", "disabled_err": "none"}
+        for text, manager_pre in ((table, "available"), (b"nope\n}\n", "unavailable"), (header.encode(), "unavailable")):
+            code, pairs, log = self.gui_probe(table=text, shell=evidence_down)
+            self.assertEqual((code, dict(pairs)), (0, dict(fallback, gui_print_status="0", gui_nul="clean", disabled_status="0", manager_pre=manager_pre)), log)
+        # An unreadable listing (the NUL check exits 2) is neither clean nor NUL-bearing: recorded as not-run, the manager unavailable, the table never asked for.
+        code, pairs, log = self.gui_probe(shell='OX() { case "$1" in nul-free) return 2 ;; esac; "$PYO" -I -B "$HOSTPY" "$@"; }\n')
+        self.assertEqual((code, dict(pairs)["gui_nul"], dict(pairs)["disabled_status"], dict(pairs)["manager_pre"]), (0, "not-run", "not-run", "unavailable"), log)
+        probe = self.text("scripts/ci/run-native-lifecycle.sh").split("probe_gui() {", 1)[1].split("\n}\n", 1)[0]
+        code = "\n".join(l for l in probe.splitlines() if not l.lstrip().startswith("#"))
+        self.assertEqual(re.findall(r"launchctl (\S+)", code), ["print", "print-disabled"])  # the only manager queries are the two read-only ones the earlier probe made
+        self.assertEqual(set(re.findall(r"OX (\S+)", code)), {"nul-free", "table-ok", "table-reason", "shape"})  # and the only helper reads: read-only ops over the captured files
+        self.assertIsNone(re.search(r"\b(sudo|bsudo|priv|HX|as_subject|bootstrap|bootout|kickstart|rm|mv|tee|chmod)\b", code))  # no new host effect
+        self.assertTrue('head -c 4096 > "$EV/gui.err"' in code and 'head -c 4096 > "$EV/disabled.err"' in code and code.count("2> /dev/null") == 7)  # stderr of both queries is kept, capped, in files under $EV; only the evidence helpers' own stderr is dropped
+        self.assertFalse(re.search(r'launchctl print[^\n]*2> ?"?\$EV', code) or re.search(r'2> "\$EV/[a-z]+\.err"', code))  # no query writes its stderr straight to a file: every byte goes through the cap
+        self.assertEqual(code.count("PIPESTATUS[0]"), 2)  # each query's own status, never the capture's
+        self.assertTrue(all(code.count('fact %s "$' % name) == 1 for name in self.GUI_FACTS))  # recorded once, from a variable that every path assigns (`not-run` / `none` unless its stage ran)
+        self.assertTrue(code.index('fact disabled_err "$de"') < code.index("fact manager_pre available") < code.index("fail ") and code.index('fact disabled_err "$de"') < code.index("fact manager_pre unavailable"))  # before any fail
+
+    def test_launchctl_stderr_capture_is_capped_and_never_changes_a_status_or_the_verdict(self):
+        flood = r"""launchctl() { case "$1" in
+    print) cat "$LP_FILE"; { printf 'no error\n'; head -c 5242880 /dev/zero | tr '\0' x; printf '\nlast\n'; } >&2; return "$LP_RC" ;;
+    print-disabled) cat "$LD_FILE"; { printf 'bad request\n'; head -c 5242880 /dev/zero | tr '\0' x; printf '\nlast\n'; } >&2; return "$LD_RC" ;; esac; }
+"""
+        sizes = r"""; for f in gui disabled; do [ ! -f "$EV/$f.err" ] || printf 'errsize %s %s\n' "$f" "$(wc -c < "$EV/$f.err")" >> "$LOG"; done"""
+        table = b'disabled services = {\n\t"com.x" => true\n}\n'
+        # (print status, table status, expected gui status, expected table status, manager_pre, files written): a 5 MiB stderr stream per query neither fills the file past 4096 bytes nor kills the query with SIGPIPE,
+        # so each query's own status survives and the verdict is the unchanged one.
+        for print_rc, dis_rc, want_gs, want_ds, manager_pre, files in ((0, 0, "0", "0", "available", ("gui", "disabled")), (113, 0, "113", "not-run", "unavailable", ("gui",)),
+                                                                          (0, 3, "0", "3", "unavailable", ("gui", "disabled")), (0, 127, "0", "127", "unavailable", ("gui", "disabled"))):
+            code, pairs, log = self.gui_probe(print_rc=print_rc, dis_rc=dis_rc, table=table, shell=flood, after=sizes)
+            got = dict(pairs)
+            self.assertEqual((code, got["gui_print_status"], got["disabled_status"], got["manager_pre"], got["gui_print_err"]), (0, want_gs, want_ds, manager_pre, "no error"), log)
+            self.assertEqual(re.findall(r"errsize (\w+)\s+(\d+)", log), [(f, "4096") for f in files], log)  # capped at exactly 4096 bytes, and only the queries that ran wrote anything
+            self.assertTrue(want_ds == "not-run" or got["disabled_err"] == "bad request", log)
+        # A stderr file that cannot be written is diagnostic-only: the query's own status and the verdict are untouched and the hint is `none`. A stdout file that cannot be opened is the fail-closed case:
+        # status 1, unavailable, under errexit too.
+        code, pairs, log = self.gui_probe(shell='set -e\nmkdir "$EV/gui.err"\n')
+        self.assertEqual((code, dict(pairs)["gui_print_status"], dict(pairs)["gui_print_err"], dict(pairs)["manager_pre"]), (0, "0", "none", "available"), log)
+        code, pairs, log = self.gui_probe(print_rc=113, shell='set -e\nmkdir "$EV/gui.err"\n')
+        self.assertEqual((code, dict(pairs)["gui_print_status"], dict(pairs)["manager_pre"]), (0, "113", "unavailable"), log)
+        for name, want in (("gui.txt", ("1", "not-run", "unavailable")), ("disabled.txt", ("0", "1", "unavailable"))):
+            code, pairs, log = self.gui_probe(shell='set -e\nmkdir "$EV/%s"\n' % name)
+            got = dict(pairs)
+            self.assertEqual((code, got["gui_print_status"], got["disabled_status"], got["manager_pre"]), (0,) + want, (name, log))
+
+    def test_hints_replace_every_path_like_token_and_the_gate_refuses_one_that_survives(self):
+        host = self.load_host()
+        # Everything from the FIRST path-like token to the end of the line becomes one `<path>` (a path may hold blanks); text before it, and the two non-path spellings launchd prints, stay.
+        for raw, want in ((b"/PRIVATE/HOME/Library/LaunchAgents/private.plist: denied\n", "<path>"), (b"cannot read /Users/runner/work/_temp/x.plist now\n", "cannot read <path>"),
+                          (b'"/Users/runner/x.plist" => true\n', "<path>"), (b"~/Library/x\n", "<path>"), (b"./x ../y\n", "<path>"), (b"file:///Users/r/x\n", "<path>"),
+                          (b"https://h.example/x\n", "<path>"), (b"a;/Users/r\n", "<path>"), (b"a\t/Users/r/x\n", "<path>"), ("x\u00e9/Users/r\n".encode(), "<path>"), (b"/Library/x /y/z\n", "<path>"),
+                          (b"a/b/c\n", "<path>"), (b"a/b\n", "<path>"), (b"a/\n", "<path>"), (b"/\n", "<path>"), (b"gui/501/x\n", "<path>"), (b"input/output\n", "<path>"),
+                          (b"/Users/John Smith/x\n", "<path>"), (b"/Users/John Smith\n", "<path>"), (b"/Users/a/My File.plist denied\n", "<path>"), (b"Library/Application Support/x\n", "<path>"),
+                          (b"read /Users/John Smith/x failed\n", "read <path>"), (b"gui/501 not /Users/John Smith/x\n", "gui/501 not <path>"), (b"user/501 pid/12 Input/output\n", "user/501 pid/12 Input/output"),
+                          (b"Bootstrap failed: 5: Input/output error\n", "Bootstrap failed: 5: Input/output error"), (b"Could not find domain for gui/501\n", "Could not find domain for gui/501"),
+                          # the cut falls between tokens, never inside one (a cut word could be a fragment of a name): a token that does not fit, and all after it, is dropped
+                          (("could " * 9 + "ab/cd").encode(), "could " * 9 + "<path>"), (("could " * 10 + "ab/cd").encode(), "could " * 9 + "could"), (("could " * 8 + "gui/501").encode(), "could " * 8 + "gui/501"),
+                          (("could " * 10 + "gui/501").encode(), "could " * 9 + "could"), (("x" * 60 + " ab/cd").encode(), "<x> <path>"), (("x" * 31 + " ab/cd").encode(), "<x> <path>"),
+                          # F001 (Q1DR): only known words, numbers and punctuation survive; a name, host, label, encoded or joined text becomes `<x>`
+                          (b"launchctl error %2FUsers%2Frunner%2Fsecret\n", "launchctl error <x>"), (b"%2FUsers%2Frunner%2Fsecret\n", "<x>"), (b"host john-macbook.local denied\n", "<x> <x> denied"),
+                          (b"user john denied\n", "user <x> denied"), (b'Could not find service "com.john.agent" in domain for gui/501\n', "Could not find service <x> in domain for gui/501"),
+                          (b"Users\\John\\x\n", "<x>"), (b"C:\\Users\\john\n", "<x>"), (b"runner@Mac-1234.local: denied\n", "<x> denied"), (b"COULD NOT FIND DOMAIN\n", "COULD NOT FIND DOMAIN"),
+                          (b"Couldnot find\n", "<x> find"), (b"could.not find\n", "<x> find"), (b"{domain} (gui: 501)\n", "{domain} (gui: 501)"), (b"gui: 1234567\n", "gui: <x>"), (b"gui/1234567\n", "<path>"),
+                          (b"user root denied\n", "user <x> denied"), (b"user admin daemon nobody denied\n", "user <x> <x> <x> denied"),  # account-like words are not in the vocabulary
+                          (b"a" * 33 + b" could\n", "<x> could"), (b"{" * 33 + b" could\n", "<x> could"), (b"{" * 32 + b" could\n", "{" * 32 + " could"), (b"5: 12345678\n", "5: <x>")):
+            self.assertEqual(host.shape_hint(raw, False), want, raw)
+        # F001, round 2 (Q1DR): a user or host named like a known word is still a name. The producing host redacts the names it knows (identities()), whatever the vocabulary says; the gate cannot know them.
+        for raw, names, want in ((b"user system denied\n", ("system",), "user <x> denied"), (b"User SYSTEM denied\n", ("System",), "User <x> denied"), (b'"system": denied\n', ("system",), "<x> denied"),
+                                 (b"domain target\n", ("tar",), "domain <x>"), (b"domain target\n", ("ta",), "domain target"), (b"no a\n", ("a",), "no <x>"), (b"could not\n", ("",), "could not"),
+                                 (b"user gui: 501\n", ("gui", "501"), "user <x> <x>"), (b"user system denied\n", (), "user system denied")):
+            self.assertEqual(host.shape_hint(raw, False, names), want, (raw, names))
+            self.assertTrue(m.hint_ok(want), want)  # what is left is still what the gate accepts
+        with unittest.mock.patch.dict(os.environ, {"USER": "Jane-Doe", "LOGNAME": "jd", "HOME": "/Users/Some.Body/"}), unittest.mock.patch.object(host.socket, "gethostname", return_value="Jane-Mac.local"):
+            got = host.identities()
+        self.assertTrue({"jane-doe", "jane", "doe", "jd", "some.body", "some", "body", "jane-mac.local", "mac", "local"} <= got and "" not in got)  # whole and by part, lowercase
+        with unittest.mock.patch.dict(os.environ, {}, clear=True), unittest.mock.patch.object(host.socket, "gethostname", side_effect=OSError), unittest.mock.patch.object(host.pwd, "getpwuid", side_effect=KeyError):
+            self.assertEqual(host.identities(), frozenset())  # a name that cannot be read adds nothing and fails nothing
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out, unittest.mock.patch.object(host, "identities", return_value=frozenset({"disabled"})):
+            pathlib.Path(tmp, "t").write_bytes(b"disabled services = {\n}\n")
+            self.assertEqual((host.shape({"path": tmp + "/t", "field": "head"}, []), out.getvalue()), (0, "<x> services = {\n"))  # the `shape` op applies them
+        rng = random.Random(7)  # nothing after a path's first token ever survives, however the rest is spelled
+        for start in ("/Users/John", "~/x", "./y", "a/b/c", "Library/Application", "file:///Users/Jo", "a/b"):
+            for tail in ("Smith/x", "Smith", "ZQXLEAK1/y z", "ZQXLEAK2 gui/501 ZQXLEAK3", "File.plist: ZQXLEAK4", "<path> ZQXLEAK5"):
+                for before in ("", "read ", "Could not find "):
+                    hint = host.shape_hint(("%s%s %s\n" % (before, start, tail)).encode(), False)
+                    self.assertEqual(hint, before + "<path>", (before, start, tail))
+                    self.assertTrue(m.hint_ok(hint))
+        leaks = ("ZQXLEAK", "john", "runner", "macbook", "2F", "%2F", "Users", "local")  # names, hosts and encodings the sanitizer has to drop whatever surrounds them
+        pieces = ["/", "//", ".", "..", "~", ";", ":", " ", " ", "\t", "\r", "\n", "a", "ab", "Z9", "\u00e9", "<", ">", "-", "_", "gui", "501", "x/y", "Input/output", "/Users/r", "{", "}", '"', "=", "\x00", "ab/c",
+                  "could", "not", "find", "domain", "user", "<x>", "<path>"] + list(leaks)
+        rng = random.Random(20260101)
+        for _ in range(4000):
+            raw = "".join(rng.choice(pieces) for _ in range(rng.randrange(0, 120)))
+            for hint in (host.shape_hint(raw.encode(), False), host.shape_hint(raw.encode(), True)):
+                self.assertRegex(hint, r'^[A-Za-z0-9 ={}"<>()._:/-]{1,64}$')
+                self.assertFalse(any(host.pathlike(t) for t in hint.split(" ")), (raw, hint))  # whatever the input, no path-like token survives the cut
+                self.assertNotIn("<path>", hint.split(" ")[:-1])  # and a `<path>` is always the last token: nothing that followed a path's start is kept
+                self.assertTrue(m.hint_ok(hint), (raw, hint))  # and the receipt gate accepts exactly what the helper prints
+                self.assertTrue(all(m.safe(t) for t in hint.split(" ")), (raw, hint))  # every token is punctuation, a known word, a number, a non-path spelling or a marker...
+                self.assertIsNone(re.search("|".join(re.escape(w) for w in leaks if w[0] not in "2%"), hint, re.I), (raw, hint))  # ...so a name or host never survives (`2F` alone is a number's fragment)
+                self.assertNotIn("2F", hint)
+            token = "".join(rng.choice(pieces[:2] + pieces[4:5] + pieces[6:9] + pieces[12:21] + pieces[23:]) for _ in range(rng.randrange(0, 12)))
+            self.assertEqual((host.pathlike(token), host.safe(token)), (m.pathlike(token), m.safe(token)), token)  # one rule on both sides
+        for token, path in (("gui/501", False), ("user/9", False), ("pid/1", False), ("Input/output", False), ("input/output", True), ("Input/outputs", True), ("gui/", True), ("gui/5x", True), ("x/501", True),
+                            ("session/5", True), ("x/y", True), ("a/b", True), ("/", True), ("gui/501/x", True), ("plain", False), ("<path>", False), ("a.b:c", False), ("gui/123456", False), ("gui/1234567", True)):
+            self.assertEqual((host.pathlike(token), m.pathlike(token)), (path, path), token)  # the two non-path spellings are exactly these, on both sides
+        # The vocabulary and the token rule are one rule on both sides: the same words, the same non-path spellings, the same verdict on every word, its decorations and mutations, and on odd tokens.
+        self.assertEqual((host.WORDS, host.NONPATH), (m.WORDS, m.NONPATH))
+        self.assertTrue(len(m.WORDS) > 100 and all(w == w.lower() and re.fullmatch(r"[a-z-]{1,20}", w) for w in m.WORDS) and not {"john", "runner", "users", "local", "admin", "x", "root", "daemon", "nobody", "wheel", "staff", "guest", "persona"} & m.WORDS)
+        odd = ["", "<x>", "<path>", "{", "=>", "5:", "501)", "1234567", "123456", "gui/501", "Input/output", "input/output", "a" * 32, "a" * 33, "{" * 32, "{" * 33, "<x>:", "<xx>", "<path>.", "2F", "a.b", "Z9"]
+        for word in sorted(m.WORDS):
+            for token in (word, word.upper(), word.capitalize(), '"%s"' % word, "{%s}" % word, word + ":", word + "s", word[:-1], "x" + word, word + "." + word, word + "/" + word, "<%s>" % word):
+                odd.append(token)
+                self.assertEqual(host.safe(token), m.safe(token), token)
+        self.assertTrue(all(m.safe(w) and m.safe(w.upper()) and m.safe('"%s":' % w) for w in m.WORDS if len(w) <= 20))  # every word is kept, in any case and with punctuation around it
+        self.assertFalse(any(m.safe(w + "x") or m.safe("x" + w) or m.safe(w + "." + w) for w in m.WORDS))  # and nothing built from one is
+        self.assertTrue(all(host.safe(t) == m.safe(t) for t in odd), odd)
+        code, pairs, log = self.gui_probe(print_err="/PRIVATE/HOME/Library/LaunchAgents/private.plist: denied\n", dis_err="/Users/runner/x denied\n", table=b"/Users/r/y\n}\n")
+        got = dict(pairs)
+        self.assertEqual((got["gui_print_err"], got["disabled_err"], got["disabled_head"], got["disabled_tail"], got["disabled_admission"]), ("<path>", "<path>", "<path>", "}", "header"), log)
+        self.assertIn("gui probe: status=0 nul=clean", log)  # the log line carries the same, redacted, facts
+        self.assertFalse(any(word in log for word in ("PRIVATE", "Users", "runner", "LaunchAgents")), log)
+        # F001 (Q1DR): percent-encoded paths, a host or user name with no slash, a quoted label: through the real function, into the facts and the log line
+        code, pairs, log = self.gui_probe(print_err="launchctl error %2FUsers%2Frunner%2Fsecret\n", dis_err="host john-macbook.local denied\n", table=b'"com.john.agent" => true\n}\n')
+        got = dict(pairs)
+        self.assertEqual((got["gui_print_err"], got["disabled_err"], got["disabled_head"], got["disabled_tail"], got["disabled_admission"]), ("launchctl error <x>", "<x> <x> denied", "<x> => true", "}", "header"), log)
+        self.assertIn("gui probe: status=0 nul=clean bytes=14 err=[launchctl error <x>]", log)
+        self.assertFalse(any(word in log for word in ("2F", "Users", "runner", "secret", "john", "macbook", "com.", "agent")), log)
+
+    def test_baseline_names_the_first_failing_sub_check_in_the_frozen_order_and_decides_as_before(self):
+        order = ("path-conf", "path-release", "path-cache", "path-definition", "path-legacy-definition", "path-curlrc", "path-shim", "manager-path-unread", "command-provenance", "label-active",
+                 "legacy-active", "hosts")
+        self.assertEqual(order, m.DIAG_ENUM["baseline_failed"][1:-1])  # the receipt's enum is the driver's order (`none` first, `not-run` last)
+        stub = r"""has() { case " $FAILS " in *" $1 "*) return 0 ;; esac; return 1; }
+sgone() { case "$1" in "$CONF") has path-conf ;; "$REL") has path-release ;; "$THOME/.cache/herdr-mobile-relay") has path-cache ;; "$DEF") has path-definition ;; "$LDEF") has path-legacy-definition ;;
+    "$THOME/.curlrc") has path-curlrc ;; "$SHIMDIR/herdr-mobile-relay") has path-shim ;; *) return 3 ;; esac; test $? -eq 1; }
+as_subject() { case "$1" in systemctl | launchctl) ! has manager-path-unread && echo PATH=/usr/bin:/bin ;; /bin/sh) ! has command-provenance ;; *) return 3 ;; esac; }
+snap() { if has label-active; then echo '{"active": "loaded"}'; else echo '{"active": "absent"}'; fi; }
+snap_of() { if has legacy-active; then echo '{"active": "Act;ive"}'; else echo '{"active": "absent"}'; fi; }
+absent() { ! has hosts; }
+"""
+        env = {"CONF": "/h/conf", "REL": "/h/rel", "THOME": "/h", "DEF": "/h/def", "LDEF": "/h/ldef", "SHIMDIR": "/h/shim", "MGRPATH": "/usr/bin/systemctl", "LEGACY": "x.service"}
+        # (failing sub-checks present, expected first failure, label state, legacy state); the same failure set is also tried alone
+        expected = {"label-active": ("loaded", "not-run"), "legacy-active": ("absent", "ctive"), "hosts": ("absent", "absent")}
+        for os_name in ("Linux", "Darwin"):
+            for k, name in enumerate(order):
+                for fails in (order[k:], (name,)):
+                    code, log, err = self.run_cleanup(stub + 'baseline_clean; echo "rc $? $BASEFAIL" >> "$LOG"', dict(env, OS=os_name, FAILS=" ".join(fails)), extra=("baseline_clean", "baseline_note", "state_fact"))
+                    label, legacy = expected.get(name, ("not-run", "not-run"))
+                    want = ["fact baseline_failed " + name, "fact baseline_label_state " + label, "fact baseline_legacy_state " + legacy, "rc 1 " + name]
+                    self.assertEqual(log.splitlines(), want, (os_name, fails, err))  # one outcome, the FIRST failing sub-check, and it fails closed
+            code, log, err = self.run_cleanup(stub + 'baseline_clean; echo "rc $? $BASEFAIL" >> "$LOG"', dict(env, OS=os_name, FAILS=""), extra=("baseline_clean", "baseline_note", "state_fact"))
+            self.assertEqual(log.splitlines(), ["fact baseline_failed none", "fact baseline_label_state absent", "fact baseline_legacy_state absent", "rc 0 none"], (os_name, err))
+        # A failed observation is `unknown` (never `absent`): nothing printed by snap, or a broken answer.
+        for snap_stub in ("snap() { return 1; }", "snap() { echo '{\"active\": \"\"}'; }", "snap() { echo garbage; }"):
+            code, log, err = self.run_cleanup(stub + snap_stub + '\nbaseline_clean; echo "rc $?" >> "$LOG"', dict(env, OS="Linux", FAILS=""), extra=("baseline_clean", "baseline_note", "state_fact"))
+            self.assertEqual(log.splitlines(), ["fact baseline_failed label-active", "fact baseline_label_state unknown", "fact baseline_legacy_state not-run", "rc 1"], (snap_stub, err))
+        for value, want in (("loaded", "loaded"), ("not-run", "not-run"), ("Act;ive 1", "ctive"), ("", "unknown"), ("A1;", "unknown"), ("a-b", "a-b"), ("x" * 30, "x" * 24), ("ab\ncd", "abcd"), ("caf\u00e9", "caf")):
+            code, log, err = self.run_cleanup('state_fact baseline_label_state "$V"', {"V": value}, extra=("state_fact",))
+            self.assertEqual(log, "fact baseline_label_state %s\n" % want, (value, err))  # only [a-z-], at most 24 characters, `unknown` for nothing
+        driver = self.text("scripts/ci/run-native-lifecycle.sh")
+        body = driver.split("\nbaseline_clean() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(driver.count('baseline_clean || fail "a product definition, release or mapping already exists on this runner (baseline sub-check: ${BASEFAIL:-unknown})"'), 2)  # probe and lifecycle name it
+        self.assertTrue('names=(conf release cache definition legacy-definition curlrc shim)' in body and 'baseline_note "path-${names[i]}" not-run not-run; return 1; }' in body)
+        self.assertEqual(re.findall(r"baseline_note (\S+) (\S+)", body)[1:], [("manager-path-unread", "not-run"), ("manager-path-unread", "not-run"), ("command-provenance", "not-run"),
+                                                                             ("label-active", '"$la"'), ("legacy-active", '"$la"'), ("hosts", '"$la"'), ("none", '"$la"')])  # after the seven path names
+        self.assertTrue(body.index("sgone") < body.index("show-environment") < body.index("launchctl getenv PATH") < body.index("command -v herdr") < body.index("label-active") < body.index("legacy-active") < body.index("hosts"))
 
     def test_default_target_dependency_needs_a_successful_query_and_an_exact_unit_entry(self):
         label = "herdr-mobile-relay.service"
@@ -1169,6 +1619,12 @@ class Wiring(unittest.TestCase):
                 with self.subTest(args), self.assertRaises(SystemExit) as refused:
                     host.curl_shim(o, args)
                 self.assertEqual(refused.exception.code, 2)
+
+    def test_docs_name_every_probe_diagnostic_fact_as_evidence_not_admission(self):
+        docs = " ".join(self.text("docs/ci-test-tiers.md").split())
+        self.assertTrue(all("`%s`" % name in docs for name in m.DIAG_KEYS))  # every fact the gate validates is named
+        for text in ("evidence, not admission", "the pass rule and the failure phase never read them", "cannot turn a failed probe into a pass", "refuses a *passing* receipt whose diagnostics record a failed stage", "`not-run`", "`over-limit`", "at most 64 characters", "`<path>`", "`<x>`", "known launchd words", "a name the producing host knows", "4096 bytes"):
+            self.assertIn(text, docs)
 
     def test_docs_and_lint_list_name_the_workflow_as_partial_q1(self):
         docs = " ".join(self.text("docs/ci-test-tiers.md").split())
