@@ -37,7 +37,7 @@ func TestAgentNotReadyOutcomeDependsOnOperation(t *testing.T) {
 			wantMessage := "Agent is not ready to receive prompts; review the pane before retrying"
 			if action == "agent_start" {
 				lifecycle := &Lifecycle{herdr: client}
-				err = lifecycle.startKindAgent(ctx, "claude", "reviewer", "pane-1")
+				err = lifecycle.startKindAgent(ctx, "claude", "reviewer", "pane-1", nil)
 				wantPhase = "dispatched_unknown"
 				wantMessage = "Command may have executed; review the agent before retrying"
 			} else {

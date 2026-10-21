@@ -25,7 +25,7 @@ func TestCustomAgentRenameRefusalIsPartiallyApplied(t *testing.T) {
 	lifecycle := &Lifecycle{herdr: client}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	err := lifecycle.startInTarget(ctx, profiles.Profile{Argv: []string{"custom-agent"}}, "agent", "pane-1")
+	err := lifecycle.startInTarget(ctx, profiles.Profile{Argv: []string{"custom-agent"}}, StartRequest{Name: "agent"}, "pane-1")
 	if !errors.Is(err, herdr.ErrPartiallyApplied) {
 		t.Fatalf("rename failure = %v, want partially applied", err)
 	}
@@ -47,7 +47,7 @@ func TestCustomAgentTimeoutAfterPaneRunIsDispatchedUnknown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	err := lifecycle.startInTarget(ctx, profiles.Profile{Argv: []string{"custom-agent"}}, "agent", "pane-1")
+	err := lifecycle.startInTarget(ctx, profiles.Profile{Argv: []string{"custom-agent"}}, StartRequest{Name: "agent"}, "pane-1")
 	if !errors.Is(err, herdr.ErrDispatchedUnknown) {
 		t.Fatalf("custom agent timeout = %v, want dispatched_unknown", err)
 	}

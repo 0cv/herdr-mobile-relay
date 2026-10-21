@@ -13,7 +13,7 @@ import { CommandError, relayStore } from '$lib/store';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
-import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
+import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
 
 const INCOMPLETE_CATALOG_NOTICE = 'Command suggestions may be incomplete because a discovery limit was reached. Typing searches only loaded suggestions; you can still send a command manually.';
 
@@ -43,6 +43,18 @@ const blockedAgent: Agent = {
   attention_kind: 'approval', attention_capable: true,
   command: 'Run make check?', options: ['Approve once', 'Always allow', 'Deny'],
 };
+
+// A ready relay for LaunchView tests: the directory browser capability is what
+// lets the form finish its initial listing and enable Start Agent.
+function launchConnection(agentProfiles: AgentProfile[], hermesProfiles: string[]): RelayConnectionView {
+  return {
+    status: 'connected',
+    inventory: { state: 'ready' },
+    capabilities: ['directory_browser'],
+    agentProfiles,
+    hermesProfiles,
+  } as unknown as RelayConnectionView;
+}
 
 describe('accessible Svelte interactions', () => {
   it('offers explicit browser pairing in the deferred agent-list empty state', async () => {
@@ -1292,6 +1304,117 @@ describe('accessible Svelte interactions', () => {
       relayStore.connections.set(new Map([['fast', ready as never], ['slow', ready as never]]));
       await vi.waitFor(() => expect(select.value).toBe('slow'));
     } finally {
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('shows the Hermes profile picker only for the Hermes agent', async () => {
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue({
+      current: { path: '/home/user/project', label: 'project' }, parent: '', directories: [],
+    });
+    try {
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'codex', label: 'Codex' }], ['apollo']) as never],
+      ]));
+      render(LaunchView);
+      await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'Agent' })).toHaveValue('codex'));
+      expect(screen.queryByRole('combobox', { name: 'Hermes profile' })).not.toBeInTheDocument();
+
+      // A custom profile whose label mentions Hermes must not open the picker:
+      // only the builtin agent id is accepted by the relay's start validation.
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'project-hermes', label: 'Hermes staging' }], ['apollo']) as never],
+      ]));
+      await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'Agent' })).toHaveValue('project-hermes'));
+      expect(screen.queryByRole('combobox', { name: 'Hermes profile' })).not.toBeInTheDocument();
+
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'hermes', label: 'Hermes' }], ['apollo']) as never],
+      ]));
+      await vi.waitFor(() => expect(screen.getByRole('combobox', { name: 'Hermes profile' })).toBeInTheDocument());
+    } finally {
+      list.mockRestore();
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('offers the sticky default as the first Hermes profile option', async () => {
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue({
+      current: { path: '/home/user/project', label: 'project' }, parent: '', directories: [],
+    });
+    try {
+      // hermesprofiles.List always returns Default first, then the named
+      // profiles, so this is the payload the relay really sends.
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'hermes', label: 'Hermes' }], ['default', 'apollo', 'work']) as never],
+      ]));
+      render(LaunchView);
+      const select = screen.getByRole('combobox', { name: 'Hermes profile' }) as HTMLSelectElement;
+      await vi.waitFor(() => expect(select.options.length).toBe(4));
+      // The empty choice and the literal "default" start different profiles, so
+      // they must not read the same. The empty option is the initial selection:
+      // submitting it omits -p and leaves Hermes on its sticky active_profile.
+      expect([...select.options].map((option) => option.value)).toEqual(['', 'default', 'apollo', 'work']);
+      expect([...select.options].map((option) => option.textContent?.trim())).toEqual([
+        'Use my usual setup', 'Main profile (default)', 'apollo', 'work',
+      ]);
+      expect(select.value).toBe('');
+    } finally {
+      list.mockRestore();
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('omits hermes_profile for the default option and sends an explicit choice', async () => {
+    const user = userEvent.setup();
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue({
+      current: { path: '/home/user/project', label: 'project' }, parent: '', directories: [],
+    });
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({
+      type: 'command_result', request_id: 'launch-1', ok: true, data: { pane_id: 'pane-new' },
+    } as CommandResult);
+    vi.spyOn(relayStore, 'waitForAgent').mockResolvedValue(null);
+    vi.spyOn(relayStore, 'showToast').mockImplementation(() => {});
+    try {
+      relayStore.connections.set(new Map([
+        ['fedora', launchConnection([{ id: 'hermes', label: 'Hermes' }], ['default', 'apollo']) as never],
+      ]));
+      render(LaunchView);
+      const start = screen.getByRole('button', { name: 'Start Agent' });
+      await vi.waitFor(() => expect(start).toBeEnabled());
+
+      await user.click(start);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+      const defaultPayload = send.mock.calls[0][1];
+      expect(defaultPayload.profile_id).toBe('hermes');
+      expect('hermes_profile' in defaultPayload).toBe(false);
+
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Hermes profile' }), 'apollo');
+      // A successful launch clears the name field, so the form needs it again.
+      await user.type(screen.getByLabelText('Name'), 'project-hermes');
+      await vi.waitFor(() => expect(start).toBeEnabled());
+      await user.click(start);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+      expect(send.mock.calls[1][1].hermes_profile).toBe('apollo');
+
+      // Picking the literal default is its own choice: it pins the root home,
+      // unlike the empty option above, so the field must travel.
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Hermes profile' }), 'default');
+      await user.type(screen.getByLabelText('Name'), 'project-hermes');
+      await vi.waitFor(() => expect(start).toBeEnabled());
+      await user.click(start);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+      expect(send.mock.calls[2][1].hermes_profile).toBe('default');
+    } finally {
+      send.mockRestore();
+      list.mockRestore();
+      vi.restoreAllMocks();
       relayStore.connections.set(new Map());
       relayStore.relayConfigs.set([]);
     }

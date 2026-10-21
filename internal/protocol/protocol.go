@@ -477,6 +477,10 @@ type PushConfig struct {
 	SpeechLanguages []string `json:"speech_languages,omitempty"`
 	Inventory       any      `json:"inventory"`
 	AgentProfiles   any      `json:"agent_profiles"`
+	// HermesProfiles lists the Hermes Agent profiles a launch may select, so
+	// the phone's Hermes form offers only names this host can actually start.
+	// Omitted by relays that do not know about profiles at all.
+	HermesProfiles any `json:"hermes_profiles,omitempty"`
 	// Hybrid advertises the gateway + direct WebRTC descriptor to an app that
 	// connected over the legacy WSS URL, so the bridge window needs no QR
 	// re-scan. Omitted entirely when the relay has no gateway configured.

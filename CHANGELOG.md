@@ -12,6 +12,11 @@ project follows [Semantic Versioning](https://semver.org/).
   `devin` executable is on its `PATH` or Herdr's Devin integration is
   installed, and resolves Herdr's `devin-cli` and `devin cli` aliases to it.
   The agent list names these panes `Devin` instead of the raw `devin`.
+- Choose a Hermes profile when starting a Hermes agent from the phone. The
+  launch form lists the profiles installed on the computer and starts Hermes
+  with `-p <profile>`. The default choice passes no profile, so Hermes keeps
+  the one set with `hermes profile use`. A profile that is missing or deleted
+  is refused before any pane is created.
 
 ## [0.22.10] - 2026-10-15
 
