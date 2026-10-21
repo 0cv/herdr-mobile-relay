@@ -1343,7 +1343,7 @@ describe('accessible Svelte interactions', () => {
       // submitting it omits -p and leaves Hermes on its sticky active_profile.
       expect([...select.options].map((option) => option.value)).toEqual(['', 'default', 'apollo', 'work']);
       expect([...select.options].map((option) => option.textContent?.trim())).toEqual([
-        'Hermes default (active profile)', 'default (root profile)', 'apollo', 'work',
+        'Use my usual setup', 'Main profile', 'apollo', 'work',
       ]);
       expect(select.value).toBe('');
     } finally {

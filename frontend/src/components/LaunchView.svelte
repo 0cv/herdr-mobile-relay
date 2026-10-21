@@ -79,8 +79,8 @@
   // and leave the option values alone, so the payload stays a plain
   // "empty means omit" check.
   function hermesProfileLabel(name: string): string {
-    if (name === '') return 'Hermes default (active profile)';
-    if (name === 'default') return 'default (root profile)';
+    if (name === '') return 'Use my usual setup';
+    if (name === 'default') return 'Main profile';
     return name;
   }
 
@@ -218,7 +218,7 @@
             <option value={p}>{hermesProfileLabel(p)}</option>
           {/each}
         </select>
-        <p class="hint">“Hermes default” follows the sticky profile set with <code>hermes profile use</code>; “default (root profile)” pins the computer’s root Hermes home.</p>
+        <p class="hint">Leave it on “Use my usual setup” and Hermes starts the way it does on your desktop. Pick a profile only if this agent should run somewhere else.</p>
       {/if}
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>
