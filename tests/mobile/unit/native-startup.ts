@@ -120,7 +120,10 @@ const runShellBlock = (script: string, cwd: string, env: NodeJS.ProcessEnv): Pro
 
 const runExportBlock = (script: string, cwd: string, env: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> => runShellBlock(script, cwd, env);
 
-const createIosRuntimeFixture = async (inventory: string) => {
+type XcodeIdentity = { version: string; build: string; developerDirectory: string };
+const hostedXcode: XcodeIdentity = { version: '27.0', build: '27A266a', developerDirectory: '/Applications/Xcode_27.app/Contents/Developer' };
+
+const createIosRuntimeFixture = async (inventory: string, xcode: XcodeIdentity = hostedXcode) => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-ios-runtime-'));
   const bin = join(root, 'bin');
   const runnerTemp = join(root, 'runner-temp');
@@ -131,11 +134,13 @@ const createIosRuntimeFixture = async (inventory: string) => {
   await mkdir(runnerTemp, { recursive: true });
   const scripts: Record<string, string> = {
     sudo: '#!/bin/sh\nexit 0\n',
-    xcodebuild: '#!/bin/sh\nprintf "Xcode 16.4\\nBuild version 16F6\\n"\n',
+    xcodebuild: `#!/bin/sh\nprintf "Xcode ${xcode.version}\\nBuild version ${xcode.build}\\n"\n`,
+    'xcode-select': `#!/bin/sh\nif [ "$1" = -p ]; then printf "%s\\n" "${xcode.developerDirectory}"; fi\nexit 0\n`,
+    sw_vers: '#!/bin/sh\nif [ "$1" = -productVersion ]; then printf "27.0.1\\n"; elif [ "$1" = -buildVersion ]; then printf "26A434\\n"; fi\n',
     defaults: '#!/bin/sh\nexit 0\n',
     open: '#!/bin/sh\nexit 0\n',
     pgrep: '#!/bin/sh\nexit 0\n',
-    xcrun: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_XCRUN_LOG"\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = runtimes ]; then cat "$MOCK_RUNTIME_INVENTORY"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = devicetypes ]; then printf "%s\\n" "iPhone 16 (com.apple.CoreSimulator.SimDeviceType.iPhone-16)"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = create ]; then printf "%s\\n" fake-udid; exit 0; fi\nexit 0\n',
+    xcrun: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_XCRUN_LOG"\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = runtimes ]; then cat "$MOCK_RUNTIME_INVENTORY"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = devicetypes ]; then printf "%s\\n" "iPhone 17 Pro (com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro)" "iPhone 17 (com.apple.CoreSimulator.SimDeviceType.iPhone-17)"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = create ]; then printf "%s\\n" fake-udid; exit 0; fi\nexit 0\n',
   };
   await Promise.all(Object.entries(scripts).map(async ([name, script]) => writeFile(join(bin, name), script, { mode: 0o700 })));
   const inventoryFile = join(root, 'inventory.txt');
@@ -150,7 +155,9 @@ const createIosRuntimeFixture = async (inventory: string) => {
       RUNNER_TEMP: runnerTemp,
       GITHUB_ENV: envFile,
       MOBILE_DEVICE_OWNERSHIP_FILE: ownershipFile,
-      IOS_PLATFORM_VERSION: '18.6',
+      IOS_PLATFORM_VERSION: '27.0',
+      ImageOS: 'xcode27',
+      ImageVersion: '20261019.0289.1',
       GITHUB_RUN_ID: 'fixture',
       GITHUB_RUN_ATTEMPT: '1',
       MOCK_RUNTIME_INVENTORY: inventoryFile,
@@ -231,8 +238,9 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       await writeFile(join(state, 'owner-private.json'), JSON.stringify({ ready: false, error: secret }));
       await writeFile(join(state, 'wda-preflight-private.log'), `failed launch ${secret}\n`);
       await writeFile(join(runnerTemp, 'wda-preflight.log'), `failed fallback ${secret}\n`);
-      await writeFile(join(runnerTemp, 'ios-runtime-inventory.txt'), 'iOS 18.6 (18.6 - 22G86) - com.apple.CoreSimulator.SimRuntime.iOS-18-6\n');
-      await writeFile(join(runnerTemp, 'ios-runtime-selection.txt'), 'expected_platform_version=18.6\nselected_identifier=com.apple.CoreSimulator.SimRuntime.iOS-18-6\nselected_version=18.6\nselected_build=22G86\n');
+      await writeFile(join(runnerTemp, 'ios-hosted-target.txt'), 'expected_xcode_build=27A266a\nobserved_image_version=20261019.0289.1\nobserved_xcode_build=27A266a\n');
+      await writeFile(join(runnerTemp, 'ios-runtime-inventory.txt'), 'iOS 27.0 (27.0 - 24A335) - com.apple.CoreSimulator.SimRuntime.iOS-27-0\n');
+      await writeFile(join(runnerTemp, 'ios-runtime-selection.txt'), 'expected_platform_version=27.0\nselected_identifier=com.apple.CoreSimulator.SimRuntime.iOS-27-0\nselected_version=27.0\nselected_build=24A335\n');
       const source = await readFile(join(repo, path), 'utf8');
       const result = await runExportBlock(exportBlock(source), repo, {
         ...process.env,
@@ -254,6 +262,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
           assert.equal(uploaded.includes(secret), false);
           assert.ok(uploaded.includes('[REDACTED]'));
         }
+        assert.equal(await readFile(join(output, 'ios-hosted-target.txt'), 'utf8'), await readFile(join(runnerTemp, 'ios-hosted-target.txt'), 'utf8'));
         assert.equal(await readFile(join(output, 'ios-runtime-inventory.txt'), 'utf8'), await readFile(join(runnerTemp, 'ios-runtime-inventory.txt'), 'utf8'));
         assert.equal(await readFile(join(output, 'ios-runtime-selection.txt'), 'utf8'), await readFile(join(runnerTemp, 'ios-runtime-selection.txt'), 'utf8'));
       } finally {
@@ -265,8 +274,9 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
     const repo = join(import.meta.dirname, '../../..');
     const inventory = [
       '== Runtimes ==',
-      'iOS 18.6 (18.6 - 22G86) - com.apple.CoreSimulator.SimRuntime.iOS-18-6',
-      'iOS 18.5 (18.5 - 22F76) - com.apple.CoreSimulator.SimRuntime.iOS-18-5',
+      'iOS 27.0.1 (27.0.1 - 24A400) - com.apple.CoreSimulator.SimRuntime.iOS-27-0-1',
+      'iOS 27.0 (27.0 - 24A335) - com.apple.CoreSimulator.SimRuntime.iOS-27-0',
+      'iOS 26.6 (26.6 - 23G80) - com.apple.CoreSimulator.SimRuntime.iOS-26-6',
       '',
     ].join('\n');
     for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
@@ -277,23 +287,33 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
         assert.equal(result.code, 0, `${path}: ${result.stderr}`);
         assert.equal(await readFile(join(fixture.runnerTemp, 'ios-runtime-inventory.txt'), 'utf8'), inventory);
         const selection = await readFile(join(fixture.runnerTemp, 'ios-runtime-selection.txt'), 'utf8');
-        assert.match(selection, /^expected_platform_version=18\.6$/mu);
-        assert.match(selection, /^inventory_line=iOS 18\.6 \(18\.6 - 22G86\) - com\.apple\.CoreSimulator\.SimRuntime\.iOS-18-6$/mu);
-        assert.match(selection, /^selected_identifier=com\.apple\.CoreSimulator\.SimRuntime\.iOS-18-6$/mu);
-        assert.match(selection, /^selected_version=18\.6$/mu);
-        assert.match(selection, /^selected_build=22G86$/mu);
+        assert.match(selection, /^expected_platform_version=27\.0$/mu);
+        assert.match(selection, /^inventory_line=iOS 27\.0 \(27\.0 - 24A335\) - com\.apple\.CoreSimulator\.SimRuntime\.iOS-27-0$/mu);
+        assert.match(selection, /^selected_identifier=com\.apple\.CoreSimulator\.SimRuntime\.iOS-27-0$/mu);
+        assert.match(selection, /^selected_version=27\.0$/mu);
+        assert.match(selection, /^selected_build=24A335$/mu);
+        const target = await readFile(join(fixture.runnerTemp, 'ios-hosted-target.txt'), 'utf8');
+        for (const line of ['expected_xcode_application=/Applications/Xcode_27.app', 'expected_xcode_version=27.0', 'expected_xcode_build=27A266a', 'expected_platform_version=27.0',
+          'observed_image_os=xcode27', 'observed_image_version=20261019.0289.1', 'observed_macos_version=27.0.1', 'observed_macos_build=26A434',
+          'observed_developer_directory=/Applications/Xcode_27.app/Contents/Developer', 'observed_xcode_version=27.0', 'observed_xcode_build=27A266a',
+          'selected_device_type=com.apple.CoreSimulator.SimDeviceType.iPhone-17']) assert.ok(target.split('\n').includes(line), `${path}: missing ${line}`);
         const requests = await readFile(fixture.xcrunLog, 'utf8');
         assert.ok(requests.indexOf('simctl list runtimes') >= 0);
         assert.ok(requests.indexOf('simctl list runtimes') < requests.indexOf('simctl create'));
-        assert.match(await readFile(join(fixture.root, 'github-env'), 'utf8'), /IOS_SIMULATOR_UDID=fake-udid/u);
+        assert.ok(requests.includes('simctl create herdr-mobile-ci-fixture-1 com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-27-0'));
+        const githubEnv = await readFile(join(fixture.root, 'github-env'), 'utf8');
+        assert.match(githubEnv, /IOS_SIMULATOR_UDID=fake-udid/u);
+        assert.match(githubEnv, /^DEVELOPER_DIR=\/Applications\/Xcode_27\.app\/Contents\/Developer$/mu);
       } finally { await rm(fixture.root, { recursive: true, force: true }); }
     }
   }],
   ['Native startup iOS runtime capture rejects missing and unavailable runtimes before provisioning', async () => {
     const repo = join(import.meta.dirname, '../../..');
     const cases = [
-      ['missing', '== Runtimes ==\niOS 18.5 (18.5 - 22F76) - com.apple.CoreSimulator.SimRuntime.iOS-18-5\n'],
-      ['unavailable', '== Runtimes ==\niOS 18.6 (18.6 - 22G86) - com.apple.CoreSimulator.SimRuntime.iOS-18-6 (unavailable, runtime profile not found)\n'],
+      ['missing', '== Runtimes ==\niOS 26.6 (26.6 - 23G80) - com.apple.CoreSimulator.SimRuntime.iOS-26-6\n'],
+      ['legacy', '== Runtimes ==\niOS 18.6 (18.6 - 22G86) - com.apple.CoreSimulator.SimRuntime.iOS-18-6\n'],
+      ['patch-only', '== Runtimes ==\niOS 27.0.1 (27.0.1 - 24A400) - com.apple.CoreSimulator.SimRuntime.iOS-27-0-1\n'],
+      ['unavailable', '== Runtimes ==\niOS 27.0 (27.0 - 24A335) - com.apple.CoreSimulator.SimRuntime.iOS-27-0 (unavailable, runtime profile not found)\n'],
     ] as const;
     for (const [name, inventory] of cases) for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
       const fixture = await createIosRuntimeFixture(inventory);
@@ -303,13 +323,36 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
         assert.notEqual(result.code, 0, `${path}: ${name}`);
         assert.equal(await readFile(join(fixture.runnerTemp, 'ios-runtime-inventory.txt'), 'utf8'), inventory);
         const selection = await readFile(join(fixture.runnerTemp, 'ios-runtime-selection.txt'), 'utf8');
-        assert.match(selection, /^expected_platform_version=18\.6$/mu);
+        assert.match(selection, /^expected_platform_version=27\.0$/mu);
         assert.match(selection, /^inventory_line=$/mu);
         assert.match(selection, /^selected_identifier=$/mu);
         assert.match(selection, /^selected_version=$/mu);
         assert.match(selection, /^selected_build=$/mu);
         const requests = await readFile(fixture.xcrunLog, 'utf8');
         assert.equal(requests.includes('simctl create'), false, `${path}: ${name} provisioned a simulator`);
+        await assert.rejects(readFile(join(fixture.root, 'owned')), /ENOENT/u);
+      } finally { await rm(fixture.root, { recursive: true, force: true }); }
+    }
+  }],
+  ['Native startup iOS hosted target rejects mismatched Xcode identity before runtime selection on both CI paths', async () => {
+    const repo = join(import.meta.dirname, '../../..');
+    const inventory = '== Runtimes ==\niOS 27.0 (27.0 - 24A335) - com.apple.CoreSimulator.SimRuntime.iOS-27-0\n';
+    const cases: Array<[string, XcodeIdentity, string]> = [
+      ['version', { ...hostedXcode, version: '27.1' }, 'observed_xcode_version=27.1'],
+      ['build', { ...hostedXcode, build: '27A5218g' }, 'observed_xcode_build=27A5218g'],
+      ['legacy-xcode', { version: '16.4', build: '16F6', developerDirectory: hostedXcode.developerDirectory }, 'observed_xcode_version=16.4'],
+      ['developer-directory', { ...hostedXcode, developerDirectory: '/Applications/Xcode_16.4.app/Contents/Developer' }, 'observed_developer_directory=/Applications/Xcode_16.4.app/Contents/Developer'],
+    ];
+    for (const [name, xcode, observed] of cases) for (const path of ['.github/workflows/mobile-ci.yml', '.github/actions/mobile-device-run/action.yml']) {
+      const fixture = await createIosRuntimeFixture(inventory, xcode);
+      try {
+        const source = await readFile(join(repo, path), 'utf8');
+        const result = await runShellBlock(createIosBlock(source), repo, fixture.env);
+        assert.notEqual(result.code, 0, `${path}: ${name} was accepted`);
+        const target = (await readFile(join(fixture.runnerTemp, 'ios-hosted-target.txt'), 'utf8')).split('\n');
+        for (const line of ['expected_xcode_application=/Applications/Xcode_27.app', 'expected_xcode_version=27.0', 'expected_xcode_build=27A266a', 'observed_image_version=20261019.0289.1', observed]) assert.ok(target.includes(line), `${path}: ${name} missing ${line}`);
+        await assert.rejects(readFile(join(fixture.runnerTemp, 'ios-runtime-inventory.txt')), /ENOENT/u);
+        await assert.rejects(readFile(fixture.xcrunLog), /ENOENT/u);
         await assert.rejects(readFile(join(fixture.root, 'owned')), /ENOENT/u);
       } finally { await rm(fixture.root, { recursive: true, force: true }); }
     }
@@ -380,10 +423,11 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
     assert.ok(finalized);
   }],
   ['Native startup WDA status identity and absent managed evidence refuse fallback', async () => {
-    const status = { value: { ready: true, state: 'success', build: { version: '16.12.8', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '18.6' } } };
-    assert.ok(validWdaStatus(status, '18.6'));
-    for (const invalid of [{}, { value: { ready: true } }, { value: { ...status.value, ready: false } }, { value: { ...status.value, build: { ...status.value.build, version: 'wrong' } } }]) assert.equal(validWdaStatus(invalid, '18.6'), false);
-    assert.equal(validWdaStatus(status, '18.5'), false);
+    const status = { value: { ready: true, state: 'success', build: { version: '16.12.8', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '27.0' } } };
+    assert.ok(validWdaStatus(status, '27.0'));
+    for (const invalid of [{}, { value: { ready: true } }, { value: { ...status.value, ready: false } }, { value: { ...status.value, build: { ...status.value.build, version: 'wrong' } } }]) assert.equal(validWdaStatus(invalid, '27.0'), false);
+    for (const runtime of ['27.0.1', '27.1', '18.6']) assert.equal(validWdaStatus(status, runtime), false);
+    assert.equal(validWdaStatus({ value: { ...status.value, os: { version: '18.6' } } }, '27.0'), false);
     const old = process.env.IOS_XCTEST_STATE_DIR;
     delete process.env.IOS_XCTEST_STATE_DIR;
     try { await assert.rejects(managedWdaCapabilities('82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40'), /missing IOS_XCTEST_STATE_DIR/u); }
@@ -417,8 +461,14 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       assert.equal(source.split('bun tests/mobile/support/ios-xctest.ts stop').length - 1, 1);
       assert.ok(!source.includes('simctl launch --terminate-running-process'));
       assert.ok(!source.includes("-name 'WebDriverAgentRunner_*.xctestrun' -print -quit"));
-      assert.ok(source.includes('IOS_PLATFORM_VERSION=18.6'));
-      assert.ok(source.includes('IPHONEOS_DEPLOYMENT_TARGET=18.5'));
+      assert.ok(source.includes('IOS_PLATFORM_VERSION=27.0'));
+      assert.ok(!source.includes('IOS_PLATFORM_VERSION=18.6'));
+      assert.ok(!source.includes('Xcode_16.4'));
+      assert.ok(source.includes('xcode_application=/Applications/Xcode_27.app'));
+      assert.ok(source.includes('expected_xcode_version=27.0'));
+      assert.ok(source.includes('expected_xcode_build=27A266a'));
+      assert.ok(source.includes('IPHONEOS_DEPLOYMENT_TARGET=27.0'));
+      assert.doesNotMatch(source, /\b18\.[0-9]\b/u);
       assert.ok(source.indexOf('name: Finalize owned XCTest diagnostics') < source.indexOf('name: Sanitize bounded diagnostics'));
     }
     const source = await readFile(join(import.meta.dirname, '../platforms/android.ts'), 'utf8');

@@ -293,7 +293,13 @@ jobs:
             .android.trichromeLibraryCertificateSha256 == "b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1" and
             (.android.trichromeLibraryCertificateSha256 | length == 64 and test("^[0-9a-f]{64}$")) and
             .android.trichromeLibraryCertificateSha1 == "9524aa4a04aceeab425451e593ac639c942fb3cd" and
-            (.android.trichromeLibraryCertificateSha1 | length == 40 and test("^[0-9a-f]{40}$"))
+            (.android.trichromeLibraryCertificateSha1 | length == 40 and test("^[0-9a-f]{40}$")) and
+            .ios.runner == "xcode-27" and
+            .ios.xcode == "/Applications/Xcode_27.app" and
+            .ios.xcodeVersion == "27.0" and
+            .ios.xcodeBuild == "27A266a" and
+            .ios.runtime == "iOS 27.0" and
+            .ios.deviceType == "iPhone 17"
           ' tests/mobile/toolchains.json >/dev/null
           test "$(bun --version)" = 1.4.2
       - name: Select requested device matrix
@@ -306,10 +312,10 @@ jobs:
           set -euo pipefail
           case "$REQUESTED_PLATFORM/$REQUESTED_BASELINE_SET" in
             all/all)
-              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.8","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"0.20.8","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"0.20.9","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"},{"platform":"ios","runner":"xcode-27","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             all/latest)
-              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"},{"platform":"ios","runner":"xcode-27","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             android/all)
               matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"}]}'
@@ -318,10 +324,10 @@ jobs:
               matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             ios/all)
-              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.8","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
+              matrix='{"include":[{"platform":"ios","runner":"xcode-27","baseline":"0.20.8","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"0.20.9","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             ios/latest)
-              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
+              matrix='{"include":[{"platform":"ios","runner":"xcode-27","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"xcode-27","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             *)
               echo "unsupported platform/baseline set: $REQUESTED_PLATFORM/$REQUESTED_BASELINE_SET" >&2
@@ -450,10 +456,103 @@ jobs:
           overwrite: true
           retention-days: 1
 
+  android_qualification:
+    name: Android qualification before iOS
+    needs: [provenance, prepare]
+    if: needs.prepare.result == 'success' && needs.provenance.result == 'success' && (inputs.suite || 'release') == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the verified source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.provenance.outputs.source_sha }}
+          fetch-depth: 1
+      - name: Run controlled Android release qualification
+        uses: ./.github/actions/mobile-device-run
+        with:
+          platform: android
+          baseline: 0.20.10
+          scenario: historical
+          suite: release
+          source_head_sha: ${{ needs.provenance.outputs.head_sha }}
+          evidence_prefix: mobile-evidence-android-qualification
+
+  android_qualification_evidence:
+    name: Validate Android qualification before iOS
+    needs: [provenance, prepare, android_qualification]
+    if: "!cancelled() && (inputs.suite || 'release') == 'release'"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ANDROID_QUALIFICATION_MATRIX: '{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"}]}'
+    steps:
+      - name: Require Android qualification prerequisites
+        env:
+          PROVENANCE_RESULT: ${{ needs.provenance.result }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          ANDROID_QUALIFICATION_RESULT: ${{ needs.android_qualification.result }}
+        run: |
+          set -euo pipefail
+          test "$PROVENANCE_RESULT" = success
+          test "$PREPARE_RESULT" = success
+          test "$ANDROID_QUALIFICATION_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.provenance.outputs.source_sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - name: Assert shell Node runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.21.0
+          test "$(command -v node)" = "$(node -p 'process.execPath')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: Download current-attempt Android qualification evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mobile-evidence-android-qualification-*-${{ github.run_attempt }}
+          path: android-qualification-evidence
+          merge-multiple: false
+      - name: Validate Android qualification result contract
+        env:
+          CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
+          SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
+          CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
+          BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
+        run: |
+          bun tests/mobile/validate-evidence.ts --contract qualified --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --directory android-qualification-evidence \
+            --matrix "$ANDROID_QUALIFICATION_MATRIX" \
+            --suite release \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
+            --candidate-web-hash "$CANDIDATE_WEB_HASH" \
+            --candidate-identity "$CANDIDATE_IDENTITY" \
+            --baseline-identities "$BASELINE_IDENTITIES"
+      - name: Require strict Android environment qualification
+        env:
+          CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
+          SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
+          CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
+          BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
+        run: |
+          bun tests/mobile/validate-environment.ts --require-pass --contract qualified --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --directory android-qualification-evidence --matrix "$ANDROID_QUALIFICATION_MATRIX" --suite release \
+            --candidate-commit "$CANDIDATE_COMMIT" --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
+            --candidate-web-hash "$CANDIDATE_WEB_HASH" --candidate-identity "$CANDIDATE_IDENTITY" \
+            --baseline-identities "$BASELINE_IDENTITIES"
+
   smoke:
     name: Controlled smoke (${{ matrix.platform }})
-    needs: [provenance, prepare]
-    if: needs.prepare.result == 'success' && needs.provenance.result == 'success'
+    needs: [provenance, prepare, android_qualification, android_qualification_evidence]
+    if: "!cancelled() && needs.prepare.result == 'success' && needs.provenance.result == 'success' && ((inputs.suite || 'release') != 'release' || (needs.android_qualification.result == 'success' && needs.android_qualification_evidence.result == 'success'))"
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.smoke_matrix) }}
@@ -742,7 +841,7 @@ jobs:
           printf 'MOBILE_FIXTURE_BINARY=%s\n' "$RUNNER_TEMP/herdr-mobile-fixture" >> "$GITHUB_ENV"
           printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
           printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
-          printf 'IOS_PLATFORM_VERSION=18.6\n' >> "$GITHUB_ENV"
+          printf 'IOS_PLATFORM_VERSION=27.0\n' >> "$GITHUB_ENV"
           printf 'IOS_XCTEST_STATE_DIR=%s\n' "$RUNNER_TEMP/herdr-xctest-owner" >> "$GITHUB_ENV"
           printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
           printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
@@ -918,8 +1017,33 @@ jobs:
         if: matrix.platform == 'ios'
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcode_application=/Applications/Xcode_27.app
+          developer_directory="$xcode_application/Contents/Developer"
+          expected_xcode_version=27.0
+          expected_xcode_build=27A266a
+          hosted_target="$RUNNER_TEMP/ios-hosted-target.txt"
+          {
+            printf 'expected_xcode_application=%s\n' "$xcode_application"
+            printf 'expected_xcode_version=%s\n' "$expected_xcode_version"
+            printf 'expected_xcode_build=%s\n' "$expected_xcode_build"
+            printf 'expected_platform_version=%s\n' "$IOS_PLATFORM_VERSION"
+            printf 'observed_image_os=%s\n' "${ImageOS:-}"
+            printf 'observed_image_version=%s\n' "${ImageVersion:-}"
+            printf 'observed_macos_version=%s\n' "$(sw_vers -productVersion 2>/dev/null || true)"
+            printf 'observed_macos_build=%s\n' "$(sw_vers -buildVersion 2>/dev/null || true)"
+          } >"$hosted_target"
+          sudo xcode-select -s "$xcode_application"
+          selected_developer_directory="$(xcode-select -p)"
+          printf 'observed_developer_directory=%s\n' "$selected_developer_directory" >>"$hosted_target"
+          test "$selected_developer_directory" = "$developer_directory"
+          export DEVELOPER_DIR="$developer_directory"
+          printf 'DEVELOPER_DIR=%s\n' "$developer_directory" >> "$GITHUB_ENV"
           xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          xcode_version="$(awk '$1 == "Xcode" { print $2; exit }' "$RUNNER_TEMP/xcode-version.txt")"
+          xcode_build="$(awk '$1 == "Build" && $2 == "version" { print $3; exit }' "$RUNNER_TEMP/xcode-version.txt")"
+          printf 'observed_xcode_version=%s\nobserved_xcode_build=%s\n' "$xcode_version" "$xcode_build" >>"$hosted_target"
+          test "$xcode_version" = "$expected_xcode_version"
+          test "$xcode_build" = "$expected_xcode_build"
           defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool NO
           runtime_inventory="$RUNNER_TEMP/ios-runtime-inventory.txt"
           runtime_selection="$RUNNER_TEMP/ios-runtime-selection.txt"
@@ -930,7 +1054,7 @@ jobs:
             } >"$runtime_selection"
             exit 1
           fi
-          runtime_line="$(awk '$0 ~ /^iOS 18\.6 \(/ && $0 !~ /unavailable/ { print; exit }' "$runtime_inventory")"
+          runtime_line="$(awk -v prefix="iOS $IOS_PLATFORM_VERSION (" 'index($0, prefix) == 1 && $0 !~ /unavailable/ { print; exit }' "$runtime_inventory")"
           runtime="$(printf '%s\n' "$runtime_line" | sed -nE 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+).*/\1/p')"
           runtime_version="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS ([0-9]+\.[0-9]+) \(.*/\1/p')"
           runtime_build="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS [0-9]+\.[0-9]+ \([^)]* - ([^)]+)\) - .*/\1/p')"
@@ -944,7 +1068,8 @@ jobs:
           test "$runtime_version" = "$IOS_PLATFORM_VERSION"
           test -n "$runtime"
           test -n "$runtime_build"
-          device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 16 \(/ { print $2; exit }')"
+          device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 17 \(/ { print $2; exit }')"
+          printf 'selected_device_type=%s\n' "$device_type" >>"$hosted_target"
           test -n "$device_type"
           device_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           udid="$(xcrun simctl create "$device_name" "$device_type" "$runtime")"
@@ -955,7 +1080,7 @@ jobs:
           # WDA/XCTest is substantially more reliable when the Simulator UI is
           # already attached. Appium otherwise restarts the booted device while
           # it is trying to launch WDA, which can leave XCTest waiting forever.
-          open -Fn /Applications/Xcode_16.4.app/Contents/Developer/Applications/Simulator.app
+          open -Fn "$developer_directory/Applications/Simulator.app"
           for attempt in $(seq 1 30); do
             if pgrep -f 'Simulator.app/Contents/MacOS/Simulator' >/dev/null 2>&1; then break; fi
             sleep 1
@@ -983,7 +1108,7 @@ jobs:
             -scheme WebDriverAgentRunner \
             -derivedDataPath "$IOS_WDA_DERIVED_DATA_PATH" \
             -destination "id=$IOS_SIMULATOR_UDID" \
-            IPHONEOS_DEPLOYMENT_TARGET=18.5 \
+            IPHONEOS_DEPLOYMENT_TARGET=27.0 \
             GCC_TREAT_WARNINGS_AS_ERRORS=0 \
             COMPILER_INDEX_STORE_ENABLE=NO \
             APPIUM_XCODEBUILD_WDA_MARKER=1 \
@@ -1093,7 +1218,7 @@ jobs:
           fi
           if [ -f "$RUNNER_TEMP/xcode-version.txt" ]; then cp "$RUNNER_TEMP/xcode-version.txt" "$MOBILE_OUTPUT/xcode-version.txt"; fi
           if [ -f "$RUNNER_TEMP/ios-apps-before.txt" ]; then cp "$RUNNER_TEMP/ios-apps-before.txt" "$MOBILE_OUTPUT/ios-apps-before.txt"; fi
-          for artifact in ios-runtime-inventory.txt ios-runtime-selection.txt; do
+          for artifact in ios-hosted-target.txt ios-runtime-inventory.txt ios-runtime-selection.txt; do
             if [ -f "$RUNNER_TEMP/$artifact" ]; then cp "$RUNNER_TEMP/$artifact" "$MOBILE_OUTPUT/$artifact"; fi
           done
           if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
@@ -1136,7 +1261,7 @@ jobs:
           rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}" || true
 
   gate:
-    needs: [provenance, prepare, smoke, smoke_evidence, smoke_environment_report, smoke_qualification, release_smoke, release_evidence, device]
+    needs: [provenance, prepare, android_qualification, android_qualification_evidence, smoke, smoke_evidence, smoke_environment_report, smoke_qualification, release_smoke, release_evidence, device]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1176,6 +1301,8 @@ jobs:
         env:
           PROVENANCE_RESULT: ${{ needs.provenance.result }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
+          ANDROID_QUALIFICATION_RESULT: ${{ needs.android_qualification.result }}
+          ANDROID_QUALIFICATION_EVIDENCE_RESULT: ${{ needs.android_qualification_evidence.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
           SMOKE_EVIDENCE_RESULT: ${{ needs.smoke_evidence.result }}
           REPORT_RESULT: ${{ needs.smoke_environment_report.result }}
@@ -1192,11 +1319,15 @@ jobs:
           test "$SMOKE_EVIDENCE_RESULT" = success
           test "$REPORT_RESULT" = success
           if [ "$EXPECTED_SUITE" = release ]; then
+            test "$ANDROID_QUALIFICATION_RESULT" = success
+            test "$ANDROID_QUALIFICATION_EVIDENCE_RESULT" = success
             test "$QUALIFICATION_RESULT" = success
             test "$RELEASE_SMOKE_RESULT" = success
             test "$RELEASE_EVIDENCE_RESULT" = success
             test "$DEVICE_RESULT" = success
           else
+            test "$ANDROID_QUALIFICATION_RESULT" = skipped
+            test "$ANDROID_QUALIFICATION_EVIDENCE_RESULT" = skipped
             test "$QUALIFICATION_RESULT" = skipped
             test "$RELEASE_SMOKE_RESULT" = skipped
             test "$RELEASE_EVIDENCE_RESULT" = skipped

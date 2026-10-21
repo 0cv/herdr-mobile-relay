@@ -2,7 +2,7 @@
 
 `tests/mobile` exercises the release web tree on a real Android emulator or iOS simulator. It installs from the Home Screen flow, starts two local TLS/WSS relay peers, completes encrypted invitation pairing, switches the same origin to a verified candidate bundle, and checks the executing app build, credentials, preferences, lifecycle, keyboard, and bounded reload evidence.
 
-The check workflow passes its exact `release-bundles` artifact to `.github/workflows/mobile-ci.yml` after the bundle job completes. Every device qualification first runs one controlled Android and iOS smoke against the latest historical baseline (`0.20.10`); a release request then runs one complete release scenario per platform before the requested full matrix. A push to `dev` stops after the controlled latest-baseline smoke, while `main` and pull requests targeting `main` continue through the full Android and iOS release suite across all historical baselines. The release device matrix adds the current-code synthetic pair once per platform, instead of repeating it for every historical baseline. Smoke matrices remain historical-only. Each matrix entry provisions its own disposable device and Appium session. The release workflow invokes the same reusable workflow for release tags and waits for the full suite against the exact release artifact before publication. These CI paths use GitHub-hosted runners with read-only permissions and no secrets.
+The check workflow passes its exact `release-bundles` artifact to `.github/workflows/mobile-ci.yml` after the bundle job completes. A release request first qualifies Android with one complete controlled release scenario against the latest historical baseline (`0.20.10`) before any iOS job starts. Every device qualification then runs one controlled Android and iOS smoke against that baseline; a release request then runs one complete release scenario per platform before the requested full matrix. A push to `dev` stops after the controlled latest-baseline smoke, while `main` and pull requests targeting `main` continue through the full Android and iOS release suite across all historical baselines. The release device matrix adds the current-code synthetic pair once per platform, instead of repeating it for every historical baseline. Smoke matrices remain historical-only. Each matrix entry provisions its own disposable device and Appium session. The release workflow invokes the same reusable workflow for release tags and waits for the full suite against the exact release artifact before publication. These CI paths use GitHub-hosted runners with read-only permissions and no secrets.
 
 ## Product result and environment qualification
 
@@ -186,18 +186,21 @@ version selector to `pm path`. The binary URLs are an APK.now mirror fallback be
 APKMirror is Cloudflare blocked; replace them only with another source carrying
 the same hashes and signing certificates.
 
-For iOS, select the Xcode/runtime declared in `toolchains.json`, create one disposable iPhone 16 simulator, and record its ownership marker. The simulator runtime is iOS 18.6; WDA still builds with the iPhoneSimulator 18.5 SDK and `IPHONEOS_DEPLOYMENT_TARGET=18.5`. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead. The hosted entrypoints retain the complete runtime inventory and the selected inventory line, identifier, version, and build as `ios-runtime-inventory.txt` and `ios-runtime-selection.txt` in uploaded output, even when later provisioning or WDA steps fail:
+For iOS, select the Xcode/runtime declared in `toolchains.json`, create one disposable iPhone 17 simulator, and record its ownership marker. Hosted iOS runs on the `xcode-27` label with Xcode 27.0 (27A266a) at `/Applications/Xcode_27.app` and the iOS 27.0 simulator runtime. iOS 27 is the only supported iOS target, so WDA is also built with `IPHONEOS_DEPLOYMENT_TARGET=27.0`. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead. Before any simulator exists, the hosted entrypoints check the selected developer directory and the Xcode version/build and fail without installing or falling back. They retain `ios-hosted-target.txt` (expected and observed Xcode identity plus the runner's `ImageOS`, `ImageVersion` and macOS version/build), the complete runtime inventory, and the selected inventory line, identifier, version, and build as `ios-runtime-inventory.txt` and `ios-runtime-selection.txt` in uploaded output, even when later provisioning or WDA steps fail. GitHub does not let a workflow pin a hosted image revision, so the image identity is recorded rather than enforced:
+
+Locally, pass the developer directory explicitly instead of changing the global Xcode selector; hosted CI also runs `sudo xcode-select -s /Applications/Xcode_27.app` and requires `xcode-select -p` to report the same developer directory:
 
 ```sh
-sudo xcode-select -s /Applications/Xcode_16.4.app
-export IOS_PLATFORM_VERSION=18.6
+export DEVELOPER_DIR=/Applications/Xcode_27.app/Contents/Developer
+xcodebuild -version  # must report Xcode 27.0 and Build version 27A266a
+export IOS_PLATFORM_VERSION=27.0
 runtime_inventory="$PWD/run-artifacts/ios-runtime-inventory.txt"
 runtime_selection="$PWD/run-artifacts/ios-runtime-selection.txt"
 if ! xcrun simctl list runtimes | tee "$runtime_inventory" >/dev/null; then
   printf 'expected_platform_version=%s\ninventory_command=failed\n' "$IOS_PLATFORM_VERSION" > "$runtime_selection"
   exit 1
 fi
-runtime_line="$(awk '$0 ~ /^iOS 18\.6 \(/ && $0 !~ /unavailable/ { print; exit }' "$runtime_inventory")"
+runtime_line="$(awk -v prefix="iOS $IOS_PLATFORM_VERSION (" 'index($0, prefix) == 1 && $0 !~ /unavailable/ { print; exit }' "$runtime_inventory")"
 runtime="$(printf '%s\n' "$runtime_line" | sed -nE 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+).*/\1/p')"
 runtime_version="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS ([0-9]+\.[0-9]+) \(.*/\1/p')"
 runtime_build="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS [0-9]+\.[0-9]+ \([^)]* - ([^)]+)\) - .*/\1/p')"
@@ -206,13 +209,13 @@ printf 'expected_platform_version=%s\ninventory_line=%s\nselected_identifier=%s\
 test "$runtime_version" = "$IOS_PLATFORM_VERSION"
 test -n "$runtime"
 test -n "$runtime_build"
-device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 16 \\(/ { print $2; exit }')"
+device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 17 \(/ { print $2; exit }')"
 export IOS_SIMULATOR_UDID="$(xcrun simctl create herdr-mobile-ci "$device_type" "$runtime")"
 export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/ios-owned"
 printf 'ios:%s\n' "$IOS_SIMULATOR_UDID" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
 xcrun simctl boot "$IOS_SIMULATOR_UDID"
 xcrun simctl bootstatus "$IOS_SIMULATOR_UDID" -b
-open -Fn /Applications/Xcode_16.4.app/Contents/Developer/Applications/Simulator.app
+open -Fn /Applications/Xcode_27.app/Contents/Developer/Applications/Simulator.app
 npm install --global appium@3.7.0
 appium driver install xcuitest@12.12.4
 appium --address 127.0.0.1 --port 4723 &
@@ -220,16 +223,13 @@ export MOBILE_PLATFORM=ios
 export MOBILE_FIXTURE_BINARY="$PWD/run-artifacts/herdr-mobile-fixture"
 ```
 
-### iOS 27 operator prerequisite
+### Local iOS 27 operator prerequisite
 
-The current CI contract intentionally remains macOS-15/Xcode 16.4/iOS 18.6;
-this checkout does not claim iOS 27 qualification. Stable Xcode 27 requires
-macOS Tahoe 26.6 or newer. The current host is macOS 26.1, and the available
-`xcode-27` hosted image is a preview beta, so neither is an acceptable source
-for changing `tests/mobile/toolchains.json`.
+Hosted CI targets the `xcode-27` image described above. A local host still needs
+its own preparation: stable Xcode 27 requires macOS Tahoe 26.6 or newer, so a
+local qualification is not possible on an older host.
 
-After the protected iOS49 qualification has finished, and before an iOS 27
-qualification, an operator must use the Apple release
+Before a local iOS 27 qualification, an operator must use the Apple release
 information at [Apple's iOS 27 support page](https://support.apple.com/en-us/100100),
 the [Xcode support matrix](https://developer.apple.com/support/xcode/), and the
 [Apple developer downloads](https://developer.apple.com/download/all/) to:
@@ -247,10 +247,10 @@ the [Xcode support matrix](https://developer.apple.com/support/xcode/), and the
 
 After those identities are recorded, rebuild WDA from the pinned XCUITest
 12.12.4/WDA 16.12.8 tree, run the managed XCTest/Appium qualification on an
-owned iOS 27 simulator, and retain the runtime/build provenance. Do not replace
-the current iOS 18.6 pin with a beta, a `macos-latest` label, or an unmeasured
-runtime. Do not change the global Xcode selector for this qualification; pass
-`DEVELOPER_DIR` explicitly to each `xcodebuild`/`xcrun` command.
+owned iOS 27 simulator, and retain the runtime/build provenance. Do not use a
+beta Xcode, a `macos-latest` label, or an unmeasured runtime. Do not change the
+local global Xcode selector for this qualification; pass `DEVELOPER_DIR`
+explicitly to each `xcodebuild`/`xcrun` command.
 
 Run one baseline at a time. Supply explicit positive `GITHUB_RUN_ID` and
 `GITHUB_RUN_ATTEMPT` identifiers plus the exact `MOBILE_SOURCE_RUN_HEAD_SHA`; local
@@ -270,6 +270,8 @@ The runner keeps fixture info, TLS keys, and relay stores under `--private-outpu
 ## CI inputs and evidence
 
 A manual workflow dispatch requires `artifact_run_id`, the completed successful same-repository `check` push on `main` that contains `release-bundles`; provide `source_commit` when qualifying a specific revision. The dispatch path always uses external provenance. The reusable workflow validates repository, workflow, push event, `main` branch, conclusion, source SHA, exact artifact name, archive checksums, release-manifest revision, and expiration before provisioning devices. The check and release reusable calls bind to the caller's exact artifact and its manifest revision without comparing a pull-request merge build to the pull-request head SHA; evidence records that run head separately from the build SHA. The gate downloads only evidence artifacts from the current workflow attempt and validates each expected platform/baseline/suite/source/hash/native-provider result, including the exact recorded synthetic current-code web hash once per platform. Every Actions upload declares literal `retention-days: 1`, including release bundles, derived mobile bundles, controlled-smoke evidence, full-matrix evidence, and tag-release bundles. All exact source/build/mobile inputs must be consumed within that one-day window; an expired input requires a new recorded source run rather than an unrecorded substitute build. The release workflow invokes the same file with the exact artifact produced by its `build` job, and `publish` depends on the mobile result. Preparation validates the Linux candidate for Android and the Darwin arm64 candidate for iOS against the archive checksum, release manifest, web descriptor, hashed assets, and web-tree hash. It also runs a real Chromium/Go-fixture cache-recovery check with normal browser caching: the baseline loads, the target activates, a target-only missing stylesheet response is consumed, the failed phone plan is observed, and the candidate is reached through the shipped recovery button after the fault is repaired.
+
+A release request qualifies Android before any iOS work starts. The `android_qualification` job runs one complete controlled release scenario on Android with the 0.20.10 baseline and uploads it under its own `mobile-evidence-android-qualification` prefix, separate from smoke, release-smoke and full-device evidence. `android_qualification_evidence` then validates that current-attempt result with the qualified contract and requires strict environment qualification (`validate-environment.ts --require-pass`). Controlled smoke, which starts the first iOS simulator, waits for both jobs to succeed; a failed, cancelled or skipped Android qualification therefore prevents every iOS job and fails the gate. Ordinary smoke requests skip both jobs and keep reporting `qualification_status=NOT_REQUESTED`. This barrier is additional evidence: the complete Android and iOS matrices below still run.
 
 Each device matrix entry selects one of 0.20.8, 0.20.9, or 0.20.10 as the installed baseline. `baseline_set: latest` prepares only 0.20.10; smoke runs omit the unused synthetic bundle artifact. The controlled smoke and release suites inject one bounded corrupt candidate-script response for historical upgrades and a missing-stylesheet response for the synthetic current-code pair, prove each request was consumed and phone completion was not acknowledged, then use the shipped Try again control without reinstalling or re-pairing. It also builds two coherent temporary current-code bundles through the real frontend pipeline and runs the same fault/completion assertions against that pair. The historical 0.20.8/0.20.9 progress-format gap is reported as `HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:<version>` rather than treated as a successful acknowledgement or a failed upgrade. After recording completion evidence, the runner closes the non-dismissible update dialog, returns from Settings to the fixture's alpha agent, and only then runs the native keyboard check. Evidence artifacts contain the mobile result, screenshots, bounded fixture/Appium logs, driver versions, and platform version records. Secrets, setup fragments, relay credentials, and control headers are redacted or deleted before upload.
 

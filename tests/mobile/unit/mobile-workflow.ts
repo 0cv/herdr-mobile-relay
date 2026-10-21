@@ -5,16 +5,20 @@ import { repositoryPath } from '../support/paths';
 type Status = 'success' | 'failure' | 'cancelled' | 'skipped';
 type Context = Record<string, any>;
 type Row = { platform: 'android' | 'ios'; product: 'PASS' | 'FAIL' | 'INDETERMINATE'; environment: 'PASS' | 'FAIL' | 'UNKNOWN' | 'NOT_APPLICABLE'; complete: boolean; artifact: boolean; current?: boolean };
-type StageRows = { smoke: Row[]; release: Row[]; full: Row[] };
-const needed = ['provenance', 'prepare', 'smoke', 'smoke_evidence', 'smoke_environment_report', 'smoke_qualification', 'release_smoke', 'release_evidence', 'device', 'gate'];
-const strictOnly = ['smoke_qualification', 'release_smoke', 'release_evidence', 'device'];
+type StageRows = { android?: Row[]; smoke: Row[]; release: Row[]; full: Row[] };
+const needed = ['provenance', 'prepare', 'android_qualification', 'android_qualification_evidence', 'smoke', 'smoke_evidence', 'smoke_environment_report', 'smoke_qualification', 'release_smoke', 'release_evidence', 'device', 'gate'];
+const strictOnly = ['android_qualification', 'android_qualification_evidence', 'smoke_qualification', 'release_smoke', 'release_evidence', 'device'];
+const iosExecutingJobs = ['smoke', 'release_smoke', 'device'];
+const qualifiedAndroid: Row[] = [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }];
+const androidQualificationMatrix = '{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"}]}';
+const iosRunner = 'xcode-27';
 
 function expression(source: string, context: Context): any {
   const text = source.replace(/^\s*\$\{\{\s*|\s*\}\}\s*$/gu, '');
   const tokens: string[] = [];
   let position = 0;
   while (position < text.length) {
-    const token = /\s*(\|\||&&|==|!=|[()]|'[^']*'|[A-Za-z_][A-Za-z0-9_.-]*)/uy;
+    const token = /\s*(\|\||&&|==|!=|!|[()]|'[^']*'|[A-Za-z_][A-Za-z0-9_.-]*)/uy;
     token.lastIndex = position;
     const match = token.exec(text);
     if (!match) { if (!text.slice(position).trim()) break; throw new Error(`Unsupported expression: ${text.slice(position)}`); }
@@ -25,11 +29,13 @@ function expression(source: string, context: Context): any {
     const token = tokens[index++];
     if (!token) throw new Error('Missing expression operand');
     if (token === '(') { const value = or(); assert.equal(tokens[index++], ')'); return value; }
+    if (token === '!') return !atom();
     if (token.startsWith("'")) return token.slice(1, -1);
     if (token === 'true' || token === 'false') return token === 'true';
     if (tokens[index] === '(') {
       index++;
       if (token === 'always' || token === 'success') { assert.equal(tokens[index++], ')'); return token === 'always' || context.success; }
+      if (token === 'cancelled') { assert.equal(tokens[index++], ')'); return Boolean(context.cancelled); }
       if (token === 'fromJSON') { const value = or(); assert.equal(tokens[index++], ')'); return JSON.parse(value); }
       throw new Error(`Unsupported expression function: ${token}`);
     }
@@ -45,7 +51,7 @@ function expression(source: string, context: Context): any {
 }
 function condition(source: string | undefined, context: Context): boolean {
   if (source === undefined) return Boolean(context.success);
-  if (!/\b(?:always|success)\s*\(/u.test(source) && !context.success) return false;
+  if (!/\b(?:always|success|cancelled)\s*\(/u.test(source) && !context.success) return false;
   return Boolean(expression(source, context));
 }
 function envValues(step: any, context: Context): Context {
@@ -174,8 +180,9 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
   }
   validateNativePath(action.runs.steps, 'inputs'); validateNativePath(jobs.device.steps, 'matrix');
   for (const name of ['smoke', 'device']) assert.equal(jobs[name].strategy['fail-fast'], false);
+  auditAndroidQualificationBarrier(workflow);
   const validators = Object.entries(jobs).flatMap(([job, value]: [string, any]) => (value.steps || []).filter((step: any) => step.run?.includes('bun tests/mobile/validate-evidence.ts')).map((step: any) => ({ job, step })));
-  assert.deepEqual(validators.map(value => value.job), ['smoke_evidence', 'release_evidence', 'gate']);
+  assert.deepEqual(validators.map(value => value.job), ['android_qualification_evidence', 'smoke_evidence', 'release_evidence', 'gate']);
   for (const { job, step } of validators) {
     assert.match(step.run, new RegExp('--contract ' + (job === 'smoke_evidence' ? 'product' : 'qualified')));
     for (const flag of ['run-id', 'attempt', 'matrix', 'candidate-commit', 'source-run-head-sha', 'candidate-web-hash', 'candidate-identity', 'baseline-identities']) assert.match(step.run, new RegExp('--' + flag + ' '));
@@ -186,7 +193,7 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
   assert.ok(!jobs.smoke_environment_report.needs.includes('smoke_evidence'));
   assert.equal(jobs.smoke_environment_report.if, 'always()');
   for (const name of ['release_smoke', 'device', 'gate']) assert.ok(jobs[name].needs.includes('smoke_qualification'));
-  for (const name of ['smoke_evidence', 'smoke_environment_report', 'smoke_qualification', 'release_evidence', 'gate']) {
+  for (const name of ['android_qualification_evidence', 'smoke_evidence', 'smoke_environment_report', 'smoke_qualification', 'release_evidence', 'gate']) {
     const steps = jobs[name].steps;
     const checkout = steps.findIndex((step: any) => step.uses?.startsWith('actions/checkout@'));
     const downloads = steps.filter((step: any) => step.uses?.startsWith('actions/download-artifact@'));
@@ -240,11 +247,61 @@ function audit(workflow: any, action: any, release: any, check: any, shardSource
   for (const value of ['', 'NOT_REQUESTED', 'FAIL', 'UNKNOWN']) assert.equal(shellAssertions(guard.run, { QUALIFICATION_STATUS: value }).passed, false);
   for (const job of Object.values(jobs) as any[]) { assert.equal(job['continue-on-error'], undefined); for (const step of job.steps || []) assert.equal(step['continue-on-error'], undefined); }
 }
+function auditAndroidQualificationBarrier(workflow: any): void {
+  const jobs = workflow.jobs;
+  const names = Object.keys(jobs);
+  assert.ok(names.indexOf('android_qualification') < names.indexOf('smoke'));
+  const barrier = jobs.android_qualification;
+  assert.deepEqual(barrier.needs, ['provenance', 'prepare']);
+  assert.equal(barrier['runs-on'], 'ubuntu-24.04');
+  assert.equal(barrier.strategy, undefined);
+  const run = barrier.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run');
+  assert.deepEqual(run.with, { platform: 'android', baseline: '0.20.10', scenario: 'historical', suite: 'release', source_head_sha: '${{ needs.provenance.outputs.head_sha }}', evidence_prefix: 'mobile-evidence-android-qualification' });
+  const checkout = barrier.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, '${{ needs.provenance.outputs.source_sha }}');
+  assert.ok(barrier.steps.indexOf(checkout) < barrier.steps.indexOf(run));
+  for (const prefix of ['mobile-evidence-smoke', 'mobile-evidence-release-smoke', 'mobile-evidence-full']) assert.equal(run.with.evidence_prefix.startsWith(prefix), false);
+  const evidence = jobs.android_qualification_evidence;
+  assert.deepEqual(evidence.needs, ['provenance', 'prepare', 'android_qualification']);
+  assert.equal(evidence.env.ANDROID_QUALIFICATION_MATRIX, androidQualificationMatrix);
+  const download = evidence.steps.find((step: any) => step.uses?.startsWith('actions/download-artifact@'));
+  assert.equal(download.with.pattern, 'mobile-evidence-android-qualification-*-${{ github.run_attempt }}');
+  const product = evidence.steps.find((step: any) => step.run?.includes('validate-evidence.ts'));
+  assert.match(product.run, /--contract qualified/u); assert.match(product.run, /--suite release/u); assert.match(product.run, /--matrix "\$ANDROID_QUALIFICATION_MATRIX"/u);
+  const strict = evidence.steps.find((step: any) => step.run?.includes('validate-environment.ts'));
+  assert.match(strict.run, /--require-pass --contract qualified/u); assert.match(strict.run, /--suite release/u); assert.match(strict.run, /--matrix "\$ANDROID_QUALIFICATION_MATRIX"/u);
+  assert.ok(evidence.steps.indexOf(product) < evidence.steps.indexOf(strict));
+  for (const name of ['android_qualification_evidence', 'smoke']) {
+    assert.match(jobs[name].if, /^!cancelled\(\) && /u, `${name} must stay cancellable`);
+    assert.doesNotMatch(jobs[name].if, /always\(\)/u);
+    assert.equal(condition(jobs[name].if, { needs: Object.fromEntries(jobs[name].needs.map((key: string) => [key, { result: 'success', outputs: {} }])), inputs: { suite: 'release' }, success: true, cancelled: true }), false);
+  }
+  const gateGuard = jobs.gate.steps.find((step: any) => step.name === 'Reject skipped evidence stages');
+  assert.equal(gateGuard.env.ANDROID_QUALIFICATION_RESULT, '${{ needs.android_qualification.result }}');
+  assert.equal(gateGuard.env.ANDROID_QUALIFICATION_EVIDENCE_RESULT, '${{ needs.android_qualification_evidence.result }}');
+  for (const suite of ['release', 'smoke']) for (const name of ['ANDROID_QUALIFICATION_RESULT', 'ANDROID_QUALIFICATION_EVIDENCE_RESULT']) {
+    const expected = suite === 'release' ? 'success' : 'skipped';
+    for (const actual of ['success', 'failure', 'cancelled', 'skipped']) {
+      const env = { EXPECTED_SUITE: suite, PROVENANCE_RESULT: 'success', PREPARE_RESULT: 'success', ANDROID_QUALIFICATION_RESULT: expected, ANDROID_QUALIFICATION_EVIDENCE_RESULT: expected, SMOKE_RESULT: 'success', SMOKE_EVIDENCE_RESULT: 'success', REPORT_RESULT: 'success',
+        QUALIFICATION_RESULT: expected, RELEASE_SMOKE_RESULT: expected, RELEASE_EVIDENCE_RESULT: expected, DEVICE_RESULT: expected, [name]: actual };
+      assert.equal(shellAssertions(gateGuard.run, env).passed, actual === expected, `gate ${suite} ${name}=${actual}`);
+    }
+  }
+  for (const name of ['android_qualification', 'android_qualification_evidence']) {
+    assert.ok(jobs.smoke.needs.includes(name), `smoke must wait for ${name}`);
+    assert.ok(jobs.gate.needs.includes(name), `gate must require ${name}`);
+    assert.match(jobs.smoke.if, new RegExp(`needs\\.${name}\\.result == 'success'`, 'u'));
+  }
+  const matrix = jobs.prepare.steps.find((step: any) => step.id === 'matrix').run as string;
+  const runners = [...matrix.matchAll(/\{"platform":"(android|ios)","runner":"([^"]+)"/gu)];
+  assert.equal(runners.length, 24);
+  for (const [, platform, runner] of runners) assert.equal(runner, platform === 'ios' ? iosRunner : 'ubuntu-24.04');
+}
 function simulate(workflow: any, suite: string, stages: StageRows, overrides: Record<string, Status> = {}) {
   const completed: Context = {};
   for (const name of needed) {
     const job = workflow.jobs[name];
-    const rows = stages[['release_smoke', 'release_evidence'].includes(name) ? 'release' : ['device', 'gate'].includes(name) ? 'full' : 'smoke'];
+    const rows = name.startsWith('android_qualification') ? stages.android ?? qualifiedAndroid : stages[['release_smoke', 'release_evidence'].includes(name) ? 'release' : ['device', 'gate'].includes(name) ? 'full' : 'smoke'];
     const invocations: string[] = [];
     const dependencies = Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : [];
     const needs = Object.fromEntries(dependencies.map((key: string) => [key, completed[key] || { result: 'failure', outputs: {} }]));
@@ -254,7 +311,7 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
     if (name === 'provenance' || name === 'prepare') { completed[name] = { result: overrides[name] || 'success', outputs: {} }; continue; }
     if (!condition(job.if, context)) result = 'skipped';
     else if (overrides[name]) result = overrides[name];
-    else if (['smoke', 'release_smoke', 'device'].includes(name)) result = rows.every(row => row.product === 'PASS' && row.complete && row.artifact) ? 'success' : 'failure';
+    else if (['android_qualification', 'smoke', 'release_smoke', 'device'].includes(name)) result = rows.every(row => row.product === 'PASS' && row.complete && row.artifact) ? 'success' : 'failure';
     else {
       let succeeded = true;
       for (const step of job.steps || []) {
@@ -281,7 +338,7 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
   }
   return completed;
 }
-export const workflowMutationNames = ['strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
+export const workflowMutationNames = ['android-barrier-smoke-edge', 'android-barrier-gate-edge', 'android-barrier-gate-guard', 'android-barrier-uncancellable', 'android-barrier-strict', 'android-barrier-platform', 'android-barrier-prefix', 'android-barrier-skip-tolerated', 'ios-runner-label', 'strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
   ['mobile workflow SM59 10 ordinary and strict aggregation', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
@@ -291,6 +348,34 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
     const shardSource = await readFile(repositoryPath('tests/mobile/unit/test-shard-ci.ts'), 'utf8');
     audit(workflow, action, release, check, shardSource);
     const stages = (rows: Row[]): StageRows => ({ smoke: rows, release: rows, full: rows });
+    const assertAndroidBeforeIos = (candidate: any) => {
+      for (const suite of ['smoke', 'release']) {
+        const healthyRun = simulate(candidate, suite, stages([{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }]));
+        assert.equal(healthyRun.android_qualification.result, suite === 'release' ? 'success' : 'skipped');
+        assert.equal(healthyRun.android_qualification_evidence.result, suite === 'release' ? 'success' : 'skipped');
+        assert.equal(healthyRun.smoke.result, 'success');
+        assert.equal(healthyRun.gate.result, 'success');
+      }
+      for (const android of [
+        [{ platform: 'android', product: 'FAIL', environment: 'PASS', complete: true, artifact: true }],
+        [{ platform: 'android', product: 'PASS', environment: 'FAIL', complete: true, artifact: true }],
+        [{ platform: 'android', product: 'PASS', environment: 'UNKNOWN', complete: true, artifact: true }],
+        [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: false, artifact: true }],
+        [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: false }],
+      ] as Row[][]) {
+        const blocked = simulate(candidate, 'release', { ...stages([{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }]), android });
+        assert.notEqual(blocked.android_qualification_evidence.result, 'success');
+        for (const job of iosExecutingJobs) assert.equal(blocked[job].result, 'skipped', `${job} ran before Android qualification`);
+        assert.equal(blocked.gate.result, 'failure');
+        assert.notEqual(blocked.gate.outputs.qualification_status, 'PASS');
+      }
+      for (const prerequisite of ['android_qualification', 'android_qualification_evidence']) for (const status of ['failure', 'cancelled', 'skipped'] as const) {
+        const blocked = simulate(candidate, 'release', stages([{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }]), { [prerequisite]: status });
+        for (const job of iosExecutingJobs) assert.equal(blocked[job].result, 'skipped', `${prerequisite}/${status}: ${job} ran before Android qualification`);
+        assert.equal(blocked.gate.result, 'failure');
+      }
+    };
+    assertAndroidBeforeIos(workflow);
     const healthy: Row[] = [{ platform: 'android', product: 'PASS', environment: 'PASS', complete: true, artifact: true }, { platform: 'ios', product: 'PASS', environment: 'NOT_APPLICABLE', complete: true, artifact: true }];
     for (const suite of ['smoke', 'release']) for (const environment of ['PASS', 'FAIL', 'UNKNOWN'] as const) {
       const rows = structuredClone(healthy); rows[0].environment = environment;
@@ -350,6 +435,22 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
     for (const mutation of workflowMutationNames) {
       const w = structuredClone(workflow), a = structuredClone(action), r = structuredClone(release), k = structuredClone(check);
       let source = shardSource;
+      if (mutation === 'android-barrier-smoke-edge') {
+        w.jobs.smoke.needs = ['provenance', 'prepare'];
+        w.jobs.smoke.if = "needs.prepare.result == 'success' && needs.provenance.result == 'success'";
+        assert.throws(() => assertAndroidBeforeIos(w), mutation);
+      }
+      if (mutation === 'android-barrier-gate-edge') w.jobs.gate.needs = w.jobs.gate.needs.filter((name: string) => name !== 'android_qualification_evidence');
+      if (mutation === 'android-barrier-gate-guard') { const step = w.jobs.gate.steps.find((step: any) => step.name === 'Reject skipped evidence stages'); step.run = step.run.split('\n').filter((line: string) => !line.includes('ANDROID_QUALIFICATION')).join('\n'); }
+      if (mutation === 'android-barrier-uncancellable') w.jobs.smoke.if = w.jobs.smoke.if.replace('!cancelled()', 'always()');
+      if (mutation === 'android-barrier-strict') { const step = w.jobs.android_qualification_evidence.steps.find((step: any) => step.run?.includes('validate-environment.ts')); step.run = step.run.replace('--require-pass ', ''); }
+      if (mutation === 'android-barrier-platform') w.jobs.android_qualification.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run').with.platform = 'ios';
+      if (mutation === 'android-barrier-prefix') w.jobs.android_qualification.steps.find((step: any) => step.uses === './.github/actions/mobile-device-run').with.evidence_prefix = 'mobile-evidence-smoke-android';
+      if (mutation === 'android-barrier-skip-tolerated') {
+        w.jobs.smoke.if = "always() && needs.prepare.result == 'success' && needs.provenance.result == 'success'";
+        assert.throws(() => assertAndroidBeforeIos(w), mutation);
+      }
+      if (mutation === 'ios-runner-label') { const step = w.jobs.prepare.steps.find((step: any) => step.id === 'matrix'); step.run = step.run.replace('"runner":"xcode-27"', '"runner":"macos-15"'); }
       if (mutation === 'strict-edge') w.jobs.device.needs = w.jobs.device.needs.filter((name: string) => name !== 'smoke_qualification');
       if (mutation === 'qualified-flag') { const step = w.jobs.gate.steps.find((step: any) => step.run?.includes('validate-evidence.ts')); step.run = step.run.replace('--contract qualified', '--contract product'); }
       if (mutation === 'native-continue') a.runs.steps.find((step: any) => step.name === 'Run installed-PWA upgrade scenarios')['continue-on-error'] = true;

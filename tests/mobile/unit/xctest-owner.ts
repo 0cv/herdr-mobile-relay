@@ -1318,7 +1318,7 @@ const server = createServer((_request, response) => {
   }
   const body = mode === 'status-forged-markers'
     ? { payload: 'forged-status-payload', classification: 'forged-status-classification', note: 'status-opaque-secret', PASSWORD: 'status-password-sentinel', PRIVATE_URL: 'https://status.private.example/internal' }
-    : { value: { ready: mode !== 'invalid', state: 'success', build: { version: '16.12.8', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '18.6' } } };
+    : { value: { ready: mode !== 'invalid', state: 'success', build: { version: '16.12.8', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '27.0' } } };
   const oversized = mode === 'oversized' || (mode === 'ready-then-oversized' && count >= 1);
   const responseBody = mode === 'status-noisy-first-failure' ? '\\0'.repeat(64000) : JSON.stringify(body) + (oversized ? ' '.repeat(70000) : '');
   response.setHeader('content-type', 'application/json');
@@ -2371,7 +2371,7 @@ const stop=()=>{if(stopping)return;stopping=true;if(endpoint&&endpoint.exitCode=
 process.on('SIGTERM',stop);process.on('SIGINT',stop);
 const fail=()=>{try{writeFileSync(join(root,'target-error'),'ERROR',{flag:'wx'});}catch{}stop();};
 if(endpointRole){
- server=createServer((request,response)=>{if(request.url==='/witness'){response.setHeader('content-type','application/json');response.end(JSON.stringify({nonce,pid:process.pid,parentPID}));return;}const p=join(root,'status-queries');const count=existsSync(p)?Number(readFileSync(p,'utf8')):0;writeFileSync(p,String(count+1));response.setHeader('content-type','application/json');response.end(JSON.stringify({value:{ready:true,state:'success',build:{version:'16.12.8',productBundleIdentifier:'com.facebook.WebDriverAgentRunner'},os:{version:'18.6'}}}));});
+ server=createServer((request,response)=>{if(request.url==='/witness'){response.setHeader('content-type','application/json');response.end(JSON.stringify({nonce,pid:process.pid,parentPID}));return;}const p=join(root,'status-queries');const count=existsSync(p)?Number(readFileSync(p,'utf8')):0;writeFileSync(p,String(count+1));response.setHeader('content-type','application/json');response.end(JSON.stringify({value:{ready:true,state:'success',build:{version:'16.12.8',productBundleIdentifier:'com.facebook.WebDriverAgentRunner'},os:{version:'27.0'}}}));});
  server.listen(Number(process.env.IOS_WDA_PORT),'127.0.0.1',()=>{try{put('endpoint','',{pid:process.pid,parentPID});writeFileSync(join(root,'runner.pid'),String(process.pid));}catch{fail();}});
  server.on('error',fail);
  setInterval(()=>{if(cancelled()||existsSync(join(root,'endpoint-stop')))stop();else if(Date.now()>=deadline)fail();},1);
@@ -2475,7 +2475,7 @@ const assertReadyStatus = (candidate: unknown): void => {
     state: 'success',
     buildVersion: '16.12.8',
     productBundleIdentifier: 'com.facebook.WebDriverAgentRunner',
-    osVersion: '18.6',
+    osVersion: '27.0',
     payload: 'suppressed',
     diagnostic: 'suppressed',
     diagnosticBytes: status.bytes,
@@ -2977,7 +2977,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
     await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: mode, STARTUP_TEST_EXECUTABLE: process.execPath, STARTUP_TEST_WDA_SERVER: wdaServerFile,
       STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_PRODUCT: product, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
-      IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.6', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
+      IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '27.0', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
       IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
       MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned'),
       STARTUP_TEST_INVALID_PID_CONTROL: invalidPidControl || '',
@@ -3670,7 +3670,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
             platform.driver.create = async options => {
               sessions++;
               assert.equal(options.capabilities['appium:webDriverAgentUrl'], `http://127.0.0.1:${port}`);
-              assert.equal(options.capabilities['appium:platformVersion'], '18.6');
+              assert.equal(options.capabilities['appium:platformVersion'], '27.0');
               assert.equal(options.capabilities['appium:usePreinstalledWDA'], undefined);
               assert.equal(options.capabilities['appium:prebuiltWDAPath'], undefined);
               throw new Error('session request captured');
@@ -5774,7 +5774,7 @@ xctestOwnerTests.push(['Native startup status publication ordering is determinis
       await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
       const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: 'status-forged-markers', STARTUP_TEST_EXECUTABLE: process.execPath, STARTUP_TEST_WDA_SERVER: wdaServerFile,
         STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_PRODUCT: product, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
-        IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.6', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
+        IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '27.0', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
         IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
         MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned') };
       const deadline = Date.now() + 10_000;

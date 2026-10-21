@@ -35,10 +35,13 @@
     "installationProvider": "signed Chrome WebappLauncherActivity or WebAPK; every attach requires fresh foreground and Chromium-target evidence"
   },
   "ios": {
-    "runner": "macos-15",
-    "xcode": "/Applications/Xcode_16.4.app",
-    "runtime": "iOS 18.6",
-    "deviceType": "iPhone 16",
+    "runner": "xcode-27",
+    "imageSelection": "GitHub-hosted xcode-27 label; the image revision is not pinnable, so ImageOS, ImageVersion and macOS version/build are recorded per run",
+    "xcode": "/Applications/Xcode_27.app",
+    "xcodeVersion": "27.0",
+    "xcodeBuild": "27A266a",
+    "runtime": "iOS 27.0",
+    "deviceType": "iPhone 17",
     "installationProvider": "Home Screen web app",
     "contextRequirement": "an inspectable installed-app web context with the expected origin"
   },
