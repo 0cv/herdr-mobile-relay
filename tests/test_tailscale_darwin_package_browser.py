@@ -511,7 +511,8 @@ OFFLINE = MappingProxyType({
     "parser": ("valid_result", "malformed_json", "oversize_json", "wrong_mode",
                "wrong_platform", "missing_case", "duplicate_case", "extra_case",
                "exit_disagreement", "invalid_producer", "invalid_budget_or_paths",
-               "sensitive_receipt_fields"),
+               "sensitive_receipt_fields", "missing_probe_category_receipt",
+               "launcher_exit_before_link_receipt"),
     "archive": ("valid_archive", "traversal", "absolute", "duplicate", "ambiguous",
                 "symlink", "hardlink", "special_member", "zip_digest", "tar_digest",
                 "checksum", "manifest_target_or_version", "zip_count", "tar_count",
@@ -519,7 +520,9 @@ OFFLINE = MappingProxyType({
     "phase-caps": ("within_limits", "per_phase_deadline", "global_deadline",
                    "stop_before_next_phase", "stdin_cap", "result_cap", "raw_output_cap",
                    "receipt_cap", "dependency_storage_cap", "hydration_stream_cap",
-                   "immutable_production_limits", "injected_operations_refuse_real_effects"),
+                   "immutable_production_limits", "injected_operations_refuse_real_effects",
+                   "verifier_requests_admitted", "missing_probe_near_misses_refused",
+                   "missing_probe_forwarded_by_relay", "launcher_exit_before_link_refused"),
     "cleanup": ("ordered_success", "failure_cleanup", "handled_signal_cleanup",
                 "bounded_escalation_and_reap", "unowned_ids_refused",
                 "surviving_children_fail", "surviving_listener_fail", "closure_error_fails",
@@ -684,7 +687,8 @@ def browser_result(data, mode, exit_code):
 # Diagnostic strings are a finite protocol, never truncated external values.
 SAFE_FAILURES = frozenset({"unexpected_exception", "fixture_refused", "command_failed", "phase_deadline",
     "owned_operation_allowlist", "cleanup_uncertain", "receipt_validation", "cap_raw", "cap_dependencies",
-    "cap_stdin", "cap_result", "cap_receipt", "launchctl_authority", "service_guard_query_cap"})
+    "cap_stdin", "cap_result", "cap_receipt", "launchctl_authority", "service_guard_query_cap",
+    "launcher_exit_before_link"})
 SAFE_EXCEPTION_TYPES = frozenset({"Unknown", "Refusal", "CleanupFailure", "GateFailure", "SystemExit",
     "KeyboardInterrupt", "OSError", "FileNotFoundError", "PermissionError", "FileExistsError", "TimeoutError",
     "ConnectionError", "ConnectionRefusedError", "ConnectionResetError", "BrokenPipeError", "ConnectionAbortedError",
@@ -699,7 +703,8 @@ SAFE_FUNCTIONS = frozenset({"unknown", "runtime", "command", "phase", "interrupt
     "tls_controls", "packaged_go_tls_control", "private_link", "fake_operation_summary", "browser_result", "receipt_policy",
     "receipt_values_safe", "verify", "remove_owned_tree", "stop", "close", "group_gone", "reap_bounded",
     "read", "__init__", "socket_allowed", "fake_allowed", "start_launcher", "require", "cap",
-    "verify_producer_archive", "record_digest", "write_receipt", "publish_receipt", "publication"})
+    "verify_producer_archive", "record_digest", "write_receipt", "publish_receipt", "publication",
+    "launcher_started"})
 # Helper (tests/test_tailscale_extracted_package_browser.py) frames reachable from
 # the Darwin runtime and its GateFailure codes. "die" is deliberately absent: the
 # locator names the die() caller. The offline parser group pins that each name
@@ -1784,7 +1789,22 @@ def browser_query_allowed(path, query):
     return False
 
 
+# main's appdeploy.checkCanonicalPublicBundle (worker.go:1020-1023) asks for one random missing asset per attempt
+# and requires the relay's own non-200 answer. This exact raw target is the only unlisted path ever admitted.
+MISSING_PROBE_PATH = re.compile(r"/assets/herdr-missing-[0-9a-f]{32}\.js")
+
+
+def proxy_paths(web):
+    """The only paths the cell's HTTPS proxy forwards: a fixed set plus the real files of the package's web/."""
+    return {"/", "/index.html", "/healthz", "/release.json", "/version.json", "/ws", "/favicon.ico"} | {
+        "/" + p.relative_to(web).as_posix() for p in web.rglob("*") if p.is_file()}
+
+
 def public_request_allowed(raw_path, host, upgrade, paths, port):
+    if type(raw_path) is str and MISSING_PROBE_PATH.fullmatch(raw_path) is not None:
+        # GET only (ProxyHandler has no other method), raw target equal to the path (no query, fragment or
+        # encoding), no upgrade, fixture host. Not in `paths`: it is forwarded and the relay answers it.
+        return fixture_port_allowed(port) and host == "127.0.0.1:" + str(port) and not upgrade
     try:
         parts = urllib.parse.urlsplit(raw_path)
     except ValueError:
@@ -1987,7 +2007,7 @@ PROXY_FAILURE_REASONS = frozenset({
     "worker_exception"})
 PROXY_PATH_CATEGORIES = frozenset({
     "unknown", "invalid", "root", "index", "healthz", "release", "version", "build_entry", "asset", "icon", "font",
-    "manifest", "service_worker", "script", "favicon", "websocket", "other"})
+    "manifest", "service_worker", "script", "favicon", "websocket", "missing_probe", "other"})
 PROXY_QUERY_CATEGORIES = frozenset({"unknown", "none", "version", "deploy_check", "check", "reload", "other"})
 PROXY_METHOD_CATEGORIES = frozenset({"unknown", "get", "head", "post", "put", "delete", "options", "patch",
                                      "connect", "trace", "other"})
@@ -2009,6 +2029,8 @@ def proxy_request_categories(raw_path):
     path = parts.path
     if path in PROXY_FIXED_PATHS:
         path_category = PROXY_FIXED_PATHS[path]
+    elif type(raw_path) is str and MISSING_PROBE_PATH.fullmatch(raw_path) is not None:
+        path_category = "missing_probe"
     elif BUILD_ENTRY_PATH.fullmatch(path) is not None:
         path_category = "build_entry"
     else:
@@ -2411,6 +2433,19 @@ def private_link(data, origin):
     return None
 
 
+def launcher_started(captured, failed_command):
+    """Resolve Operations.capture_launcher's result into (child, link).
+
+    capture returns (child, link) only once the launcher prints its link; a launcher that exits first yields a
+    completed process instead. That is a named refusal carrying only the sanitized exit status, never its output.
+    """
+    if type(captured) is tuple and len(captured) == 2 and type(captured[1]) is str:
+        return captured
+    status = getattr(captured, "returncode", None)
+    failed_command[:] = ["unknown", status if type(status) is int and -2**31 <= status < 2**31 else None]
+    raise Refusal("launcher_exit_before_link")
+
+
 def environment(root):
     env = {"PATH": os.environ["PATH"], "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
            "GOTOOLCHAIN": "local", "GOFLAGS": "-mod=readonly", "GOENV": "off", "GOWORK": "off",
@@ -2791,9 +2826,7 @@ class Proxy(http.server.HTTPServer):
         self.operations, self.lock = operations, threading.RLock()
         self.workers, self.connections, self.counts = [], set(), {}
         self.failure, self.failure_reason = False, None
-        self.paths = {"/", "/index.html", "/healthz", "/release.json", "/version.json", "/ws", "/favicon.ico"}
-        self.paths.update("/" + p.relative_to(root / "release/web").as_posix()
-                          for p in (root / "release/web").rglob("*") if p.is_file())
+        self.paths = proxy_paths(root / "release/web")
         self.thread, self.socket = None, None
         self.closing = False
         operations.cleanup.listener(self)
@@ -2922,12 +2955,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         server = self.server
-        self.diag_path, self.diag_query = proxy_request_categories(self.path)
+        # BaseHTTPRequestHandler collapses a leading "//" in self.path (gh-87389) before do_GET runs. Categorize the
+        # target as the client sent it, and admit the missing-asset probe only when it was sent exactly as checked.
+        words = self.requestline.split()
+        raw = words[1] if len(words) > 1 else self.path
+        self.diag_path, self.diag_query = proxy_request_categories(raw)
         # Reject ambiguity before scalar allowlist evaluation, traffic counters,
         # backend allocation or forwarding, including WebSocket upgrade headers.
         hosts, upgrades = self.headers.get_all("Host", []), self.headers.get_all("Upgrade", [])
         require(len(hosts) == 1 and len(upgrades) <= 1, "request_header_multiplicity")
         upgrade = upgrades[0].lower() if upgrades else ""
+        require(raw == self.path or MISSING_PROBE_PATH.fullmatch(self.path) is None, "request_allowlist")
         require(public_request_allowed(self.path, hosts[0], upgrade, server.paths,
                                        server.server_port), "request_allowlist")
         require("Content-Length" not in self.headers and "Transfer-Encoding" not in self.headers, "request_body")
@@ -3483,12 +3521,13 @@ def runtime(args):
                 require(shutil.which("launchctl", path=wrapper_path) == launchctl_path
                         and sha(read_bounded(Path(launchctl_path), LIMITS["individual"])) == guard["launchctl_sha256"],
                         "service_guard_command_drift")
-                child, setup = operations.capture_launcher(launcher_args, guard, cwd=root / "release", link_origin=ORIGIN)
+                captured = operations.capture_launcher(launcher_args, guard, cwd=root / "release", link_origin=ORIGIN)
                 require(service_inputs_allowed(plist.exists(), plist.is_symlink(),
                                                shutil.which("launchctl", path=wrapper_path)), "private_service_definition")
                 require(shutil.which("launchctl", path=wrapper_path) == launchctl_path
                         and sha(read_bounded(Path(launchctl_path), LIMITS["individual"])) == guard["launchctl_sha256"],
                         "service_guard_command_drift")
+                child, setup = launcher_started(captured, failed_command)
                 guard["observations"].append({"ordinal": guard["starts"],
                     "private_plist_before_absent": True, "private_plist_after_absent": True,
                     "setup_ready_seconds": child.startup_seconds, "loaded_service": False,
@@ -4604,6 +4643,45 @@ def offline_check(group):
                             for target in (link, hard, folder, big, Path(directory) / "absent.jsonl")),
                         "offline_fake_read_refusals")
             return True
+        def missing_probe_receipts():
+            # The new path category is a fixed word, never an echo of the target, and the receipt schema is closed over it.
+            probe = "/assets/herdr-missing-" + "0123456789abcdef" * 2 + ".js"
+            failed = {**valid_receipt, "result": "fail", "failure": "owned_operation_allowlist", "failure_guard": "proxy"}
+            row = {"proxy": 0, "reason": "request_allowlist", "path": "missing_probe", "query": "none", "method": "get"}
+            require("missing_probe" in PROXY_PATH_CATEGORIES and proxy_request_categories(probe) == ("missing_probe", "none")
+                    and receipt_policy(encode({**failed, "proxy_failure": [row]}), BASE, sources, producer_id) is False,
+                    "offline_missing_probe_receipt")
+            for bad in (probe, probe[1:], "herdr-missing-" + "0" * 32, "Missing_Probe", "missing_probe ", "missing-probe", "missing"):
+                require(rejects(lambda: receipt_policy(encode({**failed, "proxy_failure": [{**row, "path": bad}]}),
+                        BASE, sources, producer_id)), "offline_missing_probe_receipt_refused")
+            require(rejects(lambda: receipt_policy(encode({**valid_receipt, "proxy_failure": [row]}), BASE, sources, producer_id)),
+                    "offline_missing_probe_pass_refused")
+            for near in (probe + "?x=1", probe + "?", probe + "#f", probe + "/", probe[:-3] + "0.js", "/assets/x" + probe[7:],
+                         probe.upper(), "//assets/" + probe[8:], "https://127.0.0.1:8443" + probe):
+                categories = proxy_request_categories(near)
+                require(categories[0] != "missing_probe" and categories[0] in PROXY_PATH_CATEGORIES
+                        and categories[1] in PROXY_QUERY_CATEGORIES and not any("0123456789" in c for c in categories),
+                        "offline_missing_probe_category_exact")
+            return True
+        def launcher_exit_receipts():
+            # A launcher that exits before its link is a named failure code with only the sanitized exit status.
+            failed_command = []
+            try:
+                launcher_started(SimpleNamespace(returncode=17, stdout=b"token=SECRET", stderr=b"/private/path"), failed_command)
+            except Refusal as error:
+                detail, code = failure_detail(error, failed_command), safe_failure_code(error)
+            else:
+                return False
+            failed = {**valid_receipt, "result": "fail", "failure": code, "failure_detail": detail}
+            require(code == "launcher_exit_before_link" and detail["exit_code"] == 17 and detail["command"] == "unknown"
+                    and receipt_policy(encode(failed), BASE, sources, producer_id) is False, "offline_launcher_exit_receipt")
+            for bad in ("launcher_exit_before_link ", "Launcher_exit_before_link", "launcher_exit", "/private/path"):
+                require(rejects(lambda: receipt_policy(encode({**failed, "failure": bad}), BASE, sources, producer_id)),
+                        "offline_launcher_exit_code_refused")
+            for bad in ("17", True, 1.5, 2**31, [17], "token=SECRET"):
+                require(rejects(lambda: receipt_policy(encode({**failed, "failure_detail": {**detail, "exit_code": bad}}),
+                        BASE, sources, producer_id)), "offline_launcher_exit_status_refused")
+            return True
         operations = {
             "valid_result": lambda: browser_result(encode(valid), "enroll", 0)["ok"]
                 and receipt_policy(encode(valid_receipt), BASE, sources, producer_id)
@@ -4634,6 +4712,8 @@ def offline_check(group):
                 and receipt_reject(("tools", "secret"), "offline_marker")
                 and receipt_reject(("tools", "curl"), "https://invalid/#setup=offline_marker")
                 and sensitive_failures() and socket_privacy(),
+            "missing_probe_category_receipt": missing_probe_receipts,
+            "launcher_exit_before_link_receipt": launcher_exit_receipts,
         }
     elif group == "archive":
         valid_entries = [Entry(".", "directory", 0), Entry("web", "directory", 0),
@@ -5660,6 +5740,7 @@ def offline_check(group):
             require(policies[0] == policies[1], "offline_same_argument_name_policy")
             return True
 
+        harness = {}
         def proxy_transport_cases():
             # Exercise real worker -> BaseRequestHandler construction -> stdlib
             # parsing -> our GET/abort/backend paths, using memory-only peers.
@@ -5740,8 +5821,11 @@ def offline_check(group):
             def exercise(data=b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n", *,
                          error=TimeoutError, read_at=0, write_error=False, flush_at=0,
                          handshake=False, backend_error="", buffered=True, closing=False, close_error=None,
-                         chunks=None, capture=None):
+                         chunks=None, capture=None, status=200, seen=None):
                 backend = Backend(error, backend_error, None if chunks is None else list(chunks))
+                backend.status = status
+                if seen is not None:
+                    backend.request = lambda *args, **_kwargs: seen.append(args)
                 calls = []
                 class Handler(ProxyHandler):
                     wbufsize = 1 if buffered else 0
@@ -5766,6 +5850,7 @@ def offline_check(group):
                 require(connection.closed and not server.connections, "offline_proxy_peer_closed")
                 require(proxy_request_counts([server]) == [server.counts], "offline_proxy_snapshot")
                 return server, calls
+            harness["exercise"] = exercise
             errors = (ssl.SSLEOFError, ssl.SSLZeroReturnError, ssl.SSLError, ConnectionResetError,
                       BrokenPipeError, ConnectionAbortedError, TimeoutError)
             for error in errors:
@@ -6440,6 +6525,120 @@ def offline_check(group):
                     and rejects(lambda: Proxy(0, None, None, mock))
                     and rejects(lambda: Child(SimpleNamespace(returncode=None, pid=0), gate).send("INT"))
                     and not mock.children)
+        probe_hex = "0123456789abcdef" * 2
+        missing_probe = "/assets/herdr-missing-" + probe_hex + ".js"
+        def verifier_requests_admitted():
+            # Audit of every request appdeploy.VerifyPublic makes through the proxy (worker.go:990-1121), built from
+            # THIS release's real descriptor and the proxy's real path set, plus the /healthz reads of the launcher,
+            # the relay readiness check and the cell's curl control.
+            web = Path(__file__).resolve().parents[1] / "web"
+            files, paths = json.loads((web / "release.json").read_text())["files"], proxy_paths(web)
+            kinds = ("entry", "javascript", "stylesheet")
+            resource = {kind: "/" + files[kind]["path"] for kind in kinds}
+            query = "?herdr_deploy_check=" + BASE + "-1791800000000000000-0"
+            requests = [*resource.values(),  # :999 canonical, no query (identity and br share one target)
+                missing_probe,  # :1022-1023
+                "/release.json" + query,  # :1046
+                *(resource[kind] + query + prefix + kind for kind in kinds for prefix in ("-", "-br-")),  # :1070, :1082
+                "/version.json" + query + "-version", "/version.json" + query + "-version-br",  # :1099, :1112
+                "/healthz"]
+            require(len(set(requests)) == len(requests) == 14 and missing_probe not in paths, "offline_verifier_request_list")
+            for raw in requests:
+                require(public_request_allowed(raw, "127.0.0.1:8443", "", paths, 8443)
+                        and proxy_request_categories(raw)[0] not in {"unknown", "invalid", "other"},
+                        "offline_verifier_request_admitted")
+            return proxy_request_categories(missing_probe) == ("missing_probe", "none")
+        def missing_probe_near_misses_refused():
+            host = "127.0.0.1:8443"
+            admit = lambda raw, h=host, upgrade="", port=8443: public_request_allowed(raw, h, upgrade, set(), port)
+            require(admit(missing_probe) is True, "offline_missing_probe_admitted")
+            head, tail = "/assets/herdr-missing-", ".js"
+            near = [head + probe_hex[:31] + tail, head + probe_hex + "0" + tail, head + tail, head + probe_hex * 2 + tail,
+                head + probe_hex.upper() + tail, head + probe_hex[:-1] + "F" + tail, head + "g" * 32 + tail,
+                head + probe_hex[:-1] + "g" + tail, head + "\uff10" * 32 + tail, head + "\u0663" * 32 + tail,
+                head + probe_hex + ".mjs", head + probe_hex + ".JS", head + probe_hex + ".js.map", head + probe_hex + ".js.",
+                head + probe_hex + ".js ", head + probe_hex, head + probe_hex + ".css",
+                missing_probe + "?v=1", missing_probe + "?x=1", missing_probe + "?", missing_probe + "?&",
+                missing_probe + "?herdr_deploy_check=" + BASE + "-0-0", missing_probe + "#", missing_probe + "#f",
+                missing_probe + "?x=1#f", "/assets/x" + head[7:] + probe_hex + tail, "/assets/sub/" + head[8:] + probe_hex + tail,
+                head + probe_hex[:16] + "/" + probe_hex[16:] + tail, "/assets/herdr-absent-" + probe_hex + tail,
+                "/assets/herdr-missing_" + probe_hex + tail, "/assets/Herdr-missing-" + probe_hex + tail,
+                "/Assets/herdr-missing-" + probe_hex + tail, "/asset/herdr-missing-" + probe_hex + tail,
+                "/herdr-missing-" + probe_hex + tail, "/builds/herdr-missing-" + probe_hex + tail,
+                "/assets/%2e%2e/herdr-missing-" + probe_hex + tail, "/assets/%2E%2E/herdr-missing-" + probe_hex + tail,
+                "/assets/./herdr-missing-" + probe_hex + tail, "/assets/../assets/herdr-missing-" + probe_hex + tail,
+                "/assets%2Fherdr-missing-" + probe_hex + tail, "%2Fassets/herdr-missing-" + probe_hex + tail,
+                "/assets/herdr-missing-%30" + probe_hex[1:] + tail, head + probe_hex + ".%6as", head + probe_hex + "%2ejs",
+                head + probe_hex + "%2F.js", "//assets/herdr-missing-" + probe_hex + tail,
+                "/assets//herdr-missing-" + probe_hex + tail, "///assets/herdr-missing-" + probe_hex + tail,
+                "https://127.0.0.1:8443" + missing_probe, "http://127.0.0.1:8443" + missing_probe,
+                "//127.0.0.1:8443" + missing_probe, "/assets\\herdr-missing-" + probe_hex + tail, missing_probe + ";x=1",
+                missing_probe + "/", missing_probe + "\n", " " + missing_probe, missing_probe + "\x00", missing_probe + "\t",
+                missing_probe.encode(), ""]
+            for raw in near:
+                require(not admit(raw), "offline_missing_probe_near_miss")
+            for wrong in ("127.0.0.1:18444", "127.0.0.1:443", "127.0.0.1", "localhost:8443", "evil.example", "", host + " ",
+                          host + ".evil", "[::1]:8443", "127.0.0.1:08443", "foo@127.0.0.1:8443"):
+                require(not admit(missing_probe, h=wrong), "offline_missing_probe_wrong_host")
+            for port in (0, 443, 8444, None, "8443", True):
+                require(not admit(missing_probe, h="127.0.0.1:" + str(port), port=port), "offline_missing_probe_wrong_port")
+            for upgrade in ("websocket", "h2c", "x"):
+                require(not admit(missing_probe, upgrade=upgrade), "offline_missing_probe_upgrade")
+            return True
+        def missing_probe_forwarded_by_relay():
+            # The proxy only forwards: the relay's own 404 reaches the verifier, never one synthesized here.
+            if "exercise" not in harness:
+                proxy_transport_cases()
+            exercise = harness["exercise"]
+            request = lambda target: ("GET " + target + " HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n").encode()
+            seen, sent = [], []
+            server, calls = exercise(request(missing_probe), capture=sent, status=404, seen=seen)
+            written = bytes(sent[0].output.written)
+            require(proxy_operations_allowed([server]) and server.failure_reason is None and len(calls) == 1
+                    and seen == [("GET", missing_probe)] and server.counts.get("http_get") == 1
+                    and written.split(b"\r\n", 1)[0].split(b" ")[1:2] == [b"404"] and written.endswith(b"fixture"),
+                    "offline_missing_probe_forwarded_unchanged")
+            # parse_request collapses a leading "//" in self.path: the probe sent as "//..." or "///..." must not be
+            # admitted or forwarded, even though the collapsed path equals the probe.
+            for target, categories in ((missing_probe + "?x=1", ("asset", "other")), (missing_probe + "?", ("asset", "none")),
+                                       (missing_probe[:-3] + "0.js", ("asset", "none")), ("/" + missing_probe, ("invalid", "other")),
+                                       ("//" + missing_probe, ("asset", "none"))):
+                seen, sent = [], []
+                server, calls = exercise(request(target), error=BrokenPipeError, flush_at=1, capture=sent, seen=seen)
+                require(not proxy_operations_allowed([server]) and not calls and not seen and not sent[0].output.written
+                        and server.failure_reason == ("request_allowlist", *categories, "get"),
+                        "offline_missing_probe_near_miss_not_forwarded")
+            return True
+        def launcher_exit_before_link_refused():
+            # Operations.capture returns (child, link) only once a link appears, else a completed process. Unpacking
+            # that raised TypeError (unexpected_exception) and hid the exit; it is now a named, secret-free refusal.
+            mock = Operations(Path("/must-not-be-accessed"), {}, Budget(clock), Cleanup(),
+                              SimpleNamespace(require_launchctl=lambda: None, effect=lambda kind: None))
+            exited = SimpleNamespace(returncode=17, stdout=b"token=SECRET /private/path", stderr=b"https://leak.invalid",
+                                     seconds=1.0)
+            mock.capture = lambda *args, **kwargs: exited
+            guard, failed, child = {"starts": 0}, [], object()
+            try:
+                launcher_started(mock.capture_launcher(["inert"], guard, cwd=None, link_origin=ORIGIN), failed)
+            except Refusal as error:
+                detail, code = failure_detail(error, failed or None), safe_failure_code(error)
+            else:
+                return False
+            require(code == "launcher_exit_before_link" and code in SAFE_FAILURES and guard["starts"] == 1
+                    and detail["type"] == "Refusal" and detail["function"] == "launcher_started"
+                    and detail["command"] == "unknown" and detail["exit_code"] == 17
+                    and not any(word in json.dumps(detail) for word in ("SECRET", "private", "leak")),
+                    "offline_launcher_exit_named_refusal")
+            require(launcher_started((child, ORIGIN + "/#setup=" + "0" * 32), failed) == (child, ORIGIN + "/#setup=" + "0" * 32),
+                    "offline_launcher_link_returned")
+            for bad, exit_code in ((exited, 17), (SimpleNamespace(returncode=-9), -9), (SimpleNamespace(returncode="17"), None),
+                    (SimpleNamespace(returncode=True), None), (SimpleNamespace(returncode=2**31), None),
+                    (SimpleNamespace(), None), ((child, None), None), ((child,), None), ((child, b"link"), None),
+                    ((child, "link", 1), None), ([child, "link"], None), (None, None)):
+                failed = []
+                require(rejects(lambda: launcher_started(bad, failed)) and failed == ["unknown", exit_code],
+                        "offline_launcher_exit_fail_closed")
+            return True
         operations = {"within_limits": within, "per_phase_deadline": lambda: deadline(90),
             "global_deadline": global_deadline, "stop_before_next_phase": lambda: deadline(90, True),
             "stdin_cap": lambda: rejects(lambda: cap("stdin", 65537)),
@@ -6452,7 +6651,11 @@ def offline_check(group):
                 and rejects(lambda: streaming_body(io.BytesIO(b"ab"), 1, Budget(clock)))
                 and streaming_body(io.BytesIO(b"a"), 1, Budget(clock)) == b"a",
             "immutable_production_limits": immutable,
-            "injected_operations_refuse_real_effects": forbidden_effects}
+            "injected_operations_refuse_real_effects": forbidden_effects,
+            "verifier_requests_admitted": verifier_requests_admitted,
+            "missing_probe_near_misses_refused": missing_probe_near_misses_refused,
+            "missing_probe_forwarded_by_relay": missing_probe_forwarded_by_relay,
+            "launcher_exit_before_link_refused": launcher_exit_before_link_refused}
     else:
         def cleanup_case(survive=False, listener_survives=False, error=False, handled=False, escalation=False):
             owner, child, listener = Cleanup(), InertChild(survive, escalation), InertListener(listener_survives, error)
