@@ -255,7 +255,7 @@ Rerun that command to move to a newer candidate.
 
 ## Contributing
 
-Work lands on `dev`; open pull requests against it and make sure `make check`
+Work lands on `main`; open pull requests against it and make sure `make check`
 passes first.
 
 ## Toolchains

@@ -305,7 +305,7 @@ func TestCursorHonorsConfiguredSkillDirs(t *testing.T) {
 	}
 }
 
-// A non-regular *.md entry is skipped rather than read: fileFrontmatter would
+// A non-regular *.md entry is skipped rather than read: opening it would
 // block forever on a FIFO with no writer, in a service that polls.
 func TestCursorSkipsNonRegularCommandFile(t *testing.T) {
 	home := t.TempDir()

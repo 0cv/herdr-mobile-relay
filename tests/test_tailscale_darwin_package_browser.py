@@ -194,6 +194,30 @@ ALLOWED = (
     # Fixture repair for the installed 32-byte key policy; it failed the check workflow's
     # Shell job (stable setup success) at 1bb8723f.
     "tests/test_stable_setup.sh",
+    # M5 reconciliation, clean ports from main (9f9a3950, 5de36ace, d3697d29, bef118ae, 1ff552c4,
+    # 92b8f498, 2a484686, cf55dabe, 4b231f64, 736d7e40). Sixteen of these paths are exactly main's
+    # bytes, for files the branch never changed. Two keep branch-side content:
+    # internal/slashcmd/command_file_size_test.go is main's bytes plus additions only (the F002
+    # at-limit and over-limit command fixtures), and docs/development.md keeps the branch's own
+    # changes and takes only 736d7e40's one-line hunk ("Work lands on `main`").
+    "docs/agent-directories.md",
+    "docs/development.md",
+    "docs/slash-command-discovery.md",
+    "internal/agentroots/agentroots.go",
+    "internal/conversation/browser.go",
+    "internal/conversation/hermes.go",
+    "internal/conversation/hermes_test.go",
+    "internal/conversation/opencode.go",
+    "internal/conversation/opencode_test.go",
+    "internal/conversation/reader.go",
+    "internal/conversation/reader_test.go",
+    "internal/slashcmd/catalog.go",
+    "internal/slashcmd/command_file_size_test.go",
+    "internal/slashcmd/cursor_test.go",
+    "internal/slashcmd/frontmatter.go",
+    "internal/slashcmd/frontmatter_test.go",
+    "internal/slashcmd/walk.go",
+    "internal/slashcmd/walk_test.go",
     # T001 CI wiring: the service-qualification job and the check.yml edits.
     ".github/workflows/check.yml",
     ".github/workflows/service-qualification.yml",

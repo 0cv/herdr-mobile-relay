@@ -134,6 +134,27 @@ COMMIT;`, sessionID, cwd, sessionID, sessionID, sessionID)
 	}
 }
 
+func TestHermesDirectoryBindingResolvesSymlinks(t *testing.T) {
+	realDirectory := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(realDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "project-link")
+	if err := os.Symlink(realDirectory, link); err != nil {
+		t.Fatal(err)
+	}
+	if !sameHermesDirectory(link, realDirectory) {
+		t.Fatal("symlinked workspace did not match its real Hermes directory")
+	}
+	other := filepath.Join(t.TempDir(), "other")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if sameHermesDirectory(other, realDirectory) {
+		t.Fatal("different workspace matched Hermes session directory")
+	}
+}
+
 func TestHermesReaderPagesByMessageIDAndBindsWorkspace(t *testing.T) {
 	sqlite, err := exec.LookPath("sqlite3")
 	if err != nil {
