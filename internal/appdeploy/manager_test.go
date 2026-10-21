@@ -58,6 +58,7 @@ func TestManagerRejectsPhoneOverrides(t *testing.T) {
 	t.Setenv("HERDR_APP_DEPLOY_NPX", npx)
 	t.Setenv("HERDR_APP_DEPLOY_NODE_DIR", nodeDir)
 	manager := NewManager(root, webRoot, "1.2.3", "abc")
+	manager.SetTransport("cloudflare")
 	manager.launch = func(context.Context, string) error { return nil }
 	if !manager.State().Configured {
 		t.Fatalf("state = %#v", manager.State())
@@ -130,6 +131,7 @@ func TestManagerSweepsFinishedWorkersBeforeLaunch(t *testing.T) {
 		version:    "1.2.3",
 		revision:   "abc",
 		origin:     "https://app.example.test",
+		transport:  "cloudflare",
 		launch: func(context.Context, string) error {
 			calls = append(calls, "launch")
 			return nil
@@ -199,5 +201,146 @@ func TestManagerAllowsScheduledWorkerStartupGracePeriod(t *testing.T) {
 	manager := NewManager(root, filepath.Join(root, "web"), "1.2.3", "abc")
 	if state := manager.State(); state.State != "scheduled" {
 		t.Fatalf("state = %#v", state)
+	}
+}
+
+// scheduleFixture is a configured manager whose launch and sweep are counted, so
+// a test can prove that a refused deployment did not start anything.
+func scheduleFixture(t *testing.T, transport string) (manager *Manager, runtimeDir string, launches, sweeps *int) {
+	t.Helper()
+	launches, sweeps = new(int), new(int)
+	previousSweep := sweepWorkers
+	sweepWorkers = func(context.Context) error {
+		*sweeps++
+		return nil
+	}
+	t.Cleanup(func() { sweepWorkers = previousSweep })
+	runtimeDir = t.TempDir()
+	manager = &Manager{
+		runtimeDir: runtimeDir,
+		version:    "1.2.3",
+		revision:   "abc",
+		origin:     "https://app.example.test",
+		project:    "relay-app",
+		branch:     "main",
+		transport:  transport,
+		launch: func(context.Context, string) error {
+			*launches++
+			return nil
+		},
+	}
+	return manager, runtimeDir, launches, sweeps
+}
+
+func TestScheduleRefusesTailscaleAndInconsistentTransports(t *testing.T) {
+	const tailscaleRefusal = "unavailable on Tailscale transports"
+	const inconsistentRefusal = "explicit, consistent transport policy"
+	for _, test := range []struct {
+		name     string
+		resolved string
+		current  string
+		set      bool // whether the resolved transport is handed to the manager
+		want     string
+	}{
+		{"resolved tailscale", "tailscale", "", true, tailscaleRefusal},
+		{"resolved tailscale-external", "tailscale-external", "", true, tailscaleRefusal},
+		{"resolved tailscale-cli", "tailscale-cli", "", true, tailscaleRefusal},
+		{"resolved tailscale, legacy environment", "tailscale-external", "cloudflare", true, tailscaleRefusal},
+		{"resolved with case and spaces", " Tailscale-CLI ", "", true, tailscaleRefusal},
+		{"cloudflare vetoed by tailscale", "cloudflare", "tailscale", true, tailscaleRefusal},
+		{"gateway vetoed by tailscale-external", "gateway", "tailscale-external", true, tailscaleRefusal},
+		{"cloudflare vetoed by a mixed-case tailscale", "cloudflare", " TAILSCALE ", true, tailscaleRefusal},
+		{"cloudflare against gateway", "cloudflare", "gateway", true, inconsistentRefusal},
+		{"gateway against cloudflare", "gateway", "cloudflare", true, inconsistentRefusal},
+		{"cloudflare against an unknown environment", "cloudflare", "bogus", true, inconsistentRefusal},
+		{"unknown resolved transport", "bogus", "", true, inconsistentRefusal},
+		{"blank resolved transport", "  ", "cloudflare", true, inconsistentRefusal},
+		{"resolved transport never handed over", "", "cloudflare", false, inconsistentRefusal},
+		{"resolved transport never handed over, no environment", "", "", false, inconsistentRefusal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HERDR_RELAY_TRANSPORT", test.current)
+			manager, runtimeDir, launches, sweeps := scheduleFixture(t, "")
+			if test.set {
+				manager.SetTransport(test.resolved)
+			}
+			job, state, err := manager.Schedule(t.Context(), "1.2.3", "abc", "https://app.example.test")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Schedule error = %v, want one containing %q", err, test.want)
+			}
+			if job != "" || state.State != "idle" || state.TargetVersion != "" || state.TargetRevision != "" {
+				t.Fatalf("a refused deployment reported job %q, state %#v", job, state)
+			}
+			if *launches != 0 || *sweeps != 0 {
+				t.Fatalf("a refused deployment started %d workers and swept %d times", *launches, *sweeps)
+			}
+			entries, readErr := os.ReadDir(runtimeDir)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("a refused deployment wrote files: %v (%v)", entries, readErr)
+			}
+		})
+	}
+}
+
+func TestScheduleRefusalDoesNotReconcileOrChangePersistedState(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TRANSPORT", "")
+	manager, runtimeDir, launches, _ := scheduleFixture(t, "tailscale-external")
+	statePath := filepath.Join(runtimeDir, "app-deploy-state.json")
+	// With no worker holding the lock, an admitted manager would reconcile this to "failed".
+	if err := writeState(statePath, State{State: "deploying", TargetVersion: "1.2.3", TargetRevision: "abc"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, state, scheduleErr := manager.Schedule(t.Context(), "1.2.3", "abc", "https://app.example.test")
+	if scheduleErr == nil || job != "" || *launches != 0 {
+		t.Fatalf("Schedule = %q, %v after %d launches", job, scheduleErr, *launches)
+	}
+	if state.State != "deploying" {
+		t.Fatalf("the refusal reported %q, not the persisted state", state.State)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("the refusal changed the persisted state: %q -> %q (%v)", before, after, err)
+	}
+	entries, err := os.ReadDir(runtimeDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("the refusal left unexpected files: %v (%v)", entries, err)
+	}
+}
+
+func TestScheduleAdmitsLegacyTransports(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		resolved string
+		current  string
+	}{
+		{"cloudflare without an environment value", "cloudflare", ""},
+		{"gateway without an environment value", "gateway", ""},
+		{"cloudflare with an agreeing environment", "cloudflare", "cloudflare"},
+		{"case and spaces", " Cloudflare ", " CLOUDFLARE "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HERDR_RELAY_TRANSPORT", test.current)
+			manager, runtimeDir, launches, sweeps := scheduleFixture(t, "")
+			manager.SetTransport(test.resolved)
+			job, state, err := manager.Schedule(t.Context(), "1.2.3", "abc", "https://app.example.test")
+			if err != nil {
+				t.Fatalf("a legacy transport was refused: %v", err)
+			}
+			if state.State != "scheduled" || state.TargetVersion != "1.2.3" || state.TargetRevision != "abc" {
+				t.Fatalf("state = %#v", state)
+			}
+			if *launches != 1 || *sweeps != 1 {
+				t.Fatalf("launches = %d, sweeps = %d, want 1 and 1", *launches, *sweeps)
+			}
+			for _, name := range []string{job, "app-deploy-state.json"} {
+				if _, statErr := os.Stat(filepath.Join(runtimeDir, name)); statErr != nil {
+					t.Fatalf("%q was not written: %v", name, statErr)
+				}
+			}
+		})
 	}
 }

@@ -37,6 +37,40 @@ var appDeployEnvironmentKeys = [...]string{
 	"HERDR_GITHUB_TOKEN_FILE",
 }
 
+// workerProxyEnvironmentKeys are the ordinary proxy variables a service-local
+// proxy may set. The job is serialized into a launchd plist and a systemd-run
+// argument vector, neither of which is a secret store, so a value reaches the
+// detached worker only when workerProxyForwardable accepts it.
+var workerProxyEnvironmentKeys = [...]string{
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+}
+
+// workerProxyForwardable reports whether a proxy variable may be handed to the
+// detached worker: non-blank and free of credentials. It fails closed and never
+// reports or logs a refused value, because the value may be a credential.
+// NO_PROXY is a host list, not a URL, so it is forwarded unless blank. Every
+// other value must parse as a proxy URL (a missing scheme means http, as for
+// Go's proxy resolution) without userinfo or "@" anywhere in it; anything that
+// does not parse is dropped.
+func workerProxyForwardable(key, value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return false
+	}
+	if strings.EqualFold(key, "NO_PROXY") {
+		return true
+	}
+	if strings.Contains(trimmed, "@") {
+		return false
+	}
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "http://" + trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	return err == nil && parsed.User == nil && parsed.Host != ""
+}
+
 var sweepWorkers = launchd.SweepWorkers
 
 var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -536,11 +570,16 @@ func updateWorkerJob(
 	executable, jobPath, transport string,
 	lookupEnv func(string) (string, bool),
 ) launchd.Job {
-	environment := make(map[string]string, len(appDeployEnvironmentKeys)+1)
+	environment := make(map[string]string, len(appDeployEnvironmentKeys)+len(workerProxyEnvironmentKeys)+1)
 	environment[workerTransportKey] = transport
 	for _, key := range appDeployEnvironmentKeys {
 		value, present := lookupEnv(key)
 		if present && strings.TrimSpace(value) != "" {
+			environment[key] = value
+		}
+	}
+	for _, key := range workerProxyEnvironmentKeys {
+		if value, present := lookupEnv(key); present && workerProxyForwardable(key, value) {
 			environment[key] = value
 		}
 	}
@@ -553,7 +592,9 @@ func updateWorkerJob(
 
 func systemdRunArgs(job launchd.Job) []string {
 	args := []string{"--user", "--collect", "--unit=" + job.Label}
-	for _, key := range append([]string{workerTransportKey}, appDeployEnvironmentKeys[:]...) {
+	keys := append([]string{workerTransportKey}, appDeployEnvironmentKeys[:]...)
+	keys = append(keys, workerProxyEnvironmentKeys[:]...)
+	for _, key := range keys {
 		if value, forwarded := job.Environment[key]; forwarded {
 			args = append(args, "--setenv="+key+"="+value)
 		}

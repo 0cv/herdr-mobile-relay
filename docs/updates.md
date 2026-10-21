@@ -118,6 +118,34 @@ Pages cache state. Set `HERDR_APP_DEPLOY_ATTACH_DOMAIN=true` to allow that
 without being asked, or `false` to refuse. Otherwise it names the credential to
 set and offers to take a different origin.
 
+Phone-triggered app deployment is refused on every Tailscale transport
+(`tailscale`, `tailscale-external`, `tailscale-cli`), and whenever the relay's
+resolved transport is not `cloudflare` or `gateway`, or a set
+`HERDR_RELAY_TRANSPORT` disagrees with it — the same rule that refuses
+phone-managed updates; the environment can veto but never override. A
+Tailscale phone loads its app from the relay over the tailnet, so publishing to
+the public Pages origin would serve no phone, and the relay does not start a
+public publication on a remote request. The refusal comes before any job file,
+worker, or state change, and reports the stored deployment state, never a
+scheduled one. The `cloudflare` and `gateway` transports are unchanged.
+
+## Proxies and the detached update worker
+
+A phone-driven update runs in a detached worker. Its environment is written into
+a launchd plist or a `systemd-run` command line, neither of which is a secret
+store, so the worker receives only a short allowlist of variables. That list
+includes the proxy variables `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+`NO_PROXY`, and their lowercase forms, but a value is passed on only when it is
+non-blank and credential-free. A proxy URL must parse and carry no user
+information (`user:password@host`) and no `@`; `NO_PROXY` is a host list and is
+passed on unless blank. Any other value is dropped without being logged,
+because it may be a credential, and the worker then runs without that proxy.
+
+A credentialed proxy is therefore not handed to the detached worker. If your
+network requires one, configure that proxy for the system, or in `relay.env`
+without credentials; the relay's own credentialed proxy variables never reach a
+phone-driven update.
+
 ## Release checks and app reloads
 
 Release checks use the GitHub API. When an unauthenticated request is rate

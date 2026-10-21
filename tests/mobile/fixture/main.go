@@ -46,6 +46,7 @@ const (
 	maxRequestPaths   = 512
 	maxFaultEvents    = 1_024
 	maxActiveFaults   = 128
+	maxStallBarriers  = 128
 	maxFaultResponses = 100
 	maxFaultLifetime  = 5 * time.Minute
 	controlSecretSize = 32
@@ -113,6 +114,7 @@ type responseFault struct {
 	LifetimeMs int       `json:"lifetime_ms,omitempty"`
 	ExpiresAt  time.Time `json:"-"`
 	key        string
+	instance   uint64
 	admitted   bool
 	inFlight   int
 }
@@ -132,6 +134,7 @@ type releaseRouter struct {
 	actions            []faultAction
 	repairPolicies     map[string]*repairPolicy
 	nextSequence       uint64
+	nextFaultInstance  uint64
 	invalidated        bool
 	invalidationReason string
 }
@@ -470,10 +473,15 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 			return errors.New("stall barrier must be a short safe label")
 		}
 		if _, ok := r.barriers[fault.Barrier]; !ok {
+			if len(r.barriers) >= maxStallBarriers {
+				return errors.New("stall barrier limit reached")
+			}
 			r.barriers[fault.Barrier] = make(chan struct{})
 		}
 	}
+	r.nextFaultInstance++
 	copy := fault
+	copy.instance = r.nextFaultInstance
 	r.faults[key] = &copy
 	return nil
 }
@@ -617,7 +625,7 @@ func (r *releaseRouter) finishFault(fault *responseFault) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	active := r.faults[fault.key]
-	if active == nil || active.ID != fault.ID || active.Generation != fault.Generation {
+	if active == nil || active.instance != fault.instance {
 		return
 	}
 	if active.inFlight > 0 {

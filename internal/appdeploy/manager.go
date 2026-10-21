@@ -45,6 +45,7 @@ type Manager struct {
 	nodeDir    string
 	reason     string
 	required   bool
+	transport  string // resolved relay transport; the environment is only a veto
 
 	mu     sync.Mutex
 	launch func(context.Context, string) error
@@ -107,6 +108,36 @@ func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
 // instead of upgrading past an app that could not be deployed first.
 func (m *Manager) Required() bool {
 	return m.required
+}
+
+// SetTransport records the relay's resolved transport, which Schedule needs for
+// admission. Until it is set the transport is unknown and Schedule refuses.
+func (m *Manager) SetTransport(transport string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transport = strings.ToLower(strings.TrimSpace(transport))
+}
+
+// transportAdmission refuses app deployment on every Tailscale transport, where
+// the phone loads the app from the relay itself, and on an unknown or
+// inconsistent transport. It mirrors update.transportAdmission, which this
+// package cannot import: the resolved policy is immutable for a relay lifetime,
+// and the process environment, re-read at admission, may veto but never override
+// it. Keep the two decisions aligned.
+func transportAdmission(resolved, current string) error {
+	resolved = strings.ToLower(strings.TrimSpace(resolved))
+	current = strings.ToLower(strings.TrimSpace(current))
+	tailscale := func(value string) bool {
+		return value == "tailscale" || value == "tailscale-external" || value == "tailscale-cli"
+	}
+	if tailscale(resolved) || tailscale(current) {
+		return errors.New("Phone-triggered app deployment is unavailable on Tailscale transports: the phone loads the app from the relay over the tailnet, so a public Pages deployment is not started")
+	}
+	legacy := func(value string) bool { return value == "cloudflare" || value == "gateway" }
+	if !legacy(resolved) || (current != "" && (!legacy(current) || current != resolved)) {
+		return errors.New("Phone-triggered app deployment requires an explicit, consistent transport policy; stop and verify configuration before deploying the app")
+	}
+	return nil
 }
 
 // ValidateOrigin pins a phone-triggered deployment to this relay's configured
@@ -179,6 +210,11 @@ func (m *Manager) State() PublicState {
 func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevision, expectedOrigin string) (string, PublicState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Admit before anything is read, reconciled, written or launched; a refusal
+	// reports the persisted state as it is and never claims a deployment.
+	if err := transportAdmission(m.transport, os.Getenv("HERDR_RELAY_TRANSPORT")); err != nil {
+		return "", m.public(m.persistedState()), err
+	}
 	state := m.loadState()
 	if m.reason != "" {
 		return "", state, errors.New(m.reason)
@@ -226,19 +262,25 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 	return filepath.Base(jobPath), m.public(scheduled), nil
 }
 
-func (m *Manager) loadState() PublicState {
-	state := State{State: "idle"}
-	statePath := filepath.Join(m.runtimeDir, "app-deploy-state.json")
-	data, err := os.ReadFile(statePath)
-	if err == nil {
-		var loaded State
-		if json.Unmarshal(data, &loaded) == nil && validDeployState(loaded.State) {
-			state = loaded
-		}
+// persistedState reads the stored deployment state without reconciling it.
+func (m *Manager) persistedState() State {
+	data, err := os.ReadFile(filepath.Join(m.runtimeDir, "app-deploy-state.json"))
+	if err != nil {
+		return State{State: "idle"}
 	}
+	var loaded State
+	if json.Unmarshal(data, &loaded) != nil || !validDeployState(loaded.State) {
+		return State{State: "idle"}
+	}
+	return loaded
+}
+
+func (m *Manager) loadState() PublicState {
+	state := m.persistedState()
+	statePath := filepath.Join(m.runtimeDir, "app-deploy-state.json")
 	if state.State == "deploying" || scheduledStateExpired(state) {
 		recoverAppDeployState(m.runtimeDir, false)
-		data, err = os.ReadFile(statePath)
+		data, err := os.ReadFile(statePath)
 		if err == nil {
 			var recovered State
 			if json.Unmarshal(data, &recovered) == nil && validDeployState(recovered.State) {

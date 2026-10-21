@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -244,6 +245,86 @@ func TestReleaseRouterStaleStallCompletionCannotRetireNewGeneration(t *testing.T
 	}
 	if active := router.activeFaults(); len(active) != 0 {
 		t.Fatalf("replacement generation remains active: %#v", active)
+	}
+}
+
+func TestReleaseRouterStaleStallCompletionCannotRetireSameGenerationReplacement(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	waitForRequests := func(count int) {
+		deadline := time.Now().Add(time.Second)
+		for len(router.snapshotRequests()) < count && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if len(router.snapshotRequests()) < count {
+			t.Fatalf("expected %d admitted requests", count)
+		}
+	}
+	// The generation is omitted, so it defaults to the ID: both faults are identical to a reader of ID and generation.
+	if err := router.addFault(responseFault{ID: "same", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "entry-1", Remaining: 1, LifetimeMs: 60_000}); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/index.html", nil))
+		close(firstDone)
+	}()
+	waitForRequests(1)
+	if err := router.addFault(responseFault{ID: "same", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "entry-2", Remaining: 1, LifetimeMs: 60_000}); err != nil {
+		t.Fatal(err)
+	}
+	secondDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/index.html", nil))
+		close(secondDone)
+	}()
+	waitForRequests(2)
+	if err := router.releaseBarrier("entry-1"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not finish")
+	}
+	if active := router.activeFaults(); len(active) != 1 || active[0].Barrier != "entry-2" {
+		t.Fatalf("stale completion retired the same-generation replacement: %#v", active)
+	}
+	if err := router.releaseBarrier("entry-2"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second request did not finish")
+	}
+	if active := router.activeFaults(); len(active) != 0 {
+		t.Fatalf("replacement remains active after its own completion: %#v", active)
+	}
+}
+
+func TestStallBarrierAllocationIsBoundedAcrossReplacements(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	var refused error
+	for i := 0; i < 4*maxStallBarriers && refused == nil; i++ {
+		refused = router.addFault(responseFault{ID: "key", Generation: "gen", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: fmt.Sprintf("barrier-%d", i), Remaining: 1, LifetimeMs: 60_000})
+	}
+	if refused == nil {
+		t.Fatalf("unique stall barriers were never refused; %d retained", len(router.barriers))
+	}
+	if len(router.barriers) > maxStallBarriers {
+		t.Fatalf("%d barrier channels retained, limit %d", len(router.barriers), maxStallBarriers)
+	}
+	// Reusing an already declared barrier name is still allowed at the limit.
+	if err := router.addFault(responseFault{ID: "key", Generation: "gen2", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "barrier-0", Remaining: 1, LifetimeMs: 60_000}); err != nil {
+		t.Fatalf("reusing a declared barrier was refused: %v", err)
 	}
 }
 

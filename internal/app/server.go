@@ -610,7 +610,7 @@ func newServerWithStartup(
 		conversationM:       conversationReader,
 		conversationB:       conversationBrowser,
 		updateM:             newUpdateManager(cfg, version, revision, healthURL),
-		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
+		appDeployM:          newAppDeployManager(cfg, version, revision),
 		uploadM:             uploadManager,
 		deviceAuth:          deviceStore,
 		bootstrapGate:       bootstrapGate,
@@ -631,6 +631,13 @@ func newServerWithStartup(
 		historyActive:       make(map[string]bool),
 		pushTestLast:        make(map[string]time.Time),
 	}
+}
+
+// Pass the resolved transport so app deployment refuses Tailscale transports.
+func newAppDeployManager(cfg *config.Config, version, revision string) *appdeploy.Manager {
+	manager := appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision)
+	manager.SetTransport(cfg.Transport)
+	return manager
 }
 
 // Pass resolved policy before the manager can reconcile persisted update state.
