@@ -85,6 +85,13 @@ function validateNativePath(steps: any[], dimension: 'inputs' | 'matrix'): void 
   assert.match(check[0].run, /check --contract report/u);
   for (const flag of ['directory', 'identity', 'bundle-set', 'run-id', 'attempt', 'suite', 'baseline', 'scenario', 'source-run-head-sha']) assert.match(check[0].run, new RegExp('--' + flag + ' '));
   assert.doesNotMatch(check[0].run, /--output|continue-on-error|\|\| true/u);
+  const settle = steps.filter(step => step.run?.includes('tests/mobile/android-gms-settle.ts'));
+  assert.equal(settle.length, 1);
+  assert.equal(settle[0].if, `${dimension}.platform == 'android'`);
+  assert.equal(settle[0].run, 'set -euo pipefail\nbun tests/mobile/android-gms-settle.ts --serial "$ANDROID_SERIAL" --output "$MOBILE_OUTPUT/android-gms-settle.json"\n');
+  const appium = steps.findIndex(step => step.name === 'Start Appium');
+  const scenarios = steps.map((step, index) => step.run?.includes('bun run --cwd tests/mobile run --') ? index : -1).filter(index => index >= 0);
+  assert.ok(appium >= 0 && scenarios.length > 0 && appium < steps.indexOf(settle[0]) && scenarios.every(index => steps.indexOf(settle[0]) < index));
   const sanitize = steps.find(step => step.name === 'Sanitize bounded diagnostics');
   assert.equal(sanitize.if, 'always()'); assert.doesNotMatch(sanitize.run, /cat .*mobile-result/u);
   const summary = steps.find(step => step.name === 'Publish bounded mobile summary');
@@ -338,7 +345,7 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
   }
   return completed;
 }
-export const workflowMutationNames = ['android-barrier-smoke-edge', 'android-barrier-gate-edge', 'android-barrier-gate-guard', 'android-barrier-uncancellable', 'android-barrier-strict', 'android-barrier-platform', 'android-barrier-prefix', 'android-barrier-skip-tolerated', 'ios-runner-label', 'strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
+export const workflowMutationNames = ['gms-settle-order', 'gms-settle-platform', 'gms-settle-swallow', 'android-barrier-smoke-edge', 'android-barrier-gate-edge', 'android-barrier-gate-guard', 'android-barrier-uncancellable', 'android-barrier-strict', 'android-barrier-platform', 'android-barrier-prefix', 'android-barrier-skip-tolerated', 'ios-runner-label', 'strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
   ['mobile workflow SM59 10 ordinary and strict aggregation', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
@@ -454,6 +461,12 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
       if (mutation === 'strict-edge') w.jobs.device.needs = w.jobs.device.needs.filter((name: string) => name !== 'smoke_qualification');
       if (mutation === 'qualified-flag') { const step = w.jobs.gate.steps.find((step: any) => step.run?.includes('validate-evidence.ts')); step.run = step.run.replace('--contract qualified', '--contract product'); }
       if (mutation === 'native-continue') a.runs.steps.find((step: any) => step.name === 'Run installed-PWA upgrade scenarios')['continue-on-error'] = true;
+      if (mutation === 'gms-settle-order') {
+        const index = a.runs.steps.findIndex((step: any) => step.run?.includes('android-gms-settle.ts'));
+        a.runs.steps.push(...a.runs.steps.splice(index, 1));
+      }
+      if (mutation === 'gms-settle-platform') w.jobs.device.steps.find((step: any) => step.run?.includes('android-gms-settle.ts')).if = 'always()';
+      if (mutation === 'gms-settle-swallow') a.runs.steps.find((step: any) => step.run?.includes('android-gms-settle.ts')).run += ' || true';
       if (mutation === 'upload-always') a.runs.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@')).if = 'success()';
       if (mutation === 'no-files') w.jobs.device.steps.find((step: any) => step.uses?.startsWith('actions/upload-artifact@')).with['if-no-files-found'] = 'warn';
       if (mutation === 'attempt') w.jobs.smoke_evidence.steps.find((step: any) => step.uses?.startsWith('actions/download-artifact@')).with.pattern = 'mobile-evidence-smoke-*';

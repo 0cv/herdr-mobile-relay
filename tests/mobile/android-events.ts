@@ -78,16 +78,22 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
   };
   const events: string[] = [];
   const cleanExits: { record: LogRecord; pid: string }[] = [];
-  const intervals = planned.map((operation) => ({ ...operation, begun: false,
+  const intervals = planned.map((operation) => ({ ...operation, begun: false, stopping: false,
     eligible: new Map(Object.entries(operation.processes).filter(([pid]) => !records.some((record) =>
       record.tag === 'ActivityManager' && record.message.startsWith(`Start proc ${pid}:`)
       && (record.lineNumber > operation.startLine || record.time >= operation.start)
       && (record.lineNumber < operation.endLine || record.time <= operation.end)))),
   }));
-  const forcedStops = new Map<string, { name: string; since: number; until: number; startLine: number; endLine: number }>();
-  const exempt = (pid: string, name: string, time: number, lineNumber: number) => {
+  const forcedStops = new Map<string, { name: string; since: number; until: number; startLine: number; endLine: number; reaped?: { killLine: number; exitLine?: number } }>();
+  const exempt = (pid: string, name: string, record: LogRecord) => {
     const stopped = forcedStops.get(pid);
-    return stopped?.name === name && time >= stopped.since && time <= stopped.until && lineNumber > stopped.startLine && lineNumber < stopped.endLine;
+    const { time, lineNumber } = record;
+    if (stopped?.name !== name || time < stopped.since || time > stopped.until || lineNumber <= stopped.startLine || lineNumber >= stopped.endLine) return false;
+    if (!stopped.reaped || lineNumber === stopped.reaped.killLine) return true;
+    if (record.tag !== 'Zygote' || processes[record.pid] !== 'com.android.chrome_zygote'
+      || ![`Process ${pid} exited cleanly (0)`, `Process ${pid} exited due to signal 9 (Killed)`].includes(record.message)) return false;
+    stopped.reaped.exitLine ??= lineNumber;
+    return stopped.reaped.exitLine === lineNumber;
   };
   for (const record of records) {
     const { tag, message, time, pid } = record;
@@ -104,11 +110,23 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
         for (const operation of intervals) if (operation.begun) operation.eligible.delete(start[1]);
       }
       const killing = message.match(/^Killing (\d+):([^/\s]+)\/u0[a-z0-9]+ .*: stop (\S+) due to from pid \d+(?: \([^)]+\))?$/u);
-      if (killing) {
+      if (killing && !killing[2].includes(':sandboxed_process')) {
         const operation = intervals.find((entry) => time >= entry.start && time <= entry.end
           && record.lineNumber > entry.startLine && record.lineNumber < entry.endLine
           && entry.packageName === killing[3] && entry.eligible.get(killing[1]) === killing[2]);
         if (operation) forcedStops.set(killing[1], { name: killing[2], since: time, until: operation.end, startLine: operation.startLine, endLine: operation.endLine });
+      }
+      const inInterval = (entry: typeof intervals[number]) => time >= entry.start && time <= entry.end
+        && record.lineNumber > entry.startLine && record.lineNumber < entry.endLine;
+      if (processes[pid] === 'system_server' && /^Force stopping com\.android\.chrome appid=\d+ user=0: from pid \d+$/u.test(message)) {
+        for (const operation of intervals) if (operation.packageName === 'com.android.chrome' && inInterval(operation)) operation.stopping = true;
+      }
+      // A Chrome force-stop also unbinds its sandboxed helpers, which the system may then kill as no longer needed instead of as part of the stop.
+      const reaped = message.match(/^Killing (\d+):(com\.android\.chrome:sandboxed_process0:org\.chromium\.content\.app\.SandboxedProcessService0:\d+)\/u0a\d+i-\d+ \(adj -?\d+\): isolated not needed$/u);
+      if (reaped && processes[pid] === 'system_server') {
+        const operation = intervals.find((entry) => entry.stopping && inInterval(entry)
+          && entry.packageName === 'com.android.chrome' && entry.eligible.get(reaped[1]) === reaped[2]);
+        if (operation && !forcedStops.has(reaped[1])) forcedStops.set(reaped[1], { name: reaped[2], since: time, until: operation.end, startLine: operation.startLine, endLine: operation.endLine, reaped: { killLine: record.lineNumber } });
       }
     }
     const source = identity(pid, record);
@@ -132,7 +150,7 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     const cleanPid = tag === 'Zygote' ? message.match(/^Process (\d+) exited cleanly \(0\)$/u)?.[1] : undefined;
     const cleanTarget = cleanPid ? identity(cleanPid, record) : undefined;
     if (cleanPid && cleanTarget && relevant(cleanTarget.name)
-      && !exempt(cleanPid, cleanTarget.name, time, record.lineNumber)) cleanExits.push({ record, pid: cleanPid });
+      && !exempt(cleanPid, cleanTarget.name, record)) cleanExits.push({ record, pid: cleanPid });
     let targetPid = '';
     let targetName = '';
     if (tag === 'ActivityManager') {
@@ -150,7 +168,7 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     const completeTermination = (tag === 'Process' && /^Sending signal\. PID: \d+ SIG: \d+$/u.test(message))
       || (tag === 'Zygote' && /^Process \d+ exited (?:due to signal \d+ \([^)]+\)|cleanly \(\d+\))$/u.test(message))
       || (tag === 'ActivityManager' && /^(?:Killing \d+:\S+\/\S+ .*: .+|Process \S+ \(pid \d+\) has died: .+)$/u.test(message));
-    if (relevant(targetName) && (!completeTermination || !exempt(targetPid, targetName, time, record.lineNumber))) events.push(record.line);
+    if (relevant(targetName) && (!completeTermination || !exempt(targetPid, targetName, record))) events.push(record.line);
     if (tag === 'ActivityManager') remember(targetPid, targetName, record);
   }
   for (const { record, pid } of cleanExits) {
@@ -216,30 +234,48 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const exits = records.filter((record) => record.tag === 'Zygote' && record.message.startsWith(`Process ${pid} exited`));
     const children = records.filter((record) => record.pid === pid && record.tag === 'chromium'
       && /^\[INFO:child_process_service\.cc\(\d+\)\] ChildProcessService: Exiting child process\.$/u.test(record.message));
-    if (births.length !== 1 || forks.length !== 1 || exits.length !== 1 || children.length !== 1) continue;
+    if (births.length !== 1 || forks.length !== 1 || exits.length !== 1 || children.length > 1) continue;
     const fork = forks[0];
     const exit = exits[0];
-    const child = children[0];
+    const child: LogRecord | undefined = children[0];
+    const reapers = records.filter((record) => record.tag === 'ActivityManager' && record.pid === birth.pid
+      && record.message.startsWith(`Killing ${pid}:`));
+    // The system reaps an isolated helper once Chrome stops binding it; the zygote then reports either the helper's own exit or the kill.
+    const reaper = reapers.length === 1 && androidEventDetails(reapers[0].line).reason === 'isolated not needed' ? reapers[0] : undefined;
+    const cleanExit = exit.message === `Process ${pid} exited cleanly (0)`;
+    const killedByReaper = Boolean(reaper) && exit.message === `Process ${pid} exited due to signal 9 (Killed)`;
     const service = processName.match(/SandboxedProcessService0:(\d+)$/u)?.[1];
     const startupMessages = [
       { priority: 'I', message: 'Using CollectorTypeCMC GC.' },
       { priority: 'W', message: 'Unexpected CPU variant for x86: x86_64.' },
       { priority: 'W', message: 'Known variants: atom, sandybridge, silvermont, goldmont, goldmont-plus, goldmont-without-sha-xsaves, tremont, kabylake, default' },
     ];
+    // Android logs a process by the last 15 characters of its name, and the child may log its first startup lines before the zygote logs the fork.
+    const startupTag = processName.slice(-15).replace(/:\d+$/u, '');
     const startup = records.filter((record) => record.pid === pid && record.lineNumber < fork.lineNumber);
-    if (startup.length > 0 && (!service || startup.length !== startupMessages.length || startup.some((record, index) => {
+    if (startup.length > 0 && (!service || startup.length > startupMessages.length || startup.some((record, index) => {
       const expected = startupMessages[index];
-      return record.tid !== pid || record.priority !== expected.priority || record.tag !== 'cessService0'
-        || record.message !== `${service}: ${expected.message}` || record.lineNumber !== fork.lineNumber - startupMessages.length + index
-        || record.time < fork.time - 2 || record.time > fork.time || !bounded(record)
+      return record.tid !== pid || record.priority !== expected.priority || record.tag !== startupTag
+        || record.message !== `${service}: ${expected.message}` || record.lineNumber !== fork.lineNumber - startup.length + index
+        || record.time < fork.time - 20 || record.time > fork.time || !bounded(record)
         || (index > 0 && record.time < startup[index - 1].time);
     }))) continue;
     const startupLines = new Set(startup.map((record) => record.lineNumber));
     const lifetimeStart = startup[0] || fork;
-    if (exit.message !== `Process ${pid} exited cleanly (0)` || fork.pid !== exit.pid
-      || processes[fork.pid] !== 'com.android.chrome_zygote'
-      || !(fork.time <= birth.time && birth.time < child.time && child.time <= exit.time)
-      || !(fork.lineNumber < birth.lineNumber && birth.lineNumber < child.lineNumber && child.lineNumber < exit.lineNumber)) continue;
+    const childBeforeExit = Boolean(child) && birth.time < child!.time && child!.time <= exit.time
+      && birth.lineNumber < child!.lineNumber && child!.lineNumber < exit.lineNumber;
+    const childProof = cleanExit && childBeforeExit;
+    const reaperProof = Boolean(reaper) && (cleanExit || killedByReaper) && (child ? childBeforeExit : reaper!.time - fork.time <= 2_000)
+      && birth.time < reaper!.time && reaper!.time <= exit.time && exit.time - reaper!.time <= 1_000
+      && birth.lineNumber < reaper!.lineNumber && reaper!.lineNumber < exit.lineNumber;
+    const zygoteBirths = records.filter((record) => record.tag === 'Zygote' && record.message === `Forked child process ${fork.pid}`);
+    const chromeZygote = processes[fork.pid] === 'com.android.chrome_zygote'
+      || (!processes[fork.pid] && remaining[fork.pid] === 'com.android.chrome_zygote' && zygoteBirths.length === 1
+        && processes[zygoteBirths[0].pid] === 'zygote64' && bounded(zygoteBirths[0])
+        && zygoteBirths[0].time <= fork.time && zygoteBirths[0].lineNumber < fork.lineNumber
+        && !records.some((record) => record.tag === 'Zygote' && record.message.startsWith(`Process ${fork.pid} exited`)));
+    if (fork.pid !== exit.pid || !chromeZygote || !(fork.time <= birth.time && fork.lineNumber < birth.lineNumber)
+      || !(childProof || reaperProof)) continue;
     const conflictingAuditSubject = records.some((record) => record.pid === pid
       && /^type=1400\s+audit\(/u.test(record.message)
       && [...record.message.matchAll(/\sscontext=(\S*)/gu)].some((context) => context[1] !== 'u:r:isolated_app:s0:c512,c768'));
@@ -258,7 +294,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       record.message.includes(`audit(0.0:${subject.serial}):`)).length !== 1))) continue;
     if (records.some((record) => record.pid === pid && record.tag === 'cr_SplitCompatApp'
       && !record.message.endsWith(` processName=${processName} isIsolatedProcess=true`))) continue;
-    if ([fork, birth, child, exit, ...records.filter((record) => record.pid === pid)].some((record) => !bounded(record))) continue;
+    if ([fork, birth, ...(child ? [child] : []), ...(reaper ? [reaper] : []), exit, ...records.filter((record) => record.pid === pid)].some((record) => !bounded(record))) continue;
     const auditLines = new Set(auditSubjects.map((subject) => subject.lineNumber));
     if (records.some((record) => (record.tag === 'ActivityManager'
       && [fork.pid, birth.pid].some((producerPid) => record.message.startsWith(`Start proc ${producerPid}:`)))
@@ -266,8 +302,10 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
         || record.time > exit.time
         || (record.lineNumber > exit.lineNumber && !auditLines.has(record.lineNumber)))))) continue;
     const deaths = events.filter((line) => androidEventDetails(line).pid === pid);
-    if (deaths.length !== 1) continue;
-    const deathRecords = deaths.map((line) => records.find((record) => record.line === line));
+    if (deaths.length !== (killedByReaper ? 2 : 1) || (killedByReaper && !deaths.includes(exit.line))) continue;
+    const deathRecords = deaths.filter((line) => !killedByReaper || line !== exit.line)
+      .map((line) => records.find((record) => record.line === line));
+    if (!childProof && !deathRecords.includes(reaper)) continue;
     if (deathRecords.some((record) => !record || !bounded(record) || record.lineNumber <= birth.lineNumber || record.time < birth.time || record.time > exit.time + 1000
       || record.tag !== 'ActivityManager' || record.pid !== birth.pid
       || (() => {
@@ -290,6 +328,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const ended = Math.max(exit.time, ...deathRecords.map((record) => record!.time));
     const endedLine = Math.max(exit.lineNumber, ...deathRecords.map((record) => record!.lineNumber));
     const adverse = records.some((record) => {
+      if (killedByReaper && record === exit) return false;
       const possiblyDuringLifetime = (record.time >= lifetimeStart.time || record.lineNumber >= lifetimeStart.lineNumber)
         && (record.time <= ended || record.lineNumber <= endedLine);
       if (possiblyDuringLifetime && record.tag === 'ActivityManager' && /^Force stopping com\.android\.chrome(?:\s|$)/u.test(record.message)
@@ -306,7 +345,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     });
     if (adverse) continue;
     result.push({ pid, processName, packageName: 'com.android.chrome', uid: Number(isolated) + 90000, auditSubjects,
-      proof: [...startup, fork, birth, child, exit, ...deathRecords as LogRecord[]].sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
+      proof: [...startup, fork, birth, ...(child ? [child] : []), exit, ...deathRecords as LogRecord[]].sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
   }
   return result;
 }

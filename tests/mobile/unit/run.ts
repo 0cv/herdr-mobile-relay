@@ -52,6 +52,7 @@ import {
 
 import { androidTransitionTests } from './android-transitions';
 import { androidEventTests } from './android-events';
+import { androidGmsSettleTests } from './android-gms-settle';
 import { androidEnvironmentTests, validateFakeAdbDiagnostic, type FakeAdbDiagnostic, type FakeAdbDiagnosticEvent, type FakeAdbDiagnosticStage, type FakeAdbExitCategory, type FakeAdbFixturePathCategory } from './android-environment';
 import { androidTransportTests } from './android-transport';
 import { nativeStartupTests } from './native-startup';
@@ -2366,7 +2367,7 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
   assert.deepEqual(contexts, ['NATIVE_APP', 'WEBVIEW_OLD', 'NATIVE_APP', 'WEBVIEW_NEW']);
 });
 
-for (const [name, body] of [...androidTransitionTests, ...androidEventTests]) test(name, body);
+for (const [name, body] of [...androidTransitionTests, ...androidEventTests, ...androidGmsSettleTests]) test(name, body);
 for (const [name, body] of scenarioRunnerTests) test(name, body);
 for (const [name, body] of androidProductEnvironmentTests) test(name, body);
 for (const [name, body] of mobileWorkflowTests) test(name, body);

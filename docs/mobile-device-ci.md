@@ -23,8 +23,8 @@ drift, changed dependency identity, firstFatal, ownership/session/target loss,
 invalid inspection or collection still blocks product smoke. Unknown child
 relation is INDETERMINATE, also blocking: different browser and child PIDs, later
 HTTP success, `isolated not needed`, or an unknown initiator do not prove a death
-unrelated. Existing complete normal-retirement and exact planned-cold policies
-remain unchanged; no general signal/exit-zero exemption is introduced.
+unrelated. Only the complete normal-retirement and exact planned-cold policies
+below exempt a death; there is no general signal or exit-zero exemption.
 
 The recorder is activated by the runner, not by ordinary driver admission. It
 retains actual owner-object ordinals, native birth/kernel capability, bounded
@@ -148,12 +148,37 @@ APKM, installs the library first, and then installs all Chrome splits. The
 hosted emulator uses the declared Google APIs image without the Play Store and
 records GMS, module, Chrome, and Trichrome identities before and after each
 Android scenario; package replacement or a forced restart fails qualification
-and is independently assessed for product impact. The owner-approved normal-retirement exception admits only
-isolated Chrome sandbox helpers with a complete in-interval fork/start identity,
-orderly Chromium child exit, and matching Zygote exit status zero. The schema-3
+and is independently assessed for product impact. A cold-booted emulator's GMS
+sends its module init intents once at boot but on hosted runners takes up to
+about three minutes to finish them, enabling and disabling its own components
+until it logs `NewModuleHelper: Completed all new module init intents for all
+processes.` Each Android job therefore runs one step before its scenario step
+that samples every 5 seconds until that line is in the main log buffer and the
+normalized GMS component state has then been unchanged for 20 seconds. If that
+does not happen by device uptime 600 seconds, or three consecutive samples fail,
+the step only warns and the unchanged strict before/after comparison decides; a
+drop in device uptime between samples fails the step. Once sampling ends,
+`android-gms-settle.json` records the decision, sampling failures and every
+sample, and the step only warns if that file cannot be written. The
+normal-retirement exception admits only
+isolated Chrome sandbox helpers with a complete in-interval fork/start identity
+whose Chrome zygote is in the START inventory, or is absent from it and was forked
+exactly once, by `zygote64`, inside the measurement, remains in the END inventory
+and never exits. The helper must then end with either an orderly Chromium child
+exit and matching Zygote exit status zero, or one system_server `isolated not
+needed` kill with the matching isolated UID followed within one second by that
+Zygote's report of exit status zero or SIGKILL; without the Chromium child exit
+the kill must come within two seconds of the fork. A planned Chrome force-stop
+also covers helpers from its observed process set that the system kills as
+`isolated not needed` after system_server logs `Force stopping com.android.chrome`
+for user 0 inside the exact operation interval; that exemption admits only the
+kill and one following START-inventory Chrome zygote report of exit status zero or
+SIGKILL, so any other signal, crash or second exit stays fatal. The schema-3
 check retains raw observations and numbered proof lines, reporting normal helper
 lifetimes separately from fatal events and distinguishing event counts from PID
-counts. Ordinary helper observations require both timestamp and capture-order
+counts. Android logs a helper by the last 15 characters of its process name, and
+a contiguous prefix of its three runtime startup lines may precede the Zygote fork
+record by at most 20 ms. Ordinary helper observations require both timestamp and capture-order
 lifetime bounds and must fit both START/END marker bounds, including audit subject
 timestamps. Capture is monitored, receive-bounded `main`/`system` logcat, not an
 exhaustive or lossless all-producer generation-time trace. Producers sample time
@@ -174,9 +199,11 @@ numeric UID and unique audit serial qualify; original timestamps remain bounded,
 pre-fork publication and adverse content still reject. This textual reference
 contract is not authenticated socket provenance or runtime-image attestation.
 Missing, ambiguous, reused or contradictory identities and incomplete log
-coverage fail closed; force-stop, signals, nonzero exits, crashes and replacement
-evidence override clean-exit evidence. An `isolated not needed` reason alone is
-never sufficient. Main/privileged Chrome processes and GMS are not covered, and
+coverage fail closed; force-stop, other signals, nonzero exits, crashes and
+replacement evidence override clean-exit evidence. Within normal retirements and
+the planned force-stop exemption, the only accepted helper signal is the SIGKILL
+completing a matching system `isolated not needed` kill, and that reason is never
+sufficient without the complete helper identity or planned operation. Main/privileged Chrome processes and GMS are not covered, and
 native/document ownership and required teardown guarantees remain blocking.
 Only the component-only product policy described above differs from strict
 configuration qualification. Android 15's package manager stores a static-library record

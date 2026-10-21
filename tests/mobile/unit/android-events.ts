@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { measuredAndroidEvents, parseAndroidAuditSubject } from '../android-events';
 import type { AndroidEnvironmentSnapshot, AndroidPlannedTermination } from '../android-environment';
 
@@ -12,6 +13,9 @@ const child = line(3, 200, 'chromium', '[INFO:child_process_service.cc(72)] Chil
 const death = line(4, 559, 'ActivityManager', `Killing 200:${processName}/u0a145i-8998 (adj 0): isolated not needed`);
 const exit = line(5, 100, 'Zygote', 'Process 200 exited cleanly (0)');
 const body = fork + birth + child + death + exit;
+const quickDeath = death.replace('6374.000', '6372.500');
+const quickExit = exit.replace('6375.000', '6372.600');
+const quickBody = fork + birth + quickDeath + quickExit;
 const uid = line(2, 200, 'CompatChangeReporter', 'Compat change id reported: 242716250; UID 90002; state: ENABLED');
 const recordedProcessName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22';
 const recordedLine = (value: string) => `${value}\n`;
@@ -77,14 +81,14 @@ export const androidEventTests: [string, () => Promise<void>][] = [
     }
     assert.equal(measure(start + body.replace(child, child + unrelated.replace('6370', '6373').replace('user=0', 'user=1')) + end).normalRetirements.length, 1);
   }],
-  ['recorded startup skew admits the exact two-millisecond boundary and covers pre-fork adverse events', async () => {
+  ['recorded startup skew admits the exact twenty-millisecond boundary and covers pre-fork adverse events', async () => {
     const log = recordedStart + recordedBody + recordedEnd;
-    const exactBoundary = log.replace('1790252389.327 9917', '1790252389.326 9917');
+    const exactBoundary = log.replace('1790252389.327 9917', '1790252389.308 9917');
     const accepted = measureRecorded(exactBoundary);
     assert.equal(accepted.normalRetirements.length, 1);
     assert.deepEqual(accepted.fatalEvents, []);
-    assert.equal(accepted.normalRetirements[0].proof[0].line, recordedStartup.split('\n')[0].replace('1790252389.327', '1790252389.326'));
-    const outside = measureRecorded(log.replace('1790252389.327 9917', '1790252389.325 9917'));
+    assert.equal(accepted.normalRetirements[0].proof[0].line, recordedStartup.split('\n')[0].replace('1790252389.327', '1790252389.308'));
+    const outside = measureRecorded(log.replace('1790252389.327 9917', '1790252389.307 9917'));
     assert.equal(outside.normalRetirements.length, 0);
     assert.ok(outside.fatalEvents.includes(recordedDeath.trimEnd()));
     const forceStop = recordedLine('         1790252389.327 553 1783 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 50');
@@ -342,7 +346,10 @@ const negative: [string, string][] = [
   ['audit adverse content retained', auditBody + audit.replace('arbitrary.txt', 'fatal-signal.txt')],
   ['audit does not cover unknown post-exit execution', auditBody + audit + line(3, 200, 'Other', 'unknown')],
   ['audit does not replace clean-exit proof', auditBody.replace(exit, '') + audit],
-  ['signal9 with isolated-not-needed', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)'))],
+  ['signal9 after a different kill reason', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)')).replace('isolated not needed', 'remove task')],
+  ['crash signal after isolated-not-needed', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 11 (Segmentation fault)'))],
+  ['signal9 without the system reaping record', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)')).replace(death, '')],
+  ['signal9 reaped helper with an additional signal', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)')) + line(8, 559, 'Process', 'Sending signal. PID: 200 SIG: 9')],
   ['nonzero', body.replace('cleanly (0)', 'cleanly (1)')],
   ['contradictory exit', body + exit.replace('6375', '6376').replace('cleanly (0)', 'due to signal 9 (Killed)')],
   ['late contradictory signal', body + line(8, 559, 'Process', 'Sending signal. PID: 200 SIG: 9')],
@@ -350,7 +357,13 @@ const negative: [string, string][] = [
   ['duplicate death observation', body + death],
   ['missing fork', body.replace(fork, '')],
   ['missing birth', body.replace(birth, '')],
-  ['missing child', body.replace(child, '')],
+  ['missing child and system reaping record', quickBody.replace(quickDeath, '')],
+  ['missing child after a different kill reason', quickBody.replace('isolated not needed', 'remove task')],
+  ['missing child with system reaping after the exit', fork + birth + quickExit + quickDeath.replace('6372.500', '6372.700')],
+  ['missing child with exit more than one second after reaping', quickBody.replace(quickExit, quickExit.replace('6372.600', '6373.501'))],
+  ['missing child with duplicate system reaping', quickBody + quickDeath],
+  ['missing child after a helper lifetime over two seconds', body.replace(child, '')],
+  ['missing child and kill signal after a helper lifetime over two seconds', body.replace(child, '').replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)'))],
   ['missing system exit', body.replace(exit, '')],
   ['reused PID', body + birth.replace('6372', '6376')],
   ['wrong user', body.replace('/u0ai2', '/u1ai2')],
@@ -385,6 +398,117 @@ const negative: [string, string][] = [
   ['backwards child clock', body.replace('6373.000', '6371.000')],
   ...['com.android.chrome', 'com.android.chrome:privileged_process0', 'com.google.android.gms'].map((name): [string, string] => [name + ' clean death', body.replaceAll(processName, name)]),
 ];
+androidEventTests.push(['synthetic system-reaped helper admits a missing child exit or the kill signal only with the reaping record', async () => {
+  const killed = exit.replace('cleanly (0)', 'due to signal 9 (Killed)');
+  const quickKilled = quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)');
+  for (const [name, value, events, ending] of [
+    ['missing child', quickBody, [quickDeath], quickExit],
+    ['kill signal', body.replace(exit, killed), [death, killed], killed],
+    ['missing child and kill signal', quickBody.replace(quickExit, quickKilled), [quickDeath, quickKilled], quickKilled],
+  ] as [string, string, string[], string][]) {
+    const log = start + value + end;
+    const result = measure(log);
+    assert.deepEqual(result.issues, [], name);
+    assert.deepEqual(result.fatalEvents, [], name);
+    assert.equal(result.normalRetirements.length, 1, name);
+    assert.deepEqual(result.normalRetirements[0].events, events.map((entry) => entry.trimEnd()), name);
+    for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line, name);
+    assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === events[0].trimEnd()), name);
+    assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === ending.trimEnd()), name);
+  }
+}]);
+
+const hostedProcesses = {
+  before: { '364': 'zygote64', '559': 'system_server', '5242': 'com.android.chrome', '5283': 'com.android.chrome_zygote' },
+  after: { '364': 'zygote64', '559': 'system_server', '12943': 'com.android.chrome', '12987': 'com.android.chrome_zygote' },
+};
+const hostedSnapshot = (boundary: 'start' | 'end', processes: Record<string, string>) => ({
+  measurement: { id: '8ef766af-ac79-417d-a2a7-7007e7d12d91', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const measureHosted = (log: string, after: Record<string, string> = hostedProcesses.after) => measuredAndroidEvents(log,
+  hostedSnapshot('start', hostedProcesses.before), hostedSnapshot('end', after), []);
+const hostedHelperLog = () => readFile(new URL('./fixtures/android-hosted-39634239574-helper-retirements.log', import.meta.url), 'utf8');
+
+androidEventTests.push(['hosted 39634239574 helpers retire through interleaved startup, system reaping and a relaunched Chrome zygote', async () => {
+  const log = await hostedHelperLog();
+  const result = measureHosted(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => [retirement.pid, retirement.events.length]), [['5716', 1], ['9619', 2], ['13837', 1]]);
+  const interleaved = result.normalRetirements[0].proof;
+  assert.match(interleaved[0].line, /5716 {2}5716 I ocessService0:3: Using CollectorTypeCMC GC\.$/u);
+  assert.match(interleaved[1].line, /Forked child process 5716$/u);
+  for (const retirement of result.normalRetirements) {
+    for (const proof of retirement.proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+}]);
+
+const hostedRejections: [string, string, (log: string) => string, Record<string, string>?][] = [
+  ['reaped helper with a different kill reason', '9619', (log) => log.replace('(adj 0): isolated not needed\n         1792601029.076', '(adj 0): remove task\n         1792601029.076')],
+  ['reaped helper with a crash signal', '9619', (log) => log.replace('Process 9619 exited due to signal 9 (Killed)', 'Process 9619 exited due to signal 11 (Segmentation fault)')],
+  ['relaunched zygote missing from the final inventory', '13837', (log) => log, { '364': 'zygote64', '559': 'system_server', '12943': 'com.android.chrome' }],
+  ['relaunched zygote forked by an unknown parent', '13837', (log) => log.replace('1792601069.463   364   364 D Zygote', '1792601069.463   365   365 D Zygote')],
+  ['relaunched zygote with a second fork record', '13837', (log) => log.replace(/^( *1792601069\.463 +364 +364 D Zygote *: Forked child process 12987\n)/mu, '$1$1')],
+  ['relaunched zygote that exited', '13837', (log) => log.replace('Process 13837 exited cleanly (0)\n', 'Process 13837 exited cleanly (0)\n         1792601081.095 12987 12987 I Zygote  : Process 12987 exited cleanly (0)\n')],
+  ['startup line more than twenty milliseconds before the fork', '5716', (log) => log.replace('1792600976.843  5716', '1792600976.826  5716')],
+  ['startup line with a foreign process tag', '5716', (log) => log.replace('I ocessService0:3: Using', 'I cessService0:3: Using')],
+  ['startup lines that are not the leading startup messages', '5716', (log) => log.replace('I ocessService0:3: Using CollectorTypeCMC GC.', 'W ocessService0:3: Unexpected CPU variant for x86: x86_64.')],
+];
+for (const [name, pid, mutate, after] of hostedRejections) androidEventTests.push([`hosted 39634239574 helper rejection: ${name}`, async () => {
+  const original = await hostedHelperLog();
+  const log = mutate(original);
+  assert.notEqual(log === original, after === undefined, 'each rejection must change the log or the final inventory');
+  const result = measureHosted(log, after);
+  assert.ok(!result.normalRetirements.some((retirement) => retirement.pid === pid));
+  assert.ok(result.fatalEvents.some((event) => event.includes(` ${pid}:`) || event.includes(`Process ${pid} `)));
+}]);
+
+androidEventTests.push(['synthetic planned Chrome force-stop covers observed helpers the system reaps inside the operation', async () => {
+  const helper = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
+  const operation: AndroidPlannedTermination = {
+    id: 'stop', measurementId: 'synthetic', packageName: 'com.android.chrome', pid: '300',
+    processes: { '300': 'com.android.chrome', '301': helper }, succeeded: true,
+    command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'],
+  };
+  const processes: Record<string, string> = { '100': 'com.android.chrome_zygote', '300': 'com.android.chrome', '301': helper, '559': 'system_server' };
+  const begin = line(2, 1, 'HerdrMeasure', 'synthetic OP_BEGIN stop com.android.chrome 300');
+  const finish = line(6, 1, 'HerdrMeasure', 'synthetic OP_END stop com.android.chrome 300');
+  const stopping = line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50');
+  const kill = line(3, 559, 'ActivityManager', 'Killing 300:com.android.chrome/u0a145 (adj 0): stop com.android.chrome due to from pid 50');
+  const reap = line(4, 559, 'ActivityManager', `Killing 301:${helper}/u0a145i-9000 (adj 0): isolated not needed`);
+  const helperExit = line(4, 100, 'Zygote', 'Process 301 exited due to signal 9 (Killed)');
+  const signal = line(5, 100, 'Zygote', 'Process 300 exited due to signal 9 (Killed)');
+  const check = (log: string, operations = [operation], before = processes) => measuredAndroidEvents(log, snapshot('start', before), snapshot('end'), operations);
+  const operationLog = (...records: string[]) => start + begin + records.join('') + finish + end;
+  const valid = operationLog(stopping, kill, reap, helperExit, signal);
+  assert.deepEqual(check(valid).issues, []);
+  assert.deepEqual(check(valid).fatalEvents, []);
+  assert.deepEqual(check(operationLog(stopping, kill, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal)).fatalEvents, []);
+  const otherProcesses = { ...operation, processes: { '300': 'com.android.chrome' } };
+  const otherName = { ...operation, processes: { '300': 'com.android.chrome', '301': `${helper}1` } };
+  for (const [name, log, operations] of [
+    ['helper outside the observed process set', valid, [otherProcesses]],
+    ['helper with a different observed name', valid, [otherName]],
+    ['reaping received after the operation', start + begin + stopping + kill + signal + finish + reap + helperExit + end, [operation]],
+    ['reaping timestamped after the operation', operationLog(stopping, kill, reap.replace('6374.000', '6377.000'), helperExit, signal), [operation]],
+    ['reaping before the force-stop record', operationLog(reap, helperExit, stopping, kill, signal), [operation]],
+    ['force-stop record for another user', operationLog(stopping.replace('user=0', 'user=10'), kill, reap, helperExit, signal), [operation]],
+    ['reaping by an unknown producer', operationLog(stopping, kill, reap.replace('559 559', '558 558'), helperExit, signal), [operation]],
+    ['different reaping reason', operationLog(stopping, kill, reap.replace('isolated not needed', 'remove task'), helperExit, signal), [operation]],
+    ['crash signal after reaping', operationLog(stopping, kill, reap, helperExit.replace('signal 9 (Killed)', 'signal 11 (Segmentation fault)'), signal), [operation]],
+    ['additional signal after reaping', operationLog(stopping, kill, reap, helperExit, line(4, 559, 'Process', 'Sending signal. PID: 301 SIG: 9'), signal), [operation]],
+    ['second exit after reaping', operationLog(stopping, kill, reap, helperExit, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal), [operation]],
+    ['helper exit from an unknown zygote', operationLog(stopping, kill, reap, helperExit.replace('100 100', '101 101'), signal), [operation]],
+    ['force-stop record from an unknown producer', operationLog(stopping.replace('559 559', '558 558'), kill, reap, helperExit, signal), [operation]],
+    ['repeated reaping record', operationLog(stopping, kill, reap, reap, helperExit, signal), [operation]],
+    ['reaping repeated after the exit', operationLog(stopping, kill, reap, helperExit, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal), [operation]],
+  ] as [string, string, AndroidPlannedTermination[]][]) {
+    const result = check(log, operations);
+    assert.deepEqual(result.issues, [], name);
+    assert.ok(result.fatalEvents.some((event) => event.includes('301')), name);
+  }
+}]);
+
 for (const [name, value] of negative) androidEventTests.push([`synthetic helper rejection: ${name}`, async () => {
   const result = measure(start + value + end);
   assert.equal(result.normalRetirements.length, 0);

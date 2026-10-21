@@ -338,6 +338,12 @@ runs:
         sed -n '1,160p' "$RUNNER_TEMP/appium.log" >&2
         exit 1
       shell: bash
+    - name: Wait for Google Play services components to settle
+      if: inputs.platform == 'android'
+      run: |
+        set -euo pipefail
+        bun tests/mobile/android-gms-settle.ts --serial "$ANDROID_SERIAL" --output "$MOBILE_OUTPUT/android-gms-settle.json"
+      shell: bash
     - name: Run installed-PWA upgrade scenarios
       if: inputs.scenario == 'historical'
       run: |
