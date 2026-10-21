@@ -54,7 +54,12 @@
   }));
   const connection = $derived($connections.get(relayId));
   // The relay refuses the home folder itself; only a project folder below it can run an agent.
-  const atHome = $derived(Boolean(connection?.directoryBrowser && !connection.directoryBrowser.parent));
+  // Only the listing of the selected folder counts: a failed reload keeps an older listing.
+  const atHome = $derived(Boolean(
+    connection?.directoryBrowser
+    && connection.directoryBrowser.current.path === cwd
+    && !connection.directoryBrowser.parent,
+  ));
   const profiles = $derived(connection?.agentProfiles || []);
   const targetWorkspace = $derived(
     $workspaces.find((workspace) => (
@@ -114,7 +119,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (!relayId || readOnly || connection?.directoryLoading || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
+    if (!relayId || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
     submitting = true;
     error = false;
     status = 'Starting agent…';
@@ -227,7 +232,7 @@
         {/if}
       </div>
       {#if atHome}
-        <p class="hint" role="status">Pick a project folder: agents cannot start in the home folder itself.</p>
+        <p id="launch-cwd-hint" class="hint" role="status">Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.</p>
       {:else}
         <p class="hint">The folder shown above is selected. Tap it to browse; use ↑ or Parent folder to go back.</p>
       {/if}
@@ -238,7 +243,7 @@
       <label for="launch-prompt">Initial task <span class="optional">(optional)</span></label>
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>
       <p class="hint">Sent to the agent as its first prompt after it starts.</p>
-      <Button type="submit" disabled={submitting || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
+      <Button type="submit" aria-describedby={atHome ? 'launch-cwd-hint' : undefined} disabled={submitting || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
       {#if status}<p class:error class="form-status" role="status">{status}</p>{/if}
     </form>
   </Card>

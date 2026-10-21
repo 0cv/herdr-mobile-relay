@@ -1280,30 +1280,30 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
+  const homeListing = { current: { path: '/home/user', label: '~' }, parent: '', directories: [] };
+  const projectListing = { current: { path: '/home/user/project', label: '~/project' }, parent: '/home/user', directories: [] };
   it.each([
-    ['the home folder, which the relay refuses', '/home/user', '', true],
-    ['a project folder below it', '/home/user/project', '/home/user', false],
-  ])('offers Start Agent only for a project folder: %s', async (_case, path, parent, refused) => {
-    const listing = { current: { path, label: path === '/home/user' ? '~' : '~/project' }, parent, directories: [] };
+    ['the home folder, which the relay refuses', '/home/user', homeListing, () => Promise.resolve(homeListing), true],
+    ['a project folder below it', '/home/user/project', projectListing, () => Promise.resolve(projectListing), false],
+    // A failed reload keeps the older listing, which must not veto the selected project folder.
+    ['a project folder whose reload failed over an older home listing', '/home/user/project', homeListing, () => Promise.reject(new CommandError('Relay timed out')), false],
+  ])('offers Start Agent only for a project folder: %s', async (_case, cwd, shown, load, refused) => {
+    const hint = 'Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.';
     const connection = {
       status: 'connected', inventory: { state: 'ready' }, capabilities: ['directory_browser'],
       agentProfiles: [{ id: 'claude', label: 'Claude Code' }],
-      directoryBrowser: listing, directoryLoading: false, directoryError: '',
+      directoryBrowser: shown, directoryLoading: false, directoryError: '',
     } as unknown as RelayConnectionView;
     relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
     relayStore.connections.set(new Map([['fedora', connection as never]]));
-    const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue(listing as never);
+    const list = vi.spyOn(relayStore, 'listDirectories').mockImplementation(load as never);
     try {
-      render(LaunchView, { relayId: 'fedora', cwd: path });
-      const start = screen.getByRole('button', { name: 'Start Agent' });
+      render(LaunchView, { relayId: 'fedora', cwd });
+      const start = screen.getByRole('button', { name: 'Start Agent' }) as HTMLButtonElement;
       await vi.waitFor(() => expect(list).toHaveBeenCalled());
-      if (refused) {
-        await vi.waitFor(() => expect(start).toBeDisabled());
-        expect(screen.getByText('Pick a project folder: agents cannot start in the home folder itself.')).toBeInTheDocument();
-      } else {
-        await vi.waitFor(() => expect(start).toBeEnabled());
-        expect(screen.queryByText(/agents cannot start in the home folder/)).not.toBeInTheDocument();
-      }
+      await vi.waitFor(() => expect(start.disabled).toBe(refused));
+      expect(start).toHaveAccessibleDescription(refused ? hint : '');
+      expect(Boolean(screen.queryByText(hint))).toBe(refused);
     } finally {
       list.mockRestore();
       relayStore.connections.set(new Map());
