@@ -965,7 +965,7 @@ export class AndroidEnvironmentMeasurement {
       if (this.collectorFailure) throw this.collectorFailure;
       const output = Buffer.concat(this.chunks).toString('utf8');
       const complete = output.slice(0, output.lastIndexOf('\n') + 1);
-      const expected = new RegExp(`^\\d{10}\\.\\d{3,9}\\s+\\d+\\s+\\d+\\s+I\\s+HerdrMeasure: ${this.id} ${marker}\\r?$`, 'mu');
+      const expected = new RegExp(`^\\s*\\d{10}\\.\\d{3,9}\\s+\\d+\\s+\\d+\\s+I\\s+HerdrMeasure: ${this.id} ${marker}\\r?$`, 'mu');
       if (expected.test(complete)) return;
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {

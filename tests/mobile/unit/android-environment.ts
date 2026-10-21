@@ -5903,7 +5903,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         finally { resolveWorkerFinished(); }
       },
     });
-    collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(triggerPath)})){fs.rmSync(${JSON.stringify(triggerPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I adbd: timeout expired while flushing socket, closing\\n')}if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
+    collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch.padStart(23)+'  5606  5606 I HerdrMeasure: ${measurement.id} START\\n')},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(triggerPath)})){fs.rmSync(${JSON.stringify(triggerPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3).padStart(23)+'   546   561 I adbd    : timeout expired while flushing socket, closing\\n')}if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3).padStart(23)+'  6233  6233 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.exit(0)})`;
     try {
       const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
       measurement.requireGmsObservations();
@@ -6052,6 +6052,23 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.deepEqual(trailing.observe(Buffer.from(marker('1790000000.200', suffix)), 102), []);
       assert.equal(trailing.failure, 'collector measurement start marker was malformed or duplicated');
     }
+    // Device logcat right-aligns the epoch column and pads short tags, as recorded on the hosted emulator.
+    const deviceFormat = new AndroidTransportTriggerDetector(id);
+    assert.deepEqual(deviceFormat.observe(Buffer.from(`         1790000000.100  5606  5606 I HerdrMeasure: ${id} START\n`), 101), []);
+    assert.equal(deviceFormat.failure, undefined);
+    const deviceCandidates = deviceFormat.observe(Buffer.from('         1790000000.200   546   561 I adbd    : timeout expired while flushing socket, closing\n'), 102);
+    assert.equal(deviceFormat.failure, undefined);
+    assert.equal(deviceCandidates.length, 1);
+    assert.equal(deviceCandidates[0].guestEpochSeconds, '1790000000.200');
+    assert.equal(deviceCandidates[0].anchorGuestEpochSeconds, '1790000000.100');
+    const deviceDuplicate = new AndroidTransportTriggerDetector(id);
+    deviceDuplicate.observe(Buffer.from(`         1790000000.100  5606  5606 I HerdrMeasure: ${id} START\n`), 101);
+    assert.deepEqual(deviceDuplicate.observe(Buffer.from(`         1790000000.150  5606  5606 I HerdrMeasure: ${id} START\n`), 102), []);
+    assert.equal(deviceDuplicate.failure, 'collector measurement start marker was malformed or duplicated');
+    const deviceMalformedTrigger = new AndroidTransportTriggerDetector(id);
+    deviceMalformedTrigger.observe(Buffer.from(`         1790000000.100  5606  5606 I HerdrMeasure: ${id} START\n`), 101);
+    assert.deepEqual(deviceMalformedTrigger.observe(Buffer.from('         1790000000.200   546   561 I adbd    : timeout expired while flushing socket, closing now\n'), 102), []);
+    assert.equal(deviceMalformedTrigger.failure, 'collector transport trigger record was malformed');
     const unrelated = new AndroidTransportTriggerDetector(id);
     assert.deepEqual(unrelated.observe(Buffer.from(flush('1790000000.900').replace('77 77 I adbd:', 'malformed adbd:')), 100), []);
     assert.equal(unrelated.failure, undefined);

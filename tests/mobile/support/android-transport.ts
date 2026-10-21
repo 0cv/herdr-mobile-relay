@@ -252,7 +252,7 @@ export class AndroidTransportTriggerDetector {
         continue;
       }
       if (line.includes(`HerdrMeasure: ${this.measurementId} `)) {
-        const marker = line.match(/^(\d{10}\.\d{3,9})\s+\d+\s+\d+\s+I\s+HerdrMeasure:\s+([A-Za-z0-9-]{1,80}) (.*)$/u);
+        const marker = line.match(/^\s*(\d{10}\.\d{3,9})\s+\d+\s+\d+\s+I\s+HerdrMeasure:\s+([A-Za-z0-9-]{1,80}) (.*)$/u);
         if (!marker || marker[2] !== this.measurementId) {
           this.failureValue = 'collector measurement start marker was malformed or duplicated';
           return [];
@@ -265,8 +265,8 @@ export class AndroidTransportTriggerDetector {
         this.anchor = { guestEpochSeconds: marker[1], monotonicMs };
         continue;
       }
-      if (!this.anchor || this.accepted || !line.includes('adbd:') || !line.includes('timeout expired while flushing socket, closing')) continue;
-      const signal = line.match(/^(\d{1,10}\.\d{3,9})\s+\d+\s+\d+\s+[VDIWEF]\s+adbd:\s+timeout expired while flushing socket, closing$/u);
+      if (!this.anchor || this.accepted || !/\badbd\s*:/u.test(line) || !line.includes('timeout expired while flushing socket, closing')) continue;
+      const signal = line.match(/^\s*(\d{1,10}\.\d{3,9})\s+\d+\s+\d+\s+[VDIWEF]\s+adbd\s*:\s+timeout expired while flushing socket, closing$/u);
       if (!signal) {
         this.failureValue = 'collector transport trigger record was malformed';
         return [];
