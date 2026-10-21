@@ -1779,11 +1779,11 @@ service_removal_read_bounded() {
 # Supported systemd vocabulary is deliberately narrow: loaded with a known
 # active state and enabled/disabled, or coherent not-found/inactive/no unit.
 # Launchd requires the domain to answer (status only: its listing is never read),
-# an exact label header and the documented not-found diagnostic, and the
+# an exact label header and the documented not-found diagnostic (alone or beside launchctl's `Bad request.` line), and the
 # print-disabled grammar named at native_install_observe (relay/native-install-transaction.sh),
 # read identically here. Loaded/waiting is never quiet. Missing disabled entry is enabled.
 service_removal_observe() {
-    local manager="$1" label="$2" output line code=0 domain uid count=0 load="" active="" enabled="" l=0 a=0 e=0 probe_status name state=0
+    local manager="$1" label="$2" output line code=0 domain uid count=0 load="" active="" enabled="" l=0 a=0 e=0 probe_status name state=0 notfound
     local LC_ALL=C
     SERVICE_REMOVAL_STATE=unknown SERVICE_REMOVAL_ENABLED=unknown
     export -n SERVICE_REMOVAL_STATE SERVICE_REMOVAL_ENABLED
@@ -1833,7 +1833,9 @@ service_removal_observe() {
     code="${output##*$'\n'}"; code="${code%.}"
     output="${output%$'\n'*}"; output="${output%$'\n'}"
     if [ "$code" -ne 0 ]; then
-        [ "$output" = "Could not find service \"$label\" in domain for user gui: $uid" ] || return 1
+        # The exact not-found diagnostic, alone or beside modern launchctl's `Bad request.` line: the same three texts as native_install_observe, nothing else.
+        notfound="Could not find service \"$label\" in domain for user gui: $uid"
+        case "$output" in "$notfound"|"Bad request."$'\n'"$notfound"|"$notfound"$'\n'"Bad request.") ;; *) return 1 ;; esac
         active=absent
     else
         case "$output" in "$domain/$label = {"$'\n'*'}'|"$domain/$label = {}") ;; *) return 1 ;; esac

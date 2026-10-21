@@ -1179,9 +1179,63 @@ def finish_cells():
     print('uninstall CLI cells completed: %d of %d (tier %s, shard %d/%d)' % (len(plan['selected']), len(plan['inventory']), plan['tier'], plan['shard_index'], plan['shard_count']), flush=True)
 
 
+def launchd_not_found_control():
+    # Task Z. Not a cell (the frozen inventories of tests/service_qualification_matrix.py do not grow, and the adapters above are digest-pinned): the REAL service_removal_observe, sourced from the repository,
+    # reads modern launchctl's two-line answer for a label that is not loaded. A nonzero label query is absence only when its merged `2>&1` text, after ONE terminating LF, is exactly the diagnostic
+    # (macOS 12 and earlier), `Bad request.` + LF + the diagnostic, or the diagnostic + LF + `Bad request.` (a stdout line buffered under `2>&1` can follow an unbuffered stderr one); every other text,
+    # and any status of 0, is unknown.
+    label, uid = 'com.herdr-mobile-relay.service', str(os.getuid())
+    diag = lambda name, user=uid: 'Could not find service "' + name + '" in domain for user gui: ' + user
+    ours, bad, framed = diag(label), 'Bad request.', 'gui/' + uid + '/' + label + ' = {\n}\n'
+    script = r'''set +e
+. "$REPO/relay/common.sh"
+launchctl() { case "$1" in print) case "$2" in gui/*/*) printf '%s' "$OUT"; printf '%s' "$ERR" >&2; return "$CODE" ;; *) printf '%s = {}' "$2" ;; esac ;; print-disabled) printf 'disabled services = {}\n' ;; esac; }
+if service_removal_observe launchd "$LABEL"; then echo "$SERVICE_REMOVAL_STATE:$SERVICE_REMOVAL_ENABLED"; else echo unknown:unknown; fi
+'''
+    # (stdout, stderr, status): the product merges the two streams, stdout first
+    accepted = [('', ours + '\n', 113), (ours + '\n', '', 113), ('', bad + '\n' + ours + '\n', 113), (bad + '\n' + ours + '\n', '', 113), ('', ours + '\n' + bad + '\n', 113),
+                ('', bad + '\n' + ours, 1), (bad + '\n', ours + '\n', 113), (ours + '\n', bad + '\n', 255)]
+    refused = [('', bad + '\n\n' + ours + '\n', 113), (bad + '\n\n', ours + '\n', 113),  # a blank line between the two
+               ('', bad + '\n' + diag('com.example.other') + '\n', 113), ('', bad + '\n' + diag(label, str(os.getuid() + 1)) + '\n', 113),  # another label, another uid
+               ('', bad + '\n' + ours + '\n', 0), (bad + '\n' + ours + '\n', '', 0), ('', ours + '\n', 0),  # a status of 0 is no not-found diagnostic
+               ('', bad + '\n' + bad + '\n' + ours + '\n', 113), ('', bad + '\r\n' + ours + '\n', 113), ('', bad + ' ' + ours + '\n', 113), ('', 'bad request.\n' + ours + '\n', 113),
+               ('', bad + '\n' + ours + '\nextra\n', 113), ('', bad + '\n' + ours + '\n\n', 113), ('', bad + '\n', 113), ('', '', 113),
+               (framed, '', 113), (bad + '\n' + framed, '', 113)]  # a loaded answer is never absence, whatever the status
+    # The grammar variants, byte for byte those of tests/test_native_manager_lifecycle_matrix.py (NOT_FOUND_ACCEPTED and NOT_FOUND_REFUSED; a matrix test compares them, so the three never drift): {b} is `Bad request.`,
+    # {d} the exact diagnostic of this label and uid, {dl} the diagnostic of another label, {du} of another uid, {dc} a cut diagnostic and {dlow} the lower-cased one.
+    NOT_FOUND_ACCEPTED = ('{d}', '{d}\n', '{b}\n{d}', '{b}\n{d}\n', '{d}\n{b}', '{d}\n{b}\n')
+    NOT_FOUND_REFUSED = (
+        '{b}', '{b}\n', '', '\n', '\n\n',  # the other line alone, nothing at all
+        '{b}\n\n{d}', '{b}\n\n{d}\n', '{d}\n\n{b}', '{d}\n\n{b}\n',  # a blank line between the two
+        '{b}\n{b}\n{d}', '{b}\n{d}\n{d}', '{b}\n{d}\n{b}', '{d}\n{b}\n{d}', '{d}\n{d}', '{d}\n{d}\n{b}', '{b}\n{b}',  # a repeated line
+        '{b}\r\n{d}', '{b}\n{d}\r', '{b}\r\n{d}\r\n', '{d}\r\n{b}', '{d}\n{b}\r', '{b}\r{d}',  # a CR
+        '{b} {d}', '{b}{d}', '{d} {b}', '{d}{b}', '{b}\n{d} {b}',  # the two on one line
+        'bad request.\n{d}', 'BAD REQUEST.\n{d}', 'Bad Request.\n{d}', '{b}\n{dlow}', '{dlow}', 'Bad request\n{d}', 'Bad request..\n{d}', '{b}.\n{d}',  # case and spelling
+        '{b}\n{dl}', '{dl}\n{b}', '{b}\n{du}', '{du}\n{b}', '{b}\n{dc}', '{dc}',  # another label, another uid, a cut diagnostic
+        '{b}\n{d}\nextra', 'extra\n{b}\n{d}', '{b}\nextra\n{d}', '{b}\n{d} ', ' {b}\n{d}', '{b} \n{d}', '{b}\n {d}', '\n{b}\n{d}', '{d}\n{b}\nextra',  # extra text or blanks
+        '{b}\n{d}\n\n', '{d}\n{b}\n\n', '{b}\n{d}\n\n\n', '{d}\n\n')  # a second trailing LF
+    fill = lambda template: template.format(b=bad, d=ours, dl=diag('com.example.other'), du=diag(label, str(os.getuid() + 1)), dc=ours[:-1], dlow=ours.lower())
+    # The whole text arrives merged (here on stderr; the product reads `2>&1`): every accepted form at status 113 (and at 1 and 255 for three), none at status 0; every refused variant at 113, and five of them at 0, 2 and 255.
+    accepted += [('', fill(x), code) for x in NOT_FOUND_ACCEPTED for code in ((113, 1, 255) if x in ('{d}', '{b}\n{d}\n', '{d}\n{b}\n') else (113,))]
+    refused += [('', fill(x), 113) for x in NOT_FOUND_REFUSED] + [('', fill(x), 0) for x in NOT_FOUND_ACCEPTED]
+    refused += [('', fill(x), code) for x in ('{b}\n\n{d}\n', '{b}\n{dl}', '{b}\n{du}', '{d}\n{b}\r', '{b}\n{d}\n\n') for code in (0, 2, 255)]
+    # The same texts split across the two streams (stdout first, as the merge orders them): the accepted forms stay absence at the cut, the refused ones stay refused.
+    for x, first in (('{b}\n{d}\n', '{b}\n'), ('{d}\n{b}\n', '{d}\n'), ('{b}\n{d}', '{b}\n'), ('{d}\n{b}', '{d}\n'), ('{d}\n', '{d}')):
+        accepted.append((fill(x)[:len(fill(first))], fill(x)[len(fill(first)):], 113))
+    for x in ('{b}\n\n{d}\n', '{b}\n{dl}\n', '{b}\n{du}\n', '{b}\n{d}\n\n'):
+        refused.append((fill(x)[:fill(x).index('\n') + 1], fill(x)[fill(x).index('\n') + 1:], 113))
+    for expected, cases in (('absent:true', accepted), ('unknown:unknown', refused)):
+        for out, err, code in cases:
+            with tempfile.TemporaryDirectory() as home:
+                done = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-c', script], capture_output=True, cwd=REPO, timeout=30,
+                                      env={'PATH': '/usr/bin:/bin', 'HOME': home, 'REPO': str(REPO), 'LABEL': label, 'OUT': out, 'ERR': err, 'CODE': str(code)})
+            assert done.stdout.decode().strip() == expected, ('modern not-found answer', out, err, code, done.stdout, done.stderr[:200])
+
+
 def main():
     if os.getuid() == 0: raise SystemExit('removal fixtures must run as a non-root hosted user')
     select_cells()
+    launchd_not_found_control()
     if cell('control/timeout-diagnostics'): timeout_diagnostics_control()
     if cell('control/fast-stub-equivalence'): fast_stub_equivalence_control()
     if cell('control/metadata-batch'): metadata_batch_control()

@@ -322,8 +322,11 @@ if name in ("systemctl", "launchctl"):
                 if kind in malformed_paths:
                     body += malformed_paths[kind] + "/Library/LaunchAgents/" + args[1].rsplit("/", 1)[1] + ".plist\n"
                 native_capture("label", key, (body + "}\n").encode())
-            payload = ('Could not find service "' + args[1].rsplit("/", 1)[1] + '" in domain for user gui: ' + str(os.getuid()) + "\n").encode()
-            native_capture("label", key, payload, 113, stderr=True)
+            payload = 'Could not find service "' + args[1].rsplit("/", 1)[1] + '" in domain for user gui: ' + str(os.getuid()) + "\n"
+            # macOS 13+ answers a label that is not loaded with `Bad request.` and then the diagnostic (status 113), macOS 12 and earlier with the diagnostic alone: the current label answers as
+            # the modern launchctl does, the legacy label as the old one, so every cell reads both forms as absence.
+            if key == "current": payload = "Bad request.\n" + payload
+            native_capture("label", key, payload.encode(), 113, stderr=True)
         if command == "print-disabled":
             # The fault cells (NATIVE_FAILURE set) answer in the macOS 13+ layout (indented, keyword states, a trailing login-item section); the others keep macOS 12's (true|false).
             modern = bool(os.getenv("NATIVE_FAILURE"))

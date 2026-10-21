@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Hermetic tests of the matrix/gate and the static wiring of the native-manager lifecycle workflow: only a fresh temporary directory is written; no manager, sudo, relay or network is touched."""
+import ast
 import atexit
 import contextlib
 import copy
@@ -95,7 +96,8 @@ def facts(os_name, **over):
 
 
 DIAG = {"gui_print_status": "0", "gui_nul": "clean", "gui_bytes": "1234", "gui_print_err": "none", "disabled_status": "0", "disabled_bytes": "321", "disabled_admission": "pass",
-        "disabled_head": "disabled services = {", "disabled_tail": "}", "disabled_err": "none", "baseline_failed": "none", "baseline_label_state": "absent", "baseline_legacy_state": "absent"}
+        "disabled_head": "disabled services = {", "disabled_tail": "}", "disabled_err": "none", "baseline_failed": "none", "baseline_label_state": "absent", "baseline_legacy_state": "absent",
+        "baseline_label_status": "113", "baseline_label_stdout": "empty", "baseline_label_stderr": "bad-request+not-found"}  # the macOS probe's baseline label shape (Task Z), evidence only
 HINT_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ={}"<>()._:/-'  # the sanitized hint class, written out
 
 
@@ -264,7 +266,7 @@ class Matrix(unittest.TestCase):
         # Well-formed diagnostics: integers for statuses and sizes, strings for the rest, every key exactly once; the gate accepts them.
         doc = mac()
         self.assertEqual(set(doc), set(m.PROBE_KEYS))
-        self.assertTrue(set(m.DIAG_KEYS) < set(m.PROBE_KEYS) and len(m.DIAG_KEYS) == 13)
+        self.assertTrue(set(m.DIAG_KEYS) < set(m.PROBE_KEYS) and len(m.DIAG_KEYS) == 16)
         self.assertEqual([doc[k] for k in ("gui_print_status", "gui_bytes", "disabled_status", "disabled_bytes")], [0, 1234, 0, 321])
         self.assertEqual([doc[k] for k in ("gui_nul", "disabled_admission", "disabled_head", "disabled_tail", "gui_print_err", "disabled_err", "baseline_failed", "baseline_label_state")],
                          ["clean", "pass", "disabled services = {", "}", "none", "none", "none", "absent"])
@@ -282,6 +284,8 @@ class Matrix(unittest.TestCase):
         edge += [("gui_bytes", v, w) for v, w in (("0", 0), ("65537", 65537), ("1000000000000", 10 ** 12), ("1000000000001", "not-run"), ("9" * 14, "not-run"), ("-5", "not-run"), ("1e3", "not-run"))]
         edge += [("disabled_bytes", "0", 0), ("disabled_bytes", "1000000000001", "not-run")]
         edge += [("gui_nul", v, v if v in ("clean", "nul", "not-run") else "not-run") for v in ("clean", "nul", "not-run", "unknown", "Clean", "", "clean ")]
+        edge += [("baseline_label_status", v, w) for v, w in (("0", 0), ("113", 113), ("255", 255), ("256", "not-run"), ("-1", "not-run"), ("007", "not-run"), ("1.0", "not-run"), ("", "not-run"), ("x", "not-run"))]
+        edge += [(k, v, v if v in m.LABEL_STREAMS else "not-run") for k in ("baseline_label_stdout", "baseline_label_stderr") for v in m.LABEL_STREAMS + ("unknown", "Empty", "", "empty ", "bad request", "notfound", "framed ")]
         edge += [("disabled_admission", v, v if v != "bogus" else "not-run") for v in ("pass", "over-limit", "nul", "header", "trailer", "empty", "not-run", "bogus")]
         edge += [("baseline_failed", v, v) for v in m.DIAG_ENUM["baseline_failed"]] + [("baseline_failed", "path-other", "not-run"), ("baseline_failed", "path-conf ", "not-run"), ("baseline_failed", "", "not-run")]
         for key_ in m.DIAG_HINT:
@@ -300,7 +304,7 @@ class Matrix(unittest.TestCase):
         # The gate REFUSES anything outside a domain: a typed value of the wrong type or range (bool is not an integer), an enum or hint outside its class, a missing or an extra key.
         good_probe = mac()
         bad = {k: ["unknown", "", None, 1, True, ["clean"], "Clean", "clean "] for k in m.DIAG_ENUM}
-        bad.update({k: [256, -1, True, False, 1.5, "1", "", None, [], {}, "unknown"] for k in ("gui_print_status", "disabled_status")})
+        bad.update({k: [256, -1, True, False, 1.5, "1", "", None, [], {}, "unknown"] for k in ("gui_print_status", "disabled_status", "baseline_label_status")})
         bad.update({k: [10 ** 12 + 1, -1, True, 2.0, "5", "", None, "none"] for k in ("gui_bytes", "disabled_bytes")})
         bad.update({k: ["", "x" * 65, "a;b", "a\nb", "a\tb", "caf\u00e9", None, 1, ["none"], "a\x00b", "a\r", "/PRIVATE/HOME/Library/LaunchAgents/private.plist: denied", "a/b/c", "x /y", "./x", "a/", "<path> denied", "x <path> y", "Smith/x", "a/b",
                           "2FUsers2Frunner2Fsecret", "launchctl error 2FUsers2Frunner2Fsecret", "host john-macbook.local denied", "x" * 64, '"com.apple.x" => true', "{" * 33] for k in m.DIAG_HINT})
@@ -344,11 +348,27 @@ class Matrix(unittest.TestCase):
         for name, value in (("baseline_failed", "hosts"), ("baseline_label_state", "loaded"), ("baseline_legacy_state", "not-run")):
             with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=name):
                 m.check_probe(m.probe_receipt(facts("Linux", **{name: value}), 0, IDENT, "Linux", 1001), IDENT, "Linux")
+        for shape in ({k: DIAG[k] for k in m.LABEL_SHAPE}, {"baseline_label_status": "0", "baseline_label_stdout": "framed", "baseline_label_stderr": "empty"}):  # Linux asks no label query: Task Z
+            with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=shape):
+                m.check_probe(m.probe_receipt(facts("Linux", **shape), 0, IDENT, "Linux", 1001), IDENT, "Linux")
+        # A status alone (F002: no stream beside it is no coherent shape) is no longer kept by the builder: it records `not-run` throughout, which a Linux probe may carry; the same status forged into the
+        # receipt is refused as malformed, and a coherent forged shape as a contradiction.
+        alone = m.probe_receipt(facts("Linux", baseline_label_status="113"), 0, IDENT, "Linux", 1001)
+        self.assertEqual([alone[k] for k in m.LABEL_SHAPE], ["not-run"] * 3)
+        m.check_probe(alone, IDENT, "Linux")
+        with self.assertRaisesRegex(m.Refusal, "malformed probe diagnostics"):
+            m.check_probe(dict(alone, baseline_label_status=113), IDENT, "Linux")
+        with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result"):
+            m.check_probe(dict(alone, baseline_label_status=113, baseline_label_stdout="empty", baseline_label_stderr="bad-request+not-found"), IDENT, "Linux")
         for ok in ({"gui_bytes": "not-run"}, {"disabled_bytes": "not-run"}, {"gui_bytes": "65536", "disabled_bytes": "65536"},
                    {"gui_bytes": "65537"}, {"gui_bytes": "89044"}, {"gui_bytes": str(10 ** 12)}, {"gui_bytes": "89044", "disabled_bytes": "266"},  # macOS 15's domain listing: 89,044 bytes, read by status only; its size is evidence
                    {"gui_nul": "nul"}, {"gui_nul": "not-run"}, {"gui_nul": "nul", "gui_bytes": "89044"},  # the domain listing is read by status alone: a NUL in it (a diagnostic) fails nothing; it was a stage (Task XR F004)
-                   {"gui_print_err": "warn: <x>", "disabled_err": "bad request", "disabled_head": "}", "disabled_tail": "x"}):
-            m.check_probe(mac(**ok), IDENT, "Darwin")  # unmeasured sizes, sizes at the bound, a NUL in the listing and any valid hint are no failed stage
+                   {"gui_print_err": "warn: <x>", "disabled_err": "bad request", "disabled_head": "}", "disabled_tail": "x"},
+                   # Task Z: the baseline label's shape is evidence, never a stage: whatever coherent shape the one extra query got (it is not the observation the baseline decides on) fails nothing
+                   {"baseline_label_status": "113", "baseline_label_stdout": "bad-request", "baseline_label_stderr": "not-found"},
+                   {"baseline_label_status": "0", "baseline_label_stdout": "framed", "baseline_label_stderr": "empty"},
+                   {"baseline_label_status": "1", "baseline_label_stdout": "other", "baseline_label_stderr": "other"}, {k: "not-run" for k in m.LABEL_SHAPE}):
+            m.check_probe(mac(**ok), IDENT, "Darwin")  # unmeasured sizes, sizes at the bound, a NUL in the listing, any valid hint and any coherent label shape are no failed stage
         with self.assertRaisesRegex(m.Refusal, r"the capability probe failed \(complete\)"):
             m.check_probe(mac(manager_pre="unavailable", **alarming), IDENT, "Darwin")  # a failing probe with failed stages is still refused as a failure (the diagnostics explain it)
         original = lambda d, linux: (d["exit"] == 0 and d["manager_post"] == "available" and (linux or d["manager_pre"] == "available") and d["cleanup"] == "pass" and d["trust_negative"] == "refused"
@@ -364,12 +384,22 @@ class Matrix(unittest.TestCase):
     def test_gate_accepts_well_formed_probe_diagnostics_and_refuses_malformed_or_extra_ones(self):
         mac, fresh = key("probe", "macos-15"), lambda **over: m.probe_receipt(facts("Darwin", **dict(DIAG, **over)), 0, IDENT, "Darwin", 501)
         self.assertTrue(run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", fresh())))))
+        self.assertTrue(run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", fresh(baseline_label_status="1", baseline_label_stdout="other", baseline_label_stderr="framed"))))))  # a label shape is evidence (Task Z)
+        for shape in (dict(baseline_label_status="127", baseline_label_stdout="bad-request", baseline_label_stderr="not-found"), dict(baseline_label_status="126", baseline_label_stdout="empty", baseline_label_stderr="empty"),
+                      {k: "not-run" for k in m.LABEL_SHAPE}):  # a launchctl that really exits 126 or 127 (F001), and a query that recorded nothing, are coherent
+            self.assertTrue(run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", fresh(**shape))))))
         self.assertTrue(run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", fresh(disabled_head="}", gui_print_err="Could not find domain for user gui: 501"))))))  # hints are evidence, never a failed stage
         for name, edit in {"out-of-range status": lambda x: x.update(gui_print_status=300), "boolean size": lambda x: x.update(gui_bytes=True), "free-text enum": lambda x: x.update(gui_nul="maybe"),
                            "unsanitized hint": lambda x: x.update(disabled_head="a;b"), "encoded path hint": lambda x: x.update(gui_print_err="launchctl error 2FUsers2Frunner2Fsecret"),
                            "host name hint": lambda x: x.update(disabled_err="host john-macbook.local denied"), "overlong hint": lambda x: x.update(disabled_tail="x" * 65), "empty state": lambda x: x.update(baseline_label_state=""),
                            "missing key": lambda x: x.pop("baseline_failed"), "extra key": lambda x: x.update(extra="x"),
-                           "string status": lambda x: x.update(disabled_status="0")}.items():
+                           "string status": lambda x: x.update(disabled_status="0"),
+                           "free-text label stream": lambda x: x.update(baseline_label_stderr="Could not find service"), "label status as text": lambda x: x.update(baseline_label_status="113"),
+                           "label stream with a uid": lambda x: x.update(baseline_label_stdout="not-found 501"), "label shape half recorded": lambda x: x.update(baseline_label_stdout="not-run"),
+                           "label status without streams": lambda x: x.update(baseline_label_status=0, baseline_label_stdout="not-run", baseline_label_stderr="not-run"),
+                           "label 113 without streams": lambda x: x.update(baseline_label_status=113, baseline_label_stdout="not-run", baseline_label_stderr="not-run"),
+                           "label 127 without streams": lambda x: x.update(baseline_label_status=127, baseline_label_stdout="not-run", baseline_label_stderr="not-run"),
+                           "label streams without status": lambda x: x.update(baseline_label_status="not-run")}.items():
             doc = fresh()
             edit(doc)
             with self.subTest(name), self.assertRaises(m.Refusal):
@@ -377,6 +407,99 @@ class Matrix(unittest.TestCase):
         failed = m.probe_receipt(facts("Darwin", **dict(DIAG, manager_pre="unavailable")), 1, IDENT, "Darwin", 501)  # all-clean diagnostics, a failed probe: the gate still refuses it
         with self.assertRaisesRegex(m.Refusal, r"the capability probe failed \(complete\)"):
             run_gate(mutated(lambda d: d.__setitem__(mac, ("probe.json", failed))))
+
+    def test_baseline_label_shape_facts_are_strict_evidence_never_a_stage_and_linux_records_not_run(self):
+        # Task Z: the macOS probe records the exit status and one fixed word per stream of the baseline's label query (never a byte, a label or a uid), as evidence only, like `gui_nul`.
+        mac = lambda code=0, **over: m.probe_receipt(facts("Darwin", **dict(DIAG, **over)), code, IDENT, "Darwin", 501)
+        linux = lambda **over: m.probe_receipt(facts("Linux", **over), 0, IDENT, "Linux", 1001)
+        keys = m.LABEL_SHAPE
+        self.assertEqual(keys, ("baseline_label_status", "baseline_label_stdout", "baseline_label_stderr"))
+        self.assertEqual(m.LABEL_STREAMS, ("empty", "bad-request", "not-found", "bad-request+not-found", "not-found+bad-request", "framed", "other", "not-run"))
+        self.assertTrue(set(keys) <= set(m.DIAG_KEYS) and set(keys) <= set(m.PROBE_KEYS) and m.DIAG_NUMBER["baseline_label_status"] == 255)
+        self.assertEqual([m.DIAG_ENUM[k] for k in keys[1:]], [m.LABEL_STREAMS] * 2)
+        good = mac()
+        self.assertEqual([good[k] for k in keys], [113, "empty", "bad-request+not-found"])
+        m.check_probe(good, IDENT, "Darwin")
+        # Every coherent shape is kept and accepted, and none changes the verdict (the status is an integer, each stream a fixed word).
+        for status in ("0", "1", "113", "126", "127", "255"):  # 126 and 127 included: a launchctl that exits so and wrote an answer is recorded like any other (F001)
+            for out in m.LABEL_STREAMS[:-1]:
+                for err in m.LABEL_STREAMS[:-1]:
+                    doc = mac(baseline_label_status=status, baseline_label_stdout=out, baseline_label_stderr=err)
+                    self.assertEqual([doc[k] for k in keys], [int(status), out, err])
+                    self.assertEqual((doc["result"], doc["failure_phase"]), ("pass", "none"))
+                    m.check_probe(doc, IDENT, "Darwin")
+        # A query the helper could not run or had to end records nothing: `not-run` throughout (the helper prints no status for it). `not-run` is the one coherent absence.
+        for over in ({k: "not-run" for k in keys},):
+            doc = mac(**over)
+            self.assertEqual([doc[k] for k in keys], ["not-run"] * 3)
+            m.check_probe(doc, IDENT, "Darwin")
+        # F002, both directions: a numeric status beside `not-run` streams (the helper cannot print it: a status always has both streams, `empty` for none) and `not-run` beside captured streams are
+        # contradictions in a coherent word, and every triple is judged by one rule: all three captured or all three `not-run`.
+        statuses = ("not-run", 0, 1, 113, 126, 127, 255)
+        for status, out, err in itertools.product(statuses, m.LABEL_STREAMS, m.LABEL_STREAMS):
+            doc = {"baseline_label_status": status, "baseline_label_stdout": out, "baseline_label_stderr": err}
+            self.assertEqual(m.label_shape_coherent(doc), len({status == "not-run", out == "not-run", err == "not-run"}) == 1, doc)
+        for status in (0, 1, 113, 126, 127, 255):  # a status with no stream at all, or with one stream only
+            for out, err in (("not-run", "not-run"), ("not-run", "empty"), ("empty", "not-run")):
+                over = {"baseline_label_status": str(status), "baseline_label_stdout": out, "baseline_label_stderr": err}
+                self.assertFalse(m.label_shape_coherent(dict(over, baseline_label_status=status)), over)
+                self.assertEqual([mac(**over)[k] for k in keys], ["not-run"] * 3, over)  # the builder records one observation or none
+                m.check_probe(mac(**over), IDENT, "Darwin")
+        for out, err in itertools.product(m.LABEL_STREAMS[:-1], m.LABEL_STREAMS[:-1]):  # no status beside captured streams
+            over = {"baseline_label_status": "not-run", "baseline_label_stdout": out, "baseline_label_stderr": err}
+            self.assertEqual([mac(**over)[k] for k in keys], ["not-run"] * 3, over)
+        # The builder records one observation or none: a half-recorded or unrecognised shape becomes `not-run` throughout (a failed probe still yields a valid receipt).
+        for over in ({"baseline_label_status": "not-run"}, {"baseline_label_status": "256"}, {"baseline_label_status": "-1"}, {"baseline_label_status": "113 "}, {"baseline_label_stdout": "not-run"},
+                     {"baseline_label_stderr": "not-run"}, {"baseline_label_stdout": "maybe"}, {"baseline_label_stderr": "Not-found"}, {"baseline_label_stdout": ""},
+                     {"baseline_label_stderr": 'Could not find service "com.herdr-mobile-relay.service" in domain for user gui: 501'}, {"baseline_label_stdout": "/Users/runner/x"},
+                     {"baseline_label_stdout": "com.herdr-mobile-relay.service"}):
+            doc = mac(**over)
+            self.assertEqual([doc[k] for k in keys], ["not-run"] * 3, over)
+            self.assertEqual((doc["result"], doc["failure_phase"]), ("pass", "none"))
+            m.check_probe(doc, IDENT, "Darwin")
+        # A probe that recorded no label shape at all (it died first, or the helper failed) has the same three `not-run`.
+        self.assertEqual([m.probe_receipt("", 2, IDENT, "Darwin", 501)[k] for k in keys], ["not-run"] * 3)
+        # The gate refuses a forged receipt: a wrong type or range, a word outside the enumeration (a label, a uid, a path or a sentence is not one), a half-recorded shape.
+        coherent = dict(zip(keys, (113, "empty", "not-found")))
+        forged = [dict(baseline_label_status=v) for v in (256, -1, True, False, 1.5, "113", "", None, [], "not-run ")]
+        for k in keys[1:]:
+            forged += [{k: v} for v in ("unknown", "", None, 1, True, ["empty"], "Empty", "empty ", "bad request", "framed\n", "Could not find service", "com.herdr-mobile-relay.service", "501", "gui/501", "x" * 65, "/Users/r/x")]
+        forged += [dict(baseline_label_status="not-run"), dict(baseline_label_stdout="not-run"), dict(baseline_label_stderr="not-run"), dict(baseline_label_status="not-run", baseline_label_stdout="empty")]
+        # F002: the contradictory tuples the gate once accepted, a numeric status with both streams `not-run` (a successful query with no bytes is `empty` `empty`), and `not-run` beside captured streams
+        forged += [dict(baseline_label_status=status, baseline_label_stdout="not-run", baseline_label_stderr="not-run") for status in (0, 1, 113, 126, 127, 255)]
+        forged += [dict(baseline_label_status="not-run", baseline_label_stdout=out, baseline_label_stderr=err) for out, err in (("empty", "empty"), ("other", "framed"), ("not-found", "bad-request"))]
+        for over in forged:
+            with self.assertRaisesRegex(m.Refusal, "malformed probe diagnostics", msg=over):
+                m.check_probe(dict(mac(**coherent), **over), IDENT, "Darwin")
+        for k in keys:  # a missing key and an extra key are refused as any other receipt key is
+            with self.assertRaisesRegex(m.Refusal, "wrong keys"):
+                m.check_probe({n: v for n, v in good.items() if n != k}, IDENT, "Darwin")
+        # The verdict is unchanged by any shape: failing facts fail whatever it says, and a passing probe passes whatever it says (the pass rule never reads it).
+        for over in ({"manager_pre": "unavailable"}, {"cleanup": "fail"}, {"trust_positive": "refused"}):
+            failing = mac(**dict(over, **coherent))
+            self.assertEqual((failing["result"], failing["failure_phase"]), ("fail", "complete"))
+            with self.assertRaisesRegex(m.Refusal, "the capability probe failed"):
+                m.check_probe(failing, IDENT, "Darwin")
+        sample = itertools.product((0, 1), ("available", "unavailable"), ("available", "unknown"), ("pass", "fail"))
+        for exit_code, pre, post, cleanup in sample:
+            base = {"exit": exit_code, "manager_pre": pre, "manager_post": post, "cleanup": cleanup, "trust_negative": "refused", "trust_positive": "accepted", "isolated_uid": "not-applicable", "default_target": "not-applicable"}
+            self.assertEqual({m.probe_passes(dict(base, **shape), "Darwin") for shape in ({}, coherent, {k: "not-run" for k in keys}, dict(coherent, baseline_label_stdout="other"))}, {m.probe_passes(base, "Darwin")})
+        # Linux asks no label query: it records `not-run` and any recorded shape contradicts a passing Linux receipt (the macOS-only evidence is no Linux fact).
+        bare = linux()
+        self.assertEqual([bare[k] for k in keys], ["not-run"] * 3)
+        m.check_probe(bare, IDENT, "Linux")
+        for over in ({k: DIAG[k] for k in keys}, {"baseline_label_status": "0", "baseline_label_stdout": "other", "baseline_label_stderr": "other"}):
+            with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=over):
+                m.check_probe(linux(**over), IDENT, "Linux")
+            with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=over):
+                run_gate(mutated(lambda d: d.__setitem__(key("probe"), ("probe.json", linux(**over)))))
+        # A status alone is half a shape: the builder drops it (F002), so the Linux receipt carries nothing; forged in afterwards it is malformed, through the gate too.
+        self.assertEqual([linux(baseline_label_status="113")[k] for k in keys], ["not-run"] * 3)
+        for forged_over in ({"baseline_label_status": 113}, {"baseline_label_status": 0, "baseline_label_stdout": "not-run", "baseline_label_stderr": "not-run"}):
+            with self.assertRaisesRegex(m.Refusal, "malformed probe diagnostics", msg=forged_over):
+                m.check_probe(dict(bare, **forged_over), IDENT, "Linux")
+            with self.assertRaisesRegex(m.Refusal, "malformed probe diagnostics", msg=forged_over):
+                run_gate(mutated(lambda d: d.__setitem__(key("probe"), ("probe.json", dict(bare, **forged_over)))))
 
     def test_producer_receipt_binds_archives_checksums_and_revision(self):
         m.check_producer(PROD, IDENT)
@@ -901,6 +1024,14 @@ class Wiring(unittest.TestCase):
         self.assertEqual(host.sh(["/bin/echo", "abcdef"], limit=3), (126, "", ""))  # longer than the limit: status 126 and nothing is returned
         self.assertEqual(host.sh(["/bin/echo", "abc"], limit=100), (0, "abc\n", ""))
         self.assertEqual(host.sh(["/nonexistent/x"])[0], 127)
+        # F001: sh_kept tells sh's own outcomes (kept False: over the bound, could not run) from a program that really exits 126 or 127 (kept True, with the streams it wrote); sh is its tail, unchanged
+        for argv, kwargs, want in ((["/bin/echo", "abcdef"], {"limit": 3}, (False, 126, "", "")), (["/nonexistent/x"], {}, (False, 127, "", "")), (["/bin/echo", "abc"], {"limit": 100}, (True, 0, "abc\n", "")),
+                                   (["/bin/sh", "-c", "exit 126"], {}, (True, 126, "", "")), (["/bin/sh", "-c", "exit 127"], {}, (True, 127, "", "")),
+                                   (["/bin/sh", "-c", "printf 'x\\n'; echo y >&2; exit 126"], {}, (True, 126, "x\n", "y\n")), (["/bin/sh", "-c", "printf 'x\\n'; echo y >&2; exit 127"], {}, (True, 127, "x\n", "y\n")),
+                                   (["/bin/sh", "-c", "exit 3"], {}, (True, 3, "", "")), (["/bin/sh", "-c", "kill -9 $$"], {}, (True, -9, "", ""))):
+            self.assertEqual(host.sh_kept(argv, **kwargs), want, argv)
+            self.assertEqual(host.sh(argv, **kwargs), want[1:], argv)
+        self.assertEqual(host.sh_kept([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1), (False, 127, "", ""))  # a timeout is sh's own outcome too
         # the manager's row is there, the listing exceeds 16 MiB: the real `sh` stops it at the bound, so the digest is unknown
         listing = "import sys; sys.stdout.write(' 4242 1 Mon Oct 21 04:46:00 2025 /bin/sleep 5\\n' + 'x' * (1 << 24))"
         real = host.sh
@@ -1119,6 +1250,200 @@ class Wiring(unittest.TestCase):
         for out, err, want in ((diag, "", "absent"), ("", diag, "absent"), (diag + "\n", "", "absent"), ("", diag + "\n", "absent"), (diag, "\n", "unknown"), ("\n", diag, "unknown"),
                                (diag, "warning\n", "unknown"), ("warning\n", diag, "unknown"), ("", "", "unknown"), (diag + "\n", "\n", "unknown")):
             self.assertEqual(self.observed("launchd", print=(1, out, err))["active"], want, (out, err))
+
+    # Task Z: modern launchctl answers a label that is not loaded with TWO lines (`Bad request.`, then the diagnostic), status 113 (hosted macos-15 run 39664354384: the baseline label was `unknown`).
+    # <b> is `Bad request.` and <d> the exact diagnostic of the observed label and uid; the product reads the merged text (`2>&1`) after dropping ONE terminating LF.
+    NOT_FOUND_ACCEPTED = ("{d}", "{d}\n", "{b}\n{d}", "{b}\n{d}\n", "{d}\n{b}", "{d}\n{b}\n")
+    NOT_FOUND_REFUSED = (
+        "{b}", "{b}\n", "", "\n", "\n\n",  # the other line alone, nothing at all
+        "{b}\n\n{d}", "{b}\n\n{d}\n", "{d}\n\n{b}", "{d}\n\n{b}\n",  # a blank line between the two
+        "{b}\n{b}\n{d}", "{b}\n{d}\n{d}", "{b}\n{d}\n{b}", "{d}\n{b}\n{d}", "{d}\n{d}", "{d}\n{d}\n{b}", "{b}\n{b}",  # a repeated line
+        "{b}\r\n{d}", "{b}\n{d}\r", "{b}\r\n{d}\r\n", "{d}\r\n{b}", "{d}\n{b}\r", "{b}\r{d}",  # a CR
+        "{b} {d}", "{b}{d}", "{d} {b}", "{d}{b}", "{b}\n{d} {b}",  # the two on one line
+        "bad request.\n{d}", "BAD REQUEST.\n{d}", "Bad Request.\n{d}", "{b}\n{dlow}", "{dlow}", "Bad request\n{d}", "Bad request..\n{d}", "{b}.\n{d}",  # case and spelling
+        "{b}\n{dl}", "{dl}\n{b}", "{b}\n{du}", "{du}\n{b}", "{b}\n{dc}", "{dc}",  # another label, another uid, a cut diagnostic
+        "{b}\n{d}\nextra", "extra\n{b}\n{d}", "{b}\nextra\n{d}", "{b}\n{d} ", " {b}\n{d}", "{b} \n{d}", "{b}\n {d}", "\n{b}\n{d}", "{d}\n{b}\nextra",  # extra text or blanks
+        "{b}\n{d}\n\n", "{d}\n{b}\n\n", "{b}\n{d}\n\n\n", "{d}\n\n")  # a second trailing LF
+
+    @classmethod
+    def not_found(cls, template, name, uid=None):
+        uid = os.getuid() if uid is None else uid
+        diag = lambda who, user: 'Could not find service "%s" in domain for user gui: %d' % (who, user)
+        return template.format(b="Bad request.", d=diag(name, uid), dl=diag("com.example.other", uid), du=diag(name, uid + 1), dc=diag(name, uid)[:-1], dlow=diag(name, uid).lower())
+
+    def test_modern_two_line_not_found_is_absent_in_both_product_observers_and_only_one_stream_in_the_helper(self):
+        label, helper_label, table = "com.herdr-mobile-relay.service", "x.service", "disabled services = {}\n"
+        both = lambda *a, **k: {observer: self.product_launchd(observer, table, *a, **k) for observer in ("install", "removal")}
+        absent, unknown = {o: "absent:true" for o in ("install", "removal")}, {o: "unknown:unknown" for o in ("install", "removal")}
+        seen = lambda out, err, code=113: self.observed("launchd", print=(code, out, err))
+        for template in self.NOT_FOUND_ACCEPTED:
+            text, hosted = self.not_found(template, label), self.not_found(template, helper_label)
+            for code in (113, 1, 255) if template in ("{d}", "{b}\n{d}\n", "{d}\n{b}\n") else (113,):  # any nonzero status admits exactly the closed set
+                self.assertEqual(both(answer=text, answer_rc=code), absent, (template, code))  # install and removal read the same text the same way
+                one, other = seen(hosted, "", code), seen("", hosted, code)  # one stream carries the whole answer: the helper reads it as the product does
+                self.assertEqual([(s["active"], s["origin"], s["owned_pid_digest"]) for s in (one, other)], [("absent", "absent", "none")] * 2, (template, code))
+            self.assertEqual(both(answer=text, answer_rc=0), unknown, template)  # a status-0 answer is never the not-found diagnostic, the closed set or not
+            self.assertEqual(seen(hosted, "", 0)["active"], "unknown", template)
+            self.assertEqual(seen("", hosted, 0)["active"], "unknown", template)
+        for template in self.NOT_FOUND_REFUSED:
+            text, hosted = self.not_found(template, label), self.not_found(template, helper_label)
+            self.assertEqual(both(answer=text, answer_rc=113), unknown, (template, 113))  # nothing outside the closed set is absence, in either observer
+            for out, err in ((hosted, ""), ("", hosted)):
+                self.assertEqual(seen(out, err)["active"], "unknown", (template, out, err))
+        for template in ("{b}\n\n{d}\n", "{b}\n{dl}", "{b}\n{du}", "{d}\n{b}\r", "{b}\n{d}\n\n"):  # refused variants with a status of 0 and others stay unknown
+            text, hosted = self.not_found(template, label), self.not_found(template, helper_label)
+            for code in (0, 2, 255):
+                self.assertEqual(both(answer=text, answer_rc=code), unknown, (template, code))
+                self.assertEqual(seen(hosted, "", code)["active"], "unknown", (template, code))
+        # The two lines may come from two streams: the product merges them in the order they were written, the stub writes stdout first, so each ORDER is absence for the product, and the helper (which reads two
+        # pipes and cannot know that order) is never looser: an answer split across the streams, at any byte, is unknown there.
+        for template, first in (("{b}\n{d}\n", "{b}\n"), ("{d}\n{b}\n", "{d}\n"), ("{b}\n{d}", "{b}\n"), ("{d}\n{b}", "{d}\n"), ("{d}\n", "{d}")):
+            text, hosted = self.not_found(template, label), self.not_found(template, helper_label)
+            cut, hosted_cut = len(self.not_found(first, label)), len(self.not_found(first, helper_label))
+            self.assertEqual(both(answer=text[:cut], answer_err=text[cut:], answer_rc=113), absent, (template, "split across stdout and stderr"))
+            self.assertEqual(seen(hosted[:hosted_cut], hosted[hosted_cut:])["active"], "unknown", (template, "split across stdout and stderr"))
+        for template in ("{b}\n{d}\n", "{d}\n{b}\n"):  # every byte of the two modern forms, as the helper reads them
+            hosted = self.not_found(template, helper_label)
+            for cut in range(len(hosted) + 1):
+                want = "absent" if cut in (0, len(hosted)) else "unknown"
+                self.assertEqual(seen(hosted[:cut], hosted[cut:])["active"], want, (template, cut))
+        # A refused text stays refused whichever way the two streams share it (the product reads the merged text), and a split never makes the helper read what the product refuses.
+        for template in ("{b}\n\n{d}\n", "{b}\n{dl}\n", "{b}\n{du}\n", "{b}\n{d}\n\n"):
+            text, hosted = self.not_found(template, label), self.not_found(template, helper_label)
+            cut = text.index("\n") + 1
+            self.assertEqual(both(answer=text[:cut], answer_err=text[cut:], answer_rc=113), unknown, template)
+            self.assertEqual(seen(hosted[:cut], hosted[cut:])["active"], "unknown", template)
+        # A loaded or failing answer is never absence: a framed label answer is loaded at status 0 and unknown at any other, the closed set before or after a frame is unknown, and the byte bound and the NUL refusal stand.
+        uid = os.getuid()
+        frame = lambda name: "gui/%d/%s = {\n\tstate = running\n}\n" % (uid, name)
+        self.assertEqual(both(answer=frame(label), answer_rc=0), {o: "loaded:true" for o in ("install", "removal")})
+        self.assertEqual(seen(frame(helper_label), "", 0)["active"], "loaded")
+        for code in (1, 113):
+            self.assertEqual(both(answer=frame(label), answer_rc=code), unknown, code)
+            self.assertEqual(seen(frame(helper_label), "", code)["active"], "unknown", code)
+        modern = self.not_found("{b}\n{d}\n", label)
+        for text in (modern + frame(label), frame(label) + modern, "{b}\n".format(b="Bad request.") + frame(label), modern + "\x00", "\x00" + modern, modern.replace("find", "fi\x00nd"),
+                     modern + " " * 65536, "Bad request.\n" + "x" * 65536, "Bad request.\n" + self.not_found("{d}", label) + "\n" * 65536):
+            self.assertEqual(both(answer=text.encode(), answer_rc=113), unknown, text[:40])
+            self.assertEqual(seen(text.replace(label, helper_label), "")["active"], "unknown", text[:40])
+        # With the label absent the disabled table still decides `enabled`: the two-line answer leaves it alone.
+        for observer in ("install", "removal"):
+            disabled = '\tdisabled services = {\n\t\t"%s" => disabled\n\t}\n' % label
+            self.assertEqual(self.product_launchd(observer, disabled, answer=modern, answer_rc=113), "absent:false", observer)
+            self.assertEqual(self.product_launchd(observer, disabled, answer=modern, answer_rc=113, table_rc=1), "unknown:unknown", observer)
+
+    def test_both_product_observers_carry_the_same_not_found_grammar_and_the_helper_names_the_same_texts(self):
+        install, removal = (self.text(path) for path in ("relay/native-install-transaction.sh", "relay/common.sh"))
+        line = r'''case "$output" in "$notfound"|"Bad request."$'\n'"$notfound"|"$notfound"$'\n'"Bad request.") ;; *) return 1 ;; esac''' + "\n"  # the closed set, byte for byte, in both
+        self.assertEqual((install.count(line), removal.count(line)), (1, 1))
+        for source, uid in ((install, "$UID"), (removal, "$uid")):
+            self.assertEqual(source.count('notfound="Could not find service \\"$label\\" in domain for user gui: %s"\n' % uid), 1)
+            self.assertNotIn('[ "$output" = "Could not find service', source)  # the single-line equality was the defect: it is gone
+            self.assertIn(" name state=0 notfound\n", source)  # a local of the observer, not a global
+            self.assertEqual(len(re.findall(r'launchctl print "\$domain/\$label" 2>&1 \| \w+_read_bounded 65536', source)), 1)  # the merged query and its byte bound are unchanged
+        host, label, uid = self.load_host(), "x.service", os.getuid()
+        diag = 'Could not find service "%s" in domain for user gui: %d' % (label, uid)
+        self.assertEqual(host.not_found_texts(label, uid), (diag, "Bad request.\n" + diag, diag + "\nBad request."))  # the helper's closed set is the product's three texts
+        self.assertEqual(host.not_found_texts("other.service", 7)[0], 'Could not find service "other.service" in domain for user gui: 7')
+
+    def test_hosted_not_found_controls_carry_every_variant_of_the_matrix_grammar(self):
+        # F002: the hosted-guarded controls (not run here: they need a hosted runner) must exercise every accepted and every refused variant this matrix declares, not a subset. They are standalone
+        # scripts, so each holds a byte-for-byte copy of NOT_FOUND_ACCEPTED / NOT_FOUND_REFUSED and the statements that drive them; this reads both files as text and compares, so a variant added
+        # or changed here, or a driving statement dropped there, fails here instead of going unnoticed until a hosted run.
+        driving = (
+            'fill = lambda template: template.format(b=bad, d=ours, dl=diag("com.example.other"), du=diag(label, str(os.getuid() + 1)), dc=ours[:-1], dlow=ours.lower())',
+            'accepted += [("", fill(x), code) for x in NOT_FOUND_ACCEPTED for code in ((113, 1, 255) if x in ("{d}", "{b}\\n{d}\\n", "{d}\\n{b}\\n") else (113,))]',
+            'refused += [("", fill(x), 113) for x in NOT_FOUND_REFUSED] + [("", fill(x), 0) for x in NOT_FOUND_ACCEPTED]',
+            'refused += [("", fill(x), code) for x in ("{b}\\n\\n{d}\\n", "{b}\\n{dl}", "{b}\\n{du}", "{d}\\n{b}\\r", "{b}\\n{d}\\n\\n") for code in (0, 2, 255)]',
+            'for x, first in (("{b}\\n{d}\\n", "{b}\\n"), ("{d}\\n{b}\\n", "{d}\\n"), ("{b}\\n{d}", "{b}\\n"), ("{d}\\n{b}", "{d}\\n"), ("{d}\\n", "{d}")):',
+            'accepted.append((fill(x)[:len(fill(first))], fill(x)[len(fill(first)):], 113))',
+            'for x in ("{b}\\n\\n{d}\\n", "{b}\\n{dl}\\n", "{b}\\n{du}\\n", "{b}\\n{d}\\n\\n"):',
+            'refused.append((fill(x)[:fill(x).index("\\n") + 1], fill(x)[fill(x).index("\\n") + 1:], 113))')
+        for path, name in (("tests/test_native_install.sh", "native_modern_not_found_control"), ("tests/test_service_uninstall_cli.py", "launchd_not_found_control")):
+            source = self.text(path)
+            if path.endswith(".sh"):  # the suite is a shell script around one Python program
+                source = source.split("python3 - \"$REPO_DIR\" \"$WORK_DIR\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+            control = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == name)
+            held = {target.id: ast.literal_eval(node.value) for node in ast.walk(control) if isinstance(node, ast.Assign) for target in node.targets
+                    if isinstance(target, ast.Name) and target.id in ("NOT_FOUND_ACCEPTED", "NOT_FOUND_REFUSED")}
+            self.assertEqual(held, {"NOT_FOUND_ACCEPTED": self.NOT_FOUND_ACCEPTED, "NOT_FOUND_REFUSED": self.NOT_FOUND_REFUSED}, path)
+            body = ast.get_source_segment(source, control).replace("'", '"')
+            for statement in driving:
+                self.assertIn(statement, body, (path, statement))
+            self.assertEqual((body.count("NOT_FOUND_ACCEPTED"), body.count("NOT_FOUND_REFUSED")), (4, 3), path)  # the comment, the definition and the loops over it (accepted twice: absence, and status 0); no other use
+        # the variants the hosted subsets lacked are in the shared sets and are refused or accepted as the closed set says
+        self.assertIn("{d}\n{b}", self.NOT_FOUND_ACCEPTED)
+        self.assertTrue({"BAD REQUEST.\n{d}", "{d}\n\n{b}"} <= set(self.NOT_FOUND_REFUSED))
+
+    def test_label_stream_names_one_stream_with_a_fixed_word_and_never_its_bytes(self):
+        host, label, uid = self.load_host(), "x.service", os.getuid()
+        diag = 'Could not find service "%s" in domain for user gui: %d' % (label, uid)
+        target = "gui/%d/%s" % (uid, label)
+        words = (("", "empty"), ("Bad request.", "bad-request"), ("Bad request.\n", "bad-request"), (diag, "not-found"), (diag + "\n", "not-found"),
+                 ("Bad request.\n" + diag, "bad-request+not-found"), ("Bad request.\n" + diag + "\n", "bad-request+not-found"),
+                 (diag + "\nBad request.", "not-found+bad-request"), (diag + "\nBad request.\n", "not-found+bad-request"),
+                 (target + " = {}", "framed"), (target + " = {}\n", "framed"), (target + " = {\n\tstate = running\n}\n", "framed"), (target + " = {\n}", "framed"),
+                 ("\n", "other"), (" ", "other"), ("\n\n", "other"), ("Bad request.\n\n", "other"), ("Bad request.\n\n" + diag, "other"), ("Bad request.\nBad request.\n", "other"), (diag + "\n\n", "other"),
+                 ("Bad request.\r\n" + diag, "other"), ("bad request.", "other"), (diag.upper(), "other"), ('Could not find service "y.service" in domain for user gui: %d' % uid, "other"),
+                 ('Could not find service "%s" in domain for user gui: %d' % (label, uid + 1), "other"), ("Bad request. " + diag, "other"), ("extra\n" + diag, "other"),
+                 (target + " = {\n\tstate = running\n", "other"), (target + " = {\n\x00}\n", "other"), ("gui/%d/y.service = {}" % uid, "other"), (target + " = {} ", "other"),
+                 ("controller unavailable\n", "other"), ("x" * 4096, "other"))
+        for text, want in words:
+            self.assertEqual(host.label_stream(text, label, uid), want, text[:60])
+            self.assertIn(want, m.LABEL_STREAMS[:-1])  # every word the helper can name is one the receipt gate accepts (and `not-run` is the gate's own)
+        self.assertEqual({w for _, w in words}, set(m.LABEL_STREAMS[:-1]))  # and every one of them is reached
+        # label_shape: ONE read-only `launchctl print gui/<uid>/<label>`, printed as `<status> <stdout word> <stderr word>`; nothing else of the answer, the label or the uid.
+        secret, uid = "secret-token-4711", 4242  # a uid that no status or word can contain
+        diag, target = 'Could not find service "%s" in domain for user gui: %d' % (label, uid), "gui/%d/%s" % (uid, label)
+        # Each reply is sh_kept's (kept, status, stdout, stderr): kept False is sh's own outcome (over the bound, could not run, timed out), kept True a program that ran to its own exit.
+        for reply, want in (((True, 113, "", "Bad request.\n" + diag + "\n"), "113 empty bad-request+not-found"), ((True, 113, "Bad request.\n", diag + "\n"), "113 bad-request not-found"),
+                            ((True, 113, diag + "\n", "Bad request.\n"), "113 not-found bad-request"), ((True, 113, "", diag), "113 empty not-found"), ((True, 0, target + " = {}\n", ""), "0 framed empty"),
+                            ((True, 1, secret + "\n", secret), "1 other other"), ((True, 255, "", ""), "255 empty empty"), ((True, 113, "Bad request.\n" + diag + "\n", ""), "113 bad-request+not-found empty"),
+                            ((False, 126, "", ""), "not-run not-run not-run"), ((False, 127, "", ""), "not-run not-run not-run"),  # sh ended the query or never ran it: nothing was captured, so no status either (F001, F002)
+                            ((True, 126, "", ""), "126 empty empty"), ((True, 127, "", ""), "127 empty empty"),  # a launchctl that really exits 126 or 127 is recorded like any other status (F001)
+                            ((True, 126, "Bad request.\n", diag + "\n"), "126 bad-request not-found"), ((True, 127, "", "Bad request.\n" + diag + "\n"), "127 empty bad-request+not-found"),
+                            ((True, 127, diag + "\n", "Bad request.\n"), "127 not-found bad-request"), ((True, 126, target + " = {}\n", ""), "126 framed empty"), ((True, 127, secret, secret), "127 other other"),
+                            ((True, -9, "", ""), "137 empty empty"), ((True, -15, "Bad request.\n", diag + "\n"), "143 bad-request not-found"),  # a signal leaves no exit status of its own: 128 + N, as the shell reads it, with the streams it wrote (F003)
+                            ((True, -9, "Bad request.\n", diag + "\n"), "137 bad-request not-found"), ((True, -11, "", "Bad request.\n" + diag + "\n"), "139 empty bad-request+not-found"), ((True, -6, secret, secret), "134 other other")):
+            calls = []
+            with unittest.mock.patch.object(host, "sh_kept", side_effect=lambda argv, *a, **k: calls.append(argv) or reply), unittest.mock.patch.object(host.os, "getuid", return_value=uid), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(host.label_shape({"label": label}, []), 0)
+            self.assertEqual(out.getvalue(), want + "\n", reply)
+            self.assertEqual(calls, [[host.LAUNCHCTL, "print", target]])  # one query, read-only: print of this label and no other command
+            self.assertRegex(out.getvalue(), r"\A([0-9]{1,3} (%s) (%s)|not-run not-run not-run)\n\Z" % (("|".join(map(re.escape, m.LABEL_STREAMS[:-1])),) * 2))  # never a number beside `not-run`, never `not-run` beside a number
+            self.assertTrue(all(token not in out.getvalue() for token in (secret, label, str(uid), "gui", "service")))  # no byte of the answer, no label, no uid
+        with unittest.mock.patch.object(host, "sh_kept", return_value=(True, 113, "", "Bad request.\n" + diag + "\n")), unittest.mock.patch.object(host.os, "getuid", return_value=uid), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(host.main(["native-lifecycle-host.py", "label-shape", "--label", label]), 0)  # the command is wired
+        self.assertEqual(out.getvalue(), "113 empty bad-request+not-found\n")
+        # a real run of a stand-in `launchctl`, over the real `sh_kept`: statuses and both streams are read as raw pipes
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = pathlib.Path(tmp, "launchctl")
+            host.LAUNCHCTL = str(stub)
+            real_kept, uid = host.sh_kept, os.getuid()
+            answer = "printf 'Bad request.\\n'\nprintf 'Could not find service \"%s\" in domain for user gui: %d\\n' >&2\n"
+
+            def ask(script, timeout=10):
+                stub.write_text("#!/bin/sh\n" + script)
+                stub.chmod(0o755)
+                with unittest.mock.patch.object(host, "sh_kept", side_effect=lambda argv, **kw: real_kept(argv, timeout=timeout, **kw)), contextlib.redirect_stdout(io.StringIO()) as out:
+                    host.label_shape({"label": label}, [])
+                return out.getvalue()
+            for who, number, want in ((label, uid, "113 bad-request not-found\n"), ("y.service", uid, "113 bad-request other\n"), (label, uid + 1, "113 bad-request other\n")):
+                self.assertEqual(ask(answer % (who, number) + "exit 113\n"), want, (who, number))  # both streams read raw: the diagnostic of this label and uid is `not-found`, any other is `other`
+            # F001: the program's OWN exit 126 or 127 keeps what it wrote; only sh's outcomes (over the bound, timeout, no such program) are `not-run`
+            for code in (126, 127):
+                self.assertEqual(ask(answer % (label, uid) + "exit %d\n" % code), "%d bad-request not-found\n" % code, code)
+                self.assertEqual(ask("exit %d\n" % code), "%d empty empty\n" % code, code)
+            self.assertEqual(ask("head -c 70000 /dev/zero | tr '\\000' x\nexit 126\n"), "not-run not-run not-run\n")  # over the 65,536-byte bound: sh kills it and keeps nothing
+            self.assertEqual(ask("sleep 30\n", timeout=1), "not-run not-run not-run\n")  # timed out
+            self.assertEqual(ask(answer % (label, uid) + "kill -9 $$\n"), "137 bad-request not-found\n")  # F003: ended by a signal after it answered: 128 + 9, with the streams it wrote
+            self.assertEqual(ask("kill -15 $$\n"), "143 empty empty\n")  # and with nothing written
+            stub.unlink()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                host.label_shape({"label": label}, [])  # no such program: sh could not run it
+            self.assertEqual(out.getvalue(), "not-run not-run not-run\n")
 
     def test_helper_and_both_product_observers_agree_on_generated_tables(self):
         host, label, rng = self.load_host(), "com.herdr-mobile-relay.service", random.Random(20261022)
@@ -1774,6 +2099,31 @@ absent() { ! has hosts; }
         self.assertEqual(re.findall(r"baseline_note (\S+) (\S+)", body)[1:], [("manager-path-unread", "not-run"), ("manager-path-unread", "not-run"), ("command-provenance", "not-run"),
                                                                              ("label-active", '"$la"'), ("legacy-active", '"$la"'), ("hosts", '"$la"'), ("none", '"$la"')])  # after the seven path names
         self.assertTrue(body.index("sgone") < body.index("show-environment") < body.index("launchctl getenv PATH") < body.index("command -v herdr") < body.index("label-active") < body.index("legacy-active") < body.index("hosts"))
+
+    def test_driver_records_the_baseline_label_shape_as_evidence_before_the_baseline_on_macos_only(self):
+        driver = self.text("scripts/ci/run-native-lifecycle.sh")
+        probe = driver.split("\nprobe_main() {", 1)[1].split("\n}\n", 1)[0].splitlines()
+        start = [l.strip() for l in probe].index("phase baseline")
+        self.assertEqual([l.split("  #")[0].strip() for l in probe[start + 1:start + 3]], ['[ "$OS" != Darwin ] || label_shape', 'baseline_clean || fail "a product definition, release or mapping already exists on this runner (baseline sub-check: ${BASEFAIL:-unknown})"'])
+        self.assertEqual(driver.count("label_shape"), 2)  # its definition and that one call: the lifecycle never asks (no extra query on the cases' runner)
+        self.assertEqual(driver.count("label-shape"), 1)
+        self.assertNotIn("label_shape", driver.split("\nlifecycle_main() {", 1)[1].split("\n}\n", 1)[0])
+        self.assertNotIn("label_shape", driver.split("\nbaseline_clean() {", 1)[1].split("\n}\n", 1)[0])  # the baseline sub-checks, their order and their facts are untouched
+        code_lines = [re.sub(r"\s+#.*", "", l) for l in self.shell_function("label_shape").splitlines()]  # the function's code, comments dropped
+        self.assertEqual([l.split()[:2] for l in code_lines if l.lstrip().startswith("fact ")], [["fact", "baseline_label_status"], ["fact", "baseline_label_stdout"], ["fact", "baseline_label_stderr"]])
+        self.assertEqual(len(re.findall(r"\bHX\b|launchctl|\bas_subject\b|\bOX\b|\bsudo\b|\bpriv\b", "\n".join(code_lines))), 1)  # one helper call, the read-only query inside it; the function runs nothing else
+        self.assertNotRegex("\n".join(code_lines), r"\bfail\b|\bexit\b|\breturn 1\b")  # evidence only: it can fail nothing
+        wanted = lambda status, out, err: ["HX label-shape --label com.herdr-mobile-relay.service", "fact baseline_label_status " + status, "fact baseline_label_stdout " + out, "fact baseline_label_stderr " + err]
+        for reply, rc, want in (("113 empty bad-request+not-found", 0, ("113", "empty", "bad-request+not-found")), ("113 bad-request+not-found empty\n", 0, ("113", "bad-request+not-found", "empty")),
+                                ("0 framed empty", 0, ("0", "framed", "empty")), ("126 not-run not-run", 0, ("126", "not-run", "not-run")), ("255 other other", 0, ("255", "other", "other")),
+                                ("not-run not-run not-run", 0, ("not-run",) * 3), ("127 bad-request not-found", 0, ("127", "bad-request", "not-found")), ("126 empty empty", 0, ("126", "empty", "empty")),  # F001: the helper's own words, and a real 126/127 with its streams
+                                ("", 0, ("not-run",) * 3), ("garbage", 0, ("not-run",) * 3), ("113 empty", 0, ("not-run",) * 3), ("x 113 empty empty", 0, ("not-run",) * 3),
+                                ("113 empty empty", 1, ("not-run",) * 3), ("113 empty empty", 127, ("not-run",) * 3),  # a helper that failed leaves nothing
+                                ("113 empty x\ncleanup=pass", 0, ("113", "empty", "xcleanuppass")),  # nothing but [0-9a-z+ -] reaches the facts file: no newline, no `=`, so no second fact
+                                ("113 empty empty\ncleanup=pass", 0, ("113", "empty", "emptycleanuppass"))):
+            code, log, err = self.run_cleanup('HX() { echo "HX $*" >> "$LOG"; printf "%s\\n" "$SHAPE"; return "$SHAPE_RC"; }\nlabel_shape', {"SHAPE": reply, "SHAPE_RC": str(rc), "LABEL": "com.herdr-mobile-relay.service"}, extra=("label_shape",))
+            self.assertEqual((code, log.splitlines()), (0, wanted(*want)), (reply, rc, err))
+            self.assertEqual(sum(l.startswith("fact ") for l in log.splitlines()), 3)  # three facts, whatever the helper printed
 
     def test_default_target_dependency_needs_a_successful_query_and_an_exact_unit_entry(self):
         label = "herdr-mobile-relay.service"

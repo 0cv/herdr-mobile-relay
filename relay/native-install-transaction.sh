@@ -25,7 +25,7 @@ native_install_read_bounded() {
 # again: a second table could contradict the first), their content not interpreted. Anything else (no header, an unclosed
 # section, stray text) is unknown, as are a nonzero status, a NUL and more than 65,536 bytes. A label the table does not list is enabled.
 native_install_observe() {
-    local label="$1" output line load="" active="" enabled="" count=0 code=0 domain="gui/$UID" disabled probe_status name state=0
+    local label="$1" output line load="" active="" enabled="" count=0 code=0 domain="gui/$UID" disabled probe_status name state=0 notfound
     local tab=$'\t' job_path="" job_paths=0 job_ambiguous=false
     local LC_ALL=C
     # native_observed_origin is launchd-only evidence taken from this same observation; it is
@@ -72,9 +72,12 @@ native_install_observe() {
     # with a further trailing LF is not the exact diagnostic and not a closed label answer.
     output="${output%$'\n'}"
     if [ "$code" -ne 0 ]; then
-        # Only the exact label/domain not-found diagnostic is absence. A bad
-        # domain, malformed output or any other nonzero result remains unknown.
-        [ "$output" = "Could not find service \"$label\" in domain for user gui: $UID" ] || return 1
+        # Only the exact label/domain not-found diagnostic is absence, alone (macOS 12 and earlier) or beside modern launchctl's `Bad request.` line (the two
+        # streams are merged, so a buffered line can follow the unbuffered one): exactly these three texts, read identically in service_removal_observe
+        # (relay/common.sh) and, one stream at a time, by scripts/ci/native-lifecycle-host.py. A bad domain, a blank, repeated, CR-ended or extra line, another
+        # label or uid, malformed output or any other nonzero result remains unknown.
+        notfound="Could not find service \"$label\" in domain for user gui: $UID"
+        case "$output" in "$notfound"|"Bad request."$'\n'"$notfound"|"$notfound"$'\n'"Bad request.") ;; *) return 1 ;; esac
         active=absent
     else
         # Framed exactly as service_removal_observe frames it: the header, a body and the closing `}`, or the inline `{}`. A cut answer is unknown.

@@ -28,11 +28,13 @@ ENUM = {"manager_pre": ("available", "unavailable", "unknown"), "manager_post": 
         "cleanup": ("pass", "fail", "unknown")}
 # Probe diagnostics (Q1D): EVIDENCE of where a probe stopped, validated strictly and read by no verdict (probe_passes and failure_phase never look at them; check_probe refuses a PASSING receipt whose diagnostics record a failed stage). Each is a fixed enum, an integer
 # in a range, or text restricted to a sanitized character class, and `not-run` / `none` is what a stage that did not run, or a fact the driver did not write, becomes.
+LABEL_STREAMS = ("empty", "bad-request", "not-found", "bad-request+not-found", "not-found+bad-request", "framed", "other", "not-run")  # the fixed shapes of ONE stream of the baseline label query (scripts/ci/native-lifecycle-host.py label_stream); never a byte, a label or a uid
 DIAG_ENUM = {"gui_nul": ("clean", "nul", "not-run"),
+             "baseline_label_stdout": LABEL_STREAMS, "baseline_label_stderr": LABEL_STREAMS,
              "disabled_admission": ("pass", "over-limit", "nul", "header", "trailer", "empty", "not-run"),
              "baseline_failed": ("none", "path-conf", "path-release", "path-cache", "path-definition", "path-legacy-definition", "path-curlrc", "path-shim", "manager-path-unread",
                                  "command-provenance", "label-active", "legacy-active", "hosts", "not-run")}
-DIAG_NUMBER = {"gui_print_status": 255, "disabled_status": 255, "gui_bytes": 10 ** 12, "disabled_bytes": 10 ** 12}  # an integer 0..limit (an exit status, a size), or `not-run`
+DIAG_NUMBER = {"gui_print_status": 255, "disabled_status": 255, "gui_bytes": 10 ** 12, "disabled_bytes": 10 ** 12, "baseline_label_status": 255}  # an integer 0..limit (an exit status, a size), or `not-run`
 HINT = r'[A-Za-z0-9 ={}"<>()._:/-]{1,64}'  # a launchctl answer line reduced to this class (and to known words, numbers and punctuation: hint_ok), `none` for nothing (scripts/ci/native-lifecycle-host.py shape_hint)
 DIAG_HINT = ("disabled_head", "disabled_tail", "gui_print_err", "disabled_err")
 STATE = r"not-run|[a-z-]{1,24}"  # the observer's `active` value at the baseline, or `not-run`
@@ -41,6 +43,7 @@ DIAG_KEYS = tuple(DIAG_ENUM) + tuple(DIAG_NUMBER) + DIAG_HINT + DIAG_STATE
 BASELINE_PASS = {"baseline_failed": "none", "baseline_label_state": "absent", "baseline_legacy_state": "absent"}  # what the baseline records when it passes (baseline_note none absent absent)
 GUI_PASS = {"gui_print_status": 0, "disabled_status": 0, "disabled_admission": "pass"}  # macOS: the stages whose success makes the manager available
 GUI_EVIDENCE = ("gui_nul",)  # recorded where the gui queries ran, never a stage: the product discards the domain listing and reads only its status, so a NUL in it fails nothing (`not-run` on Linux)
+LABEL_SHAPE = ("baseline_label_status", "baseline_label_stdout", "baseline_label_stderr")  # EVIDENCE of the answer to the baseline's `launchctl print gui/UID/LABEL`, recorded by the macOS probe only (`not-run` on Linux); it is no stage, a passing probe may carry any coherent shape
 GUI_SIZES = ("gui_bytes", "disabled_bytes")  # recorded only where the gui queries ran (`not-run` on Linux)
 TABLE_BOUND = "disabled_bytes"  # the print-disabled table is at most the product's 65536 bytes (the helper refuses a larger one), or not measured; the domain listing's size is evidence only: the product reads that listing by status and it is 89,044 bytes on macos-15
 
@@ -117,8 +120,16 @@ def diagnostics_agree(doc, os_name):
     if any(doc[k] != v for k, v in BASELINE_PASS.items()):
         return False
     if os_name == "Linux":
-        return all(doc[k] == "not-run" for k in tuple(GUI_PASS) + GUI_EVIDENCE + GUI_SIZES)
+        return all(doc[k] == "not-run" for k in tuple(GUI_PASS) + GUI_EVIDENCE + GUI_SIZES + LABEL_SHAPE)
     return all(doc[k] == v for k, v in GUI_PASS.items()) and (doc[TABLE_BOUND] == "not-run" or doc[TABLE_BOUND] <= 65536)
+
+
+def label_shape_coherent(doc):
+    """The three label-shape facts are one observation of one query, so they are all captured or all `not-run`, in both directions: a status of `not-run` (a query the helper could not run or had to end) has
+    no streams, and a numeric status (the query's own exit status, 126 and 127 included) always has both, `empty` for none (the helper never prints a number beside `not-run`). Evidence: an incoherent record
+    is refused, no verdict reads it."""
+    captured = [doc[k] != "not-run" for k in LABEL_SHAPE]
+    return all(captured) or not any(captured)
 
 
 def sha256(path):
@@ -178,6 +189,8 @@ def probe_receipt(facts, code, ident, os_name, uid):
         doc[key] = seen.get(key) if hint_ok(seen.get(key)) else "none"
     for key in DIAG_STATE:
         doc[key] = seen.get(key) if text(seen.get(key), STATE) else "not-run"
+    if not label_shape_coherent(doc):
+        doc.update({k: "not-run" for k in LABEL_SHAPE})  # one observation or none: a half-recorded shape is no evidence
     phase = seen.get("phase") if text(seen.get("phase"), r"[a-z0-9-]{1,40}") else "unknown"
     doc["result"] = "pass" if probe_passes(doc, os_name) else "fail"
     doc["failure_phase"] = "none" if doc["result"] == "pass" else phase
@@ -191,7 +204,7 @@ def check_probe(doc, ident, os_name):
             and text(doc["curl_backend"], r"[A-Za-z0-9._/ -]{1,80}"), "malformed probe fields")
     require(all(type(doc[k]) is str and doc[k] in allowed for k, allowed in DIAG_ENUM.items())
             and all(doc[k] == "not-run" or (type(doc[k]) is int and 0 <= doc[k] <= high) for k, high in DIAG_NUMBER.items())
-            and all(hint_ok(doc[k]) for k in DIAG_HINT) and all(text(doc[k], STATE) for k in DIAG_STATE), "malformed probe diagnostics")  # evidence: validated, never part of the verdict
+            and all(hint_ok(doc[k]) for k in DIAG_HINT) and all(text(doc[k], STATE) for k in DIAG_STATE) and label_shape_coherent(doc), "malformed probe diagnostics")  # evidence: validated, never part of the verdict
     require(doc["result"] == ("pass" if probe_passes(doc, os_name) else "fail"), "probe result contradicts its facts")
     require((doc["result"] == "pass") == (doc["failure_phase"] == "none"), "probe failure_phase contradicts its result")  # a pass names no failure phase, a failure names one
     require(doc["result"] != "pass" or diagnostics_agree(doc, os_name), "probe diagnostics contradict a passing result")  # a pass that records a failed stage is not evidence

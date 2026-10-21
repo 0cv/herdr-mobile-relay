@@ -358,6 +358,15 @@ probe_gui() {  # macOS: ONE captured listing of the gui domain; a failed query i
         fact manager_pre unavailable
     fi
 }
+label_shape() {  # macOS probe only; EVIDENCE, it decides nothing and the baseline's own query is untouched: the exit status and the fixed shape of each stream (never a byte, label or uid) of ONE read-only `launchctl print gui/UID/LABEL`, asked of the helper
+    local LC_ALL=C shape st=not-run so=not-run se=not-run
+    shape=$(HX label-shape --label "$LABEL" 2> /dev/null) || shape=''  # a helper that fails leaves all three `not-run`
+    shape=${shape//[!0-9a-z+ -]/}  # one line of the fixed vocabulary: nothing else (a newline included) reaches the facts file
+    case "$shape" in [0-9]*\ *\ *) st=${shape%% *} se=${shape##* } so=${shape#* }; so=${so% *} ;; esac
+    fact baseline_label_status "$st"
+    fact baseline_label_stdout "$so"
+    fact baseline_label_stderr "$se"
+}
 probe_main() {
     phase manager
     fact curl_backend "$(/usr/bin/curl --version 2> /dev/null | head -1 | tr -cd 'A-Za-z0-9._/ -' | cut -c1-80)"
@@ -370,6 +379,7 @@ probe_main() {
     phase stage
     stage_base
     phase baseline
+    [ "$OS" != Darwin ] || label_shape  # before the baseline, which it neither feeds nor changes
     baseline_clean || fail "a product definition, release or mapping already exists on this runner (baseline sub-check: ${BASEFAIL:-unknown})"
     tls_up 0 probe
     phase manager-post

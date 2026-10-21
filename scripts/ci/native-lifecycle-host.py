@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side fixtures of the native-manager lifecycle workflow (hosted disposable runners only): run (bounded; run it as the uid owning the command, root for sudo operations), tls-front, herdr-socket, cloudflared, curl (strict shim), herdr (unregister-only adapter), observe, tree, exists, table-ok, table-reason, shape, nul-free, counts, ident, resolve, stop; `--name value` options, then `--` and any argv."""
+"""Host-side fixtures of the native-manager lifecycle workflow (hosted disposable runners only): run (bounded; run it as the uid owning the command, root for sudo operations), tls-front, herdr-socket, cloudflared, curl (strict shim), herdr (unregister-only adapter), observe, label-shape, tree, exists, table-ok, table-reason, shape, nul-free, counts, ident, resolve, stop; `--name value` options, then `--` and any argv."""
 import hashlib
 import http.client
 import http.server
@@ -44,11 +44,18 @@ def note(log, *fields):
 def sh(argv, timeout=10, limit=LIMIT):
     """(status, stdout, stderr), each decoded from the RAW bytes (UTF-8, invalid bytes replaced; no newline translation, so what is parsed is what the program wrote).
     Status 127: it could not run or timed out. Status 126: stdout or stderr was longer than `limit` BYTES (the product's bound): never more than limit + 1 bytes of either
-    stream is read, the program is killed, and nothing is returned, because a truncated answer is never a complete one (every caller treats a nonzero status as unknown)."""
+    stream is read, the program is killed, and nothing is returned, because a truncated answer is never a complete one (every caller treats a nonzero status as unknown).
+    A program that itself exits 126 or 127 is returned the same way, with the streams it wrote: only sh_kept tells the two apart."""
+    return sh_kept(argv, timeout, limit)[1:]
+
+
+def sh_kept(argv, timeout=10, limit=LIMIT):
+    """(kept, status, stdout, stderr): sh's outcome with the one fact its status alone cannot carry. `kept` is True when the program ran to its own exit: `status` is then ITS exit status (any value, 126 and
+    127 included; -N when signal N ended it, as subprocess reports it) and the streams are what it wrote. `kept` is False when this function ended it or never ran it (status 126 over the bound, 127 could not run or timed out): the streams are empty and nothing was captured."""
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError:
-        return 127, "", ""
+        return False, 127, "", ""
     out, err = bytearray(), bytearray()
     buffers = {proc.stdout.fileno(): out, proc.stderr.fileno(): err}
     deadline, status, ended = time.monotonic() + timeout, None, None  # ended: 126 or 127 once this function itself ends the program
@@ -78,8 +85,8 @@ def sh(argv, timeout=10, limit=LIMIT):
         proc.stdout.close()
         proc.stderr.close()
     if ended is not None:
-        return ended, "", ""
-    return status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")[:4096]
+        return False, ended, "", ""
+    return True, status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")[:4096]
 
 
 def identity(body):
@@ -625,6 +632,43 @@ def drop_one_lf(text):
     return text[:-1] if text.endswith("\n") else text
 
 
+def not_found_texts(label, uid):
+    """The ONLY texts that make a nonzero `launchctl print gui/<uid>/<label>` answer absence, after ONE terminating LF is dropped, exactly as native_install_observe and service_removal_observe read it
+    (their merged `2>&1` text): the diagnostic alone (macOS 12 and earlier), or with modern launchctl's `Bad request.` line before it, or after it (a stdout line buffered under `2>&1` can be flushed after an
+    unbuffered stderr line). Anything else is unknown: a blank, repeated, CR-ended or extra line, both lines on one line, a changed case, another label or uid, an empty answer."""
+    diag = 'Could not find service "%s" in domain for user gui: %d' % (label, uid)
+    return diag, "Bad request.\n" + diag, diag + "\nBad request."
+
+
+def label_stream(text, label, uid):
+    """Probe diagnostics, EVIDENCE only: the fixed shape of ONE stream of a `launchctl print gui/<uid>/<label>` answer, never a byte of it, a label or a uid. One terminating LF is dropped, as the product drops it.
+    `empty`; `bad-request` (exactly `Bad request.`); `not-found` (exactly the diagnostic for this label and uid); `bad-request+not-found` and `not-found+bad-request` (those two lines, one LF between, in that
+    order); `framed` (the product's loaded framing: the header, a body and the closing `}`, or the inline `{}`; no NUL); `other` for anything else."""
+    diag, bad_first, bad_last = not_found_texts(label, uid)
+    body, target = drop_one_lf(text), "gui/%d/%s" % (uid, label)
+    named = {"Bad request.": "bad-request", diag: "not-found", bad_first: "bad-request+not-found", bad_last: "not-found+bad-request"}
+    if text == "":
+        return "empty"
+    if body in named:
+        return named[body]
+    framed = "\x00" not in text and ((body.startswith(target + " = {\n") and body.endswith("}")) or body == target + " = {}")
+    return "framed" if framed else "other"
+
+
+def label_shape(o, rest):
+    """Probe diagnostics, EVIDENCE only (it decides nothing): one read-only `launchctl print gui/<uid>/<label>`, printed as `<status> <stdout> <stderr>`: its exit status and, per stream, label_stream's fixed word.
+    The three are `not-run` together when nothing was captured (sh_kept: the query could not run, timed out or was over LIMIT bytes), and only then. Otherwise the status is the program's own, whatever its
+    value (a launchctl that exits 126 or 127 and wrote an answer is named like any other) and both streams are named, `empty` for none. A program ended by a signal has no exit status of its own (subprocess
+    reports -N): it is recorded as 128 + N, what the shell reads in the product's `launchctl print ... 2>&1`, with the streams it wrote."""
+    label, uid = o["label"], int(os.getuid())
+    kept, code, out, err = sh_kept([LAUNCHCTL, "print", "gui/%d/%s" % (uid, label)])
+    if not kept:
+        print("not-run not-run not-run")
+        return 0
+    print(code if code >= 0 else 128 - code, *(label_stream(text, label, uid) for text in (out, err)))
+    return 0
+
+
 def disabled_flag(code, table, label):
     """`false` (disabled) / `true` (enabled) from a COMPLETE launchctl disabled table, in the product's own grammar (table_flag): `unknown` for a failed status or any table the product reads as
     unknown (a NUL, no header, an unclosed section, stray text, a line naming the label with another value or the label twice), so such an answer is never read as enabled. Blank lines and
@@ -650,9 +694,9 @@ def observe(o, rest):
     if o["manager"] == "launchd":
         code, out, err = sh([LAUNCHCTL, "print", "gui/%d/%s" % (uid, label)])
         if code != 0:
-            # The product merges the two streams (`2>&1`) in the order they were written; this helper reads two pipes and cannot know it, so the exact diagnostic counts only when ONE stream carries all of it
-            # (the other empty): a diagnostic split across the streams, or text on both, is unknown, never absence. The product drops one terminating LF only.
-            absent = (not out or not err) and drop_one_lf(out + err) == 'Could not find service "%s" in domain for user gui: %d' % (label, uid)
+            # The product merges the two streams (`2>&1`) in the order they were written; this helper reads two pipes and cannot know it, so the exact diagnostic (alone, or with `Bad request.` before or after it:
+            # not_found_texts) counts only when ONE stream carries all of it (the other empty): an answer split across the streams, or text on both, is unknown, never absence. The product drops one terminating LF only.
+            absent = (not out or not err) and drop_one_lf(out + err) in not_found_texts(label, uid)
             snap.update(active="absent" if absent else "unknown", origin="absent" if absent else "unknown")
             pid = 0 if absent else None  # an unanswered query is not "no process"
         else:
@@ -801,7 +845,7 @@ def main(argv):
         return 0
     o, rest = opts(argv[2:])
     table = {"run": run_bounded, "tls-front": tls_front, "herdr-socket": herdr_socket, "cloudflared": cloudflared, "curl": curl_shim,
-             "herdr": herdr_adapter, "observe": observe, "counts": counts, "stop": stop, "tree": tree, "exists": exists, "table-ok": table_ok, "table-reason": table_why, "shape": shape, "nul-free": nul_free}
+             "herdr": herdr_adapter, "observe": observe, "label-shape": label_shape, "counts": counts, "stop": stop, "tree": tree, "exists": exists, "table-ok": table_ok, "table-reason": table_why, "shape": shape, "nul-free": nul_free}
     if argv[1] not in table:
         sys.exit("native lifecycle host: unknown command")
     return table[argv[1]](o, rest) or 0
