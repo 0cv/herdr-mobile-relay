@@ -272,7 +272,12 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 # extras, a native_done gate, other labels, other argument forms and every fault, is the adapter's. These answers mirror
 # the adapter text: model_stub_control pins it by digest, runs chains of calls through both implementations and compares
 # every output, event, tally and model byte.
-MIRRORED = {'c476dcb2143220e7ee5b363b952c7e951bf15e6d7401f1cee69da7ce2d37544f', '7ec0920fc45fc3516bb482bd6955416f9296fe5f6e9f7edcf24473b2292390ff'}
+# MIRRORED holds the two adapters in use: c476dcb2... is ADAPTER (this file), d1bbd99a... is the FULL_ADAPTER of tests/test_uninstall.sh. The
+# earlier FULL_ADAPTER (7ec0920f...) is retired, no suite uses that text any more. d1bbd99a... re-derived FAST_STUB against the prefix that
+# Linux mount confinement extended with a staged-guard `rm` branch and a `late_kind == 'fifo'` gate arm; neither touches a call the stub
+# answers itself (no FAST_TOOL is rm; the gate is reached only by an observation once native_done is set, and the stub delegates that), so the
+# stub text is unchanged.
+MIRRORED = {'c476dcb2143220e7ee5b363b952c7e951bf15e6d7401f1cee69da7ce2d37544f', 'd1bbd99aa066c1f2a1fb55b333ec8d7cd8918acbc7d3f07550d9e36ee6846506'}
 FAST_TOOLS = ('stat', 'head', 'wc', 'uname', 'systemctl', 'launchctl', 'plutil')
 MODEL_CHECK = r'''import json, pathlib, sys
 ''' + ACCEPTABLE + r'''try:

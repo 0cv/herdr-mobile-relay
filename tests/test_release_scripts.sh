@@ -176,6 +176,9 @@ tar -C "$GUARD_EXTRACT" -xzf "$WORK_DIR/positive.tar.gz"
 GUARD_RELAY="$GUARD_EXTRACT/herdr-mobile-relay"
 # Classify the complete namespace independently; never use the guard verdict.
 # fdinfo mnt_id is the descriptor-bound ID also returned by statx.
+# The autofs rule mirrors the guard's (internal/uninstallmount, written again here, not shared): an autofs mount is
+# unsupported only on the ancestry of, at or beneath HOME or a selected root, and the one same-point stack of an autofs
+# trigger and the single non-autofs filesystem it triggered (systemd's binfmt_misc) is the only duplicate mountpoint tolerated.
 GUARD_SUPPORTED=false
 if [ "$HOST_OS" = linux ] && python3 - "$GUARD_HOME" <<'PY'
 import os, re, sys
@@ -211,13 +214,13 @@ try:
         data = inventory.read((4 << 20) + 1)
     if not data or len(data) > 4 << 20 or not data.endswith(b'\n') or b'\x00' in data:
         raise ValueError()
-    mounts, points = {}, set()
+    mounts = {}
     for line in data.splitlines():
         fields = line.split()
         if len(line) > 4096 or len(mounts) >= 16384 or len(fields) < 10 or \
                 fields.count(b'-') != 1 or b' '.join(fields) != line: raise ValueError()
         sep = fields.index(b'-')
-        if sep < 6 or len(fields) - sep != 4 or fields[sep+1] == b'autofs' or \
+        if sep < 6 or len(fields) - sep != 4 or \
                 any(not field for field in (fields[5], fields[sep+1], fields[sep+2], fields[sep+3])):
             raise ValueError()
         if any(re.search(rb'\\(?!040|011|012|134)', field) for field in fields): raise ValueError()
@@ -229,22 +232,29 @@ try:
         ident, parent = number(fields[0]), number(fields[1])
         major, minor = (number(part) for part in fields[2].split(b':'))
         origin, point = path(fields[3]), path(fields[4])
-        if ident == 0 or ident == parent or ident in mounts or point in points: raise ValueError()
-        mounts[ident] = (parent, (major, minor), origin, point)
-        points.add(point)
+        if ident == 0 or ident == parent or ident in mounts: raise ValueError()
+        mounts[ident] = (parent, (major, minor), origin, point, fields[sep+1])
     base = mounts.get(base_id)
-    if base is None or base[2:] != (b'/', b'/') or base[1] != base_dev or \
-            selected_id != base_id or selected_dev != base_dev or len(mounts) != len(points):
+    if base is None or base[2:4] != (b'/', b'/') or base[1] != base_dev or \
+            selected_id != base_id or selected_dev != base_dev:
         raise ValueError()
     roots = tuple(home + b'/' + name for name in (b'releases', b'config', b'cache'))
-    for ident, (parent, dev, origin, point) in mounts.items():
+    for ident, (parent, dev, origin, point, fstype) in mounts.items():
+        if fstype == b'autofs' and any(under(p, point) or under(point, p) for p in (home,) + roots): raise ValueError()
+    covered = set()
+    for ident, (parent, dev, origin, point, fstype) in mounts.items():
         if ident == base_id: continue
         ancestor = mounts.get(parent)
-        if ancestor is None or point == ancestor[3] or not under(point, ancestor[3]): raise ValueError()
+        if ancestor is None or not under(point, ancestor[3]): raise ValueError()
+        if point == ancestor[3]:
+            if ancestor[4] != b'autofs' or fstype == b'autofs' or parent in covered: raise ValueError()
+            covered.add(parent)
         for root in roots:
             if under(root, point) or under(point, root) or \
                     dev == base_dev and (under(root, origin) or under(origin, root)):
                 raise ValueError()
+    visible = [m[3] for ident, m in mounts.items() if ident not in covered]
+    if len(visible) != len(set(visible)): raise ValueError()
 except (OSError, ValueError, IndexError, UnicodeError, AttributeError):
     sys.exit(1)
 PY
