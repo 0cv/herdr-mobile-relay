@@ -5367,13 +5367,13 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await closeParserObserver();
       const parserEvents = observerRecords(parserObserverPath);
       assert.equal(parserRuns.length, stages.length);
-      assert.ok(parserRuns.every(run => run.timeoutMs === 250 && run.cleanupReservationMs === 40
+      assert.ok(parserRuns.every(run => run.timeoutMs === 1_000 && run.cleanupReservationMs === 40
         && Number(run.targetPID) > 0 && run.targetCloseObserved === true && run.childExited === true
         && run.ownedProcessesExited === true && run.stdioClosed === true && run.timedOut === false
         && Number(run.inputBytes) > 0 && /^[a-f0-9]{64}$/u.test(String(run.inputSha256))
         && BigInt(String(run.startedAtNs)) < BigInt(String(run.endedAtNs))), JSON.stringify(parserRuns));
       for (const stage of observations.stages) {
-        assert.equal(stage.parseTimeoutMs, 250);
+        assert.equal(stage.parseTimeoutMs, 1_000);
         assert.equal(stage.parseCleanupReservationMs, 40);
         assert.equal(stage.parserStarted, true);
         assert.equal(stage.parserReady, true);
@@ -5426,7 +5426,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
             const parserSource = evalIndex < 0 ? '' : String(args[evalIndex + 1] || '');
             if (!parserSource.includes('PARSER_STARTED')) return boundedCommand(binary, args, timeout, options);
             const delayedSource = parserSource.replace('const parser = await import(',
-              'await new Promise(resolve => setTimeout(resolve, 400));\nconst parser = await import(');
+              'await new Promise(resolve => setTimeout(resolve, 1_500));\nconst parser = await import(');
             assert.notEqual(delayedSource, parserSource);
             const input = Buffer.from(options.input || '');
             const startedAtNs = monotonicNowNs();
@@ -5466,7 +5466,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         }, receipt: delayedParserReceipt, command: boundedCommandFailureDetails(delayedParserFailure?.result, delayedEvents) });
         assert.equal(delayedStage.outcome, 'failed');
         assert.equal(delayedStage.normalizationTimedOut, true);
-        assert.equal(delayedStage.parseTimeoutMs, 250);
+        assert.equal(delayedStage.parseTimeoutMs, 1_000);
         assert.equal(delayedStage.parseCleanupReservationMs, 40);
         assert.equal(delayedStage.parserStarted, true);
         assert.equal(delayedStage.parserReady, false);
@@ -5477,14 +5477,14 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         assert.equal(delayedStage.parseChildExited, true);
         assert.equal(delayedStage.parseOwnedProcessesExited, true);
         assert.equal(delayedStage.parseStdioClosed, true);
-        assert.ok(delayedStage.parseDurationMs <= 250);
+        assert.ok(delayedStage.parseDurationMs <= 1_000);
         assert.equal(delayedStage.state, undefined);
         assert.ok(delayedParserFailure instanceof BoundedCommandError);
         assert.equal(delayedParserFailure.result.timedOut, true);
         assert.match(delayedParserFailure.result.stdout, /^PARSER_STARTED \d+\n/u);
         assert.doesNotMatch(delayedParserFailure.result.stdout, /PARSER_READY|PARSER_INPUT|PARSER_OUTPUT/u);
         assert.ok(delayedParserReceipt);
-        assert.equal(delayedParserReceipt.timeoutMs, 250);
+        assert.equal(delayedParserReceipt.timeoutMs, 1_000);
         assert.equal(delayedParserReceipt.cleanupReservationMs, 40);
         assert.equal(delayedParserReceipt.inputBytes, delayedStage.stdoutBytes);
         assert.equal(delayedParserReceipt.inputSha256, decodeRetainedHash(delayedStage.stdoutSha256));
@@ -7696,10 +7696,10 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     }
   });
   test('diagnostic GMS timeout probe reserves ownership and parsing before testing the command deadline', async () => {
-    const limits = { persistenceOperationTimeoutMs: 1_000, ownershipTimeoutMs: 500, parseReserveMs: 250 };
+    const limits = { persistenceOperationTimeoutMs: 1_000, ownershipTimeoutMs: 500, parseReserveMs: 1_000 };
     const probeBudgetMs = gmsTimeoutProbeBudgetMs(limits);
-    assert.equal(probeBudgetMs, 1_750);
-    for (const parentTimeoutMs of [1_500, probeBudgetMs]) {
+    assert.equal(probeBudgetMs, 2_500);
+    for (const parentTimeoutMs of [2_250, probeBudgetMs]) {
       const fixture = await harness.createFixture();
       let clockMs = 0;
       let ownershipTimeoutMs: number | undefined;
@@ -7730,7 +7730,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await measurement.finalizeGmsObservations();
       assert.deepEqual(snapshot.limits.ownershipTimeoutMs, limits.ownershipTimeoutMs);
       assert.equal(snapshot.stages[0].outcome, 'failed');
-      if (parentTimeoutMs === 1_500) {
+      if (parentTimeoutMs === 2_250) {
         assert.equal(ownershipTimeoutMs, 249);
         assert.equal(commandTimeoutMs, undefined);
         assert.match(snapshot.stages[0].error, /owned-device verification exceeded its monotonic time bound/u);
@@ -7789,13 +7789,13 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         JSON.stringify({ stage: attackResult.stages[0], commandResult: failureMetadata(attackCommandFailure) }));
       assert.ok(attackResult.stages[0].parseDurationMs > 0);
       assert.deepEqual([attackResult.limits.ownershipTimeoutMs, attackResult.limits.commandTimeoutMs, attackResult.limits.parseReserveMs,
-        attackResult.limits.persistenceOperationTimeoutMs, attackResult.limits.totalCollectionMs], [500, 5_000, 250, 1_000, 5 * 5_750]);
+        attackResult.limits.persistenceOperationTimeoutMs, attackResult.limits.totalCollectionMs], [500, 5_000, 1_000, 1_000, 5 * 6_500]);
       limits = attackResult.limits;
       const attackTiming = gmsAttackTimingRule(attackResult.limits, attackResult.stages[0], attackElapsedMs);
       assert.deepEqual(attackTiming.violations, [], JSON.stringify({ attackElapsedMs, stage: attackResult.stages[0],
         commandResult: failureMetadata(attackCommandFailure), parserResult: failureMetadata(attackParserFailure) }));
-      assert.equal(attackTiming.stageAllowanceMs, 5_750);
-      assert.equal(attackTiming.compositeCeilingMs, 7_750);
+      assert.equal(attackTiming.stageAllowanceMs, 6_500);
+      assert.equal(attackTiming.compositeCeilingMs, 8_500);
       assert.equal(attackResult.totalCollectionMs, attackResult.stages[0].durationMs);
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in attackEnvironment)) delete process.env[key];

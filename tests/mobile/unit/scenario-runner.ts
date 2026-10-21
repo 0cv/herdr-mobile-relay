@@ -63,14 +63,14 @@ export class AndroidPlatform {
   async installFromBrowser() { trace('install'); }
   async launchInstalledApp() { trace('launch'); }
   async clickWebText(text) { trace('click:' + text); if (text === 'Try again' && mode.includes('recovery-failure')) throw new Error('ORIGIN_ORIGINAL: recovery failure'); }
-  async clickDialogText(_dialog, text) { trace('dialog:' + text); }
+  async clickDialogText(_dialog, text) { trace('dialog:' + text); if (text === 'Close') this.progressClosed = true; }
   async assertStandalone() { return this.readRunningIdentity(); }
   async readRunningIdentity() { const failed = state.faults.length > 0; return { ...identity(state.active_release === 'candidate'),
     url: origin + '/', origin, standalone:true, provider: this.name === 'ios' ? 'ios-home-screen' : 'android-standalone',
     nativeProvider: this.name === 'ios' ? 'ios:com.apple.webapp' : 'android:com.android.chrome', nativePid:this.cold ? '43' : '42',
     nativeActivity:'org.chromium.chrome.browser.webapps.WebappActivity', navigationId:this.cold ? 'two' : 'one', buildFromApplication:true,
     requiredAssetsReady:!failed, requiredAssetFailure:failed, failureUiVisible:failed, applicationInitialized:true }; }
-  async readUpdateCompletion() { const loaded = state.faults.length === 0; return { phoneRequired:true, phoneAcknowledged:loaded, phoneState: loaded ? 'loaded' : 'failed', visibleCompletion:loaded, rawPlanPresent:true }; }
+  async readUpdateCompletion() { if (this.progressClosed) return { phoneRequired:false, phoneAcknowledged:false, phoneState:'', visibleCompletion:false, rawPlanPresent:false }; const loaded = state.faults.length === 0; return { phoneRequired:true, phoneAcknowledged:loaded, phoneState: loaded ? 'loaded' : 'failed', visibleCompletion:loaded, rawPlanPresent:true }; }
   async openSetupURLInInstalledApp() { trace('second-invitation'); }
   async setPreference() { trace('preference'); }
   async preferenceValue() { return 'state'; }

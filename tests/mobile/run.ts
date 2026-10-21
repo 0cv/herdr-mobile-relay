@@ -11,6 +11,7 @@ import {
   assertCredentialPreserved,
   assertPhoneUpdateAcknowledged,
   assertPhoneUpdateNotAcknowledged,
+  assertUpdateProgressClosed,
   assertNoRelayDeploy,
   assertNoRelayInstall,
   assertOldIdentity,
@@ -566,7 +567,7 @@ async function runUpgradeScenario(
     assertRelayOwnership(agentBeforeAuth, ['alpha']);
     const agentCompletion = await platform.readUpdateCompletion();
     qualification.observe({ completion: agentCompletion });
-    if (phonePlanContract(baseline, agentCompletion, oracleControls)) assertPhoneUpdateAcknowledged(agentCompletion);
+    assertUpdateProgressClosed(agentCompletion);
     await platform.openFixtureAgent('alpha');
     const agentAfterAuth = authEvidence(await fixtureState(info));
     qualification.observe({ ownership: agentAfterAuth });

@@ -39,6 +39,7 @@ import {
   assertNoRelayInstall,
   assertPhoneUpdateAcknowledged,
   assertPhoneUpdateNotAcknowledged,
+  assertUpdateProgressClosed,
   assertRunningIdentity,
   assertStandalone,
   assertStandaloneOwnership,
@@ -1538,6 +1539,14 @@ test('oracle observes phone completion instead of only runtime readiness', async
   assert.throws(() => assertPhoneUpdateAcknowledged({
     phoneRequired: true, phoneAcknowledged: false, phoneState: 'loading', visibleCompletion: false, rawPlanPresent: true,
   }), /PHONE_COMPLETION_MISSING/);
+  assert.doesNotThrow(() => assertUpdateProgressClosed({
+    phoneRequired: false, phoneAcknowledged: false, phoneState: '', visibleCompletion: false, rawPlanPresent: false,
+  }));
+  for (const reopened of [
+    { phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true, rawPlanPresent: true },
+    { phoneRequired: false, phoneAcknowledged: false, phoneState: '', visibleCompletion: false, rawPlanPresent: true },
+    { phoneRequired: false, phoneAcknowledged: false, phoneState: '', visibleCompletion: true, rawPlanPresent: false },
+  ]) assert.throws(() => assertUpdateProgressClosed(reopened), /UPDATE_PROGRESS_REOPENED/);
   assert.throws(() => assertPhoneUpdateNotAcknowledged({
     phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false, rawPlanPresent: true,
   }), /PHONE_PLAN_MISSING/);
