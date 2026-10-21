@@ -156,8 +156,10 @@ processes.` Each Android job therefore runs one step before its scenario step
 that samples every 5 seconds until that line is in the main log buffer and the
 normalized GMS component state has then been unchanged for 20 seconds. If that
 does not happen by device uptime 600 seconds, or three consecutive samples fail,
-the step only warns and the unchanged strict before/after comparison decides; a
-drop in device uptime between samples fails the step. Once sampling ends,
+the step only warns and the unchanged strict before/after comparison decides. A
+device uptime that does not increase between successful samples fails the step;
+a restart long enough to fail three samples in a row ends as a warning instead.
+Once sampling ends,
 `android-gms-settle.json` records the decision, sampling failures and every
 sample, and the step only warns if that file cannot be written. The
 normal-retirement exception admits only
@@ -165,7 +167,10 @@ isolated Chrome sandbox helpers with a complete in-interval fork/start identity
 whose Chrome zygote is in the START inventory, or is absent from it and was forked
 exactly once, by `zygote64`, inside the measurement, remains in the END inventory
 and never exits. The helper must then end with either an orderly Chromium child
-exit and matching Zygote exit status zero, or one system_server `isolated not
+exit and matching Zygote exit status zero, then either one system_server `has
+died` record whose label is only the process's importance at death (such as
+`vis BTOP`, `fg  SVC` or `cch+75 CEM`) or one `isolated not needed` kill, within
+one second of that exit; or one system_server `isolated not
 needed` kill with the matching isolated UID followed within one second by that
 Zygote's report of exit status zero or SIGKILL; without the Chromium child exit
 the kill must come within two seconds of the fork. A planned Chrome force-stop
@@ -180,7 +185,11 @@ counts. Android logs a helper by the last 15 characters of its process name, and
 a contiguous prefix of its three runtime startup lines may precede the Zygote fork
 record by at most 20 ms. Ordinary helper observations require both timestamp and capture-order
 lifetime bounds and must fit both START/END marker bounds, including audit subject
-timestamps. Capture is monitored, receive-bounded `main`/`system` logcat, not an
+timestamps. The fork and start record must always be inside both bounds; only when
+the helper's own child exit, Zygote exit, kill or death record is after END in
+both timestamp and capture order may its remaining records, and records that
+mention it, also come from the capture after END, still under every other check
+above. Capture is monitored, receive-bounded `main`/`system` logcat, not an
 exhaustive or lossless all-producer generation-time trace. Producers sample time
 before submission; another producer's earlier/later timestamp is diagnostic
 `boundaryDiscordances`, not proof of capture loss. Original bytes and line numbers

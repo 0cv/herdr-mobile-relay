@@ -220,7 +220,7 @@ export interface AndroidNormalRetirement {
   events: string[];
 }
 
-function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, bounded: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
+function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, bounded: (record: LogRecord) => boolean, afterEnd: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
   const result: AndroidNormalRetirement[] = [];
   const proof = (record: LogRecord) => ({ lineNumber: record.lineNumber, line: record.line });
   for (const birth of records) {
@@ -261,6 +261,11 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
         || (index > 0 && record.time < startup[index - 1].time);
     }))) continue;
     const startupLines = new Set(startup.map((record) => record.lineNumber));
+    const deaths = events.filter((line) => androidEventDetails(line).pid === pid);
+    // Chrome can start a helper just before END, so its retirement may finish in the capture that continues after END.
+    const straddlesEnd = [child, reaper, exit, ...deaths.map((line) => records.find((record) => record.line === line))]
+      .some((record) => record && afterEnd(record));
+    const observed = (record: LogRecord) => bounded(record) || (straddlesEnd && afterEnd(record));
     const lifetimeStart = startup[0] || fork;
     const childBeforeExit = Boolean(child) && birth.time < child!.time && child!.time <= exit.time
       && birth.lineNumber < child!.lineNumber && child!.lineNumber < exit.lineNumber;
@@ -294,24 +299,24 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       record.message.includes(`audit(0.0:${subject.serial}):`)).length !== 1))) continue;
     if (records.some((record) => record.pid === pid && record.tag === 'cr_SplitCompatApp'
       && !record.message.endsWith(` processName=${processName} isIsolatedProcess=true`))) continue;
-    if ([fork, birth, ...(child ? [child] : []), ...(reaper ? [reaper] : []), exit, ...records.filter((record) => record.pid === pid)].some((record) => !bounded(record))) continue;
+    if (!bounded(fork) || !bounded(birth)
+      || [...(child ? [child] : []), ...(reaper ? [reaper] : []), exit, ...records.filter((record) => record.pid === pid)].some((record) => !observed(record))) continue;
     const auditLines = new Set(auditSubjects.map((subject) => subject.lineNumber));
     if (records.some((record) => (record.tag === 'ActivityManager'
       && [fork.pid, birth.pid].some((producerPid) => record.message.startsWith(`Start proc ${producerPid}:`)))
       || (record.pid === pid && ((record.time < fork.time || record.lineNumber < fork.lineNumber) && !startupLines.has(record.lineNumber)
         || record.time > exit.time
         || (record.lineNumber > exit.lineNumber && !auditLines.has(record.lineNumber)))))) continue;
-    const deaths = events.filter((line) => androidEventDetails(line).pid === pid);
     if (deaths.length !== (killedByReaper ? 2 : 1) || (killedByReaper && !deaths.includes(exit.line))) continue;
     const deathRecords = deaths.filter((line) => !killedByReaper || line !== exit.line)
       .map((line) => records.find((record) => record.line === line));
     if (!childProof && !deathRecords.includes(reaper)) continue;
-    if (deathRecords.some((record) => !record || !bounded(record) || record.lineNumber <= birth.lineNumber || record.time < birth.time || record.time > exit.time + 1000
+    if (deathRecords.some((record) => !record || !observed(record) || record.lineNumber <= birth.lineNumber || record.time < birth.time || record.time > exit.time + 1000
       || record.tag !== 'ActivityManager' || record.pid !== birth.pid
       || (() => {
         const detail = androidEventDetails(record.line);
         if (detail.processName !== processName) return true;
-        if (record.message.startsWith('Process ')) return !/^Process \S+ \(pid \d+\) has died: (?:vis(?:\+\d+)? BTOP)$/u.test(record.message);
+        if (record.message.startsWith('Process ')) return !/^Process \S+ \(pid \d+\) has died: [a-z]{2,4} *(?:\+ ?\d+)? +[A-Z]{2,4} *$/u.test(record.message);
         const uid = detail.uid?.match(/^u0a\d+i(-?\d+)$/u);
         return detail.reason !== 'isolated not needed' || !uid || Number(uid[1]) + 99000 !== Number(isolated) + 90000;
       })())) continue;
@@ -335,7 +340,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
         && !/^Force stopping com\.android\.chrome appid=\d+ user=[1-9]\d*: \S.*$/u.test(record.message)) return true;
       if (possiblyDuringLifetime && /^(?:PackageManager|PackageInstaller)$/u.test(record.tag) && record.message.includes('com.android.chrome')) return true;
       const mentionsPid = new RegExp(`\\b${pid}\\b`, 'u').test(record.message);
-      if (mentionsPid && !bounded(record)) return true;
+      if (mentionsPid && !observed(record)) return true;
       if (record.tag === 'ActivityManager' && mentionsPid && /^(?:Killing |Process .* has died:)/u.test(record.message)
         && !deaths.includes(record.line)) return true;
       if (record.tag === 'Process' && mentionsPid && /Sending signal/u.test(record.message)) return true;
@@ -411,7 +416,8 @@ export function measuredAndroidEvents(
   const operationMarkers = records.filter((record) => record.tag === 'HerdrMeasure' && record.message.startsWith(`${first.id} OP_`));
   if (operationMarkers.length !== operations.length * 2) issues.push('unrecorded or incomplete planned termination markers');
   const events = androidLogEvents(log, first.processes, planned, starts[0]);
-  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, bounded);
+  const afterEnd = (record: LogRecord) => record.time >= ends[0].time && record.lineNumber > ends[0].lineNumber;
+  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, bounded, afterEnd);
   const normalEvents = new Set(retirements.flatMap((retirement) => retirement.events));
   return { events, fatalEvents: events.filter((event) => !normalEvents.has(event)), normalRetirements: retirements, issues, boundaryDiscordances };
 }

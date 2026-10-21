@@ -463,6 +463,57 @@ for (const [name, pid, mutate, after] of hostedRejections) androidEventTests.pus
   assert.ok(result.fatalEvents.some((event) => event.includes(` ${pid}:`) || event.includes(`Process ${pid} `)));
 }]);
 
+const lateProcesses = {
+  before: { '358': 'zygote64', '556': 'system_server', '5492': 'com.android.chrome', '5531': 'com.android.chrome_zygote' },
+  after: { '358': 'zygote64', '556': 'system_server', '13129': 'com.android.chrome', '13170': 'com.android.chrome_zygote' },
+};
+const lateSnapshot = (boundary: 'start' | 'end', processes: Record<string, string>) => ({
+  measurement: { id: '0bf6b509-b835-4dc7-ab8f-3b2a8493789c', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const measureLate = (log: string) => measuredAndroidEvents(log, lateSnapshot('start', lateProcesses.before), lateSnapshot('end', lateProcesses.after), []);
+const lateHelperLog = () => readFile(new URL('./fixtures/android-hosted-39656482139-helper-retirements.log', import.meta.url), 'utf8');
+
+androidEventTests.push(['hosted 39656482139 helpers retire with any process-state death label and across the END marker', async () => {
+  const log = await lateHelperLog();
+  const result = measureLate(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154']);
+  assert.match(result.normalRetirements[0].events[0], /\(pid 10768\) has died: fg {2}SVC $/u);
+  for (const retirement of result.normalRetirements) {
+    for (const proof of retirement.proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+  for (const label of ['vis+1 BTOP', 'fg  + 5 SVC ', 'cch+75 CEM ', 'prcp FGS ']) {
+    const relabelled = measureLate(log.replace('has died: fg  SVC ', `has died: ${label}`));
+    assert.deepEqual(relabelled.fatalEvents, [], label);
+    assert.deepEqual(relabelled.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154'], label);
+  }
+  const sameMillisecond = measureLate(log.replace('1792609794.698 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar',
+    '1792609794.694 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar'));
+  assert.deepEqual(sameMillisecond.fatalEvents, []);
+}]);
+
+const lateRejections: [string, string, (log: string) => string][] = [
+  ['death label without a process state', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg')],
+  ['death label with extra words', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg  SVC  extra')],
+  ['start record received after the END marker', '14154', (log) => log.replace(/^(.*HerdrMeasure: .* END\n)/mu, '').replace(/^(.*Start proc 14154:.*\n)/mu,
+    '         1792609794.684 14165 14165 I HerdrMeasure: 0bf6b509-b835-4dc7-ab8f-3b2a8493789c END\n$1')],
+  ['own record received after END but timestamped before it', '14154', (log) => log.replace('1792609794.698 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar',
+    '1792609794.690 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar')],
+  ['post-END mention timestamped before the END marker', '14154', (log) => log.replace('1792609794.781 13129 13129', '1792609794.690 13129 13129')],
+  ['post-END crash exit', '14154', (log) => log.replace('Process 14154 exited cleanly (0)', 'Process 14154 exited due to signal 11 (Segmentation fault)')],
+  ['post-END exit without the child exit', '14154', (log) => log.replace(/^.*\b14154 +14167 I chromium: .*Exiting child process\.\n/mu, '')],
+];
+for (const [name, pid, mutate] of lateRejections) androidEventTests.push([`hosted 39656482139 helper rejection: ${name}`, async () => {
+  const original = await lateHelperLog();
+  const log = mutate(original);
+  assert.notEqual(log, original);
+  const result = measureLate(log);
+  assert.deepEqual(result.issues, []);
+  assert.ok(!result.normalRetirements.some((retirement) => retirement.pid === pid));
+  assert.ok(result.fatalEvents.some((event) => event.includes(`(pid ${pid})`) || event.includes(`Process ${pid} `)));
+}]);
+
 androidEventTests.push(['synthetic planned Chrome force-stop covers observed helpers the system reaps inside the operation', async () => {
   const helper = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0';
   const operation: AndroidPlannedTermination = {
@@ -501,6 +552,7 @@ androidEventTests.push(['synthetic planned Chrome force-stop covers observed hel
     ['helper exit from an unknown zygote', operationLog(stopping, kill, reap, helperExit.replace('100 100', '101 101'), signal), [operation]],
     ['force-stop record from an unknown producer', operationLog(stopping.replace('559 559', '558 558'), kill, reap, helperExit, signal), [operation]],
     ['repeated reaping record', operationLog(stopping, kill, reap, reap, helperExit, signal), [operation]],
+    ['force-stop kill of a sandboxed helper', operationLog(stopping, kill, reap.replace('/u0a145i-9000 (adj 0): isolated not needed', '/u0ai2 (adj 0): stop com.android.chrome due to from pid 50'), reap, helperExit, signal), [operation]],
     ['reaping repeated after the exit', operationLog(stopping, kill, reap, helperExit, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal), [operation]],
   ] as [string, string, AndroidPlannedTermination[]][]) {
     const result = check(log, operations);
