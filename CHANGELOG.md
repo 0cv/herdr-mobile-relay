@@ -15,16 +15,6 @@ entry below states its limits.
 
 ### Added
 
-- Start Devin CLI agents from relay-provided launch profiles. Herdr already
-  supports `--kind devin`; the relay now offers a `Devin` profile whenever the
-  `devin` executable is on its `PATH` or Herdr's Devin integration is
-  installed, and resolves Herdr's `devin-cli` and `devin cli` aliases to it.
-  The agent list names these panes `Devin` instead of the raw `devin`.
-- Choose a Hermes profile when starting a Hermes agent from the phone. The
-  launch form lists the profiles installed on the computer and starts Hermes
-  with `-p <profile>`. The default choice passes no profile, so Hermes keeps
-  the one set with `hermes profile use`. A profile that is missing or deleted
-  is refused before any pane is created.
 - Add managed Tailscale Serve as an optional foreground connection path for a
   tailnet HTTPS address. Start it with
   `relay/plugin-choose-transport.sh tailscale` or
@@ -178,6 +168,40 @@ entry below states its limits.
   admission and again right before each Herdr dispatch, and make the relay check
   the dispatch boundary immediately before resizing so that a request whose
   target changed since the last Herdr lookup writes nothing.
+
+## [0.22.11] - 2026-10-21
+
+### Added
+
+- Start Devin CLI agents from relay-provided launch profiles. Herdr already
+  supports `--kind devin`; the relay now offers a `Devin` profile whenever the
+  `devin` executable is on its `PATH` or Herdr's Devin integration is
+  installed, and resolves Herdr's `devin-cli` and `devin cli` aliases to it.
+  The agent list names these panes `Devin` instead of the raw `devin`.
+- Choose a Hermes profile when starting a Hermes agent from the phone. The
+  launch form lists the profiles installed on the computer and starts Hermes
+  with `-p <profile>`. The default choice passes no profile, so Hermes keeps
+  the one set with `hermes profile use`. A profile that is missing or deleted
+  is refused before any pane is created.
+
+### Fixed
+
+- Do not offer Start Agent in the home folder. The launch form opened on the
+  home folder, which the relay refuses to start an agent in, so a launch with
+  the default folder always failed, and only after the tap. Start Agent is now
+  disabled there and the form asks for a project folder below home; any such
+  folder works as before.
+- Stop showing rows that Claude Code writes itself as your messages in Claude
+  Code conversation history. Skill bodies, compaction summaries and messages
+  relayed from other Claude sessions are hidden; scheduled `/loop` prompts
+  carry the same marker, so they are hidden too. Slash commands read as
+  `/name args`, `!` shell commands as `! command`, and the output rows of
+  those shell commands are hidden. A prompt that only starts with one of these
+  tags keeps its full text.
+- Document `HERDR_CURSOR_PROJECTS_DIRS` with the other agent directory
+  overrides in `docs/agent-directories.md`. Each entry is a Cursor projects
+  directory, the parent of `<slug>/agent-transcripts`, not the `.cursor`
+  folder above it.
 
 ## [0.22.10] - 2026-10-15
 
@@ -1887,7 +1911,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
   laptop terminal from remaining narrowed.
 
 [Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...HEAD
-[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.23.0
+[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.23.0
+[0.22.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.22.11
 [0.22.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.22.10
 [0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
 [0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8

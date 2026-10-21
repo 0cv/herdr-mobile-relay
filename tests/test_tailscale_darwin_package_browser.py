@@ -409,6 +409,23 @@ ALLOWED = (
     "web/assets/workspace-tools-415.js.br",
     "web/builds/0.23.0-415-a6db7feb794382d7/index.html",
     "web/builds/0.23.0-415-a6db7feb794382d7/index.html.br",
+    # M5 U-G: port of main 32e84ed5..0e070b26 (launch home-folder fix #67, snapshot eviction test wait, release
+    # v0.22.11): main bytes for LaunchView.svelte and internal/conversation/browser_coverage_test.go, the recorded
+    # raw merge of components.test.ts, main's CHANGELOG with the branch [0.23.0] above [0.22.11], and the one-time
+    # regeneration of web/ at asset generation 417. Paths already listed above, such as CHANGELOG.md,
+    # frontend/build-versions.json, LaunchView.svelte and components.test.ts, are not repeated. Listing a path
+    # here is not a review.
+    "internal/conversation/browser_coverage_test.go",
+    "web/assets/ConversationHistory-417.js",
+    "web/assets/ConversationHistory-417.js.br",
+    "web/assets/ResumeTimingSettings-417.js",
+    "web/assets/ResumeTimingSettings-417.js.br",
+    "web/assets/app-fd778345d5bbcdae21d7562d6d50058e53dd53a892dfd4e8cebefff2ab320189.js",
+    "web/assets/app-fd778345d5bbcdae21d7562d6d50058e53dd53a892dfd4e8cebefff2ab320189.js.br",
+    "web/assets/workspace-tools-417.js",
+    "web/assets/workspace-tools-417.js.br",
+    "web/builds/0.23.0-417-8bdcf74f662af4bd/index.html",
+    "web/builds/0.23.0-417-8bdcf74f662af4bd/index.html.br",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")
