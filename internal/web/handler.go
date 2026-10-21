@@ -114,7 +114,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setSecurityHeaders(w)
-	setCacheHeaders(w, requestPath, h.immutableAsset(requestPath))
+	setCacheHeaders(w, requestPath)
 	if hasCompressed {
 		w.Header().Set("Vary", "Accept-Encoding")
 	}
@@ -183,10 +183,6 @@ func (h *Handler) isAllowedAsset(asset string) bool {
 		isAttachmentHashWorker(asset) ||
 		strings.HasPrefix(asset, "icons/") ||
 		strings.HasPrefix(asset, "fonts/")
-}
-
-func (h *Handler) immutableAsset(asset string) bool {
-	return h.webFiles[asset] || h.isVersionedLazyAsset(asset)
 }
 
 // Lazy chunks are not entry assets, so they are not repeated in the small
@@ -306,11 +302,16 @@ func setErrorHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 }
 
-func setCacheHeaders(w http.ResponseWriter, asset string, immutable bool) {
-	if immutable {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		return
-	}
+// Release assets (the descriptor-listed entry, JavaScript and stylesheet, and
+// the versioned lazy chunks) are content-addressed but are deliberately served
+// for revalidation (no-cache with an ETag) rather than marked immutable or given
+// a long max-age. That keeps the relay-served app admissible to main's
+// canonical public verifier (appdeploy.VerifyPublic), which refuses `immutable`
+// and an asset max-age of 24 hours or more and which the relay applies to the
+// phone bundle it serves, and consistent with main's generated Pages headers
+// (frontend/scripts/pages-policy.ts). Stable bootstrap and metadata names stay
+// non-storing.
+func setCacheHeaders(w http.ResponseWriter, asset string) {
 	switch asset {
 	case "index.html", "herdr-bootstrap.js", "manifest-loader.js", "manifest.webmanifest",
 		"setup.webmanifest", "sw.js", "version.json", "release.json":

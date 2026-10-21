@@ -922,6 +922,37 @@ func stampedWebCopy(t *testing.T, source string) string {
 	return destination
 }
 
+// canonicalPagesWebHandler serves the stamped web root the way Pages canonically
+// serves it to the app verifier: the exact build entry (.../index.html) is
+// normalized to its directory with one same-origin 308 that keeps any query, the
+// directory serves the entry bytes as HTML, and every other file is served
+// unchanged. Go's bare http.FileServer answers that index.html with a 301
+// instead, which the verifier admits only as the single 308 hop.
+func canonicalPagesWebHandler(t *testing.T, webRoot string) http.Handler {
+	t.Helper()
+	descriptor, err := release.LoadWebDescriptor(os.DirFS(webRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := descriptor.Entry
+	if !strings.HasPrefix(entry, "/builds/") || !strings.HasSuffix(entry, "/index.html") {
+		t.Fatal("packaged build entry is not a build index.html")
+	}
+	directory := strings.TrimSuffix(entry, "index.html")
+	files := http.FileServer(http.Dir(webRoot))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != entry {
+			files.ServeHTTP(w, r)
+			return
+		}
+		location := directory
+		if r.URL.RawQuery != "" {
+			location += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, location, http.StatusPermanentRedirect)
+	})
+}
+
 // A fresh subprocess keeps the trust pool independent of other unit tests.
 // A run-owned root stands in for OS trust on both hosted platforms; the actual
 // command still uses default verified TLS, never an insecure client. The only
@@ -951,7 +982,7 @@ func TestVerifyPublicExactTrustedGatewayApp(t *testing.T) {
 	if err := json.Unmarshal(metadata, &identity); err != nil || identity.Version == "" || identity.Revision == "" {
 		t.Fatal("packaged fixture identity is missing")
 	}
-	server := httptest.NewTLSServer(http.FileServer(http.Dir(webRoot)))
+	server := httptest.NewTLSServer(canonicalPagesWebHandler(t, webRoot))
 	defer server.Close()
 	root := t.TempDir()
 	cert := filepath.Join(root, "fixture-ca.pem")
@@ -1005,10 +1036,12 @@ func TestGatewayAppVerifierSubprocess(t *testing.T) {
 	}
 	code, err := run(args)
 	if err != nil {
-		t.Fatal("app verifier refused the fixture")
+		// The verifier's own error is already sanitized: it names the refused
+		// resource and rule, never a credential or a response body.
+		t.Fatalf("app verifier refused the fixture: %v", err)
 	}
 	if code != 0 {
-		t.Fatal("app verifier did not pass")
+		t.Fatalf("app verifier did not pass (exit %d)", code)
 	}
 }
 

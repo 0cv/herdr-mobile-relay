@@ -37,7 +37,7 @@ func TestServesShippedConversationHistoryLazyChunk(t *testing.T) {
 	if plain.Code != http.StatusOK {
 		t.Fatalf("GET %s = %d, want %d", requestPath, plain.Code, http.StatusOK)
 	}
-	if got := plain.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+	if got := plain.Header().Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("lazy chunk cache control = %q", got)
 	}
 	if plain.Header().Get("ETag") == "" {
@@ -56,6 +56,9 @@ func TestServesShippedConversationHistoryLazyChunk(t *testing.T) {
 	}
 	if compressed.Header().Get("Vary") != "Accept-Encoding" {
 		t.Fatalf("Brotli Vary = %q", compressed.Header().Get("Vary"))
+	}
+	if got := compressed.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("Brotli lazy chunk cache control = %q", got)
 	}
 	if compressed.Header().Get("ETag") == plain.Header().Get("ETag") {
 		t.Fatal("compressed and uncompressed representations share an ETag")

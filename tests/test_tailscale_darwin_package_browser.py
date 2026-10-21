@@ -126,6 +126,7 @@ ALLOWED = (
     "internal/update/worker.go",
     "internal/web/handler_test.go",
     "internal/web/handler.go",
+    "internal/web/lazy_chunk_test.go",
     "relay/pi-command-bridge/bridge.mjs",
     "tests/blackbox/hybrid_test.go",
     "tests/blackbox/lifecycle_test.go",
