@@ -75,7 +75,14 @@ import { constants, gzipSync } from 'node:zlib';
 // safe Conversation routing with native-transcript fallback.
 // Raised from 164 KiB for bounded history diagnostics, source-change recovery,
 // and snapshot-aware refresh handling.
-const limitKiB = 165;
+// Raised from 165 KiB for main's opt-in Resize Session (#60) integrated with the
+// branch's eager shell: the per-device consent switch in Settings, its
+// remembered preference and the lease gating in the store add about 500 B gzip
+// (1,490 B raw) to the single application script. The integrated 0.23.0
+// payload measures 169,451 B against the old 169,216 B ceiling, where the
+// branch without #60 measured 168,938 B (Bun's zlib, this guard's complete
+// eager accounting).
+const limitKiB = 166;
 const limit = limitKiB * 1024 + 256;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));

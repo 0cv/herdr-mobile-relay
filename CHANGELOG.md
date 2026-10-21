@@ -5,6 +5,273 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-21
+
+This release adds optional Tailscale connection paths, read-only diagnostics, an
+opt-in encrypted last-known summary and local resume timing on the phone, and
+stricter service, update and uninstall handling. None of the Tailscale paths has
+been qualified on a physical phone or against a real Tailscale daemon, and each
+entry below states its limits.
+
+### Added
+
+- Add managed Tailscale Serve as an optional foreground connection path for a
+  tailnet HTTPS address. Start it with
+  `relay/plugin-choose-transport.sh tailscale` or
+  `HERDR_RELAY_TRANSPORT=tailscale`; the setup menu does not offer it. The relay
+  stays on `127.0.0.1`. After a read-only identity, version, Serve and Funnel
+  check and per-run consent, the relay process owns a temporary HTTPS route
+  through Tailscale's LocalAPI. It never runs `tailscale login` or
+  `tailscale serve`, never enables Funnel, and refuses to adopt or overwrite an
+  existing Serve or Funnel configuration, leaving it untouched. Keep the pane
+  open: Ctrl-C requests authenticated retirement, and if route clearing cannot
+  be confirmed the owner record and recovery evidence are kept. Limits: pinned
+  to Tailscale 1.102.4 on Linux and the open-source Darwin daemon socket; the
+  macOS App Store and GUI builds are unsupported; no real-daemon or
+  physical-phone qualification.
+- Add operator-owned HTTPS Serve (BYO) as a second foreground Tailscale path,
+  chosen under **3 Tailscale** > **2 Your own HTTPS route (advanced BYO)** in
+  the setup menu. You route a canonical `https://host[:port]` origin to the
+  loopback relay yourself. Herdr stores it as
+  `HERDR_RELAY_TRANSPORT=tailscale-external` and `HERDR_EXTERNAL_HTTPS_ORIGIN`,
+  checks the origin's TLS certificate, relay instance and release before arming
+  an invitation, disables automatic PCP/UPnP router mapping, and makes no
+  Tailscale CLI or LocalAPI call. It never creates, inspects or removes the
+  route, which stays yours when Herdr stops. The phone app may stay on an
+  independently hosted origin, whose exact bundle Herdr verifies before pairing.
+- Add development-only Tailscale tooling for checkouts: `make dev-tailscale`
+  (guided foreground Serve with a private state root and nonproduction ports),
+  `make dev-tailscale-cli` (CLI-backed persistent Serve for the exact
+  macOS/arm64 App Store Tailscale 1.102.4 profile) and a connection chooser in
+  `make dev-tunnel`. The CLI-backed mode is not offered in setup and is not
+  runtime-qualified, and shipped builds refuse production and installed-service
+  activation. Its route survives stopping the relay and is removed only by a
+  separate, explicitly confirmed operation.
+- Add read-only `herdr-mobile-relay doctor` and `status` commands, with
+  `--json`, `--config ABSOLUTE_FILE` and `--probe-ingress`. The plugin's Status
+  pane and the setup menu header now render them. They check the selected
+  configuration, the installed package's manifest and file hashes (Linux), exact
+  loopback relay health and, for ordinary Cloudflare, gateway and BYO
+  selections, one Herdr `ping`. The exit status is 2 for an invalid invocation
+  or configuration, 1 for an observed failure, 3 when a required check cannot be
+  observed and 0 when every applicable required check completes. This first
+  slice is partial: service lifecycle, the full Herdr comparison, pairing and
+  phone activity are not checked, `--probe-ingress` sends no external request,
+  and on macOS the installed-package byte check and the Herdr ping are reported
+  unavailable instead of guessed, so a healthy relay does not yet report exit 0.
+- Add an opt-in **Keep an Encrypted Last-known Summary** switch, off by default,
+  and **Forget last-known data** to Settings. While a relay reconnects, the app
+  can show a dated, read-only list of agents and workspaces (display labels,
+  coarse type and status, time last seen) from this tab's encrypted
+  `sessionStorage`. Nothing in it opens a terminal or acts on an agent, and it
+  is replaced, never merged, when the relay reports authoritative inventory.
+  Entries expire after 60 minutes, are bounded to 200 rows and 50 groups per
+  relay, 10 relays and 512 KiB, and exclude terminal, conversation, prompt,
+  approval, attachment and path content. Locking removes the summary;
+  forgetting, opting out, removing a relay or changing credentials invalidates
+  it in every tab. Labels may be sensitive, a new Home Screen launch, a closed
+  tab or browser eviction can lose the cache, and browser-refused deletion is
+  reported rather than promised. This is a candidate feature with no
+  physical-phone performance claim.
+- Add **Settings > Resume Timing**, which measures how long the app takes to
+  show fresh agents after each wake, by connection path (Cloudflare WSS,
+  Tailscale WSS, gateway relayed or direct) and kind of wake. It is on by
+  default but local: at most 100 wakes from the last 24 hours stay in this tab's
+  memory and are never uploaded. Turn **Measure Resume Timing** off to stop and
+  clear them, use **Clear Resume Timings**, or **Export Redacted Summary** for
+  aggregates and sample counts only. The delay before the app's code runs and
+  DNS, TCP and TLS inside a connection cannot be observed and are reported as
+  unavailable. Relays add an optional coarse `ingress` label (`cloudflare`,
+  `gateway`, `tailscale-managed`, `tailscale-byo` or `tailscale-cli`) to the
+  encrypted push configuration so paths are labelled without guessing from
+  hostnames; older apps ignore it and older relays omit it. No performance claim
+  is made.
+
+### Changed
+
+- Reorganize the setup menu into **1 Cloudflare**, **2 WebRTC Gateway** and
+  **3 Tailscale** submenus, with **4 Show setup QR**,
+  **5 Publish the phone app to your Cloudflare Pages (advanced)** and
+  **6 Doctor** at the top level. `b` goes back and `q` exits; a blank answer at
+  the top opens Cloudflare and never starts a tunnel. In the Tailscale submenu
+  **Always on** and **Remove Herdr's own route** are listed as unavailable and
+  do nothing.
+- Require fresh, authenticated inventory before the phone app acts on a relay.
+  After each connection, path change or wake the app sends one snapshot request
+  with a random nonce, which the relay answers from an inventory poll that
+  started after the request. Reads and writes, such as watching a pane, sending
+  input, leasing a pane size and uploading, wait for it, and a hidden or locked
+  app drops that authority, allowing only cleanup and connection recovery.
+  Relays now advertise `inventory_snapshot_v1`; a relay older than this release
+  cannot provide it, so upgrade relays together with the phone app. The
+  pane-size lease follows the same rule: a hidden or locked app gives its lease
+  back and does not renew it, the relay keeps the size for its ten-second grace,
+  and the phone leases again once fresh inventory is confirmed. This replaces
+  the five-minute hidden renewal.
+- Keep background paths away from foreground Tailscale. While managed or
+  operator-owned Tailscale Serve is selected, background service installation
+  and phone-managed updates are refused, and a plugin update is refused if a
+  background service is installed. A recorded foreground session also blocks
+  plugin updates, full uninstall and choosing another transport. Phone-managed
+  updates are likewise refused for CLI-backed installations. Stop the foreground
+  pane first.
+- Explain expired, already-used or refused setup links in Settings: if no phone
+  has paired yet, retry the original bootstrap link while the same relay is
+  running, because its ten-minute window renews when presented; ordinary device
+  invitations expire ten minutes after issue and need a new invitation from a
+  paired owner.
+- Verify a gateway service installation before reporting success. The installer
+  now needs an already selected HTTPS phone app, checks that it serves the exact
+  packaged bundle, and requires the relay to report a verified gateway
+  registration with usable inventory. Phone reachability is still not proved.
+- Package the Tailscale launchers, the transport-switch helper, the Status
+  wrapper, `speech-voices.sh` and `.env.example` in release archives, and have
+  release verification reject an archive without the transport-switch helper.
+- Require a successful Full service qualification run of the tagged commit
+  before a release is published, in addition to `check.yml`. The fast per-push
+  run is not accepted: dispatch the Full run, or use the nightly one, for the
+  commit to be tagged. See `docs/ci-test-tiers.md`.
+
+### Fixed
+
+- Ignore setup links that repeat an invitation selector (`invite`,
+  `invite_version`, `invite_expires`, `setup`, `relay_id` or `rendezvous`) and
+  links that carry invitation metadata without a valid invitation, instead of
+  choosing one of the values.
+
+### Security
+
+- Make full uninstall refuse before it changes anything when it cannot prove
+  what it would remove. It now refuses while a foreground Tailscale or
+  operator-owned Serve session is recorded, when the service configuration
+  cannot be selected unambiguously, and when release files have more than one
+  link. On Linux the relay's own mount guard also checks, before any effect and
+  again before each destructive step, that no release, config or cache root has
+  a mount at, beneath or aliasing it, including a temporary directory that
+  aliases a root. macOS has no mount-confinement proof; its path is unchanged.
+- Make native user-service installation and replacement (systemd and launchd) a
+  guarded transaction. It refuses to touch a loaded service of the same label
+  unless it comes from Herdr's own definition, verifies readiness of the
+  replacement and, on failure, rolls back only after the services are confirmed
+  quiescent. The previous service is reactivated only when its readiness was
+  recorded before the change; otherwise the services stay stopped and the
+  recovery evidence is kept. Behavior against real systemd and launchd service
+  lifecycles is not yet qualified.
+- Print a bounded, historical `support-public-v1` projection from
+  `herdr-mobile-relay support` instead of the whole persisted snapshot, which
+  can hold operational metadata and recent errors. It records protocol,
+  readiness and inventory state and counters, and is not current health. The
+  snapshot must be a private regular file in an absolute canonical runtime
+  directory. On macOS it is read only when descriptor ACL evidence shows it is
+  private; that path is not yet qualified on a real macOS host.
+- Require device authorization for pane-size lease and release requests at
+  admission and again right before each Herdr dispatch, and make the relay check
+  the dispatch boundary immediately before resizing so that a request whose
+  target changed since the last Herdr lookup writes nothing.
+
+## [0.22.10] - 2026-10-15
+
+### Added
+
+- Read OpenCode 2.x conversation history. History, completion responses and
+  activity extracts now work for OpenCode 2.x, on fresh installs and on stores
+  upgraded from 1.x, where each session is read from whichever format holds
+  it. OpenCode 1.x stores keep working as before. Herdr reports OpenCode
+  sessions only with its OpenCode integration: run
+  `herdr integration install opencode` and restart OpenCode.
+
+### Fixed
+
+- Show OpenCode conversation history, completion responses and activity
+  extracts when a session is resumed from a directory other than the one it
+  was created in, such as a subdirectory or another project folder. OpenCode
+  resumes a session in its stored directory, so the relay now trusts the
+  session ID Herdr reports for the pane instead of rejecting it as belonging
+  to a different workspace (#61). Hermes keeps its workspace check.
+- Mark OpenCode shell commands that exit with a non-zero code as failed in
+  conversation history. OpenCode records them as completed and stores the
+  exit code separately.
+
+## [0.22.9] - 2026-10-13
+
+### Fixed
+
+- Accept Cloudflare Pages' single same-origin HTTP 308 redirect from a
+  build-specific `index.html` to its directory during phone-app deployment
+  verification. This fixes the `canonical public resource must not redirect`
+  failure introduced in 0.22.6. Query-changing redirects, additional hops and
+  JavaScript/CSS redirects remain rejected; the entry's MIME type and exact
+  content digest are still checked. If the old verifier blocks a phone-driven
+  upgrade, update the deployment-owner relay manually first, then retry app
+  deployment without clearing phone storage or pairing again.
+
+## [0.22.8] - 2026-10-13
+
+### Changed
+
+- Resize Session is now a per-device opt-in, off by default. Settings states
+  the cost before you turn it on: while the phone has a pane open, the shared
+  terminal is resized to fit it, so the laptop and SSH views of that pane look
+  garbled until the phone lets go, and agents may leave narrow copies of their
+  output in the scrollback. Resizing may also truncate scrollback and lose
+  older output. Herdr has no API to resize a pane's grid and
+  terminal together, so this cannot be avoided. Restoration is requested
+  when the phone leaves (immediately when the switch is turned off), with
+  best-effort preservation of dimensions changed on the laptop meanwhile.
+  Lease Terminal Height stays a separate, remembered opt-in, inactive while
+  Resize Session is off. Linux and macOS relays only; when off or unsupported,
+  controllers keep the desktop width with horizontal scrolling and readers
+  wrap. Relays no longer advertise the capability that made apps up to 0.22.7
+  resize automatically, and refuse resize requests that do not carry the new
+  opt-in. ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
+
+### Fixed
+
+- Guard against resizing a closed or replaced terminal. Every resize and
+  restore now opens the TTY first and then re-checks the pane's Herdr terminal,
+  shell process and TTY before writing through the held descriptor, using
+  direct ioctls instead of `stty`. A closed or replaced pane is dropped without
+  a write instead of being retried every second forever, and a restore that
+  cannot be confirmed is retried at most five times within thirty seconds,
+  then logged once with advice to resize the pane locally.
+  ([#60](https://github.com/0cv/herdr-mobile-relay/issues/60))
+
+## [0.22.7] - 2026-10-05
+
+### Fixed
+
+- List command and skill files up to 1 MiB in the slash-command palette. Skills
+  larger than 64 KiB were silently left out, and commands larger than 64 KiB
+  lost their frontmatter, so hidden and non-invocable commands were listed
+  without descriptions. Larger files are skipped.
+  ([#59](https://github.com/0cv/herdr-mobile-relay/issues/59))
+
+## [0.22.6] - 2026-10-02
+
+Version 0.22.5 was withdrawn; this release skips its version and asset generation.
+
+### Fixed
+
+- Run each macOS update and app deployment worker exactly once. launchd used to
+  restart finished workers forever, so a failed update re-ran in full, app
+  deployment included, over and over and blocked later updates. The relay
+  now removes finished workers, including the endlessly restarting ones left
+  by earlier releases, when it starts, before each update or deployment, and
+  on every update check. Failed updates no longer leave their job file behind.
+  ([#57](https://github.com/0cv/herdr-mobile-relay/issues/57))
+- Show Pi's live commands on the phone when Pi runs on Bun on macOS. The Pi
+  integration could not identify Herdr's socket there, so none were listed.
+- Include a static missing-page response in generated Pages bundles and require
+  application-resource revalidation instead of one-year immutable caching.
+  Recovery from responses already cached as immutable still needs qualification.
+- Include the transaction helper required by native service installers in
+  release archives.
+- Verify hosted application resources at their canonical URLs, including MIME,
+  digest, cache policy, and missing-asset responses, so cached failures cannot
+  hide behind cache-busting deployment checks.
+- Skip withdrawn asset generations and reject withdrawn application scripts
+  when preparing a release.
+
 ## [0.22.4] - 2026-10-01
 
 ### Added
@@ -1609,7 +1876,13 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.23.0
+[0.22.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.22.10
+[0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
+[0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8
+[0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7
+[0.22.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.4...v0.22.6
 [0.22.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.3...v0.22.4
 [0.22.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.1...v0.22.2

@@ -6,7 +6,8 @@ outstanding. No physical resume or performance claim is made.
 
 ## Complete eager shell accounting
 
-The gzip ceiling remains **169216 bytes**. The size guard charges the stable
+The gzip ceiling is **170240 bytes** (166 KiB; it was 169216 bytes until main's
+opt-in Resize Session, #60, was integrated). The size guard charges the stable
 fallback `index.html` and `herdr-bootstrap.js` even when the host redirects,
 the build-specific entry, its parser-blocking `manifest-loader.js`, the single
 application JS/CSS pair, the immediate startup update probe's `version.json`,
@@ -18,8 +19,10 @@ scope is explicitly accounted for. Vite still rejects shared eager JS imports.
 The shell has no eager image or remote-font dependency. The apple-touch/PWA icons
 are install metadata, not page-rendered images; Nerd Symbols is a unicode-gated,
 `font-display: swap` face used by terminal/history content, not the initial
-home/summary surface. The hash worker and Terminal/Conversation/Settings chunks
-are content/action-triggered, not shared eager imports. Service-worker/push art
+home/summary surface. The hash worker and the Conversation History, workspace
+tools and Resume Timing chunks are content/action-triggered, not shared eager
+imports; the terminal and Settings views are part of the single application
+script, not separate chunks, so they count against the ceiling. Service-worker/push art
 requires notification state and authenticated relay configuration; `release.json`
 is release-verifier metadata, not a startup fetch. These are shipped and validated,
 but are outside the eager home/summary shell budget; the budget is not all traffic

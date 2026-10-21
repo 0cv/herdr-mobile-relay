@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.22.3`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.22.3) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.23.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.23.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -299,8 +299,8 @@ Current diagnostic ladder:
    validation or release/runtime qualification. Compressed bytes are hashed, not
    decompressed; browser asset validity remains a separate release gate. A
    same-owner attacker can replace metadata and content or edit/restore between
-   observations. The separate complete eager gzip ceiling of 169216 bytes is
-   unchanged and not measured by doctor.
+   observations. The separate complete eager gzip ceiling (166 KiB, 170240
+   bytes) is not measured by doctor.
 3. Exact loopback relay health/readiness and, in gateway mode, attributed local
    registration. Only fixed GETs to `127.0.0.1` at the selected port are allowed;
    bare liveness is insufficient. Gateway registration does not prove a phone's

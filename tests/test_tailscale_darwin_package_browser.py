@@ -270,7 +270,6 @@ ALLOWED = (
     "internal/panesize/terminal.go",
     "internal/protocol/protocol.go",
     "tests/blackbox/panesize_test.go",
-    "tests/mobile/fixture/main.go",
     # Follow-ups d757d6f5 (installer) and 75cd2e9f (Linux mount guard):
     # listing these paths is not a review of runtime behavior.
     "install.sh",
@@ -332,6 +331,47 @@ ALLOWED = (
     "tests/test_uninstall_mounts.py",
     "scripts/ci/run-uninstall-mount-controls.sh",
     ".github/workflows/uninstall-mount-controls.yml",
+    # M5 U-E: version 0.23.0, its CHANGELOG section and the one-time regeneration of the committed phone
+    # bundle (asset generation 410, main's withdrawn lists): the plugin version, the new and deleted web/
+    # files, and the initial-payload size guard with its pinned test (limit 165 -> 166 KiB for main's
+    # opt-in Resize Session), plus the two docs that stated the old ceiling or the lazy chunks. Paths already
+    # listed above, such as README.md and frontend/build-versions.json, are not repeated. Listing a path here
+    # is not a review.
+    "CHANGELOG.md",
+    "docs/last-known-contract.md",
+    "docs/resume.md",
+    "frontend/scripts/check-size.mjs",
+    "frontend/tests/unit/initial-payload.test.ts",
+    "herdr-plugin.toml",
+    "web/404.html",
+    "web/_headers",
+    "web/_redirects",
+    "web/assets/ConversationHistory-409.js",
+    "web/assets/ConversationHistory-409.js.br",
+    "web/assets/ConversationHistory-410.js",
+    "web/assets/ConversationHistory-410.js.br",
+    "web/assets/ResumeTimingSettings-409.js",
+    "web/assets/ResumeTimingSettings-409.js.br",
+    "web/assets/ResumeTimingSettings-410.js",
+    "web/assets/ResumeTimingSettings-410.js.br",
+    "web/assets/app-46ee1b280e5e33aa6a24b5fbde596a1412b9d53c0af7e3a418bdbed291a6e0d1.js",
+    "web/assets/app-46ee1b280e5e33aa6a24b5fbde596a1412b9d53c0af7e3a418bdbed291a6e0d1.js.br",
+    "web/assets/app-94bc2e5b3e8629906726f9ff29485596a8270d2cf44cdff5af405c76e03ae931.js",
+    "web/assets/app-94bc2e5b3e8629906726f9ff29485596a8270d2cf44cdff5af405c76e03ae931.js.br",
+    "web/assets/workspace-tools-409.js",
+    "web/assets/workspace-tools-409.js.br",
+    "web/assets/workspace-tools-410.js",
+    "web/assets/workspace-tools-410.js.br",
+    "web/builds/0.22.4-409-1adf25c652489d98/index.html",
+    "web/builds/0.22.4-409-1adf25c652489d98/index.html.br",
+    "web/builds/0.23.0-410-ae243604b5e460aa/index.html",
+    "web/builds/0.23.0-410-ae243604b5e460aa/index.html.br",
+    "web/herdr-bootstrap.js",
+    "web/herdr-bootstrap.js.br",
+    "web/release.json",
+    "web/release.json.br",
+    "web/version.json",
+    "web/version.json.br",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")

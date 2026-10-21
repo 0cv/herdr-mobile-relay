@@ -296,7 +296,8 @@ shows the card; nothing runs in the background otherwise.
 | `frontend/scripts/run-resume-benchmarks.mjs`, `analyze-resume-benchmarks.mjs` | hosted harness |
 
 The Settings card and summary code load as one lazy chunk so the startup
-payload stays inside the existing 165 KiB gzip budget, which was not raised.
+payload stayed inside the 165 KiB gzip budget in force when this landed; the
+ceiling is now 166 KiB (`frontend/scripts/check-size.mjs`).
 No runtime or development dependency was added; the harness uses the pinned
 `@playwright/test`, Node built-ins and WebCrypto.
 
