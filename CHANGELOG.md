@@ -7,6 +7,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Start Devin CLI agents from relay-provided launch profiles. Herdr already
+  supports `--kind devin`; the relay now offers a `Devin` profile whenever the
+  `devin` executable is on its `PATH` or Herdr's Devin integration is
+  installed, and resolves Herdr's `devin-cli` and `devin cli` aliases to it.
+  The agent list names these panes `Devin` instead of the raw `devin`.
 - Choose a Hermes profile when starting a Hermes agent from the phone. The
   launch form lists the profiles installed on the computer and starts Hermes
   with `-p <profile>`. The default choice passes no profile, so Hermes keeps
