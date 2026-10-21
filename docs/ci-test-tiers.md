@@ -174,3 +174,40 @@ mount controls are a separate workflow, so the service gates, shard counts and t
 Only the pure helper runs locally: `python3 -I -B tests/service_qualification_matrix.py list --tier fast`
 (`--suite uninstall-cli` for the uninstall CLI) and `python3 -I -B tests/test_service_qualification_matrix.py`. The suites
 themselves refuse outside disposable hosted CI.
+
+## Native manager lifecycle: partial Q1, not M3
+
+`.github/workflows/native-manager-lifecycle.yml` runs the installed release under the real launchd (macos-15) and systemd-user
+(ubuntu-24.04) managers on disposable hosted runners only. `scripts/ci/run-native-lifecycle.sh` stops casual and accidental runs elsewhere: besides the Actions variables it requires a
+process named `Runner.Worker` among its ancestors, read with the absolute `/bin/ps` so a `PATH` or function shim cannot answer for it. That is **not a security boundary**: a same-user caller
+that forges such a process (or runs code before the script starts) passes it, and a caller with passwordless `sudo` can already change the host directly, so the driver must only be started by this
+workflow on a hosted runner. It is **partial Q1,
+not M3**: the probe, A install/start/stop/login-style relaunch/full uninstall and the refusals. Update, rollback and the signal matrix (Q2)
+are not run, so nothing here claims the M3 lifecycle. A push to the CI branch runs it only with `[native-lifecycle]` in the head commit
+message (exact, case-sensitive); a push without it runs `decide` alone and is not qualification. `workflow_dispatch` qualifies its commit
+(`candidate_sha`, when given, must equal it). Jobs and caps: decide 5 min, probe 10 (both OSes), producer 30, lifecycle 45 (both OSes), gate
+10; no retries, no fail-fast, one-day artifacts, a read-only token, and two macOS jobs per run. No hosted run exists yet: the first one measures. Branch rules and release admission stay separate prerequisites that no YAML here establishes.
+
+| Part | What it does |
+| --- | --- |
+| probe | first real-manager contact, per OS; publishes `probe.json` (`native-capability-v1`, `result=pass\|fail`) for every outcome once its private staging exists (the hosted, path and checkout guards run first: a guard refusal writes nothing, and the upload step's `if-no-files-found: error` plus the gate's missing-artifact refusal make that red), and a failed probe stays red. It records the manager, the dedicated test user and its `default.target` (Linux), linger changes, curl's TLS backend and the CA-less refusal then trusted acceptance |
+| producer | `make cross-build` then the unchanged `scripts/package-release.sh` at the checked-out commit; `producer.json` (`native-producer-v1`) binds the archive and manifest digests (B is null in Q1) |
+| lifecycle | `a-install-start`, `a-stop-start-restart`, `login-style-relaunch`, `bad-token`, `bad-policy`, `public-wizard-premutation`, `gateway-missing-app`, `manager-missing-injected` (simulated), `a-full-uninstall`, `bystander-nonmutation`; plus `foreign-launchd-path` (macOS) or `foreign-systemd-fragment` and `foreign-systemd-dropin` (Linux) |
+| HTTPS | a per-run `.test` name in one marked `/etc/hosts` line, a fresh CA and leaf trusted on the disposable runner, a TLS front on 127.0.0.1:443 that drops privileges before serving, and the fake cloudflared child of the real service wrapper forwarding the installed relay's real `/readyz`; a clean environment and a strict `curl` PATH shim; hits are counted on the front AND the child |
+| Herdr | a nonroot Unix-socket API fixture through `HERDR_SOCKET_PATH` in `relay.env` (never `HERDR_BIN`), and an adapter that accepts only `plugin uninstall herdr-mobile-relay.events`; it proves no real Herdr registration |
+
+The Linux product runs as a newly created disposable test UID, never the Actions user. `login-style-relaunch` stops only that user's manager
+(`loginctl terminate-user`, else `systemctl stop user@UID.service`), starts it again with `systemctl start user@UID.service` and passes only if
+the installed unit becomes active through `default.target` with no manual start on a new manager generation: a fresh user manager, not an
+interactive login. macOS uses an owned-label `bootout` and `bootstrap` in `gui/$UID`. Cleanup is registered before each mutation; the stage is created with an atomic `mkdir` and removed only when that call proved this run created it. On an unknown
+stop or identity the native definition is retained and the cleanup fails (the VM is destroyed), never force-deleted. A removal is accepted as proven only when its
+absence check had a definite answer (an unreadable `/etc/hosts` or keychain listing, a failed `pgrep`, an unprobeable port 443 or a failed process listing is unknown, not absent).
+The baseline refuses a real `herdr` on the service wrapper's search path and a manager other than the system one; a refusal case counts only with a known snapshot and a
+product exit that is neither 0 nor a timeout (124, 125, 137).
+
+Every case records before and after definition hash, mode, origin (`path =` or `FragmentPath` plus `DropInPaths`), state, release revision,
+owned process digest and manager generation, the readiness identity, the Herdr socket counts and matched HTTPS hits of THAT case (deltas against the counters at its start, never cumulative values), `default.target` observed active after the Linux login-style restart, and a bystander digest. The
+`gate` job (`tests/native_manager_lifecycle_matrix.py`, partial Q1) requires every dependency to succeed and exactly one probe per OS, one
+producer and one `native-cases-v1` per OS, bound to the commit, run and attempt; it downloads the release bundle itself and re-hashes it against the producer receipt; it refuses a missing, empty, malformed, duplicate, extra,
+failed, stale or cross-OS receipt, a failed probe receipt and any cleanup failure. It does not prove physical login/logout, external
+Cloudflare, phone reachability, gateway success or real Herdr registration. Offline: `python3 -I -B tests/test_native_manager_lifecycle_matrix.py`.

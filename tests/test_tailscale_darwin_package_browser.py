@@ -372,6 +372,11 @@ ALLOWED = (
     "web/release.json.br",
     "web/version.json",
     "web/version.json.br",
+    ".github/workflows/native-manager-lifecycle.yml",
+    "scripts/ci/run-native-lifecycle.sh",
+    "scripts/ci/native-lifecycle-host.py",
+    "tests/native_manager_lifecycle_matrix.py",
+    "tests/test_native_manager_lifecycle_matrix.py",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")

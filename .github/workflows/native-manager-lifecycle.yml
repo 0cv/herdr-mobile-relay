@@ -1,0 +1,234 @@
+name: Native manager lifecycle (partial Q1)
+
+# Real launchd and systemd-user lifecycle of the installed release, on DISPOSABLE GitHub-hosted runners
+# (macos-15 and ubuntu-24.04), behind runner-local trusted HTTPS.
+#
+# This is PARTIAL Q1: the capability probe, the A install/start/stop/relaunch/full-uninstall lifecycle and the
+# refusals. Update, rollback and the signal matrix (Q2) are NOT run here, so this workflow does not claim M3.
+#
+# A push to the CI branch (the only branch named below) runs it ONLY when the head commit message contains
+# [native-lifecycle]; without the marker only the decide job runs and the run is NOT qualification. A manual
+# dispatch qualifies its own commit (candidate_sha, when given, must equal it). No job is retried.
+# See docs/ci-test-tiers.md.
+on:
+  push:
+    branches: [ci/tailscale-native-preflight-ef9f843]
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Optional full commit SHA the selected ref must be at (the run fails otherwise)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  decide:
+    name: Decide whether this run qualifies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        name: Run unless this is a push without the opt-in marker
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+          REQUESTED_SHA: ${{ github.event.inputs.candidate_sha }}
+        run: |
+          run=true
+          if [ "$EVENT_NAME" = push ]; then
+            case "$HEAD_MESSAGE" in
+              *'[native-lifecycle]'*) ;;
+              *) run=false; echo "::notice::No [native-lifecycle] marker in the head commit message: every other job is skipped and this run is NOT qualification." ;;
+            esac
+          fi
+          if [ -n "$REQUESTED_SHA" ] && [ "$REQUESTED_SHA" != "$GITHUB_SHA" ]; then
+            echo "Requested candidate $REQUESTED_SHA is not the commit $GITHUB_SHA this run qualifies." >&2
+            exit 1
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  # The first real contact with a native manager, on both OSes, alongside the producer. The driver creates its private
+  # evidence directory and its finalizer before any manager query or privileged call, so probe.json is written for every
+  # outcome after the hosted guards pass. It is uploaded pass or fail; a failed probe stays red, and a missing receipt is
+  # an explicit upload error that the gate also refuses.
+  probe:
+    needs: decide
+    if: ${{ needs.decide.outputs.run == 'true' }}
+    name: Capability probe (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      # Python is pinned, not the runner image's ambient python3 (the driver requires 3.11 or newer).
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        timeout-minutes: 3
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - name: Probe the real manager, the isolated user and the runner-local HTTPS trust
+        timeout-minutes: 7
+        run: /bin/bash scripts/ci/run-native-lifecycle.sh probe
+      - name: Upload the probe receipt (pass or fail)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-receipt-probe-${{ matrix.runner }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-evidence/probe.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # Builds revision A with make cross-build and the unchanged scripts/package-release.sh, uploads the checksum-bound
+  # release bundle, and receipts the archive and manifest digests that the lifecycle and the gate re-bind to.
+  producer:
+    needs: decide
+    if: ${{ needs.decide.outputs.run == 'true' }}
+    name: Build and receipt revision A
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        timeout-minutes: 3
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/setup-go@v7
+        timeout-minutes: 8
+        with:
+          go-version: 1.27.1
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        timeout-minutes: 5
+        with:
+          bun-version: 1.4.0
+      - name: make cross-build, then the unchanged scripts/package-release.sh for the checked-out commit
+        timeout-minutes: 20
+        run: /bin/bash scripts/ci/run-native-lifecycle.sh producer
+      - name: Upload the checksum-bound release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-bundle-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+      - name: Upload the producer receipt (pass or fail)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-receipt-producer-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-evidence/producer.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # Needs both the probe and the producer: it is skipped, not red, when either failed (the gate, which always runs,
+  # refuses the failed dependency and the skipped lifecycle). It downloads the producer's bundle and receipt and
+  # re-binds the installed release to them. Root runs no product script; the only privileged steps are the bounded
+  # operations listed in scripts/ci/run-native-lifecycle.sh.
+  lifecycle:
+    needs: [decide, probe, producer]
+    if: ${{ needs.decide.outputs.run == 'true' }}
+    name: Lifecycle, partial Q1 (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        timeout-minutes: 3
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/download-artifact@v8
+        timeout-minutes: 5
+        with:
+          name: lifecycle-bundle-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-bundle
+      - uses: actions/download-artifact@v8
+        timeout-minutes: 5
+        with:
+          name: native-receipt-producer-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-producer
+      - name: Real A lifecycle and refusals on the installed release (bounded sudo, disposable runner only)
+        timeout-minutes: 35
+        run: /bin/bash scripts/ci/run-native-lifecycle.sh lifecycle
+      - name: Upload the cases receipt (pass or fail)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-receipt-cases-${{ matrix.runner }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-evidence/cases.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # Runs unless decide said run=false (a failed decide leaves the output empty, so the gate runs and refuses). Green only
+  # if every dependency succeeded, the exact expected receipts pass, AND its own copy of the bundle re-hashes to the
+  # producer's digests.
+  gate:
+    name: Native lifecycle gate (partial Q1, not M3)
+    needs: [decide, probe, producer, lifecycle]
+    if: ${{ always() && needs.decide.outputs.run != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HERDR_NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - name: Require every dependency to have succeeded
+        run: python3 -I -B tests/native_manager_lifecycle_matrix.py needs decide probe producer lifecycle
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-receipt-*-${{ github.sha }}-${{ github.run_attempt }}
+          path: native-evidence
+      - uses: actions/download-artifact@v8
+        with:
+          name: lifecycle-bundle-${{ github.sha }}-${{ github.run_attempt }}
+          path: native-bundle
+      - name: Verify the exact-once, SHA, run and attempt bound receipts of both OSes, and re-hash the release bundle itself
+        run: >-
+          python3 -I -B tests/native_manager_lifecycle_matrix.py gate --sha "$GITHUB_SHA"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --artifacts native-evidence
+          --bundle native-bundle --version "$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"

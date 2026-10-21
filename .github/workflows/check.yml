@@ -62,6 +62,7 @@ jobs:
           .github/workflows/service-full-qualification.yml
           .github/workflows/resume-benchmark.yml
           .github/workflows/tailscale-native-preflight.yml
+          .github/workflows/native-manager-lifecycle.yml
       - run: go vet ./...
       - run: go test ./...
 
