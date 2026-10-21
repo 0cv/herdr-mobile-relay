@@ -74,6 +74,46 @@ function observerRecords(path: string): Array<Record<string, unknown>> {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
 }
 
+type BoundedCommandArguments = Parameters<typeof boundedCommand>;
+type GmsCleanupOutcome = { timeoutMs: number; returned: boolean; timedOut?: boolean; command?: unknown; request: BoundedCommandArguments };
+
+async function observeGmsCleanup(outcomes: GmsCleanupOutcome[], ...request: BoundedCommandArguments): ReturnType<typeof boundedCommand> {
+  const timeoutMs = request[2];
+  try {
+    const result = await boundedCommand(...request);
+    outcomes.push({ timeoutMs, returned: true, command: boundedCommandFailureDetails(result), request });
+    return result;
+  } catch (error) {
+    outcomes.push({ timeoutMs, returned: false, timedOut: error instanceof BoundedCommandError ? error.result.timedOut : undefined,
+      command: error instanceof BoundedCommandError ? boundedCommandFailureDetails(error.result) : String(error).slice(0, 500), request });
+    throw error;
+  }
+}
+
+// A real cleanup worker on a slow host can exceed its fixed allowance; the measurement must then report the evidence as
+// pending with a removal error, and the same worker must still remove the evidence when given enough time.
+async function assertGmsTemporaryCleanup(state: unknown, errors: string[], outcomes: GmsCleanupOutcome[]): Promise<void> {
+  const details = JSON.stringify({ state, outcomes: outcomes.map(({ request: _request, ...outcome }) => outcome),
+    errors: errors.filter(error => /temporary observation/u.test(error)) });
+  const last = outcomes.at(-1);
+  assert.ok(last, details);
+  if (state === 'removed-after-failure') {
+    assert.equal(last.returned, true, details);
+    return;
+  }
+  assert.equal(state, 'pending', details);
+  assert.equal(last.returned, false, details);
+  assert.equal(last.timedOut, true, details);
+  assert.ok(errors.some(error => error.includes('GMS temporary observation evidence could not be removed')), details);
+  const [binary, args, , options] = last.request;
+  const confirmation = await boundedCommand(binary, args, 15_000, {
+    label: options.label, maxBytes: options.maxBytes, maxBytesPerStream: options.maxBytesPerStream, input: options.input, cleanupReservationMs: 1_000,
+  });
+  assert.equal(confirmation.stdout, '{"removed":true}\n', details);
+  const { temporary } = JSON.parse(String(options.input)) as { temporary: string };
+  assert.equal(existsSync(temporary), false, details);
+}
+
 export function createBoundedSupervisorObserver(root: string, name: string) {
   const path = join(root, `${name}.jsonl`);
   const fd = openSync(path, 'wx', 0o600);
@@ -5524,8 +5564,10 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     let entered!: () => void;
     const writerEntered = new Promise<void>(resolve => { entered = resolve; });
     let writeFailure: BoundedCommandError | undefined;
+    const cleanupOutcomes: GmsCleanupOutcome[] = [];
     const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
       boundedCommand: async (binary, args, timeout, options) => {
+        if (args.includes('--gms-diagnostic-cleanup')) return observeGmsCleanup(cleanupOutcomes, binary, args, timeout, options);
         if (!args.includes('--gms-diagnostic-persist') || !String(options.input || '').includes('"finalized":true')) {
           return boundedCommand(binary, args, timeout, options);
         }
@@ -5575,7 +5617,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
       assert.ok(collector.gmsObservations.errors > 0);
       assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
-      assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, 'removed-after-failure');
+      await assertGmsTemporaryCleanup(collector.gmsObservations.temporaryEvidenceCleanup, outcome.errors.map(error => String(error)), cleanupOutcomes);
     } finally {
       await observer.close();
       await measurement.finish().catch(() => undefined);
@@ -5592,6 +5634,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const observer = createBoundedSupervisorObserver(fixture.root, 'gms-publication-supervisor');
     const writers = gmsWriterDiagnostics(fixture.root);
     let writerFailure: BoundedCommandError | undefined;
+    const cleanupOutcomes: GmsCleanupOutcome[] = [];
     let cleanupCallsObserved = 0;
     const cleanupCommands: Array<{
       call: number; timeoutMs: number; cleanupReservationMs?: number; command?: Record<string, unknown>;
@@ -5608,7 +5651,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           if (cleanupCommands.length > 4) cleanupCommands.shift();
           let result: Awaited<ReturnType<typeof boundedCommand>>;
           try {
-            result = await boundedCommand(binary, args, timeout, options);
+            result = await observeGmsCleanup(cleanupOutcomes, binary, args, timeout, options);
           } catch (error) {
             try {
               record.status = error instanceof BoundedCommandError ? 'bounded-command-error' : error instanceof Error ? 'error' : 'non-error';
@@ -5681,7 +5724,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.notDeepEqual(await readFile(observationsPath), prior);
       collector = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
       assert.equal(collector.gmsObservations.persistenceRetirement, 'retired');
-      assert.equal(collector.gmsObservations.temporaryEvidenceCleanup, 'removed-after-failure');
+      await assertGmsTemporaryCleanup(collector.gmsObservations.temporaryEvidenceCleanup, outcome.errors.map(error => String(error)), cleanupOutcomes);
       assert.equal(collector.gmsObservations.terminalConfirmation, 'unconfirmed');
       assert.equal(collector.gmsObservations.observationSha256, undefined);
       assert.ok(collector.gmsObservations.errors > 0);
@@ -7245,6 +7288,41 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       closeSync(observerFD);
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);
+    }
+  });
+  test('owned caller stop followed by an immediate release keeps the requested stop reason', async () => {
+    const fixture = await harness.createFixture();
+    const observer = createBoundedSupervisorObserver(fixture.root, 'stop-release-order-supervisor');
+    const owned = spawnOwnedProcess(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+      timeoutMs: 8_000, cleanupReservationMs: 2_000, observerSupervisor: observer.stream,
+    });
+    try {
+      await owned.ready;
+      owned.start();
+      assert.ok(await owned.started);
+      owned.stop('aborted');
+      owned.release();
+      assert.equal(owned.supervisor.stdin?.writableEnded, false, 'lease ended before the supervisor acknowledged the stop');
+      assert.equal(await owned.stopCause, 'aborted');
+      const retirement = await owned.retirement;
+      if (!owned.isSupervisorClosed) await new Promise(resolve => owned.supervisor.once('close', resolve));
+      await observer.close();
+      const records = observer.records();
+      const details = JSON.stringify({ records, retirement });
+      const ready = records.find(record => record.type === 'supervisor-retirement-ready');
+      assert.equal((ready?.evidence as Record<string, unknown> | undefined)?.stopReason, 'aborted', details);
+      assert.equal(records.find(record => record.type === 'supervisor-stopping')?.reason, 'aborted', details);
+      assert.equal(owned.supervisor.stdin?.writableEnded, true);
+      assert.equal(retirement.groupAbsent, true, details);
+      assert.equal(owned.supervisor.exitCode, 0, details);
+    } finally {
+      if (!owned.isSupervisorClosed) {
+        await owned.retire('stop-release-order-cleanup').catch(() => undefined);
+        owned.release();
+      }
+      if (owned.binding) assert.equal(await waitForGroupAbsent(owned.binding.groupID, 8_000), true);
+      await observer.close();
+      await rm(fixture.root, { recursive: true, force: true });
     }
   });
   test('GMS finalization aborts and retires the owned ownership-check process before command dispatch', async () => {

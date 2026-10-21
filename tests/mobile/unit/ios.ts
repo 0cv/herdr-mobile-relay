@@ -14,7 +14,7 @@ import { AppiumClient, isRetryableElementLookupError, type RequestEnforcementClo
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
 import { PhaseBudget } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
-import { CommandError, command } from '../support/process';
+import { CommandError, command, type CommandResult } from '../support/process';
 import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
@@ -1816,6 +1816,10 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     const processes: Array<{ binary: string; args: string[]; timeoutMs: number }> = [];
     let listCalls = 0;
     let navigationError: unknown;
+    // Successful diagnostics settle on a timer instead of a real process so a slow host cannot turn them into timeouts.
+    const settledOutput = (stdout: string) => new Promise<CommandResult>((resolve) => setTimeout(() => resolve({
+      stdout, stderr: '', code: 0, durationMs: 5, timedOut: false,
+    }), 5));
     (platform as any).navigationCommand = async (binary: string, args: string[], timeoutMs: number) => {
       assert.equal(processActive, false);
       processActive = true;
@@ -1837,7 +1841,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
           assert.ok(args.includes('--start') && args.includes('--end'));
           assert.ok(timeoutMs <= 5_000);
           if (mode === 'diagnostic-failure') throw new Error('host log unavailable');
-          return command('/usr/bin/printf', ['%s', 'host trace #invite=fixture-secret'], timeoutMs);
+          return settledOutput('host trace #invite=fixture-secret');
         }
         assert.deepEqual(args, ['simctl', 'list', 'devices', 'available', '--json']);
         assert.ok(timeoutMs <= 3_000);
@@ -1845,7 +1849,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
         if ((mode === 'pre-diagnostic-timeout' && listCalls === 1) || (mode === 'post-simulator-timeout' && listCalls === 2)) {
           return command('/bin/sleep', ['2'], 40);
         }
-        return command('/usr/bin/printf', ['%s', JSON.stringify({ devices: { runtime: [{ udid: 'protocol-only', state: 'Booted', isAvailable: true }] } })], timeoutMs);
+        return settledOutput(JSON.stringify({ devices: { runtime: [{ udid: 'protocol-only', state: 'Booted', isAvailable: true }] } }));
       } finally {
         processActive = false;
       }
@@ -1854,6 +1858,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     assert.equal(processes.filter((process) => process.args.includes('openurl')).length, 1);
     assert.equal(requests.some((request) => request.path.endsWith('/url') || /activateApp|navigate/u.test(request.body.script || '')), false);
     const events = platform.evidenceSnapshot().events as any[];
+    const eventDetails = JSON.stringify(events.map((event) => ({ operation: event.operation, outcome: event.detail?.outcome, durationMs: event.durationMs })));
     const start = events.find((event) => event.operation === 'simctl openurl started');
     const failure = events.find((event) => event.operation === 'simctl openurl failed');
     assert.ok(start && failure);
@@ -1862,8 +1867,8 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     assert.equal(failure.detail.process.timedOut, mode !== 'uncertain-failure');
     assert.equal(failure.detail.startedAt, start.detail.startedAt);
     assert.ok(events.some((event) => event.operation === 'before-openurl-boot-state'
-      && event.detail.outcome === (mode === 'pre-diagnostic-timeout' ? 'unavailable' : 'collected')));
-    assert.ok(events.some((event) => event.operation === 'after-openurl-foreground' && event.detail.outcome === 'collected'));
+      && event.detail.outcome === (mode === 'pre-diagnostic-timeout' ? 'unavailable' : 'collected')), eventDetails);
+    assert.ok(events.some((event) => event.operation === 'after-openurl-foreground' && event.detail.outcome === 'collected'), eventDetails);
     if (mode === 'post-simulator-timeout') {
       assert.ok(events.some((event) => event.operation === 'after-openurl-boot-state' && event.detail.outcome === 'unavailable'));
     }

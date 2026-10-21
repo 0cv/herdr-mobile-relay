@@ -306,6 +306,8 @@ export class OwnedProcessHandle implements OwnedProcess {
   private firstFailure?: Error;
   private released = false;
   private stopped = false;
+  private stopAcknowledged = false;
+  private leaseEndAwaitingStopAcknowledgement = false;
   private protocol = '';
   private executionTimer?: ReturnType<typeof setTimeout>;
   private hardTimer?: ReturnType<typeof setTimeout>;
@@ -416,7 +418,10 @@ export class OwnedProcessHandle implements OwnedProcess {
     if (!lease) throw new Error('OWNED_PROCESS: caller lease writer was not created');
     this.control.setEncoding('utf8');
     this.control.on('data', (chunk: string) => this.readControl(chunk));
-    this.control.on('error', error => this.fail(error instanceof Error ? error : new Error('OWNED_PROCESS: control channel failed')));
+    this.control.on('error', error => {
+      if (this.leaseEndAwaitingStopAcknowledgement) this.endLease();
+      this.fail(error instanceof Error ? error : new Error('OWNED_PROCESS: control channel failed'));
+    });
     if (options.terminalTransport) {
       const authorityControl = writableStream(this.supervisor, 10);
       const authorityOutput = readableStream(this.supervisor, 11);
@@ -437,6 +442,7 @@ export class OwnedProcessHandle implements OwnedProcess {
       });
     }
     this.control.on('end', () => {
+      if (this.leaseEndAwaitingStopAcknowledgement) this.endLease();
       if (!this.retirementValue?.groupAbsent) this.fail(new Error('OWNED_PROCESS: supervisor control channel closed'));
     });
     this.stdout.on('end', () => { this.stdoutEnded = true; this.stdoutNaturalEnd.resolve(); this.settleRetirementProjection(); });
@@ -448,6 +454,7 @@ export class OwnedProcessHandle implements OwnedProcess {
     });
     this.supervisor.once('error', error => this.fail(error));
     this.supervisor.once('exit', (code, signal) => {
+      if (this.leaseEndAwaitingStopAcknowledgement) this.endLease();
       this.supervisorExited = true;
       this.supervisorExitCode = code;
       this.supervisorSignal = signal;
@@ -469,6 +476,7 @@ export class OwnedProcessHandle implements OwnedProcess {
     this.executionTimer = setTimeout(() => this.stop('timeout'), Math.max(0, Number((executionDeadlineNs - monotonicNowNs()) / 1_000_000n)));
     this.hardTimer = setTimeout(() => {
       this.stop('hard-deadline');
+      if (this.leaseEndAwaitingStopAcknowledgement) this.endLease();
       this.settleRetirementProjection(true);
     }, Math.max(0, Number((hardDeadlineNs - monotonicNowNs()) / 1_000_000n)));
     options.signal?.addEventListener('abort', this.onAbort, { once: true });
@@ -505,6 +513,17 @@ export class OwnedProcessHandle implements OwnedProcess {
     if (this.executionTimer) clearTimeout(this.executionTimer);
     if (this.hardTimer && this.retirementValue) clearTimeout(this.hardTimer);
     writeRecord(this.control, { type: 'release' });
+    // The supervisor reads the lease and control pipes independently; ending the lease before it has seen our stop would
+    // let it record the stop as a lost caller instead of the requested reason.
+    if (this.stopped && !this.stopAcknowledged && !this.supervisorExited) {
+      this.leaseEndAwaitingStopAcknowledgement = true;
+      return;
+    }
+    this.endLease();
+  }
+
+  private endLease(): void {
+    this.leaseEndAwaitingStopAcknowledgement = false;
     if (this.supervisor.stdin && !this.supervisor.stdin.writableEnded) this.supervisor.stdin.end();
   }
 
@@ -641,6 +660,8 @@ export class OwnedProcessHandle implements OwnedProcess {
       return;
     }
     if (record.type === 'stopping' || record.type === 'retirement-unproved') {
+      this.stopAcknowledged = true;
+      if (this.leaseEndAwaitingStopAcknowledgement) this.endLease();
       if (typeof record.reason === 'string') this.stopCauseDeferred.resolve(record.reason);
       if (!this.targetStarted) this.settleImpossibleLaunch(new Error('OWNED_PROCESS: launch was stopped before dispatch'));
     }
