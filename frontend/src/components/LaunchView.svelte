@@ -80,7 +80,9 @@
   // "empty means omit" check.
   function hermesProfileLabel(name: string): string {
     if (name === '') return 'Use my usual setup';
-    if (name === 'default') return 'Main profile';
+    // Hermes lets the user give the root profile a display name, so the id
+    // stays visible for anyone who knows it by `default`.
+    if (name === 'default') return 'Main profile (default)';
     return name;
   }
 
@@ -218,7 +220,7 @@
             <option value={p}>{hermesProfileLabel(p)}</option>
           {/each}
         </select>
-        <p class="hint">Leave it on “Use my usual setup” and Hermes starts the way it does on your desktop. Pick a profile only if this agent should run somewhere else.</p>
+        <p class="hint">Leave it on “Use my usual setup” and Hermes starts the profile it uses on your desktop, as set by <code>hermes profile use</code>. Pick a profile only if this agent should run somewhere else.</p>
       {/if}
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>

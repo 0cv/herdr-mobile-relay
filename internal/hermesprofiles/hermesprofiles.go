@@ -41,9 +41,10 @@ func Valid(name string) bool {
 // half-created or half-deleted profile that `-p` cannot select.
 var liveMarkers = []string{"config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db"}
 
-// tombstoneDir is where `hermes profile delete` moves a deleted profile's
-// directory. A name found under it is dead even if a fresh directory of the same
-// name was created later without a marker.
+// tombstoneDir holds Hermes' deletion markers. `hermes profile delete` writes a
+// marker file at profiles/.deleted/<name> before it removes the profile
+// directory, so a stale process that re-creates that directory cannot bring the
+// name back. Any entry there marks the name dead, matching Hermes' exists().
 const tombstoneDir = ".deleted"
 
 // liveProfileDir reports whether profiles/<name> under root is a profile hermes
@@ -62,15 +63,15 @@ func liveProfileDir(root, name string) bool {
 		return false
 	}
 	for _, marker := range liveMarkers {
-		markerPath := filepath.Join(dir, marker)
-		if _, err := os.Stat(markerPath); err == nil {
-			return true
+		// Hermes accepts is_file() or is_symlink(): a regular file, or any
+		// symlink, including one whose target moved away (clone or migration
+		// leftover). os.Lstat sees the link itself, and a directory that happens
+		// to carry a marker's name is not an identity claim.
+		info, err := os.Lstat(filepath.Join(dir, marker))
+		if err != nil {
+			continue
 		}
-		// Hermes accepts is_file() or is_symlink(), so a marker that is a symlink
-		// to a target that moved away (clone or migration leftover) is still an
-		// identity claim. os.Stat followed the link and reported ENOENT; os.Lstat
-		// sees the link itself.
-		if _, err := os.Lstat(markerPath); err == nil {
+		if info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return true
 		}
 	}
@@ -84,11 +85,13 @@ func liveProfileDir(root, name string) bool {
 // sets it, then ~/.hermes. A host that relocated its hermes home would otherwise
 // offer a picker of nothing but Default.
 //
-// Caveat: names are unioned across every root, but `hermes -p <name>` resolves
-// against its own single root. A name that lives only in a secondary,
-// history-only root is therefore listed and still refused by ValidateStart at
-// start time; that trade-off is accepted, because hiding it would make a
-// relocated home's profiles unselectable.
+// Caveat: names are unioned across every root, and Exists accepts a name from
+// any of them, but `hermes -p <name>` resolves against a single root: the pane's
+// HERMES_HOME, else ~/.hermes. A name that lives only in a secondary,
+// history-only root is therefore listed and passes ValidateStart, and the
+// launch then fails inside the new pane. The relay cannot see the pane's
+// environment to pick that root, so the trade-off is accepted: hiding such
+// names would make a relocated home's profiles unselectable.
 func List(home string) []string {
 	names := []string{Default}
 	seen := map[string]bool{Default: true}

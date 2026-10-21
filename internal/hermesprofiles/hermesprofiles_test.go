@@ -182,12 +182,21 @@ func TestListAndExistsIgnoreMarkerlessProfile(t *testing.T) {
 	root := filepath.Join(home, ".hermes")
 	writeProfile(t, root, "apollo")
 	writeProfileWith(t, root, "ghost", "")
+	// Hermes checks is_file() or is_symlink(), so a directory carrying a
+	// marker's name does not make a profile live.
+	writeProfileWith(t, root, "dirmarker", "")
+	if err := os.Mkdir(filepath.Join(root, "profiles", "dirmarker", "config.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := List(home); !reflect.DeepEqual(got, []string{Default, "apollo"}) {
 		t.Fatalf("List() = %#v, want %#v", got, []string{Default, "apollo"})
 	}
 	if Exists(home, "ghost") {
 		t.Error("Exists(ghost) = true, want false for a directory with no identity marker")
+	}
+	if Exists(home, "dirmarker") {
+		t.Error("Exists(dirmarker) = true, want false for a marker that is a directory")
 	}
 }
 
@@ -250,7 +259,12 @@ func TestListAndExistsIgnoreTombstonedProfile(t *testing.T) {
 	root := filepath.Join(home, ".hermes")
 	writeProfile(t, root, "apollo")
 	writeProfile(t, root, "work")
-	if err := os.MkdirAll(filepath.Join(root, "profiles", ".deleted", "work"), 0o755); err != nil {
+	// `hermes profile delete` writes this marker file before removing the
+	// directory; the directory still being here is the stale-process case.
+	if err := os.MkdirAll(filepath.Join(root, "profiles", ".deleted"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", ".deleted", "work"), []byte("deleted\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
