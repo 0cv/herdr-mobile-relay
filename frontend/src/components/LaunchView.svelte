@@ -54,6 +54,13 @@
     return connection?.status === 'connected' && connection.inventory.state !== 'ready';
   }));
   const connection = $derived($connections.get(relayId));
+  // The relay refuses the home folder itself; only a project folder below it can run an agent.
+  // Only the listing of the selected folder counts: a failed reload keeps an older listing.
+  const atHome = $derived(Boolean(
+    connection?.directoryBrowser
+    && connection.directoryBrowser.current.path === cwd
+    && !connection.directoryBrowser.parent,
+  ));
   const profiles = $derived(connection?.agentProfiles || []);
   // The builtin Hermes profile id is "hermes". The resolver never serializes a
   // kind for an agent profile, so the id is the only reliable signal that the
@@ -141,7 +148,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (!relayId || readOnly || connection?.directoryLoading || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
+    if (!relayId || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
     submitting = true;
     error = false;
     status = 'Starting agent…';
@@ -266,7 +273,11 @@
           </div>
         {/if}
       </div>
-      <p class="hint">The folder shown above is selected. Tap it to browse; use ↑ or Parent folder to go back.</p>
+      {#if atHome}
+        <p id="launch-cwd-hint" class="hint" role="status">Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.</p>
+      {:else}
+        <p class="hint">The folder shown above is selected. Tap it to browse; use ↑ or Parent folder to go back.</p>
+      {/if}
 
       <label for="launch-name">Name</label>
       <input id="launch-name" bind:value={name} required maxlength="32" pattern={'[a-z][a-z0-9_-]{0,31}'} title="Start with a lowercase letter; use lowercase letters, numbers, underscores, or dashes." placeholder="project-codex" autocomplete="off" />
@@ -274,7 +285,7 @@
       <label for="launch-prompt">Initial task <span class="optional">(optional)</span></label>
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>
       <p class="hint">Sent to the agent as its first prompt after it starts.</p>
-      <Button type="submit" disabled={submitting || readOnly || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
+      <Button type="submit" aria-describedby={atHome ? 'launch-cwd-hint' : undefined} disabled={submitting || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
       {#if status}<p class:error class="form-status" role="status">{status}</p>{/if}
     </form>
   </Card>
