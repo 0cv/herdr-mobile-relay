@@ -169,8 +169,9 @@ exactly once, by `zygote64`, inside the measurement, remains in the END inventor
 and never exits. The helper must then end with either an orderly Chromium child
 exit and matching Zygote exit status zero, then either one system_server `has
 died` record whose label is only the process's importance at death (such as
-`vis BTOP`, `fg  SVC` or `cch+75 CEM`) or one `isolated not needed` kill, within
-one second of that exit; or one system_server `isolated not
+`vis BTOP`, `fg  SVC` or `cch+75 CEM`) or one `isolated not needed` kill with the
+matching isolated UID, logged after the start record and no later than one second
+after that exit; or one system_server `isolated not
 needed` kill with the matching isolated UID followed within one second by that
 Zygote's report of exit status zero or SIGKILL; without the Chromium child exit
 the kill must come within two seconds of the fork. A planned Chrome force-stop
@@ -186,8 +187,8 @@ a contiguous prefix of its three runtime startup lines may precede the Zygote fo
 record by at most 20 ms. Ordinary helper observations require both timestamp and capture-order
 lifetime bounds and must fit both START/END marker bounds, including audit subject
 timestamps. The fork and start record must always be inside both bounds; only when
-the helper's own child exit, Zygote exit, kill or death record is after END in
-both timestamp and capture order may its remaining records, and records that
+the helper's own child exit, Zygote exit, kill or death record is at or after
+END's timestamp and after END in capture order may its remaining records, and records that
 mention it, also come from the capture after END, still under every other check
 above. Capture is monitored, receive-bounded `main`/`system` logcat, not an
 exhaustive or lossless all-producer generation-time trace. Producers sample time
@@ -196,7 +197,9 @@ before submission; another producer's earlier/later timestamp is diagnostic
 are retained without sorting. All captured records, including pre-START and
 post-END spill, remain available for adverse and ambiguous attribution checks;
 planned termination markers and exempted events must also fit both receive and
-timestamp bounds. Missing/duplicate markers, malformed records, reported loss and
+timestamp bounds. A planned termination waits up to 5 seconds after `am force-stop`
+for every observed process of the package to exit before it logs `OP_END`; a
+survivor or any new process of that package fails it. Missing/duplicate markers, malformed records, reported loss and
 collector failures still reject. A paused producer can submit only after collection
 stops, and absence of loss text in these buffers cannot prove universal losslessness.
 No quiet wait or marker provides an all-producer submission barrier.

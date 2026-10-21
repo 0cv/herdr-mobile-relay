@@ -497,7 +497,7 @@ const lateRejections: [string, string, (log: string) => string][] = [
   ['death label without a process state', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg')],
   ['death label with extra words', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg  SVC  extra')],
   ['start record received after the END marker', '14154', (log) => log.replace(/^(.*HerdrMeasure: .* END\n)/mu, '').replace(/^(.*Start proc 14154:.*\n)/mu,
-    '         1792609794.684 14165 14165 I HerdrMeasure: 0bf6b509-b835-4dc7-ab8f-3b2a8493789c END\n$1')],
+    '         1792609794.686 14165 14165 I HerdrMeasure: 0bf6b509-b835-4dc7-ab8f-3b2a8493789c END\n$1')],
   ['own record received after END but timestamped before it', '14154', (log) => log.replace('1792609794.698 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar',
     '1792609794.690 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar')],
   ['post-END mention timestamped before the END marker', '14154', (log) => log.replace('1792609794.781 13129 13129', '1792609794.690 13129 13129')],

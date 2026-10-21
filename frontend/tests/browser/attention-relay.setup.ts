@@ -270,6 +270,10 @@ export default async function setup() {
   };
   const socketServer = createServer((connection) => {
     connection.setEncoding('utf8');
+    // The relay can close a request connection before this fixture replies to it.
+    connection.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EPIPE' && error.code !== 'ECONNRESET') throw error;
+    });
     let pending = '';
     const handle = (line: string) => {
       let request: { id?: string; method?: string; params?: Record<string, unknown> };

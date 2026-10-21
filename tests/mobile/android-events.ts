@@ -316,6 +316,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       || (() => {
         const detail = androidEventDetails(record.line);
         if (detail.processName !== processName) return true;
+        // The label is the process's importance when it died (Android's adjustment and state codes), never the cause.
         if (record.message.startsWith('Process ')) return !/^Process \S+ \(pid \d+\) has died: [a-z]{2,4} *(?:\+ ?\d+)? +[A-Z]{2,4} *$/u.test(record.message);
         const uid = detail.uid?.match(/^u0a\d+i(-?\d+)$/u);
         return detail.reason !== 'isolated not needed' || !uid || Number(uid[1]) + 99000 !== Number(isolated) + 90000;

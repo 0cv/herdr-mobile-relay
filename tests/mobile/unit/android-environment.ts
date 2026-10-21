@@ -4601,6 +4601,33 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       }
     });
   }
+  test('review: measured termination waits for force-stopped processes to exit before ending the operation', async () => {
+    const fixture = await harness.createFixture();
+    const children = { '6700': 'com.android.chrome:renderer' };
+    await state(fixture, { absent: true, children });
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment);
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
+    try {
+      await measurement.begin();
+      await state(fixture, { absent: true, children, lingeringInventories: 2 });
+      await measurement.terminate('com.android.chrome', '6538');
+      await measurement.finish();
+      const operations = JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8'));
+      assert.equal(operations[0].succeeded, true);
+      const check = JSON.parse(await readFile(join(fixture.root, 'android-environment-check.json'), 'utf8'));
+      assert.equal(check.passed, true, JSON.stringify(check));
+      const requests = await readFile(fixture.log, 'utf8');
+      const stop = requests.indexOf('shell am force-stop --user 0 com.android.chrome');
+      const end = requests.indexOf('OP_END', stop);
+      assert.ok(stop >= 0 && end > stop);
+      assert.equal(requests.slice(stop, end).split('shell ps -A -o PID,NAME').length - 1, 3);
+    } finally {
+      await measurement.finish().catch(() => undefined);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
   test('measurement collector failure is fatal and cannot leave an active descendant', async () => {
     const fixture = await harness.createFixture();
     await state(fixture, { absent: true, logcatFail: true });
