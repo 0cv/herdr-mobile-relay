@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import AgentLogo, { hasAgentLogo } from '$components/AgentLogo.svelte';
+  import AgentLogo, { agentDisplayName, hasAgentLogo } from '$components/AgentLogo.svelte';
   import PairDeferredRelay from '$components/PairDeferredRelay.svelte';
   import LastKnownView from '$components/LastKnownView.svelte';
   import Button from '$components/ui/Button.svelte';
@@ -417,7 +417,7 @@
       tab && tab !== displayName(agent) ? tab : '',
       agent.session || '',
     ].filter(Boolean);
-    if (agent.agent && !hasAgentLogo(agent.agent)) labels.push(agent.agent);
+    if (agent.agent && !hasAgentLogo(agent.agent)) labels.push(agentDisplayName(agent.agent));
     return labels.join(' · ');
   }
 

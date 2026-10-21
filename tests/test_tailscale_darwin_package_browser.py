@@ -378,6 +378,37 @@ ALLOWED = (
     "scripts/ci/native-lifecycle-host.py",
     "tests/native_manager_lifecycle_matrix.py",
     "tests/test_native_manager_lifecycle_matrix.py",
+    # M5 U-F: port of main 7b0b9627..32e84ed5 (Hermes profile launch #65, Devin launch profile #68): main bytes
+    # where a file had no branch change, the reviewed raw three-way merge otherwise, the two CHANGELOG bullets
+    # moved into [0.23.0], and the one-time regeneration of web/ at asset generation 415. Paths already listed
+    # above, such as CHANGELOG.md and frontend/build-versions.json, are not repeated. Listing a path here is
+    # not a review.
+    "frontend/src/components/AgentList.svelte",
+    "frontend/src/components/AgentLogo.svelte",
+    "frontend/src/components/LaunchView.svelte",
+    "frontend/src/lib/types.ts",
+    "frontend/tests/unit/components.test.ts",
+    "internal/coordinator/dispatch.go",
+    "internal/coordinator/lifecycle.go",
+    "internal/coordinator/lifecycle_hermes_profile_test.go",
+    "internal/coordinator/lifecycle_outcome_test.go",
+    "internal/coordinator/lifecycle_protocol_test.go",
+    "internal/coordinator/prompt_refusal_test.go",
+    "internal/herdr/client_agent_args_test.go",
+    "internal/hermesprofiles/hermesprofiles.go",
+    "internal/hermesprofiles/hermesprofiles_test.go",
+    "internal/profiles/resolver.go",
+    "internal/profiles/resolver_test.go",
+    "web/assets/ConversationHistory-415.js",
+    "web/assets/ConversationHistory-415.js.br",
+    "web/assets/ResumeTimingSettings-415.js",
+    "web/assets/ResumeTimingSettings-415.js.br",
+    "web/assets/app-bbe666b653571d3fe9df8c10ff3660a7c2c4fd8ad2a816f16d936acac5608bf0.js",
+    "web/assets/app-bbe666b653571d3fe9df8c10ff3660a7c2c4fd8ad2a816f16d936acac5608bf0.js.br",
+    "web/assets/workspace-tools-415.js",
+    "web/assets/workspace-tools-415.js.br",
+    "web/builds/0.23.0-415-a6db7feb794382d7/index.html",
+    "web/builds/0.23.0-415-a6db7feb794382d7/index.html.br",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")

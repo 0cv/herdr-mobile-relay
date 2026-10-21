@@ -34,6 +34,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/noecho"
@@ -3619,6 +3620,7 @@ func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
 		SpeechLanguages: speechLanguages,
 		Inventory:       inventory,
 		AgentProfiles:   s.profiles.Profiles(),
+		HermesProfiles:  hermesprofiles.List(s.home),
 		Hybrid:          s.hybridDescriptor(),
 		Ingress:         s.ingressDescriptor(),
 	})

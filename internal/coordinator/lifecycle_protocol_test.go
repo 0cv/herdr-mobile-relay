@@ -22,7 +22,7 @@ func TestStartKindAgentDoesNotRetryProtocolMismatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	err := lifecycle.startKindAgent(ctx, "codex", "project", "pane-1")
+	err := lifecycle.startKindAgent(ctx, "codex", "project", "pane-1", nil)
 	if err == nil || !herdr.IsRefused(err) || herdr.IsTransientRefused(err) {
 		t.Fatalf("error = %v, want permanent refusal without transient retry", err)
 	}
