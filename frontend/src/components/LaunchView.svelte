@@ -27,7 +27,7 @@
 
   let relayId = $state('');
   let profileId = $state('');
-  let hermesProfile = $state('default');
+  let hermesProfile = $state('');
   let cwd = $state('');
   let name = $state('');
   let prompt = $state('');
@@ -55,11 +55,16 @@
   }));
   const connection = $derived($connections.get(relayId));
   const profiles = $derived(connection?.agentProfiles || []);
+  // The builtin Hermes profile id is "hermes". The resolver never serializes a
+  // kind for an agent profile, so the id is the only reliable signal that the
+  // start command accepts hermes_profile at all.
   const isHermes = $derived(profileId === 'hermes');
-  // A relay that predates the picker reports nothing, and Default is always
-  // startable, so the form never has to show an empty select.
+  // Empty first option = "use Hermes sticky active profile" (no -p flag).
+  // This preserves the behaviour of `hermes profile use <name>` on the computer.
   const hermesProfiles = $derived(
-    connection?.hermesProfiles?.length ? connection.hermesProfiles : ['default'],
+    connection?.hermesProfiles?.length
+      ? ['', ...connection.hermesProfiles]
+      : [''],
   );
   const targetWorkspace = $derived(
     $workspaces.find((workspace) => (
@@ -67,6 +72,17 @@
     )) || null,
   );
   const readOnly = $derived(readOnlyRelayIds.has(relayId));
+
+  // Both the empty choice and the literal "default" id would read as "default",
+  // but they start different agents: empty omits -p so Hermes follows its sticky
+  // active_profile, while "default" pins the root hermes home. Label them apart
+  // and leave the option values alone, so the payload stays a plain
+  // "empty means omit" check.
+  function hermesProfileLabel(name: string): string {
+    if (name === '') return 'Hermes default (active profile)';
+    if (name === 'default') return 'default (root profile)';
+    return name;
+  }
 
   $effect(() => {
     if (requestedRelayPending && connectedRelays.some((relay) => relay.id === requestedRelayId)) {
@@ -137,10 +153,9 @@
         cwd: launchCwd,
         prompt,
         workspace_id: targetWorkspace?.workspace_id || '',
-        // Always sent for a Hermes launch, `default` included: the form's
-        // selection is the intent, and an omitted field would silently start
-        // the default profile on a computer that has several.
-        ...(isHermes ? { hermes_profile: hermesProfile } : {}),
+        // Only sent when the user explicitly chose a profile.
+        // Empty selection = omit the field = let Hermes follow its sticky active_profile.
+        ...(isHermes && hermesProfile !== '' ? { hermes_profile: hermesProfile } : {}),
       });
       const warning = String(result.data?.warning || '');
       status = warning || 'Agent started.';
@@ -199,9 +214,11 @@
       {#if isHermes}
         <label for="launch-hermes-profile">Hermes profile</label>
         <select id="launch-hermes-profile" bind:value={hermesProfile}>
-          {#each hermesProfiles as profile (profile)}<option value={profile}>{profile}</option>{/each}
+          {#each hermesProfiles as p (p)}
+            <option value={p}>{hermesProfileLabel(p)}</option>
+          {/each}
         </select>
-        <p class="hint">Starts hermes with -p for this named profile on the computer.</p>
+        <p class="hint">“Hermes default” follows the sticky profile set with <code>hermes profile use</code>; “default (root profile)” pins the computer’s root Hermes home.</p>
       {/if}
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>

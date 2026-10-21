@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,46 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
+
+// TestHermesProfileArgs covers the last frame before the picker's value becomes
+// argv: an empty choice adds no -p (hermes keeps its sticky active_profile), an
+// explicit name travels as `-p <name>`, and a name that cannot be a profile is an
+// error instead of a silent omission that would start a different agent.
+func TestHermesProfileArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile string
+		want    []string
+		wantErr bool
+	}{
+		{name: "unset", profile: ""},
+		{name: "named", profile: "apollo", want: []string{"-p", "apollo"}},
+		{name: "default", profile: hermesprofiles.Default, want: []string{"-p", hermesprofiles.Default}},
+		{name: "malformed", profile: "Bad Name", wantErr: true},
+		// 65 characters: one past the longest name NamePattern accepts.
+		{name: "too long", profile: "a" + strings.Repeat("b", 64), wantErr: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := hermesProfileArgs(test.profile)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("hermesProfileArgs(%q) error = nil, want a rejection", test.profile)
+				}
+				if args != nil {
+					t.Fatalf("hermesProfileArgs(%q) args = %#v, want nil", test.profile, args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("hermesProfileArgs(%q) error = %v", test.profile, err)
+			}
+			if !reflect.DeepEqual(args, test.want) {
+				t.Fatalf("hermesProfileArgs(%q) = %#v, want %#v", test.profile, args, test.want)
+			}
+		})
+	}
+}
 
 // hermesLifecycle builds a Lifecycle whose home carries the given profile
 // directories, so Exists answers against the test's own home rather than the
@@ -27,8 +68,14 @@ func hermesLifecycle(t *testing.T, names ...string) *Lifecycle {
 	t.Setenv("HERDR_HERMES_DATA_DIRS", "")
 	home := t.TempDir()
 	for _, name := range names {
-		if err := os.MkdirAll(filepath.Join(home, ".hermes", "profiles", name), 0o755); err != nil {
+		// The profile needs an identity marker: hermesprofiles mirrors hermes'
+		// named_profile_is_live, so a bare directory is a ghost, not a profile.
+		dir := filepath.Join(home, ".hermes", "profiles", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("create profile %q: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write marker for profile %q: %v", name, err)
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(home, "project"), 0o755); err != nil {
@@ -122,7 +169,13 @@ func TestLifecycleStartsHermesWithSelectedProfile(t *testing.T) {
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			home := filepath.Join(dir, "home")
 			for _, profile := range []string{"apollo"} {
-				if err := os.MkdirAll(filepath.Join(home, ".hermes", "profiles", profile), 0o755); err != nil {
+				profileDir := filepath.Join(home, ".hermes", "profiles", profile)
+				if err := os.MkdirAll(profileDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				// hermesprofiles only reports a profile with an identity marker,
+				// matching hermes' named_profile_is_live.
+				if err := os.WriteFile(filepath.Join(profileDir, "config.yaml"), []byte("{}"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}

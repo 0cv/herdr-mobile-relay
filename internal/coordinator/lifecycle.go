@@ -220,7 +220,11 @@ func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd st
 func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile, request StartRequest, paneID string) error {
 	name := request.Name
 	if profile.Kind != "" {
-		return l.startKindAgent(ctx, profile.Kind, name, paneID, hermesProfileArgs(request.HermesProfile))
+		agentArgs, err := hermesProfileArgs(request.HermesProfile)
+		if err != nil {
+			return err
+		}
+		return l.startKindAgent(ctx, profile.Kind, name, paneID, agentArgs)
 	}
 	if len(profile.Argv) == 0 {
 		return errors.New("profile has no executable argv")
@@ -272,12 +276,17 @@ func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID strin
 //
 // The name is re-checked here even though ValidateStart already did: this is
 // the last frame before it becomes argv, and a name that cannot be a profile
-// must never reach the command line.
-func hermesProfileArgs(name string) []string {
-	if name == "" || !hermesprofiles.Valid(name) {
-		return nil
+// must never reach the command line. A name that fails the check is an error
+// rather than a silent nil: dropping -p would start Hermes on whatever profile
+// is sticky on the host, which is a different agent than the user asked for.
+func hermesProfileArgs(name string) ([]string, error) {
+	if name == "" {
+		return nil, nil
 	}
-	return []string{"-p", name}
+	if !hermesprofiles.Valid(name) {
+		return nil, fmt.Errorf("hermes_profile %q must match %s", name, hermesprofiles.NamePattern)
+	}
+	return []string{"-p", name}, nil
 }
 
 func retryAgentStart(ctx context.Context, start func() error, wait func(context.Context, time.Duration) bool) error {
