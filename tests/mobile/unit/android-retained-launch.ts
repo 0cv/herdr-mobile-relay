@@ -414,7 +414,7 @@ else if (request === 'shell pm list packages') {
 `);
   await chmod(adb, 0o700);
   const budget = new PhaseBudget('retained-lifecycle', { timeoutMs: 600_000, recoveryLimit: 0, now: () => Date.now() + JSON.parse(readFileSync(file, 'utf8')).timeOffset });
-  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {}, budget);
+  const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { plannedTerminationExitMs: 300 }, budget);
   const kernel = await kernelReaderFixture(async command => {
     const s = await state();
     const pid = s.fault === 'changed-native-pid' ? '6539' : s.pid;

@@ -167,11 +167,11 @@ isolated Chrome sandbox helpers with a complete in-interval fork/start identity
 whose Chrome zygote is in the START inventory, or is absent from it and was forked
 exactly once, by `zygote64`, inside the measurement, remains in the END inventory
 and never exits. The helper must then end with either an orderly Chromium child
-exit and matching Zygote exit status zero, then either one system_server `has
-died` record whose label is only the process's importance at death (such as
-`vis BTOP`, `fg  SVC` or `cch+75 CEM`) or one `isolated not needed` kill with the
-matching isolated UID, logged after the start record and no later than one second
-after that exit; or one system_server `isolated not
+exit and matching Zygote exit status zero, plus, logged after the start record and
+no later than one second after the Zygote exit, either one system_server `has died`
+record whose label is only the process's importance at death (such as `vis BTOP`,
+`fg  SVC` or `cch+75 CEM`) or one `isolated not needed` kill with the matching
+isolated UID; or one system_server `isolated not
 needed` kill with the matching isolated UID followed within one second by that
 Zygote's report of exit status zero or SIGKILL; without the Chromium child exit
 the kill must come within two seconds of the fork. A planned Chrome force-stop
@@ -198,8 +198,10 @@ are retained without sorting. All captured records, including pre-START and
 post-END spill, remain available for adverse and ambiguous attribution checks;
 planned termination markers and exempted events must also fit both receive and
 timestamp bounds. A planned termination waits up to 5 seconds after `am force-stop`
-for every observed process of the package to exit before it logs `OP_END`; a
-survivor or any new process of that package fails it. Missing/duplicate markers, malformed records, reported loss and
+for every observed process of the package to exit before it logs `OP_END`; if any
+observed PID or any process of that package is still listed after 5 seconds (or
+25 seconds after `OP_BEGIN`, whichever comes first), the operation fails without
+`OP_END`. Missing/duplicate markers, malformed records, reported loss and
 collector failures still reject. A paused producer can submit only after collection
 stops, and absence of loss text in these buffers cannot prove universal losslessness.
 No quiet wait or marker provides an all-producer submission barrier.

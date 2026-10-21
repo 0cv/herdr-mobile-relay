@@ -37,6 +37,7 @@ export interface AndroidMeasurementIO {
   collectorObserverStderr?: Writable;
   collectorObserverSupervisor?: Writable;
   monotonicNow: () => number;
+  plannedTerminationExitMs: number;
   transport: Pick<AndroidTransportObservation, 'observe' | 'finish' | 'failure'>;
   transportObservationFixture?: AndroidTransportTestFixture;
 }
@@ -68,6 +69,8 @@ const ANDROID_MEASUREMENT_FILE_WRITE_TIMEOUT_MS = 5_000;
 const ANDROID_BEGIN_OPERATION_TIMEOUT_MS = 1_000;
 const ANDROID_BEGIN_TOTAL_TIMEOUT_MS = 4_000;
 const ANDROID_PLANNED_TERMINATION_EXIT_MS = 5_000;
+// The event checker rejects planned operations whose OP_BEGIN and OP_END are more than 30 seconds apart.
+const ANDROID_PLANNED_TERMINATION_OPERATION_MS = 25_000;
 
 function collectorRetired(evidence: RetirementEvidence): boolean {
   return evidence.targetExitObserved && evidence.targetCloseObserved && evidence.anchorExitObserved
@@ -309,7 +312,8 @@ export class AndroidEnvironmentMeasurement {
           observerSupervisor: io.collectorObserverSupervisor,
         });
       },
-      monotonicNow: () => performance.now(), transport: new AndroidTransportObservation(serial, outputDir), ...io };
+      monotonicNow: () => performance.now(), plannedTerminationExitMs: ANDROID_PLANNED_TERMINATION_EXIT_MS,
+      transport: new AndroidTransportObservation(serial, outputDir), ...io };
     this.transport = this.io.transport;
   }
 
@@ -999,17 +1003,24 @@ export class AndroidEnvironmentMeasurement {
     };
     this.operations.push(operation);
     await writeSanitizedJson(this.path('operations'), this.operations);
+    const operationStarted = this.io.monotonicNow();
     await androidMeasurementMarker(this.serial, `${this.id} OP_BEGIN ${operation.id} ${packageName} ${pid}`);
     const stopped = await command('adb', ['-s', this.serial, ...operation.command], 20_000);
     if (stopped.stdout.trim() || stopped.stderr.trim()) throw new Error('ANDROID_ENVIRONMENT: force-stop returned unexpected output');
     // force-stop returns once it has signalled the processes; a large process can take a moment to exit.
-    const exitDeadline = Date.now() + ANDROID_PLANNED_TERMINATION_EXIT_MS;
+    const stoppedAt = this.io.monotonicNow();
+    const operationDeadline = operationStarted + ANDROID_PLANNED_TERMINATION_OPERATION_MS;
+    const exitDeadline = Math.min(stoppedAt + this.io.plannedTerminationExitMs, operationDeadline);
+    const inventoryDeadline = Math.min(stoppedAt + ANDROID_PLANNED_TERMINATION_EXIT_MS, operationDeadline);
     for (;;) {
-      const remaining = await command('adb', ['-s', this.serial, 'shell', 'ps', '-A', '-o', 'PID,NAME'], 5000);
+      if (!this.active || this.collectorFailure) throw this.collectorFailure || new Error('ANDROID_ENVIRONMENT: termination is outside measurement');
+      const inventoryTimeout = Math.min(5_000, Math.max(1_000, Math.ceil(inventoryDeadline - this.io.monotonicNow())));
+      const remaining = await command('adb', ['-s', this.serial, 'shell', 'ps', '-A', '-o', 'PID,NAME'], inventoryTimeout);
+      if (remaining.stderr.trim()) throw new Error('ANDROID_ENVIRONMENT: planned termination exit inventory reported stderr');
       const processes = parseAndroidProcesses(remaining.stdout);
-      if (!remaining.stderr.trim() && !Object.keys(affected).some((targetPid) => processes[targetPid])
+      if (!Object.keys(affected).some((targetPid) => processes[targetPid])
         && !Object.values(processes).some((name) => isAndroidPackageProcess(name, packageName))) break;
-      if (Date.now() >= exitDeadline) throw new Error('ANDROID_ENVIRONMENT: planned termination did not remove the observed package process set');
+      if (this.io.monotonicNow() >= exitDeadline) throw new Error('ANDROID_ENVIRONMENT: planned termination did not remove the observed package process set');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     await androidMeasurementMarker(this.serial, `${this.id} OP_END ${operation.id} ${packageName} ${pid}`);

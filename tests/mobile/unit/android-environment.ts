@@ -4560,7 +4560,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await state(fixture, { absent: true, children });
       const saved = { ...process.env };
       Object.assign(process.env, fixture.environment);
-      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
+      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), { plannedTerminationExitMs: 300 });
       try {
         await measurement.begin();
         const changes = {
@@ -4583,7 +4583,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           assert.ok(check.forcedRestartEvents.some((line: string) => line.includes(variant === 'unobserved child' ? '6701' : '6700')));
           return;
         }
-        await assert.rejects(measurement.terminate('com.android.chrome', '6538'));
+        const terminated = measurement.terminate('com.android.chrome', '6538');
+        if (variant.endsWith('remaining child')) await assert.rejects(terminated, /did not remove the observed package process set/u);
+        else await assert.rejects(terminated);
         const requests = await readFile(fixture.log, 'utf8');
         const dispatched = !['inventory denied', 'malformed inventory', 'main PID changed'].includes(variant);
         assert.equal(requests.includes('shell am force-stop --user 0'), dispatched);
@@ -4622,6 +4624,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const end = requests.indexOf('OP_END', stop);
       assert.ok(stop >= 0 && end > stop);
       assert.equal(requests.slice(stop, end).split('shell ps -A -o PID,NAME').length - 1, 3);
+      const events = await readFile(join(fixture.fixtureDirectory, 'native.log'), 'utf8');
+      const lateExit = events.indexOf('Zygote: Process 6538 exited due to signal 9 (Killed)');
+      assert.ok(lateExit >= 0 && lateExit < events.indexOf(' OP_END '), events);
     } finally {
       await measurement.finish().catch(() => undefined);
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
