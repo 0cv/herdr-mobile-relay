@@ -127,6 +127,8 @@ type Server struct {
 	tailscaleSession                managedTailscaleAuthority
 	tailscaleCLIRegistration        tailscaleCLIRegistrationVerifier
 	developmentCLIWorkflow          *tailscalecli.DevelopmentWorkflow
+	listenerBound                   chan struct{}
+	listenerBoundOnce               sync.Once
 	developmentBackendBound         chan struct{}
 	developmentBackendBoundOnce     sync.Once
 	developmentBackendMu            sync.RWMutex
@@ -286,6 +288,18 @@ func NewDevelopmentCLI(cfg *config.Config, version, revision string, logger *slo
 	server.developmentCLIWorkflow = workflow
 	server.developmentBackendBound = make(chan struct{})
 	return server, nil
+}
+
+// ListenerBound closes once Run has bound this server's configured TCP listener:
+// the first point at which a relay without a managed owner (a foreground or an
+// installed service) owns its instance. It stays open if the bind fails or the
+// server never runs. Callers must not infer ownership from a separate loopback
+// health response.
+func (s *Server) ListenerBound() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.listenerBound
 }
 
 // DevelopmentBackendBound closes only after this server process successfully
@@ -603,6 +617,7 @@ func newServerWithStartup(
 		tailscaleSession:    authority,
 		verifyPublicBundle:  appdeploy.VerifyPublic,
 		managedRetired:      make(chan struct{}),
+		listenerBound:       make(chan struct{}),
 		initErr:             deviceStoreErr,
 		startedAt:           time.Now(),
 		refreshClients:      make(map[string]bool),
@@ -1676,6 +1691,9 @@ func (s *Server) Run(ctx context.Context) error {
 			_ = s.udp.Close()
 		}
 		return s.unwindManagedStartup(fmt.Errorf("listen %s: %w", s.cfg.Addr(), err))
+	}
+	if s.listenerBound != nil {
+		s.listenerBoundOnce.Do(func() { close(s.listenerBound) })
 	}
 	serveListener := net.Listener(ln)
 	if s.tailscaleSession != nil {

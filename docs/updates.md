@@ -92,6 +92,18 @@ Pages app, configure exactly one stable relay as deployment owner with the
 before it installs and restarts the relay; a failed download, compatibility
 check, deployment, or public-origin check leaves the current relay running.
 
+Public verification waits for the target release descriptor, then checks the
+canonical entry, JavaScript, and stylesheet URLs without cache-busting queries.
+For a build entry only, a single same-origin HTTP 308 redirect from
+`/builds/<build>/index.html` to `/builds/<build>/` is accepted, matching Pages'
+normal URL normalization. It must not add a query or fragment, change builds,
+or redirect again. JavaScript and stylesheet redirects remain rejected, and
+the returned entry still has to match its expected MIME type and digest.
+Wrong MIME types or digests, immutable or day-long asset cache policies, and
+successful responses for missing assets fail immediately. If `verify-public`
+names a cached canonical resource, purge exactly that URL in Cloudflare and
+re-run verification; do not clear the phone's data.
+
 The optional deployment-owner role requires Node.js 22 or newer — Wrangler's own
 floor, and what the action verifies before it records a directory — plus
 Cloudflare credentials on that computer only. The action looks for `node` where
@@ -164,6 +176,15 @@ signoff for a user-facing release.
 
 ## Troubleshooting
 
+- **Phone app deployment failed with `canonical public resource must not redirect`
+  at a build's `index.html`:** versions 0.22.6–0.22.8 reject Pages' normal
+  directory redirect. Version 0.22.9 fixes this. The old deployment-owner
+  relay also uses its own verifier before a phone-driven relay upgrade, so
+  it can block installing the fix. On that computer, run
+  `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes`
+  to update the relay first, then retry the app update from Settings. Do not
+  clear phone storage or pair again. Other redirect errors still require
+  checking the hosted origin rather than bypassing verification.
 - **Update operation failed with `read canonical release: HTTP 403`:** an older
   relay's unauthenticated GitHub release check was rate-limited. Run
   `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes`

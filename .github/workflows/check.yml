@@ -464,8 +464,9 @@ jobs:
   mobile-host-check:
     needs: provenance
     name: Mobile harness checks
-    # The sentinel ref is not in the current push/PR triggers; mobile remains disabled.
-    if: ${{ github.ref == 'refs/heads/__mobile-ci-disabled__' }}
+    # Temporarily disabled while mobile CI is isolated on ci-mobile. No trigger
+    # emits this event name, so the job never runs.
+    if: ${{ github.event_name == 'herdr-mobile-check-disabled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -488,8 +489,9 @@ jobs:
 
   mobile:
     name: Mobile device CI
-    # The sentinel ref is not in the current push/PR triggers; mobile remains disabled.
-    if: ${{ github.ref == 'refs/heads/__mobile-ci-disabled__' }}
+    # Temporarily disabled alongside mobile-host-check and the release caller.
+    # No trigger emits this event name, so the job never runs.
+    if: ${{ github.event_name == 'herdr-mobile-check-disabled' }}
     needs: [release, mobile-host-check, provenance]
     uses: ./.github/workflows/mobile-ci.yml
     with:

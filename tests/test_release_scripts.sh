@@ -161,6 +161,34 @@ else
     HASH=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
 fi
 printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
+if OUTPUT=$(
+    check_release \
+        "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" 2>&1
+); then
+    echo "installed-release check accepted a missing native installer transaction helper" >&2
+    exit 1
+fi
+printf '%s\n' "$OUTPUT" | grep -q "does not contain the native installer transaction helper"
+
+cp "$REPO_DIR/relay/native-install-transaction.sh" "$RELEASE_DIR/relay/native-install-transaction.sh"
+"$RELEASE_DIR/herdr-mobile-relay" release-manifest \
+    "$RELEASE_DIR" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" >/dev/null
+tar -C "$RELEASE_DIR" -czf "$ARCHIVE" .
+if command -v sha256sum >/dev/null 2>&1; then
+    HASH=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+else
+    HASH=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+fi
+printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
+
+# The checked relay runs on this machine, so it must not reach its launchd jobs.
+HOST_LAUNCHCTL_LOG="$WORK_DIR/host-launchctl.log"
+mkdir "$WORK_DIR/host-bin"
+cat > "$WORK_DIR/host-bin/launchctl" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$HOST_LAUNCHCTL_LOG"
+EOF
+chmod 700 "$WORK_DIR/host-bin/launchctl"
 
 # Rebind a synthetic archive to a delegating relay: real serve/verify-release
 # still run, while selected scalar or support acquisitions are corrupted.
@@ -366,9 +394,14 @@ rm "$RELEASE_DIR/native-relay"
 cp "$WORK_DIR/positive.tar.gz" "$ARCHIVE"
 mkdir "$WORK_DIR/physical-tmp"
 ln -s "$WORK_DIR/physical-tmp" "$WORK_DIR/logical-tmp"
-TMPDIR="$WORK_DIR/logical-tmp" \
+TMPDIR="$WORK_DIR/logical-tmp" PATH="$WORK_DIR/host-bin:$PATH" \
     check_release \
     "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET"
+if [ -e "$HOST_LAUNCHCTL_LOG" ]; then
+    echo "installed-release check ran launchctl on this machine:" >&2
+    cat "$HOST_LAUNCHCTL_LOG" >&2
+    exit 1
+fi
 
 # The installed checker must retain both fixture identity comparisons even
 # though release_directory is forbidden in public support output. Exercise the

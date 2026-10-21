@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import { createConnection, createServer } from 'node:net';
-import { mkdtemp, rm, chmod, lstat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, mkdir, rm, chmod, lstat, symlink, writeFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
@@ -188,6 +188,42 @@ test('aborts autocomplete when a client disconnects or the bridge shuts down', a
     await pending;
     expect(observed.aborted).toBe(true);
   } finally { socket.destroy(); await close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('names one instance for a socket reached through symbolic links', async () => {
+  const fixture = await mkdtemp('/tmp/pi-identity-');
+  const server = createServer();
+  try {
+    await mkdir(join(fixture, 'real', 'sub'), { recursive: true });
+    await mkdir(join(fixture, 'elsewhere'));
+    const socket = join(fixture, 'real', 'herdr.sock');
+    await new Promise(resolve => server.listen(socket, resolve));
+    await symlink('real', join(fixture, 'linked'));
+    await symlink('herdr.sock', join(fixture, 'real', 'alias.sock'));
+    await symlink('../real/sub', join(fixture, 'elsewhere', 'hop'));
+    await symlink(socket, join(fixture, 'absolute.sock'));
+    await symlink('loop.sock', join(fixture, 'loop.sock'));
+    await symlink('missing.sock', join(fixture, 'dangling.sock'));
+    await writeFile(join(fixture, 'file'), '');
+    const expected = await instanceIdentity(socket);
+    for (const path of [
+      `${fixture}/linked/herdr.sock`, `${fixture}/real/alias.sock`,
+      `${fixture}/elsewhere/hop/../herdr.sock`, `${fixture}/absolute.sock`,
+      relative(process.cwd(), socket),
+    ]) {
+      expect(await instanceIdentity(path)).toBe(expected);
+    }
+    await expect(instanceIdentity(join(fixture, 'file'))).rejects.toThrow('Invalid Herdr socket');
+    await expect(instanceIdentity(join(fixture, 'missing.sock'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(instanceIdentity(join(fixture, 'dangling.sock'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(instanceIdentity(join(fixture, 'loop.sock'))).rejects.toMatchObject({ code: 'ELOOP' });
+    for (const path of [`${fixture}/file/../real/herdr.sock`, `${socket}/../herdr.sock`, `${socket}/`]) {
+      await expect(instanceIdentity(path)).rejects.toMatchObject({ code: 'ENOTDIR' });
+    }
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 test('rejects public runtime directories', async () => {

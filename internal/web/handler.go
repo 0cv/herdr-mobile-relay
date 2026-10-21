@@ -67,11 +67,13 @@ func NewHandler(webRoot string) (*Handler, error) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
+		setErrorHeaders(w)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	requestPath, ok := canonicalAssetPath(r.URL.Path)
 	if !ok {
+		setErrorHeaders(w)
 		http.NotFound(w, r)
 		return
 	}
@@ -90,8 +92,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.isAllowedAsset(requestPath) {
-		// Extensionless paths are SPA routes. Asset-looking paths remain 404.
-		if path.Ext(requestPath) != "" {
+		if path.Ext(requestPath) != "" || strings.HasPrefix(requestPath, "assets/") || strings.HasPrefix(requestPath, "builds/") {
+			setErrorHeaders(w)
 			http.NotFound(w, r)
 			return
 		}
@@ -100,6 +102,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	body, err := fs.ReadFile(h.files, requestPath)
 	if err != nil {
+		setErrorHeaders(w)
 		http.NotFound(w, r)
 		return
 	}
@@ -296,6 +299,11 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	// media-src blob: carries relay-synthesized speech audio; every blob is
 	// built in-page from E2EE payloads, never fetched from a remote origin.
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' blob: data:; media-src blob:; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+}
+
+func setErrorHeaders(w http.ResponseWriter) {
+	setSecurityHeaders(w)
+	w.Header().Set("Cache-Control", "no-store")
 }
 
 func setCacheHeaders(w http.ResponseWriter, asset string, immutable bool) {

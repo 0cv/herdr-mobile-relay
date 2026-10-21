@@ -4,6 +4,7 @@ import { join, normalize, resolve } from 'node:path';
 import { brotliDecompressSync } from 'node:zlib';
 import versions from '../build-versions.json' with { type: 'json' };
 import { releaseCompressedAssets } from './compressed-assets.mjs';
+import { validatePagesHeaders, validatePagesRedirects } from './pages-policy.ts';
 
 const root = resolve(process.argv[2] || 'dist');
 const pluginManifest = await readFile(new URL('../../herdr-plugin.toml', import.meta.url), 'utf8');
@@ -13,6 +14,7 @@ const required = [
   '_headers',
   '_redirects',
   'index.html',
+  '404.html',
   'herdr-bootstrap.js',
   'manifest-loader.js',
   'manifest.webmanifest',
@@ -35,6 +37,14 @@ for (const relative of required) {
   if (!(await stat(file).catch(() => null))?.isFile()) {
     throw new Error(`Required release file is missing: ${relative}`);
   }
+}
+
+const descriptor = JSON.parse(await readFile(join(root, 'release.json'), 'utf8'));
+if (versions.withdrawnAssets.includes(descriptor.assets)) {
+  throw new Error(`Release uses withdrawn asset generation: ${descriptor.assets}`);
+}
+if (versions.withdrawnScripts.includes(descriptor.files?.javascript?.path)) {
+  throw new Error(`Release uses withdrawn application script: ${descriptor.files.javascript.path}`);
 }
 
 const compressedAssets = await releaseCompressedAssets(root);
@@ -61,6 +71,9 @@ const unexpectedScripts = scripts.filter((name) => !workerScripts.includes(name)
   && !applicationScripts.includes(name) && !lazyScripts.includes(name));
 if (applicationScripts.length !== 1 || workerScripts.length !== 1 || unexpectedScripts.length !== 0) {
   throw new Error(`Expected one content-addressed app script and one attachment hash worker; found ${scripts.join(', ')}`);
+}
+if (versions.withdrawnScripts.includes(`assets/${applicationScripts[0]}`)) {
+  throw new Error(`Release uses withdrawn application script: assets/${applicationScripts[0]}`);
 }
 const lazyReferencePattern = /import\(\s*[`'"]\.\/([A-Za-z0-9_.-]+-[0-9]+\.js)[`'"]\s*\)/g;
 const applicationSource = await readFile(join(root, 'assets', applicationScripts[0]), 'utf8');
@@ -98,7 +111,6 @@ function safeRelativePath(value) {
     && !value.startsWith('../');
 }
 
-const descriptor = JSON.parse(await readFile(join(root, 'release.json'), 'utf8'));
 if (descriptor.schema !== 1
   || descriptor.version !== productVersion
   || !Number.isInteger(descriptor.assets)
@@ -165,22 +177,12 @@ if (version.version !== productVersion
   throw new Error('version.json differs from release.json, herdr-plugin.toml, or build-versions.json');
 }
 
-const headers = await readFile(join(root, '_headers'), 'utf8');
-const headerLines = headers.split(/\r?\n/);
-for (const route of ['/', '/index.html', '/version.json', '/release.json', '/herdr-bootstrap.js']) {
-  const routeIndex = headerLines.findIndex((line) => line === route);
-  const cacheLine = routeIndex >= 0
-    ? headerLines.slice(routeIndex + 1, routeIndex + 5).find((line) => line.trim() === 'Cache-Control: no-cache, no-store')
-    : undefined;
-  if (!cacheLine) throw new Error(`_headers does not preserve no-cache for ${route}`);
-}
-if (!headers.includes('/builds/*') || !headers.includes('public, max-age=31536000, immutable')
-  || !headers.includes('/assets/*')) {
-  throw new Error('_headers does not mark only digest-addressed resources immutable');
-}
-const redirects = await readFile(join(root, '_redirects'), 'utf8');
-if (!redirects.includes(`/ ${descriptor.entry} 302`) || !redirects.includes(`/index.html ${descriptor.entry} 302`)) {
-  throw new Error('_redirects does not route stable bootstrap paths to the current build entry');
+validatePagesHeaders(await readFile(join(root, '_headers'), 'utf8'));
+validatePagesRedirects(await readFile(join(root, '_redirects'), 'utf8'), descriptor.entry);
+const notFound = await readFile(join(root, '404.html'), 'utf8');
+if (!notFound.includes('<a href="/">') || !notFound.includes('<h1>')
+  || /<(?:script|iframe|object|embed|base)\b|\bon\w+\s*=|http-equiv\s*=|javascript:/i.test(notFound)) {
+  throw new Error('404.html must be a static error page with a same-origin home link and no automatic navigation');
 }
 
 const serviceWorker = await readFile(join(root, 'sw.js'), 'utf8');

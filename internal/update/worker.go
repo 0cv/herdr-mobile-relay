@@ -87,10 +87,12 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 		return err
 	}
 	// Missing detached environment is a refusal, not a legacy default. This must
-	// precede even validation-error persistence and preserve rejected jobs.
+	// precede even validation-error persistence and preserve rejected jobs, so the
+	// job file is removed only once the worker has been admitted.
 	if err := transportAdmission(job.Transport, os.Getenv("HERDR_RELAY_TRANSPORT"), true); err != nil {
 		return err
 	}
+	defer func() { _ = os.Remove(jobPath) }()
 	started := time.Now().UTC().Format(time.RFC3339)
 	state := State{
 		State:          "scheduled",
@@ -183,11 +185,7 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	state.CheckedAt = time.Now().Unix()
 	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	state.Error = ""
-	if err := writeState(job.StatePath, state); err != nil {
-		return err
-	}
-	_ = os.Remove(jobPath)
-	return nil
+	return writeState(job.StatePath, state)
 }
 
 func installPlugin(ctx context.Context, job Job) error {

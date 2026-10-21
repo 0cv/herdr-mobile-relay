@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 )
 
 const (
@@ -27,7 +31,33 @@ func TestNewerVersion(t *testing.T) {
 	}
 }
 
-func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
+// workerLaunch holds the scheduling arguments generated for one update worker
+// job. tailscale_policy_test.go reads them to prove the transport propagates.
+type workerLaunch struct {
+	args []string
+}
+
+// updateWorkerLaunch renders the production job (updateWorkerJob) the way the
+// platform consumes it: systemd-run arguments on Linux, and on macOS the
+// environment assignments followed by the program, because launchd receives
+// the environment through the job plist rather than through arguments.
+func updateWorkerLaunch(
+	goos, label, executable, jobPath, transport string,
+	lookupEnv func(string) (string, bool),
+) workerLaunch {
+	job := updateWorkerJob(executable, jobPath, transport, lookupEnv)
+	job.Label = label
+	if goos != "darwin" {
+		return workerLaunch{args: systemdRunArgs(job)}
+	}
+	var args []string
+	for _, key := range slices.Sorted(maps.Keys(job.Environment)) {
+		args = append(args, key+"="+job.Environment[key])
+	}
+	return workerLaunch{args: append(args, job.Program...)}
+}
+
+func TestUpdateWorkerJobForwardsAppDeploymentConfiguration(t *testing.T) {
 	values := map[string]string{
 		"HERDR_APP_DEPLOY_ORIGIN":        "https://app.example.test",
 		"HERDR_CLOUDFLARE_PAGES_PROJECT": "relay-app",
@@ -36,6 +66,7 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 		"HERDR_APP_DEPLOY_NODE_DIR":      "/opt/node/bin",
 		"HERDR_RELAY_ENV":                "/home/cv/.config/herdr-mobile-relay/relay.env",
 		"HERDR_PLUGIN_CONFIG_DIR":        "/home/cv/.config/herdr-mobile-relay",
+		"HERDR_GITHUB_TOKEN_FILE":        "  ",
 		"CLOUDFLARE_API_TOKEN":           "must-not-be-forwarded",
 	}
 	lookup := func(key string) (string, bool) {
@@ -53,22 +84,30 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 		"HERDR_PLUGIN_CONFIG_DIR=/home/cv/.config/herdr-mobile-relay",
 	}
 
-	linux := updateWorkerLaunch("linux", "relay-update", "/opt/relay", "/tmp/job.json", "cloudflare", lookup)
-	linuxArgs := []string{"--user", "--collect", "--unit=relay-update"}
+	job := updateWorkerJob("/opt/relay", "/tmp/job.json", "cloudflare", lookup)
+	sequence, found := strings.CutPrefix(job.Label, launchd.UpdateWorkerPrefix)
+	if _, err := strconv.ParseInt(sequence, 10, 64); !found || err != nil {
+		t.Fatalf("label = %q, want %s<unix nanoseconds>", job.Label, launchd.UpdateWorkerPrefix)
+	}
+	if !slices.Equal(job.Program, []string{"/opt/relay", "update-worker", "/tmp/job.json"}) {
+		t.Fatalf("program = %q", job.Program)
+	}
+	wantEnvironment := make(map[string]string, len(assignments))
+	for _, assignment := range assignments {
+		key, value, _ := strings.Cut(assignment, "=")
+		wantEnvironment[key] = value
+	}
+	if !maps.Equal(job.Environment, wantEnvironment) {
+		t.Fatalf("environment = %#v, want %#v", job.Environment, wantEnvironment)
+	}
+
+	linuxArgs := []string{"--user", "--collect", "--unit=" + job.Label}
 	for _, assignment := range assignments {
 		linuxArgs = append(linuxArgs, "--setenv="+assignment)
 	}
 	linuxArgs = append(linuxArgs, "/opt/relay", "update-worker", "/tmp/job.json")
-	if linux.application != "systemd-run" || !slices.Equal(linux.args, linuxArgs) {
-		t.Fatalf("linux launch = %#v, want application systemd-run args %#v", linux, linuxArgs)
-	}
-
-	darwin := updateWorkerLaunch("darwin", "relay-update", "/opt/relay", "/tmp/job.json", "cloudflare", lookup)
-	darwinArgs := []string{"submit", "-l", "relay-update", "--", "/usr/bin/env"}
-	darwinArgs = append(darwinArgs, assignments...)
-	darwinArgs = append(darwinArgs, "/opt/relay", "update-worker", "/tmp/job.json")
-	if darwin.application != "launchctl" || !slices.Equal(darwin.args, darwinArgs) {
-		t.Fatalf("darwin launch = %#v, want application launchctl args %#v", darwin, darwinArgs)
+	if args := systemdRunArgs(job); !slices.Equal(args, linuxArgs) {
+		t.Fatalf("systemd-run args = %#v, want %#v", args, linuxArgs)
 	}
 }
 
@@ -421,6 +460,90 @@ func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
 		!job.DeployAppFirst ||
 		job.ExpectedAppOrigin != "https://app.example.test" {
 		t.Fatalf("job = %#v", job)
+	}
+}
+
+func TestManagerSweepsFinishedWorkersBeforeLaunchAndOnCheck(t *testing.T) {
+	var calls []string
+	previousSweep := sweepWorkers
+	sweepWorkers = func(context.Context) error {
+		calls = append(calls, "sweep")
+		return errors.New("launchctl list: exit status 1")
+	}
+	t.Cleanup(func() { sweepWorkers = previousSweep })
+
+	root := t.TempDir()
+	manager := NewManager(
+		"cloudflare",
+		filepath.Join(root, "installed"),
+		filepath.Join(root, "runtime"),
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1:8375/healthz",
+	)
+	manager.state = State{
+		State:            "available",
+		AvailableVersion: "1.2.4",
+		TargetVersion:    "1.2.4",
+		TargetRevision:   nextTestRevision,
+		Mode:             "plugin",
+		Eligible:         true,
+		CanInstall:       true,
+	}
+	manager.metadata = releaseMetadata{Version: "1.2.4", Revision: nextTestRevision}
+	if err := writeState(manager.statePath(), manager.state); err != nil {
+		t.Fatal(err)
+	}
+	manager.launch = func(context.Context, string) error {
+		calls = append(calls, "launch")
+		return nil
+	}
+
+	if _, _, err := manager.Schedule(t.Context(), "1.2.4", nextTestRevision, false, ""); err != nil {
+		t.Fatalf("a failed sweep blocked the update: %v", err)
+	}
+	if !slices.Equal(calls, []string{"sweep", "launch"}) {
+		t.Fatalf("schedule calls = %q", calls)
+	}
+
+	calls = nil
+	if state := manager.Check(t.Context()); state.State != "scheduled" {
+		t.Fatalf("check state = %#v", state)
+	}
+	if !slices.Equal(calls, []string{"sweep"}) {
+		t.Fatalf("check calls = %q", calls)
+	}
+}
+
+func TestManagerRefusedByTransportPolicyDoesNotSweepWorkers(t *testing.T) {
+	for _, transport := range []string{"tailscale", "tailscale-cli", "tailscale-external", "unknown"} {
+		t.Run(transport, func(t *testing.T) {
+			sweeps := 0
+			previousSweep := sweepWorkers
+			sweepWorkers = func(context.Context) error {
+				sweeps++
+				return nil
+			}
+			t.Cleanup(func() { sweepWorkers = previousSweep })
+
+			root := t.TempDir()
+			manager := NewManager(
+				transport,
+				filepath.Join(root, "installed"),
+				filepath.Join(root, "runtime"),
+				testHerdrBinary(t),
+				"1.2.3",
+				currentTestRevision,
+				"http://127.0.0.1:8375/healthz",
+			)
+			if state := manager.Check(t.Context()); state.CanInstall {
+				t.Fatalf("a refused transport can install: %#v", state)
+			}
+			if sweeps != 0 {
+				t.Fatalf("a manager refused by the transport policy swept launchd workers %d times", sweeps)
+			}
+		})
 	}
 }
 

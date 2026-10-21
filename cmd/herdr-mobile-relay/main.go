@@ -19,6 +19,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/eventhook"
+	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 	"github.com/0cv/herdr-mobile-relay/internal/localcontrol"
 	"github.com/0cv/herdr-mobile-relay/internal/processsupervisor"
 	"github.com/0cv/herdr-mobile-relay/internal/readiness"
@@ -49,12 +50,24 @@ func main() {
 }
 
 func run(args []string) (int, error) {
-	return runWithServerRunner(args, (*app.Server).Run)
+	return runCommand(args, (*app.Server).Run, launchd.SweepWorkers)
 }
 
 // The runner seam leaves production dispatch/config/construction intact while
 // hosted command tests can inspect the real store without starting listeners.
+// It never sweeps launchd worker jobs, so those tests cannot reach this
+// machine's launchd.
 func runWithServerRunner(args []string, runner func(*app.Server, context.Context) error) (int, error) {
+	return runCommand(args, runner, nil)
+}
+
+// sweep removes finished launchd worker jobs once a serving relay has bound its
+// listener; nil leaves launchd alone.
+func runCommand(
+	args []string,
+	runner func(*app.Server, context.Context) error,
+	sweep func(context.Context) error,
+) (int, error) {
 	command := "serve"
 	if len(args) > 0 {
 		command, args = args[0], args[1:]
@@ -92,12 +105,12 @@ func runWithServerRunner(args []string, runner func(*app.Server, context.Context
 		if len(args) != 0 {
 			return 2, errors.New("serve does not accept arguments")
 		}
-		return runServeWithRunner(false, runner)
+		return runServeWithRunner(false, runner, sweep)
 	case "serve-installed":
 		if len(args) != 0 {
 			return 2, errors.New("serve-installed does not accept arguments")
 		}
-		return runServeWithRunner(true, runner)
+		return runServeWithRunner(true, runner, sweep)
 	case "doctor":
 		return runDoctorCommand(args, false)
 	case "status":
@@ -531,10 +544,14 @@ func loadCommandConfig() (*config.Config, error) {
 }
 
 func runServe() (int, error) {
-	return runServeWithRunner(false, (*app.Server).Run)
+	return runServeWithRunner(false, (*app.Server).Run, nil)
 }
 
-func runServeWithRunner(installed bool, runner func(*app.Server, context.Context) error) (int, error) {
+func runServeWithRunner(
+	installed bool,
+	runner func(*app.Server, context.Context) error,
+	sweep func(context.Context) error,
+) (int, error) {
 	if installed {
 		// Match the wrapper's strict false-only policy before config.Load can
 		// silently interpret an unknown rearm value as its false fallback.
@@ -557,6 +574,16 @@ func runServeWithRunner(installed bool, runner func(*app.Server, context.Context
 	logger := newRelayLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr))
 	slog.SetDefault(logger)
 
+	// Finished and legacy launchd worker jobs are removed only once this process
+	// owns its instance. A refused startup never reaches the runner. A relay
+	// without a managed owner (a foreground or an installed service) owns its
+	// instance only when Run has bound the listener, so the sweep waits for that
+	// signal and a failed bind (for instance a duplicate start) never sweeps.
+	start := func(srv *app.Server, ctx context.Context) error {
+		sweepWorkerJobsOnceBound(ctx, serverListenerBound(srv), cfg.Transport, sweep, logger)
+		return runner(srv, ctx)
+	}
+
 	if installed {
 		// Constructor policy validation occurs before managed-owner acquisition
 		// and before any app/store/listener side effects. No CLI authority is
@@ -565,7 +592,7 @@ func runServeWithRunner(installed bool, runner func(*app.Server, context.Context
 		if err != nil {
 			return 1, err
 		}
-		return runSignalServer(srv, runner)
+		return runSignalServer(srv, start)
 	}
 
 	// O is acquired before managed app/control resources. Tailscale ownership
@@ -651,7 +678,50 @@ func runServeWithRunner(installed bool, runner func(*app.Server, context.Context
 	if err != nil {
 		return 1, err
 	}
-	return runSignalServer(srv, runner)
+	return runSignalServer(srv, start)
+}
+
+// serverListenerBound reports when a server owns its TCP listener; tests replace it.
+var serverListenerBound = func(srv *app.Server) <-chan struct{} { return srv.ListenerBound() }
+
+// sweepsTransport reports whether startup sweeps worker jobs for a transport. Only
+// transports that admit phone-managed updates schedule update workers; the
+// Tailscale transports refuse them, so startup does not sweep for those (an
+// app-deploy request is a separate path and is not admitted by transport).
+func sweepsTransport(transport string) bool {
+	return transport == config.TransportCloudflare || transport == config.TransportGateway
+}
+
+// sweepWorkerJobsOnceBound sweeps from a goroutine as soon as bound closes, and
+// never if it does not close before ctx ends: a failed bind, a refused startup or
+// a cancellation before the bind leave launchd alone. It never blocks the server.
+func sweepWorkerJobsOnceBound(
+	ctx context.Context,
+	bound <-chan struct{},
+	transport string,
+	sweep func(context.Context) error,
+	logger *slog.Logger,
+) {
+	if bound == nil || sweep == nil || !sweepsTransport(transport) {
+		return
+	}
+	go func() {
+		select {
+		case <-bound:
+			sweepWorkerJobs(ctx, transport, sweep, logger)
+		case <-ctx.Done():
+		}
+	}()
+}
+
+// sweepWorkerJobs removes finished and legacy launchd worker jobs (macOS only).
+func sweepWorkerJobs(ctx context.Context, transport string, sweep func(context.Context) error, logger *slog.Logger) {
+	if sweep == nil || !sweepsTransport(transport) {
+		return
+	}
+	if err := sweep(ctx); err != nil && ctx.Err() == nil {
+		logger.Warn("remove finished worker jobs", "error", err)
+	}
 }
 
 func runSignalServer(srv *app.Server, runner func(*app.Server, context.Context) error) (int, error) {

@@ -1,5 +1,5 @@
 import { createServer } from 'node:net';
-import { lstat, mkdir, realpath, chmod } from 'node:fs/promises';
+import { lstat, mkdir, readlink, chmod } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -134,8 +134,38 @@ export function normalizeCommands(raw, skillNames) {
   return { commands, status: partial ? 'partial' : 'available', truncated };
 }
 
+// Bun's realpath cannot resolve macOS sockets. Walk links before handling ".."
+// so the socket identity matches the relay's filepath.EvalSymlinks result.
+async function resolveLinks(input) {
+  const pending = (input.startsWith('/') ? input : `${process.cwd()}/${input}`).split('/');
+  let resolved = '';
+  let links = 0;
+  while (pending.length > 0) {
+    const name = pending.shift();
+    if (name === '' || name === '.') continue;
+    if (name === '..') {
+      resolved = resolved.slice(0, Math.max(resolved.lastIndexOf('/'), 0));
+      continue;
+    }
+    const next = `${resolved}/${name}`;
+    const stat = await lstat(next);
+    if (!stat.isSymbolicLink()) {
+      if (pending.length > 0 && !stat.isDirectory()) {
+        throw Object.assign(new Error(`Not a directory: ${next}`), { code: 'ENOTDIR' });
+      }
+      resolved = next;
+      continue;
+    }
+    if (++links > 255) throw Object.assign(new Error(`Too many symbolic links: ${input}`), { code: 'ELOOP' });
+    const target = await readlink(next);
+    if (target.startsWith('/')) resolved = '';
+    pending.unshift(...target.split('/'));
+  }
+  return resolved || '/';
+}
+
 export async function instanceIdentity(socketPath) {
-  const path = await realpath(socketPath);
+  const path = await resolveLinks(socketPath);
   const stat = await lstat(path, { bigint: true });
   if (!stat.isSocket() || stat.uid !== BigInt(process.getuid())) throw new Error('Invalid Herdr socket');
   return createHash('sha256').update(`${path}\n${stat.dev}\n${stat.ino}`).digest('hex');

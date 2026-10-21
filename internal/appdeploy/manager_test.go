@@ -3,12 +3,17 @@ package appdeploy
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
@@ -71,10 +76,11 @@ func TestManagerRejectsPhoneOverrides(t *testing.T) {
 	}
 }
 
-func TestAppDeployWorkerLaunchForwardsRelayEnvironmentPaths(t *testing.T) {
+func TestAppDeployWorkerJobForwardsRelayEnvironmentPaths(t *testing.T) {
 	values := map[string]string{
-		"HERDR_RELAY_ENV":         "/home/cv/.config/herdr-mobile-relay/relay.env",
-		"HERDR_PLUGIN_CONFIG_DIR": "/home/cv/.config/herdr-mobile-relay",
+		"HERDR_RELAY_ENV":                "/home/cv/.config/herdr-mobile-relay/relay.env",
+		"HERDR_PLUGIN_CONFIG_DIR":        "/home/cv/.config/herdr-mobile-relay",
+		"HERDR_CLOUDFLARE_PAGES_PROJECT": "relay-app",
 	}
 	lookup := func(key string) (string, bool) {
 		value, found := values[key]
@@ -85,22 +91,55 @@ func TestAppDeployWorkerLaunchForwardsRelayEnvironmentPaths(t *testing.T) {
 		"HERDR_PLUGIN_CONFIG_DIR=/home/cv/.config/herdr-mobile-relay",
 	}
 
-	linux := appDeployWorkerLaunch("linux", "app-deploy", "/opt/relay", "/tmp/job.json", lookup)
-	linuxArgs := []string{"--user", "--collect", "--unit=app-deploy"}
+	job := appDeployWorkerJob("/opt/relay", "/tmp/job.json", lookup)
+	sequence, found := strings.CutPrefix(job.Label, launchd.AppDeployWorkerPrefix)
+	if _, err := strconv.ParseInt(sequence, 10, 64); !found || err != nil {
+		t.Fatalf("label = %q, want %s<unix nanoseconds>", job.Label, launchd.AppDeployWorkerPrefix)
+	}
+	if !slices.Equal(job.Program, []string{"/opt/relay", "app-deploy-worker", "/tmp/job.json"}) {
+		t.Fatalf("program = %q", job.Program)
+	}
+	wantEnvironment := map[string]string{
+		"HERDR_RELAY_ENV":         "/home/cv/.config/herdr-mobile-relay/relay.env",
+		"HERDR_PLUGIN_CONFIG_DIR": "/home/cv/.config/herdr-mobile-relay",
+	}
+	if !maps.Equal(job.Environment, wantEnvironment) {
+		t.Fatalf("environment = %#v, want %#v", job.Environment, wantEnvironment)
+	}
+
+	linuxArgs := []string{"--user", "--collect", "--unit=" + job.Label}
 	for _, assignment := range assignments {
 		linuxArgs = append(linuxArgs, "--setenv="+assignment)
 	}
 	linuxArgs = append(linuxArgs, "/opt/relay", "app-deploy-worker", "/tmp/job.json")
-	if linux.application != "systemd-run" || !slices.Equal(linux.args, linuxArgs) {
-		t.Fatalf("linux launch = %#v, want application systemd-run args %#v", linux, linuxArgs)
+	if args := systemdRunArgs(job); !slices.Equal(args, linuxArgs) {
+		t.Fatalf("systemd-run args = %#v, want %#v", args, linuxArgs)
 	}
+}
 
-	darwin := appDeployWorkerLaunch("darwin", "app-deploy", "/opt/relay", "/tmp/job.json", lookup)
-	darwinArgs := []string{"submit", "-l", "app-deploy", "--", "/usr/bin/env"}
-	darwinArgs = append(darwinArgs, assignments...)
-	darwinArgs = append(darwinArgs, "/opt/relay", "app-deploy-worker", "/tmp/job.json")
-	if darwin.application != "launchctl" || !slices.Equal(darwin.args, darwinArgs) {
-		t.Fatalf("darwin launch = %#v, want application launchctl args %#v", darwin, darwinArgs)
+func TestManagerSweepsFinishedWorkersBeforeLaunch(t *testing.T) {
+	var calls []string
+	previousSweep := sweepWorkers
+	sweepWorkers = func(context.Context) error {
+		calls = append(calls, "sweep")
+		return errors.New("launchctl list: exit status 1")
+	}
+	t.Cleanup(func() { sweepWorkers = previousSweep })
+	manager := &Manager{
+		runtimeDir: t.TempDir(),
+		version:    "1.2.3",
+		revision:   "abc",
+		origin:     "https://app.example.test",
+		launch: func(context.Context, string) error {
+			calls = append(calls, "launch")
+			return nil
+		},
+	}
+	if _, _, err := manager.Schedule(t.Context(), "1.2.3", "abc", "https://app.example.test"); err != nil {
+		t.Fatalf("a failed sweep blocked the deployment: %v", err)
+	}
+	if !slices.Equal(calls, []string{"sweep", "launch"}) {
+		t.Fatalf("schedule calls = %q", calls)
 	}
 }
 

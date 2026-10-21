@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertDistinctUpgrade,
+  assertStylesheetMode,
   fileSha256,
   prepareBundle,
   safeRelativePath,
@@ -410,6 +411,20 @@ test('same-version different-build pairs are distinct', async () => {
     { name: 'base', provenance: legacyExpected, root: '/tmp/base', identity: base, archiveSha256: '' },
     { name: 'target', provenance: legacyExpected, root: '/tmp/target', identity: target, archiveSha256: '' },
   ));
+});
+
+test('current-code fixtures enforce distinct and unchanged stylesheet modes', async () => {
+  const baseline: BundleIdentity = {
+    version: '0.20.10', assets: 363, build: 'a'.repeat(64), entry: '/builds/a/index.html',
+    script: '/assets/app-a.js', style: '/assets/app.css', scriptSha256: 'a'.repeat(64),
+    styleSha256: 'b'.repeat(64), webHash: 'c'.repeat(64), descriptor: true,
+  };
+  const changed = { ...baseline, style: '/assets/app-c.css', styleSha256: 'd'.repeat(64) };
+  const unchanged = { ...baseline, build: 'e'.repeat(64), script: '/assets/app-e.js', scriptSha256: 'e'.repeat(64) };
+  assert.doesNotThrow(() => assertStylesheetMode(baseline, changed, 'changed'));
+  assert.doesNotThrow(() => assertStylesheetMode(baseline, unchanged, 'unchanged'));
+  assert.throws(() => assertStylesheetMode(baseline, unchanged, 'changed'), /distinct immutable identities/u);
+  assert.throws(() => assertStylesheetMode(baseline, changed, 'unchanged'), /preserve path and bytes/u);
 });
 
 test('repository-relative CLI paths are anchored at the repository root', async () => {

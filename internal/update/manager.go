@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
@@ -35,6 +36,8 @@ var appDeployEnvironmentKeys = [...]string{
 	"HERDR_PLUGIN_CONFIG_DIR",
 	"HERDR_GITHUB_TOKEN_FILE",
 }
+
+var sweepWorkers = launchd.SweepWorkers
 
 var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
@@ -131,6 +134,10 @@ func (m *Manager) State() State {
 }
 
 func (m *Manager) Check(ctx context.Context) State {
+	// A manager refused by the transport policy is read-only: no launchd effects.
+	if m.policyError() == nil {
+		_ = sweepWorkers(ctx)
+	}
 	m.mu.Lock()
 	if m.policyError() != nil {
 		state := m.publicState(m.readOnlyState())
@@ -278,6 +285,7 @@ func (m *Manager) Schedule(
 		_ = os.Remove(jobPath)
 		return "", m.publicState(m.state), fmt.Errorf("persist scheduled update: %w", err)
 	}
+	_ = sweepWorkers(ctx)
 	if err := m.launch(ctx, jobPath); err != nil {
 		m.state.State = "failed"
 		m.state.Error = safeError(err)
@@ -520,40 +528,37 @@ func (m *Manager) eligibility() (bool, string, string) {
 	return true, "plugin", ""
 }
 
-type workerLaunch struct {
-	application string
-	args        []string
-}
+// workerTransportKey hands the resolved transport to the detached worker, which
+// refuses to run unless it agrees with the persisted job (see transportAdmission).
+const workerTransportKey = "HERDR_RELAY_TRANSPORT"
 
-func updateWorkerLaunch(
-	goos, label, executable, jobPath, transport string,
+func updateWorkerJob(
+	executable, jobPath, transport string,
 	lookupEnv func(string) (string, bool),
-) workerLaunch {
-	assignments := []string{"HERDR_RELAY_TRANSPORT=" + transport}
+) launchd.Job {
+	environment := make(map[string]string, len(appDeployEnvironmentKeys)+1)
+	environment[workerTransportKey] = transport
 	for _, key := range appDeployEnvironmentKeys {
 		value, present := lookupEnv(key)
 		if present && strings.TrimSpace(value) != "" {
-			assignments = append(assignments, key+"="+value)
+			environment[key] = value
 		}
 	}
+	return launchd.Job{
+		Label:       fmt.Sprintf("%s%d", launchd.UpdateWorkerPrefix, time.Now().UnixNano()),
+		Program:     []string{executable, "update-worker", jobPath},
+		Environment: environment,
+	}
+}
 
-	worker := []string{executable, "update-worker", jobPath}
-	if goos == "darwin" {
-		args := []string{"submit", "-l", label, "--"}
-		if len(assignments) > 0 {
-			args = append(args, "/usr/bin/env")
-			args = append(args, assignments...)
+func systemdRunArgs(job launchd.Job) []string {
+	args := []string{"--user", "--collect", "--unit=" + job.Label}
+	for _, key := range append([]string{workerTransportKey}, appDeployEnvironmentKeys[:]...) {
+		if value, forwarded := job.Environment[key]; forwarded {
+			args = append(args, "--setenv="+key+"="+value)
 		}
-		args = append(args, worker...)
-		return workerLaunch{application: "launchctl", args: args}
 	}
-
-	args := []string{"--user", "--collect", "--unit=" + label}
-	for _, assignment := range assignments {
-		args = append(args, "--setenv="+assignment)
-	}
-	args = append(args, worker...)
-	return workerLaunch{application: "systemd-run", args: args}
+	return append(args, job.Program...)
 }
 
 func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
@@ -561,10 +566,14 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 	if err != nil {
 		return err
 	}
-	label := fmt.Sprintf("herdr-mobile-relay-update-%d", time.Now().Unix())
-	launch := updateWorkerLaunch(runtime.GOOS, label, executable, jobPath, m.transport, os.LookupEnv)
-	command := childenv.CommandContext(ctx, launch.application, launch.args...)
-	output, err := command.CombinedOutput()
+	job := updateWorkerJob(executable, jobPath, m.transport, os.LookupEnv)
+	if runtime.GOOS == "darwin" {
+		if err := launchd.Bootstrap(ctx, m.runtimeDir, job); err != nil {
+			return fmt.Errorf("schedule update worker: %w", err)
+		}
+		return nil
+	}
+	output, err := childenv.CommandContext(ctx, "systemd-run", systemdRunArgs(job)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schedule update worker: %s: %s", err, compact(string(output), 300))
 	}

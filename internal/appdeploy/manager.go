@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/childenv"
+	"github.com/0cv/herdr-mobile-relay/internal/launchd"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 )
@@ -214,6 +215,7 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 		_ = os.Remove(jobPath)
 		return "", state, err
 	}
+	_ = sweepWorkers(ctx)
 	if err := m.launch(ctx, jobPath); err != nil {
 		scheduled.State = "failed"
 		scheduled.Error = safeError(err)
@@ -263,45 +265,39 @@ func (m *Manager) public(state State) PublicState {
 	}
 }
 
-type workerLaunch struct {
-	application string
-	args        []string
-}
-
 var workerEnvironmentKeys = [...]string{
 	"HERDR_RELAY_ENV",
 	"HERDR_PLUGIN_CONFIG_DIR",
 }
 
-func appDeployWorkerLaunch(
-	goos, label, executable, jobPath string,
+var sweepWorkers = launchd.SweepWorkers
+
+func appDeployWorkerJob(
+	executable, jobPath string,
 	lookupEnv func(string) (string, bool),
-) workerLaunch {
-	assignments := make([]string, 0, len(workerEnvironmentKeys))
+) launchd.Job {
+	environment := make(map[string]string, len(workerEnvironmentKeys))
 	for _, key := range workerEnvironmentKeys {
 		value, present := lookupEnv(key)
 		if present && strings.TrimSpace(value) != "" {
-			assignments = append(assignments, key+"="+value)
+			environment[key] = value
 		}
 	}
+	return launchd.Job{
+		Label:       fmt.Sprintf("%s%d", launchd.AppDeployWorkerPrefix, time.Now().UnixNano()),
+		Program:     []string{executable, "app-deploy-worker", jobPath},
+		Environment: environment,
+	}
+}
 
-	worker := []string{executable, "app-deploy-worker", jobPath}
-	if goos == "darwin" {
-		args := []string{"submit", "-l", label, "--"}
-		if len(assignments) > 0 {
-			args = append(args, "/usr/bin/env")
-			args = append(args, assignments...)
+func systemdRunArgs(job launchd.Job) []string {
+	args := []string{"--user", "--collect", "--unit=" + job.Label}
+	for _, key := range workerEnvironmentKeys {
+		if value, forwarded := job.Environment[key]; forwarded {
+			args = append(args, "--setenv="+key+"="+value)
 		}
-		args = append(args, worker...)
-		return workerLaunch{application: "launchctl", args: args}
 	}
-
-	args := []string{"--user", "--collect", "--unit=" + label}
-	for _, assignment := range assignments {
-		args = append(args, "--setenv="+assignment)
-	}
-	args = append(args, worker...)
-	return workerLaunch{application: "systemd-run", args: args}
+	return append(args, job.Program...)
 }
 
 func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
@@ -309,10 +305,14 @@ func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 	if err != nil {
 		return err
 	}
-	label := fmt.Sprintf("herdr-mobile-relay-app-deploy-%d", time.Now().Unix())
-	launch := appDeployWorkerLaunch(runtime.GOOS, label, executable, jobPath, os.LookupEnv)
-	command := childenv.CommandContext(ctx, launch.application, launch.args...)
-	output, err := command.CombinedOutput()
+	job := appDeployWorkerJob(executable, jobPath, os.LookupEnv)
+	if runtime.GOOS == "darwin" {
+		if err := launchd.Bootstrap(ctx, m.runtimeDir, job); err != nil {
+			return fmt.Errorf("schedule app deployment worker: %w", err)
+		}
+		return nil
+	}
+	output, err := childenv.CommandContext(ctx, "systemd-run", systemdRunArgs(job)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schedule app deployment worker: %s: %s", err, compact(string(output), 300))
 	}
