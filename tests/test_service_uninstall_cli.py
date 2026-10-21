@@ -193,18 +193,21 @@ if name != 'launchctl': refuse()
 domain = 'gui/' + str(os.getuid())
 if args == ['print', domain]:
     if model['fault'] == 'domain-fail': event('domain-error'); raise SystemExit(1)
-    if model['fault'] == 'domain-malformed': print('wrong-domain = {}'); raise SystemExit(0)
+    # The product reads the domain listing by status alone, so a malformed answer refuses only as a FAILING query (status 1).
+    if model['fault'] == 'domain-malformed': print('wrong-domain = {}'); raise SystemExit(1)
     lifecycle_output(model['fault_label'], 'domain', domain + ' = {}')
 if args == ['print-disabled', domain]:
     if model['fault'] == 'disabled-fail': raise SystemExit(1)
     if model['fault'] == 'disabled-malformed': print('unknown disabled map'); raise SystemExit(0)
-    rows = ['disabled services = {']
+    # A faulted model answers in the macOS 13+ layout (indented, keyword states, a trailing login-item section); an unfaulted one, which the sh stub answers, in macOS 12's.
+    modern = model['fault'] != ''
+    rows = ['\tdisabled services = {' if modern else 'disabled services = {']
     for label, s in model['states'].items():
         if fault(label, 'disabled-missing'): continue
-        value = 'false' if s['enabled'] else 'true'
-        rows.append('    "%s" => %s' % (label, value))
-        if fault(label, 'disabled-duplicate'): rows.append('    "%s" => %s' % (label, value))
-    lifecycle_output(model['fault_label'], 'disabled', '\n'.join(rows + ['}']))
+        row = '\t\t"%s" => %s' % (label, 'enabled' if s['enabled'] else 'disabled') if modern else '    "%s" => %s' % (label, 'false' if s['enabled'] else 'true')
+        rows.append(row)
+        if fault(label, 'disabled-duplicate'): rows.append(row)
+    lifecycle_output(model['fault_label'], 'disabled', '\n'.join(rows + (['\t}', '', '\tlogin item associations = {', '\t}'] if modern else ['}'])))
 if len(args) != 2 or not args[1].startswith(domain + '/'): refuse()
 label = args[1][len(domain) + 1:]
 if label not in model['states']: refuse()
@@ -272,12 +275,13 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 # extras, a native_done gate, other labels, other argument forms and every fault, is the adapter's. These answers mirror
 # the adapter text: model_stub_control pins it by digest, runs chains of calls through both implementations and compares
 # every output, event, tally and model byte.
-# MIRRORED holds the two adapters in use: c476dcb2... is ADAPTER (this file), d1bbd99a... is the FULL_ADAPTER of tests/test_uninstall.sh. The
-# earlier FULL_ADAPTER (7ec0920f...) is retired, no suite uses that text any more. d1bbd99a... re-derived FAST_STUB against the prefix that
-# Linux mount confinement extended with a staged-guard `rm` branch and a `late_kind == 'fifo'` gate arm; neither touches a call the stub
-# answers itself (no FAST_TOOL is rm; the gate is reached only by an observation once native_done is set, and the stub delegates that), so the
-# stub text is unchanged.
-MIRRORED = {'c476dcb2143220e7ee5b363b952c7e951bf15e6d7401f1cee69da7ce2d37544f', 'd1bbd99aa066c1f2a1fb55b333ec8d7cd8918acbc7d3f07550d9e36ee6846506'}
+# MIRRORED holds the two adapters in use: 1f47fddd... is ADAPTER (this file), a59e54e3... is the FULL_ADAPTER of tests/test_uninstall.sh. The
+# earlier pair (c476dcb2..., d1bbd99a...; 7ec0920f... before it) is retired, no suite uses that text any more. a59e54e3... and 1f47fddd... changed only the
+# launchd `print-disabled` answer of a FAULTED model (the macOS 13+ layout) and the `domain-malformed` status (a failing query: the product reads the domain
+# by status alone). The sh stub answers `print-disabled` and the domain only for an UNFAULTED model (any fault delegates to the adapter), so the stub text
+# is unchanged (d1bbd99a... had re-derived FAST_STUB against the prefix that Linux mount confinement extended with a staged-guard `rm` branch and a
+# `late_kind == 'fifo'` gate arm; neither touches a call the stub answers itself).
+MIRRORED = {'1f47fddd726e058c1482cbfd68debd552ee7c09c64e7842cf9cdcf6ce843e99b', 'a59e54e332d0c08252558f836c9c6d935a2ccc2cbeb00f2ca791dc8b3ec88720'}
 FAST_TOOLS = ('stat', 'head', 'wc', 'uname', 'systemctl', 'launchctl', 'plutil')
 MODEL_CHECK = r'''import json, pathlib, sys
 ''' + ACCEPTABLE + r'''try:
@@ -1257,8 +1261,9 @@ def main():
                             # for the normalized quiet-claim counterexample.
                             for i, state in enumerate(f.model['states'].values()):
                                 state.update(state=('active' if platform == 'Linux' else 'loaded') if i == index and seam in ('systemd', 'label-absent', 'label-loaded') else ('inactive' if platform == 'Linux' else 'absent'), enabled=False)
+                            # The product reads the domain listing by status alone (its text is discarded): every fault of that seam is a FAILING query.
                             f.model.update(lifecycle_seam='label' if seam.startswith('label-') else seam,
-                                           lifecycle_text=payload, lifecycle_status=status_code,
+                                           lifecycle_text=payload, lifecycle_status=1 if seam == 'domain' else status_code,
                                            lifecycle_stderr=seam == 'label-absent')
                             f.save(); f.environment['HERDR_CLI_SETUP_ROLLBACK'] = '1'
                             before = tuple(snapshot(q) for q in f.definitions)

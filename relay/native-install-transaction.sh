@@ -15,8 +15,17 @@ native_install_read_bounded() {
     printf '%s' "$output"
 }
 
+# launchd `print-disabled gui/<uid>` grammar, read identically here and in service_removal_observe (relay/common.sh), and by the
+# CI mirror (scripts/ci/native-lifecycle-host.py disabled_flag). Blank lines, and the blanks around each line, are ignored. The first
+# line is `disabled services = {` (a section), or `disabled services = {}` (an empty one). In the section each line is
+# `"<label>" => <state>` (no quote inside the label) with <state> `true` or `disabled` (disabled), `false` or `enabled` (enabled); macOS 12 and earlier print
+# true|false, macOS 13+ print disabled|enabled. A line naming our label with any other value, our label twice, or any other line in
+# the section is unknown. The section closes with `}`. Zero or more further sections may follow, each `<name> = {` ... `}` or
+# `<name> = {}` (for example `login item associations`; <name> holds no quote, brace or `=`, and is not `disabled services`
+# again: a second table could contradict the first), their content not interpreted. Anything else (no header, an unclosed
+# section, stray text) is unknown, as are a nonzero status, a NUL and more than 65,536 bytes. A label the table does not list is enabled.
 native_install_observe() {
-    local label="$1" output line load="" active="" enabled="" count=0 code=0 domain="gui/$UID" disabled probe_status
+    local label="$1" output line load="" active="" enabled="" count=0 code=0 domain="gui/$UID" disabled probe_status name state=0
     local tab=$'\t' job_path="" job_paths=0 job_ambiguous=false
     local LC_ALL=C
     # native_observed_origin is launchd-only evidence taken from this same observation; it is
@@ -47,11 +56,9 @@ native_install_observe() {
         NATIVE_STATE="$active" NATIVE_ENABLED="$enabled"
         return 0
     fi
-    output="$(
-        LC_ALL=C launchctl print "$domain" 2>/dev/null | native_install_read_bounded 65536
-        probe_status=( "${PIPESTATUS[@]}" )
-        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
-    )" || return 1
+    # The domain listing is never read (on macOS 15 it is 89,044 bytes, past any capture bound): only that the domain answers is
+    # established, by status with its output discarded. A failing query is unknown.
+    LC_ALL=C launchctl print "$domain" >/dev/null 2>&1 || return 1
     output="$(
         LC_ALL=C launchctl print "$domain/$label" 2>&1 | native_install_read_bounded 65536
         probe_status=( "${PIPESTATUS[@]}" )
@@ -60,16 +67,18 @@ native_install_observe() {
         printf '\n%s' "${probe_status[0]}"
     )" || return 1
     code="${output##*$'\n'}"; output="${output%$'\n'*}"
-    # Preserve the original substitution's trailing-newline normalization,
-    # now only AFTER binary admission and producer-status separation.
-    while [ "${output%$'\n'}" != "$output" ]; do output="${output%$'\n'}"; done
+    # Only the ONE terminating LF of the answer is dropped, after binary admission and
+    # producer-status separation, exactly as service_removal_observe drops it: an answer
+    # with a further trailing LF is not the exact diagnostic and not a closed label answer.
+    output="${output%$'\n'}"
     if [ "$code" -ne 0 ]; then
         # Only the exact label/domain not-found diagnostic is absence. A bad
         # domain, malformed output or any other nonzero result remains unknown.
         [ "$output" = "Could not find service \"$label\" in domain for user gui: $UID" ] || return 1
         active=absent
     else
-        case "$output" in "$domain/$label = {"$'\n'*|"$domain/$label = {}") ;; *) return 1 ;; esac
+        # Framed exactly as service_removal_observe frames it: the header, a body and the closing `}`, or the inline `{}`. A cut answer is unknown.
+        case "$output" in "$domain/$label = {"$'\n'*'}'|"$domain/$label = {}") ;; *) return 1 ;; esac
         # A loaded waiting job can launch again: only bootout/observed absence
         # establishes launchd quiescence, regardless of current PID/state.
         active=loaded
@@ -95,18 +104,38 @@ native_install_observe() {
         probe_status=( "${PIPESTATUS[@]}" )
         [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
     )" || return 1
-    case "$disabled" in "disabled services = {"*'}') ;; *) return 1 ;; esac
     enabled=true
     count=0
     while IFS= read -r line; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        case "$line" in
-            "\"$label\" => true") enabled=false; count=$((count + 1)) ;;
-            "\"$label\" => false") enabled=true; count=$((count + 1)) ;;
-            *"\"$label\""*) return 1 ;;
+        line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+        [ -n "$line" ] || continue
+        case "$state" in
+            0) case "$line" in
+                   'disabled services = {') state=1 ;;
+                   'disabled services = {}') state=2 ;;
+                   *) return 1 ;;
+               esac ;;
+            1) case "$line" in
+                   '}') state=2 ;;
+                   "\"$label\" => true"|"\"$label\" => disabled") enabled=false; count=$((count + 1)) ;;
+                   "\"$label\" => false"|"\"$label\" => enabled") enabled=true; count=$((count + 1)) ;;
+                   *"\"$label\""*) return 1 ;;
+                   \"*\"\ =\>\ true|\"*\"\ =\>\ false|\"*\"\ =\>\ disabled|\"*\"\ =\>\ enabled)
+                       name="${line% => *}"; name="${name#\"}"; name="${name%\"}"
+                       case "$name" in *\"*) return 1 ;; esac ;;
+                   *) return 1 ;;
+               esac ;;
+            2) case "$line" in
+                   *' = {}') name="${line% = *}" ;;
+                   *' = {') name="${line% = *}"; state=3 ;;
+                   *) return 1 ;;
+               esac
+               name="${name%"${name##*[![:space:]]}"}"
+               case "$name" in ''|'disabled services'|*[\"{}=]*) return 1 ;; esac ;;
+            *) [ "$line" != '}' ] || state=2 ;;
         esac
     done <<< "$disabled"
-    [ "$count" -le 1 ] || return 1
+    [ "$state" -eq 2 ] && [ "$count" -le 1 ] || return 1
     NATIVE_STATE="$active" NATIVE_ENABLED="$enabled"
     return 0
 }

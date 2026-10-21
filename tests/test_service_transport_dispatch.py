@@ -325,10 +325,13 @@ if name in ("systemctl", "launchctl"):
             payload = ('Could not find service "' + args[1].rsplit("/", 1)[1] + '" in domain for user gui: ' + str(os.getuid()) + "\n").encode()
             native_capture("label", key, payload, 113, stderr=True)
         if command == "print-disabled":
-            payload = "disabled services = {\n"
+            # The fault cells (NATIVE_FAILURE set) answer in the macOS 13+ layout (indented, keyword states, a trailing login-item section); the others keep macOS 12's (true|false).
+            modern = bool(os.getenv("NATIVE_FAILURE"))
+            payload = "\tdisabled services = {\n" if modern else "disabled services = {\n"
             for k, label in (("current", "com.herdr-mobile-relay.service"), ("legacy", "com.herdr-remote.service")):
-                payload += ' "' + label + '" => ' + ("false" if state[k]["enabled"] else "true") + "\n"
-            native_capture("disabled", "all", (payload + "}\n").encode())
+                if modern: payload += '\t\t"' + label + '" => ' + ("enabled" if state[k]["enabled"] else "disabled") + "\n"
+                else: payload += ' "' + label + '" => ' + ("false" if state[k]["enabled"] else "true") + "\n"
+            native_capture("disabled", "all", (payload + ("\t}\n\n\tlogin item associations = {\n\t}\n" if modern else "}\n")).encode())
         if command in ("enable", "disable"):
             state[key]["enabled"] = command == "enable"
         else:

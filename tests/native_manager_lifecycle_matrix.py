@@ -39,8 +39,10 @@ STATE = r"not-run|[a-z-]{1,24}"  # the observer's `active` value at the baseline
 DIAG_STATE = ("baseline_label_state", "baseline_legacy_state")
 DIAG_KEYS = tuple(DIAG_ENUM) + tuple(DIAG_NUMBER) + DIAG_HINT + DIAG_STATE
 BASELINE_PASS = {"baseline_failed": "none", "baseline_label_state": "absent", "baseline_legacy_state": "absent"}  # what the baseline records when it passes (baseline_note none absent absent)
-GUI_PASS = {"gui_print_status": 0, "gui_nul": "clean", "disabled_status": 0, "disabled_admission": "pass"}  # macOS: the stages whose success makes the manager available
-GUI_SIZES = ("gui_bytes", "disabled_bytes")  # at most the product's 65536 bytes (the driver fails a larger listing, the helper refuses a larger table), or not measured
+GUI_PASS = {"gui_print_status": 0, "disabled_status": 0, "disabled_admission": "pass"}  # macOS: the stages whose success makes the manager available
+GUI_EVIDENCE = ("gui_nul",)  # recorded where the gui queries ran, never a stage: the product discards the domain listing and reads only its status, so a NUL in it fails nothing (`not-run` on Linux)
+GUI_SIZES = ("gui_bytes", "disabled_bytes")  # recorded only where the gui queries ran (`not-run` on Linux)
+TABLE_BOUND = "disabled_bytes"  # the print-disabled table is at most the product's 65536 bytes (the helper refuses a larger one), or not measured; the domain listing's size is evidence only: the product reads that listing by status and it is 89,044 bytes on macos-15
 
 
 class Refusal(Exception):
@@ -110,13 +112,13 @@ def hint_ok(value):
 
 
 def diagnostics_agree(doc, os_name):
-    """A passing probe passed every stage its diagnostics record, as the driver fails closed on each: the baseline clean, on macOS the gui print, the NUL check and print-disabled admitted by the product's
-    framing with each size within its bound (or unmeasured), on Linux no gui stage ran. Hints are not read (a warning on stderr is not a failure)."""
+    """A passing probe passed every stage its diagnostics record, as the driver fails closed on each: the baseline clean, on macOS the gui print and print-disabled admitted by the product's
+    grammar with the table within its bound (or unmeasured; the domain listing's NUL and size are evidence, not stages), on Linux no gui stage ran. Hints are not read (a warning on stderr is not a failure)."""
     if any(doc[k] != v for k, v in BASELINE_PASS.items()):
         return False
     if os_name == "Linux":
-        return all(doc[k] == "not-run" for k in tuple(GUI_PASS) + GUI_SIZES)
-    return all(doc[k] == v for k, v in GUI_PASS.items()) and all(doc[k] == "not-run" or doc[k] <= 65536 for k in GUI_SIZES)
+        return all(doc[k] == "not-run" for k in tuple(GUI_PASS) + GUI_EVIDENCE + GUI_SIZES)
+    return all(doc[k] == v for k, v in GUI_PASS.items()) and (doc[TABLE_BOUND] == "not-run" or doc[TABLE_BOUND] <= 65536)
 
 
 def sha256(path):

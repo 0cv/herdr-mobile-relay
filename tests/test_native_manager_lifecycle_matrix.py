@@ -327,8 +327,8 @@ class Matrix(unittest.TestCase):
         self.assertEqual(mac(1)["result"], "fail")  # a nonzero driver exit
         # A PASSING receipt that records a failed stage is a contradiction the gate REFUSES (the driver fails closed on each stage; the builder's verdict is unchanged, check_probe is what refuses it).
         alarming = dict(gui_print_status="113", gui_nul="nul", disabled_admission="header", baseline_failed="label-active", baseline_label_state="loaded", disabled_err="Could not find domain", disabled_head="x")
-        stages = [(k, v) for k in ("gui_print_status", "disabled_status") for v in ("1", "113", "255", "not-run")] + [("gui_nul", v) for v in ("nul", "not-run")]
-        stages += [("disabled_admission", v) for v in m.DIAG_ENUM["disabled_admission"][1:]] + [("gui_bytes", "65537"), ("disabled_bytes", "65537")]
+        stages = [(k, v) for k in ("gui_print_status", "disabled_status") for v in ("1", "113", "255", "not-run")]  # (gui_nul is no stage: see the accepted facts below)
+        stages += [("disabled_admission", v) for v in m.DIAG_ENUM["disabled_admission"][1:]] + [("disabled_bytes", "65537")]  # (the domain listing's size is no stage: see the accepted sizes below)
         stages += [("baseline_failed", v) for v in m.DIAG_ENUM["baseline_failed"][1:]] + [(k, v) for k in m.DIAG_STATE for v in ("loaded", "unknown", "not-run")]
         for name, value in stages + [("combined", alarming)]:
             over = value if name == "combined" else {name: value}
@@ -344,8 +344,11 @@ class Matrix(unittest.TestCase):
         for name, value in (("baseline_failed", "hosts"), ("baseline_label_state", "loaded"), ("baseline_legacy_state", "not-run")):
             with self.assertRaisesRegex(m.Refusal, "diagnostics contradict a passing result", msg=name):
                 m.check_probe(m.probe_receipt(facts("Linux", **{name: value}), 0, IDENT, "Linux", 1001), IDENT, "Linux")
-        for ok in ({"gui_bytes": "not-run"}, {"disabled_bytes": "not-run"}, {"gui_bytes": "65536", "disabled_bytes": "65536"}, {"gui_print_err": "warn: <x>", "disabled_err": "bad request", "disabled_head": "}", "disabled_tail": "x"}):
-            m.check_probe(mac(**ok), IDENT, "Darwin")  # unmeasured sizes, sizes at the bound and any valid hint are no failed stage
+        for ok in ({"gui_bytes": "not-run"}, {"disabled_bytes": "not-run"}, {"gui_bytes": "65536", "disabled_bytes": "65536"},
+                   {"gui_bytes": "65537"}, {"gui_bytes": "89044"}, {"gui_bytes": str(10 ** 12)}, {"gui_bytes": "89044", "disabled_bytes": "266"},  # macOS 15's domain listing: 89,044 bytes, read by status only; its size is evidence
+                   {"gui_nul": "nul"}, {"gui_nul": "not-run"}, {"gui_nul": "nul", "gui_bytes": "89044"},  # the domain listing is read by status alone: a NUL in it (a diagnostic) fails nothing; it was a stage (Task XR F004)
+                   {"gui_print_err": "warn: <x>", "disabled_err": "bad request", "disabled_head": "}", "disabled_tail": "x"}):
+            m.check_probe(mac(**ok), IDENT, "Darwin")  # unmeasured sizes, sizes at the bound, a NUL in the listing and any valid hint are no failed stage
         with self.assertRaisesRegex(m.Refusal, r"the capability probe failed \(complete\)"):
             m.check_probe(mac(manager_pre="unavailable", **alarming), IDENT, "Darwin")  # a failing probe with failed stages is still refused as a failure (the diagnostics explain it)
         original = lambda d, linux: (d["exit"] == 0 and d["manager_post"] == "available" and (linux or d["manager_pre"] == "available") and d["cleanup"] == "pass" and d["trust_negative"] == "refused"
@@ -947,30 +950,230 @@ class Wiring(unittest.TestCase):
         rc, _, flag = done.stdout.strip().partition(":")
         return flag if rc == "0" else "unknown"
 
+    @staticmethod
+    def product_launchd(observer, table, table_rc=0, domain=b"gui/501 = {\n}\n", domain_rc=0, label="com.herdr-mobile-relay.service", answer=None, answer_rc=0, answer_err=None):
+        """What either product observer reads from one launchd answer set, `launchctl` a function stub serving these bytes and statuses: `install` is native_install_observe
+        (relay/native-install-transaction.sh), `removal` service_removal_observe (relay/common.sh), both sourced (functions only). The label is loaded (`print gui/<uid>/<label>` answers its header, or the bytes of `answer` on stdout, then those of `answer_err` on stderr, with status `answer_rc`).
+        Returns `state:enabled`, or `unknown:unknown` when the observer fails."""
+        script = textwrap.dedent("""\
+            set +e
+            launchctl() { case "$1" in print) case "$2" in gui/*/*) if [ -n "$ANSWER_FILE" ]; then cat "$ANSWER_FILE"; [ -z "$ANSWER_ERR_FILE" ] || cat "$ANSWER_ERR_FILE" >&2; return "$ANSWER_RC"; else printf '%s = {\\n}' "$2"; fi ;; *) cat "$DOMAIN_FILE"; return "$DOMAIN_RC" ;; esac ;; print-disabled) cat "$TABLE_FILE"; return "$TABLE_RC" ;; esac; }
+            if [ "$OBSERVER" = install ]; then
+                native_manager=launchd; source relay/native-install-transaction.sh
+                native_install_observe "$LABEL" && echo "$NATIVE_STATE:$NATIVE_ENABLED" || echo unknown:unknown
+            else
+                source relay/common.sh
+                service_removal_observe launchd "$LABEL" && echo "$SERVICE_REMOVAL_STATE:$SERVICE_REMOVAL_ENABLED" || echo unknown:unknown
+            fi
+        """)
+        with tempfile.TemporaryDirectory() as tmp:  # the answers go through files: an environment variable cannot carry a NUL byte
+            pathlib.Path(tmp, "table").write_bytes(table if isinstance(table, bytes) else table.encode())
+            pathlib.Path(tmp, "domain").write_bytes(domain)
+            if answer is not None:
+                pathlib.Path(tmp, "answer").write_bytes(answer if isinstance(answer, bytes) else answer.encode())
+            if answer_err is not None:
+                pathlib.Path(tmp, "answer-err").write_bytes(answer_err.encode())
+            done = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script], capture_output=True, text=True, cwd=ROOT,
+                                  env={"PATH": "/usr/bin:/bin", "HOME": tmp, "OBSERVER": observer, "TABLE_FILE": tmp + "/table", "TABLE_RC": str(table_rc),
+                                       "DOMAIN_FILE": tmp + "/domain", "DOMAIN_RC": str(domain_rc), "LABEL": label,
+                                       "ANSWER_FILE": tmp + "/answer" if answer is not None else "", "ANSWER_RC": str(answer_rc),
+                                       "ANSWER_ERR_FILE": tmp + "/answer-err" if answer_err is not None else ""})
+        return done.stdout.strip().splitlines()[-1] if done.stdout.strip() else "error:" + done.stderr[:200]
+
+    def removal_enabled(self, code, text, label):
+        """What service_removal_observe reads from the same table: the real removal label stands in for `label` (it refuses any other), everything else is the product_enabled drive."""
+        flag = self.product_launchd("removal", text.replace(label, "com.herdr-mobile-relay.service"), code).partition(":")[2]
+        return flag if flag in ("true", "false") else "unknown"
+
     def test_launchd_enabled_needs_a_complete_well_formed_disabled_table(self):
         host = self.load_host()
         table = lambda *entries: "disabled services = {\n" + "".join("\t%s\n" % e for e in entries) + "}\n"
-        # The product's grammar (relay/native-install-transaction.sh): a line naming the label is exactly `"label" => true` or `"label" => false`, anything else fails there. The aliases
-        # `enabled`/`disabled` were accepted here before Q1R5 (the previous expectation for `"com.x" => disabled` was "false"); now they are unknown, as is any other value or trailing text.
+        modern = lambda *entries: "\tdisabled services = {\n" + "".join("\t\t%s\n" % e for e in entries) + "\t}\n\n\tlogin item associations = {\n\t}\n"  # macOS 13+: indented, with a trailing section
+        # The product's grammar (native_install_observe, relay/native-install-transaction.sh, and service_removal_observe, relay/common.sh: identical): blank lines and the blanks around a line are
+        # ignored; a line naming the label is `"label" => true|disabled` (disabled) or `"label" => false|enabled` (enabled) and anything else naming it fails; further sections follow the table.
+        # Before Task X the aliases `enabled`/`disabled`, a leading or trailing blank and a trailing section were unknown; those expectations are exactly what the grammar changed (marked below).
         for code, text, want in ((0, table(), "true"), (0, table('"com.x" => false'), "true"), (0, table('"com.x" => true'), "false"),  # complete: an unlisted label is enabled
-                                 (0, table('"com.x" => disabled', '"com.y" => true'), "unknown"), (0, table('"com.x" => enabled'), "unknown"), (0, table('"com.x" => disabled'), "unknown"),
-                                 (0, table('"com.y" => enabled', '"com.x" => true'), "false"), (0, table('"com.y" => disabled', '"com.x" => false'), "true"),  # other labels' lines are not judged
-                                 (0, table('"com.x" => 1'), "unknown"), (0, table('"com.x" => '), "unknown"), (0, table('"com.x" => true '), "unknown"), (0, table('"com.x" => false;'), "unknown"),
-                                 (0, table('"com.x" => TRUE'), "unknown"), (0, table('"com.x"=>true'), "unknown"), (0, table('"com.x" => true\r'), "unknown"), (0, table('"com.x" => true\x0b'), "unknown"), (0, table('"com.x" => true', '"com.x" => enabled'), "unknown"), (0, table('"com.xy" => true'), "true"),
-                                 # The raw framing, byte for byte as the product reads it (only trailing newlines are dropped; nothing else is normalized):
-                                 (0, " " + table(), "unknown"), (0, "\n" + table(), "unknown"), (0, "\t" + table(), "unknown"), (0, "x" + table(), "unknown"),  # blanks or text before the header
-                                 (0, table().rstrip("\n") + " ", "unknown"), (0, table() + " ", "unknown"), (0, table() + "\t\n", "unknown"),  # blanks after the closing brace
-                                 (0, table().replace("\n", "\r\n"), "unknown"), (0, table('"com.x" => true').replace("}\n", "\x00}\n"), "unknown"),  # CRLF, an embedded NUL
-                                 (0, table('"com.x" => true') + "\n\n\n", "false"), (0, "disabled services = {}\n", "true"), (0, "disabled services = {junk\n}\n", "true"),  # what the product accepts
-                                 (0, table('"com.x" => true') + "}", "false"), (0, "disabled services = {\n\t\"com.x\" => true\n}\nextra\n}", "false"),
+                                 (0, table('"com.x" => disabled', '"com.y" => true'), "false"), (0, table('"com.x" => enabled'), "true"), (0, table('"com.x" => disabled'), "false"),  # keyword states (were unknown)
+                                 (0, table('"com.y" => enabled', '"com.x" => true'), "false"), (0, table('"com.y" => disabled', '"com.x" => false'), "true"),  # other labels' lines are judged only by their shape
+                                 (0, table('"com.x" => 1'), "unknown"), (0, table('"com.x" => '), "unknown"), (0, table('"com.x" => true '), "false"), (0, table('"com.x" => false;'), "unknown"),  # a trailing blank is ignored (was unknown)
+                                 (0, table('"com.x" => TRUE'), "unknown"), (0, table('"com.x"=>true'), "unknown"), (0, table('"com.x" => true\r'), "false"), (0, table('"com.x" => true\x0b'), "false"),  # CR and VT are blanks (were unknown)
+                                 (0, table('"com.x" => true', '"com.x" => enabled'), "unknown"), (0, table('"com.xy" => true'), "true"),
+                                 # The framing: blank lines and blanks around lines are ignored (they were each unknown), text before the header is not
+                                 (0, " " + table(), "true"), (0, "\n" + table(), "true"), (0, "\t" + table(), "true"), (0, "x" + table(), "unknown"),  # blanks before the header; text before it
+                                 (0, table().rstrip("\n") + " ", "true"), (0, table() + " ", "true"), (0, table() + "\t\n", "true"),  # blanks after the closing brace
+                                 (0, table().replace("\n", "\r\n"), "true"), (0, table('"com.x" => true').replace("}\n", "\x00}\n"), "unknown"),  # CRLF (CR is a blank), an embedded NUL
+                                 (0, table('"com.x" => true') + "\n\n\n", "false"), (0, "disabled services = {}\n", "true"),
+                                 (0, "disabled services = {junk\n}\n", "unknown"),  # the header is exactly `disabled services = {` or `disabled services = {}` (the product once admitted this)
+                                 (0, table('"com.x" => true') + "}", "unknown"), (0, "disabled services = {\n\t\"com.x\" => true\n}\nextra\n}", "unknown"),  # stray text after the table (the product once admitted these)
                                  (0, "", "unknown"), (0, 'disabled services = {\n\t"com.y" => true\n', "unknown"),  # truncated: no closing brace
                                  (0, "something else\n}\n", "unknown"), (0, table('"com.x" => maybe'), "unknown"), (0, table('"com.x" => true', '"com.x" => false'), "unknown"),
-                                 (126, table('"com.x" => true'), "unknown"), (1, table(), "unknown")):
+                                 (126, table('"com.x" => true'), "unknown"), (1, table(), "unknown"),
+                                 # Modern format (macOS 13+): keyword states, an indented header, a trailing login-item section
+                                 (0, modern(), "true"), (0, modern('"com.x" => disabled'), "false"), (0, modern('"com.x" => enabled'), "true"),
+                                 (0, modern('"com.y" => disabled', '"com.x" => enabled'), "true"), (0, modern('"com.y" => enabled', '"com.x" => disabled'), "false"),
+                                 (0, modern('"com.x" => true'), "false"), (0, modern('"com.x" => false'), "true"),  # the legacy states inside the modern layout
+                                 (0, modern('"com.x" => disabled', '"com.x" => enabled'), "unknown"), (0, modern('"com.x" => true', '"com.x" => disabled'), "unknown"),  # the label twice
+                                 (0, modern('"com.x" => Disabled'), "unknown"), (0, modern('"com.x" => disabled;'), "unknown"), (0, modern('"com.x" => maybe'), "unknown"),
+                                 (0, modern('"com.x" => disabled').replace("\t\t", "\t\t\t"), "false"), (0, modern('"com.x" => disabled').replace("\n", "\r\n"), "false"),  # deeper indentation, CRLF
+                                 (0, modern('"com.x" => disabled').replace("\x09", "\x00", 1), "unknown"),
+                                 # Inline empty forms, and further sections whose content is not interpreted
+                                 (0, "disabled services = {}\n\nlogin item associations = {}\n", "true"), (0, "\tdisabled services = {}\n\n\tlogin item associations = {}\n", "true"),
+                                 (0, table('"com.x" => disabled') + "\nlogin item associations = {\n\t\"com.x\" => 1\n\tjunk\n\n}\n", "false"),
+                                 (0, table('"com.x" => disabled') + "a = {}\nb = {\n}\nc d = {\nx\n}\n", "false"), (0, "disabled services = {}\nlogin item associations = {\n\"com.x\" => disabled\n}\n", "true"),
+                                 # Malformed: an unclosed or stray section, a second table (which could contradict the first), no header first, an unnamed or oddly named section, a row naming the label inside another
+                                 (0, table('"com.x" => disabled') + "login item associations = {\n", "unknown"), (0, "disabled services = {}\n}\n", "unknown"),
+                                 (0, "disabled services = {}\nstray\n", "unknown"), (0, table() + "stray text\n", "unknown"), (0, table() + "login item associations = {}\n}\n", "unknown"),
+                                 (0, table('"com.x" => disabled') + "disabled services = {\n}\n", "unknown"), (0, "disabled services = {}\ndisabled services = {}\n", "unknown"),
+                                 (0, "disabled services = {}\ndisabled services  = {\n}\n", "unknown"), (0, "login item associations = {}\n" + table(), "unknown"),
+                                 (0, "\n\n  \t\n", "unknown"), (0, "disabled services = { }\n", "unknown"), (0, "disabled services = {\n\t\"com.x\" => disabled\n", "unknown"),
+                                 (0, table() + "= {}\n", "unknown"), (0, table() + 'a"b = {}\n', "unknown"), (0, table() + "a = b = {\n}\n", "unknown"), (0, table() + "a={}\n", "unknown"),
+                                 (0, table('"x" => true "com.x" => disabled'), "unknown"), (0, table('"com.x" => disabled "x" => true'), "unknown"), (0, table('stray'), "unknown"),
+                                 # a row of ANOTHER label is a row only if its name holds no quote (an interior quote is no `"<label>" => <state>`): it must not be skipped as a well-formed row
+                                 (0, table('"other"junk" => enabled'), "unknown"), (0, table('"other"junk" => disabled', '"com.x" => disabled'), "unknown"), (0, table('"a" => b" => true'), "unknown"),
+                                 (0, table('"a"b" => true'), "unknown"), (0, table('"a"" => false'), "unknown"), (0, table('""a" => false'), "unknown"), (0, modern('"x"y" => enabled'), "unknown"),
+                                 (0, table('"a => b" => true', '"com.x" => disabled'), "false"), (0, table('"" => enabled'), "true"), (0, table('"a b" => disabled'), "true"),  # ...but a name may hold ` => `, be empty or hold blanks
+                                 (0, "disabled services = {\n\t\"com.x\" => disabled\n}\n" + "x" * 3, "unknown")):
             self.assertEqual(host.disabled_flag(code, text, "com.x"), want, (code, text))
-            self.assertEqual(self.product_enabled(code, text, "com.x"), want, (code, text))  # the product's own parser reads every one of these tables the same way
+            self.assertEqual(self.product_enabled(code, text, "com.x"), want, (code, text))  # native_install_observe reads every one of these tables the same way
+            self.assertEqual(self.removal_enabled(code, text, "com.x"), want, (code, text))  # and so does service_removal_observe
         path = (0, "gui/%d/x.service = {\n\tpath = /p\n}\n" % os.getuid(), "")
         self.assertEqual(self.observed("launchd", print=path, **{"print-disabled": (126, "", "")})["enabled"], "unknown")  # output over the limit
         self.assertEqual(self.observed("launchd", print=path, **{"print-disabled": (0, table(), "")})["enabled"], "true")
+        self.assertEqual(self.observed("launchd", print=path, **{"print-disabled": (0, modern('"x.service" => disabled'), "")})["enabled"], "false")
+        for kind in ("true", "disabled"):  # the helper's two states for a disabled label, both observers
+            self.assertEqual({self.product_launchd(o, modern('"com.herdr-mobile-relay.service" => ' + kind)) for o in ("install", "removal")}, {"loaded:false"})
+        for kind in ("false", "enabled"):
+            self.assertEqual({self.product_launchd(o, modern('"com.herdr-mobile-relay.service" => ' + kind)) for o in ("install", "removal")}, {"loaded:true"})
+        self.assertEqual({self.product_launchd(o, "disabled services = {}\n") for o in ("install", "removal")}, {"loaded:true"})  # the inline empty form: an unlisted label is enabled
+
+    def test_both_product_observers_read_the_domain_by_status_alone(self):
+        # The domain listing's text is never read (macOS 15 prints 89,044 bytes of it, past the 65,536-byte capture bound): only its STATUS counts, in native_install_observe and in service_removal_observe.
+        modern_table = "\tdisabled services = {\n\t\t\"com.herdr-mobile-relay.service\" => disabled\n\t}\n\n\tlogin item associations = {\n\t}\n"
+        listing = b"gui/501 = {\n" + b"".join(b"\t\t%05d\t-\tcom.example.agent%05d\n" % (i, i) for i in range(2700)) + b"}\n"  # 89,114 bytes, the size macOS 15 reported (89,044)
+        self.assertGreater(len(listing), 65536)
+        for observer in ("install", "removal"):
+            for domain, rc, want in ((listing, 0, "loaded:false"), (listing[:65536], 0, "loaded:false"), (listing[:65537], 0, "loaded:false"), (b"", 0, "loaded:false"), (b"x" * 100000, 0, "loaded:false"),
+                                     (b"wrong-domain = {}\n", 0, "loaded:false"), (b"gui/501 = {\n\x00}\n", 0, "loaded:false"), (b"\x00" + b"x" * 70000, 0, "loaded:false"),  # whatever it prints, the status is the answer
+                                     (listing, 1, "unknown:unknown"), (b"", 1, "unknown:unknown"), (b"gui/501 = {}\n", 113, "unknown:unknown"), (listing, 126, "unknown:unknown"),  # a failing query is unknown, never absence
+                                     (b"gui/501 = {}\n", 127, "unknown:unknown"), (b"gui/501 = {}\n", 255, "unknown:unknown")):
+                self.assertEqual(self.product_launchd(observer, modern_table, domain=domain, domain_rc=rc), want, (observer, len(domain), rc))
+            # the table keeps its own bound and NUL refusal, whatever the domain answered
+            for table, rc in ((modern_table + " " * 65536, 0), (modern_table.replace("services", "serv\x00ices"), 0), (modern_table, 1), (modern_table, 126)):
+                self.assertEqual(self.product_launchd(observer, table, table_rc=rc, domain=listing), "unknown:unknown", (observer, len(table), rc))
+            self.assertEqual(self.product_launchd(observer, modern_table + " " * (65536 - len(modern_table.encode())), domain=listing), "loaded:false", observer)  # exactly the bound
+
+    def test_both_product_observers_carry_the_same_domain_check_and_disabled_grammar_text(self):
+        # The two observers are kept textually parallel (the grammar is named once, at native_install_observe): the domain status check and the whole table loop, byte for byte but for the
+        # variable that holds the answer ($disabled there, $output in common.sh). Drift in either file fails here.
+        install, removal = (self.text(path) for path in ("relay/native-install-transaction.sh", "relay/common.sh"))
+        loop = lambda source, variable: ("    enabled=true\n    count=0\n    while IFS= read -r line; do\n" + source.split("    enabled=true\n    count=0\n    while IFS= read -r line; do\n", 1)[1]
+                                         .split('    done <<< "$%s"\n' % variable, 1)[0] + '    done <<< "$%s"\n' % variable).replace("$" + variable, "$ANSWER")
+        self.assertEqual(loop(install, "disabled"), loop(removal, "output"))
+        self.assertIn('            0) case "$line" in\n                   \'disabled services = {\') state=1 ;;', loop(install, "disabled"))
+        domain = '    LC_ALL=C launchctl print "$domain" >/dev/null 2>&1 || return 1\n'
+        self.assertEqual((install.count(domain), removal.count(domain)), (1, 1))
+        frame = '''case "$output" in "$domain/$label = {"$'\\n'*'}'|"$domain/$label = {}") ;; *) return 1 ;; esac\n'''  # the label answer's framing (Task X F003): the same text, in both
+        self.assertEqual((install.count(frame), removal.count(frame)), (1, 1))
+        for source in (install, removal):  # the closing check, and no capture of the domain listing under the byte bound any more
+            self.assertEqual(source.count('    [ "$state" -eq 2 ] && [ "$count" -le 1 ] || return 1\n'), 1)
+            self.assertEqual(len(re.findall(r'launchctl print "\$domain"', source)), 1)
+
+    def test_a_loaded_label_answer_must_be_closed_by_its_brace_in_the_helper_and_both_product_observers(self):
+        # Task X F003: a status-0 `launchctl print gui/<uid>/<label>` answer is loaded only as `<header> = {`, LF, a body and the closing `}`, or as the inline `<header> = {}`; an answer cut before
+        # its brace is unknown. service_removal_observe and the helper framed it so; native_install_observe admitted any header and body, however cut (an answer with no closing brace was "loaded").
+        uid, label = os.getuid(), "com.herdr-mobile-relay.service"
+        header = lambda name: "gui/%d/%s = {" % (uid, name)
+        for tail, want in (("\n}\n", "loaded"), ("\n}", "loaded"), ("\n\tpath = /p\n\tstate = running\n}\n", "loaded"), ("}\n", "loaded"), ("}", "loaded"),  # closed, or the inline empty form
+                           ("\n\tpath = /p\n\tstate = running\n", "unknown"), ("\n\tstate = running\n", "unknown"), ("\n\tpath = /p\n", "unknown"), ("\n", "unknown"), ("", "unknown"),  # cut before the brace
+                           ("\n}\n\n", "unknown"), ("\n\tstate = running\n}\n\n\n", "unknown"), ("}\n\n", "unknown"),  # a second trailing LF (Task XR F001: one is dropped, by both observers and the helper)
+                           ("\n\tstate = running\n} x\n", "unknown"), ("\n\tstate = running\n\x00}\n", "unknown"), ("\n\tstate = running\n}\x00", "unknown")):  # stray text after it; a NUL
+            seen = {observer: self.product_launchd(observer, "disabled services = {}\n", answer=header(label) + tail) for observer in ("install", "removal")}
+            self.assertEqual(seen, {observer: "loaded:true" if want == "loaded" else "unknown:unknown" for observer in seen}, repr(tail))
+            self.assertEqual(self.observed("launchd", print=(0, header("x.service") + tail, ""))["active"], want, repr(tail))  # the CI helper frames the answer the same way
+
+    def test_not_found_is_exact_after_one_lf_and_stderr_spoils_a_loaded_answer_in_the_helper_and_both_product_observers(self):
+        # Task XR F001: ONE terminating LF of a label answer is dropped, by native_install_observe as by service_removal_observe and the helper (install dropped every trailing LF: `<not-found>\\n\\n` was
+        # absence there, unknown in removal). Task XR F002: the product merges stderr into the label answer (`2>&1`); the helper keeps the two streams apart, so ANY stderr text on a status-0 answer leaves it
+        # unframed (unknown), never loaded where the product refuses the merged text.
+        uid, label = os.getuid(), "com.herdr-mobile-relay.service"
+        missing = lambda name: 'Could not find service "%s" in domain for user gui: %d' % (name, uid)
+        table = "disabled services = {}\n"
+        for tail, code, want in (("", 113, "absent"), ("\n", 113, "absent"), ("\n\n", 113, "unknown"), ("\n\n\n", 1, "unknown"), (" \n", 113, "unknown"), ("\r\n", 113, "unknown"),  # exact, or one LF; no more
+                                 ("\n", 0, "unknown"), ("\n", 1, "absent")):  # a status-0 diagnostic is no frame; any nonzero status admits the exact text
+            seen = {observer: self.product_launchd(observer, table, answer=missing(label) + tail, answer_rc=code) for observer in ("install", "removal")}
+            self.assertEqual(seen, {observer: ("absent:true" if want == "absent" else "unknown:unknown") for observer in seen}, (tail, code))
+            self.assertEqual(self.observed("launchd", print=(code, missing("x.service") + tail, ""))["active"], want, (tail, code))
+        closed = lambda name: "gui/%d/%s = {\n\tpath = /p\n\tstate = running\n}\n" % (uid, name)
+        for warning, want in ((None, "loaded"), ("warning\n", "unknown"), ("\n", "unknown"), ("x", "unknown"), ("warning: unrelated\nsecond line\n", "unknown")):
+            seen = {observer: self.product_launchd(observer, table, answer=closed(label), answer_err=warning) for observer in ("install", "removal")}
+            self.assertEqual(seen, {observer: ("loaded:true" if want == "loaded" else "unknown:unknown") for observer in seen}, warning)
+            helper = self.observed("launchd", print=(0, closed("x.service"), "" if warning is None else warning))
+            self.assertEqual((helper["active"], helper["origin"]), (want, "/p" if want == "loaded" else "unknown"), warning)
+        # Task XR F003 (turn 3): the helper reads two pipes and cannot know the order of the product's merged `2>&1` text. The exact diagnostic is absence only when ONE stream carries all of it: split across the
+        # streams in either order, or with any text on the other stream, it is unknown (a merged text that the product might read as absent, or refuse, is not proven by the helper), never absence.
+        diag = missing("x.service")
+        for cut in range(1, len(diag)):
+            for out, err in ((diag[:cut], diag[cut:]), (diag[cut:], diag[:cut])):
+                seen = self.observed("launchd", print=(1, out, err))
+                self.assertEqual((seen["active"], seen["origin"], seen["owned_pid_digest"]), ("unknown",) * 3, (out, err))
+        for out, err, want in ((diag, "", "absent"), ("", diag, "absent"), (diag + "\n", "", "absent"), ("", diag + "\n", "absent"), (diag, "\n", "unknown"), ("\n", diag, "unknown"),
+                               (diag, "warning\n", "unknown"), ("warning\n", diag, "unknown"), ("", "", "unknown"), (diag + "\n", "\n", "unknown")):
+            self.assertEqual(self.observed("launchd", print=(1, out, err))["active"], want, (out, err))
+
+    def test_helper_and_both_product_observers_agree_on_generated_tables(self):
+        host, label, rng = self.load_host(), "com.herdr-mobile-relay.service", random.Random(20261022)
+        blanks = ("", "", " ", "\t", "\t\t", "\r", "\x0b", "\x0c", " \t ")
+        rows = ['"%s" => %s' % (label, v) for v in ("true", "false", "disabled", "enabled", "disabled", "maybe", "TRUE", "", "true;")] + ['"com.other" => %s' % v for v in ("true", "false", "disabled", "enabled", "maybe")]
+        rows += ['"x" => true "%s" => disabled' % label, '"%sx" => true' % label, '"%s"=>true' % label, '"\u00e9" => enabled', '"" => true', '"other"junk" => enabled', '"a"b" => true', '"a => b" => disabled']
+        heads = ("disabled services = {junk", "disabled services = { }", "login item associations = {", "login item associations = {}", "x = {", "x = {}", "disabled services = {", "disabled services = {}",
+                 "disabled  services = {", "a = b = {", "= {}", 'q"x = {', "x{y = {}", "disabled services = {} x", "Disabled services = {")
+        stray = ("}", "}}", "} x", "stray", "{", "", " ", "text = value")
+        pad = lambda text: rng.choice(blanks) + text + rng.choice(blanks)
+
+        def table():
+            lines = [pad(rng.choice(("disabled services = {",) * 4 + ("disabled services = {}",)))]
+            if lines[0].strip().endswith("{"):
+                lines += [pad(rng.choice(rows)) for _ in range(rng.randint(0, 4))] + [pad("}")]
+            for _ in range(rng.randint(0, 2)):
+                lines.append(pad(rng.choice(("login item associations = {}", "login item associations = {"))))
+                if lines[-1].strip().endswith("{"):
+                    lines += [rng.choice(("\t\"x\" => 12", "junk", "", '"%s" => disabled' % label)) for _ in range(rng.randint(0, 2))] + [pad("}")]
+            for _ in range(rng.randint(0, 2)):  # mutations: drop a line, add a head or stray line, repeat a line, or change one character
+                kind, at = rng.random(), rng.randint(0, len(lines))
+                if kind < .25 and lines:
+                    del lines[min(at, len(lines) - 1)]
+                elif kind < .5:
+                    lines.insert(at, pad(rng.choice(heads + stray + tuple(rows))))
+                elif kind < .7 and lines:
+                    lines.insert(at, lines[min(at, len(lines) - 1)])
+                elif lines and lines[min(at, len(lines) - 1)]:
+                    j = min(at, len(lines) - 1)
+                    k = rng.randrange(len(lines[j]))
+                    lines[j] = lines[j][:k] + rng.choice((" ", "x", "}", "{", '"', "=", "\t", "\r")) + lines[j][k + 1:]
+            return "\n".join(lines) + rng.choice(("\n", "", "\n\n"))
+        tables = [table() for _ in range(800)] + ["disabled services = {\n}\n", "disabled services = {}\n", '\tdisabled services = {\n\t\t"%s" => disabled\n\t}\n\n\tlogin item associations = {\n\t}\n' % label]
+        script = textwrap.dedent("""\
+            set +e
+            launchctl() { case "$1" in print) case "$2" in gui/*/*) printf '%s = {\\n}' "$2" ;; esac ;; print-disabled) cat "$TMP/t$I" ;; esac; }
+            native_manager=launchd; source relay/native-install-transaction.sh; source relay/common.sh
+            for ((I = 0; I < COUNT; I++)); do
+                native_install_observe "$LABEL" && a=$NATIVE_ENABLED || a=unknown
+                service_removal_observe launchd "$LABEL" && b=$SERVICE_REMOVAL_ENABLED || b=unknown
+                echo "$a $b"
+            done
+        """)
+        with tempfile.TemporaryDirectory() as tmp:  # one shell for all of them; the tables go through files (a NUL cannot ride in an environment variable)
+            for number, text in enumerate(tables):
+                pathlib.Path(tmp, "t%d" % number).write_bytes(text.encode())
+            done = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script], capture_output=True, text=True, cwd=ROOT,
+                                  env={"PATH": "/usr/bin:/bin", "HOME": tmp, "TMP": tmp, "COUNT": str(len(tables)), "LABEL": label})
+        answers = done.stdout.splitlines()
+        self.assertEqual(len(answers), len(tables), done.stderr[:300])
+        for text, answer in zip(tables, answers):
+            want = host.disabled_flag(0, text, label)
+            self.assertEqual(answer, "%s %s" % (want, want), text)  # the helper, native_install_observe and service_removal_observe read every generated table the same way
+        outcomes = {flag: sum(1 for answer in answers if answer.split()[0] == flag) for flag in ("true", "false", "unknown")}
+        self.assertTrue(all(outcomes[flag] >= 15 for flag in ("true", "false", "unknown")), outcomes)  # the generator reaches every outcome, so the agreement is not vacuous
 
     def observed_real(self, answer, table):
         """host.observe over the REAL `sh` (raw bytes, byte caps) against a stub `launchctl` script that serves exactly these bytes for `print` and `print-disabled`."""
@@ -1022,10 +1225,10 @@ class Wiring(unittest.TestCase):
             self.assertEqual((seen["active"], self.product_state("systemd", three)), (want, want), (lines, eol))
             if want == "unknown":  # nothing else is read from such a reply either
                 self.assertEqual((seen["enabled"], seen["origin"], seen["owned_pid_digest"]), ("unknown",) * 3, (lines, eol))
-        # launchd: the not-found diagnostic is the product's exact text after trailing newlines only (any other blank, CR or leading newline is not it)
+        # launchd: the not-found diagnostic is the product's exact text after ONE terminating LF only (a second LF, any other blank, a CR or a leading newline is not it; Task XR F001 made install drop one LF, as removal does)
         uid = os.getuid()
         missing = 'Could not find service "x.service" in domain for user gui: %d' % uid
-        for text, code, want in ((missing, 113, "absent"), (missing + "\n", 113, "absent"), (missing + "\n\n", 1, "absent"), (" " + missing, 113, "unknown"), (missing + " ", 113, "unknown"),
+        for text, code, want in ((missing, 113, "absent"), (missing + "\n", 113, "absent"), (missing + "\n\n", 1, "unknown"), (missing + "\n\n\n", 113, "unknown"), (" " + missing, 113, "unknown"), (missing + " ", 113, "unknown"),
                                  (missing + "\r", 113, "unknown"), (missing + "\r\n", 113, "unknown"), ("\n" + missing, 113, "unknown"), ("\t" + missing + "\n", 113, "unknown"),
                                  (missing, 0, "unknown"), ("", 113, "unknown"), (missing.replace("x.service", "y.service"), 113, "unknown")):
             self.assertEqual((self.observed("launchd", print=(code, text, ""))["active"], self.product_state("launchd", text, code)), (want, want), (text, code))
@@ -1103,17 +1306,21 @@ class Wiring(unittest.TestCase):
         table = lambda eol: eol.join(("disabled services = {", '\t"x.service" => true', "}", "")).encode()
         seen = self.observed_real(answer, table("\n"))
         self.assertEqual((seen["active"], seen["enabled"], seen["owned_pid_digest"], seen["manager_generation"]), ("loaded", "false", "none", "123"))
-        # A CRLF table is not the product's table (it reads the bytes as they are): the real `sh` must not translate CRLF to LF before the parse.
-        self.assertEqual(self.observed_real(answer, table("\r\n"))["enabled"], "unknown")
+        # A CRLF table is read as the product reads it: CR is a blank (`[[:space:]]`), so each row still parses (it was unknown before Task X, when only a leading blank was trimmed). The label's own
+        # answer is still read as the bytes are: a CRLF `print` reply is no reply, so the real `sh` must not translate CRLF to LF before the parse.
+        self.assertEqual(self.observed_real(answer, table("\r\n"))["enabled"], "false")
         self.assertEqual(self.observed_real(answer.replace(b"\n", b"\r\n"), table("\n"))["owned_pid_digest"], "unknown")
+        modern = b'\tdisabled services = {\n\t\t"x.service" => disabled\n\t}\n\n\tlogin item associations = {\n\t}\n'  # macOS 13+: indented, keyword states, a trailing section
+        self.assertEqual(self.observed_real(answer, modern)["enabled"], "false")
+        self.assertEqual(self.observed_real(answer, modern.replace(b"disabled\n", b"enabled\n"))["enabled"], "true")
         # The bound is in BYTES, as in the product: 40,000 two-byte characters are under 65,536 characters and over 65,536 bytes.
         wide = "\u00e9" * 40000
-        big_table = ("disabled services = {\n\t\"y.service\" => \"%s\"\n}\n" % wide).encode()
+        big_table = ('disabled services = {\n\t"%s" => true\n}\n' % wide).encode()  # a well-formed row, so that the byte bound is what refuses it
         self.assertEqual(self.observed_real(answer, big_table)["enabled"], "unknown")
         big_answer = ("gui/%d/x.service = {\n\tstate = not running\n\tnote = %s\n}\n" % (os.getuid(), wide)).encode()
         seen = self.observed_real(big_answer, table("\n"))
         self.assertEqual((seen["active"], seen["origin"], seen["owned_pid_digest"]), ("unknown", "unknown", "unknown"))
-        padded = ("disabled services = {\n\t\"y.service\" => \"%s\"\n}\n" % ("\u00e9" * 20000)).encode()  # 40,000 bytes: within the bound
+        padded = ('disabled services = {\n\t"%s" => true\n}\n' % ("\u00e9" * 20000)).encode()  # 40,000 bytes: within the bound
         self.assertEqual(self.observed_real(answer, padded)["enabled"], "true")
 
     def test_counts_fail_on_an_unreadable_hits_log_and_only_a_missing_log_is_zero(self):
@@ -1161,7 +1368,8 @@ class Wiring(unittest.TestCase):
         stub = r"""launchctl() { case "$1" in print) [ "$LC_BYTES" != fail ] || return 1; head -c "$LC_BYTES" /dev/zero | tr '\0' x ;; print-disabled) printf 'disabled services = {\n}\n' ;; esac; }
 """
         with tempfile.TemporaryDirectory() as ev:
-            for size, want, fact in (("fail", 0, "unavailable"), ("100", 0, "available"), ("65536", 0, "available"), ("65537", 1, "available")):  # a failed listing is never a zero-byte one
+            # The listing's size is a diagnostic only (the product reads the domain by status; macOS 15 prints 89,044 bytes): a listing over 65536 bytes no longer fails the probe.
+            for size, want, fact in (("fail", 0, "unavailable"), ("100", 0, "available"), ("65536", 0, "available"), ("65537", 0, "available"), ("89044", 0, "available")):  # a failed listing is never a zero-byte one
                 code, log, err = self.run_cleanup(stub + "probe_gui", {"EV": ev, "SUID": "501", "LC_BYTES": size}, extra=("probe_gui",))
                 self.assertEqual((code, "fact manager_pre %s" % fact in log, "fail" in log), (want, True, want == 1), (size, log, err))
 
@@ -1169,40 +1377,50 @@ class Wiring(unittest.TestCase):
         header = "disabled services = {\n"
         stub = r"""launchctl() { case "$1" in print) printf x ;; print-disabled) cat "$LD_FILE"; return "$LD_RC" ;; esac; }
 """
-        # The product's admission (relay/native-install-transaction.sh): at most 65536 BYTES, no NUL, the text starting with the header and ending with `}`.
+        # The product's admission (relay/native-install-transaction.sh): at most 65536 BYTES, no NUL, the text in its print-disabled grammar (blank lines ignored, a `disabled services = {` section of
+        # `"label" => state` rows closed by `}`, further sections allowed). The bound is tested with blanks and with well-formed rows, so that it, not the grammar, is what refuses.
         pad = 65536 - len(header) - len("\n}\n")  # a table of exactly the bound, trailing newline included
+        row = lambda name, state="true": '\t"' + name + '" => ' + state + "\n"
 
-        def sized(total):  # a COMPLETE, framed table of exactly `total` bytes of two-byte characters (one ASCII byte when odd): at the bound it is under 33,000 characters
-            fill = total - len(header) - len("\n}\n")
-            return header + "\u00e9" * (fill // 2) + "x" * (fill % 2) + "\n}\n"
+        def sized(total):  # a COMPLETE, well-formed table of exactly `total` bytes: one row naming two-byte characters (and one ASCII byte when odd): at the bound it is under 33,000 characters
+            fill = total - len(header) - len(row("")) - len("}\n")
+            return header + row("\u00e9" * (fill // 2) + "x" * (fill % 2)) + "}\n"
         for total in (65536, 65537, 65538):
             self.assertEqual((len(sized(total).encode()), len(sized(total)) < 65536), (total, True))
         # (print-disabled output, its status, manager_pre): available only for a SUCCESSFUL, COMPLETE answer; a matching header and then a failing producer is not.
         for out, status, fact in ((header + "}\n", "0", "available"), (header + '\t"x" => true\n}\n', "0", "available"), ("disabled services = {}\n", "0", "available"),
-                                  (header + "x" * pad + "\n}\n", "0", "available"), (header + "x" * (pad + 1) + "\n}\n", "0", "unavailable"), (header + "x" * 70000 + "\n}\n", "0", "unavailable"),  # the bound
+                                  (header + " " * pad + "\n}\n", "0", "available"), (header + " " * (pad + 1) + "\n}\n", "0", "unavailable"), (header + " " * 70000 + "\n}\n", "0", "unavailable"),  # the bound
+                                  (header + "x" * pad + "\n}\n", "0", "unavailable"), (header + "x" * (pad + 1) + "\n}\n", "0", "unavailable"), (header + "x" * 70000 + "\n}\n", "0", "unavailable"),  # a stray line, within the bound or not
                                   (header, "0", "unavailable"), (header + '\t"x" => true\n', "0", "unavailable"), (header.rstrip("\n"), "0", "unavailable"),  # header only or truncated: no closing brace
                                   (header + "}\n", "1", "unavailable"), (header, "1", "unavailable"), (header + "}\n", "124", "unavailable"), (header + "}\n", "126", "unavailable"),
                                   (header + "}\n", "127", "unavailable"), ("", "0", "unavailable"), ("something else\n}\n", "0", "unavailable"),
-                                  ("\n" + header + "}\n", "0", "unavailable"), ("not " + header + "}\n", "0", "unavailable"), (header + "} \n", "0", "unavailable"),
+                                  ("not " + header + "}\n", "0", "unavailable"), ("disabled services = {junk\n}\n", "0", "unavailable"),
+                                  # Task X: blank lines and the blanks around a line are ignored (these were unavailable), as are further sections after the table; the keyword states are rows too
+                                  ("\n" + header + "}\n", "0", "available"), (header + "} \n", "0", "available"), (" \t" + header + "}\r\n", "0", "available"), (header + "}\n\n  \n", "0", "available"),
+                                  ("\tdisabled services = {\n\t\t\"x\" => disabled\n\t\t\"y\" => enabled\n\t}\n\n\tlogin item associations = {\n\t}\n", "0", "available"),
+                                  ("disabled services = {}\n\nlogin item associations = {}\n", "0", "available"), (header + "}\nlogin item associations = {\n\tx\n}\nb = {}\n", "0", "available"),
+                                  (header + "}\nlogin item associations = {\n", "0", "unavailable"), (header + "}\nstray\n", "0", "unavailable"), (header + "}\n}\n", "0", "unavailable"),  # an unclosed section, stray text
+                                  (header + "}\n" + header + "}\n", "0", "unavailable"), (header + '\t"x" => maybe\n}\n', "0", "unavailable"), ("login item associations = {}\n" + header + "}\n", "0", "unavailable"),
                                   (header + "\x00}\n", "0", "unavailable"), (header + "x\x00\n}\n", "0", "unavailable"), ("\x00" + header + "}\n", "0", "unavailable"),  # a NUL (a shell substitution would drop it)
-                                  (header + "\u00e9" * 40000 + "\n}\n", "0", "unavailable"), (header + "\u00e9" * 20000 + "\n}\n", "0", "available"),  # bytes, not characters
+                                  (header + row("\u00e9" * 40000) + "}\n", "0", "unavailable"), (header + row("\u00e9" * 20000) + "}\n", "0", "available"),  # bytes, not characters
+                                  (header + "\u00e9" * 40000 + "\n}\n", "0", "unavailable"), (header + "\u00e9" * 20000 + "\n}\n", "0", "unavailable"),  # (stray lines: unavailable at any size)
                                   (sized(65536), "0", "available"), (sized(65537), "0", "unavailable"), (sized(65538), "0", "unavailable")):  # the bound itself, with the closing brace in the read: a character count would admit 65,537
             with tempfile.TemporaryDirectory() as ev:
                 pathlib.Path(ev, "served").write_bytes(out.encode())
                 code, log, err = self.run_cleanup(stub + "probe_gui", {"EV": ev, "SUID": "501", "LD_FILE": ev + "/served", "LD_RC": status}, extra=("probe_gui",))
             self.assertEqual((code, log.count("fact manager_pre"), "fact manager_pre %s" % fact in log, "fail" in log), (0, 1, True, False), (out[:80], status, log, err))
-        # The domain listing is admitted as the product admits it: a NUL (which a shell substitution would drop) makes the manager unavailable, wherever it sits within the bound.
+        # The domain listing: the product discards it and reads only the query's status, so only a failed query makes the manager unavailable; neither its size nor a NUL in it does (Task XR F004: a NUL was this probe's own check).
         listing_stub = r"""launchctl() { case "$1" in print) cat "$LP_FILE"; return "$LP_RC" ;; print-disabled) printf 'disabled services = {\n}\n' ;; esac; }
 """
         for listing, status, fact, hard in ((b"gui/501 = {\n}\n", "0", "available", False), (b"", "0", "available", False), (b"gui/501 = {\n}\n", "1", "unavailable", False),
-                                            (b"\x00", "0", "unavailable", False), (b"gui/501 = {\n\x00}\n", "0", "unavailable", False), (b"x" * 100 + b"\x00", "0", "unavailable", False),
-                                            (b"\x00" + b"x" * 70000, "0", "unavailable", False), (b"x" * 65535 + b"\x00", "0", "unavailable", False),  # a NUL inside the bound is unavailable, not a size failure
-                                            (b"x" * 65536, "0", "available", False), (b"x" * 65537, "0", "available", True)):  # an over-limit listing is still the size failure
+                                            (b"\x00", "0", "available", False), (b"gui/501 = {\n\x00}\n", "0", "available", False), (b"x" * 100 + b"\x00", "0", "available", False),
+                                            (b"\x00" + b"x" * 70000, "0", "available", False), (b"x" * 65535 + b"\x00", "0", "available", False), (b"\x00", "1", "unavailable", False),  # a NUL in the listing is no failure (it was); a failed query still is
+                                            (b"x" * 65536, "0", "available", False), (b"x" * 65537, "0", "available", False), (b"x" * 89044, "0", "available", False)):  # an over-limit listing is no failure (it was)
             with tempfile.TemporaryDirectory() as ev:
                 pathlib.Path(ev, "served").write_bytes(listing)
                 code, log, err = self.run_cleanup(listing_stub + "probe_gui", {"EV": ev, "SUID": "501", "LP_FILE": ev + "/served", "LP_RC": status}, extra=("probe_gui",))
             self.assertEqual((code, log.count("fact manager_pre"), "fact manager_pre %s" % fact in log, "fail" in log), (1 if hard else 0, 1, True, hard), (listing[:20], len(listing), status, log, err))
-        # The listing's size comes from wc's own status, never from a pipeline's: a failed wc that printed a number is a failure, not a measurement within the bound.
+        # The listing's size (a diagnostic) comes from wc's own status, never from a pipeline's: a failed wc that printed a number is a failure, not a measurement.
         for wc, want in (('wc() { printf "      70000"; return 1; }', 1), ('wc() { printf "      5"; return 1; }', 1), ('wc() { command wc "$@"; }', 0)):
             with tempfile.TemporaryDirectory() as ev:
                 pathlib.Path(ev, "served").write_bytes((header + "}\n").encode())
@@ -1213,8 +1431,9 @@ class Wiring(unittest.TestCase):
         # its stderr capture, which writes at most 4096 bytes to the evidence file); a capture that cannot be opened stays status 1.
         self.assertTrue('    rc=1\n    {\n        launchctl print "gui/$SUID" 2>&1 1>&3 3>&- \\\n            | { /usr/bin/head -c 4096 > "$EV/gui.err"; /bin/cat > /dev/null; } 3>&-\n'
                         '        rc=${PIPESTATUS[0]}\n    } 3> "$EV/gui.txt" || rc=$?\n    gs=$rc\n    if [ "$gs" -eq 0 ]; then\n        rc=0\n        OX nul-free --path "$EV/gui.txt" || rc=$?' in probe
-                        and probe.index("OX nul-free") < probe.index("launchctl print-disabled"))  # the listing is admitted (its status, then the NUL check) before the table is asked for
-        self.assertTrue('if [ "$gn" = clean ]; then\n        rc=1\n        {\n            launchctl print-disabled "gui/$SUID" 2>&1 1>&3 3>&- \\\n'
+                        and probe.index("OX nul-free") < probe.index("launchctl print-disabled"))  # the listing's status decides; its NUL is recorded (evidence) before the table is asked for
+        self.assertEqual([l.strip().split(" ", 2)[:2] for l in probe.splitlines() if "$gn" in l and not l.lstrip().startswith("#")], [["fact", "gui_nul"], ["printf", "'gui"]])  # gui_nul decides nothing: it is assigned (evidence) and read only to be recorded and logged
+        self.assertTrue('1) gn=nul ;; esac  # evidence only (any other status, unreadable, is recorded as not-run): the product discards the listing, so a NUL in it fails nothing\n        rc=1\n        {\n            launchctl print-disabled "gui/$SUID" 2>&1 1>&3 3>&- \\\n'
                         '                | { /usr/bin/head -c 4096 > "$EV/disabled.err"; /bin/cat > /dev/null; } 3>&-\n            rc=${PIPESTATUS[0]}\n        } 3> "$EV/disabled.txt" || rc=$?\n        ds=$rc\n'
                         '        if [ "$ds" -eq 0 ] && OX table-ok --path "$EV/disabled.txt"; then avail=yes; fi\n    fi' in probe)  # its own status, then the helper's admission of the file
         self.assertIn('    if [ "$avail" = yes ]; then\n        fact manager_pre available\n', probe)  # the only way to `available`: those two deciders and nothing recorded as evidence
@@ -1222,14 +1441,24 @@ class Wiring(unittest.TestCase):
 
     def test_table_reason_names_the_first_framing_defect_and_agrees_with_table_ok_and_the_product(self):
         host, header = self.load_host(), "disabled services = {\n"
+        row = lambda name: '\t"' + name + '" => true\n'
+        modern = '\tdisabled services = {\n\t\t"x" => disabled\n\t}\n\n\tlogin item associations = {\n\t}\n'
         frames = {
-            "pass": [header + "}\n", header + '\t"x" => true\n}\n', "disabled services = {}\n", header + "}\n\n\n", "disabled services = {junk\n}\n", header + "\u00e9" * 20000 + "\n}\n",
-                     header + "x" * (65536 - len(header) - 3) + "\n}\n"],  # the last: exactly the 65536-byte bound
-            "over-limit": [header + "x" * (65536 - len(header) - 2) + "\n}\n", header + "x" * 70000 + "\n}\n", "x" * 65537, header + "\u00e9" * 40000 + "\n}\n", header + "\x00" + "x" * 70000 + "}"],
-            "nul": [header + "\x00}\n", "\x00" + header + "}\n", header + "x\x00\n}\n", "\x00"],
-            "header": ["something else\n}\n", "\n" + header + "}\n", " " + header + "}\n", "not " + header + "}\n", "}\n", "x", "Disabled services = {\n}\n", "disabled services = \n}\n"],
-            "trailer": [header, header.rstrip("\n"), header + '\t"x" => true\n', header + "} \n", header + "}\r\n", header + "}\nextra", "disabled services = {\n}\n}x"],
-            "empty": ["", "\n", "\n\n\n"]}
+            "pass": [header + "}\n", header + '\t"x" => true\n}\n', "disabled services = {}\n", header + "}\n\n\n", header + row("\u00e9" * 20000) + "}\n",
+                     header + " " * (65536 - len(header) - 3) + "\n}\n",  # the last: exactly the 65536-byte bound
+                     # Task X: blank lines and blanks around a line are ignored, rows may use the keyword states, further sections may follow (each of these was a `header` or `trailer` defect)
+                     "\n" + header + "}\n", " " + header + "}\n", header + "} \n", header + "}\r\n", modern, "\tdisabled services = {}\n\n\tlogin item associations = {}\n",
+                     header + '\t"x" => enabled\n}\n\nlogin item associations = {\n\tjunk\n}\nb = {}\n'],
+            "over-limit": [header + "x" * (65536 - len(header) - 2) + "\n}\n", header + "x" * 70000 + "\n}\n", "x" * 65537, header + "\u00e9" * 40000 + "\n}\n", header + "\x00" + "x" * 70000 + "}",
+                           header + row("\u00e9" * 40000) + "}\n", header + " " * (65536 - len(header) - 2) + "\n}\n"],
+            "nul": [header + "\x00}\n", "\x00" + header + "}\n", header + "x\x00\n}\n", "\x00", modern.replace("login", "lo\x00gin")],
+            "header": ["something else\n}\n", "not " + header + "}\n", "}\n", "x", "Disabled services = {\n}\n", "disabled services = \n}\n",
+                       "disabled services = {junk\n}\n", "disabled services = { }\n", "login item associations = {}\n" + header + "}\n", "\t  junk\n", "xdisabled services = {\n}\n"],  # the first line decides
+            "trailer": [header, header.rstrip("\n"), header + '\t"x" => true\n', header + "}\nextra", "disabled services = {\n}\n}x",
+                        header + "stray\n}\n", header + '\t"x" => maybe\n}\n', "disabled services = {}\n}\n", header + "}\nlogin item associations = {\n", header + "}\ndisabled services = {}\n", header + '\t"other"junk" => enabled\n}\n',
+                        header + "}\na = b = {\n}\n", header + "}\n= {}\n", modern + "}\n",  # a defect after a good header: a row, an unclosed or stray section, a second table
+                        header + "\u00e9" * 20000 + "\n}\n", header + "x" * (65536 - len(header) - 3) + "\n}\n"],  # the bound's old pass frames, text instead of a row: a stray line at any size
+            "empty": ["", "\n", "\n\n\n", " \n\t\r\n"]}
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "table")
             for want, texts in frames.items():
@@ -1242,6 +1471,7 @@ class Wiring(unittest.TestCase):
                     self.assertEqual(out.getvalue(), want + "\n", where)
                     self.assertEqual(host.table_ok({"path": path}, []) == 0, want == "pass", where)  # the admission itself, unchanged: `pass` exactly when table-ok admits
                     self.assertEqual(self.product_enabled(0, text, "com.x") != "unknown", want == "pass", where)  # and exactly when the product's own observer admits the table
+                    self.assertEqual(self.removal_enabled(0, text, "com.x") != "unknown", want == "pass", where)  # and the removal observer
         with contextlib.redirect_stdout(io.StringIO()) as out, tempfile.TemporaryDirectory() as tmp:
             pathlib.Path(tmp, "t").write_bytes(b"\xff" + header.encode() + b"}\n")
             self.assertEqual((host.main(["h", "table-reason", "--path", tmp + "/t"]), out.getvalue()), (0, "header\n"))  # invalid UTF-8 is decoded as table-ok decodes it
@@ -1327,6 +1557,7 @@ class Wiring(unittest.TestCase):
     def test_gui_probe_records_every_diagnostic_fact_on_the_passing_and_every_failing_path(self):
         host, header = self.load_host(), "disabled services = {\n"
         table = '\t"com.x" => true\n}\n'.join((header, "")).encode()
+        modern = b'\tdisabled services = {\n\t\t"x" => disabled\n\t}\n\n\tlogin item associations = {\n\t}\n'
         none = {"disabled_status": "not-run", "disabled_bytes": "not-run", "disabled_admission": "not-run", "disabled_head": "none", "disabled_tail": "none", "disabled_err": "none"}
         scenarios = (
             (dict(listing=b"gui/501 = {\n}\n", table=table, print_err="warn: x\n"), 0, "available", {
@@ -1335,15 +1566,18 @@ class Wiring(unittest.TestCase):
             (dict(print_rc=113, listing=b"", print_err="Could not find domain for user gui: 501\n"), 0, "unavailable", dict(none, gui_print_status="113", gui_nul="not-run", gui_bytes="0",
                                                                                                                                 gui_print_err="Could not find domain for user gui: 501")),
             (dict(print_rc=127, listing=b"", print_err=""), 0, "unavailable", dict(none, gui_print_status="127", gui_nul="not-run", gui_bytes="0", gui_print_err="none")),
-            (dict(listing=b"gui/501 = {\n\x00}\n"), 0, "unavailable", dict(none, gui_print_status="0", gui_nul="nul", gui_bytes="15", gui_print_err="none")),
+            (dict(listing=b"gui/501 = {\n\x00}\n"), 0, "available", dict(none, gui_print_status="0", gui_nul="nul", gui_bytes="15", gui_print_err="none", disabled_status="0",  # a NUL in the listing is recorded, no failure (Task XR F004)
+                                                                          disabled_bytes="24", disabled_admission="pass", disabled_head="disabled services = {", disabled_tail="}")),
             (dict(dis_rc=2, table=b"", dis_err="Could not\x01 find domain; x\n"), 0, "unavailable", {
                 "gui_print_status": "0", "gui_nul": "clean", "gui_bytes": "14", "gui_print_err": "none", "disabled_status": "2", "disabled_bytes": "0", "disabled_admission": "empty",
                 "disabled_head": "none", "disabled_tail": "none", "disabled_err": "Could not find domain <x>"}),
             (dict(dis_rc=1, table=table), 0, "unavailable", {  # a complete table and a failing producer: the frame is fine, the status refuses it
                 "gui_print_status": "0", "gui_nul": "clean", "gui_bytes": "14", "gui_print_err": "none", "disabled_status": "1", "disabled_bytes": str(len(table)), "disabled_admission": "pass",
                 "disabled_head": "disabled services = {", "disabled_tail": "}", "disabled_err": "none"}),
-            (dict(listing=b"x" * 65537), 1, "available", dict(none, gui_print_status="0", gui_nul="clean", gui_bytes="65537", gui_print_err="none", disabled_status="0", disabled_bytes="24",  # the size failure
-                                                              disabled_admission="pass", disabled_head="disabled services = {", disabled_tail="}")))
+            (dict(listing=b"x" * 65537), 0, "available", dict(none, gui_print_status="0", gui_nul="clean", gui_bytes="65537", gui_print_err="none", disabled_status="0", disabled_bytes="24",  # no size failure any more:
+                                                              disabled_admission="pass", disabled_head="disabled services = {", disabled_tail="}")),  # the listing's size is a diagnostic
+            (dict(listing=b"x" * 89044, table=modern), 0, "available", dict(none, gui_print_status="0", gui_nul="clean", gui_bytes="89044",
+                gui_print_err="none", disabled_status="0", disabled_bytes=str(len(modern)), disabled_admission="pass", disabled_head="disabled services = {", disabled_tail="}")))  # macOS 15's shape: 89,044 bytes, a modern table
         for kwargs, want_exit, manager_pre, want in scenarios:
             code, pairs, log = self.gui_probe(**kwargs)
             self.assertEqual(sorted(k for k, _ in pairs), sorted(self.GUI_FACTS + ("manager_pre",)), log)  # every diagnostic fact, and the verdict fact, exactly once: whatever the outcome
@@ -1355,8 +1589,8 @@ class Wiring(unittest.TestCase):
             self.assertEqual((dict(pairs)["disabled_admission"], dict(pairs)["manager_pre"]), (reason, "available" if reason == "pass" else "unavailable"), reason)
             for name in ("disabled_head", "disabled_tail"):
                 self.assertRegex(dict(pairs)[name], "^[A-Za-z0-9 ={}\"<>()._:/-]{1,64}$")
-        # Parity with the earlier `&&` chain, evaluated here independently: manager_pre is `available` ONLY for a successful, NUL-free listing, a successful table and a framed table within the bound.
-        old_available = lambda print_rc, listing, dis_rc, table: (print_rc == 0 and b"\x00" not in listing[:65537] and dis_rc == 0 and len(table[:65537]) <= 65536
+        # Parity with the earlier `&&` chain, evaluated here independently: manager_pre is `available` ONLY for a successful listing query (its content is never read: the product reads its status), a successful table and a framed table within the bound.
+        old_available = lambda print_rc, listing, dis_rc, table: (print_rc == 0 and dis_rc == 0 and len(table[:65537]) <= 65536
                                                                   and host.framed_table(table[:65537].decode("utf-8", "replace")))
         tables = (table, b"nope\n}\n", header.encode(), b"", header.encode() + b"\x00}", b"x" * 65537)
         runs = [(rc, b"gui/501 = {\n}\n", 0, table) for rc in (1, 113, 127)] + [(0, b"x\x00y", 0, table)] + [(0, b"gui/501 = {\n}\n", rc, t) for rc in (0, 3) for t in tables]
@@ -1366,7 +1600,7 @@ class Wiring(unittest.TestCase):
             self.assertEqual(got["manager_pre"] == "available", old_available(print_rc, listing, dis_rc, text), (print_rc, listing[:8], dis_rc, text[:20], log))
             stage = [got["gui_print_status"], got["gui_nul"], got["disabled_status"], got["disabled_admission"]]
             self.assertEqual(stage[:2], [str(print_rc), "not-run" if print_rc else ("nul" if b"\x00" in listing else "clean")])
-            self.assertEqual(stage[2:] == ["not-run", "not-run"], print_rc != 0 or b"\x00" in listing)  # a stage that is not reached is `not-run`, exactly where the chain stopped
+            self.assertEqual(stage[2:] == ["not-run", "not-run"], print_rc != 0)  # a stage that is not reached is `not-run`, exactly where the chain stopped (a NUL in the listing stops nothing)
             self.assertTrue(stage[2:] == ["not-run", "not-run"] or (stage[2] == str(dis_rc) and stage[3] == host.table_reason(text[:65537])), (stage, log))
             self.assertEqual(code, 0, log)
         # The evidence helpers decide nothing: with `shape` and `table-reason` failing, the verdict and the deciding facts are those of the real helper, and the evidence falls back to `not-run` / `none`.
@@ -1375,9 +1609,11 @@ class Wiring(unittest.TestCase):
         for text, manager_pre in ((table, "available"), (b"nope\n}\n", "unavailable"), (header.encode(), "unavailable")):
             code, pairs, log = self.gui_probe(table=text, shell=evidence_down)
             self.assertEqual((code, dict(pairs)), (0, dict(fallback, gui_print_status="0", gui_nul="clean", disabled_status="0", manager_pre=manager_pre)), log)
-        # An unreadable listing (the NUL check exits 2) is neither clean nor NUL-bearing: recorded as not-run, the manager unavailable, the table never asked for.
+        # A listing whose NUL check cannot run (the helper exits 2) is neither clean nor NUL-bearing: recorded as not-run. That is evidence only: the product reads the query's status, so the table is still asked for and decides.
         code, pairs, log = self.gui_probe(shell='OX() { case "$1" in nul-free) return 2 ;; esac; "$PYO" -I -B "$HOSTPY" "$@"; }\n')
-        self.assertEqual((code, dict(pairs)["gui_nul"], dict(pairs)["disabled_status"], dict(pairs)["manager_pre"]), (0, "not-run", "not-run", "unavailable"), log)
+        self.assertEqual((code, dict(pairs)["gui_nul"], dict(pairs)["disabled_status"], dict(pairs)["manager_pre"]), (0, "not-run", "0", "available"), log)
+        code, pairs, log = self.gui_probe(table=b"nope\n}\n", shell='OX() { case "$1" in nul-free) return 2 ;; esac; "$PYO" -I -B "$HOSTPY" "$@"; }\n')
+        self.assertEqual((code, dict(pairs)["gui_nul"], dict(pairs)["manager_pre"]), (0, "not-run", "unavailable"), log)  # and a table the product refuses still makes the manager unavailable
         probe = self.text("scripts/ci/run-native-lifecycle.sh").split("probe_gui() {", 1)[1].split("\n}\n", 1)[0]
         code = "\n".join(l for l in probe.splitlines() if not l.lstrip().startswith("#"))
         self.assertEqual(re.findall(r"launchctl (\S+)", code), ["print", "print-disabled"])  # the only manager queries are the two read-only ones the earlier probe made

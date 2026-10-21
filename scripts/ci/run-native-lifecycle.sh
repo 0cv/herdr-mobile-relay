@@ -297,11 +297,12 @@ tls_up() {  # $1: upstream port (0 = probe-only static body); $2 probe: also pro
     fi
 }
 
-probe_gui() {  # macOS: ONE captured listing of the gui domain; a failed query is unavailable, never a zero-byte listing within the bound
+probe_gui() {  # macOS: ONE captured listing of the gui domain; a failed query is unavailable, never a zero-byte listing (its size is a diagnostic: the product reads only the status)
     local size avail=no rc gs=not-run gn=not-run gb=not-run ge=none ds=not-run db=not-run da=not-run dh=none dt=none de=none
-    # Both answers are written to files with their own statuses and then admitted by the helper as the product admits them (relay/native-install-transaction.sh): no NUL (a shell substitution would drop
-    # it), and for the table at most 65536 bytes and the text starting with the header and ending with `}`. A failed, NUL-bearing, over-limit, header-only or truncated answer is unavailable;
-    # the size of the domain listing is measured below. The stages run in this order and a stage that is not reached stays `not-run`, as the earlier `&&` chain stopped at the first refusal.
+    # Both answers are written to files with their own statuses. The table is then admitted by the helper as the product admits it (relay/native-install-transaction.sh): no NUL (a shell substitution would drop
+    # it), at most 65536 bytes and the text in the product's print-disabled grammar (blank lines ignored, `disabled services = {` ... `}` holding rows of `"<label>" => <state>` with a state
+    # of true, false, enabled or disabled, further sections allowed). A failed, NUL-bearing, over-limit or malformed table is unavailable. The product discards the domain listing and reads only its status, so the listing's
+    # NUL and size (89,044 bytes on macos-15) are diagnostics below (`gui_nul`, `gui_bytes`), never a stage. The stages run in this order and a stage that is not reached stays `not-run`, as the earlier `&&` chain stopped at the first refusal.
     # Diagnostics (Q1D): each stage's status, size and shape is recorded further down as evidence for the receipt, whatever the result; only the statuses and helper answers here decide.
     # Each query's stdout goes to its file as before; its STDERR goes through a capture that writes at most 4096 bytes to the evidence file and drains (never writes) the rest, so a runaway stream can neither
     # fill the runner nor kill the query with SIGPIPE; the query's own status is the first PIPESTATUS element. A stderr file that cannot be written is diagnostic-only (the hint is `none`; the query's
@@ -316,9 +317,7 @@ probe_gui() {  # macOS: ONE captured listing of the gui domain; a failed query i
     if [ "$gs" -eq 0 ]; then
         rc=0
         OX nul-free --path "$EV/gui.txt" || rc=$?
-        case "$rc" in 0) gn=clean ;; 1) gn=nul ;; esac  # any other status (unreadable) is recorded as not-run and is unavailable like a NUL
-    fi
-    if [ "$gn" = clean ]; then
+        case "$rc" in 0) gn=clean ;; 1) gn=nul ;; esac  # evidence only (any other status, unreadable, is recorded as not-run): the product discards the listing, so a NUL in it fails nothing
         rc=1
         {
             launchctl print-disabled "gui/$SUID" 2>&1 1>&3 3>&- \
@@ -354,8 +353,7 @@ probe_gui() {  # macOS: ONE captured listing of the gui domain; a failed query i
         fact manager_pre available
         size=$(wc -c < "$EV/gui.txt") || fail 'cannot measure the gui domain listing'  # wc's own status, not a pipeline's; padding blanks are dropped below
         size=${size//[[:space:]]/}
-        printf 'gui domain listing: %s bytes (the product accepts at most 65536)\n' "$size"
-        [ "$size" -le 65536 ] || fail 'the gui domain listing exceeds the 65536-byte bound of the product observation'
+        printf 'gui domain listing: %s bytes (diagnostic only: the product reads the domain by status)\n' "$size"
     else
         fact manager_pre unavailable
     fi

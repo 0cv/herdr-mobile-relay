@@ -350,26 +350,33 @@ def capture_control(f, seam, role, payload, status=0, when="initial", at=1):
     d.write(f.root / "native-capture.json", json.dumps(dict(seam=seam, label=role, hex=payload.hex(), status=status, when=when, at=at)))
 
 
+OVER_BOUND_LISTING = b"gui/fixture = {\n" + b"\t\t00001\t-\tcom.example.agent\n" * 2340 + b"}"  # 65,537 bytes
+
+
 def capture_frames(platform, role):
     label = ("herdr-mobile-relay.service" if role == "current" else "herdr-remote.service") if platform == "systemd" else (
         "com.herdr-mobile-relay.service" if role == "current" else "com.herdr-remote.service")
     if platform == "systemd":
         return label, [("systemd", b"LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n", 0, b"inactive", 4096)]
     negative = ('Could not find service "' + label + '" in domain for user gui: ' + str(os.getuid())).encode()
-    disabled = ('disabled services = {\n "' + label + '" => true\n}').encode()
+    # The current label's table has the macOS 13+ layout (indented, keyword states, a trailing login-item section); the legacy label's keeps the macOS 12 one (single blank, true|false).
+    disabled = ('\tdisabled services = {\n\t\t"' + label + '" => disabled\n\t}\n\n\tlogin item associations = {\n\t}' if role == "current" else
+                'disabled services = {\n "' + label + '" => true\n}').encode()
     return label, [("domain", b"gui/fixture = {}", 0, b"fixture", 65536),
                    ("label", negative, 113, b"service", 65536),
-                   ("disabled", disabled, 0, b"true", 65536)]
+                   ("disabled", disabled, 0, b"disabled" if role == "current" else b"true", 65536)]
 
 
 def capture_faults(seam, payload, status, part, limit):
-    return [("middle-nul", payload.replace(part, part[:2] + b"\x00" + part[2:], 1), status),
-            ("prefix-nul", b"\x00" + payload, status), ("suffix-nul", payload + b"\x00", status),
-            ("oversized", b"x" * (limit + 1), status),
-            # An exact nonzero launchd absence is SUPPORTED, not a failed
-            # capture. Failed label probes must have a nonmatching diagnostic.
-            ("failed", b"controller unavailable" if seam == "label" else payload, 2),
-            ("partial", payload[:len(payload) // 2], 2), ("empty", b"", 2)]
+    faults = [("middle-nul", payload.replace(part, part[:2] + b"\x00" + part[2:], 1), status),
+              ("prefix-nul", b"\x00" + payload, status), ("suffix-nul", payload + b"\x00", status),
+              ("oversized", b"x" * (limit + 1), status),
+              # An exact nonzero launchd absence is SUPPORTED, not a failed
+              # capture. Failed label probes must have a nonmatching diagnostic.
+              ("failed", b"controller unavailable" if seam == "label" else payload, 2),
+              ("partial", payload[:len(payload) // 2], 2), ("empty", b"", 2)]
+    # The domain listing is read by STATUS alone (its text is discarded, so a NUL or an over-limit listing is no fault): every fault of that seam is a failing query.
+    return [(name, data, 2) for name, data, code in faults] if seam == "domain" else faults
 
 
 def native_capture_cases(parent, platform, transport):
@@ -392,7 +399,7 @@ def native_capture_cases(parent, platform, transport):
             # and public failure EXIT rollback after replacement activation.
             for initial in (False, True):
                 cells = [("initial", 1, name, data, code, "") for name, data, code in faults]
-                cells += [("fresh", number, "middle-nul", faults[0][1], status, "") for number in (2, 3, 4)]
+                cells += [("fresh", number, "middle-nul", faults[0][1], faults[0][2], "") for number in (2, 3, 4)]
                 cells += [(phase, 1, name, data, code, conditional)
                           for phase in ("ready", "public")
                           for name, data, code in faults[:6]
@@ -451,7 +458,8 @@ def native_capture_cases(parent, platform, transport):
         result, output = probe(f, label, "quiet-if", "supported")
         assert result == 0 and output in (b"absent:false\n", b"inactive:false\n")
         for seam, payload, code, part, limit in frames:
-            capture_control(f, seam, role, payload.rstrip(b"\n"), code)
+            # The domain listing is read by status alone: one over the old 65,536-byte bound (65,537 bytes, the most a control carries; macOS 15 prints 89,044) is as good as a short one.
+            capture_control(f, seam, role, OVER_BOUND_LISTING if seam == "domain" else payload.rstrip(b"\n"), code)
             result, output = probe(f, label, "quiet-or", "supported")
             assert result == 0 and output in (b"absent:false\n", b"inactive:false\n")
         if platform == "launchd":

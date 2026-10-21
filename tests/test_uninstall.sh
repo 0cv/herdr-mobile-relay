@@ -244,8 +244,15 @@ with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-', dir=os.environ.
             for seam in seams:
                 for text in ('\x00', 'X' * (4097 if seam == 'systemd' else 65537)):
                     f = FullFixture(parent, platform, fault='lifecycle-output', fault_index=index)
-                    f.model.update(lifecycle_seam=seam, lifecycle_text=text, lifecycle_status=0); f.save()
+                    # The launchd domain listing is read by STATUS alone (its text is discarded), so its refusal is a failing query (status 1), as in test_service_uninstall_cli.py.
+                    f.model.update(lifecycle_seam=seam, lifecycle_text=text, lifecycle_status=1 if seam == 'domain' else 0); f.save()
                     status, out, events = f.invoke(); assert status != 0; f.retained(out, events)
+                    if seam != 'domain': continue
+                    # The same NUL or over-64 KiB listing with status 0 (the hosted macOS 15 domain prints 89,044 bytes) no longer refuses.
+                    f = FullFixture(parent, platform, fault='lifecycle-output', fault_index=index)
+                    f.model.update(lifecycle_seam=seam, lifecycle_text=text, lifecycle_status=0); f.save()
+                    status, out, events = f.invoke()
+                    assert status == 0 and b'has been uninstalled.' in out and any(e['op'] == 'lifecycle-capture' for e in events)
             f = FullFixture(parent, platform, fault='lifecycle-output', fault_index=index)
             f.model.update(lifecycle_seam='systemd' if platform == 'Linux' else 'label',
                            lifecycle_text='LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled' if platform == 'Linux' else 'controller unavailable',

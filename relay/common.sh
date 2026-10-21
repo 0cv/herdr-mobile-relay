@@ -1778,10 +1778,12 @@ service_removal_read_bounded() {
 
 # Supported systemd vocabulary is deliberately narrow: loaded with a known
 # active state and enabled/disabled, or coherent not-found/inactive/no unit.
-# Launchd requires exact domain/label headers and the documented not-found
-# diagnostic. Loaded/waiting is never quiet. Missing disabled entry is enabled.
+# Launchd requires the domain to answer (status only: its listing is never read),
+# an exact label header and the documented not-found diagnostic, and the
+# print-disabled grammar named at native_install_observe (relay/native-install-transaction.sh),
+# read identically here. Loaded/waiting is never quiet. Missing disabled entry is enabled.
 service_removal_observe() {
-    local manager="$1" label="$2" output line code=0 domain uid count=0 load="" active="" enabled="" l=0 a=0 e=0 probe_status
+    local manager="$1" label="$2" output line code=0 domain uid count=0 load="" active="" enabled="" l=0 a=0 e=0 probe_status name state=0
     local LC_ALL=C
     SERVICE_REMOVAL_STATE=unknown SERVICE_REMOVAL_ENABLED=unknown
     export -n SERVICE_REMOVAL_STATE SERVICE_REMOVAL_ENABLED
@@ -1817,14 +1819,9 @@ service_removal_observe() {
     uid="$(id -u)" || return 1
     case "$uid" in ''|*[!0-9]*) return 1 ;; esac
     domain="gui/$uid"
-    output="$(
-        LC_ALL=C launchctl print "$domain" 2>/dev/null | service_removal_read_bounded 65536
-        probe_status=( "${PIPESTATUS[@]}" )
-        [ "${probe_status[0]}:${probe_status[1]}" = 0:0 ] || exit 1
-        printf '.'
-    )" || return 1
-    output="${output%.}"; output="${output%$'\n'}"
-    case "$output" in "$domain = {"$'\n'*'}'|"$domain = {}") ;; *) return 1 ;; esac
+    # The domain listing is never read (on macOS 15 it is 89,044 bytes, past any capture bound): only that the domain answers is
+    # established, by status with its output discarded. A failing query is unknown.
+    LC_ALL=C launchctl print "$domain" >/dev/null 2>&1 || return 1
     output="$(
         LC_ALL=C launchctl print "$domain/$label" 2>&1 | service_removal_read_bounded 65536
         probe_status=( "${PIPESTATUS[@]}" )
@@ -1850,23 +1847,37 @@ service_removal_observe() {
     )" || return 1
     output="${output%.}"; output="${output%$'\n'}"
     enabled=true
-    count=0; l=0; a=0
+    count=0
     while IFS= read -r line; do
         line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
-        if [ "$l" -eq 0 ]; then
-            [ "$line" = 'disabled services = {' ] || return 1
-            l=1; continue
-        fi
-        [ "$a" -eq 0 ] || return 1
-        case "$line" in
-            '}') a=1 ;;
-            "\"$label\" => true") enabled=false; count=$((count + 1)) ;;
-            "\"$label\" => false") enabled=true; count=$((count + 1)) ;;
-            \"*\"\ =\>\ true|\"*\"\ =\>\ false) case "$line" in *"\"$label\""*) return 1 ;; esac ;;
-            *) return 1 ;;
+        [ -n "$line" ] || continue
+        case "$state" in
+            0) case "$line" in
+                   'disabled services = {') state=1 ;;
+                   'disabled services = {}') state=2 ;;
+                   *) return 1 ;;
+               esac ;;
+            1) case "$line" in
+                   '}') state=2 ;;
+                   "\"$label\" => true"|"\"$label\" => disabled") enabled=false; count=$((count + 1)) ;;
+                   "\"$label\" => false"|"\"$label\" => enabled") enabled=true; count=$((count + 1)) ;;
+                   *"\"$label\""*) return 1 ;;
+                   \"*\"\ =\>\ true|\"*\"\ =\>\ false|\"*\"\ =\>\ disabled|\"*\"\ =\>\ enabled)
+                       name="${line% => *}"; name="${name#\"}"; name="${name%\"}"
+                       case "$name" in *\"*) return 1 ;; esac ;;
+                   *) return 1 ;;
+               esac ;;
+            2) case "$line" in
+                   *' = {}') name="${line% = *}" ;;
+                   *' = {') name="${line% = *}"; state=3 ;;
+                   *) return 1 ;;
+               esac
+               name="${name%"${name##*[![:space:]]}"}"
+               case "$name" in ''|'disabled services'|*[\"{}=]*) return 1 ;; esac ;;
+            *) [ "$line" != '}' ] || state=2 ;;
         esac
     done <<< "$output"
-    [ "$l:$a" = 1:1 ] && [ "$count" -le 1 ] || return 1
+    [ "$state" -eq 2 ] && [ "$count" -le 1 ] || return 1
     SERVICE_REMOVAL_STATE="$active" SERVICE_REMOVAL_ENABLED="$enabled"
     return 0
 }

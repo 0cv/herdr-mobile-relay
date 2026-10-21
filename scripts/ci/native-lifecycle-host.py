@@ -435,11 +435,53 @@ def file_state(path):
         return "unknown", "unknown"
 
 
+BLANKS = " \t\n\v\f\r"  # what `[[:space:]]` matches in the C locale: the blanks the product trims around every line
+HEADERS = ("disabled services = {", "disabled services = {}")
+ENTRY = re.compile(r'"[^"]*" => (?:true|false|disabled|enabled)')  # any label's row in the table: the name holds no quote
+SECTION = re.compile(r'([^"{}=]+) = (\{\}?)')  # the opening line of a further section; `{}` is an empty one
+
+
+def table_flag(text, label=None):
+    """The enabled flag (`true`/`false`; `true` for a label the table does not list) of `label` in a launchctl print-disabled table, read in the product's grammar, or None where the product reads it
+    as unknown. The grammar is the one named at native_install_observe (relay/native-install-transaction.sh) and read identically by service_removal_observe (relay/common.sh), state for state: blank
+    lines and the blanks around each line are ignored; the first line is `disabled services = {` or `disabled services = {}`; each line of the section is `"<label>" => <state>` (the label holds no quote), `true` or `disabled`
+    meaning disabled and `false` or `enabled` enabled; a line naming the label with another value, the label twice or any other line is unknown; the section closes with `}`; further sections
+    (`<name> = {` ... `}`, or `<name> = {}`; the name holds no quote, brace or `=` and is not `disabled services` again) follow with their content not interpreted; anything else, a NUL included, is
+    unknown. With no label only what does not depend on one is judged (a table `table_ok` admits)."""
+    if "\x00" in text:
+        return None
+    flag, count, where = "true", 0, 0  # where: 0 before the header, 1 in the disabled services section, 2 between sections, 3 in a further section
+    for line in (piece.strip(BLANKS) for piece in text.split("\n")):
+        if not line:
+            continue
+        if where == 0:
+            if line not in HEADERS:
+                return None
+            where = 1 if line.endswith("{") else 2
+        elif where == 1:
+            if line == "}":
+                where = 2
+            elif label is not None and line in ('"%s" => true' % label, '"%s" => disabled' % label):
+                flag, count = "false", count + 1
+            elif label is not None and line in ('"%s" => false' % label, '"%s" => enabled' % label):
+                flag, count = "true", count + 1
+            elif label is not None and '"%s"' % label in line:
+                return None
+            elif ENTRY.fullmatch(line) is None:
+                return None
+        elif where == 2:
+            section = SECTION.fullmatch(line)
+            if section is None or section[1].rstrip(BLANKS) == "disabled services":
+                return None
+            where = 3 if section[2] == "{" else 2
+        elif line == "}":
+            where = 2
+    return flag if where == 2 and count <= 1 else None
+
+
 def framed_table(text):
-    """The product's admission of a launchctl disabled table (native-install-transaction.sh), after its size bound: no NUL, and the text, trailing newlines dropped, starts with
-    `disabled services = {` and ends with `}`."""
-    body = text.rstrip("\n")
-    return "\x00" not in text and body.startswith("disabled services = {") and body.endswith("}")
+    """The product's admission of a launchctl disabled table (native-install-transaction.sh), after its size bound: the grammar of table_flag, in what does not depend on a label."""
+    return table_flag(text) is not None
 
 
 def table_ok(o, rest):
@@ -450,8 +492,9 @@ def table_ok(o, rest):
 
 
 def nul_free(o, rest):
-    """Exit 0 only for a file that holds no NUL byte, 1 for one that does, 2 for one that cannot be read; nothing is printed. At most LIMIT + 1 bytes are read: the caller bounds the size
-    itself (a longer file fails there), and the product's bounded reader refuses a NUL before it parses anything, where a shell substitution would drop it."""
+    """Exit 0 only for a file that holds no NUL byte, 1 for one that does, 2 for one that cannot be read; nothing is printed. At most LIMIT + 1 bytes are read: the table's size is bounded by
+    table_ok, and the product's bounded reader refuses a NUL before it parses anything, where a shell substitution would drop it. The domain listing is checked here for its first LIMIT + 1 bytes only,
+    as EVIDENCE (`gui_nul`): neither its NUL nor its size fails the probe, because the product discards that listing and reads only the query's status."""
     try:
         with open(o["path"], "rb") as stream:
             return 1 if b"\x00" in stream.read(LIMIT + 1) else 0
@@ -461,17 +504,20 @@ def nul_free(o, rest):
 
 def table_reason(raw):
     """Why the product would refuse a launchctl disabled table, or `pass`: EVIDENCE for the probe's diagnostics, never an admission (table_ok decides, unchanged). `raw` is at most the first
-    LIMIT + 1 bytes of the file. The product's own checks (native-install-transaction.sh) in its order: the size bound, no NUL, then the framing of framed_table: the text, trailing newlines
-    dropped, starts with `disabled services = {` (header) and ends with `}` (trailer). `empty`: nothing but newlines. `pass` exactly when table_ok exits 0."""
+    LIMIT + 1 bytes of the file. The product's own checks (native-install-transaction.sh) in its order: the size bound, no NUL, then the grammar of table_flag: `empty` when no line is left once
+    blank lines are ignored, `header` when the first one is not `disabled services = {` or `disabled services = {}`, `trailer` when the rest breaks the grammar (a line of the section, an unclosed
+    section, stray text). `pass` exactly when table_ok exits 0."""
     if len(raw) > LIMIT:
         return "over-limit"
     text = raw.decode("utf-8", "replace")
     if "\x00" in text:
         return "nul"
-    if framed_table(text):
-        return "pass"
-    body = text.rstrip("\n")
-    return "empty" if not body else "trailer" if body.startswith("disabled services = {") else "header"
+    lines = [line for line in (piece.strip(BLANKS) for piece in text.split("\n")) if line]
+    if not lines:
+        return "empty"
+    if lines[0] not in HEADERS:
+        return "header"
+    return "pass" if framed_table(text) else "trailer"
 
 
 def table_why(o, rest):
@@ -573,20 +619,18 @@ def lf_lines(text):
     return records[:-1] if records[-1] == "" else records
 
 
+def drop_one_lf(text):
+    """`text` without ONE terminating LF, as both product observers drop it from a label answer (native_install_observe, service_removal_observe): a further trailing LF stays, so `<not-found>\\n\\n` is not
+    the exact diagnostic and `...}\\n\\n` is not a closed answer. (`str.rstrip("\\n")` took them all: it read the first as absence, which service_removal_observe refuses.)"""
+    return text[:-1] if text.endswith("\n") else text
+
+
 def disabled_flag(code, table, label):
-    """`false` (disabled) / `true` (enabled) from a COMPLETE launchctl disabled table, in the product's own grammar (native-install-transaction.sh): the text, unnormalized, starts
-    with `disabled services = {` and ends with `}`, holds no NUL, and names the label at most once as `"label" => true|false` (a label the table does not list is enabled).
-    `unknown` for a failed, truncated, empty or malformed answer, so such an answer is never read as enabled. Any other value on a line naming the label (`enabled`, `disabled`, `maybe`,
-    trailing text) is malformed, exactly as the product's parser fails on it: no alias is translated into a known state. Only trailing newlines are dropped (the product's command
-    substitution does that), and only the blanks `[:space:]` matches in front of a line, so a leading blank, a space after the closing brace or a CR makes the table unknown."""
-    text = table.rstrip("\n")
-    if code != 0 or not framed_table(table):
-        return "unknown"
-    named = [line.lstrip(" \t\n\v\f\r") for line in text.split("\n") if '"%s"' % label in line]
-    flags = [re.fullmatch(r'"%s" => (true|false)' % re.escape(label), line) for line in named]
-    if len(named) > 1 or not all(flags):
-        return "unknown"
-    return "false" if flags and flags[0][1] == "true" else "true"
+    """`false` (disabled) / `true` (enabled) from a COMPLETE launchctl disabled table, in the product's own grammar (table_flag): `unknown` for a failed status or any table the product reads as
+    unknown (a NUL, no header, an unclosed section, stray text, a line naming the label with another value or the label twice), so such an answer is never read as enabled. Blank lines and
+    the blanks around a line are ignored; the states are `true`/`disabled` (disabled) and `false`/`enabled` (enabled); a label the table does not list is enabled."""
+    flag = table_flag(table, label) if code == 0 else None
+    return "unknown" if flag is None else flag
 
 
 def observe(o, rest):
@@ -606,12 +650,16 @@ def observe(o, rest):
     if o["manager"] == "launchd":
         code, out, err = sh([LAUNCHCTL, "print", "gui/%d/%s" % (uid, label)])
         if code != 0:
-            absent = ("%s%s" % (out, err)).rstrip("\n") == 'Could not find service "%s" in domain for user gui: %d' % (label, uid)  # the product drops trailing newlines only
+            # The product merges the two streams (`2>&1`) in the order they were written; this helper reads two pipes and cannot know it, so the exact diagnostic counts only when ONE stream carries all of it
+            # (the other empty): a diagnostic split across the streams, or text on both, is unknown, never absence. The product drops one terminating LF only.
+            absent = (not out or not err) and drop_one_lf(out + err) == 'Could not find service "%s" in domain for user gui: %d' % (label, uid)
             snap.update(active="absent" if absent else "unknown", origin="absent" if absent else "unknown")
             pid = 0 if absent else None  # an unanswered query is not "no process"
         else:
-            target, body = "gui/%d/%s" % (uid, label), out.rstrip("\n")
-            framed = "\x00" not in out and (body.startswith(target + " = {\n") or body == target + " = {}")  # the product's own framing check on a loaded answer
+            target, body = "gui/%d/%s" % (uid, label), drop_one_lf(out)
+            # The product's own framing check on a loaded answer: closed by `}`. It merges stderr into the answer (`2>&1`), in an order this helper (two pipes) cannot know, so ANY stderr text
+            # on a status-0 answer leaves it unframed: unknown, never loaded where the product might refuse.
+            framed = "\x00" not in out and not err and ((body.startswith(target + " = {\n") and body.endswith("}")) or body == target + " = {}")
             records = lf_lines(out)
             paths = [l[len("\tpath = "):] for l in records if l.startswith("\tpath = ")]
             pids = [l[len("\tpid = "):] for l in records if l.startswith("\tpid = ")]
