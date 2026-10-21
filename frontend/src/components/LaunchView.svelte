@@ -53,6 +53,8 @@
     return connection?.status === 'connected' && connection.inventory.state !== 'ready';
   }));
   const connection = $derived($connections.get(relayId));
+  // The relay refuses the home folder itself; only a project folder below it can run an agent.
+  const atHome = $derived(Boolean(connection?.directoryBrowser && !connection.directoryBrowser.parent));
   const profiles = $derived(connection?.agentProfiles || []);
   const targetWorkspace = $derived(
     $workspaces.find((workspace) => (
@@ -224,7 +226,11 @@
           </div>
         {/if}
       </div>
-      <p class="hint">The folder shown above is selected. Tap it to browse; use ↑ or Parent folder to go back.</p>
+      {#if atHome}
+        <p class="hint" role="status">Pick a project folder: agents cannot start in the home folder itself.</p>
+      {:else}
+        <p class="hint">The folder shown above is selected. Tap it to browse; use ↑ or Parent folder to go back.</p>
+      {/if}
 
       <label for="launch-name">Name</label>
       <input id="launch-name" bind:value={name} required maxlength="32" pattern={'[a-z][a-z0-9_-]{0,31}'} title="Start with a lowercase letter; use lowercase letters, numbers, underscores, or dashes." placeholder="project-codex" autocomplete="off" />
@@ -232,7 +238,7 @@
       <label for="launch-prompt">Initial task <span class="optional">(optional)</span></label>
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>
       <p class="hint">Sent to the agent as its first prompt after it starts.</p>
-      <Button type="submit" disabled={submitting || readOnly || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
+      <Button type="submit" disabled={submitting || readOnly || atHome || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
       {#if status}<p class:error class="form-status" role="status">{status}</p>{/if}
     </form>
   </Card>
