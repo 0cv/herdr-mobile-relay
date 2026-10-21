@@ -15,6 +15,12 @@ BIN_LINK="${HERDR_RELAY_BIN_DIR:-$HOME/.local/bin}/herdr-mobile-relay"
 # Controller routing and deletion bookkeeping are never loaded from config.
 shared_progress=false
 shared_attempted=false
+# Linux only: the relay's own mount-confinement guard (full_uninstall_mount_*
+# below). Darwin never sets MOUNT_GUARD, stages nothing and never calls it.
+MOUNT_GUARD=false
+GUARD_BIN=""
+GUARD_DIR=""
+GUARD_HOME=""
 full_uninstall_fail() {
     echo 'Full uninstall incomplete; remaining shared roots and recovery were retained.' >&2
     if [ "$shared_progress" = true ]; then
@@ -31,7 +37,7 @@ trap 'full_uninstall_fail 130' INT
 trap 'full_uninstall_fail 143' TERM
 require_user_service_context || full_uninstall_fail
 case "$(uname -s)" in
-    Linux) MANAGER=systemd; NATIVE_REMOVER="$SCRIPT_DIR/uninstall-systemd-user-service.sh" ;;
+    Linux) MANAGER=systemd; NATIVE_REMOVER="$SCRIPT_DIR/uninstall-systemd-user-service.sh"; MOUNT_GUARD=true ;;
     Darwin) MANAGER=launchd; NATIVE_REMOVER="$SCRIPT_DIR/uninstall-service.sh" ;;
     *) echo 'Unsupported full-uninstall platform.' >&2; full_uninstall_fail ;;
 esac
@@ -225,6 +231,132 @@ preflight_release_links() {
     fi
 }
 
+# Linux mount confinement. The installed binary lives in the releases root,
+# which is deleted before the config and cache roots are rechecked, so a private
+# 0700 copy, compared byte for byte with the installed binary, is staged once
+# and removed when the script exits (normal exit, `exit N`, the INT/TERM handlers
+# above, bash's own exit on a terminating signal; SIGKILL cannot be handled). The
+# EXIT trap is installed BEFORE the directory exists, and a copy that cannot be
+# removed is reported and turns a would-be success into a failure. It is never
+# found through PATH or HERDR_RELAY_BIN, only a real (non-symlink) releases root
+# can supply it, it is staged outside every selected root, and a copy that cannot
+# be made, compared or executed refuses. NOTHING is written until the installed
+# relay, run in place, has proved all three roots: a TMPDIR that is a bind-mount
+# alias of a root (or of a subtree of one) is not visible to a path comparison, but
+# the proof refuses every such alias, so the copy is never staged through one.
+full_uninstall_guard_cleanup() {
+    local status=$?
+    [ -n "$GUARD_DIR" ] || return 0
+    rm -rf -- "$GUARD_DIR" || true
+    [ -e "$GUARD_DIR" ] || [ -L "$GUARD_DIR" ] || return 0
+    echo "Private mount-guard copy could not be removed: $GUARD_DIR" >&2
+    [ "$status" -ne 0 ] || status=1
+    exit "$status"
+}
+
+# Physical location of root entry $1 itself (a final symlink is not followed): its
+# nearest existing ancestor directory, resolved, plus the names below it. The
+# tolerant guard then proves absence, or the link, without traversing it.
+full_uninstall_root_entry() {
+    local parent suffix resolved
+    parent="$(dirname "$1")" || return 1
+    suffix="/$(basename "$1")" || return 1
+    while [ ! -d "$parent" ]; do
+        suffix="/$(basename "$parent")$suffix"
+        parent="$(dirname "$parent")" || return 1
+    done
+    # `cd` and `pwd -P` resolve every symlink (a parent may itself be one) with no lexical fallback.
+    resolved="$(cd "$parent" && pwd -P)" || return 1
+    printf '%s%s\n' "${resolved%/}" "$suffix"
+}
+
+# Succeeds when physical path $1 is neither one of the physical roots $2... nor beneath one.
+full_uninstall_outside_roots() {
+    local path="$1" root
+    shift
+    for root in "$@"; do
+        case "$path" in "$root"|"$root"/*) return 1 ;; esac
+    done
+    return 0
+}
+
+# $@ are the physical selected roots. The staged copy must survive the deletion of any of them.
+full_uninstall_guard_stage() {
+    local active="$RELEASE_ROOT/current/herdr-mobile-relay" active_real release_real tmp_base staged
+    [ -z "$GUARD_BIN" ] || return 0
+    # A symlinked releases root is removed as a link only and never traversed, so it cannot supply an executable.
+    # `current` may be a symlink inside a real root, but the binary must resolve to a file beneath that root.
+    [ -d "$RELEASE_ROOT" ] && [ ! -L "$RELEASE_ROOT" ] || return 1
+    release_real="$(canonicalize "$RELEASE_ROOT")" || return 1
+    active_real="$(canonicalize "$active")" || return 1
+    case "$active_real" in "$release_real"/*) ;; *) return 1 ;; esac
+    [ -f "$active_real" ] && [ ! -L "$active" ] && [ ! -L "$active_real" ] && [ -x "$active_real" ] || return 1
+    command -v mktemp >/dev/null 2>&1 && command -v install >/dev/null 2>&1 &&
+        command -v cmp >/dev/null 2>&1 || return 1
+    GUARD_HOME="$(cd "$HOME" && pwd -P)" || return 1
+    # The physical temp base, from `cd` and `pwd -P` alone: a symlinked TMPDIR is followed, and a failed resolution refuses
+    # (canonicalize would fall back to the lexical path). It is checked before anything is created, then the directory itself.
+    tmp_base="${TMPDIR:-/tmp}"
+    [ -d "$tmp_base" ] || return 1
+    tmp_base="$(cd "$tmp_base" && pwd -P)" || return 1
+    full_uninstall_outside_roots "$tmp_base" "$@" || return 1
+    # The proof before any write: the installed relay itself, by its resolved absolute path, checks all three roots. This is
+    # what refuses a TMPDIR that aliases a root through a bind mount (its physical name is outside every root), so no copy is
+    # created, and no cleanup `rm -rf` can later act, through such an alias. The copy below is then proved again by running it.
+    full_uninstall_guard_exec "$active_real" "$@" || return 1
+    trap full_uninstall_guard_cleanup EXIT
+    GUARD_DIR="$(mktemp -d "$tmp_base/herdr-uninstall-guard.XXXXXX")" || return 1
+    staged="$(cd "$GUARD_DIR" && pwd -P)" || return 1
+    full_uninstall_outside_roots "$staged" "$@" || return 1
+    install -m 0700 "$active_real" "$staged/relay" || return 1
+    cmp -s "$active_real" "$staged/relay" || return 1
+    GUARD_BIN="$staged/relay"
+}
+
+# Run guard binary $1 (an absolute path) on the physical roots $2...; any nonzero status, output or crash refuses.
+full_uninstall_guard_exec() {
+    local binary="$1"
+    shift
+    HOME="$GUARD_HOME" "$binary" __private-uninstall-mount-roots "$@" >/dev/null 2>&1
+}
+
+# The staged private copy, on physical roots.
+full_uninstall_guard_run() {
+    full_uninstall_guard_exec "$GUARD_BIN" "$@"
+}
+
+# Before any route, native or shared effect: all three selected roots go to the
+# guard. A directory root is proved in full; an absent root has nothing to prove
+# and a symlink root is removed as a link only, never traversed, so neither can
+# make another root unprovable. The guard binary, the staging and the guard must
+# all work even when no root is a directory: an unavailable proof refuses. The
+# proof runs twice: first the installed relay in place (before anything is
+# written), then the staged copy (which must also execute).
+full_uninstall_mount_preflight() {
+    local target root
+    set --
+    for target in "$RELEASE_ROOT" "$CONFIG_DIR" "$CACHE_DIR"; do
+        if [ -L "$target" ] || [ ! -e "$target" ]; then
+            root="$(full_uninstall_root_entry "$target")" || return 1
+        else
+            root="$(canonicalize "$target")" || return 1
+        fi
+        set -- "$@" "$root"
+    done
+    full_uninstall_guard_stage "$@" && full_uninstall_guard_run "$@"
+}
+
+# Immediately before a destructive step on directory root $1: the same proof for
+# that root alone, from a fresh mount inventory. A refusal precedes the step, so
+# it is not a partially applied shared batch.
+full_uninstall_mount_recheck() {
+    [ "$MOUNT_GUARD" = true ] || return 0
+    full_uninstall_guard_run "$1" && return 0
+    echo "  REFUSING to change $1: its mount confinement can no longer be proved." >&2
+    shared_attempted=false
+    return 1
+}
+
 safe_remove_dir() {
     local target="$1" label="$2"
     if [ ! -e "$target" ] && [ ! -L "$target" ]; then
@@ -249,6 +381,7 @@ safe_remove_dir() {
     shared_attempted=true
     if [ "$label" = "releases" ]; then
         preflight_release_links "$canonical" || return 1
+        full_uninstall_mount_recheck "$canonical" || return 1
         # Only directory permissions are needed to unlink sealed release
         # contents. Never chmod a file: its inode may have an outside link.
         find -P "$canonical" -type d -exec chmod u+w {} + || return 1
@@ -257,6 +390,7 @@ safe_remove_dir() {
         full_uninstall_quiet || return 1
         shared_attempted=true
     fi
+    full_uninstall_mount_recheck "$canonical" || return 1
     rm -rf "$canonical" || return 1
     shared_attempted=false
     shared_progress=true
@@ -323,6 +457,15 @@ preflight_removal_target "$CACHE_DIR" "cache" || full_uninstall_fail
 if [ -d "$RELEASE_ROOT" ] && [ ! -L "$RELEASE_ROOT" ]; then
     release_canonical="$(canonicalize "$RELEASE_ROOT")" || full_uninstall_fail
     preflight_release_links "$release_canonical" || full_uninstall_fail
+fi
+# Linux only, after every read-only admission and still before any route,
+# native, link or shared effect: refusal leaves the service, journal and all
+# roots untouched. Darwin has no confinement proof and is unchanged.
+if [ "$MOUNT_GUARD" = true ]; then
+    full_uninstall_mount_preflight || {
+        echo 'Full uninstall refused: mount confinement of the uninstall roots could not be proved; nothing was changed.' >&2
+        full_uninstall_fail
+    }
 fi
 
 CLI_ROUTE_DISPOSITION=""

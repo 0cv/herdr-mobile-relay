@@ -1,0 +1,61 @@
+name: Uninstall mount controls
+
+# Real-mount controls for the Linux full uninstall: the real relay/uninstall.sh and the real compiled relay (its mount guard)
+# run against fixture HOMEs on a disposable ubuntu-24.04 runner, with real bind mounts at, beneath and aliasing each root.
+# This is a separate workflow so the service qualification gates stay unchanged (docs/ci-test-tiers.md). The only privileged
+# operations are `mount --bind` and `umount` inside one private work directory, run by scripts/ci/run-uninstall-mount-controls.sh,
+# which unmounts when it exits (EXIT, INT, TERM) and deletes nothing unless the mount table was read and shows no mount
+# beneath its work directory. No secrets, no retries, no continue-on-error.
+on:
+  push:
+    branches: [ci/tailscale-native-preflight-ef9f843]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  mount-controls:
+    name: Uninstall mount controls (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      # Python is pinned, not the runner image's ambient python3 (the suite requires 3.11 or newer).
+      - uses: actions/setup-python@v6
+        timeout-minutes: 5
+        with:
+          python-version: "3.14.0"
+      - name: Verify event commit, clean state, modes, bytes, and source membership
+        timeout-minutes: 3
+        run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/setup-go@v7
+        timeout-minutes: 8
+        with:
+          go-version: 1.27.1
+          cache: false
+      - name: Build the relay (the uninstall's mount guard)
+        timeout-minutes: 5
+        run: go build -o "$RUNNER_TEMP/native-helper" ./cmd/herdr-mobile-relay
+      - name: Run the real-mount uninstall controls
+        timeout-minutes: 15
+        env:
+          NATIVE_HELPER: ${{ runner.temp }}/native-helper
+        run: /bin/bash scripts/ci/run-uninstall-mount-controls.sh
+      - name: Upload the sanitized mount census
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: uninstall-mount-controls-${{ github.sha }}
+          path: ${{ runner.temp }}/uninstall-mount-controls/census.txt
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true

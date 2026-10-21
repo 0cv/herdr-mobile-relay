@@ -7,3 +7,7 @@ import "errors"
 func Check(home, release, config, cache string) error {
 	return errors.New("uninstall mount guard unsupported")
 }
+
+func CheckRoots(home string, roots ...string) error {
+	return errors.New("uninstall mount guard unsupported")
+}

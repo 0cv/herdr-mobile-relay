@@ -375,14 +375,15 @@ run_service_suites() {
     run_helper_suite tests/test_plugin_doctor.py 120
     run_helper_suite tests/test_setup_menu.py 180
 
-    run_suite tests/test_uninstall.sh '' /bin/bash tests/test_uninstall.sh
+    # On a Linux host the full-uninstall fixtures run the real mount guard: the compiled relay is their binary.
+    run_helper_suite tests/test_uninstall.sh "$SUITE_TIMEOUT_SECONDS" /bin/bash
     # The launcher-admission variable is set for this one suite only, as in the Makefile.
     run_suite tests/test_tailscale_cli_setup_failure.py HERDR_TAILSCALE_LAUNCHER_CI=1 \
         "$PYTHON3" tests/test_tailscale_cli_setup_failure.py
     run_suite tests/test_release_scripts.sh '' /bin/sh tests/test_release_scripts.sh
 }
 
-# run_helper_suite NAME SECONDS: a Python suite that needs the NATIVE_HELPER built above.
+# run_helper_suite NAME SECONDS [INTERPRETER]: a suite (Python unless INTERPRETER) that needs the NATIVE_HELPER built above.
 run_helper_suite() {
     banner "$1"
     helper_suite_started=$SECONDS
@@ -390,7 +391,7 @@ run_helper_suite() {
     if [ "$helper_status" -ne 0 ]; then
         printf 'NATIVE_HELPER build failed; the suite is not run\n' >&2
     else
-        run_closed "$2" "NATIVE_HELPER=$helper" "$PYTHON3" "$1" || helper_suite_status=$?
+        run_closed "$2" "NATIVE_HELPER=$helper" "${3:-$PYTHON3}" "$1" || helper_suite_status=$?
     fi
     record_suite "$1" "$helper_suite_status" "$((SECONDS - helper_suite_started))"
     check_checkout "$1"

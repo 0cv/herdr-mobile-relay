@@ -150,6 +150,25 @@ successive groups of macOS jobs and a push at least two, and pushes, pull reques
 is a constraint, not a prediction: no wall-clock, queue or 15-minute figure is promised. `release.yml` (unchanged) waits at most 1800 s
 for a still-running Full run, so dispatch it and let it finish before tagging.
 
+## Uninstall mount confinement
+
+On Linux, `relay/uninstall.sh` runs the relay's own mount guard (`internal/uninstallmount`, command
+`__private-uninstall-mount-roots`) before any route, native or shared effect, and again for each directory root immediately
+before its `chmod` (releases) and `rm -rf`. A root with a mount at, beneath or aliasing it, or any inventory the guard cannot
+prove, refuses with no effects. All three selected roots are preflighted (a directory is proved, an absent root or a final symlink is not traversed). The guard
+binary is a private, byte-compared copy of the installed relay, supplied only by a real (non-symlink) releases root, staged outside
+every selected root and removed when the script exits (a copy that cannot be removed fails the run) (the releases root is deleted before the config and cache rechecks). Nothing is written before the installed relay, run in place, has proved all three roots, so a `TMPDIR` that is a bind-mount alias of a root is refused before the copy is staged. Darwin has no confinement proof: its path is
+unchanged, never calls the guard, and stays an open obligation.
+
+| Proof | Where it runs | What it shows |
+| --- | --- | --- |
+| Guard unit tests (synthetic inventories; absent, symlink and single-root kinds on the real filesystem) | `go test ./...` and the race job of `check.yml` (Linux only) | the autofs scope, parser strictness, per-root recheck |
+| `tests/test_uninstall.sh` (both Service suites jobs, now given `NATIVE_HELPER`) | Linux host: the real compiled relay is the guard and refusals use a real FIFO; macOS host: a recording **model** guard checks call order and arguments | wiring and ordering, no effects on refusal; Darwin never calls the guard |
+| `uninstall-mount-controls.yml` (ubuntu-24.04: push to the CI branch, `pull_request`, `workflow_dispatch`) | `scripts/ci/run-uninstall-mount-controls.sh` (sudo only for `mount --bind` and `umount` inside a private work directory, always unmounted) running `tests/test_uninstall_mounts.py` | real bind mounts at, beneath and aliasing each root (and as the temp directory) refuse before any effect or write; a mount after the native step is refused by the per-step recheck; absent and link-only roots; a sanitized census of mount filesystem types |
+
+The full-uninstall suite gains about ten invocations and one binary copy per Linux-model invocation; its 900 s bound is unchanged. The
+mount controls are a separate workflow, so the service gates, shard counts and their matrix are unchanged.
+
 ## Local use
 
 Only the pure helper runs locally: `python3 -I -B tests/service_qualification_matrix.py list --tier fast`

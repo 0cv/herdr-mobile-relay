@@ -66,9 +66,20 @@ func runWithServerRunner(args []string, runner func(*app.Server, context.Context
 		if len(args) != 3 {
 			return 2, errors.New("private uninstall mount guard requires exactly three roots")
 		}
-		// This read-only candidate is deliberately not wired into uninstall.
-		// Never expose a pathname, mount table, or syscall error through the CLI.
+		// Strict form: all three roots must exist as real directories. Never
+		// expose a pathname, mount table, or syscall error through the CLI.
 		if err := uninstallmount.Check(os.Getenv("HOME"), args[0], args[1], args[2]); err != nil {
+			return 1, errors.New("uninstall mount guard refused")
+		}
+		return 0, nil
+	case "__private-uninstall-mount-roots":
+		// What relay/uninstall.sh runs on Linux (never on Darwin): one to three
+		// roots, each a real directory, absent, or a symlink that is not
+		// traversed. One root is the recheck made just before a destructive step.
+		if len(args) < 1 || len(args) > 3 {
+			return 2, errors.New("private uninstall mount roots guard requires one to three roots")
+		}
+		if err := uninstallmount.CheckRoots(os.Getenv("HOME"), args...); err != nil {
 			return 1, errors.New("uninstall mount guard refused")
 		}
 		return 0, nil

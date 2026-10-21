@@ -1194,3 +1194,38 @@ func captureRunStdout(t *testing.T, args []string) (int, error, []byte) {
 	}
 	return code, runErr, output
 }
+
+// The private mount-guard CLI contract: fixed exit codes and messages, and no
+// caller-supplied pathname or syscall detail in any output. Every input here is
+// refused on every platform (the Linux proof is in internal/uninstallmount).
+func TestPrivateUninstallMountGuardContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const secret = "/fixture-private-canary"
+	for _, tc := range []struct {
+		name string
+		args []string
+		code int
+	}{
+		{"strict, no roots", []string{"__private-uninstall-mount-guard"}, 2},
+		{"strict, two roots", []string{"__private-uninstall-mount-guard", "a", secret}, 2},
+		{"strict, four roots", []string{"__private-uninstall-mount-guard", "a", "b", "c", secret}, 2},
+		{"strict, foreign root", []string{"__private-uninstall-mount-guard", "a", "b", secret}, 1},
+		{"roots, none", []string{"__private-uninstall-mount-roots"}, 2},
+		{"roots, four", []string{"__private-uninstall-mount-roots", "a", "b", "c", secret}, 2},
+		{"roots, foreign root", []string{"__private-uninstall-mount-roots", secret}, 1},
+		{"roots, three foreign roots", []string{"__private-uninstall-mount-roots", "a", "b", secret}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, err := run(tc.args)
+			if err == nil || strings.Contains(err.Error(), secret) {
+				t.Fatalf("expected a fixed refusal, got %v", err)
+			}
+			if code != tc.code {
+				t.Fatalf("exit %d, want %d (%v)", code, tc.code, err)
+			}
+			if tc.code == 1 && err.Error() != "uninstall mount guard refused" {
+				t.Fatalf("refusal is not the fixed message: %v", err)
+			}
+		})
+	}
+}

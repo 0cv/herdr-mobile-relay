@@ -15,6 +15,31 @@ sys.path.insert(0, str(Path(sys.argv[1]) / 'tests'))
 # executes only in the later admitted fixture phase, never at source authoring.
 from test_service_uninstall_cli import ADAPTER, INVOCATIONS, Fixture, bounded_communicate, contain, drain_pty, failure_states, fast_stub_equivalence_control, install_stub, snapshot, spawn_report, spawn_tally
 REPO = Path(sys.argv[1]); TIMEOUT = 40
+# On a Linux host the Linux-model cases run the REAL mount guard: the compiled relay is installed as current/herdr-mobile-relay.
+LINUX_HOST = sys.platform.startswith('linux'); HELPER = os.environ.get('NATIVE_HELPER', '')
+if LINUX_HOST and not (os.path.isabs(HELPER) and os.path.isfile(HELPER) and os.access(HELPER, os.X_OK)):
+    raise SystemExit('uninstall fixtures on Linux require NATIVE_HELPER: the compiled relay, which provides the real mount guard')
+# A MODEL of the Linux mount guard, NOT the real one. A macOS host cannot run the compiled Linux relay, so its Linux-model cases (and
+# every Darwin-model case on any host, where the guard must never run) install this recording script as current/herdr-mobile-relay.
+# It records each call (argv, in call order) and answers allow, deny or fail per call from control/guard-verdicts ("N VERDICT" lines).
+GUARD_MODEL = r'''#!/bin/sh
+control="$FIXTURE_ROOT/control"
+n=0; [ ! -f "$control/guard-calls" ] || read -r n < "$control/guard-calls"
+n=$((n + 1)); printf '%s\n' "$n" > "$control/guard-calls"
+list=""; for a in "$@"; do list="$list${list:+, }\"$a\""; done
+staged=0; for d in "$TMPDIR"/herdr-uninstall-guard.*; do [ ! -e "$d" ] || staged=$((staged + 1)); done
+case "$0" in "$TMPDIR"/herdr-uninstall-guard.*/*) from=staged ;; *) from=installed ;; esac
+printf '{"op": "guard", "n": %s, "args": [%s], "staged": %s, "from": "%s"}\n' "$n" "$list" "$staged" "$from" >> "$control/events.jsonl"
+verdict=allow
+if [ -f "$control/guard-verdicts" ]; then
+    while read -r index word; do [ "$index" != "$n" ] || verdict=$word; done < "$control/guard-verdicts"
+fi
+case "$verdict" in
+    allow) exit 0 ;;
+    deny) echo 'herdr-mobile-relay: uninstall mount guard refused' >&2; exit 1 ;;
+    *) exit 70 ;;
+esac
+'''
 PREFIX = r'''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ['FIXTURE_ROOT']); control = root / 'control'
 model_path = control / 'model.json'; model = json.loads(model_path.read_text())
@@ -31,6 +56,10 @@ if name == 'bash':
     if args not in ([str(remover)], [str(remover), '--cli-route-disposition=retained'], [str(remover), '--cli-route-disposition=removed']):
         record('forbidden', tool=name); raise SystemExit(97)
     os.execv('/bin/bash', ['/bin/bash'] + args)
+# The staged private guard copy lives in this fixture's own tmp/; only the script's own cleanup removes it.
+if name == 'rm' and len(args) == 3 and args[:2] == ['-rf', '--'] and pathlib.Path(args[2]).parent == root / 'tmp' and pathlib.Path(args[2]).name.startswith('herdr-uninstall-guard.'):
+    if model.get('cleanup_fail'): record('guard-cleanup-refused'); raise SystemExit(1)  # fixture: this one rm fails
+    record('guard-cleanup'); os.execv('/bin/rm', ['rm'] + args)
 # Explicit finite paths; no filesystem existence -> controller activity inference.
 shared = model['shared']
 if name in ('rm', 'chmod', 'herdr'):
@@ -63,6 +92,8 @@ if label in model['states'] and model.get('native_done'):
     if label == model.get('late_label') and gates[label] == model.get('late_at'):
         if model['late_kind'] == 'active':
             model['states'][label].update(state='active' if model['platform'] == 'Linux' else 'loaded', enabled=True)
+        elif model['late_kind'] == 'fifo':
+            os.mkfifo(model['fifo_path'], 0o600)  # an object the real guard refuses, added after native removal
         else:
             model.update(fault='query-fail', fault_label=label, unknown_seen=True)
     store()
@@ -99,11 +130,13 @@ class FullFixture(Fixture):
         assert stat.S_IMODE(src.stat().st_mode) == stat.S_IMODE(dst.stat().st_mode)
         self.release = self.home / 'custom/releases-root'; self.config = self.home / 'custom/config/herdr-mobile-relay'
         self.cache = self.home / 'custom/cache/herdr-mobile-relay'; self.link = self.home / '.local/bin/herdr-mobile-relay'
-        for q in (self.release, self.config, self.cache, self.link.parent): q.mkdir(parents=True, mode=0o700)
+        for q in (self.release, self.config, self.cache, self.link.parent, self.root / 'tmp'): q.mkdir(parents=True, mode=0o700)
         for q in (self.release, self.config, self.cache):
             marker = q / '.herdr-mobile-relay-installation'; marker.write_text('product=herdr-mobile-relay\nroot=' + str(q) + '\n'); marker.chmod(0o600)
         current = self.release / 'current'; current.mkdir(mode=0o700)
-        (current / 'herdr-mobile-relay').write_text('inert binary\n'); (current / 'herdr-mobile-relay').chmod(0o700)
+        if platform == 'Linux' and LINUX_HOST: shutil.copyfile(HELPER, current / 'herdr-mobile-relay')
+        else: (current / 'herdr-mobile-relay').write_text(GUARD_MODEL)
+        (current / 'herdr-mobile-relay').chmod(0o700)
         self.link.symlink_to(current / 'herdr-mobile-relay')
         sealed = self.release / 'releases/sealed/web'; sealed.mkdir(parents=True)
         (sealed / 'index.html').write_text('sealed release\n'); sealed.chmod(0o555); sealed.parent.chmod(0o555)
@@ -111,7 +144,7 @@ class FullFixture(Fixture):
         if mode == 'gateway':
             with self.env_file.open('a') as stream: stream.write('HERDR_GATEWAY_URL=https://gateway.example.test\n')
         self.environment.update(HERDR_RELAY_ENV=str(self.env_file), HERDR_PLUGIN_CONFIG_DIR=str(self.config),
-                                HERDR_RELEASE_ROOT=str(self.release), XDG_CACHE_HOME=str(self.cache.parent))
+                                HERDR_RELEASE_ROOT=str(self.release), XDG_CACHE_HOME=str(self.cache.parent), TMPDIR=str(self.root / 'tmp'))
         self.model['shared'] = dict(release=str(self.release), config=str(self.config), cache=str(self.cache), link=str(self.link))
         for i in present: self.write_definition(i, self.env_file)
         self.save()
@@ -147,6 +180,7 @@ class FullFixture(Fixture):
             assert bystander.poll() is None
             assert all(canary not in output for canary in (b'private-source-canary', b'fixture-saved-canary', b'fixture-ambient-canary', b'fixture-ambient-github-canary'))
             events = self.events(); assert not any(e['op'] == 'forbidden' for e in events), events
+            if self.model['platform'] == 'Darwin': assert not any(e['op'] in ('guard', 'guard-cleanup') for e in events), 'the Linux guard ran on Darwin'
             assert self.protected_before[1] == snapshot(self.source)
             assert not any(e.get('op') in ('restart', 'bootstrap', 'kickstart', 'enable') for e in events)
             return p.returncode, output, events
@@ -168,7 +202,10 @@ class FullFixture(Fixture):
 
 # The fast stat/head/wc stubs delegate to FULL_ADAPTER for every fault; this proves they agree with it.
 fast_stub_equivalence_control(FULL_ADAPTER, FULL_MODEL_SHAPE)
-with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-') as temporary:
+SUB = '__private-uninstall-mount-roots'
+def guard_args(events): return [e['args'] for e in events if e['op'] == 'guard']
+# On Linux the real guard needs the fixture HOME on the root filesystem; RUNNER_TEMP is, whatever /tmp may be mounted as.
+with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-', dir=os.environ.get('RUNNER_TEMP') if LINUX_HOST else None) as temporary:
     parent = Path(temporary).resolve()
     for platform in ('Linux', 'Darwin'):
         # F001: real /bin/bash (stock 3.2 on Darwin), nounset enabled in the
@@ -295,6 +332,8 @@ with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-') as temporary:
         f = FullFixture(parent, platform); other = f.home / 'bystander-cache'; other.mkdir(); (other / 'keep').write_text('keep\n')
         shutil.rmtree(f.cache); f.cache.symlink_to(other); protected_link_target = snapshot(other)
         status, out, events = f.invoke(); assert status == 0 and snapshot(other) == protected_link_target
+        if platform == 'Linux' and not LINUX_HOST:  # all three roots are preflighted (the link by its own location, not traversed); only directories are rechecked
+            assert guard_args(events) == [[SUB, str(f.release), str(f.config), str(f.cache)]] * 2 + [[SUB, str(f.release)], [SUB, str(f.release)], [SUB, str(f.config)]]
         for content in ('HERDR_RELEASE_ROOT=/should-not-be-imported\n', 'HOME=/should-not-be-imported\n', 'GH_TOKEN=$(touch /should-not-execute)\n'):
             f = FullFixture(parent, platform)
             with f.env_file.open('a') as stream: stream.write(content)
@@ -351,5 +390,76 @@ with tempfile.TemporaryDirectory(prefix='herdr-full-uninstall-') as temporary:
         f = FullFixture(parent, platform, mode='tailscale-cli'); f.model['route_status'] = 1; f.save()
         status, out, events = f.invoke(b'y\ny\n', tty=True); assert status == 1; f.retained(out, events)
         assert not any(e['op'] in ('stop', 'disable', 'bootout', 'remove') for e in events)
+    # Linux mount-confinement wiring. On a Linux host the guard is the real compiled relay and a refusal is induced with a real object
+    # (a FIFO); on a macOS host it is the recording MODEL, which also proves the exact order and arguments of every call.
+    def attempts(events): return [e['batch'] for e in events if e['op'] == 'shared-attempt']
+    def no_effects(events): assert not any(e['op'] in ('unpublish', 'native-delegate', 'stop', 'disable', 'remove', 'shared-attempt') for e in events), events
+    f = FullFixture(parent, 'Linux', mode='tailscale-cli'); status, out, events = f.invoke(b'y\ny\n', tty=True); assert status == 0
+    r, c, k = str(f.release), str(f.config), str(f.cache)
+    expected = [('guard', None), ('guard', None), ('unpublish', None), ('native-delegate', None), ('shared-attempt', 'link'), ('guard', None),
+                ('shared-attempt', 'release-mode'), ('guard', None), ('shared-attempt', 'release'), ('guard', None),
+                ('shared-attempt', 'config'), ('guard', None), ('shared-attempt', 'cache'), ('shared-attempt', 'registration')]
+    if LINUX_HOST: expected = [x for x in expected if x[0] != 'guard']; assert not guard_args(events)
+    else:
+        assert guard_args(events) == [[SUB, r, c, k], [SUB, r, c, k], [SUB, r], [SUB, r], [SUB, c], [SUB, k]]
+        # Nothing is staged before the first proof, which runs the installed relay in place; every later call runs the staged copy.
+        assert [(e['from'], e['staged']) for e in events if e['op'] == 'guard'] == [('installed', 0)] + [('staged', 1)] * 5
+    assert [(e['op'], e.get('batch')) for e in events if e['op'] in ('guard', 'unpublish', 'native-delegate', 'shared-attempt')] == expected
+    for shape in (('fifo', 'not-executable') if LINUX_HOST else ('deny', 'fail', 'staged-deny', 'not-executable')):
+        routed = shape in ('deny', 'staged-deny', 'fifo')
+        f = FullFixture(parent, 'Linux', mode='tailscale-cli' if routed else 'cloudflare')
+        if shape == 'not-executable': (f.release / 'current/herdr-mobile-relay').chmod(0o600); f.before = tuple(snapshot(q) for q in f.roots)
+        elif shape == 'fifo': os.mkfifo(f.release / 'refused-fifo', 0o600)
+        else: (f.control / 'guard-verdicts').write_text(('2 deny' if shape == 'staged-deny' else '1 ' + shape) + '\n')
+        status, out, events = f.invoke(b'y\ny\n', tty=routed)
+        (f.release / 'refused-fifo').unlink(missing_ok=True)
+        assert status != 0 and b'mount confinement' in out and b'persists independently' not in out
+        f.retained(out, events); no_effects(events); assert all(q.exists() for q in f.definitions)
+        assert guard_args(events) == ([] if LINUX_HOST or shape == 'not-executable' else [[SUB, str(f.release), str(f.config), str(f.cache)]] * (2 if shape == 'staged-deny' else 1))
+        assert not list((f.root / 'tmp').glob('herdr-uninstall-guard.*')), 'a refusal left a staged guard copy'
+    # The recheck before each destructive step: recheck N follows the (N+1)-th shared quiet gate. The model's guard calls are
+    # 1 = preflight, installed relay in place; 2 = preflight, staged copy; then 3 = before the release chmod, 4 = before rm of releases,
+    # 5 = config, 6 = cache (N = call - 1); nothing at or after the refused step runs.
+    for call, which, done in ((2, 'release', ['link']), (3, 'release', ['link', 'release-mode']),
+                              (4, 'config', ['link', 'release-mode', 'release']), (5, 'cache', ['link', 'release-mode', 'release', 'config'])):
+        f = FullFixture(parent, 'Linux'); root = getattr(f, which)
+        if LINUX_HOST: f.model.update(late_label=f.labels[0], late_at=call + 1, late_kind='fifo', fifo_path=str(root / 'refused-fifo')); f.save()
+        else: (f.control / 'guard-verdicts').write_text('%d deny\n' % (call + 1))
+        status, out, events = f.invoke()
+        (root / 'refused-fifo').unlink(missing_ok=True)
+        assert status != 0 and b'mount confinement' in out and b'has been uninstalled.' not in out
+        assert attempts(events) == done, events
+        if not LINUX_HOST: assert len(guard_args(events)) == call + 1 and guard_args(events)[-1] == [SUB, str(root)]
+        refused = ('release', 'config', 'cache').index(which)
+        for i, name in enumerate(('release', 'config', 'cache')):
+            q = getattr(f, name)
+            if i < refused: assert not q.exists()
+            elif call == 3 and i == refused: assert q.is_dir() and (q / '.herdr-mobile-relay-installation').is_file()  # its directory modes changed
+            else: assert snapshot(q) == f.before[i]
+    f = FullFixture(parent, 'Linux'); shutil.rmtree(f.cache)  # an absent root has nothing to prove
+    status, out, events = f.invoke(); assert status == 0 and b'has been uninstalled.' in out and not f.cache.exists()
+    if not LINUX_HOST: assert guard_args(events) == [[SUB, str(f.release), str(f.config), str(f.cache)]] * 2 + [[SUB, str(f.release)], [SUB, str(f.release)], [SUB, str(f.config)]]
+    # A symlinked releases root is removed as a link only and never traversed, so it cannot supply (or execute) the guard: refuse
+    # with no effects, and never run the outside executable it points at.
+    f = FullFixture(parent, 'Linux'); moved = f.home / 'bystander-release'; f.release.rename(moved)
+    (moved / 'current/herdr-mobile-relay').write_text('#!/bin/sh\n: > "$FIXTURE_ROOT/control/executed"\nexit 0\n')
+    f.release.symlink_to(moved); f.before = tuple(snapshot(q) for q in f.roots); bystander = snapshot(moved)
+    status, out, events = f.invoke()
+    assert status != 0 and b'mount confinement' in out and not (f.control / 'executed').exists()
+    f.retained(out, events); no_effects(events); assert snapshot(moved) == bystander and not guard_args(events) and all(q.exists() for q in f.definitions)
+    # The staged guard copy must survive the deletion of every root: a temp directory inside a selected root is refused before anything is made.
+    # A TMPDIR that is a symlink into a root is followed (physically) and refused the same way.
+    for inside, via_link in (('release', False), ('config', False), ('release', True)):
+        f = FullFixture(parent, 'Linux'); where = getattr(f, inside) / 'tmp-in-root'; where.mkdir(mode=0o700)
+        if via_link: (f.home / 'tmp-link').symlink_to(where)
+        f.environment['TMPDIR'] = str(f.home / 'tmp-link' if via_link else where); f.before = tuple(snapshot(q) for q in f.roots)
+        status, out, events = f.invoke()
+        assert status != 0 and b'mount confinement' in out and not list(where.iterdir())
+        f.retained(out, events); no_effects(events); assert not guard_args(events) and all(q.exists() for q in f.definitions)
+    # A staged copy that cannot be removed is reported and fails an otherwise successful uninstall (the stub refuses that one rm).
+    f = FullFixture(parent, 'Linux'); f.model['cleanup_fail'] = True; f.save()
+    status, out, events = f.invoke(); leaked = list((f.root / 'tmp').glob('herdr-uninstall-guard.*'))
+    assert status != 0 and b'could not be removed' in out and len(leaked) == 1 and any(e['op'] == 'guard-cleanup-refused' for e in events), out
+    shutil.rmtree(leaked[0])
 print('PASS actual full-uninstall fail-closed SOURCE controls (execution requires separate admission)')
 PY

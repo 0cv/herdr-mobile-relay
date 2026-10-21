@@ -1150,6 +1150,18 @@ exit 0
         )
         # Removal authority requires a private, singly linked sentinel.
         (path / ".herdr-mobile-relay-installation").chmod(0o600)
+    # The Linux full uninstall stages the installed relay as its mount guard. This fixture proves route and journal
+    # retention, not confinement, so the installed relay is a MODEL guard that records and allows (the real guard is run by
+    # tests/test_uninstall.sh and tests/test_uninstall_mounts.py).
+    uninstall_guard_record = cli_uninstall_root / "guard-record"
+    (uninstall_release / "current").mkdir(mode=0o700)
+    (uninstall_release / "current" / "herdr-mobile-relay").write_text(
+        "#!/bin/sh\n"
+        "[ \"$1\" = __private-uninstall-mount-roots ] || exit 64\n"
+        "printf '%s\\n' \"$*\" >> \"$UNINSTALL_GUARD_RECORD\"\n",
+        encoding="utf-8",
+    )
+    (uninstall_release / "current" / "herdr-mobile-relay").chmod(0o700)
     uninstall_env = uninstall_config / "relay.env"
     uninstall_env.write_text(
         "HERDR_RELAY_TRANSPORT=tailscale-cli\n"
@@ -1174,6 +1186,7 @@ exit 0
         "XDG_STATE_HOME": str(cli_uninstall_home / ".local" / "state"),
         "HERDR_RELAY_BIN_DIR": str(cli_uninstall_home / ".local" / "bin"),
         "UNINSTALL_SYSTEMCTL_RECORD": str(uninstall_systemctl_record),
+        "UNINSTALL_GUARD_RECORD": str(uninstall_guard_record),
         "PATH": f"{cli_uninstall_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
     })
     for name in ("CLOUDFLARED_BIN", "CLOUDFLARED_CONFIG", "GH_TOKEN", "SUDO_USER"):
@@ -1194,6 +1207,11 @@ exit 0
         not uninstall_coordination.is_dir() or uninstall_release.exists() or uninstall_config.exists() or
         uninstall_cache.exists() or sentinel.exists()):
         raise AssertionError(f"CLI uninstall did not retain only explicit route state: {uninstall_stdout + uninstall_stderr!r}")
+    # The guard ran for all three roots twice (the installed relay in place, then its staged copy), then before each destructive
+    # step: releases (chmod, rm), config, cache.
+    guard_calls = uninstall_guard_record.read_text(encoding="utf-8").splitlines()
+    if len(guard_calls) != 6 or any(call.count(" ") != 3 for call in guard_calls[:2]) or any(call.count(" ") != 1 for call in guard_calls[2:]):
+        raise AssertionError(f"CLI uninstall did not run the mount guard at its seams: {guard_calls!r}")
     print("PASS CLI uninstall fixture: service removed, exact route explicitly retained, registration journal preserved")
 
     # Positive development setup/update uses isolated tool and relay fixtures.

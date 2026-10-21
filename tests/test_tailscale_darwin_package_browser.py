@@ -214,6 +214,10 @@ ALLOWED = (
     ".github/workflows/tailscale-darwin-package-browser.yml",
     "tests/test_tailscale_darwin_package_browser.py",
     "scripts/qualify-darwin-package-browser.py",
+    # Linux full-uninstall mount confinement: the privileged real-mount suite, its driver and its workflow.
+    "tests/test_uninstall_mounts.py",
+    "scripts/ci/run-uninstall-mount-controls.sh",
+    ".github/workflows/uninstall-mount-controls.yml",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")
