@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Start Devin CLI agents from relay-provided launch profiles. Herdr already
+  supports `--kind devin`; the relay now offers a `Devin` profile whenever the
+  `devin` executable is on its `PATH`, and resolves Herdr's `devin-cli` and
+  `devin cli` aliases to it.
+
 ## [0.22.10] - 2026-10-15
 
 ### Added

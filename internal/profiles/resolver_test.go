@@ -21,9 +21,9 @@ func TestDefaultCandidatesFiltered(t *testing.T) {
 	}
 }
 
-func TestDefaultCandidatesIncludePiOhMyPiKimiAndHermes(t *testing.T) {
+func TestDefaultCandidatesIncludePiOhMyPiKimiHermesAndDevin(t *testing.T) {
 	binDir := t.TempDir()
-	for _, name := range []string{"pi", "omp", "kimi", "hermes"} {
+	for _, name := range []string{"pi", "omp", "kimi", "hermes", "devin"} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -36,6 +36,7 @@ func TestDefaultCandidatesIncludePiOhMyPiKimiAndHermes(t *testing.T) {
 		{ID: "omp", Label: "Oh My Pi", Kind: "omp"},
 		{ID: "kimi", Label: "Kimi", Kind: "kimi"},
 		{ID: "hermes", Label: "Hermes", Kind: "hermes"},
+		{ID: "devin", Label: "Devin", Kind: "devin"},
 	} {
 		var got *Profile
 		for index := range profiles {
@@ -50,6 +51,21 @@ func TestDefaultCandidatesIncludePiOhMyPiKimiAndHermes(t *testing.T) {
 		}
 		if got.Label != want.Label || got.Kind != want.Kind || len(got.Argv) != 1 {
 			t.Errorf("profile %q = %+v, want label %q, kind %q, and one executable", want.ID, *got, want.Label, want.Kind)
+		}
+	}
+}
+
+func TestDevinAliasesResolveToProfile(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "devin"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	resolver := NewResolver(t.TempDir(), nil)
+	for _, agent := range []string{"devin", "devin-cli", "devin cli"} {
+		if got := resolver.ProfileIDForAgent(agent); got != "devin" {
+			t.Errorf("ProfileIDForAgent(%q) = %q, want devin", agent, got)
 		}
 	}
 }
