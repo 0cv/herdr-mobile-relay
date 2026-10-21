@@ -113,7 +113,7 @@ export const testOutputTests: Array<[string, () => Promise<void>]> = [
     ]);
     assert.equal(validateUnitTestOutput(fixture.inventory, [responseId], outputFor(fixture.inventory, [responseId]), '').accepted, true);
     const inspection = createUnitTestOutputContract(fixture.inventory, [inspectionId]);
-    assert.equal(inspection.expectedDiagnostics.length, 63);
+    assert.equal(inspection.expectedDiagnostics.length, 65);
     assert.equal(validateUnitTestOutput(fixture.inventory, [inspectionId], outputFor(fixture.inventory, [inspectionId]), '').accepted, true);
     const cleanId = selected(fixture, 'Android fixture without source diagnostics');
     const clean = outputFor(fixture.inventory, [cleanId]);

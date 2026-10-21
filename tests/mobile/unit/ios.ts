@@ -2070,6 +2070,51 @@ test('Cycle4 unnamed system application retains native ownership and overlay obs
   await assert.rejects(() => a.platform.attachToInstalledView(), /IOS_CONTEXT_OWNERSHIP/u);
 });
 
+for (const summaryClick of ['native', 'refused'] as const) {
+  test(`fixture agent inside a collapsed workspace card opens the card before clicking the agent with a ${summaryClick} summary click`, async () => {
+    const summarySelector = 'details.workspace-card:not([open]):has(button.agent-open[aria-label="Open mobile-ci on fixture"]) > summary';
+    const clicked: string[] = [];
+    const a = await adapter(`collapsed-workspace-agent-${summaryClick}`, ({ path, body }) => {
+      if (path.endsWith('/url')) return value(`${origin}/`);
+      if (path.endsWith('/elements') && String(body.value).includes('details.workspace-card')) {
+        return value(clicked.includes('workspace-summary') ? [] : [element('workspace-summary')]);
+      }
+      if (path.endsWith('/element')) return value(element('agent'));
+      if (path.endsWith('/attribute/disabled')) return value(null);
+      if (path.endsWith('/execute/sync')) {
+        assert.equal(summaryClick, 'refused');
+        assert.deepEqual(body.args, [summarySelector]);
+        clicked.push('workspace-summary');
+        return value(null);
+      }
+      const click = /\/element\/([^/]+)\/click$/u.exec(path);
+      if (click?.[1] === 'workspace-summary' && summaryClick === 'refused') {
+        return Response.json({ value: { error: 'element not interactable', message: 'element not interactable' } }, { status: 400 });
+      }
+      if (click) {
+        clicked.push(click[1]!);
+        return value(null);
+      }
+      throw new Error(`unexpected agent request ${path} ${JSON.stringify(body)}`);
+    });
+    (a.platform as any).attachToInstalledView = async () => undefined;
+    const marker = join(a.outputDir, 'ios-ownership');
+    await writeFile(marker, 'ios:protocol-only\n');
+    const previous = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    process.env.MOBILE_DEVICE_OWNERSHIP_FILE = marker;
+    try {
+      await a.platform.openFixtureAgent('fixture');
+    } finally {
+      if (previous === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+      else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previous;
+    }
+    assert.deepEqual(clicked, ['workspace-summary', 'agent']);
+    const lookup = a.requests.find((request) => request.path.endsWith('/elements'));
+    assert.equal(lookup?.body.value, summarySelector);
+    assert.equal(a.requests.some((request) => request.path.endsWith('/execute/sync')), summaryClick === 'refused');
+  });
+}
+
 for (const count of [0, 2]) {
   test(`Cycle4 system application root count ${count} fails before launch without retry`, async () => {
     const a = await lifecycleReplay(`root-count-${count}`);

@@ -63,7 +63,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     'zero-candidate': r => { r.observations[1].document.href = 'https://other.test/'; r.observations[1].document.origin = 'https://other.test'; r.targets[1].url = 'https://other.test/'; },
     'association-final-count': r => { r.processAssociation.after.requestId++; },
   };
-  for (const scenario of [...Object.keys(changes), 'route-error', 'route-timeout', 'overlap', 'fresh-navigation', 'service-worker', 'mutation-postcheck', 'parent-admission', 'identity-document-race', 'completion-document-race', 'preference-native-race', 'agent-native-race', 'composer-native-race', 'completion-parent-admission', 'completion-parent-expiry', 'failure-parent-admission', 'failure-parent-expiry', 'composer-type-native-race', 'candidate-navigation-during-switch', 'confirmation-publication']) {
+  for (const scenario of [...Object.keys(changes), 'route-error', 'route-timeout', 'overlap', 'fresh-navigation', 'service-worker', 'agent-collapsed-workspace', 'mutation-postcheck', 'parent-admission', 'identity-document-race', 'completion-document-race', 'preference-native-race', 'agent-native-race', 'agent-collapsed-native-race', 'composer-native-race', 'completion-parent-admission', 'completion-parent-expiry', 'failure-parent-admission', 'failure-parent-expiry', 'composer-type-native-race', 'candidate-navigation-during-switch', 'confirmation-publication']) {
     const admissionScenario = ['zero-candidate', 'candidate-navigation-during-switch', 'confirmation-publication'].includes(scenario);
     let armed = admissionScenario;
     let calls = 0;
@@ -73,6 +73,8 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     let readCalls = 0;
     let productCalls = 0;
     let confirmationObserved = false;
+    const clicked: string[] = [];
+    const workspaceLookups: string[] = [];
     let elapsed = 0;
     const clock = Date.now;
     Date.now = () => clock() + elapsed;
@@ -106,8 +108,15 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
       }
       if (path === '/url' && init?.method === 'GET') { productCalls++; return response(href); }
       if (path === '/url' && init?.method === 'POST') { href = body.url; timeOrigin++; mutations++; return response(null); }
+      if (path.endsWith('/click')) clicked.push(path.split('/')[2]!);
       if (path.endsWith('/click') || path.endsWith('/value')) { productCalls++; mutations++; return response(null); }
       if (path === '/element') { productCalls++; return response({ 'element-6066-11e4-a52e-4f735466cecf': 'settings' }); }
+      if (path === '/elements' && String(body.value).includes('details.workspace-card')) {
+        productCalls++;
+        workspaceLookups.push(String(body.value));
+        const collapsed = ['agent-collapsed-workspace', 'agent-collapsed-native-race'].includes(scenario) && !clicked.includes('workspace-summary');
+        return response(collapsed ? [{ 'element-6066-11e4-a52e-4f735466cecf': 'workspace-summary' }] : []);
+      }
       if (path === '/elements') { productCalls++; return response([{ 'element-6066-11e4-a52e-4f735466cecf': 'settings' }]); }
       if (path.endsWith('/rect')) { productCalls++; return response({ x: 0, y: 0, width: 100, height: 100 }); }
       if (path === '/execute/sync') {
@@ -128,7 +137,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
         }
         result.targets[1].url = href;
         if (scenario === 'service-worker') result.targets.push({ targetId: 'service-worker', type: 'service_worker', title: '', url: 'https://fixture.test/sw.js' });
-        if (['mutation-postcheck', 'preference-native-race', 'agent-native-race', 'composer-native-race'].includes(scenario) && mutations) result.after.native.activity = 'com.google.android.apps.chrome.Main';
+        if (['mutation-postcheck', 'preference-native-race', 'agent-native-race', 'agent-collapsed-native-race', 'composer-native-race'].includes(scenario) && mutations) result.after.native.activity = 'com.google.android.apps.chrome.Main';
         if (scenario === 'composer-type-native-race' && mutations === 2) result.after.native.activity = 'com.google.android.apps.chrome.Main';
         if (armed && changes[scenario]) changes[scenario](result);
         if (armed && scenario === 'route-error') return Response.json({ value: { error: 'unknown error', message: 'secret endpoint must not be projected' } }, { status: 500 });
@@ -147,6 +156,12 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
     const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://inspection.invalid', outputDir: '/tmp', certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget });
     Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
       retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([bootstrap, installed], bootstrap, installed, startedAt).original } });
+    const mutatedClicks: string[] = [];
+    const mutateInstalledDocument = (platform as any).mutateInstalledDocument.bind(platform);
+    (platform as any).mutateInstalledDocument = (operation: () => Promise<unknown>, deadline: number) => mutateInstalledDocument(async () => {
+      const before = clicked.length;
+      try { await operation(); } finally { mutatedClicks.push(...clicked.slice(before)); }
+    }, deadline);
     if (admissionScenario && scenario !== 'confirmation-publication') {
       let first: unknown;
       await assert.rejects(() => platform.attachToInstalledView(), error => { first = error; return true; });
@@ -174,7 +189,24 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
       continue;
     }
     armed = true;
-    if (scenario === 'fresh-navigation' || scenario === 'service-worker') {
+    if (scenario === 'agent-collapsed-workspace') {
+      const fixture = await mkdtemp(join(tmpdir(), 'herdr-adapter-qualification.'));
+      const previousMarker = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+      process.env.MOBILE_DEVICE_OWNERSHIP_FILE = `${fixture}/owned`;
+      await writeFile(process.env.MOBILE_DEVICE_OWNERSHIP_FILE, 'android:emulator-5554');
+      try {
+        await platform.openFixtureAgent('fixture');
+      } finally {
+        if (previousMarker === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+        else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousMarker;
+        await rm(fixture, {recursive: true, force: true});
+      }
+      assert.deepEqual(clicked, ['workspace-summary', 'settings']);
+      assert.deepEqual(mutatedClicks, ['workspace-summary', 'settings']);
+      assert.deepEqual(workspaceLookups, Array(2).fill('details.workspace-card:not([open]):has(button.agent-open[aria-label="Open mobile-ci on fixture"]) > summary'));
+      assert.equal(mutations, 2);
+      assert.deepEqual(switches, [installed]);
+    } else if (scenario === 'fresh-navigation' || scenario === 'service-worker') {
       await platform.readRunningIdentity();
       await platform.clickWebText('Settings');
       await platform.openSetupURLInInstalledApp('https://fixture.test/pair#invitation');
@@ -197,7 +229,7 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
             if (scenario === 'identity-document-race') return platform.readRunningIdentity();
             if (scenario === 'completion-document-race') return platform.readUpdateCompletion();
             if (scenario === 'preference-native-race') return platform.preferenceValue();
-            if (scenario === 'agent-native-race') return platform.openFixtureAgent('fixture');
+            if (scenario === 'agent-native-race' || scenario === 'agent-collapsed-native-race') return platform.openFixtureAgent('fixture');
             if (scenario === 'composer-native-race' || scenario === 'composer-type-native-race') return platform.showKeyboardOnComposer();
             if (scenario.startsWith('failure-parent-')) {
               const fetch = globalThis.fetch;
@@ -220,7 +252,12 @@ export async function runAndroidRetainedInspectionRegressions(): Promise<void> {
           if (scenario === 'failure-parent-expiry') assert.equal(readCalls, 2);
           if (scenario === 'composer-type-native-race') assert.equal(mutations, 2);
           if (scenario === 'completion-parent-expiry') assert.equal(readCalls, 1);
-          if (['mutation-postcheck', 'identity-document-race', 'completion-document-race', 'preference-native-race', 'agent-native-race', 'composer-native-race'].includes(scenario)) assert.equal(mutations, 1);
+          if (['mutation-postcheck', 'identity-document-race', 'completion-document-race', 'preference-native-race', 'agent-native-race', 'agent-collapsed-native-race', 'composer-native-race'].includes(scenario)) assert.equal(mutations, 1);
+          if (scenario === 'agent-collapsed-native-race') {
+            assert.match(String(first), /ANDROID_CONTEXT_OWNERSHIP/u);
+            assert.deepEqual(clicked, ['workspace-summary']);
+            assert.deepEqual(mutatedClicks, ['workspace-summary']);
+          }
         } finally {
           if (previousMarker === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
           else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousMarker;

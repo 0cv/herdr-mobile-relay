@@ -949,11 +949,19 @@ export class AndroidPlatform implements MobilePlatform {
     });
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
     const deadline = Date.now() + 30_000;
+    const agentSelector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
     let lastError = '';
     while (Date.now() < deadline) {
       try {
         await this.attachToInstalledView(deadline - Date.now());
-        const agent = await this.driver.find(css(`button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`), 2_000);
+        // Several idle workspaces start as collapsed cards whose agent buttons cannot be clicked until opened.
+        const collapsedCard = (await this.driver.findAll(css(`details.workspace-card:not([open]):has(${agentSelector}) > summary`), 2_000))[0];
+        if (collapsedCard) {
+          await this.mutateInstalledDocument(() => this.driver.click(collapsedCard, 2_000), deadline);
+          lastError = `agent ${relayName} was inside a collapsed workspace card`;
+          continue;
+        }
+        const agent = await this.driver.find(css(agentSelector), 2_000);
         // The card remains in the DOM while the relay's inventory reconnects,
         // but its button is disabled until that inventory is ready.
         if ((await this.driver.attribute(agent, 'disabled', 2_000)) !== null) {

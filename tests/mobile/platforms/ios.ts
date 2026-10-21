@@ -1231,11 +1231,27 @@ export class IOSPlatform implements MobilePlatform {
     });
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
     const deadline = Date.now() + 30_000;
+    const selector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
     let lastError = '';
     while (Date.now() < deadline) {
       try {
         await this.attachToInstalledView();
-        const agent = await this.driver.find(css(`button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`), 2_000);
+        // Several idle workspaces start as collapsed cards whose agent buttons cannot be clicked until opened.
+        const summarySelector = `details.workspace-card:not([open]):has(${selector}) > summary`;
+        const collapsedCard = (await this.driver.findAll(css(summarySelector), 2_000))[0];
+        if (collapsedCard) {
+          try {
+            await this.driver.click(collapsedCard);
+          } catch (error) {
+            if (isFatalDriverError(error)) throw error;
+            // After a standalone relaunch the web view can refuse native clicks just like the agent button below.
+            await this.driver.execute('document.querySelector(arguments[0])?.click();', [summarySelector]);
+          }
+          lastError = `agent ${relayName} was inside a collapsed workspace card`;
+          await delay(250);
+          continue;
+        }
+        const agent = await this.driver.find(css(selector), 2_000);
         // The card remains in the DOM while the relay's inventory reconnects,
         // but its button is disabled until that inventory is ready.
         if ((await this.driver.attribute(agent, 'disabled')) !== null) {
@@ -1249,7 +1265,6 @@ export class IOSPlatform implements MobilePlatform {
             // interactable after a standalone relaunch. Dispatch the same DOM
             // click only after confirming that the matching enabled button is
             // visible.
-            const selector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
             const result = await this.driver.execute<{ clicked: boolean; reason?: string }>(
               `return (() => {
                 const buttons = [...document.querySelectorAll(arguments[0])];

@@ -80,9 +80,9 @@ const INSPECTION_CHANGE_SCENARIOS = [
   'endpoint-drift', 'forward-drift', 'document-scope', 'zero-candidate', 'association-final-count',
 ];
 const INSPECTION_EXTRA_SCENARIOS = [
-  'route-error', 'route-timeout', 'overlap', 'fresh-navigation', 'service-worker', 'mutation-postcheck',
+  'route-error', 'route-timeout', 'overlap', 'fresh-navigation', 'service-worker', 'agent-collapsed-workspace', 'mutation-postcheck',
   'parent-admission', 'identity-document-race', 'completion-document-race', 'preference-native-race',
-  'agent-native-race', 'composer-native-race', 'completion-parent-admission', 'completion-parent-expiry',
+  'agent-native-race', 'agent-collapsed-native-race', 'composer-native-race', 'completion-parent-admission', 'completion-parent-expiry',
   'failure-parent-admission', 'failure-parent-expiry', 'composer-type-native-race', 'candidate-navigation-during-switch',
   'confirmation-publication',
 ];

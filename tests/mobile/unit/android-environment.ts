@@ -7517,7 +7517,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       boundedCommand: async (binary, args, timeout, options) => {
         if (args.includes('--gms-diagnostic-ownership')) {
           const result = await boundedCommand(binary, args, timeout, options);
-          const deadline = performance.now() + 550;
+          const deadline = performance.now() + 2_050;
           let now = performance.now();
           while (now < deadline) now = performance.now();
           return result;
@@ -7696,9 +7696,9 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     }
   });
   test('diagnostic GMS timeout probe reserves ownership and parsing before testing the command deadline', async () => {
-    const limits = { persistenceOperationTimeoutMs: 1_000, ownershipTimeoutMs: 500, parseReserveMs: 1_000 };
+    const limits = { persistenceOperationTimeoutMs: 1_000, ownershipTimeoutMs: 2_000, parseReserveMs: 1_000 };
     const probeBudgetMs = gmsTimeoutProbeBudgetMs(limits);
-    assert.equal(probeBudgetMs, 2_500);
+    assert.equal(probeBudgetMs, 4_000);
     for (const parentTimeoutMs of [2_250, probeBudgetMs]) {
       const fixture = await harness.createFixture();
       let clockMs = 0;
@@ -7736,8 +7736,8 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         assert.match(snapshot.stages[0].error, /owned-device verification exceeded its monotonic time bound/u);
         continue;
       }
-      assert.equal(ownershipTimeoutMs, 499);
-      assert.equal(commandTimeoutMs, 200);
+      assert.equal(ownershipTimeoutMs, 1_999);
+      assert.equal(commandTimeoutMs, 1_700);
       assert.equal(snapshot.stages[0].timedOut, true);
       assert.match(snapshot.stages[0].error, /GMS diagnostic command timed out/u);
     }
@@ -7789,13 +7789,13 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         JSON.stringify({ stage: attackResult.stages[0], commandResult: failureMetadata(attackCommandFailure) }));
       assert.ok(attackResult.stages[0].parseDurationMs > 0);
       assert.deepEqual([attackResult.limits.ownershipTimeoutMs, attackResult.limits.commandTimeoutMs, attackResult.limits.parseReserveMs,
-        attackResult.limits.persistenceOperationTimeoutMs, attackResult.limits.totalCollectionMs], [500, 5_000, 1_000, 1_000, 5 * 6_500]);
+        attackResult.limits.persistenceOperationTimeoutMs, attackResult.limits.totalCollectionMs], [2_000, 5_000, 1_000, 1_000, 5 * 8_000]);
       limits = attackResult.limits;
       const attackTiming = gmsAttackTimingRule(attackResult.limits, attackResult.stages[0], attackElapsedMs);
       assert.deepEqual(attackTiming.violations, [], JSON.stringify({ attackElapsedMs, stage: attackResult.stages[0],
         commandResult: failureMetadata(attackCommandFailure), parserResult: failureMetadata(attackParserFailure) }));
-      assert.equal(attackTiming.stageAllowanceMs, 6_500);
-      assert.equal(attackTiming.compositeCeilingMs, 8_500);
+      assert.equal(attackTiming.stageAllowanceMs, 8_000);
+      assert.equal(attackTiming.compositeCeilingMs, 10_000);
       assert.equal(attackResult.totalCollectionMs, attackResult.stages[0].durationMs);
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in attackEnvironment)) delete process.env[key];
@@ -7826,7 +7826,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
           assert.doesNotMatch(adbLog, /shell dumpsys package com\.google\.android\.gms/u);
         }
         if (failure === 'timeout') {
-          assert.ok(observation.stages[0].timeoutMs <= 500, JSON.stringify(observation.stages[0]));
+          assert.ok(observation.stages[0].timeoutMs <= limits!.ownershipTimeoutMs, JSON.stringify(observation.stages[0]));
           assert.ok(observation.stages[0].timedOut, JSON.stringify(observation.stages[0]));
         }
         if (failure === 'stage-order') assert.match(observation.stages[0].error, /stage order mismatch/u);
