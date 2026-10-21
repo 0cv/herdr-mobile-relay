@@ -37,6 +37,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
+	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
@@ -201,6 +202,210 @@ func TestValidateExactPaneTargetAllowsStaleOwnerCleanup(t *testing.T) {
 	}, true); err == nil {
 		t.Fatal("cleanup accepted a different pane")
 	}
+}
+
+// changingLookups stands in for Herdr: like the socket client it honours the
+// dispatch check before each lookup, then lets a test change the target.
+type changingLookups struct {
+	*paneSizeFakes
+	after func()
+}
+
+func (c changingLookups) PaneGet(ctx context.Context, paneID string) (pane *herdr.Pane, err error) {
+	if err = herdr.CheckDispatch(ctx); err == nil {
+		pane, err = c.paneSizeFakes.PaneGet(ctx, paneID)
+		c.after()
+	}
+	return pane, err
+}
+
+func (c changingLookups) PaneProcessInfoFresh(ctx context.Context, paneID string) (info *herdr.PaneProcessInfo, err error) {
+	if err = herdr.CheckDispatch(ctx); err == nil {
+		info, err = c.paneSizeFakes.PaneProcessInfoFresh(ctx, paneID)
+		c.after()
+	}
+	return info, err
+}
+
+// paneSizeClient connects one hub client whose pane-size requests run through
+// handlePaneSizeCommand, or through runPaneSizeCommand when authorize is set,
+// which lets a test choose who the device is. send returns the next reply.
+func paneSizeClient(t *testing.T, s *Server, authorize func(protocol.Inbound) *protocol.ApiError) (clientID func() string, send func(string) map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	frames := &leaseTestFrames{name: transport.TransportGateway, in: make(chan []byte, 1), out: make(chan []byte, 4), done: make(chan struct{})}
+	owner := ""
+	s.hub.SetOnConnect(func(*transport.ClientConn) {})
+	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
+		defer admitted()
+		inbound, _ := protocol.DecodeMap(msg)
+		owner = client.ID()
+		if authorize == nil {
+			s.handlePaneSizeCommand(client, inbound)
+			return
+		}
+		s.runPaneSizeCommand(client, inbound, func() *protocol.ApiError { return authorize(inbound) })
+	})
+	served := make(chan struct{})
+	go func() { s.hub.Serve(ctx, frames); close(served) }()
+	t.Cleanup(func() { frames.CloseNow(); <-served; cancel() })
+	return func() string { return owner }, func(request string) map[string]any {
+		t.Helper()
+		frames.in <- []byte(request)
+		select {
+		case data := <-frames.out:
+			var reply map[string]any
+			_ = json.Unmarshal(data, &reply)
+			return reply
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+			return nil
+		}
+	}
+}
+
+// paneSizeRequest is a pane-size request for pane-1 carrying the exact target
+// the server currently holds.
+func paneSizeRequest(s *Server, operation string, columns int) string {
+	current, _ := s.state.Agent("pane-1")
+	return fmt.Sprintf(`{"type":%q,"request_id":"r1","protocol":%d,"pane_id":"pane-1","columns":%d,"opt_in":true,"immediate":true,`+
+		`"target":{"server_session_id":"primary","pane_id":"pane-1","terminal_id":"terminal-1","generation":%d,"agent_session_id":"agent-session-1"}}`,
+		operation, protocol.Version, columns, current.Generation)
+}
+
+func commitPaneSizeAgent(s *Server, session string) {
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", ServerSessionID: "primary", TerminalID: "terminal-1", SessionID: session,
+	}}, s.state.RevisionCounter())
+}
+
+// A pane replaced while an admitted lease looks its terminal up, or right after
+// the last lookup, must neither write the terminal nor keep a lease.
+func TestPaneSizeLeaseRechecksTheTargetUntilTheTerminalWrite(t *testing.T) {
+	for name, changeAfter := range map[string]int{"during the lookups": 2, "after the last lookup": 4} {
+		t.Run(name, func(t *testing.T) {
+			s := testServer()
+			commitPaneSizeAgent(s, "agent-session-1")
+			fakes := newPaneSizeFakes(s)
+			lookups := 0
+			s.paneSizeM = panesize.NewManagerWith(changingLookups{fakes, func() {
+				if lookups++; lookups == changeAfter {
+					commitPaneSizeAgent(s, "agent-session-2")
+				}
+			}}, fakes, fakes, time.Now, nil)
+			owner, send := paneSizeClient(t, s, nil)
+			result := send(paneSizeRequest(s, "lease_pane_size", 80))
+			if result["ok"] != false || result["phase"] != "failed" {
+				t.Fatalf("a lease for a replaced target succeeded: %v", result)
+			}
+			if _, size, writes := fakes.snapshot(); size.Columns != 120 || size.Rows != 40 || writes != 0 {
+				t.Fatalf("a stale lease resized the terminal: size=%+v writes=%d", size, writes)
+			}
+			if _, _, held := s.paneSizeM.ReadGeometry(owner(), "pane-1"); held {
+				t.Fatal("a stale lease was kept")
+			}
+		})
+	}
+}
+
+// A lease outlives its request, and revoke_device cuts the connection 250 ms
+// after it answers. Pane-size requests therefore pass the ordinary device
+// authorization at admission, before every Herdr dispatch they make, and after
+// Acquire: a reader or a revoked credential acquires and holds no lease.
+func TestPaneSizeCommandsEnforceLiveDeviceAuthorization(t *testing.T) {
+	// revokeAfter revokes the controller once that many Herdr lookups ran (0: never).
+	setup := func(t *testing.T, revokeAfter int) (s *Server, fakes *paneSizeFakes, controller, reader transport.AuthenticatedIdentity, revoke func()) {
+		t.Helper()
+		s = testServer()
+		commitPaneSizeAgent(s, "agent-session-1")
+		store, err := deviceauth.Open(filepath.Join(t.TempDir(), "store"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.attachDeviceStore(store); err != nil {
+			t.Fatal(err)
+		}
+		controller = enrollInstalledFixture(t, store, deviceauth.RoleController).Identity
+		enrollInstalledFixture(t, store, deviceauth.RoleController) // the relay keeps a controller
+		reader = enrollInstalledFixture(t, store, deviceauth.RoleReader).Identity
+		revoke = func() {
+			if _, err := store.RevokeCredential(controller.CredentialID); err != nil {
+				t.Error(err)
+			}
+		}
+		fakes = newPaneSizeFakes(s)
+		lookups := 0
+		s.paneSizeM = panesize.NewManagerWith(changingLookups{fakes, func() {
+			if lookups++; lookups == revokeAfter {
+				revoke()
+			}
+		}}, fakes, fakes, time.Now, nil)
+		return s, fakes, controller, reader, revoke
+	}
+	asDevice := func(s *Server, identity transport.AuthenticatedIdentity) func(protocol.Inbound) *protocol.ApiError {
+		return func(inbound protocol.Inbound) *protocol.ApiError {
+			action, _ := protocol.ClassifyAction(inbound.Type)
+			return s.authorizeDeviceIdentity(identity, true, action, inbound.DeviceID)
+		}
+	}
+	denied := func(t *testing.T, reply map[string]any) {
+		t.Helper()
+		body, _ := reply["error"].(map[string]any)
+		if reply["type"] != "error" || body["code"] != protocol.ErrorReaderDenied {
+			t.Fatalf("an unauthorized device was not refused: %v", reply)
+		}
+	}
+
+	for _, who := range []string{"reader", "revoked controller"} {
+		for _, operation := range []string{"lease_pane_size", "release_pane_size"} {
+			t.Run(who+" "+operation+" at admission", func(t *testing.T) {
+				s, fakes, controller, reader, revoke := setup(t, 0)
+				identity := reader
+				if who == "revoked controller" {
+					revoke()
+					identity = controller
+				}
+				owner, send := paneSizeClient(t, s, asDevice(s, identity))
+				denied(t, send(paneSizeRequest(s, operation, 80)))
+				if lookups, size, writes := fakes.snapshot(); lookups != 0 || writes != 0 || size.Columns != 120 {
+					t.Fatalf("an unauthorized request reached the backend: lookups=%d writes=%d size=%+v", lookups, writes, size)
+				}
+				if _, _, held := s.paneSizeM.ReadGeometry(owner(), "pane-1"); held {
+					t.Fatal("an unauthorized device holds a lease")
+				}
+			})
+		}
+	}
+	for name, test := range map[string]struct{ revokeAfter, columns int }{
+		"during the lookups":                   {2, 80},
+		"after the last lookup":                {4, 80},
+		"after the last lookup, no resize due": {4, 120},
+	} {
+		t.Run("revoked "+name, func(t *testing.T) {
+			s, fakes, controller, _, _ := setup(t, test.revokeAfter)
+			owner, send := paneSizeClient(t, s, asDevice(s, controller))
+			denied(t, send(paneSizeRequest(s, "lease_pane_size", test.columns)))
+			if _, size, writes := fakes.snapshot(); writes != 0 || size.Columns != 120 || size.Rows != 40 {
+				t.Fatalf("a revoked device resized the terminal: size=%+v writes=%d", size, writes)
+			}
+			if _, _, held := s.paneSizeM.ReadGeometry(owner(), "pane-1"); held {
+				t.Fatal("a revoked device kept a lease")
+			}
+		})
+	}
+	t.Run("revoked while its release restores the pane", func(t *testing.T) {
+		s, fakes, controller, _, _ := setup(t, 5) // the first lookup of the restore
+		_, send := paneSizeClient(t, s, asDevice(s, controller))
+		if reply := send(paneSizeRequest(s, "lease_pane_size", 80)); reply["ok"] != true {
+			t.Fatalf("lease: %v", reply)
+		}
+		send(paneSizeRequest(s, "release_pane_size", 0))
+		// The restore's second lookup was refused; the relay's own cleanup
+		// finishes it, not a request from the revoked device.
+		if lookups, size, writes := fakes.snapshot(); lookups != 5 || writes != 1 || size.Columns != 80 {
+			t.Fatalf("a revoked device's release dispatched on: lookups=%d writes=%d size=%+v", lookups, writes, size)
+		}
+	})
 }
 
 // The agents broadcast deep-copies snapshots through JSON before projecting
@@ -2049,7 +2254,7 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
+func TestPreparePaneResponsePreservesHistoryForViewportOnlyRead(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",

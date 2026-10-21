@@ -79,9 +79,9 @@ freshness check. This is not physical-phone performance qualification.
   Speak button.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
-| Agents | Native Resize |
-| --- | --- |
-| <img src="../images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="../images/native_mobile_resolution.jpeg" alt="OMP terminal rendered at native mobile width" width="392"> |
+| Agents |
+| --- |
+| <img src="../images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> |
 
 | Plan Questions | Notifications |
 | --- | --- |
@@ -262,33 +262,56 @@ controls to resize it without changing the rest of the app.
 
 ## Mobile terminal
 
-Controller terminals use **Resize Session** whenever the relay advertises size
-leases. While a terminal is open and the app is visible, the relay leases the
-live PTY at the measured phone width. Reader terminals never change the shared
-PTY; they wrap desktop-width rows to the phone viewport instead. Closing a
-controller terminal restores the previous width about ten seconds later, so
-stepping back into the same agent resumes instantly instead of resizing the
-pane twice. A hidden controller page keeps renewing its lease for five minutes
-— desktop Safari reports an occluded window as hidden, so brief switches to
-another app must not resize the shared pane — after which the desktop size
-returns within about two minutes. A sleeping phone freezes sooner than that, a
-disconnecting phone and relay shutdown restore the size immediately, and
-returning to the terminal takes the phone size again.
+By default the phone shows each pane at the size Herdr gives it. Controller
+terminals keep the desktop width, with column alignment preserved, and scroll
+horizontally. Read-only reader panes wrap desktop-width text to the phone width
+instead. Prompts, keys, approvals, uploads, terminal reading, and Conversation
+work the same in both layouts.
 
-**Lease Terminal Height** (Settings → Terminal, off by default) additionally
-leases the phone's measured height, so full-screen agents redraw to fit the
-phone instead of serving a mostly empty desktop-sized grid. The shared pane
-physically shrinks to phone size on the computer, and each height change can
-strand a stale copy of an inline agent's status bar (omp, Claude Code) in the
-scrollback: the terminal reflows its primary buffer before the agent can
-repaint, and scrollback cannot be erased afterwards. Leave it off unless you
-mostly drive full-screen TUIs from the phone. While the height is leased, the
-on-screen keyboard never shrinks it — the lease keeps the resting height and
-re-measures when the keyboard closes.
+**Resize Session** (Settings → Terminal, off by default, saved per device) lets
+a controller phone resize the shared terminal to fit itself while it has the
+pane open. Turn it on only if you accept what that costs:
 
-Herdr 0.9.0's independent client views do not replace this option: the relay
-still reads pane snapshots and resizes the shared PTY, rather than attaching as
-a native Herdr terminal client. Clients sharing a tab still share its size.
+- **The laptop and SSH views of that pane look garbled until the phone lets
+  go.** Herdr has no way to resize a pane for one viewer, so the relay resizes
+  the pane's terminal device directly while Herdr's own grid stays at the
+  layout size ([issue 60](https://github.com/0cv/herdr-mobile-relay/issues/60)).
+- Agents redraw at the new size and may leave narrow copies of their output in
+  the scrollback, which cannot be erased afterwards. Resizing may also truncate
+  scrollback and lose older output.
+- The relay attempts to restore the previous size when the phone leaves the
+  pane: about ten seconds after closing the terminal (so stepping straight
+  back in does not resize twice), immediately when you turn Resize Session
+  off or the phone disconnects, and within two minutes if the phone just goes
+  silent. Dimensions that differ from the last leased value are left alone;
+  preserving local changes is best effort, not a guarantee. If the
+  relay cannot confirm the pane is still the terminal it resized, it writes
+  nothing; after about thirty seconds of failed attempts it logs a warning,
+  and a normal local resize puts the pane right.
+- It is available only on relays that advertise it (Linux and macOS relays
+  from this release on). Elsewhere the switch has no effect and the terminal
+  keeps the default layout; no error is shown.
+
+While the app is hidden or locked the phone gives its lease back and does not
+renew it. The relay keeps the size for its ten-second grace, so a brief app
+switch does not resize the pane twice, and the phone leases again once fresh
+inventory is confirmed on return. Several phones on one pane get the narrowest
+requested size. Readers never resize anything.
+
+**Lease Terminal Height** (off by default, available only with Resize Session
+on and a relay that supports it) also fits the height, so full-screen agents
+redraw to the phone instead of serving a mostly empty desktop-sized grid. Each
+height change can strand a stale copy of an inline agent's status bar (omp,
+Claude Code) in the scrollback. While the height is leased, the on-screen
+keyboard never shrinks it. Turning Resize Session off disables height leasing
+without clearing its saved preference: a checked but disabled height switch
+is inactive and is reused when Resize Session is enabled again.
+
+Older apps (0.22.7 and earlier) resized automatically whenever a relay offered
+it. This relay no longer offers that, and refuses any resize request that does
+not carry the new opt-in, so an older app keeps the default layout. Design,
+safety checks and residual risks are in
+[pane-size-leasing.md](pane-size-leasing.md).
 
 Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
 1,000 is the default and the ceiling on the gateway-relayed path; direct

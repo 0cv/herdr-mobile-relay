@@ -37,7 +37,7 @@
     speechState,
     stopSpeech,
   } from '$lib/speech';
-  import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
+  import { interfaceSize, terminalHeightLease, terminalResizeSession, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
@@ -244,8 +244,13 @@
   const inspectionMode = $derived(agentNeedsInspection(agent));
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(!readOnly && responsePending && attentionKind(agent) === 'question' && interaction));
+  // Resize Session needs three things: this device opted in, it controls the
+  // relay, and the relay advertises the opt-in capability. The legacy
+  // pane_size_lease name is ignored: a relay offering only that resizes on any
+  // lease, with no opt-in check.
   const resizeSessionActive = $derived(
-    Boolean(!readOnly && $connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
+    Boolean($terminalResizeSession
+      && !readOnly && $connections.get(agent.relay_id)?.capabilities.includes('pane_size_opt_in')),
   );
   // The capability only says the relay can lease; it does not mean this pane
   // has a width yet. The wrapping layout is engaged solely when it does.
@@ -509,7 +514,14 @@
     const interfaceSizeValue = $interfaceSize;
     const paneId = agent.pane_id;
     void interfaceSizeValue;
-    if (readOnly) {
+    if (!$terminalResizeSession) {
+      // Turned off: the store has already released every pane this phone
+      // leased, immediately. Only the local lease state is left to drop.
+      discardPaneSizeLease();
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (!resizeSessionActive || readOnly) {
       releasePaneSizeLease(componentMounted);
       paneSizeLeaseError = '';
       return;
@@ -522,11 +534,6 @@
     if (connection?.status !== 'connected') {
       discardPaneSizeLease();
       paneSizeLeaseError = '';
-      return;
-    }
-    if (!connection.capabilities.includes('pane_size_lease')) {
-      discardPaneSizeLease();
-      paneSizeLeaseError = 'Resize Session is unavailable on this relay.';
       return;
     }
     if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
@@ -1715,13 +1722,14 @@
   function paneSizeLeaseSupported(target: Agent | null): boolean {
     if (!componentMounted || !target || readOnly || questionMode) return false;
     const connection = $connections.get(target.relay_id);
-    return connection?.status === 'connected'
-      && connection.capabilities.includes('pane_size_lease');
+    return resizeSessionActive
+      && connection?.status === 'connected'
+      && connection.capabilities.includes('pane_size_opt_in');
   }
 
   function paneSizeRowLeaseSupported(target: Agent): boolean {
     return $terminalHeightLease && Boolean(
-      $connections.get(target.relay_id)?.capabilities.includes('pane_size_lease_rows'),
+      $connections.get(target.relay_id)?.capabilities.includes('pane_size_opt_in_rows'),
     );
   }
 
@@ -1788,6 +1796,7 @@
     leaseTarget = null;
     lastLeasedColumns = 0;
     lastLeasedRows = 0;
+    renderedResizeColumns = 0;
     clearResizeSettling();
     queuedLease = null;
   }

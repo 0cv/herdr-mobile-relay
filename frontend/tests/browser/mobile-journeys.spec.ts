@@ -440,7 +440,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         else if (message.type === 'lease_pane_size') {
           data = typeof message.rows === 'number'
             ? { columns: message.columns, rows: message.rows }
-            : { columns: message.columns };
+            : { columns: message.columns, rows: 46 };
         }
         else if (message.type === 'agent_clear') data = {
           pane_id: 'w1:pre-clear', name: 'clear-codex-123', cwd: '/home/test/Development/relay',
@@ -2412,7 +2412,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+    capabilities: ['attention_classification', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -2436,8 +2436,8 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await expect(page.getByRole('log')).toBeHidden();
   await expect(page.getByRole('img', { name: 'Agent working' })).toBeHidden();
 
-  // A half-open socket answers nothing — not even the refocus width lease.
-  // Neither command acks nor a correlated poll may provide live traffic.
+  // A half-open socket answers nothing, including refocus reads. Neither
+  // command acks nor a correlated poll may provide live traffic.
   await setAutoCommands(page, false);
   await page.evaluate(() => (window as any).__relayAutoInventory(false));
   await page.evaluate(() => {
@@ -2448,7 +2448,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await setAutoCommands(page, true);
   await page.evaluate(() => (window as any).__relayAutoInventory(true));
   await handshake(page, 1, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+    capabilities: ['attention_classification', 'slash_commands'],
   });
   await server(page, 1, {
     type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
@@ -2456,7 +2456,6 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await expect.poll(async () =>
     (await commandsForSocket(page, 1)).some((command) => command.type === 'read_pane')).toBe(true);
   await expect(terminal.locator('.term-screen')).toHaveJSProperty('innerHTML', cachedScreen);
-  await expect(terminal).not.toContainText('Resizing terminal…');
   await server(page, 1, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
     content: 'fresh output after resume', content_fingerprint: 'resume-cache-2',
@@ -2525,41 +2524,88 @@ test('keeps Claude desktop prompt and status in the shared terminal output', asy
   await expect(terminal).toContainText('manual mode');
 });
 
-test('uses Resize Session as the only terminal layout', async ({ page }) => {
+test('keeps wide controller panes aligned and horizontally scrollable', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize-only app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Resize-only app on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'terminal history before resize',
-  });
-
-  await expect(page.getByRole('navigation', { name: 'Application' })
-    .getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBeNull();
-});
-
-test('keeps a wide pane readable while its size lease is still pending', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+    capabilities: ['attention_classification', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'claude' }],
   });
-  // The relay advertises the lease capability unconditionally, so the pane is
-  // shown before any width is granted. Leaving the lease unanswered pins that
-  // state: wrapping then had no cap and broke every row mid-word.
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
+  const wideRow = `${'the pane is far wider than the phone viewport '.repeat(3)}and keeps going`;
+  // A box border padded out to the pane's width. Preserved spaces may hang
+  // past the edge instead of wrapping, which WebKit reports as scrollable
+  // width, handing the reader a pane that pans sideways.
+  const paddedRow = `╰─${' '.repeat(150)}─╯`;
+  // Box-drawing rows must retain their desktop-width column alignment.
+  const gridRow = `│ ${'aligned cell '.repeat(12)}│`;
+  // Long unbroken tokens are routine in agent output.
+  const tokenRow = `https://example.test/${'x'.repeat(300)}`;
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: ['first row', wideRow, paddedRow, gridRow, tokenRow, 'last row'].join('\n'),
+  });
+
+  const terminal = page.getByRole('log');
+  const lines = terminal.locator('.ansi-line');
+  await expect(lines).toHaveCount(6);
+
+  // Preserve desktop alignment and permit horizontal scrolling, rather than
+  // claiming that browser wrapping creates an independently sized TUI.
+  const geometry = await terminal.evaluate((element) => {
+    const rows = Array.from(element.querySelectorAll<HTMLElement>('.ansi-line'));
+    const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+    const wide = rows[1];
+    // A word split across lines reports more than one client rect. A word too
+    // long to fit a line has to break; one that would have fit must not.
+    let brokenWords = 0;
+    const walker = document.createTreeWalker(wide, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.textContent || '';
+      const pattern = /\S+/g;
+      for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+        const range = document.createRange();
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        const rects = Array.from(range.getClientRects());
+        const advance = rects.reduce((total, rect) => total + rect.width, 0);
+        if (rects.length > 1 && advance <= element.clientWidth) brokenWords += 1;
+      }
+    }
+    return {
+      lineHeight,
+      wideHeight: wide.getBoundingClientRect().height,
+      narrowHeight: rows[0].getBoundingClientRect().height,
+      brokenWords,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(geometry.lineHeight).toBeGreaterThan(0);
+  expect(geometry.narrowHeight).toBeLessThan(geometry.lineHeight * 1.5);
+  expect(geometry.wideHeight).toBeLessThan(geometry.lineHeight * 1.5);
+  expect(geometry.brokenWords).toBe(0);
+  expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+});
+
+test('keeps a wide pane readable while its size lease is still pending', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'claude' }],
+  });
+  // The relay advertises the opt-in capability and this device opted in, so the
+  // pane is shown before any width is granted. Leaving the lease unanswered pins
+  // that state: wrapping then had no cap and broke every row mid-word.
   await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
   const wideRow = `${'the pane is far wider than the phone viewport '.repeat(3)}and keeps going`;
@@ -2624,9 +2670,11 @@ test('keeps a wide pane readable while its size lease is still pending', async (
 });
 
 test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
+  // A reader never leases, even opted in on a relay that supports it.
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await boot(page, [fedora], '/', { reader: true });
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_lease'] });
+  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_opt_in'] });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader pane', agent: 'claude' }],
@@ -2651,13 +2699,20 @@ test('wraps wide terminal output for a paired reader credential', async ({ page 
   });
   expect(geometry.rowHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Application' })
+    .getByRole('button', { name: /^Settings(?:,|$)/ }).click();
+  expect((await commands(page)).filter((command) => command.type === 'lease_pane_size')).toHaveLength(0);
+  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true }))
+    .toHaveAccessibleDescription(/controller terminals keep the desktop width and scroll horizontally; read-only reader panes wrap to the phone width\./);
 });
 
 test('estimates wrapped row heights while a lease is pending', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -2691,7 +2746,279 @@ test('estimates wrapped row heights while a lease is pending', async ({ page }) 
   }).toBe(true);
 });
 
-test('reports unavailable Resize Session without exposing legacy width modes', async ({ page }) => {
+const optInCapabilities = ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'];
+
+async function leaseCommands(page: Page) {
+  return (await commands(page)).filter((command) => command.type === 'lease_pane_size');
+}
+
+async function releaseCommands(page: Page) {
+  return (await commands(page)).filter((command) => command.type === 'release_pane_size');
+}
+
+async function openSizedPane(page: Page, project: string, capabilities = optInCapabilities) {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
+  await showWidePane(page, 0);
+}
+
+async function showWidePane(page: Page, socket: number) {
+  await server(page, socket, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: ['resize session baseline', `${'desktop width output '.repeat(12)}end`].join('\n'),
+  });
+  await expect(page.getByRole('log')).toContainText('resize session baseline');
+}
+
+async function settingsFromTerminal(page: Page) {
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('navigation', { name: 'Application' })
+    .getByRole('button', { name: /^Settings(?:,|$)/ }).click();
+}
+
+async function expectDesktopWidthLayout(page: Page) {
+  const terminal = page.getByRole('log');
+  await expect(terminal).not.toHaveClass(/resize-(layout|pending)/);
+  await expect.poll(() => terminal.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+}
+
+test('leaves a capable relay unleased while Resize Session is off by default', async ({ page }) => {
+  await openSizedPane(page, 'Default off');
+  await page.waitForTimeout(300);
+  expect(await leaseCommands(page)).toHaveLength(0);
+  await expectDesktopWidthLayout(page);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  await settingsFromTerminal(page);
+  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('switch', { name: 'Lease Terminal Height', exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_resize_session'))).toBeNull();
+  expect(await releaseCommands(page)).toHaveLength(0);
+});
+
+test('never leases on the legacy capability alone, even with consent saved', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('herdr_terminal_resize_session', 'true');
+    localStorage.setItem('herdr_terminal_height_lease', 'true');
+  });
+  await openSizedPane(page, 'Legacy relay', ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands']);
+  await page.waitForTimeout(500);
+  expect(await leaseCommands(page)).toHaveLength(0);
+  await expectDesktopWidthLayout(page);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeEnabled();
+
+  await settingsFromTerminal(page);
+  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true })).toBeChecked();
+  const height = page.getByRole('switch', { name: 'Lease Terminal Height', exact: true });
+  await expect(height).toBeChecked();
+  await expect(height).toBeDisabled();
+  expect(await releaseCommands(page)).toHaveLength(0);
+});
+
+test('opts in, leases with opt_in, and releases immediately when turned off in Settings', async ({ page }) => {
+  await openSizedPane(page, 'Opt-in pane');
+  expect(await leaseCommands(page)).toHaveLength(0);
+  await settingsFromTerminal(page);
+  const resize = page.getByRole('switch', { name: 'Resize Session', exact: true });
+  await resize.click();
+  await expect(resize).toBeChecked();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_resize_session'))).toBe('true');
+  await expect(page.getByRole('switch', { name: 'Lease Terminal Height', exact: true })).toBeEnabled();
+  expect(await leaseCommands(page)).toHaveLength(0);
+
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Opt-in pane on Fedora' }).click();
+  await expect.poll(async () => (await leaseCommands(page)).length).toBe(1);
+  const [lease] = await leaseCommands(page);
+  expect(lease).toMatchObject({ type: 'lease_pane_size', pane_id: 'w1:p1', protocol: 3, opt_in: true });
+  expect(lease).not.toHaveProperty('rows');
+  expect(lease).not.toHaveProperty('client_id');
+  expect(Number(lease.columns)).toBeGreaterThanOrEqual(40);
+  expect(Number(lease.columns)).toBeLessThanOrEqual(240);
+  await showWidePane(page, 0);
+  const terminal = page.getByRole('log');
+  await expect(terminal).toHaveClass(/resize-layout/);
+  await expect.poll(() => terminal.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+
+  // Leaving the pane keeps the relay's short navigation grace...
+  await settingsFromTerminal(page);
+  await expect.poll(async () => (await releaseCommands(page)).length).toBe(1);
+  expect((await releaseCommands(page))[0]).not.toHaveProperty('immediate');
+  // ...which turning the switch off ends at once, with no terminal open.
+  await resize.click();
+  await expect(resize).not.toBeChecked();
+  await expect.poll(async () => (await releaseCommands(page)).length).toBe(2);
+  expect((await releaseCommands(page))[1]).toMatchObject({ type: 'release_pane_size', pane_id: 'w1:p1', immediate: true });
+  await expect(page.getByRole('switch', { name: 'Lease Terminal Height', exact: true })).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Opt-in pane on Fedora' }).click();
+  await showWidePane(page, 0);
+  await page.waitForTimeout(300);
+  expect(await leaseCommands(page)).toHaveLength(1);
+  await expectDesktopWidthLayout(page);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('leases the height only when the relay supports it and the height switch is on', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('herdr_terminal_resize_session', 'true');
+    localStorage.setItem('herdr_terminal_height_lease', 'true');
+  });
+  await openSizedPane(page, 'Height pane', ['attention_classification', 'pane_size_opt_in', 'slash_commands']);
+  await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThan(0);
+  expect((await leaseCommands(page))[0]).not.toHaveProperty('rows');
+
+  await settingsFromTerminal(page);
+  const height = page.getByRole('switch', { name: 'Lease Terminal Height', exact: true });
+  await expect(height).toBeChecked();
+  await expect(height).toBeDisabled();
+  await handshake(page, 0, { capabilities: optInCapabilities });
+  await expect(height).toBeEnabled();
+
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const beforeRows = (await leaseCommands(page)).length;
+  await page.getByRole('button', { name: 'Open Height pane on Fedora' }).click();
+  await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThan(beforeRows);
+  const withRows = (await leaseCommands(page)).at(-1)!;
+  expect(withRows).toMatchObject({ opt_in: true });
+  expect(Number(withRows.rows)).toBeGreaterThanOrEqual(10);
+  expect(Number(withRows.rows)).toBeLessThanOrEqual(120);
+
+  await settingsFromTerminal(page);
+  await height.click();
+  await expect(height).not.toBeChecked();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const beforeWidthOnly = (await leaseCommands(page)).length;
+  await page.getByRole('button', { name: 'Open Height pane on Fedora' }).click();
+  await expect.poll(async () => (await leaseCommands(page)).length).toBeGreaterThan(beforeWidthOnly);
+  expect((await leaseCommands(page)).at(-1)).not.toHaveProperty('rows');
+});
+
+test('ignores a lease reply that lands after Resize Session was turned off', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: optInCapabilities });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Late reply', agent: 'omp' }],
+  });
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Late reply on Fedora' }).click();
+  await showWidePane(page, 0);
+  await expect.poll(async () => (await leaseCommands(page)).length).toBe(1);
+  const [lease] = await leaseCommands(page);
+
+  await settingsFromTerminal(page);
+  const resize = page.getByRole('switch', { name: 'Resize Session', exact: true });
+  await resize.click();
+  await expect(resize).not.toBeChecked();
+  await expect.poll(async () => (await releaseCommands(page))
+    .some((command) => command.immediate === true && command.pane_id === 'w1:p1')).toBe(true);
+  await server(page, 0, {
+    type: 'command_result', action: 'lease_pane_size', request_id: lease.request_id,
+    ok: true, phase: 'completed', data: { columns: lease.columns, rows: 46 },
+  });
+
+  await setAutoCommands(page, true);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Late reply on Fedora' }).click();
+  await showWidePane(page, 0);
+  await page.waitForTimeout(300);
+  expect(await leaseCommands(page)).toHaveLength(1);
+  await expectDesktopWidthLayout(page);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('stays unleased across a reconnect after Resize Session is turned off', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
+  await openSizedPane(page, 'Reconnect pane');
+  await expect.poll(async () => (await leaseCommands(page)).length).toBe(1);
+  await settingsFromTerminal(page);
+  await page.getByRole('switch', { name: 'Resize Session', exact: true }).click();
+  await expect.poll(async () => (await releaseCommands(page))
+    .some((command) => command.immediate === true)).toBe(true);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+
+  await page.evaluate(() => (window as any).__relayClose(0));
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 1, { capabilities: optInCapabilities });
+  await server(page, 1, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reconnect pane', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Reconnect pane on Fedora' }).click();
+  await showWidePane(page, 1);
+  await page.waitForTimeout(500);
+  expect((await commandsForSocket(page, 1)).filter((command) => command.type === 'lease_pane_size')).toHaveLength(0);
+  await expectDesktopWidthLayout(page);
+});
+
+test('keeps pane resizing off through hidden timers and refocus', async ({ page }) => {
+  await openSizedPane(page, 'Sleeping pane', ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta']);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  // Cross the ten-second renewal cadence. Off means no timer acquisition.
+  await page.waitForTimeout(11_000);
+  expect(await leaseCommands(page)).toHaveLength(0);
+  expect(await releaseCommands(page)).toHaveLength(0);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
+  expect(await leaseCommands(page)).toHaveLength(0);
+});
+
+test('estimates fixed row heights for a controller pane', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'omp' }],
+  });
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
+  // Desktop-width rows remain single lines on a controller pane. The
+  // virtualizer must estimate that fixed-grid geometry correctly.
+  const content = Array.from({ length: 400 }, (_, index) =>
+    `row ${String(index + 1).padStart(4, '0')} ${'wide content '.repeat(14)}`).join('\n');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content });
+
+  const terminal = page.getByRole('log');
+  await expect(terminal.locator('.ansi-line').first()).toBeVisible();
+  const estimated = await terminal.evaluate((element) => element.scrollHeight);
+  // Walking the log mounts and measures every row, so the height afterwards is
+  // the truth the estimate was predicting.
+  const step = await terminal.evaluate((element) => Math.max(1, element.clientHeight - 20));
+  for (let top = 0; top <= estimated; top += step) {
+    await terminal.evaluate((element, offset) => {
+      element.scrollTop = offset;
+      element.dispatchEvent(new Event('scroll'));
+    }, top);
+    await page.waitForTimeout(50);
+  }
+  await expect.poll(async () => {
+    const measured = await terminal.evaluate((element) => element.scrollHeight);
+    return Math.abs(measured - estimated) / measured < 0.1;
+  }).toBe(true);
+});
+
+test('keeps box-drawn controller rows aligned at the desktop width', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -2729,11 +3056,9 @@ test('reports unavailable Resize Session without exposing legacy width modes', a
   expect(await terminal.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
   expect(await page.evaluate(() =>
     document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-  await expect(page.getByRole('alert')).toHaveText('Resize Session is unavailable on this relay.');
+  await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: 'Application' })
     .getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
-  expect((await commands(page)).filter((command) =>
-    command.type === 'lease_pane_size' || command.type === 'release_pane_size')).toHaveLength(0);
 });
 
 test('virtualizes terminal history and copies the latest response', async ({ page }) => {
@@ -3226,7 +3551,7 @@ test('downloads a missing relay speech voice from Settings', async ({ page }) =>
     .toMatchObject([{ language: 'fr' }]);
 });
 
-test('virtualizes large ANSI grids when Resize Session is unavailable', async ({ page }) => {
+test('virtualizes large ANSI grids on a controller pane', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -3278,13 +3603,12 @@ test('virtualizes large ANSI grids when Resize Session is unavailable', async ({
   expect(await mountedRows.count()).toBeLessThan(250);
 });
 
-
-
 test('restores a non-bottom anchor after a Resize Session width change', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -3385,11 +3709,12 @@ test('restores a non-bottom anchor after a Resize Session width change', async (
 test('leases measured terminal columns and releases on teardown', async ({ page }) => {
   // Height leasing is opt-in: resizing the shared pane's height strands
   // stale status-bar copies of inline agents in the scrollback.
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_height_lease', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -3617,11 +3942,12 @@ test('paints again when the relay keeps a pane settling after a resize', async (
   // whose desktop client keeps fighting the leased size re-arms the relay's
   // settling window on every read, and an unbounded wait freezes the phone on
   // its last painted frame for as long as that lasts.
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await page.addInitScript(() => localStorage.setItem('herdr_terminal_height_lease', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -3661,10 +3987,11 @@ test('paints again when a re-entry lease never lands', async ({ page }) => {
   // The same wait also covers a pane with no lease yet. Reopening a pane asks
   // for a fresh lease while the cached frame is painted, so a relay that never
   // answers must not strand the phone on that cached frame.
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -3700,10 +4027,11 @@ test('paints again when a re-entry lease never lands', async ({ page }) => {
 });
 
 test('does not lease rows unless the height setting is on', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_size_opt_in_rows', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -3718,186 +4046,6 @@ test('does not lease rows unless the height setting is on', async ({ page }) => 
   // lease width-only so the shared pane's height is never touched.
   expect(acquire.columns).toEqual(expect.any(Number));
   expect(acquire).not.toHaveProperty('rows');
-});
-
-test('withdraws hidden pane leases and re-leases only after fresh inventory on return', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'pane_realtime_delta'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Sleeping app', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Sleeping app on Fedora' }).click();
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'before sleep',
-    content_fingerprint: 'sleep-1',
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  // Suspension withdraws action authority: no grace-window renewal may
-  // reacquire a lease. Releasing an already-owned lease remains allowed.
-  await page.waitForTimeout(11_000);
-  expect((await commands(page))
-    .filter((command) => command.type === 'lease_pane_size')).toHaveLength(1);
-  expect((await commands(page))
-    .filter((command) => command.type === 'release_pane_size')).toHaveLength(1);
-
-  // Refocus re-leases at once — the lease may have lapsed and the pane may be
-  // back at the desktop width — and re-reads the pane without waiting for the
-  // resync interval.
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThanOrEqual(2);
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
-});
-
-const resizeCapabilities = [
-  'attention_classification', 'pane_size_lease', 'slash_commands',
-];
-
-async function openResizePane(page: Page, project: string) {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { capabilities: resizeCapabilities });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
-}
-
-test('renders the raw pane window as terminal history', async ({ page }) => {
-  await openResizePane(page, 'Raw window');
-  const windowRow = (index: number) => `raw window row ${String(index).padStart(3, '0')}`;
-  const windowRows = Array.from({ length: 120 }, (_, index) => windowRow(index + 1));
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: windowRows.join('\n'),
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: windowRows.join('\n'),
-    viewport_only: true,
-    viewport_rows: 20,
-  });
-
-  const terminal = page.getByRole('log');
-  // The raw window renders exactly as read: scrolled-back rows included.
-  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
-  await expect(terminal).toContainText(windowRow(120));
-
-  // A window shorter than the requested history carries the truncation flag.
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: windowRows.concat('raw window row 121').join('\n'),
-    viewport_only: true,
-    viewport_rows: 20,
-    truncated: true,
-  });
-  await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' }))
-    .toBeVisible();
-});
-
-test('keeps the reader anchored while streamed output grows and unsticks on scroll-up', async ({ page }) => {
-  // Rows 401-700 are three-character rows: too short for anchor text
-  // matching, so only correct index math can keep the reader anchored there.
-  const historyRow = (index: number) => (index > 400 && index <= 700
-    ? String(index)
-    : `anchored history row ${String(index).padStart(4, '0')}`);
-  const historyRows = Array.from({ length: 1_000 }, (_, index) => historyRow(index + 1));
-  await openResizePane(page, 'Anchored stream');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: historyRows[0],
-  });
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  await page.waitForTimeout(300);
-
-  const streamedRows = Array.from({ length: 100 }, (_, index) => `anchored burst row ${index + 1}`);
-  const stream = historyRows.concat(streamedRows);
-  // Herdr always serves the newest 1,000-row window: streamed output appends
-  // at the bottom and crops the oldest rows off the front.
-  const frame = (streamed: number) => server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: stream
-      .slice(Math.max(0, historyRows.length + streamed - 1_000), historyRows.length + streamed)
-      .join('\n'),
-    viewport_only: true,
-    viewport_rows: 46,
-  });
-  await frame(0);
-  const terminal = page.getByRole('log');
-  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '1000');
-
-  // Pinned at the bottom: appended output is shown immediately.
-  await frame(54);
-  await expect(terminal).toContainText('anchored burst row 54');
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
-
-  // Scrolling up leaves sticky mode.
-  await terminal.evaluate((element) => {
-    element.scrollTop = element.scrollHeight / 2;
-    element.dispatchEvent(new Event('scroll'));
-  });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
-  const firstVisibleRow = () => terminal.evaluate((element) => {
-    const top = element.getBoundingClientRect().top;
-    const row = [...element.querySelectorAll('[data-terminal-row]')]
-      .find((candidate) => candidate.getBoundingClientRect().bottom > top + 1);
-    return {
-      text: row?.textContent || '',
-      offset: row ? Math.round(row.getBoundingClientRect().top - top) : 0,
-    };
-  });
-  // The virtual window re-renders on the next animation frame.
-  await expect.poll(async () => (await firstVisibleRow()).offset).toBeLessThanOrEqual(1);
-  const before = await firstVisibleRow();
-  expect(before.text.trim()).toMatch(/^\d{3}$/);
-
-  // More output arrives and the served window crops rows from the front:
-  // the reader's position must not move and sticky mode must stay off.
-  await frame(100);
-  await expect.poll(async () => (await firstVisibleRow()).text).toBe(before.text);
-  const after = await firstVisibleRow();
-  // Same row, and within a row of the same position: cropped rows shift every
-  // index, so only exact index math keeps this stable.
-  const rowHeight = await terminal.evaluate((element) => {
-    const row = element.querySelector<HTMLElement>('[data-terminal-row]');
-    return row ? row.getBoundingClientRect().height : 20;
-  });
-  expect(Math.abs(after.offset - before.offset)).toBeLessThan(rowHeight);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
-
-  // Returning to the bottom re-engages sticky mode.
-  await terminal.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
-    element.dispatchEvent(new Event('scroll'));
-  });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
 test('scrolls stale wide grids in place and preserves current grids in Resize Session', async ({ page }) => {
@@ -3986,11 +4134,30 @@ test('scrolls stale wide grids in place and preserves current grids in Resize Se
     .map((row) => row.scrollLeft))).toEqual([60, 60]);
 });
 
+const resizeCapabilities = [
+  'attention_classification', 'pane_size_opt_in', 'slash_commands',
+];
+
+async function openResizePane(page: Page, project: string) {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: resizeCapabilities });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
+}
+
 test('surfaces one explicit error when a pane-size lease fails', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -4018,6 +4185,179 @@ test('surfaces one explicit error when a pane-size lease fails', async ({ page }
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'release_pane_size').length).toBe(1);
+});
+
+test('withdraws hidden pane leases and re-leases only after fresh inventory on return', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Sleeping app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Sleeping app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'before sleep',
+    content_fingerprint: 'sleep-1',
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  // Suspension withdraws action authority: no grace-window renewal may
+  // reacquire a lease. Releasing an already-owned lease remains allowed.
+  await page.waitForTimeout(11_000);
+  expect((await commands(page))
+    .filter((command) => command.type === 'lease_pane_size')).toHaveLength(1);
+  expect((await commands(page))
+    .filter((command) => command.type === 'release_pane_size')).toHaveLength(1);
+
+  // Refocus re-leases at once — the lease may have lapsed and the pane may be
+  // back at the desktop width — and re-reads the pane without waiting for the
+  // resync interval.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThanOrEqual(2);
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
+});
+
+async function openOmpPane(page: Page, project: string) {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['attention_classification', 'slash_commands'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
+}
+
+test('renders the raw pane window as terminal history', async ({ page }) => {
+  await openOmpPane(page, 'Raw window');
+  const windowRow = (index: number) => `raw window row ${String(index).padStart(3, '0')}`;
+  const windowRows = Array.from({ length: 120 }, (_, index) => windowRow(index + 1));
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: windowRows.join('\n'),
+  });
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: windowRows.join('\n'),
+    viewport_only: true,
+    viewport_rows: 20,
+  });
+
+  const terminal = page.getByRole('log');
+  // The raw window renders exactly as read: scrolled-back rows included.
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await expect(terminal).toContainText(windowRow(120));
+
+  // A window shorter than the requested history carries the truncation flag.
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: windowRows.concat('raw window row 121').join('\n'),
+    viewport_only: true,
+    viewport_rows: 20,
+    truncated: true,
+  });
+  await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' }))
+    .toBeVisible();
+});
+
+test('keeps the reader anchored while streamed output grows and unsticks on scroll-up', async ({ page }) => {
+  // Rows 401-700 are three-character rows: too short for anchor text
+  // matching, so only correct index math can keep the reader anchored there.
+  const historyRow = (index: number) => (index > 400 && index <= 700
+    ? String(index)
+    : `anchored history row ${String(index).padStart(4, '0')}`);
+  const historyRows = Array.from({ length: 1_000 }, (_, index) => historyRow(index + 1));
+  await openOmpPane(page, 'Anchored stream');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: historyRows[0],
+  });
+  await page.waitForTimeout(300);
+
+  const streamedRows = Array.from({ length: 100 }, (_, index) => `anchored burst row ${index + 1}`);
+  const stream = historyRows.concat(streamedRows);
+  // Herdr always serves the newest 1,000-row window: streamed output appends
+  // at the bottom and crops the oldest rows off the front.
+  const frame = (streamed: number) => server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: stream
+      .slice(Math.max(0, historyRows.length + streamed - 1_000), historyRows.length + streamed)
+      .join('\n'),
+    viewport_only: true,
+    viewport_rows: 46,
+  });
+  await frame(0);
+  const terminal = page.getByRole('log');
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '1000');
+
+  // Pinned at the bottom: appended output is shown immediately.
+  await frame(54);
+  await expect(terminal).toContainText('anchored burst row 54');
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
+
+  // Scrolling up leaves sticky mode.
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  const firstVisibleRow = () => terminal.evaluate((element) => {
+    const top = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll('[data-terminal-row]')]
+      .find((candidate) => candidate.getBoundingClientRect().bottom > top + 1);
+    return {
+      text: row?.textContent || '',
+      offset: row ? Math.round(row.getBoundingClientRect().top - top) : 0,
+    };
+  });
+  // The virtual window re-renders on the next animation frame.
+  await expect.poll(async () => (await firstVisibleRow()).offset).toBeLessThanOrEqual(1);
+  const before = await firstVisibleRow();
+  expect(before.text.trim()).toMatch(/^\d{3}$/);
+
+  // More output arrives and the served window crops rows from the front:
+  // the reader's position must not move and sticky mode must stay off.
+  await frame(100);
+  await expect.poll(async () => (await firstVisibleRow()).text).toBe(before.text);
+  const after = await firstVisibleRow();
+  // Same row, and within a row of the same position: cropped rows shift every
+  // index, so only exact index math keeps this stable.
+  const rowHeight = await terminal.evaluate((element) => {
+    const row = element.querySelector<HTMLElement>('[data-terminal-row]');
+    return row ? row.getBoundingClientRect().height : 20;
+  });
+  expect(Math.abs(after.offset - before.offset)).toBeLessThan(rowHeight);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  // Returning to the bottom re-engages sticky mode.
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
@@ -4291,7 +4631,7 @@ test('default agent view: Conversation opens directly and persists across reload
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('Direct conversation answer')).toBeVisible();
   const openingCommands = (await commands(page)).slice(before.length);
-  expect(openingCommands.some((command) => ['read_pane', 'watch_pane', 'lease_pane_size'].includes(String(command.type)))).toBe(false);
+  expect(openingCommands.some((command) => ['read_pane', 'watch_pane'].includes(String(command.type)))).toBe(false);
   expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(true);
 
   await page.getByRole('button', { name: 'Back' }).click();
@@ -5411,7 +5751,10 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await expect(page.getByRole('group', { name: 'Terminal Width' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Fit to Phone' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Original Columns' })).toHaveCount(0);
-  await expect(page.getByText(/Resize Session automatically leases/)).toBeVisible();
+  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true })).not.toBeChecked();
+  await expect(page.getByText(/laptop and SSH views of that pane look garbled/)).toBeVisible();
+  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true }))
+    .toHaveAccessibleDescription(/Resizing may truncate scrollback and lose older output\./);
 
   await history.getByRole('button', { name: '500' }).click();
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_history_lines'))).toBe('500');

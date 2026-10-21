@@ -657,6 +657,10 @@ func (s *Server) attachDeviceStore(store *deviceauth.Store) error {
 
 func (s *Server) authorizeDeviceAction(client *transport.ClientConn, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
 	identity, authenticated := client.Identity()
+	return s.authorizeDeviceIdentity(identity, authenticated, action, deviceID)
+}
+
+func (s *Server) authorizeDeviceIdentity(identity transport.AuthenticatedIdentity, authenticated bool, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
 	store := s.deviceStore()
 	if authenticated && store != nil {
 		credential, current := store.AuthorizeCredential(identity.CredentialID, identity.CredentialVersion)
@@ -1018,11 +1022,12 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.hybrid != nil {
 			s.hybrid.forgetClient(client.ID())
 		}
+		// A departing phone gives its panes back at once, without the
+		// navigation grace. Restores that cannot finish now continue in the
+		// manager's bounded cleanup.
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := s.paneSizeM.ReleaseClient(releaseCtx, client.ID()); err != nil {
-			s.logger.Warn("client pane size leases were not fully restored", "client_id", client.ID(), "error", err)
-		}
+		_ = s.paneSizeM.ReleaseClient(releaseCtx, client.ID())
 	})
 
 	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
@@ -1140,31 +1145,10 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
 			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
-		case "lease_pane_size":
-			columns, rows, leaseErr := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
-			if leaseErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "lease_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(
-				client,
-				inbound.RequestID,
-				"lease_pane_size",
-				true,
-				"completed",
-				"",
-				inbound.PaneID,
-				map[string]any{"columns": columns, "rows": rows},
-			)
-		case "release_pane_size":
-			leaseErr := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID)
-			if leaseErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "release_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(client, inbound.RequestID, "release_pane_size", true, "completed", "", inbound.PaneID, nil)
+		case "lease_pane_size", "release_pane_size":
+			s.handlePaneSizeCommand(client, inbound)
 		case "read_pane":
-			s.applyPaneReadLease(msg)
+			s.applyPaneReadLease(client.ID(), msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
 			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
 			if inbound.Target != nil {
@@ -2293,12 +2277,92 @@ func serveManagedInertHTTP(listener *retainedTCPListener) (*http.Server, <-chan 
 	return server, done
 }
 
+// Resize Session is a per-device opt-in. A PTY resize Herdr does not perform
+// leaves its grid at the layout size while the application draws at the
+// leased one, so the desktop and SSH views of a leased pane look garbled
+// (issue 60); Herdr exposes no absolute rows/columns operation to avoid that.
+// Apps up to 0.22.7 leased automatically whenever the relay advertised
+// pane_size_lease, so only a request carrying opt_in is honoured: anything
+// else fails before any Herdr, process or TTY access. Release stays an
+// idempotent cleanup; immediate skips the navigation grace. A lease is admitted
+// against the exact target, but the manager's lookups and the terminal write
+// follow, so the target is rechecked on every Herdr lookup, immediately before
+// the terminal write, and once more after Acquire: a pane replaced meanwhile
+// keeps neither a lease nor a resized terminal.
+func (s *Server) handlePaneSizeCommand(client *transport.ClientConn, inbound protocol.Inbound) {
+	scope, _ := protocol.ScopeFor(inbound)
+	s.runPaneSizeCommand(client, inbound, func() *protocol.ApiError {
+		return s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID)
+	})
+}
+
+// runPaneSizeCommand applies the ordinary command admission to a pane-size
+// request: authorize reports whether the device may still run it (a revoked
+// credential, or a reader, may not). Admission already asked once; a lease
+// outlives its request and revoke_device cuts the connection 250 ms later, so
+// the answer is asked again before every Herdr dispatch the request makes and
+// once more after Acquire, which gives back what an unauthorized device got.
+func (s *Server) runPaneSizeCommand(client *transport.ClientConn, inbound protocol.Inbound, authorize func() *protocol.ApiError) {
+	if authorizationErr := authorize(); authorizationErr != nil {
+		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
+		return
+	}
+	authorized := herdr.WithDispatchCheck(client.Context(), func() error {
+		if authorize() != nil {
+			return errors.New("device is no longer authorized")
+		}
+		return nil
+	})
+	if inbound.Type == "release_pane_size" {
+		if err := s.paneSizeM.Release(authorized, client.ID(), inbound.PaneID, inbound.Immediate); err != nil {
+			s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+			return
+		}
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, nil)
+		return
+	}
+	if !inbound.OptIn || !s.paneSizeM.Available() {
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.ErrUnavailable.Error(), inbound.PaneID, nil)
+		return
+	}
+	_, authenticated := client.Identity()
+	recheck := func() error {
+		if validateExactPaneTarget(s.state, inbound, authenticated) != nil {
+			return coordinator.ErrPaneReplaced
+		}
+		return nil
+	}
+	columns, rows, err := s.paneSizeM.Acquire(herdr.WithDispatchCheck(authorized, recheck), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
+	if authorizationErr := authorize(); authorizationErr != nil {
+		if err == nil {
+			_ = s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID, true)
+		}
+		s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
+		return
+	}
+	if err == nil && recheck() != nil {
+		_ = s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID, true)
+		err = panesize.ErrTerminalGone
+	}
+	if err != nil {
+		s.logger.Debug("pane size lease failed", "pane_id", inbound.PaneID, "error", err)
+		s.sendCommandResult(client, inbound.RequestID, inbound.Type, false, "failed", panesize.PublicMessage(err), inbound.PaneID, nil)
+		return
+	}
+	s.sendCommandResult(client, inbound.RequestID, inbound.Type, true, "completed", "", inbound.PaneID, map[string]any{"columns": columns, "rows": rows})
+}
+
 func (s *Server) effectiveCapabilities() []string {
 	return s.effectiveCapabilitiesFor(s.herdrC.CapabilityStatus())
 }
 
 func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
+	// Never the legacy pane_size_lease names: apps up to 0.22.7 lease
+	// automatically when they see them.
+	if s.paneSizeM.Available() {
+		capabilities = append(capabilities, protocol.PaneSizeOptInCapability, protocol.PaneSizeOptInRowsCapability)
+	}
 	if s.pushM != nil {
 		capabilities = append(capabilities, "typed_push", "push_policy")
 	}
@@ -3789,9 +3853,9 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 	}
 	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly &&
 		s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow) {
-		// The agent re-renders its transcript after a width change and can push
-		// a redrawn block into the scrollback for a while; the app must not
-		// commit rows from frames read inside this window as history.
+		// The agent re-renders its transcript after a size change and can
+		// push a redrawn block into the scrollback for a while; the app must
+		// not commit rows from frames read inside this window as history.
 		response["resize_settling"] = true
 	}
 	agentLower := strings.ToLower(agent)

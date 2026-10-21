@@ -223,6 +223,8 @@ type Inbound struct {
 	Limit                int             `json:"limit,omitempty"`
 	Columns              int             `json:"columns,omitempty"`
 	Rows                 int             `json:"rows,omitempty"`
+	OptIn                bool            `json:"opt_in,omitempty"`
+	Immediate            bool            `json:"immediate,omitempty"`
 	Format               string          `json:"format,omitempty"`
 	Path                 string          `json:"path,omitempty"`
 	Filename             string          `json:"filename,omitempty"`
@@ -501,6 +503,13 @@ const (
 const AgentResponseCopyCapability = "agent_response_copy"
 
 const SpeechSynthesisCapability = "speech_synthesis"
+
+// PaneSizeOptInCapability is advertised only by relays that can resize a pane
+// on platforms with a backend. It replaces pane_size_lease, which apps up to
+// 0.22.7 treated as permission to lease automatically; leases must now carry
+// opt_in. PaneSizeOptInRowsCapability adds height leasing.
+const PaneSizeOptInCapability = "pane_size_opt_in"
+const PaneSizeOptInRowsCapability = "pane_size_opt_in_rows"
 const SpeechVoiceManagementCapability = "speech_voice_management"
 
 // InventorySnapshotCapability binds one atomic snapshot to a post-request poll.
@@ -517,8 +526,6 @@ var Capabilities = []string{
 	"structured_questions",
 	"slash_commands",
 	"conversation_history",
-	"pane_size_lease",
-	"pane_size_lease_rows",
 	"workspace_inspection",
 	"semantic_input",
 	"secret_input",

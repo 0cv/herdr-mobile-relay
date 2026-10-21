@@ -9,6 +9,9 @@ export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
+// Resize Session is a per-device opt-in, off by default. Whether a relay can
+// honour it is its pane_size_opt_in capability, never a build constant.
+export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';
 export const TERMINAL_HEIGHT_LEASE_KEY = 'herdr_terminal_height_lease';
 export const TERMINAL_WAKE_LOCK_KEY = 'herdr_terminal_wake_lock';
 export const HOME_LAYOUT_KEY = 'herdr_home_workspace_layout';
@@ -75,12 +78,13 @@ export const MIN_PANE_SIZE_ROWS = 10;
 export const MAX_PANE_SIZE_ROWS = 120;
 // A hidden page keeps renewing its pane-size lease for this long. Desktop
 // Safari reports an occluded window as hidden, so every switch to another app
-// would otherwise lapse the lease after its 30s TTL and resize the shared
+// would otherwise lapse the lease after the relay's TTL and resize the shared
 // pane twice per glance — each cycle can strand a stale copy of an inline
 // agent's status bar in the scrollback. The grace is bounded so a page that
 // stays hidden — a phone in a pocket whose open DataChannel keeps it
 // unfrozen — still gives the desktop its size back within minutes, not
-// overnight.
+// overnight. The store also withdraws lease authority while the page is
+// hidden (the pane closes and releases), so this bound covers a mounted pane.
 export const PANE_LEASE_HIDDEN_GRACE_MS = 5 * 60_000;
 
 export function paneLeaseRenewalAllowed(visible: boolean, hiddenAt: number, now: number): boolean {

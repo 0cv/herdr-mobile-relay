@@ -86,6 +86,7 @@ import {
   clearPaneAgentViewOverridesForRelay,
   terminalHistoryLines,
   terminalRefreshInterval,
+  terminalResizeSession,
 } from './preferences';
 import {
   clearPendingRelayUpdate,
@@ -593,6 +594,11 @@ class RelayStore {
   private pendingPaneReads = new Map<string, number>();
   private paneContentFingerprints = new Map<string, string>();
   private watchedPanes = new Map<string, Agent>();
+  // Panes this phone may hold a size lease on, kept outside TerminalView so
+  // turning Resize Session off can release panes whose view already closed
+  // and are only in the relay's navigation grace.
+  private ownedPaneLeases = new Map<string, Agent>();
+  private paneLeaseEpoch = 0;
   private paneWatchesStarted = new Set<string>();
   private slashCommandCache = new Map<string, SlashCommandCacheEntry>();
   private pendingSlashCommands = new Map<string, PendingSlashCommands>();
@@ -632,6 +638,9 @@ class RelayStore {
       if (value === previousRefreshInterval) return;
       previousRefreshInterval = value;
       this.restartPaneWatches();
+    });
+    terminalResizeSession.subscribe((enabled) => {
+      if (!enabled) this.releaseAllPaneSizeLeases();
     });
   }
 
@@ -872,6 +881,7 @@ class RelayStore {
     clearConversationPreviews();
     this.watchedPanes.clear();
     this.paneWatchesStarted.clear();
+    this.ownedPaneLeases.clear();
     resumeMetrics.reset();
   }
 
@@ -2943,6 +2953,11 @@ class RelayStore {
   private rejectPendingOperations(relayId: string, message: string): void {
     this.rejectPending(this.pendingRequests, relayId, message);
     this.rejectPending(this.pendingUploads, relayId, message);
+    // The relay releases a departed connection's size leases itself, and a
+    // reconnect is a new lease owner, so this phone owns none there any more.
+    for (const [key, agent] of this.ownedPaneLeases) {
+      if (agent.relay_id === relayId) this.ownedPaneLeases.delete(key);
+    }
   }
 
   async leasePaneSize(
@@ -2950,28 +2965,43 @@ class RelayStore {
     columns: number,
     rows = 0,
   ): Promise<{ columns: number; rows: number }> {
+    if (!get(terminalResizeSession)) {
+      throw new CommandError('Resize Session is off');
+    }
+    // Only a relay that understands opt-in leases is ever asked. Older relays
+    // advertise pane_size_lease and resize on any lease; they never receive
+    // one from this app.
     const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('pane_size_lease')) {
-      throw new CommandError('Relay lacks pane-size lease support');
+    if (!connection?.capabilities.includes('pane_size_opt_in')) {
+      throw new CommandError('Resize Session is unavailable on this relay');
     }
     if (!Number.isInteger(columns) || columns < MIN_PANE_SIZE_COLUMNS || columns > MAX_PANE_SIZE_COLUMNS) {
       throw new CommandError(
         `Terminal columns must be between ${MIN_PANE_SIZE_COLUMNS} and ${MAX_PANE_SIZE_COLUMNS}`,
       );
     }
-    // Rows ride the same lease only when the relay understands them; an old
-    // relay would silently ignore the field and the client must not believe
-    // a height was applied.
-    const leaseRows = connection.capabilities.includes('pane_size_lease_rows') ? rows : 0;
+    // Rows ride the same lease only when the relay understands them; the
+    // client must not believe a height was applied otherwise.
+    const leaseRows = connection.capabilities.includes('pane_size_opt_in_rows') ? rows : 0;
     if (leaseRows !== 0
       && (!Number.isInteger(leaseRows) || leaseRows < MIN_PANE_SIZE_ROWS || leaseRows > MAX_PANE_SIZE_ROWS)) {
       throw new CommandError(
         `Terminal rows must be between ${MIN_PANE_SIZE_ROWS} and ${MAX_PANE_SIZE_ROWS}`,
       );
     }
-    const payload: Record<string, any> = { type: 'lease_pane_size', columns };
+    const payload: Record<string, any> = { type: 'lease_pane_size', columns, opt_in: true };
     if (leaseRows) payload.rows = leaseRows;
+    const epoch = this.paneLeaseEpoch;
+    // Recorded before the request leaves: turning Resize Session off while
+    // the reply is outstanding still releases this pane, and the relay
+    // handles that release after the lease.
+    this.ownedPaneLeases.set(paneLeaseKey(agent), agent);
     const result = await this.sendToAgent(agent, payload);
+    if (epoch !== this.paneLeaseEpoch || !get(terminalResizeSession)) {
+      // A late reply after the switch was turned off must not reactivate
+      // resizing; the pane has already been released.
+      throw new CommandError('Resize Session was turned off');
+    }
     if (result.action && result.action !== 'lease_pane_size') {
       throw new CommandError('Wrong pane-size lease confirmation');
     }
@@ -2991,14 +3021,30 @@ class RelayStore {
     return { columns: appliedColumns, rows: appliedRows };
   }
 
-  async releasePaneSize(agent: Agent): Promise<void> {
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('pane_size_lease')) {
-      throw new CommandError('Relay lacks pane-size lease support');
+  async releasePaneSize(agent: Agent, options: { immediate?: boolean } = {}): Promise<void> {
+    // Cleanup does not require consent or capability advertisement. Without
+    // immediate the relay keeps the size for a short navigation grace.
+    const payload: Record<string, any> = { type: 'release_pane_size' };
+    if (options.immediate) {
+      payload.immediate = true;
+      this.ownedPaneLeases.delete(paneLeaseKey(agent));
     }
-    const result = await this.sendToAgent(agent, { type: 'release_pane_size' });
+    const result = await this.sendToAgent(agent, payload);
     if (result.action && result.action !== 'release_pane_size') {
       throw new CommandError('Relay returned the wrong pane-size release confirmation');
+    }
+  }
+
+  // Turning Resize Session off ends every lease this phone may hold at once,
+  // without the navigation grace, and invalidates replies still in flight.
+  releaseAllPaneSizeLeases(): void {
+    this.paneLeaseEpoch += 1;
+    const owned = [...this.ownedPaneLeases.values()];
+    for (const agent of owned) {
+      void this.releasePaneSize(agent, { immediate: true }).catch(() => {
+        // The relay also releases a disconnected phone's leases, and a lapsed
+        // lease is restored by its TTL; there is nothing left to retry here.
+      });
     }
   }
 
@@ -3835,6 +3881,10 @@ function applyPaneDelta(previous: string, value: unknown): string | null {
   return chunks.join('');
 }
 
+
+function paneLeaseKey(agent: Agent): string {
+  return `${agent.relay_id}\u0000${agent.pane_id}`;
+}
 
 function commandRequestId(): string {
   if (crypto.randomUUID) return crypto.randomUUID();
