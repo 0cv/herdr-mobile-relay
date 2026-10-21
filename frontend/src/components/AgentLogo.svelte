@@ -1,8 +1,19 @@
 <script module lang="ts">
   export type AgentLogoKind = 'claude' | 'codex' | 'generic' | 'hermes' | 'kimi' | 'omp' | 'opencode' | 'pi' | 'qoder';
 
+  // Agents without a bundled logo keep the generic glyph but still show the
+  // name their vendor uses instead of the raw executable reported by Herdr.
+  const GENERIC_AGENT_LABELS = new Map([
+    ['devin', 'Devin'],
+    ['devin cli', 'Devin'],
+  ]);
+
+  function normalizedAgentName(value: string): string {
+    return value.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+  }
+
   export function agentLogoKind(value: string): AgentLogoKind {
-    const normalized = value.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+    const normalized = normalizedAgentName(value);
     if (['claude', 'claude code', 'claudecode'].includes(normalized)) return 'claude';
     if (['codex', 'codex cli'].includes(normalized)) return 'codex';
     if (['open code', 'opencode'].includes(normalized)) return 'opencode';
@@ -27,7 +38,11 @@
     if (value === 'kimi') return 'Kimi';
     if (value === 'qoder') return 'Qoder';
     if (value === 'hermes') return 'Hermes';
-    return original.trim() || 'Agent';
+    return GENERIC_AGENT_LABELS.get(normalizedAgentName(original)) || original.trim() || 'Agent';
+  }
+
+  export function agentDisplayName(value: string): string {
+    return agentLogoLabel(agentLogoKind(value), value);
   }
 
   /*

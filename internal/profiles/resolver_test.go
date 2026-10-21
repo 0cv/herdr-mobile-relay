@@ -1,6 +1,7 @@
 package profiles
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestDefaultCandidatesFiltered(t *testing.T) {
 	}
 }
 
-func TestDefaultCandidatesIncludePiOhMyPiKimiHermesAndDevin(t *testing.T) {
+func TestDefaultCandidatesIncludeOptionalAgents(t *testing.T) {
 	binDir := t.TempDir()
 	for _, name := range []string{"pi", "omp", "kimi", "hermes", "devin"} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -67,6 +68,27 @@ func TestDevinAliasesResolveToProfile(t *testing.T) {
 		if got := resolver.ProfileIDForAgent(agent); got != "devin" {
 			t.Errorf("ProfileIDForAgent(%q) = %q, want devin", agent, got)
 		}
+	}
+}
+
+type staticIntegrationStatus string
+
+func (s staticIntegrationStatus) IntegrationStatus(context.Context) ([]byte, error) {
+	return []byte(s), nil
+}
+
+// An installed Herdr integration offers its agent even when the executable is
+// not on the relay's PATH, and must carry the same label as the PATH profile.
+func TestIntegrationProfileUsesDevinLabel(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	status := staticIntegrationStatus("devin: current (v1) (/home/user/.config/devin/herdr-agent-state.sh)\n")
+
+	profile, ok := NewResolver(t.TempDir(), status).Profile("devin")
+	if !ok {
+		t.Fatal("devin integration profile was not offered")
+	}
+	if profile.Label != "Devin" || profile.Kind != "devin" {
+		t.Fatalf("devin integration profile = %+v, want label Devin and kind devin", profile)
 	}
 }
 

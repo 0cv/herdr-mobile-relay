@@ -926,6 +926,23 @@ describe('accessible Svelte interactions', () => {
     expect(container.querySelector('.agent-meta')).toHaveTextContent('custom-agent');
   });
 
+  it('names Devin panes without a dedicated logo', () => {
+    const agents: Agent[] = ['devin', 'devin-cli'].map((agent, index) => ({
+      relay_id: 'fedora',
+      relay_label: 'Fedora',
+      raw_pane_id: `w4:p${index}`,
+      pane_id: `fedora::w4:p${index}`,
+      project: `devin-${index}`,
+      agent,
+      status: 'working',
+    }));
+    const { container } = render(AgentList, { agents, relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    expect(screen.getAllByRole('img', { name: 'Devin' })).toHaveLength(2);
+    expect(container.querySelectorAll('.agent-logo-generic')).toHaveLength(2);
+    const meta = [...container.querySelectorAll('.agent-meta')].map((element) => element.textContent?.trim());
+    expect(meta).toEqual(['Devin', 'Devin']);
+  });
+
   it('keeps a structured answer local until Submit', async () => {
     const interaction: QuestionInteraction = {
       id: 'question-1', kind: 'single_select', question: 'Where should the adapter live?',

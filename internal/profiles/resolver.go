@@ -242,6 +242,7 @@ func (r *Resolver) loadINI() (
 
 var integrationLabels = map[string]string{
 	"qodercli": "Qoder",
+	"devin":    "Devin",
 }
 
 func (r *Resolver) discoverIntegrations() []Profile {

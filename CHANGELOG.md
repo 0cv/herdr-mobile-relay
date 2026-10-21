@@ -9,8 +9,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Start Devin CLI agents from relay-provided launch profiles. Herdr already
   supports `--kind devin`; the relay now offers a `Devin` profile whenever the
-  `devin` executable is on its `PATH`, and resolves Herdr's `devin-cli` and
-  `devin cli` aliases to it.
+  `devin` executable is on its `PATH` or Herdr's Devin integration is
+  installed, and resolves Herdr's `devin-cli` and `devin cli` aliases to it.
+  The agent list names these panes `Devin` instead of the raw `devin`.
 
 ## [0.22.10] - 2026-10-15
 
