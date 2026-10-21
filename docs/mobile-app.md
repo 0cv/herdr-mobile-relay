@@ -52,7 +52,7 @@ setup and want to know what every screen and control is for.
   neural voice the relay falls back to espeak-ng, espeak, flite, or macOS `say`;
   a language it cannot speak is reported in Settings instead of failing at the
   Speak button.
-- Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
+- Detect Codex, Claude Code, Devin, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents |
 | --- |

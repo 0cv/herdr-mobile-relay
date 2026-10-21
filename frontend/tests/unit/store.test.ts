@@ -136,6 +136,24 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it('keeps only well-formed Hermes profile names from push_config', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    // A relay that predates the picker omits the field entirely.
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
+    expect(relayStore.connection(relayId)?.hermesProfiles).toEqual([]);
+    socket.message({
+      type: 'push_config',
+      protocol: 3,
+      host: 'fedora',
+      capabilities: [],
+      agent_profiles: [],
+      hermes_profiles: ['default', 'apollo', '', 7, null],
+    });
+    expect(relayStore.connection(relayId)?.hermesProfiles).toEqual(['default', 'apollo']);
+  });
+
   it.each(['completed', 'completed_with_warning'])('retains a launch until delayed %s', async (phase) => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;

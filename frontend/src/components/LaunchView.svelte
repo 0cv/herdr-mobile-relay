@@ -27,6 +27,7 @@
 
   let relayId = $state('');
   let profileId = $state('');
+  let hermesProfile = $state('');
   let cwd = $state('');
   let name = $state('');
   let prompt = $state('');
@@ -61,12 +62,36 @@
     && !connection.directoryBrowser.parent,
   ));
   const profiles = $derived(connection?.agentProfiles || []);
+  // The builtin Hermes profile id is "hermes". The resolver never serializes a
+  // kind for an agent profile, so the id is the only reliable signal that the
+  // start command accepts hermes_profile at all.
+  const isHermes = $derived(profileId === 'hermes');
+  // Empty first option = "use Hermes sticky active profile" (no -p flag).
+  // This preserves the behaviour of `hermes profile use <name>` on the computer.
+  const hermesProfiles = $derived(
+    connection?.hermesProfiles?.length
+      ? ['', ...connection.hermesProfiles]
+      : [''],
+  );
   const targetWorkspace = $derived(
     $workspaces.find((workspace) => (
       workspace.relay_id === relayId && workspace.workspace_id === workspaceId
     )) || null,
   );
   const readOnly = $derived(readOnlyRelayIds.has(relayId));
+
+  // Both the empty choice and the literal "default" id would read as "default",
+  // but they start different agents: empty omits -p so Hermes follows its sticky
+  // active_profile, while "default" pins the root hermes home. Label them apart
+  // and leave the option values alone, so the payload stays a plain
+  // "empty means omit" check.
+  function hermesProfileLabel(name: string): string {
+    if (name === '') return 'Use my usual setup';
+    // Hermes lets the user give the root profile a display name, so the id
+    // stays visible for anyone who knows it by `default`.
+    if (name === 'default') return 'Main profile (default)';
+    return name;
+  }
 
   $effect(() => {
     if (requestedRelayPending && connectedRelays.some((relay) => relay.id === requestedRelayId)) {
@@ -79,6 +104,10 @@
         : connectedRelays[0]?.id || '';
     }
     if (!profiles.some((profile) => profile.id === profileId)) profileId = profiles[0]?.id || '';
+    // A profile can disappear from the relay (renamed, or the connection moved
+    // to another computer), so the picker falls back instead of submitting a
+    // name the start validation would reject.
+    if (!hermesProfiles.includes(hermesProfile)) hermesProfile = hermesProfiles[0];
     if (relayId && relayId !== loadedRelay) {
       loadedRelay = relayId;
       directoryRelayId = '';
@@ -133,6 +162,9 @@
         cwd: launchCwd,
         prompt,
         workspace_id: targetWorkspace?.workspace_id || '',
+        // Only sent when the user explicitly chose a profile.
+        // Empty selection = omit the field = let Hermes follow its sticky active_profile.
+        ...(isHermes && hermesProfile !== '' ? { hermes_profile: hermesProfile } : {}),
       });
       const warning = String(result.data?.warning || '');
       status = warning || 'Agent started.';
@@ -187,6 +219,16 @@
         {#if !profiles.length}<option value="">No agent profiles available</option>{/if}
         {#each profiles as profile (profile.id)}<option value={profile.id}>{profile.label || profile.id}</option>{/each}
       </select>
+
+      {#if isHermes}
+        <label for="launch-hermes-profile">Hermes profile</label>
+        <select id="launch-hermes-profile" bind:value={hermesProfile}>
+          {#each hermesProfiles as p (p)}
+            <option value={p}>{hermesProfileLabel(p)}</option>
+          {/each}
+        </select>
+        <p class="hint">Leave it on “Use my usual setup” and Hermes starts the profile it uses on your desktop, as set by <code>hermes profile use</code>. Pick a profile only if this agent should run somewhere else.</p>
+      {/if}
 
       <span id="launch-cwd-label" class="field-label">Working Directory</span>
       <div bind:this={directoryBrowser} class:open={directoryOpen} class="directory-browser" aria-labelledby="launch-cwd-label">

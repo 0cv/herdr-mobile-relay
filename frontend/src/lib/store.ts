@@ -919,6 +919,7 @@ class RelayStore {
       connectingSince: Date.now(),
       lastMessageAt: 0,
       agentProfiles: [],
+      hermesProfiles: [],
       capabilities: [],
       speechLanguages: [],
       speechVoices: [],
@@ -1370,6 +1371,11 @@ class RelayStore {
             )
             || String(left.id).localeCompare(String(right.id), undefined, { sensitivity: 'base' })
           ))
+        : [];
+      // A relay that predates the picker omits the field entirely, and a
+      // malformed entry would otherwise reach `-p` as a non-string.
+      connection.hermesProfiles = Array.isArray(message.hermes_profiles)
+        ? message.hermes_profiles.filter((name): name is string => typeof name === 'string' && name.length > 0)
         : [];
       this.emitConnections();
       this.pushConfigHandler?.(relayId);
