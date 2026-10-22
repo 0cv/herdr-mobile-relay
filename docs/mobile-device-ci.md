@@ -334,6 +334,14 @@ bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.
 
+Initial Safari navigation issues one `simctl openurl` with a 90-second cap.
+The following 60-second readiness phase allows two complete 20-second WebKit
+discovery calls, a 15-second attachment, URL verification and return to native
+context, plus 3 seconds for polling and overhead. All phases remain bounded by
+the enclosing run deadline. A native-only discovery is not readiness: the
+adapter must attach and read the expected origin, and a timed-out driver command
+still quarantines the session rather than permitting another query.
+
 Android retains a separate all-buffer threadtime startup diagnostic before the
 first certificate-preparation session. It connects only to the existing local
 ADB server, uses one shell-v2 stream, and records bounded stdout/stderr, framing,

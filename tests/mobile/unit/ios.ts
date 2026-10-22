@@ -418,6 +418,69 @@ test('recorded 18302ms native-only discovery settles before subsequent Safari pu
   assert.ok(driver.snapshot().commands.filter((entry) => entry.path.endsWith('/execute/sync')).every((entry) => entry.timeoutMs === 20_000 && !entry.timedOut));
 });
 
+for (const mode of ['ready', 'absent'] as const) {
+  test(`hosted 39755232141 Safari ${mode} after near-limit native-only discovery uses the bounded readiness phase`, async () => {
+    let now = 0;
+    let discoveries = 0;
+    let navigations = 0;
+    const { platform, driver, requests, budget } = await adapter(`hosted-safari-${mode}`, ({ path, body }) => {
+      if (body.script === 'mobile: getContexts') {
+        discoveries += 1;
+        now += discoveries === 1 ? 19_889 : 19_500;
+        return value(discoveries === 1 || mode === 'absent'
+          ? [{ id: 'NATIVE_APP' }]
+          : [{ id: 'WEBVIEW_46542.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
+      }
+      if (path.endsWith('/context')) {
+        now += body.name === 'NATIVE_APP' ? 900 : 14_900;
+        return value(null);
+      }
+      if (path.endsWith('/url') && !body.url) {
+        now += 900;
+        return value(`${origin}/`);
+      }
+      throw new Error(`unexpected hosted Safari operation ${path}`);
+    }, () => now);
+    (platform as any).simulatorReadyAt = '2026-10-22T09:56:48.108Z';
+    (platform as any).navigationCommand = async (binary: string, args: string[], timeoutMs: number) => {
+      assert.equal(binary, 'xcrun');
+      assert.deepEqual(args, ['simctl', 'openurl', 'protocol-only', `${origin}/`]);
+      assert.equal(timeoutMs, 90_000);
+      navigations += 1;
+      now += 8_971;
+      return { code: 0, stdout: '', stderr: '', durationMs: 8_971, timedOut: false };
+    };
+    const originalWait = PhaseBudget.prototype.wait;
+    PhaseBudget.prototype.wait = async function (milliseconds: number) {
+      assert.equal(this.phase, 'ios-safari-readiness');
+      assert.equal(milliseconds, 250);
+      now += 264;
+      this.assertAvailable('fixture wait');
+    };
+    try {
+      if (mode === 'ready') await platform.openSetupURL(`${origin}/`);
+      else await assert.rejects(() => platform.openSetupURL(`${origin}/`), /IOS_NAVIGATION.*native-only/u);
+    } finally {
+      PhaseBudget.prototype.wait = originalWait;
+    }
+    assert.equal(navigations, 1);
+    assert.equal(discoveries, 2);
+    assert.equal(driver.snapshot().unusable, false);
+    assert.equal(driver.snapshot().firstFatal, undefined);
+    assert.equal(budget.recoveryCount, 0);
+    assert.ok(now - 8_971 < 60_000);
+    assert.deepEqual(driver.snapshot().commands.filter(entry => entry.timing?.operation === 'contexts').map(entry => entry.timeoutMs), [20_000, 20_000]);
+    assert.equal(requests.some(request => request.body.url || request.body.script === 'mobile: activateApp'), false);
+    if (mode === 'ready') {
+      assert.deepEqual(requests.filter(request => request.path.endsWith('/context')).map(request => request.body.name), ['WEBVIEW_46542.1', 'NATIVE_APP']);
+      assert.equal((platform.evidenceSnapshot().safariNavigation as any).lastObservation.result, 'expected-origin');
+    } else {
+      assert.equal(requests.some(request => request.path.endsWith('/context') || request.path.endsWith('/url')), false);
+      assert.equal((platform.evidenceSnapshot().safariNavigation as any).reserveExhaustion.reason, 'discovery-observation');
+    }
+  });
+}
+
 test('cold Safari attach consumes recorded backend duration plus synthetic send and full-body overhead', async () => {
   const { platform, driver, requests, budget } = await adapter('cold-safari-attach', async ({ path, body, signal }) => {
     if (body.script === 'mobile: getContexts') return value([{ id: 'WEBVIEW_23086.1', bundleId: 'com.apple.mobilesafari' }]);
