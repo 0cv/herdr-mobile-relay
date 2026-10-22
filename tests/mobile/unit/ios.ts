@@ -1826,7 +1826,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
       processes.push({ binary, args, timeoutMs });
       try {
         if (args.includes('openurl')) {
-          assert.equal(timeoutMs, 30_000);
+          assert.equal(timeoutMs, 90_000);
           if (mode === 'real-process-timeout') {
             try { return await command('/bin/sleep', ['2'], 40); }
             catch (error) { navigationError = error; throw error; }
@@ -3396,6 +3396,16 @@ test('SM55 receipt ordinary delayed writes stay owned and frozen on reentry', as
   assert.equal(a.native.length, 2);
   await a.platform.captureSanitizedEvidence('failure');
   assert.equal(a.writes.length, 2);
+});
+
+test('ordinary failure evidence includes the SpringBoard, CoreSimulatorBridge and lsd simulator log', async () => {
+  const a = await receiptCaptureAdapter('springboard-log');
+  a.internal.launchObservation = new IOSLaunchObservation(a.clock);
+  await a.platform.captureSanitizedEvidence('failure');
+  const springboard = a.native.find(argv => argv.at(-1) === 'process == "SpringBoard" OR process == "CoreSimulatorBridge" OR process == "lsd"');
+  assert.deepEqual(springboard?.slice(0, 9), ['simctl', 'spawn', receiptUdid, 'log', 'show', '--last', '10m', '--style', 'compact']);
+  assert.equal(a.native.filter(argv => argv.includes('log')).length, 3);
+  assert.equal(a.writes.length, 0);
 });
 
 test('SM55 receipt rejected partial writes preserve first fatal without retry', async () => {

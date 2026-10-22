@@ -36,12 +36,12 @@ import { runtimeScript, updateCompletionScript, type MobilePlatform, type Platfo
 
 const IOS_INSTALLED_BUNDLE_ID = 'com.apple.webapp';
 const IOS_SPRINGBOARD_BUNDLE_ID = 'com.apple.springboard';
-const IOS_OPENURL_COMMAND_MS = 30_000;
+const IOS_OPENURL_COMMAND_MS = 90_000;
 const IOS_WEBVIEW_CONNECT_TIMEOUT_MS = 5_000;
 const IOS_WEBVIEW_CONNECT_RETRIES = 1;
 const IOS_WEBKIT_DISCOVERY_COMMAND_MS = 20_000;
 const IOS_SAFARI_READINESS_PHASE_MS = 46_000;
-const IOS_NAVIGATION_PHASE_MS = 86_000;
+const IOS_NAVIGATION_PHASE_MS = IOS_OPENURL_COMMAND_MS + IOS_SAFARI_READINESS_PHASE_MS + 10_000;
 const IOS_SAFARI_DISCOVERY_RESERVE_MS = 6_000;
 const IOS_SAFARI_ATTACH_COMMAND_MS = 15_000;
 const IOS_SAFARI_OBSERVATION_MS = IOS_SAFARI_ATTACH_COMMAND_MS + 2_000;
@@ -1508,12 +1508,15 @@ export class IOSPlatform implements MobilePlatform {
     const captures: Array<[string, string[]]> = [
       ['simulator-log', ['simctl', 'spawn', this.udid, 'log', 'show', '--last', '10m', '--style', 'compact']],
       ['webkit-safari', ['simctl', 'spawn', this.udid, 'log', 'show', '--last', '10m', '--style', 'compact', '--predicate', 'process CONTAINS[c] "WebKit" OR process CONTAINS[c] "Safari"']],
+      ...(name === 'failure'
+        ? [['springboard', ['simctl', 'spawn', this.udid, 'log', 'show', '--last', '10m', '--style', 'compact', '--predicate', 'process == "SpringBoard" OR process == "CoreSimulatorBridge" OR process == "lsd"']]] as Array<[string, string[]]>
+        : []),
       ['apps', ['simctl', 'listapps', this.udid]],
       ['wda', ['simctl', 'spawn', this.udid, 'launchctl', 'print', 'system']],
     ];
     for (const [suffix, args] of captures) {
       if (this.nativeDiagnosticsBlocked) break;
-      if (this.omitLaunchLogs && (suffix === 'simulator-log' || suffix === 'webkit-safari')) continue;
+      if (this.omitLaunchLogs && (suffix === 'simulator-log' || suffix === 'webkit-safari' || suffix === 'springboard')) continue;
       const output = await this.diagnosticCommand('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
       await writeBoundedText(join(this.outputDir, `${name}-ios-${suffix}.log`), output);
     }
