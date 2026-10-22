@@ -236,6 +236,73 @@ jobs:
           cache: true
       - run: go test -race ./...
 
+  go-darwin:
+    needs: provenance
+    name: Go Darwin ACL, doctor and support (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+          cache: false
+      - name: Run the real-ACL tests on macOS; every required one must pass, a skip fails
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -s)" = Darwin
+          log="$RUNNER_TEMP/go-darwin-test.jsonl" err="$RUNNER_TEMP/go-darwin-test.stderr"
+          go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support >"$log" 2>"$err" && go_exit=0 || go_exit=$?
+          [ "$go_exit" = 0 ] || tail -n 5 "$err" | cut -c1-200 >&2
+          python3 - "$log" "$go_exit" <<'PY'
+          import json
+          import sys
+
+          def reject(constant):
+              raise ValueError(constant)
+
+          log, go_exit = sys.argv[1:]
+          required = {
+              "internal/darwinacl": ["TestRealPlainObjectsHaveNoACLOnAnAllowedVolume"],
+              "internal/doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads"],
+              "internal/support": ["TestLoadDarwinHostedRealACL"],
+          }
+          module = [line.split()[1] for line in open("go.mod") if line.startswith("module ")][0]
+          ends, unparsed = {}, 0
+          for line in open(log, errors="replace"):
+              try:
+                  event = json.loads(line, parse_constant=reject)
+                  action = event["Action"]
+              except (ValueError, TypeError, KeyError):
+                  action = None
+              if not isinstance(action, str):
+                  unparsed += 1
+                  continue
+              if action in ("pass", "fail", "skip"):
+                  ends.setdefault((event.get("Package"), event.get("Test")), []).append(action)
+          problems = [] if go_exit == "0" else ["go test exited " + go_exit[:8]]
+          if unparsed:
+              problems.append("%d log lines were not JSON events with an Action" % unparsed)
+          for package, names in required.items():
+              path = module + "/" + package
+              if ends.get((path, None)) != ["pass"]:
+                  problems.append("%s: package ended %s" % (package, ends.get((path, None)) or "missing"))
+              for name in names:
+                  nested = [test for (pkg, test), got in ends.items() if pkg == path and (test or "").startswith(name + "/") and got != ["pass"]]
+                  if ends.get((path, name)) != ["pass"] or nested:
+                      problems.append("%s:%s ended %s%s" % (package, name, ends.get((path, name)) or "missing", ", subtests not passed: %s" % nested[:3] if nested else ""))
+          if problems:
+              sys.exit("go-darwin: required real-ACL evidence is not met:\n  " + "\n  ".join(problems[:20]))
+          print("go-darwin: all %d required real-ACL tests passed in their own packages; go test exited 0" % sum(map(len, required.values())))
+          PY
+
   shell:
     needs: provenance
     name: Shell and production paths

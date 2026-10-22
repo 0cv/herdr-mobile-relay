@@ -151,6 +151,18 @@ successive groups of macOS jobs and a push at least two, and pushes, pull reques
 is a constraint, not a prediction: no wall-clock, queue or 15-minute figure is promised. `release.yml` (unchanged) waits at most 1800 s
 for a still-running Full run, so dispatch it and let it finish before tagging.
 
+## Hosted macOS Go job: real descriptor ACL evidence
+
+`check.yml` job `go-darwin` (**Go Darwin ACL, doctor and support (macos-15)**: after `provenance`, read-only token, no secrets, `setup-go` caching off so that no cache is saved to or restored from the repository's Actions cache, no artifact; only the job log outlives the runner) runs
+`go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support` on a GitHub-hosted macos-15 runner. The Ubuntu
+`go` and `race` jobs never execute the real macOS ACL cells (they skip or return early off Darwin or off a hosted runner). The job
+passes only if `go test` exits 0, the three packages end `pass`, and each of five required tests ends `pass` **in its own package**
+with no skipped or failed subtest: `internal/darwinacl` `TestRealPlainObjectsHaveNoACLOnAnAllowedVolume`; `internal/doctor`
+`TestDarwinHostedRealACLGrant`, `TestDarwinHostedRealDirectoryACL` and `TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads`;
+`internal/support` `TestLoadDarwinHostedRealACL`. For any of the five, **a skip, a missing test or a pass under another package is a failure**, never a pass (a skip of any other test in the three packages is not examined: `go test` still exits 0).
+A failure prints package and test names (and the last five stderr lines of `go` itself when it fails), never the log. Only a passing
+hosted run of this job qualifies the real-ACL cells on a real macOS host: until one has passed, they are unqualified.
+
 ## Uninstall mount confinement
 
 On Linux, `relay/uninstall.sh` runs the relay's own mount guard (`internal/uninstallmount`, command

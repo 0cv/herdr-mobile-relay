@@ -717,6 +717,26 @@ class Wiring(unittest.TestCase):
         self.assertEqual(re.findall(r"tests/test_\w+\.(?:sh|py)", service), ["tests/test_native_install.sh", "tests/test_uninstall.sh", "tests/test_service_uninstall_cli.py"])
         self.assertFalse(set(re.findall(r"tests/test_\w+\.(?:sh|py)", service)) & set(re.findall(r"tests/test_\w+\.(?:sh|py)", complement)))
 
+    def test_check_keeps_the_hosted_macos_go_job_and_its_five_required_real_acl_tests(self):
+        check, docs = self.text(".github/workflows/check.yml"), " ".join(self.text("docs/ci-test-tiers.md").split())
+        found = re.search(r"(?ms)^  go-darwin:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)", check)
+        self.assertIsNotNone(found, "check.yml dropped the go-darwin job")
+        job = found.group(1)
+        for text in ("needs: provenance", "runs-on: macos-15", "go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support", '!= ["pass"]'):
+            self.assertIn(text, job)
+        self.assertNotIn("str.strip", job, "blank log lines must be rejected, not filtered out")
+        self.assertIn("cache: false", job, "the job must save nothing to the Actions cache")
+        self.assertIn("parse_constant=reject", job, "NaN/Infinity are not JSON")
+        required = {"darwinacl": ["TestRealPlainObjectsHaveNoACLOnAnAllowedVolume"], "support": ["TestLoadDarwinHostedRealACL"],
+                    "doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads"]}
+        for package, names in required.items():
+            source = "".join(path.read_text() for path in (ROOT / "internal" / package).glob("*_test.go"))
+            for name in names:  # the job, its page and the package's own tests all name the same five tests
+                self.assertIn('"internal/%s"' % package, job)
+                self.assertIn(name, job)
+                self.assertIn("`%s`" % name, docs)
+                self.assertRegex(source, r"(?m)^func %s\(t \*testing\.T\)" % name)
+
 
 if __name__ == "__main__":
     unittest.main()
