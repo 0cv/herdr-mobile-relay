@@ -551,6 +551,17 @@
     pendingLayoutStick = virtualStickToBottom;
   });
 
+  // While the reader's finger is moving (and through iOS momentum), nothing re-pins the view to
+  // the bottom: following resumes once they stop at the bottom.
+  let lastUserScrollAt = Number.NEGATIVE_INFINITY;
+  function noteUserScroll() {
+    lastUserScrollAt = performance.now();
+  }
+
+  function fingerScrolling(): boolean {
+    return performance.now() - lastUserScrollAt < 1500;
+  }
+
   function rememberVirtualScrollGeometry(element: HTMLElement) {
     virtualScrollTop = element.scrollTop;
     virtualClientHeight = element.clientHeight;
@@ -759,7 +770,7 @@
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) return;
-    const frameStick = virtualStickToBottom || Boolean(terminalElement
+    const frameStick = virtualStickToBottom || Boolean(!fingerScrolling() && terminalElement
       && terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48);
     const stick = resizeSessionActive && pendingResizeStick !== null
       ? pendingResizeStick
@@ -1040,8 +1051,8 @@
     if (!terminalElement || !entries.length) return;
     if (virtualScrollResetPending) return;
     const previousTop = terminalElement.scrollTop;
-    const wasAtBottom = virtualStickToBottom
-      || terminalElement.scrollHeight - previousTop - terminalElement.clientHeight < 48;
+    const wasAtBottom = virtualStickToBottom || (!fingerScrolling()
+      && terminalElement.scrollHeight - previousTop - terminalElement.clientHeight < 48);
     const anchor = virtualIndex.indexAt(previousTop);
     let anchorDelta = 0;
     let changed = false;
@@ -1695,7 +1706,10 @@
     // row heights disagree with the estimates more than Chromium's — opened
     // a growing gap above the transcript's end and fought every scroll with
     // anchor-preserving corrections (issue #11's missing bottom + flicker).
-    const movedTowardHistory = !layoutChanged
+    // A moving finger outranks a height change: Safari's address bar resizes the view during
+    // the very scroll that leaves the bottom, and reading that as layout re-pinned the reader.
+    const fingerMoving = fingerScrolling();
+    const movedTowardHistory = (!layoutChanged || fingerMoving)
       && scrollTop < virtualScrollTop - 1
       && bottomDistance > 1;
     rememberVirtualScrollGeometry(terminalElement);
@@ -1704,12 +1718,20 @@
       jumpVisible = true;
     } else if (atBottom) {
       if (bottomDistance > 0.5) {
+        if (fingerMoving) {
+          virtualStickToBottom = false;
+          jumpVisible = true;
+          return;
+        }
         jumpToBottom();
         return;
       }
       virtualStickToBottom = true;
       jumpVisible = false;
     } else if (!virtualStickToBottom) {
+      jumpVisible = true;
+    } else if (fingerMoving) {
+      virtualStickToBottom = false;
       jumpVisible = true;
     } else {
       jumpToBottom();
@@ -2186,6 +2208,8 @@
     aria-label="Agent terminal output"
     onscroll={handleScroll}
     onscrollcapture={syncWideGridScroll}
+    ontouchmove={noteUserScroll}
+    onwheel={noteUserScroll}
   >
     <span
       bind:this={cellMeasureElement}

@@ -3510,6 +3510,40 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
+test('keeps a small scroll-up from the bottom while output streams', async ({ page }) => {
+  const rows = Array.from({ length: 200 }, (_, index) => `near-bottom row ${index + 1}`);
+  await openOmpPane(page, 'Near bottom');
+  const frame = (count: number) => server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: rows.slice(0, count).join('\n'),
+  });
+  await frame(150);
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('near-bottom row 150');
+  const bottomDistance = () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight);
+  await expect.poll(bottomDistance).toBeLessThan(2);
+
+  // A finger drags the view up by less than the 48px "near the bottom" band.
+  await terminal.evaluate((element) => {
+    element.dispatchEvent(new Event('touchmove', { bubbles: true }));
+    element.scrollTop -= 20;
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  await frame(151);
+  await expect(terminal).toContainText('near-bottom row 151');
+  expect(await bottomDistance()).toBeGreaterThan(10);
+
+  // Jumping back right away follows output again, even mid-gesture window.
+  await page.getByRole('button', { name: 'Jump to latest' }).click();
+  await frame(200);
+  await expect(terminal).toContainText('near-bottom row 200');
+  await expect.poll(bottomDistance).toBeLessThan(2);
+});
+
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
