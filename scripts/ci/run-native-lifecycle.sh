@@ -407,7 +407,7 @@ stage_base() {
     for t in curl cloudflared; do
         extra=''
         if [ "$t" = curl ]; then
-            extra="--art $S/art --ancestor-art $S/ancestor-art --version $VER --sha $SHA --ancestor $ANCESTOR --target $TARGET --host $HOSTN --ports $RELAY_PORT --selector $S/run/selected --candidate-digest $CAND_DIGEST --ancestor-digest $ANCE_DIGEST --candidate-archive $CAND_ARCHIVE --ancestor-archive $ANCE_ARCHIVE"
+            extra="--art $S/art --ancestor-art $S/ancestor-art --version $VER --sha $SHA --ancestor $ANCESTOR --target $TARGET --host $HOSTN --ports $RELAY_PORT --selector $S/run/selected --candidate-digest ${CAND_DIGEST:-none} --ancestor-digest ${ANCE_DIGEST:-none} --candidate-archive ${CAND_ARCHIVE:-none} --ancestor-archive ${ANCE_ARCHIVE:-none}"  # probe has no artifact facts: `none` matches no digest, so every download is refused
         fi
         printf '#!/bin/sh\nexec %s -I -B %s/native-lifecycle-host.py %s --log %s/run/hits.log %s -- "$@"\n' "$PY" "$S" "$t" "$S" "$extra" > "$EV/shim.$t"
         stage_put "$EV/shim.$t" "$([ "$t" = curl ] && echo "$SHIMDIR/curl" || echo "$S/bin/$t")" 700

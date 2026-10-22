@@ -703,6 +703,19 @@ class Wiring(unittest.TestCase):
         proc.wait()
         self.assertTrue(host.group_gone(proc.pid, 2))
 
+    def test_probe_stage_base_needs_no_artifact_facts_and_refuses_downloads(self):
+        # Hosted 667d7aca: probe mode calls stage_base before artifact_facts, and `set -u` aborted on CAND_DIGEST.
+        # Run the driver's own stage_base under `set -u` with no artifact facts; the curl shim must name `none` digests.
+        stubs = 'on_cleanup() { :; }\nas_subject() { :; }\nfail() { echo "fail $*" >&2; exit 1; }\nstage_put() { :; }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"PATH": "/usr/bin:/bin", "EV": tmp, "OS": "Darwin", "S": "/stage", "SHIMDIR": "/stage/shim", "HOSTPY": "/host.py", "PY": "/py",
+                   "VER": "0.0.0", "SHA": SHA, "ANCESTOR": m.ANCESTOR, "TARGET": "darwin_arm64", "HOSTN": "h.test", "RELAY_PORT": "18375"}
+            program = "set -euo pipefail\n" + stubs + self.shell_function("stage_base") + "stage_base\n"
+            subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", program], env=env, capture_output=True, text=True, check=True)
+            shim = (pathlib.Path(tmp) / "shim.curl").read_text()
+        for flag in ("--candidate-digest none", "--ancestor-digest none", "--candidate-archive none", "--ancestor-archive none"):
+            self.assertIn(flag, shim)
+
     def shell_function(self, name):
         driver = self.text("scripts/ci/run-native-lifecycle.sh")
         return name + "() {" + driver.split("\n" + name + "() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
