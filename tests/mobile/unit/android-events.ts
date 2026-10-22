@@ -571,9 +571,22 @@ androidEventTests.push(['synthetic planned Chrome force-stop covers observed hel
   assert.deepEqual(check(valid).issues, []);
   assert.deepEqual(check(valid).fatalEvents, []);
   assert.deepEqual(check(operationLog(stopping, kill, reap, helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)'), signal)).fatalEvents, []);
+  const cleanExit = helperExit.replace('due to signal 9 (Killed)', 'cleanly (0)');
+  assert.deepEqual(check(operationLog(stopping, kill, cleanExit, reap, signal)).fatalEvents, []);
+  const earlyCleanExit = cleanExit.replace('6374.000', '6373.750');
+  assert.deepEqual(check(operationLog(stopping, kill, earlyCleanExit, reap, signal)).fatalEvents, []);
   const otherProcesses = { ...operation, processes: { '300': 'com.android.chrome' } };
   const otherName = { ...operation, processes: { '300': 'com.android.chrome', '301': `${helper}1` } };
   for (const [name, log, operations] of [
+    ['early clean exit without reaping', operationLog(stopping, kill, earlyCleanExit, signal), [operation]],
+    ['early crash exit', operationLog(stopping, kill, earlyCleanExit.replace('cleanly (0)', 'due to signal 11 (Segmentation fault)'), reap, signal), [operation]],
+    ['clean exit received before force-stop', operationLog(earlyCleanExit, stopping, kill, reap, signal), [operation]],
+    ['clean exit timestamped before force-stop', operationLog(stopping, kill, earlyCleanExit.replace('6373.750', '6372.500'), reap, signal), [operation]],
+    ['early clean exit from unknown zygote', operationLog(stopping, kill, earlyCleanExit.replace('100 100', '101 101'), reap, signal), [operation]],
+    ['early clean exit with another signal', operationLog(stopping, kill, earlyCleanExit, reap, line(4, 559, 'Process', 'Sending signal. PID: 301 SIG: 9'), signal), [operation]],
+    ['early clean exit with duplicate exit', operationLog(stopping, kill, earlyCleanExit, reap, cleanExit, signal), [operation]],
+    ['early clean exit with wrong helper identity', operationLog(stopping, kill, earlyCleanExit, reap, signal), [otherName]],
+    ['early clean exit with unknown reaper', operationLog(stopping, kill, earlyCleanExit, reap.replace('559 559', '558 558'), signal), [operation]],
     ['helper outside the observed process set', valid, [otherProcesses]],
     ['helper with a different observed name', valid, [otherName]],
     ['reaping received after the operation', start + begin + stopping + kill + signal + finish + reap + helperExit + end, [operation]],
@@ -594,6 +607,35 @@ androidEventTests.push(['synthetic planned Chrome force-stop covers observed hel
     const result = check(log, operations);
     assert.deepEqual(result.issues, [], name);
     assert.ok(result.fatalEvents.some((event) => event.includes('301')), name);
+  }
+}]);
+
+androidEventTests.push(['hosted 39793077230 planned-stop excerpt correlates clean exit before system reaping', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-39793077230-planned-stop.log', import.meta.url), 'utf8');
+  const id = '65047b4c-6b5d-49d3-b557-fa384afcd7ea';
+  const processes = {
+    '5409': 'com.android.chrome',
+    '5460': 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0',
+    '5489': 'com.android.chrome:privileged_process0',
+    '6132': 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:10',
+  };
+  const before = snapshot('start', { ...processes, '558': 'system_server', '5449': 'com.android.chrome_zygote' });
+  const after = snapshot('end', {});
+  before.measurement!.id = id;
+  after.measurement!.id = id;
+  const operation: AndroidPlannedTermination = {
+    id: '0bfbeb9d-5d35-487e-93de-34a42d48b3de', measurementId: id,
+    packageName: 'com.android.chrome', pid: '5409', processes, succeeded: true,
+    command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'],
+  };
+  const result = measuredAndroidEvents(log, before, after, [operation]);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.boundaryDiscordances, []);
+  assert.deepEqual(result.fatalEvents, []);
+  for (const operations of [[], [{ ...operation, succeeded: false }]]) {
+    const rejected = measuredAndroidEvents(log, before, after, operations);
+    assert.ok(rejected.issues.length > 0);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('5460')));
   }
 }]);
 

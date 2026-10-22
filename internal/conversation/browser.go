@@ -2166,6 +2166,10 @@ func (b *Browser) runJob(job *browseJob) {
 	defer func() {
 		job.mu.Lock()
 		job.running = false
+		if job.err != nil {
+			job.state = BrowseFailed
+			job.phase = "failed"
+		}
 		job.mu.Unlock()
 		b.done <- job
 	}()
@@ -2444,8 +2448,6 @@ func (b *Browser) jobHasInterest(job *browseJob) bool {
 func (b *Browser) failJob(job *browseJob, code, message string, retryable bool) {
 	failure := browseErrorFor(code, message, retryable)
 	job.mu.Lock()
-	job.state = BrowseFailed
-	job.phase = "failed"
 	job.err = failure
 	index := job.index
 	job.index = nil

@@ -77,8 +77,8 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     known.set(pid, { name, time: record.time, lineNumber: record.lineNumber });
   };
   const events: string[] = [];
-  const cleanExits: { record: LogRecord; pid: string }[] = [];
-  const intervals = planned.map((operation) => ({ ...operation, begun: false, stopping: false,
+  const cleanExits: { record: LogRecord; pid: string; name: string }[] = [];
+  const intervals = planned.map((operation) => ({ ...operation, begun: false, stopping: undefined as LogRecord | undefined,
     eligible: new Map(Object.entries(operation.processes).filter(([pid]) => !records.some((record) =>
       record.tag === 'ActivityManager' && record.message.startsWith(`Start proc ${pid}:`)
       && (record.lineNumber > operation.startLine || record.time >= operation.start)
@@ -119,14 +119,14 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
       const inInterval = (entry: typeof intervals[number]) => time >= entry.start && time <= entry.end
         && record.lineNumber > entry.startLine && record.lineNumber < entry.endLine;
       if (processes[pid] === 'system_server' && /^Force stopping com\.android\.chrome appid=\d+ user=0: from pid \d+$/u.test(message)) {
-        for (const operation of intervals) if (operation.packageName === 'com.android.chrome' && inInterval(operation)) operation.stopping = true;
+        for (const operation of intervals) if (operation.packageName === 'com.android.chrome' && inInterval(operation)) operation.stopping ??= record;
       }
       // A Chrome force-stop also unbinds its sandboxed helpers, which the system may then kill as no longer needed instead of as part of the stop.
       const reaped = message.match(/^Killing (\d+):(com\.android\.chrome:sandboxed_process0:org\.chromium\.content\.app\.SandboxedProcessService0:\d+)\/u0a\d+i-\d+ \(adj -?\d+\): isolated not needed$/u);
       if (reaped && processes[pid] === 'system_server') {
         const operation = intervals.find((entry) => entry.stopping && inInterval(entry)
           && entry.packageName === 'com.android.chrome' && entry.eligible.get(reaped[1]) === reaped[2]);
-        if (operation && !forcedStops.has(reaped[1])) forcedStops.set(reaped[1], { name: reaped[2], since: time, until: operation.end, startLine: operation.startLine, endLine: operation.endLine, reaped: { killLine: record.lineNumber } });
+        if (operation?.stopping && time >= operation.stopping.time && !forcedStops.has(reaped[1])) forcedStops.set(reaped[1], { name: reaped[2], since: operation.stopping.time, until: operation.end, startLine: operation.stopping.lineNumber, endLine: operation.endLine, reaped: { killLine: record.lineNumber } });
       }
     }
     const source = identity(pid, record);
@@ -150,7 +150,7 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     const cleanPid = tag === 'Zygote' ? message.match(/^Process (\d+) exited cleanly \(0\)$/u)?.[1] : undefined;
     const cleanTarget = cleanPid ? identity(cleanPid, record) : undefined;
     if (cleanPid && cleanTarget && relevant(cleanTarget.name)
-      && !exempt(cleanPid, cleanTarget.name, record)) cleanExits.push({ record, pid: cleanPid });
+      && !exempt(cleanPid, cleanTarget.name, record)) cleanExits.push({ record, pid: cleanPid, name: cleanTarget.name });
     let targetPid = '';
     let targetName = '';
     if (tag === 'ActivityManager') {
@@ -171,7 +171,8 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     if (relevant(targetName) && (!completeTermination || !exempt(targetPid, targetName, record))) events.push(record.line);
     if (tag === 'ActivityManager') remember(targetPid, targetName, record);
   }
-  for (const { record, pid } of cleanExits) {
+  for (const { record, pid, name } of cleanExits) {
+    if (forcedStops.get(pid)?.reaped && exempt(pid, name, record)) continue;
     if (!events.some((line) => androidEventDetails(line).pid === pid)) events.push(record.line);
   }
   return events;

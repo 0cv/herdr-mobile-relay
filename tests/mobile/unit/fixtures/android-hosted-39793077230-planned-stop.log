@@ -1,0 +1,10 @@
+         1792679148.461  5808  5808 I HerdrMeasure: 65047b4c-6b5d-49d3-b557-fa384afcd7ea START
+         1792679251.518 12833 12833 I HerdrMeasure: 65047b4c-6b5d-49d3-b557-fa384afcd7ea OP_BEGIN 0bfbeb9d-5d35-487e-93de-34a42d48b3de com.android.chrome 5409
+         1792679251.537   558  1565 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 12836
+         1792679251.544   558  1565 I ActivityManager: Killing 5409:com.android.chrome/u0a145 (adj 0): stop com.android.chrome due to from pid 12836
+         1792679251.580  5449  5449 I Zygote  : Process 5460 exited cleanly (0)
+         1792679251.596   558  1565 I ActivityManager: Killing 5460:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0/u0a145i-9000 (adj 0): isolated not needed
+         1792679252.867   355   355 I Zygote  : Process 5409 exited due to signal 9 (Killed)
+         1792679253.071 12858 12858 I HerdrMeasure: 65047b4c-6b5d-49d3-b557-fa384afcd7ea OP_END 0bfbeb9d-5d35-487e-93de-34a42d48b3de com.android.chrome 5409
+         1792679253.292   558  1560 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 12868
+         1792679274.059 14006 14006 I HerdrMeasure: 65047b4c-6b5d-49d3-b557-fa384afcd7ea END
