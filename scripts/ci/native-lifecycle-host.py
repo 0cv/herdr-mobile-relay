@@ -89,13 +89,13 @@ def sh_kept(argv, timeout=10, limit=LIMIT):
     return True, status, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")[:4096]
 
 
-def identity(body):
+def identity(body, revision=None):
     """sha256 over the readiness identity (instance, version, revision, web hash) of a ready /readyz body, else `none`."""
     try:
         doc = json.loads(body)
         inv = doc.get("inventory") or {}
         fields = [doc.get(k) for k in ("instance", "release_version", "revision", "bundle_hash")]
-        if doc.get("status") == "ready" and inv.get("state") == "ready" and all(isinstance(f, str) and f for f in fields):
+        if doc.get("status") == "ready" and inv.get("state") == "ready" and all(isinstance(f, str) and f for f in fields) and (revision is None or fields[2] == revision):
             return hashlib.sha256("\n".join(fields).encode()).hexdigest()
     except (ValueError, AttributeError, TypeError):
         pass
@@ -116,7 +116,7 @@ def forward(port, path="/readyz"):
         return 502, b""
 
 
-def serve_readyz(log, tag, port):
+def serve_readyz(log, tag, port, reject=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def setup(self):
             if hasattr(self.request, "do_handshake"):
@@ -128,6 +128,13 @@ def serve_readyz(log, tag, port):
 
         def do_GET(self):
             status, body = forward(port) if self.path == "/readyz" else (404, b"")
+            if reject and os.path.exists(reject[0]) and status == 200:
+                try:
+                    if json.loads(body).get("revision") == reject[1]:
+                        note(log, tag, "rejected-b")
+                        status, body = 503, b""
+                except (ValueError, TypeError):
+                    status, body = 503, b""
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -166,7 +173,7 @@ def tls_front(o, rest):
 
         def handle_error(self, request, client_address):
             pass
-    front = Front(("127.0.0.1", 443), serve_readyz(o["log"], "front", int(o["upstream"])))
+    front = Front(("127.0.0.1", 443), serve_readyz(o["log"], "front", int(o["upstream"]), (o["reject-file"], o["reject-revision"])))
     os.setgroups([])
     os.setgid(gid)
     os.setuid(uid)
@@ -265,7 +272,19 @@ def refuse(o, why):
 def curl_shim(o, rest):
     """Strict curl: only the product's own flags; three exact download URLs served from the checksum-bound artifact; loopback
     /healthz and /readyz plus exactly https://<chosen host>/readyz delegated to the real curl with no config, proxy or override."""
-    version, host, sha, target = o["version"], o["host"], o["sha"], o["target"]
+    version, host, target = o["version"], o["host"], o["target"]
+    try:
+        with open(o["selector"], encoding="ascii") as stream:
+            sha = stream.read()
+        if sha not in (o["sha"], o["ancestor"]):
+            refuse(o, "revision-selector")
+        art = o["art"] if sha == o["sha"] else o["ancestor-art"]
+        with open(art + "/checksums.txt", "rb") as stream:
+            checks = stream.read()
+        if hashlib.sha256(checks).hexdigest() != (o["candidate-digest"] if sha == o["sha"] else o["ancestor-digest"]):
+            refuse(o, "checksums-digest")
+    except OSError:
+        refuse(o, "revision-selector")
     ports = set(o["ports"].split(","))
     plain, url, out, follow = {"--disable", "--fail", "--show-error", "--silent", "--location"}, None, None, False
     i = 0
@@ -294,13 +313,13 @@ def curl_shim(o, rest):
     archive = "herdr-mobile-relay_%s_%s.tar.gz" % (version, target)
     commit = "https://api.github.com/repos/%s/commits/v%s" % (REPO, version)
     if url in (commit, base + "/checksums.txt", base + "/" + archive):
-        checks = open(o["art"] + "/checksums.txt", "rb").read()
         payload = json.dumps({"sha": sha}).encode() if url == commit else checks
         if url.endswith(archive):
-            payload = open(o["art"] + "/" + archive, "rb").read()
+            with open(art + "/" + archive, "rb") as stream:
+                payload = stream.read()
             want = "%s  %s\n" % (hashlib.sha256(payload).hexdigest(), archive)
-            if want.encode() not in checks:
-                refuse(o, "archive-not-checksum-bound")
+            if want.encode() not in checks or hashlib.sha256(payload).hexdigest() != (o["candidate-archive"] if sha == o["sha"] else o["ancestor-archive"]):
+                refuse(o, "archive-not-receipt-bound")
         if out in (None, "-"):
             sys.stdout.buffer.write(payload)
         else:
@@ -320,6 +339,37 @@ def curl_shim(o, rest):
     if not local and url.endswith("/readyz"):
         note(o["log"], "curl", "public", identity(done.stdout) if done.returncode == 0 else "failed")
     return done.returncode
+
+
+def registry(o, rest):
+    """Fail closed on ambiguous or malformed CLI registration; never print registry contents."""
+    import pathlib
+    root = pathlib.Path(o["home"])
+    files = list(root.rglob("plugins.json"))
+    if not files and o["expected"] == "absent":
+        return 0
+    if len(files) != 1 or files[0].is_symlink():
+        return 1
+    try:
+        doc = json.loads(files[0].read_text())
+    except (OSError, ValueError):
+        return 1
+    entries = doc.get("plugins", doc) if isinstance(doc, dict) else doc
+    if isinstance(entries, dict):
+        pairs = list(entries.items())
+    elif isinstance(entries, list):
+        pairs = [("", item) for item in entries]
+    else:
+        return 1
+    matches = [item for key, item in pairs if isinstance(item, dict) and (REPO in key or REPO in json.dumps(item))]
+    if o["expected"] == "absent":
+        return 0 if not matches else 1
+    if len(matches) != 1:
+        return 1
+    item = matches[0]
+    requested = item.get("requested_ref", item.get("source_ref", item.get("ref")))
+    resolved = item.get("resolved_commit", item.get("resolved_sha", item.get("commit")))
+    return 0 if requested == o["expected"] and resolved == o["resolved"] else 1
 
 
 def herdr_adapter(o, rest):
@@ -388,7 +438,7 @@ def tree(o, rest):
     return 0
 
 
-def tree_digest(pid):
+def tree_digest(pid, pids=False):
     """Digest of the manager's main process and every descendant (pid, parent, start time, executable).
 
     `none` only when the pid is known to be 0, or is absent from a process table whose rows all parsed. `unknown` when the pid itself is unknown
@@ -411,10 +461,10 @@ def tree_digest(pid):
         if m:
             rows[int(m[1])] = (int(m[2]), m[3], m[4])
     if pid not in parents:
-        # The table never named the pid, but a garbled or truncated row would look the same: ask for that pid alone. Only a definite "no such process"
-        # (exit 1 and no output) is none; a process the table parse missed, or an unanswered query, is unknown.
-        code, answer, _ = sh(["ps", "-p", str(pid), "-o", "pid="])
-        return "none" if code == 1 and not answer.strip() else "unknown"
+        # The table never named the pid: a direct query distinguishes a no-match (procps may return 0 or 1 with empty output)
+        # from a malformed table, an error, or an unanswered query.
+        code, answer, error = sh(["ps", "-p", str(pid), "-o", "pid="])
+        return "none" if code in (0, 1) and not answer.strip() and not error.strip() else "unknown"
     owned = {pid}
     while True:
         more = {p for p, parent in parents.items() if parent in owned and p not in owned}
@@ -423,6 +473,8 @@ def tree_digest(pid):
         owned |= more
     if not owned <= set(rows):  # an owned process whose row did not parse is unobserved, not absent
         return "unknown"
+    if pids:
+        return ",".join(str(p) for p in sorted(owned))
     return hashlib.sha256("\n".join("%d %d %s %s" % ((p, rows[p][0], rows[p][1], rows[p][2])) for p in sorted(owned)).encode()).hexdigest()
 
 
@@ -750,6 +802,12 @@ def observe(o, rest):
         else:
             snap["manager_generation"] = "%s:%s" % (kv["MainPID"], kv.get("InvocationID", "")) if re.fullmatch(r"[0-9a-f]{32}", kv.get("InvocationID", "")) else "unknown"
     snap["owned_pid_digest"] = tree_digest(pid)
+    if o.get("pid-only") or o.get("pids-only"):
+        if o.get("pids-only"):
+            print(tree_digest(pid, pids=True) if snap["owned_pid_digest"] not in ("none", "unknown") else "unknown")
+        else:
+            print(pid if isinstance(pid, int) and pid > 0 and snap["owned_pid_digest"] not in ("none", "unknown") else "unknown")
+        return 0
     if o.get("digest"):
         view = {k: v for k, v in snap.items() if not (o["digest"] == "stable" and k in ("owned_pid_digest", "manager_generation"))}
         if o.get("file"):
@@ -760,6 +818,18 @@ def observe(o, rest):
         print("unknown" if unobserved else hashlib.sha256(json.dumps(view, sort_keys=True).encode()).hexdigest())
     else:
         print(json.dumps(snap, sort_keys=True))
+    return 0
+
+
+def pids_gone(o, rest):
+    """Only a valid no-match response for every captured manager/child PID proves the old tree gone."""
+    values = o.get("pids", "")
+    if not re.fullmatch(r"[1-9][0-9]*(,[1-9][0-9]*){0,127}", values):
+        return 1
+    for pid in values.split(","):
+        code, answer, error = sh(["ps", "-p", pid, "-o", "pid="])
+        if code not in (0, 1) or answer.strip() or error.strip():
+            return 1
     return 0
 
 
@@ -838,14 +908,16 @@ def main(argv):
     if len(argv) < 2:
         sys.exit("usage: native-lifecycle-host.py COMMAND [--option value ...] [-- argv]")
     if argv[1] == "ident":
-        print(identity(sys.stdin.read(LIMIT)))
+        if len(argv) not in (2, 4) or (len(argv) == 4 and (argv[2] != "--revision" or not re.fullmatch(r"[0-9a-f]{40}", argv[3]))):
+            return 2
+        print(identity(sys.stdin.read(LIMIT), argv[3] if len(argv) == 4 else None))
         return 0
     if argv[1] == "resolve" and len(argv) == 3:
         print(" ".join(sorted({a[4][0] for a in socket.getaddrinfo(argv[2], 443, type=socket.SOCK_STREAM)})))
         return 0
     o, rest = opts(argv[2:])
     table = {"run": run_bounded, "tls-front": tls_front, "herdr-socket": herdr_socket, "cloudflared": cloudflared, "curl": curl_shim,
-             "herdr": herdr_adapter, "observe": observe, "label-shape": label_shape, "counts": counts, "stop": stop, "tree": tree, "exists": exists, "table-ok": table_ok, "table-reason": table_why, "shape": shape, "nul-free": nul_free}
+             "herdr": herdr_adapter, "registry": registry, "observe": observe, "label-shape": label_shape, "counts": counts, "stop": stop, "tree": tree, "pids-gone": pids_gone, "exists": exists, "table-ok": table_ok, "table-reason": table_why, "shape": shape, "nul-free": nul_free}
     if argv[1] not in table:
         sys.exit("native lifecycle host: unknown command")
     return table[argv[1]](o, rest) or 0

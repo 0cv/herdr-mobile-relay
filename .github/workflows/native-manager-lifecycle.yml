@@ -1,10 +1,9 @@
-name: Native manager lifecycle (partial Q1)
+name: Native manager lifecycle (Q1 + CLI update/rollback/uninstall)
 
 # Real launchd and systemd-user lifecycle of the installed release, on DISPOSABLE GitHub-hosted runners
 # (macos-15 and ubuntu-24.04), behind runner-local trusted HTTPS.
 #
-# This is PARTIAL Q1: the capability probe, the A install/start/stop/relaunch/full-uninstall lifecycle and the
-# refusals. Update, rollback and the signal matrix (Q2) are NOT run here, so this workflow does not claim M3.
+# Q1 lifecycle/refusals plus real CLI A-to-B update, failed B rollback and B uninstall. Physical login/phone remain out of scope.
 #
 # A push to the CI branch (the only branch named below) runs it ONLY when the head commit message contains
 # [native-lifecycle]; without the marker only the decide job runs and the run is NOT qualification. A manual
@@ -100,9 +99,9 @@ jobs:
   producer:
     needs: decide
     if: ${{ needs.decide.outputs.run == 'true' }}
-    name: Build and receipt revision A
+    name: Build and receipt candidate B plus pinned ancestor A
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         timeout-minutes: 5
@@ -116,6 +115,13 @@ jobs:
       - name: Verify event commit, clean state, modes, bytes, and source membership
         timeout-minutes: 3
         run: python3 scripts/verify-checkout-provenance.py --expected-sha "$GITHUB_SHA"
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          ref: 8170bcd3dd58ccfb9716075b0e9cd5319addd369
+          path: native-ancestor
+          fetch-depth: 1
+          persist-credentials: false
       - uses: actions/setup-go@v7
         timeout-minutes: 8
         with:
@@ -125,9 +131,17 @@ jobs:
         timeout-minutes: 5
         with:
           bun-version: 1.4.0
-      - name: make cross-build, then the unchanged scripts/package-release.sh for the checked-out commit
-        timeout-minutes: 20
+      - name: Build both revisions using each checkout's unchanged package-release.sh
+        timeout-minutes: 30
         run: /bin/bash scripts/ci/run-native-lifecycle.sh producer
+      - name: Upload the pinned ancestor release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-ancestor-${{ github.sha }}-${{ github.run_attempt }}
+          path: native-ancestor/dist/release/
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
       - name: Upload the checksum-bound release bundle
         uses: actions/upload-artifact@v7
         with:
@@ -153,9 +167,9 @@ jobs:
   lifecycle:
     needs: [decide, probe, producer]
     if: ${{ needs.decide.outputs.run == 'true' }}
-    name: Lifecycle, partial Q1 (${{ matrix.runner }})
+    name: Lifecycle, Q1 + CLI update/rollback/uninstall (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -183,8 +197,13 @@ jobs:
         with:
           name: native-receipt-producer-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-producer
-      - name: Real A lifecycle and refusals on the installed release (bounded sudo, disposable runner only)
-        timeout-minutes: 35
+      - uses: actions/download-artifact@v8
+        timeout-minutes: 5
+        with:
+          name: lifecycle-ancestor-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-ancestor-bundle
+      - name: Q1 lifecycle plus real CLI update, rollback and uninstall (disposable runner only)
+        timeout-minutes: 55
         run: /bin/bash scripts/ci/run-native-lifecycle.sh lifecycle
       - name: Upload the cases receipt (pass or fail)
         if: always()
@@ -200,7 +219,7 @@ jobs:
   # if every dependency succeeded, the exact expected receipts pass, AND its own copy of the bundle re-hashes to the
   # producer's digests.
   gate:
-    name: Native lifecycle gate (partial Q1, not M3)
+    name: Native lifecycle gate (Q1 + CLI update/rollback/uninstall; not M3)
     needs: [decide, probe, producer, lifecycle]
     if: ${{ always() && needs.decide.outputs.run != 'false' }}
     runs-on: ubuntu-24.04
@@ -227,8 +246,12 @@ jobs:
         with:
           name: lifecycle-bundle-${{ github.sha }}-${{ github.run_attempt }}
           path: native-bundle
-      - name: Verify the exact-once, SHA, run and attempt bound receipts of both OSes, and re-hash the release bundle itself
+      - uses: actions/download-artifact@v8
+        with:
+          name: lifecycle-ancestor-${{ github.sha }}-${{ github.run_attempt }}
+          path: native-ancestor-bundle
+      - name: Verify exact-once receipts and re-hash both release bundles
         run: >-
           python3 -I -B tests/native_manager_lifecycle_matrix.py gate --sha "$GITHUB_SHA"
           --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --artifacts native-evidence
-          --bundle native-bundle --version "$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
+          --bundle native-bundle --ancestor-bundle native-ancestor-bundle --version "$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"

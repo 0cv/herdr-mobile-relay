@@ -48,6 +48,8 @@ MATRIX="$HERE/tests/native_manager_lifecycle_matrix.py"
 EV="$RUNNER_TEMP/native-evidence"
 BUNDLE="$RUNNER_TEMP/native-bundle"
 PRODJ="$RUNNER_TEMP/native-producer/producer.json"
+ABUNDLE="$RUNNER_TEMP/native-ancestor-bundle" ANCESTOR=8170bcd3dd58ccfb9716075b0e9cd5319addd369
+ACHECKOUT="$GITHUB_WORKSPACE/native-ancestor"
 VER=$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)
 RELAY_PORT=18375 CHILD_PORT=18376
 HOSTN="nlt-$RUN-$ATT.test"
@@ -65,7 +67,7 @@ SPATH="$S/bin:$THOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/
 SUID=$(id -u) SGID=$(id -g) SVC="$REL/current/relay/service.sh"
 SENV=("PATH=$SPATH")
 TSTATE=n/a ASTO=120
-FOREIGN_DEF='' STUB='' BYL='' BYD='' PRODUCT='' LINGER_ON='' TRUSTED='' STAGE_OWNED='' MID='' HOSTS_LINE='' FRONT_JOB='' CA_SHA1='' RC=0 BEFORE='' BYP0='' BY_BASE='' CNT0='' ACCT_CREATED=''
+FOREIGN_DEF='' STUB='' BYL='' BYD='' PRODUCT='' LINGER_ON='' TRUSTED='' STAGE_OWNED='' MID='' HOSTS_LINE='' FRONT_JOB='' CA_SHA1='' RC=0 BEFORE='' BYP0='' BY_BASE='' CNT0='' ACCT_CREATED='' Q2JSON='' QHOME='' CLI='' APID='' BPID='' AIDENT='' BIDENT='' REGISTRY='' PUBLIC='' A_PIDS='' B_PIDS='' RESOLVED=''
 
 # The guards above refuse (exit 2, nothing written); from here, before any manager query or sudo, the finalizer cleans up and writes the receipt for EVERY outcome.
 [ ! -L "$EV" ] || refuse 'evidence directory is a symlink'
@@ -96,7 +98,7 @@ finish() {
     # shellcheck disable=SC2086  # fixed, space-free values
     case "$mode" in
         probe) mx probe $id_args --os "$OS" --uid "$(id -u)" --facts "$FACTS" --exit "$rc" --output "$EV/probe.json" ;;
-        producer) mx producer $id_args --release-dir dist/release --version "$VER" --artifact "lifecycle-bundle-$SHA-$ATT" --exit "$rc" --output "$EV/producer.json" ;;
+        producer) mx producer $id_args --release-dir dist/release --ancestor-dir "$ACHECKOUT/dist/release" --version "$VER" --artifact "lifecycle-bundle-$SHA-$ATT" --exit "$rc" --output "$EV/producer.json" ;;
         lifecycle) mx cases $id_args --os "$OS" --records "$CASES" --producer "$PRODJ" --cleanup "$clean" --failed "$FAILED" --exit "$rc" --output "$EV/cases.json" ;;
     esac
     receipt=$?
@@ -144,7 +146,7 @@ priv() {  # The ONLY sudo sites (the long-lived TLS front is the one unbounded c
                 bsudo security delete-certificate -Z "$CA_SHA1" /Library/Keychains/System.keychain
             fi ;;
         front) sudo -n "$PY" -I -B "$S/native-lifecycle-host.py" tls-front --cert "$S/pki/leaf.pem" --key "$S/pki/leaf.key" --uid "$SUID" --gid "$SGID" \
-            --upstream "$1" --log "$S/run/hits.log" --run "$S/run" ;;
+            --upstream "$1" --log "$S/run/hits.log" --run "$S/run" --reject-file "$S/run/reject-b" --reject-revision "$SHA" ;;
         *) fail "unlisted privileged operation $op" ;;
     esac
 }
@@ -229,7 +231,7 @@ residue_gone() {  # every path the product owns is definitely absent; an uninspe
 physical_release() {  # the installed release as a PHYSICAL path, proved owned: the product's own entrypoint (the Herdr plugin pane runs `bash relay/uninstall.sh` from the package directory) never goes through the `current` link, and its native remover refuses a symlinked ancestor
     local p
     p=$(as_subject /bin/sh -c 'cd -P "$1" && pwd -P' _ "$REL/current") && [ -n "$p" ] || return 1
-    case "$p" in "$REL/releases/${VER}-${SHA}-"*/*) return 1 ;; "$REL/releases/${VER}-${SHA}-"*) printf '%s\n' "$p" ;; *) return 1 ;; esac  # one directory directly under releases/, named for this version and revision
+    case "$p" in "$REL/releases/${VER}-${SHA}-"*/* | "$REL/releases/${VER}-${ANCESTOR}-"*/*) return 1 ;; "$REL/releases/${VER}-${SHA}-"* | "$REL/releases/${VER}-${ANCESTOR}-"*) printf '%s\n' "$p" ;; *) return 1 ;; esac  # one directory directly under releases/, named for this version and revision
 }
 cl_hosts() {
     local rc=0
@@ -399,12 +401,14 @@ probe_main() {
 stage_base() {
     [ "$OS" != Darwin ] || on_cleanup cl_stage  # registered first, but it removes nothing until the atomic mkdir below proves this run created the stage
     as_subject /bin/sh -c 'umask 077 && mkdir "$1"' _ "$S" && STAGE_OWNED=yes || fail 'cannot create a fresh stage (an existing path, even a symlink, is refused and never removed)'
-    as_subject /bin/sh -c 'umask 077 && mkdir -p "$@"' _ "$S/bin" "$S/run" "$S/tmp" "$S/art" "$S/pki" "$S/src" "$S/cf" "$S/fix" "$SHIMDIR" || fail 'cannot create the stage directories'
+    as_subject /bin/sh -c 'umask 077 && mkdir -p "$@"' _ "$S/bin" "$S/run" "$S/tmp" "$S/art" "$S/ancestor-art" "$S/pki" "$S/src" "$S/cf" "$S/fix" "$SHIMDIR" || fail 'cannot create the stage directories'
     stage_put "$HOSTPY" "$S/native-lifecycle-host.py" 600
     # curl lives in SHIMDIR: ~/.local/bin of the fresh test user on Linux (the installer prepends it to PATH), a private directory on macOS
     for t in curl cloudflared; do
         extra=''
-        [ "$t" != curl ] || extra="--art $S/art --version $VER --sha $SHA --target $TARGET --host $HOSTN --ports $RELAY_PORT"
+        if [ "$t" = curl ]; then
+            extra="--art $S/art --ancestor-art $S/ancestor-art --version $VER --sha $SHA --ancestor $ANCESTOR --target $TARGET --host $HOSTN --ports $RELAY_PORT --selector $S/run/selected --candidate-digest $CAND_DIGEST --ancestor-digest $ANCE_DIGEST --candidate-archive $CAND_ARCHIVE --ancestor-archive $ANCE_ARCHIVE"
+        fi
         printf '#!/bin/sh\nexec %s -I -B %s/native-lifecycle-host.py %s --log %s/run/hits.log %s -- "$@"\n' "$PY" "$S" "$t" "$S" "$extra" > "$EV/shim.$t"
         stage_put "$EV/shim.$t" "$([ "$t" = curl ] && echo "$SHIMDIR/curl" || echo "$S/bin/$t")" 700
     done
@@ -458,7 +462,8 @@ bystander_running() { local d; d=$(snap_of "$BYL" "$BYD" | jget owned_pid_digest
 bystander() { snap_of "$BYL" "$BYD" --release /nonexistent --digest "$1" --file "$S/fix/bystander.txt"; }  # the later --release wins: the product's release must not move this digest
 counts() { HX counts --log "$S/run/hits.log" --host "$HOSTN" --ident "$IDENT"; }
 readyz_local() { as_subject curl -fsS --max-time 3 "http://127.0.0.1:$RELAY_PORT/readyz"; }
-local_ident() { local body; body=$(readyz_local 2> /dev/null) && printf '%s' "$body" | OX ident || echo none; }  # the identity of a body only after curl itself succeeded; any failure is `none`, never an empty answer
+local_ident() { local body; body=$(readyz_local 2> /dev/null) && printf '%s' "$body" | OX ident || echo none; }
+local_ident_revision() { local body; body=$(readyz_local 2> /dev/null) && printf '%s' "$body" | OX ident --revision "$1" || echo none; }  # the identity of a body only after curl itself succeeded; any failure is `none`, never an empty answer
 public_ident() { local body; body=$(as_subject curl -fsS --proto '=https' --max-time 5 "https://$HOSTN/readyz" 2> /dev/null) && printf '%s' "$body" | OX ident || echo none; }
 ready_ok() { [ "$(local_ident)" != none ]; }
 public_ok() { known_digest "$IDENT" && [ "$(public_ident)" = "$IDENT" ]; }  # two `none` answers are not the same identity
@@ -473,9 +478,11 @@ case_end() {  # PHASE PRODUCT-EXIT [MANUAL-START-COUNT] [login]
     byp=$(bystander full)
     [ "$by" = "$BY_BASE" ] && [ "$by" != unknown ] || stable=false  # the helper prints `unknown` when any bystander field was unobserved: two unknowns are not "unchanged"
     [ "${4:-}" = login ] || { [ "$byp" = "$BYP0" ] && [ "$byp" != unknown ]; } || stable=false
+    local extras=()
+    [ -z "$Q2JSON" ] || extras=(--q2 "$Q2JSON")
     mx case-add --file "$CASES" --os "$OS" --sha "$SHA" --run-id "$RUN" --run-attempt "$ATT" --id "$CASE" --phase "$1" --exit "$2" --before "$BEFORE" --after "$after" --readiness "$(local_ident)" \
-        --counts "$tally" --base "$CNT0" --manual-start "${3:-0}" --target "$TSTATE" --bystander "$by" --stable "$stable" --mid "${MID:-n/a}" || fail 'the case evidence was refused'
-    CASE='' TSTATE=n/a MID=''
+        --counts "$tally" --base "$CNT0" --manual-start "${3:-0}" --target "$TSTATE" --bystander "$by" --stable "$stable" --mid "${MID:-n/a}" "${extras[@]}" || fail 'the case evidence was refused'
+    CASE='' TSTATE=n/a MID='' Q2JSON=''
 }
 write_env() {  # TRANSPORT [extra literal assignments]
     local t=$1
@@ -576,8 +583,18 @@ default_target_lists() {  # the query itself must succeed (its status is checked
 }
 manager_stopped() { [ "$(snap | jget owned_pid_digest)" = none ] && procs_gone; }
 owned_origin() { [ "$(snap | jget origin)" = "$DEF" ]; }
+artifact_facts() {
+    mx bundle --sha "$SHA" --run-id "$RUN" --run-attempt "$ATT" --producer "$PRODJ" --bundle "$BUNDLE" --ancestor-bundle "$ABUNDLE" --version "$VER" || fail 'the downloaded bundles differ from the producer receipt'
+    CAND_DIGEST=$("$PYO" -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["artifact"]["digest"])' "$PRODJ")
+    ANCE_DIGEST=$("$PYO" -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["ancestor"]["checksums_sha256"])' "$PRODJ")
+    CAND_ARCHIVE=$("$PYO" -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["a"]["targets"][sys.argv[2]]["archive_sha256"])' "$PRODJ" "$TARGET")
+    ANCE_ARCHIVE=$("$PYO" -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["ancestor"]["targets"][sys.argv[2]]["archive_sha256"])' "$PRODJ" "$TARGET")
+}
 stage_release() {
-    mx bundle --sha "$SHA" --run-id "$RUN" --run-attempt "$ATT" --producer "$PRODJ" --bundle "$BUNDLE" --version "$VER" || fail 'the downloaded bundle differs from the producer receipt'
+    stage_put "$ABUNDLE/checksums.txt" "$S/ancestor-art/checksums.txt" 600
+    stage_put "$ABUNDLE/herdr-mobile-relay_${VER}_$TARGET.tar.gz" "$S/ancestor-art/herdr-mobile-relay_${VER}_$TARGET.tar.gz" 600
+    printf '%s' "$SHA" > "$EV/selected"
+    stage_put "$EV/selected" "$S/run/selected" 600
     stage_put "$BUNDLE/checksums.txt" "$S/art/checksums.txt" 600
     stage_put "$BUNDLE/herdr-mobile-relay_${VER}_$TARGET.tar.gz" "$S/art/herdr-mobile-relay_${VER}_$TARGET.tar.gz" 600
     COPYFILE_DISABLE=1 tar -c -C "$HERE" install.sh relay | as_subject tar -x -C "$S/src"
@@ -749,10 +766,12 @@ teardown_refusal_base() {  # no Herdr adapter is installed here: the product not
 lifecycle_main() {
     phase setup
     [ "$OS" = Darwin ] || user_up
+    artifact_facts
     stage_base
     baseline_clean || fail "a product definition, release or mapping already exists on this runner (baseline sub-check: ${BASEFAIL:-unknown})"
     RB0=$(OX tree --paths "$HOME/.local/bin") && [ -n "$RB0" ] || fail 'cannot digest the Actions user ~/.local/bin'  # its own ~/.local/bin: nothing here may touch it
     stage_release
+    stage_cli
     tls_up "$CHILD_PORT"
     phase fixtures
     fixtures_up
@@ -775,7 +794,185 @@ lifecycle_main() {
     case_begin bystander-nonmutation
     expect "$(bystander stable)" "$BY_BASE" 'the bystander changed'
     case_end bystander-continuity 0
+    q2_cases
     phase complete
+}
+
+stage_cli() {
+    local url digest size
+    if [ "$OS" = Darwin ]; then
+        url=https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-macos-aarch64
+        CLI_SHA=fb77c2232a05a8035421382c894392f4174e4e38a18e48af3dd0290157c3a7e2 CLI_SIZE=22536176
+    else
+        url=https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64
+        CLI_SHA=14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d CLI_SIZE=30285672
+    fi
+    CLI="$S/bin/herdr-v0.9.5"  # never place this or the Q1 unregister adapter on the CLI's PATH
+    as_subject /usr/bin/curl --disable -fLsS --proto '=https' --proto-redir '=https' --max-time 120 -o "$CLI" "$url" || fail 'official CLI download failed'
+    digest=$(sha_file "$CLI") && size=$(as_subject /bin/sh -c 'wc -c < "$1"' _ "$CLI") || fail 'cannot measure the official CLI'
+    size=${size//[[:space:]]/}
+    [ "$digest" = "$CLI_SHA" ] && [ "$size" = "$CLI_SIZE" ] || fail 'official CLI digest or size mismatch (not executable)'
+    as_subject chmod 0700 "$CLI" || fail 'cannot make verified CLI executable'
+}
+select_revision() {
+    case "$1" in "$SHA" | "$ANCESTOR") ;; *) fail 'unknown artifact selection' ;; esac
+    printf '%s' "$1" > "$EV/selected"
+    stage_put "$EV/selected" "$S/run/selected" 600
+}
+qenv() {
+    # The plugin's socket belongs only in relay.env, not in the real CLI environment.
+    RUNB 300 env -u HERDR_SOCKET_PATH -u HERDR_SESSION -u HERDR_CLIENT_SOCKET_PATH \
+        HOME="$QHOME" XDG_CONFIG_HOME="$QHOME/.config" XDG_STATE_HOME="$QHOME/.state" XDG_DATA_HOME="$QHOME/.data" PATH="$QHOME/.bin:$SPATH" \
+        HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay \
+        HERDR_RELEASE_ROOT="$REL" HERDR_PLUGIN_CONFIG_DIR="$CONF" HERDR_RELAY_BIN_DIR="$SHIMDIR" "$@"
+}
+qregistry() { HX registry --home "$QHOME" --expected "$1" --resolved "$2"; }
+owned_pids() { snap_of "$LABEL" "$DEF" --pids-only yes; }
+valid_pids() { printf '%s' "$1" | grep -Eq '^[1-9][0-9]*(,[1-9][0-9]*)+$'; }  # main process AND at least one child
+pids_gone() { HX pids-gone --pids "$1"; }
+qinstall() {
+    qenv "$CLI" plugin install 0cv/herdr-mobile-relay --ref "$1" --yes
+}
+q2_meta() {
+    Q2JSON=$("$PYO" -I -B -c 'import json,sys; d=dict(zip(("requested","resolved","cli_sha256","cli_size","a_pid","b_pid","a_identity","b_identity","public","setup","registry","rejected","a_gone","b_gone"), sys.argv[1:])); d["cli_size"]=int(d["cli_size"]); print(json.dumps(d))' \
+        "$SHA" "$RESOLVED" "$CLI_SHA" "$CLI_SIZE" "$APID" "$BPID" "$AIDENT" "$BIDENT" "$PUBLIC" none "$([ "$REGISTRY" = absent ] && echo absent || echo present)" "$([ "$CASE" = b-public-fail-rollback ] && echo b || echo n/a)" yes "$([ "$CASE" = b-public-fail-rollback ] && echo yes || echo n/a)")
+}
+q2_no_setup() {
+    local i
+    for i in 1 2 3 4 5; do
+        sleep 1
+        none pgrep -u "$SUID" -f 'herdr plugin action invoke setup|plugin-choose-transport' || fail 'Setup was started after the CLI update'
+    done
+}
+q2_manifest() {
+    local target=$1 recorded
+    recorded=$("$PYO" -I -B -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p[sys.argv[2]]["targets"][sys.argv[3]]["manifest_sha256"])' "$PRODJ" "$target" "$TARGET")
+    expect "$(sha_file "$REL/current/release-manifest.json")" "$recorded" 'Q2 installed manifest digest'
+}
+q2_begin() {
+    local name=$1
+    case_begin "$name"
+    QHOME="$S/q2/$name"
+    as_subject /bin/sh -c 'umask 077; mkdir -p "$1/.config" "$1/.state" "$1/.data" "$1/.bin"' _ "$QHOME" || fail 'cannot create private CLI home'
+    sgone "$SHIMDIR/herdr" && as_subject /bin/sh -c '[ -z "$(command -v herdr)" ]' || fail 'the Q1 adapter or an ambient Herdr is on the CLI PATH'
+    as_subject ln -s "$CLI" "$QHOME/.bin/herdr" || fail 'cannot expose the verified real CLI for full uninstall'
+    expect "$(as_subject /bin/sh -c 'PATH="$1/.bin:$2"; command -v herdr' _ "$QHOME" "$SPATH")" "$QHOME/.bin/herdr" 'Q2 CLI PATH provenance'
+    select_revision "$ANCESTOR"
+    qinstall "$ANCESTOR" || fail 'real CLI A install failed'
+    qregistry "$ANCESTOR" "$ANCESTOR" || fail 'A registry commit is not the requested and resolved pin'
+    expect "$(snap | jget release_revision)" "$ANCESTOR" 'A release revision'
+    q2_manifest ancestor
+    write_env cloudflare
+    service install || fail 'A service install failed'
+    wait_for 60 ready_ok || fail 'A service did not become ready'
+    AIDENT=$(local_ident_revision "$ANCESTOR") IDENT=$AIDENT
+    known_digest "$AIDENT" || fail 'A local readiness does not name the ancestor revision'
+    wait_for 30 public_ok || fail 'A public readiness failed'
+    APID=$(snap | jget owned_pid_digest)
+    A_PIDS=$(owned_pids)
+    known_digest "$APID" && valid_pids "$A_PIDS" && owned_origin || fail 'A manager/child identity unknown'
+    BPID=none BIDENT=none PUBLIC=a REGISTRY=$ANCESTOR RESOLVED=$ANCESTOR
+}
+q2_clear() {
+    local rel
+    rel=$(physical_release) || fail 'cannot prove the Q2 physical release'
+    RC=0
+    printf 'y\n' | qenv "$rel/relay/uninstall.sh" || RC=$?
+    expect "$RC" 0 'real CLI full uninstall'
+    qregistry absent absent || fail 'registry still contains the plugin after uninstall'
+    expect "$(snap | jget active)" absent 'Q2 uninstall left manager state'
+    residue_gone && sgone "$QHOME/.cache/herdr-mobile-relay" && procs_gone || fail 'Q2 uninstall left product residue, its private-HOME cache or an owned process'
+    as_subject /bin/rm -rf "$QHOME" || fail 'cannot remove private CLI home'
+}
+q2_update() {
+    select_revision "$SHA"
+    RC=0
+    qinstall "$SHA" || RC=$?
+}
+q2_update_observe_b() {
+    # The CLI can roll B back before returning: sample the live B manager/child tree while
+    # its public-readiness check is failing, then prove *those* PIDs gone after A returns.
+    local job n=0 state digest
+    select_revision "$SHA"
+    ( qinstall "$SHA" ) > "$EV/b-update.log" 2>&1 < /dev/null &
+    job=$!
+    BPID=none B_PIDS=''
+    while [ "$n" -lt 165 ] && jobs -pr | grep -qx "$job"; do
+        state=$(snap)
+        if [ "$(printf '%s' "$state" | jget release_revision)" = "$SHA" ]; then
+            digest=$(printf '%s' "$state" | jget owned_pid_digest)
+            if known_digest "$digest" && [ "$digest" != "$APID" ]; then
+                B_PIDS=$(owned_pids)
+                if valid_pids "$B_PIDS"; then BPID=$digest; break; fi
+            fi
+        fi
+        n=$((n + 1))
+        sleep 2
+    done
+    RC=0
+    wait "$job" || RC=$?
+}
+q2_cases() {
+    IDENT=none
+    q2_begin a-to-b-update
+    q2_update
+    expect "$RC" 0 'real A-to-B CLI update'
+    qregistry "$SHA" "$SHA" || fail 'B registry commit differs'
+    expect "$(snap | jget release_revision)" "$SHA" 'B release revision'
+    q2_manifest a
+    wait_for 60 ready_ok || fail 'B local readiness failed'
+    BIDENT=$(local_ident_revision "$SHA") IDENT=$BIDENT
+    known_digest "$BIDENT" && [ "$BIDENT" != "$AIDENT" ] || fail 'B readiness does not identify the candidate revision'
+    wait_for 30 public_ok || fail 'B public readiness failed'
+    BPID=$(snap | jget owned_pid_digest)
+    known_digest "$BPID" && [ "$BPID" != "$APID" ] && owned_origin && wait_for 20 pids_gone "$A_PIDS" || fail 'A manager/child survived or B process/definition is unknown'
+    q2_no_setup
+    PUBLIC=b REGISTRY=$SHA RESOLVED=$SHA
+    q2_meta
+    case_end cli-update "$RC"
+    q2_clear
+
+    IDENT=none
+    q2_begin b-public-fail-rollback
+    as_subject touch "$S/run/reject-b"
+    q2_update_observe_b
+    as_subject /bin/rm -f "$S/run/reject-b"
+    [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$RC" -ne 125 ] || fail 'B public failure did not fail the CLI update'
+    grep -q '^front rejected-b$' "$S/run/hits.log" || fail 'B public-readiness refusal was not observed at the TLS front'
+    valid_pids "$B_PIDS" && known_digest "$BPID" && wait_for 20 pids_gone "$B_PIDS" && wait_for 20 pids_gone "$A_PIDS" || fail 'failed-B or old-A manager/child survived (or B was never observed)'
+    qregistry "$ANCESTOR" "$ANCESTOR" || fail 'rollback registry claims a working B'
+    expect "$(snap | jget release_revision)" "$ANCESTOR" 'rollback release revision'
+    q2_manifest ancestor
+    IDENT=$AIDENT
+    wait_for 60 ready_ok && wait_for 30 public_ok || fail 'A did not regain local and public readiness'
+    expect "$(local_ident_revision "$ANCESTOR")" "$AIDENT" 'rollback A identity and revision'
+    APID=$(snap | jget owned_pid_digest)
+    known_digest "$APID" && owned_origin || fail 'rollback manager/child unknown'
+    q2_no_setup
+    REGISTRY=$ANCESTOR PUBLIC=a RESOLVED=$ANCESTOR
+    q2_meta
+    case_end cli-rollback "$RC"
+    q2_clear
+
+    IDENT=none
+    q2_begin b-full-uninstall
+    q2_update
+    expect "$RC" 0 'B update before uninstall'
+    qregistry "$SHA" "$SHA" || fail 'B registry commit before uninstall differs'
+    RESOLVED=$SHA  # preserve the verified B commit when the registry entry is deleted by full uninstall
+    expect "$(snap | jget release_revision)" "$SHA" 'B release revision before uninstall'
+    q2_manifest a
+    wait_for 60 ready_ok || fail 'B not locally ready before uninstall'
+    BIDENT=$(local_ident_revision "$SHA") IDENT=$BIDENT
+    known_digest "$BIDENT" && [ "$BIDENT" != "$AIDENT" ] || fail 'B readiness before uninstall does not identify the candidate revision'
+    wait_for 30 public_ok || fail 'B not publicly ready before uninstall'
+    BPID=$(snap | jget owned_pid_digest)
+    known_digest "$BPID" && [ "$BPID" != "$APID" ] && owned_origin && wait_for 20 pids_gone "$A_PIDS" || fail 'B manager/child not owned, or A manager/child survived before uninstall'
+    q2_no_setup
+    q2_clear
+    REGISTRY=absent PUBLIC=b
+    q2_meta
+    case_end cli-full-uninstall "$RC"
 }
 
 producer_main() {
@@ -784,6 +981,9 @@ producer_main() {
     make cross-build
     phase package
     scripts/package-release.sh "$VER" "$SHA" dist/release
+    [ "$(git -C "$ACHECKOUT" rev-parse HEAD)" = "$ANCESTOR" ] || fail 'ancestor checkout differs from pin'
+    [ "$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ACHECKOUT/herdr-plugin.toml")" = "$VER" ] || fail 'ancestor manifest version differs'
+    (cd "$ACHECKOUT" && make cross-build && scripts/package-release.sh "$VER" "$ANCESTOR" dist/release) || fail 'ancestor packaging failed'
     phase complete
 }
 

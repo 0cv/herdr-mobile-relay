@@ -9,6 +9,10 @@ import sys
 import tarfile
 
 TIER = "q1-partial"
+Q2_TIER = "q2-cli"
+ANCESTOR = "8170bcd3dd58ccfb9716075b0e9cd5319addd369"
+CLI = {"Linux": ("14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d", 30285672),
+       "Darwin": ("fb77c2232a05a8035421382c894392f4174e4e38a18e48af3dd0290157c3a7e2", 22536176)}
 SCHEMAS = {"probe": "native-capability-v1", "producer": "native-producer-v1", "cases": "native-cases-v1"}
 RUNNERS = {"macos-15": "Darwin", "ubuntu-24.04": "Linux"}
 TARGETS = {"Darwin": "darwin_arm64", "Linux": "linux_amd64"}
@@ -16,6 +20,7 @@ COMMON = ("a-install-start", "a-stop-start-restart", "login-style-relaunch", "ba
           "public-wizard-premutation", "gateway-missing-app", "manager-missing-injected", "a-full-uninstall",
           "bystander-nonmutation")
 ONLY = {"Darwin": ("foreign-launchd-path",), "Linux": ("foreign-systemd-fragment", "foreign-systemd-dropin")}
+Q2 = ("a-to-b-update", "b-public-fail-rollback", "b-full-uninstall")
 REFUSALS = frozenset(COMMON[3:8] + ONLY["Darwin"] + ONLY["Linux"])  # the product must exit nonzero and change nothing
 LIVE = ("a-install-start", "a-stop-start-restart", "login-style-relaunch")  # cells that need real public HTTPS and socket traffic
 LIMIT = 1 << 20
@@ -59,7 +64,7 @@ def require(condition, message):
 
 def case_ids(os_name):
     require(os_name in TARGETS, "unknown runner OS")
-    return COMMON + ONLY[os_name]
+    return COMMON + ONLY[os_name] + Q2
 
 
 def _unique(pairs):
@@ -212,12 +217,11 @@ def check_probe(doc, ident, os_name):
 
 
 
-PRODUCER_KEYS = ("schema", "kind", "candidate_sha", "run_id", "run_attempt", "runner_os", "tier", "artifact", "a", "b", "exit", "result")
+PRODUCER_KEYS = ("schema", "kind", "candidate_sha", "run_id", "run_attempt", "runner_os", "tier", "artifact", "a", "b", "ancestor", "exit", "result")
 
 
-def producer_receipt(release_dir, version, artifact, code, ident):
-    """A: the revision under test, one archive and manifest digest per used target. B is null in Q1 (no update is exercised)."""
-    sha = ident[0]
+def release_digests(release_dir, version, sha):
+    """Require every target archive, checksum line and manifest to agree with one revision."""
     targets = {}
     try:
         with open(os.path.join(release_dir, "checksums.txt"), encoding="utf-8") as stream:
@@ -234,15 +238,22 @@ def producer_receipt(release_dir, version, artifact, code, ident):
         bundle = hashlib.sha256(checks.encode()).hexdigest()
     except (OSError, KeyError, AttributeError, tarfile.TarError, Refusal):
         targets, bundle = {}, "invalid"
-    ok = code == 0 and len(targets) == len(TARGETS) and all(t["archive_sha256"] != "invalid" for t in targets.values())
-    return dict(header("producer", ident, "Linux"), tier=TIER, artifact={"name": artifact, "digest": bundle},
-                a={"commit": sha, "version": version, "targets": targets}, b=None, exit=code, result="pass" if ok else "fail")
+    ok = len(targets) == len(TARGETS) and all(t["archive_sha256"] != "invalid" for t in targets.values())
+    return {"commit": sha, "version": version, "targets": targets, "checksums_sha256": bundle}, ok
+
+
+def producer_receipt(release_dir, ancestor_dir, version, artifact, code, ident):
+    candidate, good_b = release_digests(release_dir, version, ident[0])
+    ancestor, good_a = release_digests(ancestor_dir, version, ANCESTOR)
+    return dict(header("producer", ident, "Linux"), tier=Q2_TIER, artifact={"name": artifact, "digest": candidate["checksums_sha256"]},
+                a={k: v for k, v in candidate.items() if k != "checksums_sha256"}, b=None, ancestor=ancestor,
+                exit=code, result="pass" if code == 0 and good_a and good_b else "fail")
 
 
 def check_producer(doc, ident):
     check_ident(doc, "producer", ident, "Linux", PRODUCER_KEYS)
     a, artifact = doc["a"], doc["artifact"]
-    require(doc["tier"] == TIER and doc["b"] is None, "producer tier or B differs (Q1 has no B)")
+    require(doc["tier"] == Q2_TIER and doc["b"] is None, "producer tier or B differs")
     require(type(artifact) is dict and set(artifact) == {"name", "digest"} and artifact["name"] == "lifecycle-bundle-%s-%s" % (ident[0], ident[2])
             and re.fullmatch(r"[0-9a-f]{64}", str(artifact["digest"])), "malformed producer artifact, or not this commit's and attempt's bundle")
     require(type(a) is dict and set(a) == {"commit", "version", "targets"} and a["commit"] == ident[0]
@@ -251,19 +262,29 @@ def check_producer(doc, ident):
     for target in a["targets"].values():
         require(type(target) is dict and set(target) == {"archive_sha256", "manifest_sha256"}
                 and all(re.fullmatch(r"[0-9a-f]{64}", str(v)) for v in target.values()), "malformed producer digests")
+    ancestor = doc["ancestor"]
+    require(type(ancestor) is dict and set(ancestor) == {"commit", "version", "targets", "checksums_sha256"}
+            and ancestor["commit"] == ANCESTOR and ancestor["version"] == a["version"]
+            and re.fullmatch(r"[0-9a-f]{64}", str(ancestor["checksums_sha256"]))
+            and type(ancestor["targets"]) is dict and set(ancestor["targets"]) == set(TARGETS.values()), "malformed ancestor receipt")
+    for target in ancestor["targets"].values():
+        require(type(target) is dict and set(target) == {"archive_sha256", "manifest_sha256"}
+                and all(re.fullmatch(r"[0-9a-f]{64}", str(v)) for v in target.values()), "malformed ancestor digests")
     require(doc["exit"] == 0 and doc["result"] == "pass", "the producer did not pass")
 
 
-def check_bundle(producer, bundle, version, ident):
-    again = producer_receipt(bundle, version, producer["artifact"]["name"], 0, ident)
-    require(again["result"] == "pass" and again["a"] == producer["a"] and again["artifact"] == producer["artifact"],
-            "the downloaded bundle differs from the producer receipt")
+def check_bundle(producer, bundle, ancestor_bundle, version, ident):
+    candidate, good_b = release_digests(bundle, version, ident[0])
+    ancestor, good_a = release_digests(ancestor_bundle, version, ANCESTOR)
+    require(good_b and good_a and {k: v for k, v in candidate.items() if k != "checksums_sha256"} == producer["a"]
+            and candidate["checksums_sha256"] == producer["artifact"]["digest"] and ancestor == producer["ancestor"],
+            "a downloaded bundle differs from the producer receipt")
 
 
 
 CASE_KEYS = ("id", "phase", "result", "exit", "before", "after", "readiness", "socket", "https", "unregister", "signals",
              "manual_start", "target", "bystander", "bystander_stable", "cleanup", "mid")
-CASES_KEYS = ("schema", "kind", "candidate_sha", "run_id", "run_attempt", "runner_os", "tier", "producer", "cases",
+CASES_KEYS = ("schema", "kind", "candidate_sha", "run_id", "run_attempt", "runner_os", "tier", "producer", "q2", "cases",
               "failed_case", "cleanup", "exit", "result")
 
 
@@ -288,7 +309,7 @@ def check_snap(snap):
 
 
 def check_case(case, os_name, sha):
-    require(type(case) is dict and set(case) == set(CASE_KEYS), "a case has the wrong keys")
+    require(type(case) is dict and set(case) == set(CASE_KEYS) | ({"q2"} if case.get("id") in Q2 else set()), "a case has the wrong keys")
     ident = case["id"]
     require(ident in case_ids(os_name) and text(case["phase"]) and type(case["exit"]) is int, "a case id, phase or exit is invalid")
     for key in ("before", "after"):
@@ -301,9 +322,29 @@ def check_case(case, os_name, sha):
     require(case["result"] == "pass" and case["cleanup"] == "pass" and case["bystander_stable"] is True, "a case failed, left residue or touched the bystander")
     require(re.fullmatch(r"[0-9a-f]{64}|none", case["readiness"]) and re.fullmatch(r"[0-9a-f]{64}", case["bystander"]), "malformed digests")
     # A refusal exits nonzero and every other case exits zero; 124 (timed out), 125 (could not be stopped) and 137 (killed) are neither, so a hang is never a refusal.
-    require((case["exit"] != 0) == (ident in REFUSALS) and case["exit"] not in (124, 125, 137),
+    require((case["exit"] != 0) == (ident in REFUSALS or ident == "b-public-fail-rollback") and case["exit"] not in (124, 125, 137),
             "%s: the product exit must be %s, never a timeout" % (ident, "nonzero" if ident in REFUSALS else "zero"))
-    require(case["unregister"] == (1 if ident == "a-full-uninstall" else 0), "%s: wrong Herdr unregister count" % ident)
+    require(case["unregister"] == (1 if ident == "a-full-uninstall" else 0), "%s: wrong Q1 adapter count" % ident)
+    if ident in Q2:
+        q = case["q2"]
+        require(type(q) is dict and set(q) == {"requested", "resolved", "cli_sha256", "cli_size", "a_pid", "b_pid", "a_identity", "b_identity", "public", "setup", "registry", "rejected", "a_gone", "b_gone"}, "malformed Q2 evidence")
+        require(q["cli_sha256"] == CLI[os_name][0] and q["cli_size"] == CLI[os_name][1]
+                and q["requested"] == sha and q["resolved"] == (ANCESTOR if ident == "b-public-fail-rollback" else sha)
+                and q["registry"] == ("absent" if ident == "b-full-uninstall" else "present") and q["setup"] == "none"
+                and re.fullmatch(r"[0-9a-f]{64}", q["a_pid"]) and re.fullmatch(r"[0-9a-f]{64}", q["a_identity"]), "invalid Q2 registry, CLI or A identity")
+        require(q["b_identity"] == "none" if ident == "b-public-fail-rollback" else re.fullmatch(r"[0-9a-f]{64}", q["b_identity"]) and q["b_identity"] != q["a_identity"], "invalid B identity")
+        require(re.fullmatch(r"[0-9a-f]{64}", q["b_pid"]) and q["b_pid"] != q["a_pid"], "invalid B process")
+        require(q["public"] == ("a" if ident == "b-public-fail-rollback" else "b")
+                and q["rejected"] == ("b" if ident == "b-public-fail-rollback" else "n/a")
+                and q["a_gone"] == "yes" and q["b_gone"] == ("yes" if ident == "b-public-fail-rollback" else "n/a"), "wrong public or old-process evidence")
+        require(before["active"] == "absent" and after["release_revision"] == ("absent" if ident == "b-full-uninstall" else ANCESTOR if ident == "b-public-fail-rollback" else sha), "wrong Q2 release transition")
+        require(case["readiness"] == ("none" if ident == "b-full-uninstall" else q["a_identity"] if ident == "b-public-fail-rollback" else q["b_identity"]), "wrong Q2 readiness")
+        require(case["https"]["front"] > 0 and case["https"]["child"] > 0 and min(case["socket"].values()) > 0, "missing Q2 traffic")
+        if ident == "b-full-uninstall":
+            require(after["definition_hash"] == after["active"] == "absent" and after["owned_pid_digest"] == "none", "B uninstall left the service")
+        else:
+            require(after["origin"] != "unknown" and after["active"] in ("active", "loaded") and re.fullmatch(r"[0-9a-f]{64}", after["definition_hash"])
+                    and after["owned_pid_digest"] == (q["a_pid"] if ident == "b-public-fail-rollback" else q["b_pid"]), "wrong Q2 manager process")
     require(case["target"] == ("active" if (ident, os_name) == ("login-style-relaunch", "Linux") else "n/a"),
             "default.target must be observed active after the Linux login-style restart, and only there")
     if ident in REFUSALS or ident == "bystander-nonmutation":
@@ -338,7 +379,7 @@ def cases_receipt(records, producer, cleanup, failed, code, ident, os_name):
     if failed == "none" and sorted(r.get("id") for r in records) != sorted(case_ids(os_name)):
         failed = "incomplete"
     done = cleanup == "pass" and failed == "none" and code == 0
-    return dict(header("cases", ident, os_name), tier=TIER, producer=producer, cases=records, failed_case=failed,
+    return dict(header("cases", ident, os_name), tier=Q2_TIER, producer=producer["candidate"], q2=producer["q2"], cases=records, failed_case=failed,
                 cleanup={"result": cleanup}, exit=code, result="pass" if done else "fail")
 
 
@@ -346,7 +387,10 @@ def check_cases(doc, ident, os_name, producer):
     check_ident(doc, "cases", ident, os_name, CASES_KEYS)
     target = producer["a"]["targets"][TARGETS[os_name]]
     want = {"artifact_digest": producer["artifact"]["digest"], "archive_sha256": target["archive_sha256"], "manifest_sha256": target["manifest_sha256"]}
-    require(doc["tier"] == TIER and doc["producer"] == want, "cases receipt is bound to another tier, artifact or archive")
+    ancestor = producer["ancestor"]["targets"][TARGETS[os_name]]
+    q2 = {"ancestor_checksums_sha256": producer["ancestor"]["checksums_sha256"], "ancestor_archive_sha256": ancestor["archive_sha256"],
+          "ancestor_manifest_sha256": ancestor["manifest_sha256"], "cli_sha256": CLI[os_name][0], "cli_size": CLI[os_name][1]}
+    require(doc["tier"] == Q2_TIER and doc["producer"] == want and doc["q2"] == q2, "cases receipt is bound to another tier, archive or CLI")
     require(doc["cleanup"] == {"result": "pass"} and doc["exit"] == 0 and doc["failed_case"] == "none" and doc["result"] == "pass", "the lifecycle failed or left residue")
     cases = doc["cases"]
     require(type(cases) is list and all(type(c) is dict for c in cases), "malformed case list")
@@ -370,7 +414,7 @@ def read_artifact(directory, name, file):
         return json_load(stream.read())
 
 
-def gate(directory, ident, bundle, version):
+def gate(directory, ident, bundle, ancestor_bundle, version):
     sha, run_id, attempt = ident
     require(re.fullmatch(r"[0-9a-f]{40}", sha) and run_id.isdigit() and attempt.isdigit(), "malformed run identity")
     suffix = "-%s-%s" % (sha, attempt)
@@ -381,7 +425,7 @@ def gate(directory, ident, bundle, version):
     require(os.path.isdir(directory) and sorted(os.listdir(directory)) == sorted(names), "artifact set differs from the expected receipts")
     producer = read_artifact(directory, "native-receipt-producer" + suffix, "producer.json")
     check_producer(producer, ident)
-    check_bundle(producer, bundle, version, ident)
+    check_bundle(producer, bundle, ancestor_bundle, version, ident)
     for name, (file, os_name, check) in sorted(names.items()):
         if check:
             check(read_artifact(directory, name, file), ident, os_name)
@@ -416,6 +460,7 @@ def build_parser():
         if name == "gate":
             p.add_argument("--artifacts", required=True)
             p.add_argument("--bundle", required=True)
+            p.add_argument("--ancestor-bundle", required=True)
             p.add_argument("--version", required=True)
             continue
         p.add_argument("--os", default="Linux")
@@ -423,10 +468,12 @@ def build_parser():
             for key in ("file", "id", "phase", "exit", "before", "after", "readiness", "counts", "base", "manual-start", "target", "bystander", "stable"):
                 p.add_argument("--" + key, required=True)
             p.add_argument("--mid", default="n/a")
+            p.add_argument("--q2")
             continue
         if name == "bundle":
             p.add_argument("--producer", required=True)
             p.add_argument("--bundle", required=True)
+            p.add_argument("--ancestor-bundle", required=True)
             p.add_argument("--version", required=True)
             continue
         p.add_argument("--exit", type=int, required=True)
@@ -436,6 +483,7 @@ def build_parser():
             p.add_argument("--uid", type=int, required=True)
         if name == "producer":
             p.add_argument("--release-dir", required=True)
+            p.add_argument("--ancestor-dir", required=True)
             p.add_argument("--version", required=True)
             p.add_argument("--artifact", required=True)
         if name == "cases":
@@ -452,7 +500,7 @@ def main(argv):
         if args.command == "needs":
             check_needs(os.environ.get("HERDR_NEEDS_JSON", ""), args.names)
         elif args.command == "gate":
-            gate(args.artifacts, (args.sha, args.run_id, args.run_attempt), args.bundle, args.version)
+            gate(args.artifacts, (args.sha, args.run_id, args.run_attempt), args.bundle, args.ancestor_bundle, args.version)
         else:
             ident = (args.sha, args.run_id, args.run_attempt)
             if args.command == "case-add":
@@ -461,6 +509,8 @@ def main(argv):
                         "after": json_load(args.after), "readiness": args.readiness, "socket": socket, "https": https,
                         "unregister": unregister, "signals": {"sent": 0}, "manual_start": int(args.manual_start), "target": args.target,
                         "bystander": args.bystander, "bystander_stable": args.stable == "true", "cleanup": "pass", "mid": args.mid}
+                if args.q2 is not None:
+                    case["q2"] = json_load(args.q2)
                 check_case(case, args.os, args.sha)
                 with open(args.file, "a", encoding="utf-8") as stream:
                     stream.write(json.dumps(case) + "\n")
@@ -469,13 +519,13 @@ def main(argv):
                 with open(args.producer, encoding="utf-8") as stream:
                     prod = json_load(stream.read(LIMIT))
                 check_producer(prod, ident)
-                check_bundle(prod, args.bundle, args.version, ident)
+                check_bundle(prod, args.bundle, args.ancestor_bundle, args.version, ident)
                 return 0
             if args.command == "probe":
                 with open(args.facts, encoding="utf-8") as stream:
                     doc = probe_receipt(stream.read(1 << 16), args.exit, ident, args.os, args.uid)
             elif args.command == "producer":
-                doc = producer_receipt(args.release_dir, args.version, args.artifact, args.exit, ident)
+                doc = producer_receipt(args.release_dir, args.ancestor_dir, args.version, args.artifact, args.exit, ident)
             else:
                 with open(args.records, encoding="utf-8") as stream:
                     records = [json_load(line) for line in stream.read(LIMIT).splitlines() if line]
@@ -483,7 +533,10 @@ def main(argv):
                     prod = json_load(stream.read(LIMIT))
                 target = prod["a"]["targets"][TARGETS[args.os]]
                 bound = {"artifact_digest": prod["artifact"]["digest"], "archive_sha256": target["archive_sha256"], "manifest_sha256": target["manifest_sha256"]}
-                doc = cases_receipt(records, bound, args.cleanup, args.failed, args.exit, ident, args.os)
+                ancestor = prod["ancestor"]["targets"][TARGETS[args.os]]
+                q2 = {"ancestor_checksums_sha256": prod["ancestor"]["checksums_sha256"], "ancestor_archive_sha256": ancestor["archive_sha256"],
+                      "ancestor_manifest_sha256": ancestor["manifest_sha256"], "cli_sha256": CLI[args.os][0], "cli_size": CLI[args.os][1]}
+                doc = cases_receipt(records, {"candidate": bound, "q2": q2}, args.cleanup, args.failed, args.exit, ident, args.os)
             write(args.output, doc)
             print("%s receipt: result=%s" % (args.command, doc["result"]))
             return 0 if doc["result"] == "pass" else 1

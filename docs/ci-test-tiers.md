@@ -199,26 +199,24 @@ Only the pure helper runs locally: `python3 -I -B tests/service_qualification_ma
 (`--suite uninstall-cli` for the uninstall CLI) and `python3 -I -B tests/test_service_qualification_matrix.py`. The suites
 themselves refuse outside disposable hosted CI.
 
-## Native manager lifecycle: partial Q1, not M3
+## Native manager lifecycle: Q1 plus real CLI Q2, not M3
 
 `.github/workflows/native-manager-lifecycle.yml` runs the installed release under the real launchd (macos-15) and systemd-user
 (ubuntu-24.04) managers on disposable hosted runners only. `scripts/ci/run-native-lifecycle.sh` stops casual and accidental runs elsewhere: besides the Actions variables it requires a
 process named `Runner.Worker` among its ancestors, read with the absolute `/bin/ps` so a `PATH` or function shim cannot answer for it. That is **not a security boundary**: a same-user caller
 that forges such a process (or runs code before the script starts) passes it, and a caller with passwordless `sudo` can already change the host directly, so the driver must only be started by this
-workflow on a hosted runner. It is **partial Q1,
-not M3**: the probe, A install/start/stop/login-style relaunch/full uninstall and the refusals. Update, rollback and the signal matrix (Q2)
-are not run, so nothing here claims the M3 lifecycle. A push to the CI branch runs it only with `[native-lifecycle]` in the head commit
+workflow on a hosted runner. It includes **partial Q1, not M3**: the probe, candidate install/start/stop/login-style relaunch/full uninstall and refusals, followed by three real Herdr CLI v0.9.5 cases on each OS: pinned ancestor A (`8170bcd3dd58ccfb9716075b0e9cd5319addd369`) to candidate B update; failed B public-readiness update with A rollback; and full uninstall after B. Signals and legacy-label migration through the real CLI are not covered here. Physical login/logout and a phone remain separate qualifications. A push to the CI branch runs it only with `[native-lifecycle]` in the head commit
 message (exact, case-sensitive); a push without it runs `decide` alone and is not qualification. `workflow_dispatch` qualifies its commit
-(`candidate_sha`, when given, must equal it). Jobs and caps: decide 5 min, probe 10 (both OSes), producer 30, lifecycle 45 (both OSes), gate
-10; no retries, no fail-fast, one-day artifacts, a read-only token, and two macOS jobs per run. No hosted run exists yet: the first one measures. Branch rules and release admission stay separate prerequisites that no YAML here establishes.
+(`candidate_sha`, when given, must equal it). Jobs and caps: decide 5 min, probe 10 (both OSes), producer 40, lifecycle 65 (both OSes), gate
+10; the producer adds an estimated 8 minutes for a second cross-build and package, while the lifecycle adds 20 minutes for the three clone/build-hook/service cycles and the failed update's 30-second readiness wait (estimates, not hosted measurements); no retries, no fail-fast, one-day artifacts, a read-only token, and two macOS jobs per run. No hosted run exists yet: the first one measures. Branch rules and release admission stay separate prerequisites that no YAML here establishes.
 
 | Part | What it does |
 | --- | --- |
 | probe | first real-manager contact, per OS; publishes `probe.json` (`native-capability-v1`, `result=pass\|fail`) for every outcome once its private staging exists (the hosted, path and checkout guards run first: a guard refusal writes nothing, and the upload step's `if-no-files-found: error` plus the gate's missing-artifact refusal make that red), and a failed probe stays red. It records the manager, the dedicated test user and its `default.target` (Linux), linger changes, curl's TLS backend and the CA-less refusal then trusted acceptance |
-| producer | `make cross-build` then the unchanged `scripts/package-release.sh` at the checked-out commit; `producer.json` (`native-producer-v1`) binds the archive and manifest digests (B is null in Q1) |
+| producer | unchanged package-release.sh builds the candidate and the verified pinned ancestor checkout (same manifest version); `producer.json` binds checksums, archive and manifest digests of both |
 | lifecycle | `a-install-start`, `a-stop-start-restart`, `login-style-relaunch`, `bad-token`, `bad-policy`, `public-wizard-premutation`, `gateway-missing-app`, `manager-missing-injected` (simulated), `a-full-uninstall`, `bystander-nonmutation`; plus `foreign-launchd-path` (macOS) or `foreign-systemd-fragment` and `foreign-systemd-dropin` (Linux) |
 | HTTPS | a per-run `.test` name in one marked `/etc/hosts` line, a fresh CA and leaf trusted on the disposable runner, a TLS front on 127.0.0.1:443 that drops privileges before serving, and the fake cloudflared child of the real service wrapper forwarding the installed relay's real `/readyz`; a clean environment and a strict `curl` PATH shim; hits are counted on the front AND the child |
-| Herdr | a nonroot Unix-socket API fixture through `HERDR_SOCKET_PATH` in `relay.env` (never `HERDR_BIN`), and an adapter that accepts only `plugin uninstall herdr-mobile-relay.events`; it proves no real Herdr registration |
+| Herdr | Q1 uses a nonroot Unix-socket API fixture through `HERDR_SOCKET_PATH` in `relay.env` and an unregister-only adapter. Q2 downloads the official Herdr v0.9.5 executable, checks its pinned size and SHA-256 before chmod, calls it by absolute path with private HOME/XDG roots and no CLI socket or adapter PATH, and checks requested/resolved commits in `plugins.json` |
 
 The Linux product runs as a newly created disposable test UID, never the Actions user. `login-style-relaunch` stops only that user's manager
 (`loginctl terminate-user`, else `systemctl stop user@UID.service`), starts it again with `systemctl start user@UID.service` and passes only if
@@ -243,8 +241,8 @@ token (a private home or temp path, which may hold blanks) to the end of the lin
 an integer range or the sanitized pattern, a hint holding a token that is no known word, number or punctuation, a path-like token or text after a `<path>` included; a missing, extra or malformed key is refused), but the pass rule and the failure phase never read them, so they cannot turn a failed probe into a pass. The gate also refuses a *passing* receipt whose diagnostics record a failed stage, because the driver fails closed on each: a baseline sub-check other than `none` or a baseline state other than `absent`; on macOS a `gui_print_status` or `disabled_status` other than 0, an admission other than `pass` or a `disabled_bytes` over 65536 bytes (a NUL in the domain listing fails nothing: the product discards that listing), and on Linux any recorded gui stage or label shape (a Linux probe asks no label query; the label shape is evidence on macOS and a passing macOS probe may record any coherent one).
 
 Every case records before and after definition hash, mode, origin (`path =` or `FragmentPath` plus `DropInPaths`), state, release revision,
-owned process digest and manager generation, the readiness identity, the Herdr socket counts and matched HTTPS hits of THAT case (deltas against the counters at its start, never cumulative values), `default.target` observed active after the Linux login-style restart, and a bystander digest. The
-`gate` job (`tests/native_manager_lifecycle_matrix.py`, partial Q1) requires every dependency to succeed and exactly one probe per OS, one
-producer and one `native-cases-v1` per OS, bound to the commit, run and attempt; it downloads the release bundle itself and re-hashes it against the producer receipt; it refuses a missing, empty, malformed, duplicate, extra,
+owned process digest and manager generation, the readiness identity, the Herdr socket counts and matched HTTPS hits of THAT case (deltas against the counters at its start, never cumulative values), `default.target` observed active after the Linux login-style restart, and a bystander digest. Q2 additionally checks the ready body's revision against A or B, captures the live manager and child PIDs before each transition (including B while its CLI update is in flight), and refuses a rollback or update until the prior tree is gone; a no-match PID query can return 0 or 1, but any output or error is not absence. The
+`gate` job (`tests/native_manager_lifecycle_matrix.py`, Q1 + Q2) requires every dependency to succeed and exactly one probe per OS, one
+producer and one `native-cases-v1` per OS, bound to the commit, run and attempt; it downloads both release bundles and re-hashes each against the producer receipt, and binds the official CLI pin and the three Q2 case IDs exactly once per OS; it refuses a missing, empty, malformed, duplicate, extra,
 failed, stale or cross-OS receipt, a failed probe receipt and any cleanup failure. It does not prove physical login/logout, external
 Cloudflare, phone reachability, gateway success or real Herdr registration. Offline: `python3 -I -B tests/test_native_manager_lifecycle_matrix.py`.

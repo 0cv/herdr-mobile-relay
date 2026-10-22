@@ -48,8 +48,10 @@ def make_bundle(path, sha=SHA):
 
 
 BUNDLE = make_bundle(tempfile.mkdtemp())
+ANCESTOR_BUNDLE = make_bundle(tempfile.mkdtemp(), m.ANCESTOR)
 atexit.register(shutil.rmtree, BUNDLE, True)
-PROD = m.producer_receipt(BUNDLE, VERSION, "lifecycle-bundle-%s-%s" % (SHA, ATT), 0, IDENT)
+atexit.register(shutil.rmtree, ANCESTOR_BUNDLE, True)
+PROD = m.producer_receipt(BUNDLE, ANCESTOR_BUNDLE, VERSION, "lifecycle-bundle-%s-%s" % (SHA, ATT), 0, IDENT)
 
 
 def bound(os_name):
@@ -83,6 +85,17 @@ def case(ident, os_name):
         c.update(after=ABSENT, readiness="none", unregister=1)
     elif ident == "bystander-nonmutation":
         c.update(before=ABSENT, after=ABSENT, readiness="none")
+    elif ident in m.Q2:
+        resolved = m.ANCESTOR if ident == "b-public-fail-rollback" else SHA
+        c.update(before=ABSENT, after=ABSENT if ident == "b-full-uninstall" else snap(release_revision=resolved, owned_pid_digest=H("6") if resolved == SHA else H("5")),
+                 readiness="none" if ident == "b-full-uninstall" else H("a") if resolved == m.ANCESTOR else H("b"),
+                 exit=1 if ident == "b-public-fail-rollback" else 0,
+                 q2={"requested": SHA, "resolved": resolved, "cli_sha256": m.CLI[os_name][0], "cli_size": m.CLI[os_name][1],
+                     "a_pid": H("5"), "b_pid": H("6"),
+                     "a_identity": H("a"), "b_identity": "none" if ident == "b-public-fail-rollback" else H("b"),
+                     "public": "a" if ident == "b-public-fail-rollback" else "b", "setup": "none", "rejected": "b" if ident == "b-public-fail-rollback" else "n/a",
+                     "a_gone": "yes", "b_gone": "yes" if ident == "b-public-fail-rollback" else "n/a",
+                     "registry": "absent" if ident == "b-full-uninstall" else "present"})
     return c
 
 
@@ -107,17 +120,20 @@ def good():
     for runner, os_name in m.RUNNERS.items():
         suffix = "%s-%s-%s" % (runner, SHA, ATT)
         out["native-receipt-probe-" + suffix] = ("probe.json", m.probe_receipt(facts(os_name), 0, IDENT, os_name, 1001))
-        out["native-receipt-cases-" + suffix] = ("cases.json", m.cases_receipt([case(i, os_name) for i in m.case_ids(os_name)], bound(os_name), "pass", "none", 0, IDENT, os_name))
+        ancestor = PROD["ancestor"]["targets"][m.TARGETS[os_name]]
+        q2 = {"ancestor_checksums_sha256": PROD["ancestor"]["checksums_sha256"], "ancestor_archive_sha256": ancestor["archive_sha256"],
+              "ancestor_manifest_sha256": ancestor["manifest_sha256"], "cli_sha256": m.CLI[os_name][0], "cli_size": m.CLI[os_name][1]}
+        out["native-receipt-cases-" + suffix] = ("cases.json", m.cases_receipt([case(i, os_name) for i in m.case_ids(os_name)], {"candidate": bound(os_name), "q2": q2}, "pass", "none", 0, IDENT, os_name))
     return out
 
 
-def run_gate(docs, bundle=BUNDLE):
+def run_gate(docs, bundle=BUNDLE, ancestor=ANCESTOR_BUNDLE):
     with tempfile.TemporaryDirectory() as tmp:
         for name, (file, doc) in docs.items():
             os.makedirs(os.path.join(tmp, name))
             with open(os.path.join(tmp, name, file), "w") as stream:
                 stream.write(doc if isinstance(doc, str) else json.dumps(doc))
-        m.gate(tmp, IDENT, bundle, VERSION)
+        m.gate(tmp, IDENT, bundle, ancestor, VERSION)
         return True
 
 
@@ -135,8 +151,8 @@ class Matrix(unittest.TestCase):
     def test_frozen_ids_and_applicability(self):
         common = ("a-install-start", "a-stop-start-restart", "login-style-relaunch", "bad-token", "bad-policy", "public-wizard-premutation",
                   "gateway-missing-app", "manager-missing-injected", "a-full-uninstall", "bystander-nonmutation")
-        self.assertEqual(m.case_ids("Darwin"), common + ("foreign-launchd-path",))
-        self.assertEqual(m.case_ids("Linux"), common + ("foreign-systemd-fragment", "foreign-systemd-dropin"))
+        self.assertEqual(m.case_ids("Darwin"), common + ("foreign-launchd-path",) + m.Q2)
+        self.assertEqual(m.case_ids("Linux"), common + ("foreign-systemd-fragment", "foreign-systemd-dropin") + m.Q2)
         self.assertEqual(m.SCHEMAS, {"probe": "native-capability-v1", "producer": "native-producer-v1", "cases": "native-cases-v1"})
 
     def test_a_complete_run_passes(self):
@@ -171,6 +187,17 @@ class Matrix(unittest.TestCase):
             "driver exit": up(linux, exit=1),
             "other archive": edit(linux, lambda x: x["producer"].update(archive_sha256=H("9"))),
             "other artifact": edit(mac, lambda x: x["producer"].update(artifact_digest=H("9"))),
+            "wrong ancestor digest": edit(prod, lambda x: x["ancestor"]["targets"]["linux_amd64"].update(archive_sha256=H("9"))),
+            "wrong CLI digest": edit(linux, lambda x: x["q2"].update(cli_sha256=H("9"))),
+            "missing Q2": edit(linux, lambda x: x["cases"].pop()),
+            "extra Q2": edit(linux, lambda x: x["cases"].append(case("a-to-b-update", "Linux"))),
+            "failed Q2": edit(linux, lambda x: x["cases"][-1].update(result="fail")),
+            "wrong case CLI digest": edit(linux, lambda x: x["cases"][-1]["q2"].update(cli_sha256=H("9"))),
+            "rollback not rejected by front": edit(linux, lambda x: x["cases"][-2]["q2"].update(rejected="n/a")),
+            "A child not gone after B": edit(linux, lambda x: x["cases"][-3]["q2"].update(a_gone="no")),
+            "stale B readiness identity": edit(linux, lambda x: x["cases"][-3].update(readiness=H("a"), q2=dict(x["cases"][-3]["q2"], b_identity=H("a")))),
+            "failed B child never observed": edit(linux, lambda x: x["cases"][-2]["q2"].update(b_pid="none")),
+            "failed B child survived": edit(linux, lambda x: x["cases"][-2]["q2"].update(b_gone="no")),
             "missing case": edit(linux, lambda x: x["cases"].pop()),
             "duplicate case": edit(linux, lambda x: x["cases"].append(x["cases"][0])),
             "extra case": edit(mac, lambda x: x["cases"].append(case("foreign-systemd-dropin", "Linux"))),
@@ -507,11 +534,11 @@ class Matrix(unittest.TestCase):
             make_bundle(tmp)
             for ident, version in (((SHA[:-1] + "b", RUN, ATT), VERSION), (IDENT, "0.22.5")):  # another revision, another version
                 with self.assertRaises(m.Refusal):
-                    m.check_producer(m.producer_receipt(tmp, version, "x", 0, ident), ident)
+                    m.check_producer(m.producer_receipt(tmp, ANCESTOR_BUNDLE, version, "x", 0, ident), ident)
             pathlib.Path(tmp, "checksums.txt").write_text(pathlib.Path(tmp, "checksums.txt").read_text().replace("0", "1", 1))
             with self.assertRaises(m.Refusal):
-                m.check_producer(m.producer_receipt(tmp, VERSION, "x", 0, IDENT), IDENT)
-            self.assertEqual(m.producer_receipt(tmp + "/missing", VERSION, "x", 0, IDENT)["result"], "fail")
+                m.check_producer(m.producer_receipt(tmp, ANCESTOR_BUNDLE, VERSION, "x", 0, IDENT), IDENT)
+            self.assertEqual(m.producer_receipt(tmp + "/missing", ANCESTOR_BUNDLE, VERSION, "x", 0, IDENT)["result"], "fail")
 
     def test_needs_gate_refuses_any_unsuccessful_dependency(self):
         names = ("decide", "probe", "producer", "lifecycle")
@@ -543,13 +570,14 @@ class Wiring(unittest.TestCase):
         self.assertEqual(decided("workflow_dispatch", ""), (0, "run=true"))
         self.assertEqual(decided("workflow_dispatch", "", SHA), (0, "run=true"))
         self.assertEqual(decided("workflow_dispatch", "", "b" * 40)[0], 1)
-        for text in ("name: Lifecycle, partial Q1", "needs: [decide, probe, producer]", "needs: [decide, probe, producer, lifecycle]",
+        for text in ("name: Lifecycle, Q1 + CLI update/rollback/uninstall", "needs: [decide, probe, producer]",  "needs: [decide, probe, producer, lifecycle]",
                      "if: ${{ always() && needs.decide.outputs.run != 'false' }}", "branches: [ci/tailscale-native-preflight-ef9f843]"):
             self.assertIn(text, flow)
         upload = flow.split("Upload the probe receipt (pass or fail)", 1)[1].split("- name:", 1)[0]
         for text in ("if: always()", "if-no-files-found: error", "retention-days: 1", "native-evidence/probe.json"):
             self.assertIn(text, upload)  # the failure receipt is uploaded, and a missing one is an explicit error
         self.assertEqual(flow.count("run: /bin/bash scripts/ci/run-native-lifecycle.sh"), 3)
+        self.assertIn("--ancestor-bundle native-ancestor-bundle", flow)
         gate = flow.split("  gate:\n", 1)[1]
         for text in ("name: lifecycle-bundle-${{ github.sha }}-${{ github.run_attempt }}", "--bundle native-bundle", "--version"):
             self.assertIn(text, gate)  # the gate downloads and re-hashes the bundle itself
@@ -760,6 +788,8 @@ class Wiring(unittest.TestCase):
     def mx_calls(self):
         """Every `mx SUBCOMMAND ...` call of the driver as an argv: continuation lines joined, `$id_args` expanded to the flags the driver defines, each value a placeholder."""
         driver = re.sub(r"\\\n\s*", " ", self.text("scripts/ci/run-native-lifecycle.sh"))
+        self.assertIn('"${extras[@]}"', driver)
+        driver = driver.replace('"${extras[@]}"', '--q2 "0"')  # the Q2 branch supplies an optional JSON value; Q1 supplies no extra argument
         id_args, calls = re.search(r'id_args="([^"]*)"', driver).group(1), []
         for line in (l for l in driver.splitlines() if not l.lstrip().startswith("#")):
             for found in re.finditer(r"(?<![\w$./-])mx (\S+)(.*)", line):
@@ -869,9 +899,24 @@ class Wiring(unittest.TestCase):
                                       (" 4242 garbled\n", (0, "4242\n", ""), "unknown"),
                                       (row(7, 1), (0, "4242\n", ""), "unknown"),  # absent from a parsed table but the direct query finds it
                                       (row(7, 1), (127, "", ""), "unknown"), (row(7, 1), (2, "", "boom"), "unknown"), (row(7, 1), (1, "4242\n", ""), "unknown"),
-                                      (" 4242\n", (1, "", ""), "none")):  # the direct query definitively says it is gone
+                                      (" 4242\n", (1, "", ""), "none"), (" 4242\n", (0, "", ""), "none"),
+                                      (" 4242\n", (1, "", "permission denied"), "unknown")):  # both no-match statuses are valid; stderr is not
             with unittest.mock.patch.object(host, "sh", side_effect=self.ps_stub((0, listing, ""), direct)):
                 self.assertEqual(host.tree_digest(4242), want, (listing, direct))
+        with unittest.mock.patch.object(host, "sh", side_effect=self.ps_stub((0, row(4242, 1) + row(4243, 4242), ""))):
+            self.assertEqual(host.tree_digest(4242, pids=True), "4242,4243")
+
+    def test_old_manager_and_child_pid_queries_fail_closed(self):
+        host = self.load_host()
+        for response, expected in (((0, "", ""), 0), ((1, "", ""), 0), ((0, "4242\n", ""), 1),
+                                   ((127, "", ""), 1), ((1, "", "denied"), 1)):
+            with unittest.mock.patch.object(host, "sh", return_value=response) as query:
+                self.assertEqual(host.pids_gone({"pids": "4242,4243"}, []), expected, response)
+                self.assertEqual(query.call_count, 2 if expected == 0 else 1)
+        for invalid in ("", "none", "4242,", "0,4243", "4242; echo bad"):
+            with unittest.mock.patch.object(host, "sh") as query:
+                self.assertEqual(host.pids_gone({"pids": invalid}, []), 1)
+                query.assert_not_called()
 
     @staticmethod
     def unit(**kw):
@@ -2269,6 +2314,15 @@ absent() { ! has hosts; }
         ready = json.dumps({"status": "ready", "inventory": {"state": "ready"}, "instance": "i", "release_version": "1", "revision": "r", "bundle_hash": "b"})
         digest = host.identity(ready)
         self.assertRegex(digest, "^[0-9a-f]{64}$")
+        self.assertEqual(host.identity(ready, "r"), digest)
+        self.assertEqual(host.identity(ready, SHA), "none")  # a stale A body cannot identify the candidate B
+        candidate = ready.replace('"revision": "r"', '"revision": "%s"' % SHA)
+        for body, rc, revision, want in ((candidate, "0", SHA, host.identity(candidate)),
+                                        (ready, "0", SHA, "none"), (candidate, "28", SHA, "none")):
+            stubs = 'readyz_local() { printf "%s" "$BODY"; return "$BODY_RC"; }\n'
+            code, log, err = self.run_cleanup(stubs + 'fact id "$(local_ident_revision "$REVISION")"',
+                                               {"BODY": body, "BODY_RC": rc, "REVISION": revision}, oneliners=("local_ident_revision", "OX"))
+            self.assertEqual((code, log), (0, "fact id %s\n" % want), err)
         driver = self.text("scripts/ci/run-native-lifecycle.sh")
         lines = driver.splitlines()
         stubs = 'readyz_local() { printf "%s" "$BODY"; return "$BODY_RC"; }\nas_subject() { printf "%s" "$BODY"; return "$BODY_RC"; }\npublic_curl() { printf "%s" "$BODY"; return "$BODY_RC"; }\n'
@@ -2302,13 +2356,91 @@ absent() { ! has hosts; }
     def test_curl_shim_refuses_redirects_overrides_and_foreign_urls(self):
         host = self.load_host()  # the refusal paths below return before any process or network use
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(io.StringIO()):
-            o = {"version": VERSION, "host": "nlt.test", "sha": SHA, "target": "linux_amd64", "ports": "18375", "art": tmp, "log": tmp + "/hits"}
+            pathlib.Path(tmp, "selected").write_text(SHA)
+            pathlib.Path(tmp, "checksums.txt").write_text("fixture")
+            o = {"version": VERSION, "host": "nlt.test", "sha": SHA, "ancestor": m.ANCESTOR, "target": "linux_amd64", "ports": "18375", "art": tmp, "ancestor-art": tmp,
+                 "selector": tmp + "/selected", "candidate-digest": hashlib_sha256(b"fixture"), "ancestor-digest": hashlib_sha256(b"fixture"),
+                 "candidate-archive": H("1"), "ancestor-archive": H("2"), "log": tmp + "/hits"}
             ready, local = "https://nlt.test/readyz", "http://127.0.0.1:18375/readyz"
             for args in (["-fsSL", local], ["--location", ready], ["--proxy", "http://x", ready], ["--resolve", "nlt.test:443:1.1.1.1", ready], ["-k", ready],
                          ["--cacert", "x", ready], ["-H", "Authorization: x", ready], ["https://example.com/"], ["http://127.0.0.1:9/readyz"], []):
                 with self.subTest(args), self.assertRaises(SystemExit) as refused:
                     host.curl_shim(o, args)
                 self.assertEqual(refused.exception.code, 2)
+
+    def test_q2_pins_wiring_and_registry_fail_closed(self):
+        driver = self.text("scripts/ci/run-native-lifecycle.sh")
+        flow = self.text(".github/workflows/native-manager-lifecycle.yml")
+        self.assertIn(m.ANCESTOR, driver)
+        self.assertIn(m.ANCESTOR, flow)
+        for os_name, (digest, size) in m.CLI.items():
+            self.assertIn(digest, driver)
+            self.assertIn(str(size), driver)
+        self.assertIn('HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1', driver)
+        self.assertIn('env -u HERDR_SOCKET_PATH -u HERDR_SESSION -u HERDR_CLIENT_SOCKET_PATH', driver)
+        self.assertIn('command -v herdr', driver)
+        self.assertIn('"$CLI" plugin install 0cv/herdr-mobile-relay --ref "$1" --yes', driver)
+        self.assertNotIn('"$SHIMDIR/herdr" 700\n    qinstall', driver)
+        host = self.load_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 0)
+            (home / "plugins.json").write_text(json.dumps({"plugins": [{"repository": "0cv/herdr-mobile-relay", "ref": m.ANCESTOR, "commit": m.ANCESTOR}]}))
+            self.assertEqual(host.registry({"home": tmp, "expected": m.ANCESTOR, "resolved": m.ANCESTOR}, []), 0)
+            self.assertEqual(host.registry({"home": tmp, "expected": SHA, "resolved": SHA}, []), 1)
+            self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 1)
+
+    def test_q2_rollback_samples_b_tree_before_failed_cli_returns(self):
+        # Run the driver's concurrent observation with an inert, bounded CLI stub; the
+        # background child returns failure only after the manager/child tree was sampled.
+        with tempfile.TemporaryDirectory() as tmp:
+            stubs = '''
+select_revision() { :; }
+qinstall() { /bin/sleep 1; return 9; }
+snap() { printf '{"release_revision":"%s","owned_pid_digest":"%s"}' "$SHA" "$B_DIGEST"; }
+owned_pids() { printf '4242,4243'; }
+'''
+            lines = self.text("scripts/ci/run-native-lifecycle.sh").splitlines()
+            oneline = lambda name: next(line for line in lines if line.startswith(name + "() {"))
+            program = ('set -eu\n' + stubs + '\n'.join(oneline(n) for n in ("jget", "known_digest", "valid_pids")) + '\n'
+                       + self.shell_function("q2_update_observe_b") + 'q2_update_observe_b; printf "%s:%s:%s" "$RC" "$BPID" "$B_PIDS"')
+            env = {"PATH": "/usr/bin:/bin", "PYO": sys.executable, "SHA": SHA, "APID": H("5"), "B_DIGEST": H("6"), "EV": tmp}
+            result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", program], env=env, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, "9:%s:4242,4243" % H("6"), (result.stderr, (pathlib.Path(tmp) / "b-update.log").read_text()))
+
+    def test_q2_uninstall_checks_private_cache_before_removing_home(self):
+        # Run the actual Q2 cleanup body with stubbed manager, CLI and filesystem operations.
+        # A present or uninspectable private-HOME cache must retain QHOME; only a proven absence permits its removal.
+        stubs = '''
+physical_release() { echo /release; }
+qenv() { :; }
+qregistry() { :; }
+expect() { :; }
+residue_gone() { :; }
+procs_gone() { :; }
+sgone() { echo "cache $*" >> "$LOG"; [ "$CACHE" = absent ]; }
+'''
+        for cache, allowed in (("absent", True), ("present", False), ("unknown", False)):
+            code, log, _ = self.run_cleanup(stubs + 'QHOME=/private/q2; q2_clear', {"CACHE": cache, "SNAP1": json.dumps({"active": "absent"})}, extra=("q2_clear",))
+            self.assertIn('cache /private/q2/.cache/herdr-mobile-relay', log)
+            self.assertEqual((code == 0, 'AS /bin/rm -rf /private/q2' in log), (allowed, allowed), cache)
+
+    def test_q2_full_uninstall_metadata_keeps_verified_b_commit_after_unregister(self):
+        # Exercise the driver's metadata constructor, not a hand-authored receipt: registry absence
+        # after unregister is distinct from the B commit observed immediately before removal.
+        env = {"PATH": "/usr/bin:/bin", "PYO": sys.executable, "SHA": SHA, "RESOLVED": SHA, "REGISTRY": "absent", "CASE": "b-full-uninstall",
+               "CLI_SHA": m.CLI["Linux"][0], "CLI_SIZE": str(m.CLI["Linux"][1]), "APID": H("5"), "BPID": H("6"), "AIDENT": H("a"), "BIDENT": H("b"), "PUBLIC": "b"}
+        code = self.shell_function("q2_meta") + 'q2_meta; printf "%s" "$Q2JSON"'
+        result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", code], env=env, text=True, capture_output=True, check=True)
+        actual = json.loads(result.stdout)
+        self.assertEqual((actual["resolved"], actual["registry"]), (SHA, "absent"))
+        record = case("b-full-uninstall", "Linux")
+        record["q2"] = actual
+        m.check_case(record, "Linux", SHA)
+        bad = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", code], env=dict(env, RESOLVED="absent"), text=True, capture_output=True, check=True)
+        record["q2"] = json.loads(bad.stdout)
+        with self.assertRaises(m.Refusal):
+            m.check_case(record, "Linux", SHA)
 
     def test_docs_name_every_probe_diagnostic_fact_as_evidence_not_admission(self):
         docs = " ".join(self.text("docs/ci-test-tiers.md").split())
