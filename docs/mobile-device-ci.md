@@ -256,7 +256,7 @@ export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/ios-owned"
 printf 'ios:%s\n' "$IOS_SIMULATOR_UDID" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
 xcrun simctl boot "$IOS_SIMULATOR_UDID"
 xcrun simctl bootstatus "$IOS_SIMULATOR_UDID" -b
-open -Fn /Applications/Xcode_27.app/Contents/Developer/Applications/Simulator.app
+open -Fn /Applications/Xcode_27.app/Contents/Applications/DeviceHub.app
 npm install --global appium@3.7.0
 appium driver install xcuitest@12.12.4
 appium --address 127.0.0.1 --port 4723 &

@@ -130,6 +130,7 @@ const createIosRuntimeFixture = async (inventory: string, xcode: XcodeIdentity =
   const envFile = join(root, 'github-env');
   const ownershipFile = join(root, 'owned');
   const xcrunLog = join(root, 'xcrun.log');
+  const openLog = join(root, 'open.log');
   await mkdir(bin, { recursive: true });
   await mkdir(runnerTemp, { recursive: true });
   const scripts: Record<string, string> = {
@@ -138,7 +139,7 @@ const createIosRuntimeFixture = async (inventory: string, xcode: XcodeIdentity =
     'xcode-select': `#!/bin/sh\nif [ "$1" = -p ]; then printf "%s\\n" "${xcode.developerDirectory}"; fi\nexit 0\n`,
     sw_vers: '#!/bin/sh\nif [ "$1" = -productVersion ]; then printf "27.0.1\\n"; elif [ "$1" = -buildVersion ]; then printf "26A434\\n"; fi\n',
     defaults: '#!/bin/sh\nexit 0\n',
-    open: '#!/bin/sh\nexit 0\n',
+    open: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_OPEN_LOG"\nexit 0\n',
     pgrep: '#!/bin/sh\nexit 0\n',
     xcrun: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_XCRUN_LOG"\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = runtimes ]; then cat "$MOCK_RUNTIME_INVENTORY"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = devicetypes ]; then printf "%s\\n" "iPhone 17 Pro (com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro)" "iPhone 17 (com.apple.CoreSimulator.SimDeviceType.iPhone-17)"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = create ]; then printf "%s\\n" fake-udid; exit 0; fi\nexit 0\n',
   };
@@ -162,8 +163,10 @@ const createIosRuntimeFixture = async (inventory: string, xcode: XcodeIdentity =
       GITHUB_RUN_ATTEMPT: '1',
       MOCK_RUNTIME_INVENTORY: inventoryFile,
       MOCK_XCRUN_LOG: xcrunLog,
+      MOCK_OPEN_LOG: openLog,
     },
     xcrunLog,
+    openLog,
   };
 };
 
@@ -304,6 +307,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
         const githubEnv = await readFile(join(fixture.root, 'github-env'), 'utf8');
         assert.match(githubEnv, /IOS_SIMULATOR_UDID=fake-udid/u);
         assert.match(githubEnv, /^DEVELOPER_DIR=\/Applications\/Xcode_27\.app\/Contents\/Developer$/mu);
+        assert.equal(await readFile(fixture.openLog, 'utf8'), '-Fn /Applications/Xcode_27.app/Contents/Applications/DeviceHub.app\n', path);
       } finally { await rm(fixture.root, { recursive: true, force: true }); }
     }
   }],
