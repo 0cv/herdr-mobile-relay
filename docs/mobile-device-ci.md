@@ -214,6 +214,9 @@ Only the supported nonpermissive isolated-app file-denial format, corroborated
 numeric UID and unique audit serial qualify; original timestamps remain bounded,
 pre-fork publication and adverse content still reject. This textual reference
 contract is not authenticated socket provenance or runtime-image attestation.
+A helper PID appearing only as digits in another process's `Killing` UID field
+is not a reference to that helper. PID references elsewhere in the record and
+the killed helper's own isolated-UID consistency checks remain enforced.
 Missing, ambiguous, reused or contradictory identities and incomplete log
 coverage fail closed; force-stop, other signals, nonzero exits, crashes and
 replacement evidence override clean-exit evidence. Within normal retirements and
@@ -341,6 +344,12 @@ context, plus 3 seconds for polling and overhead. All phases remain bounded by
 the enclosing run deadline. A native-only discovery is not readiness: the
 adapter must attach and read the expected origin, and a timed-out driver command
 still quarantines the session rather than permitting another query.
+
+When Safari's compact layout exposes Page Menu instead of Share, installation
+opens the visible, enabled native `MoreMenuButton` once, verifies Safari remains
+foreground, and observes the menu before looking for Share again. A web-content
+lookalike cannot select Page Menu. Missing or unusable Share controls still fail
+closed; this path does not skip the Share sheet or final installation confirmation.
 
 Android retains a separate all-buffer threadtime startup diagnostic before the
 first certificate-preparation session. It connects only to the existing local

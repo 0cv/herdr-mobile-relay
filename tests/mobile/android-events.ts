@@ -341,7 +341,10 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       if (possiblyDuringLifetime && record.tag === 'ActivityManager' && /^Force stopping com\.android\.chrome(?:\s|$)/u.test(record.message)
         && !/^Force stopping com\.android\.chrome appid=\d+ user=[1-9]\d*: \S.*$/u.test(record.message)) return true;
       if (possiblyDuringLifetime && /^(?:PackageManager|PackageInstaller)$/u.test(record.tag) && record.message.includes('com.android.chrome')) return true;
-      const mentionsPid = new RegExp(`\\b${pid}\\b`, 'u').test(record.message);
+      const pidReferences = record.tag === 'ActivityManager'
+        ? record.message.replace(/^(Killing [1-9]\d*:[^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?=\s)/u, '$1')
+        : record.message;
+      const mentionsPid = new RegExp(`\\b${pid}\\b`, 'u').test(pidReferences);
       if (mentionsPid && !observed(record)) return true;
       if (record.tag === 'ActivityManager' && mentionsPid && /^(?:Killing |Process .* has died:)/u.test(record.message)
         && !deaths.includes(record.line)) return true;

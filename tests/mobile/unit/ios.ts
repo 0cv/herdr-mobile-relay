@@ -856,11 +856,20 @@ const confirmationProfiles: Record<string, number[]> = {
   'latest-pr': [1_488, 4_587],
 };
 
-for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'latest-push', 'earlier-pr', 'earlier-push', 'latest-pr', 'add-missing', 'add-disabled', 'add-hidden', 'add-not-hittable', 'add-budget', 'add-hung'] as const) {
+for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 'compact-disabled', 'compact-web-content', 'compact-not-hittable', 'compact-hung', 'disabled', 'dismissed', 'limit', 'eighth', 'latest-push', 'earlier-pr', 'earlier-push', 'latest-pr', 'add-missing', 'add-disabled', 'add-hidden', 'add-not-hittable', 'add-budget', 'add-hung'] as const) {
   test(`recorded Share sheet protocol ${mode} keeps scoped controls and bounded gestures`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
     const { before, after, browser, hypotheticalConfirmation } = await shareFixtures();
+    const compact = mode.startsWith('compact');
+    const compactBrowser = compact ? (await readFile(join(fixtureDir, 'ios-hosted-39765785984-before-share.xml'), 'utf8'))
+      .replace(/<XCUIElementTypeButton\b[^>]*name="MoreMenuButton"[^>]*>[\s\S]*?<\/XCUIElementTypeButton>/u, (button) => {
+        if (mode === 'compact-hidden') return button.replace('visible="true"', 'visible="false"');
+        if (mode === 'compact-disabled') return button.replace('enabled="true"', 'enabled="false"');
+        if (mode === 'compact-web-content') return `<XCUIElementTypeWebView>${button}</XCUIElementTypeWebView>`;
+        return button;
+      }) : '';
+    let menuOpened = false;
     let sheet = mode === 'limit' || mode === 'eighth';
     let scrolls = 0;
     let reads = 0;
@@ -871,6 +880,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
     const scrolling = mode === 'limit' || mode === 'eighth';
     const ready = () => scrolling ? scrolls >= (mode === 'eighth' ? 8 : 9) : scrolls > 0;
     const currentSource = () => {
+      if (compact && !sheet && (!menuOpened || mode === 'compact-no-share')) return compactBrowser;
       if (!sheet || (mode === 'dismissed' && scrolls > 0) || (!scrolling && reads++ === 0)) return browser;
       if (ready()) return after;
       if (!scrolling) return before;
@@ -897,7 +907,15 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
         return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
       }
       if (path.endsWith('/element')) {
-        if (body.value === 'ShareButton') return value(element('share'));
+        if (body.value.includes('MoreMenuButton')) {
+          assert.equal(body.using, 'xpath');
+          if (mode === 'compact-hung') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+          return xpathCount(source, body.value) === 1 ? value(element('page-menu')) : missing();
+        }
+        if (body.value === 'ShareButton') {
+          if (compact && (!menuOpened || mode === 'compact-no-share')) return missing();
+          return value(element('share'));
+        }
         assert.ok(!body.value.includes('Open as Web App'), 'the pinned confirmation must not probe optional controls');
         if (body.value === 'Add') {
           assert.equal(body.using, 'accessibility id');
@@ -919,6 +937,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
         return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
       }
       if (path.includes('/attribute/')) {
+        if (path.includes('/page-menu/') && path.endsWith('/hittable') && mode === 'compact-not-hittable') return value('false');
         if (path.includes('/add/')) {
           if (mode === 'add-disabled' && path.endsWith('/enabled')) { now += 5_000; return value('false'); }
           if (mode === 'add-hidden' && path.endsWith('/visible')) { now += 5_000; return value('false'); }
@@ -931,6 +950,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       if (path.endsWith('/click')) {
         const id = path.split('/element/')[1].split('/')[0];
         if (id === 'share') sheet = true;
+        else if (id === 'page-menu') menuOpened = true;
         else if (id.startsWith('target')) {
           assert.ok(ready());
           if (mode === 'add-budget') now = 116_000;
@@ -946,11 +966,16 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       else assert.equal(await operation(), 'target-8');
       assert.equal(scrolls, 8);
       assert.deepEqual(clicks, []);
-    } else if (mode === 'success' || mode in confirmationProfiles) {
+    } else if (mode === 'success' || mode === 'compact' || mode in confirmationProfiles) {
       await platform.installFromBrowser();
-      assert.deepEqual(clicks, ['share', 'target-1', 'add']);
+      assert.deepEqual(clicks, compact ? ['page-menu', 'share', 'target-1', 'add'] : ['share', 'target-1', 'add']);
       assert.equal(scrolls, 1);
       assert.equal(confirmationLookups, (confirmationProfiles[mode]?.length ?? 0) + 1);
+    } else if (compact) {
+      await assert.rejects(() => platform.installFromBrowser(), /IOS_SHARE|APPIUM_TIMEOUT/u);
+      assert.deepEqual(clicks, mode === 'compact-no-share' ? ['page-menu'] : []);
+      assert.equal(scrolls, 0);
+      assert.equal(confirmationLookups, 0);
     } else if (mode.startsWith('add-')) {
       await assert.rejects(() => platform.installFromBrowser(), /APPIUM_TIMEOUT|confirmation control was not ready/u);
       assert.deepEqual(clicks, ['share', 'target-1']);
@@ -968,7 +993,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
     const commands = driver.snapshot().commands;
     const lookups = commands.filter((_entry, index) => requests[requests.length - commands.length + index]?.body.value === 'Add');
     assert.ok(lookups.every((entry) => entry.timeoutMs === 8_000), 'confirmation probes must receive a complete native transaction, never optional-loop leftovers');
-    assert.equal(driver.snapshot().unusable, ['add-hung', 'add-budget', 'add-disabled', 'add-hidden', 'add-not-hittable'].includes(mode));
+    assert.equal(driver.snapshot().unusable, ['compact-hung', 'add-hung', 'add-budget', 'add-disabled', 'add-hidden', 'add-not-hittable'].includes(mode));
   });
 }
 

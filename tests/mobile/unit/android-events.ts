@@ -143,6 +143,28 @@ export const androidEventTests: [string, () => Promise<void>][] = [
   }],
 ];
 
+androidEventTests.push(['hosted 39765785984 helper PID digits in another helper UID do not create a second death', async () => {
+  const other = body.replace(/\b200\b/gu, '300').replaceAll('Service0:2', 'Service0:3')
+    .replace('/u0ai2 ', '/u0ai8800 ').replace('/u0a145i-8998 ', '/u0a145i-200 ');
+  const log = start + body + other + end;
+  const accepted = measure(log);
+  assert.deepEqual(accepted.issues, []);
+  assert.deepEqual(accepted.fatalEvents, []);
+  assert.equal(accepted.events.length, 2);
+  assert.deepEqual(accepted.normalRetirements.map((retirement) => retirement.pid), ['200', '300']);
+  for (const adverse of [
+    other.replace('isolated not needed', 'signal sent to pid 200'),
+    other + line(6, 559, 'ActivityManager', `Killing 200:${processName}/u0a145i-8998 (adj 0): remove task`),
+    other + line(6, 559, 'Process', 'Sending signal. PID: 200 SIG: 9'),
+  ]) {
+    const rejected = measure(start + body + adverse + end);
+    assert.ok(!rejected.normalRetirements.some((retirement) => retirement.pid === '200'));
+    assert.ok(rejected.fatalEvents.includes(death.trimEnd()));
+  }
+  const wrongUid = measure(log.replace('/u0a145i-200 ', '/u0a145i-201 '));
+  assert.ok(!wrongUid.normalRetirements.some((retirement) => retirement.pid === '300'));
+}]);
+
 androidEventTests.push(['synthetic delayed audit retains typed subject attribution, not helper execution', async () => {
   const log = start + auditBody + audit + end;
   const result = measure(log);

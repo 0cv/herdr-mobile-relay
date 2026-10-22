@@ -847,18 +847,40 @@ export class IOSPlatform implements MobilePlatform {
     await this.driver.switchContext('NATIVE_APP', Math.max(minimumDriverRequestMs, phase.remainingMs));
     await this.setNativeObservationTarget('auto', phase);
     await this.observeNativeForeground('com.apple.mobilesafari', phase);
-    const source = await this.captureNativeReadiness('ios-before-share', phase.remainingMs);
-    const findTimeout = Math.min(5_000, phase.remainingMs);
-    if (findTimeout < minimumDriverRequestMs) throw new Error('IOS_SHARE: insufficient time to inspect Safari toolbar');
-    const share = await this.driver.findAnyOnce([
-      accessibility('ShareButton'),
-      accessibility('Share'),
-      accessibility('Share button'),
-      textLocator('Share'),
-    ], findTimeout).catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-      return '';
-    });
+    let source = await this.captureNativeReadiness('ios-before-share', phase.remainingMs);
+    const findShare = () => {
+      const findTimeout = Math.min(5_000, phase.remainingMs);
+      if (findTimeout < minimumDriverRequestMs) throw new Error('IOS_SHARE: insufficient time to inspect Safari toolbar');
+      return this.driver.findAnyOnce([
+        accessibility('ShareButton'),
+        accessibility('Share'),
+        accessibility('Share button'),
+        textLocator('Share'),
+      ], findTimeout).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return '';
+      });
+    };
+    let share = await findShare();
+    if (!share && !nativeShareBounds(source)) {
+      const pageMenu = await this.driver.findAnyOnce([{
+        using: 'xpath',
+        value: "//XCUIElementTypeApplication[@name='Safari']//XCUIElementTypeButton[@name='MoreMenuButton' and @enabled='true' and @visible='true' and not(ancestor::XCUIElementTypeWebView)]",
+      }], Math.min(5_000, phase.remainingMs)).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return '';
+      });
+      if (pageMenu) {
+        await this.assertNativeControl(pageMenu, 'Safari Page Menu', phase);
+        if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+          throw new Error('IOS_SHARE: insufficient time to open and observe Safari Page Menu');
+        }
+        await this.driver.click(pageMenu, IOS_NATIVE_SCROLL_COMMAND_MS);
+        await this.observeNativeForeground('com.apple.mobilesafari', phase);
+        source = await this.captureNativeReadiness('ios-after-page-menu', phase.remainingMs);
+        share = await findShare();
+      }
+    }
     if (share) {
       await this.assertNativeControl(share, 'Share', phase);
       if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
