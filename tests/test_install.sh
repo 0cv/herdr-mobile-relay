@@ -2,7 +2,12 @@
 set -eu
 
 REPO_DIR=$(CDPATH='' cd "${0%/*}/.." && pwd)
-WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/herdr-install-test.XXXXXX")
+# Collapse repeated "/" and drop every trailing "/" from TMPDIR (macOS ends it with one): install.sh refuses "//" roots by design.
+tmp_base=${TMPDIR:-/tmp}
+while :; do
+    case $tmp_base in *//*) tmp_base=${tmp_base%%//*}/${tmp_base#*//} ;; */) tmp_base=${tmp_base%/} ;; *) break ;; esac
+done
+WORK_DIR=$(mktemp -d "${tmp_base:-/tmp}/herdr-install-test.XXXXXX")
 trap 'status=$?; trap - EXIT INT TERM; chmod -R u+rwx "$WORK_DIR" && rm -rf "$WORK_DIR" || exit 1; exit "$status"' EXIT INT TERM
 
 # Load the installer functions without executing main.
