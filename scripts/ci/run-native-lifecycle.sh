@@ -481,7 +481,7 @@ case_end() {  # PHASE PRODUCT-EXIT [MANUAL-START-COUNT] [login]
     local extras=()
     [ -z "$Q2JSON" ] || extras=(--q2 "$Q2JSON")
     mx case-add --file "$CASES" --os "$OS" --sha "$SHA" --run-id "$RUN" --run-attempt "$ATT" --id "$CASE" --phase "$1" --exit "$2" --before "$BEFORE" --after "$after" --readiness "$(local_ident)" \
-        --counts "$tally" --base "$CNT0" --manual-start "${3:-0}" --target "$TSTATE" --bystander "$by" --stable "$stable" --mid "${MID:-n/a}" "${extras[@]}" || fail 'the case evidence was refused'
+        --counts "$tally" --base "$CNT0" --manual-start "${3:-0}" --target "$TSTATE" --bystander "$by" --stable "$stable" --mid "${MID:-n/a}" ${extras[@]+"${extras[@]}"} || fail 'the case evidence was refused'  # macOS /bin/bash 3.2: an empty array is unbound under set -u
     CASE='' TSTATE=n/a MID='' Q2JSON=''
 }
 write_env() {  # TRANSPORT [extra literal assignments]

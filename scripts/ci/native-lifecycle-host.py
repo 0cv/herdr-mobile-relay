@@ -342,34 +342,31 @@ def curl_shim(o, rest):
 
 
 def registry(o, rest):
-    """Fail closed on ambiguous or malformed CLI registration; never print registry contents."""
-    import pathlib
-    root = pathlib.Path(o["home"])
-    files = list(root.rglob("plugins.json"))
-    if not files and o["expected"] == "absent":
-        return 0
-    if len(files) != 1 or files[0].is_symlink():
+    """Herdr v0.9.5's real registry: <XDG_CONFIG_HOME>/herdr/plugins.json, a JSON array of InstalledPluginInfo whose
+    `source` holds kind/owner/repo/requested_ref/resolved_commit (src/api/schema/plugins.rs, src/persist/plugin_registry.rs).
+    Fail closed on anything ambiguous or malformed; never print registry contents."""
+    path = os.path.join(o["home"], ".config", "herdr", "plugins.json")
+    if not os.path.lexists(path):
+        return 0 if o["expected"] == "absent" else 1
+    if os.path.islink(path):
         return 1
     try:
-        doc = json.loads(files[0].read_text())
+        with open(path, encoding="utf-8") as stream:
+            doc = json.load(stream)
     except (OSError, ValueError):
         return 1
-    entries = doc.get("plugins", doc) if isinstance(doc, dict) else doc
-    if isinstance(entries, dict):
-        pairs = list(entries.items())
-    elif isinstance(entries, list):
-        pairs = [("", item) for item in entries]
-    else:
+    if not isinstance(doc, list):
         return 1
-    matches = [item for key, item in pairs if isinstance(item, dict) and (REPO in key or REPO in json.dumps(item))]
+    matches = [e for e in doc if isinstance(e, dict) and e.get("plugin_id") == "herdr-mobile-relay.events"]
     if o["expected"] == "absent":
         return 0 if not matches else 1
     if len(matches) != 1:
         return 1
-    item = matches[0]
-    requested = item.get("requested_ref", item.get("source_ref", item.get("ref")))
-    resolved = item.get("resolved_commit", item.get("resolved_sha", item.get("commit")))
-    return 0 if requested == o["expected"] and resolved == o["resolved"] else 1
+    src = matches[0].get("source")
+    owner, repo = REPO.split("/")
+    if not isinstance(src, dict) or (src.get("kind"), src.get("owner"), src.get("repo")) != ("github", owner, repo):
+        return 1
+    return 0 if src.get("requested_ref") == o["expected"] and src.get("resolved_commit") == o["resolved"] else 1
 
 
 def herdr_adapter(o, rest):

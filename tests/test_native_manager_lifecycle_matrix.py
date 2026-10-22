@@ -703,6 +703,20 @@ class Wiring(unittest.TestCase):
         proc.wait()
         self.assertTrue(host.group_gone(proc.pid, 2))
 
+    def test_case_end_without_q2_fields_runs_under_set_u_in_macos_bash(self):
+        # Hosted be9758a7 (macOS /bin/bash 3.2): `"${extras[@]}"` of an empty array aborted every Q1 case_end under set -u.
+        stubs = ('snap() { echo "{}"; }\ncounts() { echo "{}"; }\nbystander() { echo same; }\nlocal_ident() { echo none; }\n'
+                 'fail() { echo "fail $*" >&2; exit 1; }\nmx() { printf "%s\\n" "$@" > "$OUT"; }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "argv")
+            env = {"PATH": "/usr/bin:/bin", "OUT": out, "CASES": "c", "OS": "Darwin", "SHA": SHA, "RUN": "1", "ATT": "1", "CASE": "a-install-start",
+                   "BEFORE": "{}", "BY_BASE": "same", "BYP0": "same", "TSTATE": "n/a", "CNT0": "{}", "MID": ""}
+            for q2, extra in (('', []), ('{"x":1}', ['--q2', '{"x":1}'])):
+                program = "set -euo pipefail\n" + stubs + self.shell_function("case_end") + 'Q2JSON=%s\ncase_end install 0\n' % shlex.quote(q2)
+                subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", program], env=env, capture_output=True, text=True, check=True)
+                argv = pathlib.Path(out).read_text().splitlines()
+                self.assertEqual(argv[-len(extra) - 2:], ["--mid", "n/a"] + extra)
+
     def test_probe_stage_base_needs_no_artifact_facts_and_refuses_downloads(self):
         # Hosted 667d7aca: probe mode calls stage_base before artifact_facts, and `set -u` aborted on CAND_DIGEST.
         # Run the driver's own stage_base under `set -u` with no artifact facts; the curl shim must name `none` digests.
@@ -801,8 +815,8 @@ class Wiring(unittest.TestCase):
     def mx_calls(self):
         """Every `mx SUBCOMMAND ...` call of the driver as an argv: continuation lines joined, `$id_args` expanded to the flags the driver defines, each value a placeholder."""
         driver = re.sub(r"\\\n\s*", " ", self.text("scripts/ci/run-native-lifecycle.sh"))
-        self.assertIn('"${extras[@]}"', driver)
-        driver = driver.replace('"${extras[@]}"', '--q2 "0"')  # the Q2 branch supplies an optional JSON value; Q1 supplies no extra argument
+        self.assertIn('${extras[@]+"${extras[@]}"}', driver)  # the bash-3.2-safe expansion of the optional Q2 arguments
+        driver = driver.replace('${extras[@]+"${extras[@]}"}', '--q2 "0"')  # the Q2 branch supplies an optional JSON value; Q1 supplies no extra argument
         id_args, calls = re.search(r'id_args="([^"]*)"', driver).group(1), []
         for line in (l for l in driver.splitlines() if not l.lstrip().startswith("#")):
             for found in re.finditer(r"(?<![\w$./-])mx (\S+)(.*)", line):
@@ -2396,12 +2410,25 @@ absent() { ! has hosts; }
         self.assertNotIn('"$SHIMDIR/herdr" 700\n    qinstall', driver)
         host = self.load_host()
         with tempfile.TemporaryDirectory() as tmp:
-            home = pathlib.Path(tmp)
+            # Herdr v0.9.5's real shape (hosted 39860634906 showed the earlier invented shape never matched).
+            reg = pathlib.Path(tmp) / ".config/herdr/plugins.json"
+            reg.parent.mkdir(parents=True)
             self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 0)
-            (home / "plugins.json").write_text(json.dumps({"plugins": [{"repository": "0cv/herdr-mobile-relay", "ref": m.ANCESTOR, "commit": m.ANCESTOR}]}))
+            entry = lambda **src: {"plugin_id": "herdr-mobile-relay.events", "name": "Herdr Mobile Relay", "enabled": True,
+                                   "source": dict({"kind": "github", "owner": "0cv", "repo": "herdr-mobile-relay", "requested_ref": m.ANCESTOR, "resolved_commit": m.ANCESTOR}, **src)}
+            reg.write_text(json.dumps([{"plugin_id": "other.plugin", "source": {"kind": "local"}}, entry()], indent=2))
             self.assertEqual(host.registry({"home": tmp, "expected": m.ANCESTOR, "resolved": m.ANCESTOR}, []), 0)
             self.assertEqual(host.registry({"home": tmp, "expected": SHA, "resolved": SHA}, []), 1)
             self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 1)
+            for bad in (entry(owner="someone"), entry(kind="local"), entry(resolved_commit=SHA)):
+                reg.write_text(json.dumps([bad]))
+                self.assertEqual(host.registry({"home": tmp, "expected": m.ANCESTOR, "resolved": m.ANCESTOR}, []), 1, bad)
+            reg.write_text(json.dumps([entry(), entry()]))  # duplicate registration is ambiguous
+            self.assertEqual(host.registry({"home": tmp, "expected": m.ANCESTOR, "resolved": m.ANCESTOR}, []), 1)
+            reg.write_text(json.dumps({"plugins": [{"repository": "0cv/herdr-mobile-relay", "ref": m.ANCESTOR, "commit": m.ANCESTOR}]}))
+            self.assertEqual(host.registry({"home": tmp, "expected": m.ANCESTOR, "resolved": m.ANCESTOR}, []), 1)  # not Herdr's format
+            reg.write_text("[]")
+            self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 0)
 
     def test_q2_rollback_samples_b_tree_before_failed_cli_returns(self):
         # Run the driver's concurrent observation with an inert, bounded CLI stub; the
