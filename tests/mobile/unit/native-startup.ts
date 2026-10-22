@@ -140,7 +140,6 @@ const createIosRuntimeFixture = async (inventory: string, xcode: XcodeIdentity =
     sw_vers: '#!/bin/sh\nif [ "$1" = -productVersion ]; then printf "27.0.1\\n"; elif [ "$1" = -buildVersion ]; then printf "26A434\\n"; fi\n',
     defaults: '#!/bin/sh\nexit 0\n',
     open: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_OPEN_LOG"\nexit 0\n',
-    pgrep: '#!/bin/sh\nexit 0\n',
     xcrun: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_XCRUN_LOG"\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = runtimes ]; then cat "$MOCK_RUNTIME_INVENTORY"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = list ] && [ "$3" = devicetypes ]; then printf "%s\\n" "iPhone 17 Pro (com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro)" "iPhone 17 (com.apple.CoreSimulator.SimDeviceType.iPhone-17)"; exit 0; fi\nif [ "$1" = simctl ] && [ "$2" = create ]; then printf "%s\\n" fake-udid; exit 0; fi\nexit 0\n',
   };
   await Promise.all(Object.entries(scripts).map(async ([name, script]) => writeFile(join(bin, name), script, { mode: 0o700 })));
@@ -307,7 +306,7 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
         const githubEnv = await readFile(join(fixture.root, 'github-env'), 'utf8');
         assert.match(githubEnv, /IOS_SIMULATOR_UDID=fake-udid/u);
         assert.match(githubEnv, /^DEVELOPER_DIR=\/Applications\/Xcode_27\.app\/Contents\/Developer$/mu);
-        assert.equal(await readFile(fixture.openLog, 'utf8'), '-Fn /Applications/Xcode_27.app/Contents/Applications/DeviceHub.app\n', path);
+        await assert.rejects(readFile(fixture.openLog, 'utf8'), { code: 'ENOENT' }, `${path}: opened a simulator UI`);
       } finally { await rm(fixture.root, { recursive: true, force: true }); }
     }
   }],

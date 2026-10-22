@@ -256,7 +256,6 @@ export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/ios-owned"
 printf 'ios:%s\n' "$IOS_SIMULATOR_UDID" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
 xcrun simctl boot "$IOS_SIMULATOR_UDID"
 xcrun simctl bootstatus "$IOS_SIMULATOR_UDID" -b
-open -Fn /Applications/Xcode_27.app/Contents/Applications/DeviceHub.app
 npm install --global appium@3.7.0
 appium driver install xcuitest@12.12.4
 appium --address 127.0.0.1 --port 4723 &
@@ -322,8 +321,11 @@ On hosted iOS, both CI entrypoints prebuild pinned WDA 16.12.8 and use
 expected xctestrun and runner for the owned simulator. It records the child PID,
 registration receipts, status identity and exit status under `IOS_XCTEST_STATE_DIR`.
 Appium requires that live owner and uses its loopback `webDriverAgentUrl`; it does
-not launch another WDA. The existing 300-second startup deadline is shared with
-HTTP checks. Always-run finalization stops the owner before diagnostic upload.
+not launch another WDA. The session also sets `appium:isHeadless`, and no
+simulator UI (DeviceHub since Xcode 27) is opened: without it, Appium reboots a
+booted simulator that has no UI window, which kills the managed WDA. The
+existing 300-second startup deadline is shared with HTTP checks. Always-run
+finalization stops the owner before diagnostic upload.
 Local harness invocations also require this managed owner; the simulator/Appium
 setup above alone is not sufficient. Supply the already-built WDA product,
 bootstrap and project paths, runtime and fresh state directory before running

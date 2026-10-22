@@ -271,11 +271,6 @@ runs:
         printf 'ios:%s\n' "$udid" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
         xcrun simctl boot "$udid"
         xcrun simctl bootstatus "$udid" -b
-        open -Fn "$xcode_application/Contents/Applications/DeviceHub.app"
-        for attempt in $(seq 1 30); do
-          if pgrep -f 'DeviceHub.app/Contents/MacOS/' >/dev/null 2>&1; then break; fi
-          sleep 1
-        done
         xcrun simctl listapps "$udid" >"$RUNNER_TEMP/ios-apps-before.txt"
       shell: bash
     - name: Install pinned Appium and platform driver

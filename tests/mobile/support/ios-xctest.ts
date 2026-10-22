@@ -2456,7 +2456,9 @@ export async function managedWdaCapabilities(udid: string): Promise<Record<strin
     || !runnerExecutableMatches(afterStatusListener.executable, product, udid, afterStatusDeadline, productBinaryHash)) {
     throw new Error('XCTEST: managed WDA executable changed');
   }
-  return { 'appium:webDriverAgentUrl': owner.url };
+  // Without isHeadless, Appium reboots a booted simulator that has no UI client
+  // window, which kills this managed WDA.
+  return { 'appium:webDriverAgentUrl': owner.url, 'appium:isHeadless': true };
 }
 
 async function main(): Promise<void> {

@@ -3664,12 +3664,13 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
           if (mode === 'ready-then-oversized') {
             await assert.rejects(managedWdaCapabilities(udid), /managed WDA not ready/u);
           } else {
-            assert.deepEqual(await managedWdaCapabilities(udid), { 'appium:webDriverAgentUrl': `http://127.0.0.1:${port}` });
+            assert.deepEqual(await managedWdaCapabilities(udid), { 'appium:webDriverAgentUrl': `http://127.0.0.1:${port}`, 'appium:isHeadless': true });
             const platform = new IOSPlatform({ deviceId: udid, origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
             let sessions = 0;
             platform.driver.create = async options => {
               sessions++;
               assert.equal(options.capabilities['appium:webDriverAgentUrl'], `http://127.0.0.1:${port}`);
+              assert.equal(options.capabilities['appium:isHeadless'], true);
               assert.equal(options.capabilities['appium:platformVersion'], '27.0');
               assert.equal(options.capabilities['appium:usePreinstalledWDA'], undefined);
               assert.equal(options.capabilities['appium:prebuiltWDAPath'], undefined);

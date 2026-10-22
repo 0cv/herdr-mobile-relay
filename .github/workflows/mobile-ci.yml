@@ -1077,15 +1077,8 @@ jobs:
           printf 'ios:%s\n' "$udid" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
-          # WDA/XCTest is substantially more reliable when the simulator UI
-          # (DeviceHub since Xcode 27) is already attached. Appium otherwise
-          # restarts the booted device while it is trying to launch WDA, which
-          # can leave XCTest waiting forever.
-          open -Fn "$xcode_application/Contents/Applications/DeviceHub.app"
-          for attempt in $(seq 1 30); do
-            if pgrep -f 'DeviceHub.app/Contents/MacOS/' >/dev/null 2>&1; then break; fi
-            sleep 1
-          done
+          # No simulator UI is opened: Appium attaches headless to the managed
+          # WDA, so it never reboots this device to show a window.
           xcrun simctl listapps "$udid" >"$RUNNER_TEMP/ios-apps-before.txt"
       - name: Install pinned Appium and platform driver
         run: |
