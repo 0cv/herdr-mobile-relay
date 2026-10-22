@@ -404,6 +404,9 @@ def write(path, text, executable=False):
 
 
 class Fixture:
+    # Set by wrapper(): the drained supervisor output (only after check_safe passed) and whether kill(2) was issued.
+    output, signal_issued = "", False
+
     def __init__(self, parent, name, transport="gateway", platform="systemd", initial=False):
         # Darwin's disposable /var roots may alias /private/var. Fixtures
         # select the physical owned root rather than weakening native policy.
@@ -490,6 +493,14 @@ class Fixture:
                 assert "--launchd" not in unit["ExecStart"]
                 assert not {"SuccessExitStatus", "RemainAfterExit"} & unit.keys()
         return result
+
+    def tail(self):
+        # Assertion-message evidence only: the last 600 characters of the output kept by wrapper() AFTER check_safe
+        # passed (no canary, setup=, QR or #), with every canary replaced again defensively before the cut.
+        text = self.output
+        for canary in CANARIES:
+            text = text.replace(canary, "<canary>")
+        return text[-600:]
 
     def hang_evidence(self, proc, expired, termination, redelivered=0):
         # Evidence only, for a supervisor that outlived TIMEOUT (hosted macOS, a SIGINT case, gave a
@@ -596,6 +607,7 @@ class Fixture:
         proc = subprocess.Popen(["/bin/bash", "-x", *argv],
                                 env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        self.output, self.signal_issued = "", False
         try:
             expected = {"relay", "tunnel"} if self.transport == "cloudflare" else {"relay"}
             mark, sent = 0, time.monotonic()
@@ -607,6 +619,10 @@ class Fixture:
                     mark, sent = len(self.events()), time.monotonic()
                     if termination:
                         proc.send_signal(termination)
+                        # Evidence only. send_signal skips a supervisor it has already reaped, so None here means kill(2) was
+                        # issued to an unreaped one. That is NOT proof a live supervisor received it: one that exited in the
+                        # microseconds before kill(2) is a zombie, which still accepts it (an unreaped pid is never ESRCH).
+                        self.signal_issued = proc.returncode is None
                     else:
                         write(self.root / ("exit-" + child), "release\n")
                     break
@@ -616,6 +632,7 @@ class Fixture:
                 time.sleep(.02)
             output = self.await_exit(proc, termination, mark, sent)
             self.check_safe(output)
+            self.output = output
             events = self.events()
             started = [e for e in events if e["kind"] in ("relay", "tunnel") and e["action"] == "start"]
             ended = [e for e in events if e["kind"] in ("relay", "tunnel") and e["action"] in ("stop", "exit")]
@@ -1353,8 +1370,8 @@ def main():
                     fixture.env["CLOUDFLARED_CONFIG"] = str(fixture.root / "absent-config")
                     code, started = fixture.wrapper(code=child_code)
                     assert code == (child_code or 1) and [e["kind"] for e in started] == ["relay"], (
-                        "case %s: mode %s, child exit %d: exit code %r, expected %d; started kinds %r, expected ['relay']"
-                        % (fixture.root.name, mode, child_code, code, child_code or 1, [e["kind"] for e in started]))
+                        "case %s: mode %s, child exit %d: exit code %r, expected %d; started kinds %r, expected ['relay']; output tail %r"
+                        % (fixture.root.name, mode, child_code, code, child_code or 1, [e["kind"] for e in started], fixture.tail()))
                     assert (fixture.root / "config/tunnel.yml").read_text() == "hostname: relay.example.test\n", (
                         "case %s: tunnel config content changed" % fixture.root.name)
             for key, value in (("HERDR_RELAY_RUN_ID", "foreground"),
@@ -1366,30 +1383,32 @@ def main():
                 fixture.env[key] = value
                 code, started = fixture.wrapper()
                 assert code == 78 and not started, (
-                    "case %s: exit code %r, expected 78; started kinds %r, expected none"
-                    % (fixture.root.name, code, sorted(e["kind"] for e in started)))
+                    "case %s: exit code %r, expected 78; started kinds %r, expected none; output tail %r"
+                    % (fixture.root.name, code, sorted(e["kind"] for e in started), fixture.tail()))
             for mode in ("gateway", "cloudflare"):
                 for sig in (signal.SIGTERM, signal.SIGINT):
                     fixture = Fixture(parent, "signal-" + mode + "-" + str(sig), mode)
                     code, started = fixture.wrapper(termination=sig)
                     assert code == 128 + sig and len(started) == (2 if mode == "cloudflare" else 1), (
-                        "case %s: mode %s, signal %s (%d): exit code %r, expected %d; started kinds %r, expected count %d"
+                        "case %s: mode %s, signal %s (%d): exit code %r, expected %d; started kinds %r, expected count %d; signal issued %s; output tail %r"
                         % (fixture.root.name, mode, sig.name, int(sig), code, 128 + sig,
-                           sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1))
+                           sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1,
+                           fixture.signal_issued, fixture.tail()))
             for child in ("relay", "tunnel"):
                 for child_code in (0, 23):
                     fixture = Fixture(parent, "cloudflare-exit-" + child + "-" + str(child_code), "cloudflare")
                     code, started = fixture.wrapper(child, child_code)
                     assert code == (child_code or 1) and sorted(e["kind"] for e in started) == ["relay", "tunnel"], (
-                        "case %s: exiting child %s, child exit %d: exit code %r, expected %d; started kinds %r, expected ['relay', 'tunnel']"
-                        % (fixture.root.name, child, child_code, code, child_code or 1, sorted(e["kind"] for e in started)))
+                        "case %s: exiting child %s, child exit %d: exit code %r, expected %d; started kinds %r, expected ['relay', 'tunnel']; output tail %r"
+                        % (fixture.root.name, child, child_code, code, child_code or 1, sorted(e["kind"] for e in started),
+                           fixture.tail()))
             for missing in ("binary", "config"):
                 fixture = Fixture(parent, "cloudflare-missing-" + missing, "cloudflare")
                 fixture.env["CLOUDFLARED_BIN" if missing == "binary" else "CLOUDFLARED_CONFIG"] = str(fixture.root / "absent")
                 code, started = fixture.wrapper()
                 assert code == 78 and not started, (
-                    "case %s: missing %s: exit code %r, expected 78; started kinds %r, expected none"
-                    % (fixture.root.name, missing, code, sorted(e["kind"] for e in started)))
+                    "case %s: missing %s: exit code %r, expected 78; started kinds %r, expected none; output tail %r"
+                    % (fixture.root.name, missing, code, sorted(e["kind"] for e in started), fixture.tail()))
             # Reserved child failures are NOT launchd admission refusals.
             for launchd in (False, True):
                 for mode in ("gateway", "cloudflare"):
@@ -1399,17 +1418,18 @@ def main():
                             code, started = fixture.wrapper(child, child_code, launchd=launchd)
                             assert code == (child_code or 1) and len(started) == (2 if mode == "cloudflare" else 1), (
                                 "case %s: launchd %s, mode %s, exiting child %s, child exit %d: exit code %r, expected %d; "
-                                "started kinds %r, expected count %d"
+                                "started kinds %r, expected count %d; output tail %r"
                                 % (fixture.root.name, launchd, mode, child, child_code, code, child_code or 1,
-                                   sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1))
+                                   sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1, fixture.tail()))
                     for sig in (signal.SIGINT, signal.SIGTERM):
                         fixture = Fixture(parent, f"adapter-signal-{launchd}-{mode}-{sig}", mode)
                         code, started = fixture.wrapper(termination=sig, launchd=launchd)
                         assert code == 128 + sig and len(started) == (2 if mode == "cloudflare" else 1), (
                             "case %s: launchd %s, mode %s, signal %s (%d): exit code %r, expected %d; "
-                            "started kinds %r, expected count %d"
+                            "started kinds %r, expected count %d; signal issued %s; output tail %r"
                             % (fixture.root.name, launchd, mode, sig.name, int(sig), code, 128 + sig,
-                               sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1))
+                               sorted(e["kind"] for e in started), 2 if mode == "cloudflare" else 1,
+                               fixture.signal_issued, fixture.tail()))
             assert stranger.poll() is None, "cleanup killed a bystander"
 
             for platform in ("systemd", "launchd"):
@@ -1455,7 +1475,10 @@ def main():
                     assert fixture.envfile.read_bytes() == before and not fixture.definition.exists()
                     assert not any(e["kind"] in ("manager", "http", "app") for e in fixture.events())
                     code, started = fixture.wrapper()
-                    assert not started and code == (69 if mode in ("tailscale-cli", "cli-staged") else 78)
+                    assert not started and code == (69 if mode in ("tailscale-cli", "cli-staged") else 78), (
+                        "case %s: exit code %r, expected %d; started kinds %r, expected none; output tail %r"
+                        % (fixture.root.name, code, 69 if mode in ("tailscale-cli", "cli-staged") else 78,
+                           sorted(e["kind"] for e in started), fixture.tail()))
                 for app in ("absent", "invalid"):
                     fixture = Fixture(parent, platform + "-app-" + app, platform=platform)
                     (fixture.root / "config/phone-app-origin-configured").unlink()
