@@ -64,7 +64,10 @@ def pause(label):
         if time.monotonic() >= end: refuse()
         time.sleep(.01)
 def observe(label):
-    s = model['states'][label]; s['queries'] += 1
+    s = model['states'][label]
+    # A `failed` answer is the reset path's observation, not a lifecycle poll: it does not advance `queries`, so every count-addressed fault below
+    # (and lifecycle_fault_at, and the full adapter's arming) keeps its seam relative to the quiescence checks, as before Task SF.
+    if s['state'] != 'failed': s['queries'] += 1
     if s.get('remaining', 0):
         s['remaining'] -= 1
         if not s['remaining']: s['state'] = s.pop('desired')
@@ -114,7 +117,9 @@ def transition(label, op):
     if fault(label, op + '-fail'): raise SystemExit(1)
     if op == 'disable': s['enabled'] = False
     elif not fault(label, 'stop-noop'):
-        desired = 'inactive' if model['platform'] == 'Linux' else 'absent'
+        # Linux: Herdr's wrapper traps TERM and exits 143, which systemd does not count as a clean exit (systemd.service(5), SuccessExitStatus=), so
+        # stopping an active (or already failed) unit leaves it `failed`; only `reset-failed` takes it to inactive. launchd has no such state.
+        desired = ('failed' if s['state'] in ('active', 'failed') else 'inactive') if model['platform'] == 'Linux' else 'absent'
         if fault(label, 'delayed'): s.update(remaining=3, desired=desired)
         else: s['state'] = desired
     save()
@@ -175,6 +180,12 @@ if name == 'systemctl':
         event('reload'); raise SystemExit(1 if model['fault'] == 'reload-fail' else 0)
     if len(args) == 3 and args[0] == '--user' and args[1] in ('stop', 'disable') and args[2] in model['states']:
         transition(args[2], args[1])
+    if len(args) == 3 and args[:2] == ['--user', 'reset-failed'] and args[2] in model['states']:
+        label = args[2]; s = model['states'][label]; event('reset-failed', label)
+        if s['state'] != 'failed': refuse()   # only a unit the manager reports failed is ever reset
+        if fault(label, 'reset-failed-fail'): raise SystemExit(1)
+        if not fault(label, 'reset-failed-noop'): s['state'] = 'inactive'; save()
+        raise SystemExit(0)
     if len(args) == 12 and args[:2] == ['--user', 'show'] and args[2] in model['files'] and args[3:] == ['--all', '--property=Id', '--property=LoadState', '--property=ActiveState', '--property=UnitFileState', '--property=FragmentPath', '--property=DropInPaths', '--property=NeedDaemonReload', '--no-pager']:
         configuration(args[2])
     if len(args) != 7 or args[:2] != ['--user', 'show'] or args[2] not in model['states'] or args[3:] != ['--property=LoadState', '--property=ActiveState', '--property=UnitFileState', '--no-pager']: refuse()
@@ -275,13 +286,15 @@ lifecycle_output(label, 'label', domain + '/' + label + ' = {\n    state = waiti
 # extras, a native_done gate, other labels, other argument forms and every fault, is the adapter's. These answers mirror
 # the adapter text: model_stub_control pins it by digest, runs chains of calls through both implementations and compares
 # every output, event, tally and model byte.
-# MIRRORED holds the two adapters in use: 1f47fddd... is ADAPTER (this file), a59e54e3... is the FULL_ADAPTER of tests/test_uninstall.sh. The
-# earlier pair (c476dcb2..., d1bbd99a...; 7ec0920f... before it) is retired, no suite uses that text any more. a59e54e3... and 1f47fddd... changed only the
+# MIRRORED holds the two adapters in use: 74cf9e83... is ADAPTER (this file), 286e2fb5... is the FULL_ADAPTER of tests/test_uninstall.sh. The
+# earlier pairs (1f47fddd..., a59e54e3...; c476dcb2..., d1bbd99a...; 7ec0920f... before them) are retired, no suite uses that text any more. a59e54e3... and 1f47fddd... changed only the
 # launchd `print-disabled` answer of a FAULTED model (the macOS 13+ layout) and the `domain-malformed` status (a failing query: the product reads the domain
 # by status alone). The sh stub answers `print-disabled` and the domain only for an UNFAULTED model (any fault delegates to the adapter), so the stub text
 # is unchanged (d1bbd99a... had re-derived FAST_STUB against the prefix that Linux mount confinement extended with a staged-guard `rm` branch and a
 # `late_kind == 'fifo'` gate arm; neither touches a call the stub answers itself).
-MIRRORED = {'1f47fddd726e058c1482cbfd68debd552ee7c09c64e7842cf9cdcf6ce843e99b', 'a59e54e332d0c08252558f836c9c6d935a2ccc2cbeb00f2ca791dc8b3ec88720'}
+# Task SF re-derived both digests: the adapters changed only in the Linux stop (an active or failed unit is left `failed`, never `inactive`), in the `failed`
+# observation (it does not advance `queries`) and in the new `reset-failed LABEL` call, which the sh stub does not answer (no op: the adapter's, delegated).
+MIRRORED = {'74cf9e8306106b289bb52717a7f78aff31eee9d828b0ad98e1c07ab7b04599c0', '286e2fb5a8c144b3efe6915eee8c0fc1e18d8046154db9133449de877dd44c02'}
 FAST_TOOLS = ('stat', 'head', 'wc', 'uname', 'systemctl', 'launchctl', 'plutil')
 MODEL_CHECK = r'''import json, pathlib, sys
 ''' + ACCEPTABLE + r'''try:
@@ -413,10 +426,10 @@ case "$name" in
                 for row in "$LA:$EA" "$LB:$EB"; do if [ "${row#*:}" = true ]; then v=false; else v=true; fi; printf '    "%s" => %s\n' "${row%:*}" "$v"; done
                 printf '}\n'; exit 0 ;;
             reload) printf '{"op": "reload", "label": ""}\n' >> "$control/events.jsonl"; exit 0 ;;
-            observe) Q=$((Q + 1)); event='{"op": "observe", "label": "'$L'", "state": "'$S'", "enabled": '$E'}' ;;
+            observe) [ "$S" = failed ] || Q=$((Q + 1)); event='{"op": "observe", "label": "'$L'", "state": "'$S'", "enabled": '$E'}' ;;
             config) C=$((${C:-0} + 1)); event='{"op": "configuration-observe", "label": "'$L'", "query": '$C'}' ;;
             disable) E=false; event='{"op": "disable", "label": "'$L'"}' ;;
-            *) if [ "$P" = Linux ]; then S=inactive; else S=absent; fi; event='{"op": "'$op'", "label": "'$L'"}' ;;
+            *) if [ "$P" != Linux ]; then S=absent; elif [ "$S" = active ] || [ "$S" = failed ]; then S=failed; else S=inactive; fi; event='{"op": "'$op'", "label": "'$L'"}' ;;
         esac
         if [ "$L" = "$LA" ]; then SA=$S; EA=$E; QA=$Q; CA=$C; else SB=$S; EB=$E; QB=$Q; CB=$C; fi
         build
@@ -894,7 +907,7 @@ def model_stub_control(adapter, model_shape):
                 alls = [['--user', 'show', label, '--all', '--property=Id', '--property=LoadState', '--property=ActiveState', '--property=UnitFileState', '--property=FragmentPath',
                          '--property=DropInPaths', '--property=NeedDaemonReload', '--no-pager'] for label in labels]
                 good = [shows[0], shows[1], alls[0], alls[1], ['--user', 'stop', labels[1]], ['--user', 'disable', labels[0]], ['--user', 'daemon-reload'], shows[0], shows[1]]
-                bad = [['--user', 'show', labels[0]], ['--user', 'show', 'other.service'] + shows[0][3:]]
+                bad = [['--user', 'show', labels[0]], ['--user', 'show', 'other.service'] + shows[0][3:], ['--user', 'reset-failed', labels[1]]]   # all delegated; the last one resets the unit the chain's stop left failed
                 cross = [('launchctl', ['bootout', domain + '/' + labels[1]]), ('launchctl', ['print', domain + '/' + labels[0]])]
             else:
                 good = [['print', domain + '/' + labels[0]], ['print', domain + '/' + labels[1]], ['print', domain], ['print-disabled', domain], ['bootout', domain + '/' + labels[1]],
@@ -1248,6 +1261,7 @@ def main():
                 f = Fixture(parent, platform, present=present)
                 status, output, events = f.run()
                 assert status == 0 and all(not q.exists() for q in f.definitions)
+                if platform == 'Linux': assert [e['label'] for e in events if e['op'] == 'reset-failed'] == [f.labels[i] for i in present]  # the stop leaves each present unit failed: reset once
                 f.unchanged()
             for initial in (('inactive',) if platform == 'Linux' else ('absent',)):
                 if not cell(f'{manager}/initial/{initial}'): continue
@@ -1279,6 +1293,41 @@ def main():
                     if fault == 'reload-fail': assert b'definition, but systemd reload failed' in output
                     if fault in ('query-fail', 'stop-fail', 'bootout-fail', 'rm-fail', 'reactivate'):
                         assert not f.definitions[1 - bad_index].exists()  # both partial-progress directions
+            # Task SF: the fixture's stop is the real one (a stopped Herdr unit is `failed`, see transition()), so every Linux removal above already runs the reset.
+            # These pin it: both labels, active or already failed, go stop, disable, reset-failed, remove; `failed` was observed (never quiet) right before the one
+            # reset, and the unit was inactive when its definition was deleted.
+            for scenario in ('active', 'failed') if platform == 'Linux' else ():
+                if not cell(f'{manager}/reset-failed/{scenario}'): continue
+                f = Fixture(parent, platform)
+                for s in f.model['states'].values(): s.update(state=scenario, enabled=True)
+                f.save(); status, output, events = f.run(); f.unchanged()
+                assert status == 0 and all(not q.exists() for q in f.definitions) and b'for both Herdr labels' in output
+                for label in f.labels:
+                    assert [e['op'] for e in effects(events) if e['label'] == label] == ['stop', 'disable', 'reset-failed', 'remove']
+                    trace = [e['state'] if e['op'] == 'observe' else e['op'] for e in events if e['label'] == label and e['op'] in ('observe', 'reset-failed')]
+                    assert trace.count('reset-failed') == 1 and trace[trace.index('reset-failed') - 1] == 'failed' and trace[-1] == 'inactive', trace
+            # A reset that fails, or succeeds and leaves the unit failed, refuses: the definition stays, the reset is tried once and never retried, the other label's progress is honest.
+            for fault in ('reset-failed-fail', 'reset-failed-noop') if platform == 'Linux' else ():
+                for index in (0, 1):
+                    if not cell(f'{manager}/reset-failed/{fault}-{index}'): continue
+                    f = Fixture(parent, platform, fault=fault, fault_index=index)
+                    before = snapshot(f.definitions[index])
+                    status, output, events = f.run(); f.unchanged()
+                    assert status == 1 and b'for both Herdr labels' not in output and ('Removal incomplete for ' + f.labels[index]).encode() in output
+                    assert snapshot(f.definitions[index]) == before and not f.definitions[1 - index].exists()
+                    assert [e['op'] for e in effects(events) if e['label'] == f.labels[index]] == ['stop', 'disable', 'reset-failed']
+            # A unit that is inactive and disabled at the first observation and turns failed one poll later (another actor started it and it exited) was not
+            # stopped by this call, so it is refused, never reset: no effect at all on that label. remaining=2: the entry observation leaves it inactive, the first poll flips it.
+            for index in (0, 1) if platform == 'Linux' else ():
+                if not cell(f'{manager}/reset-failed/late-failed-{index}'): continue
+                f = Fixture(parent, platform)
+                f.model['states'][f.labels[index]].update(state='inactive', enabled=False, remaining=2, desired='failed'); f.save()
+                before = snapshot(f.definitions[index])
+                status, output, events = f.run(); f.unchanged()
+                assert status == 1 and b'for both Herdr labels' not in output and ('Removal incomplete for ' + f.labels[index]).encode() in output
+                assert snapshot(f.definitions[index]) == before and not f.definitions[1 - index].exists()
+                assert [e['state'] for e in events if e['op'] == 'observe' and e['label'] == f.labels[index]] == ['inactive', 'failed']
+                assert not [e for e in effects(events) if e['label'] == f.labels[index]]  # never stopped, reset or removed
             # F005: lifecycle capture, NOT the independent configuration
             # query, must reject NUL before command substitution can erase it.
             # Native state may be active/loaded while malformed text claims
@@ -1698,7 +1747,7 @@ def main():
                     assert status == 1 and b'for both Herdr labels' not in output
                     assert snapshot(f.definitions[index]) == before and not f.definitions[1 - index].exists()
                     target_effects = [e['op'] for e in effects(events) if e['label'] == f.labels[index]]
-                    assert target_effects == ([] if at == 2 else ['stop', 'disable']); f.unchanged()
+                    assert target_effects == ([] if at == 2 else ['stop', 'disable', 'reset-failed']); f.unchanged()
         # Partial query output/binary/over-limit failure also propagates under
         # if/|| callers where errexit cannot supply the safety contract.
         for fault in ('meta-query-fail', 'meta-partial-fail', 'meta-nul', 'meta-oversize'):

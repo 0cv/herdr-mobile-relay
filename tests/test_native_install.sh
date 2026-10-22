@@ -56,6 +56,54 @@ assert d.FAKE.count(imports) == 1 and d.FAKE.count("def worker(kind):") == 1
 assert "subprocess." not in d.FAKE
 d.FAKE = d.FAKE.replace(imports, "import json, os, pathlib, sys, time", 1).replace(
     "def worker(kind):", "def worker(kind):\n    import signal", 1)
+# Task SF: on real systemd a stopped Herdr unit is `failed`, not `inactive` (its wrapper traps TERM and exits 143, which systemd does not count as
+# a clean exit: systemd.service(5), SuccessExitStatus=), and only `reset-failed` takes it to inactive. The adapter above models stop as inactive and
+# the cells written against it (per-seam capture counters, exact activation documents, fault timing) rely on that, so the real behavior is OPT-IN:
+# with NATIVE_SYSTEMD_STOP=failed, stop of an active unit leaves it failed (state key `failed`) and `reset-failed LABEL` is accepted, for a failed
+# unit only (any other reset is a forbidden call). NATIVE_RESET_FAILED is a comma list, one action per reset call (the last repeats): ok (the default,
+# the unit becomes inactive) or fail (exit 1); calls are counted in `reset-calls`. NATIVE_DISABLE_FAILED is the same for every systemd disable call (ok or
+# fail, exit 1 before any state change; counted in `disable-calls`). A reset action of noop returns 0 but leaves the unit failed;
+# native and CLI cells both assert that this is never considered quiescence.
+# Unset (every other cell) the adapter answers byte for byte as before, and a reset-failed call is forbidden. Each replacement must match once.
+for old, new in (
+        ('''                 or (len(args) == 3 and args[0] == "--user" and args[1] in ("enable", "disable", "restart", "stop") and args[2] in labels)
+''',
+         '''                 or (len(args) == 3 and args[0] == "--user" and args[1] in ("enable", "disable", "restart", "stop") and args[2] in labels)
+                 or (os.getenv("NATIVE_SYSTEMD_STOP") == "failed" and len(args) == 3 and args[:2] == ["--user", "reset-failed"] and args[2] in labels)
+'''),
+        (r'''+ "ActiveState=" + ("active" if state[key]["active"] else "inactive") + "\n"''',
+         r'''+ "ActiveState=" + ("active" if state[key]["active"] else "failed" if state[key].get("failed") else "inactive") + "\n"'''),
+        ('''        assert command in ("enable", "disable", "restart", "stop")
+''',
+         '''        assert command in ("enable", "disable", "restart", "stop", "reset-failed")
+'''),
+        ('''        if command in ("enable", "disable"): state[key]["enabled"] = command == "enable"
+''',
+         '''        if command == "disable" and os.getenv("NATIVE_DISABLE_FAILED"):
+            plan = os.getenv("NATIVE_DISABLE_FAILED").split(","); counter = root / "disable-calls"
+            calls = int(counter.read_text()) if counter.exists() else 0; counter.write_text(str(calls + 1))
+            action = plan[min(calls, len(plan) - 1)]
+            assert action in ("ok", "fail"), action
+            if action == "fail": raise SystemExit(1)
+        if command in ("enable", "disable"): state[key]["enabled"] = command == "enable"
+'''),
+        ('''        if command in ("restart", "stop") or "--now" in args: state[key]["active"] = command == "restart"
+''',
+         '''        if command == "reset-failed":
+            if not state[key].get("failed"): event("forbidden", tool=name, point="reset-of-a-unit-that-is-not-failed"); raise SystemExit(99)
+            plan = os.getenv("NATIVE_RESET_FAILED", "ok").split(","); counter = root / "reset-calls"
+            calls = int(counter.read_text()) if counter.exists() else 0; counter.write_text(str(calls + 1))
+            action = plan[min(calls, len(plan) - 1)]
+            assert action in ("ok", "fail", "noop"), action
+            if action == "fail": raise SystemExit(1)
+            if action == "ok": state[key].pop("failed")
+        elif command in ("restart", "stop") or "--now" in args:
+            if command == "stop" and state[key]["active"] and os.getenv("NATIVE_SYSTEMD_STOP") == "failed": state[key]["failed"] = True
+            if command == "restart": state[key].pop("failed", None)
+            state[key]["active"] = command == "restart"
+''')):
+    assert d.FAKE.count(old) == 1, old
+    d.FAKE = d.FAKE.replace(old, new, 1)
 dispatch_write = d.write
 
 # Process cost. A cell starts the Python adapter ~140 times (about 25 ms each, most of it the interpreter), and
@@ -630,6 +678,70 @@ def native_origin_input_cases(parent, platform):
         assert invoke(value) == (99, 1), platform + ": a malformed NATIVE_ORIGIN was not forbidden: " + repr(value)
 
 
+def manager_commands(events, label):
+    return [e["command"] for e in events if e["kind"] == "manager" and e["command"] != "show" and e["argv"][-1] == label]
+
+
+def native_failed_cases(parent):
+    # Task SF. systemd, gateway only (every cell runs the real installer and the suite shares one 900 s bound). Each cell opts in to the real stop
+    # semantics patched into the adapter above: stop of an active unit leaves it `failed`, and only `reset-failed` takes it to inactive. They fail on
+    # the code before Task SF, which refused a failed unit (observation) or left it failed (quiescence). NOT the default for the other cells: see the patch.
+    current, legacy = "herdr-mobile-relay.service", "herdr-remote.service"
+    for scenario in ("active-ok", "failed-ok", "active-reset-fails", "active-reset-leaves", "active-start-rollback",
+                     "failed-start-rollback", "active-reset-fails-then-leaves", "active-reset-fails-then-disable-fails"):
+        cell_id = f"systemd-gateway-failed-{scenario}"
+        if not cell(cell_id): continue
+        f = d.Fixture(parent, cell_id, "gateway", "systemd", True)
+        f.env["NATIVE_SYSTEMD_STOP"] = "failed"
+        if scenario.startswith("failed"):  # the prior service already stopped and failed: enabled, not active, current label only
+            d.write(f.root / "activation", json.dumps({"current": dict(active=False, enabled=True, failed=True), "legacy": dict(active=False, enabled=False)}))
+        if scenario == "active-reset-fails": f.env["NATIVE_RESET_FAILED"] = "fail"
+        if scenario == "active-reset-leaves": f.env["NATIVE_RESET_FAILED"] = "noop"
+        if scenario == "active-reset-fails-then-leaves": f.env["NATIVE_RESET_FAILED"] = "fail,noop"
+        if scenario == "active-reset-fails-then-disable-fails":  # publication's reset fails; the rollback's disable fails while the unit is failed
+            f.env.update(NATIVE_RESET_FAILED="fail", NATIVE_DISABLE_FAILED="ok,fail")
+        if scenario.endswith("start-rollback"): f.env["NATIVE_FAILURE"] = "start"
+        before = snapshot(resources(f)); activation = state(f)
+        result = run(f)
+        events = f.events(); sequence = {label: manager_commands(events, label) for label in (current, legacy)}
+        resets = [i for i, e in enumerate(events) if e["kind"] == "manager" and e["command"] == "reset-failed"]
+        first_write = next((i for i, e in enumerate(events) if e["kind"] == "filesystem" and e["live"] and e["tool"] == "mv"), len(events))
+        assert bystander.poll() is None
+        if scenario in ("active-ok", "failed-ok"):
+            # Success over an active OR already-failed unit: reset only a failed label after stop+disable, before any live write.
+            assert result.returncode == 0 and not f.legacy.exists() and not recovery(f), result.stderr
+            assert sequence[current][:3] == ["stop", "disable", "reset-failed"] and sequence[current].count("reset-failed") == 1
+            assert sequence[legacy] == (["stop", "disable", "reset-failed"] if scenario == "active-ok" else ["stop", "disable"])
+            assert resets and max(resets) < first_write < len(events), "a unit was written over before it was reset"
+            assert state(f) == {"current": dict(active=True, enabled=True), "legacy": dict(active=False, enabled=False)}
+        elif scenario in ("active-reset-fails", "active-reset-leaves", "active-reset-fails-then-leaves"):
+            # Distinct syscall failure, successful no-op, and failure followed by no-op on rollback: none authorizes publication.
+            assert result.returncode != 0 and recovery(f) and "rollback is incomplete" in result.stderr
+            assert snapshot(resources(f)) == before and first_write == len(events), "a definition was written over an unquiet unit"
+            assert sequence[current] == ["stop", "disable", "reset-failed", "stop", "disable", "reset-failed"], sequence
+            assert [events[i]["argv"][-1] for i in resets] == [current, current] and (f.root / "reset-calls").read_text() == "2"
+            assert not any(e["kind"] == "manager" and e["command"] in ("enable", "restart") for e in events), "activation after failed reset"
+            assert state(f)["current"] == dict(active=False, enabled=False, failed=True)
+        elif scenario == "active-reset-fails-then-disable-fails":
+            # A reset that fails (publication) refuses; then in the rollback's own quiescence the unit is failed and its disable fails: the failed record is
+            # NOT cleared (no second reset). Nothing is written, nothing is activated, the unit stays down and failed, the recovery evidence is retained.
+            assert result.returncode != 0 and recovery(f) and "rollback is incomplete" in result.stderr
+            assert snapshot(resources(f)) == before and first_write == len(events), "a definition was written over a unit that could not be reset"
+            assert sequence[current] == ["stop", "disable", "reset-failed", "stop", "disable"], sequence
+            assert [events[i]["argv"][-1] for i in resets] == [current] and (f.root / "reset-calls").read_text() == "1" and (f.root / "disable-calls").read_text() == "2"
+            assert not any(e["kind"] == "manager" and e["command"] in ("enable", "restart") for e in events), "a unit was activated after a failed reset"
+            assert state(f)["current"] == dict(active=False, enabled=False, failed=True)
+        elif scenario == "active-start-rollback":
+            # The replacement fails to start: the rollback stops it (failed), resets it, and only then restarts the PRIOR active service.
+            assert result.returncode != 0 and not recovery(f) and snapshot(resources(f)) == before and state(f) == activation, result.stderr
+            assert sequence[current] == ["stop", "disable", "reset-failed", "enable", "restart", "stop", "disable", "reset-failed", "enable", "restart"]
+        else:
+            # The prior unit was failed, not active: the rollback restores its files and enabled flag but does NOT start it.
+            assert result.returncode != 0 and not recovery(f) and snapshot(resources(f)) == before, result.stderr
+            assert sequence[current] == ["stop", "disable", "reset-failed", "enable", "restart", "stop", "disable", "reset-failed", "enable"]
+            assert state(f) == {"current": dict(active=False, enabled=True), "legacy": dict(active=False, enabled=False)}
+
+
 def native_shim_parity():
     # The bash prelude must be indistinguishable from the adapter it shortcuts. Replay representative calls, including
     # each condition it must hand back (fault names, live destinations, other argv), through the prelude in one fixture
@@ -701,6 +813,7 @@ try:
         for transport in ("gateway", "cloudflare"):
             native_capture_cases(parent, platform, transport)
             if transport == "gateway": native_origin_cases(parent, platform)
+            if platform == "systemd" and transport == "gateway": native_failed_cases(parent)
             # Deterministic policy refusals precede all managers, HTTP/app,
             # relay/tunnel dispatch and credential/configuration mutation.
             for name, addition in (

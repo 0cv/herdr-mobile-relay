@@ -1,9 +1,9 @@
 # CI test tiers
 
-The native-install suite (`tests/test_native_install.sh`) is a matrix of 2331 semantic cells: 1864 installer
+The native-install suite (`tests/test_native_install.sh`) is a matrix of 2339 semantic cells: 1872 installer
 invocations, 8 cancellation cells and 459 parser-probe, control and parity cells. Run in one process it does not fit
 its 900 s bound, so CI splits it by cell id into shards and runs a subset on every push. The uninstall CLI suite
-(`tests/test_service_uninstall_cli.py`: 1032 cells holding 1657 `Fixture.run` invocations, plus 3 controls) is sliced the same
+(`tests/test_service_uninstall_cli.py`: 1040 cells holding 1665 `Fixture.run` invocations, plus 3 controls) is sliced the same
 way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is never full qualification.**
 
 ## Workflows and events
@@ -11,7 +11,7 @@ way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is nev
 | Workflow (required check) | Events | Sharded suites' cells | Shards per OS (macos-15, ubuntu-24.04) |
 | --- | --- | --- | --- |
 | `service-qualification.yml` (**Service qualification gate (fast)**) | push to `main`, `dev`, the CI branch | native: the explicit fast subset, 592 cells (353 installer runs + 8 cancellations); uninstall CLI: the explicit fast subset, 345 cells (550 invocations + 3 controls) | native 5, uninstall CLI 1 |
-| `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch, push to the CI branch **only with `[full-qualification]` in the head commit message** (below) | native: all 2331 cells; uninstall CLI: all 1032 cells (1657 invocations + 3 controls) | native 28, uninstall CLI 3 |
+| `service-full-qualification.yml` (**Full service qualification gate**) | `pull_request` (before merge), `workflow_dispatch` for an exact candidate (optional `candidate_sha` must equal the run's commit), nightly cron on the default branch, push to the CI branch **only with `[full-qualification]` in the head commit message** (below) | native: all 2339 cells; uninstall CLI: all 1040 cells (1665 invocations + 3 controls) | native 29, uninstall CLI 3 |
 | `check.yml` (Shell job) | push to `main`, `dev`, the CI branch; `pull_request` | none: runs `make shell-check-ci-complement` | - |
 | `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes, and a push run is never accepted); none found fails closed; the existing 1800 s window | - |
 | `resume-benchmark.yml` | `workflow_dispatch` only (was a per-push `check.yml` job) | - | - |
@@ -60,8 +60,12 @@ cancellation cell. Given up (full only): the second transport of probes, positiv
 
 Shards are assigned by `assign()`: longest-processing-time balancing over the modeled hosted-macOS cost of each cell (below),
 the same assignment on both OSes, so every shard mixes systemd and launchd cells and each OS covers both inventories across
-its aggregate. The shard counts are fixed (`SHARD_COUNTS`): native 5 fast and 28 full; changing one is a deliberate edit of the
+its aggregate. The shard counts are fixed (`SHARD_COUNTS`): native 5 fast and 29 full; changing one is a deliberate edit of the
 helper, both workflows and this page.
+
+Real systemd leaves a stopped Herdr unit `failed` (its wrapper exits 143), so removal and install quiescence reset the owned label. Eight
+**distinct** `systemd-gateway-failed-*` native cells (two successful installs, separate reset failure and no-op, two start rollbacks, and two combined faults) and eight `systemd/reset-failed/*` uninstall CLI cells pin it; both are full tier only (the fast files are unchanged). The native cells are priced as `install-ok` (the two successes)
+or `quiesce` (each refusal and rollback), not as ordinary installs. The 29th Full native shard preserves all these cells rather than dropping any to fit 28.
 
 ### Uninstall CLI cells
 
@@ -70,7 +74,7 @@ a counter: `<manager>/<family>/<parameters>` with the manager the fixture model 
 `launchd/capture/1/label-absent/oversize/observe-or`, or `control/<name>`. The suite opens every group with `cell(id)`;
 `main()` refuses an invalid `HERDR_UNINSTALL_CLI_TIER`, `_SHARD` or `_CELL` before any control or fixture (a variable that is set
 but empty is invalid too: unset it), and with none of them set it selects everything. `tests/service_qualification_matrix.py` enumerates the ids from the suite's text and freezes them
-(`CLI_FROZEN`: 1032 cells, 1657 invocations, the digest of the ids, of every cell's id and run count and, in order, of every
+(`CLI_FROZEN`: 1040 cells, 1665 invocations, the digest of the ids, of every cell's id and run count and, in order, of every
 invocation's call, Fixture and loop variables). At run time the ids
 the suite reaches and each cell's invocation count must equal that enumeration. The three controls (timeout diagnostics,
 fast-stub/model-stub equivalence, metadata batch) are cells pinned to **shard 1 of the tier, on each runner, and run nowhere
@@ -80,12 +84,12 @@ else**: the gate recomputes each shard's expected cells, so a control in another
 (both labels where the assertion is direction-specific), every capture seam x payload shape x caller context x label at least
 once (40 cells), every observation-time branch, every positive state and every refusal class on both manager models, every
 hidden unit directive, overlay location, effective-metadata property and query failure, every identity outcome, route choice and
-signal. Fast is 345 cells and 550 invocations of 1657 (the audit's ~200 counted cases loosely: each atomic cell here runs 1 to 7
+signal. Fast is 345 cells and 550 invocations of 1665 (the audit's ~200 counted cases loosely: each atomic cell here runs 1 to 7
 entrypoints, and every refusal class is kept on both models). Given up (full only): the cross-product of payload shape x caller
 x label, fault kind x label (non-progress kinds), caller x observation count, serializer x label x directive, location x label x
 survivor, property x label x position, and the second value of each protected environment key per model.
 
-The uninstall CLI shards: 1 per OS in the fast tier, 3 in the full tier (modeled 304 s each, 34% of the 900 s bound).
+The uninstall CLI shards: 1 per OS in the fast tier, 3 in the full tier (modeled 310 s each, 34% of the 900 s bound).
 
 ## Exact-once evidence and the gate
 
@@ -132,10 +136,10 @@ the suite bound, the 40 s invocation bound and the 180 s helper-build bound are 
 | Tier (cells) | Shards per OS | Modeled macOS shard (max) | Margin to 540 s / 900 s | Modeled Ubuntu shard (max) |
 | --- | ---: | ---: | ---: | ---: |
 | fast (592) | 5 | 466 s | 74 s / 434 s | 270 s |
-| full (2331) | 28 | 539 s | 1 s / 361 s | 315 s |
+| full (2339) | 29 | ≤ 540 s (model; 28 shards exceed 540 s) | ≥ 0 s / ≥ 360 s | not re-derived for 29 shards |
 
 `python3 -I -B tests/service_qualification_matrix.py list --tier full` prints the modeled macOS seconds of every shard (`modeled_shard_seconds`). The
-full tier's capture-ready and capture-public cells (1152 of 2331, 78% of its modeled macOS work) are priced from the 24 of each in the
+full tier's capture-ready and capture-public cells (1152 of 2339, approximately 78% of its modeled macOS work) are priced from the 24 of each in the
 fast subset, whose transport mix (two cloudflare cells per gateway cell) is slower than the full tier's even mix: that errs high
 (pricing each transport at its own maximum would give 27 shards). **No full-tier native shard has run on a hosted runner**, and the
 projections are not measurements: a shard over its unchanged 900 s bound fails closed (no retry, no pass-on-timeout) and the
@@ -144,7 +148,7 @@ remedy is a larger fixed count. The suite seconds exclude the job's checkout and
 ### Cost and queueing
 
 Jobs per event (each also runs on Ubuntu; the gate job is Ubuntu only): **a push runs 7 macOS jobs** (suites, 5 native shards, 1 uninstall
-CLI shard; it ran 4 with 2 native shards) and **a full run 32** (suites, 28 native shards, 3 uninstall CLI shards; it ran 12 with 8).
+CLI shard; it ran 4 with 2 native shards) and **a full run 33** (suites, 29 native shards, 3 uninstall CLI shards; it ran 12 with 8).
 GitHub caps how many macOS jobs a plan runs at once on standard hosted runners (its documentation lists 5 for the Free, Pro and Team
 plans and 50 for Enterprise Cloud; this repository's plan was not inspected, so verify it): with 5, a full run needs at least seven
 successive groups of macOS jobs and a push at least two, and pushes, pull requests and the nightly run queue behind each other. That

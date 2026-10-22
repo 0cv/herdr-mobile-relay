@@ -1,7 +1,7 @@
 name: Full service qualification
 
-# FULL tier: the same unsharded suites plus EVERY native-install cell (the exhaustive matrix, 1864 installer
-# invocations and 8 cancellation cells; 28 shards per OS) and EVERY uninstall CLI cell (all 1657 Fixture.run invocations and
+# FULL tier: the same unsharded suites plus EVERY native-install cell (the exhaustive matrix, 1872 installer
+# invocations and 8 cancellation cells; 29 shards per OS) and EVERY uninstall CLI cell (all 1665 Fixture.run invocations and
 # the 3 controls; 3 shards per OS). It is the only workflow whose success release.yml accepts as
 # service qualification. It runs on demand for an exact candidate (workflow_dispatch; set candidate_sha to assert the
 # commit), on every pull request before merge, and nightly on the default branch after merge. A push to the CI branch (the
@@ -11,7 +11,7 @@ name: Full service qualification
 # name in branch rules is the gate job below; configuring hosting rules is a separate administrative step this file
 # does not establish (docs/ci-test-tiers.md). No cell, assertion or timeout is dropped or weakened relative to the
 # fast tier: the fast tier is a subset of this one.
-# macOS jobs per run: 32 (the suites job, 28 native shards, 3 uninstall CLI shards), and as many on Ubuntu. The native shard count is
+# macOS jobs per run: 33 (the suites job, 29 native shards, 3 uninstall CLI shards), and as many on Ubuntu. The native shard count is
 # sized so that every MODELED macOS shard stays within 60% of the 900 s suite bound (docs/ci-test-tiers.md); hosted macOS runs only a
 # few jobs at once, so a run queues for runners (a constraint of the account's plan, not a time this file promises). No full-tier
 # native shard has run hosted yet: the first run measures them.
@@ -126,14 +126,14 @@ jobs:
   native:
     needs: [decide, candidate]
     if: ${{ needs.decide.outputs.run == 'true' }}
-    name: Native install, full (${{ matrix.runner }}, shard ${{ matrix.shard }}/28)
+    name: Native install, full (${{ matrix.runner }}, shard ${{ matrix.shard }}/29)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         runner: [macos-15, ubuntu-24.04]
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
     steps:
       - uses: actions/checkout@v7
         timeout-minutes: 5
@@ -153,7 +153,7 @@ jobs:
           go-version: 1.27.1
           cache: false
       - name: Run the native-install full shard (the suite keeps its 900s bound)
-        run: /bin/bash scripts/ci/run-service-qualification.sh native full ${{ matrix.shard }}/28
+        run: /bin/bash scripts/ci/run-service-qualification.sh native full ${{ matrix.shard }}/29
       - name: Upload sanitized shard summary and completed-cell evidence
         if: always()
         uses: actions/upload-artifact@v7

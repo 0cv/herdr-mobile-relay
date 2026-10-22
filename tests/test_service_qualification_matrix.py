@@ -47,7 +47,7 @@ def projection(ids, family, *keep):
 class Inventory(unittest.TestCase):
     def test_frozen_inventory_and_gate_fixture_agreement(self):
         self.assertEqual(m.totals(list(CELLS.values())), m.FROZEN)
-        self.assertEqual((m.FROZEN["runs"], m.FROZEN["cancels"]), (1864, 8))
+        self.assertEqual((m.FROZEN["runs"], m.FROZEN["cancels"]), (1872, 8))
         self.assertEqual(m.enumerate_cells(SOURCE, legacy=True), list(CELLS.values()))
         self.assertTrue(all(m.classify(i) for i in INVENTORY))
 
@@ -139,7 +139,17 @@ class Selection(unittest.TestCase):
             self.assertLess(max(loads) / min(loads), 1.02)
             for shard in shards:
                 self.assertEqual({m.classify(i).get("platform") for i in shard} - {None}, {"systemd", "launchd"})
-        self.assertEqual(m.SHARD_COUNTS, {"fast": 5, "full": 28})
+        self.assertEqual(m.SHARD_COUNTS, {"fast": 5, "full": 29})
+
+    def test_failed_state_cases_are_distinct_and_refusals_are_not_priced_as_success(self):
+        scenarios = ("active-ok", "failed-ok", "active-reset-fails", "active-reset-leaves", "active-start-rollback",
+                     "failed-start-rollback", "active-reset-fails-then-leaves", "active-reset-fails-then-disable-fails")
+        for scenario in scenarios:
+            cell = "systemd-gateway-failed-" + scenario
+            self.assertIn(cell, CELLS)
+            self.assertEqual(CELLS[cell]["runs"], 1)
+            self.assertNotIn(cell, FAST_IDS)
+            self.assertEqual(m.cost_class(m.classify(cell)), "install-ok" if scenario.endswith("-ok") else "quiesce")
 
     def test_the_cost_model_prices_every_class_once_and_never_passes_a_projection_off_as_a_measurement(self):
         classes = {m.cost_class(m.classify(i)) for i in INVENTORY}
@@ -211,7 +221,7 @@ def cli_projection(ids, family, *keep):
 class UninstallCli(unittest.TestCase):
     def test_inventory_is_frozen_complete_and_classified(self):
         self.assertEqual(m.totals(list(CLI_CELLS.values())), m.CLI_FROZEN)
-        self.assertEqual((m.CLI_FROZEN["cells"], m.CLI_FROZEN["runs"]), (1032, 1657))  # the 1657 Fixture.run invocations of the unchanged suite
+        self.assertEqual((m.CLI_FROZEN["cells"], m.CLI_FROZEN["runs"]), (1040, 1665))  # 1657 Fixture.run invocations of the 0598331f suite and the eight of Task SF
         self.assertEqual([i for i in CLI_INVENTORY if CLI_CELLS[i]["runs"] == 0], ["control/" + n for n in m.CLI_CONTROLS])
         self.assertEqual({m.classify_cli(i)["family"] for i in CLI_INVENTORY} - {"control"}, set(m.CLI_FAMILIES))
         self.assertEqual({m.classify_cli(i).get("platform") for i in CLI_INVENTORY}, {None, "systemd", "launchd"})
@@ -290,6 +300,7 @@ class UninstallCli(unittest.TestCase):
         self.assertTrue({"control/" + n for n in m.CLI_CONTROLS} <= CLI_FAST_IDS and CLI_FAST_IDS <= set(CLI_INVENTORY))
         covered = lambda family, *keep: self.assertEqual(cli_projection(CLI_INVENTORY, family, *keep), cli_projection(CLI_FAST_IDS, family, *keep), (family, keep))
         for family in m.CLI_FAMILIES:
+            if family == "reset-failed" and not cli_projection(CLI_FAST_IDS, family, "platform"): continue  # Task SF: full tier only until tests/uninstall_cli_fast_cases.json lists it; once it lists any, it must cover every model
             covered(family, "platform")  # every family on every model that has it
         complete = ("present", "initial", "direct", "opposite", "bound", "definition", "ancestor-absent", "ancestor-unsearchable", "route-spelling",
                     "route-choice", "route-failure", "route-prior", "usage", "env-text", "role-alias", "tool-fault", "legacy-selection", "config-input",
@@ -353,7 +364,7 @@ class UninstallCli(unittest.TestCase):
             self.assertLessEqual(max(loads), .6 * 900, "a modeled shard must stay within 60% of the unchanged 900 s bound")
             for shard in shards:
                 self.assertEqual({m.classify_cli(i).get("platform") for i in shard} - {None}, {"systemd", "launchd"})
-        self.assertAlmostEqual(sum(m.assign(CLI_INVENTORY, 3, m.CLI, runs)[1]), 912.6, 1)  # modeled hosted-macOS seconds of the whole suite
+        self.assertAlmostEqual(sum(m.assign(CLI_INVENTORY, 3, m.CLI, runs)[1]), 928.7, 1)  # modeled hosted-macOS seconds of the whole suite (912.6 s plus the eight Task SF cells)
 
     def test_plan_defaults_to_full_and_refuses_invalid_requests(self):
         plan = lambda env: m.plan(CLI_SOURCE, CLI_FAST, env, m.CLI)

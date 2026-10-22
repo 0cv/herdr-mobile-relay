@@ -51,7 +51,9 @@ native_install_observe() {
             NATIVE_STATE=absent NATIVE_ENABLED=false; return 0
         fi
         [ "$load" = loaded ] || return 1
-        case "$active" in active|inactive) ;; *) return 1 ;; esac
+        # `failed` is what a stopped Herdr unit becomes on real systemd (its wrapper exits 143). It is parsed so the callers can see it,
+        # never quiet. Only a LOADED unit gets here: a not-found unit reported failed (a stale record of a removed definition) stays unknown.
+        case "$active" in active|inactive|failed) ;; *) return 1 ;; esac
         case "$enabled" in enabled) enabled=true ;; disabled) enabled=false ;; *) return 1 ;; esac
         NATIVE_STATE="$active" NATIVE_ENABLED="$enabled"
         return 0
@@ -243,6 +245,7 @@ native_install_begin() {
     native_install_observe "$native_label" || return 1
     native_install_origin_ok "$native_label" "$native_definition" || return 1
     native_enabled="$NATIVE_ENABLED"
+    # A prior `failed` unit was not active: it is snapshotted inactive (never restored as active), its enabled flag is kept.
     case "$NATIVE_STATE" in active|loaded) native_active=true ;; esac
     native_install_observe "$native_legacy_label" || return 1
     native_install_origin_ok "$native_legacy_label" "$native_legacy_definition" || return 1
@@ -280,19 +283,31 @@ native_install_label_quiet() {
 }
 
 native_install_quiesce() {
-    local label attempt
+    local label attempt reset stopped
     for label in "$native_label" "$native_legacy_label"; do
+        reset=false stopped=false
         native_install_observe "$label" || return 1
         if [ "$native_manager" = systemd ]; then
             if [ "$NATIVE_STATE" != absent ]; then
-                systemctl --user stop "$label" >/dev/null 2>&1 || true
-                systemctl --user disable "$label" >/dev/null 2>&1 || true
+                # Neither status is authority (the strict quiet test below decides), but a failed record is cleared only after BOTH succeeded.
+                stopped=true
+                systemctl --user stop "$label" >/dev/null 2>&1 || stopped=false
+                systemctl --user disable "$label" >/dev/null 2>&1 || stopped=false
             fi
         elif [ "$NATIVE_STATE" != absent ]; then
             launchctl bootout "gui/$UID/$label" >/dev/null 2>&1 || true
         fi
         for ((attempt=0; attempt<10; attempt++)); do
             native_install_observe "$label" || return 1
+            # After the stop and disable above: this owned label alone, ONCE, and only when freshly observed `failed` after this call stopped
+            # AND disabled it (a label that was absent, then failed without being stopped here, or whose stop or disable failed, is refused
+            # before any reset). Its status is not authority and `failed` is never quiet, so quiescence is still observed below.
+            if [ "$native_manager" = systemd ] && [ "$NATIVE_STATE" = failed ] && [ "$reset" = false ]; then
+                [ "$stopped" = true ] || return 1
+                reset=true
+                systemctl --user reset-failed "$label" >/dev/null 2>&1 || return 1
+                continue
+            fi
             if native_install_label_quiet "$label"; then break; fi
             [ "$attempt" -eq 9 ] || sleep 0.1 || return 1
         done
@@ -384,6 +399,7 @@ native_install_restore_activation() {
         [ "$active" = true ] || continue
         native_install_observe "$label" || return 1
         if [ "$native_manager" = systemd ]; then
+            # Strict: a `failed` unit here is not the quiesced state just verified, so nothing is restarted.
             [ "$NATIVE_STATE" = inactive ] || return 1
             systemctl --user restart "$label" || return 1
         else

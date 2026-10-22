@@ -1890,7 +1890,7 @@ service_removal_quiet() {
 }
 
 service_removal_one() {
-    local manager="$1" label="$2" file original attempt uid quiet=false
+    local manager="$1" label="$2" file original attempt uid quiet=false reset=false stopped=false
     file="$(service_removal_path "$manager" "$label")" || return 1
     service_removal_resource "$file" || return 1
     original="$SERVICE_REMOVAL_RESOURCE_ID"
@@ -1904,7 +1904,7 @@ service_removal_one() {
     if [ "$manager" = systemd ]; then
         case "$SERVICE_REMOVAL_STATE" in
             absent|inactive) ;;
-            *) systemctl --user stop "$label" >/dev/null 2>&1 || return 1 ;;
+            *) systemctl --user stop "$label" >/dev/null 2>&1 || return 1; stopped=true ;;
         esac
         if [ "$SERVICE_REMOVAL_ENABLED" != false ]; then
             systemctl --user disable "$label" >/dev/null 2>&1 || return 1
@@ -1919,9 +1919,19 @@ service_removal_one() {
             launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || return 1
         fi
     fi
+    # Herdr's wrapper traps TERM and exits 143, which systemd does not count as a clean exit (systemd.service(5), SuccessExitStatus=): a
+    # stopped unit is `failed`, not `inactive`. `failed` is never quiet. After the stop and disable above, the owned label alone is reset
+    # ONCE, and only when freshly observed `failed` AFTER this call stopped it: a unit that fails without having been stopped here (started by
+    # someone else after the first observation) is refused, never reset. The reset status is not authority, so quiescence is still observed below.
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
         service_removal_observe "$manager" "$label" || return 1
         case "$SERVICE_REMOVAL_STATE:$SERVICE_REMOVAL_ENABLED" in absent:false|inactive:false) quiet=true; break ;; esac
+        if [ "$manager" = systemd ] && [ "$SERVICE_REMOVAL_STATE" = failed ] && [ "$reset" = false ]; then
+            [ "$stopped" = true ] || return 1
+            reset=true
+            systemctl --user reset-failed "$label" >/dev/null 2>&1 || return 1
+            continue
+        fi
         [ "$attempt" -eq 10 ] || sleep 0.1 || return 1
     done
     [ "$quiet" = true ] || return 1

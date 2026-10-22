@@ -25,7 +25,7 @@ SCHEMA = 1
 # Fixed shard counts per tier and runner OS, sized from hosted measurements (task-l-evidence/calibration.json): the smallest count whose
 # largest MODELED hosted-macOS shard (cost() balanced by assign(), plus SHARD_OVERHEAD) stays within PROJECTION_LIMIT. A modeled shard is a
 # projection, never a measured hosted time; changing a count is a deliberate edit of this line, the workflows and the docs together.
-SHARD_COUNTS = {"fast": 5, "full": 28}
+SHARD_COUNTS = {"fast": 5, "full": 29}
 SUITE_BOUND = 900  # seconds; the driver's unchanged SUITE_TIMEOUT_SECONDS (the suite is killed, and its shard fails closed, at this bound)
 PROJECTION_LIMIT = 540.0  # seconds; 60% of SUITE_BOUND: room for run-to-run variance (hosted macOS ran one shard up to 1.4x slower than another run)
 RUNNER_OS = {"macos-15": "Darwin", "ubuntu-24.04": "Linux"}
@@ -38,9 +38,9 @@ SUITES = ("tests/test_common.sh", "tests/test_service_credentials.sh", "tests/te
 # The exhaustive inventory enumerated from the committed suite at 9ad13cba (baseline-inventory.json): the totals, the
 # digest of the ids and the digest of every cell's own id/run/probe record (a run or probe moved between cells changes
 # it). A suite edit that changes any of them must change these numbers deliberately; nothing adjusts them silently.
-FROZEN = {"cells": 2331, "runs": 1864, "probes": 576, "cancels": 8,
-          "digest": "85271de3a24a8fd3a9268e6e79a10eed1326ba9bbbc38b7fc5594a9dc6e5ca73",
-          "cell_digest": "885eb859c6d009bc648075e36bc52225cdfbc4c1718bfdc5d10c3e19c62905e5"}
+FROZEN = {"cells": 2339, "runs": 1872, "probes": 576, "cancels": 8,
+          "digest": "34af07a824a4c2ec3f419bac2ce658a3c12fb83df393c07faede7aad96d0e744",
+          "cell_digest": "4821c30d88fc061ff79e30b59736ec62189c09c96223465e27b89485fb898fcc"}
 LIMIT = 4 * 1024 * 1024
 
 
@@ -358,7 +358,9 @@ PATTERNS = (
     ("pointer", rf"{_P}-{_T}-pointer"),
     ("defaults", rf"{_P}-{_T}-defaults-(?P<missing>file|key|instance)"),
     ("cancel", rf"{_P}-{_T}-cancel-(?P<signal>2|15)"),
-    ("matrix", rf"{_P}-{_T}-(?P<initial>active|inactive|fresh)-(?P<failure>ok|{FAILURES})"))
+    ("matrix", rf"{_P}-{_T}-(?P<initial>active|inactive|fresh)-(?P<failure>ok|{FAILURES})"),
+    # Task SF: the real systemd stop (a stopped unit is `failed`, reset by `reset-failed`), opted into by these cells only.
+    ("failed", rf"{_P}-{_T}-failed-(?P<scenario>active-ok|failed-ok|active-reset-fails|active-reset-leaves|active-start-rollback|failed-start-rollback|active-reset-fails-then-leaves|active-reset-fails-then-disable-fails)"))
 COMPILED = tuple((family, re.compile(pattern)) for family, pattern in PATTERNS)
 
 
@@ -374,7 +376,7 @@ def classify(cell_id):
 # took Xs` lines of six hosted fast-tier jobs (three runs, commits 1bb8723f 0598331f 6304e405, two shards each); no full-tier shard has
 # ever run hosted. A modeled value is a PROJECTION used to balance shards and to size their count, never a measured hosted time.
 #   CLASS_SECONDS   MEASURED classes, (systemd, launchd): the largest mean seconds of one timed installer invocation of the class over the
-#                   six jobs, rounded up. The full tier's capture-ready and capture-public classes (1152 of 2331 cells) are priced from the
+#                   six jobs, rounded up. The full tier's capture-ready and capture-public classes (1152 of 2339 cells) are priced from the
 #                   24 cells of each the fast tier holds.
 #   MODELED_SECONDS the classes no invocation line times (probes, validation, cancellation, parity): the older local Ubuntu-equivalent
 #                   estimate (seconds, launchd multiplier) times MACOS_FACTOR, the ratio of the measured seconds above to those estimates
@@ -399,6 +401,8 @@ def cost_class(a):
         failure = a["failure"]
         return ("install-ok" if failure == "ok" else "early" if failure in EARLY else
                 "public" if failure.startswith("public") else "ready" if failure.startswith(("ready", "prior")) else "quiesce")
+    if family == "failed":  # Task SF: the installs that succeed are install-ok; every refusal or rollback stops, resets and quiesces twice, like a `quiesce` failure
+        return "install-ok" if a["scenario"].endswith("-ok") else "quiesce"
     return {"parity": "parity", "probe": "probe", "valid": "valid", "origin": "origin-refusal", "cancel": "cancel",
             "origin-input": "refusal", "refuse": "refusal", "alias": "refusal", "overlap": "refusal"}.get(family, "install-ok")
 
@@ -431,7 +435,7 @@ CLI_FAMILIES = {
     "overlay": ("index", "present", "location"), "metadata-field": ("index", "present", "field", "fault"),
     "metadata-fault": ("index", "fault"), "metadata-override": ("index", "override"), "fragment-bystander": ("index",),
     "cached-unit": ("index",), "absent-override": ("index", "override"), "absent-not-found": ("index",),
-    "drift": ("index", "at", "field"), "meta-caller": ("fault", "caller")}
+    "drift": ("index", "at", "field"), "meta-caller": ("fault", "caller"), "reset-failed": ("scenario",)}
 CLI_CONTROLS = {"timeout-diagnostics": 4.0, "fast-stub-equivalence": 45.0, "metadata-batch": 0.5}  # modeled seconds
 CLI_FIXTURE = 0.03
 CLI_RUN = {  # modeled hosted-macOS seconds per Fixture.run: (systemd model, launchd model)
@@ -443,7 +447,7 @@ CLI_RUN = {  # modeled hosted-macOS seconds per Fixture.run: (systemd model, lau
     "metadata-field": (.2, .2), "metadata-override": (.23, .23), "opposite": (.11, .09), "overlay": (.22, .22), "override": (.2, .2),
     "percent-specifier": (.58, .58), "plist-label": (.17, .17), "present": (1.56, 1.08), "quoted-route": (1.62, 1.62), "role-alias": (.44, .28),
     "role-selected": (.53, .33), "rollback-unauthorized": (.13, .07), "route-choice": (1.3, .88), "route-failure": (.89, .68),
-    "route-prior": (1.72, 1.13), "route-spelling": (1.27, .85), "section": (.2, .2), "signal": (1.48, 1.17), "stopped": (.53, .65),
+    "reset-failed": (1.98, 1.72), "route-prior": (1.72, 1.13), "route-spelling": (1.27, .85), "section": (.2, .2), "signal": (1.48, 1.17), "stopped": (.53, .65),
     "tool-fault": (.18, .15), "usage": (.01, .01)}
 
 
@@ -480,10 +484,11 @@ NATIVE_P = Profile(name="native", source=NATIVE, fast="tests/native_install_fast
 # suite makes (checked invocation by invocation against that source in task-j-evidence/baseline-inventory.json) and its 3 controls. The
 # digest of the ids and the digest of every cell's own id/run count freeze it exactly as FROZEN does for the native suite; the
 # invocation digest also freezes, in order, what each of the 1657 invocations is (its call, its Fixture and its loop variables).
-CLI_FROZEN = {"cells": 1032, "runs": 1657, "probes": 0, "cancels": 0,
-              "digest": "3933b90d3589f14462492b8c225e8b4b33526f854daa9412f9c41ebe9927f0f1",
-              "cell_digest": "b8e2a4a3a49caaff3afc7fca5119bd4f35e7beda718b0578eb16bbc64d877158",
-              "invocation_digest": "712209c922ad95c7ff23d3a0fb746e11991d50b6c10441b38d3f97b4e65eb466"}
+# Task SF added the eight `systemd/reset-failed/*` cells (eight invocations): 1040 cells, 1665 invocations.
+CLI_FROZEN = {"cells": 1040, "runs": 1665, "probes": 0, "cancels": 0,
+              "digest": "47481d04c49f0877ed5f41c463b89b8d116c1802ddcbd944b55b450c20880e30",
+              "cell_digest": "e7b8af3094f2c355b26be54c772aaa265818b8c8b398c392b6ef8db7aacc536a",
+              "invocation_digest": "8db78629453007ac5f114cd39dc29cb2bd1dd694261b706176e13512dd41d522"}
 CLI = Profile(name="uninstall-cli", source=UNINSTALL_CLI, fast="tests/uninstall_cli_fast_cases.json", counts={"fast": 1, "full": 3},
               cli=True, frozen=CLI_FROZEN, env="HERDR_UNINSTALL_CLI", kind="uninstall-cli-shard", artifact="uninstall-cli",
               evidence="uninstall-cli-shard-evidence.json", classify=classify_cli, cost=cost_cli, pin=lambda i: i.startswith("control/"),
