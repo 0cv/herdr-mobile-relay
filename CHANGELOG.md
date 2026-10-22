@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Stop filling the Herdr server log with a failed `workspace.move_block`
+  request every 30 seconds. That request is the relay's capability check, and
+  Herdr's refusal is the expected answer. The relay now checks once per Herdr
+  server and again only after a reconnect, the same as its `tab.move` and
+  `pane.read` checks. (#70)
+
 ## [0.22.11] - 2026-10-21
 
 ### Added

@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,8 +29,6 @@ func TestCapabilityRefreshTracksLiveServerSeparatelyFromInstalledClient(t *testi
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "tab  not found"}},
 		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
-		{"type": "pong", "version": "0.9.0", "protocol": 1},
-		{"error": map[string]any{"code": "unknown_method", "message": "unsupported"}},
 	})
 	defer listener.Close()
 
@@ -40,16 +40,80 @@ func TestCapabilityRefreshTracksLiveServerSeparatelyFromInstalledClient(t *testi
 	if !first.Supports(FeatureWorkspaceMoveBlock) {
 		t.Fatalf("first status = %+v, want live move-block support", first)
 	}
-
-	second := client.RefreshCapabilities(context.Background())
-	if second.ServerVersion != "0.9.0" || second.Supports(FeatureWorkspaceMoveBlock) {
-		t.Fatalf("second status = %+v, want same-version server with unsupported move-block", second)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
-	if second.Feature(FeatureWorkspaceMoveBlock).Reason != "method_not_supported" {
-		t.Fatalf("move-block evidence = %+v, want method_not_supported", second.Feature(FeatureWorkspaceMoveBlock))
+}
+
+// Each workspace.move_block probe is logged by Herdr as a failed API request,
+// so a healthy refresh of the same server must not repeat it (#70).
+func TestCapabilityRefreshReusesWorkspaceMoveBlockEvidenceForSameServer(t *testing.T) {
+	socketPath, listener, done, methods := recordingCapabilitySocket(t, []map[string]any{
+		{"type": "pong", "version": "0.9.0", "protocol": 1},
+		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
+		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
+		// A healthy refresh of the same server only pings.
+		{"type": "pong", "version": "0.9.0", "protocol": 1},
+		// A same-version reconnect must recheck instead of retaining support.
+		{"type": "pong", "version": "0.9.0", "protocol": 1},
+		{"error": map[string]any{"code": "unknown_method", "message": "unsupported"}},
+		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
+	})
+	defer listener.Close()
+
+	client := NewClient("missing-herdr", socketPath)
+	for range 2 {
+		feature := client.RefreshCapabilities(context.Background()).Feature(FeatureWorkspaceMoveBlock)
+		if feature.State != FeatureSupported || feature.Reason != "recognized_validation_refusal" {
+			t.Fatalf("move-block evidence = %+v, want supported/recognized_validation_refusal", feature)
+		}
+	}
+	client.InvalidateLiveCapabilities()
+	feature := client.RefreshCapabilities(context.Background()).Feature(FeatureWorkspaceMoveBlock)
+	if feature.State != FeatureUnsupported || feature.Reason != "method_not_supported" {
+		t.Fatalf("move-block evidence after reconnect = %+v, want unsupported/method_not_supported", feature)
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	want := []string{
+		"ping", "workspace.move_block", "tab.move", "pane.read",
+		"ping",
+		"ping", "workspace.move_block", "tab.move", "pane.read",
+	}
+	if got := methods(); !slices.Equal(got, want) {
+		t.Fatalf("requests = %q, want %q", got, want)
+	}
+}
+
+func TestCapabilityRefreshRetriesUnknownWorkspaceMoveBlock(t *testing.T) {
+	socketPath, listener, done, methods := recordingCapabilitySocket(t, []map[string]any{
+		{"type": "pong", "version": "0.9.0", "protocol": 1},
+		{"error": map[string]any{"code": "invalid_request", "message": "temporary refusal"}},
+		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
+		{"type": "pong", "version": "0.9.0", "protocol": 1},
+		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
+	})
+	defer listener.Close()
+
+	client := NewClient("missing-herdr", socketPath)
+	first := client.RefreshCapabilities(context.Background()).Feature(FeatureWorkspaceMoveBlock)
+	if first.State != FeatureUnknown || first.Reason != "probe_failed" {
+		t.Fatalf("first check = %+v, want unknown/probe_failed", first)
+	}
+	second := client.RefreshCapabilities(context.Background()).Feature(FeatureWorkspaceMoveBlock)
+	if second.State != FeatureSupported || second.Reason != "recognized_validation_refusal" {
+		t.Fatalf("second check = %+v, want supported/recognized_validation_refusal", second)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ping", "workspace.move_block", "tab.move", "pane.read", "ping", "workspace.move_block"}
+	if got := methods(); !slices.Equal(got, want) {
+		t.Fatalf("requests = %q, want %q", got, want)
 	}
 }
 
@@ -283,6 +347,19 @@ func TestCapabilityPingIdentityChangeRejectsOlderOperationEvidence(t *testing.T)
 
 func capabilitySocket(t *testing.T, responses []map[string]any) (string, *net.UnixListener, <-chan error) {
 	t.Helper()
+	path, listener, done, _ := recordingCapabilitySocket(t, responses)
+	return path, listener, done
+}
+
+// recordingCapabilitySocket answers each connection with the next response and
+// records the request methods in arrival order.
+func recordingCapabilitySocket(
+	t *testing.T,
+	responses []map[string]any,
+) (string, *net.UnixListener, <-chan error, func() []string) {
+	t.Helper()
+	var methodsMu sync.Mutex
+	var methods []string
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "herdr.sock"), Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +383,9 @@ func capabilitySocket(t *testing.T, responses []map[string]any) (string, *net.Un
 					done <- decodeErr
 					return
 				}
+				methodsMu.Lock()
+				methods = append(methods, request.Method)
+				methodsMu.Unlock()
 				envelope := map[string]any{"id": request.ID}
 				if failure, ok := response["error"]; ok {
 					envelope["error"] = failure
@@ -319,5 +399,10 @@ func capabilitySocket(t *testing.T, responses []map[string]any) (string, *net.Un
 		}
 		done <- nil
 	}()
-	return listener.Addr().String(), listener, done
+	recorded := func() []string {
+		methodsMu.Lock()
+		defer methodsMu.Unlock()
+		return slices.Clone(methods)
+	}
+	return listener.Addr().String(), listener, done, recorded
 }
