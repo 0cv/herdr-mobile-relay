@@ -197,6 +197,8 @@ ALLOWED = (
     "internal/doctor/herdr_test.go",
     "internal/doctor/local.go",
     "internal/doctor/local_test.go",
+    "internal/doctor/package_acl.go",
+    "internal/doctor/package_acl_test.go",
     "internal/doctor/package_identity.go",
     "internal/doctor/package_identity_test.go",
     "internal/doctor/probes.go",

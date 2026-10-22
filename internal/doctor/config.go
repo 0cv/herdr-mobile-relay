@@ -155,9 +155,9 @@ func privateRegular(st *unix.Stat_t, uid int) bool {
 
 // Descriptor ACL evidence is the shared internal/darwinacl inspector.
 //
-// Package-metadata acquisition (package_identity.go) still has no ACL evidence,
-// so it keeps refusing every Darwin host. Only the selected configuration
-// reader has a descriptor ACL route (configHostCannotProveACL).
+// Mode-only acquisition remains refused. Package readers instead use their
+// separate descriptor-bound ACL AND volume admission (package_acl.go); that
+// evidence path does not relax the selected-configuration policy.
 func earlyReaderHostRefusesModeOnlyAcquisition(goos string) bool { return goos == "darwin" }
 
 // A simulated Darwin host cannot supply real descriptor ACL evidence.

@@ -55,16 +55,37 @@ func readPackageIdentityWithHost(root, version, revision, target, goos string,
 	acquireParent func(string) (int, string, error), openContent func(int, string) (int, error),
 	read func(io.Reader) ([]byte, error),
 ) BuildIdentity {
-	if earlyReaderHostRefusesModeOnlyAcquisition(goos) {
-		return BuildIdentity{}
+	if goos == "darwin" && runtime.GOOS != "darwin" {
+		return BuildIdentity{} // simulated hosts need an explicitly injected probe
 	}
+	return readPackageIdentityWithACL(root, version, revision, target, goos, acquireParent, openContent, read, productionPackageACLProbe)
+}
+
+func readPackageIdentityWithACL(root, version, revision, target, goos string,
+	acquireParent func(string) (int, string, error), openContent func(int, string) (int, error),
+	read func(io.Reader) ([]byte, error), probe packageACLProbe,
+) BuildIdentity {
 	// Do not even open metadata for an unqualified development build/target.
 	expected := BuildIdentity{version, revision, strings.Repeat("0", 64), target}
 	if !validBuild(expected) || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
 		return BuildIdentity{}
 	}
 	filename := filepath.Join(root, "release-manifest.json")
+	var chain []unix.Stat_t
+	if goos == "darwin" {
+		if !bundleRootPath(root) {
+			return BuildIdentity{}
+		}
+		acquireParent = func(path string) (int, string, error) {
+			var err error
+			var fd int
+			var base string
+			fd, base, chain, err = packageMetadataParent(path, probe)
+			return fd, base, err
+		}
+	}
 	parent, base, err := acquireParent(filename)
+	originalChain := chain
 	if err != nil {
 		return BuildIdentity{}
 	}
@@ -83,12 +104,19 @@ func readPackageIdentityWithHost(root, version, revision, target, goos string,
 	if unix.Fstat(fd, &opened) != nil || !packageRegular(&opened) || !samePackageStat(&before, &opened) {
 		return BuildIdentity{}
 	}
+	if goos == "darwin" && (len(chain) == 0 || opened.Dev != chain[len(chain)-1].Dev ||
+		!sameBundleStat(&before, &opened) || probe.objectSafe(fd, false) != nil) {
+		return BuildIdentity{}
+	}
 	initial, err := file.Stat()
 	if err != nil {
 		return BuildIdentity{}
 	}
 	data, err := read(file)
 	if err != nil || len(data) > maxPackageMetadata || int64(len(data)) != opened.Size {
+		return BuildIdentity{}
+	}
+	if goos == "darwin" && probe.objectSafe(fd, false) != nil {
 		return BuildIdentity{}
 	}
 	final, err := file.Stat()
@@ -105,11 +133,39 @@ func readPackageIdentityWithHost(root, version, revision, target, goos string,
 		!packageRegular(&named) || !packageRegular(&after) || !samePackageStat(&named, &after) || !samePackageStat(&opened, &after) {
 		return BuildIdentity{}
 	}
+	if goos == "darwin" {
+		if !sameBundleStat(&opened, &after) || !sameBundleStat(&named, &after) || len(originalChain) != len(chain) || len(chain) == 0 {
+			return BuildIdentity{}
+		}
+		for i := range chain {
+			if (i == len(chain)-1 && !sameBundleStat(&originalChain[i], &chain[i])) ||
+				(i != len(chain)-1 && !sameBundleAncestor(&originalChain[i], &chain[i])) {
+				return BuildIdentity{}
+			}
+		}
+	}
 	last, err := file.Stat()
 	if err != nil || !os.SameFile(initial, last) || initial.Size() != last.Size() || initial.Mode() != last.Mode() || !initial.ModTime().Equal(last.ModTime()) {
 		return BuildIdentity{}
 	}
 	return packageIdentity(data, version, revision, target)
+}
+
+// Checked no-follow ancestry, including /, with a full root stat. The walk's
+// visitor runs before descent; the manifest is never opened on a failed chain.
+func packageMetadataParent(path string, probe packageACLProbe) (int, string, []unix.Stat_t, error) {
+	var chain []unix.Stat_t
+	rootDepth := len(strings.Split(strings.TrimPrefix(filepath.Dir(path), "/"), "/"))
+	fd, base, err := openParentWalk(path, func(fd int) error {
+		ancestor := len(chain) != rootDepth
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) != nil || !bundleDirectory(&st, ancestor) || probe.objectSafe(fd, ancestor) != nil {
+			return errAncestorUnknown
+		}
+		chain = append(chain, st)
+		return nil
+	})
+	return fd, base, chain, err
 }
 
 // Dedicated complete manifest projection. Bounds apply even to additive fields;

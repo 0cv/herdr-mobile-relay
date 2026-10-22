@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0cv/herdr-mobile-relay/internal/darwinacl"
 	"golang.org/x/sys/unix"
 )
 
@@ -89,16 +90,18 @@ func TestPackageIdentityDarwinRefusesBeforeFilesystemOpen(t *testing.T) {
 	}
 
 	parentOpens, contentOpens, reads := 0, 0, 0
-	got := readPackageIdentityWithHost(root, build.Version, build.Revision, build.Target, "darwin",
+	probe := absentPackageACL()
+	probe.inspect = func(int) (darwinacl.ACL, error) { return darwinacl.ACL{}, errors.New("unproved ancestor") }
+	got := readPackageIdentityWithACL(root, build.Version, build.Revision, build.Target, "darwin",
 		func(path string) (int, string, error) { parentOpens++; return openParent(path) },
 		func(parent int, base string) (int, error) { contentOpens++; return openSelectedFile(parent, base) },
-		func(r io.Reader) ([]byte, error) { reads++; return io.ReadAll(r) })
+		func(r io.Reader) ([]byte, error) { reads++; return io.ReadAll(r) }, probe)
 	assertMetadataUnavailable(t, got)
 	if parentOpens != 0 || contentOpens != 0 || reads != 0 {
 		t.Fatal("Darwin metadata refusal crossed an acquisition boundary")
 	}
-	if runtime.GOOS == "darwin" && ReadPackageIdentity(root, build.Version, build.Revision, build.Target) != (BuildIdentity{}) {
-		t.Fatal("production host policy admitted metadata based on its advertised Linux target")
+	if runtime.GOOS == "darwin" && ReadPackageIdentity(root, build.Version, build.Revision, build.Target) != build {
+		t.Fatal("production host policy refused proved plain metadata despite its advertised Linux target")
 	}
 	afterBytes, err := os.ReadFile(filename)
 	if err != nil {
@@ -439,5 +442,117 @@ func TestSharedManifestProjectionRemainsMetadataOnlyAndPrivate(t *testing.T) {
 		if _, ok := packageObject(bad); ok {
 			t.Fatal("shared strict grammar accepted duplicate/suffix input")
 		}
+	}
+}
+
+func TestDarwinPackageIdentityReadFlipsAndReplacements(t *testing.T) {
+	for _, stage := range []string{"before", "before-replace", "after", "manifest", "root", "ancestor", "ctime"} {
+		t.Run(stage, func(t *testing.T) {
+			m, b := metadataFixture(t)
+			data := metadataEncode(t, m)
+			holder := metadataRoot(t, data)
+			root := holder
+			if stage == "ancestor" {
+				root = filepath.Join(holder, "package")
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(holder, "release-manifest.json"), filepath.Join(root, "release-manifest.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(root, "release-manifest.json")
+			wanted := bundleLstat(t, path)
+			p := absentPackageACL()
+			changed, reads := false, 0
+			p.inspect = func(fd int) (darwinacl.ACL, error) {
+				if changed && (stage == "before" || stage == "after") && packageFDMatches(t, fd, wanted) {
+					return packageACLAnswer("grant")
+				}
+				return packageACLAnswer("absent")
+			}
+			got := readPackageIdentityWithACL(root, b.Version, b.Revision, b.Target, "darwin", openParent,
+				func(fd int, name string) (int, error) {
+					changed = stage == "before" || stage == "before-replace"
+					if stage == "before-replace" {
+						if err := os.Rename(path, path+".old"); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, data, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return openSelectedFile(fd, name)
+				},
+				func(r io.Reader) ([]byte, error) {
+					reads++
+					bytes, err := io.ReadAll(r)
+					changed = true
+					switch stage {
+					case "manifest":
+						if err := os.Remove(path); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, data, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					case "root", "ancestor":
+						// Same mode and intact manifest/package; only identity changes.
+						if err := os.Rename(holder, holder+".old"); err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() { _ = os.RemoveAll(holder + ".old") })
+						if err := os.Mkdir(holder, 0o700); err != nil {
+							t.Fatal(err)
+						}
+						from, to := filepath.Join(holder+".old", "release-manifest.json"), path
+						if stage == "ancestor" {
+							from, to = filepath.Join(holder+".old", "package"), root
+						}
+						if err := os.Rename(from, to); err != nil {
+							t.Fatal(err)
+						}
+					case "ctime":
+						if err := os.Chmod(path, 0o600); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Chmod(path, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return bytes, err
+				}, p)
+			assertMetadataUnavailable(t, got)
+			if !changed || (strings.HasPrefix(stage, "before") && reads != 0) || (!strings.HasPrefix(stage, "before") && reads != 1) {
+				t.Fatal("read-stage refusal boundary lost")
+			}
+		})
+	}
+}
+
+func TestDarwinHostedPackageIdentityACLFreeAndGrantRefusal(t *testing.T) {
+	if !hostedDarwin() {
+		t.Skip("requires an authorized disposable GitHub-hosted runner")
+	}
+	for _, object := range []string{"manifest", "root"} {
+		t.Run(object, func(t *testing.T) {
+			m, b := metadataFixture(t)
+			root := metadataRoot(t, metadataEncode(t, m))
+			if ReadPackageIdentity(root, b.Version, b.Revision, b.Target) != b {
+				t.Fatal("real ACL-free metadata refused")
+			}
+			path := root
+			if object == "manifest" {
+				path = filepath.Join(root, "release-manifest.json")
+			}
+			addHostedPackageGrant(t, path)
+			reads := 0
+			got := readPackageIdentityWithHost(root, b.Version, b.Revision, b.Target, "darwin", openParent, openSelectedFile,
+				func(r io.Reader) ([]byte, error) { reads++; return io.ReadAll(r) })
+			assertMetadataUnavailable(t, got)
+			if reads != 0 {
+				t.Fatal("real ACL grant allowed metadata read")
+			}
+		})
 	}
 }

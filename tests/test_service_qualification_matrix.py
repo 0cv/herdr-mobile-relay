@@ -739,16 +739,27 @@ class Wiring(unittest.TestCase):
         cli = 'go test -json -count=1 ./cmd/herdr-mobile-relay -run \'^TestSupportCommandProjectsLoadedPrivateState$\' >>"$log" 2>>"$err" || go_exit=$?'
         self.assertIn(core, job)
         self.assertIn(cli, job)
-        self.assertLess(job.index(core), job.index(cli), "the filtered CLI test must append after the full ACL suites")
-        self.assertIn('"cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState"]', job)
+        cmd_names = ["TestDarwinSelectedConfigAndRequiredBundleUnknown", "TestDiagnosticActualLocalCompositionStillIncomplete",
+                     "TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate", "TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure",
+                     "TestDiagnosticBundleFailureUnknownPriorityAndLateResult"]
+        doctor = "go test -json -count=1 ./cmd/herdr-mobile-relay -run '^(" + "|".join(cmd_names) + ")$' >>\"$log\" 2>>\"$err\" || go_exit=$?"
+        self.assertEqual(job.count(core), 1)
+        self.assertEqual(job.count(cli), 1)
+        self.assertEqual(job.count(doctor), 1)
+        self.assertLess(job.index(core), job.index(cli))
+        self.assertLess(job.index(cli), job.index(doctor), "both filtered CLI tests must append after the full ACL suites")
+        self.assertIn('"cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState", ' + ", ".join('"%s"' % name for name in cmd_names) + ']', job)
+        self.assertIn('expected_package_ends = ["pass"] * (2 if package == "cmd/herdr-mobile-relay" else 1)', job)
+        self.assertIn('if ends.get((path, None)) != expected_package_ends:', job)
         self.assertNotIn("str.strip", job, "blank log lines must be rejected, not filtered out")
         self.assertIn("cache: false", job, "the job must save nothing to the Actions cache")
         self.assertIn("parse_constant=reject", job, "NaN/Infinity are not JSON")
         required = {"darwinacl": ["TestRealPlainObjectsHaveNoACLOnAnAllowedVolume"], "support": ["TestLoadDarwinHostedRealACL"],
-                    "doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads"]}
+                    "doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads",
+                               "TestDarwinHostedPackageIdentityACLFreeAndGrantRefusal", "TestDarwinHostedBundleACLFreePositive", "TestDarwinHostedBundleACLGrantRefusals"]}
         for package, names in required.items():
             source = "".join(path.read_text() for path in (ROOT / "internal" / package).glob("*_test.go"))
-            for name in names:  # the job, its page and the package's own tests all name the same five ACL tests
+            for name in names:  # the job, its page and the package's own tests all name the same eight ACL tests
                 self.assertIn('"internal/%s"' % package, job)
                 self.assertIn(name, job)
                 self.assertIn("`%s`" % name, docs)
@@ -756,6 +767,10 @@ class Wiring(unittest.TestCase):
         name = "TestSupportCommandProjectsLoadedPrivateState"
         self.assertIn("`%s`" % name, docs)
         self.assertRegex(self.text("cmd/herdr-mobile-relay/main_test.go"), r"(?m)^func %s\(t \*testing\.T\)" % name)
+        cmd_source = self.text("cmd/herdr-mobile-relay/doctor_test.go")
+        for name in cmd_names:
+            self.assertIn("`%s`" % name, docs)
+            self.assertRegex(cmd_source, r"(?m)^func %s\(t \*testing\.T\)" % name)
 
 
 if __name__ == "__main__":

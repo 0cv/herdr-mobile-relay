@@ -121,7 +121,12 @@ func (f *bundleFixture) rebuild(t *testing.T) {
 }
 func (f *bundleFixture) query() (*PackageQueries, LocalTarget) {
 	cfg := ParseConfig(strings.NewReader("HERDR_RELAY_TRANSPORT=cloudflare\n")) // no local instance: never network
-	return NewPackageQueries(f.root, cfg, f.build), selectedLocalTarget(cfg, f.build)
+	q := NewPackageQueries(f.root, cfg, f.build)
+	if runtime.GOOS == "darwin" {
+		probe := absentPackageACL() // portable pipeline tests, not native qualification
+		q.acl = &probe
+	}
+	return q, selectedLocalTarget(cfg, f.build)
 }
 func (f *bundleFixture) observe() Datum {
 	q, target := f.query()
@@ -129,7 +134,7 @@ func (f *bundleFixture) observe() Datum {
 }
 
 // Target strings exercise metadata/layout shapes, not a host ACL attestation.
-// Darwin intentionally has no bundle byte verdict until ACL safety is known.
+// These fixtures inject absent ACL + allowed-volume evidence on Darwin.
 func bundleExpectedState(state State) State {
 	if !bundleWriterSafetySupported(runtime.GOOS) {
 		return Unknown
@@ -162,10 +167,7 @@ func assertBundleMetadataProjection(t *testing.T, f *bundleFixture) {
 	if !ok || projection.build != f.build {
 		t.Fatal("platform-independent strict manifest projection changed")
 	}
-	want := f.build
-	if runtime.GOOS == "darwin" {
-		want = BuildIdentity{}
-	}
+	want := f.build // plain metadata must prove ACL/volume safety on the actual host
 	if got := ReadPackageIdentity(f.root, f.build.Version, f.build.Revision, f.build.Target); got != want {
 		t.Fatal("public package metadata acquisition diverged from actual-host policy")
 	}
@@ -932,10 +934,10 @@ func bytesWithDuplicate(data []byte, key, value string) []byte {
 
 // F003: conservative policy tests run everywhere. The actual ACL-grant cells
 // run on authorized disposable hosted Darwin runners, with no required skip,
-// and never qualify ACL inspection (that capability is intentionally absent).
+// and prove refusal before reads even when mode bits appear safe.
 func TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows", "", "unrecognized"} {
-		if bundleWriterSafetySupported(goos) != (goos == "linux") {
+		if bundleWriterSafetySupported(goos) != (goos == "linux" || goos == "darwin") {
 			t.Fatal("unsupported writer safety became available")
 		}
 	}
@@ -993,7 +995,12 @@ func TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads(t *testin
 			}
 			before := bundleInventoryFingerprint(t, root)
 			q, target := f.query()
-			q.hooks = &bundleHooks{event: func(string, string, *os.File) { t.Fatal("unestablished ACL safety acquired bundle content") }}
+			q.acl = nil // this cell must use the real production descriptor probe
+			q.hooks = &bundleHooks{event: func(stage, _ string, _ *os.File) {
+				if stage == "read" {
+					t.Fatal("unestablished ACL safety acquired bundle content")
+				}
+			}}
 			assertBundleState(t, q.Bundle(context.Background(), target, f.build), Unknown)
 			cfg := ParseConfig(strings.NewReader("HERDR_RELAY_TRANSPORT=cloudflare\n"))
 			r := Run(context.Background(), cfg, f.build, Options{}, Dependencies{Host: q, Transport: q})
@@ -1010,8 +1017,8 @@ func TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads(t *testin
 
 // Descriptor/permission-model fixtures are synthetic on every host: they test
 // the real Bundle acquisition pipeline with injected Fstatfs classifications,
-// not Linux runtime qualification or Darwin ACL support. Public Bundle still
-// refuses Darwin before this pipeline or its fixture hooks can run.
+// not Linux runtime qualification. Separate Darwin probes exercise ACL/volume
+// admission; these cells explicitly select the synthetic Linux policy.
 func TestInstalledBundleFilesystemModelPolicy(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -1069,6 +1076,7 @@ func TestInstalledBundleFilesystemAdmissionBeforeContentOpen(t *testing.T) {
 					t.Fatal(err)
 				}
 				q, _ := f.query()
+				q.goos = "linux" // this fixture exercises Linux POSIX-mask volume policy
 				checked := false
 				descriptors := []int{}
 				q.hooks = &bundleHooks{
@@ -1114,6 +1122,7 @@ func TestInstalledBundleFilesystemRevalidationAndUnavailableMetadata(t *testing.
 		t.Run(stage, func(t *testing.T) {
 			f := newBundleFixture(t, "linux/amd64")
 			q, _ := f.query()
+			q.goos = "linux" // synthetic Linux volume evidence on either host
 			refuse := stage == "initial"
 			refused := false
 			opened := []*os.File{}
@@ -1166,6 +1175,7 @@ func TestInstalledBundleFilesystemRevalidationAndUnavailableMetadata(t *testing.
 			}
 		}
 		q, _ := f.query()
+		q.goos = "linux"
 		opened := 0
 		q.hooks = &bundleHooks{filesystemType: func(int) (uint64, error) { return 0x01021994, nil }, event: func(stage, _ string, _ *os.File) {
 			if stage == "open" {
@@ -1227,6 +1237,7 @@ func bundleLstat(t *testing.T, path string) unix.Stat_t {
 func inspectWithComponentHook(t *testing.T, f *bundleFixture, component string, mutate func(call int)) (State, Evidence, map[string]int) {
 	t.Helper()
 	q, _ := f.query()
+	q.goos = "linux" // component-race fixtures retain their synthetic Linux model
 	stages, calls := map[string]int{}, 0
 	q.hooks = &bundleHooks{
 		filesystemType: func(int) (uint64, error) { return 0xef53, nil },
@@ -1374,16 +1385,20 @@ func TestInstalledBundleAncestorIdentityPredicate(t *testing.T) {
 }
 
 func TestInstalledBundleDarwinFilesystemGateStillPrecedesAcquisition(t *testing.T) {
-	if bundleWriterSafetySupported("darwin") {
-		t.Fatal("Darwin permission model enabled")
-	}
-	if runtime.GOOS != "darwin" {
-		return
+	if !bundleWriterSafetySupported("darwin") {
+		t.Fatal("Darwin descriptor evidence path disabled")
 	}
 	f := newBundleFixture(t, "linux/amd64") // advertised target cannot override host policy
 	q, target := f.query()
+	probe := absentPackageACL()
+	probe.filesystem = func(int) error { return errors.New("unsupported volume") }
+	q.goos, q.acl = "darwin", &probe
 	q.hooks = &bundleHooks{
-		event:          func(string, string, *os.File) { t.Fatal("Darwin refusal reached bundle acquisition") },
+		event: func(stage, _ string, _ *os.File) {
+			if stage == "read" {
+				t.Fatal("Darwin refusal reached bundle acquisition")
+			}
+		},
 		filesystemType: func(int) (uint64, error) { t.Fatal("Darwin reached Linux filesystem policy"); return 0xef53, nil },
 	}
 	assertBundleState(t, q.Bundle(context.Background(), target, f.build), Unknown)
@@ -1457,5 +1472,87 @@ func TestInstalledBundleBuilderShapeAndCanonicalDescriptorBoundary(t *testing.T)
 	}
 	if _, err := file.Stat(); err == nil {
 		t.Fatal("semantic file remained open")
+	}
+}
+
+func addHostedPackageGrant(t *testing.T, path string) {
+	t.Helper()
+	if !hostedDarwin() {
+		t.Fatal("requires an authorized disposable GitHub-hosted runner")
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := "group:everyone allow write,append,writeattr,writeextattr"
+	if before.IsDir() {
+		grant = "group:everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/bin/chmod", "+a", grant, path)
+	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C"}
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if command.Run() != nil {
+		t.Fatal("hosted package ACL fixture creation failed")
+	}
+	after, err := os.Stat(path)
+	if err != nil || before.Mode() != after.Mode() {
+		t.Fatal("ACL fixture changed mode bits")
+	}
+}
+
+func hostedPackageFixture(t *testing.T) *bundleFixture {
+	t.Helper()
+	if !hostedDarwin() {
+		t.Fatal("requires an authorized disposable GitHub-hosted runner")
+	}
+	t.Setenv("TMPDIR", t.TempDir()) // all builder writes stay under disposable scratch
+	return newBundleFixture(t, "darwin/arm64")
+}
+
+func TestDarwinHostedBundleACLFreePositive(t *testing.T) {
+	if !hostedDarwin() {
+		t.Skip("requires an authorized disposable GitHub-hosted runner")
+	}
+	f := hostedPackageFixture(t)
+	q, target := f.query()
+	q.acl = nil // genuine production ACL AND volume evidence, never fake admission
+	assertBundleState(t, q.Bundle(context.Background(), target, f.build), OK)
+}
+
+func TestDarwinHostedBundleACLGrantRefusals(t *testing.T) {
+	if !hostedDarwin() {
+		t.Skip("requires an authorized disposable GitHub-hosted runner")
+	}
+	for _, object := range []string{"file", "root", "subdirectory", "ancestor"} {
+		t.Run(object, func(t *testing.T) {
+			f := hostedPackageFixture(t)
+			path := f.root
+			switch object {
+			case "file":
+				path = filepath.Join(f.root, "LICENSE")
+			case "subdirectory":
+				path = filepath.Join(f.root, "relay/pi-command-bridge")
+			case "ancestor":
+				path = filepath.Dir(f.root)
+			}
+			addHostedPackageGrant(t, path)
+			q, target := f.query()
+			q.acl = nil
+			reads := 0
+			q.hooks = &bundleHooks{event: func(stage, _ string, _ *os.File) {
+				if stage == "read" {
+					reads++
+				}
+			}}
+			assertBundleState(t, q.Bundle(context.Background(), target, f.build), Unknown)
+			cfg := ParseConfig(strings.NewReader("HERDR_RELAY_TRANSPORT=cloudflare\n"))
+			r := Run(context.Background(), cfg, f.build, Options{}, Dependencies{Host: q, Transport: q})
+			if check := findCheck(t, r, CheckBundle); !check.Required || check.State != Unknown || check.Evidence != EvidenceUnavailable || reads != 0 {
+				t.Fatal("real ACL grant did not give required Unknown before reads")
+			}
+			assertRenderPrivacy(t, r)
+		})
 	}
 }

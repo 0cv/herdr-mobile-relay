@@ -261,6 +261,7 @@ jobs:
           log="$RUNNER_TEMP/go-darwin-test.jsonl" err="$RUNNER_TEMP/go-darwin-test.stderr"
           go test -json -count=1 ./internal/darwinacl ./internal/doctor ./internal/support >"$log" 2>"$err" && go_exit=0 || go_exit=$?
           go test -json -count=1 ./cmd/herdr-mobile-relay -run '^TestSupportCommandProjectsLoadedPrivateState$' >>"$log" 2>>"$err" || go_exit=$?
+          go test -json -count=1 ./cmd/herdr-mobile-relay -run '^(TestDarwinSelectedConfigAndRequiredBundleUnknown|TestDiagnosticActualLocalCompositionStillIncomplete|TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate|TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure|TestDiagnosticBundleFailureUnknownPriorityAndLateResult)$' >>"$log" 2>>"$err" || go_exit=$?
           [ "$go_exit" = 0 ] || tail -n 5 "$err" | cut -c1-200 >&2
           python3 - "$log" "$go_exit" <<'PY'
           import json
@@ -271,10 +272,11 @@ jobs:
 
           log, go_exit = sys.argv[1:]
           required = {
-              "cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState"],
               "internal/darwinacl": ["TestRealPlainObjectsHaveNoACLOnAnAllowedVolume"],
-              "internal/doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads"],
+              "internal/doctor": ["TestDarwinHostedRealACLGrant", "TestDarwinHostedRealDirectoryACL", "TestInstalledBundleDarwinACLWriterSafetyRemainsUnknownBeforeReads",
+                                  "TestDarwinHostedPackageIdentityACLFreeAndGrantRefusal", "TestDarwinHostedBundleACLFreePositive", "TestDarwinHostedBundleACLGrantRefusals"],
               "internal/support": ["TestLoadDarwinHostedRealACL"],
+              "cmd/herdr-mobile-relay": ["TestSupportCommandProjectsLoadedPrivateState", "TestDarwinSelectedConfigAndRequiredBundleUnknown", "TestDiagnosticActualLocalCompositionStillIncomplete", "TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate", "TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure", "TestDiagnosticBundleFailureUnknownPriorityAndLateResult"],
           }
           module = [line.split()[1] for line in open("go.mod") if line.startswith("module ")][0]
           ends, unparsed = {}, 0
@@ -294,7 +296,8 @@ jobs:
               problems.append("%d log lines were not JSON events with an Action" % unparsed)
           for package, names in required.items():
               path = module + "/" + package
-              if ends.get((path, None)) != ["pass"]:
+              expected_package_ends = ["pass"] * (2 if package == "cmd/herdr-mobile-relay" else 1)
+              if ends.get((path, None)) != expected_package_ends:
                   problems.append("%s: package ended %s" % (package, ends.get((path, None)) or "missing"))
               for name in names:
                   nested = [test for (pkg, test), got in ends.items() if pkg == path and (test or "").startswith(name + "/") and got != ["pass"]]

@@ -213,9 +213,9 @@ after the read, with the same owner-only, no-follow and literal-parse rules. A
 file with any ACL, a directory whose ACL is not deny-only, or a directory not
 owned by you or root or writable by group/other (a root-owned sticky one
 excepted) is unsafe; ACL evidence that cannot be obtained or fully parsed is
-unavailable, never assumed safe. Packaged
-release-manifest metadata acquisition is still reported unavailable, and the
-bundle check unknown/unavailable, on macOS before any filesystem acquisition.
+unavailable, never assumed safe. On macOS, package metadata and bundle reads
+require descriptor-bound ACL and local ownership-honouring volume evidence for
+every acquired object; unproved evidence remains required unknown/unavailable.
 Missing, unsafe or malformed files are not created, repaired or migrated.
 
 The packaged wrapper accepts
@@ -250,10 +250,10 @@ Current diagnostic ladder:
 
 1. Literal configuration and bounded package **metadata**. On macOS, the
    configuration is read through the descriptor-bound ACL inspection described
-   above, but package metadata acquisition is unavailable before parent
-   traversal, content open or read: ACL grants are not represented by mode bits
-   and metadata has no ACL evidence. This host decision is derived from the
-   actual host, not an advertised package target or config
+   above. Package metadata additionally requires same-descriptor ACL/volume
+   evidence: ancestors may have only absent or deny-only ACLs; the root and
+   manifest must have no ACL. Unproved evidence is unavailable before content
+   reads. This policy follows the actual host, not a package target or config
    value. On Linux, installed executable shim/`current` symlinks are resolved to
    a regular executable before selecting the package root; unresolved paths
    leave build metadata unavailable. The package's regular, no-follow
@@ -263,14 +263,14 @@ Current diagnostic ladder:
    relay's identity. Symlinked or unsafe metadata paths are unavailable, not
    guessed development health.
 2. Installed-package **byte consistency**, independently reacquired from that
-   physical executing package root on Linux. On Darwin, Bundle is currently
-   required **unknown/unavailable before bundle filesystem acquisition**:
-   owner/mode bits cannot establish safety against ACL-granted foreign writers,
-   and the bundle check has no descriptor-bound ACL inspection. This applies
-   to ancestors, package directories and files, including apparently sealed
-   packages. No ACL is changed or inferred safe. An advertised manifest target
-   cannot bypass the host permission policy. Darwin bundle observations require
-   a separately reviewed ACL-safe adapter, not a config/environment override.
+   physical executing package root on Linux and Darwin. Darwin requires
+   same-descriptor ACL and local ACL-capable, ownership-honouring volume evidence
+   before directory enumeration and content reads, then rechecks that evidence.
+   Ancestors admit absent or deny-only ACLs; every package directory and file
+   requires an absent ACL. All approved files are preflighted before any content
+   read. Grants, empty/unknown ACLs, unsupported volumes, mount crossings and
+   unstable evidence remain required **unknown/unavailable**, never byte failures.
+   No ACL is changed or inferred safe; package targets cannot bypass host policy.
 
    Where writer safety is supported, the bundle observation checks the complete
    inventory and every listed SHA-256: binary, public documents/example config,

@@ -46,6 +46,8 @@ type PackageQueries struct {
 	build  BuildIdentity
 	bound  bool
 	hooks  *bundleHooks // package-private synchronized fixtures only; nil in production
+	goos   string       // empty selects the actual host; private fixture override
+	acl    *packageACLProbe
 }
 type bundleHooks struct {
 	// Stages: component (root walk, between a component's named stat and open;
@@ -81,12 +83,8 @@ func (q *PackageQueries) Bundle(parent context.Context, target LocalTarget, buil
 	if q == nil || !q.bound || target != q.target || build != q.build || absent(parent) || contextEnded(parent) {
 		return localUnknown()
 	}
-	// Darwin ACL grants are not represented by mode bits. Until a bounded
-	// descriptor-bound ACL inspector exists, no bundle acquisition on that
-	// host may claim writer safety from stat alone. Manifest target/config
-	// cannot select a different host permission policy. Local queries remain
-	// independent; this refusal performs no bundle filesystem operations.
-	if !bundleWriterSafetySupported(runtime.GOOS) {
+	// Permission policy follows the host, never manifest target/config.
+	if !bundleWriterSafetySupported(q.packageHost()) {
 		return localUnknown()
 	}
 	ctx, cancel := context.WithTimeout(parent, GlobalBudget) // runner passes its remaining global budget
@@ -98,9 +96,31 @@ func (q *PackageQueries) Bundle(parent context.Context, target LocalTarget, buil
 	return localDatum(state, evidence)
 }
 
-// Fail closed for Darwin and any unimplemented host permission model. This
-// deliberately reduces observation availability, never relaxes writer checks.
-func bundleWriterSafetySupported(goos string) bool { return goos == "linux" }
+// A supported host still needs per-object writer evidence before acquisition.
+func bundleWriterSafetySupported(goos string) bool { return goos == "linux" || goos == "darwin" }
+
+func (q *PackageQueries) packageHost() string {
+	if q.goos != "" {
+		return q.goos
+	}
+	return runtime.GOOS
+}
+
+func (q *PackageQueries) bundleObjectSafe(fd int, ancestor bool) bool {
+	if q.packageHost() != "darwin" {
+		return q.bundleFilesystem(fd)
+	}
+	probe := productionPackageACLProbe
+	if q.acl != nil {
+		probe = *q.acl
+	} else if runtime.GOOS != "darwin" {
+		return false // a simulated Darwin host needs explicitly injected evidence
+	}
+	if ancestor {
+		return probe.objectSafe(fd, true) == nil
+	}
+	return probe.objectSafe(fd, false) == nil
+}
 
 // Reuse Herdr's finite Linux POSIX ACL-mask filesystem policy, not its
 // socket/private-parent shape checks. Bundle's own owner/mode checks deny
@@ -256,7 +276,7 @@ func (q *PackageQueries) openBundleRoot(ctx context.Context, root string) (int, 
 	for i, part := range parts {
 		ancestor := i != len(parts)-1 // the last component is the package root itself
 		var parent, named, opened unix.Stat_t
-		if contextEnded(ctx) || unix.Fstat(fd, &parent) != nil || !bundleDirectory(&parent, true) || !q.bundleFilesystem(fd) ||
+		if contextEnded(ctx) || unix.Fstat(fd, &parent) != nil || !bundleDirectory(&parent, true) || !q.bundleObjectSafe(fd, true) ||
 			unix.Fstatat(fd, part, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || !bundleDirectory(&named, ancestor) {
 			unix.Close(fd)
 			return -1, nil, false
@@ -271,7 +291,7 @@ func (q *PackageQueries) openBundleRoot(ctx context.Context, root string) (int, 
 		}
 		fd = next
 		if contextEnded(ctx) || unix.Fstat(fd, &opened) != nil ||
-			(ancestor && !sameBundleAncestor(&named, &opened)) || (!ancestor && !sameBundleStat(&named, &opened)) || !q.bundleFilesystem(fd) {
+			(ancestor && !sameBundleAncestor(&named, &opened)) || (!ancestor && !sameBundleStat(&named, &opened)) || !q.bundleObjectSafe(fd, ancestor) {
 			unix.Close(fd)
 			return -1, nil, false
 		}
@@ -294,7 +314,7 @@ func (q *PackageQueries) bundleInventoryAt(ctx context.Context, root int) (bundl
 	var walk func(int, string, int) bool
 	walk = func(fd int, name string, depth int) (good bool) {
 		var start unix.Stat_t
-		if contextEnded(ctx) || depth > maxBundleDepth || unix.Fstat(fd, &start) != nil || !bundleDirectory(&start, false) || !q.bundleFilesystem(fd) {
+		if contextEnded(ctx) || depth > maxBundleDepth || unix.Fstat(fd, &start) != nil || !bundleDirectory(&start, false) || !q.bundleObjectSafe(fd, false) {
 			return false
 		}
 		directories++
@@ -307,7 +327,7 @@ func (q *PackageQueries) bundleInventoryAt(ctx context.Context, root int) (bundl
 			return false
 		}
 		var opened unix.Stat_t
-		if contextEnded(ctx) || unix.Fstat(dup, &opened) != nil || !sameBundleStat(&start, &opened) || !q.bundleFilesystem(dup) {
+		if contextEnded(ctx) || unix.Fstat(dup, &opened) != nil || !sameBundleStat(&start, &opened) || !q.bundleObjectSafe(dup, false) {
 			unix.Close(dup)
 			return false
 		}
@@ -318,11 +338,11 @@ func (q *PackageQueries) bundleInventoryAt(ctx context.Context, root int) (bundl
 			}
 		}()
 		for {
-			if contextEnded(ctx) {
+			if contextEnded(ctx) || (q.packageHost() == "darwin" && !q.bundleObjectSafe(dup, false)) {
 				return false
 			}
 			batch, err := file.ReadDir(32)
-			if err != nil && err != io.EOF {
+			if (err != nil && err != io.EOF) || (q.packageHost() == "darwin" && !q.bundleObjectSafe(dup, false)) {
 				return false
 			}
 			for _, entry := range batch {
@@ -350,7 +370,8 @@ func (q *PackageQueries) bundleInventoryAt(ctx context.Context, root int) (bundl
 						return false
 					}
 					var opened unix.Stat_t
-					ok := unix.Fstat(child, &opened) == nil && sameBundleStat(&st, &opened) && walk(child, relative, depth+1)
+					ok := unix.Fstat(child, &opened) == nil && sameBundleStat(&st, &opened) &&
+						(q.packageHost() != "darwin" || opened.Dev == start.Dev) && walk(child, relative, depth+1)
 					if unix.Close(child) != nil || !ok {
 						return false
 					}
@@ -370,7 +391,8 @@ func (q *PackageQueries) bundleInventoryAt(ctx context.Context, root int) (bundl
 			}
 		}
 		var final unix.Stat_t
-		return !contextEnded(ctx) && unix.Fstat(fd, &final) == nil && sameBundleStat(&start, &final)
+		return !contextEnded(ctx) && unix.Fstat(fd, &final) == nil && sameBundleStat(&start, &final) &&
+			(q.packageHost() != "darwin" || (q.bundleObjectSafe(fd, false) && q.bundleObjectSafe(dup, false)))
 	}
 	ok := walk(root, ".", 0)
 	return nodes, ok
@@ -386,7 +408,7 @@ func (q *PackageQueries) bundleParentAt(ctx context.Context, root int, name stri
 	}
 	expected, exists := inventory["."]
 	var opened unix.Stat_t
-	if !exists || !expected.dir || unix.Fstat(fd, &opened) != nil || !sameBundleStat(&expected.stat, &opened) || !q.bundleFilesystem(fd) {
+	if !exists || !expected.dir || unix.Fstat(fd, &opened) != nil || !sameBundleStat(&expected.stat, &opened) || !q.bundleObjectSafe(fd, false) {
 		unix.Close(fd)
 		return -1, "", false
 	}
@@ -410,7 +432,7 @@ func (q *PackageQueries) bundleParentAt(ctx context.Context, root int, name stri
 			return -1, "", false
 		}
 		fd = next
-		if contextEnded(ctx) || unix.Fstat(fd, &opened) != nil || !sameBundleStat(&expected.stat, &opened) || !q.bundleFilesystem(fd) {
+		if contextEnded(ctx) || unix.Fstat(fd, &opened) != nil || !sameBundleStat(&expected.stat, &opened) || !q.bundleObjectSafe(fd, false) {
 			unix.Close(fd)
 			return -1, "", false
 		}
@@ -421,12 +443,18 @@ func (q *PackageQueries) bundleParentAt(ctx context.Context, root int, name stri
 // Fixed streaming buffer, complete EOF/size check, descriptor/named identity
 // before/after read, and context between every chunk. Capture is only requested
 // for strict metadata and the descriptor's three already-approved public files.
-func (q *PackageQueries) readBundleFile(ctx context.Context, root int, name string, inventory bundleInventory, capture bool, readBytes *int64) (digest string, data []byte, ok bool) {
+func (q *PackageQueries) readBundleFile(ctx context.Context, root int, name string, inventory bundleInventory, capture bool, readBytes *int64) (string, []byte, bool) {
+	return q.acquireBundleFile(ctx, root, name, inventory, capture, readBytes, false)
+}
+
+func (q *PackageQueries) acquireBundleFile(ctx context.Context, root int, name string, inventory bundleInventory, capture bool, readBytes *int64, preflight bool) (digest string, data []byte, ok bool) {
 	node, exists := inventory[name]
 	if !exists || node.dir || (name != "release-manifest.json" && !bundleContentPath(name)) || !bundleRegular(&node.stat, name) {
 		return "", nil, false
 	}
-	q.event("before_open", name, nil)
+	if !preflight {
+		q.event("before_open", name, nil)
+	}
 	parent, base, ready := q.bundleParentAt(ctx, root, name, inventory)
 	if !ready {
 		return "", nil, false
@@ -450,16 +478,23 @@ func (q *PackageQueries) readBundleFile(ctx context.Context, root int, name stri
 			ok = false
 		}
 	}()
-	q.event("open", name, file)
+	if preflight {
+		q.event("preflight", name, file)
+	} else {
+		q.event("open", name, file)
+	}
 	var opened unix.Stat_t
-	if contextEnded(ctx) || unix.Fstat(fd, &opened) != nil || !sameBundleStat(&node.stat, &opened) || !bundleRegular(&opened, name) || !q.bundleFilesystem(fd) {
+	if contextEnded(ctx) || unix.Fstat(fd, &opened) != nil || !sameBundleStat(&node.stat, &opened) || !bundleRegular(&opened, name) || !q.bundleObjectSafe(fd, false) {
 		return "", nil, false
+	}
+	if preflight {
+		return "", nil, true
 	}
 	hasher := sha256.New()
 	buffer := make([]byte, bundleBufferBytes)
 	var count int64
 	for {
-		if contextEnded(ctx) {
+		if contextEnded(ctx) || (q.packageHost() == "darwin" && !q.bundleObjectSafe(fd, false)) {
 			return "", nil, false
 		}
 		// Read one extra byte, never a silently accepted prefix.
@@ -471,7 +506,8 @@ func (q *PackageQueries) readBundleFile(ctx context.Context, root int, name stri
 		count += int64(n)
 		*readBytes += int64(n)
 		q.event("read", name, file)
-		if contextEnded(ctx) || count > opened.Size || *readBytes > maxBundleBytes+2*maxPackageMetadata {
+		if contextEnded(ctx) || count > opened.Size || *readBytes > maxBundleBytes+2*maxPackageMetadata ||
+			(q.packageHost() == "darwin" && !q.bundleObjectSafe(fd, false)) {
 			return "", nil, false
 		}
 		if n > 0 {
@@ -619,6 +655,24 @@ func sameBundleInventory(a, b bundleInventory) bool {
 	}
 	return true
 }
+
+// All approved content is opened no-follow and checked before the first byte.
+// The same admission runs again on each actual read fd and final reacquisition.
+func (q *PackageQueries) preflightBundleFiles(ctx context.Context, root int, inventory bundleInventory) bool {
+	if q.packageHost() != "darwin" {
+		return true // preserve the Linux acquisition sequence
+	}
+	var unused int64
+	for name, node := range inventory {
+		if !node.dir {
+			if _, _, ok := q.acquireBundleFile(ctx, root, name, inventory, false, &unused, true); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (q *PackageQueries) inspectBundle(ctx context.Context) (state State, evidence Evidence) {
 	root, chain, ok := q.openBundleRoot(ctx, q.root)
 	if !ok {
@@ -634,6 +688,9 @@ func (q *PackageQueries) inspectBundle(ctx context.Context) (state State, eviden
 		return Unknown, EvidenceUnavailable
 	}
 	q.event("inventory", "", nil)
+	if !q.preflightBundleFiles(ctx, root, inventory) {
+		return Unknown, EvidenceUnavailable
+	}
 	var readBytes int64
 	_, manifestData, ok := q.readBundleFile(ctx, root, "release-manifest.json", inventory, true, &readBytes)
 	if !ok {
@@ -741,7 +798,7 @@ func (q *PackageQueries) inspectBundle(ctx context.Context) (state State, eviden
 		return Unknown, EvidenceUnavailable
 	}
 	finalInventory, ok := q.bundleInventoryAt(ctx, root)
-	if !ok || !sameBundleInventory(inventory, finalInventory) {
+	if !ok || !sameBundleInventory(inventory, finalInventory) || !q.preflightBundleFiles(ctx, root, finalInventory) {
 		return Unknown, EvidenceUnavailable
 	}
 	current, currentChain, ok := q.openBundleRoot(ctx, q.root)

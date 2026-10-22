@@ -553,11 +553,12 @@ func TestDarwinSelectedConfigAndRequiredBundleUnknown(t *testing.T) {
 	document := diagnosticDocument(t, out.String())
 	config, build := diagnosticWireCheck(t, document, doctor.CheckConfig), diagnosticWireCheck(t, document, doctor.CheckBuild)
 	// A plain private 0600 config in private directories is admitted by
-	// descriptor evidence; package metadata has none yet and stays refused.
+	// descriptor evidence; plain manifest metadata also proves ACL/volume safety.
+	// This inventory is intentionally incomplete and cannot qualify the bundle.
 	if document["exit_code"] != float64(3) || document["selected_transport"] != "cloudflare" ||
 		config["state"] != "warn" || config["required"] != true || config["evidence_code"] != string(doctor.EvidenceTokenMissing) ||
-		build["state"] != "unknown" || build["required"] != true || build["evidence_code"] != string(doctor.EvidenceBuildInvalid) {
-		t.Fatal("Darwin config was not admitted exactly, or package metadata refusal changed")
+		build["state"] != "ok" || build["required"] != true || build["evidence_code"] != string(doctor.EvidenceHealthy) {
+		t.Fatal("Darwin config or proved package metadata was not admitted exactly")
 	}
 	bundle := diagnosticWireCheck(t, document, doctor.CheckBundle)
 	if bundle["state"] != "unknown" || bundle["required"] != true || bundle["evidence_code"] != string(doctor.EvidenceUnavailable) {
@@ -938,10 +939,10 @@ func diagnosticBundleFixture(t *testing.T, text string) (diagnosticRuntime, stri
 	return runtime, selected, build
 }
 
-// Expected host policy, not the manifest's advertised target or synthetic ACL
-// qualification: only Linux currently supplies complete bundle observations.
+// Plain private fixtures can prove Linux or Darwin bundle evidence; an advertised
+// manifest target cannot establish evidence on an unsupported host.
 func diagnosticExpectedBundleState(state string) string {
-	if goruntime.GOOS != "linux" {
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
 		return "unknown"
 	}
 	return state
@@ -986,7 +987,7 @@ func TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate(t *testing.T)
 				if bundle["state"] != diagnosticExpectedBundleState("ok") {
 					t.Fatal("actual byte verifier or unestablished ACL safety policy not composed")
 				}
-				if goruntime.GOOS != "linux" && (bundle["evidence_code"] != string(doctor.EvidenceUnavailable) || bundle["required"] != true) {
+				if bundle["required"] != true || (diagnosticExpectedBundleState("ok") == "unknown" && bundle["evidence_code"] != string(doctor.EvidenceUnavailable)) {
 					t.Fatal("unestablished ACL safety did not retain required unavailable evidence")
 				}
 				for _, id := range []doctor.CheckID{doctor.CheckService, doctor.CheckRelay, doctor.CheckHerdr, doctor.CheckPairing, doctor.CheckIngress, doctor.CheckIngressBundle} {
@@ -1020,7 +1021,7 @@ func TestDiagnosticActualBundleCompositionRemainsPartialAndPrivate(t *testing.T)
 
 // F001: emulate execute permission disappearing after OS executable discovery,
 // while the diagnostic process is already running. The binary is never run.
-// Darwin's unestablished ACL safety overrides this otherwise stable failure.
+// Unproved host evidence overrides stable failure; the plain Darwin fixture can prove ACL safety.
 func TestDiagnosticNonexecutablePackageAfterDiscoveryIsObservedFailure(t *testing.T) {
 	for _, invalid := range []bool{false, true} {
 		t.Run(fmt.Sprint(invalid), func(t *testing.T) {
