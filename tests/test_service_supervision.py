@@ -519,6 +519,21 @@ class Fixture:
                     waits=sum(s.startswith("wait-end ") for s in lines),
                     term_events={k: sum(e["action"] == "term" for e in self.events(k)) for k in ("relay", "cloudflared")})
 
+    def capture_failed(self, name):
+        # Exactly one line, printed even when a shutdown was already requested: the capture status, the
+        # size of the retained listing, how many records name the launched PID, and their state words
+        # (never the listing text). The bystander job is always listed, so a failed listing would show records=0.
+        text = self.output.read_text()
+        pattern = r"^%s owned-job capture failed \(status=1 records=[1-9][0-9]* pid-matches=0 state=none\)$" % name
+        assert text.count("owned-job capture failed") == 1 and re.search(pattern, text, re.M), (
+            "capture failure line (case %s): %r" % (self.root.name, tail_text(self.output, 600)))
+
+    def cleanup_failed(self, name, job):
+        # job is the captured jobspec, or "none" when the capture never produced one.
+        line = "%s cleanup could not confirm owned-child completion (job=%s)" % (name, job)
+        assert line in self.output.read_text().splitlines(), "cleanup line %r (case %s): %r" % (
+            line, self.root.name, tail_text(self.output, 600))
+
     def complete(self, status, kinds=("relay", "cloudflared"), unknown=None):
         # All assertions precede fallback containment. wait-end plus PID absence
         # proves supervisor reaping, not just handler entry or harness cleanup.
@@ -1085,7 +1100,24 @@ def main():
             until(lambda: not alive(f.pid("relay")), "relay did not finish during uncertain capture")
             f.release("capture")
             f.complete(23, unknown="cloudflared")
+            f.capture_failed("cloudflared")
+            f.cleanup_failed("cloudflared", "none")
         run_case(parent, "peer-terminal-with-capture-refusal", peer_terminal_with_capture_refusal,
+                 CAPTURE_GATE="2", CAPTURE_UNKNOWN="2")
+
+        def shutdown_during_uncertain_tunnel_capture(f):
+            # A shutdown requested while the tunnel capture is held, then refused: the supervisor must still
+            # say what the capture saw BEFORE honouring the request (hosted macOS adapter-signal-False-cloudflare-15
+            # printed only a bare cleanup line), and the uncaptured cleanup names no job. Status and ownership stay.
+            f.held("capture")
+            f.ready()
+            f.proc.send_signal(signal.SIGTERM)
+            f.release("capture")
+            f.complete(143, unknown="cloudflared")
+            f.capture_failed("cloudflared")
+            f.cleanup_failed("cloudflared", "none")
+            assert not any(e["action"] == "term" for e in f.events("cloudflared"))
+        run_case(parent, "shutdown-during-uncertain-tunnel-capture", shutdown_during_uncertain_tunnel_capture,
                  CAPTURE_GATE="2", CAPTURE_UNKNOWN="2")
 
         for corrupt in ("MISMATCH", "UNKNOWN"):
@@ -1094,6 +1126,7 @@ def main():
                     f.complete(1, kinds=("relay",) if count == 1 else ("relay", "cloudflared"), unknown=kind)
                     assert not any(e["action"] == "term" for e in f.events(kind))
                     assert "owned-job capture failed" in f.output.read_text()
+                    f.capture_failed("herdr relay" if kind == "relay" else "cloudflared")
                 run_case(parent, "capture-refusal-" + corrupt + "-" + kind, capture_refusal,
                          **{"CAPTURE_" + corrupt: str(count), "WITH_GENERATIONS": "1"})
 
@@ -1130,6 +1163,8 @@ def main():
                 f.release("poll")
                 f.complete(primary, unknown="cloudflared")
                 assert "cloudflared cleanup could not confirm" in f.output.read_text()
+                # The tunnel WAS captured: the line names its jobspec (a capture that failed says none).
+                f.cleanup_failed("cloudflared", "%" + next(s.split()[2] for s in f.shell() if s.startswith("capture 2 ")).strip("[]+-"))
             run_case(parent, "cleanup-uncertainty-" + str(primary), cleanup_uncertainty,
                      CORRUPT_CHILD="cloudflared", POLL_TERMINAL="1" if primary == 23 else "0")
 

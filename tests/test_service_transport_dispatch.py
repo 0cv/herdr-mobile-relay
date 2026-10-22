@@ -519,9 +519,11 @@ class Fixture:
             partial = partial.replace(canary, "<canary>")
         events = self.events()
         pids = {e["kind"]: e["pid"] for e in events if e["kind"] in ("relay", "tunnel") and e["action"] == "start"}
-        return "supervisor still running after %ds (case %s, signal %r, redelivered %d); output tail %r; events %r; supervisor state %r; child states %r" % (
+        # The exit status (None while it runs) is read AFTER the state, which can show a zombie (hosted macOS: Z<); a
+        # supervisor that already exited with children still holding the pipe was not stuck in its own loop.
+        return "supervisor still running after %ds (case %s, signal %r, redelivered %d); output tail %r; events %r; supervisor state %r; supervisor exit status %r; child states %r" % (
             TIMEOUT, self.root.name, termination, redelivered, partial[-600:],
-            [(e["kind"], e.get("action")) for e in events[-12:]], state(proc.pid),
+            [(e["kind"], e.get("action")) for e in events[-12:]], state(proc.pid), proc.poll(),
             {kind: state(pid) for kind, pid in pids.items()})
 
     def in_normal_loop(self, proc, deadline):

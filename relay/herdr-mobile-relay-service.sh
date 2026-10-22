@@ -231,11 +231,11 @@ finish() {
     # Signals during capture/cleanup only record intent, never interrupt the
     # bookkeeping or recursively enter cleanup. The first request wins.
     if [ -n "$TUNNEL_PID" ] && ! stop_child "$TUNNEL_JOB" "$TUNNEL_PID"; then
-        echo "cloudflared cleanup could not confirm owned-child completion" >&2
+        echo "cloudflared cleanup could not confirm owned-child completion (job=${TUNNEL_JOB:-none})" >&2
         cleanup_failed=1
     fi
     if [ -n "$RELAY_PID" ] && ! stop_child "$RELAY_JOB" "$RELAY_PID"; then
-        echo "herdr relay cleanup could not confirm owned-child completion" >&2
+        echo "herdr relay cleanup could not confirm owned-child completion (job=${RELAY_JOB:-none})" >&2
         cleanup_failed=1
     fi
     if [ "$REQUESTED_STATUS" -ne 0 ]; then
@@ -274,6 +274,24 @@ check_child() {
     exit 1
 }
 
+# Diagnostic only: say what a failed capture saw (counts and state words of the
+# listing it retained, never the listing text). Builtins only, so it adds no fork
+# and runs after the listing. It changes no exit decision, even if a write or read fails.
+report_capture_failure() {
+    local name="$1" pid="$2" status="$3" rest="${SUPERVISED_JOB_RECORDS:-}" nl=$'\n'
+    local line listed state records=0 matches=0 states=""
+    while [ -n "$rest" ]; do
+        line=${rest%%"$nl"*}
+        case "$rest" in *"$nl"*) rest=${rest#*"$nl"} ;; *) rest="" ;; esac
+        records=$((records + 1))
+        IFS=$' \t' read -r _ listed state _ <<< "$line" || continue
+        [ "$listed" = "$pid" ] || continue
+        matches=$((matches + 1))
+        states="${states:+$states,}${state:-unknown}"
+    done
+    echo "$name owned-job capture failed (status=$status records=$records pid-matches=$matches state=${states:-none})" >&2 || true
+}
+
 echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
 # The listing file is made BEFORE the launch: no forked command may run between
 # launching a child and its first jobs -l (see supervised_child_prepare).
@@ -283,12 +301,12 @@ RELAY_PID=$!
 capture_status=0
 supervised_child_capture "$RELAY_PID" || capture_status=$?
 RELAY_JOB="$SUPERVISED_JOB_SPEC"
+[ "$capture_status" -eq 0 ] || [ "$capture_status" -eq 2 ] || report_capture_failure "herdr relay" "$RELAY_PID" "$capture_status"
 [ "$REQUESTED_STATUS" -eq 0 ] || exit "$REQUESTED_STATUS"
 if [ "$capture_status" -eq 2 ]; then
     unexpected_exit "herdr relay" "$SUPERVISED_JOB_STATUS"
 fi
 if [ "$capture_status" -ne 0 ]; then
-    echo "herdr relay owned-job capture failed" >&2
     exit 1
 fi
 check_child "herdr relay" "$RELAY_JOB" "$RELAY_PID"
@@ -302,6 +320,7 @@ if [ "$TRANSPORT" = cloudflare ]; then
     supervised_child_capture "$TUNNEL_PID" || capture_status=$?
     TUNNEL_JOB="$SUPERVISED_JOB_SPEC"
     capture_exit_status="$SUPERVISED_JOB_STATUS"
+    [ "$capture_status" -eq 0 ] || [ "$capture_status" -eq 2 ] || report_capture_failure "cloudflared" "$TUNNEL_PID" "$capture_status"
     [ "$REQUESTED_STATUS" -eq 0 ] || exit "$REQUESTED_STATUS"
     # Capturing the tunnel may also observe/prune a completed relay record.
     # Its cached status is retained, including if tunnel capture is uncertain.
@@ -310,7 +329,6 @@ if [ "$TRANSPORT" = cloudflare ]; then
         unexpected_exit "cloudflared" "$capture_exit_status"
     fi
     if [ "$capture_status" -ne 0 ]; then
-        echo "cloudflared owned-job capture failed" >&2
         exit 1
     fi
 fi
