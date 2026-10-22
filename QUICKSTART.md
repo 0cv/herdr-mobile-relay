@@ -97,8 +97,9 @@ own gateway.
 ## Use managed Tailscale Serve
 
 If a supported Tailscale Unix daemon is already installed, running, and
-authenticated on the computer, choose **Managed Tailscale Serve (foreground)**
-in the setup menu (press `t`). The relay stays on `127.0.0.1`, and after read-only
+authenticated on the computer, use the explicit managed entrypoint
+`relay/plugin-choose-transport.sh tailscale`;
+managed foreground is no longer a setup-menu choice. The relay stays on `127.0.0.1`, and after read-only
 preflight and per-run consent the relay process owns its temporary HTTPS Serve
 route through LocalAPI. It does not run `tailscale login`, invoke `tailscale serve`,
 enable Funnel, adopt a route, or overwrite existing Serve configuration.
@@ -127,8 +128,9 @@ installation or qualifies an untested daemon.
 
 If you already configured Tailscale Serve to route a canonical HTTPS origin to
 the relay's loopback listener (`127.0.0.1:8375` by default, or your configured port), choose
-**Operator-owned Tailscale HTTPS Serve (BYO,
-foreground)** (press `b`). Enter that `https://` origin. Herdr checks its trusted
+**3 Tailscale → 2 Your own HTTPS route (advanced BYO)** in the setup menu; the
+other two Tailscale entries, Always on and Remove Herdr's own route, are
+unavailable. Enter that `https://` origin. Herdr checks its trusted
 TLS certificate, instance identity, and readiness. Choose this origin or keep an
 independently hosted Herdr phone app; the selected app must pass TLS checks and
 serve the exact packaged frontend before Herdr arms an invitation. For an

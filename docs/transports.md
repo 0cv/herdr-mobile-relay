@@ -19,14 +19,17 @@ and Tailscale traffic use their respective trusted HTTPS paths.
 | **Operator-owned Tailscale HTTPS Serve (BYO, foreground)** | An existing canonical HTTPS origin that you have routed to this relay's loopback listener. | Your independently configured ingress; Herdr does not inspect or change it. | Keep an existing operator-owned HTTPS route, and retain it after Herdr stops. |
 
 Pick **Temporary Cloudflare Tunnel**, **Community WebRTC Gateway**, **Deploy or
-Upgrade Your Own WebRTC Gateway**, **Managed Tailscale Serve (foreground)**,
-**Operator-owned Tailscale HTTPS Serve (BYO, foreground)**, or **Stable Tunnel**
-directly from the setup menu (`t` for managed, `b` for BYO). A completed choice
-starts or restarts the relay and verifies the phone app before printing a QR.
+Upgrade Your Own WebRTC Gateway**, or **Stable Tunnel** from the setup menu, or
+**3 Tailscale → 2 Your own HTTPS route (advanced BYO)** for operator-owned
+Tailscale HTTPS Serve; the other two Tailscale entries, Always on and Remove
+Herdr's own route, are unavailable. Managed Tailscale Serve (foreground) is no
+longer a menu choice: start it with `relay/plugin-choose-transport.sh tailscale`.
+A completed choice starts or restarts the relay and verifies the phone app before printing a QR.
 
 ## Managed Tailscale Serve
 
-Choose **Managed Tailscale Serve (foreground)**, or press `t` in the setup menu, when this
+Choose **Managed Tailscale Serve (foreground)** through its explicit entrypoint,
+`relay/plugin-choose-transport.sh tailscale` (it is not in the setup menu), when this
 computer already has a supported Tailscale Unix daemon installed, running, and
 authenticated. The relay binds only to `127.0.0.1`; the launcher performs a
 read-only identity/version/Serve/Funnel preflight, asks for per-run consent, then
@@ -97,7 +100,8 @@ operator-owned BYO mode.
 
 ## Operator-owned HTTPS Serve (BYO)
 
-Choose this distinct foreground transport (menu key `b`) only after you have
+Choose this distinct foreground transport (setup menu: **3 Tailscale → 2 Your own
+HTTPS route (advanced BYO)**) only after you have
 independently configured an HTTPS Serve origin to reach Herdr's local listener
 on `127.0.0.1:8375` by default (or your configured loopback port). Enter a canonical
 `https://host[:port]` origin with no path,

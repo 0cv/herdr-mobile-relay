@@ -51,8 +51,8 @@ and prints a QR code.
 For tailnet HTTPS in the setup menu, choose **3 Tailscale → 2 Your own HTTPS
 route (advanced BYO)**, which uses a canonical HTTPS origin you already route to
 this loopback relay. Managed foreground is no longer a menu choice; its explicit
-`HERDR_RELAY_TRANSPORT=tailscale` / `relay/plugin-choose-transport.sh tailscale`
-entrypoints remain unchanged for supported authenticated standalone nodes, with
+`relay/plugin-choose-transport.sh tailscale` entrypoint remains unchanged for
+supported authenticated standalone nodes, with
 fresh consent and session guards. BYO can keep
 an independently hosted phone app, whose exact bundle Herdr verifies before
 pairing. It does not inspect or change Tailscale state; the ingress remains
@@ -166,8 +166,7 @@ action; the next header uses a fresh diagnostic read.
 This is source-only navigation/presentation work. Gateway inline app
 choose/publish when missing is still unfinished, and the existing QR/publishing
 children's storage/cancellation/onboarding behavior is unchanged, not qualified
-by this slice. `QUICKSTART.md` remains unchanged and still documents obsolete
-managed/BYO t/b menu shortcuts; use this section for current navigation. Full
+by this slice. Full
 item-5/A1, hosted/package and phone qualification remain outstanding.
 
 ## Choosing how your phone connects
@@ -207,10 +206,16 @@ explicit `--config`, then `HERDR_RELAY_ENV`, then
 `relay/.env`. Paths must be absolute; explicit paths must also be canonical and
 control-free. There is no installed-service discovery or ambient credential,
 port, transport or web-root merge. On Linux, the selected owner-only regular
-file is parsed as bounded literal data, never sourced. On Darwin, selected
-configuration and packaged release-manifest metadata acquisition are reported
-unavailable before parent traversal, content open or read: mode bits cannot
-exclude ACL grants and no bounded descriptor-bound ACL inspector is implemented.
+file is parsed as bounded literal data, never sourced. On macOS, the selected
+configuration is read only after descriptor-bound ACL inspection
+(`internal/darwinacl`) of the file and of every directory above it, before and
+after the read, with the same owner-only, no-follow and literal-parse rules. A
+file with any ACL, a directory whose ACL is not deny-only, or a directory not
+owned by you or root or writable by group/other (a root-owned sticky one
+excepted) is unsafe; ACL evidence that cannot be obtained or fully parsed is
+unavailable, never assumed safe. Packaged
+release-manifest metadata acquisition is still reported unavailable, and the
+bundle check unknown/unavailable, on macOS before any filesystem acquisition.
 Missing, unsafe or malformed files are not created, repaired or migrated.
 
 The packaged wrapper accepts
@@ -243,11 +248,12 @@ addresses or paths.
 
 Current diagnostic ladder:
 
-1. Literal configuration and bounded package **metadata**. On Darwin, both
-   early filesystem acquisitions are unavailable before parent traversal,
-   content open or read because ACL grants are not represented by mode bits and
-   no bounded descriptor-bound ACL inspector is implemented. This refusal is
-   derived from the actual host, not an advertised package target or config
+1. Literal configuration and bounded package **metadata**. On macOS, the
+   configuration is read through the descriptor-bound ACL inspection described
+   above, but package metadata acquisition is unavailable before parent
+   traversal, content open or read: ACL grants are not represented by mode bits
+   and metadata has no ACL evidence. This host decision is derived from the
+   actual host, not an advertised package target or config
    value. On Linux, installed executable shim/`current` symlinks are resolved to
    a regular executable before selecting the package root; unresolved paths
    leave build metadata unavailable. The package's regular, no-follow
@@ -260,7 +266,7 @@ Current diagnostic ladder:
    physical executing package root on Linux. On Darwin, Bundle is currently
    required **unknown/unavailable before bundle filesystem acquisition**:
    owner/mode bits cannot establish safety against ACL-granted foreign writers,
-   and no bounded descriptor-bound ACL inspector is implemented. This applies
+   and the bundle check has no descriptor-bound ACL inspection. This applies
    to ancestors, package directories and files, including apparently sealed
    packages. No ACL is changed or inferred safe. An advertised manifest target
    cannot bypass the host permission policy. Darwin bundle observations require
