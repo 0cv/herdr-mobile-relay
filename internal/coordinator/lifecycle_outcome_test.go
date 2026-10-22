@@ -3,7 +3,9 @@ package coordinator
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,5 +55,61 @@ func TestCustomAgentTimeoutAfterPaneRunIsDispatchedUnknown(t *testing.T) {
 	}
 	if errors.Is(err, herdr.ErrNotStarted) {
 		t.Fatalf("custom agent timeout was also classified not_started: %v", err)
+	}
+}
+
+func TestLaunchRecordsHermesProfileOnlyWhereItWasSent(t *testing.T) {
+	for _, test := range []struct{ name, kind, requested, want string }{
+		{"built-in with a profile", "hermes", "apollo", "apollo"},
+		{"built-in without a profile", "hermes", "", ""},
+		{"custom argv profile", "", "apollo", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle := hermesLifecycle(t, "apollo")
+			requireNoError(t, lifecycle.profiles.BeginLaunchOwnership(reconcileTarget, "hermes"))
+			requireNoError(t, lifecycle.rememberLaunch(reconcileTarget, profiles.Profile{ID: "hermes", Kind: test.kind}, StartRequest{HermesProfile: test.requested}))
+			owned, _, _ := lifecycle.profiles.OwnedHermesProfile(reconcileTarget, "hermes")
+			requireNoError(t, lifecycle.profiles.ReconcileOwnership([]profiles.PaneIdentity{reconcileTarget}))
+			if got, known := lifecycle.profiles.ResolveOwnedHermesProfile(reconcileTarget.PaneID); !owned || got != test.want || known != (test.kind == "hermes") {
+				t.Fatalf("verified=%v recorded profile %q known=%v, want %q", owned, got, known, test.want)
+			}
+		})
+	}
+	lifecycle := hermesLifecycle(t, "apollo")
+	_ = lifecycle.profiles.SetOwnershipPath(lifecycle.home) // refused (a directory): the store requires recovery
+	err := lifecycle.rememberLaunch(reconcileTarget, profiles.Profile{ID: "hermes", Kind: "hermes"}, StartRequest{HermesProfile: "apollo"})
+	if !errors.Is(err, herdr.ErrPartiallyApplied) {
+		t.Fatalf("unsaved record = %v, want partially applied", err)
+	}
+}
+
+// Clear and restart (one handler) relaunch with the pane's recorded Hermes profile
+// (refused by name here, as it is gone from disk) and refuse a Hermes pane whose
+// profile is unknown, instead of starting Hermes' implicit profile.
+func TestClearKeepsTheRecordedHermesProfile(t *testing.T) {
+	for _, test := range []struct {
+		name, recorded string
+		legacy         bool
+		want           string
+	}{
+		{"recorded profile", "apollo", false, `hermes profile "apollo" is not installed`},
+		{"started without a profile", "", false, "Command failed"},
+		{"no record from an older relay", "", true, "Hermes profile is unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newReconcileFixture(t, test.recorded, test.legacy)
+			state := NewState(testLogger())
+			d := NewDispatcher(nil, state, nil, testLogger())
+			t.Cleanup(func() { _ = d.Close(context.Background()) })
+			d.SetProfiles(f.lifecycle.profiles)
+			d.lifecycle.home = f.lifecycle.home
+			d.lifecycle.inventory = func(context.Context) (*herdr.Inventory, error) { return nil, errors.New("no herdr") }
+			pane := reconcileTarget
+			state.CommitInventory([]*AgentState{{PaneID: pane.PaneID, RawPaneID: pane.PaneID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID, Agent: "hermes", Status: "idle", Cwd: f.cwd}}, state.RevisionCounter())
+			requireNoError(t, os.RemoveAll(filepath.Join(f.lifecycle.home, ".hermes", "profiles", "apollo")))
+			if result := d.handleClear(context.Background(), time.Now(), "clear-test", pane.PaneID); result.OK || !strings.Contains(result.Error, test.want) {
+				t.Fatalf("handleClear = %+v, want an error containing %q", result, test.want)
+			}
+		})
 	}
 }

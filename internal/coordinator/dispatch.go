@@ -816,8 +816,12 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	if !exists {
 		return d.fail(requestID, "agent_clear", paneID, "Launch profile ownership is unknown; start a new agent explicitly before stopping this one")
 	}
+	hermesProfile, known := d.profiles.ResolveOwnedHermesProfile(paneID)
+	if profile.Kind == "hermes" && !known {
+		return d.fail(requestID, "agent_clear", paneID, "Hermes profile is unknown; start a new agent explicitly before replacing this one")
+	}
 	name := "clear-" + fmt.Sprintf("%x", receivedAt.UnixNano())[:8]
-	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd}
+	request := StartRequest{ProfileID: profile.ID, Name: name, Cwd: agent.Cwd, HermesProfile: hermesProfile}
 	_, request, err := d.lifecycle.ValidateStart(request)
 	if err != nil {
 		return d.fail(requestID, "agent_clear", paneID, err.Error())
@@ -935,6 +939,8 @@ func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *Comma
 	public := "Command failed"
 	var data any
 	switch {
+	case errors.Is(err, errHermesProfileConflict):
+		public = errHermesProfileConflict.Error()
 	case errors.Is(err, herdr.ErrPartiallyApplied):
 		phase = "dispatched_unknown"
 		public = "Part of the command already reached the agent; review it before retrying"

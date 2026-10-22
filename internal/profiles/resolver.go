@@ -62,6 +62,7 @@ type Resolver struct {
 	configHome           string
 	herdr                IntegrationStatuser
 	ownership            map[string]profileOwnership
+	hermes               map[string]hermesOwnership
 	observed             map[string]PaneIdentity
 	unobserved           map[string]bool
 	ownershipPath        string
@@ -85,6 +86,7 @@ func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 		configHome: configHome,
 		herdr:      herdr,
 		ownership:  make(map[string]profileOwnership),
+		hermes:     make(map[string]hermesOwnership),
 		observed:   make(map[string]PaneIdentity),
 		unobserved: make(map[string]bool),
 		aliases:    cloneAliases(defaultAliases),
@@ -318,7 +320,8 @@ func (r *Resolver) Forget(paneID string) {
 	}
 	delete(r.ownership, ownershipKey(paneID))
 	delete(r.unobserved, ownershipKey(paneID))
-	if err := r.persistOwnershipLocked(); err != nil {
+	hermesChanged := r.dropHermesLocked(ownershipKey(paneID))
+	if err := r.persistReleaseLocked(hermesChanged); err != nil {
 		r.ownershipUnavailable = true
 		slog.Warn("profile ownership cleanup failed", "error", err)
 	}
@@ -328,6 +331,19 @@ func (r *Resolver) Forget(paneID string) {
 // never guesses which executable owns a pane.
 func (r *Resolver) ResolveOwnedPane(paneID string) string {
 	return r.verifiedProfile(paneID)
+}
+
+// ResolveOwnedHermesProfile is the Hermes profile a verified pane started with
+// ("" for none); known is false when no record exists (an older relay's pane).
+func (r *Resolver) ResolveOwnedHermesProfile(paneID string) (hermesProfile string, known bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := ownershipKey(paneID)
+	record, observed, hermes := r.ownership[key], r.observed[key], r.hermes[key]
+	if r.ownershipUnavailable || record.Pending || !record.Target.valid() || observed != record.Target || hermes.Target != record.Target {
+		return "", false
+	}
+	return hermes.HermesProfile, true
 }
 
 // ResolvePane answers read-only questions such as slash-command discovery and

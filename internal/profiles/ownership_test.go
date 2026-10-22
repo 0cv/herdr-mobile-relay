@@ -1,8 +1,11 @@
 package profiles
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -310,5 +313,182 @@ func TestOwnershipPersistenceFailureAndRemovedProfile(t *testing.T) {
 	resolver.Reload()
 	if resolver.ResolveOwnedPane("pane") != "" {
 		t.Fatal("resolved removed profile")
+	}
+}
+
+var hermesTarget = PaneIdentity{PaneID: "pane", TerminalID: "terminal", TabID: "tab", WorkspaceID: "workspace"}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hermesResolver(t *testing.T, dir, path string) (*Resolver, string) {
+	t.Helper()
+	resolver := NewResolver(dir, nil)
+	requireNoError(t, resolver.SetOwnershipPath(path))
+	_, hermes, _ := resolver.OwnedHermesProfile(hermesTarget, "wrapper")
+	return resolver, hermes
+}
+
+// The Hermes profile survives a restart, and every path that releases or replaces
+// the ownership record releases it too: a later record never inherits it.
+func TestHermesProfileIsReleasedWithItsOwnershipRecord(t *testing.T) {
+	other := PaneIdentity{PaneID: "pane", TerminalID: "replacement"}
+	for name, release := range map[string]func(*Resolver) error{
+		"forget":               func(r *Resolver) error { r.Forget("pane"); return nil },
+		"terminal replaced":    func(r *Resolver) error { return r.ReconcileOwnership([]PaneIdentity{other}) },
+		"pane gone twice":      func(r *Resolver) error { _ = r.ReconcileOwnership(nil); return r.ReconcileOwnership(nil) },
+		"relaunch pending":     func(r *Resolver) error { return r.BeginLaunchOwnership(hermesTarget, "wrapper") },
+		"verified without one": func(r *Resolver) error { return r.RememberVerified(hermesTarget, "wrapper") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, path := ownershipFixture(t)
+			resolver, _ := hermesResolver(t, dir, path)
+			requireNoError(t, resolver.RememberVerifiedHermes(hermesTarget, "wrapper", "apollo"))
+			restarted, hermes := hermesResolver(t, dir, path)
+			if _, known := restarted.ResolveOwnedHermesProfile("pane"); hermes != "apollo" || known {
+				t.Fatalf("profile after restart = %q, want apollo, and none for a pane not yet observed", hermes)
+			}
+			requireNoError(t, resolver.ReconcileOwnership([]PaneIdentity{hermesTarget}))
+			if got, known := resolver.ResolveOwnedHermesProfile("pane"); got != "apollo" || !known {
+				t.Fatalf("observed pane profile = %q, want apollo", got)
+			}
+			requireNoError(t, release(resolver))
+			if owned, hermes, known := resolver.OwnedHermesProfile(hermesTarget, "wrapper"); hermes != "" || known || (name != "relaunch pending" && name != "verified without one" && owned) {
+				t.Fatalf("released record still answers: owned=%v profile=%q known=%v", owned, hermes, known)
+			}
+			if got, known := resolver.ResolveOwnedHermesProfile("pane"); got != "" || known {
+				t.Fatalf("a relaunch would keep the released profile %q", got)
+			}
+			data, err := os.ReadFile(hermesStorePath(path))
+			requireNoError(t, err)
+			if strings.TrimSpace(string(data)) != "[]" {
+				t.Fatalf("hermes file after release = %s", data)
+			}
+			restarted, _ = hermesResolver(t, dir, path)
+			requireNoError(t, restarted.RememberVerified(hermesTarget, "wrapper"))
+			if _, hermes, known := restarted.OwnedHermesProfile(hermesTarget, "wrapper"); hermes != "" || known {
+				t.Fatalf("a new record inherited %q (known=%v)", hermes, known)
+			}
+		})
+	}
+}
+
+// An unreadable Hermes file makes the store unavailable, leaves the files alone and matches nothing.
+func TestUnreadableHermesFileFailsClosed(t *testing.T) {
+	good := `[{"target":{"pane_id":"pane","terminal_id":"terminal","tab_id":"tab","workspace_id":"workspace"},"hermes_profile":"apollo"}`
+	for name, damage := range map[string]func(path string) error{
+		"corrupt":        func(p string) error { return os.WriteFile(p, []byte("not-json"), 0600) },
+		"oversized":      func(p string) error { return os.WriteFile(p, []byte(strings.Repeat(" ", 1024*1024+1)), 0600) },
+		"mode":           func(p string) error { return os.Chmod(p, 0644) },
+		"symlink":        func(p string) error { _ = os.Rename(p, p+".real"); return os.Symlink(p+".real", p) },
+		"hard link":      func(p string) error { return os.Link(p, p+".link") },
+		"unknown field":  func(p string) error { return os.WriteFile(p, []byte(good[:len(good)-1]+`,"x":1}]`), 0600) },
+		"duplicate pane": func(p string) error { return os.WriteFile(p, []byte(good+","+good[1:]+"]"), 0600) },
+		"invalid name": func(p string) error {
+			return os.WriteFile(p, []byte(strings.Replace(good, "apollo", "Bad Name", 1)+"]"), 0600)
+		},
+		"trailing data":   func(p string) error { return os.WriteFile(p, []byte(good+"] []"), 0600) },
+		"hermes is a dir": func(p string) error { _ = os.Remove(p); return os.Mkdir(p, 0700) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, path := ownershipFixture(t)
+			resolver, _ := hermesResolver(t, dir, path)
+			requireNoError(t, resolver.RememberVerifiedHermes(hermesTarget, "wrapper", "apollo"))
+			requireNoError(t, damage(hermesStorePath(path)))
+			before, _ := os.ReadFile(path)
+			if err := resolver.SetOwnershipPath(path); err == nil {
+				t.Fatal("accepted an unreadable Hermes file")
+			}
+			if owned, hermes, known := resolver.OwnedHermesProfile(hermesTarget, "wrapper"); owned || hermes != "" || known || resolver.OwnsTarget(hermesTarget, "wrapper") {
+				t.Fatalf("unreadable store matched: owned=%v profile=%q known=%v", owned, hermes, known)
+			}
+			resolver.Forget("pane")
+			if resolver.RememberVerifiedHermes(hermesTarget, "wrapper", "zeus") == nil || resolver.ReconcileOwnership(nil) == nil {
+				t.Fatal("wrote to or reconciled an unavailable store")
+			}
+			if after, _ := os.ReadFile(path); string(after) != string(before) {
+				t.Fatalf("ownership file rewritten: %s", after)
+			}
+		})
+	}
+}
+
+func TestStaleHermesRecordsAreDroppedOnLoad(t *testing.T) {
+	dir, path := ownershipFixture(t)
+	resolver, _ := hermesResolver(t, dir, path)
+	moved := PaneIdentity{PaneID: "moved", TerminalID: "terminal"}
+	pending := PaneIdentity{PaneID: "pending", TerminalID: "terminal"}
+	requireNoError(t, resolver.RememberVerifiedHermes(hermesTarget, "wrapper", "apollo"))
+	requireNoError(t, resolver.RememberVerified(moved, "wrapper"))
+	requireNoError(t, resolver.BeginLaunchOwnership(pending, "wrapper"))
+	records := []hermesOwnership{
+		{Target: hermesTarget, HermesProfile: "apollo"},
+		{Target: PaneIdentity{PaneID: "moved", TerminalID: "elsewhere"}, HermesProfile: "zeus"},
+		{Target: pending, HermesProfile: "zeus"},
+		{Target: PaneIdentity{PaneID: "gone", TerminalID: "terminal"}, HermesProfile: "zeus"},
+	}
+	data, err := json.Marshal(records)
+	requireNoError(t, err)
+	requireNoError(t, os.WriteFile(hermesStorePath(path), data, 0600))
+	restarted, hermes := hermesResolver(t, dir, path)
+	if _, got, known := restarted.OwnedHermesProfile(moved, "wrapper"); hermes != "apollo" || got != "" || known {
+		t.Fatalf("profiles = %q and %q (known=%v), want apollo and an unknown one", hermes, got, known)
+	}
+	if owned, got, _ := restarted.OwnedHermesProfile(pending, "wrapper"); owned || got != "" {
+		t.Fatalf("pending record answered: %v %q", owned, got)
+	}
+	if rewritten, _ := os.ReadFile(hermesStorePath(path)); !strings.Contains(string(rewritten), "apollo") || strings.Contains(string(rewritten), "zeus") {
+		t.Fatalf("stale records kept on disk: %s", rewritten)
+	}
+}
+
+func TestHermesRecordPersistenceFailureKeepsThePreviousRecord(t *testing.T) {
+	dir, path := ownershipFixture(t)
+	resolver, _ := hermesResolver(t, dir, path)
+	requireNoError(t, resolver.RememberVerifiedHermes(hermesTarget, "wrapper", "apollo"))
+	requireNoError(t, os.Chmod(filepath.Dir(path), 0500))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(path), 0700) })
+	if resolver.RememberVerifiedHermes(hermesTarget, "wrapper", "zeus") == nil {
+		t.Fatal("ignored a write failure")
+	}
+	if owned, hermes, known := resolver.OwnedHermesProfile(hermesTarget, "wrapper"); !owned || hermes != "apollo" || !known {
+		t.Fatalf("answer after a failed replacement = %v %q known=%v, want the previous apollo", owned, hermes, known)
+	}
+}
+
+// A Hermes launch without `-p` is a known empty profile, unlike a pane with no record.
+func TestHermesLaunchWithoutProfileIsKnownAcrossRestart(t *testing.T) {
+	dir, path := ownershipFixture(t)
+	resolver, _ := hermesResolver(t, dir, path)
+	requireNoError(t, resolver.RememberVerifiedHermes(hermesTarget, "wrapper", ""))
+	restarted, _ := hermesResolver(t, dir, path)
+	requireNoError(t, restarted.ReconcileOwnership([]PaneIdentity{hermesTarget}))
+	if got, known := restarted.ResolveOwnedHermesProfile("pane"); got != "" || !known {
+		t.Fatalf("launch without -p = %q known=%v, want known and empty", got, known)
+	}
+	if owned, got, known := restarted.OwnedHermesProfile(hermesTarget, "wrapper"); !owned || got != "" || !known {
+		t.Fatalf("reuse answer for a launch without -p = %v %q known=%v, want owned, empty and known", owned, got, known)
+	}
+}
+
+func TestOwnershipRecordKeepsItsRolledBackShape(t *testing.T) {
+	if got := reflect.TypeOf(profileOwnership{}).NumField(); got != 3 {
+		t.Fatalf("profileOwnership has %d fields; an added field breaks a rolled-back relay", got)
+	}
+	dir, path := ownershipFixture(t)
+	resolver, _ := hermesResolver(t, dir, path)
+	requireNoError(t, resolver.RememberVerifiedHermes(hermesTarget, "wrapper", "apollo"))
+	file, err := os.Open(path)
+	requireNoError(t, err)
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	var records []profileOwnership
+	if err := decoder.Decode(&records); err != nil || len(records) != 1 || records[0].ProfileID != "wrapper" {
+		t.Fatalf("base decoder: %+v, %v", records, err)
 	}
 }

@@ -426,6 +426,10 @@ ALLOWED = (
     "web/assets/workspace-tools-417.js.br",
     "web/builds/0.23.0-417-8bdcf74f662af4bd/index.html",
     "web/builds/0.23.0-417-8bdcf74f662af4bd/index.html.br",
+    # UP1: the Hermes profile record, kept beside the ownership file so a rolled-back relay still reads it.
+    # Listing a path here is not a review.
+    "internal/profiles/ownership.go",
+    "internal/profiles/ownership_test.go",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")

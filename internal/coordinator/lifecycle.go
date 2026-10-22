@@ -37,6 +37,10 @@ const (
 
 var agentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
+// errHermesProfileConflict refuses a start that would reuse a pane running another
+// Hermes profile. Its text reaches the phone, so it names no profile; the log does.
+var errHermesProfileConflict = errors.New("A Hermes agent is already running there with another profile, or one that was not recorded; stop it first to start with this profile")
+
 type StartRequest struct {
 	ProfileID   string
 	WorkspaceID string
@@ -63,6 +67,8 @@ type Lifecycle struct {
 	profiles     *profiles.Resolver
 	home         string
 	waitForRetry func(context.Context, time.Duration) bool
+	// inventory replaces the Herdr agent list in tests (no socket); nil in production.
+	inventory func(context.Context) (*herdr.Inventory, error)
 }
 
 func NewLifecycle(client *herdr.Client, resolver *profiles.Resolver) *Lifecycle {
@@ -124,7 +130,11 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 			}
 		}()
 	}
-	if existing := l.reconcileExisting(ctx, profile.ID, request); existing.PaneID != "" {
+	existing, err := l.reconcileExisting(ctx, profile, request)
+	if err != nil {
+		return StartResult{}, err
+	}
+	if existing.PaneID != "" {
 		expectedTerminal = existing.TerminalID
 		return StartResult{PaneID: existing.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
 	}
@@ -140,7 +150,7 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 	startupCtx, cancel := context.WithDeadline(ctx, startupDeadline)
 	defer cancel()
 
-	inventory, err := l.herdr.GetInventory(startupCtx)
+	inventory, err := l.agentInventory(startupCtx)
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -189,10 +199,22 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		return result, startErr
 	}
 
-	if err := l.profiles.RememberVerified(ownership, profile.ID); err != nil {
-		return result, partiallyApplied("agent started but profile ownership could not be saved", err)
+	return result, l.rememberLaunch(ownership, profile, request)
+}
+
+// rememberLaunch verifies a launch that really started and, for Hermes, records the
+// profile it was started with (none when no `-p` was sent).
+func (l *Lifecycle) rememberLaunch(ownership profiles.PaneIdentity, profile profiles.Profile, request StartRequest) error {
+	var err error
+	if profile.Kind == "hermes" {
+		err = l.profiles.RememberVerifiedHermes(ownership, profile.ID, request.HermesProfile)
+	} else {
+		err = l.profiles.RememberVerified(ownership, profile.ID)
 	}
-	return result, nil
+	if err != nil {
+		return partiallyApplied("agent started but profile ownership could not be saved", err)
+	}
+	return nil
 }
 
 func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd string) (*herdr.CreateResult, error) {
@@ -329,11 +351,23 @@ func remainingTimeoutMS(ctx context.Context) int {
 	return int(min(remaining, agentStartProcessTimeoutMS))
 }
 
-func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, request StartRequest) profiles.PaneIdentity {
-	inventory, err := l.herdr.GetInventory(ctx)
-	if err != nil {
-		return profiles.PaneIdentity{}
+func (l *Lifecycle) agentInventory(ctx context.Context) (*herdr.Inventory, error) {
+	if l.inventory != nil {
+		return l.inventory(ctx)
 	}
+	return l.herdr.GetInventory(ctx)
+}
+
+// reconcileExisting returns the verified pane a retry should reuse, or an explicit
+// refusal when that pane runs another Hermes profile or one that was not recorded:
+// only a recorded profile equal to the request (including a recorded launch without
+// `-p`) matches. Other kinds carry no Hermes profile and are reused as before.
+func (l *Lifecycle) reconcileExisting(ctx context.Context, profile profiles.Profile, request StartRequest) (profiles.PaneIdentity, error) {
+	inventory, err := l.agentInventory(ctx)
+	if err != nil {
+		return profiles.PaneIdentity{}, nil
+	}
+	var conflict error
 	for _, pane := range inventory.Panes {
 		if pane.Name != request.Name {
 			continue
@@ -346,11 +380,20 @@ func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, req
 			continue
 		}
 		target := profiles.PaneIdentity{PaneID: pane.ID, TerminalID: pane.TerminalID, TabID: pane.TabID, WorkspaceID: pane.WorkspaceID}
-		if l.profiles.OwnsTarget(target, profileID) {
-			return target
+		owned, running, known := l.profiles.OwnedHermesProfile(target, profile.ID)
+		switch {
+		case !owned:
+		case profile.Kind != "hermes" || (known && running == request.HermesProfile):
+			return target, nil
+		case conflict == nil:
+			recorded := "unrecorded"
+			if known {
+				recorded = fmt.Sprintf("%q", running)
+			}
+			conflict = fmt.Errorf("%w (pane %s: recorded %s, requested %q)", errHermesProfileConflict, pane.ID, recorded, request.HermesProfile)
 		}
 	}
-	return profiles.PaneIdentity{}
+	return profiles.PaneIdentity{}, conflict
 }
 
 func workspaceExists(workspaces []herdr.Workspace, workspaceID string) bool {
