@@ -206,6 +206,10 @@ absence check had a definite answer (an unreadable `/etc/hosts` or keychain list
 The baseline refuses a real `herdr` on the service wrapper's search path and a manager other than the system one; a refusal case counts only with a known snapshot and a
 product exit that is neither 0 nor a timeout (124, 125, 137).
 
+On macOS the per-run CA is removed from the System keychain by its SHA-1 (`security delete-certificate -Z`) and its absence from the keychain listing is proven; `security remove-trusted-cert`
+is not used, because it hangs as root on current runner images (actions/runner-images#12116). The admin trust-settings record of that destroyed per-run CA stays on the disposable VM, which is
+harmless: the CA private key is deleted at creation, the certificate and the `/etc/hosts` line are gone, and the VM is destroyed.
+
 The probe also records **diagnostic facts** so a failed run names its cause: for each real macOS manager query its status, size and a sanitized shape hint (`gui_print_status`, `gui_nul`, `gui_bytes`,
 `gui_print_err` for `launchctl print gui/UID`; `disabled_status`, `disabled_bytes`, `disabled_admission`, `disabled_head`, `disabled_tail`, `disabled_err` for `launchctl print-disabled`, whose admission
 reason is `pass`, `over-limit`, `nul`, `header`, `trailer` or `empty`, the product's own grammar: blank lines ignored, a `disabled services = {` section of `"label" => true|false|enabled|disabled` rows, further sections such as macOS 13+'s `login item associations` allowed; the helper and the product read it identically, and the product reads the domain listing, 89,044 bytes on macos-15, by status alone, so `gui_nul` and `gui_bytes` are evidence only), and the first failing baseline sub-check (`baseline_failed`: a `path-*` name, `manager-path-unread`,

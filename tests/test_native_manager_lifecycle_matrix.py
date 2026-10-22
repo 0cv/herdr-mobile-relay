@@ -1689,6 +1689,33 @@ class Wiring(unittest.TestCase):
             code, log, err = self.run_cleanup("negative_trust %s" % status, {}, extra=("negative_trust",))
             self.assertEqual((code, "fact trust_negative %s" % fact in log, "fail" in log), (want, True, want == 1), (status, log, err))
 
+    def test_trust_removal_deletes_the_macos_ca_by_sha1_without_the_hanging_remove_trusted_cert_and_proves_its_absence(self):
+        sha, chain, fails = "A1B2" * 10, "/Library/Keychains/System.keychain", 'bsudo() { echo "bsudo $*" >> "$LOG"; return 1; }\n'
+        base = {"S": "/s", "RUN": "7", "ATT": "1", "CA_SHA1": sha}
+        driver = self.text("scripts/ci/run-native-lifecycle.sh")
+        self.assertEqual([l for l in driver.splitlines() if "remove-trusted-cert" in l and not l.lstrip().startswith("#")], [])  # it hangs as root on current runner images (runner-images#12116): never run
+        code, log, err = self.run_cleanup("priv trust-del", dict(base, OS="Darwin"), extra=("priv",))
+        self.assertEqual((code, log.splitlines()), (0, ["bsudo security delete-certificate -Z %s %s" % (sha, chain)]), (log, err))  # exactly one privileged call: the delete by SHA-1
+        self.assertNotIn("remove-trusted-cert", log)
+        code, log, err = self.run_cleanup(fails + "priv trust-del", dict(base, OS="Darwin"), extra=("priv",))
+        self.assertEqual((code, log.splitlines()), (1, ["bsudo security delete-certificate -Z %s %s" % (sha, chain)]), (log, err))  # a failed delete fails the operation
+        code, log, err = self.run_cleanup("priv trust-del", dict(base, OS="Linux"), extra=("priv",))
+        self.assertEqual((code, log.splitlines()), (0, ["bsudo rm -f /usr/local/share/ca-certificates/herdr-nlt-7-1.crt", "bsudo update-ca-certificates --fresh"]), (log, err))  # Linux unchanged
+        code, log, err = self.run_cleanup(fails + "priv trust-del", dict(base, OS="Linux"), extra=("priv",))
+        self.assertEqual((code, log.splitlines()), (1, ["bsudo rm -f /usr/local/share/ca-certificates/herdr-nlt-7-1.crt"]), (log, err))
+        # cl_trust end to end (a stubbed keychain listing): the delete runs first, then the listing must hold no trace of the SHA-1; only a definite answer proves absence.
+        listing = lambda *hashes: "".join("SHA-256 hash: 00\nSHA-1 hash: %s\nkeychain: \"%s\"\n" % (h, chain) for h in hashes)
+        find = 'security() { echo "security $*" >> "$LOG"; [ -z "$KEYS" ] || printf "%s\\n" "$KEYS"; return "$KEYS_RC"; }\n'
+        darwin = dict(base, OS="Darwin", TRUSTED="yes", KEYS_RC="0")
+        for keys, rc, want in ((listing(sha), "0", 1), (listing("FFFF" * 10, sha.lower()), "0", 1), (listing("FFFF" * 10), "0", 0), ("", "44", 0),
+                               (listing("FFFF" * 10), "1", 1), ("", "128", 1)):  # status 44 is the empty keychain; any other failed listing is unknown, never absent
+            code, log, err = self.run_cleanup(find + "cl_trust", dict(darwin, KEYS=keys, KEYS_RC=rc), extra=("priv", "cl_trust"))
+            self.assertEqual((code, log.splitlines()), (want, ["bsudo security delete-certificate -Z %s %s" % (sha, chain), "security find-certificate -a -Z %s" % chain]), (keys, rc, log, err))
+        code, log, err = self.run_cleanup(fails + find + "cl_trust", dict(darwin, KEYS=""), extra=("priv", "cl_trust"))
+        self.assertEqual((code, log.splitlines()), (1, ["bsudo security delete-certificate -Z %s %s" % (sha, chain)]), (log, err))  # a failed delete is never rescued by a clean listing
+        code, log, err = self.run_cleanup(find + "cl_trust", dict(darwin, TRUSTED=""), extra=("priv", "cl_trust"))
+        self.assertEqual((code, log), (0, ""), err)  # nothing was trusted: nothing to remove
+
     def test_gui_domain_size_check_uses_one_captured_listing(self):
         stub = r"""launchctl() { case "$1" in print) [ "$LC_BYTES" != fail ] || return 1; head -c "$LC_BYTES" /dev/zero | tr '\0' x ;; print-disabled) printf 'disabled services = {\n}\n' ;; esac; }
 """

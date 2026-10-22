@@ -135,11 +135,13 @@ priv() {  # The ONLY sudo sites (the long-lived TLS front is the one unbounded c
             else
                 bsudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$S/pki/ca.pem"
             fi ;;
+        # macOS deletes the per-run CA by its SHA-1: `security remove-trusted-cert` hangs on current runner images (actions/runner-images#12116) and is never called.
+        # The admin trust-settings record of the deleted per-run CA stays on the disposable VM; cl_trust proves the certificate itself absent from the System keychain.
         trust-del)
             if [ "$OS" = Linux ]; then
                 bsudo rm -f "/usr/local/share/ca-certificates/herdr-nlt-$RUN-$ATT.crt" && bsudo update-ca-certificates --fresh
             else
-                bsudo security remove-trusted-cert -d "$S/pki/ca.pem" && bsudo security delete-certificate -Z "$CA_SHA1" /Library/Keychains/System.keychain
+                bsudo security delete-certificate -Z "$CA_SHA1" /Library/Keychains/System.keychain
             fi ;;
         front) sudo -n "$PY" -I -B "$S/native-lifecycle-host.py" tls-front --cert "$S/pki/leaf.pem" --key "$S/pki/leaf.key" --uid "$SUID" --gid "$SGID" \
             --upstream "$1" --log "$S/run/hits.log" --run "$S/run" ;;
