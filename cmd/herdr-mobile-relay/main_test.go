@@ -74,6 +74,8 @@ func TestSupportCommandProjectsLoadedPrivateState(t *testing.T) {
 	if err != nil || os.Chmod(filepath.Dir(dir), 0o700) != nil || os.Chmod(dir, 0o700) != nil {
 		t.Fatal("private fixture path unavailable")
 	}
+	// Select the canonical private directory, not the helper's possibly symlinked root.
+	t.Setenv("HERDR_RELAY_ENV", filepath.Join(dir, "relay.env"))
 	const secret = "command-private-canary"
 	if err := support.Write(dir, support.Snapshot{
 		Version: secret, Revision: secret, Protocol: 3, ReleaseDirectory: secret,
@@ -90,7 +92,7 @@ func TestSupportCommandProjectsLoadedPrivateState(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, runErr, output := captureRunStdout(t, []string{"support"})
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		if code != 1 || runErr == nil || len(output) != 0 {
 			t.Fatal("unsupported native acquisition returned a document")
 		}
@@ -100,6 +102,26 @@ func TestSupportCommandProjectsLoadedPrivateState(t *testing.T) {
 			!bytes.Contains(output, []byte(`"activity_failures": 4`)) ||
 			bytes.Contains(output, []byte(`"release_directory"`)) {
 			t.Fatal("real support command did not emit only bounded historical projection")
+		}
+		decoder := json.NewDecoder(bytes.NewReader(output))
+		decoder.DisallowUnknownFields()
+		var document support.PublicSupport
+		if err := decoder.Decode(&document); err != nil {
+			t.Fatal("support command emitted an invalid public document:", err)
+		}
+		var extra support.PublicSupport
+		if err := decoder.Decode(&extra); err != io.EOF {
+			t.Fatal("support command emitted a trailing document or invalid data:", err)
+		}
+		if document.Schema != "support-public-v1" || document.Source != "persisted_snapshot" ||
+			document.Meaning != "historical_only_not_current_health_or_admission" ||
+			document.RecordedReadiness != "ready" || document.RecordedInventory != "ready" ||
+			document.Protocol == nil || *document.Protocol != 3 ||
+			document.ActivityFailures == nil || *document.ActivityFailures != 4 ||
+			document.TopologyRetries == nil || *document.TopologyRetries != 0 ||
+			document.PollFailures == nil || *document.PollFailures != 0 ||
+			document.RecentErrorCount == nil || *document.RecentErrorCount != 1 {
+			t.Fatal("support command did not emit the exact historical fixture projection")
 		}
 	}
 	after, err := os.ReadFile(support.Path(dir))
