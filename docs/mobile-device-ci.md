@@ -163,8 +163,10 @@ Once sampling ends,
 `android-gms-settle.json` records the decision, sampling failures and every
 sample, and the step only warns if that file cannot be written. The
 normal-retirement exception admits only
-isolated Chrome sandbox helpers with a complete in-interval fork/start identity
-whose Chrome zygote is in the START inventory, or is absent from it and was forked
+isolated Chrome sandbox helpers with a complete in-interval fork/start identity,
+absent from the START inventory and absent from the END inventory unless listed
+there under the same process name (that inventory is taken just before the END
+marker), whose Chrome zygote is in the START inventory, or is absent from it and was forked
 exactly once, by `zygote64`, inside the measurement, remains in the END inventory
 and never exits. The helper must then end with either an orderly Chromium child
 exit and matching Zygote exit status zero, plus, logged after the start record and

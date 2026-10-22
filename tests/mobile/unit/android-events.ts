@@ -493,6 +493,20 @@ androidEventTests.push(['hosted 39656482139 helpers retire with any process-stat
   assert.deepEqual(sameMillisecond.fatalEvents, []);
 }]);
 
+androidEventTests.push(['hosted 39750084306 a helper still listed in the END inventory under its own name retires inside the measurement', async () => {
+  const log = await lateHelperLog();
+  const helper = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:22';
+  const listed = (name: string) => measuredAndroidEvents(log, lateSnapshot('start', lateProcesses.before),
+    lateSnapshot('end', { ...lateProcesses.after, '10768': name }), []);
+  const own = listed(helper);
+  assert.deepEqual(own.issues, []);
+  assert.deepEqual(own.fatalEvents, []);
+  assert.deepEqual(own.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154']);
+  const other = listed(`${helper.slice(0, -2)}23`);
+  assert.ok(!other.normalRetirements.some((retirement) => retirement.pid === '10768'));
+  assert.ok(other.fatalEvents.some((event) => event.includes('(pid 10768)')));
+}]);
+
 const lateRejections: [string, string, (log: string) => string][] = [
   ['death label without a process state', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg')],
   ['death label with extra words', '10768', (log) => log.replace('has died: fg  SVC ', 'has died: fg  SVC  extra')],

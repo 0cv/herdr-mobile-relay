@@ -226,8 +226,9 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
   for (const birth of records) {
     if (birth.tag !== 'ActivityManager') continue;
     const start = birth.message.match(/^Start proc ([1-9]\d*):(com\.android\.chrome:sandboxed_process0:org\.chromium\.content\.app\.SandboxedProcessService0:(\d+))\/u0ai(0|[1-9]\d{0,3}) for {2}\{com\.android\.chrome\/org\.chromium\.content\.app\.SandboxedProcessService0:(\d+)\}$/u);
-    if (!start || start[3] !== start[5] || processes[start[1]] || remaining[start[1]] || Number(start[4]) > 8999
-      || processes[birth.pid] !== 'system_server') continue;
+    // The END inventory is taken before the END marker, so it can still list a helper that retires inside the measurement.
+    if (!start || start[3] !== start[5] || processes[start[1]] || (remaining[start[1]] && remaining[start[1]] !== start[2])
+      || Number(start[4]) > 8999 || processes[birth.pid] !== 'system_server') continue;
     const [, pid, processName, , isolated] = start;
     const births = records.filter((record) => record.tag === 'ActivityManager' && record.message.startsWith(`Start proc ${pid}:`));
     const forks = records.filter((record) => record.tag === 'Zygote' && record.message === `Forked child process ${pid}`);
