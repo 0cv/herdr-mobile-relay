@@ -689,7 +689,7 @@ class Wiring(unittest.TestCase):
             priv() { echo "priv $*" >> "$LOG"; }
             HX() { echo "HX $*" >> "$LOG"; [ "$1" != exists ] || { if grep -q '^RUNB' "$LOG" 2> /dev/null; then printf '%s' "${EXISTS_AFTER-$EXISTS}"; else printf '%s' "$EXISTS"; fi; }; }
             fact() { echo "fact $*" >> "$LOG"; }
-            as_subject() { echo "AS $*" >> "$LOG"; }
+            as_subject() { echo "AS $*" >> "$LOG"; case "$*" in *"cd -P"*) printf '%s\\n' "$PHYS" ;; esac; }
             RUNB() { echo "RUNB $*" >> "$LOG"; cat > /dev/null; }
             wait_for() { shift; "$@"; }
             snap() { local n=0; [ ! -f "$NCALL" ] || n=$(cat "$NCALL"); echo $((n + 1)) > "$NCALL"; if [ "$n" -eq 0 ]; then printf '%s\\n' "$SNAP1"; else printf '%s\\n' "$SNAP2"; fi; }
@@ -701,7 +701,7 @@ class Wiring(unittest.TestCase):
             log = os.path.join(tmp, "log")
             head = "set +e\nLOG=%s NCALL=%s/ncall GCALL=%s/gcall PYO=%s HOSTPY=%s\n" % (shlex.quote(log), tmp, tmp, shlex.quote(sys.executable), shlex.quote(str(ROOT / "scripts/ci/native-lifecycle-host.py")))
             script = (head + "\n".join(one(n) for n in ("none", "absent", "no_such_user", "owned_account", "jget", "OX", "gone", "sgone") + tuple(oneliners)) + stubs
-                      + "".join(self.shell_function(n) for n in ("cl_user", "cl_product", "cl_foreign") + tuple(extra)) + call)
+                      + "".join(self.shell_function(n) for n in ("cl_user", "cl_product", "cl_foreign", "physical_release") + tuple(extra)) + call)
             done = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script], capture_output=True, text=True,
                                   env=dict({"PATH": "/usr/bin:/bin", "HOME": tmp, "GETENT_OUT": "", "GETENT_SEQ": "0"}, **env))
             return done.returncode, pathlib.Path(log).read_text() if os.path.exists(log) else "", done.stderr
@@ -736,7 +736,7 @@ class Wiring(unittest.TestCase):
         self.assertEqual((code, "bsudo useradd" in log, "bsudo userdel --remove nlt-1-1" in log), (0, True, True), (log, err))
         j = lambda **kw: json.dumps(kw)
         gone = j(active="absent", origin="absent", definition_hash="absent")
-        product = {"PRODUCT": "yes", "SHIMDIR": "/shim", "STUB": "", "REL": "/rel", "DEF": "/def", "LDEF": "/ldef", "CONF": "/conf", "THOME": "/h"}
+        product = {"PRODUCT": "yes", "SHIMDIR": "/shim", "STUB": "", "REL": "/rel", "DEF": "/def", "LDEF": "/ldef", "CONF": "/conf", "THOME": "/h", "VER": VERSION, "SHA": SHA, "PHYS": "/rel/releases/%s-%s-linux-amd64" % (VERSION, SHA)}
         # (answer for every owned path before the uninstall, answer after it, snapshot, expected status, uninstall attempted): success needs the manager absent AND every owned
         # path (release, config, cache, link, definition) definitely gone; an empty or `unknown` answer, or residue the uninstall left, is never "clean".
         for before, after, snapshot, want, uninstall in (("no", "no", gone, 0, False), ("", "no", gone, 0, True), ("", "", gone, 1, True), ("unknown", "unknown", gone, 1, True),
@@ -756,6 +756,83 @@ class Wiring(unittest.TestCase):
             code, log, err = foreign(before, **now)
             self.assertEqual(code, 1, (before, now, err))
             self.assertNotIn("rm -rf", log, (before, now))
+
+    def mx_calls(self):
+        """Every `mx SUBCOMMAND ...` call of the driver as an argv: continuation lines joined, `$id_args` expanded to the flags the driver defines, each value a placeholder."""
+        driver = re.sub(r"\\\n\s*", " ", self.text("scripts/ci/run-native-lifecycle.sh"))
+        id_args, calls = re.search(r'id_args="([^"]*)"', driver).group(1), []
+        for line in (l for l in driver.splitlines() if not l.lstrip().startswith("#")):
+            for found in re.finditer(r"(?<![\w$./-])mx (\S+)(.*)", line):
+                lexer = shlex.shlex(found.group(2).replace("$id_args", id_args), posix=True, punctuation_chars=True)
+                lexer.whitespace_split = True
+                words = itertools.takewhile(lambda w: w[0] not in "|&;<>()", lexer)  # up to `;;`, `||`, ...
+                calls.append([found.group(1)] + [w if w.startswith("--") else "0" for w in words])
+        return calls
+
+    def test_every_mx_call_in_the_driver_parses_with_the_real_parser(self):
+        parser, calls = m.build_parser(), self.mx_calls()
+
+        def refusal(argv):  # argparse's own message, or "" when the real parser accepts the call
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                try:
+                    parser.parse_args(argv)
+                except SystemExit:
+                    return err.getvalue().strip().splitlines()[-1]
+            return ""
+        self.assertEqual(sorted(c[0] for c in calls), ["bundle", "case-add", "cases", "probe", "producer"])  # every receipt call is read, none skipped
+        self.assertEqual(self.text("scripts/ci/run-native-lifecycle.sh").count('"$MATRIX"'), 1)  # and none reaches the module except through mx
+        for call in calls:
+            self.assertEqual(refusal(call), "", call)
+            for flag in ("--run-id", "--run-attempt", "--sha"):  # non-vacuous: the parser refuses the call with any identity flag dropped, and any unknown flag
+                self.assertIn("required", refusal(call[:call.index(flag)] + call[call.index(flag) + 2:]), (call[0], flag))
+            self.assertIn("unrecognized", refusal(call + ["--bogus", "0"]), call[0])
+
+    def test_no_driver_line_runs_the_full_uninstall_through_the_current_symlink(self):
+        code = [l for l in self.text("scripts/ci/run-native-lifecycle.sh").splitlines() if not l.lstrip().startswith("#")]
+        self.assertEqual([l for l in code if "current/relay/uninstall.sh" in l], [])  # the native remover refuses a symlinked ancestor; the product's own entrypoint never uses the link
+
+    def test_the_physical_release_resolver_yields_the_physical_path_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            top, name = os.path.realpath(tmp), "%s-%s-linux-amd64" % (VERSION, SHA)
+            rel, other = top + "/rel", "%s-%s-linux-amd64" % (VERSION, "b" * 40)
+            for d in (name + "/relay", other, "9.9.9-%s-linux" % SHA):
+                os.makedirs("%s/releases/%s" % (rel, d))
+            os.makedirs(top + "/outside")
+            os.symlink(top + "/outside", "%s/releases/%s-link" % (rel, name))  # named for this revision, but it points outside releases/
+            os.symlink(rel, top + "/alias")
+
+            def resolve(target, root=rel):
+                if os.path.lexists(rel + "/current"):
+                    os.remove(rel + "/current")
+                if target:
+                    os.symlink(target, rel + "/current")
+                code, log, err = self.run_cleanup('as_subject() { "$@"; }\np=$(physical_release); rc=$?; echo "phys=$p" >> "$LOG"; exit $rc', {"REL": root, "VER": VERSION, "SHA": SHA})
+                return code, log.strip()
+            physical = (0, "phys=%s/releases/%s" % (rel, name))
+            self.assertEqual(resolve("releases/" + name), physical)  # a relative link and an absolute one both yield the physical directory, never the link
+            self.assertEqual(resolve("%s/releases/%s" % (rel, name)), physical)
+            for target in (name + "-link", "releases/" + name + "-link", "releases/" + name + "/relay", "releases/" + other, "releases/9.9.9-%s-linux" % SHA, "releases", "../outside", "releases/missing", None):
+                self.assertEqual(resolve(target), (1, "phys="), target)  # outside releases/, nested, another revision or version, the root itself, dangling, absent
+            self.assertEqual(resolve("releases/" + name, top + "/alias"), (1, "phys="))  # a release root reached through a symlink is not the owned physical root
+
+    def test_every_full_uninstall_site_runs_from_the_physical_release_and_fails_closed(self):
+        name = "%s-%s-linux-amd64" % (VERSION, SHA)
+        absent = json.dumps({"active": "absent", "origin": "absent", "definition_hash": "absent"})
+        env = {"REL": "/rel", "VER": VERSION, "SHA": SHA, "PRODUCT": "yes", "SHIMDIR": "/shim", "STUB": "", "DEF": "/def", "LDEF": "/ldef", "CONF": "/conf", "THOME": "/h",
+               "SNAP1": absent, "SNAP2": absent, "EXISTS": "yes", "EXISTS_AFTER": "no", "PHYS": "/rel/releases/" + name}
+        stubs = 'case_begin() { CASE=$1; }\ncase_end() { echo "case_end $*" >> "$LOG"; }\nstage_put() { echo "stage_put $*" >> "$LOG"; }\nsnap_of() { echo "$SNAP1"; }\nprocs_gone() { :; }\nEV=$HOME\n'
+        extra = ("expect", "residue_gone", "case_full_uninstall", "teardown_refusal_base")
+        for call in ("cl_product", "case_full_uninstall", "teardown_refusal_base"):  # the real driver functions, every effect a logging stub
+            code, log, err = self.run_cleanup(stubs + call, env, extra=extra)
+            self.assertEqual(code, 0, (call, log, err))
+            self.assertEqual(re.findall(r"(?m)^RUNB .*", log), ["RUNB 300 /rel/releases/%s/relay/uninstall.sh" % name], call)  # exactly one uninstall, from the physical directory
+            self.assertNotIn("/current/", log)
+            self.assertEqual(call == "cl_product", 'AS /bin/sh -c [ -x "$1" ] _ /rel/releases/%s/relay/uninstall.sh' % name in log, call)  # the executable check uses it too
+            for bad in ("", "/rel/current", "/rel/releases", "/rel/releases/%s/relay" % name, "/rel/releases/9.9.9-%s-linux" % SHA, "/rel/releases/%s-%s-linux" % (VERSION, "b" * 40), "/elsewhere/releases/" + name, "/rel/other/" + name):
+                code, log, err = self.run_cleanup(stubs + call, dict(env, PHYS=bad), extra=extra)
+                self.assertEqual(code, 1, (call, bad, log, err))
+                self.assertFalse(any(word in log for word in ("RUNB", "stage_put", "case_end")), (call, bad, log))  # nothing runs, no shim is staged, no case is recorded as passed
 
     def test_baseline_path_check_includes_the_manager_inherited_path_and_per_tool_bins(self):
         driver = self.text("scripts/ci/run-native-lifecycle.sh")

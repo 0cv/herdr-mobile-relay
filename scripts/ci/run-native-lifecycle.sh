@@ -226,6 +226,11 @@ residue_gone() {  # every path the product owns is definitely absent; an uninspe
     local p
     for p in "$REL" "$CONF" "$THOME/.cache/herdr-mobile-relay" "$SHIMDIR/herdr-mobile-relay" "$SHIMDIR/herdr" "$DEF" "$LDEF"; do sgone "$p" || return 1; done
 }
+physical_release() {  # the installed release as a PHYSICAL path, proved owned: the product's own entrypoint (the Herdr plugin pane runs `bash relay/uninstall.sh` from the package directory) never goes through the `current` link, and its native remover refuses a symlinked ancestor
+    local p
+    p=$(as_subject /bin/sh -c 'cd -P "$1" && pwd -P' _ "$REL/current") && [ -n "$p" ] || return 1
+    case "$p" in "$REL/releases/${VER}-${SHA}-"*/*) return 1 ;; "$REL/releases/${VER}-${SHA}-"*) printf '%s\n' "$p" ;; *) return 1 ;; esac  # one directory directly under releases/, named for this version and revision
+}
 cl_hosts() {
     local rc=0
     [ -n "$HOSTS_LINE" ] || return 0
@@ -468,7 +473,7 @@ case_end() {  # PHASE PRODUCT-EXIT [MANUAL-START-COUNT] [login]
     byp=$(bystander full)
     [ "$by" = "$BY_BASE" ] && [ "$by" != unknown ] || stable=false  # the helper prints `unknown` when any bystander field was unobserved: two unknowns are not "unchanged"
     [ "${4:-}" = login ] || { [ "$byp" = "$BYP0" ] && [ "$byp" != unknown ]; } || stable=false
-    mx case-add --file "$CASES" --os "$OS" --sha "$SHA" --id "$CASE" --phase "$1" --exit "$2" --before "$BEFORE" --after "$after" --readiness "$(local_ident)" \
+    mx case-add --file "$CASES" --os "$OS" --sha "$SHA" --run-id "$RUN" --run-attempt "$ATT" --id "$CASE" --phase "$1" --exit "$2" --before "$BEFORE" --after "$after" --readiness "$(local_ident)" \
         --counts "$tally" --base "$CNT0" --manual-start "${3:-0}" --target "$TSTATE" --bystander "$by" --stable "$stable" --mid "${MID:-n/a}" || fail 'the case evidence was refused'
     CASE='' TSTATE=n/a MID=''
 }
@@ -509,14 +514,15 @@ cl_fixtures() {
     [ "$(snap_of "$BYL" "$BYD" | jget owned_pid_digest)" = none ] && as_subject /bin/rm -f "$BYD" && { [ "$OS" = Darwin ] || as_subject "$MGRPATH" --user daemon-reload; }
 }
 cl_product() {  # a failure mid-lifecycle: use the product's own uninstall, and only on a KNOWN owned identity; success needs every owned path definitely gone
-    local a o
+    local a o rel
     [ -n "$PRODUCT" ] || return 0
     as_subject /bin/rm -f "$SHIMDIR/herdr" "${STUB:-$SHIMDIR/herdr}"
     a=$(snap | jget active) o=$(snap | jget origin)
     if [ "$a" = absent ] && residue_gone; then return 0; fi  # nothing is loaded and no release, config, cache, link or definition remains (an unanswered probe is not "gone")
     [ "$a" = absent ] || [ "$o" = "$DEF" ] || return 1
-    as_subject /bin/sh -c '[ -x "$1" ]' _ "$REL/current/relay/uninstall.sh" || return 1
-    printf 'y\n' | RUNB 300 "$REL/current/relay/uninstall.sh" > /dev/null && [ "$(snap | jget active)" = absent ] && residue_gone
+    rel=$(physical_release) || return 1
+    as_subject /bin/sh -c '[ -x "$1" ]' _ "$rel/relay/uninstall.sh" || return 1
+    printf 'y\n' | RUNB 300 "$rel/relay/uninstall.sh" > /dev/null && [ "$(snap | jget active)" = absent ] && residue_gone
 }
 cl_foreign() {  # removes only the planted fixture: its origin and definition must still equal the record taken after planting and nothing may run; any other identity is retained
     local f v now
@@ -643,11 +649,13 @@ case_login_relaunch() {
     case_end login-relaunch 0 0 login
 }
 case_full_uninstall() {
+    local rel
     case_begin a-full-uninstall
+    rel=$(physical_release) || fail 'cannot prove the installed release directory (it must be one physical directory under releases/ for this revision)'
     printf '#!/bin/sh\nexec %s -I -B %s/native-lifecycle-host.py herdr --log %s/run/hits.log -- "$@"\n' "$PY" "$S" "$S" > "$EV/herdr.shim"
     stage_put "$EV/herdr.shim" "$SHIMDIR/herdr" 700
     RC=0
-    printf 'y\n' | RUNB 300 "$REL/current/relay/uninstall.sh" || RC=$?
+    printf 'y\n' | RUNB 300 "$rel/relay/uninstall.sh" || RC=$?
     as_subject /bin/rm -f "$SHIMDIR/herdr"
     expect "$RC" 0 'full uninstall exit'
     expect "$(snap | jget active)" absent 'owned label after uninstall'
@@ -729,8 +737,10 @@ refusal_cases() {
     if [ "$OS" = Darwin ]; then case_foreign_launchd; else case_foreign_systemd foreign-systemd-fragment; case_foreign_systemd foreign-systemd-dropin; fi
 }
 teardown_refusal_base() {  # no Herdr adapter is installed here: the product notes that plugin registration is unavailable and finishes
+    local rel
+    rel=$(physical_release) || fail 'cannot prove the installed release directory (it must be one physical directory under releases/ for this revision)'
     RC=0
-    printf 'y\n' | RUNB 300 "$REL/current/relay/uninstall.sh" || RC=$?
+    printf 'y\n' | RUNB 300 "$rel/relay/uninstall.sh" || RC=$?
     expect "$RC" 0 'baseline teardown'
     expect "$(snap | jget active)" absent 'baseline label after teardown'
     residue_gone || fail 'the baseline teardown left a release, config, cache, link or definition, or it cannot be inspected'

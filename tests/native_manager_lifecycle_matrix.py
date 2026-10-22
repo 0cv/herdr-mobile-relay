@@ -404,7 +404,7 @@ def write(path, doc):
     os.replace(path + ".tmp", path)
 
 
-def main(argv):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("needs").add_argument("names", nargs="+")
@@ -443,7 +443,11 @@ def main(argv):
             p.add_argument("--producer", required=True)
             p.add_argument("--cleanup", required=True)
             p.add_argument("--failed", required=True)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
     try:
         if args.command == "needs":
             check_needs(os.environ.get("HERDR_NEEDS_JSON", ""), args.names)
