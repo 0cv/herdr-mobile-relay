@@ -31,8 +31,8 @@ PROJECTION_LIMIT = 540.0  # seconds; 60% of SUITE_BOUND: room for run-to-run var
 RUNNER_OS = {"macos-15": "Darwin", "ubuntu-24.04": "Linux"}
 NATIVE = "tests/test_native_install.sh"
 UNINSTALL_CLI = "tests/test_service_uninstall_cli.py"
-# The suites job: the nine suites that run unsharded (the native install and the uninstall CLI are their own sharded jobs).
-SUITES = ("tests/test_common.sh", "tests/test_service_credentials.sh", "tests/test_service_supervision.py",
+# The suites job: the ten suites that run unsharded (the native install and the uninstall CLI are their own sharded jobs).
+SUITES = ("tests/test_common.sh", "tests/test_service_credentials.sh", "tests/test_install.sh", "tests/test_service_supervision.py",
           "tests/test_service_transport_dispatch.py", "tests/test_plugin_doctor.py", "tests/test_setup_menu.py",
           "tests/test_uninstall.sh", "tests/test_tailscale_cli_setup_failure.py", "tests/test_release_scripts.sh")
 # The exhaustive inventory enumerated from the committed suite at 9ad13cba (baseline-inventory.json): the totals, the

@@ -16,7 +16,8 @@ way, with unchanged 900 s suite and 40 s invocation bounds. **A fast pass is nev
 | `release.yml` `verify` | tag `v*` | requires `check.yml` **and** a successful *Full* run of the tagged commit (`workflow_dispatch` or nightly; a pull-request run tested a merge commit, not these bytes, and a push run is never accepted); none found fails closed; the existing 1800 s window | - |
 | `resume-benchmark.yml` | `workflow_dispatch` only (was a per-push `check.yml` job) | - | - |
 
-Both service workflows also run the nine unsharded suites on both runners: common, credentials, supervision, dispatch,
+Both service workflows also run the ten unsharded suites on both runners: common, credentials, **install** (the
+hosted macOS run of `install.sh`'s Darwin-specific `stat -f` branch), supervision, dispatch,
 **doctor**, **setup-menu**, full uninstall, Tailscale CLI setup failure and release scripts. Dispatch,
 doctor and setup-menu used to be nested inside the native suite, so one doctor failure hid every native cell; they are now
 required runs with their own exit status and bounds (900 s, 120 s, 180 s). The uninstall CLI used to be the slowest of the
@@ -24,7 +25,7 @@ sequential suites job (its macOS run hit the 900 s bound); it is now its own `un
 `make shell-check` is unchanged and complete (no environment variable selects everything: it still nests them and runs the
 whole uninstall CLI suite, unsharded); `make shell-check-ci-complement` is it minus the native, full-uninstall and
 uninstall-CLI suites, which the service workflows cover on every event `check.yml` runs on.
-`common`, `credentials` and `release` are intentionally still run by both `check.yml` and the service workflows.
+`common`, `credentials`, `install` and `release` are intentionally still run by both `check.yml` and the service workflows.
 
 Branch rules must name the two gate jobs above (and `check`); that hosting configuration is a separate administrative
 prerequisite that no YAML here establishes.

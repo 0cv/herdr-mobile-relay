@@ -2,7 +2,7 @@
 # Service qualification driver for GitHub-hosted CI.
 #
 # Modes (anything else refuses with exit 2):
-#   suites               the nine unsharded suites, each invoked the way the Makefile's
+#   suites               the ten unsharded suites, each invoked the way the Makefile's
 #                        shell-check invokes it. The dispatch, doctor and setup-menu suites that
 #                        tests/test_native_install.sh nests are each their own required run here
 #                        (own exit status, timing and bound), so one doctor failure can no
@@ -345,6 +345,8 @@ run_suite() {
 run_service_suites() {
     run_suite tests/test_common.sh '' /bin/bash tests/test_common.sh
     run_suite tests/test_service_credentials.sh '' /bin/bash tests/test_service_credentials.sh
+    # install.sh's legacy-cache admission has a Darwin-specific stat branch: this is its hosted macOS (and Linux) run.
+    run_suite tests/test_install.sh '' /bin/sh tests/test_install.sh
     run_suite tests/test_service_supervision.py '' "$PYTHON3" tests/test_service_supervision.py
 
     # The dispatch, doctor and setup-menu suites require NATIVE_HELPER at import time: the compiled
@@ -443,10 +445,10 @@ run_uninstall_cli_suite() {
 
 EXPECTED_SUITE_COUNT=0
 case "$mode" in
-    suites) EXPECTED_SUITE_COUNT=9; run_service_suites ;;
+    suites) EXPECTED_SUITE_COUNT=10; run_service_suites ;;
     native) EXPECTED_SUITE_COUNT=1; run_native_suite ;;
     uninstall-cli) EXPECTED_SUITE_COUNT=1; run_uninstall_cli_suite ;;
-    *) EXPECTED_SUITE_COUNT=11; run_service_suites; run_native_suite; run_uninstall_cli_suite ;;
+    *) EXPECTED_SUITE_COUNT=12; run_service_suites; run_native_suite; run_uninstall_cli_suite ;;
 esac
 
 # --------------------------------------------------------------- results ----

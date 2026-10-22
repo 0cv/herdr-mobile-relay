@@ -109,16 +109,56 @@ for key in GH_TOKEN GITHUB_TOKEN; do
 done
 # General callers retain explicit credential precedence; failed second-resource
 # publication restores an existing UNSELECTED destination's exact bytes/mode.
+# The mv overrides below read only a1c_* names: bash scopes dynamically, so a
+# name common.sh also uses as a local (file, pointer, ...) would resolve to the
+# innermost caller's value (set_env_value_atomic's candidate) and fail the wrong mv.
 (
     . "$ROOT/relay/common.sh"
-    file="$WORK/persist-failure.env"; pointer="$WORK/github-token"
-    printf 'KEEP=untouched\n' > "$file"
-    printf 'prior-unselected-content\n' > "$pointer"; chmod 640 "$pointer"
-    cp -p "$file" "$file.before"; cp -p "$pointer" "$pointer.before"
-    mv() { [ "${!#}" != "$file" ] || return 2; command mv "$@"; }
-    if persist_github_token "$file" synthetic-explicit-contract-token; then exit 1; fi
-    cmp "$file" "$file.before"; cmp "$pointer" "$pointer.before"
-    mode="$(stat -c '%a' "$pointer" 2>/dev/null)" || mode="$(stat -f '%Lp' "$pointer")"
-    test "$mode" = 640
+    a1c_dir="$WORK/persist-rename-failure"; mkdir -m 700 "$a1c_dir"
+    a1c_env="$a1c_dir/persist-failure.env"; a1c_pointer="$a1c_dir/github-token"
+    printf 'KEEP=untouched\n' > "$a1c_env"
+    printf 'prior-unselected-content\n' > "$a1c_pointer"; chmod 640 "$a1c_pointer"
+    cp -p "$a1c_env" "$a1c_env.before"; cp -p "$a1c_pointer" "$a1c_pointer.before"
+    a1c_denied=""
+    mv() {
+        if [ "${!#}" = "$a1c_env" ]; then a1c_denied="$a1c_denied env:$(cat "$a1c_pointer")"; return 2; fi
+        command mv "$@"
+    }
+    if persist_github_token "$a1c_env" synthetic-explicit-contract-token; then exit 1; fi
+    # The env-file rename ran AFTER the pointer already held the new token: the second-resource branch was reached.
+    test "$a1c_denied" = " env:synthetic-explicit-contract-token"
+    cmp "$a1c_env" "$a1c_env.before"; cmp "$a1c_pointer" "$a1c_pointer.before"
+    a1c_mode="$(stat -c '%a' "$a1c_pointer" 2>/dev/null)" || a1c_mode="$(stat -f '%Lp' "$a1c_pointer")"
+    test "$a1c_mode" = 640
+    if compgen -G "$a1c_dir/.relay-persist.*" > /dev/null; then
+        echo 'a restored second-resource failure left a private recovery directory' >&2; exit 1
+    fi
+)
+# The same failure, but restoring the first resource fails too: the call fails,
+# says so on stderr and RETAINS the owned private recovery holding the prior bytes.
+(
+    . "$ROOT/relay/common.sh"
+    a1c_dir="$WORK/persist-restore-failure"; mkdir -m 700 "$a1c_dir"
+    a1c_env="$a1c_dir/persist-failure.env"; a1c_pointer="$a1c_dir/github-token"
+    printf 'KEEP=untouched\n' > "$a1c_env"
+    printf 'prior-unselected-content\n' > "$a1c_pointer"; chmod 640 "$a1c_pointer"
+    cp -p "$a1c_env" "$a1c_env.before"; cp -p "$a1c_pointer" "$a1c_pointer.before"
+    a1c_denied=""
+    mv() {
+        a1c_source="${*: -2:1}"
+        if [ "${!#}" = "$a1c_env" ]; then a1c_denied="$a1c_denied env:$(cat "$a1c_pointer")"; return 2; fi
+        if [ "${!#}" = "$a1c_pointer" ] && [ "${a1c_source##*/}" = restore ]; then a1c_denied="$a1c_denied restore"; return 2; fi
+        command mv "$@"
+    }
+    if persist_github_token "$a1c_env" synthetic-explicit-contract-token 2> "$a1c_dir/stderr"; then exit 1; fi
+    # Both renames ran and were refused, in this order: the restoration-failure branch was reached.
+    test "$a1c_denied" = " env:synthetic-explicit-contract-token restore"
+    test "$(cat "$a1c_dir/stderr")" = 'Updater persistence restoration is incomplete; private recovery retained.'
+    cmp "$a1c_env" "$a1c_env.before"
+    set -- "$a1c_dir"/.relay-persist.*
+    test "$#" = 1; test -d "$1"
+    a1c_mode="$(stat -c '%a' "$1" 2>/dev/null)" || a1c_mode="$(stat -f '%Lp' "$1")"
+    test "$a1c_mode" = 700
+    cmp "$1/1" "$a1c_pointer.before"
 )
 printf 'service credential boundaries passed\n'

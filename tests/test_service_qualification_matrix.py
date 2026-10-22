@@ -372,7 +372,8 @@ class UninstallCli(unittest.TestCase):
                 plan({"HERDR_UNINSTALL_CLI_" + k: v for k, v in env.items()})
 
     def test_a_cell_is_the_one_semantic_id_not_a_counter(self):
-        self.assertEqual(len(m.SUITES), 9)
+        self.assertEqual(len(m.SUITES), 10)
+        self.assertEqual(m.SUITES[:3], ("tests/test_common.sh", "tests/test_service_credentials.sh", "tests/test_install.sh"))  # the hosted install run follows credentials
         self.assertNotIn(m.UNINSTALL_CLI, m.SUITES)  # it is its own sharded job now
         self.assertEqual(len({i.lower() for i in CLI_INVENTORY}), len(CLI_INVENTORY))
         self.assertNotRegex(" ".join(CLI_INVENTORY), r"invocation|counter|INVOCATIONS")
