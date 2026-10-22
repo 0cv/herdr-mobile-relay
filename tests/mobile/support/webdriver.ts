@@ -523,9 +523,17 @@ export class AppiumClient {
     throw new ElementLookupError(`APPIUM_ELEMENT: ${locator.using}=${redactText(locator.value)}: element response did not contain an id`);
   }
 
-  async findAll(locator: Locator, timeoutMs = this.requestTimeoutMs): Promise<string[]> {
-    const values = await this.command<Record<string, string>[]>('/elements', 'POST', locator, timeoutMs);
-    return values.map((value) => value['element-6066-11e4-a52e-4f735466cecf'] || value.ELEMENT).filter(Boolean);
+  async findAll(locator: Locator, timeoutMs = this.requestTimeoutMs, policy?: WebDriverRequestPolicy): Promise<string[]> {
+    const values = await this.command<unknown>('/elements', 'POST', locator, timeoutMs, policy);
+    const malformed = () => new ElementLookupError('APPIUM_ELEMENT: malformed element list response');
+    if (!Array.isArray(values)) throw malformed();
+    return values.map((value: unknown) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw malformed();
+      const reference = value as Record<string, unknown>;
+      const id = reference['element-6066-11e4-a52e-4f735466cecf'] ?? reference.ELEMENT;
+      if (typeof id !== 'string' || !id.trim()) throw malformed();
+      return id;
+    });
   }
 
   async click(element: string, timeoutMs?: number, policy?: WebDriverRequestPolicy): Promise<void> {

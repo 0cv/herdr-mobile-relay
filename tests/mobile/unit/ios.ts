@@ -856,7 +856,7 @@ const confirmationProfiles: Record<string, number[]> = {
   'latest-pr': [1_488, 4_587],
 };
 
-for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 'compact-disabled', 'compact-web-content', 'compact-not-hittable', 'compact-hung', 'disabled', 'dismissed', 'limit', 'eighth', 'latest-push', 'earlier-pr', 'earlier-push', 'latest-pr', 'add-missing', 'add-disabled', 'add-hidden', 'add-not-hittable', 'add-budget', 'add-hung'] as const) {
+for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'compact-hidden', 'compact-disabled', 'compact-web-content', 'compact-not-hittable', 'compact-hung', 'disabled', 'dismissed', 'limit', 'eighth', 'latest-push', 'earlier-pr', 'earlier-push', 'latest-pr', 'add-missing', 'add-disabled', 'add-hidden', 'add-not-hittable', 'add-budget', 'add-hung'] as const) {
   test(`recorded Share sheet protocol ${mode} keeps scoped controls and bounded gestures`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -869,6 +869,8 @@ for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 
         if (mode === 'compact-web-content') return `<XCUIElementTypeWebView>${button}</XCUIElementTypeWebView>`;
         return button;
       }) : '';
+    const collapsedSheet = mode === 'collapsed' ? await readFile(join(fixtureDir, 'ios-hosted-39774217447-share-collapsed.xml'), 'utf8') : '';
+    let expanded = false;
     let menuOpened = false;
     let sheet = mode === 'limit' || mode === 'eighth';
     let scrolls = 0;
@@ -880,6 +882,7 @@ for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 
     const scrolling = mode === 'limit' || mode === 'eighth';
     const ready = () => scrolling ? scrolls >= (mode === 'eighth' ? 8 : 9) : scrolls > 0;
     const currentSource = () => {
+      if (mode === 'collapsed' && sheet && !expanded) return collapsedSheet;
       if (compact && !sheet && (!menuOpened || mode === 'compact-no-share')) return compactBrowser;
       if (!sheet || (mode === 'dismissed' && scrolls > 0) || (!scrolling && reads++ === 0)) return browser;
       if (ready()) return after;
@@ -899,6 +902,10 @@ for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 
       }
       if (path.endsWith('/elements')) {
         assert.equal(body.using, 'xpath');
+        if (body.value.includes("@label='View More'")) {
+          assert.equal(xpathCount(source, body.value), 1);
+          return value([element('view-more')]);
+        }
         if (body.value.includes('XCUIElementTypeNavigationBar')) {
           assert.equal(xpathCount(hypotheticalConfirmation, body.value), 1);
           return value([element('add')]);
@@ -951,6 +958,7 @@ for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 
         const id = path.split('/element/')[1].split('/')[0];
         if (id === 'share') sheet = true;
         else if (id === 'page-menu') menuOpened = true;
+        else if (id === 'view-more') expanded = true;
         else if (id.startsWith('target')) {
           assert.ok(ready());
           if (mode === 'add-budget') now = 116_000;
@@ -966,9 +974,10 @@ for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 
       else assert.equal(await operation(), 'target-8');
       assert.equal(scrolls, 8);
       assert.deepEqual(clicks, []);
-    } else if (mode === 'success' || mode === 'compact' || mode in confirmationProfiles) {
+    } else if (mode === 'success' || mode === 'compact' || mode === 'collapsed' || mode in confirmationProfiles) {
       await platform.installFromBrowser();
-      assert.deepEqual(clicks, compact ? ['page-menu', 'share', 'target-1', 'add'] : ['share', 'target-1', 'add']);
+      const actions = compact ? ['page-menu', 'share'] : mode === 'collapsed' ? ['share', 'view-more'] : ['share'];
+      assert.deepEqual(clicks, [...actions, 'target-1', 'add']);
       assert.equal(scrolls, 1);
       assert.equal(confirmationLookups, (confirmationProfiles[mode]?.length ?? 0) + 1);
     } else if (compact) {
@@ -994,6 +1003,121 @@ for (const mode of ['success', 'compact', 'compact-no-share', 'compact-hidden', 
     const lookups = commands.filter((_entry, index) => requests[requests.length - commands.length + index]?.body.value === 'Add');
     assert.ok(lookups.every((entry) => entry.timeoutMs === 8_000), 'confirmation probes must receive a complete native transaction, never optional-loop leftovers');
     assert.equal(driver.snapshot().unusable, ['compact-hung', 'add-hung', 'add-budget', 'add-disabled', 'add-hidden', 'add-not-hittable'].includes(mode));
+  });
+}
+
+for (const mode of ['ready', 'unchanged', 'no-target', 'ambiguous', 'hidden', 'disabled', 'not-hittable', 'web-content', 'foreign-app', 'budget', 'click-budget', 'context-lookup', 'context-click', 'malformed-array', 'malformed-entry', 'malformed-empty-id', 'malformed-number-id', 'malformed-null-entry', 'lookup-timeout', 'click-timeout'] as const) {
+  test(`hosted 39774217447 collapsed Share actions ${mode} require one verified expansion`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const { after } = await shareFixtures();
+    let collapsed = await readFile(join(fixtureDir, 'ios-hosted-39774217447-share-collapsed.xml'), 'utf8');
+    collapsed = collapsed.replace(/<XCUIElementTypeCell\b[^>]*label="View More"[^>]*>[\s\S]*?<\/XCUIElementTypeCell>/u, (cell) => {
+      if (mode === 'hidden') return cell.replace('visible="true"', 'visible="false"');
+      if (mode === 'disabled') return cell.replace('enabled="true"', 'enabled="false"');
+      if (mode === 'web-content') return `<XCUIElementTypeWebView>${cell}</XCUIElementTypeWebView>`;
+      return cell;
+    });
+    if (mode === 'foreign-app') collapsed = collapsed.replace('name="Safari"', 'name="Other"');
+    assert.equal(nativeActionListEvidence(collapsed, 'Add to Home Screen'), undefined);
+    let now = 0;
+    let expanded = false;
+    let source = '';
+    let expansionLookups = 0;
+    const clicks: string[] = [];
+    const { platform, driver, requests, budget } = await adapter(`share-expand-${mode}`, async ({ path, body, signal }) => {
+      if (path.endsWith('/context')) return value(null);
+      if (path.endsWith('/source')) {
+        now += mode === 'budget' ? 60_000 : 1_000;
+        source = expanded && mode !== 'unchanged' ? after : collapsed;
+        if (mode === 'no-target') source = source.replaceAll('Add to Home Screen', 'Different action');
+        return value(source);
+      }
+      if (path.endsWith('/elements')) {
+        assert.equal(body.using, 'xpath');
+        if (body.value.includes("@label='View More'")) {
+          expansionLookups += 1;
+          if (mode === 'lookup-timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+          const count = xpathCount(source, body.value);
+          assert.equal(count, ['hidden', 'disabled', 'web-content', 'foreign-app'].includes(mode) ? 0 : 1);
+          if (mode === 'malformed-array') return value(element('expand'));
+          if (mode === 'malformed-entry') return value([element('expand'), {}]);
+          if (mode === 'malformed-empty-id') return value([element('expand'), element('')]);
+          if (mode === 'malformed-number-id') return value([element('expand'), { 'element-6066-11e4-a52e-4f735466cecf': 5 }]);
+          if (mode === 'malformed-null-entry') return value([element('expand'), null]);
+          return value(count ? mode === 'ambiguous' ? [element('expand-1'), element('expand-2')] : [element('expand')] : []);
+        }
+        return value(nativeActionListEvidence(source, 'Add to Home Screen')?.targetRows.length ? [element('target')] : []);
+      }
+      if (path.endsWith('/rect')) return value(nativeActionListEvidence(source, 'Add to Home Screen')!.targetRows[0].bounds);
+      if (path.includes('/attribute/')) {
+        if (path.includes('/expand/') && path.endsWith('/hittable')) {
+          if (mode === 'not-hittable') return value('false');
+        }
+        return value('true');
+      }
+      if (path.endsWith('/click')) {
+        assert.ok(path.includes('/expand/'));
+        clicks.push('expand');
+        if (mode === 'click-timeout') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+        expanded = true;
+        return value(null);
+      }
+      throw new Error(`unexpected expansion command ${path} ${JSON.stringify(body)}`);
+    }, () => now);
+    if (mode === 'context-lookup') {
+      const findAll = driver.findAll.bind(driver);
+      driver.findAll = async (...args: Parameters<AppiumClient['findAll']>) => {
+        if (args[0].value.includes("@label='View More'")) await driver.switchContext('WEBVIEW_changed');
+        return findAll(...args);
+      };
+    }
+    if (mode === 'click-budget' || mode === 'context-click') {
+      const attribute = driver.attribute.bind(driver);
+      driver.attribute = async (...args: Parameters<AppiumClient['attribute']>) => {
+        const result = await attribute(...args);
+        if (args[0] === 'expand' && args[1] === 'hittable') {
+          if (mode === 'click-budget') now += 21_000;
+          else await driver.switchContext('WEBVIEW_changed');
+        }
+        return result;
+      };
+    }
+    const operation = () => (platform as any).findNativeScrollable([{ using: 'xpath', value: "//*[@name='ActivityListView']//*[@name='activityCollectionView']//*[@name='actionGroupCell' and contains(@label, 'Add to Home Screen')]" }], 'Add to Home Screen', 84_000);
+    if (mode === 'ready') assert.equal(await operation(), 'target');
+    else if (mode.startsWith('malformed-')) await assert.rejects(operation, /APPIUM_ELEMENT: malformed element list response/u);
+    else await assert.rejects(operation, mode.startsWith('context-') ? /APPIUM_SESSION: original native request context is unavailable/u : /IOS_SHARE|APPIUM_TIMEOUT/u);
+    assert.deepEqual(clicks, ['ready', 'unchanged', 'no-target', 'click-timeout'].includes(mode) ? ['expand'] : []);
+    if (mode === 'budget' || mode === 'context-lookup') assert.equal(expansionLookups, 0);
+    if (clicks.length) assert.equal(expansionLookups, 1, 'an unchanged sheet must not reissue View More');
+    assert.equal(driver.snapshot().unusable, mode.endsWith('timeout'));
+    assert.ok(!requests.some((request) => ['mobile: tap', 'mobile: scroll', 'mobile: swipe'].includes(request.body.script)));
+    assert.ok(driver.snapshot().commands.filter((command) => command.path.endsWith('/elements') || command.path.endsWith('/click')).every((command) => command.timeoutMs <= 5_000));
+    assert.equal(budget.recoveryCount, 0);
+  });
+}
+
+for (const mode of ['empty', 'mixed-malformed'] as const) {
+  test(`keyboard dismissal ${mode} requires a valid absence observation`, async () => {
+    let reattachments = 0;
+    const { platform, driver, requests } = await adapter(`keyboard-hide-${mode}`, ({ path, body }) => {
+      if (path.endsWith('/context') || body.script === 'mobile: hideKeyboard') return value(null);
+      if (path.endsWith('/elements')) {
+        assert.deepEqual(body, { using: 'class name', value: 'XCUIElementTypeKeyboard' });
+        return value(mode === 'empty' ? [] : [element('visible-keyboard'), {}]);
+      }
+      if (path.endsWith('/rect')) return value({ x: 0, y: 500, width: 400, height: 300 });
+      if (path.endsWith('/attribute/visible')) return value('true');
+      if (body.script?.startsWith('return document.querySelector')) return value('retained draft');
+      throw new Error(`unexpected keyboard command ${path} ${JSON.stringify(body)}`);
+    });
+    platform.attachToInstalledView = async () => { reattachments += 1; };
+    (platform as any).keyboardDraft = 'retained draft';
+    if (mode === 'empty') await platform.hideKeyboard();
+    else await assert.rejects(() => platform.hideKeyboard(), /APPIUM_ELEMENT: malformed element list response/u);
+    assert.equal(reattachments, mode === 'empty' ? 1 : 0);
+    assert.equal(requests.filter(request => request.path.endsWith('/elements')).length, 1);
+    assert.equal(driver.snapshot().unusable, false);
   });
 }
 

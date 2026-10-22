@@ -350,6 +350,13 @@ opens the visible, enabled native `MoreMenuButton` once, verifies Safari remains
 foreground, and observes the menu before looking for Share again. A web-content
 lookalike cannot select Page Menu. Missing or unusable Share controls still fail
 closed; this path does not skip the Share sheet or final installation confirmation.
+A collapsed Share sheet may expose `View More` instead of its installation row.
+The adapter selects only one visible, enabled action inside Safari's native Share
+sheet, verifies it is hittable, and clicks it at most once. Lookup, attribute
+checks and click are capped at five seconds each, with a complete hierarchy
+observation reserved. A fresh bounded publication wait follows expansion under
+the original search deadline. The expanded list must still pass the existing
+visibility, row identity and progress checks; collection visibility is not waived.
 
 Android retains a separate all-buffer threadtime startup diagnostic before the
 first certificate-preparation session. It connects only to the existing local

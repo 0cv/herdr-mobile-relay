@@ -1741,17 +1741,49 @@ export class IOSPlatform implements MobilePlatform {
     return this.driver.nativeRequestPolicy(gestureBudget);
   }
 
+  private async expandNativeShareActions(source: string, phase: PhaseBudget): Promise<boolean> {
+    const commandBudget = 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_NATIVE_SCROLL_COMMAND_MS;
+    if (phase.remainingMs < commandBudget + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+      throw new Error('IOS_SHARE: insufficient time to expand and observe Share actions');
+    }
+    const expansion = phase.phaseView('ios-share-expansion', commandBudget, IOS_NATIVE_HIERARCHY_COMMAND_MS);
+    const policy = this.driver.nativeRequestPolicy(expansion);
+    const matches = await this.driver.findAll({
+      using: 'xpath',
+      value: "//XCUIElementTypeApplication[@name='Safari']//*[@name='ActivityListView' and @visible='true']//*[@name='ShareSheet.RemoteContainerView' and @visible='true']//*[@name='activityCollectionView']//XCUIElementTypeCell[@name='actionGroupCell' and @label='View More' and @visible='true' and @enabled='true' and not(ancestor::XCUIElementTypeWebView)]",
+    }, IOS_NATIVE_LOOKUP_ROUND_MS, policy);
+    if (matches.length === 0) return false;
+    if (matches.length !== 1) throw new Error('IOS_SHARE: ambiguous View More action');
+    for (const attribute of ['enabled', 'visible', 'hittable']) {
+      if (await this.readNativeControlAttribute(matches[0], attribute, IOS_NATIVE_LOOKUP_ROUND_MS, true, policy) !== 'true') {
+        throw new Error(`IOS_SHARE: View More action is not ${attribute}`);
+      }
+    }
+    if (expansion.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: insufficient time to click View More');
+    await writeBoundedText(join(this.outputDir, 'ios-share-collapsed-hierarchy.xml'), source);
+    await this.driver.click(matches[0], IOS_NATIVE_SCROLL_COMMAND_MS, policy);
+    return true;
+  }
+
   private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
     if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
     const phase = this.budget.phaseView('ios-share-search', timeoutMs);
-    const readiness = phase.phaseView('ios-share-publication', IOS_NATIVE_LIST_READINESS_MS);
+    let readiness = phase.phaseView('ios-share-publication', IOS_NATIVE_LIST_READINESS_MS);
+    let expanded = false;
     let lastError = '';
     let source: string | undefined;
     let actionList: NativeActionListEvidence | undefined;
     while (!actionList && readiness.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS) {
       const currentSource = await this.captureNativeShareHierarchy(0, readiness);
       actionList = nativeActionListEvidence(currentSource, description);
+      if (!expanded && !actionList?.targetRows.length && currentSource.includes('label="View More"')
+        && await this.expandNativeShareActions(currentSource, phase)) {
+        expanded = true;
+        actionList = undefined;
+        readiness = phase.phaseView('ios-share-expanded-publication', IOS_NATIVE_LIST_READINESS_MS);
+        continue;
+      }
       if (actionList) {
         source = currentSource;
         break;
@@ -2192,10 +2224,7 @@ export class IOSPlatform implements MobilePlatform {
       await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
       const findTimeout = Math.min(2_000, phase.remainingMs);
       if (findTimeout <= 1) break;
-      const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }, findTimeout).catch((error: unknown) => {
-        if (isFatalDriverError(error)) throw error;
-        return [];
-      });
+      const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }, findTimeout);
       let visible = false;
       for (const element of elements) {
         const rectTimeout = Math.min(1_000, phase.remainingMs);
