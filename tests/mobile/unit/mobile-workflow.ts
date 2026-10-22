@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { repositoryPath } from '../support/paths';
+import { command, CommandError } from '../support/process';
 
 type Status = 'success' | 'failure' | 'cancelled' | 'skipped';
 type Context = Record<string, any>;
@@ -347,6 +350,74 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
 }
 export const workflowMutationNames = ['gms-settle-order', 'gms-settle-platform', 'gms-settle-swallow', 'android-barrier-smoke-edge', 'android-barrier-gate-edge', 'android-barrier-gate-guard', 'android-barrier-uncancellable', 'android-barrier-strict', 'android-barrier-platform', 'android-barrier-prefix', 'android-barrier-skip-tolerated', 'ios-runner-label', 'strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
+  ['mobile XML bootstrap avoids hosted Azure mirror stalls and propagates setup failures', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
+    const check = runtime.YAML.parse(await readFile(repositoryPath('.github/workflows/check.yml'), 'utf8')) as any;
+    const ubuntuMirrors = 'https://archive.ubuntu.com/ubuntu/\tpriority:2\nhttps://security.ubuntu.com/ubuntu/\tpriority:3\n';
+    for (const job of ['mobile-unit-prepare', 'mobile-unit-shards', 'mobile-unit-aggregate']) {
+      const steps = check.jobs[job].steps.filter((step: any) => step.name === 'Install XML test tools');
+      assert.equal(steps.length, 1);
+      assert.equal(steps[0].if, undefined);
+      assert.equal(steps[0]['continue-on-error'], undefined);
+      for (const [mode, exitCode, operations] of [
+        ['ready', 0, ['mirror', 'update', 'install']],
+        ['mirror-failure', 1, ['mirror']],
+        ['update-failure', 100, ['mirror', 'update']],
+        ['update-timeout', 124, ['mirror', 'update']],
+        ['install-failure', 100, ['mirror', 'update', 'install']],
+        ['install-timeout', 124, ['mirror', 'update', 'install']],
+      ] as const) {
+        const root = await mkdtemp(join(tmpdir(), 'herdr-xml-bootstrap-'));
+        let passed = false;
+        try {
+          await writeFile(join(root, 'mirrors'), `http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n${ubuntuMirrors}`);
+          await writeFile(join(root, 'calls'), '');
+          await writeFile(join(root, 'sudo'), `#!${process.execPath}
+import assert from 'node:assert/strict';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const args = process.argv.slice(2);
+const root = process.env.FIXTURE;
+const mode = process.env.MODE;
+const record = (name) => appendFileSync(root + '/calls', name + '\\n');
+if (args[0] === 'sed') {
+  record('mirror');
+  assert.equal(args.length, 4);
+  assert.equal(args[1], '-i');
+  assert.equal(args[3], '/etc/apt/apt-mirrors.txt');
+  if (mode === 'mirror-failure') process.exit(1);
+  writeFileSync(root + '/mirrors', execFileSync('/usr/bin/sed', [args[2], root + '/mirrors']));
+  process.exit(0);
+}
+if (readFileSync(root + '/mirrors', 'utf8').includes('azure.archive.ubuntu.com')) {
+  console.error('simulated hosted Azure mirror stall');
+  process.exit(124);
+}
+assert.deepEqual(args.slice(0, 4), ['timeout', '--kill-after=5s', '120s', 'apt-get']);
+assert.deepEqual(args.slice(4, 10), ['-o', 'Acquire::http::Timeout=15', '-o', 'Acquire::https::Timeout=15', '-o', 'Acquire::Retries=1']);
+const update = args.at(-1) === 'update';
+assert.deepEqual(args.slice(10), update ? ['-o', 'APT::Update::Error-Mode=any', 'update'] : ['install', '-y', 'libxml2-utils']);
+const operation = update ? 'update' : 'install';
+record(operation);
+if (mode === operation + '-failure') process.exit(100);
+if (mode === operation + '-timeout') process.exit(124);
+`, { mode: 0o700 });
+          const run = () => command('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', steps[0].run], 5_000, {
+            cwd: root,
+            env: { PATH: root, FIXTURE: root, MODE: mode, BUN_OPTIONS: '--no-env-file' },
+          });
+          if (exitCode === 0) await run();
+          else await assert.rejects(run, (error: unknown) => error instanceof CommandError && error.exitCode === exitCode && !error.timedOut);
+          assert.deepEqual((await readFile(join(root, 'calls'), 'utf8')).trim().split('\n'), operations, `${job}/${mode}`);
+          if (mode !== 'mirror-failure') assert.equal(await readFile(join(root, 'mirrors'), 'utf8'), ubuntuMirrors);
+          passed = true;
+        } finally {
+          if (passed) await rm(root, { recursive: true, force: true });
+          else console.error(`XML bootstrap fixture retained: ${root}`);
+        }
+      }
+    }
+  }],
   ['mobile workflow SM59 10 ordinary and strict aggregation', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
     assert.ok(runtime?.YAML);
