@@ -5,6 +5,19 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.13] - 2026-10-23
+
+### Changed
+
+- Show approval choices in full, wrapping long labels and paths instead of
+  cutting them off. Approval and answer buttons on agent cards have a 44px
+  minimum height on touch screens; terminal controls keep their compact size.
+- Answer a short standalone single-choice question directly from its agent
+  card when it has up to four plain options. More… opens the full form;
+  longer questions, described options, and questionnaires keep the full form.
+  Follow-up questions refresh the card in place without opening the terminal,
+  and the card and answer form show consistent follow-up messages. (#73)
+
 ## [0.22.12] - 2026-10-23
 
 ### Fixed
@@ -1761,7 +1774,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...HEAD
+[0.22.13]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...v0.22.13
 [0.22.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.22.12
 [0.22.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.22.11
 [0.22.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.22.10
