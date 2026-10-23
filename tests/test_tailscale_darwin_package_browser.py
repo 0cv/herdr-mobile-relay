@@ -461,6 +461,9 @@ ALLOWED = (
     "web/assets/app-975efa34145ce510bb486ca72a6f7f808dd8b47d1c899430b0b6866b9a256edb.js.br",
     "web/builds/0.23.0-421-75c8578a2021dc8a/index.html",
     "web/builds/0.23.0-421-75c8578a2021dc8a/index.html.br",
+    # PG3: fallback service restart rollback unit paths (docs/updates.md is already listed).
+    "relay/plugin-build.sh",
+    "tests/test_plugin_build.sh",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")

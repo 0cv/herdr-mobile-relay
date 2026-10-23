@@ -120,6 +120,7 @@ service_was_active=false
 service_should_run=false
 recover_broken_service=false
 service_cutover_started=false
+service_fallback_restarted=false
 case "$PLATFORM" in
     Linux)
         SERVICE_FILE="$HOME/.config/systemd/user/herdr-mobile-relay.service"
@@ -448,7 +449,8 @@ rollback_plugin_migration() {
     elif [ "$current_was_present" = false ]; then
         rm -f "$INSTALL_ROOT/current"
     fi
-    if [ -n "$SERVICE_BACKUP" ] && [ -n "$SERVICE_FILE" ]; then
+    if [ -n "$SERVICE_BACKUP" ] && [ -n "$SERVICE_FILE" ] &&
+       [ "$service_fallback_restarted" != true ]; then
         restore_temp="${SERVICE_FILE}.rollback.$$"
         cp "$SERVICE_BACKUP" "$restore_temp" || return 1
         mv -f "$restore_temp" "$SERVICE_FILE" || return 1
@@ -463,22 +465,29 @@ rollback_plugin_migration() {
             return 1
     fi
 
-    if [ "$service_cutover_started" != true ]; then
+    if [ "$service_cutover_started" != true ] &&
+       [ "$service_fallback_restarted" != true ]; then
         echo "herdr-mobile-relay: previous running service was left untouched." >&2
         return 0
     fi
-    if [ "$service_should_run" != true ]; then
+    if [ "$service_cutover_started" = true ] && [ "$service_should_run" != true ]; then
         echo "herdr-mobile-relay: previous inactive service definition restored." >&2
         return 0
     fi
     case "$PLATFORM" in
         Linux)
-            systemctl --user daemon-reload || return 1
+            if [ "$service_cutover_started" = true ]; then
+                systemctl --user daemon-reload || return 1
+            fi
             systemctl --user restart herdr-mobile-relay.service || return 1
             ;;
         Darwin)
-            label=com.herdr-mobile-relay.service
-            reload_launchd_service_definition "$SERVICE_FILE" "$label" || return 1
+            if [ "$service_cutover_started" = true ]; then
+                label=com.herdr-mobile-relay.service
+                reload_launchd_service_definition "$SERVICE_FILE" "$label" || return 1
+            else
+                launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service" || return 1
+            fi
             ;;
     esac
 
@@ -676,6 +685,7 @@ case "$PLATFORM" in
             fi
         elif systemctl --user is-active --quiet herdr-mobile-relay.service 2>/dev/null; then
             echo "herdr-mobile-relay: restarting existing service..." >&2
+            service_fallback_restarted=true
             systemctl --user restart herdr-mobile-relay.service
             service_restarted=true
         fi
@@ -699,6 +709,7 @@ case "$PLATFORM" in
         elif launchd_service_loaded \
             "gui/$(id -u)/com.herdr-mobile-relay.service"; then
             echo "herdr-mobile-relay: restarting existing service..." >&2
+            service_fallback_restarted=true
             launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service"
             service_restarted=true
         fi

@@ -10,7 +10,8 @@ The plugin installs a pre-built, checksum- and manifest-verified bundle for the
 exact version in `herdr-plugin.toml`. Updates atomically activate the
 executable, web app, and runtime wrappers, verify their exact version,
 revision, and web hash after restart, and roll back the complete release if
-verification fails.
+verification fails. If a running service uses a non-default definition path, a
+failed update restarts and verifies the previous release without changing that definition.
 
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.

@@ -47,6 +47,7 @@ REPO_RECORD="$WORK_DIR/installer-repository"
 FRESH_TOKEN_RECORD="$WORK_DIR/fresh-installer-token"
 FRESH_REPO_RECORD="$WORK_DIR/fresh-installer-repository"
 RESTART_LOG="$WORK_DIR/restarts"
+SERVICE_RELOAD_LOG="$WORK_DIR/service-reloads"
 SETUP_RECORD="$WORK_DIR/setup-invocations"
 mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/device-auth" \
     "$SOURCE_CONFIG/push" "$SOURCE_CONFIG/cloudflared" \
@@ -146,6 +147,7 @@ chmod 700 "$FAKE_INSTALLER"
 cat > "$FAKE_BIN/systemctl" <<'EOF'
 #!/bin/sh
 case " $* " in
+    *" daemon-reload "*) printf 'reload\n' >> "$SERVICE_RELOAD_LOG"; exit 0 ;;
     *" is-active "*)
         if [ "${FORCE_INACTIVE:-}" = 1 ] && [ ! -s "$RESTART_LOG" ]; then
             printf 'inactive\n'
@@ -216,7 +218,7 @@ chmod 700 "$FAKE_BIN/gh"
 chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" \
     "$FAKE_BIN/sleep" "$FAKE_BIN/uname"
 
-export REPO_DIR SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
+export REPO_DIR SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG SERVICE_RELOAD_LOG
 export SETUP_RECORD
 export RELEASE_ROOT OLD_RELEASE NEW_RELEASE
 # CLI-backed Serve has no qualified update path; refuse before the installer,
@@ -249,6 +251,37 @@ test ! -e "$RESTART_LOG"
 diff -qr "$WORK_DIR/target-before" "$TARGET_CONFIG" >/dev/null
 grep -F "previous running service was left untouched" "$WORK_DIR/pre-cutover-output" >/dev/null
 
+# A running service can be installed outside HOME. A fallback restart must be
+# reversed without creating or reloading the absent HOME-derived definition.
+printf "HERDR_RELAY_INSTANCE_ID='source-instance'\nHERDR_RELAY_PORT='18375'\n" >> "$TARGET_CONFIG/relay.env"
+cp -pR "$TARGET_CONFIG" "$WORK_DIR/fallback-target-before"
+rm -f "$UNIT_FILE" "$RESTART_LOG" "$SERVICE_RELOAD_LOG"
+if HOME="$TEST_HOME" \
+    PATH="$FAKE_BIN:$PATH" \
+    HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
+    HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+    bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/fallback-output" 2>&1; then
+    echo "fallback update unexpectedly accepted the wrong replacement identity" >&2
+    exit 1
+fi
+
+test "$(readlink -f "$RELEASE_ROOT/current")" = "$OLD_RELEASE"
+test "$(wc -l < "$RESTART_LOG")" -eq 2
+grep -F '"revision":"old-revision"' "$HEALTH_FILE" >/dev/null
+grep -F "replacement service did not report the expected release identity" \
+    "$WORK_DIR/fallback-output" >/dev/null
+grep -F "previous service recovered successfully" "$WORK_DIR/fallback-output" >/dev/null
+if grep -F "left untouched" "$WORK_DIR/fallback-output" >/dev/null; then
+    echo "fallback rollback incorrectly claimed the running service was untouched" >&2
+    exit 1
+fi
+test ! -e "$UNIT_FILE"
+test ! -e "$SERVICE_RELOAD_LOG"
+diff -qr "$WORK_DIR/fallback-target-before" "$TARGET_CONFIG" >/dev/null
+
+cp "$WORK_DIR/initial-unit" "$UNIT_FILE"
+cp "$WORK_DIR/target-before/relay.env" "$TARGET_CONFIG/relay.env"
+rm -f "$RESTART_LOG" "$SERVICE_RELOAD_LOG"
 if HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
