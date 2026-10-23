@@ -336,7 +336,7 @@ def check_case(case, os_name, sha):
         require(re.fullmatch(r"[0-9a-f]{64}", q["b_pid"]) and q["b_pid"] != q["a_pid"], "invalid B process")
         require(q["public"] == ("a" if ident == "b-public-fail-rollback" else "b")
                 and q["rejected"] == ("b" if ident == "b-public-fail-rollback" else "n/a")
-                and q["a_gone"] == "yes" and q["b_gone"] == ("yes" if ident == "b-public-fail-rollback" else "n/a"), "wrong public or old-process evidence")
+                and q["a_gone"] == "yes" and q["b_gone"] == ("yes" if ident in ("b-public-fail-rollback", "b-full-uninstall") else "n/a"), "wrong public or old-process evidence")
         require(before["active"] == "absent" and after["release_revision"] == ("absent" if ident == "b-full-uninstall" else ANCESTOR if ident == "b-public-fail-rollback" else sha), "wrong Q2 release transition")
         require(case["readiness"] == ("none" if ident == "b-full-uninstall" else q["a_identity"] if ident == "b-public-fail-rollback" else q["b_identity"]), "wrong Q2 readiness")
         require(case["https"]["front"] > 0 and case["https"]["child"] > 0 and min(case["socket"].values()) > 0, "missing Q2 traffic")

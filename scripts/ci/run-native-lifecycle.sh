@@ -837,7 +837,7 @@ qinstall() {
 }
 q2_meta() {
     Q2JSON=$("$PYO" -I -B -c 'import json,sys; d=dict(zip(("requested","resolved","cli_sha256","cli_size","a_pid","b_pid","a_identity","b_identity","public","setup","registry","rejected","a_gone","b_gone"), sys.argv[1:])); d["cli_size"]=int(d["cli_size"]); print(json.dumps(d))' \
-        "$SHA" "$RESOLVED" "$CLI_SHA" "$CLI_SIZE" "$APID" "$BPID" "$AIDENT" "$BIDENT" "$PUBLIC" none "$([ "$REGISTRY" = absent ] && echo absent || echo present)" "$([ "$CASE" = b-public-fail-rollback ] && echo b || echo n/a)" yes "$([ "$CASE" = b-public-fail-rollback ] && echo yes || echo n/a)")
+        "$SHA" "$RESOLVED" "$CLI_SHA" "$CLI_SIZE" "$APID" "$BPID" "$AIDENT" "$BIDENT" "$PUBLIC" none "$([ "$REGISTRY" = absent ] && echo absent || echo present)" "$([ "$CASE" = b-public-fail-rollback ] && echo b || echo n/a)" yes "$({ [ "$CASE" = b-public-fail-rollback ] || [ "$CASE" = b-full-uninstall ]; } && echo yes || echo n/a)")
 }
 q2_diag() {  # the installed service's own last stderr after a failed Q2 step (disposable runner, fixture configuration)
     if [ "$OS" = Darwin ]; then as_subject tail -n 25 "$THOME/Library/Logs/herdr-mobile-relay/service.err"; else as_subject journalctl --user -u "$LABEL" -n 25 --no-pager; fi || true
@@ -977,9 +977,11 @@ q2_cases() {
     known_digest "$BIDENT" && [ "$BIDENT" != "$AIDENT" ] || fail 'B readiness before uninstall does not identify the candidate revision'
     wait_for 30 public_ok || fail 'B not publicly ready before uninstall'
     BPID=$(snap | jget owned_pid_digest)
-    known_digest "$BPID" && [ "$BPID" != "$APID" ] && owned_origin && wait_for 20 pids_gone "$A_PIDS" || fail 'B manager/child not owned, or A manager/child survived before uninstall'
+    B_PIDS=$(owned_pids)  # B's exact manager+child PIDs, proved gone after the uninstall (QRV F002/F004), not only a name pattern
+    known_digest "$BPID" && [ "$BPID" != "$APID" ] && valid_pids "$B_PIDS" && owned_origin && wait_for 20 pids_gone "$A_PIDS" || fail 'B manager/child not owned, or A manager/child survived before uninstall'
     q2_no_setup
     q2_clear
+    wait_for 20 pids_gone "$B_PIDS" || fail 'B manager/child survived the full uninstall'
     REGISTRY=absent PUBLIC=b
     q2_meta
     case_end cli-full-uninstall "$RC"

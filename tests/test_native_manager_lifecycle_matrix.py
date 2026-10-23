@@ -95,7 +95,7 @@ def case(ident, os_name):
                      "a_pid": H("5"), "b_pid": H("6"),
                      "a_identity": H("a"), "b_identity": "none" if ident == "b-public-fail-rollback" else H("b"),
                      "public": "a" if ident == "b-public-fail-rollback" else "b", "setup": "none", "rejected": "b" if ident == "b-public-fail-rollback" else "n/a",
-                     "a_gone": "yes", "b_gone": "yes" if ident == "b-public-fail-rollback" else "n/a",
+                     "a_gone": "yes", "b_gone": "yes" if ident in ("b-public-fail-rollback", "b-full-uninstall") else "n/a",
                      "registry": "absent" if ident == "b-full-uninstall" else "present"})
     return c
 
@@ -202,6 +202,7 @@ class Matrix(unittest.TestCase):
             "failed B tree still running after rollback": edit(linux, lambda x: x["cases"][-2]["after"].update(owned_pid_digest=H("6"))),
             "unknown final Q2 process": edit(linux, lambda x: x["cases"][-3]["after"].update(owned_pid_digest="unknown")),
             "failed B child survived": edit(linux, lambda x: x["cases"][-2]["q2"].update(b_gone="no")),
+            "B tree unproved after full uninstall": edit(linux, lambda x: x["cases"][-1]["q2"].update(b_gone="n/a")),
             "missing case": edit(linux, lambda x: x["cases"].pop()),
             "duplicate case": edit(linux, lambda x: x["cases"].append(x["cases"][0])),
             "extra case": edit(mac, lambda x: x["cases"].append(case("foreign-systemd-dropin", "Linux"))),
@@ -2448,6 +2449,17 @@ absent() { ! has hosts; }
             self.assertEqual(host.registry({"home": tmp, "expected": m.ANCESTOR, "resolved": m.ANCESTOR}, []), 1)  # not Herdr's format
             reg.write_text("[]")
             self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 0)
+            reg.unlink()
+            reg.parent.chmod(0)  # QRV F001/F003: an unsearchable parent makes lstat fail; that is never "absent"
+            try:
+                self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 1)
+            finally:
+                reg.parent.chmod(0o700)
+            self.assertEqual(host.registry({"home": tmp, "expected": "absent", "resolved": "absent"}, []), 0)
+        # QRV F002/F004: B's exact PID tree is captured while it runs and proved gone after the full uninstall.
+        cases = self.shell_function("q2_cases")
+        tail = cases[cases.index("q2_begin b-full-uninstall"):]
+        self.assertTrue(tail.index('B_PIDS=$(owned_pids)') < tail.index('valid_pids "$B_PIDS"') < tail.index("q2_clear") < tail.index('wait_for 20 pids_gone "$B_PIDS"') < tail.index("case_end cli-full-uninstall"))
 
     def test_q2_rollback_samples_b_tree_before_failed_cli_returns(self):
         # Run the driver's concurrent observation with an inert, bounded CLI stub; the

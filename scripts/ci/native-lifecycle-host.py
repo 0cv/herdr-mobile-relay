@@ -346,8 +346,12 @@ def registry(o, rest):
     `source` holds kind/owner/repo/requested_ref/resolved_commit (src/api/schema/plugins.rs, src/persist/plugin_registry.rs).
     Fail closed on anything ambiguous or malformed; never print registry contents."""
     path = os.path.join(o["home"], ".config", "herdr", "plugins.json")
-    if not os.path.lexists(path):
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):  # only a missing path is absence (QRV F001/F003)
         return 0 if o["expected"] == "absent" else 1
+    except OSError:  # a denied or failed lstat is uninspectable, never absence
+        return 1
     if os.path.islink(path):
         return 1
     try:
