@@ -545,22 +545,8 @@
     const interfaceSizeValue = $interfaceSize;
     void interfaceSizeValue;
     if (!terminalElement) return;
-    virtualStickToBottom = terminalElement.scrollHeight
-      - terminalElement.scrollTop
-      - terminalElement.clientHeight < 48;
     pendingLayoutStick = virtualStickToBottom;
   });
-
-  // While the reader's finger is moving (and through iOS momentum), nothing re-pins the view to
-  // the bottom: following resumes once they stop at the bottom.
-  let lastUserScrollAt = Number.NEGATIVE_INFINITY;
-  function noteUserScroll() {
-    lastUserScrollAt = performance.now();
-  }
-
-  function fingerScrolling(): boolean {
-    return performance.now() - lastUserScrollAt < 1500;
-  }
 
   function rememberVirtualScrollGeometry(element: HTMLElement) {
     virtualScrollTop = element.scrollTop;
@@ -598,10 +584,7 @@
       const widthChanged = Math.abs(nextWidth - previousWidth) >= 1;
       const heightChanged = Math.abs(nextHeight - previousHeight) >= 1;
       if (renderedRows.length && widthChanged) {
-        const stick = virtualStickToBottom
-          || element.scrollHeight - element.scrollTop - element.clientHeight < 48;
-        virtualStickToBottom = stick;
-        resetVirtualScroll(element, stick);
+        resetVirtualScroll(element, virtualStickToBottom);
       } else if (heightChanged && virtualStickToBottom) {
         jumpToBottom();
       } else {
@@ -770,8 +753,7 @@
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) return;
-    const frameStick = virtualStickToBottom || Boolean(!fingerScrolling() && terminalElement
-      && terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48);
+    const frameStick = virtualStickToBottom;
     const stick = resizeSessionActive && pendingResizeStick !== null
       ? pendingResizeStick
       : layoutChanged && pendingLayoutStick !== null
@@ -1051,8 +1033,7 @@
     if (!terminalElement || !entries.length) return;
     if (virtualScrollResetPending) return;
     const previousTop = terminalElement.scrollTop;
-    const wasAtBottom = virtualStickToBottom || (!fingerScrolling()
-      && terminalElement.scrollHeight - previousTop - terminalElement.clientHeight < 48);
+    const wasAtBottom = virtualStickToBottom;
     const anchor = virtualIndex.indexAt(previousTop);
     let anchorDelta = 0;
     let changed = false;
@@ -1694,7 +1675,6 @@
     const scrollHeight = terminalElement.scrollHeight;
     const clientHeight = terminalElement.clientHeight;
     const bottomDistance = scrollHeight - scrollTop - clientHeight;
-    const atBottom = bottomDistance < 48;
     // Only a viewport/controls height change may re-pin: content growth also
     // changes scrollHeight, and a user scrolling up during a stream must win.
     const layoutChanged = Math.abs(clientHeight - virtualClientHeight) >= 1;
@@ -1706,32 +1686,17 @@
     // row heights disagree with the estimates more than Chromium's — opened
     // a growing gap above the transcript's end and fought every scroll with
     // anchor-preserving corrections (issue #11's missing bottom + flicker).
-    // A moving finger outranks a height change: Safari's address bar resizes the view during
-    // the very scroll that leaves the bottom, and reading that as layout re-pinned the reader.
-    const fingerMoving = fingerScrolling();
-    const movedTowardHistory = (!layoutChanged || fingerMoving)
+    const movedTowardHistory = !layoutChanged
       && scrollTop < virtualScrollTop - 1
       && bottomDistance > 1;
     rememberVirtualScrollGeometry(terminalElement);
     if (movedTowardHistory) {
       virtualStickToBottom = false;
       jumpVisible = true;
-    } else if (atBottom) {
-      if (bottomDistance > 0.5) {
-        if (fingerMoving) {
-          virtualStickToBottom = false;
-          jumpVisible = true;
-          return;
-        }
-        jumpToBottom();
-        return;
-      }
+    } else if (bottomDistance <= 1) {
       virtualStickToBottom = true;
       jumpVisible = false;
     } else if (!virtualStickToBottom) {
-      jumpVisible = true;
-    } else if (fingerMoving) {
-      virtualStickToBottom = false;
       jumpVisible = true;
     } else {
       jumpToBottom();
@@ -2208,8 +2173,6 @@
     aria-label="Agent terminal output"
     onscroll={handleScroll}
     onscrollcapture={syncWideGridScroll}
-    ontouchmove={noteUserScroll}
-    onwheel={noteUserScroll}
   >
     <span
       bind:this={cellMeasureElement}

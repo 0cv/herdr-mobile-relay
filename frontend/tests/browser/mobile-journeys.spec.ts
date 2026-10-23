@@ -3537,11 +3537,69 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await expect(terminal).toContainText('near-bottom row 151');
   expect(await bottomDistance()).toBeGreaterThan(10);
 
-  // Jumping back right away follows output again, even mid-gesture window.
+  // Long after the scroll, an agent keeps rewriting its last line.
+  await page.waitForTimeout(1_600);
+  const readingTop = await terminal.evaluate((element) => element.scrollTop);
+  for (let tick = 1; tick <= 5; tick += 1) {
+    await server(page, 0, {
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      content: rows.slice(0, 150).concat(`working ${tick}`).join('\n'),
+    });
+    await expect(terminal).toContainText(`working ${tick}`);
+    await page.waitForTimeout(200);
+  }
+  expect(Math.abs(await terminal.evaluate((element) => element.scrollTop) - readingTop))
+    .toBeLessThanOrEqual(1);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  // Scrolling partway back down is still reading, not following.
+  await terminal.evaluate((element) => {
+    element.scrollTop += 5;
+  });
+  await frame(152);
+  await expect(terminal).toContainText('near-bottom row 152');
+  expect(await bottomDistance()).toBeGreaterThan(10);
+
+  // Jump to latest follows output again.
   await page.getByRole('button', { name: 'Jump to latest' }).click();
   await frame(200);
   await expect(terminal).toContainText('near-bottom row 200');
   await expect.poll(bottomDistance).toBeLessThan(2);
+});
+
+test('renders rows after a long wheel scroll to just above the bottom', async ({ page }) => {
+  const rows = Array.from({ length: 1_000 }, (_, index) => `wheel row ${index + 1}`);
+  await openOmpPane(page, 'Wheel jump');
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: rows.join('\n'),
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '1000');
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await page.waitForTimeout(300);
+
+  // One big wheel scroll lands 20px above the bottom.
+  await terminal.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 10_000 }));
+    element.scrollTop = element.scrollHeight - element.clientHeight - 20;
+  });
+  const visibleRow = () => terminal.evaluate((element) => {
+    const viewport = element.getBoundingClientRect();
+    return [...element.querySelectorAll('[data-terminal-row]')].some((row) => {
+      const bounds = row.getBoundingClientRect();
+      return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+    });
+  });
+  await expect.poll(visibleRow).toBe(true);
+  // Being near the bottom is not a request to follow output.
+  expect(await terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(10);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
 });
 
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
