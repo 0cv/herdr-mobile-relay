@@ -2408,6 +2408,9 @@ absent() { ! has hosts; }
         self.assertIn('command -v herdr', driver)
         self.assertIn('"$CLI" plugin install 0cv/herdr-mobile-relay --ref "$1" --yes', driver)
         self.assertNotIn('"$SHIMDIR/herdr" 700\n    qinstall', driver)
+        begin = self.shell_function("q2_begin")  # hosted 39865658354: relay.env must go to Herdr's plugin config dir, and the service env must follow it
+        self.assertRegex(begin, r'\n    CONF="\$QHOME/\.config/herdr/plugins/config/herdr-mobile-relay\.events"[^\n]*\n    senv_init\n')
+        self.assertLess(begin.index("senv_init"), begin.index("write_env cloudflare"))
         host = self.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             # Herdr v0.9.5's real shape (hosted 39860634906 showed the earlier invented shape never matched).

@@ -853,6 +853,8 @@ q2_begin() {
     local name=$1
     case_begin "$name"
     QHOME="$S/q2/$name"
+    CONF="$QHOME/.config/herdr/plugins/config/herdr-mobile-relay.events"  # the real CLI's plugin config dir (Herdr prints it): the product's build, relay.env and service use it, not the Q1 default
+    senv_init
     as_subject /bin/sh -c 'umask 077; mkdir -p "$1/.config" "$1/.state" "$1/.data" "$1/.bin"' _ "$QHOME" || fail 'cannot create private CLI home'
     sgone "$SHIMDIR/herdr" && as_subject /bin/sh -c '[ -z "$(command -v herdr)" ]' || fail 'the Q1 adapter or an ambient Herdr is on the CLI PATH'
     as_subject ln -s "$CLI" "$QHOME/.bin/herdr" || fail 'cannot expose the verified real CLI for full uninstall'
