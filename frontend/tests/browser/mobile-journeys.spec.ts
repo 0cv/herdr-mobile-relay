@@ -3511,7 +3511,7 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
 });
 
 test('keeps a small scroll-up from the bottom while output streams', async ({ page }) => {
-  const rows = Array.from({ length: 200 }, (_, index) => `near-bottom row ${index + 1}`);
+  const rows = Array.from({ length: 220 }, (_, index) => `near-bottom row ${index + 1}`);
   await openOmpPane(page, 'Near bottom');
   const frame = (count: number) => server(page, 0, {
     type: 'pane_content',
@@ -3567,6 +3567,22 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await frame(200);
   await expect(terminal).toContainText('near-bottom row 200');
   await expect.poll(bottomDistance).toBeLessThan(2);
+
+  await terminal.evaluate((element) => {
+    element.scrollTop -= 20;
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  // Reaching the bottom follows again, even when output lands before the scroll event.
+  await terminal.evaluate((element, message) => {
+    element.scrollTop = element.scrollHeight;
+    (window as any).__relayServer(0, message);
+  }, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: rows.slice(0, 203).join('\n') });
+  await expect(terminal).toContainText('near-bottom row 203');
+  await frame(220);
+  await expect(terminal).toContainText('near-bottom row 220');
+  await expect.poll(bottomDistance).toBeLessThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
 test('renders rows after a long wheel scroll to just above the bottom', async ({ page }) => {

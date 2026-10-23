@@ -753,7 +753,10 @@
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) return;
-    const frameStick = virtualStickToBottom;
+    // Exactly at the bottom counts too: the scroll event that would say so may
+    // not have run yet when this frame arrives.
+    const frameStick = virtualStickToBottom || Boolean(terminalElement
+      && terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight <= 1);
     const stick = resizeSessionActive && pendingResizeStick !== null
       ? pendingResizeStick
       : layoutChanged && pendingLayoutStick !== null
