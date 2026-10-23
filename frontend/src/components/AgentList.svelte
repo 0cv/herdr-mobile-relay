@@ -17,7 +17,7 @@
     tabName,
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
-  import { returnedInteraction } from '$lib/questions';
+  import { answerFailureToast, returnedInteraction } from '$lib/questions';
   import { relayStore, type CommandError } from '$lib/store';
   import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
@@ -419,17 +419,14 @@
         return;
       }
       fresh = returnedInteraction(result);
-      if (!fresh) relayStore.showToast('Unexpected question result.', true);
+      relayStore.showToast(...answerFailureToast({ message: 'Unexpected question result.' }, fresh, interaction));
     } catch (caught) {
       relayStore.clearResponding(agent.pane_id);
       // A follow-up question comes back as a failed answer that carries the new question.
       fresh = returnedInteraction(caught as CommandError);
-      if (!fresh) relayStore.showToast((caught as Error).message, true);
+      relayStore.showToast(...answerFailureToast(caught as CommandError, fresh, interaction));
     }
-    if (fresh) {
-      relayStore.applyQuestionInteraction(agent, fresh);
-      relayStore.showToast('The agent asked another question.');
-    }
+    if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
   }
 
   async function respond(agent: Agent, index: number, total: number, option: string) {

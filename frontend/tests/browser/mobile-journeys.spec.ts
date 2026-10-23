@@ -5354,6 +5354,8 @@ test('answers a short single-choice question from its card in one tap', async ({
   expect((await answers())[0]).toMatchObject({ interaction_id: 'short-question', selected_indices: [1], other_selected: false });
   await reply({ ok: false, phase: 'failed', error: unexpected, data: { interaction: { id: 'broken', question: 'No options' } } });
   await expect(page.getByRole('button', { name: 'SQLite', exact: true })).toBeVisible();
+  await expect(page.locator('.toast')).toHaveText('The agent asked another question; it will appear with the next update.');
+  await expect(page.locator('.toast.error')).toHaveCount(0);
 
   // A real follow-up arrives as a failed reply with the new question: the card shows it,
   // without an error and without leaving the list.
@@ -5371,6 +5373,60 @@ test('answers a short single-choice question from its card in one tap', async ({
   await expect(page.locator('.toast.error')).toContainText('Pane changed before the answer landed');
   await expect(page.getByRole('main', { name: /Terminal for/ })).toHaveCount(0);
   expect(pageErrors).toEqual([]);
+});
+
+test('treats a follow-up question from the answer form like the card does', async ({ page }) => {
+  const lone = {
+    id: 'lone-question', kind: 'single_select', question: 'Which database?',
+    options: [{ index: 0, label: 'Postgres' }, { index: 1, label: 'SQLite' }],
+    submit_label: 'Submit', question_index: 1, question_total: 1,
+  };
+  const followUp = { ...lone, id: 'follow-up', question: 'Which region?', options: [{ index: 0, label: 'Asia' }, { index: 1, label: 'Europe' }] };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone, question_layout: true }],
+  });
+  await page.getByRole('button', { name: 'More…' }).click();
+  await expect(page.getByRole('group', { name: 'Which database?' })).toBeVisible();
+  await setAutoCommands(page, false);
+  await page.getByRole('radio', { name: /SQLite/ }).click();
+  await page.getByRole('button', { name: 'Submit' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
+  const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
+  await server(page, 0, {
+    type: 'command_result', action: 'answer_question', request_id: answer.request_id, ok: false, phase: 'failed',
+    error: 'The agent opened an unexpected question; the screen was refreshed', data: { interaction: followUp },
+  });
+  await expect(page.getByRole('group', { name: 'Which region?' })).toBeVisible();
+  await expect(page.locator('.toast')).toHaveText('The agent asked another question.');
+  await expect(page.locator('.toast.error')).toHaveCount(0);
+
+  // In a questionnaire, landing on an unexpected question is still reported as an error.
+  const third = { ...followUp, id: 'third', question: 'Which zone?', question_index: 3, question_total: 3, submit_label: 'Next' };
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [],
+      interaction: { ...followUp, id: 'first-of-three', question: 'Which tier?', question_index: 1, question_total: 3, submit_label: 'Next' }, question_layout: true }],
+  });
+  await expect(page.getByRole('group', { name: 'Which tier?' })).toBeVisible();
+  await page.getByRole('radio', { name: /Asia/ }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(2);
+  const second = (await commands(page)).filter((command) => command.type === 'answer_question').at(-1)!;
+  // An agent update lands before the rejection; the toast still judges the submitted question.
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone, question_layout: true }],
+  });
+  await server(page, 0, {
+    type: 'command_result', action: 'answer_question', request_id: second.request_id, ok: false, phase: 'failed',
+    error: 'The agent opened an unexpected question; the screen was refreshed', data: { interaction: third },
+  });
+  await expect(page.getByRole('group', { name: 'Which zone?' })).toBeVisible();
+  await expect(page.locator('.toast.error')).toHaveText('The agent opened an unexpected question; the screen was refreshed');
 });
 
 test('keeps one-tap answers working with missing option indexes and explains disabled ones', async ({ page }) => {
