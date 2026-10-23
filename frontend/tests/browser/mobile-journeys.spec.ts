@@ -4360,6 +4360,114 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
+test('keeps a small scroll-up from the bottom while output streams', async ({ page }) => {
+  const rows = Array.from({ length: 220 }, (_, index) => `near-bottom row ${index + 1}`);
+  await openOmpPane(page, 'Near bottom');
+  const frame = (count: number) => server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: rows.slice(0, count).join('\n'),
+  });
+  await frame(150);
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('near-bottom row 150');
+  const bottomDistance = () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight);
+  await expect.poll(bottomDistance).toBeLessThan(2);
+
+  // A finger drags the view up by less than the 48px "near the bottom" band.
+  await terminal.evaluate((element) => {
+    element.dispatchEvent(new Event('touchmove', { bubbles: true }));
+    element.scrollTop -= 20;
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  await frame(151);
+  await expect(terminal).toContainText('near-bottom row 151');
+  expect(await bottomDistance()).toBeGreaterThan(10);
+
+  // Long after the scroll, an agent keeps rewriting its last line.
+  await page.waitForTimeout(1_600);
+  const readingTop = await terminal.evaluate((element) => element.scrollTop);
+  for (let tick = 1; tick <= 5; tick += 1) {
+    await server(page, 0, {
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      content: rows.slice(0, 150).concat(`working ${tick}`).join('\n'),
+    });
+    await expect(terminal).toContainText(`working ${tick}`);
+    await page.waitForTimeout(200);
+  }
+  expect(Math.abs(await terminal.evaluate((element) => element.scrollTop) - readingTop))
+    .toBeLessThanOrEqual(1);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  // Scrolling partway back down is still reading, not following.
+  await terminal.evaluate((element) => {
+    element.scrollTop += 5;
+  });
+  await frame(152);
+  await expect(terminal).toContainText('near-bottom row 152');
+  expect(await bottomDistance()).toBeGreaterThan(10);
+
+  // Jump to latest follows output again.
+  await page.getByRole('button', { name: 'Jump to latest' }).click();
+  await frame(200);
+  await expect(terminal).toContainText('near-bottom row 200');
+  await expect.poll(bottomDistance).toBeLessThan(2);
+
+  await terminal.evaluate((element) => {
+    element.scrollTop -= 20;
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  // Reaching the bottom follows again, even when output lands before the scroll event.
+  await terminal.evaluate((element, message) => {
+    element.scrollTop = element.scrollHeight;
+    (window as any).__relayServer(0, message);
+  }, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: rows.slice(0, 203).join('\n') });
+  await expect(terminal).toContainText('near-bottom row 203');
+  await frame(220);
+  await expect(terminal).toContainText('near-bottom row 220');
+  await expect.poll(bottomDistance).toBeLessThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
+});
+
+test('renders rows after a long wheel scroll to just above the bottom', async ({ page }) => {
+  const rows = Array.from({ length: 1_000 }, (_, index) => `wheel row ${index + 1}`);
+  await openOmpPane(page, 'Wheel jump');
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: rows.join('\n'),
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '1000');
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await page.waitForTimeout(300);
+
+  // One big wheel scroll lands 20px above the bottom.
+  await terminal.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 10_000 }));
+    element.scrollTop = element.scrollHeight - element.clientHeight - 20;
+  });
+  const visibleRow = () => terminal.evaluate((element) => {
+    const viewport = element.getBoundingClientRect();
+    return [...element.querySelectorAll('[data-terminal-row]')].some((row) => {
+      const bounds = row.getBoundingClientRect();
+      return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+    });
+  });
+  await expect.poll(visibleRow).toBe(true);
+  // Being near the bottom is not a request to follow output.
+  expect(await terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(10);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+});
+
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -5579,9 +5687,15 @@ test('finds and highlights matches across virtualized terminal output', async ({
     agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Search app', agent: 'codex' }],
   });
   await page.getByRole('button', { name: 'Open Search app on Fedora' }).click();
+  const terminal = page.getByRole('log');
+  await terminal.evaluate((element) => {
+    element.style.height = '96px';
+    element.style.minHeight = '0';
+    element.style.maxHeight = '96px';
+  });
   const lines = Array.from({ length: 320 }, (_, index) => {
     if (index === 24) return 'needle early result';
-    if (index === 286) return 'needle late result';
+    if (index === 316) return 'needle late result';
     return `terminal row ${index}`;
   });
   await server(page, 0, {
@@ -5605,7 +5719,16 @@ test('finds and highlights matches across virtualized terminal output', async ({
   await page.getByRole('button', { name: 'Next match' }).click();
   await expect(page.getByText('2 of 2', { exact: true })).toBeVisible();
   await expect(page.locator('mark.terminal-find-match.active')).toHaveText('needle');
-  await expect(page.getByRole('log')).toContainText('needle late result');
+  await expect(terminal).toContainText('needle late result');
+  const before = await terminal.evaluate((element) => ({ top: element.scrollTop,
+    gap: element.scrollHeight - element.scrollTop - element.clientHeight }));
+  expect(before.gap).toBeGreaterThan(1);
+  expect(before.gap).toBeLessThan(48);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: `${lines.join('\n')}\nnew output` });
+  await expect(terminal).toContainText('new output');
+  expect(await terminal.evaluate((element) => element.scrollTop)).toBeCloseTo(before.top, 0);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
 
   await search.press('Escape');
   await expect(search).toBeHidden();
@@ -6109,6 +6232,207 @@ test('never executes notification approvals, stale or current', async ({ page })
   await page.evaluate((target) => { location.hash = `#notify=${target}`; }, currentTarget);
   await expect(page.getByRole('main', { name: /Terminal for Stale approval/ })).toBeVisible();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(0);
+});
+
+test('shows long approval choices in full on touch-sized buttons', async ({ page }) => {
+  const long = 'Yes, allow all edits during this session (shift+tab to cycle)';
+  const path = 'Yes, and always allow ./frontend/src/components/AgentListWithAVeryLongUnbrokenFileName.svelte';
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Long choice', agent: 'claude', options: [long, path, 'No'] }],
+  });
+  const choice = page.getByRole('button', { name: long, exact: true });
+  await expect(choice).toBeVisible();
+  // A long unbroken token wraps inside the card instead of widening the page.
+  const card = (await page.locator('.agent-actions').boundingBox())!;
+  const pathBox = (await page.getByRole('button', { name: path, exact: true }).boundingBox())!;
+  expect(pathBox.x + pathBox.width).toBeLessThanOrEqual(card.x + card.width + 1);
+  expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+  expect((await choice.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  expect((await page.getByRole('button', { name: 'No', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+});
+
+test('answers a short single-choice question from its card in one tap', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const short = {
+    id: 'short-question', kind: 'single_select',
+    question: `Which database should the migration target? ${'It rewrites every table. '.repeat(12)}Production data is dropped.`,
+    options: [{ index: 0, label: 'Postgres' }, { index: 1, label: 'SQLite' }, { index: 2, label: 'MySQL' }],
+    submit_label: 'Submit', question_index: 1, question_total: 1,
+  };
+  const long = {
+    ...short, id: 'long-question',
+    options: ['A', 'B', 'C', 'D', 'E'].map((label, index) => ({ index, label })),
+  };
+  const described = {
+    ...short, id: 'described-question',
+    options: [{ index: 0, label: 'Keep' }, { index: 1, label: 'Drop', description: 'Deletes the table' }],
+  };
+  const essay = {
+    ...short, id: 'essay-question', question: `Pick one. ${'Background detail. '.repeat(30)}`,
+    options: [{ index: 0, label: 'One' }, { index: 1, label: 'Two' }, { index: 2, label: 'Three' }],
+  };
+  const followUp = { ...short, id: 'follow-up', question: 'Which region?', options: [{ index: 0, label: 'Asia' }, { index: 1, label: 'Europe' }] };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Short', agent: 'claude', options: [], interaction: short, question_layout: true },
+      { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'question', project: 'Long', agent: 'claude', options: [], interaction: long, question_layout: true },
+      { pane_id: 'w1:p3', status: 'blocked', attention_kind: 'question', project: 'Described', agent: 'claude', options: [], interaction: described, question_layout: true },
+      { pane_id: 'w1:p4', status: 'blocked', attention_kind: 'question', project: 'Essay', agent: 'claude', options: [], interaction: essay, question_layout: true },
+    ],
+  });
+  // Five options, options with descriptions, or a very long question keep the full form;
+  // nothing is preselected.
+  await expect(page.getByRole('button', { name: 'Choose answer (5)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Choose answer (2)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Choose answer (3)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'More…' })).toBeVisible();
+  // The whole question is visible next to its one-tap answers.
+  const shortCard = page.locator('.agent-card', { has: page.getByRole('button', { name: 'SQLite', exact: true }) });
+  const shortPrompt = shortCard.locator('.prompt-preview');
+  expect(await shortPrompt.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+
+  // Replies come from the test, shaped like the relay's finishQuestionWatch.
+  await setAutoCommands(page, false);
+  const answers = async () => (await commands(page)).filter((command) => command.type === 'answer_question');
+  const reply = async (result: Record<string, unknown>) => {
+    const last = (await answers()).at(-1)!;
+    await server(page, 0, { type: 'command_result', action: 'answer_question', request_id: last.request_id, ...result });
+  };
+  const unexpected = 'The agent opened an unexpected question; the screen was refreshed';
+
+  // A reply carrying a malformed question neither crashes the card nor replaces it.
+  await page.getByRole('button', { name: 'SQLite', exact: true }).click();
+  await expect.poll(async () => (await answers()).length).toBe(1);
+  expect((await answers())[0]).toMatchObject({ interaction_id: 'short-question', selected_indices: [1], other_selected: false });
+  await reply({ ok: false, phase: 'failed', error: unexpected, data: { interaction: { id: 'broken', question: 'No options' } } });
+  await expect(page.getByRole('button', { name: 'SQLite', exact: true })).toBeVisible();
+  await expect(page.locator('.toast')).toHaveText('The agent asked another question; it will appear with the next update.');
+  await expect(page.locator('.toast.error')).toHaveCount(0);
+
+  // A real follow-up arrives as a failed reply with the new question: the card shows it,
+  // without an error and without leaving the list.
+  await page.getByRole('button', { name: 'SQLite', exact: true }).click();
+  await expect.poll(async () => (await answers()).length).toBe(2);
+  await reply({ ok: false, phase: 'failed', error: unexpected, data: { interaction: followUp } });
+  await expect(page.getByRole('button', { name: 'Asia', exact: true })).toBeVisible();
+  await expect(page.locator('.toast.error')).toHaveCount(0);
+  await expect(page.getByRole('main', { name: /Terminal for/ })).toHaveCount(0);
+
+  // A plain failure is reported where the user is.
+  await page.getByRole('button', { name: 'Asia', exact: true }).click();
+  await expect.poll(async () => (await answers()).length).toBe(3);
+  await reply({ ok: false, phase: 'failed', error: 'Pane changed before the answer landed' });
+  await expect(page.locator('.toast.error')).toContainText('Pane changed before the answer landed');
+  await expect(page.getByRole('main', { name: /Terminal for/ })).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test('treats a follow-up question from the answer form like the card does', async ({ page }) => {
+  const lone = {
+    id: 'lone-question', kind: 'single_select', question: 'Which database?',
+    options: [{ index: 0, label: 'Postgres' }, { index: 1, label: 'SQLite' }],
+    submit_label: 'Submit', question_index: 1, question_total: 1,
+  };
+  const followUp = { ...lone, id: 'follow-up', question: 'Which region?', options: [{ index: 0, label: 'Asia' }, { index: 1, label: 'Europe' }] };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone, question_layout: true }],
+  });
+  await page.getByRole('button', { name: 'More…' }).click();
+  await expect(page.getByRole('group', { name: 'Which database?' })).toBeVisible();
+  await setAutoCommands(page, false);
+  await page.getByRole('radio', { name: /SQLite/ }).click();
+  await page.getByRole('button', { name: 'Submit' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
+  const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
+  await server(page, 0, {
+    type: 'command_result', action: 'answer_question', request_id: answer.request_id, ok: false, phase: 'failed',
+    error: 'The agent opened an unexpected question; the screen was refreshed', data: { interaction: followUp },
+  });
+  await expect(page.getByRole('group', { name: 'Which region?' })).toBeVisible();
+  await expect(page.locator('.toast')).toHaveText('The agent asked another question.');
+  await expect(page.locator('.toast.error')).toHaveCount(0);
+
+  // In a questionnaire, landing on an unexpected question is still reported as an error.
+  const third = { ...followUp, id: 'third', question: 'Which zone?', question_index: 3, question_total: 3, submit_label: 'Next' };
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [],
+      interaction: { ...followUp, id: 'first-of-three', question: 'Which tier?', question_index: 1, question_total: 3, submit_label: 'Next' }, question_layout: true }],
+  });
+  await expect(page.getByRole('group', { name: 'Which tier?' })).toBeVisible();
+  await page.getByRole('radio', { name: /Asia/ }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(2);
+  const second = (await commands(page)).filter((command) => command.type === 'answer_question').at(-1)!;
+  // An agent update lands before the rejection; the toast still judges the submitted question.
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Form', agent: 'claude', options: [], interaction: lone, question_layout: true }],
+  });
+  await server(page, 0, {
+    type: 'command_result', action: 'answer_question', request_id: second.request_id, ok: false, phase: 'failed',
+    error: 'The agent opened an unexpected question; the screen was refreshed', data: { interaction: third },
+  });
+  await expect(page.getByRole('group', { name: 'Which zone?' })).toBeVisible();
+  await expect(page.locator('.toast.error')).toHaveText('The agent opened an unexpected question; the screen was refreshed');
+});
+
+test('keeps one-tap answers working with missing option indexes and explains disabled ones', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const unindexed = {
+    id: 'unindexed', kind: 'single_select', question: 'Which side?',
+    options: [{ label: 'Left' }, { label: 'Right' }], submit_label: 'Submit', question_index: 1, question_total: 1,
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    inventory: { state: 'error', error_code: 'topology_churn', message: 'Agent inventory is changing too quickly.', last_attempt_at: 1, last_success_at: 0, stale: true },
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Sides', agent: 'claude', options: [], interaction: unindexed, question_layout: true }],
+  });
+  const left = page.getByRole('button', { name: 'Left', exact: true });
+  await expect(left).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Right', exact: true })).toBeVisible();
+  await expect(left).toHaveAttribute('title', 'Agent controls are unavailable until Herdr inventory recovers.');
+
+  // Ready alone is not actionable while inventory is stale or the correlated
+  // snapshot has not restored authority.
+  await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 2, last_success_at: 1, stale: true });
+  await expect(left).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Open Sides on Fedora' })).toBeDisabled();
+
+  // Once inventory recovers, an option without an index answers by its position.
+  await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 3, last_success_at: 3, stale: false });
+  await expect(left).toBeEnabled();
+  await page.getByRole('button', { name: 'Right', exact: true }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
+  expect((await commands(page)).find((command) => command.type === 'answer_question')).toMatchObject({ interaction_id: 'unindexed', selected_indices: [1] });
+  expect(pageErrors).toEqual([]);
+});
+
+test('keeps the terminal key row compact on touch screens', async ({ page }) => {
+  await openOmpPane(page, 'Key row');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'ready' });
+  const esc = page.getByRole('button', { name: 'Esc', exact: true }).last();
+  await expect(esc).toBeVisible();
+  expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+  expect((await esc.boundingBox())!.height).toBeLessThan(44);
 });
 
 test('restores structured questions from the cached agent snapshot after reload', async ({ page }) => {

@@ -19,7 +19,6 @@ func TestCapabilityRefreshChecksPaneReadAfterReconnect(t *testing.T) {
 		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 		// A healthy refresh reuses evidence without probing a terminal again.
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
-		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		// A same-version reconnect must recheck instead of retaining support.
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
@@ -57,7 +56,6 @@ func TestCapabilityRefreshRetriesUnknownPaneRead(t *testing.T) {
 		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
 		{"error": map[string]any{"code": "invalid_request", "message": "temporary refusal"}},
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
-		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 	})
 	defer listener.Close()

@@ -3,9 +3,11 @@
   import Button from '$components/ui/Button.svelte';
   import { CommandError, relayStore } from '$lib/store';
   import {
+    answerFailureToast,
     createQuestionDraft,
     questionDraftKey,
     questionSubmitAllowed,
+    returnedInteraction,
     shouldRestoreQuestionDraft,
     updateQuestionOption,
     updateQuestionOther,
@@ -89,26 +91,19 @@
     save(updateQuestionOther(interaction, draft, selected, text));
   }
 
-  function returnedInteraction(result: { data?: Record<string, unknown> }): QuestionInteraction | undefined {
-    const value = result.data?.interaction;
-    if (!value || typeof value !== 'object') return undefined;
-    const candidate = value as QuestionInteraction;
-    if (!candidate.id || !candidate.question || !Array.isArray(candidate.options)) return undefined;
-    return candidate;
-  }
-
   function unexpectedResult(message: string, fresh?: QuestionInteraction): CommandError {
     const error = new CommandError(message);
     if (fresh) error.data = { interaction: fresh };
     return error;
   }
 
-  function handleQuestionError(caught: unknown) {
+  function handleQuestionError(caught: unknown, answered?: QuestionInteraction) {
     relayStore.clearResponding(agent.pane_id);
     const error = caught as CommandError;
     const fresh = returnedInteraction(error);
     if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
-    relayStore.showToast(error.message, true);
+    const [message, isError] = answered ? answerFailureToast(error, fresh, answered) : [error.message, true];
+    relayStore.showToast(message, isError);
   }
 
   async function submit(event: SubmitEvent) {
@@ -117,6 +112,7 @@
       relayStore.showToast('Complete the question first.', true);
       return;
     }
+    const answered = interaction;
     try {
       const submittedKey = questionDraftKey(agent, interaction);
       const final = interaction.submit_label !== 'Next';
@@ -134,10 +130,10 @@
         relayStore.applyQuestionInteraction(agent, null);
         relayStore.showToast('Answers submitted.');
       } else {
-        throw unexpectedResult('Unexpected question result.', next);
+        handleQuestionError(unexpectedResult('Unexpected question result.', next));
       }
     } catch (caught) {
-      handleQuestionError(caught);
+      handleQuestionError(caught, answered);
     }
   }
 

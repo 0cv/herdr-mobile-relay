@@ -981,6 +981,38 @@ describe('accessible Svelte interactions', () => {
     expect(screen.queryByText('No chat agents are running.')).not.toBeInTheDocument();
   });
 
+  it('disables stale question navigation like the card it opens, and restores it when inventory is fresh', async () => {
+    const relay = { id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' };
+    const question = (id: string, options: QuestionInteraction['options']): Agent => ({
+      ...blockedAgent, pane_id: `fedora::${id}`, raw_pane_id: id, project: id, attention_kind: 'question', options: undefined,
+      interaction: { id, kind: 'single_select', question: `Pick ${id}?`, options },
+    });
+    const quick = question('quick', [{ index: 0, label: 'Yes' }, { index: 1, label: 'No' }]);
+    const full = question('full', [{ index: 0, label: 'Domain port', description: 'Transport agnostic.' }]);
+    const user = userEvent.setup();
+    const onopen = vi.fn();
+    const stale = new Map([['fedora', {
+      status: 'connected', actionsFresh: true,
+      inventory: { state: 'ready', errorCode: '', message: '', lastAttemptAt: 2, lastSuccessAt: 1, stale: true },
+    } as any]]);
+    const view = render(AgentList, { agents: [quick, full, blockedAgent], relays: [relay], connections: stale, responding: new Set<string>(), onopen });
+    for (const name of ['Yes', 'More…', /Choose answer/, 'Approve once']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+    await user.click(screen.getByRole('button', { name: 'More…' }));
+    await user.click(screen.getByRole('button', { name: /Choose answer/ }));
+    expect(onopen).not.toHaveBeenCalled();
+
+    const fresh = new Map([['fedora', { status: 'connected', actionsFresh: true, inventory: { state: 'ready', stale: false } } as any]]);
+    await view.rerender({ agents: [quick, full, blockedAgent], relays: [relay], connections: fresh, responding: new Set<string>(), onopen });
+    for (const name of ['Yes', 'More…', /Choose answer/, 'Approve once']) {
+      expect(screen.getByRole('button', { name })).toBeEnabled();
+    }
+    await user.click(screen.getByRole('button', { name: 'More…' }));
+    await user.click(screen.getByRole('button', { name: /Choose answer/ }));
+    expect(onopen.mock.calls).toEqual([[quick], [full]]);
+  });
+
   it('distinguishes successful empty inventory from loading inventory', () => {
     const relay = { id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' };
     const readyConnections = new Map([['fedora', {

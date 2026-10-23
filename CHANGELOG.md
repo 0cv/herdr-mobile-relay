@@ -169,6 +169,34 @@ entry below states its limits.
   the dispatch boundary immediately before resizing so that a request whose
   target changed since the last Herdr lookup writes nothing.
 
+## [0.22.13] - 2026-10-23
+
+### Changed
+
+- Show approval choices in full, wrapping long labels and paths instead of
+  cutting them off. Approval and answer buttons on agent cards have a 44px
+  minimum height on touch screens; terminal controls keep their compact size.
+- Answer a short standalone single-choice question directly from its agent
+  card when it has up to four plain options. More… opens the full form;
+  longer questions, described options, and questionnaires keep the full form.
+  Follow-up questions refresh the card in place without opening the terminal,
+  and the card and answer form show consistent follow-up messages. (#73)
+
+## [0.22.12] - 2026-10-23
+
+### Fixed
+
+- Keep the terminal at the reader's position after a small scroll up, even
+  while the agent keeps rewriting its last line. Following resumes only when
+  the reader returns to the bottom or taps Jump to latest. Long scrolls near
+  the bottom render the visible rows instead of leaving a blank viewport. (#71)
+
+- Stop filling the Herdr server log with a failed `workspace.move_block`
+  request every 30 seconds. That request is the relay's capability check, and
+  Herdr's refusal is the expected answer. The relay now checks once per Herdr
+  server and again only after a reconnect, the same as its `tab.move` and
+  `pane.read` checks. (#70)
+
 ## [0.22.11] - 2026-10-21
 
 ### Added
@@ -1911,7 +1939,9 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
   laptop terminal from remaining narrowed.
 
 [Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...HEAD
-[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.23.0
+[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.13...v0.23.0
+[0.22.13]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...v0.22.13
+[0.22.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.22.12
 [0.22.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.22.11
 [0.22.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.22.10
 [0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9

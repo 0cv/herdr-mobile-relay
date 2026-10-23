@@ -435,6 +435,32 @@ ALLOWED = (
     # Unit DOC: align the setup-menu and macOS doctor text with the code.
     "QUICKSTART.md",
     "docs/transports.md",
+    # M5 U-H: port of main 0e070b26..278b8c26 (terminal scroll fixes #71, workspace.move_block capability evidence
+    # reuse #70, release v0.22.12, touch-sized approval cards and one-tap answers #73, release v0.22.13): main bytes
+    # for six files, the recorded merges of TerminalView.svelte, mobile-journeys.spec.ts and AgentList.svelte, main's
+    # CHANGELOG with the branch [0.23.0] above [0.22.13], and the one-time regeneration of web/ at asset generation
+    # 421. Paths already listed above are not repeated. Listing a path here is not a review.
+    "frontend/src/app.css",
+    "frontend/src/components/QuestionForm.svelte",
+    "frontend/src/lib/questions.ts",
+    "internal/herdr/capabilities.go",
+    "internal/herdr/capabilities_test.go",
+    "internal/herdr/pane_read_capabilities_test.go",
+    "web/assets/ConversationHistory-421.js",
+    "web/assets/ConversationHistory-421.js.br",
+    "web/assets/ResumeTimingSettings-421.js",
+    "web/assets/ResumeTimingSettings-421.js.br",
+    "web/assets/app-a3de4ca65bfe111f1abd9068ead06620baad39f85e4bee1daf45d6f206a379bc.css",
+    "web/assets/app-a3de4ca65bfe111f1abd9068ead06620baad39f85e4bee1daf45d6f206a379bc.css.br",
+    "web/assets/app-d7e81f20ff3989c80020a4af281c3b3963755f76ae652b83ef89bd4dcb5cabad.css",
+    "web/assets/app-d7e81f20ff3989c80020a4af281c3b3963755f76ae652b83ef89bd4dcb5cabad.css.br",
+    "web/assets/workspace-tools-421.js",
+    "web/assets/workspace-tools-421.js.br",
+    # U-H follow-up: the reviewed F001/F002 fixes and the parent stale-navigation fix regenerate these paths.
+    "web/assets/app-975efa34145ce510bb486ca72a6f7f808dd8b47d1c899430b0b6866b9a256edb.js",
+    "web/assets/app-975efa34145ce510bb486ca72a6f7f808dd8b47d1c899430b0b6866b9a256edb.js.br",
+    "web/builds/0.23.0-421-75c8578a2021dc8a/index.html",
+    "web/builds/0.23.0-421-75c8578a2021dc8a/index.html.br",
 )
 INHERITED = (BASE, 37609261144, 11477250012,
              "cd2de67aaacfcd61d6a8292b34c8f10e2f62760844b8e2572b65eff12132c1ad")

@@ -1,5 +1,28 @@
 import type { Agent, QuestionDraft, QuestionInteraction } from './types';
 
+// A question the relay returned with a result, or undefined when it is missing or malformed.
+export function returnedInteraction(result: { data?: Record<string, unknown> }): QuestionInteraction | undefined {
+  const value = result.data?.interaction;
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as QuestionInteraction;
+  if (!candidate.id || !candidate.question || !Array.isArray(candidate.options)) return undefined;
+  return candidate;
+}
+
+// The toast for an answer the relay rejected. After a lone question, a rejection that carries
+// a question means the agent moved on to it; one we cannot read shows up with the next pane
+// update. In a questionnaire an unexpected question stays an error.
+export function answerFailureToast(
+  error: { message: string; data?: Record<string, unknown> },
+  fresh: QuestionInteraction | undefined,
+  answered: QuestionInteraction,
+): [message: string, isError: boolean] {
+  if ((answered.question_total ?? 1) > 1) return [error.message, true];
+  if (fresh) return ['The agent asked another question.', false];
+  if (error.data?.interaction) return ['The agent asked another question; it will appear with the next update.', false];
+  return [error.message, true];
+}
+
 export function questionDraftKey(agent: Agent, interaction: QuestionInteraction): string {
   return `${agent.pane_id}::${interaction.id}`;
 }
