@@ -1027,12 +1027,16 @@ import sys
 args = sys.argv[1:]
 with open(args[-1], "rb") as handle:
     document = plistlib.load(handle)
-if args[0] == "-replace":
-    key, kind, value = args[1], args[2], args[3]
+if args[0] in ("-replace", "-insert", "-remove"):
+    key = args[1]
+    value = args[3] if args[0] != "-remove" else None
     with open(args[-1], "r+b") as handle:
         handle.seek(0)
-        if key == "ProgramArguments.0":
-            document["ProgramArguments"][0] = value
+        if key == "ProgramArguments.0" and args[0] == "-remove":
+            document["ProgramArguments"].pop(0)
+        elif key == "ProgramArguments.0":
+            # As /usr/bin/plutil does: -replace on an array index inserts, exactly like -insert.
+            document["ProgramArguments"].insert(0, value)
         elif key == "WorkingDirectory":
             document["WorkingDirectory"] = value
         elif key == "EnvironmentVariables.HERDR_RELAY_ENV":
@@ -1065,6 +1069,7 @@ cat > "$WORK_DIR/service.plist" <<EOF
     <key>ProgramArguments</key>
     <array>
         <string>$WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh</string>
+        <string>--launchd</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$WORK_DIR/releases/current</string>
@@ -1076,6 +1081,7 @@ cat > "$WORK_DIR/service.plist" <<EOF
 </dict>
 </plist>
 EOF
+cp "$WORK_DIR/service.plist" "$WORK_DIR/service.plist.orig"
 PLIST_SERVICE_WRAPPER="$WORK_DIR/releases/current path/relay/service & 'quoted' \"percent%\".sh"
 PLIST_WORK_DIR="$WORK_DIR/releases/current path/worker & data"
 PLIST_ENV_FILE="$WORK_DIR/config/relay 'quoted' &.env"
@@ -1086,10 +1092,21 @@ import plistlib
 import sys
 with open(sys.argv[1], "rb") as handle:
     document = plistlib.load(handle)
-assert document["ProgramArguments"][0] == sys.argv[2]
+assert document["ProgramArguments"] == [sys.argv[2], "--launchd"], document["ProgramArguments"]
 assert document["WorkingDirectory"] == sys.argv[3]
 assert document["EnvironmentVariables"]["HERDR_RELAY_ENV"] == sys.argv[4]
 PY
+if [ -x /usr/bin/plutil ]; then  # macOS: the same update with the real tool (hosted Q2 39935380551 refused [new, old, --launchd])
+    cp "$WORK_DIR/service.plist.orig" "$WORK_DIR/real.plist"
+    HERDR_PLUTIL=/usr/bin/plutil update_launchd_release_paths "$WORK_DIR/real.plist" \
+        "$PLIST_SERVICE_WRAPPER" "$PLIST_WORK_DIR" "$PLIST_ENV_FILE" > /dev/null
+    python3 - "$WORK_DIR/real.plist" "$PLIST_SERVICE_WRAPPER" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as handle:
+    assert plistlib.load(handle)["ProgramArguments"] == [sys.argv[2], "--launchd"]
+PY
+fi
 
 FAKE_LAUNCHCTL_DIR="$WORK_DIR/launchctl-bin"
 LAUNCHCTL_LOG="$WORK_DIR/launchctl.log"

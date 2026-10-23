@@ -1296,7 +1296,10 @@ update_launchd_release_paths() {
     [ -f "$plist" ] && [ ! -L "$plist" ] || return 1
     temp="$(mktemp "${plist}.XXXXXX")" || return 1
     cp -p "$plist" "$temp" || { rm -f "$temp"; return 1; }
-    if ! "$plist_tool" -replace ProgramArguments.0 -string "$service_wrapper" "$temp" ||
+    # plutil -replace on an array index INSERTS (argv became [new, old, --launchd] and the wrapper refused it);
+    # remove then insert replaces only the executable and keeps the remaining arguments.
+    if ! "$plist_tool" -remove ProgramArguments.0 "$temp" ||
+        ! "$plist_tool" -insert ProgramArguments.0 -string "$service_wrapper" "$temp" ||
         ! "$plist_tool" -replace WorkingDirectory -string "$work_dir" "$temp"; then
         rm -f "$temp"
         return 1
