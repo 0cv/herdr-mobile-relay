@@ -17,8 +17,9 @@
     tabName,
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
-  import { relayStore } from '$lib/store';
-  import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
+  import { answerFailureToast, returnedInteraction } from '$lib/questions';
+  import { relayStore, type CommandError } from '$lib/store';
+  import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
@@ -397,6 +398,37 @@
     void commitReorder(workspace, tabId, insertIndex, order);
   }
 
+  // A lone single-choice question with a few plain options is answered from the card in one
+  // tap; long questions, descriptions, multi-select, several questions or anything unexpected
+  // keep the full form.
+  function quickQuestion(interaction: QuestionInteraction): boolean {
+    return interaction.kind === 'single_select' && interaction.options.length > 0
+      && interaction.options.length <= 4 && (interaction.question_total ?? 1) <= 1 && interaction.submit_label !== 'Next'
+      && interaction.question.length <= 400
+      && interaction.options.every((option) => !option.description && !option.summary?.length);
+  }
+
+  async function quickAnswer(agent: Agent, interaction: QuestionInteraction, index: number) {
+    let fresh: QuestionInteraction | undefined;
+    try {
+      const result = await relayStore.answerQuestion(agent, interaction, { selected: new Set([index]), otherSelected: false, otherText: '' });
+      relayStore.clearResponding(agent.pane_id);
+      if (result.phase === 'confirmed') {
+        relayStore.applyQuestionInteraction(agent, null);
+        relayStore.showToast('Answer sent.');
+        return;
+      }
+      fresh = returnedInteraction(result);
+      relayStore.showToast(...answerFailureToast({ message: 'Unexpected question result.' }, fresh, interaction));
+    } catch (caught) {
+      relayStore.clearResponding(agent.pane_id);
+      // A follow-up question comes back as a failed answer that carries the new question.
+      fresh = returnedInteraction(caught as CommandError);
+      relayStore.showToast(...answerFailureToast(caught as CommandError, fresh, interaction));
+    }
+    if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
+  }
+
   async function respond(agent: Agent, index: number, total: number, option: string) {
     await relayStore.respond(agent, index, total, option);
   }
@@ -500,13 +532,23 @@
             </span>
             {#if meta}<span class="agent-meta">{meta}</span>{/if}
             {#if blocked || needsInspection}
-              <span class="prompt-preview">{interaction?.question || approvalPromptPreview(agent)}</span>
+              <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{interaction?.question || approvalPromptPreview(agent)}</span>
             {/if}
           </span>
         </button>
         {#if blocked && !responding.has(agent.pane_id)}
           <div class="agent-actions" aria-label={`Actions for ${displayName(agent)}`}>
-            {#if interaction}
+            {#if interaction && quickQuestion(interaction)}
+              {#each interaction.options as option, position (`${interaction.id}:${option.index ?? position}`)}
+                <Button
+                  size="sm"
+                  disabled={!inventoryReady}
+                  title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
+                  onclick={() => quickAnswer(agent, interaction, Number.isInteger(option.index) ? option.index : position)}
+                >{option.label}</Button>
+              {/each}
+              <Button variant="secondary" size="sm" onclick={() => onopen(agent)}>More…</Button>
+            {:else if interaction}
               <Button variant="trust" size="sm" onclick={() => onopen(agent)}>
                 {interaction.kind === 'multi_select' ? 'Choose options' : 'Choose answer'} ({interaction.options.length})
               </Button>
@@ -518,7 +560,7 @@
                   disabled={!inventoryReady}
                   title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
                   onclick={() => respond(agent, index, options.length, option)}
-                >{option.length > 48 ? `${option.slice(0, 45)}...` : option}</Button>
+                >{option}</Button>
               {/each}
             {/if}
           </div>

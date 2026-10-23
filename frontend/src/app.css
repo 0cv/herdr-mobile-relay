@@ -1015,3 +1015,14 @@ textarea { min-height: 6.5rem; resize: vertical; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+
+/* Touch screens: approval and answer buttons get a 44px hit area (Apple HIG,
+   WCAG 2.5.8), in px so Interface Size cannot shrink it. */
+@media (pointer: coarse) {
+  .agent-actions .button { min-height: 44px; }
+}
+
+/* Approval choices wrap instead of being cut, and each row fills the card. */
+.agent-actions .button { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+/* A question answered from its card is shown whole. */
+.prompt-preview.prompt-full { display: block; }
