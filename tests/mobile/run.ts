@@ -816,6 +816,10 @@ async function main(): Promise<void> {
   } else result.environment_qualification = { platform: 'ios', applicability: 'NOT_APPLICABLE' };
   await attempt('final-driver-snapshot', async () => {
     const teardown = platform ? freezeEvidence(platform) : undefined;
+    if (teardown?.confirmationCapture !== undefined) {
+      result.evidence = { ...result.evidence, confirmationCapture: result.evidence?.confirmationCapture ?? teardown.confirmationCapture };
+      delete teardown.confirmationCapture;
+    }
     result.evidence = { ...result.evidence, teardown };
     const driver = teardown?.driver as { firstFatal?: unknown; unusable?: boolean } | undefined;
     if (driver?.unusable || (!measuredDriver?.firstFatal && driver?.firstFatal)) throw new Error('MOBILE_FINALIZATION: sticky teardown driver failure');

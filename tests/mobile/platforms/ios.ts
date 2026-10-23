@@ -10,6 +10,7 @@ import {
 import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
 import { initializeIOSConfirmationSettings, withIOSConfirmationSettings } from '../support/confirmation-settings';
+import { IOS_CONFIRMATION_CAPTURE_LIMITS, projectIOSConfirmation, type IOSConfirmationProjection } from '../support/ios-confirmation-capture';
 import { CommandError, command, commandOutput } from '../support/process';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, iosReceiptWriteStatus, observeIOSReceiptWrite, type IOSLaunchReceipt } from '../support/ios-launch-receipt';
 import { requireOwnedDevice } from '../support/device';
@@ -62,6 +63,13 @@ const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
 const IOS_NATIVE_LIST_READINESS_MS = 15_000;
 const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_GESTURE_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
+
+interface ConfirmationCaptureEvidence {
+  status: 'skipped-budget' | 'captured' | 'unavailable' | 'fatal';
+  acknowledgement?: Readonly<WebDriverRequestTiming>;
+  source?: Readonly<WebDriverRequestTiming>;
+  projection?: IOSConfirmationProjection;
+}
 
 type SafariDiscoveryResult = 'no-context' | 'native-only' | 'safari-context' | 'expected-origin-context' | 'unrelated-context' | 'inspection-truncated';
 type SafariNavigationFailureKind = 'discovery' | 'observation' | 'reserve';
@@ -454,6 +462,7 @@ export class IOSPlatform implements MobilePlatform {
   private failureCapture?: Promise<void>;
   private launchReceipt?: IOSLaunchReceipt;
   private nativeDiagnosticsBlocked = false;
+  private confirmationCapture?: ConfirmationCaptureEvidence;
   private installationAddRequested = false;
   private installationAddFailure?: unknown;
   private omitLaunchLogs = false;
@@ -917,20 +926,28 @@ export class IOSPlatform implements MobilePlatform {
           throw error;
         }
         this.diagnostics.record({ phase: 'ios-install', operation: 'activity-click-acknowledged' });
+        const acknowledgement = this.driver.snapshot().lastCommand?.timing;
+        this.confirmationCapture = { status: 'skipped-budget', acknowledgement: acknowledgement && { ...acknowledgement } };
         const confirmation = operation.phaseView('ios-install-confirmation', 75_000);
         const confirmationPolicy = Object.freeze({ ...operationPolicy, budget: confirmation });
-        const addButton = await this.waitForInstallConfirmation(confirmation, confirmationPolicy);
-        if (confirmation.remainingMs < IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS || operation.remainingMs < IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS) {
-          throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
-        }
-        if (this.installationAddRequested) throw new Error('IOS_SHARE: final Add was already requested');
-        this.installationAddRequested = true;
+        const restoreTiming = this.driver.setRequestTimingScope('ios-install-confirmation', confirmation);
         try {
-          await this.driver.click(addButton, IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS, Object.freeze({ ...confirmationPolicy, finalAction: true }));
-        } catch (error) {
-          this.installationAddFailure ??= error;
-          this.nativeDiagnosticsBlocked = true;
-          throw error;
+          await this.captureInstallConfirmation(confirmation, confirmationPolicy);
+          const addButton = await this.waitForInstallConfirmation(confirmation, confirmationPolicy);
+          if (confirmation.remainingMs < IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS || operation.remainingMs < IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS) {
+            throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+          }
+          if (this.installationAddRequested) throw new Error('IOS_SHARE: final Add was already requested');
+          this.installationAddRequested = true;
+          try {
+            await this.driver.click(addButton, IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS, Object.freeze({ ...confirmationPolicy, finalAction: true }));
+          } catch (error) {
+            this.installationAddFailure ??= error;
+            this.nativeDiagnosticsBlocked = true;
+            throw error;
+          }
+        } finally {
+          restoreTiming();
         }
       }, policy);
     } catch (error) {
@@ -938,6 +955,63 @@ export class IOSPlatform implements MobilePlatform {
       throw error;
     }
     await delay(Math.min(1_500, phase.remainingMs), phase);
+  }
+
+  private async captureInstallConfirmation(confirmation: PhaseBudget, policy: WebDriverRequestPolicy): Promise<void> {
+    const evidence = this.confirmationCapture!;
+    const required = IOS_NATIVE_HIERARCHY_COMMAND_MS + IOS_CONFIRMATION_CAPTURE_LIMITS.localMs + IOS_CONFIRMATION_ROUND_MS;
+    const assertHealthy = (error?: unknown) => {
+      const snapshot = this.driver.snapshot();
+      if (!isFatalDriverError(error) && !snapshot.unusable && !snapshot.firstFatal) return;
+      evidence.status = 'fatal';
+      this.nativeDiagnosticsBlocked = true;
+      this.installationAddFailure ??= isFatalDriverError(error) ? error : new WebDriverError({
+        code: 'APPIUM_SESSION_UNUSABLE', message: 'confirmation capture requires the original healthy session',
+        path: '/source', method: 'GET', durationMs: 0, selectedContext: 'NATIVE_APP', selectedWindow: '',
+      });
+      throw this.installationAddFailure;
+    };
+    assertHealthy();
+    if (confirmation.remainingMs < required) return;
+    const capture = confirmation.phaseView('ios-confirmation-capture', 9_000, IOS_CONFIRMATION_ROUND_MS);
+    let skippedBudget = false;
+    let localDeadline: number;
+    try {
+      let source: unknown;
+      try {
+        source = await this.driver.command<unknown>('/source', 'GET', undefined, IOS_NATIVE_HIERARCHY_COMMAND_MS, Object.freeze({
+          ...policy, budget: capture,
+          beforeDispatch: () => {
+            policy.beforeDispatch();
+            if (confirmation.remainingMs >= required && capture.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS) return;
+            skippedBudget = true;
+            throw new WebDriverError({
+              code: 'APPIUM_COMMAND_NOT_ADMITTED', message: 'confirmation capture surplus unavailable',
+              path: '/source', method: 'GET', durationMs: 0, selectedContext: 'NATIVE_APP', selectedWindow: '',
+            });
+          },
+        }));
+      } finally {
+        localDeadline = performance.now() + Math.min(IOS_CONFIRMATION_CAPTURE_LIMITS.localMs, capture.remainingMs);
+        const command = this.driver.snapshot().lastCommand;
+        evidence.source = command?.path.endsWith('/source') && command.timing ? { ...command.timing } : undefined;
+      }
+      assertHealthy();
+      evidence.projection = projectIOSConfirmation(source, () => performance.now(), localDeadline);
+      evidence.status = 'captured';
+      while (Buffer.byteLength(`${JSON.stringify({ evidence: { confirmationCapture: evidence } }, null, 2)}\n`) > IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes && evidence.projection.nodes.length) {
+        evidence.projection.nodes.pop();
+        evidence.projection.status = 'truncated';
+        evidence.projection.reason = 'bytes';
+      }
+      if (performance.now() >= localDeadline) {
+        evidence.projection.status = 'truncated';
+        evidence.projection.reason = 'local-time';
+      }
+    } catch (error) {
+      assertHealthy(error);
+      evidence.status = skippedBudget ? 'skipped-budget' : 'unavailable';
+    }
   }
 
   private async waitForInstallConfirmation(phase: PhaseBudget, policy: WebDriverRequestPolicy): Promise<string> {
@@ -1590,6 +1664,7 @@ export class IOSPlatform implements MobilePlatform {
       launchPersistence: structuredClone(this.launchPersistence),
       launchCollectionAndPersistenceElapsedMs: captureElapsedMs,
       nativeDiagnosticsBlocked: this.nativeDiagnosticsBlocked,
+      confirmationCapture: this.confirmationCapture && structuredClone(this.confirmationCapture),
       safariNavigation: {
         lastDiscovery: this.safariLastDiscovery,
         lastObservation: this.safariLastObservation,

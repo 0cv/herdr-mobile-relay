@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repositoryPath } from '../support/paths';
@@ -350,6 +350,58 @@ function simulate(workflow: any, suite: string, stages: StageRows, overrides: Re
 }
 export const workflowMutationNames = ['gms-settle-order', 'gms-settle-platform', 'gms-settle-swallow', 'android-barrier-smoke-edge', 'android-barrier-gate-edge', 'android-barrier-gate-guard', 'android-barrier-uncancellable', 'android-barrier-strict', 'android-barrier-platform', 'android-barrier-prefix', 'android-barrier-skip-tolerated', 'ios-runner-label', 'strict-edge', 'qualified-flag', 'native-continue', 'upload-always', 'no-files', 'attempt', 'source-ref', 'output-map', 'postcheck-contract', 'postcheck-overwrite', 'publish-first', 'publish-assertion', 'report-product-dependency', 'full-validator-skipped', 'publish-native-edge', 'unit-aggregate-edge', 'unit-aggregate-always', 'unit-aggregate-dependency', 'unit-shards-unconditional', 'unit-test-dependencies', 'unit-fail-fast', 'unit-continue', 'unit-selector', 'unit-runtime', 'unit-node-runtime', 'unit-go-runtime', 'unit-source-ref', 'unit-weak-aggregate', 'unit-admission-always', 'unit-aggregate-test-dependencies', 'upload-overwrite'] as const;
 export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
+  ['mobile iOS Appium log withholding executes both scoped copy branches without changing Android', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
+    for (const path of ['.github/actions/mobile-device-run/action.yml', '.github/workflows/mobile-ci.yml']) {
+      const document = runtime.YAML.parse(await readFile(repositoryPath(path), 'utf8')) as any;
+      const groups = document.runs ? [document.runs.steps] : Object.values(document.jobs).map((job: any) => job.steps || []);
+      const copies = groups.flat().filter((step: any) => step.run?.includes('"$MOBILE_OUTPUT/appium.log"'));
+      assert.equal(copies.length, 1, path);
+      const step = copies[0];
+      assert.equal(step.if, 'always()');
+      const branch = step.run.match(/if \[ "\$MOBILE_PLATFORM" = ios \]; then\n {2}rm -f "\$MOBILE_OUTPUT\/appium.log"[\s\S]*?\nfi/u)?.[0];
+      assert.ok(branch, path);
+      assert.match(branch, /elif \[ -f "\$RUNNER_TEMP\/appium.log" \]; then/u);
+      assert.equal(step.run.replace(branch, '').includes('appium.log'), false);
+      for (const steps of groups) {
+        const copyIndex = steps.indexOf(step);
+        for (const [index, candidate] of steps.entries()) {
+          if (!candidate.run?.includes('appium.log') || candidate === step) continue;
+          assert.ok(copyIndex > index, 'only startup logging may precede capture');
+          assert.match(candidate.run, /sed -n '1,160p' "\$RUNNER_TEMP\/appium.log"/u);
+          assert.doesNotMatch(candidate.run, /MOBILE_OUTPUT\/appium.log/u);
+        }
+        for (const upload of steps.filter((candidate: any) => candidate.uses?.startsWith('actions/upload-artifact'))) {
+          assert.doesNotMatch(upload.with.path, /appium.log|\$\{\{ runner.temp \}\}\s*$/u);
+        }
+      }
+      for (const platform of ['ios', 'android']) {
+        const root = await mkdtemp(join(tmpdir(), 'herdr-appium-disposition-'));
+        const output = join(root, 'output');
+        await mkdir(output);
+        const raw = 'private source: 秘密 https://private.test/ arbitrary-application-label\n';
+        await writeFile(join(root, 'appium.log'), raw, { flag: 'wx' });
+        await writeFile(join(output, 'appium.log'), 'stale artifact must be withheld', { flag: 'wx' });
+        const result = await command('bash', ['-c', 'set -euo pipefail\n' + branch], 10_000, {
+          env: { ...process.env, MOBILE_PLATFORM: platform, RUNNER_TEMP: root, MOBILE_OUTPUT: output },
+        });
+        assert.equal(result.stdout, '');
+        assert.equal(result.stderr, '');
+        assert.equal(await readFile(join(root, 'appium.log'), 'utf8'), raw, 'private ephemeral logging remains unchanged');
+        if (platform === 'ios') {
+          await assert.rejects(() => readFile(join(output, 'appium.log')), { code: 'ENOENT' });
+          const disposition = JSON.parse(await readFile(join(output, 'appium-log-disposition.json'), 'utf8'));
+          assert.equal(disposition.appiumLog, 'withheld');
+          assert.match(disposition.reason, /client request timing and bounded confirmation diagnostics/u);
+          assert.doesNotMatch(JSON.stringify(disposition), /秘密|private.test|application-label/u);
+        } else {
+          assert.equal(await readFile(join(output, 'appium.log'), 'utf8'), raw);
+          await assert.rejects(() => readFile(join(output, 'appium-log-disposition.json')), { code: 'ENOENT' });
+        }
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  }],
   ['mobile XML bootstrap avoids hosted Azure mirror stalls and propagates setup failures', async () => {
     const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
     const check = runtime.YAML.parse(await readFile(repositoryPath('.github/workflows/check.yml'), 'utf8')) as any;

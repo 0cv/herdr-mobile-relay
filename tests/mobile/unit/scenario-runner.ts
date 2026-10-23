@@ -6,11 +6,38 @@ import { spawnSync } from 'node:child_process';
 import { repositoryPath } from '../support/paths';
 import { observationsFixture, environmentFixture, measurementIdentity } from './android-product-environment';
 import { assessAndroidEnvironment } from '../android-environment';
+import { sanitizeValue } from '../support/diagnostics';
+import { IOS_CONFIRMATION_CAPTURE_LIMITS as captureLimits, projectIOSConfirmation } from '../support/ios-confirmation-capture';
+import type { WebDriverRequestTiming } from '../support/webdriver';
+import { confirmationBytePressureFixture } from './ios-confirmation-capture';
+
+type CaptureMode = 'unchanged' | 'changed' | 'teardown-only';
+
+function confirmationCaptureFixture() {
+  const receipt = (ordinal: number, scope: WebDriverRequestTiming['scope'], start: number, remaining: number): WebDriverRequestTiming => ({
+    attemptId: ordinal, dispatchedOrdinal: ordinal, sessionGeneration: 7, operation: 'other', scope,
+    entryMs: start, dispatchMs: start + 0.125, responseAvailableMs: start + 120,
+    bodyReadStartMs: start + 120.125, bodyReadCompleteMs: start + 121,
+    parseStartMs: start + 121.125, parseCompleteMs: start + 121.25,
+    historyStartMs: start + 121.375, redactionCompleteMs: start + 121.5, historyCompleteMs: start + 121.625,
+    settlementMs: start + 122, priorSettlementToEntryMs: 0.5, priorSettlementToDispatchMs: 0.625,
+    phaseRemainingAtEntryMs: remaining, phaseRemainingAtDispatchMs: remaining - 0.125,
+    phaseRemainingAtSettlementMs: remaining - 122, admitted: true, sent: true, completed: true, status: 200, outcome: 'success',
+  });
+  return {
+    status: 'captured', acknowledgement: receipt(41, 'unscoped', 20_000, 80_000),
+    source: receipt(42, 'ios-install-confirmation', 20_122.5, 74_999.5),
+    projection: projectIOSConfirmation(confirmationBytePressureFixture().source),
+  };
+}
 
 const fixtureSource = `
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 export const mode = process.env.RUN_PROTOCOL_CASE;
+export const captureMode = process.env.RUN_PROTOCOL_CAPTURE;
+export const capture = captureMode ? JSON.parse(readFileSync(process.env.RUN_PROTOCOL_CAPTURE_FILE, 'utf8')) : undefined;
+export const recordSnapshot = snapshot => { appendFileSync(process.env.RUN_PROTOCOL_SNAPSHOTS, JSON.stringify(snapshot) + '\\n'); return snapshot; };
 export const trace = (event) => appendFileSync(process.env.RUN_PROTOCOL_TRACE, event + '\\n');
 export const origin = 'https://fixture.test:52101';
 export const identity = (candidate) => ({ version: candidate ? '0.21.0' : '0.20.10', assets: candidate ? 370 : 363,
@@ -45,11 +72,18 @@ export const releaseObservations = ${JSON.stringify(observationsFixture(measurem
 export const assessment = ${JSON.stringify(assessAndroidEnvironment(environmentFixture(), measurementIdentity()))};
 `;
 const platformSource = `
-import { trace, mode, origin, state, identity, observations, releaseObservations } from '../fixture-protocol';
+import { trace, mode, origin, state, identity, observations, releaseObservations, captureMode, capture, recordSnapshot } from '../fixture-protocol';
 export class AndroidPlatform {
   name = process.env.MOBILE_PLATFORM;
   selected = true; driver = { unusable:false }; cold = false;
-  constructor(options) { this.options = options; }
+  constructor(options) {
+    this.options = options;
+    globalThis.protocolPlatform = this;
+    this.confirmationCapture = captureMode === 'teardown-only' ? undefined : structuredClone(capture);
+    this.extraEvidence = captureMode ? { nativeDiagnosticsBlocked:false, launchPersistence:{receipt:'written'},
+      safariNavigation:{lastDiscovery:'expected-origin-context'}, events:[{phase:'fixture',detail:{token:'synthetic-secret'}}] } : {};
+    if (captureMode) Object.assign(this.driver, { sessionGeneration:7, selectedContext:'NATIVE_APP', commands:[], lastCommand:{operation:'close'} });
+  }
   activateProductRecorder(identity) { this.template = structuredClone(identity.suite === 'release' ? releaseObservations : observations); this.template.identity = identity; this.proof = structuredClone(this.template); this.proof.records = this.proof.records.slice(0,1); trace('recorder:activate'); }
   productCheckpoint(name) { this.proof.records = structuredClone(this.template.records.slice(0,this.template.records.findIndex(record=>record.kind==='checkpoint'&&record.name===name)+1)); }
   async startFreshDevice() { trace('fresh:begin'); if (mode.includes('fresh-failure')) throw new Error('FRESH_FAILED: original'); trace('fresh:end'); }
@@ -75,19 +109,33 @@ export class AndroidPlatform {
   async setPreference() { trace('preference'); }
   async preferenceValue() { return 'state'; }
   async captureSanitizedEvidence(label) { trace('evidence:' + label); }
-  evidenceSnapshot() { trace('snapshot:platform'); return { driver:this.driver, selectedInstalledWindowValid:this.selected, productObservations:this.proof }; }
+  evidenceSnapshot() {
+    trace('snapshot:platform');
+    if (!this.selected && mode === 'final-snapshot-failure') throw new Error('SNAPSHOT_FAILED');
+    return recordSnapshot({ driver:this.driver, selectedInstalledWindowValid:this.selected, productObservations:this.proof,
+      ...this.extraEvidence, ...(this.confirmationCapture ? {confirmationCapture:this.confirmationCapture} : {}) });
+  }
   async relaunchInstalledApp() { trace('relaunch'); if (!this.pendingCold) return; this.pendingCold=false; this.cold=true; }
   async backgroundApp() { trace('background'); }
   async terminateInstalledApp() { trace('terminate'); this.pendingCold=true; if (this.name === 'android') await this.environmentMeasurement.terminate('com.android.chrome', '42'); }
   async openFixtureAgent() { trace('agent'); }
   async showKeyboardOnComposer() { trace('keyboard'); }
   async hideKeyboard() { trace('hide-keyboard'); }
-  async stopOwnedResources() { trace('cleanup:platform'); if (mode === 'late-driver-failure') { this.driver.firstFatal={code:'APPIUM_TIMEOUT',operation:'teardown'}; this.driver.unusable=true; } this.selected=false; if(this.proof) this.proof.records.length=0; if (mode.includes('cleanup-failure')) throw new Error('CLEANUP_FAILED'); }
+  async stopOwnedResources() {
+    trace('cleanup:platform');
+    if (mode === 'late-driver-failure') { this.driver.firstFatal={code:'APPIUM_TIMEOUT',operation:'teardown'}; this.driver.unusable=true; }
+    this.selected=false;
+    if(this.proof) this.proof.records.length=0;
+    if (captureMode === 'teardown-only') this.confirmationCapture = structuredClone(capture);
+    if (captureMode === 'changed') { this.confirmationCapture.status='unavailable'; this.confirmationCapture.source.dispatchedOrdinal=99; this.confirmationCapture.projection.nodes.pop(); }
+    if (captureMode) this.extraEvidence.nativeDiagnosticsBlocked=this.driver.unusable;
+    if (mode.includes('cleanup-failure')) throw new Error('CLEANUP_FAILED');
+  }
 }
 `;
 export const runnerProtocolCases = ['success', 'component-drift', 'unknown-relation', 'gms-out-of-order', 'gms-missing-post-begin', 'fresh-failure', 'baseline-failure', 'baseline-failure-cleanup-failure', 'scenario-failure', 'fatal-failure', 'post-failure', 'scenario-failure-post-failure', 'recovery-failure-post-failure', 'scenario-failure-post-failure-cleanup-failure', 'cleanup-failure', 'shutdown-failure', 'fixture-stop-failure', 'reverse-acquire-failure', 'reverse-remove-failure', 'fixture-log-failure', 'private-failure', 'event-write-failure', 'result-write-failure', 'sticky-driver-failure', 'late-driver-failure'] as const;
 
-async function replay(mode: string, platform: string, suite: string): Promise<void> {
+async function replay(mode: string, platform: string, suite: string, captureMode?: CaptureMode): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'herdr-scenario-protocol-'));
   const source = process.env.MOBILE_RUN_TEST_SOURCE || repositoryPath('tests/mobile');
   await mkdir(join(root, 'platforms')); await mkdir(join(root, 'android-appium'));
@@ -95,6 +143,14 @@ async function replay(mode: string, platform: string, suite: string): Promise<vo
   await cp(join(source, 'android-appium/kernel-namespace.cjs'), join(root, 'android-appium/kernel-namespace.cjs'));
   await cp(join(source, 'run.ts'), join(root, 'run.ts'));
   assert.equal(await readFile(join(root, 'run.ts'), 'utf8'), await readFile(join(source, 'run.ts'), 'utf8'));
+  const capture = captureMode ? confirmationCaptureFixture() : undefined;
+  if (capture) {
+    assert.equal(capture.projection.status, 'truncated');
+    assert.equal(capture.projection.reason, 'bytes');
+    assert.ok(capture.projection.nodes.length > 300);
+    await writeFile(join(root, 'capture.json'), JSON.stringify(capture), { flag: 'wx' });
+  }
+  assert.equal(await readFile(join(root, 'support/diagnostics.ts'), 'utf8'), await readFile(join(source, 'support/diagnostics.ts'), 'utf8'));
   await writeFile(join(root, 'fixture-protocol.ts'), fixtureSource);
   await writeFile(join(root, 'platforms/android.ts'), platformSource);
   await writeFile(join(root, 'platforms/ios.ts'), platformSource.replace('class AndroidPlatform', 'class IOSPlatform'));
@@ -175,7 +231,7 @@ import * as fs from 'node:fs/promises';
 import { trace, mode } from './fixture-protocol';
 const original={...fs};
 mock.module('node:fs/promises',()=>({...original,
-  writeFile:async(path,...args)=>{const name=String(path).split('/').at(-1);trace('write:'+name); if ((mode.includes('fixture-log-failure')&&name==='fixture.log')||(mode.includes('event-write-failure')&&name==='scenario-events.json')||(mode.includes('result-write-failure')&&name==='mobile-result.json')) throw Error('WRITE_FAILED:'+name);return original.writeFile(path,...args);},
+  writeFile:async(path,...args)=>{const name=String(path).split('/').at(-1);trace('write:'+name); if (name==='mobile-result.json' && process.env.RUN_PROTOCOL_CAPTURE) await original.writeFile(process.env.RUN_PROTOCOL_LIVE_CAPTURE, JSON.stringify(globalThis.protocolPlatform.confirmationCapture), {flag:'wx'}); if ((mode.includes('fixture-log-failure')&&name==='fixture.log')||(mode.includes('event-write-failure')&&name==='scenario-events.json')||(mode.includes('result-write-failure')&&name==='mobile-result.json')) throw Error('WRITE_FAILED:'+name);return original.writeFile(path,...args);},
   rm:async(path,...args)=>{trace('remove:'+String(path).split('/').at(-1));if(mode.includes('private-failure')&&String(path).endsWith('/private'))throw Error('PRIVATE_REMOVE_FAILED');return original.rm(path,...args);}
 }));
 `);
@@ -184,19 +240,79 @@ mock.module('node:fs/promises',()=>({...original,
   await writeFile(join(root, 'bundles.json'), JSON.stringify({ schema: 1, baselines: [bundle(false)], candidate: bundle(true) }));
   const traceFile = join(root, 'trace.log');
   const child = spawnSync(process.execPath, ['--preload', join(root, 'preload.ts'), join(root, 'run.ts'), '--bundle-set', join(root, 'bundles.json'), '--output', join(root, 'output'), '--private-output', join(root, 'private'), '--suite', suite], {
-    env: { ...process.env, MOBILE_PLATFORM: platform, MOBILE_SOURCE_RUN_HEAD_SHA: 'b'.repeat(40), GITHUB_RUN_ID: '35556703407', GITHUB_RUN_ATTEMPT: '2', ANDROID_SERIAL: 'emulator-protocol', RUN_PROTOCOL_CASE: mode, RUN_PROTOCOL_TRACE: traceFile }, encoding: 'utf8', timeout: 20_000,
+    env: { ...process.env, MOBILE_PLATFORM: platform, MOBILE_SOURCE_RUN_HEAD_SHA: 'b'.repeat(40), GITHUB_RUN_ID: '35556703407', GITHUB_RUN_ATTEMPT: '2', ANDROID_SERIAL: 'emulator-protocol', RUN_PROTOCOL_CASE: mode, RUN_PROTOCOL_TRACE: traceFile, RUN_PROTOCOL_CAPTURE: captureMode || '', RUN_PROTOCOL_CAPTURE_FILE: join(root, 'capture.json'), RUN_PROTOCOL_SNAPSHOTS: join(root, 'snapshots.jsonl'), RUN_PROTOCOL_LIVE_CAPTURE: join(root, 'capture-live.json') }, encoding: 'utf8', timeout: 20_000,
   });
-  await writeFile(join(root, 'command.json'), JSON.stringify({ status: child.status, stdout: child.stdout, stderr: child.stderr, error: String(child.error || '') }, null, 2));
+  await writeFile(join(root, 'command.json'), JSON.stringify({ mode, platform, suite, captureMode, status: child.status, stdout: child.stdout, stderr: child.stderr, error: String(child.error || '') }, null, 2));
   assert.equal(child.error, undefined);
   const events = (await readFile(traceFile, 'utf8')).trim().split('\n');
   const before = (first: string, last: string) => assert.ok(events.includes(first) && events.includes(last) && events.indexOf(first) < events.indexOf(last), `${mode}: ${first} before ${last}: ${events}`);
   const resultMissing = mode === 'result-write-failure';
-  const result = resultMissing ? undefined : JSON.parse(await readFile(join(root, 'output/mobile-result.json'), 'utf8'));
+  const resultText = resultMissing ? '' : await readFile(join(root, 'output/mobile-result.json'), 'utf8');
+  const result = resultMissing ? undefined : JSON.parse(resultText);
   const failed = mode.includes('failure') || mode === 'unknown-relation' || mode.startsWith('gms-');
   assert.equal(child.status, failed ? 1 : 0, JSON.stringify({ result, stderr:child.stderr, events }));
   before('cleanup:fixture', 'write:fixture.log'); before('write:fixture.log', 'remove:private'); before('remove:private', 'write:scenario-events.json'); before('write:scenario-events.json', 'write:mobile-result.json');
   if (resultMissing) { await assert.rejects(readFile(join(root, 'output/mobile-result.json'))); return; }
   assert.equal(result.schema, 2);
+  assert.equal(resultText, `${JSON.stringify(sanitizeValue(result), null, 2)}\n`);
+  const snapshots = (mode === 'reverse-acquire-failure' ? [] : (await readFile(join(root, 'snapshots.jsonl'), 'utf8')).trim().split('\n')).map(line => {
+    const snapshot = JSON.parse(line);
+    snapshot.driver.firstFatal ??= null;
+    return sanitizeValue(snapshot) as any;
+  });
+  const measuredSnapshot = snapshots.findLast(snapshot => snapshot.selectedInstalledWindowValid) || {};
+  const teardownSnapshot = snapshots.find(snapshot => !snapshot.selectedInstalledWindowValid);
+  const measuredEvidence = structuredClone(result.evidence);
+  delete measuredEvidence.teardown;
+  delete measuredEvidence.productEventRelations;
+  if (captureMode === 'teardown-only') measuredSnapshot.confirmationCapture = teardownSnapshot.confirmationCapture;
+  assert.deepEqual(measuredEvidence, measuredSnapshot);
+  if (capture) {
+    const withoutCapture = structuredClone(result);
+    delete withoutCapture.evidence.confirmationCapture;
+    if (withoutCapture.evidence.teardown) delete withoutCapture.evidence.teardown.confirmationCapture;
+    const projectionBytes = (teardown = false) => {
+      const withoutProjection = structuredClone(result);
+      const target = teardown ? withoutProjection.evidence.teardown : withoutProjection.evidence;
+      if (!target?.confirmationCapture?.projection) return 0;
+      delete target.confirmationCapture.projection;
+      return Buffer.byteLength(resultText) - Buffer.byteLength(`${JSON.stringify(sanitizeValue(withoutProjection), null, 2)}\n`);
+    };
+    const metrics = {
+      mode, captureMode, resultBytes: Buffer.byteLength(resultText), nodes: result.evidence.confirmationCapture.projection.nodes.length,
+      canonicalProjectionBytes: projectionBytes(), teardownProjectionBytes: projectionBytes(true),
+      totalAddedBytesIncludingReceipts: Buffer.byteLength(resultText) - Buffer.byteLength(`${JSON.stringify(sanitizeValue(withoutCapture), null, 2)}\n`),
+      captureCopies: (resultText.match(/"confirmationCapture":/gu) || []).length,
+    };
+    await writeFile(join(root, 'terminal-metrics.json'), `${JSON.stringify(metrics, null, 2)}\n`, { flag: 'wx' });
+    assert.equal(metrics.captureCopies, 1, JSON.stringify(metrics));
+    assert.ok(metrics.canonicalProjectionBytes > captureLimits.projectionBytes - 256);
+    assert.ok(metrics.canonicalProjectionBytes <= captureLimits.projectionBytes);
+    assert.equal(metrics.teardownProjectionBytes, 0);
+    assert.ok(metrics.totalAddedBytesIncludingReceipts > metrics.canonicalProjectionBytes);
+    assert.ok(metrics.totalAddedBytesIncludingReceipts <= captureLimits.evidenceBytes);
+    assert.deepEqual(result.evidence.confirmationCapture, capture);
+    const liveCapture = JSON.parse(await readFile(join(root, 'capture-live.json'), 'utf8'));
+    const expectedLive = structuredClone(capture);
+    if (captureMode === 'changed') { expectedLive.status = 'unavailable'; expectedLive.source.dispatchedOrdinal = 99; expectedLive.projection.nodes.pop(); }
+    assert.deepEqual(liveCapture, expectedLive);
+    assert.equal(result.evidence.events[0].detail.token, '[REDACTED]');
+    assert.doesNotMatch(resultText, /synthetic-secret/u);
+    assert.deepEqual(result.environment_qualification, { platform: 'ios', applicability: 'NOT_APPLICABLE' });
+    if (captureMode === 'teardown-only') {
+      assert.equal(result.product.status, 'FAIL');
+      assert.equal(result.finalization.status, 'PASS');
+    }
+    if (teardownSnapshot) delete teardownSnapshot.confirmationCapture;
+  } else {
+    assert.equal(resultText.includes('confirmationCapture'), false);
+  }
+  assert.deepEqual(result.evidence.teardown, teardownSnapshot);
+  if (mode === 'final-snapshot-failure') {
+    assert.equal(result.product.status, 'PASS');
+    assert.equal(result.finalization.status, 'FAIL');
+    assert.deepEqual(result.finalization.failures, [{ stage: 'final-driver-snapshot', category: 'FINALIZATION', message: 'SNAPSHOT_FAILED' }]);
+  }
   const measured = platform === 'android' && !/fresh-failure|baseline-failure|reverse-acquire-failure|gms-out-of-order/u.test(mode);
   assert.equal(events.filter(event => event === 'measurement:finish').length, measured ? 1 : 0);
   if (measured) { before('fresh:end','measurement:begin'); before('measurement:begin','invitation'); before('measurement:finish','cleanup:platform'); }
@@ -241,4 +357,10 @@ export const scenarioRunnerTests: Array<[string, () => Promise<void>]> = [
   ...runnerProtocolCases.map(mode => [`production runner Android ${mode} preserves the preparation/measurement/cleanup contract`, () => replay(mode, 'android', 'smoke')] as [string, () => Promise<void>]),
   ['production runner release records the lifecycle operation without rebaseline', () => replay('success', 'android', 'release')],
   ['production runner iOS never starts Android measurement', () => replay('success', 'ios', 'release')],
+  ...(['success', 'scenario-failure', 'fatal-failure', 'cleanup-failure', 'sticky-driver-failure', 'late-driver-failure', 'event-write-failure', 'final-snapshot-failure'] as const).map(mode => [
+    `production runner iOS terminal byte-pressure ${mode} retains only the frozen capture and all other evidence`,
+    () => replay(mode, 'ios', 'release', mode === 'success' ? 'unchanged' : 'changed'),
+  ] as [string, () => Promise<void>]),
+  ['production runner iOS terminal changed teardown cannot replace the frozen byte-pressure capture', () => replay('success', 'ios', 'release', 'changed')],
+  ['production runner iOS terminal teardown-only capture remains diagnostic on scenario failure', () => replay('scenario-failure', 'ios', 'release', 'teardown-only')],
 ];

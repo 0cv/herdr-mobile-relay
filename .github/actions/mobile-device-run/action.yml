@@ -400,7 +400,10 @@ runs:
           fi
         fi
         if [ "$MOBILE_PLATFORM" = android ]; then bash tests/mobile/android-appium/ci.sh evidence "$MOBILE_OUTPUT"; fi
-        if [ -f "$RUNNER_TEMP/appium.log" ]; then
+        if [ "$MOBILE_PLATFORM" = ios ]; then
+          rm -f "$MOBILE_OUTPUT/appium.log"
+          printf '%s\n' '{"platform":"ios","appiumLog":"withheld","reason":"Payload-bearing Appium log is not uploaded; use client request timing and bounded confirmation diagnostics. Private ephemeral runner logging is unchanged."}' >"$MOBILE_OUTPUT/appium-log-disposition.json"
+        elif [ -f "$RUNNER_TEMP/appium.log" ]; then
           bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
         fi
         if [ -f "$RUNNER_TEMP/wda-build.log" ]; then

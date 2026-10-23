@@ -370,6 +370,56 @@ queries. The Share-sheet installation-row click records its start, acknowledgeme
 or failure separately from the final Add lookup; acknowledgement alone does not
 prove the confirmation appeared.
 
+Immediately after that acknowledgement, a one-shot diagnostic GET `/source`
+may run inside the original 75-second confirmation child. Admission requires
+73 seconds remaining: the full 8-second source request, at most 1 second of
+local projection/receipt work, and the unchanged 64-second confirmation round.
+The optional 9-second child reserves that round; original native ownership and
+the surplus/full request cap are rechecked at dispatch. Insufficient surplus
+records `skipped-budget`, without shortening a request or changing transaction
+admission, settings, selectors, restoration reserves or deadlines. Capture
+consumes the same confirmation clock; it never renews it.
+
+`confirmationCapture` in the platform evidence snapshot retains copied activity
+acknowledgement/source client timing and a structural projection, persisted by
+the existing terminal evidence writers without a capture-time file await or
+screenshot. Ordinals/generation/phase offsets are client correlation, not native
+server request IDs or proof of a native stage's cause. The quote-aware projection
+inspects at most 262,144 UTF-16 units, 512 nodes and depth 64, with a 48 KiB
+projection allowance and 64 KiB total added serialized evidence cap. Local work
+checks a 1-second cutoff. These are inspection/retention limits, not a new bound
+on the existing client's network-body buffering or filesystem persistence time.
+
+Hidden ancestors, unrelated controls and unknown wrappers retain their parentage.
+Version 2 stores each node as an ASCII JSON-array string in original order, with
+zero-based parent indices (null for the root), original depth, and static column
+and enum maps in `format`. Numeric codes index the corresponding column's enum;
+geometry remains numeric or null. Tuple strings stay compact through terminal
+pretty-printing. Size checks include the deepest terminal nesting and receipts.
+Decoding is diagnostic/test-only; installation never reads these tuples.
+Only allowlisted native types, bounded finite geometry, boolean-or-unknown flags
+and separate exact name/label/value enums (`Add`, `Add to Home Screen`, `Cancel`,
+withheld or missing) survive. No arbitrary labels, URLs, application names,
+element IDs or malformed fragments are retained by this projection. Unsupported
+declarations/entities are rejected; unavailable, malformed and truncated states
+are explicit, not evidence of absent UI. Settled nonfatal capture failures may
+continue through all original readiness and unique-identity checks. A fatal or
+unusable driver blocks native diagnostics and immediately propagates failure;
+no lookup, final click, settings restoration or capture retry follows.
+
+This is diagnostic-only and a scheduling intervention: requesting source may
+change snapshot/idle scheduling. A passing instrumented run is not proof of
+repair, recovery or qualification. The confirmation fixture is hypothetical,
+not an observed hierarchy from the failing hosted run.
+
+Both mobile CI upload paths withhold `RUNNER_TEMP/appium.log` on iOS, remove
+any stale copy from the artifact directory, and emit the small static
+`appium-log-disposition.json` instead. Use client timing and bounded diagnostics.
+Android's existing log-copy behavior is unchanged. This privacy decision covers
+the uploaded Appium log only: private ephemeral local Appium logging remains
+enabled, and the startup-only console dump precedes the new capture. It does
+not claim removal of other existing restricted diagnostic artifacts.
+
 The XCTest owner retains at most 128 recognized activity enums with host receipt
 timestamps, plus unknown, oversized, incomplete and dropped-event counts.
 Raw output, element labels, application names and source timestamps stay withheld.

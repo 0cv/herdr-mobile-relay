@@ -16,6 +16,7 @@ import {
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
+import { decodeConfirmationProjection } from './ios-confirmation-capture';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
@@ -2078,6 +2079,8 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   let sheetOpen = false;
   let scrolls = 0;
   let shareSourceReads = 0;
+  let confirming = false;
+  const hypotheticalConfirmation = await readFile(new URL('./fixtures/ios/ios-confirmation-hypothetical.xml', import.meta.url), 'utf8');
   const savedConfirmationSettings = { waitForIdleTimeout: 7, animationCoolOffTimeout: 0.8 };
   const initialSettings = { ...savedConfirmationSettings, snapshotMaxDepth: 50 };
   let settings: Record<string, unknown> = { ...initialSettings };
@@ -2086,6 +2089,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   const scrollArguments: Array<Record<string, unknown>> = [];
   const clicks: string[] = [];
   const source = () => {
+    if (confirming) return hypotheticalConfirmation;
     if (!sheetOpen) return iosSafariHierarchy();
     if (shareSourceReads++ === 0) return iosShareHierarchy(0, false);
     return iosShareHierarchy(scrolls);
@@ -2154,6 +2158,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
       const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
       clicks.push(id);
       if (id === 'share') sheetOpen = true;
+      if (id === 'add-home') confirming = true;
       if (id === 'add-button') {
         assert.equal(settings.waitForIdleTimeout, 1);
         assert.equal(settings.animationCoolOffTimeout, 0.2);
@@ -2175,6 +2180,11 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     { element: 'container', direction: 'down', distance: 0.75 },
   ]);
   assert.deepEqual(clicks, ['share', 'add-home', 'add-button']);
+  const capture = platform.evidenceSnapshot().confirmationCapture as any;
+  assert.equal(capture.status, 'captured');
+  assert.equal(capture.projection.status, 'complete');
+  assert.ok(decodeConfirmationProjection(capture.projection).some(node => node.type === 'XCUIElementTypeNavigationBar' && node.name === 'Add to Home Screen'));
+  assert.equal(capture.source.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal + 1);
   const observationSettings = { defaultActiveApplication: 'auto', respectSystemAlerts: true };
   const confirmationSettings = { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 };
   assert.deepEqual(settingsWrites, [observationSettings, confirmationSettings, savedConfirmationSettings]);
