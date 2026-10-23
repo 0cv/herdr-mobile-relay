@@ -3832,6 +3832,10 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     element.scrollTop = Math.max(0, bottom - 6);
     element.dispatchEvent(new Event('scroll'));
   });
+  // Since main #71 a small scroll-up keeps the reader's place; Jump to latest follows the output again.
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(1);
+  await page.getByRole('button', { name: 'Jump to latest' }).click();
   await expect.poll(async () => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(1);
 
@@ -5688,11 +5692,14 @@ test('finds and highlights matches across virtualized terminal output', async ({
   });
   await page.getByRole('button', { name: 'Open Search app on Fedora' }).click();
   const terminal = page.getByRole('log');
-  await terminal.evaluate((element) => {
-    element.style.height = '96px';
-    element.style.minHeight = '0';
-    element.style.maxHeight = '96px';
+  // The terminal rewrites its own style attribute and the page CSP refuses inline styles, so a short
+  // viewport comes from a constructed stylesheet.
+  await page.evaluate(() => {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync('[role="log"].term-content { height: 96px !important; min-height: 0 !important; max-height: 96px !important; flex: none !important; }');
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
   });
+  await expect.poll(() => terminal.evaluate((element) => element.clientHeight)).toBe(96);
   const lines = Array.from({ length: 320 }, (_, index) => {
     if (index === 24) return 'needle early result';
     if (index === 316) return 'needle late result';
@@ -6399,23 +6406,24 @@ test('keeps one-tap answers working with missing option indexes and explains dis
   };
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    inventory: { state: 'error', error_code: 'topology_churn', message: 'Agent inventory is changing too quickly.', last_attempt_at: 1, last_success_at: 0, stale: true },
-  });
+  await handshake(page, 0);
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Sides', agent: 'claude', options: [], interaction: unindexed, question_layout: true }],
   });
   const left = page.getByRole('button', { name: 'Left', exact: true });
-  await expect(left).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Right', exact: true })).toBeVisible();
-  await expect(left).toHaveAttribute('title', 'Agent controls are unavailable until Herdr inventory recovers.');
+  await expect(left).toBeEnabled();
+  // This relay offers no remote action from unavailable or stale inventory: the card is withheld rather than
+  // shown disabled (the disabled card and its explanation are component-tested in components.test.ts).
+  await server(page, 0, { type: 'inventory_status', state: 'error', error_code: 'topology_churn', message: 'Agent inventory is changing too quickly.', last_attempt_at: 1, last_success_at: 0, stale: true });
+  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toBeVisible();
+  await expect(left).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Right', exact: true })).toBeHidden();
 
-  // Ready alone is not actionable while inventory is stale or the correlated
-  // snapshot has not restored authority.
+  // Ready alone is not actionable while inventory is stale.
   await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 2, last_success_at: 1, stale: true });
-  await expect(left).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Open Sides on Fedora' })).toBeDisabled();
+  await expect(left).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Open Sides on Fedora' })).toBeHidden();
 
   // Once inventory recovers, an option without an index answers by its position.
   await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 3, last_success_at: 3, stale: false });

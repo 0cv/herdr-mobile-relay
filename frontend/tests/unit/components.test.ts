@@ -998,6 +998,7 @@ describe('accessible Svelte interactions', () => {
     const view = render(AgentList, { agents: [quick, full, blockedAgent], relays: [relay], connections: stale, responding: new Set<string>(), onopen });
     for (const name of ['Yes', 'More…', /Choose answer/, 'Approve once']) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
+      expect(screen.getByRole('button', { name })).toHaveAttribute('title', 'Agent controls are unavailable until Herdr inventory recovers.');
     }
     await user.click(screen.getByRole('button', { name: 'More…' }));
     await user.click(screen.getByRole('button', { name: /Choose answer/ }));
