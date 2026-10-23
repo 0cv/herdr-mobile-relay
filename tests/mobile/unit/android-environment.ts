@@ -9,7 +9,7 @@ import type { Readable } from 'node:stream';
 import { createConnection as createNetConnection, createServer as createNetServer, type Server, type Socket } from 'node:net';
 import { repositoryPath, repositoryRoot } from '../support/paths';
 import { fileSha256 } from '../support/artifacts';
-import { parseAndroidGmsComponentState, type AndroidEnvironmentSnapshot, type AndroidPreparation } from '../android-environment';
+import { ANDROID_LOG_LIMIT, parseAndroidGmsComponentState, type AndroidEnvironmentSnapshot, type AndroidPreparation } from '../android-environment';
 import { AndroidEnvironmentMeasurement as Measurement, gmsWriterProgress, type AndroidMeasurementIO } from '../android-measurement';
 import { BoundedCommandError, boundedCommand } from '../support/bounded-process';
 import { callerDeadlineToRuntime, callerDurationToRuntime, monotonicNowNs, processGroupAbsent, spawnOwnedProcess, type OwnedProcessHandle, type RetirementEvidence } from '../support/owned-process';
@@ -17,6 +17,7 @@ import { admitNonblockingDescriptor, createOwnedGroupPollOwner, createSupervisor
 import { PhaseBudget } from '../support/budget';
 import { redactText } from '../support/diagnostics';
 import { checkCLI, measurementIdentity, rehashPackage } from './android-product-environment';
+import { androidTransportNormalRecords } from './android-transport';
 
 class AndroidEnvironmentMeasurement extends Measurement {
   constructor(serial: string, output: string, toolchains: string, io: Partial<AndroidMeasurementIO> = {},
@@ -6182,6 +6183,120 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       await writeFile(endPath, 'end');
       await measurement.finish().catch(() => undefined);
       await endpoint.stop();
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
+  for (const mode of ['normal', 'oversized', 'eof', 'non-gms-eof'] as const) {
+    test(`Android transport framing measurement preserves evidence and classification ${mode}`, async () => {
+      const fixture = await harness.createFixture();
+      const saved = { ...process.env };
+      Object.assign(process.env, fixture.environment);
+      const endPath = join(fixture.root, 'framing-end');
+      const observed: Buffer[] = [];
+      let dispatches = 0;
+      let collectorCode = '';
+      const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'), {
+        spawnCollector: () => {
+          const collector = spawnOwnedProcess(process.execPath, ['--no-env-file', '-e', collectorCode], { timeoutMs: 50_000, cleanupReservationMs: 2_000 });
+          collector.stdout.on('data', chunk => { observed.push(Buffer.from(chunk)); });
+          return collector;
+        },
+        boundedCommand: async (binary, args, timeout, options) => {
+          if (args.includes('--android-transport-observation-trigger')) dispatches++;
+          const result = await boundedCommand(binary, args, timeout, options);
+          if (args.includes('snapshot') && args[args.indexOf('--boundary') + 1] === 'end') await writeFile(endPath, 'end');
+          return result;
+        },
+      });
+      const normal = androidTransportNormalRecords.join('\r\n') + '\r\n'
+        + '1790000000.150 77 77 I normal: ' + 'é🙂'.repeat(600) + '\n';
+      const tail = mode === 'normal' ? '' : mode === 'oversized'
+        ? '1790000000.200 77 77 I normal: ' + 'x'.repeat(2050) + ' adbd: timeout expired while flushing socket, closing\n'
+        : '1790000000.200 77 77 I adbd: timeout expired while flushing soc';
+      collectorCode = `const fs=require('node:fs');setTimeout(()=>{const epoch=(Date.now()/1000).toFixed(3);process.stdout.write(epoch+' 77 77 I HerdrMeasure: ${measurement.id} START\\n');const bytes=Buffer.from(${JSON.stringify(normal)}.replaceAll('1790000000.150',epoch));for(let offset=0;offset<bytes.length;offset+=17)process.stdout.write(bytes.subarray(offset,offset+17))},30);const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(endPath)})){fs.rmSync(${JSON.stringify(endPath)},{force:true});process.stdout.write((Date.now()/1000).toFixed(3)+' 77 77 I HerdrMeasure: ${measurement.id} END\\n')}},5);process.on('SIGTERM',()=>{clearInterval(timer);process.stdout.write(${JSON.stringify(tail)},()=>process.exit(0))})`;
+      try {
+        const stages = ['after-device-start', 'before-measurement-begin', 'after-setup-url', 'after-browser-install', 'after-initial-installed-app-launch'] as const;
+        if (mode !== 'non-gms-eof') {
+          measurement.requireGmsObservations();
+          for (const stage of stages.slice(0, 2)) await measurement.observeGmsStage(stage, new PhaseBudget('framing-measurement', { timeoutMs: 20_000 }));
+        }
+        await measurement.begin();
+        if (mode !== 'non-gms-eof') {
+          for (const stage of stages.slice(2)) await measurement.observeGmsStage(stage, new PhaseBudget('framing-measurement', { timeoutMs: 20_000 }));
+        }
+        const outcome = await measurement.finish();
+        const raw = Buffer.concat(observed);
+        const persisted = await readFile(join(fixture.root, 'android-qualification-logcat.log'));
+        assert.deepEqual(persisted, raw);
+        assert.ok(raw.toString('utf8').endsWith(tail));
+        const epoch = raw.subarray(0, raw.indexOf(32)).toString('utf8');
+        assert.match(epoch, /^\d{10}\.\d{3}$/u);
+        assert.ok(raw.includes(Buffer.from(normal.replaceAll('1790000000.150', epoch))));
+        const summary = JSON.parse(await readFile(join(fixture.root, 'android-environment-collector.json'), 'utf8'));
+        assert.equal(summary.acquiredBytes, raw.length);
+        assert.equal(summary.bytes, raw.length);
+        assert.equal(summary.failure, undefined);
+        assert.equal(dispatches, 0);
+        if (mode !== 'non-gms-eof') assert.equal(summary.gmsObservations.terminalConfirmation, 'confirmed');
+        if (mode === 'normal') {
+          assert.equal(summary.transportObservationFailure, undefined);
+          assert.equal(outcome.assessment?.collection.status, 'PASS', JSON.stringify(outcome.assessment?.collection));
+          assert.deepEqual(outcome.errors, []);
+        } else {
+          assert.equal(summary.transportObservationFailure, mode === 'oversized'
+            ? 'collector trigger record exceeded its framing bound' : 'collector trigger record was incomplete at EOF');
+          assert.equal(outcome.assessment?.collection.status, 'UNKNOWN');
+          assert.ok(outcome.assessment?.findings.some(finding => finding.category === 'EVIDENCE_INVALID'));
+          assert.ok(outcome.errors.length > 0);
+        }
+      } finally {
+        await writeFile(endPath, 'end');
+        await measurement.finish().catch(() => undefined);
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+      }
+    });
+  }
+  test('Android transport framing acquisition ceiling precedes both detector paths', async () => {
+    assert.equal(ANDROID_LOG_LIMIT, 100 * 1024 * 1024);
+    const fixture = await harness.createFixture();
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment);
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
+    try {
+      await measurement.begin();
+      const internal = measurement as unknown as {
+        bytes: number; collectorStdoutHandler: (chunk: Buffer) => void; requireGmsObservationsValue: boolean;
+        transportTrigger: AndroidTransportTriggerDetector; transport: AndroidMeasurementIO['transport'];
+        collector: { stop: (reason: string) => void }; collectorFailure?: Error; chunks: Buffer[];
+      };
+      let detectorCalls = 0;
+      let observerCalls = 0;
+      const stops: string[] = [];
+      internal.transportTrigger.observe = () => { detectorCalls++; return []; };
+      internal.transport.observe = () => { observerCalls++; };
+      const stop = internal.collector.stop.bind(internal.collector);
+      internal.collector.stop = reason => { stops.push(reason); };
+      const chunk = Buffer.from('ordinary message\n');
+      const chunksBefore = internal.chunks.length;
+      internal.bytes = ANDROID_LOG_LIMIT - chunk.length;
+      internal.collectorStdoutHandler(chunk);
+      assert.equal(observerCalls, 1);
+      assert.equal(internal.chunks.length, chunksBefore + 1);
+      for (const gms of [false, true]) {
+        internal.requireGmsObservationsValue = gms;
+        internal.collectorStdoutHandler(chunk);
+      }
+      internal.requireGmsObservationsValue = false;
+      internal.collector.stop = stop;
+      assert.equal(observerCalls, 1);
+      assert.equal(detectorCalls, 0);
+      assert.equal(internal.chunks.length, chunksBefore + 1);
+      assert.deepEqual(stops, ['collector-output-limit', 'collector-output-limit']);
+      assert.equal(internal.collectorFailure?.message, 'ANDROID_ENVIRONMENT: measured log exceeds bound');
+    } finally {
+      await measurement.finish().catch(() => undefined);
       for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
       Object.assign(process.env, saved);
     }

@@ -197,8 +197,23 @@ export function androidGuestEpochNanoseconds(value: string, requireNanoseconds =
   return BigInt(match[1]) * 1_000_000_000n + BigInt(match[2].padEnd(9, '0'));
 }
 
+const ANDROID_TRANSPORT_RECORD_BYTES = 2_048;
+const ANDROID_TRANSPORT_FLUSH = 'timeout expired while flushing socket, closing';
+type AndroidTransportEnd = 'complete' | 'irrelevant-tail' | 'failed';
+
 export class AndroidTransportTriggerDetector {
-  private pending = '';
+  private readonly record = Buffer.alloc(ANDROID_TRANSPORT_RECORD_BYTES);
+  private readonly decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  private readonly markerNeedle: string;
+  private recordBytes = 0;
+  private lastByte = 0;
+  private relevanceTail = '';
+  private markerSeen = false;
+  private flushSeen = false;
+  private adbdSeen = false;
+  private adbdPrefix = 0;
+  private previousWord = false;
+  private ended?: AndroidTransportEnd;
   private anchor?: { guestEpochSeconds: string; monotonicMs: number };
   private readonly observedBuffers = new Set<string>();
   private failureValue?: string;
@@ -208,6 +223,7 @@ export class AndroidTransportTriggerDetector {
     if (measurementId !== undefined && !/^[A-Za-z0-9-]{1,80}$/u.test(measurementId)) {
       throw new Error('Android transport measurement identity is malformed');
     }
+    this.markerNeedle = measurementId ? `HerdrMeasure: ${measurementId} ` : '';
   }
 
   get failure(): string | undefined { return this.failureValue; }
@@ -219,62 +235,128 @@ export class AndroidTransportTriggerDetector {
     return true;
   }
 
+  private scan(text: string): void {
+    const searchable = this.relevanceTail + text;
+    this.markerSeen ||= Boolean(this.markerNeedle && searchable.includes(this.markerNeedle));
+    this.flushSeen ||= searchable.includes(ANDROID_TRANSPORT_FLUSH);
+    this.relevanceTail = searchable.slice(1 - Math.max(this.markerNeedle.length, ANDROID_TRANSPORT_FLUSH.length));
+    for (const character of text) {
+      if (this.adbdSeen) break;
+      if (this.adbdPrefix === 4 && character === ':') this.adbdSeen = true;
+      else if (this.adbdPrefix === 4 && /\s/u.test(character)) {
+        this.previousWord = false;
+        continue;
+      } else if (this.adbdPrefix > 0 && character === 'adbd'[this.adbdPrefix]) this.adbdPrefix++;
+      else this.adbdPrefix = character === 'a' && !this.previousWord ? 1 : 0;
+      this.previousWord = /\w/u.test(character);
+    }
+  }
+
+  private decode(bytes?: Buffer): void {
+    try { this.scan(this.decoder.decode(bytes, { stream: bytes !== undefined })); }
+    catch { this.failureValue = 'collector trigger record contained invalid UTF-8'; }
+  }
+
+  finish(): AndroidTransportEnd {
+    if (this.ended) return this.ended;
+    this.decode();
+    if (this.failureValue) return this.ended = 'failed';
+    if (this.recordBytes === 0) return this.ended = 'complete';
+    const partialNeedle = [this.markerNeedle, ANDROID_TRANSPORT_FLUSH].some(needle => {
+      for (let length = 1; length < needle.length; length++) {
+        if (this.relevanceTail.endsWith(needle.slice(0, length))) return true;
+      }
+      return false;
+    });
+    const tail = this.record.subarray(0, Math.min(this.recordBytes, this.record.length)).toString('utf8');
+    const hasBody = /^\s*\d{1,10}\.\d{3,9}\s+\d+\s+\d+\s+[VDIWEF]\s+[^:\s][^:]*:\s*\S/u.test(tail);
+    if (!hasBody || this.markerSeen || this.flushSeen || this.adbdSeen || this.adbdPrefix || partialNeedle) {
+      this.failureValue = 'collector trigger record was incomplete at EOF';
+      return this.ended = 'failed';
+    }
+    return this.ended = 'irrelevant-tail';
+  }
+
   observe(chunk: Buffer, monotonicMs = performance.now()): AndroidTransportCandidate[] {
-    if (this.failureValue) return [];
-    this.pending += chunk.toString('utf8');
-    if (this.pending.length > 2_048 && !this.pending.includes('\n')) {
-      this.failureValue = 'collector trigger record exceeded its framing bound';
-      return [];
-    }
-    const lines = this.pending.split('\n');
-    this.pending = lines.pop() || '';
-    if (this.pending.length > 2_048) {
-      this.failureValue = 'collector trigger record exceeded its framing bound';
-      this.pending = '';
-      return [];
-    }
+    if (this.failureValue || this.ended) return [];
     const candidates: AndroidTransportCandidate[] = [];
-    for (const rawLine of lines) {
-      const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-      if (!this.measurementId) {
-        const legacy = line.match(/^\s*(\d+\.\d+)\s+\d+\s+\d+\s+[VDIWEF]\s+adbd\s*:\s*timeout expired while flushing socket, closing\s*$/u);
-        if (legacy) candidates.push({ guestEpochSeconds: legacy[1], triggeredAt: new Date().toISOString(),
-          candidateMonotonicMs: monotonicMs, anchorGuestEpochSeconds: legacy[1], anchorMonotonicMs: monotonicMs });
-        continue;
-      }
-      const bufferBanner = line.match(/^--------- beginning of (main|system)$/u);
-      if (bufferBanner) {
-        if (this.observedBuffers.has(bufferBanner[1]) || (bufferBanner[1] === 'main' && this.anchor)) {
-          this.failureValue = 'collector log buffer cursor restarted after admission';
-          return [];
+    let offset = 0;
+    while (offset < chunk.length) {
+      const window = chunk.subarray(offset, Math.min(chunk.length, offset + ANDROID_TRANSPORT_RECORD_BYTES));
+      const newline = window.indexOf(10);
+      const bytes = newline < 0 ? window : window.subarray(0, newline);
+      bytes.copy(this.record, Math.min(this.recordBytes, this.record.length), 0,
+        Math.min(bytes.length, Math.max(0, this.record.length - this.recordBytes)));
+      this.recordBytes = Math.min(ANDROID_TRANSPORT_RECORD_BYTES + 2, this.recordBytes + bytes.length);
+      if (bytes.length) this.lastByte = bytes[bytes.length - 1];
+      this.decode(bytes);
+      if (this.failureValue) return [];
+      offset += bytes.length;
+      if (newline < 0) continue;
+      offset++;
+      this.decode();
+      if (this.failureValue) return [];
+      const length = this.recordBytes - (this.lastByte === 13 ? 1 : 0);
+      let candidate: AndroidTransportCandidate | undefined;
+      if (length > this.record.length) {
+        if (this.markerSeen || (this.adbdSeen && this.flushSeen)) {
+          this.failureValue = 'collector trigger record exceeded its framing bound';
         }
-        this.observedBuffers.add(bufferBanner[1]);
-        continue;
-      }
-      if (line.includes(`HerdrMeasure: ${this.measurementId} `)) {
-        const marker = line.match(/^\s*(\d{10}\.\d{3,9})\s+\d+\s+\d+\s+I\s+HerdrMeasure:\s+([A-Za-z0-9-]{1,80}) (.*)$/u);
-        if (!marker || marker[2] !== this.measurementId) {
-          this.failureValue = 'collector measurement start marker was malformed or duplicated';
-          return [];
-        }
-        if (marker[3] === 'END' || marker[3].startsWith('OP_BEGIN ') || marker[3].startsWith('OP_END ')) continue;
-        if (marker[3] !== 'START' || this.anchor) {
-          this.failureValue = 'collector measurement start marker was malformed or duplicated';
-          return [];
-        }
-        this.anchor = { guestEpochSeconds: marker[1], monotonicMs };
-        continue;
-      }
-      if (!this.anchor || this.accepted || !/\badbd\s*:/u.test(line) || !line.includes('timeout expired while flushing socket, closing')) continue;
-      const signal = line.match(/^\s*(\d{1,10}\.\d{3,9})\s+\d+\s+\d+\s+[VDIWEF]\s+adbd\s*:\s+timeout expired while flushing socket, closing$/u);
-      if (!signal) {
-        this.failureValue = 'collector transport trigger record was malformed';
+      } else candidate = this.observeLine(this.record.subarray(0, length).toString('utf8'), monotonicMs);
+      if (this.failureValue) return [];
+      this.recordBytes = 0;
+      this.lastByte = 0;
+      this.relevanceTail = '';
+      this.markerSeen = this.flushSeen = this.adbdSeen = this.previousWord = false;
+      this.adbdPrefix = 0;
+      if (!candidate || (!this.measurementId && candidates.length)) continue;
+      if (candidates.length === 32) {
+        this.failureValue = 'collector trigger queue exceeded its bound';
         return [];
       }
-      candidates.push({ guestEpochSeconds: signal[1], triggeredAt: new Date().toISOString(), candidateMonotonicMs: monotonicMs,
-        anchorGuestEpochSeconds: this.anchor.guestEpochSeconds, anchorMonotonicMs: this.anchor.monotonicMs });
+      candidates.push(candidate);
     }
     return candidates;
+  }
+
+  private observeLine(line: string, monotonicMs: number): AndroidTransportCandidate | undefined {
+    if (!this.measurementId) {
+      const legacy = line.match(/^\s*(\d+\.\d+)\s+\d+\s+\d+\s+[VDIWEF]\s+adbd\s*:\s*timeout expired while flushing socket, closing\s*$/u);
+      if (legacy && !this.accepted) return { guestEpochSeconds: legacy[1], triggeredAt: new Date().toISOString(),
+        candidateMonotonicMs: monotonicMs, anchorGuestEpochSeconds: legacy[1], anchorMonotonicMs: monotonicMs };
+      return;
+    }
+    const bufferBanner = line.match(/^--------- beginning of (main|system)$/u);
+    if (bufferBanner) {
+      if (this.observedBuffers.has(bufferBanner[1]) || (bufferBanner[1] === 'main' && this.anchor)) {
+        this.failureValue = 'collector log buffer cursor restarted after admission';
+        return;
+      }
+      this.observedBuffers.add(bufferBanner[1]);
+      return;
+    }
+    if (line.includes(`HerdrMeasure: ${this.measurementId} `)) {
+      const marker = line.match(/^\s*(\d{10}\.\d{3,9})\s+\d+\s+\d+\s+I\s+HerdrMeasure:\s+([A-Za-z0-9-]{1,80}) (.*)$/u);
+      if (!marker || marker[2] !== this.measurementId) {
+        this.failureValue = 'collector measurement start marker was malformed or duplicated';
+        return;
+      }
+      if (marker[3] === 'END' || marker[3].startsWith('OP_BEGIN ') || marker[3].startsWith('OP_END ')) return;
+      if (marker[3] !== 'START' || this.anchor) {
+        this.failureValue = 'collector measurement start marker was malformed or duplicated';
+        return;
+      }
+      this.anchor = { guestEpochSeconds: marker[1], monotonicMs };
+      return;
+    }
+    if (!this.anchor || this.accepted || !/\badbd\s*:/u.test(line) || !line.includes('timeout expired while flushing socket, closing')) return;
+    const signal = line.match(/^\s*(\d{1,10}\.\d{3,9})\s+\d+\s+\d+\s+[VDIWEF]\s+adbd\s*:\s+timeout expired while flushing socket, closing$/u);
+    if (!signal) {
+      this.failureValue = 'collector transport trigger record was malformed';
+      return;
+    }
+    return { guestEpochSeconds: signal[1], triggeredAt: new Date().toISOString(), candidateMonotonicMs: monotonicMs,
+      anchorGuestEpochSeconds: this.anchor.guestEpochSeconds, anchorMonotonicMs: this.anchor.monotonicMs };
   }
 }
 
@@ -291,9 +373,11 @@ export class AndroidTransportObservation {
   }
 
   observe(chunk: Buffer): void {
-    if (this.task) return;
     const candidate = this.triggerDetector.observe(chunk)[0];
-    if (candidate) this.start({ guestEpochSeconds: candidate.guestEpochSeconds, triggeredAt: candidate.triggeredAt });
+    this.failure ||= this.triggerDetector.failure;
+    if (candidate && !this.task && this.triggerDetector.accept()) {
+      this.start({ guestEpochSeconds: candidate.guestEpochSeconds, triggeredAt: candidate.triggeredAt });
+    }
   }
 
   async observeTrigger(trigger: AndroidTransportTrigger): Promise<void> {
@@ -302,7 +386,9 @@ export class AndroidTransportObservation {
   }
 
   async finish(): Promise<void> {
+    this.triggerDetector.finish();
     await this.task;
+    this.failure ||= this.triggerDetector.failure;
   }
 
   private start(trigger: AndroidTransportTrigger): void {

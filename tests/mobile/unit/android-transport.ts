@@ -5,9 +5,202 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import type { BoundedCommandResult } from '../support/bounded-process';
-import { AndroidTransportObservation, transportAdbObservation, transportCommand } from '../support/android-transport';
+import { AndroidTransportObservation, AndroidTransportTriggerDetector, transportAdbObservation, transportCommand } from '../support/android-transport';
+
+const framingId = 'framing-test';
+const framingStart = `1790000000.100 77 77 I HerdrMeasure: ${framingId} START\n`;
+const framingFlush = '1790000000.200 77 77 I adbd: timeout expired while flushing socket, closing';
+export const androidTransportNormalRecords = ([
+  ['         1790000000.150 5213 5245 I appium  : {"error":"', 'stack frame; ', '"}', 3311],
+  ['         1790000000.150 917 957 V WindowManagerShell: transition {', 'window bounds; ', '}', 2220],
+  ['         1790000000.150 1218 1218 D SearchTargetUtil: image=', 'AbCd', '', 4105],
+] as const).map(([prefix, body, suffix, size]) => prefix
+  + body.repeat(size).slice(0, size - Buffer.byteLength(prefix + suffix)) + suffix);
+
+function framingResult(bytes: Buffer, partitions: number[]) {
+  const detector = new AndroidTransportTriggerDetector(framingId);
+  detector.observe(Buffer.from(framingStart), 100);
+  const epochs: string[] = [];
+  let offset = 0;
+  for (const end of [...partitions, bytes.length]) {
+    epochs.push(...detector.observe(bytes.subarray(offset, end), 200).map(candidate => candidate.guestEpochSeconds));
+    offset = end;
+  }
+  return { epochs, end: detector.finish(), failure: detector.failure };
+}
+
+function assertFramingPartitions(bytes: Buffer, expected: ReturnType<typeof framingResult>): void {
+  assert.deepEqual(framingResult(bytes, []), expected);
+  for (let split = 1; split < bytes.length; split++) {
+    assert.deepEqual(framingResult(bytes, [split]), expected, `split at byte ${split}`);
+  }
+  assert.deepEqual(framingResult(bytes, Array.from({ length: bytes.length }, (_, index) => index + 1)), expected);
+}
 
 export const androidTransportTests: Array<[string, () => Promise<void>]> = [
+  ['Android transport framing ignores hosted-shaped oversized records at every byte split', async () => {
+    for (const line of androidTransportNormalRecords) {
+      assert.ok(Buffer.byteLength(line) > 2048);
+      for (const ending of ['\n', '\r\n']) {
+        assertFramingPartitions(Buffer.from(line + ending + framingFlush + ending), {
+          epochs: ['1790000000.200'], end: 'complete', failure: undefined,
+        });
+      }
+    }
+  }],
+  ['Android transport framing enforces byte bounds without admitting truncated prefixes', async () => {
+    for (const size of [2047, 2048, 2049]) {
+      for (const ending of ['\n', '\r\n']) {
+        const line = framingFlush.padStart(size);
+        assertFramingPartitions(Buffer.from(line + ending), size > 2048
+          ? { epochs: [], end: 'failed', failure: 'collector trigger record exceeded its framing bound' }
+          : { epochs: ['1790000000.200'], end: 'complete', failure: undefined });
+        const marker = framingStart.trimEnd().padStart(size) + ending;
+        const detector = new AndroidTransportTriggerDetector(framingId);
+        assert.deepEqual(detector.observe(Buffer.from(marker)), []);
+        assert.equal(detector.failure, size > 2048 ? 'collector trigger record exceeded its framing bound' : undefined);
+        if (size <= 2048) assert.equal(detector.observe(Buffer.from(framingFlush + ending)).length, 1);
+      }
+    }
+    const detector = new AndroidTransportTriggerDetector(framingId);
+    detector.observe(Buffer.from(framingStart));
+    assert.equal(detector.observe(Buffer.from(framingFlush + '\n1790000000.300 77 77 I normal: ' + 'x'.repeat(10_000))).length, 1);
+    assert.equal(detector.finish(), 'irrelevant-tail');
+    assert.equal(detector.failure, undefined);
+  }],
+  ['Android transport framing scans discarded suffix needles and unbounded adbd whitespace', async () => {
+    const prefixes = ['x'.repeat(2050) + ' ', 'ordinary body '];
+    for (const prefix of prefixes) {
+      for (const suffix of [
+        `HerdrMeasure: ${framingId} START`,
+        `HerdrMeasure: ${framingId} INVALID`,
+        'adbd: timeout expired while flushing socket, closing',
+        'timeout expired while flushing socket, closing adbd' + ' \t\u2003'.repeat(700) + ':',
+        'adbd' + ' '.repeat(2200) + ' adbd: timeout expired while flushing socket, closing',
+      ]) {
+        const bytes = Buffer.from(prefix + suffix + '\n');
+        const failure = bytes.length - 1 > 2048 ? 'collector trigger record exceeded its framing bound'
+          : suffix.startsWith('HerdrMeasure') ? 'collector measurement start marker was malformed or duplicated'
+            : 'collector transport trigger record was malformed';
+        assertFramingPartitions(bytes, { epochs: [], end: 'failed', failure });
+      }
+    }
+    for (const line of [
+      'x'.repeat(2200) + '_adbd: timeout expired while flushing socket, closing',
+      'adbd: unrelated body ' + 'x'.repeat(2200),
+      'x'.repeat(2200) + ' timeout expired while flushing socket, closing',
+      `HerdrMeasure:  ${framingId} START` + 'x'.repeat(2200),
+    ]) {
+      assertFramingPartitions(Buffer.from(line + '\n' + framingFlush + '\n'), {
+        epochs: ['1790000000.200'], end: 'complete', failure: undefined,
+      });
+    }
+    const detector = new AndroidTransportTriggerDetector(framingId);
+    detector.observe(Buffer.from(framingStart));
+    assert.equal(detector.accept(), true);
+    detector.observe(Buffer.from('x'.repeat(2050) + `HerdrMeasure: ${framingId} START\n`));
+    assert.equal(detector.failure, 'collector trigger record exceeded its framing bound');
+  }],
+  ['Android transport framing decodes split UTF-8 and rejects malformed discarded suffixes', async () => {
+    const line = '1790000000.150 77 77 I normal: ' + 'é🙂\u2003'.repeat(600) + '\r\n';
+    assertFramingPartitions(Buffer.from(line + framingFlush + '\n'), {
+      epochs: ['1790000000.200'], end: 'complete', failure: undefined,
+    });
+    for (const size of [2047, 2048, 2049]) {
+      const prefixBytes = size - Buffer.byteLength(framingFlush);
+      const bytes = Buffer.from('\u2003'.repeat(Math.floor(prefixBytes / 3)) + ' '.repeat(prefixBytes % 3) + framingFlush + '\r\n');
+      assert.equal(bytes.length, size + 2);
+      assertFramingPartitions(bytes, size > 2048
+        ? { epochs: [], end: 'failed', failure: 'collector trigger record exceeded its framing bound' }
+        : { epochs: ['1790000000.200'], end: 'complete', failure: undefined });
+    }
+    for (const invalid of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xe2, 0x28, 0xa1], [0xf4, 0x90, 0x80, 0x80], [0xe2, 0x82]]) {
+      for (const ending of ['', '\n']) {
+        const bytes = Buffer.concat([Buffer.from('x'.repeat(2050)), Buffer.from(invalid), Buffer.from(ending)]);
+        assertFramingPartitions(bytes, { epochs: [], end: 'failed', failure: 'collector trigger record contained invalid UTF-8' });
+      }
+    }
+  }],
+  ['Android transport framing preserves marker and malformed body relevance without widening admission', async () => {
+    for (const line of [framingStart, `malformed HerdrMeasure: ${framingId} START\n`]) {
+      assertFramingPartitions(Buffer.from(line), {
+        epochs: [], end: 'failed', failure: 'collector measurement start marker was malformed or duplicated',
+      });
+    }
+    for (const body of [
+      'body adbd: timeout expired while flushing socket, closing',
+      'timeout expired while flushing socket, closing adbd:',
+    ]) {
+      assertFramingPartitions(Buffer.from('1790000000.200 77 77 I ordinary: ' + body + '\n'), {
+        epochs: [], end: 'failed', failure: 'collector transport trigger record was malformed',
+      });
+    }
+    for (const line of [
+      framingFlush.replace('timeout expired', 'timeout  expired'),
+      framingFlush.replace('adbd:', '_adbd:'),
+      framingFlush.replace('adbd:', 'not-adbd-tag:'),
+    ]) {
+      assertFramingPartitions(Buffer.from(line + '\n'), { epochs: [], end: 'complete', failure: undefined });
+    }
+    const id = 'H'.repeat(80);
+    const detector = new AndroidTransportTriggerDetector(id);
+    const bytes = Buffer.from('x'.repeat(2050) + `HerdrMeasure: ${id} START\n`);
+    for (const byte of bytes) assert.deepEqual(detector.observe(Buffer.from([byte])), []);
+    assert.equal(detector.failure, 'collector trigger record exceeded its framing bound');
+    const beforeAnchor = new AndroidTransportTriggerDetector(framingId);
+    beforeAnchor.observe(Buffer.from(framingFlush.padStart(2049) + '\n'));
+    assert.equal(beforeAnchor.failure, 'collector trigger record exceeded its framing bound');
+  }],
+  ['Android transport framing EOF is explicit and never admits partial records', async () => {
+    for (const tail of [
+      framingFlush, framingFlush + '\r', `HerdrMeasure: ${framingId} START`,
+      'HerdrMeasu', 'adbd   ', 'ad', 'timeout expired while flushing soc',
+      '--------- beginning of sys', '--------- beginning of main',
+      '1790000000.200 77 77 I ', '1790000000.200 77 77 I normal:', 'unclassified fragment', ' ',
+      'x'.repeat(2050) + ' HerdrMeasu', 'x'.repeat(2050) + ' adbd: ordinary',
+    ]) {
+      assertFramingPartitions(Buffer.from(tail), {
+        epochs: [], end: 'failed', failure: 'collector trigger record was incomplete at EOF',
+      });
+    }
+    for (const tail of ['ordinary body', 'x'.repeat(10000)]) {
+      const detector = new AndroidTransportTriggerDetector(framingId);
+      detector.observe(Buffer.from('1790000000.200 77 77 I normal: ' + tail));
+      assert.equal(detector.finish(), 'irrelevant-tail');
+      assert.equal(detector.finish(), 'irrelevant-tail');
+      assert.deepEqual(detector.observe(Buffer.from('\n' + framingStart + framingFlush + '\n')), []);
+      assert.equal(detector.failure, undefined);
+    }
+    assert.deepEqual(framingResult(Buffer.alloc(0), []), { epochs: [], end: 'complete', failure: undefined });
+  }],
+  ['Android transport framing bounds retained state and candidate batches under floods', async () => {
+    const detector = new AndroidTransportTriggerDetector(framingId);
+    detector.observe(Buffer.from(framingStart));
+    const flood = Buffer.alloc(65536, 120);
+    const state = detector as unknown as { record: Buffer; recordBytes: number; relevanceTail: string };
+    for (let count = 0; count < 128; count++) {
+      assert.deepEqual(detector.observe(flood), []);
+      assert.equal(state.record.length, 2048);
+      assert.ok(state.recordBytes <= 2050);
+      assert.ok(state.relevanceTail.length < 96);
+    }
+    assert.deepEqual(detector.observe(Buffer.from('\n' + ('normal message\n'.repeat(10_000)))), []);
+    assert.equal(detector.observe(Buffer.from((framingFlush + '\n').repeat(32))).length, 32);
+    assert.deepEqual(detector.observe(Buffer.from((framingFlush + '\n').repeat(33))), []);
+    assert.equal(detector.failure, 'collector trigger queue exceeded its bound');
+    assert.equal(detector.accept(), false);
+  }],
+  ['Android transport framing propagates non-GMS oversized and EOF failures', async () => {
+    for (const text of [framingFlush.padStart(2049) + '\n', framingFlush, 'x'.repeat(2050) + ' adbd: timeout expired while flushing socket, closing\n']) {
+      let calls = 0;
+      const run = async () => { calls++; throw new Error('invalid framing dispatched'); };
+      const observation = new AndroidTransportObservation('owned-test-device', tmpdir(), run, run);
+      observation.observe(Buffer.from(text));
+      await observation.finish();
+      assert.match(observation.failure || '', /framing bound|incomplete at EOF/u);
+      assert.equal(calls, 0);
+    }
+  }],
   ['Android transport missing owned loopback server stays absent without a daemon', async () => {
     const server = createServer();
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -225,7 +418,6 @@ export const androidTransportTests: Array<[string, () => Promise<void>]> = [
       const observation = new AndroidTransportObservation('emulator-5554', root, run,
         async (serial, service) => run('adb-socket', [serial, service]));
       observation.observe(Buffer.from('123.456 123 456 I unrelated: timeout expired while flushing socket, closing\n'));
-      await observation.finish();
       assert.equal(calls.length, 0);
       observation.observe(Buffer.from('123.456 123 456 I adbd    : timeout expired while flushing soc'));
       observation.observe(Buffer.from('ket, closing\n'));

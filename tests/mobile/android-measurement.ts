@@ -925,18 +925,18 @@ export class AndroidEnvironmentMeasurement {
       this.collector.stderr.on('data', this.collectorStderrHandler);
       this.collectorStdoutHandler = (chunk: Buffer) => {
         if (this.collectorDataFrozen) return;
+        this.bytes += chunk.length;
+        if (this.bytes > ANDROID_LOG_LIMIT) {
+          this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: measured log exceeds bound');
+          this.collector?.stop('collector-output-limit');
+          return;
+        }
         if (this.requireGmsObservationsValue) {
           const candidates = this.transportTrigger.observe(chunk, this.io.monotonicNow());
           if (this.transportTrigger.failure) this.failTransportObservation(this.transportTrigger.failure);
           for (const candidate of candidates) this.queueTransportCandidate(candidate);
         } else {
           try { this.transport.observe(chunk); } catch (error) { this.collectorFailure ||= error instanceof Error ? error : new Error('ANDROID_ENVIRONMENT: transport observation failed'); }
-        }
-        this.bytes += chunk.length;
-        if (this.bytes > ANDROID_LOG_LIMIT) {
-          this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: measured log exceeds bound');
-          this.collector?.stop('collector-output-limit');
-          return;
         }
         this.chunks.push(chunk);
       };
@@ -1090,6 +1090,10 @@ export class AndroidEnvironmentMeasurement {
         this.collectorStdoutHandler = undefined;
         this.collectorStderrHandler = undefined;
       }
+    }
+    if (this.requireGmsObservationsValue) {
+      this.transportTrigger.finish();
+      if (this.transportTrigger.failure) this.failTransportObservation(this.transportTrigger.failure);
     }
     let raw = Buffer.alloc(0);
     await this.attempt(async () => {
