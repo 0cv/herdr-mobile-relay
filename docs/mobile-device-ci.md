@@ -168,15 +168,18 @@ absent from the START inventory and absent from the END inventory unless listed
 there under the same process name (that inventory is taken just before the END
 marker), whose Chrome zygote is in the START inventory, or is absent from it and was forked
 exactly once, by `zygote64`, inside the measurement, remains in the END inventory
-and never exits. The helper must then end with either an orderly Chromium child
-exit and matching Zygote exit status zero, plus, logged after the start record and
-no later than one second after the Zygote exit, either one system_server `has died`
-record whose label is only the process's importance at death (such as `vis BTOP`,
-`fg  SVC` or `cch+75 CEM`) or one `isolated not needed` kill with the matching
-isolated UID; or one system_server `isolated not
-needed` kill with the matching isolated UID followed within one second by that
-Zygote's report of exit status zero or SIGKILL; without the Chromium child exit
-the kill must come within two seconds of the fork. A planned Chrome force-stop
+and never exits. The helper must then end with that Zygote's report of exit
+status zero, optionally with one system_server `has died` record whose label is
+only the process's importance at death (such as `vis BTOP`, `fg  SVC` or
+`cch+75 CEM`) or one `isolated not needed` kill with the matching isolated UID;
+or with one such `isolated not needed` kill logged before that Zygote's SIGKILL
+report by timestamp or capture order. A kill logged after a clean exit is
+accepted because the helper can exit on its own while the system reaps it.
+The Chromium child exit message, the helper's lifetime and the order in which
+the fork, start, kill and exit records arrive are not required, because
+independent producers stamp and submit them. For force-stop and package checks
+the lifetime starts at the earliest fork, start or helper record by timestamp
+or by capture order. A planned Chrome force-stop
 also covers helpers from its observed process set that the system kills as
 `isolated not needed` after system_server logs `Force stopping com.android.chrome`
 for user 0 inside the exact operation interval; that exemption admits only the
@@ -184,11 +187,9 @@ kill and one following START-inventory Chrome zygote report of exit status zero 
 SIGKILL, so any other signal, crash or second exit stays fatal. The schema-3
 check retains raw observations and numbered proof lines, reporting normal helper
 lifetimes separately from fatal events and distinguishing event counts from PID
-counts. Android logs a helper by the last 15 characters of its process name, and
-a contiguous prefix of its three runtime startup lines may precede the Zygote fork
-record by at most 20 ms. Ordinary helper observations require both timestamp and capture-order
-lifetime bounds and must fit both START/END marker bounds, including audit subject
-timestamps. The fork and start record must always be inside both bounds; only when
+counts. The helper's own records may be stamped up to 20 ms before the Zygote
+fork and no later than its exit, in any capture order, and must fit both
+START/END marker bounds, including audit subject timestamps. The fork and start record must always be inside both bounds; only when
 the helper's own child exit, Zygote exit, kill or death record is at or after
 END's timestamp and after END in capture order may its remaining records, and records that
 mention it, also come from the capture after END, still under every other check
@@ -212,7 +213,8 @@ Strictly parsed Android logd AVC subject records retain separate
 PID/TID and original timestamp, so publication after exit is not helper execution.
 Only the supported nonpermissive isolated-app file-denial format, corroborated
 numeric UID and unique audit serial qualify; original timestamps remain bounded,
-pre-fork publication and adverse content still reject. This textual reference
+and audit subjects stamped more than 20 ms before the fork or carrying adverse
+content still reject. This textual reference
 contract is not authenticated socket provenance or runtime-image attestation.
 A helper PID appearing only as digits in another process's `Killing` UID field
 is not a reference to that helper. PID references elsewhere in the record and
@@ -357,6 +359,13 @@ checks and click are capped at five seconds each, with a complete hierarchy
 observation reserved. A fresh bounded publication wait follows expansion under
 the original search deadline. The expanded list must still pass the existing
 visibility, row identity and progress checks; collection visibility is not waived.
+The final confirmation is the one button whose accessibility name or visible
+label is `Add` inside the visible navigation bar titled `Add to Home Screen`
+(by the bar's name, label or a title text inside it). iOS 27 labels this button
+`Add` without guaranteeing the accessibility name. The same selector proves the
+button is unique before the single final tap. Failure evidence outside an
+installed-app launch failure also saves one bounded native hierarchy as
+`failure-hierarchy.xml`.
 
 Android retains a separate all-buffer threadtime startup diagnostic before the
 first certificate-preparation session. It connects only to the existing local

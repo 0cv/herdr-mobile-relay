@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnOwnedProcess } from '../support/owned-process';
 import { setTimeout as wait } from 'node:timers/promises';
-import { IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
+import { IOS_CONFIRMATION_ADD_XPATH, IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
 import { AppiumClient, isRetryableElementLookupError, type RequestEnforcementClock, type WebDriverSnapshot } from '../support/webdriver';
 import { collectIOSLaunchReceipt, IOSLaunchObservation, IOS_LAUNCH_LIMITS, IOS_LAUNCH_PREDICATE, iosLaunchQuery, iosReceiptError, type IOSLaunchFailure, type IOSReceiptClock, type IOSReceiptHooks } from '../support/ios-launch-receipt';
 import { PhaseBudget } from '../support/budget';
@@ -924,8 +924,8 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
           return value(element('share'));
         }
         assert.ok(!body.value.includes('Open as Web App'), 'the pinned confirmation must not probe optional controls');
-        if (body.value === 'Add') {
-          assert.equal(body.using, 'accessibility id');
+        if (body.value === IOS_CONFIRMATION_ADD_XPATH) {
+          assert.equal(body.using, 'xpath');
           confirmationLookups += 1;
           if (mode === 'add-hung') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
           if (mode === 'add-missing') { now += 5_000; return missing(); }
@@ -1000,7 +1000,8 @@ for (const mode of ['success', 'collapsed', 'compact', 'compact-no-share', 'comp
       assert.equal(scrolls, mode === 'disabled' ? 0 : 1);
     }
     const commands = driver.snapshot().commands;
-    const lookups = commands.filter((_entry, index) => requests[requests.length - commands.length + index]?.body.value === 'Add');
+    const lookups = commands.filter((_entry, index) => requests[requests.length - commands.length + index]?.body.value === IOS_CONFIRMATION_ADD_XPATH
+      && requests[requests.length - commands.length + index]?.path.endsWith('/element'));
     assert.ok(lookups.every((entry) => entry.timeoutMs === 8_000), 'confirmation probes must receive a complete native transaction, never optional-loop leftovers');
     assert.equal(driver.snapshot().unusable, ['compact-hung', 'add-hung', 'add-budget', 'add-disabled', 'add-hidden', 'add-not-hittable'].includes(mode));
   });
@@ -1244,7 +1245,7 @@ async function confirmationReplay(name: string, options: {
     if (path.endsWith('/element')) {
       if (body.value === 'ShareButton') return value(element('share'));
       assert.ok(confirming, 'confirmation lookup cannot precede the verified activity click');
-      assert.deepEqual(body, { using: 'accessibility id', value: 'Add' }, 'no optional or unscoped replacement selectors');
+      assert.deepEqual(body, { using: 'xpath', value: IOS_CONFIRMATION_ADD_XPATH }, 'no optional or unscoped replacement selectors');
       lookups++;
       await wait(options.latency?.lookup || 0);
       advance('lookup');
@@ -2712,7 +2713,7 @@ async function hierarchyReplay(mode: string, fixture: AbortController) {
     }
     if (path.endsWith('/element')) {
       if (body.value === 'ShareButton') return value(element('share'));
-      assert.equal(body.value, 'Add');
+      assert.equal(body.value, IOS_CONFIRMATION_ADD_XPATH);
       lookups++;
       if (mode === 'recorded-latency') {
         await waitFor(recordedIteration13.confirmation.lookupMs[lookups - 1], signal);
@@ -3618,6 +3619,63 @@ test('ordinary failure evidence includes the SpringBoard, CoreSimulatorBridge an
   assert.deepEqual(springboard?.slice(0, 9), ['simctl', 'spawn', receiptUdid, 'log', 'show', '--last', '10m', '--style', 'compact']);
   assert.equal(a.native.filter(argv => argv.includes('log')).length, 3);
   assert.equal(a.writes.length, 0);
+});
+
+test('ordinary failure evidence saves one bounded native hierarchy and records hierarchy errors without failing', async () => {
+  const source = '<?xml version="1.0" encoding="UTF-8"?><AppiumAUT><XCUIElementTypeApplication name="Safari"/></AppiumAUT>';
+  for (const mode of ['saved', 'missing', 'blocked'] as const) {
+    const a = await adapter(`failure-hierarchy-${mode}`, ({ path }) => {
+      if (path.endsWith('/screenshot')) return value('');
+      if (path.endsWith('/source')) return mode === 'saved' ? value(source) : missing();
+      throw new Error(`unexpected failure evidence command ${path}`);
+    });
+    const internal = a.platform as any;
+    internal.diagnosticCommand = async () => '';
+    internal.nativeDiagnosticsBlocked = mode === 'blocked';
+    await a.platform.captureSanitizedEvidence('failure');
+    const sources = a.driver.snapshot().commands.filter((command) => command.path.endsWith('/source'));
+    assert.equal(sources.length, mode === 'blocked' ? 0 : 1, mode);
+    if (mode !== 'blocked') assert.equal(sources[0].timeoutMs, 8_000);
+    const saved = await readFile(join(a.outputDir, 'failure-hierarchy.xml'), 'utf8').catch(() => undefined);
+    assert.equal(saved, mode === 'saved' ? source : undefined, mode);
+    const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
+    assert.equal(JSON.stringify(events).includes('"operation":"hierarchy"'), mode === 'missing', mode);
+  }
+});
+
+test('iOS 27 confirmation Add is located by its visible label inside the Add to Home Screen bar only', async () => {
+  requireXmlLint();
+  const { hypotheticalConfirmation } = await shareFixtures();
+  const labelled = `<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication name="Safari" bundleId="com.apple.mobilesafari" visible="true">
+    <XCUIElementTypeWindow visible="true">
+      <XCUIElementTypeToolbar visible="true">
+        <XCUIElementTypeButton name="Add" label="Add" enabled="true" visible="true"/>
+      </XCUIElementTypeToolbar>
+      <XCUIElementTypeOther visible="true">
+        <XCUIElementTypeNavigationBar name="WebClipNavigationBar" visible="true">
+          <XCUIElementTypeButton name="CancelButton" label="Cancel" enabled="true" visible="true"/>
+          <XCUIElementTypeStaticText name="Add to Home Screen" label="Add to Home Screen" value="Add to Home Screen" visible="true"/>
+          <XCUIElementTypeButton name="AddButton" label="Add" enabled="true" visible="true"/>
+        </XCUIElementTypeNavigationBar>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeWindow>
+  </XCUIElementTypeApplication>
+</AppiumAUT>
+`;
+  const previous = "//XCUIElementTypeNavigationBar[@name='Add to Home Screen' and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add']";
+  assert.equal(xpathCount(labelled, previous), 0, 'the previous name-only selector misses a label-only Add');
+  assert.equal(xpathCount(labelled, IOS_CONFIRMATION_ADD_XPATH), 1);
+  assert.equal(xpathCount(hypotheticalConfirmation, IOS_CONFIRMATION_ADD_XPATH), 1);
+  for (const [name, xml] of [
+    ['another sheet title', labelled.replaceAll('"Add to Home Screen"', '"Add Bookmark"')],
+    ['hidden bar', labelled.replace('name="WebClipNavigationBar" visible="true"', 'name="WebClipNavigationBar" visible="false"')],
+    ['hidden container', labelled.replace('<XCUIElementTypeOther visible="true">', '<XCUIElementTypeOther visible="false">')],
+    ['another button label', labelled.replace('name="AddButton" label="Add"', 'name="AddButton" label="Add Bookmark"')],
+    ['title outside the bar', labelled.replace(/ *<XCUIElementTypeStaticText name="Add to Home Screen"[^\n]*\n/u, '')
+      .replace('<XCUIElementTypeToolbar visible="true">', '<XCUIElementTypeToolbar visible="true">\n        <XCUIElementTypeStaticText label="Add to Home Screen" visible="true"/>')],
+  ] as [string, string][]) assert.equal(xpathCount(xml, IOS_CONFIRMATION_ADD_XPATH), 0, name);
 });
 
 test('SM55 receipt rejected partial writes preserve first fatal without retry', async () => {

@@ -54,6 +54,8 @@ const IOS_CONFIRMATION_IDENTITY_MS = 12_000;
 const IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS = 12_000;
 const IOS_CONFIRMATION_ROUND_MS = 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS + 2 * IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
 const IOS_CONFIRMATION_COMPLETION_MS = 2 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_IDENTITY_MS + IOS_FINAL_ADD_ACKNOWLEDGEMENT_MS;
+// iOS 27 shows the confirmation button labelled "Add" without guaranteeing that its accessibility name is also "Add".
+export const IOS_CONFIRMATION_ADD_XPATH = "//XCUIElementTypeNavigationBar[(@name='Add to Home Screen' or @label='Add to Home Screen' or .//XCUIElementTypeStaticText[@name='Add to Home Screen' or @label='Add to Home Screen' or @value='Add to Home Screen']) and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add' or @label='Add']";
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const IOS_NATIVE_GESTURE_COMMAND_MS = 8_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
@@ -942,7 +944,7 @@ export class IOSPlatform implements MobilePlatform {
           throw new Error(`IOS_SHARE: Add: Safari confirmation is not foreground (${bundleId || 'unknown'})`);
         }
         if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
-        const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_CONFIRMATION_LOOKUP_MS, policy);
+        const response = await this.driver.command<unknown>('/element', 'POST', { using: 'xpath', value: IOS_CONFIRMATION_ADD_XPATH }, IOS_CONFIRMATION_LOOKUP_MS, policy);
         const element = this.installConfirmationElementId(response);
         if (phase.remainingMs < IOS_CONFIRMATION_IDENTITY_MS) break;
         const identity = await this.installConfirmationIdentity(policy);
@@ -1004,7 +1006,7 @@ export class IOSPlatform implements MobilePlatform {
   private async installConfirmationIdentity(policy: WebDriverRequestPolicy): Promise<string | undefined> {
     const response = await this.driver.command<unknown>('/elements', 'POST', {
       using: 'xpath',
-      value: "//XCUIElementTypeNavigationBar[@name='Add to Home Screen' and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add']",
+      value: IOS_CONFIRMATION_ADD_XPATH,
     }, IOS_CONFIRMATION_IDENTITY_MS, policy);
     if (!Array.isArray(response)) throw new Error('IOS_SHARE: Add: malformed confirmation identity response');
     const matches = response.map((candidate: unknown) => this.installConfirmationElementId(candidate));
@@ -1523,6 +1525,15 @@ export class IOSPlatform implements MobilePlatform {
         if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
       } catch (error) {
         this.diagnostics.record({ phase: 'evidence', operation: 'screenshot', detail: error instanceof Error ? error.message : String(error) });
+      }
+      if (name === 'failure' && !this.omitLaunchLogs) {
+        try {
+          const source = await this.driver.pageSource(IOS_NATIVE_HIERARCHY_COMMAND_MS);
+          if (typeof source !== 'string') throw new Error('IOS_EVIDENCE: malformed hierarchy response');
+          await writeBoundedText(join(this.outputDir, 'failure-hierarchy.xml'), source);
+        } catch (error) {
+          this.diagnostics.record({ phase: 'evidence', operation: 'hierarchy', detail: error instanceof Error ? error.message : String(error) });
+        }
       }
     }
     await writeSanitizedJson(join(this.outputDir, `${name}-appium.json`), this.evidenceSnapshot());

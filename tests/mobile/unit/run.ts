@@ -2132,8 +2132,8 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     if (path.endsWith('/element') && init?.method === 'POST') {
       const value = String(body.value || '');
       if (value.includes('ShareButton')) return new Response(JSON.stringify({ value: element('share') }), { status: 200 });
+      if (value.includes('XCUIElementTypeNavigationBar')) return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
       if (value.includes('Add to Home Screen') && sheetOpen && scrolls >= 1) return new Response(JSON.stringify({ value: element('add-home') }), { status: 200 });
-      if (value.includes('Add')) return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
       return absent();
     }
     if (path.includes('/attribute/')) {

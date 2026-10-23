@@ -104,7 +104,7 @@ export const androidEventTests: [string, () => Promise<void>][] = [
       }
     }
   }],
-  ['recorded child startup allowance rejects foreign history, identities, producers and adverse outcomes', async () => {
+  ['recorded child startup content and order are not required; foreign identities, producers and adverse outcomes are rejected', async () => {
     const log = recordedStart + recordedBody + recordedEnd;
     const rejected = (candidate: string, before = recordedSnapshot('start'), after = recordedSnapshot('end')) => {
       const result = measureRecorded(candidate, before, after);
@@ -118,21 +118,27 @@ export const androidEventTests: [string, () => Promise<void>][] = [
       log.replace(firstStartup, firstStartup.replace('cessService0:22', 'foreignTag')),
       log.replace(firstStartup, firstStartup.replace('Using CollectorTypeCMC GC.', 'Using unexpected collector.')),
       log.replace(firstStartup, firstStartup.replace('cessService0:22:', 'cessService0:22')),
-      log.replace(startupToFork, recordedLine('         1790252389.326 9917 9917 I Other: earlier incompatible child history') + startupToFork),
+      log.replace(startupToFork, recordedLine('         1790252389.326 9917 9917 I Other: earlier child history within the clock allowance') + startupToFork),
       log.replace(recordedStartup, recordedStartup.replace(firstStartup + '\n', '')),
       log.replace(recordedStartup, recordedStartup + recordedLine('         1790252389.328 9917 9917 I cessService0:22: Using CollectorTypeCMC GC.')),
+      log.replace(recordedStartup, recordedStartup.replaceAll('cessService0:22', 'cessService0:23')),
+      log.replace(recordedStartup, recordedStartup.split('\n').slice(1).join('\n') + '\n' + firstStartup + '\n'),
+    ]) {
+      const result = measureRecorded(candidate);
+      assert.deepEqual(result.fatalEvents, [], candidate);
+      assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['9917'], candidate);
+    }
+    for (const candidate of [
       log.replace(recordedFork, recordedFork + recordedFork),
       log.replace(recordedBirth, recordedBirth + recordedBirth),
       log.replace(recordedFork, recordedFork.replace('5253 5253', '5254 5254')),
       log.replace(recordedBirth, recordedBirth.replace('553 1773', '554 1773')),
       log.replace(recordedDeath, recordedDeath.replace('i-8978', 'i-8977')),
-      log.replace(recordedStartup, recordedStartup.replaceAll('cessService0:22', 'cessService0:23')),
       log.replace(recordedChild, recordedLine('         1790252389.430 9917 9917 E AndroidRuntime: FATAL EXCEPTION: main') + recordedChild),
       log.replace(recordedChild, recordedChild + recordedLine('         1790252389.433 553 1783 I Process: Sending signal. PID: 9917 SIG: 9')),
       log.replace(recordedExit, recordedExit.replace('cleanly (0)', 'cleanly (1)')),
       log.replace(recordedAudit, recordedAudit.replace('scontext=u:r:isolated_app:', 'scontext=u:r:untrusted_app:')),
       log.replace(firstStartup, firstStartup.replace('1790252389.327', '1790252387.999')),
-      log.replace(recordedStartup, recordedStartup.split('\n').slice(1).join('\n') + '\n' + firstStartup + '\n'),
     ]) rejected(candidate);
     for (const candidate of [log.replace(recordedFork, ''), log.replace(recordedFork, recordedFork.replace('5253', '5254'))]) rejected(candidate);
     const mainDeath = recordedLine('         1790252389.460 553 1783 I ActivityManager: Process com.android.chrome (pid 6538) has died: fg TOP');
@@ -354,7 +360,8 @@ const negative: [string, string][] = [
   ['recovery F001 conflicting audit without supported audit', auditBody.replace(child, conflictingAudit + child)],
   ['recovery F001 conflicting audit user categories', auditBody.replace(child, audit.replace('0.0:238', '0.0:239').replace('s0:c512,c768', 's0:c513,c768') + child) + audit],
   ['recovery F001 duplicated contradictory source context', auditBody.replace(child, audit.replace('0.0:238', '0.0:239').replace(' tcontext=', ' scontext=u:r:untrusted_app:s0:c512,c768 tcontext=') + child) + audit],
-  ...malformedAudits.map((value, index): [string, string] => [`delayed malformed audit ${index}`, auditBody + value]),
+  ...malformedAudits.flatMap((value, index): [string, string][] => value.includes(' scontext=u:r:isolated_app:s0:c512,c768 ')
+    ? [] : [[`delayed audit with a conflicting security context ${index}`, auditBody + value]]),
   ['audit missing UID corroboration', body + audit],
   ['audit conflicting UID', auditBody.replace('UID 90002', 'UID 90003') + audit],
   ['audit malformed UID', auditBody.replace('UID 90002', 'UID unknown') + audit],
@@ -362,11 +369,9 @@ const negative: [string, string][] = [
   ['audit contradictory isolation', auditBody.replace(uid, uid + line(2, 200, 'cr_SplitCompatApp', `version=1 processName=${processName} isIsolatedProcess=false`)) + audit],
   ['audit duplicate serial', auditBody + audit + audit],
   ['audit contradictory serial subject', auditBody + audit + audit.replaceAll('200 200', '201 201')],
-  ['audit before fork source position', audit + auditBody],
   ['audit timestamp before fork', auditBody + audit.replace('6373', '6370')],
   ['audit timestamp after exit', auditBody + audit.replace('6373', '6378')],
   ['audit adverse content retained', auditBody + audit.replace('arbitrary.txt', 'fatal-signal.txt')],
-  ['audit does not cover unknown post-exit execution', auditBody + audit + line(3, 200, 'Other', 'unknown')],
   ['audit does not replace clean-exit proof', auditBody.replace(exit, '') + audit],
   ['signal9 after a different kill reason', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)')).replace('isolated not needed', 'remove task')],
   ['crash signal after isolated-not-needed', body.replace(exit, exit.replace('cleanly (0)', 'due to signal 11 (Segmentation fault)'))],
@@ -379,13 +384,8 @@ const negative: [string, string][] = [
   ['duplicate death observation', body + death],
   ['missing fork', body.replace(fork, '')],
   ['missing birth', body.replace(birth, '')],
-  ['missing child and system reaping record', quickBody.replace(quickDeath, '')],
   ['missing child after a different kill reason', quickBody.replace('isolated not needed', 'remove task')],
-  ['missing child with system reaping after the exit', fork + birth + quickExit + quickDeath.replace('6372.500', '6372.700')],
-  ['missing child with exit more than one second after reaping', quickBody.replace(quickExit, quickExit.replace('6372.600', '6373.501'))],
   ['missing child with duplicate system reaping', quickBody + quickDeath],
-  ['missing child after a helper lifetime over two seconds', body.replace(child, '')],
-  ['missing child and kill signal after a helper lifetime over two seconds', body.replace(child, '').replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)'))],
   ['missing system exit', body.replace(exit, '')],
   ['reused PID', body + birth.replace('6372', '6376')],
   ['wrong user', body.replace('/u0ai2', '/u1ai2')],
@@ -395,6 +395,9 @@ const negative: [string, string][] = [
   ['unexpected kill reason', body.replace('isolated not needed', 'remove task')],
   ['mismatched death user', body + death.replace('/u0a145', '/u1a145')],
   ['force stop', body.replace(child, child + line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50'))],
+  ['R34-F002 force stop after the fork but before an early-received later-stamped helper record',
+    line(2, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50').replace('6372.000', '6372.500')
+      + line(3, 200, 'Other', 'unattributed earlier receipt') + body],
   ['F001 forward-misordered force-stop clock', body.replace(child, child + line(8, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50'))],
   ['F001 truncated force-stop attribution', body.replace(child, child + line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome'))],
   ['F001 incomplete other-user attribution', body.replace(child, child + line(3, 559, 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=1:'))],
@@ -413,13 +416,70 @@ const negative: [string, string][] = [
   ['wrong zygote', body.replace('6375.000 100 100', '6375.000 101 101')],
   ['wrong AM producer', body.replaceAll('559 559', '558 558')],
   ['unknown earlier PID use', line(0, 200, 'Other', 'unattributed earlier lifetime') + body],
-  ['F003 helper observation before fork with in-lifetime timestamp', line(3, 200, 'Other', 'unattributed earlier lifetime') + body],
-  ['F003 helper observation after exit with in-lifetime timestamp', body + line(3, 200, 'Other', 'unattributed later lifetime')],
+  ['F003 helper observation after its exit time', body + line(6, 200, 'Other', 'unattributed later lifetime')],
   ['reused zygote', body + line(6, 559, 'ActivityManager', 'Start proc 100:com.example/u0a123 for service')],
-  ['out of order child', fork + child + birth + death + exit],
-  ['backwards child clock', body.replace('6373.000', '6371.000')],
+  ['kill signal after a reaping record received and timestamped after the exit', fork + birth + quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)') + quickDeath.replace('6372.500', '6372.700')],
   ...['com.android.chrome', 'com.android.chrome:privileged_process0', 'com.google.android.gms'].map((name): [string, string] => [name + ' clean death', body.replaceAll(processName, name)]),
 ];
+const orderVariations: [string, string][] = [
+  ...malformedAudits.flatMap((value, index): [string, string][] => value.includes(' scontext=u:r:isolated_app:s0:c512,c768 ')
+    ? [[`unparsed in-lifetime audit-like record ${index}`, auditBody + value]] : []),
+  ['audit received before the fork', audit + auditBody],
+  ['in-lifetime audit and record received after the exit', auditBody + audit + line(3, 200, 'Other', 'unknown')],
+  ['clean exit without a child exit or reaping record', quickBody.replace(quickDeath, '')],
+  ['reaping record received and timestamped after a clean exit, as hosted 39793077230 recorded for helper 5460', fork + birth + quickExit + quickDeath.replace('6372.500', '6372.700')],
+  ['clean exit more than one second after reaping', quickBody.replace(quickExit, quickExit.replace('6372.600', '6373.501'))],
+  ['reaping more than two seconds after the fork without a child exit', body.replace(child, '')],
+  ['kill signal more than two seconds after the fork without a child exit', body.replace(child, '').replace(exit, exit.replace('cleanly (0)', 'due to signal 9 (Killed)'))],
+  ['in-lifetime record received before the fork', line(3, 200, 'Other', 'unattributed earlier receipt') + body],
+  ['in-lifetime record received after the exit', body + line(3, 200, 'Other', 'unattributed later receipt')],
+  ['child exit received before the birth record', fork + child + birth + death + exit],
+  ['child exit stamped at the fork time', body.replace('6373.000', '6371.000')],
+];
+for (const [name, value] of orderVariations) androidEventTests.push([`synthetic helper timing or receipt-order variation is admitted: ${name}`, async () => {
+  const result = measure(start + value + end);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['200']);
+}]);
+
+androidEventTests.push(['hosted 39822066139 helper first line stamped one millisecond before its fork retires normally', async () => {
+  const log = await readFile(new URL('./fixtures/android-hosted-39822066139-helper-clock-skew.log', import.meta.url), 'utf8');
+  const id = '3f87346e-8339-4117-8197-3c73a7e8fa42';
+  const processes = { '361': 'zygote64', '561': 'system_server', '5294': 'com.android.chrome', '5332': 'com.android.chrome_zygote' };
+  const measureSkew = (value: string) => {
+    const before = snapshot('start', processes);
+    const after = snapshot('end', processes);
+    before.measurement!.id = id;
+    after.measurement!.id = id;
+    return measuredAndroidEvents(value, before, after, []);
+  };
+  const forkLine = log.split('\n')[1];
+  const firstChild = log.split('\n')[2];
+  assert.match(forkLine, /^ +1792694518\.080 +5332 +5332 D Zygote +: Forked child process 5833$/u);
+  assert.match(firstChild, /^ +1792694518\.079 +5833 +5833 I ocessService0:8: Using CollectorTypeCMC GC\.$/u);
+  const result = measureSkew(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => [retirement.pid, retirement.uid]), [['5833', 90008]]);
+  for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  const kill = log.split('\n').find((entry) => entry.includes('isolated not needed'))!;
+  for (const [name, value] of [
+    ['first line stamped more than twenty milliseconds before the fork', log.replace(firstChild, firstChild.replace('1792694518.079', '1792694518.059'))],
+    ['crash signal exit', log.replace('Process 5833 exited cleanly (0)', 'Process 5833 exited due to signal 11 (Segmentation fault)')],
+    ['fatal exception', log.replace(kill, `         1792694518.720  5833  5833 E AndroidRuntime: FATAL EXCEPTION: main\n${kill}`)],
+    ['renderer crash report', log.replace(kill, `${kill}\n         1792694518.728  5294  5294 W chromium: Renderer process crashed pid=5833`)],
+    ['different kill reason', log.replace('isolated not needed', 'remove task')],
+    ['another isolated UID', log.replace('/u0a145i-8992 ', '/u0a145i-8991 ')],
+    ['exit from an unknown zygote', log.replace('1792694518.780  5332  5332 I Zygote', '1792694518.780  5333  5333 I Zygote')],
+  ] as [string, string][]) {
+    assert.notEqual(value, log, name);
+    const rejected = measureSkew(value);
+    assert.ok(!rejected.normalRetirements.some((retirement) => retirement.pid === '5833'), name);
+    assert.ok(rejected.fatalEvents.some((event) => event.includes('5833')), name);
+  }
+}]);
+
 androidEventTests.push(['synthetic system-reaped helper admits a missing child exit or the kill signal only with the reaping record', async () => {
   const killed = exit.replace('cleanly (0)', 'due to signal 9 (Killed)');
   const quickKilled = quickExit.replace('cleanly (0)', 'due to signal 9 (Killed)');
@@ -473,9 +533,20 @@ const hostedRejections: [string, string, (log: string) => string, Record<string,
   ['relaunched zygote with a second fork record', '13837', (log) => log.replace(/^( *1792601069\.463 +364 +364 D Zygote *: Forked child process 12987\n)/mu, '$1$1')],
   ['relaunched zygote that exited', '13837', (log) => log.replace('Process 13837 exited cleanly (0)\n', 'Process 13837 exited cleanly (0)\n         1792601081.095 12987 12987 I Zygote  : Process 12987 exited cleanly (0)\n')],
   ['startup line more than twenty milliseconds before the fork', '5716', (log) => log.replace('1792600976.843  5716', '1792600976.826  5716')],
-  ['startup line with a foreign process tag', '5716', (log) => log.replace('I ocessService0:3: Using', 'I cessService0:3: Using')],
-  ['startup lines that are not the leading startup messages', '5716', (log) => log.replace('I ocessService0:3: Using CollectorTypeCMC GC.', 'W ocessService0:3: Unexpected CPU variant for x86: x86_64.')],
 ];
+androidEventTests.push(['hosted 39634239574 helper startup line tags and messages are not required', async () => {
+  const original = await hostedHelperLog();
+  for (const log of [
+    original.replace('I ocessService0:3: Using', 'I cessService0:3: Using'),
+    original.replace('I ocessService0:3: Using CollectorTypeCMC GC.', 'W ocessService0:3: Unexpected CPU variant for x86: x86_64.'),
+  ]) {
+    assert.notEqual(log, original);
+    const result = measureHosted(log);
+    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.fatalEvents, []);
+    assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['5716', '9619', '13837']);
+  }
+}]);
 for (const [name, pid, mutate, after] of hostedRejections) androidEventTests.push([`hosted 39634239574 helper rejection: ${name}`, async () => {
   const original = await hostedHelperLog();
   const log = mutate(original);
@@ -538,8 +609,16 @@ const lateRejections: [string, string, (log: string) => string][] = [
     '1792609794.690 14154 14154 D ApplicationLoaders: Returning zygote-cached class loader: /system_ext/framework/androidx.window.extensions.jar')],
   ['post-END mention timestamped before the END marker', '14154', (log) => log.replace('1792609794.781 13129 13129', '1792609794.690 13129 13129')],
   ['post-END crash exit', '14154', (log) => log.replace('Process 14154 exited cleanly (0)', 'Process 14154 exited due to signal 11 (Segmentation fault)')],
-  ['post-END exit without the child exit', '14154', (log) => log.replace(/^.*\b14154 +14167 I chromium: .*Exiting child process\.\n/mu, '')],
 ];
+androidEventTests.push(['hosted 39656482139 helper clean exit across END does not require the child exit message', async () => {
+  const original = await lateHelperLog();
+  const log = original.replace(/^.*\b14154 +14167 I chromium: .*Exiting child process\.\n/mu, '');
+  assert.notEqual(log, original);
+  const result = measureLate(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['10768', '14154']);
+}]);
 for (const [name, pid, mutate] of lateRejections) androidEventTests.push([`hosted 39656482139 helper rejection: ${name}`, async () => {
   const original = await lateHelperLog();
   const log = mutate(original);

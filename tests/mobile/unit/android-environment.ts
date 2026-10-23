@@ -4171,11 +4171,18 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal(conflicting.report.normalRetirements.length, 0);
     assert.equal(conflicting.report.forcedRestartEvents.length, 1);
     assert.equal(conflicting.report.passed, false);
-    for (const altered of [
+    for (const admitted of [
       auditLog.replace('200 200 W', '200 201 W'), auditLog.replace('permissive=0', 'permissive=1'),
+      auditLog.replace(audit, audit + record('09.300', '200', 'Other', 'in-lifetime record received after the exit')),
+    ]) {
+      const accepted = await check(admitted);
+      assert.equal(accepted.passed, true, accepted.stderr);
+      assert.equal(accepted.report.normalRetirements.length, 1);
+    }
+    for (const altered of [
       auditLog.replace('UID 90002', 'UID 90003'), auditLog.replace(uid, ''),
       auditLog.replace(audit, audit + audit), auditLog.replace('arbitrary.txt', 'fatal-signal.txt'),
-      auditLog.replace(audit, audit + record('09.300', '200', 'Other', 'unknown post-exit execution')),
+      auditLog.replace(audit, audit + record('09.600', '200', 'Other', 'record stamped after the exit')),
     ]) {
       const rejected = await check(altered);
       assert.equal(rejected.passed, false);
@@ -4198,13 +4205,17 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(rejected.report.passed, false, finding);
     }
     for (const position of ['before fork', 'after exit']) {
-      const observation = record('09.300', '200', 'Other', `unattributed lifetime ${position}`);
+      const observation = record('09.300', '200', 'Other', `in-lifetime record received ${position}`);
       const altered = log.replace(body, position === 'before fork' ? observation + body : body + observation);
-      const rejected = await check(altered);
-      assert.equal(rejected.passed, false, `F003 ${position}`);
-      assert.equal(rejected.report.normalRetirements.length, 0, `F003 ${position}`);
-      assert.equal(rejected.report.forcedRestartEvents.length, 1, `F003 ${position}`);
-      assert.equal(rejected.report.passed, false, `F003 ${position}`);
+      const accepted = await check(altered);
+      assert.equal(accepted.passed, true, `F003 ${position}`);
+      assert.equal(accepted.report.normalRetirements.length, 1, `F003 ${position}`);
+    }
+    for (const [time, position] of [['09.000', 'before fork'], ['09.600', 'after exit']]) {
+      const rejected = await check(log.replace(body, body + record(time, '200', 'Other', `record stamped ${position}`)));
+      assert.equal(rejected.passed, false, `F003 stamped ${position}`);
+      assert.equal(rejected.report.normalRetirements.length, 0, `F003 stamped ${position}`);
+      assert.equal(rejected.report.forcedRestartEvents.length, 1, `F003 stamped ${position}`);
     }
     for (const [time, user, position] of [['09.000', '0', 'before'], ['09.300', '1', 'during'], ['09.800', '0', 'after']]) {
       const unrelated = record(time, '559', 'ActivityManager', `Force stopping com.android.chrome appid=10145 user=${user}: from pid 50`);
