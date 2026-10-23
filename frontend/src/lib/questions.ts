@@ -1,5 +1,14 @@
 import type { Agent, QuestionDraft, QuestionInteraction } from './types';
 
+// A question the relay returned with a result, or undefined when it is missing or malformed.
+export function returnedInteraction(result: { data?: Record<string, unknown> }): QuestionInteraction | undefined {
+  const value = result.data?.interaction;
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as QuestionInteraction;
+  if (!candidate.id || !candidate.question || !Array.isArray(candidate.options)) return undefined;
+  return candidate;
+}
+
 export function questionDraftKey(agent: Agent, interaction: QuestionInteraction): string {
   return `${agent.pane_id}::${interaction.id}`;
 }

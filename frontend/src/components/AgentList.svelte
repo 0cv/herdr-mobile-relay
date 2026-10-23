@@ -17,6 +17,7 @@
     tabName,
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
+  import { returnedInteraction } from '$lib/questions';
   import { relayStore, type CommandError } from '$lib/store';
   import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
@@ -398,10 +399,12 @@
   }
 
   // A lone single-choice question with a few plain options is answered from the card in one
-  // tap; descriptions, multi-select, several questions or anything unexpected keep the full form.
+  // tap; long questions, descriptions, multi-select, several questions or anything unexpected
+  // keep the full form.
   function quickQuestion(interaction: QuestionInteraction): boolean {
     return interaction.kind === 'single_select' && interaction.options.length > 0
       && interaction.options.length <= 4 && (interaction.question_total ?? 1) <= 1 && interaction.submit_label !== 'Next'
+      && interaction.question.length <= 400
       && interaction.options.every((option) => !option.description && !option.summary?.length);
   }
 
@@ -415,15 +418,18 @@
         relayStore.showToast('Answer sent.');
         return;
       }
-      fresh = result.data?.interaction as QuestionInteraction | undefined;
+      fresh = returnedInteraction(result);
+      if (!fresh) relayStore.showToast('Unexpected question result.', true);
     } catch (caught) {
       relayStore.clearResponding(agent.pane_id);
-      fresh = (caught as CommandError).data?.interaction as QuestionInteraction | undefined;
-      relayStore.showToast((caught as Error).message, true);
+      // A follow-up question comes back as a failed answer that carries the new question.
+      fresh = returnedInteraction(caught as CommandError);
+      if (!fresh) relayStore.showToast((caught as Error).message, true);
     }
-    // The agent moved on to another question: show that one, not the stale form.
-    if (fresh?.id) relayStore.applyQuestionInteraction(agent, fresh);
-    onopen(agent);
+    if (fresh) {
+      relayStore.applyQuestionInteraction(agent, fresh);
+      relayStore.showToast('The agent asked another question.');
+    }
   }
 
   async function respond(agent: Agent, index: number, total: number, option: string) {
@@ -536,8 +542,13 @@
         {#if blocked && !responding.has(agent.pane_id)}
           <div class="agent-actions" aria-label={`Actions for ${displayName(agent)}`}>
             {#if interaction && quickQuestion(interaction)}
-              {#each interaction.options as option (option.index)}
-                <Button size="sm" disabled={!inventoryReady} onclick={() => quickAnswer(agent, interaction, option.index)}>{option.label}</Button>
+              {#each interaction.options as option, position (`${interaction.id}:${option.index ?? position}`)}
+                <Button
+                  size="sm"
+                  disabled={!inventoryReady}
+                  title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
+                  onclick={() => quickAnswer(agent, interaction, Number.isInteger(option.index) ? option.index : position)}
+                >{option.label}</Button>
               {/each}
               <Button variant="secondary" size="sm" onclick={() => onopen(agent)}>More…</Button>
             {:else if interaction}

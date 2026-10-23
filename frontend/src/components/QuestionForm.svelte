@@ -6,6 +6,7 @@
     createQuestionDraft,
     questionDraftKey,
     questionSubmitAllowed,
+    returnedInteraction,
     shouldRestoreQuestionDraft,
     updateQuestionOption,
     updateQuestionOther,
@@ -87,14 +88,6 @@
   function changeOther(text: string) {
     const selected = interaction.kind === 'single_select' || Boolean(text);
     save(updateQuestionOther(interaction, draft, selected, text));
-  }
-
-  function returnedInteraction(result: { data?: Record<string, unknown> }): QuestionInteraction | undefined {
-    const value = result.data?.interaction;
-    if (!value || typeof value !== 'object') return undefined;
-    const candidate = value as QuestionInteraction;
-    if (!candidate.id || !candidate.question || !Array.isArray(candidate.options)) return undefined;
-    return candidate;
   }
 
   function unexpectedResult(message: string, fresh?: QuestionInteraction): CommandError {

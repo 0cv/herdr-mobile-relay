@@ -1016,13 +1016,10 @@ textarea { min-height: 6.5rem; resize: vertical; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
 
-/* Touch screens: 44px minimum hit area (Apple HIG, WCAG 2.5.8), in px so
-   Interface Size cannot shrink it. */
+/* Touch screens: approval and answer buttons get a 44px hit area (Apple HIG,
+   WCAG 2.5.8), in px so Interface Size cannot shrink it. */
 @media (pointer: coarse) {
-  .button, .button-sm { min-height: 44px; }
-  .button-icon, .terminal-find .button { height: 44px; min-height: 44px; min-width: 44px; width: 44px; }
-  /* Header icons keep their width so the title keeps room on a 390px screen. */
-  .app-header nav .button-icon { height: 44px; min-height: 44px; min-width: 0; }
+  .agent-actions .button { min-height: 44px; }
 }
 
 /* Approval choices wrap instead of being cut, and each row fills the card. */

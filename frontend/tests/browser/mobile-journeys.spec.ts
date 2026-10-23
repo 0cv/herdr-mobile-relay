@@ -5295,6 +5295,8 @@ test('shows long approval choices in full on touch-sized buttons', async ({ page
 });
 
 test('answers a short single-choice question from its card in one tap', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
   const short = {
     id: 'short-question', kind: 'single_select',
     question: `Which database should the migration target? ${'It rewrites every table. '.repeat(12)}Production data is dropped.`,
@@ -5309,6 +5311,10 @@ test('answers a short single-choice question from its card in one tap', async ({
     ...short, id: 'described-question',
     options: [{ index: 0, label: 'Keep' }, { index: 1, label: 'Drop', description: 'Deletes the table' }],
   };
+  const essay = {
+    ...short, id: 'essay-question', question: `Pick one. ${'Background detail. '.repeat(30)}`,
+    options: [{ index: 0, label: 'One' }, { index: 1, label: 'Two' }, { index: 2, label: 'Three' }],
+  };
   const followUp = { ...short, id: 'follow-up', question: 'Which region?', options: [{ index: 0, label: 'Asia' }, { index: 1, label: 'Europe' }] };
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -5319,22 +5325,90 @@ test('answers a short single-choice question from its card in one tap', async ({
       { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Short', agent: 'claude', options: [], interaction: short, question_layout: true },
       { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'question', project: 'Long', agent: 'claude', options: [], interaction: long, question_layout: true },
       { pane_id: 'w1:p3', status: 'blocked', attention_kind: 'question', project: 'Described', agent: 'claude', options: [], interaction: described, question_layout: true },
+      { pane_id: 'w1:p4', status: 'blocked', attention_kind: 'question', project: 'Essay', agent: 'claude', options: [], interaction: essay, question_layout: true },
     ],
   });
-  // Five options, or options with descriptions, keep the full form; nothing is preselected.
+  // Five options, options with descriptions, or a very long question keep the full form;
+  // nothing is preselected.
   await expect(page.getByRole('button', { name: 'Choose answer (5)' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Choose answer (2)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Choose answer (3)' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'More…' })).toBeVisible();
   // The whole question is visible next to its one-tap answers.
-  const shortPrompt = page.locator('.agent-card', { has: page.getByRole('button', { name: 'SQLite', exact: true }) }).locator('.prompt-preview');
+  const shortCard = page.locator('.agent-card', { has: page.getByRole('button', { name: 'SQLite', exact: true }) });
+  const shortPrompt = shortCard.locator('.prompt-preview');
   expect(await shortPrompt.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
-  // The agent asks a follow-up: the card's answer opens it instead of the old question.
-  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), followUp);
+
+  // Replies come from the test, shaped like the relay's finishQuestionWatch.
+  await setAutoCommands(page, false);
+  const answers = async () => (await commands(page)).filter((command) => command.type === 'answer_question');
+  const reply = async (result: Record<string, unknown>) => {
+    const last = (await answers()).at(-1)!;
+    await server(page, 0, { type: 'command_result', action: 'answer_question', request_id: last.request_id, ...result });
+  };
+  const unexpected = 'The agent opened an unexpected question; the screen was refreshed';
+
+  // A reply carrying a malformed question neither crashes the card nor replaces it.
   await page.getByRole('button', { name: 'SQLite', exact: true }).click();
+  await expect.poll(async () => (await answers()).length).toBe(1);
+  expect((await answers())[0]).toMatchObject({ interaction_id: 'short-question', selected_indices: [1], other_selected: false });
+  await reply({ ok: false, phase: 'failed', error: unexpected, data: { interaction: { id: 'broken', question: 'No options' } } });
+  await expect(page.getByRole('button', { name: 'SQLite', exact: true })).toBeVisible();
+
+  // A real follow-up arrives as a failed reply with the new question: the card shows it,
+  // without an error and without leaving the list.
+  await page.getByRole('button', { name: 'SQLite', exact: true }).click();
+  await expect.poll(async () => (await answers()).length).toBe(2);
+  await reply({ ok: false, phase: 'failed', error: unexpected, data: { interaction: followUp } });
+  await expect(page.getByRole('button', { name: 'Asia', exact: true })).toBeVisible();
+  await expect(page.locator('.toast.error')).toHaveCount(0);
+  await expect(page.getByRole('main', { name: /Terminal for/ })).toHaveCount(0);
+
+  // A plain failure is reported where the user is.
+  await page.getByRole('button', { name: 'Asia', exact: true }).click();
+  await expect.poll(async () => (await answers()).length).toBe(3);
+  await reply({ ok: false, phase: 'failed', error: 'Pane changed before the answer landed' });
+  await expect(page.locator('.toast.error')).toContainText('Pane changed before the answer landed');
+  await expect(page.getByRole('main', { name: /Terminal for/ })).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test('keeps one-tap answers working with missing option indexes and explains disabled ones', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const unindexed = {
+    id: 'unindexed', kind: 'single_select', question: 'Which side?',
+    options: [{ label: 'Left' }, { label: 'Right' }], submit_label: 'Submit', question_index: 1, question_total: 1,
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    inventory: { state: 'error', error_code: 'topology_churn', message: 'Agent inventory is changing too quickly.', last_attempt_at: 1, last_success_at: 0, stale: true },
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Sides', agent: 'claude', options: [], interaction: unindexed, question_layout: true }],
+  });
+  const left = page.getByRole('button', { name: 'Left', exact: true });
+  await expect(left).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Right', exact: true })).toBeVisible();
+  await expect(left).toHaveAttribute('title', 'Agent controls are unavailable until Herdr inventory recovers.');
+
+  // Once inventory recovers, an option without an index answers by its position.
+  await server(page, 0, { type: 'inventory_status', state: 'ready', error_code: '', message: '', last_attempt_at: 2, last_success_at: 2, stale: false });
+  await page.getByRole('button', { name: 'Right', exact: true }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
-  const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
-  expect(answer).toMatchObject({ interaction_id: 'short-question', selected_indices: [1], other_selected: false });
-  await expect(page.getByRole('group', { name: 'Which region?' })).toBeVisible();
+  expect((await commands(page)).find((command) => command.type === 'answer_question')).toMatchObject({ interaction_id: 'unindexed', selected_indices: [1] });
+  expect(pageErrors).toEqual([]);
+});
+
+test('keeps the terminal key row compact on touch screens', async ({ page }) => {
+  await openOmpPane(page, 'Key row');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'ready' });
+  const esc = page.getByRole('button', { name: 'Esc', exact: true }).last();
+  await expect(esc).toBeVisible();
+  expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+  expect((await esc.boundingBox())!.height).toBeLessThan(44);
 });
 
 test('restores structured questions from the cached agent snapshot after reload', async ({ page }) => {
