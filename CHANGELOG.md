@@ -5,7 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.12] - 2026-10-23
+
 ### Fixed
+
+- Keep the terminal at the reader's position after a small scroll up, even
+  while the agent keeps rewriting its last line. Following resumes only when
+  the reader returns to the bottom or taps Jump to latest. Long scrolls near
+  the bottom render the visible rows instead of leaving a blank viewport. (#71)
 
 - Stop filling the Herdr server log with a failed `workspace.move_block`
   request every 30 seconds. That request is the relay's capability check, and
@@ -1754,7 +1761,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.12...HEAD
+[0.22.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.11...v0.22.12
 [0.22.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.10...v0.22.11
 [0.22.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.22.10
 [0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
