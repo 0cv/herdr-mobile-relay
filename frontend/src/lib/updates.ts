@@ -525,6 +525,7 @@ function reloadMarkerVersion(value: string): string {
 export function reloadUpdatedSameOriginApp(
   version: string,
   target: PhoneAppTarget | null = null,
+  proceed: () => boolean = () => true,
 ): Promise<boolean> {
   const requested = requestedPhoneTarget(version, target);
   if (!phoneTargetIsNewer(requested)) return Promise.resolve(false);
@@ -563,6 +564,7 @@ export function reloadUpdatedSameOriginApp(
       assets: status.deployedAssets,
       build: status.deployedBuild || '',
     };
+    if (!proceed()) return false;
     setPhoneUpdateTarget(actualTarget);
     reloadApp(status.deployedVersion, actualTarget);
     return true;
