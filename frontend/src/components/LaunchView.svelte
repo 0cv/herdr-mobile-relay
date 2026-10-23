@@ -54,10 +54,12 @@
     return connection?.status === 'connected' && connection.inventory.state !== 'ready';
   }));
   const connection = $derived($connections.get(relayId));
-  // The relay refuses the home folder itself; only a project folder below it can run an agent.
+  // The relay refuses the home folder for agents; a terminal profile may start
+  // there because it only opens a shell.
   // Only the listing of the selected folder counts: a failed reload keeps an older listing.
   const atHome = $derived(Boolean(
-    connection?.directoryBrowser
+    profileId !== 'terminal'
+    && connection?.directoryBrowser
     && connection.directoryBrowser.current.path === cwd
     && !connection.directoryBrowser.parent,
   ));
