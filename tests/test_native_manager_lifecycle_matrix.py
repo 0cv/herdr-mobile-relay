@@ -2417,9 +2417,9 @@ absent() { ! has hosts; }
         self.assertLess(begin.index("senv_init"), begin.index("write_env cloudflare"))
         # Hosted 39911100878: install.sh's cache sentinel must land where the service (HOME=$THOME) caches, or uninstall refuses the cache.
         self.assertIn('XDG_CACHE_HOME="$THOME/.cache"', self.shell_function("qenv"))
-        homes = 'RUNB() { for a; do case "$a" in HOME=*|XDG_CONFIG_HOME=*) printf "%s " "$a";; esac; done; }; QHOME=/q THOME=/t; qenv x; echo; QENV_HOME=/t qenv x'
+        homes = 'RUNB() { for a; do case "$a" in HOME=*|XDG_CONFIG_HOME=*) printf "%s " "$a";; esac; done; }; QHOME=/q THOME=/t; qenv x'
         out = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", self.shell_function("qenv") + homes], capture_output=True, text=True, check=True).stdout
-        self.assertEqual(out, "HOME=/q XDG_CONFIG_HOME=/q/.config \nHOME=/t XDG_CONFIG_HOME=/q/.config ")
+        self.assertEqual(out, "HOME=/t XDG_CONFIG_HOME=/q/.config ")  # install, update and uninstall alike (hosted 39925636374: a private HOME hid the service definition)
         host = self.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             # Herdr v0.9.5's real shape (hosted 39860634906 showed the earlier invented shape never matched).
@@ -2469,7 +2469,7 @@ owned_pids() { printf '4242,4243'; }
         # A present or uninspectable private-HOME cache must retain QHOME; only a proven absence permits its removal.
         stubs = '''
 physical_release() { echo /release; }
-qenv() { echo "qenv home=${QENV_HOME:-} $*" >> "$LOG"; }
+qenv() { echo "qenv $*" >> "$LOG"; }
 qregistry() { :; }
 expect() { :; }
 residue_gone() { :; }
@@ -2480,7 +2480,7 @@ sgone() { echo "cache $*" >> "$LOG"; [ "$CACHE" = absent ]; }
             code, log, _ = self.run_cleanup(stubs + 'QHOME=/private/q2 THOME=/home/t; q2_clear', {"CACHE": cache, "SNAP1": json.dumps({"active": "absent"})}, extra=("q2_clear",))
             self.assertIn('cache /private/q2/.cache/herdr-mobile-relay', log)
             # Hosted 39916869695: under the private CLI HOME the product refused releases "outside HOME" and found no service definition.
-            self.assertIn('qenv home=/home/t /release/relay/uninstall.sh', log)
+            self.assertIn('qenv /release/relay/uninstall.sh', log)
             self.assertEqual((code == 0, 'AS /bin/rm -rf /private/q2' in log), (allowed, allowed), cache)
 
     def test_q2_full_uninstall_metadata_keeps_verified_b_commit_after_unregister(self):

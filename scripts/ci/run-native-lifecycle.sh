@@ -820,9 +820,10 @@ select_revision() {
     stage_put "$EV/selected" "$S/run/selected" 600
 }
 qenv() {
-    # The plugin's socket belongs only in relay.env, not in the real CLI environment.
+    # The plugin's socket belongs only in relay.env, not in the real CLI environment. The user's one HOME, as in Q1 and a real install
+    # (the product derives the service definition, releases and cache from it; hosted 39925636374); Herdr's registry stays private (XDG).
     RUNB 300 env -u HERDR_SOCKET_PATH -u HERDR_SESSION -u HERDR_CLIENT_SOCKET_PATH \
-        HOME="${QENV_HOME:-$QHOME}" XDG_CONFIG_HOME="$QHOME/.config" XDG_STATE_HOME="$QHOME/.state" XDG_DATA_HOME="$QHOME/.data" PATH="$QHOME/.bin:$SPATH" \
+        HOME="$THOME" XDG_CONFIG_HOME="$QHOME/.config" XDG_STATE_HOME="$QHOME/.state" XDG_DATA_HOME="$QHOME/.data" PATH="$QHOME/.bin:$SPATH" \
         XDG_CACHE_HOME="$THOME/.cache" \
         HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay \
         HERDR_RELEASE_ROOT="$REL" HERDR_PLUGIN_CONFIG_DIR="$CONF" HERDR_RELAY_BIN_DIR="$SHIMDIR" "$@"
@@ -880,8 +881,7 @@ q2_clear() {
     local rel
     rel=$(physical_release) || fail 'cannot prove the Q2 physical release'
     RC=0
-    # The user's HOME (as in Q1 and a real install: the service, releases and cache live there); Herdr keeps its private XDG registry.
-    printf 'y\n' | QENV_HOME="$THOME" qenv "$rel/relay/uninstall.sh" || RC=$?
+    printf 'y\n' | qenv "$rel/relay/uninstall.sh" || RC=$?
     expect "$RC" 0 'real CLI full uninstall'
     qregistry absent absent || fail 'registry still contains the plugin after uninstall'
     expect "$(snap | jget active)" absent 'Q2 uninstall left manager state'
