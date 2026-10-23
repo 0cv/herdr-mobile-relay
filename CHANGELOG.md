@@ -138,6 +138,9 @@ entry below states its limits.
   `invite_version`, `invite_expires`, `setup`, `relay_id` or `rendezvous`) and
   links that carry invitation metadata without a valid invitation, instead of
   choosing one of the values.
+- Keep the reader's place when a terminal find match lands just above the
+  bottom: new output no longer resumes following until the reader reaches the
+  bottom or taps Jump to latest.
 
 ### Security
 
@@ -155,8 +158,11 @@ entry below states its limits.
   replacement and, on failure, rolls back only after the services are confirmed
   quiescent. The previous service is reactivated only when its readiness was
   recorded before the change; otherwise the services stay stopped and the
-  recovery evidence is kept. Behavior against real systemd and launchd service
-  lifecycles is not yet qualified.
+  recovery evidence is kept. On disposable CI runners, real systemd user and
+  launchd services now pass install, start, stop, login-style relaunch and full
+  uninstall, and the official Herdr CLI's plugin update, rollback of a failed
+  update and full uninstall. Signals, legacy-label migration through the CLI
+  and login/logout on a physical machine are not yet qualified.
 - Print a bounded, historical `support-public-v1` projection from
   `herdr-mobile-relay support` instead of the whole persisted snapshot, which
   can hold operational metadata and recent errors. It records protocol,
