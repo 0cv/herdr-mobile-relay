@@ -1374,6 +1374,9 @@ const emitFixtureOutput = async () => {
     await writeChunk(process.stderr, Buffer.from('intervening diagnostic\\n'));
     await writeChunk(process.stdout, Buffer.from('<string>multiline-xml-secret</string></dict></plist>\\n'));
     await writeChunk(process.stderr, Buffer.from('PASSWORD="escaped ' + '\\\\' + '"escaped-quote-secret"\\n'));
+    await writeChunk(process.stdout, Buffer.from('    t =  99.99s Ta'));
+    await writeChunk(process.stderr, Buffer.from('    t =  99.99s Synthesize event\\n'));
+    await writeChunk(process.stdout, Buffer.from('p "activity-secret" Cell\\n'));
   } else if (mode === 'stream-framing-reversed') {
     await writeChunk(process.stderr, Buffer.from('API_PASSWORD='));
     await writeChunk(process.stdout, Buffer.from('harmless stdout\\n'));
@@ -1381,6 +1384,7 @@ const emitFixtureOutput = async () => {
     await writeChunk(process.stderr, Buffer.from('PRIVATE_URL=https://private.example/'));
     await writeChunk(process.stdout, Buffer.from('safe stdout\\n'));
     await writeChunk(process.stderr, Buffer.from('reverse/path?ref=fragment\\n'));
+    await writeChunk(process.stdout, Buffer.from('    t =  88.88s Tap "activity-secret" Cell\\n'.repeat(256)));
   } else if (mode === 'stream-utf8') {
     await writeChunk(process.stdout, Buffer.from('PASSWORD=utf8-secret-'));
     const unicode = Buffer.from('秘密\\n');
@@ -2997,6 +3001,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       const support = join(root, 'supervisor-support');
       await mkdir(support);
       await writeFile(join(support, 'diagnostics.ts'), await readFile(join(import.meta.dirname, '../support/diagnostics.ts')));
+      await writeFile(join(support, 'xctest-output.ts'), await readFile(join(import.meta.dirname, '../support/xctest-output.ts')));
       supervisorPath = join(support, 'ios-xctest.ts');
       await writeFile(supervisorPath, variant);
     }
@@ -3013,6 +3018,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       const support = join(root, 'supervisor-support');
       await mkdir(support);
       await writeFile(join(support, 'diagnostics.ts'), await readFile(join(import.meta.dirname, '../support/diagnostics.ts')));
+      await writeFile(join(support, 'xctest-output.ts'), await readFile(join(import.meta.dirname, '../support/xctest-output.ts')));
       supervisorPath = join(support, 'ios-xctest.ts');
       await writeFile(supervisorPath, variant);
     }
@@ -3055,11 +3061,13 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       await mkdir(support);
       const diagnosticsSource = await readFile(join(import.meta.dirname, '../support/diagnostics.ts'));
       await writeFile(join(support, 'diagnostics.ts'), diagnosticsSource);
+      const outputSource = await readFile(join(import.meta.dirname, '../support/xctest-output.ts'));
+      await writeFile(join(support, 'xctest-output.ts'), outputSource);
       supervisorPath = join(support, 'ios-xctest.ts');
       await writeFile(supervisorPath, variant);
       const hash = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
       await writeFile(join(root, 'revocation-source-binding.json'), JSON.stringify({
-        schema: 1, source: hash(source), variant: hash(variant), diagnostics: hash(diagnosticsSource),
+        schema: 1, source: hash(source), variant: hash(variant), diagnostics: hash(diagnosticsSource), xctestOutput: hash(outputSource),
         dispatcher: hash(shim), server: hash(wdaServer), mode,
       }));
     }
@@ -4350,7 +4358,18 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         else assert.deepEqual(installedEvidence, {schema: 1, format: 'xml', status: 'suppressed', bundleIdentifier: 'not-evaluated', values: 'suppressed'});
       }
       if (streamMode) {
-        const forbidden = ['stream-secret', 'reverse-secret', 'utf8-secret', '秘密', 'eof-secret', 'fragment', 'private.example', 'multiline-xml-secret', 'escaped-quote-secret'];
+        if (mode === 'stream-framing' || mode === 'stream-framing-reversed') {
+          for (const filename of ['owner.json', 'owner-private.json']) {
+            const summary = JSON.parse(await readFile(join(state, filename), 'utf8')).xctestOutput;
+            assert.equal(summary.recognizedRecords, mode === 'stream-framing' ? 2 : 256);
+            assert.equal(summary.droppedEvents, mode === 'stream-framing' ? 0 : 128);
+            assert.deepEqual(summary.events.map((event: { stage: string }) => event.stage).sort(), mode === 'stream-framing' ? ['synthesize-event', 'tap'] : Array(128).fill('tap'));
+            assert.ok(summary.unknownRecords > 0);
+            assert.ok(summary.events.every((event: { monotonicReceiveMs: number; observedAt: string }) => Number.isFinite(event.monotonicReceiveMs) && Number.isFinite(Date.parse(event.observedAt))));
+            assert.equal(JSON.stringify(summary).includes('activity-secret'), false);
+          }
+        }
+        const forbidden = ['stream-secret', 'reverse-secret', 'utf8-secret', '秘密', 'eof-secret', 'fragment', 'private.example', 'multiline-xml-secret', 'escaped-quote-secret', 'activity-secret'];
         const privateLog = await readFile(join(state, 'wda-preflight-private.log'), 'utf8');
         for (const value of forbidden) assert.equal(privateLog.includes(value), false, `final private log leaked ${value}`);
         assert.match(privateLog, /startup output (?:suppressed|summary)/u);
@@ -4405,6 +4424,9 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
       if (outputBoundaryMode) {
         const output = (JSON.parse(await readFile(join(root, 'output-ready'), 'utf8')) as { outputBytes: { stdout: number; stderr: number } }).outputBytes;
         assert.equal(owner.pendingLogBytes, 0);
+        assert.equal(owner.xctestOutput.inputTruncated, mode === 'output-above' || mode === 'output-combined');
+        assert.equal(owner.xctestOutput.recognizedRecords, 0);
+        assert.ok(owner.xctestOutput.oversizedRecords > 0);
         const total = output.stdout + output.stderr;
         assert.ok((await readFile(join(state, 'wda-preflight-private.log'), 'utf8')).length > 0);
         if (mode === 'output-above' || mode === 'output-combined') {
@@ -5759,6 +5781,7 @@ xctestOwnerTests.push(['Native startup status publication ordering is determinis
       } }));
       await writeFile(join(root, 'owned'), `ios:${udid}`);
       await writeFile(join(support, 'diagnostics.ts'), await readFile(join(import.meta.dirname, '../support/diagnostics.ts')));
+      await writeFile(join(support, 'xctest-output.ts'), await readFile(join(import.meta.dirname, '../support/xctest-output.ts')));
       const variantPath = join(support, `${label}.ts`);
       await writeFile(variantPath, variantSource);
       const dispatcher = join(bin, 'xctest-command-dispatcher');

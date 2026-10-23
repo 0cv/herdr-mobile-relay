@@ -365,7 +365,18 @@ label is `Add` inside the visible navigation bar titled `Add to Home Screen`
 `Add` without guaranteeing the accessibility name. The same selector proves the
 button is unique before the single final tap. Failure evidence outside an
 installed-app launch failure also saves one bounded native hierarchy as
-`failure-hierarchy.xml`.
+`failure-hierarchy.xml`, unless a fatal driver failure has quarantined native
+queries. The Share-sheet installation-row click records its start, acknowledgement
+or failure separately from the final Add lookup; acknowledgement alone does not
+prove the confirmation appeared.
+
+The XCTest owner retains at most 128 recognized activity enums with host receipt
+timestamps, plus unknown, oversized, incomplete and dropped-event counts.
+Raw output, element labels, application names and source timestamps stay withheld.
+Each stream has a 4 KiB line bound under the unchanged 100 MiB combined input cap.
+These narrowly matched XCTest activity messages are diagnostic hints, not trusted
+command identities, execution ordering, tap completion or qualification evidence.
+The parser tests use synthetic activity lines; a hosted recovery is still required.
 
 Android retains a separate all-buffer threadtime startup diagnostic before the
 first certificate-preparation session. It connects only to the existing local

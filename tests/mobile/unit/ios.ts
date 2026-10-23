@@ -1124,7 +1124,7 @@ for (const mode of ['empty', 'mixed-malformed'] as const) {
 
 type ConfirmationState = 'ready' | 'missing' | 'stale-lookup' | 'stale-enabled' | 'stale-visible' | 'stale-hittable' | 'disabled' | 'hidden' | 'not-hittable' | 'indeterminate';
 type ConfirmationFault = 'stale' | 'unrelated' | 'invalid-session' | 'misleading-404' | 'malformed' | 'malformed-value' | 'transport' | 'interrupted' | 'hung' | 'body-hung' | 'body-interrupted' | 'body-late';
-type ConfirmationBoundary = 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
+type ConfirmationBoundary = 'activity-click' | 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
 
 async function confirmationReplay(name: string, options: {
   recorded?: typeof recordedConfirmation[number];
@@ -1287,6 +1287,7 @@ async function confirmationReplay(name: string, options: {
       if (id === 'share') sheet = true;
       if (id.startsWith('target-')) {
         assert.equal(scrolls, 1);
+        if (options.faultAt === 'activity-click') return fault();
         now += options.activityDuration || 0;
         confirmationStart = now;
         confirming = true;
@@ -1299,7 +1300,7 @@ async function confirmationReplay(name: string, options: {
       return value(null);
     }
     throw new Error(`unexpected confirmation request ${path} ${JSON.stringify(body)}`);
-  }, fixture || options.latency ? undefined : () => now);
+  }, fixture || options.latency || options.faultAt === 'activity-click' ? undefined : () => now);
   const originalCommand = driver.command.bind(driver);
   driver.command = async (path, method, body, timeoutMs, policy) => {
     try {
@@ -1345,13 +1346,55 @@ async function confirmationReplay(name: string, options: {
     assert.equal(settingsWrites.length, driver.snapshot().firstFatal ? 1 : 2);
     if (!driver.snapshot().firstFatal) assert.deepEqual(settingsWrites[1].body.settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
   }
-  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now };
+  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now, outputDir };
 }
+
+test('activity click timeout records its boundary without further native commands', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('activity-timeout', { fault: 'hung', faultAt: 'activity-click' });
+  assert.match(String(a.error), /APPIUM_TIMEOUT/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.lookups, 0);
+  assert.equal(a.driver.snapshot().unusable, true);
+  const fatal = a.driver.snapshot().firstFatal;
+  assert.equal(fatal?.code, 'APPIUM_TIMEOUT');
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  const count = a.requests.length;
+  let captures = 0;
+  a.driver.screenshot = async () => { captures++; throw new Error('unexpected screenshot'); };
+  a.driver.pageSource = async () => { captures++; throw new Error('unexpected hierarchy'); };
+  (a.platform as any).diagnosticCommand = async () => { captures++; throw new Error('unexpected native diagnostic'); };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(captures, 0);
+  assert.equal(a.requests.length, count);
+  assert.deepEqual(a.driver.snapshot().firstFatal, fatal);
+  const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
+  const clicks = events.filter((event: { operation: string }) => event.operation.startsWith('activity-click-'));
+  assert.deepEqual(clicks.map((event: { operation: string }) => event.operation), ['activity-click-started', 'activity-click-failed']);
+  assert.equal(clicks[0].timeoutMs, 5_000);
+  assert.deepEqual(clicks[1].detail, { fatal: true });
+  assert.equal(a.requests.at(-1)?.path.endsWith('/element/target-1/click'), true);
+});
+
+test('activity click nonfatal failure retains settings restoration and original error', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('activity-nonfatal', { fault: 'unrelated', faultAt: 'activity-click' });
+  assert.match(String(a.error), /synthetic protocol failure/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.lookups, 0);
+  assert.equal(a.driver.snapshot().unusable, false);
+  assert.equal(a.driver.snapshot().firstFatal, undefined);
+  const events = (a.platform as any).diagnostics.snapshot().filter((event: { operation: string }) => event.operation.startsWith('activity-click-'));
+  assert.deepEqual(events.map((event: { operation: string }) => event.operation), ['activity-click-started', 'activity-click-failed']);
+  assert.deepEqual(events[1].detail, { fatal: false });
+});
 
 test('confirmation SM57 final Add12000 is isolated from all other caps', async () => {
   requireXmlLint();
   const a = await confirmationReplay('SM57-caps');
   assert.equal(a.error, undefined);
+  const activities = (a.platform as any).diagnostics.snapshot().filter((event: { operation: string }) => event.operation.startsWith('activity-click-'));
+  assert.deepEqual(activities.map((event: { operation: string }) => event.operation), ['activity-click-started', 'activity-click-acknowledged']);
   const history = a.driver.snapshot().commands;
   const commands = history.slice(history.findIndex(command => command.path.endsWith('/element/target-1/click')));
   assert.equal(commands.find(command => command.path.endsWith('/element/add-1/click'))?.timeoutMs, 12_000);

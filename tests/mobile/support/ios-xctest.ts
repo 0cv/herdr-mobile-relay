@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { redactText, sanitizeValue } from './diagnostics';
+import { XCTestOutputDiagnostics, type XCTestOutputSummary } from './xctest-output';
 
 const runnerId = 'com.facebook.WebDriverAgentRunner.xctrunner';
 const productId = 'com.facebook.WebDriverAgentRunner';
@@ -791,6 +792,7 @@ interface Owner {
   logTruncated?: boolean;
   receivedLogBytes?: number;
   receivedStreamBytes?: { stdout: number; stderr: number };
+  xctestOutput?: XCTestOutputSummary;
   safeLogBytes?: number;
   pendingLogBytes?: number;
   logPersistenceTruncated?: boolean;
@@ -949,6 +951,7 @@ function ownerContent(owner: Owner, sanitized: boolean): string {
     ...value,
     ...(value.listenerEvidence ? {listenerEvidence: value.listenerEvidence.slice(0, 1)} : {}),
     ...(value.diagnostics ? {diagnostics: {...value.diagnostics, commands: [], inspections: [], lifecycle: []}} : {}),
+    ...(value.xctestOutput ? {xctestOutput: {...value.xctestOutput, events: [], droppedEvents: value.xctestOutput.droppedEvents + value.xctestOutput.events.length}} : {}),
   };
   const reducedContent = serialize(reduced);
   if (Buffer.byteLength(reducedContent) > maxOwnerBytes) throw new Error('XCTEST: owner evidence limit');
@@ -1089,6 +1092,10 @@ async function supervise(): Promise<void> {
   };
   const diagnostics = new WdaDiagnosticsRecorder();
   owner.diagnostics = diagnostics.data;
+  const xctestOutput = new XCTestOutputDiagnostics(() => ({
+    observedAt: new Date().toISOString(), monotonicReceiveMs: Number(diagnostics.now().toFixed(3)),
+  }));
+  owner.xctestOutput = xctestOutput.data;
   let stop = false;
   let deadline = 0;
   let port = 0;
@@ -1318,14 +1325,16 @@ async function supervise(): Promise<void> {
     }
     updateOutputAccounting();
   };
-  const recordStartupChunk = (state: StartupOutputState, chunk: Buffer): void => {
+  const recordStartupChunk = (state: StartupOutputState, chunk: Buffer, stream: StartupOutputStream): void => {
     const decoded = state.decoder.write(chunk);
-    state.recordCount += [...decoded].filter(character => character === '\n').length;
+    state.recordCount += decoded.split('\n').length - 1;
+    xctestOutput.observe(decoded, stream);
   };
   const markLogLimit = (stream: StartupOutputStream, streamOffset: number, chunkBytes: number, acceptedBytes: number): void => {
     if (rawOutputSuppressed) return;
     rawOutputSuppressed = true;
     owner.logTruncated = true;
+    xctestOutput.data.inputTruncated = true;
     owner.startupOutputLimit = {
       limitBytes: maxStartupLogBytes,
       receivedBytes: receivedLogBytes,
@@ -1365,7 +1374,7 @@ async function supervise(): Promise<void> {
     const acceptedBytes = Math.max(0, Math.min(chunk.length, maxStartupLogBytes - receivedBefore));
     if (!outputStates[stream].finalized && acceptedBytes) {
       if (!rawOutputSuppressed && safeLogBytes === 0) writeSafeLog(startupOutputMarker);
-      recordStartupChunk(outputStates[stream], chunk.subarray(0, acceptedBytes));
+      recordStartupChunk(outputStates[stream], chunk.subarray(0, acceptedBytes), stream);
     }
     if (acceptedBytes < chunk.length) markLogLimit(stream, offset + acceptedBytes, chunk.length, acceptedBytes);
     updateOutputAccounting();
@@ -1375,6 +1384,8 @@ async function supervise(): Promise<void> {
       if (state.finalized) continue;
       const tail = state.decoder.end();
       state.incompleteUtf8 = tail.length > 0;
+      xctestOutput.observe(tail, stream);
+      xctestOutput.finish(stream);
       if (!rawOutputSuppressed && streamBytes[stream] > 0) {
         writeSafeLog(`[startup output summary; stream=${stream}; bytes=${streamBytes[stream]}; records=${state.recordCount}; utf8Complete=${!state.incompleteUtf8}]\n`);
       }

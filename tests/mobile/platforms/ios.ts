@@ -909,7 +909,14 @@ export class IOSPlatform implements MobilePlatform {
       await withIOSConfirmationSettings(this.driver, transaction, IOS_NATIVE_SCROLL_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS, async (operation) => {
         const operationPolicy = Object.freeze({ ...policy, budget: operation });
         if (operation.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
-        await this.driver.click(addToHomeScreen, IOS_NATIVE_SCROLL_COMMAND_MS, operationPolicy);
+        this.diagnostics.record({ phase: 'ios-install', operation: 'activity-click-started', timeoutMs: IOS_NATIVE_SCROLL_COMMAND_MS });
+        try {
+          await this.driver.click(addToHomeScreen, IOS_NATIVE_SCROLL_COMMAND_MS, operationPolicy);
+        } catch (error) {
+          this.diagnostics.record({ phase: 'ios-install', operation: 'activity-click-failed', detail: { fatal: isFatalDriverError(error) } });
+          throw error;
+        }
+        this.diagnostics.record({ phase: 'ios-install', operation: 'activity-click-acknowledged' });
         const confirmation = operation.phaseView('ios-install-confirmation', 75_000);
         const confirmationPolicy = Object.freeze({ ...operationPolicy, budget: confirmation });
         const addButton = await this.waitForInstallConfirmation(confirmation, confirmationPolicy);
