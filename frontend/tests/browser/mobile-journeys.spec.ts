@@ -5273,6 +5273,70 @@ test('never executes notification approvals, stale or current', async ({ page })
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(0);
 });
 
+test('shows long approval choices in full on touch-sized buttons', async ({ page }) => {
+  const long = 'Yes, allow all edits during this session (shift+tab to cycle)';
+  const path = 'Yes, and always allow ./frontend/src/components/AgentListWithAVeryLongUnbrokenFileName.svelte';
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Long choice', agent: 'claude', options: [long, path, 'No'] }],
+  });
+  const choice = page.getByRole('button', { name: long, exact: true });
+  await expect(choice).toBeVisible();
+  // A long unbroken token wraps inside the card instead of widening the page.
+  const card = (await page.locator('.agent-actions').boundingBox())!;
+  const pathBox = (await page.getByRole('button', { name: path, exact: true }).boundingBox())!;
+  expect(pathBox.x + pathBox.width).toBeLessThanOrEqual(card.x + card.width + 1);
+  expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+  expect((await choice.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  expect((await page.getByRole('button', { name: 'No', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+});
+
+test('answers a short single-choice question from its card in one tap', async ({ page }) => {
+  const short = {
+    id: 'short-question', kind: 'single_select',
+    question: `Which database should the migration target? ${'It rewrites every table. '.repeat(12)}Production data is dropped.`,
+    options: [{ index: 0, label: 'Postgres' }, { index: 1, label: 'SQLite' }, { index: 2, label: 'MySQL' }],
+    submit_label: 'Submit', question_index: 1, question_total: 1,
+  };
+  const long = {
+    ...short, id: 'long-question',
+    options: ['A', 'B', 'C', 'D', 'E'].map((label, index) => ({ index, label })),
+  };
+  const described = {
+    ...short, id: 'described-question',
+    options: [{ index: 0, label: 'Keep' }, { index: 1, label: 'Drop', description: 'Deletes the table' }],
+  };
+  const followUp = { ...short, id: 'follow-up', question: 'Which region?', options: [{ index: 0, label: 'Asia' }, { index: 1, label: 'Europe' }] };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      { pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Short', agent: 'claude', options: [], interaction: short, question_layout: true },
+      { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'question', project: 'Long', agent: 'claude', options: [], interaction: long, question_layout: true },
+      { pane_id: 'w1:p3', status: 'blocked', attention_kind: 'question', project: 'Described', agent: 'claude', options: [], interaction: described, question_layout: true },
+    ],
+  });
+  // Five options, or options with descriptions, keep the full form; nothing is preselected.
+  await expect(page.getByRole('button', { name: 'Choose answer (5)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Choose answer (2)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'More…' })).toBeVisible();
+  // The whole question is visible next to its one-tap answers.
+  const shortPrompt = page.locator('.agent-card', { has: page.getByRole('button', { name: 'SQLite', exact: true }) }).locator('.prompt-preview');
+  expect(await shortPrompt.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+  // The agent asks a follow-up: the card's answer opens it instead of the old question.
+  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), followUp);
+  await page.getByRole('button', { name: 'SQLite', exact: true }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
+  const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
+  expect(answer).toMatchObject({ interaction_id: 'short-question', selected_indices: [1], other_selected: false });
+  await expect(page.getByRole('group', { name: 'Which region?' })).toBeVisible();
+});
+
 test('restores structured questions from the cached agent snapshot after reload', async ({ page }) => {
   const interaction = {
     id: 'reload-question', kind: 'single_select', question: 'Choose reconnect behavior',

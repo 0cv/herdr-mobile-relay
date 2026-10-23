@@ -17,8 +17,8 @@
     tabName,
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
-  import { relayStore } from '$lib/store';
-  import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
+  import { relayStore, type CommandError } from '$lib/store';
+  import type { Agent, QuestionInteraction, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
@@ -397,6 +397,35 @@
     void commitReorder(workspace, tabId, insertIndex, order);
   }
 
+  // A lone single-choice question with a few plain options is answered from the card in one
+  // tap; descriptions, multi-select, several questions or anything unexpected keep the full form.
+  function quickQuestion(interaction: QuestionInteraction): boolean {
+    return interaction.kind === 'single_select' && interaction.options.length > 0
+      && interaction.options.length <= 4 && (interaction.question_total ?? 1) <= 1 && interaction.submit_label !== 'Next'
+      && interaction.options.every((option) => !option.description && !option.summary?.length);
+  }
+
+  async function quickAnswer(agent: Agent, interaction: QuestionInteraction, index: number) {
+    let fresh: QuestionInteraction | undefined;
+    try {
+      const result = await relayStore.answerQuestion(agent, interaction, { selected: new Set([index]), otherSelected: false, otherText: '' });
+      relayStore.clearResponding(agent.pane_id);
+      if (result.phase === 'confirmed') {
+        relayStore.applyQuestionInteraction(agent, null);
+        relayStore.showToast('Answer sent.');
+        return;
+      }
+      fresh = result.data?.interaction as QuestionInteraction | undefined;
+    } catch (caught) {
+      relayStore.clearResponding(agent.pane_id);
+      fresh = (caught as CommandError).data?.interaction as QuestionInteraction | undefined;
+      relayStore.showToast((caught as Error).message, true);
+    }
+    // The agent moved on to another question: show that one, not the stale form.
+    if (fresh?.id) relayStore.applyQuestionInteraction(agent, fresh);
+    onopen(agent);
+  }
+
   async function respond(agent: Agent, index: number, total: number, option: string) {
     await relayStore.respond(agent, index, total, option);
   }
@@ -500,13 +529,18 @@
             </span>
             {#if meta}<span class="agent-meta">{meta}</span>{/if}
             {#if blocked || needsInspection}
-              <span class="prompt-preview">{interaction?.question || approvalPromptPreview(agent)}</span>
+              <span class="prompt-preview" class:prompt-full={interaction && quickQuestion(interaction)}>{interaction?.question || approvalPromptPreview(agent)}</span>
             {/if}
           </span>
         </button>
         {#if blocked && !responding.has(agent.pane_id)}
           <div class="agent-actions" aria-label={`Actions for ${displayName(agent)}`}>
-            {#if interaction}
+            {#if interaction && quickQuestion(interaction)}
+              {#each interaction.options as option (option.index)}
+                <Button size="sm" disabled={!inventoryReady} onclick={() => quickAnswer(agent, interaction, option.index)}>{option.label}</Button>
+              {/each}
+              <Button variant="secondary" size="sm" onclick={() => onopen(agent)}>More…</Button>
+            {:else if interaction}
               <Button variant="trust" size="sm" onclick={() => onopen(agent)}>
                 {interaction.kind === 'multi_select' ? 'Choose options' : 'Choose answer'} ({interaction.options.length})
               </Button>
@@ -518,7 +552,7 @@
                   disabled={!inventoryReady}
                   title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
                   onclick={() => respond(agent, index, options.length, option)}
-                >{option.length > 48 ? `${option.slice(0, 45)}...` : option}</Button>
+                >{option}</Button>
               {/each}
             {/if}
           </div>
