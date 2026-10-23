@@ -141,6 +141,10 @@ entry below states its limits.
 - Keep the reader's place when a terminal find match lands just above the
   bottom: new output no longer resumes following until the reader reaches the
   bottom or taps Jump to latest.
+- Roll back fully when a plugin update restarted a running service whose
+  definition is not at the default path and the new release then failed
+  verification: the service is restarted on the previous release and verified,
+  instead of the new release being left running.
 
 ### Security
 
