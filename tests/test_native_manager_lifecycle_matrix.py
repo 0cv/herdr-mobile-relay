@@ -2448,7 +2448,7 @@ absent() { ! has hosts; }
         with tempfile.TemporaryDirectory() as tmp:
             stubs = '''
 select_revision() { :; }
-qinstall() { /bin/sleep 1; return 9; }
+qinstall() { /bin/sleep 1; echo 'cli says'; return 9; }
 snap() { printf '{"release_revision":"%s","owned_pid_digest":"%s"}' "$SHA" "$B_DIGEST"; }
 owned_pids() { printf '4242,4243'; }
 '''
@@ -2458,7 +2458,11 @@ owned_pids() { printf '4242,4243'; }
                        + self.shell_function("q2_update_observe_b") + 'q2_update_observe_b; printf "%s:%s:%s" "$RC" "$BPID" "$B_PIDS"')
             env = {"PATH": "/usr/bin:/bin", "PYO": sys.executable, "SHA": SHA, "APID": H("5"), "B_DIGEST": H("6"), "EV": tmp}
             result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", program], env=env, capture_output=True, text=True, check=True)
-            self.assertEqual(result.stdout, "9:%s:4242,4243" % H("6"), (result.stderr, (pathlib.Path(tmp) / "b-update.log").read_text()))
+            self.assertEqual(result.stdout, "cli says\n9:%s:4242,4243" % H("6"), (result.stderr, (pathlib.Path(tmp) / "b-update.log").read_text()))
+        # Hosted 39921339508: the runner cannot read the test user's private stage, so the hits log is read only as the subject.
+        for line in self.text("scripts/ci/run-native-lifecycle.sh").splitlines():
+            if "run/hits.log" in line:
+                self.assertTrue(any(k in line for k in ("as_subject ", "HX ", "--log ")), line)
 
     def test_q2_uninstall_checks_private_cache_before_removing_home(self):
         # Run the actual Q2 cleanup body with stubbed manager, CLI and filesystem operations.

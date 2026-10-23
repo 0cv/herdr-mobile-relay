@@ -915,6 +915,7 @@ q2_update_observe_b() {
     done
     RC=0
     wait "$job" || RC=$?
+    cat "$EV/b-update.log"  # the product's own CLI output, as every other real install prints it
 }
 q2_cases() {
     IDENT=none
@@ -942,13 +943,13 @@ q2_cases() {
     q2_update_observe_b
     as_subject /bin/rm -f "$S/run/reject-b"
     [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$RC" -ne 125 ] || fail 'B public failure did not fail the CLI update'
-    grep -q '^front rejected-b$' "$S/run/hits.log" || fail 'B public-readiness refusal was not observed at the TLS front'
+    as_subject grep -q '^front rejected-b$' "$S/run/hits.log" || fail 'B public-readiness refusal was not observed at the TLS front'
     valid_pids "$B_PIDS" && known_digest "$BPID" && wait_for 20 pids_gone "$B_PIDS" && wait_for 20 pids_gone "$A_PIDS" || fail 'failed-B or old-A manager/child survived (or B was never observed)'
     qregistry "$ANCESTOR" "$ANCESTOR" || fail 'rollback registry claims a working B'
     expect "$(snap | jget release_revision)" "$ANCESTOR" 'rollback release revision'
     q2_manifest ancestor
     IDENT=$AIDENT
-    wait_for 60 ready_ok && wait_for 30 public_ok || fail 'A did not regain local and public readiness'
+    wait_for 60 ready_ok && wait_for 30 public_ok || { echo "local=$(local_ident) public=$(public_ident) want=$IDENT"; as_subject tail -n 12 "$S/run/hits.log"; fail 'A did not regain local and public readiness'; }
     expect "$(local_ident_revision "$ANCESTOR")" "$AIDENT" 'rollback A identity and revision'
     APID=$(snap | jget owned_pid_digest)
     known_digest "$APID" && owned_origin || fail 'rollback manager/child unknown'
