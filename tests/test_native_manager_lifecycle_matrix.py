@@ -2419,7 +2419,14 @@ absent() { ! has hosts; }
         self.assertIn('XDG_CACHE_HOME="$THOME/.cache"', self.shell_function("qenv"))
         homes = 'RUNB() { for a; do case "$a" in HOME=*|XDG_CONFIG_HOME=*) printf "%s " "$a";; esac; done; }; QHOME=/q THOME=/t; qenv x'
         out = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", self.shell_function("qenv") + homes], capture_output=True, text=True, check=True).stdout
-        self.assertEqual(out, "HOME=/t XDG_CONFIG_HOME=/q/.config ")  # install, update and uninstall alike (hosted 39925636374: a private HOME hid the service definition)
+        self.assertEqual(out, "HOME=/t XDG_CONFIG_HOME=/q/.config ")
+        # Hosted 39930183057 (macOS): B's launchd reload never reported B; a failed Q2 update now shows the service's own stderr first.
+        diag = 'as_subject() { echo "$*"; }; THOME=/t LABEL=l; OS=Darwin q2_diag; OS=Linux q2_diag'
+        out = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", self.shell_function("q2_diag") + diag], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(out, "tail -n 25 /t/Library/Logs/herdr-mobile-relay/service.err\njournalctl --user -u l -n 25 --no-pager\n")
+        cases = self.shell_function("q2_cases")
+        for step in ("'real A-to-B CLI update'", "'B update before uninstall'"):
+            self.assertIn('[ "$RC" -eq 0 ] || q2_diag\n    expect "$RC" 0 ' + step, cases)  # install, update and uninstall alike (hosted 39925636374: a private HOME hid the service definition)
         host = self.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             # Herdr v0.9.5's real shape (hosted 39860634906 showed the earlier invented shape never matched).

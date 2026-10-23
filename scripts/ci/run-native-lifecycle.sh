@@ -839,6 +839,9 @@ q2_meta() {
     Q2JSON=$("$PYO" -I -B -c 'import json,sys; d=dict(zip(("requested","resolved","cli_sha256","cli_size","a_pid","b_pid","a_identity","b_identity","public","setup","registry","rejected","a_gone","b_gone"), sys.argv[1:])); d["cli_size"]=int(d["cli_size"]); print(json.dumps(d))' \
         "$SHA" "$RESOLVED" "$CLI_SHA" "$CLI_SIZE" "$APID" "$BPID" "$AIDENT" "$BIDENT" "$PUBLIC" none "$([ "$REGISTRY" = absent ] && echo absent || echo present)" "$([ "$CASE" = b-public-fail-rollback ] && echo b || echo n/a)" yes "$([ "$CASE" = b-public-fail-rollback ] && echo yes || echo n/a)")
 }
+q2_diag() {  # the installed service's own last stderr after a failed Q2 step (disposable runner, fixture configuration)
+    if [ "$OS" = Darwin ]; then as_subject tail -n 25 "$THOME/Library/Logs/herdr-mobile-relay/service.err"; else as_subject journalctl --user -u "$LABEL" -n 25 --no-pager; fi || true
+}
 q2_no_setup() {
     local i
     for i in 1 2 3 4 5; do
@@ -921,6 +924,7 @@ q2_cases() {
     IDENT=none
     q2_begin a-to-b-update
     q2_update
+    [ "$RC" -eq 0 ] || q2_diag
     expect "$RC" 0 'real A-to-B CLI update'
     qregistry "$SHA" "$SHA" || fail 'B registry commit differs'
     expect "$(snap | jget release_revision)" "$SHA" 'B release revision'
@@ -949,7 +953,7 @@ q2_cases() {
     expect "$(snap | jget release_revision)" "$ANCESTOR" 'rollback release revision'
     q2_manifest ancestor
     IDENT=$AIDENT
-    wait_for 60 ready_ok && wait_for 30 public_ok || { echo "local=$(local_ident) public=$(public_ident) want=$IDENT"; as_subject tail -n 12 "$S/run/hits.log"; fail 'A did not regain local and public readiness'; }
+    wait_for 60 ready_ok && wait_for 30 public_ok || { echo "local=$(local_ident) public=$(public_ident) want=$IDENT"; as_subject tail -n 12 "$S/run/hits.log"; q2_diag; fail 'A did not regain local and public readiness'; }
     expect "$(local_ident_revision "$ANCESTOR")" "$AIDENT" 'rollback A identity and revision'
     APID=$(snap | jget owned_pid_digest)
     known_digest "$APID" && owned_origin || fail 'rollback manager/child unknown'
@@ -962,6 +966,7 @@ q2_cases() {
     IDENT=none
     q2_begin b-full-uninstall
     q2_update
+    [ "$RC" -eq 0 ] || q2_diag
     expect "$RC" 0 'B update before uninstall'
     qregistry "$SHA" "$SHA" || fail 'B registry commit before uninstall differs'
     RESOLVED=$SHA  # preserve the verified B commit when the registry entry is deleted by full uninstall
