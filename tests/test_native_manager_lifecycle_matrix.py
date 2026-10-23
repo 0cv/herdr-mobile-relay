@@ -87,7 +87,8 @@ def case(ident, os_name):
         c.update(before=ABSENT, after=ABSENT, readiness="none")
     elif ident in m.Q2:
         resolved = m.ANCESTOR if ident == "b-public-fail-rollback" else SHA
-        c.update(before=ABSENT, after=ABSENT if ident == "b-full-uninstall" else snap(release_revision=resolved, owned_pid_digest=H("6") if resolved == SHA else H("5")),
+        # The final tree digest differs from the one recorded at readiness (the wrapper's `sleep 1` children churn), as on the hosted runners.
+        c.update(before=ABSENT, after=ABSENT if ident == "b-full-uninstall" else snap(release_revision=resolved, owned_pid_digest=H("7") if resolved == SHA else H("8")),
                  readiness="none" if ident == "b-full-uninstall" else H("a") if resolved == m.ANCESTOR else H("b"),
                  exit=1 if ident == "b-public-fail-rollback" else 0,
                  q2={"requested": SHA, "resolved": resolved, "cli_sha256": m.CLI[os_name][0], "cli_size": m.CLI[os_name][1],
@@ -197,6 +198,9 @@ class Matrix(unittest.TestCase):
             "A child not gone after B": edit(linux, lambda x: x["cases"][-3]["q2"].update(a_gone="no")),
             "stale B readiness identity": edit(linux, lambda x: x["cases"][-3].update(readiness=H("a"), q2=dict(x["cases"][-3]["q2"], b_identity=H("a")))),
             "failed B child never observed": edit(linux, lambda x: x["cases"][-2]["q2"].update(b_pid="none")),
+            "A tree still running after B update": edit(linux, lambda x: x["cases"][-3]["after"].update(owned_pid_digest=H("5"))),
+            "failed B tree still running after rollback": edit(linux, lambda x: x["cases"][-2]["after"].update(owned_pid_digest=H("6"))),
+            "unknown final Q2 process": edit(linux, lambda x: x["cases"][-3]["after"].update(owned_pid_digest="unknown")),
             "failed B child survived": edit(linux, lambda x: x["cases"][-2]["q2"].update(b_gone="no")),
             "missing case": edit(linux, lambda x: x["cases"].pop()),
             "duplicate case": edit(linux, lambda x: x["cases"].append(x["cases"][0])),
@@ -2411,6 +2415,8 @@ absent() { ! has hosts; }
         begin = self.shell_function("q2_begin")  # hosted 39865658354: relay.env must go to Herdr's plugin config dir, and the service env must follow it
         self.assertRegex(begin, r'\n    CONF="\$QHOME/\.config/herdr/plugins/config/herdr-mobile-relay\.events"[^\n]*\n    senv_init\n')
         self.assertLess(begin.index("senv_init"), begin.index("write_env cloudflare"))
+        # Hosted 39911100878: install.sh's cache sentinel must land where the service (HOME=$THOME) caches, or uninstall refuses the cache.
+        self.assertIn('XDG_CACHE_HOME="$THOME/.cache"', self.shell_function("qenv"))
         host = self.load_host()
         with tempfile.TemporaryDirectory() as tmp:
             # Herdr v0.9.5's real shape (hosted 39860634906 showed the earlier invented shape never matched).

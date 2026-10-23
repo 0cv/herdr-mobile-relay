@@ -344,7 +344,10 @@ def check_case(case, os_name, sha):
             require(after["definition_hash"] == after["active"] == "absent" and after["owned_pid_digest"] == "none", "B uninstall left the service")
         else:
             require(after["origin"] != "unknown" and after["active"] in ("active", "loaded") and re.fullmatch(r"[0-9a-f]{64}", after["definition_hash"])
-                    and after["owned_pid_digest"] == (q["a_pid"] if ident == "b-public-fail-rollback" else q["b_pid"]), "wrong Q2 manager process")
+                    and re.fullmatch(r"[0-9a-f]{64}", after["owned_pid_digest"])
+                    # The tree digest covers the wrapper's transient `sleep 1` children, so two snapshots never match (hosted 39911100878).
+                    # Which revision runs is proven by release_revision and readiness identity; old trees by the driver's pids_gone.
+                    and after["owned_pid_digest"] != (q["b_pid"] if ident == "b-public-fail-rollback" else q["a_pid"]), "wrong Q2 manager process")
     require(case["target"] == ("active" if (ident, os_name) == ("login-style-relaunch", "Linux") else "n/a"),
             "default.target must be observed active after the Linux login-style restart, and only there")
     if ident in REFUSALS or ident == "bystander-nonmutation":
