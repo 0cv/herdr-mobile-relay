@@ -17,10 +17,11 @@ import (
 )
 
 type Profile struct {
-	ID    string   `json:"id"`
-	Label string   `json:"label"`
-	Kind  string   `json:"-"`
-	Argv  []string `json:"-"`
+	ID         string   `json:"id"`
+	Label      string   `json:"label"`
+	Kind       string   `json:"-"`
+	Argv       []string `json:"-"`
+	IsTerminal bool     `json:"-"`
 }
 
 var defaultCandidates = []Profile{
@@ -32,6 +33,7 @@ var defaultCandidates = []Profile{
 	{ID: "kimi", Label: "Kimi", Kind: "kimi"},
 	{ID: "hermes", Label: "Hermes", Kind: "hermes"},
 	{ID: "devin", Label: "Devin", Kind: "devin"},
+	{ID: "terminal", Label: "Terminal", IsTerminal: true},
 }
 
 var defaultAliases = map[string]string{
@@ -130,6 +132,14 @@ func (r *Resolver) discover() []Profile {
 		candidates = append([]Profile(nil), defaultCandidates...)
 	}
 	for _, p := range candidates {
+		if p.IsTerminal {
+			if !seen[p.ID] {
+				p.Argv = nil // terminal panes start at a shell prompt; no argv needed
+				seen[p.ID] = true
+				result = append(result, p)
+			}
+			continue
+		}
 		path, ok := binaryPath(p.ID)
 		if !ok {
 			if configuredIDs[p.ID] {

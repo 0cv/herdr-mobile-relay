@@ -1340,6 +1340,36 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
+  it('lets the terminal profile start in the home folder', async () => {
+    const user = userEvent.setup();
+    const hint = 'Agents cannot start in the home folder itself. Tap the folder above to pick a project folder.';
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' }, capabilities: ['directory_browser'],
+      agentProfiles: [{ id: 'claude', label: 'Claude Code' }, { id: 'terminal', label: 'Terminal' }],
+      directoryBrowser: homeListing, directoryLoading: false, directoryError: '',
+    } as unknown as RelayConnectionView;
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    relayStore.connections.set(new Map([['fedora', connection as never]]));
+    const list = vi.spyOn(relayStore, 'listDirectories').mockImplementation(() => Promise.resolve(homeListing));
+    try {
+      render(LaunchView, { relayId: 'fedora', cwd: '/home/user' });
+      const start = screen.getByRole('button', { name: 'Start Agent' }) as HTMLButtonElement;
+      await vi.waitFor(() => expect(list).toHaveBeenCalled());
+      // An agent in the home folder stays blocked.
+      await vi.waitFor(() => expect(start.disabled).toBe(true));
+      expect(screen.queryByText(hint)).not.toBeNull();
+
+      // The terminal profile only opens a shell, so the home folder is fine.
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Agent' }), 'terminal');
+      await vi.waitFor(() => expect(start.disabled).toBe(false));
+      expect(screen.queryByText(hint)).toBeNull();
+    } finally {
+      list.mockRestore();
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
   it('shows the Hermes profile picker only for the Hermes agent', async () => {
     relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
     const list = vi.spyOn(relayStore, 'listDirectories').mockResolvedValue({

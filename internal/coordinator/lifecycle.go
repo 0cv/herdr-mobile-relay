@@ -100,7 +100,7 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 	if len([]rune(request.Prompt)) > promptMaxChars {
 		return profiles.Profile{}, request, errors.New("prompt exceeds maximum length")
 	}
-	cwd, err := l.ResolveCwd(request.Cwd)
+	cwd, err := l.ResolveCwdForProfile(request.Cwd, profile)
 	if err != nil {
 		return profiles.Profile{}, request, err
 	}
@@ -219,6 +219,12 @@ func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd st
 
 func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile, request StartRequest, paneID string) error {
 	name := request.Name
+	if profile.IsTerminal {
+		// A terminal profile launches a plain shell pane. The pane was already
+		// created with a running shell by herdr (createTarget set the tab name),
+		// so there is nothing to dispatch and no agent to rename.
+		return nil
+	}
 	if profile.Kind != "" {
 		agentArgs, err := hermesProfileArgs(request.HermesProfile)
 		if err != nil {
@@ -363,6 +369,17 @@ func workspaceExists(workspaces []herdr.Workspace, workspaceID string) bool {
 }
 
 func (l *Lifecycle) ResolveCwd(raw string) (string, error) {
+	return l.resolveCwd(raw, false)
+}
+
+// ResolveCwdForProfile allows the home directory itself only for a terminal
+// profile: a plain shell at $HOME is useful, while an agent expects a project
+// directory and upstream refuses to launch one in the home folder.
+func (l *Lifecycle) ResolveCwdForProfile(raw string, profile profiles.Profile) (string, error) {
+	return l.resolveCwd(raw, profile.IsTerminal)
+}
+
+func (l *Lifecycle) resolveCwd(raw string, allowHome bool) (string, error) {
 	if raw == "" {
 		return "", errors.New("cwd is required")
 	}
@@ -387,6 +404,9 @@ func (l *Lifecycle) ResolveCwd(raw string) (string, error) {
 		return "", errors.New("cwd must be inside the home directory")
 	}
 	if relative == "." {
+		if allowHome {
+			return resolved, nil
+		}
 		return "", errors.New("cwd must be a project directory below the home directory")
 	}
 	root, err := os.OpenRoot(resolvedHome)
