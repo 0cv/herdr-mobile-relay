@@ -3671,6 +3671,125 @@ test('preserves unsafe prompt state for older relays without error data', async 
   await expect(prompt).toHaveValue('');
 });
 
+test('loads the deployed build when a deploy removed the conversation view', async ({ page }) => {
+  // A deploy since this page loaded: the lazy chunk is gone and version.json names a newer build.
+  let deployed = false;
+  await page.route('**/assets/ConversationHistory-*.js', (route) => (deployed
+    ? route.continue()
+    : route.fulfill({ status: 404, body: '' })));
+  await page.route('**/version.json?*', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ version: APP_RELEASE, assets: APP_METADATA.assets + 1 }),
+  }));
+  const agents = {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Deployed app', agent: 'omp',
+      server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1,
+      session: 'Current session', conversation_history_available: true,
+    }],
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, agents);
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  const reload = page.waitForRequest((request) => new URL(request.url()).searchParams.has('herdr_reload'));
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  expect(new URL((await reload).url()).searchParams.get('herdr_reload')).toContain(APP_RELEASE);
+  deployed = true;
+  // The reload lands on /index.html, whose bootstrap then replaces itself with the build page.
+  await page.waitForURL((url) => url.pathname.startsWith('/builds/') && url.searchParams.has('herdr_reload'));
+  // The reloaded app keeps the conversation view and can now load it.
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, agents);
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'could not be loaded' })).toHaveCount(0);
+});
+
+test('keeps the load error when the conversation view fails without a deploy', async ({ page }) => {
+  await page.route('**/assets/ConversationHistory-*.js', (route) => route.fulfill({ status: 404, body: '' }));
+  await page.route('**/version.json?*', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ version: APP_RELEASE, assets: APP_METADATA.assets }),
+  }));
+  const reloads: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).searchParams.has('herdr_reload')) reloads.push(request.url());
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Same build', agent: 'omp',
+      server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1,
+      session: 'Current session', conversation_history_available: true,
+    }],
+  });
+  await page.getByRole('button', { name: 'Open Same build on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Conversation history could not be loaded' })).toBeVisible();
+  expect(reloads).toEqual([]);
+});
+
+for (const scenario of ['reload attempts used up', 'user left before the version check', 'user left during the deploy check'] as const) {
+  test(`does not reload for a removed conversation view when the ${scenario}`, async ({ page }) => {
+    await page.route('**/assets/ConversationHistory-*.js', (route) => route.fulfill({ status: 404, body: '' }));
+    let versionChecks = 0;
+    await page.route('**/version.json?*', async (route) => {
+      versionChecks += 1;
+      const slow = scenario === 'user left before the version check'
+        || (scenario === 'user left during the deploy check' && versionChecks > 1);
+      if (slow) await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_500));
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ version: APP_RELEASE, assets: APP_METADATA.assets + 1 }),
+      });
+    });
+    if (scenario === 'reload attempts used up') {
+      await page.addInitScript((version) => {
+        sessionStorage.setItem('herdr_app_reload_target', version);
+        sessionStorage.setItem('herdr_app_reload_attempts', JSON.stringify({ [version]: 2 }));
+      }, APP_RELEASE);
+    }
+    const reloads: string[] = [];
+    page.on('request', (request) => {
+      if (new URL(request.url()).searchParams.has('herdr_reload')) reloads.push(request.url());
+    });
+    await boot(page, [fedora]);
+    await expect.poll(() => socketCount(page)).toBe(1);
+    await handshake(page, 0, { capabilities: ['conversation_history'] });
+    await server(page, 0, {
+      type: 'agents',
+      agents: [{
+        pane_id: 'w1:p1', status: 'working', project: 'Guarded app', agent: 'omp',
+        server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1,
+        session: 'Current session', conversation_history_available: true,
+      }],
+    });
+    await page.getByRole('button', { name: 'Open Guarded app on Fedora' }).click();
+    // The deploy check is the bounded reload's own version requests, after the first one.
+    let versionRequests = 0;
+    const deployCheck = scenario === 'user left during the deploy check'
+      ? page.waitForRequest((request) => new URL(request.url()).pathname === '/version.json' && (versionRequests += 1) === 2)
+      : null;
+    await page.getByRole('button', { name: 'Conversation history' }).click();
+    if (scenario !== 'reload attempts used up') {
+      if (deployCheck) await deployCheck;
+      await page.goBack();
+      await expect(page.getByRole('main', { name: 'Opening conversation history' })).toHaveCount(0);
+      // Past both slow version requests, when a reload would have started.
+      await page.waitForTimeout(4_500);
+    } else {
+      await expect(page.getByRole('alert').filter({ hasText: 'Conversation history could not be loaded' })).toBeVisible();
+    }
+    expect(reloads).toEqual([]);
+  });
+}
+
 test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', {

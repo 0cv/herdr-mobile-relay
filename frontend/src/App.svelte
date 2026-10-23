@@ -53,6 +53,7 @@
   import { relayStore } from '$lib/store';
   import {
     appUpdateStatus,
+    checkAppUpdate,
     clearPendingRelayUpdate,
     initializeAppUpdates,
     pendingRelayUpdate,
@@ -114,7 +115,14 @@
       .then(({ default: component }) => {
         conversationHistoryComponent = component;
       })
-      .catch(() => {
+      .catch(async () => {
+        // A deploy since this page loaded removes its lazy chunks: load the deployed
+        // build (the hash keeps this view) instead of failing in the old one.
+        // The bounded reload gives up after two attempts, so a stale document cannot loop.
+        const status = await checkAppUpdate().catch(() => null);
+        const stillOpen = () => $currentView.view === 'history';
+        if (status?.state === 'reload-ready' && stillOpen()
+          && await reloadUpdatedSameOriginApp(status.deployedVersion, null, stillOpen)) return;
         conversationHistoryLoadError = true;
       });
   });
