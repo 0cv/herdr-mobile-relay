@@ -488,6 +488,8 @@ export async function waitForDeployedApp(
 }
 
 let automaticReload: Promise<boolean> | null = null;
+// Every caller waiting on the running reload adds its own check; the reload goes ahead if any still wants it.
+let automaticReloadWanted: Array<() => boolean> = [];
 
 function currentPhoneTarget(): PhoneAppTarget {
   return { version: APP_VERSION, assets: APP_ASSET_VERSION, build: APP_BUILD_ID };
@@ -533,7 +535,7 @@ function reloadMarkerVersion(value: string): string {
 export function reloadUpdatedSameOriginApp(
   version: string,
   target: PhoneAppTarget | null = null,
-  proceed: () => boolean = () => true,
+  stillWanted: () => boolean = () => true,
 ): Promise<boolean> {
   const requested = requestedPhoneTarget(version, target);
   if (!phoneTargetIsNewer(requested)) return Promise.resolve(false);
@@ -560,6 +562,7 @@ export function reloadUpdatedSameOriginApp(
     setPhoneUpdateError(`The phone app did not acknowledge build v${requested.version} after ${MAX_AUTOMATIC_RELOAD_ATTEMPTS} automatic attempts. Use Load Update to try again.`);
     return Promise.resolve(false);
   }
+  automaticReloadWanted.push(stillWanted);
   if (automaticReload) return automaticReload;
   automaticReload = (async () => {
     const status = await waitForDeployedApp(requested.version, { target: requested });
@@ -572,14 +575,38 @@ export function reloadUpdatedSameOriginApp(
       assets: status.deployedAssets,
       build: status.deployedBuild || '',
     };
-    if (!proceed()) return false;
+    if (!automaticReloadWanted.some((wanted) => wanted())) return false;
     setPhoneUpdateTarget(actualTarget);
     reloadApp(status.deployedVersion, actualTarget);
     return true;
   })().finally(() => {
     automaticReload = null;
+    automaticReloadWanted = [];
   });
   return automaticReload;
+}
+
+/**
+ * A deploy removes the previous build's lazily loaded files. When one fails to
+ * load, reload into the newer deployed build if there is one and it is still wanted.
+ */
+export async function importOrReload<T>(load: () => Promise<T>, stillWanted: () => boolean): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    const status = await checkAppUpdate();
+    const deployed = {
+      version: status.deployedVersion,
+      assets: status.deployedAssets,
+      build: status.deployedBuild || '',
+    };
+    if (status.state === 'reload-ready' && stillWanted()
+      && await reloadUpdatedSameOriginApp(deployed.version, deployed, stillWanted)) {
+      // The page is now navigating to the deployed build, so this load never finishes.
+      return new Promise<T>(() => {});
+    }
+    throw error;
+  }
 }
 
 export function reloadApp(version = '', target: PhoneAppTarget | null = null): void {

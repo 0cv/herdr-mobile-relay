@@ -11,6 +11,7 @@ import {
   initializeAppUpdates,
   clearPendingRelayUpdate,
   clearUpdateProgress,
+  importOrReload,
   newerBundle,
   newerVersion,
   normalizeAppDeployment,
@@ -437,6 +438,82 @@ describe('release updates', () => {
     expect(fetcher).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
+  });
+
+  it('reloads while any waiting caller still wants it', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const target = { version: `${major}.${minor + 1}.${patch}`, assets: 1, build: 'next-build' };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ({ ok: true, json: async () => target })));
+    const replace = vi.fn();
+    vi.stubGlobal('location', { href: 'https://app.example/#history=pane', replace });
+    let conversationOpen = true;
+
+    const conversation = reloadUpdatedSameOriginApp(target.version, target, () => conversationOpen);
+    const relayUpdate = reloadUpdatedSameOriginApp(target.version, target);
+    conversationOpen = false;
+
+    await expect(conversation).resolves.toBe(true);
+    await expect(relayUpdate).resolves.toBe(true);
+    expect(sessionStorage.getItem('herdr_app_reload_target')).toBe(`${target.version}:next-build`);
+    expect(replace).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('does not reload when no waiting caller still wants it', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const target = { version: `${major}.${minor + 1}.${patch}`, assets: 1, build: 'next-build' };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ({ ok: true, json: async () => target })));
+
+    const first = reloadUpdatedSameOriginApp(target.version, target, () => false);
+    const second = reloadUpdatedSameOriginApp(target.version, target, () => false);
+
+    await expect(first).resolves.toBe(false);
+    await expect(second).resolves.toBe(false);
+    expect(sessionStorage.getItem('herdr_app_reload_target')).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  describe('importOrReload', () => {
+    const missing = () => Promise.reject(new Error('chunk removed'));
+    const respondWith = (metadata: Record<string, unknown>) => vi.fn()
+      .mockImplementation(async () => ({ ok: true, json: async () => metadata }));
+
+    it('returns the loaded module without checking for a deploy', async () => {
+      const fetcher = vi.fn();
+      vi.stubGlobal('fetch', fetcher);
+      await expect(importOrReload(async () => 'module', () => true)).resolves.toBe('module');
+      expect(fetcher).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it('keeps the load error when no newer build is deployed', async () => {
+      const fetcher = respondWith({ version: APP_VERSION, assets: APP_ASSET_VERSION, build: APP_BUILD_ID });
+      vi.stubGlobal('fetch', fetcher);
+      await expect(importOrReload(missing, () => true)).rejects.toThrow('chunk removed');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(sessionStorage.getItem('herdr_app_reload_target')).toBeNull();
+      vi.unstubAllGlobals();
+    });
+
+    it('keeps the load error when the part is no longer wanted', async () => {
+      vi.stubGlobal('fetch', respondWith({ version: APP_VERSION, assets: APP_ASSET_VERSION + 1, build: 'next-build' }));
+      await expect(importOrReload(missing, () => false)).rejects.toThrow('chunk removed');
+      expect(sessionStorage.getItem('herdr_app_reload_target')).toBeNull();
+      vi.unstubAllGlobals();
+    });
+
+    it('reloads into a newer deployed build and leaves the load pending', async () => {
+      vi.stubGlobal('fetch', respondWith({ version: APP_VERSION, assets: APP_ASSET_VERSION + 1, build: 'next-build' }));
+      const replace = vi.fn();
+      vi.stubGlobal('location', { href: 'https://app.example/#history=pane', replace });
+      let settled = false;
+      void importOrReload(missing, () => true).finally(() => { settled = true; });
+      await vi.waitFor(() => expect(sessionStorage.getItem('herdr_app_reload_target')).toBe(`${APP_VERSION}:next-build`));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+      expect(replace).toHaveBeenCalledWith(expect.stringContaining('#history=pane'));
+      vi.unstubAllGlobals();
+    });
   });
 
   it('accepts a newer asset revision without requiring its unrelated build identity', async () => {

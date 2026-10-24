@@ -52,8 +52,8 @@
   import { relayStore } from '$lib/store';
   import {
     appUpdateStatus,
-    checkAppUpdate,
     clearPendingRelayUpdate,
+    importOrReload,
     initializeAppUpdates,
     pendingRelayUpdate,
     relayServesCurrentOrigin,
@@ -87,6 +87,7 @@
   let visibilityRevision = $state(0);
   let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
   let conversationHistoryLoadError = $state(false);
+  let conversationHistoryLoading = false;
   let viewedRelayId = '';
   let viewedTargetSignature = '';
 
@@ -109,20 +110,28 @@
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const conversationHistoryAvailable = $derived(hasConversationHistory(activeAgent, activeConnection));
   $effect(() => {
-    if ($currentView.view !== 'history' || !activeAgent || conversationHistoryComponent) return;
-    void import('$components/ConversationHistory.svelte')
+    if ($currentView.view !== 'history') {
+      conversationHistoryLoadError = false;
+      return;
+    }
+    if (!activeAgent || conversationHistoryComponent || conversationHistoryLoading || conversationHistoryLoadError) return;
+    conversationHistoryLoading = true;
+    const stillOpen = () => get(currentView).view === 'history';
+    void importOrReload(() => import('$components/ConversationHistory.svelte'), stillOpen)
       .then(({ default: component }) => {
         conversationHistoryComponent = component;
       })
-      .catch(async () => {
-        // A deploy since this page loaded removes its lazy chunks: load the deployed
-        // build (the hash keeps this view) instead of failing in the old one.
-        // The bounded reload gives up after two attempts, so a stale document cannot loop.
-        const status = await checkAppUpdate().catch(() => null);
-        const stillOpen = () => $currentView.view === 'history';
-        if (status?.state === 'reload-ready' && stillOpen()
-          && await reloadUpdatedSameOriginApp(status.deployedVersion, null, stillOpen)) return;
-        conversationHistoryLoadError = true;
+      .catch(() => {
+        if (!stillOpen()) return;
+        const route = get(currentView);
+        if (route.view === 'history' && route.fallbackToTerminalOnInitialUnavailable) {
+          replaceView({ view: 'terminal', paneId: route.paneId, target: route.target });
+        } else {
+          conversationHistoryLoadError = true;
+        }
+      })
+      .finally(() => {
+        conversationHistoryLoading = false;
       });
   });
   const workspaceInspectionAvailable = $derived(Boolean(
@@ -697,7 +706,7 @@
   {:else if $currentView.view === 'workspaces'}
     <WorkspaceManager {readOnlyRelayIds} />
   {:else if $currentView.view === 'launch'}
-    {#await import('$components/LaunchView.svelte')}
+    {#await importOrReload(() => import('$components/LaunchView.svelte'), () => get(currentView).view === 'launch')}
       <main class="page" aria-label="Opening launch form"><p role="status">Loading launch form…</p></main>
     {:then { default: LaunchView }}
       <LaunchView
