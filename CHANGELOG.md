@@ -63,12 +63,18 @@ project follows [Semantic Versioning](https://semver.org/).
   questions, layout changes and small scroll-up gestures.
 - Bound slash-catalog reads, honor Pi trust-directory decisions, retain Oh My Pi
   registry order, and recover cached phone stylesheets without clearing storage.
-- Nest indented lists in Conversation, keep lists together across blank lines,
-  and keep a numbered list's numbering after a code block interrupts it.
+- Nest list items indented to their parent item's text in Conversation and
+  keep code blocks indented under an item inside it. Keep lists together across
+  blank lines, and keep a numbered list's numbering after a code block
+  interrupts it.
 - After a deploy, reload an already open app into the deployed build when
   Conversation, the launch form, question controls or Type in terminal fail to
   load. Without a newer build, an automatic Conversation opening falls back to
-  Terminal instead of an error.
+  Terminal instead of an error. Automatic reloads wait while a terminal send is
+  unconfirmed or a draft is not saved on this phone, and **Load Update** names
+  what it would discard.
+- Deliver every OpenCode and Hermes conversation update. An update written
+  while the relay was reading could be missed until the next change.
 
 ### Upgrade
 
