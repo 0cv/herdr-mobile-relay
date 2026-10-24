@@ -86,7 +86,7 @@
   const awaitedDeployments = new Set<string>();
   let visibilityRevision = $state(0);
   let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
-  let conversationHistoryLoadError = $state(false);
+  let conversationHistoryFailedRoute = $state.raw<ViewState | null>(null);
   let conversationHistoryLoading = false;
   let viewedRelayId = '';
   let viewedTargetSignature = '';
@@ -110,11 +110,8 @@
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const conversationHistoryAvailable = $derived(hasConversationHistory(activeAgent, activeConnection));
   $effect(() => {
-    if ($currentView.view !== 'history') {
-      conversationHistoryLoadError = false;
-      return;
-    }
-    if (!activeAgent || conversationHistoryComponent || conversationHistoryLoading || conversationHistoryLoadError) return;
+    if ($currentView.view !== 'history' || !activeAgent || conversationHistoryComponent
+      || conversationHistoryLoading || conversationHistoryFailedRoute === $currentView) return;
     conversationHistoryLoading = true;
     const stillOpen = () => get(currentView).view === 'history';
     void importOrReload(() => import('$components/ConversationHistory.svelte'), stillOpen)
@@ -127,7 +124,7 @@
         if (route.view === 'history' && route.fallbackToTerminalOnInitialUnavailable) {
           replaceView({ view: 'terminal', paneId: route.paneId, target: route.target });
         } else {
-          conversationHistoryLoadError = true;
+          conversationHistoryFailedRoute = route;
         }
       })
       .finally(() => {
@@ -736,7 +733,7 @@
             ? makeInitialPageHandler(openingRoute)
             : undefined}
         />
-      {:else if conversationHistoryLoadError}
+      {:else if conversationHistoryFailedRoute === openingRoute}
         <main class="page terminal-loading" aria-label="Conversation history failed to load">
           <p role="alert">Conversation history could not be loaded. Reload the app to try again.</p>
         </main>

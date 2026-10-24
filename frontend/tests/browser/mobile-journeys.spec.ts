@@ -3850,9 +3850,11 @@ test('opens Terminal when the conversation view cannot load without a deploy', a
   await page.waitForTimeout(500);
   expect(deploy.versionRequests).toBe(checksBefore + 1);
 
-  // Leaving clears the error, so the next automatic opening falls back to Terminal again.
-  await page.goBack();
-  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  // The error belongs to that opening: opening the agent again from Search falls back to Terminal.
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  const jump = page.getByRole('dialog', { name: 'Jump to agent' });
+  await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Deployed app');
+  await jump.getByRole('button', { name: /Deployed app/ }).click();
   await expect(page.getByRole('main', { name: 'Terminal for Deployed app' })).toBeVisible();
   expect(deploy.versionRequests).toBe(checksBefore + 2);
   expect(deploy.reloads).toEqual([]);

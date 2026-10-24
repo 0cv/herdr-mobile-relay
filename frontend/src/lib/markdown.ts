@@ -1,7 +1,7 @@
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
 const INLINE_PATTERN = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>"']+)/giu;
 const UNORDERED_ITEM = /^\s*[-*+]\s+(.+)$/u;
-// As in CommonMark, a number longer than nine digits does not start a list item.
+// Markdown does not treat a number longer than nine digits as a list number.
 const ORDERED_ITEM = /^\s*(\d{1,9})[.)]\s+(.+)$/u;
 
 function escapeHtml(value: string): string {
