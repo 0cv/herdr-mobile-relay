@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Toggle individual servers above the agent list to show or hide their sessions
+  and workspaces. A hidden server shows a count of sessions that need input.
+  Visibility is remembered on this device without changing connections,
+  notifications, or the selected home layout.
+
 ## [0.22.13] - 2026-10-23
 
 ### Changed
