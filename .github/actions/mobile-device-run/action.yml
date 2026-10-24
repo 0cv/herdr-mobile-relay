@@ -390,7 +390,7 @@ runs:
         mkdir -p "$MOBILE_OUTPUT"
         if [ "$MOBILE_PLATFORM" = ios ] && [ -d "$IOS_XCTEST_STATE_DIR" ]; then
           mkdir -p "$MOBILE_OUTPUT/ios-xctest"
-          for artifact in owner.json selected.xctestrun installed-Info.plist ios-wda-system.log wda-status.json; do
+          for artifact in owner.json selected.xctestrun installed-Info.plist ios-wda-system-log-disposition.json wda-status.json; do
             if [ -f "$IOS_XCTEST_STATE_DIR/$artifact" ]; then cp "$IOS_XCTEST_STATE_DIR/$artifact" "$MOBILE_OUTPUT/ios-xctest/$artifact"; fi
           done
           wda_log="$IOS_XCTEST_STATE_DIR/wda-preflight-private.log"
@@ -413,9 +413,6 @@ runs:
           bun -e 'import { open, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); const handle = await open(input); try { const buffer = Buffer.alloc(104857600); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0); const sanitized = Buffer.from(redactText(buffer.subarray(0, bytesRead).toString("utf8"))).subarray(0, 104857600); await writeFile(output, sanitized, { mode: 0o600 }); } finally { await handle.close(); }' "$RUNNER_TEMP/wda-preflight.log" "$MOBILE_OUTPUT/wda-preflight.log"
         fi
         if [ -f "$RUNNER_TEMP/wda-status.json" ]; then cp "$RUNNER_TEMP/wda-status.json" "$MOBILE_OUTPUT/wda-status.json"; fi
-        if [ -f "$RUNNER_TEMP/ios-wda-system.log" ]; then
-          head -c 104857600 "$RUNNER_TEMP/ios-wda-system.log" >"$MOBILE_OUTPUT/ios-wda-system.log" || true
-        fi
         if [ -f "$RUNNER_TEMP/emulator.log" ]; then
           head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true
         fi

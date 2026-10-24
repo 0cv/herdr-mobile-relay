@@ -332,9 +332,15 @@ not launch another WDA. The session also sets `appium:isHeadless`, and no
 simulator UI (DeviceHub since Xcode 27) is opened: without it, Appium reboots a
 booted simulator that has no UI window, which kills the managed WDA. The
 existing 300-second startup deadline is shared with HTTP checks. Always-run
-finalization stops the owner before diagnostic upload.
-Local harness invocations also require this managed owner; the simulator/Appium
-setup above alone is not sufficient. Supply the already-built WDA product,
+finalization stops the owner before diagnostic upload. Cleanup still validates
+owned listeners, terminates only an owned runner, and stops and waits for the
+owned xcodebuild process, but no longer queries the simulator's native system
+log. It writes the payload-free `ios-wda-system-log-disposition.json` with
+`not-requested-product-first`; this records a deliberate no-query decision, not
+collection status or an explanation for a native timeout. Evidence-copy steps
+include this disposition and do not copy an old system-log file. Local harness
+invocations also require this managed owner; the simulator/Appium setup above
+alone is not sufficient. Supply the already-built WDA product,
 bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.

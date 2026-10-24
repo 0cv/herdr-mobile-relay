@@ -49,7 +49,7 @@ function redactedBounded(value: string | Buffer, maximum: number): string {
 function diagnosticText(value: unknown, maximum = maxDiagnosticOutputBytes, operation = ''): { content: string; bytes: number; truncated: boolean; suppressed?: boolean } {
   const text = value === undefined || value === null ? '' : typeof value === 'string' ? value : value instanceof Buffer ? value.toString('utf8') : String(value);
   const bytes = Buffer.byteLength(text);
-  const classification = operation === 'inspect-listener' ? 'listener command' : operation === 'collect-system-log' ? 'system log' : operation ? `${operation} command` : 'command';
+  const classification = operation === 'inspect-listener' ? 'listener command' : operation ? `${operation} command` : 'command';
   const content = bytes ? `[${classification} output suppressed]\n` : '';
   return {
     content: Buffer.from(content).subarray(0, maximum).toString('utf8'),
@@ -2395,15 +2395,11 @@ async function supervise(): Promise<void> {
         rememberFailure({error, phase: 'cleanup', stage: 'owned-listener-cleanup', category: 'owned-listener-cleanup-error', frozenOwner: true});
       }
     }
+    diagnostics.lifecycle('system-log-not-requested', {phase: 'cleanup', disposition: 'not-requested-product-first'});
     try {
-      ownership(udid);
-      const result = executeSync('xcrun', ['simctl', 'spawn', udid, 'log', 'show', '--last', '10m', '--style', 'compact', '--predicate', 'process CONTAINS[c] "WebDriverAgent" OR process == "xctest"'], 10_000, 16_777_216, commandContext('cleanup', 'collect-system-log', {endpoint: 'simulator', frozenOwner: Boolean(frozenRunner)}));
-      const stdoutBytes = Buffer.byteLength(result.stdout || '');
-      const stderrBytes = Buffer.byteLength(result.stderr || '');
-      diagnostics.lifecycle('system-log-collected', {phase: 'cleanup', status: result.status, signal: result.signal, stdoutBytes, stderrBytes, output: 'suppressed'});
-      writeFileSync(join(root, 'ios-wda-system.log'), `${JSON.stringify({schema: 1, status: result.status, signal: result.signal, stdoutBytes, stderrBytes, output: 'suppressed'})}\n`, { mode: 0o600 });
+      writeFileSync(join(root, 'ios-wda-system-log-disposition.json'), `${JSON.stringify({schema: 1, disposition: 'not-requested-product-first'})}\n`, { mode: 0o600 });
     } catch (error) {
-      rememberFailure({error, phase: 'cleanup', stage: 'system-log', category: 'system-log-error', frozenOwner: Boolean(frozenRunner)});
+      rememberFailure({error, phase: 'cleanup', stage: 'system-log-disposition-evidence-write', category: 'system-log-disposition-write-error', frozenOwner: Boolean(frozenRunner)});
     }
     try {
       finishOutput();

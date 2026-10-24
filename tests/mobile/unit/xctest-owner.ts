@@ -1047,6 +1047,11 @@ ps)
   fi
   ;;
 xcrun)
+  if [ "$1" = "simctl" ]; then
+    printf 'simctl' >> "$root/simctl-command-trace"
+    for argument do printf ' [%s]' "$argument" >> "$root/simctl-command-trace"; done
+    printf '\\n' >> "$root/simctl-command-trace"
+  fi
   if [ "$2" = "list" ]; then
     printf '%s\\n' "$IOS_SIMULATOR_UDID"
   elif [ "$2" = "get_app_container" ]; then
@@ -1293,7 +1298,7 @@ if (mode === 'listener-pending-invalid-pid' && process.env.STARTUP_TEST_INVALID_
   process.off('SIGINT', abortStart);
 }
 if (role !== 'endpoint') appendFileSync(join(root, 'launches'), JSON.stringify(args) + '\\n');
-if (mode === 'early') process.exit(43);
+if (mode === 'early' || mode === 'disposition-write-failure') process.exit(43);
 if (mode === 'exit-before-close') {
   spawn(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], { stdio: ['ignore', 'inherit', 'inherit'] });
   process.exit(44);
@@ -2508,7 +2513,40 @@ const initialRaceStages: Record<string, string> = {
 };
 
 const revocationModes = ['listener-exit-after-ready', 'listener-exit-after-ready-private-write-failure', 'listener-exit-after-ready-public-write-failure', 'listener-exit-after-ready-first-failure'];
+function isSystemLogQuery(command: string): boolean {
+  return /^simctl \[simctl\] \[spawn\] \[[^\]]+\] \[log\] \[show\](?: |$)/u.test(command);
+}
+
 export const xctestOwnerTests: Array<[string, () => Promise<void>]> = [];
+xctestOwnerTests.push(['mobile XCTest fake command trace detects system-log queries', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-command-trace-'));
+  const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
+  try {
+    const fakeXcrun = join(root, 'xcrun');
+    await writeFile(fakeXcrun, shim, {mode: 0o700});
+    for (const args of [
+      ['simctl', 'list', 'devices'],
+      ['simctl', 'spawn', udid, 'launchctl', 'print', 'system'],
+      ['simctl', 'terminate', udid, 'com.facebook.WebDriverAgentRunner.xctrunner'],
+      ['simctl', 'spawn', udid, 'log', 'show', '--last', '10m', '--style', 'compact', '--predicate', 'process CONTAINS[c] "WebDriverAgent" OR process == "xctest"'],
+    ]) {
+      const result = spawnSync(fakeXcrun, args, {
+        env: {...process.env, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: 'ready', IOS_SIMULATOR_UDID: udid, XCTEST_COMMAND_TRACE: ''},
+        encoding: 'utf8', timeout: 2_000,
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0);
+      assert.equal(result.signal, null);
+      assert.equal(result.stderr, '');
+    }
+    const commands = (await readFile(join(root, 'simctl-command-trace'), 'utf8')).trim().split(/\r?\n/u);
+    assert.equal(commands.length, 4);
+    assert.deepEqual(commands.map(isSystemLogQuery), [false, false, false, true]);
+    assert.equal(commands.filter(isSystemLogQuery).length, 1);
+  } finally {
+    await rm(root, {recursive: true, force: true});
+  }
+}]);
 xctestOwnerTests.push(['Native startup pending pin diagnostic reports the wait exit, first failure and supervisor timeline', async () => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-pin-diagnostic-'));
   try {
@@ -2652,7 +2690,7 @@ function listenerOwnerProjection(value: unknown, supervisorPid: number | undefin
   const phases = ['startup', 'preflight', 'initial', 'after-initial', 'readiness', 'status', 'scenario', 'supervisor', 'cleanup'];
   const stages = ['wda-listener-command', 'mjpeg-listener-command', 'child-spawn', 'child-process', 'child-pid-birth', 'child-exit', 'child-exit-callback', 'owner-evidence-write', 'startup-deadline', 'startup-log-write', 'startup-log-limit', 'supervisor-error'];
   const categories = [...stages, 'listener-command-error', 'listener-invalid-process-id', 'child-spawn-error', 'child-process-error', 'output-limit'];
-  const events = ['supervisor-start', 'child-spawn-requested', 'child-spawned', 'child-birth-observed', 'failure-observed', 'cleanup-enter', 'owner-ready-cleared', 'child-signal-requested', 'child-exit', 'child-close', 'child-stop-skipped', 'child-stop-finished', 'system-log-collected', 'owner-ended'];
+  const events = ['supervisor-start', 'child-spawn-requested', 'child-spawned', 'child-birth-observed', 'failure-observed', 'cleanup-enter', 'owner-ready-cleared', 'child-signal-requested', 'child-exit', 'child-close', 'child-stop-skipped', 'child-stop-finished', 'system-log-not-requested', 'owner-ended'];
   const owner = record(value), failure = record(owner.firstFailure), validation = record(owner.listenerValidation);
   const lifecycle = list(record(owner.diagnostics).lifecycle).map(record);
   const spawned = lifecycle.filter(event => event.event === 'child-spawned');
@@ -2885,7 +2923,7 @@ const pendingInvalidControls = [
   ['Native startup actual XCTest supervisor listener-pending-invalid-pid held-start ordering', 'held-start'],
   ['Native startup actual XCTest supervisor listener-pending-invalid-pid withheld-start prerequisite', 'withheld-start'],
 ] as const;
-for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pendingInvalidControls.map(([name]) => name), ...revocationModes, 'ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-ready-owner-evidence-write', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-uncoordinated-negative', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity', 'listener-http-only', ...pendingModes]) {
+for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pendingInvalidControls.map(([name]) => name), ...revocationModes, 'ready', 'ready-then-oversized', 'early', 'disposition-write-failure', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-ready-owner-evidence-write', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-uncoordinated-negative', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity', 'listener-http-only', ...pendingModes]) {
   const invalidPidControl = pendingInvalidControls.find(([name]) => name === testMode)?.[1];
   const captureControl = listenerCaptureControls.find(([name]) => name === testMode)?.[1];
   const mode = invalidPidControl ? 'listener-pending-invalid-pid' : captureControl ? 'listener-first-failure' : testMode;
@@ -2903,6 +2941,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
     const bin = join(root, 'bin');
     const xctestrun = join(root, 'products/WebDriverAgentRunner_test.xctestrun');
     await Promise.all([mkdir(bin), mkdir(state), mkdir(join(product, 'PlugIns/WebDriverAgentRunner.xctest'), { recursive: true }), mkdir(receipt, { recursive: true }), mkdir(runnerReceipt, { recursive: true }), mkdir(wrongRunnerReceipt, { recursive: true }), mkdir(join(root, 'wda'))]);
+    if (mode === 'disposition-write-failure') await mkdir(join(state, 'ios-wda-system-log-disposition.json'));
     if (mode === 'listener-pending-receipt') {
       const invalidReceipt = join(root, 'invalid-receipt');
       await mkdir(invalidReceipt);
@@ -3732,6 +3771,28 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         assert.ok(inspection.durationMs >= 0);
       }
       const lifecycle = owner.diagnostics?.lifecycle || [];
+      const simctlCommands = existsSync(join(root, 'simctl-command-trace'))
+        ? (await readFile(join(root, 'simctl-command-trace'), 'utf8')).trim().split(/\r?\n/u).filter(Boolean)
+        : [];
+      assert.equal(simctlCommands.filter(isSystemLogQuery).length, 0, `${mode} issued a simulator system-log query`);
+      assert.equal(owner.diagnostics.commands.some((command: {operation: string}) => command.operation === 'collect-system-log'), false);
+      assert.equal(lifecycle.some((event: {event: string}) => event.event === 'system-log-collected'), false);
+      assert.equal(existsSync(join(state, 'ios-wda-system.log')), false);
+      const dispositionPath = join(state, 'ios-wda-system-log-disposition.json');
+      const noQueryEvents = lifecycle.filter((event: {event: string}) => event.event === 'system-log-not-requested');
+      assert.equal(noQueryEvents.length, 1);
+      assert.deepEqual(noQueryEvents[0].detail, {phase: 'cleanup', disposition: 'not-requested-product-first'});
+      const dispositionFailures = lifecycle.filter((event: {event: string; detail?: {stage?: string}}) => event.event === 'failure-observed' && event.detail?.stage === 'system-log-disposition-evidence-write');
+      if (mode === 'disposition-write-failure') {
+        assert.equal(statSync(dispositionPath).isDirectory(), true);
+        assert.equal(owner.firstFailure.stage, 'child-exit');
+        assert.equal(owner.error, 'XCTEST: child-exit');
+        assert.equal(dispositionFailures.length, 1);
+        assert.equal(dispositionFailures[0].detail.first, false);
+      } else {
+        assert.deepEqual(JSON.parse(await readFile(dispositionPath, 'utf8')), {schema: 1, disposition: 'not-requested-product-first'});
+        assert.equal(dispositionFailures.length, 0);
+      }
       const cleanupEntry = lifecycle.find((event: { event: string }) => event.event === 'cleanup-enter');
       const endedEntry = lifecycle.find((event: { event: string }) => event.event === 'owner-ended');
       assert.ok(cleanupEntry && endedEntry && cleanupEntry.id < endedEntry.id);
@@ -4001,7 +4062,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         assert.equal(JSON.stringify(owner).includes('bare-password-sentinel'), false);
         assert.equal(JSON.stringify(owner).includes('private-reference'), false);
         assert.equal(JSON.stringify(owner).includes('ordinary-environment-secret'), false);
-        await assertSanitizedExports(root, state, ['plain-password', 'bare-password-sentinel', 'private-reference', 'https://private.example', 'https://example.test', 'multiline-xml-secret', 'escaped-quote-secret', 'ordinary-environment-secret'], ['owner.json', 'selected.xctestrun', 'installed-Info.plist', 'ios-wda-system.log', 'wda-preflight.log']);
+        await assertSanitizedExports(root, state, ['plain-password', 'bare-password-sentinel', 'private-reference', 'https://private.example', 'https://example.test', 'multiline-xml-secret', 'escaped-quote-secret', 'ordinary-environment-secret'], ['owner.json', 'selected.xctestrun', 'installed-Info.plist', 'ios-wda-system-log-disposition.json', 'wda-preflight.log']);
       }
       if (mode === 'listener-endpoints-disappear') {
         assert.equal(owner.firstFailure.stage, 'managed-wda-pid-count');
@@ -4169,7 +4230,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         }
         assert.equal(existsSync(join(root, 'xcode.pid')), false);
       }
-      if (mode === 'early') assert.equal(owner.exitCode, 43);
+      if (mode === 'early' || mode === 'disposition-write-failure') assert.equal(owner.exitCode, 43);
       if (mode === 'invalid' || mode === 'oversized' || mode === 'delayed') {
         assert.ok(owner.firstFailure);
         assert.ok(owner.error === 'XCTEST: startup deadline' || owner.error === `XCTEST: ${owner.firstFailure.category}`);
@@ -4373,7 +4434,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         const privateLog = await readFile(join(state, 'wda-preflight-private.log'), 'utf8');
         for (const value of forbidden) assert.equal(privateLog.includes(value), false, `final private log leaked ${value}`);
         assert.match(privateLog, /startup output (?:suppressed|summary)/u);
-        const requiredAfterCleanup = ['owner.json', 'selected.xctestrun', 'installed-Info.plist', 'ios-wda-system.log', 'wda-preflight.log'];
+        const requiredAfterCleanup = ['owner.json', 'selected.xctestrun', 'installed-Info.plist', 'ios-wda-system-log-disposition.json', 'wda-preflight.log'];
         await assertSanitizedExports(root, state, forbidden, requiredAfterCleanup);
         if (mode === 'stream-finalization-failure') {
           assert.equal(owner.firstFailure.stage, 'supervisor-error');
@@ -4419,7 +4480,7 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         assert.equal(JSON.stringify(owner.status).includes('status-opaque-secret'), false);
         assert.equal(JSON.stringify(owner.status).includes('status-password-sentinel'), false);
         assert.equal(JSON.stringify(owner.status).includes('status.private.example'), false);
-        await assertSanitizedExports(root, state, forbidden, ['owner.json', 'wda-status.json', 'ios-wda-system.log']);
+        await assertSanitizedExports(root, state, forbidden, ['owner.json', 'wda-status.json', 'ios-wda-system-log-disposition.json']);
       }
       if (outputBoundaryMode) {
         const output = (JSON.parse(await readFile(join(root, 'output-ready'), 'utf8')) as { outputBytes: { stdout: number; stderr: number } }).outputBytes;
@@ -4638,7 +4699,6 @@ for (const testMode of [...listenerCaptureControls.map(([name]) => name), ...pen
         } else assert.equal(owner.firstFailure.stage, 'child-exit');
       }
       if (mode === 'ready' || mode === 'status-first-failure' || mode === 'listener-http-only') assert.equal(owner.error, undefined);
-      if (mode !== 'ownership' && mode !== 'listener-pending-ownership') assert.match(await readFile(join(state, 'ios-wda-system.log'), 'utf8'), /output":"suppressed"/u);
       assert.equal(existsSync(join(root, 'runner.pid')), false);
       assertionsPassed = true;
     };

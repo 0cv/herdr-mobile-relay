@@ -2414,6 +2414,7 @@ async function lifecycleReplay(name: string, options: { foreground?: string; hom
     return state.overlay ? 'com.apple.springboard' : state.foreground;
   };
   const replay = await adapter(`lifecycle-${name}`, async ({ path, body, method, signal }) => {
+    if (method === 'DELETE' && /\/session\/[^/]+$/u.test(path)) return value(null);
     if (path.endsWith('/appium/settings')) {
       if (method === 'GET') return value(state.settingsFault === 'readback' ? { ...settings, defaultActiveApplication: 'auto' } : state.settingsFault === 'malformed-readback' ? [] : settings);
       if (state.settingsFault === 'unsupported') return Response.json({ value: { error: 'invalid argument', message: 'unsupported setting' } }, { status: 400 });
@@ -2731,14 +2732,52 @@ for (const mode of ['missing', 'loading'] as const) {
   });
 }
 
-test('Home observation timeout quarantines the Appium session without late launch work', async () => {
+test('Home observation timeout quarantines failure evidence and still permits owned DELETE cleanup', async () => {
   const a = await lifecycleReplay('home-timeout', { home: 'timeout' });
   await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /APPIUM_TIMEOUT/u);
   const stopped = a.requests.length;
-  const first = a.driver.snapshot().firstFatal;
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  let screenshotCalls = 0;
+  let pageSourceCalls = 0;
+  const screenshot = a.driver.screenshot.bind(a.driver);
+  const pageSource = a.driver.pageSource.bind(a.driver);
+  (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
+  (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
+  const native: string[][] = [];
+  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
   await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), /APPIUM_SESSION_UNUSABLE/u);
   assert.equal(a.requests.length, stopped);
   assert.deepEqual(a.driver.snapshot().firstFatal, first);
+
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('failure'), capture);
+  await capture;
+  const evidenceRequests = a.requests.slice(stopped);
+  assert.equal(evidenceRequests.some(request => request.path.endsWith('/screenshot') || request.path.endsWith('/source')), false);
+  assert.equal(screenshotCalls, 0);
+  assert.equal(pageSourceCalls, 0);
+  assert.deepEqual(native, []);
+  assert.equal(a.driver.snapshot().unusable, true);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  const evidence = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(evidence.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(evidence.driver.firstFatal, first);
+  const receipt = JSON.parse(await readFile(join(a.outputDir, 'ios-launch-receipt.json'), 'utf8'));
+  assert.equal(receipt.outcome, 'not-eligible');
+  assert.equal(receipt.query, null);
+  assert.equal(receipt.process.spawnAttempted, false);
+  const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
+  assert.ok(Array.isArray(events));
+  assert.equal(JSON.stringify(events).includes('synthetic-secret'), false);
+  assert.equal(a.requests.filter(request => request.path === '/session' && request.method === 'POST').length, 1);
+
+  await a.platform.stopOwnedResources();
+  const deletion = a.requests.at(-1)!;
+  assert.equal(deletion.method, 'DELETE');
+  assert.match(deletion.path, /\/session\/protocol$/u);
+  assert.equal(a.driver.snapshot().sessionId, '');
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  assert.equal(a.requests.filter(request => request.path === '/session' && request.method === 'POST').length, 1);
 });
 
 test('Plan13 lifecycle supported handoff survives obsolete Safari through background cold termination and relaunch', async () => {
@@ -3894,6 +3933,157 @@ test('ordinary failure evidence saves one bounded native hierarchy and records h
     assert.equal(saved, mode === 'saved' ? source : undefined, mode);
     const events = JSON.parse(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8'));
     assert.equal(JSON.stringify(events).includes('"operation":"hierarchy"'), mode === 'missing', mode);
+  }
+});
+
+for (const state of ['firstFatal-only', 'unusable-only'] as const) {
+  test(`evidence quarantine latches ${state} across paired and candidate captures`, async () => {
+    let screenshotAttempts = 0;
+    const a = await adapter(`evidence-quarantine-${state}`, ({ path }) => {
+      if (path.endsWith('/screenshot')) { screenshotAttempts += 1; return value(''); }
+      throw new Error(`unexpected quarantined request ${path}`);
+    });
+    if (state === 'firstFatal-only') {
+      (a.driver as any).firstFatal = { code: 'APPIUM_TIMEOUT', path: '/elements', method: 'POST', at: Date.now(), detail: 'fixture timeout' };
+    } else {
+      (a.driver as any).unusable = true;
+    }
+    let nativeAttempts = 0;
+    (a.platform as any).diagnosticCommand = async () => { nativeAttempts += 1; return ''; };
+    await a.platform.captureSanitizedEvidence('paired');
+    await a.platform.captureSanitizedEvidence('candidate');
+    assert.equal(screenshotAttempts, 0);
+    assert.equal(nativeAttempts, 0);
+    assert.equal(a.requests.length, 1, 'quarantine must not issue another Appium request');
+    const evidence = JSON.parse(await readFile(join(a.outputDir, 'candidate-appium.json'), 'utf8'));
+    assert.equal(evidence.nativeDiagnosticsBlocked, true);
+    assert.equal(evidence.driver.unusable, state === 'unusable-only');
+    assert.equal(evidence.driver.firstFatal?.code, state === 'firstFatal-only' ? 'APPIUM_TIMEOUT' : undefined);
+  });
+}
+
+test('fatal screenshot quarantine skips hierarchy and every later native command', async () => {
+  const a = await adapter('evidence-fatal-screenshot', ({ path }) => {
+    if (path.endsWith('/screenshot')) {
+      const response = new Response(null);
+      response.text = async () => { throw new TypeError('fixture screenshot body interrupted'); };
+      return response;
+    }
+    if (path.endsWith('/source')) return value('<AppiumAUT/>');
+    throw new Error(`unexpected screenshot-quarantine request ${path}`);
+  });
+  let screenshotCalls = 0;
+  let pageSourceCalls = 0;
+  const screenshot = a.driver.screenshot.bind(a.driver);
+  const pageSource = a.driver.pageSource.bind(a.driver);
+  (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
+  (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
+  const native: string[][] = [];
+  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.requests.filter(request => request.path.endsWith('/screenshot')).length, 1);
+  assert.equal(a.requests.filter(request => request.path.endsWith('/source')).length, 0);
+  assert.equal(screenshotCalls, 1);
+  assert.equal(pageSourceCalls, 0);
+  assert.deepEqual(native, []);
+  const first = a.driver.snapshot().firstFatal;
+  assert.equal(first?.code, 'APPIUM_INTERRUPTED');
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+});
+
+test('fatal hierarchy quarantine skips every later native command', async () => {
+  const a = await adapter('evidence-fatal-hierarchy', ({ path }) => {
+    if (path.endsWith('/screenshot')) return value('');
+    if (path.endsWith('/source')) {
+      const response = new Response(null);
+      response.text = async () => { throw new TypeError('fixture hierarchy body interrupted'); };
+      return response;
+    }
+    throw new Error(`unexpected hierarchy-quarantine request ${path}`);
+  });
+  const native: string[][] = [];
+  (a.platform as any).diagnosticCommand = async (_binary: string, argv: string[]) => { native.push(argv); return ''; };
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.requests.filter(request => request.path.endsWith('/screenshot')).length, 1);
+  assert.equal(a.requests.filter(request => request.path.endsWith('/source')).length, 1);
+  assert.deepEqual(native, []);
+  const first = a.driver.snapshot().firstFatal;
+  assert.equal(first?.code, 'APPIUM_INTERRUPTED');
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+});
+
+test('fatal driver preserves an eligible launch receipt offline without collector spawn', async () => {
+  const a = await receiptCaptureAdapter('fatal-eligible-offline');
+  (a.driver as any).firstFatal = { code: 'APPIUM_TIMEOUT', path: '/elements', method: 'POST', at: Date.now(), detail: 'fixture timeout' };
+  assert.equal(a.internal.launchObservation.queryEligible, true);
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('candidate'), capture);
+  await capture;
+  assert.equal(a.queries(), 0);
+  assert.equal(a.requests.length, 1);
+  assert.deepEqual(a.native, []);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  const receipt = JSON.parse(a.writes.at(-1)!.text);
+  assert.equal(receipt.outcome, 'not-eligible');
+  assert.equal(receipt.query, null);
+  assert.equal(receipt.process.spawnAttempted, false);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+});
+
+test('fatal failure capture without a launch failure omits receipt and all live evidence', async () => {
+  const a = await adapter('evidence-fatal-no-launch-failure', ({ path }) => {
+    if (path.endsWith('/screenshot') || path.endsWith('/source')) return value('unexpected live evidence');
+    throw new Error(`unexpected fatal evidence request ${path}`);
+  });
+  const observation = (a.platform as any).launchObservation as IOSLaunchObservation;
+  Object.defineProperty(observation, 'queryEligible', { configurable: true, get: () => true });
+  assert.equal(observation.failure, undefined);
+  assert.equal(observation.queryEligible, true);
+  const fatal = { code: 'APPIUM_TIMEOUT', path: '/elements', method: 'POST', at: Date.now(), detail: 'fixture timeout' };
+  (a.driver as any).firstFatal = fatal;
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  let collectorCalls = 0;
+  let spawnAttempts = 0;
+  (a.platform as any).launchCollector = (_udid: string, _failure: IOSLaunchFailure, _fixture: string, hooks: IOSReceiptHooks) => {
+    collectorCalls += 1;
+    if (hooks.queryEligible) spawnAttempts += 1;
+    return Promise.reject(new Error('unexpected collector invocation'));
+  };
+  let screenshotCalls = 0;
+  let pageSourceCalls = 0;
+  const screenshot = a.driver.screenshot.bind(a.driver);
+  const pageSource = a.driver.pageSource.bind(a.driver);
+  (a.driver as any).screenshot = async (timeoutMs?: number) => { screenshotCalls += 1; return screenshot(timeoutMs); };
+  (a.driver as any).pageSource = async (timeoutMs?: number) => { pageSourceCalls += 1; return pageSource(timeoutMs); };
+  let nativeCalls = 0;
+  (a.platform as any).diagnosticCommand = async () => { nativeCalls += 1; return ''; };
+
+  const capture = a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.platform.captureSanitizedEvidence('failure'), capture);
+  await capture;
+  assert.equal(collectorCalls, 0);
+  assert.equal(spawnAttempts, 0);
+  assert.equal(screenshotCalls, 0);
+  assert.equal(pageSourceCalls, 0);
+  assert.equal(nativeCalls, 0);
+  assert.equal(a.requests.length, 1);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.equal(persisted.nativeDiagnosticsBlocked, true);
+  assert.equal(Object.hasOwn(persisted, 'launchReceipt'), false);
+  assert.deepEqual(persisted.driver.firstFatal, first);
+  assert.equal(await readFile(join(a.outputDir, 'failure-events.json'), 'utf8').then(() => true), true);
+  for (const filename of ['ios-launch-receipt.json', 'ios-launch-owner-events.jsonl', 'failure.png', 'failure-hierarchy.xml']) {
+    assert.equal(await readFile(join(a.outputDir, filename), 'utf8').then(() => true).catch(() => false), false, filename);
   }
 });
 

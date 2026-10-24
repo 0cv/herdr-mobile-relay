@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repositoryPath } from '../support/paths';
@@ -383,6 +383,7 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
         await writeFile(join(root, 'appium.log'), raw, { flag: 'wx' });
         await writeFile(join(output, 'appium.log'), 'stale artifact must be withheld', { flag: 'wx' });
         const result = await command('bash', ['-c', 'set -euo pipefail\n' + branch], 10_000, {
+          cwd: repositoryPath('.'),
           env: { ...process.env, MOBILE_PLATFORM: platform, RUNNER_TEMP: root, MOBILE_OUTPUT: output },
         });
         assert.equal(result.stdout, '');
@@ -399,6 +400,49 @@ export const mobileWorkflowTests: Array<[string, () => Promise<void>]> = [
           await assert.rejects(() => readFile(join(output, 'appium-log-disposition.json')), { code: 'ENOENT' });
         }
         await rm(root, { recursive: true, force: true });
+      }
+    }
+  }],
+  ['mobile iOS XCTest disposition copy preserves only the payload-free decision', async () => {
+    const runtime = (globalThis as unknown as { Bun: { YAML: { parse(source: string): unknown } } }).Bun;
+    const disposition = '{"schema":1,"disposition":"not-requested-product-first"}\n';
+    const sentinel = 'old private simulator system-log payload sentinel';
+    const filesUnder = async (directory: string): Promise<string[]> => {
+      const entries = await readdir(directory, {withFileTypes: true});
+      const nested = await Promise.all(entries.map(entry => entry.isDirectory()
+        ? filesUnder(join(directory, entry.name))
+        : [join(directory, entry.name)]));
+      return nested.flat();
+    };
+    for (const path of ['.github/actions/mobile-device-run/action.yml', '.github/workflows/mobile-ci.yml']) {
+      const document = runtime.YAML.parse(await readFile(repositoryPath(path), 'utf8')) as any;
+      const groups = document.runs ? [document.runs.steps] : Object.values(document.jobs).map((job: any) => job.steps || []);
+      const copies = groups.flat().filter((step: any) => step.name === 'Sanitize bounded diagnostics');
+      assert.equal(copies.length, 1, path);
+      const step = copies[0];
+      assert.equal(step.if, 'always()');
+      assert.equal(step.run.includes('ios-wda-system-log-disposition.json'), true);
+      assert.equal(step.run.includes('$RUNNER_TEMP/ios-wda-system.log'), false);
+      assert.equal(step.run.includes('xcrun'), false);
+      const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-disposition-'));
+      const state = join(root, 'state');
+      const output = join(root, 'output');
+      const runnerTemp = join(root, 'runner-temp');
+      try {
+        await Promise.all([mkdir(state), mkdir(output), mkdir(runnerTemp)]);
+        await writeFile(join(state, 'ios-wda-system-log-disposition.json'), disposition);
+        await writeFile(join(state, 'ios-wda-system.log'), sentinel);
+        await writeFile(join(runnerTemp, 'ios-wda-system.log'), sentinel);
+        await command('bash', ['-c', step.run], 10_000, {
+          cwd: repositoryPath('.'),
+          env: {...process.env, MOBILE_PLATFORM: 'ios', MOBILE_OUTPUT: output, IOS_XCTEST_STATE_DIR: state, RUNNER_TEMP: runnerTemp},
+        });
+        assert.equal(await readFile(join(output, 'ios-xctest', 'ios-wda-system-log-disposition.json'), 'utf8'), disposition);
+        const uploaded = await filesUnder(output);
+        assert.equal(uploaded.some(file => file.endsWith('/ios-wda-system.log')), false);
+        for (const file of uploaded) assert.equal((await readFile(file, 'utf8')).includes(sentinel), false);
+      } finally {
+        await rm(root, {recursive: true, force: true});
       }
     }
   }],

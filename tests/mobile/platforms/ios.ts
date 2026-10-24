@@ -1515,6 +1515,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   captureSanitizedEvidence(name: string): Promise<void> {
+    this.refreshNativeDiagnosticsBlock();
     if (this.failureCapture) return this.failureCapture;
     if (name !== 'failure') return this.captureEvidence(name);
     this.omitLaunchLogs = this.launchObservation.failure !== undefined;
@@ -1522,19 +1523,27 @@ export class IOSPlatform implements MobilePlatform {
     return this.failureCapture;
   }
 
+  private refreshNativeDiagnosticsBlock(): boolean {
+    const snapshot = this.driver.snapshot();
+    if (snapshot.unusable || snapshot.firstFatal) this.nativeDiagnosticsBlocked = true;
+    return this.nativeDiagnosticsBlocked;
+  }
+
   private async captureLaunchReceipt(): Promise<boolean> {
+    const blocked = this.refreshNativeDiagnosticsBlock();
     const failure = this.launchObservation.failure;
     if (!failure) return true;
     this.omitLaunchLogs = true;
     try {
       this.launchReceipt = await this.launchCollector(this.udid, failure, this.origin, {
-        clock: this.launchObservation.clock, queryEligible: this.launchObservation.queryEligible,
+        clock: this.launchObservation.clock, queryEligible: !blocked && this.launchObservation.queryEligible,
       });
     } catch {
       this.nativeDiagnosticsBlocked = true;
       this.diagnostics.record({ phase: 'evidence', operation: 'ios-launch-receipt', detail: 'collector-unavailable-withheld' });
       return false;
     }
+    this.refreshNativeDiagnosticsBlock();
     this.nativeDiagnosticsBlocked ||= this.launchReceipt.blockNativeDiagnostics;
     const clock = this.launchObservation.clock;
     if (!await observeIOSReceiptWrite(this.launchPersistence.directory, clock, 0, () => this.launchMkdir(this.outputDir, { recursive: true }))) return false;
@@ -1548,23 +1557,26 @@ export class IOSPlatform implements MobilePlatform {
   private async captureEvidence(name: string): Promise<void> {
     if (name === 'failure' && !await this.captureLaunchReceipt()) return;
     await mkdir(this.outputDir, { recursive: true });
-    if (!this.nativeDiagnosticsBlocked) {
+    if (!this.refreshNativeDiagnosticsBlock()) {
       try {
         const screenshot = Buffer.from(await this.driver.screenshot(), 'base64');
         if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
       } catch (error) {
+        this.refreshNativeDiagnosticsBlock();
         this.diagnostics.record({ phase: 'evidence', operation: 'screenshot', detail: error instanceof Error ? error.message : String(error) });
       }
-      if (name === 'failure' && !this.omitLaunchLogs) {
+      if (name === 'failure' && !this.omitLaunchLogs && !this.refreshNativeDiagnosticsBlock()) {
         try {
           const source = await this.driver.pageSource(IOS_NATIVE_HIERARCHY_COMMAND_MS);
           if (typeof source !== 'string') throw new Error('IOS_EVIDENCE: malformed hierarchy response');
           await writeBoundedText(join(this.outputDir, 'failure-hierarchy.xml'), source);
         } catch (error) {
+          this.refreshNativeDiagnosticsBlock();
           this.diagnostics.record({ phase: 'evidence', operation: 'hierarchy', detail: error instanceof Error ? error.message : String(error) });
         }
       }
     }
+    this.refreshNativeDiagnosticsBlock();
     await writeSanitizedJson(join(this.outputDir, `${name}-appium.json`), this.evidenceSnapshot());
     await this.diagnostics.write(join(this.outputDir, `${name}-events.json`));
     const captures: Array<[string, string[]]> = [
@@ -1577,7 +1589,7 @@ export class IOSPlatform implements MobilePlatform {
       ['wda', ['simctl', 'spawn', this.udid, 'launchctl', 'print', 'system']],
     ];
     for (const [suffix, args] of captures) {
-      if (this.nativeDiagnosticsBlocked) break;
+      if (this.refreshNativeDiagnosticsBlock()) break;
       if (this.omitLaunchLogs && (suffix === 'simulator-log' || suffix === 'webkit-safari' || suffix === 'springboard')) continue;
       const output = await this.diagnosticCommand('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
       await writeBoundedText(join(this.outputDir, `${name}-ios-${suffix}.log`), output);
@@ -1585,6 +1597,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   evidenceSnapshot(): Record<string, unknown> {
+    this.refreshNativeDiagnosticsBlock();
     const persistenceTerminal = Object.values(this.launchPersistence).find(status => status.state === 'rejected')
       ?? (this.launchPersistence.receipt.state === 'fulfilled' ? this.launchPersistence.receipt : undefined);
     const captureElapsedMs = persistenceTerminal?.settled && this.launchReceipt
