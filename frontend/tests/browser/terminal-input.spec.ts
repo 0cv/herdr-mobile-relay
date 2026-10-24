@@ -83,6 +83,7 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await expect(button(page, 'Enter')).toHaveCount(0);
   await expect(page.getByText('Current terminal context', { exact: true })).toHaveCount(0);
   await button(page, 'Terminal view').click();
+  await expect(page.getByRole('log')).toContainText('/violet-comet');
   await prompt.fill('unrelated normal draft');
   await openManual(page);
   expect((await mutations()).length).toBe(initial);
