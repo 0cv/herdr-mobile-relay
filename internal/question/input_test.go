@@ -357,38 +357,37 @@ func TestPlanClaudeCapturedReviewChoiceAndPrevious(t *testing.T) {
 	}
 }
 
-// Captured from Claude Code 2.1.307: typing on the "Type something" row of a multi-select
-// question ticks it by itself, and Enter there would untick it and drop the answer.
-const claudeMultiOtherView = `
-←  ☐ Probe  ✔ Submit  →
-
-Which fruit?
-
-❯ 1. [ ] Apple
-         Red
-  2. [ ] Pear
-         Green
-  3. [ ] Type something
-     Submit
-────────────────────────────────────────
-  4. Chat about this
-
-Enter to select · Tab/Arrow keys to navigate · Esc to cancel
-`
-
-func TestPlanClaudeMultiSelectTypedAnswerStaysTicked(t *testing.T) {
-	interaction := Parse(claudeMultiOtherView, "claude")
-	if interaction == nil || interaction.Kind != "multi_select" {
+func TestPlanClaudeCapturedMultiSelectTypedAnswerStaysTicked(t *testing.T) {
+	interaction := Parse(attentionFixture(t, "claude-multi-select.ansi"), "claude")
+	if interaction == nil || interaction.Kind != "multi_select" || interaction.Other.Selected {
 		t.Fatalf("interaction = %+v", interaction)
 	}
-	steps := PlanInput(interaction, InputIntent{Selected: []int{0}, OtherSelected: true, OtherText: "kiwi"})
+	steps := PlanInput(interaction, InputIntent{
+		Selected:      []int{1, 2},
+		OtherSelected: true,
+		OtherText:     "kiwi",
+	})
 	want := []InputStep{
-		{Keys: []string{"Enter"}},
 		{Keys: []string{"Down", "Down", "Ctrl+U"}},
 		{Text: "kiwi"},
 		{Keys: []string{"Down", "Enter"}},
 	}
 	if !reflect.DeepEqual(steps, want) {
 		t.Fatalf("multi-select custom plan = %#v, want %#v", steps, want)
+	}
+}
+
+func TestPlanClaudeCapturedMultiSelectClearedAnswerStaysUnticked(t *testing.T) {
+	interaction := Parse(attentionFixture(t, "claude-multi-select-with-free-text.ansi"), "claude")
+	if interaction == nil || interaction.Kind != "multi_select" || !interaction.Other.Selected {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	steps := PlanInput(interaction, InputIntent{Selected: []int{1, 2}})
+	want := []InputStep{
+		{Keys: []string{"Ctrl+U"}},
+		{Keys: []string{"Down", "Enter"}},
+	}
+	if !reflect.DeepEqual(steps, want) {
+		t.Fatalf("multi-select cleared plan = %#v, want %#v", steps, want)
 	}
 }
