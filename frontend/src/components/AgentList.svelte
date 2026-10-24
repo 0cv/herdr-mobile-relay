@@ -23,10 +23,10 @@
   import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
-    agents,
-    relays,
+    agents: allAgents,
+    relays: allRelays,
     connections = new Map(),
-    workspaces = [],
+    workspaces: allWorkspaces = [],
     workspaceDisclosure = $bindable<Record<string, boolean>>({}),
     responding,
     onopen,
@@ -39,6 +39,41 @@
     responding: Set<string>;
     onopen: (agent: Agent) => void;
   } = $props();
+
+  const hiddenServersKey = 'herdr.hiddenServers';
+  let hiddenServers = $state<string[]>(readHiddenServers());
+  const relays = $derived(allRelays.filter((relay) => !hiddenServers.includes(relay.id)));
+  const agents = $derived(allAgents.filter((agent) => !hiddenServers.includes(agent.relay_id)));
+  const workspaces = $derived(allWorkspaces.filter((workspace) => !hiddenServers.includes(workspace.relay_id)));
+
+  function readHiddenServers(): string[] {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem(hiddenServersKey) || '[]');
+      return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function toggleServer(id: string) {
+    hiddenServers = hiddenServers.includes(id)
+      ? hiddenServers.filter((hidden) => hidden !== id)
+      : [...hiddenServers, id];
+    try {
+      localStorage.setItem(hiddenServersKey, JSON.stringify(hiddenServers));
+    } catch {
+      // Filtering remains available when browser storage is unavailable.
+    }
+  }
+
+  function hiddenNeedsInput(relayId: string): number {
+    if (!hiddenServers.includes(relayId)) return 0;
+    return allAgents.filter((agent) => {
+      if (agent.relay_id !== relayId) return false;
+      const group = agentStatusGroup(agent);
+      return group === 'blocked' || group === 'attention';
+    }).length;
+  }
 
   const unavailableRelays = $derived(relays.filter((relay) => {
     const connection = connections.get(relay.id);
@@ -686,6 +721,18 @@
 {/snippet}
 
 <main class="agent-list" aria-label="Agents">
+  {#if allRelays.length}
+    <div class="server-filters" role="group" aria-label="Show servers">
+      {#each allRelays as relay (relay.id)}
+        <button
+          type="button"
+          class="server-filter"
+          aria-pressed={!hiddenServers.includes(relay.id)}
+          onclick={() => toggleServer(relay.id)}
+        >{relay.label || relay.id}{#if hiddenNeedsInput(relay.id)}<span class="server-filter-alert" role="img" aria-label={`${hiddenNeedsInput(relay.id)} need input while hidden`}>{hiddenNeedsInput(relay.id)}</span>{/if}</button>
+      {/each}
+    </div>
+  {/if}
   {#each unavailableRelays as relay (relay.id)}
     {@const inventory = connections.get(relay.id)?.inventory}
     <section class="inventory-warning" role="status" aria-label={`${relay.label} agent inventory unavailable`}>
@@ -695,7 +742,9 @@
     </section>
   {/each}
 
-  {#if !agents.length && !relays.length}
+  {#if allRelays.length && !relays.length}
+    <div class="empty-state" role="status">All servers are hidden. Select a server above to show its sessions.</div>
+  {:else if !agents.length && !relays.length}
     <div class="empty-state">
       <span class="empty-icon" aria-hidden="true">🐑</span>
       <h2>Herdr Mobile Relay</h2>
@@ -774,3 +823,44 @@
     </section>
   {/if}
 </main>
+
+<style>
+  .server-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    margin-bottom: 1rem;
+  }
+
+  .server-filter {
+    min-height: 2.75rem;
+    padding: .5rem .75rem;
+    border: 1px solid var(--border);
+    border-radius: .5rem;
+    background: var(--card);
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .server-filter[aria-pressed='true'] {
+    border-color: var(--accent);
+    color: var(--foreground);
+    background: var(--card-hover);
+  }
+
+  .server-filter:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .server-filter-alert {
+    margin-inline-start: .4rem;
+    padding: .05rem .4rem;
+    border-radius: 999px;
+    background: var(--danger);
+    color: var(--background);
+    font-size: .75rem;
+    font-weight: 700;
+  }
+</style>
