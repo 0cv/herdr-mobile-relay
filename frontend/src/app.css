@@ -439,6 +439,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-markdown :is(h3, h4, h5, h6) { font-size: .86rem; line-height: 1.35; margin: .85rem 0 .4rem; }
 .conversation-markdown :is(ul, ol) { margin: .5rem 0; padding-left: 1.35rem; }
 .conversation-markdown li + li { margin-top: .25rem; }
+.conversation-markdown li > :is(ul, ol, p) { margin: .25rem 0; }
 .conversation-markdown blockquote { border-left: 3px solid var(--border); color: var(--muted); margin: .6rem 0; padding-left: .7rem; }
 .conversation-markdown pre { background: var(--terminal); border: 1px solid var(--border); border-radius: .5rem; color: var(--terminal-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .72rem; line-height: 1.5; margin: .55rem 0; max-width: 100%; overflow: auto; padding: .65rem; tab-size: 2; white-space: pre; }
 .conversation-markdown :not(pre) > code { background: var(--secondary); border: 1px solid var(--border); border-radius: .25rem; font-family: ui-monospace, monospace; font-size: .9em; padding: .08rem .22rem; }

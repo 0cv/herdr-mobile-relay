@@ -1,5 +1,8 @@
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
 const INLINE_PATTERN = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>"']+)/giu;
+const UNORDERED_ITEM = /^\s*[-*+]\s+(.+)$/u;
+// As in CommonMark, a number longer than nine digits does not start a list item.
+const ORDERED_ITEM = /^\s*(\d{1,9})[.)]\s+(.+)$/u;
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
@@ -203,6 +206,9 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
   let codeLines: string[] = [];
   // Open lists, outermost first. Each level keeps its <li> open so a deeper list nests inside it.
   const lists: { type: 'ul' | 'ol'; indent: number }[] = [];
+  // Text lines of the innermost open item that are not yet written to the output.
+  let itemLines: string[] = [];
+  let itemParagraph = false;
   let paragraph: string[] = [];
 
   const flushParagraph = () => {
@@ -218,12 +224,21 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
     codeLanguage = '';
     codeLines = [];
   };
+  const flushItemLines = () => {
+    if (!itemLines.length) return;
+    const html = itemLines.map((line) => renderInline(line, highlight)).join('<br>');
+    output.push(itemParagraph ? `<p>${html}</p>` : html);
+    itemLines = [];
+    itemParagraph = false;
+  };
   const closeLevel = () => {
+    flushItemLines();
     const level = lists.pop();
     if (level) output.push(`</li></${level.type}>`);
   };
   const flushList = () => {
     while (lists.length) closeLevel();
+    itemParagraph = false;
   };
   const indentOf = (text: string) => (text.match(/^[ \t]*/u)?.[0] || '').replace(/\t/gu, '    ').length;
   const listItem = (type: 'ul' | 'ol', indent: number, content: string, start = 1) => {
@@ -231,6 +246,7 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
     while (lists.length && indent < lists[lists.length - 1].indent) closeLevel();
     const top = lists[lists.length - 1];
     if (top && indent === top.indent && top.type !== type) closeLevel();
+    flushItemLines();
     const current = lists[lists.length - 1];
     if (current && indent === current.indent) {
       output.push('</li>');
@@ -238,7 +254,16 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
       lists.push({ type, indent });
       output.push(type === 'ol' && start !== 1 ? `<ol start="${start}">` : `<${type}>`);
     }
-    output.push(`<li>${renderInline(content, highlight)}`);
+    output.push('<li>');
+    itemLines = [content];
+    itemParagraph = false;
+  };
+  const listContinuesAfter = (blank: number) => {
+    let next = blank + 1;
+    while (next < lines.length && !lines[next].trim()) next += 1;
+    if (next === lines.length) return false;
+    const line = lines[next];
+    return UNORDERED_ITEM.test(line) || ORDERED_ITEM.test(line) || indentOf(line) > lists[0].indent;
   };
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -260,7 +285,12 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
     }
     if (!line.trim()) {
       flushParagraph();
-      flushList();
+      if (lists.length && listContinuesAfter(index)) {
+        flushItemLines();
+        itemParagraph = true;
+      } else {
+        flushList();
+      }
       continue;
     }
     const heading = line.match(/^\s{0,3}(#{1,4})\s+(.+)$/u);
@@ -271,12 +301,12 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
       output.push(`<h${level}>${renderInline(heading[2], highlight)}</h${level}>`);
       continue;
     }
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/u);
+    const unordered = line.match(UNORDERED_ITEM);
     if (unordered) {
       listItem('ul', indentOf(line), unordered[1]);
       continue;
     }
-    const ordered = line.match(/^\s*(\d+)[.)]\s+(.+)$/u);
+    const ordered = line.match(ORDERED_ITEM);
     if (ordered) {
       listItem('ol', indentOf(line), ordered[2], Number(ordered[1]));
       continue;
@@ -313,7 +343,7 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
     // An indented plain line continues the deepest item it is indented under.
     if (lists.length && indentOf(line) > lists[0].indent) {
       while (lists.length > 1 && indentOf(line) <= lists[lists.length - 1].indent) closeLevel();
-      output.push(`<br>${renderInline(line.trim(), highlight)}`);
+      itemLines.push(line.trim());
       continue;
     }
     flushList();
