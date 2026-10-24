@@ -5,7 +5,6 @@
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
   import AgentRail from '$components/AgentRail.svelte';
-  import LaunchView from '$components/LaunchView.svelte';
   import GlobalJump from '$components/GlobalJump.svelte';
   import LockScreen from '$components/LockScreen.svelte';
   import ManageDialog from '$components/ManageDialog.svelte';
@@ -690,12 +689,18 @@
   {:else if $currentView.view === 'workspaces'}
     <WorkspaceManager {readOnlyRelayIds} />
   {:else if $currentView.view === 'launch'}
-    <LaunchView
-      relayId={$currentView.relayId}
-      workspaceId={$currentView.workspaceId}
-      cwd={$currentView.cwd}
-      {readOnlyRelayIds}
-    />
+    {#await import('$components/LaunchView.svelte')}
+      <main class="page" aria-label="Opening launch form"><p role="status">Loading launch form…</p></main>
+    {:then { default: LaunchView }}
+      <LaunchView
+        relayId={$currentView.relayId}
+        workspaceId={$currentView.workspaceId}
+        cwd={$currentView.cwd}
+        {readOnlyRelayIds}
+      />
+    {:catch}
+      <main class="page"><p role="alert">The launch form could not be loaded. Reload the app to try again.</p></main>
+    {/await}
   {:else if $currentView.view === 'activity'}
     <ActivityView />
   {:else if $currentView.view === 'activity_detail'}
