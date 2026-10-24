@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { access, appendFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const repoRoot = resolve(import.meta.dirname, '../../..');
 const captureRoot = join(repoRoot, 'internal/question/testdata/attention');
@@ -61,7 +61,7 @@ async function stopRelay(relay: ChildProcess): Promise<void> {
 
 export default async function setup() {
   const runtime = await mkdtemp(join(tmpdir(), 'herdr-attention-browser-'));
-  const cache = join(runtime, 'go-cache');
+  const cache = process.env.GOCACHE || join(runtime, 'go-cache');
   const fakeBin = join(runtime, 'fake-herdr');
   const relayBin = join(runtime, 'herdr-mobile-relay');
   const scenarioPath = join(runtime, 'scenario.json');
@@ -75,7 +75,7 @@ export default async function setup() {
   const conversationRoot = join(runtime, 'claude');
   const conversationSession = '123e4567-e89b-12d3-a456-426614174000';
   const conversationPath = join(conversationRoot, 'projects', '-tmp-conversation', `${conversationSession}.jsonl`);
-  await Promise.all([mkdir(cache), mkdir(webRoot), mkdir(barrierDir), mkdir(join(conversationRoot, 'projects', '-tmp-conversation'), { recursive: true })]);
+  await Promise.all([mkdir(cache, { recursive: true }), mkdir(webRoot), mkdir(barrierDir), mkdir(join(conversationRoot, 'projects', '-tmp-conversation'), { recursive: true })]);
   await writeFile(join(webRoot, 'index.html'), '<html>test</html>\n');
   await writeFile(conversationPath, [
     JSON.stringify({ type: 'user', uuid: 'history-user-1', timestamp: '2026-09-02T10:00:00Z', message: { content: 'history question' } }),
@@ -406,7 +406,7 @@ export default async function setup() {
   });
   await new Promise<void>((resolveSocket, rejectSocket) => {
     socketServer.once('error', rejectSocket);
-    socketServer.listen(relative(process.cwd(), socketPath), resolveSocket);
+    socketServer.listen(socketPath, resolveSocket);
   });
   const closeSocket = async () => {
     await new Promise<void>((resolveSocket) => socketServer.close(() => resolveSocket()));
@@ -417,7 +417,7 @@ export default async function setup() {
 
   const controlServer = spawn(fakeBin, ['control-server'], {
     cwd: repoRoot,
-    env: { ...process.env, FAKE_HERDR_SCENARIO: scenarioPath, FAKE_HERDR_CONTROL: relative(repoRoot, controlPath), FAKE_HERDR_BARRIER_DIR: barrierDir },
+    env: { ...process.env, FAKE_HERDR_SCENARIO: scenarioPath, FAKE_HERDR_CONTROL: controlPath, FAKE_HERDR_BARRIER_DIR: barrierDir },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   if (process.env.HERDR_ATTENTION_PROCESS_LOG) await appendFile(process.env.HERDR_ATTENTION_PROCESS_LOG, JSON.stringify({ kind: 'fixture-control', pid: controlServer.pid, bin: fakeBin, runtime }) + '\n', { mode: 0o600 });
@@ -446,7 +446,7 @@ export default async function setup() {
       HERDR_BIN: fakeBin,
       HERDR_WEB_ROOT: webRoot,
       HERDR_CLAUDE_CONFIG_DIRS: conversationRoot,
-      HERDR_SOCKET_PATH: relative(repoRoot, socketPath),
+      HERDR_SOCKET_PATH: socketPath,
       FAKE_HERDR_SCENARIO: scenarioPath,
       FAKE_HERDR_OPERATIONS: operationsPath,
       FAKE_HERDR_BARRIER_DIR: barrierDir,
@@ -475,7 +475,7 @@ export default async function setup() {
   process.env.HERDR_ATTENTION_INPUT_OPERATIONS = inputOperationsPath;
   process.env.HERDR_ATTENTION_CREDENTIALS = join(runtime, 'browser-credential.json');
   process.env.HERDR_ATTENTION_METADATA = metadataPath;
-  process.env.HERDR_ATTENTION_CONTROL = relative(process.cwd(), controlPath);
+  process.env.HERDR_ATTENTION_CONTROL = controlPath;
   process.env.HERDR_ATTENTION_BARRIERS = barrierDir;
 
   return async () => {
