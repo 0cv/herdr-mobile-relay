@@ -3620,6 +3620,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await terminal.evaluate((element) => {
     element.dispatchEvent(new Event('touchmove', { bubbles: true }));
     element.scrollTop -= 20;
+    element.dispatchEvent(new Event('scroll'));
   });
   await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
@@ -3649,6 +3650,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   // Scrolling partway back down is still reading, not following.
   await terminal.evaluate((element) => {
     element.scrollTop += 5;
+    element.dispatchEvent(new Event('scroll'));
   });
   await frame(152);
   await expect(terminal).toContainText('near-bottom row 152');
@@ -3661,6 +3663,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
 
   await terminal.evaluate((element) => {
     element.scrollTop -= 20;
+    element.dispatchEvent(new Event('scroll'));
   });
   await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
