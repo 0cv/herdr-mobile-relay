@@ -1386,11 +1386,14 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   });
   await expect.poll(async () => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  const beforeManual = (await commands(page)).findLast(command => command.type === 'read_pane')?.request_id;
   await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
-  await replyToPaneRead(page, promptContent);
   const terminalInput = page.getByRole('textbox', { name: 'Terminal text', exact: true });
   await expect(terminalInput).toBeEnabled();
+  await expect.poll(async () => (await commands(page)).findLast(command => command.type === 'read_pane')?.request_id).not.toBe(beforeManual);
+  await replyToPaneRead(page, promptContent);
   await terminalInput.fill('custom weekend');
+  await expect(page.getByRole('button', { name: 'Send text', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Send text', exact: true }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => ['send_terminal_text', 'send_input', 'send_text', 'send_keys'].includes(String(command.type)))
