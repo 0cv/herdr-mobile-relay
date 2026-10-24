@@ -19,7 +19,7 @@ import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
 import { stableTestIdentities } from './test-registry';
-import { confirmationLateTargetFixture, decodeConfirmationProjection, iosConfirmationProjectionCases } from './ios-confirmation-capture';
+import { iosConfirmationProjectionCases } from './ios-confirmation-capture';
 import { IOS_CONFIRMATION_CAPTURE_LIMITS } from '../support/ios-confirmation-capture';
 
 const origin = 'https://localhost:52101';
@@ -1130,7 +1130,7 @@ for (const mode of ['empty', 'mixed-malformed'] as const) {
 
 type ConfirmationState = 'ready' | 'missing' | 'stale-lookup' | 'stale-enabled' | 'stale-visible' | 'stale-hittable' | 'disabled' | 'hidden' | 'not-hittable' | 'indeterminate';
 type ConfirmationFault = 'stale' | 'unrelated' | 'invalid-session' | 'misleading-404' | 'malformed' | 'malformed-value' | 'transport' | 'interrupted' | 'hung' | 'body-hung' | 'body-interrupted' | 'body-late' | 'late-missing';
-type ConfirmationBoundary = 'activity-click' | 'source' | 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
+type ConfirmationBoundary = 'activity-click' | 'source' | 'foreground' | 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
 
 async function confirmationReplay(name: string, options: {
   recorded?: typeof recordedConfirmation[number];
@@ -1151,12 +1151,9 @@ async function confirmationReplay(name: string, options: {
   after?: (boundary: string, lookup: number) => number;
   remainingAt?: (boundary: string, lookup: number, identityRead: number) => number | undefined;
   initialConfirmationRemaining?: number;
-  captureRemaining?: number;
-  captureDispatchGap?: number;
-  captureSource?: unknown;
-  captureDuration?: number;
-  captureOwnerChange?: 'context' | 'generation' | 'session' | 'overlap';
-  captureUnhealthy?: 'unusable' | 'firstFatal';
+  confirmationSource?: unknown;
+  confirmationOwnerChange?: 'context' | 'generation' | 'session';
+  confirmationUnhealthy?: 'unusable' | 'firstFatal';
   activityDuration?: number;
   afterConfirmationValidation?: number;
   parentRemaining?: number;
@@ -1218,15 +1215,17 @@ async function confirmationReplay(name: string, options: {
     };
     if (path.endsWith('/context')) return value(null);
     if (body.script === 'mobile: activeAppInfo') {
-      if (confirming) advance('foreground');
+      if (confirming) {
+        advance('foreground');
+        if (options.faultAt === 'foreground') return fault();
+      }
       return value({ bundleId: confirming ? options.foreground ?? 'com.apple.mobilesafari' : 'com.apple.mobilesafari', pid: 20640 });
     }
     if (path.endsWith('/source')) {
       if (confirming) {
-        now += options.captureDuration || 0;
         advance('source');
         if (options.faultAt === 'source') return fault();
-        return value(Object.hasOwn(options, 'captureSource') ? options.captureSource : hypotheticalConfirmation);
+        return value(Object.hasOwn(options, 'confirmationSource') ? options.confirmationSource : hypotheticalConfirmation);
       }
       source = !sheet ? shareSources[0] : scrolls ? shareSources[2] : shareSources[1];
       return value(source);
@@ -1323,14 +1322,12 @@ async function confirmationReplay(name: string, options: {
   const originalCommand = driver.command.bind(driver);
   driver.command = async (path, method, body, timeoutMs, policy) => {
     try {
-      if (path === '/source' && confirming && (options.captureDispatchGap || options.captureOwnerChange)) {
+      if (path === '/execute/sync' && confirming && options.confirmationOwnerChange) {
         const original = policy!;
         policy = { ...original, beforeDispatch: () => {
-          now += options.captureDispatchGap || 0;
-          if (options.captureOwnerChange === 'context') (driver as any).selectedContext = 'WEBVIEW_replaced';
-          if (options.captureOwnerChange === 'generation') (driver as any).sessionGeneration++;
-          if (options.captureOwnerChange === 'session') (driver as any).sessionOwner = {};
-          if (options.captureOwnerChange === 'overlap') void driver.activeAppInfo().catch(() => {});
+          if (options.confirmationOwnerChange === 'context') (driver as any).selectedContext = 'WEBVIEW_replaced';
+          if (options.confirmationOwnerChange === 'generation') (driver as any).sessionGeneration++;
+          if (options.confirmationOwnerChange === 'session') (driver as any).sessionOwner = {};
           original.beforeDispatch();
         } };
       }
@@ -1341,19 +1338,12 @@ async function confirmationReplay(name: string, options: {
       for (const advance of pendingAdvances.splice(0)) advance();
     }
   };
-  if (options.captureRemaining !== undefined || options.captureUnhealthy) {
-    const original = (platform as any).captureInstallConfirmation.bind(platform);
-    (platform as any).captureInstallConfirmation = async (phase: PhaseBudget, policy: unknown) => {
-      if (options.captureRemaining !== undefined) now = confirmationStart + 75_000 - options.captureRemaining;
-      if (options.captureUnhealthy === 'unusable') (driver as any).unusable = true;
-      if (options.captureUnhealthy === 'firstFatal') (driver as any).firstFatal = { code: 'APPIUM_INTERRUPTED', path: '/prior', method: 'GET', at: 1, detail: 'hypothetical prior fatal' };
-      return original(phase, policy);
-    };
-  }
-  if (options.initialConfirmationRemaining !== undefined || options.afterConfirmationValidation !== undefined) {
+  if (options.initialConfirmationRemaining !== undefined || options.afterConfirmationValidation !== undefined || options.confirmationUnhealthy) {
     const original = (platform as any).waitForInstallConfirmation.bind(platform);
     (platform as any).waitForInstallConfirmation = async (phase: PhaseBudget, policy: unknown) => {
       if (options.initialConfirmationRemaining !== undefined) now = confirmationStart + 75_000 - options.initialConfirmationRemaining;
+      if (options.confirmationUnhealthy === 'unusable') (driver as any).unusable = true;
+      if (options.confirmationUnhealthy === 'firstFatal') (driver as any).firstFatal = { code: 'APPIUM_INTERRUPTED', path: '/prior', method: 'GET', at: 1, detail: 'hypothetical prior fatal' };
       const result = await original(phase, policy);
       now += options.afterConfirmationValidation || 0;
       return result;
@@ -1382,146 +1372,124 @@ async function confirmationReplay(name: string, options: {
   if (!error) assert.equal(settingsWrites.length, 2, 'a successful confirmation must apply and restore the scoped backend policy');
   if (settingsWrites.length) {
     assert.deepEqual(settingsWrites[0].body.settings, { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 });
-    const restoreRefused = options.captureOwnerChange !== undefined && options.captureOwnerChange !== 'overlap';
+    const restoreRefused = options.confirmationOwnerChange !== undefined;
     assert.equal(settingsWrites.length, driver.snapshot().firstFatal || driver.snapshot().unusable || restoreRefused ? 1 : 2);
     if (!driver.snapshot().firstFatal && !driver.snapshot().unusable && !restoreRefused) assert.deepEqual(settingsWrites[1].body.settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
   }
   return { platform, driver, requests, error, lookups, attributes, clicks, observations, now, outputDir };
 }
 
-test('confirmation capture is one post-ack source with immutable timing and persisted hypothetical structure', async () => {
+test('confirmation product-first proceeds directly from acknowledged row to foreground and final Add checks', async () => {
   requireXmlLint();
-  const a = await confirmationReplay('capture-order');
+  const a = await confirmationReplay('product-first-order');
   assert.equal(a.error, undefined);
   const target = a.requests.findIndex(request => request.path.endsWith('/target-1/click'));
   const following = a.requests.slice(target + 1);
-  assert.ok(following[0].path.endsWith('/source'));
-  assert.equal(following[0].method, 'GET');
-  assert.equal(following[1].body.script, 'mobile: activeAppInfo');
-  assert.equal(following.filter(request => request.path.endsWith('/source')).length, 1);
-  assert.equal(following.some(request => request.path.endsWith('/screenshot')), false);
+  assert.equal(following[0].body.script, 'mobile: activeAppInfo');
+  assert.ok(following[1].path.endsWith('/element'));
+  assert.deepEqual(following[1].body, { using: 'xpath', value: IOS_CONFIRMATION_ADD_XPATH });
+  assert.equal(following.some(request => /\/(?:source|screenshot)$/u.test(request.path)), false);
+  assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+  assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
   const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
-  assert.equal(capture.status, 'captured');
-  assert.equal(capture.projection.status, 'complete');
-  assert.ok(decodeConfirmationProjection(capture.projection).some(node => node.type === 'XCUIElementTypeNavigationBar' && node.name === 'Add to Home Screen'));
-  assert.equal(capture.source.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal + 1);
-  assert.equal(capture.source.sessionGeneration, capture.acknowledgement.sessionGeneration);
-  assert.equal(capture.source.scope, 'ios-install-confirmation');
-  assert.equal(capture.source.sent, true);
-  assert.equal(capture.source.completed, true);
-  assert.equal(capture.source.outcome, 'success');
-  assert.equal(capture.source.phaseRemainingAtEntryMs, 75_000);
+  assert.deepEqual(Object.keys(capture).sort(), ['acknowledgement', 'status']);
+  assert.equal(capture.status, 'not-requested-product-first');
+  assert.equal(capture.acknowledgement.completed, true);
+  assert.equal(capture.acknowledgement.outcome, 'success');
+  const foreground = a.driver.snapshot().commands.find(command => command.timing?.dispatchedOrdinal === following[0].dispatchedOrdinal)!;
+  assert.equal(foreground.timing?.operation, 'active-app');
+  assert.equal(foreground.timing?.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal + 1);
+  assert.equal(foreground.timing?.sessionGeneration, capture.acknowledgement.sessionGeneration);
+  assert.equal(foreground.timing?.scope, 'ios-install-confirmation');
+  assert.equal(foreground.timing?.phaseRemainingAtEntryMs, 75_000);
   assert.equal(a.driver.snapshot().lastCommand?.timing?.scope, 'unscoped');
-  const sourceCommand = a.driver.snapshot().commands.find(command => command.timing?.dispatchedOrdinal === capture.source.dispatchedOrdinal)!;
-  assert.equal(sourceCommand.timeoutMs, 8_000);
   const persisted = JSON.parse(await readFile(join(a.outputDir, 'confirmation-result.json'), 'utf8'));
   assert.match(persisted.proofKind, /Hypothetical.*not observed native recovery/u);
   assert.deepEqual(persisted.evidence.confirmationCapture, capture);
   assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
-  capture.source.outcome = 'changed-copy';
-  assert.equal((a.platform.evidenceSnapshot().confirmationCapture as any).source.outcome, 'success');
+  capture.acknowledgement.outcome = 'changed-copy';
+  assert.equal((a.platform.evidenceSnapshot().confirmationCapture as any).acknowledgement.outcome, 'success');
 });
 
-test('confirmation capture compact rows persist the complete late target fixture and both receipts within added evidence caps', async () => {
-  requireXmlLint();
-  const fixture = confirmationLateTargetFixture();
-  const replay = await confirmationReplay('capture-compact-persisted', { captureSource: fixture.source });
-  assert.equal(replay.error, undefined);
-  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-1']);
-  const text = await readFile(join(replay.outputDir, 'confirmation-result.json'), 'utf8');
-  const persisted = JSON.parse(text);
-  const capture = persisted.evidence.confirmationCapture;
-  assert.equal(capture.status, 'captured');
-  assert.equal(capture.projection.status, 'complete');
-  assert.equal(capture.projection.inspectedUnits, fixture.source.length);
-  assert.deepEqual(decodeConfirmationProjection(capture.projection), fixture.nodes);
-  assert.equal(capture.source.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal + 1);
-  assert.equal(capture.acknowledgement.completed, true);
-  assert.equal(capture.source.completed, true);
-  const withoutProjection = structuredClone(persisted);
-  delete withoutProjection.evidence.confirmationCapture.projection;
-  const projectionBytes = Buffer.byteLength(text) - Buffer.byteLength(`${JSON.stringify(withoutProjection, null, 2)}\n`);
-  assert.ok(projectionBytes <= IOS_CONFIRMATION_CAPTURE_LIMITS.projectionBytes);
-  const withoutCapture = structuredClone(persisted);
-  delete withoutCapture.evidence.confirmationCapture;
-  const addedBytes = Buffer.byteLength(text) - Buffer.byteLength(`${JSON.stringify(withoutCapture, null, 2)}\n`);
-  assert.ok(addedBytes > projectionBytes);
-  assert.ok(addedBytes <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
-  assert.doesNotMatch(JSON.stringify(capture), /unrelated|hidden content|private|https/u);
-  assert.deepEqual(capture, replay.platform.evidenceSnapshot().confirmationCapture);
-});
-
-test('confirmation capture 73000 admission and 72999 skip preserve original transaction and parent tails', async () => {
+test('confirmation product-first disposition does not depend on retired capture surplus', async () => {
   requireXmlLint();
   for (const remaining of [73_000, 72_999]) {
-    const a = await confirmationReplay(`capture-budget-${remaining}`, { parentRemaining: 80_500, activityDuration: 75_000 - remaining });
+    const a = await confirmationReplay(`product-first-budget-${remaining}`, { parentRemaining: 80_500, activityDuration: 75_000 - remaining });
     assert.equal(a.error, undefined);
     const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
-    assert.equal(capture.status, remaining === 73_000 ? 'captured' : 'skipped-budget');
-    assert.equal(capture.source?.phaseRemainingAtEntryMs, remaining === 73_000 ? remaining : undefined);
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
     assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
-    const sourceCommands = a.driver.snapshot().commands.filter(command => command.timing?.scope === 'ios-install-confirmation' && command.path.endsWith('/source'));
-    assert.equal(sourceCommands.length, remaining === 73_000 ? 1 : 0);
-    assert.ok(sourceCommands.every(command => command.timeoutMs === 8_000));
+    const commands = a.driver.snapshot().commands.filter(command => command.timing?.scope === 'ios-install-confirmation');
+    assert.equal(commands[0].timing?.phaseRemainingAtEntryMs, remaining);
+    assert.equal(commands.some(command => command.path.endsWith('/source')), false);
   }
 });
 
-test('confirmation capture dispatch gap skips without a shortened source and consumption never renews confirmation', async () => {
+test('confirmation product-first keeps the original confirmation clock after readiness consumption', async () => {
   requireXmlLint();
-  const skipped = await confirmationReplay('capture-gap', { captureRemaining: 73_000, captureDispatchGap: 1 });
-  assert.equal(skipped.error, undefined);
-  const skippedCapture = skipped.platform.evidenceSnapshot().confirmationCapture as any;
-  assert.equal(skippedCapture.status, 'skipped-budget');
-  assert.equal(skippedCapture.source.sent, false);
-  assert.equal(skippedCapture.source.outcome, 'not-admitted');
-  assert.equal(skipped.requests.filter(request => request.path.endsWith('/source') && request.dispatchedOrdinal > skippedCapture.acknowledgement.dispatchedOrdinal).length, 0);
-  const consumed = await confirmationReplay('capture-consumption', { captureDuration: 7_500, after: boundary => boundary === 'enabled' ? 63_000 : 0 });
-  const capture = consumed.platform.evidenceSnapshot().confirmationCapture as any;
-  assert.equal(capture.source.phaseRemainingAtEntryMs, 75_000);
-  assert.equal(capture.source.phaseRemainingAtSettlementMs, 67_500);
-  assert.match(String(consumed.error), /confirmation control was not ready/u);
-  assert.deepEqual(consumed.clicks, ['share', 'target-1']);
-  assert.equal(consumed.driver.snapshot().firstFatal, undefined);
+  const a = await confirmationReplay('product-first-consumption', { after: boundary => boundary === 'enabled' ? 70_500 : 0 });
+  const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+  assert.equal(capture.status, 'not-requested-product-first');
+  assert.match(String(a.error), /confirmation control was not ready/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.driver.snapshot().firstFatal, undefined);
+  assert.equal(a.observations.find(observation => observation.boundary === 'enabled')?.now, 70_500);
 });
 
-test('confirmation capture cannot authorize readiness and settled unavailable malformed truncated sources continue unchanged', async () => {
+test('confirmation product-first never requests malformed private or oversized confirmation sources', async () => {
   requireXmlLint();
-  for (const captureSource of [null, '<private-malformed>', `<A name="${'secret'.repeat(50_000)}"/>`, `<A>${'<XCUIElementTypeButton label="Add"/>'.repeat(600)}</A>`]) {
-    const a = await confirmationReplay('capture-nonfatal', { captureSource });
+  for (const confirmationSource of [null, '<private-malformed>', `<A name="${'secret'.repeat(50_000)}"/>`, `<A>${'<XCUIElementTypeButton label="Add"/>'.repeat(600)}</A>`]) {
+    const a = await confirmationReplay('product-first-source-withheld', { confirmationSource });
     assert.equal(a.error, undefined);
     assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
     const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
-    assert.equal(capture.status, 'captured');
-    assert.equal(capture.projection.status, captureSource === null ? 'unavailable' : captureSource.length > 100 ? 'truncated' : 'malformed');
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.equal(capture.projection, undefined);
+    assert.equal(a.observations.some(observation => observation.boundary === 'source'), false);
     assert.doesNotMatch(JSON.stringify(capture), /private|secret/u);
     assert.ok(Buffer.byteLength(JSON.stringify(capture, null, 2)) <= IOS_CONFIRMATION_CAPTURE_LIMITS.evidenceBytes);
   }
-  for (const fault of ['unrelated', 'malformed', 'malformed-value'] as const) {
-    const a = await confirmationReplay('capture-refusal', { faultAt: 'source', fault });
-    assert.equal(a.error, undefined);
-    assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
-    assert.doesNotMatch(JSON.stringify(a.platform.evidenceSnapshot()), /synthetic protocol failure/u);
-  }
-  const disabled = await confirmationReplay('capture-not-readiness', { states: ['disabled'], after: boundary => boundary === 'enabled' ? 70_001 : 0 });
-  assert.equal((disabled.platform.evidenceSnapshot().confirmationCapture as any).projection.status, 'complete');
+  const disabled = await confirmationReplay('product-first-not-readiness', { states: ['disabled'], after: boundary => boundary === 'enabled' ? 70_001 : 0 });
+  assert.equal((disabled.platform.evidenceSnapshot().confirmationCapture as any).status, 'not-requested-product-first');
   assert.match(String(disabled.error), /confirmation control was not ready.*disabled/u);
   assert.deepEqual(disabled.clicks, ['share', 'target-1']);
 });
 
-test('confirmation capture unhealthy snapshots propagate without source restoration or later native work', async () => {
+for (const fault of ['unrelated', 'malformed', 'malformed-value', 'hung', 'interrupted', 'body-hung', 'body-interrupted', 'body-late', 'late-missing'] as const) {
+  test(`confirmation product-first unrequested ${fault} source cannot block the actual final Add`, async () => {
+    requireXmlLint();
+    const a = await confirmationReplay(`product-first-source-${fault}`, { faultAt: 'source', fault });
+    assert.equal(a.error, undefined);
+    assert.equal(a.lookups, 1);
+    assert.deepEqual(a.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
+    assert.equal(a.observations.some(observation => observation.boundary === 'source'), false);
+    const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.equal(a.requests.some(request => request.path.endsWith('/source') && request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal), false);
+    assert.equal(a.driver.snapshot().firstFatal, undefined);
+    assert.equal(a.driver.snapshot().unusable, false);
+  });
+}
+
+test('confirmation unhealthy snapshots propagate before foreground or lookup without restoration or later native work', async () => {
   requireXmlLint();
-  for (const captureUnhealthy of ['unusable', 'firstFatal'] as const) {
-    const a = await confirmationReplay(`capture-${captureUnhealthy}`, { captureUnhealthy, captureRemaining: 72_999 });
+  for (const confirmationUnhealthy of ['unusable', 'firstFatal'] as const) {
+    const a = await confirmationReplay(`confirmation-${confirmationUnhealthy}`, { confirmationUnhealthy });
     assert.match(String(a.error), /APPIUM_SESSION_UNUSABLE/u);
     const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
-    assert.equal(capture.status, 'fatal');
+    assert.equal(capture.status, 'not-requested-product-first');
     assert.equal(capture.source, undefined);
     assert.equal(a.lookups, 0);
     assert.deepEqual(a.clicks, ['share', 'target-1']);
     assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
     assert.equal(a.requests.at(-1)?.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal);
     const first = structuredClone(a.driver.snapshot().firstFatal);
-    if (captureUnhealthy === 'firstFatal') assert.equal(first?.code, 'APPIUM_INTERRUPTED');
+    if (confirmationUnhealthy === 'firstFatal') assert.equal(first?.code, 'APPIUM_INTERRUPTED');
     await a.platform.captureSanitizedEvidence('failure');
     for (const action of [() => a.platform.installFromBrowser(), () => a.platform.launchInstalledApp(), () => a.platform.attachToInstalledView()]) {
       await assert.rejects(action, error => error === a.error);
@@ -1531,51 +1499,47 @@ test('confirmation capture unhealthy snapshots propagate without source restorat
   }
 });
 
-test('confirmation capture original native ownership generation context and single-flight are fenced at dispatch', async () => {
+test('confirmation original native ownership generation and context are fenced at foreground dispatch', async () => {
   requireXmlLint();
-  for (const captureOwnerChange of ['context', 'generation', 'session', 'overlap'] as const) {
-    const a = await confirmationReplay(`capture-owner-${captureOwnerChange}`, { captureOwnerChange });
+  for (const confirmationOwnerChange of ['context', 'generation', 'session'] as const) {
+    const a = await confirmationReplay(`confirmation-owner-${confirmationOwnerChange}`, { confirmationOwnerChange });
     const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
-    assert.equal(capture.status, 'unavailable');
-    assert.equal(capture.source.sent, false);
-    assert.equal(capture.source.outcome, 'not-admitted');
-    assert.equal(a.driver.snapshot().commands.filter(command => command.timing?.attemptId === capture.source.attemptId).length, 1);
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
     const subsequent = a.requests.filter(request => request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal);
-    assert.equal(subsequent.some(request => request.path.endsWith('/source')), false);
-    if (captureOwnerChange === 'overlap') {
-      assert.equal(a.error, undefined);
-      assert.deepEqual(a.clicks, ['share', 'target-1', 'add-1']);
-    } else {
-      assert.ok(a.error);
-      assert.deepEqual(a.clicks, ['share', 'target-1']);
-      assert.deepEqual(subsequent, []);
-    }
+    assert.match(String(a.error), /original (?:native request context|usable session owner) is unavailable/u);
+    assert.deepEqual(a.clicks, ['share', 'target-1']);
+    assert.equal(a.lookups, 0);
+    assert.deepEqual(subsequent, []);
+    const refused = a.driver.snapshot().commands.filter(command => command.timing?.scope === 'ios-install-confirmation');
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0].timing?.sent, false);
+    assert.equal(refused[0].timing?.admitted, false);
+    assert.equal(refused[0].timing?.outcome, 'transport-error');
   }
 });
 
-for (const boundary of ['source', 'lookup'] as const) {
-  test(`confirmation capture late404 ${boundary} cannot replace first fatal or persisted diagnostic evidence`, async () => {
-    requireXmlLint();
-    const a = await confirmationReplay(`capture-late404-${boundary}`, { faultAt: boundary, fault: 'late-missing' });
-    assert.match(String(a.error), /APPIUM_TIMEOUT/u);
-    assert.deepEqual(a.clicks, ['share', 'target-1']);
-    assert.equal(a.lookups, boundary === 'source' ? 0 : 1);
-    const first = structuredClone(a.driver.snapshot().firstFatal);
-    const capture = a.platform.evidenceSnapshot().confirmationCapture;
-    const count = a.requests.length;
-    await wait(200);
-    assert.deepEqual(a.driver.snapshot().firstFatal, first);
-    assert.deepEqual(a.platform.evidenceSnapshot().confirmationCapture, capture);
-    assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
-    await a.platform.captureSanitizedEvidence('failure');
-    assert.equal(a.requests.length, count);
-    const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
-    assert.deepEqual(persisted.confirmationCapture, capture);
-    assert.equal(persisted.driver.firstFatal.code, 'APPIUM_TIMEOUT');
-    await assert.rejects(() => a.platform.installFromBrowser(), boundary === 'source' ? error => error === a.error : /APPIUM_SESSION_UNUSABLE/u);
-    assert.equal(a.requests.length, count);
-  });
-}
+test('confirmation late404 lookup cannot replace first fatal or persisted diagnostic evidence', async () => {
+  requireXmlLint();
+  const a = await confirmationReplay('product-first-late404-lookup', { faultAt: 'lookup', fault: 'late-missing' });
+  assert.match(String(a.error), /APPIUM_TIMEOUT/u);
+  assert.deepEqual(a.clicks, ['share', 'target-1']);
+  assert.equal(a.lookups, 1);
+  const first = structuredClone(a.driver.snapshot().firstFatal);
+  const capture = a.platform.evidenceSnapshot().confirmationCapture;
+  const count = a.requests.length;
+  await wait(200);
+  assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  assert.deepEqual(a.platform.evidenceSnapshot().confirmationCapture, capture);
+  assert.equal(a.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
+  await a.platform.captureSanitizedEvidence('failure');
+  assert.equal(a.requests.length, count);
+  const persisted = JSON.parse(await readFile(join(a.outputDir, 'failure-appium.json'), 'utf8'));
+  assert.deepEqual(persisted.confirmationCapture, capture);
+  assert.equal(persisted.driver.firstFatal.code, 'APPIUM_TIMEOUT');
+  await assert.rejects(() => a.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(a.requests.length, count);
+});
 
 test('activity click timeout records its boundary without further native commands', async () => {
   requireXmlLint();
@@ -1993,7 +1957,7 @@ test('confirmation hypothetical same-dialog Add replacement reacquires a complet
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable', 'add-2:enabled', 'add-2:visible', 'add-2:hittable']);
   assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-2']);
   assert.deepEqual(replay.observations.map((entry) => `${entry.lookup}:${entry.boundary}`), [
-    '0:source', '0:foreground', '1:lookup', '1:identity', '1:enabled', '1:visible', '1:hittable', '1:identity',
+    '0:foreground', '1:lookup', '1:identity', '1:enabled', '1:visible', '1:hittable', '1:identity',
     '1:foreground', '2:lookup', '2:identity', '2:enabled', '2:visible', '2:hittable', '2:identity', '2:click',
   ]);
   assert.ok(replay.now < 15_000);
@@ -2145,21 +2109,21 @@ test('confirmation final click requires its complete parent allowance after all 
   assert.equal(replay.clicks.length, 2);
 });
 
-for (const boundary of ['source', 'lookup', 'identity', 'enabled', 'click'] as const) {
+for (const boundary of ['foreground', 'lookup', 'identity', 'enabled', 'click'] as const) {
   for (const fault of ['hung', 'interrupted'] as const) {
     test(`confirmation ${fault} ${boundary} preserves single-flight, first fatal evidence and quarantine`, async () => {
       const skip = requireXmlLint();
       if (skip) return skip;
       const replay = await confirmationReplay(`${fault}-${boundary}`, { fault, faultAt: boundary });
       assert.match(String(replay.error), /APPIUM_TIMEOUT/u);
-      assert.equal(replay.lookups, boundary === 'source' ? 0 : 1);
+      assert.equal(replay.lookups, boundary === 'foreground' ? 0 : 1);
       assert.equal(replay.clicks.length, boundary === 'click' ? 3 : 2);
       assert.equal(replay.driver.snapshot().unusable, true);
       const first = replay.driver.snapshot().firstFatal;
       assert.equal(first?.code, 'APPIUM_TIMEOUT');
       const count = replay.requests.length;
       await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
-      await assert.rejects(() => replay.platform.installFromBrowser(), boundary === 'click' || boundary === 'source' ? error => error === replay.error : /APPIUM_SESSION_UNUSABLE/u);
+      await assert.rejects(() => replay.platform.installFromBrowser(), boundary === 'click' ? error => error === replay.error : /APPIUM_SESSION_UNUSABLE/u);
       assert.equal(replay.requests.length, count);
       assert.deepEqual(replay.driver.snapshot().firstFatal, first);
     });
@@ -2167,9 +2131,9 @@ for (const boundary of ['source', 'lookup', 'identity', 'enabled', 'click'] as c
 }
 
 for (const scenario of [
-  { fault: 'body-hung' as const, boundary: 'source' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
-  { fault: 'body-interrupted' as const, boundary: 'source' as const, code: 'APPIUM_INTERRUPTED', identityRead: undefined },
-  { fault: 'body-late' as const, boundary: 'source' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
+  { fault: 'body-hung' as const, boundary: 'foreground' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
+  { fault: 'body-interrupted' as const, boundary: 'foreground' as const, code: 'APPIUM_INTERRUPTED', identityRead: undefined },
+  { fault: 'body-late' as const, boundary: 'foreground' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
   { fault: 'body-hung' as const, boundary: 'lookup' as const, code: 'APPIUM_TIMEOUT', identityRead: undefined },
   { fault: 'body-hung' as const, boundary: 'identity' as const, code: 'APPIUM_TIMEOUT', identityRead: 2 },
   { fault: 'body-interrupted' as const, boundary: 'lookup' as const, code: 'APPIUM_INTERRUPTED', identityRead: undefined },
@@ -2192,18 +2156,18 @@ for (const scenario of [
     const first = replay.driver.snapshot().firstFatal;
     const count = replay.requests.length;
     await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
-    await assert.rejects(() => replay.platform.installFromBrowser(), scenario.boundary === 'source' ? error => error === replay.error : /APPIUM_SESSION_UNUSABLE/u);
+    await assert.rejects(() => replay.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
     assert.equal(replay.requests.length, count);
     assert.deepEqual(replay.driver.snapshot().firstFatal, first);
-    if (scenario.boundary === 'source') {
+    if (scenario.boundary === 'foreground') {
       assert.equal(replay.lookups, 0);
       assert.equal(replay.platform.evidenceSnapshot().nativeDiagnosticsBlocked, true);
-      assert.equal((replay.platform.evidenceSnapshot().confirmationCapture as any).status, 'fatal');
+      assert.equal((replay.platform.evidenceSnapshot().confirmationCapture as any).status, 'not-requested-product-first');
       await replay.platform.captureSanitizedEvidence('failure');
       assert.equal(replay.requests.length, count);
     }
     if (scenario.fault === 'body-late') {
-      await wait(scenario.boundary === 'source' ? 4_700 : 1_000);
+      await wait(scenario.boundary === 'foreground' ? 7_700 : 1_000);
       assert.equal(replay.requests.length, count);
       assert.deepEqual(replay.driver.snapshot().firstFatal, first);
     }
@@ -3160,10 +3124,10 @@ for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publi
     assert.deepEqual(a.clicks, ['share', 'target-1', 'add']);
     const capture = a.platform.evidenceSnapshot().confirmationCapture as any;
     assert.ok(capture);
-    if (capture.status === 'captured') {
-      assert.equal(capture.projection.status, 'complete');
-      assert.ok(decodeConfirmationProjection(capture.projection).some(node => node.type === 'XCUIElementTypeNavigationBar' && node.name === 'Add to Home Screen'));
-    } else assert.equal(capture.status, 'skipped-budget');
+    assert.equal(capture.status, 'not-requested-product-first');
+    assert.equal(capture.source, undefined);
+    assert.equal(capture.projection, undefined);
+    assert.equal(a.requests.some(request => request.path.endsWith('/source') && request.dispatchedOrdinal > capture.acknowledgement.dispatchedOrdinal), false);
     assert.equal(a.scrolls, 1);
     assert.equal(a.swipes, mode.includes('fallback') ? 1 : 0);
     assert.equal(a.driver.snapshot().unusable, false);

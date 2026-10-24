@@ -370,54 +370,35 @@ queries. The Share-sheet installation-row click records its start, acknowledgeme
 or failure separately from the final Add lookup; acknowledgement alone does not
 prove the confirmation appeared.
 
-Immediately after that acknowledgement, a one-shot diagnostic GET `/source`
-may run inside the original 75-second confirmation child. Admission requires
-73 seconds remaining: the full 8-second source request, at most 1 second of
-local projection/receipt work, and the unchanged 64-second confirmation round.
-The optional 9-second child reserves that round; original native ownership and
-the surplus/full request cap are rechecked at dispatch. Insufficient surplus
-records `skipped-budget`, without shortening a request or changing transaction
-admission, settings, selectors, restoration reserves or deadlines. Capture
-consumes the same confirmation clock; it never renews it.
+The normal real-app journey no longer requests automatic confirmation GET
+`/source` after that acknowledgement. It proceeds directly to the existing
+foreground and final-Add checks. `confirmationCapture` records the explicit
+`not-requested-product-first` disposition and copied row-click acknowledgement
+timing, with no source receipt or projection. Other readiness and failure-evidence
+source requests are unchanged. Client timing is correlation, not proof of native
+cause or confirmation readiness.
 
-`confirmationCapture` in the platform evidence snapshot retains copied activity
-acknowledgement/source client timing and a structural projection, persisted by
-the existing terminal evidence writers without a capture-time file await or
-screenshot. Ordinals/generation/phase offsets are client correlation, not native
-server request IDs or proof of a native stage's cause. The quote-aware projection
-inspects at most 262,144 UTF-16 units, 512 nodes and depth 64, with a 48 KiB
-projection allowance and 64 KiB total added serialized evidence cap. Local work
-checks a 1-second cutoff. These are inspection/retention limits, not a new bound
-on the existing client's network-body buffering or filesystem persistence time.
+The unique visible Add, complete enabled/visible/hittable checks, stable identity
+and exactly one final tap are unchanged, as are settings and all deadlines:
+5-second row click, 8-second lookup, 12-second final click, 75-second confirmation,
+64-second round, 4-second restoration reserve and 1.5-second parent tail. A fatal
+or unusable driver still blocks native diagnostics and further product commands;
+settings restoration is not attempted on that session.
 
-Hidden ancestors, unrelated controls and unknown wrappers retain their parentage.
-Version 2 stores each node as an ASCII JSON-array string in original order, with
-zero-based parent indices (null for the root), original depth, and static column
-and enum maps in `format`. Numeric codes index the corresponding column's enum;
-geometry remains numeric or null. Tuple strings stay compact through terminal
-pretty-printing. Size checks include the deepest terminal nesting and receipts.
-Decoding is diagnostic/test-only; installation never reads these tuples.
-Only allowlisted native types, bounded finite geometry, boolean-or-unknown flags
-and separate exact name/label/value enums (`Add`, `Add to Home Screen`, `Cancel`,
-withheld or missing) survive. No arbitrary labels, URLs, application names,
-element IDs or malformed fragments are retained by this projection. Unsupported
-declarations/entities are rejected; unavailable, malformed and truncated states
-are explicit, not evidence of absent UI. Settled nonfatal capture failures may
-continue through all original readiness and unique-identity checks. A fatal or
-unusable driver blocks native diagnostics and immediately propagates failure;
-no lookup, final click, settings restoration or capture retry follows.
-
-This is diagnostic-only and a scheduling intervention: requesting source may
-change snapshot/idle scheduling. A passing instrumented run is not proof of
-repair, recovery or qualification. The confirmation fixture is hypothetical,
-not an observed hierarchy from the failing hosted run.
+This retires r37's automatic pre-lookup capture recipe only for the normal journey.
+Old r37/run22 evidence and failures remain unchanged. Hosted run40004048167's
+diagnostic request prevented product lookup; removing it is not an underlying
+iOS/native fix or a passing real-device test. Run39971886984 failed final-Add
+lookup without this diagnostic, and its cause remains unknown. The standalone
+projection utility and hypothetical fixtures remain local regression tools,
+not observed native recovery or hosted qualification.
 
 Both mobile CI upload paths withhold `RUNNER_TEMP/appium.log` on iOS, remove
 any stale copy from the artifact directory, and emit the small static
 `appium-log-disposition.json` instead. Use client timing and bounded diagnostics.
 Android's existing log-copy behavior is unchanged. This privacy decision covers
 the uploaded Appium log only: private ephemeral local Appium logging remains
-enabled, and the startup-only console dump precedes the new capture. It does
+enabled, and the startup-only console dump remains unchanged. It does
 not claim removal of other existing restricted diagnostic artifacts.
 
 The XCTest owner retains at most 128 recognized activity enums with host receipt

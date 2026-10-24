@@ -11,9 +11,9 @@ import { IOS_CONFIRMATION_CAPTURE_LIMITS as captureLimits, projectIOSConfirmatio
 import type { WebDriverRequestTiming } from '../support/webdriver';
 import { confirmationBytePressureFixture } from './ios-confirmation-capture';
 
-type CaptureMode = 'unchanged' | 'changed' | 'teardown-only';
+type CaptureMode = 'unchanged' | 'changed' | 'teardown-only' | 'product-first';
 
-function confirmationCaptureFixture() {
+function confirmationCaptureFixture(productFirst: boolean) {
   const receipt = (ordinal: number, scope: WebDriverRequestTiming['scope'], start: number, remaining: number): WebDriverRequestTiming => ({
     attemptId: ordinal, dispatchedOrdinal: ordinal, sessionGeneration: 7, operation: 'other', scope,
     entryMs: start, dispatchMs: start + 0.125, responseAvailableMs: start + 120,
@@ -24,8 +24,10 @@ function confirmationCaptureFixture() {
     phaseRemainingAtEntryMs: remaining, phaseRemainingAtDispatchMs: remaining - 0.125,
     phaseRemainingAtSettlementMs: remaining - 122, admitted: true, sent: true, completed: true, status: 200, outcome: 'success',
   });
+  const acknowledgement = receipt(41, 'unscoped', 20_000, 80_000);
+  if (productFirst) return { status: 'not-requested-product-first', acknowledgement };
   return {
-    status: 'captured', acknowledgement: receipt(41, 'unscoped', 20_000, 80_000),
+    status: 'captured', acknowledgement,
     source: receipt(42, 'ios-install-confirmation', 20_122.5, 74_999.5),
     projection: projectIOSConfirmation(confirmationBytePressureFixture().source),
   };
@@ -128,6 +130,7 @@ export class AndroidPlatform {
     if(this.proof) this.proof.records.length=0;
     if (captureMode === 'teardown-only') this.confirmationCapture = structuredClone(capture);
     if (captureMode === 'changed') { this.confirmationCapture.status='unavailable'; this.confirmationCapture.source.dispatchedOrdinal=99; this.confirmationCapture.projection.nodes.pop(); }
+    if (captureMode === 'product-first') this.confirmationCapture.acknowledgement.dispatchedOrdinal=99;
     if (captureMode) this.extraEvidence.nativeDiagnosticsBlocked=this.driver.unusable;
     if (mode.includes('cleanup-failure')) throw new Error('CLEANUP_FAILED');
   }
@@ -143,13 +146,13 @@ async function replay(mode: string, platform: string, suite: string, captureMode
   await cp(join(source, 'android-appium/kernel-namespace.cjs'), join(root, 'android-appium/kernel-namespace.cjs'));
   await cp(join(source, 'run.ts'), join(root, 'run.ts'));
   assert.equal(await readFile(join(root, 'run.ts'), 'utf8'), await readFile(join(source, 'run.ts'), 'utf8'));
-  const capture = captureMode ? confirmationCaptureFixture() : undefined;
-  if (capture) {
+  const capture = captureMode ? confirmationCaptureFixture(captureMode === 'product-first') : undefined;
+  if (capture?.projection) {
     assert.equal(capture.projection.status, 'truncated');
     assert.equal(capture.projection.reason, 'bytes');
     assert.ok(capture.projection.nodes.length > 300);
-    await writeFile(join(root, 'capture.json'), JSON.stringify(capture), { flag: 'wx' });
   }
+  if (capture) await writeFile(join(root, 'capture.json'), JSON.stringify(capture), { flag: 'wx' });
   assert.equal(await readFile(join(root, 'support/diagnostics.ts'), 'utf8'), await readFile(join(source, 'support/diagnostics.ts'), 'utf8'));
   await writeFile(join(root, 'fixture-protocol.ts'), fixtureSource);
   await writeFile(join(root, 'platforms/android.ts'), platformSource);
@@ -279,22 +282,34 @@ mock.module('node:fs/promises',()=>({...original,
       return Buffer.byteLength(resultText) - Buffer.byteLength(`${JSON.stringify(sanitizeValue(withoutProjection), null, 2)}\n`);
     };
     const metrics = {
-      mode, captureMode, resultBytes: Buffer.byteLength(resultText), nodes: result.evidence.confirmationCapture.projection.nodes.length,
+      mode, captureMode, resultBytes: Buffer.byteLength(resultText), nodes: result.evidence.confirmationCapture.projection?.nodes.length || 0,
       canonicalProjectionBytes: projectionBytes(), teardownProjectionBytes: projectionBytes(true),
       totalAddedBytesIncludingReceipts: Buffer.byteLength(resultText) - Buffer.byteLength(`${JSON.stringify(sanitizeValue(withoutCapture), null, 2)}\n`),
       captureCopies: (resultText.match(/"confirmationCapture":/gu) || []).length,
     };
     await writeFile(join(root, 'terminal-metrics.json'), `${JSON.stringify(metrics, null, 2)}\n`, { flag: 'wx' });
     assert.equal(metrics.captureCopies, 1, JSON.stringify(metrics));
-    assert.ok(metrics.canonicalProjectionBytes > captureLimits.projectionBytes - 256);
-    assert.ok(metrics.canonicalProjectionBytes <= captureLimits.projectionBytes);
+    if (captureMode === 'product-first') {
+      assert.equal(metrics.canonicalProjectionBytes, 0);
+      assert.deepEqual(Object.keys(result.evidence.confirmationCapture).sort(), ['acknowledgement', 'status']);
+      assert.equal(result.evidence.confirmationCapture.status, 'not-requested-product-first');
+    } else {
+      assert.ok(metrics.canonicalProjectionBytes > captureLimits.projectionBytes - 256);
+      assert.ok(metrics.canonicalProjectionBytes <= captureLimits.projectionBytes);
+    }
     assert.equal(metrics.teardownProjectionBytes, 0);
     assert.ok(metrics.totalAddedBytesIncludingReceipts > metrics.canonicalProjectionBytes);
     assert.ok(metrics.totalAddedBytesIncludingReceipts <= captureLimits.evidenceBytes);
     assert.deepEqual(result.evidence.confirmationCapture, capture);
     const liveCapture = JSON.parse(await readFile(join(root, 'capture-live.json'), 'utf8'));
     const expectedLive = structuredClone(capture);
-    if (captureMode === 'changed') { expectedLive.status = 'unavailable'; expectedLive.source.dispatchedOrdinal = 99; expectedLive.projection.nodes.pop(); }
+    if (captureMode === 'changed') {
+      assert.ok(expectedLive.source && expectedLive.projection);
+      expectedLive.status = 'unavailable';
+      expectedLive.source.dispatchedOrdinal = 99;
+      expectedLive.projection.nodes.pop();
+    }
+    if (captureMode === 'product-first') expectedLive.acknowledgement.dispatchedOrdinal = 99;
     assert.deepEqual(liveCapture, expectedLive);
     assert.equal(result.evidence.events[0].detail.token, '[REDACTED]');
     assert.doesNotMatch(resultText, /synthetic-secret/u);
@@ -363,4 +378,8 @@ export const scenarioRunnerTests: Array<[string, () => Promise<void>]> = [
   ] as [string, () => Promise<void>]),
   ['production runner iOS terminal changed teardown cannot replace the frozen byte-pressure capture', () => replay('success', 'ios', 'release', 'changed')],
   ['production runner iOS terminal teardown-only capture remains diagnostic on scenario failure', () => replay('scenario-failure', 'ios', 'release', 'teardown-only')],
+  ...(['success', 'fatal-failure', 'late-driver-failure'] as const).map(mode => [
+    `production runner iOS terminal product-first ${mode} freezes the disposition and acknowledgement without source`,
+    () => replay(mode, 'ios', 'release', 'product-first'),
+  ] as [string, () => Promise<void>]),
 ];

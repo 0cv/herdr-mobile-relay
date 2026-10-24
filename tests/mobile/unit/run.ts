@@ -16,7 +16,6 @@ import {
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
-import { decodeConfirmationProjection } from './ios-confirmation-capture';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
@@ -2080,7 +2079,6 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   let scrolls = 0;
   let shareSourceReads = 0;
   let confirming = false;
-  const hypotheticalConfirmation = await readFile(new URL('./fixtures/ios/ios-confirmation-hypothetical.xml', import.meta.url), 'utf8');
   const savedConfirmationSettings = { waitForIdleTimeout: 7, animationCoolOffTimeout: 0.8 };
   const initialSettings = { ...savedConfirmationSettings, snapshotMaxDepth: 50 };
   let settings: Record<string, unknown> = { ...initialSettings };
@@ -2088,8 +2086,8 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   const settingsReads: Array<Record<string, unknown>> = [];
   const scrollArguments: Array<Record<string, unknown>> = [];
   const clicks: string[] = [];
+  const requests: Array<{ path: string; script?: string }> = [];
   const source = () => {
-    if (confirming) return hypotheticalConfirmation;
     if (!sheetOpen) return iosSafariHierarchy();
     if (shareSourceReads++ === 0) return iosShareHierarchy(0, false);
     return iosShareHierarchy(scrolls);
@@ -2099,6 +2097,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   const driver = new AppiumClient('http://fake.test', 100, async (input, init) => {
     const path = new URL(String(input)).pathname;
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, any> : {};
+    requests.push({ path, script: body.script });
     if (path === '/session') return new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 });
     if (path.endsWith('/context')) return new Response(JSON.stringify({ value: null }), { status: 200 });
     if (path.endsWith('/appium/settings')) {
@@ -2112,7 +2111,10 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     }
     if (path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert' } }, { status: 404 });
     if (body.script === 'mobile: queryAppState') return Response.json({ value: 4 });
-    if (path.endsWith('/source')) return new Response(JSON.stringify({ value: source() }), { status: 200 });
+    if (path.endsWith('/source')) {
+      if (confirming) return new Response('confirmation source must not be requested', { status: 500 });
+      return new Response(JSON.stringify({ value: source() }), { status: 200 });
+    }
     if (path.endsWith('/screenshot')) return new Response(JSON.stringify({ value: '' }), { status: 200 });
     if (path.endsWith('/execute/sync')) {
       if (body.script === 'mobile: activeAppInfo') return new Response(JSON.stringify({ value: { bundleId: 'com.apple.mobilesafari', pid: '42' } }), { status: 200 });
@@ -2181,10 +2183,20 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   ]);
   assert.deepEqual(clicks, ['share', 'add-home', 'add-button']);
   const capture = platform.evidenceSnapshot().confirmationCapture as any;
-  assert.equal(capture.status, 'captured');
-  assert.equal(capture.projection.status, 'complete');
-  assert.ok(decodeConfirmationProjection(capture.projection).some(node => node.type === 'XCUIElementTypeNavigationBar' && node.name === 'Add to Home Screen'));
-  assert.equal(capture.source.dispatchedOrdinal, capture.acknowledgement.dispatchedOrdinal + 1);
+  assert.equal(capture.status, 'not-requested-product-first');
+  assert.equal(capture.source, undefined);
+  assert.equal(capture.projection, undefined);
+  assert.equal(capture.acknowledgement.completed, true);
+  assert.equal(capture.acknowledgement.outcome, 'success');
+  const rowClick = requests.findIndex(request => request.path.endsWith('/element/add-home/click'));
+  assert.ok(rowClick >= 0);
+  const following = requests.slice(rowClick + 1);
+  assert.equal(following[0].script, 'mobile: activeAppInfo');
+  assert.ok(following[1].path.endsWith('/element'));
+  assert.equal(following.some(request => /\/(?:source|screenshot)$/u.test(request.path)), false);
+  const foreground = driver.snapshot().commands.find(command => command.timing?.dispatchedOrdinal === capture.acknowledgement.dispatchedOrdinal + 1);
+  assert.equal(foreground?.path, following[0].path);
+  assert.equal(foreground?.timing?.scope, 'ios-install-confirmation');
   const observationSettings = { defaultActiveApplication: 'auto', respectSystemAlerts: true };
   const confirmationSettings = { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 };
   assert.deepEqual(settingsWrites, [observationSettings, confirmationSettings, savedConfirmationSettings]);
