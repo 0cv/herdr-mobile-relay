@@ -63,6 +63,24 @@ describe('shared composer safety', () => {
     expect(JSON.stringify(localStorage)).not.toContain('rollback-secret');
   });
 
+  it('rechecks echo expiry when its timer fires before the monotonic deadline', async () => {
+    vi.useFakeTimers();
+    let monotonicNow = 100_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicNow);
+    const view = render(ConversationHistory, { agent });
+    await vi.advanceTimersByTimeAsync(0);
+    await view.rerender({ frame: { ...frame, target: targetRefForAgent(agent), noEcho: false, receivedAt: monotonicNow } });
+    await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'safe draft' } });
+    expect(loadPromptDraft(agent)).toBe('safe draft');
+    monotonicNow += 2_999;
+    await vi.advanceTimersByTimeAsync(3_000);
+    monotonicNow += 2;
+    await vi.advanceTimersByTimeAsync(2);
+    await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'expired-echo-secret' } });
+    expect(loadPromptDraft(agent)).toBe('safe draft');
+    expect(JSON.stringify(localStorage)).not.toContain('expired-echo-secret');
+  });
+
   it.each(['untagged', 'generation', 'terminal', 'session', 'server'] as const)('rejects late %s echo-on frames after a target switch', async (kind) => {
     vi.useFakeTimers();
     vi.setSystemTime(100_000);
@@ -165,7 +183,7 @@ describe('shared composer safety', () => {
     vi.useFakeTimers();
     const view = render(ConversationHistory, { agent });
     await vi.advanceTimersByTimeAsync(0);
-    expect(relayStore.readPane).toHaveBeenCalledExactlyOnceWith(agent, false, 30);
+    expect(relayStore.readPane).toHaveBeenCalledExactlyOnceWith(agent, true, 30);
     expect(relayStore.watchPane).not.toHaveBeenCalled();
     for (let update = 0; update < 12; update++) {
       relayStore.connections.update((connections) => new Map(connections));
@@ -174,6 +192,7 @@ describe('shared composer safety', () => {
     expect(relayStore.readPane).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(relayStore.readPane).toHaveBeenCalledTimes(2);
+    expect(relayStore.readPane).toHaveBeenLastCalledWith(agent, false, 30);
     view.unmount();
     await vi.advanceTimersByTimeAsync(4_000);
     expect(relayStore.readPane).toHaveBeenCalledTimes(2);

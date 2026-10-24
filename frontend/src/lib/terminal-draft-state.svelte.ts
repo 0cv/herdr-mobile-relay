@@ -38,6 +38,7 @@ export function terminalDraftState(agent: () => Agent, frame: () => TerminalFram
   });
 
   $effect(() => {
+    void expiry;
     const receivedAt = frame()?.receivedAt;
     if (!Number.isFinite(receivedAt)) return;
     const remaining = receivedAt! + 3_000 - performance.now();

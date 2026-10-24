@@ -62,7 +62,7 @@
     if (!controllerReady || !paneVisible || $securityState.locked || status !== 'connected') return;
     void identity;
     const refreshState = () => relayStore.readPane(target, false, 30);
-    refreshState();
+    relayStore.readPane(target, true, 30);
     const refresh = setInterval(refreshState, 2_000);
     return () => clearInterval(refresh);
   });
@@ -454,7 +454,7 @@
     if (bottomGap < bottomThreshold) {
       if (renderStart + mountedEntryLimit < filteredEntries.length) {
         if (movedTowardTail) demandNewer();
-      } else if (movedTowardTail) resumeFollowing();
+      } else if (movedTowardTail && bottomGap < 2) resumeFollowing();
       return;
     }
     if (query.trim() || !historyController) return;

@@ -534,6 +534,7 @@
 
   onMount(() => {
     componentMounted = true;
+    relayStore.readPane(agent, true);
     const stopWakeLock = mountTerminalWakeLock();
     const measurePane = () => requestPaneSizeLease(false);
     const realtimeDeltaEnabled = () => Boolean(
@@ -681,6 +682,11 @@
       virtualStickToBottom = true;
     } else {
       terminalElement.scrollTop = nextTop;
+      if (previousAnchor) {
+        const row = terminalElement.querySelector<HTMLElement>(`[data-terminal-row="${matchingAnchorIndex(previousAnchor)}"]`);
+        if (row) terminalElement.scrollTop += row.getBoundingClientRect().top
+          - terminalElement.getBoundingClientRect().top + previousAnchor.offset;
+      }
     }
     rememberVirtualScrollGeometry(terminalElement);
     virtualScrollResetPending = false;

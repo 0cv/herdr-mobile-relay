@@ -70,7 +70,7 @@ it('keeps a restored bottom pin through a delayed layout scroll, but respects up
   }
 });
 
-it('keeps taps pinned, resumes near the end, and releases immediately on upward movement', async () => {
+it('keeps taps pinned, resumes at the actual end, and releases immediately on upward movement', async () => {
   const resizes: (() => void)[] = [];
   vi.stubGlobal('ResizeObserver', class {
     constructor(callback: () => void) { resizes.push(callback); }
@@ -118,7 +118,7 @@ it('keeps taps pinned, resumes near the end, and releases immediately on upward 
     await fireEvent.scroll(list);
     list.scrollTop = 1582;
     await fireEvent.scroll(list);
-    expect(list.scrollTop).toBe(1600);
+    expect(list.scrollTop).toBe(1582);
     list.scrollTop = 1300;
     await fireEvent.scroll(list);
     height += 100;

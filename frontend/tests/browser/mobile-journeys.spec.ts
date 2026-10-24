@@ -34,7 +34,29 @@ async function scrollConversationToBottom(page: Page) {
     const range = (await list.locator('.conversation-source-status').allTextContents()).join('').match(/Showing \d+–(\d+) of (\d+)/);
     return (!range || range[1] === range[2])
       && await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight < 2);
-  }).toBe(true);
+  }, { timeout: 15_000, intervals: [16] }).toBe(true);
+}
+
+async function showOlderConversationEntry(page: Page, id: string) {
+  const list = page.locator('.conversation-list');
+  const entry = list.locator(`[data-conversation-entry-id="${id}"]`);
+  await expect.poll(async () => {
+    if (await entry.count()) return true;
+    const earlier = page.getByRole('button', { name: 'Show earlier loaded messages', exact: true });
+    if (await earlier.count()) await earlier.evaluate(element => (element as HTMLElement).click());
+    else {
+      await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
+      await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+    }
+    return Boolean(await entry.count());
+  }, { timeout: 15_000, intervals: [16] }).toBe(true);
+}
+
+async function replyToPaneRead(page: Page, content = 'Ready', noEcho = false) {
+  await expect.poll(async () => (await commands(page)).filter(command => command.type === 'read_pane').length).toBeGreaterThan(0);
+  const read = (await commands(page)).findLast(command => command.type === 'read_pane')!;
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read.request_id, target: read.target, format: 'plain', content, no_echo: noEcho });
+  return read.request_id;
 }
 
 async function expectNoActivityFooter(composer: Locator) {
@@ -478,7 +500,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     navigatorStandalone: options.navigatorStandalone ?? null,
     userAgent: options.userAgent ?? '',
     largeSlashCatalog: options.largeSlashCatalog ?? false,
-    answerHealthPings: options.answerHealthPings ?? false,
+    answerHealthPings: options.answerHealthPings ?? true,
   });
   await page.goto(path);
 }
@@ -1067,8 +1089,9 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
   expect(await page.evaluate(() => location.hash)).toBe('');
   await page.evaluate(() => {
     const relays = JSON.parse(localStorage.getItem('herdr_relays') || '[]');
-    localStorage.setItem('herdr_relays', JSON.stringify(relays.map((relay: RelayFixture) => ({
+    localStorage.setItem('herdr_relays', JSON.stringify(relays.map((relay: RelayFixture, index: number) => ({
       ...relay,
+      url: `ws://127.0.0.1:${8871 + index}`,
       token: '',
     }))));
     localStorage.removeItem('herdr_device_auth_v1');
@@ -1238,7 +1261,7 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
   const removeDialog = page.getByRole('dialog', { name: 'Remove Fedora?' });
   await expect(removeDialog).toContainText('You will need its setup link or connection details to add it again.');
   await removeDialog.getByRole('button', { name: 'Cancel' }).click();
-  await expect(page.getByText('wss://fedora.example')).toBeVisible();
+  await expect(page.getByText(fedora.url, { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
   await page.getByRole('button', { name: 'Approve once' }).click();
   await expect(page.getByRole('status').filter({ hasText: /protocol v1/ })).toBeVisible();
@@ -1292,7 +1315,8 @@ test('keeps Cursor filtering text-only across status updates and restores prompt
     type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
     content: `${footer}\nSelected model: Grok Fast\n>`,
   });
-  await expect(page.getByPlaceholder('Needs inspection — use terminal controls')).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Prompt', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'done', attention_kind: 'unknown', project: 'Cursor picker', agent: 'cursor' }],
@@ -1314,7 +1338,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['structured_questions', 'slash_commands'],
+    capabilities: ['structured_questions', 'slash_commands', 'manual_terminal_input'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -1336,8 +1360,9 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: choiceContent,
   });
-  const planInput = page.getByPlaceholder('Needs inspection — use terminal controls');
-  await expect(planInput).toBeDisabled();
+  const planInput = page.getByRole('combobox', { name: 'Prompt', exact: true });
+  await expect(planInput).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
   const directions = await page.locator('.generic-menu-actions > div > button').evaluateAll((elements) =>
     elements.slice(0, 4).map((element) => ({
@@ -1361,15 +1386,18 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   });
   await expect.poll(async () => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
-  const terminalInput = page.getByPlaceholder('Type terminal input…');
+  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await replyToPaneRead(page, promptContent);
+  const terminalInput = page.getByRole('textbox', { name: 'Terminal text', exact: true });
   await expect(terminalInput).toBeEnabled();
   await terminalInput.fill('custom weekend');
-  await page.getByRole('button', { name: 'Submit terminal text' }).click();
+  await page.getByRole('button', { name: 'Send text', exact: true }).click();
   await expect.poll(async () => (await commands(page))
-    .filter((command) => ['send_input', 'send_text', 'send_keys'].includes(String(command.type)))
+    .filter((command) => ['send_terminal_text', 'send_input', 'send_text', 'send_keys'].includes(String(command.type)))
     .map((command) => ({ type: command.type, text: command.text, keys: command.keys }))).toEqual([
-      { type: 'send_input', text: 'custom weekend', keys: ['Enter'] },
+      { type: 'send_terminal_text', text: 'custom weekend', keys: undefined },
     ]);
+  await page.getByRole('button', { name: 'Back to prompt and structured controls', exact: true }).click();
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -1383,7 +1411,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   await expect.poll(async () => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Enter' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Enter' })).toBeDisabled();
 
   await handshake(page, 0);
   await server(page, 0, {
@@ -1521,7 +1549,7 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
 });
 
 test('finalizes the loaded phone with a cached legacy manifest bootstrap', async ({ page }) => {
-  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
+  const mac = { id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' };
   // The 0.20.8 bootstrap installs the manifest but emits no asset-ready flags.
   await page.route('**/manifest-loader.js', (route) => route.fulfill({
     contentType: 'application/javascript',
@@ -1567,7 +1595,7 @@ document.head.append(manifestLink);`,
 });
 
 test('checks every self-updating relay automatically after connection', async ({ page }) => {
-  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
+  const mac = { id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' };
   await boot(page, [fedora, mac]);
   await setAutoCommands(page, false);
   await expect.poll(() => socketCount(page)).toBe(2);
@@ -1800,7 +1828,7 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
 });
 
 test('resumes fleet progress and updates the second relay automatically', async ({ page }) => {
-  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
+  const mac = { id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' };
   const previousVersion = '0.12.0';
   const availableUpdate = {
     state: 'available',
@@ -2184,7 +2212,9 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   await page.getByRole('button', { name: 'Open Realtime app on Fedora' }).click();
   await expect.poll(async () =>
     (await commands(page)).some((command) => command.type === 'read_pane')).toBe(true);
+  const initialRead = (await commands(page)).findLast(command => command.type === 'read_pane')!;
   await server(page, 0, {
+    request_id: initialRead.request_id, target: initialRead.target,
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
@@ -2246,7 +2276,9 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
     content_fingerprint: 'content-2',
   });
   await expect(terminal.locator('.term-screen')).toHaveJSProperty('innerHTML', cachedScreen);
+  const resumedRead = (await commands(page)).findLast(command => command.type === 'read_pane')!;
   await server(page, 0, {
+    request_id: resumedRead.request_id, target: resumedRead.target,
     type: 'pane_unchanged',
     pane_id: 'w1:p1',
     content_fingerprint: 'content-2',
@@ -2284,7 +2316,7 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
 });
 
 test('replaces a half-open socket immediately when a sleeping phone resumes', async ({ page }) => {
-  await boot(page, [fedora]);
+  await boot(page, [fedora], '/', { answerHealthPings: false });
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
     capabilities: ['attention_classification', 'slash_commands'],
@@ -2318,7 +2350,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await expect.poll(() => socketCount(page)).toBe(2);
+  await expect.poll(() => socketCount(page), { timeout: 12_000 }).toBe(2);
   await setAutoCommands(page, true);
   await handshake(page, 1, {
     capabilities: ['attention_classification', 'slash_commands'],
@@ -2346,12 +2378,13 @@ test('replaces a half-open socket when the browser reports a network handoff', a
       value: new EventTarget(),
     });
   });
-  await boot(page, [fedora]);
+  await boot(page, [fedora], '/', { answerHealthPings: false });
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
   const refreshesBefore = (await commandsForSocket(page, 0))
     .filter((command) => command.type === 'refresh_agents').length;
 
+  await setAutoCommands(page, false);
   await page.evaluate(() => {
     (navigator as Navigator & { connection: EventTarget }).connection.dispatchEvent(new Event('change'));
   });
@@ -2361,7 +2394,7 @@ test('replaces a half-open socket when the browser reports a network handoff', a
       .filter((command) => command.type === 'refresh_agents').length).toBe(refreshesBefore + 1);
   // The old socket deliberately never answers the probe. The foreground
   // health deadline replaces it without waiting for WebSocket/TCP timeouts.
-  await expect.poll(() => socketCount(page)).toBe(2);
+  await expect.poll(() => socketCount(page), { timeout: 12_000 }).toBe(2);
 });
 
 test('keeps Claude desktop prompt and status in the shared terminal output', async ({ page }) => {
@@ -2546,8 +2579,10 @@ async function openSizedPane(page: Page, project: string, capabilities = optInCa
 }
 
 async function showWidePane(page: Page, socket: number) {
+  const read = (await commands(page)).findLast(command => command.type === 'read_pane');
   await server(page, socket, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    request_id: read?.request_id, target: read?.target,
     content: ['resize session baseline', `${'desktop width output '.repeat(12)}end`].join('\n'),
   });
   await expect(page.getByRole('log')).toContainText('resize session baseline');
@@ -2777,6 +2812,7 @@ test('keeps renewing an opted-in lease briefly while hidden and re-leases on ret
 });
 
 test('keeps pane resizing off through hidden timers and refocus', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_resize_session', 'false'));
   await openSizedPane(page, 'Sleeping pane', ['attention_classification', 'pane_size_opt_in', 'pane_realtime_delta']);
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -3582,7 +3618,8 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
     element.dispatchEvent(new Event('touchmove', { bubbles: true }));
     element.scrollTop -= 20;
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   await frame(151);
   await expect(terminal).toContainText('near-bottom row 151');
@@ -3603,7 +3640,8 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   }
   expect(Math.abs(await terminal.evaluate((element) => element.scrollTop) - readingTop))
     .toBeLessThanOrEqual(1);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   // Scrolling partway back down is still reading, not following.
   await terminal.evaluate((element) => {
@@ -3613,8 +3651,7 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await expect(terminal).toContainText('near-bottom row 152');
   expect(await bottomDistance()).toBeGreaterThan(10);
 
-  // Jump to latest follows output again.
-  await page.getByRole('button', { name: 'Jump to latest' }).click();
+  await terminal.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
   await frame(200);
   await expect(terminal).toContainText('near-bottom row 200');
   await expect.poll(bottomDistance).toBeLessThan(2);
@@ -3622,7 +3659,8 @@ test('keeps a small scroll-up from the bottom while output streams', async ({ pa
   await terminal.evaluate((element) => {
     element.scrollTop -= 20;
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 
   // Reaching the bottom follows again, even when output lands before the scroll event.
   await terminal.evaluate((element, message) => {
@@ -3647,7 +3685,8 @@ test('renders rows after a long wheel scroll to just above the bottom', async ({
   await terminal.evaluate((element) => {
     element.scrollTop = element.scrollHeight / 2;
   });
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
   await page.waitForTimeout(300);
 
   // One big wheel scroll lands 20px above the bottom.
@@ -3666,7 +3705,8 @@ test('renders rows after a long wheel scroll to just above the bottom', async ({
   // Being near the bottom is not a request to follow output.
   expect(await terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(10);
-  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await expect.poll(() => terminal.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
 });
 
 test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
@@ -4505,15 +4545,17 @@ async function openFollowingConversation(page: Page, mode: 'conversation' | 'act
   return { list, gap, entry, deliver, latestInView };
 }
 
-for (const interaction of ['untouched', 'touch', 'near-end'] as const) {
+for (const interaction of ['untouched', 'touch', 'return-to-end'] as const) {
   test(`conversation follow-the-end streams growing partials after ${interaction}`, async ({ page }) => {
     const { list, entry, deliver, latestInView } = await openFollowingConversation(page);
     await page.waitForTimeout(350);
     if (interaction !== 'untouched') {
       await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
-      if (interaction === 'near-end') {
+      if (interaction === 'return-to-end') {
         await list.evaluate(element => { element.scrollTop -= 140; element.dispatchEvent(new Event('scroll')); });
         await list.evaluate(element => { element.scrollTop = element.scrollHeight - element.clientHeight - 18; element.dispatchEvent(new Event('scroll')); });
+        expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
+        await scrollConversationToBottom(page);
       }
       await list.dispatchEvent('pointerup', { pointerType: 'touch' });
     }
@@ -4721,23 +4763,25 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
   await expect.poll(bottomGap).toBeLessThan(2);
 
   // Reading history wins over the pin: later turns must not yank the view.
-  await list.evaluate((element) => {
+  await list.evaluate(async (element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
+  const readingTop = await list.evaluate(element => element.scrollTop);
+  const readingAnchor = await list.locator('article').first().getAttribute('data-conversation-entry-id');
   const later = [...streamed, {
     id: 'turn-62', timestamp: '2026-08-12T10:01:00Z', role: 'user', text: 'later streamed question',
   }];
   await setConversationFixture(page, { entries: later, total: later.length });
-  await expect(page.getByText('later streamed question')).toBeVisible();
-  expect(await list.evaluate((element) => element.scrollTop)).toBeLessThan(48);
+  await expect(page.getByText('later streamed question')).toHaveCount(0);
+  await expect(page.locator('.conversation-source-status').filter({ hasText: 'of 62 loaded messages.' })).toBeAttached();
+  await expect(list.locator('article').first()).toHaveAttribute('data-conversation-entry-id', readingAnchor!);
+  expect(await list.evaluate(element => element.scrollTop)).toBeCloseTo(readingTop, 0);
   expect(await bottomGap()).toBeGreaterThan(200);
 
   // Scrolling back to the end restores the pin.
-  await list.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
-    element.dispatchEvent(new Event('scroll'));
-  });
+  await scrollConversationToBottom(page);
   const final = [...later, {
     id: 'turn-63', timestamp: '2026-08-12T10:02:00Z', role: 'user', text: 'final streamed question',
   }];
@@ -4794,7 +4838,8 @@ test('loads older conversation automatically when scrolled near the top', async 
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll', { bubbles: true }));
   });
-  await expect(page.getByText('older automatic answer 11')).toBeVisible();
+  await showOlderConversationEntry(page, 'older-user-0');
+  await expect(page.getByText('older automatic answer 11')).toBeAttached();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'get_conversation_history' && command.cursor === 'older-1').length).toBe(1);
   await expect(page.getByText('Beginning of conversation reached.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Return to latest' })).toHaveCount(0);
@@ -4809,12 +4854,12 @@ test('loads older conversation automatically when scrolled near the top', async 
   await expect(page.locator('.conversation-source-status').filter({ hasText: 'of 225 loaded messages.' })).toBeAttached({ timeout: 10_000 });
   await expect(page.getByText('live message while reading history')).toHaveCount(0);
   await expect(page.getByText('older automatic question 0', { exact: true })).toBeAttached();
-  expect(await list.locator('article').count()).toBeLessThanOrEqual(200);
+  expect(await list.locator('article').count()).toBeLessThanOrEqual(24);
   expect(await list.evaluate((element) => element.scrollTop)).toBeCloseTo(readingTop, 0);
 
   await scrollConversationToBottom(page);
   await expect(page.getByText('live message while reading history')).toBeVisible();
-  expect(await list.locator('article').count()).toBeLessThanOrEqual(200);
+  expect(await list.locator('article').count()).toBeLessThanOrEqual(24);
 });
 
 test('retains a Claude continuation cursor through repeated preparation', async ({ page }) => {
@@ -4882,8 +4927,11 @@ test('retains a Claude continuation cursor through repeated preparation', async 
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll', { bubbles: true }));
   });
+  await page.getByRole('button', { name: 'Load older turns', exact: true }).click();
+  await showOlderConversationEntry(page, 'segment-b-0');
   await expect(page.getByText('complete child history 0')).toHaveCount(1);
   await expect(page.getByText('complete child history 23')).toHaveCount(1);
+  await showOlderConversationEntry(page, 'segment-a-0');
   await expect(page.getByText('complete parent history 0')).toHaveCount(1);
   await expect(page.getByText('complete parent history 23')).toHaveCount(1);
   await expect(page.getByRole('status').filter({ hasText: 'part of that history is unavailable' })).toBeVisible();
@@ -4966,9 +5014,12 @@ test('accepts the first Claude continuation and rejects a replacement cursor', a
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll', { bubbles: true }));
   });
+  await showOlderConversationEntry(page, 'accept-a-0');
+  await page.getByRole('button', { name: 'Load older turns', exact: true }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'get_conversation_history' && command.cursor === 'replacement-cursor').length).toBe(1);
   await expect(page.getByRole('alert').filter({ hasText: 'The conversation source changed while history was being browsed.' })).toBeVisible();
+  await scrollConversationToBottom(page);
   await expect(page.getByText('B continuation history 23')).toBeVisible();
   await expect(page.getByText('replacement history must not enter the old lane')).toBeHidden();
 });
@@ -5422,7 +5473,7 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await expect(page.getByRole('group', { name: 'Terminal Width' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Fit to Phone' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Original Columns' })).toHaveCount(0);
-  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('switch', { name: 'Resize Session', exact: true })).toBeChecked();
   await expect(page.getByText(/laptop and SSH views of that pane look garbled/)).toBeVisible();
   await expect(page.getByRole('switch', { name: 'Resize Session', exact: true }))
     .toHaveAccessibleDescription(/Resizing may truncate scrollback and lose older output\./);
@@ -5442,7 +5493,9 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await page.getByRole('button', { name: 'Open History app on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
     .some((command) => command.type === 'read_pane' && command.lines === 500)).toBe(true);
+  const read = (await commands(page)).findLast(command => command.type === 'read_pane')!;
   await server(page, 0, {
+    request_id: read.request_id, target: read.target,
     type: 'pane_content',
     pane_id: 'w1:p1',
     content: 'History output',
@@ -5602,7 +5655,8 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Proceed with plan' })).toBeVisible();
   const composer = page.getByRole('combobox', { name: 'Prompt' });
-  await expect(composer).toBeDisabled();
+  await expect(composer).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
 
   await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Proceed with plan' }).click();
@@ -5742,7 +5796,8 @@ test('shows a live plan question immediately without reopening the agent', async
   await expect(page.getByRole('group', { name: interaction.question })).toBeVisible();
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
   await expect(page.getByRole('radio', { name: 'Separate package' })).toBeVisible();
-  await expect(page.getByPlaceholder('Type a reply…')).toBeHidden();
+  await expect(page.getByPlaceholder('Type a reply…')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
 });
 
 test('keeps a nonfinal question mounted when a transient frame is confirmed', async ({ page }) => {
@@ -6107,7 +6162,7 @@ test('keeps the third single choice checked across live pane transitions', async
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Refresh terminal' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Attach files' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
@@ -6634,7 +6689,7 @@ test('resets the home page scroll offset before opening a terminal', async ({ pa
 });
 
 test('ignores a directory result after switching computers', async ({ page }) => {
-  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
+  const mac = { id: 'mac', label: 'Mac', url: 'ws://127.0.0.1:8872', token: '' };
   await boot(page, [fedora, mac]);
   await expect.poll(() => socketCount(page)).toBe(2);
   await handshake(page, 0);
@@ -6747,6 +6802,7 @@ test('keeps a newly launched agent open when its native session is discovered', 
     type: 'command_result', request_id: launch.request_id, ok: true, phase: 'completed',
     data: { pane_id: launched.pane_id, name: launched.name, cwd: launched.cwd },
   });
+  await page.getByRole('button', { name: 'Open project on Fedora', exact: true }).click();
   await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
   await server(page, 0, { type: 'agents', agents: [{ ...launched, generation: 2, agent_session_id: 'native-session' }] });
   await expect(page.getByRole('main', { name: 'Terminal for project' })).toBeVisible();
@@ -6836,6 +6892,7 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
       session: 'Current Session Review',
     }],
   });
+  await page.getByRole('button', { name: 'Open relay on Fedora', exact: true }).click();
   await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
   await expect.poll(() => page.evaluate(() => location.hash))
     .toBe('#pane=r3.WzMsImZlZG9yYSIsInByaW1hcnkiLCJ3MTpwMiIsInRlcm1pbmFsLXcxOnAyIiwxLCIiXQ');
@@ -6987,18 +7044,19 @@ test('keeps a saved draft across a hidden prompt but never persists what it hide
   await handshake(page, 0, { capabilities: ['attention_classification', 'secret_input'] });
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Draft app', agent: 'codex' }],
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Draft app', agent: 'codex', agent_session_id: 'draft-session' }],
   });
   const openTerminal = async () => {
     await page.getByRole('button', { name: 'Open Draft app on Fedora' }).click();
     return page.getByRole('combobox', { name: 'Prompt' });
   };
-  const paneContent = async (extra: Record<string, unknown>) => server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', ...extra,
-  });
+  const paneContent = async (extra: Record<string, unknown>) => {
+    const read = (await commands(page)).findLast(command => command.type === 'read_pane')!;
+    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', ...(extra.no_echo === true ? {} : { request_id: read.request_id, target: read.target }), format: 'ansi', ...extra });
+  };
 
   let prompt = await openTerminal();
-  await paneContent({ content: 'a shell at rest' });
+  await paneContent({ content: 'a shell at rest', no_echo: false });
   await prompt.fill('half-written instructions');
 
   // Recognition pauses persistence; it must not delete a draft it did not author.
@@ -7009,6 +7067,8 @@ test('keeps a saved draft across a hidden prompt but never persists what it hide
   await expect(page.getByRole('region', { name: 'Hidden terminal prompt' })).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
   prompt = await openTerminal();
+  await expect(prompt).toHaveValue('');
+  await paneContent({ content: 'Ready', no_echo: false });
   await expect(prompt).toHaveValue('half-written instructions');
 
   // Text authored while the prompt is up stays out of storage, even after the
@@ -7024,6 +7084,8 @@ test('keeps a saved draft across a hidden prompt but never persists what it hide
 
   await page.getByRole('button', { name: 'Back' }).click();
   prompt = await openTerminal();
+  await expect(prompt).toHaveValue('');
+  await paneContent({ content: 'Ready', no_echo: false });
   await expect(prompt).toHaveValue('half-written instructions');
 });
 
@@ -7043,7 +7105,7 @@ test('names a hidden prompt a relay cannot answer', async ({ page }) => {
 
   const prompt = page.getByRole('region', { name: 'Hidden terminal prompt' });
   await expect(prompt).toContainText('Enter passphrase:');
-  await expect(prompt).toContainText('answer it at the computer');
+  await expect(prompt).toContainText('answer at the computer');
   await expect(prompt.getByLabel('Value for the hidden terminal prompt')).toHaveCount(0);
 });
 
@@ -7107,7 +7169,7 @@ test('live conversation deltas preserve local reading, selection, tool expansion
   await table.evaluate(element => { element.scrollLeft = 180; });
   const horizontal = await table.evaluate(element => element.scrollLeft);
   await list.evaluate(element => { element.scrollTop = element.scrollHeight / 2; element.dispatchEvent(new Event('scroll')); });
-  const paragraph = list.locator('.conversation-entry').filter({ hasText: 'Paragraph 50:' });
+  const paragraph = list.locator('.conversation-entry').filter({ hasText: 'Paragraph 90:' });
   const anchorBefore = await paragraph.evaluate(element => element.getBoundingClientRect().top);
   await paragraph.evaluate(element => { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(element.querySelector('.conversation-message') || element); selection?.removeAllRanges(); selection?.addRange(range); });
   const selected = await page.evaluate(() => window.getSelection()?.toString());
@@ -7127,15 +7189,18 @@ test('live conversation deltas preserve local reading, selection, tool expansion
     await server(page, 0, { type: 'command_result', action: 'get_conversation_updates', request_id: request.request_id, ok: true, phase: 'completed', data: { subscription_id: 'fixture-subscription', kind: 'batch', source_revision: 'live-source:1', sequence: after + 1, entries: [], remove: [], state: 'generating', capabilities, ...batch } });
   };
   await deliver(0, { entries: [{ id: 'live:message', role: 'assistant', text: 'First partial', timestamp: '' }] });
-  await expect(list.getByText('First partial', { exact: true })).toBeVisible();
-  await expect(list.locator('[data-conversation-entry-id="live:message"] > small')).toHaveText('Live · not saved yet');
+  await expect(list.getByText('First partial', { exact: true })).toHaveCount(0);
   await expect(page.locator('.conversation-page > .conversation-source-status')).toHaveCount(0);
   await deliver(1, { entries: [{ id: 'live:message', role: 'assistant', text: 'Second partial', timestamp: '' }] });
-  await expect(list.getByText('Second partial', { exact: true })).toBeVisible();
+  await expect(list.getByText('Second partial', { exact: true })).toHaveCount(0);
   expect(Math.abs(await paragraph.evaluate(element => element.getBoundingClientRect().top) - anchorBefore)).toBeLessThanOrEqual(2);
   expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(selected);
   await expect(tool).toHaveAttribute('open', '');
   expect(await table.evaluate(element => element.scrollLeft)).toBe(horizontal);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  await scrollConversationToBottom(page);
+  await expect(list.getByText('Second partial', { exact: true })).toBeVisible();
+  await expect(list.locator('[data-conversation-entry-id="live:message"] > small')).toHaveText('Live · not saved yet');
   await deliver(2, { entries: [{ id: 'live:tools', role: 'assistant', text: '', timestamp: '', tools: [{ id: 'call', name: 'Progress tool', input: '{"path":"live-argument"}', output: 'progress one', state: 'running' }] }] });
   const progress = list.locator('details').filter({ hasText: 'Progress tool' });
   await expect(progress.locator('summary')).toContainText('running');
@@ -7167,9 +7232,10 @@ test('live conversation deltas preserve local reading, selection, tool expansion
   await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
   await page.evaluate(() => (window as any).__relayClose(0));
   await expect(list.getByText('Final response', { exact: true })).toHaveCount(1);
+  const firstBeforeScroll = await list.locator('article').first().getAttribute('data-conversation-entry-id');
   await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
   await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
-  expect(await list.evaluate(element => element.scrollTop)).toBeLessThan(2);
+  await expect(list.locator('article').first()).not.toHaveAttribute('data-conversation-entry-id', firstBeforeScroll!);
 });
 
 test('loaded windows retain tool expansion and table offsets without leaking state to another target', async ({ page }) => {
@@ -7188,6 +7254,7 @@ test('loaded windows retain tool expansion and table offsets without leaking sta
   await page.getByRole('button', { name: 'Full history' }).click();
   const list = page.locator('.conversation-list');
   await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+  await showOlderConversationEntry(page, 'pi:0');
   await expect(page.locator('.conversation-source-status').filter({ hasText: 'of 240 loaded messages.' })).toBeAttached();
   await scrollConversationToBottom(page);
   const article = page.locator('[data-conversation-entry-id="pi:220"]');
@@ -7199,8 +7266,9 @@ test('loaded windows retain tool expansion and table offsets without leaking sta
   const offset = await table.evaluate(element => element.scrollLeft);
   expect(offset).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'Show earlier loaded messages', exact: true }).evaluate(element => (element as HTMLElement).click());
+  await showOlderConversationEntry(page, 'pi:180');
   await expect(article).toHaveCount(0);
-  expect(await page.locator('.conversation-entry').count()).toBeLessThanOrEqual(200);
+  expect(await page.locator('.conversation-entry').count()).toBeLessThanOrEqual(24);
   await scrollConversationToBottom(page);
   await expect(tool).toHaveAttribute('open', '');
   await expect.poll(() => table.evaluate(element => element.scrollLeft)).toBe(offset);
@@ -7236,6 +7304,7 @@ for (const source of ['recorded_history', 'pi_events']) {
       await expect(branchTrust).toHaveCount(0);
     }
     await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+    await showOlderConversationEntry(page, 'entry:0');
     await expect(list.getByText('Seed message 0', { exact: true })).toBeAttached();
     await scrollConversationToBottom(page);
     await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
@@ -7249,7 +7318,7 @@ for (const source of ['recorded_history', 'pi_events']) {
     await deliver(1, [{ id: 'entry:242', role: 'assistant', text: '', timestamp: '', tools: [{ id: 'tail-tool', name: 'Appended tool', input: '{}', output: 'done' }] }]);
     await expect(list.locator('summary').filter({ hasText: 'Appended tool' })).toBeVisible();
     await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
-    expect(await list.locator('article').count()).toBeLessThanOrEqual(200);
+    expect(await list.locator('article').count()).toBeLessThanOrEqual(24);
     await list.evaluate(element => { element.dispatchEvent(new Event('pointerdown', { bubbles: true })); element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
     const anchor = await list.locator('article').first().getAttribute('data-conversation-entry-id');
     await deliver(2, [{ id: 'entry:243', role: 'assistant', text: 'While reading older', timestamp: '' }]);
@@ -7274,14 +7343,16 @@ for (const source of ['recorded_history', 'pi_events']) {
     await expect(list.locator('[data-conversation-entry-id="window:639"]')).toBeAttached();
     await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
     await expect.poll(async () => {
+      const earlier = page.getByRole('button', { name: 'Show earlier loaded messages', exact: true });
+      if (await earlier.count()) await earlier.evaluate(element => (element as HTMLElement).click());
       await list.evaluate(async element => {
         element.scrollTop = 0;
         element.dispatchEvent(new Event('scroll'));
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       });
       return list.locator('article').first().getAttribute('data-conversation-entry-id');
-    }).toBe('window:0');
-    await expect(list.locator('article')).toHaveCount(200);
+    }, { timeout: 15_000, intervals: [16] }).toBe('window:0');
+    await expect(list.locator('article')).toHaveCount(24);
     await expect(page.getByRole('button', { name: 'Jump to latest' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Show newer loaded messages' })).toHaveCount(0);
     const anchor = await list.locator('article').last().getAttribute('data-conversation-entry-id');
@@ -7291,13 +7362,13 @@ for (const source of ['recorded_history', 'pi_events']) {
       element.dispatchEvent(new Event('scroll'));
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     });
-    await expect(list.locator('article').first()).toHaveAttribute('data-conversation-entry-id', 'window:100');
+    await expect(list.locator('article').first()).toHaveAttribute('data-conversation-entry-id', 'window:12');
     const retained = list.locator(`[data-conversation-entry-id="${anchor}"]`);
     expect(Math.abs(await retained.evaluate(element => element.getBoundingClientRect().top) - await page.evaluate(() => (window as any).__bottomAnchorTop))).toBeLessThanOrEqual(2);
     expect(await list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(2);
     await scrollConversationToBottom(page);
     await expect(list.locator('[data-conversation-entry-id="window:639"]')).toBeVisible();
-    await expect(list.locator('article')).toHaveCount(200);
+    await expect(list.locator('article')).toHaveCount(24);
   });
 
   test(`reader Conversation and Full history keep ${source} updates read-only`, async ({ page }) => {
@@ -7366,7 +7437,7 @@ for (const source of ['recorded_history', 'pi_events']) {
     await page.getByRole('button', { name: 'Full history', exact: true }).click();
     const list = page.locator('.conversation-list');
 
-    await expect(list.locator('article')).toHaveCount(120);
+    await expect(list.locator('article')).toHaveCount(24);
     await expect.poll(() => list.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
     await list.dispatchEvent('pointerdown', { pointerType: 'touch' });
     await expect(page.locator('.conversation-jump')).toHaveCount(0);
@@ -7400,6 +7471,7 @@ for (const source of ['recorded_history', 'pi_events']) {
 
     await expect.poll(gap).toBeLessThan(2);
     await list.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+    await showOlderConversationEntry(page, 'scroll:0');
     await expect(list.locator('[data-conversation-entry-id="scroll:0"]')).toBeAttached();
     await scrollConversationToBottom(page);
     await expect.poll(gap).toBeLessThan(2);
@@ -7446,12 +7518,14 @@ for (const source of ['recorded_history', 'pi_events']) {
     });
     await list.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
     await page.evaluate(() => (window as any).__scrollTail);
+    await expect.poll(gap).toBeGreaterThan(2);
+    await scrollConversationToBottom(page);
     await expect.poll(gap).toBeLessThan(2);
     await expect(page.locator('.conversation-jump')).toHaveCount(0);
     await deliver(2, [{ id: 'scroll:281', role: 'assistant', text: 'Following after momentum', timestamp: '' }]);
     await expect(list.getByText('Following after momentum', { exact: true })).toBeVisible();
     await expect.poll(gap).toBeLessThan(2);
-    expect(await list.locator('article').count()).toBeLessThanOrEqual(200);
+    expect(await list.locator('article').count()).toBeLessThanOrEqual(24);
     for (let after = 3; after <= 6; after++) {
       await page.waitForTimeout(100);
       await deliver(after, [{ id: `scroll:${279 + after}`, role: 'assistant', text: `Stream continues ${after}`, timestamp: '' }]);
@@ -7467,7 +7541,7 @@ for (const source of ['recorded_history', 'pi_events']) {
   });
 }
 
-test('scroll intent: bottom arrival settles an already arriving momentum tail but fresh touch releases it', async ({ page }) => {
+test('scroll intent: upward movement releases following and explicit bottom arrival restores it', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -7496,6 +7570,8 @@ test('scroll intent: bottom arrival settles an already arriving momentum tail bu
   });
   await list.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
   await page.evaluate(() => (window as any).__momentumDone);
+  await expect.poll(gap).toBeGreaterThan(2);
+  await scrollConversationToBottom(page);
   await expect.poll(gap).toBeLessThan(2);
   await expect(page.locator('.conversation-jump')).toHaveCount(0);
   await page.waitForTimeout(350);
@@ -7610,6 +7686,7 @@ for (const mode of ['Conversation', 'Full history']) {
     await expect(draftStatus).not.toHaveClass(/error/);
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('unchecked-secret');
     await page.getByRole('button', { name: 'Terminal view' }).click();
+    await replyToPaneRead(page);
     await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveValue('safe fresh draft');
   });
 
@@ -7659,12 +7736,15 @@ for (const mode of ['Conversation', 'Full history']) {
     await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Password:', no_echo: true, no_echo_prompt: 'Password:' });
     const hidden = page.getByLabel('Value for the hidden terminal prompt');
     await expect(hidden).toHaveAttribute('type', 'password');
+    const hiddenRead = await replyToPaneRead(page, 'Password:', true);
     await prompt.fill('secret-in-wrong-field');
     await hidden.fill('masked-secret');
     await hidden.press('Enter');
     await expect.poll(async () => (await commands(page)).find(command => command.type === 'send_secret')).toMatchObject({ target: composerTarget, text: 'masked-secret' });
     await expect(hidden).toHaveValue('');
     expect((await commands(page)).filter(command => command.type === 'submit_prompt')).toEqual([]);
+    await expect.poll(async () => (await commands(page)).findLast(command => command.type === 'read_pane')?.request_id).not.toBe(hiddenRead);
+    await replyToPaneRead(page);
     await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Ready', no_echo: false });
     const draftStatus = page.locator('.prompt-composer > .draft-status');
     await expect(draftStatus).toContainText('Not saved on this phone');
@@ -7673,12 +7753,15 @@ for (const mode of ['Conversation', 'Full history']) {
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('secret-in-wrong-field');
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('masked-secret');
     await page.getByRole('button', { name: 'Terminal view' }).click();
+    await replyToPaneRead(page);
     await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveValue('safe shared draft');
     await page.getByRole('button', { name: 'Conversation history' }).click();
+    await expect(page.locator('.conversation-page')).toBeVisible();
+    await replyToPaneRead(page);
     await expect(prompt).toHaveValue('safe shared draft');
   });
 
-  test(`shared composer ${mode}: inline keyboard-accessible keys send arrows function keys and armed chords`, async ({ page }) => {
+  test(`shared composer ${mode}: terminal-only keys send arrows function keys and armed chords`, async ({ page }) => {
     const prompt = await openSharedComposer(page, mode);
     await expect(page.getByRole('button', { name: 'Keys', exact: true })).toHaveCount(0);
     await expect(page.getByRole('textbox', { name: 'Modifier shortcut character' })).toHaveCount(0);
@@ -7696,10 +7779,9 @@ for (const mode of ['Conversation', 'Full history']) {
       expect(Math.min(...boxes.map(box => box.left))).toBeGreaterThanOrEqual(rowBox.x);
       expect(Math.max(...boxes.map(box => box.right))).toBeLessThanOrEqual(rowBox.x + rowBox.width);
     };
-    await assertRow();
+    await expect(page.locator('.term-keys')).toHaveCount(0);
     await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
     await assertRow();
-    await page.getByRole('button', { name: 'Conversation history', exact: true }).click();
     for (const name of ['Esc', 'Tab', 'Enter']) {
       const key = page.getByRole('button', { name, exact: true });
       await key.focus();
@@ -7718,7 +7800,8 @@ for (const mode of ['Conversation', 'Full history']) {
   test(`shared composer ${mode}: structured questions and approvals respond without leaving history`, async ({ page }) => {
     const prompt = await openSharedComposer(page, mode);
     await server(page, 0, { ...composerTarget, type: 'blocked', attention_kind: 'question', interaction: composerQuestion, question_layout: true });
-    await expect(prompt).toBeDisabled();
+    await expect(prompt).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
     await page.getByRole('radio', { name: 'Both views' }).check();
     expect((await commands(page)).filter(command => command.type === 'answer_question')).toEqual([]);
     await page.getByRole('button', { name: 'Submit', exact: true }).click();
@@ -7735,11 +7818,15 @@ for (const mode of ['Conversation', 'Full history']) {
     await expect(prompt).toBeDisabled();
     await server(page, 0, { ...composerTarget, type: 'agent_update', status: 'working' });
     await expectNoActivityFooter(page.locator('.prompt-composer'));
-    for (const name of ['Attach photos', 'Attach files', 'Send prompt', 'Esc', 'Tab', 'Enter', 'Ctrl', 'Shift', 'Alt', 'Function keys', 'Arrow keys']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+    for (const name of ['Attach photos', 'Attach files', 'Send prompt']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
     await prompt.evaluate(element => { (element as HTMLTextAreaElement).value = '/plan'; element.dispatchEvent(new Event('input', { bubbles: true })); });
     await prompt.dispatchEvent('keydown', { key: 'Enter', ctrlKey: true });
     await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'reader.png', mimeType: 'image/png', buffer: Buffer.from('png') });
+    await expect(page.locator('.term-keys')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Terminal view', exact: true }).click();
+    for (const name of ['Esc', 'Tab', 'Enter', 'Ctrl', 'Shift', 'Alt', 'Function keys', 'Arrow keys']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
     await page.locator('.term-keys button').first().dispatchEvent('click');
+    await page.getByRole('button', { name: 'Conversation history', exact: true }).click();
     await server(page, 0, { ...composerTarget, type: 'blocked', attention_kind: 'question', interaction: composerQuestion });
     await expect(page.getByRole('radio')).toHaveCount(0);
     await server(page, 0, { ...composerTarget, type: 'blocked', attention_kind: 'approval', options: ['Approve once', 'Deny'] });
