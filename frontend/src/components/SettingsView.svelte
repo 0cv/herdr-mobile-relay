@@ -520,6 +520,13 @@
     updateOpen = false;
     if (!action || action.kind !== 'reload_app' && isReadOnlyRelay(action.relayId)) return;
     if (action.kind === 'reload_app') {
+      const risk = reloadRisk();
+      if (risk && risk !== pendingReloadRisk) {
+        pendingUpdateAction = action;
+        pendingReloadRisk = risk;
+        updateOpen = true;
+        return;
+      }
       const relayIds = relayRows.filter(({ relay }) => !isReadOnlyRelay(relay.id)).map(({ relay }) => relay.id);
       queueUpdateProgressForReload(action.targetVersion, relayIds, action.phoneTarget);
       reloadApp(action.targetVersion, action.phoneTarget);

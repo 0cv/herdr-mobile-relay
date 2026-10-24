@@ -5,6 +5,7 @@ import { terminalInputUnsettled } from './terminal-input-delivery.svelte';
 export type ReloadRisk = 'delivery' | 'draft';
 
 const checks = new Set<() => ReloadRisk | null>();
+let sendsInFlight = 0;
 
 /** Adds a check for state that only lives in this page. Returns the function that removes it. */
 export function guardReload(check: () => ReloadRisk | null): () => void {
@@ -12,8 +13,18 @@ export function guardReload(check: () => ReloadRisk | null): () => void {
   return () => { checks.delete(check); };
 }
 
+/** Holds automatic reloads until a send settles, even after the view that started it is gone. */
+export async function whileSending<T>(send: () => Promise<T>): Promise<T> {
+  sendsInFlight += 1;
+  try {
+    return await send();
+  } finally {
+    sendsInFlight -= 1;
+  }
+}
+
 export function reloadRisk(): ReloadRisk | null {
-  if (terminalInputUnsettled()) return 'delivery';
+  if (sendsInFlight || terminalInputUnsettled()) return 'delivery';
   let risk: ReloadRisk | null = unsavedPromptDraft() ? 'draft' : null;
   for (const check of checks) {
     const found = check();

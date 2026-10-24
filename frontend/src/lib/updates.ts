@@ -496,6 +496,7 @@ function heldReloadMessage(risk: ReloadRisk): string {
 }
 
 let automaticReload: Promise<boolean> | null = null;
+let heldReload = '';
 // Every caller waiting on the running reload adds its own check; the reload goes ahead if any still wants it.
 let automaticReloadWanted: Array<() => boolean> = [];
 
@@ -545,6 +546,7 @@ export function reloadUpdatedSameOriginApp(
   target: PhoneAppTarget | null = null,
   stillWanted: () => boolean = () => true,
 ): Promise<boolean> {
+  if (!automaticReload) heldReload = '';
   const requested = requestedPhoneTarget(version, target);
   if (!phoneTargetIsNewer(requested)) return Promise.resolve(false);
   const key = reloadTargetKey(requested);
@@ -586,7 +588,8 @@ export function reloadUpdatedSameOriginApp(
     if (!automaticReloadWanted.some((wanted) => wanted())) return false;
     const risk = reloadRisk();
     if (risk) {
-      setPhoneUpdateError(heldReloadMessage(risk));
+      heldReload = heldReloadMessage(risk);
+      setPhoneUpdateError(heldReload);
       return false;
     }
     setPhoneUpdateTarget(actualTarget);
@@ -597,6 +600,11 @@ export function reloadUpdatedSameOriginApp(
     automaticReloadWanted = [];
   });
   return automaticReload;
+}
+
+/** Why the last automatic reload waited instead of navigating, or '' if it did not wait for that reason. */
+export function reloadHeldMessage(): string {
+  return heldReload;
 }
 
 /**
@@ -625,8 +633,7 @@ export async function importOrReload<T>(load: () => Promise<T>, stillWanted: () 
         // The page is now navigating to the deployed build, so this load never finishes.
         return new Promise<T>(() => {});
       }
-      const risk = reloadRisk();
-      if (risk) throw new AppReloadHeld(heldReloadMessage(risk));
+      if (heldReload) throw new AppReloadHeld(heldReload);
     }
     throw error;
   }

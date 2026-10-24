@@ -58,7 +58,9 @@
     initializeAppUpdates,
     pendingRelayUpdate,
     relayServesCurrentOrigin,
+    reloadHeldMessage,
     reloadUpdatedSameOriginApp,
+    type PhoneAppTarget,
   } from '$lib/updates';
   import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
   import type { ViewState } from '$lib/router';
@@ -369,6 +371,13 @@
     }
   });
 
+  function reloadIntoUpdate(version: string, target: PhoneAppTarget | null) {
+    void reloadUpdatedSameOriginApp(version, target).then((reloaded) => {
+      const held = reloadHeldMessage();
+      if (!reloaded && held) relayStore.showToast(held, true);
+    });
+  }
+
   $effect(() => {
     for (const [relayId, connection] of $connections) {
       if (connection.status !== 'connected') continue;
@@ -386,7 +395,7 @@
             build: $appUpdates.deployedBuild || '',
           }
           : null;
-        void reloadUpdatedSameOriginApp(pending.version, target);
+        reloadIntoUpdate(pending.version, target);
       }
     }
   });
@@ -413,7 +422,7 @@
           build: $appUpdates.deployedBuild || '',
         }
         : null;
-      void reloadUpdatedSameOriginApp(deployment.target_version, target);
+      reloadIntoUpdate(deployment.target_version, target);
     }
   });
 

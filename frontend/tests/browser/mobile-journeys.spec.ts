@@ -3999,6 +3999,36 @@ test('keeps an unconfirmed terminal send fenced instead of reloading when a depl
   expect(new URL(deploy.reloads[0]).searchParams.get('herdr_reload')).toContain(APP_RELEASE);
 });
 
+test('explains why a finished deploy did not reload over an unsaved draft', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  await page.route('**/version.json?*', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ version: APP_RELEASE, assets: APP_METADATA.assets + 1 }),
+  }));
+  const reloads: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).searchParams.has('herdr_reload')) reloads.push(request.url());
+  });
+  await boot(page, [fedora]);
+  const origin = new URL(page.url()).origin;
+  const appDeploy = { configured: true, origin, project: 'herdr-app', branch: 'main', revision: 'f'.repeat(40) };
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history', 'app_deploy'], app_deploy: { ...appDeploy, state: 'idle' } });
+  await server(page, 0, deployedAppAgents());
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  const prompt = page.getByLabel('Prompt', { exact: true });
+  await prompt.fill('draft this phone has not saved');
+  await expect(page.getByText(/^Not saved on this phone/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Settings, phone app update available/ })).toBeVisible();
+  await markCurrentDocument(page);
+  await server(page, 0, { type: 'app_deploy_status', app_deploy: { ...appDeploy, state: 'succeeded', target_version: APP_RELEASE } });
+  await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(reloads).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
+  await expect(prompt).toHaveValue('draft this phone has not saved');
+});
+
 test('opens the deployed build when a deploy removed the question controls', async ({ page }) => {
   const interaction = {
     id: 'deploy-question', kind: 'single_select', question: 'Which build should run?',

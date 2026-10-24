@@ -2,7 +2,7 @@ import { get } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
 import { clearPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
-import { guardReload } from '$lib/reload-guard';
+import { guardReload, whileSending } from '$lib/reload-guard';
 import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import type { Agent } from '$lib/types';
 import {
@@ -29,6 +29,7 @@ import {
   phoneTargetMatchesCurrent,
   rememberPendingRelayUpdate,
   relayNeedsManualBootstrap,
+  reloadHeldMessage,
   reloadUpdatedSameOriginApp,
   semverTuple,
   restoreUpdateProgress,
@@ -560,6 +561,30 @@ describe('release updates', () => {
         clearPromptDraft(draft);
       });
 
+      it('holds the reload while a send runs, even after the view that started it is gone', async () => {
+        const replace = deployNewerBuild();
+        let finish: () => void = () => {};
+        const send = whileSending(() => new Promise<void>((resolve) => { finish = resolve; }));
+        await expectHeld(replace, 'A send to a terminal is not confirmed yet');
+        finish();
+        await send;
+        await expectReload(replace);
+      });
+
+      it('keeps the load error when automatic reloads are used up for another reason', async () => {
+        const replace = deployNewerBuild();
+        const key = `${APP_VERSION}:next-build`;
+        sessionStorage.setItem('herdr_app_reload_target', key);
+        sessionStorage.setItem('herdr_app_reload_attempts', JSON.stringify({ [key]: 2 }));
+        const release = guardReload(() => 'draft');
+        const failed = importOrReload(missing, () => true);
+        await expect(failed).rejects.toThrow('chunk removed');
+        await expect(failed).rejects.not.toBeInstanceOf(AppReloadHeld);
+        expect(reloadHeldMessage()).toBe('');
+        expect(replace).not.toHaveBeenCalled();
+        release();
+      });
+
       it('holds the reload for text or sends a mounted view reports', async () => {
         const replace = deployNewerBuild();
         let risk: 'delivery' | 'draft' | null = 'draft';
@@ -579,6 +604,7 @@ describe('release updates', () => {
         await expect(reloadUpdatedSameOriginApp(target.version, target)).resolves.toBe(false);
         expect(replace).not.toHaveBeenCalled();
         expect(get(updateProgressPlan)).toMatchObject({ phoneState: 'failed', phoneError: expect.stringContaining('A draft is not saved on this phone') });
+        expect(reloadHeldMessage()).toContain('A draft is not saved on this phone');
         release();
       });
     });
