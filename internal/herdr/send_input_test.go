@@ -11,7 +11,7 @@ import (
 )
 
 func TestSendInputUsesOfficialPasteAwareRequest(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "herdr.sock")
+	path := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestSendInputUsesOfficialPasteAwareRequest(t *testing.T) {
 }
 
 func TestSendInputWrittenStructuredErrorIsDispatchedUnknown(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "herdr.sock")
+	path := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)

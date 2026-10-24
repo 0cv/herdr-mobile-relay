@@ -8,7 +8,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" && os.Getenv("TMPDIR") == "" {
 		if tempDir, err := filepath.EvalSymlinks("/tmp"); err == nil {
 			_ = os.Setenv("TMPDIR", tempDir)
 		}

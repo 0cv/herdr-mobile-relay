@@ -74,7 +74,10 @@ func ttyPath(output []byte) (string, error) {
 		return "", ErrTTYUnavailable
 	}
 	clean := filepath.Clean(tty)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+	if clean != tty || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") ||
+		strings.IndexFunc(tty, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '/' || c == '_' || c == '-')
+		}) != -1 {
 		return "", ErrTTYUnavailable
 	}
 	return filepath.Join("/dev", clean), nil

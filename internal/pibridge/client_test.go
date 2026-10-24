@@ -18,7 +18,7 @@ func fmtPID(pid int) string { return strconv.Itoa(pid) }
 
 func testEndpoint(t *testing.T, change func(*Response), raw string, delay time.Duration) (string, Identity) {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "pi-bridge-")
+	dir, err := os.MkdirTemp("", "pi-")
 	if err != nil {
 		t.Fatal(err)
 	}

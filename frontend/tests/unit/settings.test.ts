@@ -16,7 +16,7 @@ import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
-import { defaultAgentView, paneAgentViewOverrides, setTerminalResizeSession } from '$lib/preferences';
+import { defaultAgentView, paneAgentViewOverrides, readTerminalResizeSession, setTerminalResizeSession } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -58,6 +58,22 @@ class MockWebSocket {
 }
 
 describe('settings relay status', () => {
+  it('exposes Pi Integration per connected relay with reader access kept read-only', async () => {
+    const credential = vi.spyOn(relayStore, 'deviceCredential').mockReturnValue({ role: 'reader', deviceId: 'device' } as never);
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({ type: 'command_result', request_id: 'pi-setting', ok: true,
+      data: { instance: 'synthetic', enabled: true, profiles: [] } });
+    try {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
+      await waitFor(() => expect(toggle).toBeChecked());
+      expect(toggle).toBeDisabled();
+      expect(send).toHaveBeenCalledWith(get(relayStore.relayConfigs)[0].id, { type: 'get_pi_integration' });
+    } finally { credential.mockRestore(); send.mockRestore(); }
+  });
+
   const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
 
   beforeEach(() => {
@@ -82,7 +98,7 @@ describe('settings relay status', () => {
       checkedAt: 123,
       error: '',
     });
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
+    relayStore.addRelay({ label: 'Fedora', url: 'ws://127.0.0.1:8871', token: '' });
   });
 
   afterEach(() => {
@@ -141,7 +157,7 @@ describe('settings relay status', () => {
     expect(screen.getByText('Push: waiting for relay…')).toBeInTheDocument();
 
     socket.open();
-    relayStore.setPushStatus('fedora-wss-fedora-example', 'sent');
+    relayStore.setPushStatus(get(relayStore.relayConfigs)[0].id, 'sent');
     await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
     expect(screen.getByText('Push: syncing…')).toBeInTheDocument();
 
@@ -329,7 +345,7 @@ describe('settings relay status', () => {
     const socket = MockWebSocket.instances[0];
     socket.open();
 
-    expect(await screen.findByText('Connection: relay URL fedora.example')).toBeInTheDocument();
+    expect(await screen.findByText('Connection: relay URL 127.0.0.1:8871')).toBeInTheDocument();
   });
 
   it('shows active and latest gateway versions without regressing to an older upstream', async () => {
@@ -528,7 +544,8 @@ describe('settings relay status', () => {
     await user.click(refresh.getByRole('button', { name: '250 ms' }));
   });
 
-  it('offers Resize Session as a disclosed opt-in with a subordinate height switch', async () => {
+  it('offers Resize Session on by default with a subordinate height switch', async () => {
+    setTerminalResizeSession(readTerminalResizeSession());
     const user = userEvent.setup();
     render(SettingsView);
 
@@ -536,8 +553,9 @@ describe('settings relay status', () => {
     expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
     const resize = screen.getByRole('switch', { name: 'Resize Session' });
-    expect(resize).not.toBeChecked();
+    expect(resize).toBeChecked();
     for (const disclosure of [
+      /On by default, saved on this device\./,
       /Resizes the shared terminal to fit this phone while the phone has it open\./,
       /the laptop and SSH views of that pane look garbled/,
       /agents may leave narrow copies of their output in the scrollback/,
@@ -548,7 +566,11 @@ describe('settings relay status', () => {
     ]) expect(resize).toHaveAccessibleDescription(disclosure);
     const height = screen.getByRole('switch', { name: 'Lease Terminal Height' });
     expect(height).toBeDisabled();
+    expect(height).not.toBeChecked();
 
+    await user.click(resize);
+    expect(resize).not.toBeChecked();
+    expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('false');
     await user.click(resize);
     expect(resize).toBeChecked();
     expect(localStorage.getItem(TERMINAL_RESIZE_SESSION_KEY)).toBe('true');

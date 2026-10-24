@@ -83,7 +83,7 @@ func TestFilterDelivery(t *testing.T) {
 		{"long", "", strings.Repeat("g", 33), "", "failed", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			socket := filepath.Join(t.TempDir(), "api.sock")
+			socket := filepath.Join(testSocketDir(t), "api.sock")
 			listener, err := net.Listen("unix", socket)
 			if err != nil {
 				t.Fatal(err)

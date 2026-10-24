@@ -5,7 +5,6 @@
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
   import AgentRail from '$components/AgentRail.svelte';
-  import LaunchView from '$components/LaunchView.svelte';
   import GlobalJump from '$components/GlobalJump.svelte';
   import LockScreen from '$components/LockScreen.svelte';
   import ManageDialog from '$components/ManageDialog.svelte';
@@ -645,6 +644,18 @@
             <path d="m7 9 3 3-3 3M12 15h5"></path>
           </svg>
         </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Inspect workspace"
+          disabled={!workspaceInspectionAvailable}
+          title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
+          onclick={() => { workspaceOpen = true; }}
+        >
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3 5.5h7l2 2h9v11H3z"></path>
+          </svg>
+        </Button>
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else}
         <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => toggle('workspaces')}>
@@ -678,12 +689,18 @@
   {:else if $currentView.view === 'workspaces'}
     <WorkspaceManager {readOnlyRelayIds} />
   {:else if $currentView.view === 'launch'}
-    <LaunchView
-      relayId={$currentView.relayId}
-      workspaceId={$currentView.workspaceId}
-      cwd={$currentView.cwd}
-      {readOnlyRelayIds}
-    />
+    {#await import('$components/LaunchView.svelte')}
+      <main class="page" aria-label="Opening launch form"><p role="status">Loading launch form…</p></main>
+    {:then { default: LaunchView }}
+      <LaunchView
+        relayId={$currentView.relayId}
+        workspaceId={$currentView.workspaceId}
+        cwd={$currentView.cwd}
+        {readOnlyRelayIds}
+      />
+    {:catch}
+      <main class="page"><p role="alert">The launch form could not be loaded. Reload the app to try again.</p></main>
+    {/await}
   {:else if $currentView.view === 'activity'}
     <ActivityView />
   {:else if $currentView.view === 'activity_detail'}
@@ -696,6 +713,8 @@
         <HistoryComponent
           agent={activeAgent}
           readOnly={activeReadOnly}
+          frame={$frames.get(activeAgent.pane_id)}
+          responding={$responding}
           onInitialPage={openingRoute.fallbackToTerminalOnInitialUnavailable
             ? makeInitialPageHandler(openingRoute)
             : undefined}

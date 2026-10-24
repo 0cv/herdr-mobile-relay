@@ -73,10 +73,11 @@ func parseHermesSkillMetadata(metadata map[string]string, dirName, source string
 }
 
 func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	reader := newCatalogReader()
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(hermesBuiltins))
 		copy(builtins, hermesBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 
 	commands := make([]Command, 0, len(hermesBuiltins))
@@ -97,7 +98,7 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			projectRoot = gitRoot
 		}
 		projectSkills := filepath.Join(projectRoot, ".hermes", "skills")
-		cmds, trunc := scanHermesSkillDirBudget(projectSkills, "project", projectRoot, &budget)
+		cmds, trunc := reader.scanHermesSkillDirBudget(projectSkills, "project", projectRoot, &budget)
 		for _, cmd := range cmds {
 			if !seen[cmd.Command] {
 				seen[cmd.Command] = true
@@ -109,9 +110,9 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	// Hermes keeps the active profile's skills under its Hermes home. An
 	// explicit HERMES_HOME wins; otherwise honor the sticky profile selection.
-	if home := hermesHome(ctx); home != "" {
+	if home := reader.hermesHome(ctx); home != "" {
 		personalSkills := filepath.Join(home, "skills")
-		cmds, trunc := scanHermesSkillDirBudget(personalSkills, "personal", "", &budget)
+		cmds, trunc := reader.scanHermesSkillDirBudget(personalSkills, "personal", "", &budget)
 		for _, cmd := range cmds {
 			if !seen[cmd.Command] {
 				seen[cmd.Command] = true
@@ -127,7 +128,7 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		if format == "" {
 			format = "/{name}"
 		}
-		custom, trunc := discoverGenericSkills(ctx.SkillDirs, format)
+		custom, trunc := reader.discoverGenericSkills(ctx.SkillDirs, format)
 		for _, cmd := range custom {
 			if !seen[cmd.Command] {
 				seen[cmd.Command] = true
@@ -137,10 +138,10 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		truncated = truncated || trunc
 	}
 
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
 
-func hermesHome(ctx DiscoverContext) string {
+func (reader *catalogReader) hermesHome(ctx DiscoverContext) string {
 	envHome := strings.TrimSpace(os.Getenv("HERMES_HOME"))
 	if ctx.Home == "" && envHome == "" {
 		return ""
@@ -156,8 +157,8 @@ func hermesHome(ctx DiscoverContext) string {
 		return ""
 	}
 
-	data, err := os.ReadFile(filepath.Join(defaultHome, "active_profile"))
-	if err != nil {
+	data, ok := reader.readPath(filepath.Join(defaultHome, "active_profile"), maxMetadataSize, maxMetadataSize+1)
+	if !ok {
 		return defaultHome
 	}
 	profile := strings.ToLower(strings.TrimSpace(string(data)))
@@ -172,8 +173,8 @@ func hermesHome(ctx DiscoverContext) string {
 	return profileHome
 }
 
-func scanHermesSkillDirBudget(root, source, boundary string, budget *int) ([]Command, bool) {
-	if root == "" || *budget <= 0 {
+func (reader *catalogReader) scanHermesSkillDirBudget(root, source, boundary string, budget *int) ([]Command, bool) {
+	if root == "" || *budget <= 0 || reader.truncated {
 		return nil, *budget <= 0
 	}
 	var commands []Command
@@ -183,7 +184,7 @@ func scanHermesSkillDirBudget(root, source, boundary string, budget *int) ([]Com
 
 	var scan func(string)
 	scan = func(dir string) {
-		if *budget <= 0 {
+		if *budget <= 0 || reader.truncated {
 			truncated = true
 			return
 		}
@@ -206,7 +207,7 @@ func scanHermesSkillDirBudget(root, source, boundary string, budget *int) ([]Com
 
 		skillFile := filepath.Join(dir, "SKILL.md")
 		if skillInfo, err := os.Stat(skillFile); err == nil && skillInfo.Mode().IsRegular() {
-			metadata, resolved, ok := scopedSkillMetadata(
+			metadata, resolved, ok := reader.scopedSkillMetadata(
 				filepath.Dir(dir), filepath.Base(dir), source, boundary,
 			)
 			if !ok || seenFiles[resolved] {
@@ -225,7 +226,7 @@ func scanHermesSkillDirBudget(root, source, boundary string, budget *int) ([]Com
 			return
 		}
 		for _, entry := range entries {
-			if *budget <= 0 {
+			if *budget <= 0 || reader.truncated {
 				truncated = true
 				return
 			}

@@ -201,7 +201,11 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 	request := struct {
 		Identity
 		Challenge string `json:"challenge"`
-	}{identity, challenge}
+		Operation string `json:"operation"`
+	}{identity, challenge, "catalog"}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		return result, err
 	}
@@ -212,13 +216,11 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 	if len(data) > MaxBytes {
 		return result, errors.New("bridge response too large")
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil {
+	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return result, errors.New("trailing bridge data")
+	if err := decodeBridge(data, &result); err != nil {
+		return result, err
 	}
 	after, err := owned(path, true)
 	if err != nil || !os.SameFile(before, after) {
@@ -242,6 +244,18 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 		result.Commands[index].Provenance.BaseDir = sanitizePath(entry.Provenance.BaseDir)
 	}
 	return result, nil
+}
+
+func decodeBridge(data []byte, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return errors.New("trailing bridge data")
+	}
+	return nil
 }
 
 func validate(entry slashcmd.RuntimeCommand) error {

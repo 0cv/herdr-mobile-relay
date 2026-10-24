@@ -104,7 +104,7 @@ go-check:
 backend-check: go-check shell-check production-path-audit
 
 shell-check:
-	bun test tests/pi-command-bridge.test.mjs
+	bun test tests/pi-command-bridge.test.mjs tests/pi-prompt.test.mjs tests/pi-activity.test.mjs tests/pi-notices.test.mjs
 	bash tests/test_pi_commands.sh
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
 	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done

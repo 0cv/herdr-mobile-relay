@@ -269,11 +269,15 @@ func (s *snapshotIndex) applyRecords(agent, revision string, records []JSONLReco
 		visible := role != "" && (body != "" || len(calls) > 0)
 		if visible {
 			body, truncated := clampText(body, maxEntryBytes)
+			kind := ""
+			if role == "notice" {
+				kind, role = "notice", "assistant"
+			}
 			value := projectedEntry{
 				Offset: record.Start,
 				Entry: Entry{
 					ID: browserEntryID(revision, record.Start, record.Raw), Timestamp: timestamp,
-					Role: role, Text: body, Tools: calls,
+					Kind: kind, Role: role, Text: body, Tools: calls,
 					Truncated: truncated || omittedTools > 0 || omittedPayloads > 0,
 				},
 			}

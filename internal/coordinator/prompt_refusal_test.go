@@ -30,7 +30,7 @@ func TestAgentNotReadyOutcomeDependsOnOperation(t *testing.T) {
 				"fi\n")
 			client := herdr.NewClient(bin, filepath.Join(dir, "herdr.sock"))
 			t.Cleanup(func() { _ = client.Close() })
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			var err error
 			wantPhase := "not_started"

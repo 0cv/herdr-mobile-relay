@@ -1,0 +1,23 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1791936000000}
+{"type":"context.append_message","agentId":"main","message":{"id":"keep","role":"user","content":[{"type":"text","text":"Keep this turn."}],"toolCalls":[],"origin":{"kind":"user"}},"time":1791936001000}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"keep-step"},"time":1791936001100}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"keep-step","part":{"type":"text","text":"Kept response."}},"time":1791936001200}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.end","uuid":"keep-step"},"time":1791936001300}
+{"type":"context.append_message","agentId":"main","message":{"id":"abandoned","role":"user","content":[{"type":"text","text":"ABANDONED_MAIN_PROMPT"}],"toolCalls":[],"origin":{"kind":"user"}},"time":1791936002000}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"abandoned-step"},"time":1791936002100}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"abandoned-step","part":{"type":"text","text":"ABANDONED_MAIN_RESPONSE"}},"time":1791936002200}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.end","uuid":"abandoned-step"},"time":1791936002300}
+{"type":"agent.switched","agentId":"main","branch":"b1","reason":"undo","base":{"branch":"main","line":5},"turns":1,"legacyUndoLine":11,"time":1791936003000}
+{"type":"context.undo","agentId":"main","count":1,"time":1791936003000}
+{"type":"context.undone","agentId":"main","turns":1,"fromTurnId":1,"time":1791936003000}
+{"type":"context.append_message","agentId":"main","message":{"id":"replacement","role":"user","content":[{"type":"text","text":"ABANDONED_B1_PROMPT"}],"toolCalls":[],"origin":{"kind":"user"}},"time":1791936004000}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"replacement-step"},"time":1791936004100}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"replacement-step","part":{"type":"text","text":"ABANDONED_B1_RESPONSE"}},"time":1791936004200}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.end","uuid":"replacement-step"},"time":1791936004300}
+{"type":"agent.switched","agentId":"main","branch":"b2","reason":"undo","base":{"branch":"b1","line":12},"turns":1,"legacyUndoLine":18,"time":1791936005000}
+{"type":"context.undo","agentId":"main","count":1,"time":1791936005000}
+{"type":"context.undone","agentId":"main","turns":1,"fromTurnId":2,"time":1791936005000}
+{"type":"context.append_message","agentId":"main","message":{"id":"final","role":"user","content":[{"type":"text","text":"Final branch prompt."}],"toolCalls":[],"origin":{"kind":"user"}},"time":1791936006000}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"final-step"},"time":1791936006100}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","stepUuid":"final-step","part":{"type":"text","text":"Final branch response."}},"time":1791936006200}
+{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.end","uuid":"final-step"},"time":1791936006300}
