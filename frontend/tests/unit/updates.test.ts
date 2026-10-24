@@ -1,7 +1,12 @@
 import { get } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
+import { clearPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
+import { guardReload, holdReloadsWhileSending } from '$lib/reload-guard';
+import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
+import type { Agent } from '$lib/types';
 import {
+  AppReloadHeld,
   acknowledgePhoneUpdate,
   appUpdateAvailable,
   beginUpdateProgress,
@@ -11,6 +16,7 @@ import {
   initializeAppUpdates,
   clearPendingRelayUpdate,
   clearUpdateProgress,
+  importOrReload,
   newerBundle,
   newerVersion,
   normalizeAppDeployment,
@@ -23,6 +29,7 @@ import {
   phoneTargetMatchesCurrent,
   rememberPendingRelayUpdate,
   relayNeedsManualBootstrap,
+  reloadHeldMessage,
   reloadUpdatedSameOriginApp,
   semverTuple,
   restoreUpdateProgress,
@@ -437,6 +444,181 @@ describe('release updates', () => {
     expect(fetcher).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
+  });
+
+  it('reloads while any waiting caller still wants it', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const target = { version: `${major}.${minor + 1}.${patch}`, assets: 1, build: 'next-build' };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ({ ok: true, json: async () => target })));
+    const replace = vi.fn();
+    vi.stubGlobal('location', { href: 'https://app.example/#history=pane', replace });
+    let conversationOpen = true;
+
+    const conversation = reloadUpdatedSameOriginApp(target.version, target, () => conversationOpen);
+    const relayUpdate = reloadUpdatedSameOriginApp(target.version, target);
+    conversationOpen = false;
+
+    await expect(conversation).resolves.toBe(true);
+    await expect(relayUpdate).resolves.toBe(true);
+    expect(sessionStorage.getItem('herdr_app_reload_target')).toBe(`${target.version}:next-build`);
+    expect(replace).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('does not reload when no waiting caller still wants it', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const target = { version: `${major}.${minor + 1}.${patch}`, assets: 1, build: 'next-build' };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ({ ok: true, json: async () => target })));
+
+    const first = reloadUpdatedSameOriginApp(target.version, target, () => false);
+    const second = reloadUpdatedSameOriginApp(target.version, target, () => false);
+
+    await expect(first).resolves.toBe(false);
+    await expect(second).resolves.toBe(false);
+    expect(sessionStorage.getItem('herdr_app_reload_target')).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  describe('importOrReload', () => {
+    const missing = () => Promise.reject(new Error('chunk removed'));
+    const respondWith = (metadata: Record<string, unknown>) => vi.fn()
+      .mockImplementation(async () => ({ ok: true, json: async () => metadata }));
+
+    it('returns the loaded module without checking for a deploy', async () => {
+      const fetcher = vi.fn();
+      vi.stubGlobal('fetch', fetcher);
+      await expect(importOrReload(async () => 'module', () => true)).resolves.toBe('module');
+      expect(fetcher).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it('keeps the load error when no newer build is deployed', async () => {
+      const fetcher = respondWith({ version: APP_VERSION, assets: APP_ASSET_VERSION, build: APP_BUILD_ID });
+      vi.stubGlobal('fetch', fetcher);
+      await expect(importOrReload(missing, () => true)).rejects.toThrow('chunk removed');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(sessionStorage.getItem('herdr_app_reload_target')).toBeNull();
+      vi.unstubAllGlobals();
+    });
+
+    it('keeps the load error when the part is no longer wanted', async () => {
+      vi.stubGlobal('fetch', respondWith({ version: APP_VERSION, assets: APP_ASSET_VERSION + 1, build: 'next-build' }));
+      await expect(importOrReload(missing, () => false)).rejects.toThrow('chunk removed');
+      expect(sessionStorage.getItem('herdr_app_reload_target')).toBeNull();
+      vi.unstubAllGlobals();
+    });
+
+    it('keeps the update status when the version cannot be read', async () => {
+      const before = get(appUpdateStatus);
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
+      await expect(importOrReload(missing, () => true)).rejects.toThrow('chunk removed');
+      expect(get(appUpdateStatus)).toBe(before);
+      vi.unstubAllGlobals();
+    });
+
+    describe('with work a reload would lose', () => {
+      const pane = (name: string): Agent => ({
+        relay_id: 'reload-guard', relay_label: 'Guard', raw_pane_id: name, pane_id: `reload-guard::${name}`,
+        server_session_id: 'primary', terminal_id: 'terminal', generation: 1, agent_session_id: 'session', agent: 'codex', cwd: '/work',
+      });
+      const deployNewerBuild = () => {
+        vi.stubGlobal('fetch', respondWith({ version: APP_VERSION, assets: APP_ASSET_VERSION + 1, build: 'next-build' }));
+        const replace = vi.fn();
+        vi.stubGlobal('location', { href: 'https://app.example/#history=pane', replace });
+        return replace;
+      };
+      const expectHeld = async (replace: ReturnType<typeof vi.fn>, reason: string) => {
+        const held = importOrReload(missing, () => true);
+        await expect(held).rejects.toBeInstanceOf(AppReloadHeld);
+        await expect(held).rejects.toThrow(reason);
+        expect(replace).not.toHaveBeenCalled();
+        expect(sessionStorage.getItem('herdr_app_reload_target')).toBeNull();
+      };
+      const expectReload = async (replace: ReturnType<typeof vi.fn>) => {
+        void importOrReload(missing, () => true);
+        await vi.waitFor(() => expect(replace).toHaveBeenCalledTimes(1));
+      };
+      afterEach(() => vi.unstubAllGlobals());
+
+      it('holds the reload while a terminal send is pending or unconfirmed', async () => {
+        const replace = deployNewerBuild();
+        const delivery = terminalInputDelivery(pane('delivery'));
+        expect(delivery.begin()).toBe(true);
+        await expectHeld(replace, 'A send to a terminal is not confirmed yet');
+        delivery.finish(true);
+        await expectHeld(replace, 'A send to a terminal is not confirmed yet');
+        expect(delivery.inspect(delivery.uncertainAt! + 1)).toBe(true);
+        await expectReload(replace);
+      });
+
+      it('holds the reload while a draft exists only in this page', async () => {
+        const replace = deployNewerBuild();
+        const draft = pane('oversize-draft');
+        expect(savePromptDraft(draft, 'x'.repeat(64 * 1_024 + 1))).toBe('too-large');
+        await expectHeld(replace, 'A draft is not saved on this phone');
+        expect(savePromptDraft(draft, 'short enough to save')).toBe('saved');
+        await expectReload(replace);
+        clearPromptDraft(draft);
+      });
+
+      it('holds the reload while a send runs, even after the view that started it is gone', async () => {
+        const replace = deployNewerBuild();
+        const sent = holdReloadsWhileSending();
+        await expectHeld(replace, 'A send to a terminal is not confirmed yet');
+        sent();
+        await expectReload(replace);
+      });
+
+      it('keeps the load error when automatic reloads are used up for another reason', async () => {
+        const replace = deployNewerBuild();
+        const key = `${APP_VERSION}:next-build`;
+        sessionStorage.setItem('herdr_app_reload_target', key);
+        sessionStorage.setItem('herdr_app_reload_attempts', JSON.stringify({ [key]: 2 }));
+        const release = guardReload(() => 'draft');
+        const failed = importOrReload(missing, () => true);
+        await expect(failed).rejects.toThrow('chunk removed');
+        await expect(failed).rejects.not.toBeInstanceOf(AppReloadHeld);
+        expect(reloadHeldMessage()).toBe('');
+        expect(replace).not.toHaveBeenCalled();
+        release();
+      });
+
+      it('holds the reload for text or sends a mounted view reports', async () => {
+        const replace = deployNewerBuild();
+        let risk: 'delivery' | 'draft' | null = 'draft';
+        const release = guardReload(() => risk);
+        await expectHeld(replace, 'A draft is not saved on this phone');
+        risk = 'delivery';
+        await expectHeld(replace, 'A send to a terminal is not confirmed yet');
+        release();
+        await expectReload(replace);
+      });
+
+      it('tells a pending phone update why it did not reload', async () => {
+        const replace = deployNewerBuild();
+        const target = { version: APP_VERSION, assets: APP_ASSET_VERSION + 1, build: 'next-build' };
+        queueUpdateProgressForReload(APP_VERSION, [], target);
+        const release = guardReload(() => 'draft');
+        await expect(reloadUpdatedSameOriginApp(target.version, target)).resolves.toBe(false);
+        expect(replace).not.toHaveBeenCalled();
+        expect(get(updateProgressPlan)).toMatchObject({ phoneState: 'failed', phoneError: expect.stringContaining('A draft is not saved on this phone') });
+        expect(reloadHeldMessage()).toContain('A draft is not saved on this phone');
+        release();
+      });
+    });
+
+    it('reloads into a newer deployed build and leaves the load pending', async () => {
+      vi.stubGlobal('fetch', respondWith({ version: APP_VERSION, assets: APP_ASSET_VERSION + 1, build: 'next-build' }));
+      const replace = vi.fn();
+      vi.stubGlobal('location', { href: 'https://app.example/#history=pane', replace });
+      let settled = false;
+      void importOrReload(missing, () => true).finally(() => { settled = true; });
+      await vi.waitFor(() => expect(sessionStorage.getItem('herdr_app_reload_target')).toBe(`${APP_VERSION}:next-build`));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+      expect(replace).toHaveBeenCalledWith(expect.stringContaining('#history=pane'));
+      vi.unstubAllGlobals();
+    });
   });
 
   it('accepts a newer asset revision without requiring its unrelated build identity', async () => {

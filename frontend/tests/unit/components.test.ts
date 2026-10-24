@@ -13,6 +13,7 @@ import LaunchView from '$components/LaunchView.svelte';
 import { CommandError, relayStore } from '$lib/store';
 import { AttachmentBatchController } from '$lib/attachments';
 import { clearPromptDraft } from '$lib/prompt-drafts';
+import { reloadRisk } from '$lib/reload-guard';
 import { targetRefForAgent } from '$lib/resource-id';
 import { setHomeLayout } from '$lib/preferences';
 import type { Agent, AgentProfile, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, SlashCommandCatalog, WorktreeListing } from '$lib/types';
@@ -632,6 +633,30 @@ describe('accessible Svelte interactions', () => {
     });
     view.unmount();
     vi.restoreAllMocks();
+  });
+
+  it('holds automatic app reloads until a sent prompt settles, even after its view closes', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    let settle: (result: CommandResult) => void = () => {};
+    vi.spyOn(relayStore, 'sendToAgent').mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    const agent: Agent = { ...blockedAgent, agent: 'codex', status: 'done', attention_kind: undefined, options: undefined };
+    const view = render(TerminalView, {
+      agent, allAgents: [agent], responding: new Set<string>(),
+      frame: { paneId: agent.pane_id, content: 'Ready for the next request.', format: 'plain' },
+    });
+    try {
+      await user.type(screen.getByPlaceholderText('Type a reply…'), 'Continue');
+      await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+      expect(relayStore.sendToAgent).toHaveBeenCalledExactlyOnceWith(agent, { type: 'submit_prompt', text: 'Continue' });
+      view.unmount();
+      expect(reloadRisk()).toBe('delivery');
+      settle({ type: 'command_result', request_id: 'held-reload', ok: true });
+      await waitFor(() => expect(reloadRisk()).not.toBe('delivery'));
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it.each(['cursor', 'codex'])('submits normal prompts when %s output mentions filtering', async (agentName) => {

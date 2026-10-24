@@ -83,7 +83,12 @@ test('literal input stays explicit in Terminal through reconnect and target swit
   await expect(button(page, 'Enter')).toHaveCount(0);
   await expect(page.getByText('Current terminal context', { exact: true })).toHaveCount(0);
   await button(page, 'Terminal view').click();
-  await prompt.fill('unrelated normal draft');
+  await expect(page.getByRole('log')).toContainText('/violet-comet');
+  // Terminal can restore the saved shared draft between fill selecting the old text and typing the new.
+  await expect(async () => {
+    await prompt.fill('unrelated normal draft');
+    await expect(prompt).toHaveValue('unrelated normal draft', { timeout: 1_000 });
+  }).toPass();
   await openManual(page);
   expect((await mutations()).length).toBe(initial);
   await page.getByText('Current terminal context', { exact: true }).click();

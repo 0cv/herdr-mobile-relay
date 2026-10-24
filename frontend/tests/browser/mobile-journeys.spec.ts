@@ -3768,6 +3768,301 @@ test('preserves unsafe prompt state for older relays without error data', async 
   await expect(prompt).toHaveValue('');
 });
 
+// A deploy since the page loaded removes the old build's lazily loaded files.
+async function removeLazyFile(page: Page, file: string, { newerBuild, missingRequests = Infinity }: {
+  newerBuild: boolean;
+  missingRequests?: number;
+}) {
+  const deploy = { fileRequests: 0, versionRequests: 0, reloads: [] as string[] };
+  await page.route(`**/assets/${file}-*.js`, (route) => {
+    deploy.fileRequests += 1;
+    return deploy.fileRequests <= missingRequests ? route.fulfill({ status: 404, body: '' }) : route.continue();
+  });
+  await page.route('**/version.json?*', (route) => {
+    deploy.versionRequests += 1;
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ version: APP_RELEASE, assets: APP_METADATA.assets + (newerBuild ? 1 : 0) }),
+    });
+  });
+  page.on('request', (request) => {
+    if (new URL(request.url()).searchParams.has('herdr_reload')) deploy.reloads.push(request.url());
+  });
+  return deploy;
+}
+
+function deployedAppAgents(status = 'working') {
+  return {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status, project: 'Deployed app', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  };
+}
+
+async function connectDeployedApp(page: Page) {
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, deployedAppAgents());
+}
+
+async function markCurrentDocument(page: Page) {
+  await page.evaluate(() => { (window as any).__beforeReload = true; });
+}
+
+async function waitForReloadedDocument(page: Page) {
+  await expect.poll(async () => {
+    try {
+      return await page.evaluate(() => !(window as any).__beforeReload && (window as any).__relaySockets?.length === 1);
+    } catch {
+      return false;
+    }
+  }).toBe(true);
+}
+
+test('opens the deployed build when a deploy removed the conversation view', async ({ page }) => {
+  const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: true, missingRequests: 1 });
+  await boot(page, [fedora]);
+  await connectDeployedApp(page);
+  await markCurrentDocument(page);
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  await waitForReloadedDocument(page);
+  expect(new URL(deploy.reloads[0]).searchParams.get('herdr_reload')).toContain(APP_RELEASE);
+  await connectDeployedApp(page);
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'could not be loaded' })).toHaveCount(0);
+  expect(deploy.fileRequests).toBe(2);
+});
+
+test('opens Terminal when the conversation view cannot load without a deploy', async ({ page }) => {
+  const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: false });
+  await boot(page, [fedora]);
+  await connectDeployedApp(page);
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Deployed app' })).toBeVisible();
+
+  // Asking for Conversation explicitly shows the error, and agent updates do not check for a deploy again.
+  const checksBefore = deploy.versionRequests;
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Conversation history could not be loaded' })).toBeVisible();
+  for (const status of ['idle', 'working', 'idle', 'working', 'idle']) await server(page, 0, deployedAppAgents(status));
+  await page.waitForTimeout(500);
+  expect(deploy.versionRequests).toBe(checksBefore + 1);
+
+  // The error belongs to that opening: opening the agent again from Search falls back to Terminal.
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  const jump = page.getByRole('dialog', { name: 'Jump to agent' });
+  await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Deployed app');
+  await jump.getByRole('button', { name: /Deployed app/ }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Deployed app' })).toBeVisible();
+  expect(deploy.versionRequests).toBe(checksBefore + 2);
+  expect(deploy.reloads).toEqual([]);
+});
+
+test('opens Terminal instead of reloading again once the automatic reloads are used up', async ({ page }) => {
+  const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: true });
+  await page.addInitScript((version) => {
+    sessionStorage.setItem('herdr_app_reload_target', version);
+    sessionStorage.setItem('herdr_app_reload_attempts', JSON.stringify({ [version]: 2 }));
+  }, APP_RELEASE);
+  await boot(page, [fedora]);
+  await connectDeployedApp(page);
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Deployed app' })).toBeVisible();
+  expect(deploy.reloads).toEqual([]);
+});
+
+for (const stage of ['version check', 'deploy check'] as const) {
+  test(`does not reload a removed conversation view when the user leaves during the ${stage}`, async ({ page }) => {
+    await page.route('**/assets/ConversationHistory-*.js', (route) => route.fulfill({ status: 404, body: '' }));
+    let releaseHeld: () => void = () => {};
+    const held = new Promise<void>((resolve) => { releaseHeld = resolve; });
+    let holdFrom = Infinity;
+    let versionRequests = 0;
+    let versionResponses = 0;
+    await page.route('**/version.json?*', async (route) => {
+      versionRequests += 1;
+      if (versionRequests >= holdFrom) await held;
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ version: APP_RELEASE, assets: APP_METADATA.assets + 1 }),
+      });
+      versionResponses += 1;
+    });
+    const reloads: string[] = [];
+    page.on('request', (request) => {
+      if (new URL(request.url()).searchParams.has('herdr_reload')) reloads.push(request.url());
+    });
+    await boot(page, [fedora]);
+    await connectDeployedApp(page);
+    await expect.poll(() => versionResponses).toBeGreaterThan(0);
+    // The version check is the first request after the failed load; the deploy check comes next.
+    holdFrom = versionRequests + (stage === 'version check' ? 1 : 2);
+    await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+    await expect.poll(() => versionRequests).toBe(holdFrom);
+    await page.goBack();
+    await expect(page.getByRole('button', { name: 'Open Deployed app on Fedora' })).toBeVisible();
+    releaseHeld();
+    // The deploy check reads the version twice before it decides to reload.
+    const lastRequest = stage === 'version check' ? holdFrom : holdFrom + 1;
+    await expect.poll(() => versionResponses).toBe(lastRequest);
+    await page.waitForTimeout(500);
+    expect(versionRequests).toBe(lastRequest);
+    expect(reloads).toEqual([]);
+  });
+}
+
+test('opens the deployed build when a deploy removed the launch form', async ({ page }) => {
+  const deploy = await removeLazyFile(page, 'LaunchView', { newerBuild: true, missingRequests: 1 });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await markCurrentDocument(page);
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await waitForReloadedDocument(page);
+  await handshake(page, 0);
+  await expect(page.getByRole('heading', { name: 'Start Agent', level: 2 })).toBeVisible();
+  expect(deploy.fileRequests).toBe(2);
+});
+
+test('opens the deployed build when a deploy removed the terminal input controls', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  const deploy = await removeLazyFile(page, 'ManualTerminalInput', { newerBuild: true, missingRequests: 1 });
+  await boot(page, [fedora]);
+  await connectDeployedApp(page);
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  await markCurrentDocument(page);
+  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await waitForReloadedDocument(page);
+  await connectDeployedApp(page);
+  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Terminal text', exact: true })).toBeVisible();
+  expect(deploy.fileRequests).toBe(2);
+});
+
+test('keeps an unsaved draft instead of reloading when a deploy removed the terminal input controls', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  const deploy = await removeLazyFile(page, 'ManualTerminalInput', { newerBuild: true });
+  await boot(page, [fedora]);
+  await connectDeployedApp(page);
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  const prompt = page.getByLabel('Prompt', { exact: true });
+  await prompt.fill('draft this phone has not saved');
+  await expect(page.getByText(/^Not saved on this phone/)).toBeVisible();
+  await markCurrentDocument(page);
+  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(deploy.reloads).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
+  await expect(prompt).toHaveValue('draft this phone has not saved');
+});
+
+test('keeps an unconfirmed terminal send fenced instead of reloading when a deploy removed the conversation view', async ({ page }) => {
+  const button = (name: string) => page.getByRole('button', { name, exact: true });
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: true });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history', 'manual_terminal_input'] });
+  await server(page, 0, deployedAppAgents());
+  await button('Open Deployed app on Fedora').click();
+  await button('Type in terminal').click();
+  await expect(page.getByLabel('Terminal text', { exact: true })).toBeVisible();
+  const read = (await commands(page)).findLast(command => command.type === 'read_pane');
+  expect(read).toBeTruthy();
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read!.request_id, target: read!.target, content: '> ', format: 'plain', no_echo: false });
+  await expect(button('Enter')).toBeEnabled();
+  await setAutoCommands(page, false);
+  await page.getByLabel('Terminal text', { exact: true }).fill('sent at most once');
+  await button('Send text').click();
+  const attempt = (await commands(page)).findLast(command => command.type === 'send_terminal_text')!;
+  await server(page, 0, { type: 'command_result', request_id: attempt.request_id, ok: true, phase: 'dispatched_unknown' });
+  await setAutoCommands(page, true);
+  await expect(page.getByText(/^Delivery is uncertain\./)).toBeVisible();
+  await markCurrentDocument(page);
+  await button('Conversation history').click();
+  const held = 'A newer app version is ready but was not loaded automatically. A send to a terminal is not confirmed yet';
+  await expect(page.getByRole('alert').filter({ hasText: held })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(deploy.reloads).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
+
+  // Loading the update stays an explicit choice that names what it forgets.
+  await page.getByRole('button', { name: /^Settings, phone app update available/ }).click();
+  await page.getByRole('button', { name: 'Load Update', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Load Update' });
+  await expect(dialog.getByRole('alert')).toHaveText('A send to a terminal is not confirmed yet, and loading the app update forgets it. Check the terminal before sending again.');
+  await dialog.getByRole('button', { name: 'Load Update Anyway', exact: true }).click();
+  await expect.poll(() => deploy.reloads.length).toBeGreaterThan(0);
+  expect(new URL(deploy.reloads[0]).searchParams.get('herdr_reload')).toContain(APP_RELEASE);
+});
+
+test('explains why a finished deploy did not reload over an unsaved draft', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  await page.route('**/version.json?*', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ version: APP_RELEASE, assets: APP_METADATA.assets + 1 }),
+  }));
+  const reloads: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).searchParams.has('herdr_reload')) reloads.push(request.url());
+  });
+  await boot(page, [fedora]);
+  const origin = new URL(page.url()).origin;
+  const appDeploy = { configured: true, origin, project: 'herdr-app', branch: 'main', revision: 'f'.repeat(40) };
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history', 'app_deploy'], app_deploy: { ...appDeploy, state: 'idle' } });
+  await server(page, 0, deployedAppAgents());
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  const prompt = page.getByLabel('Prompt', { exact: true });
+  await prompt.fill('draft this phone has not saved');
+  await expect(page.getByText(/^Not saved on this phone/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Settings, phone app update available/ })).toBeVisible();
+  await markCurrentDocument(page);
+  await server(page, 0, { type: 'app_deploy_status', app_deploy: { ...appDeploy, state: 'succeeded', target_version: APP_RELEASE } });
+  await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(reloads).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
+  await expect(prompt).toHaveValue('draft this phone has not saved');
+});
+
+test('opens the deployed build when a deploy removed the question controls', async ({ page }) => {
+  const interaction = {
+    id: 'deploy-question', kind: 'single_select', question: 'Which build should run?',
+    options: [{ index: 0, label: 'Deployed', description: '' }, { index: 1, label: 'Previous', description: '' }],
+    submit_label: 'Submit', can_go_back: false, question_index: 1, question_total: 1,
+  };
+  const askQuestion = async () => {
+    await expect.poll(() => socketCount(page)).toBe(1);
+    await handshake(page, 0);
+    await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Question app', agent: 'codex' }] });
+    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Which build?', content_fingerprint: 'question' });
+    await server(page, 0, {
+      type: 'pane_delta', pane_id: 'w1:p1', format: 'plain', base_fingerprint: 'question', content_fingerprint: 'question',
+      segments: [], attention_kind: 'question', interaction, question_layout: true,
+    });
+  };
+  const deploy = await removeLazyFile(page, 'QuestionForm', { newerBuild: true, missingRequests: 1 });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Question app', agent: 'codex' }] });
+  await page.getByRole('button', { name: 'Open Question app on Fedora' }).click();
+  await markCurrentDocument(page);
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'Which build?', content_fingerprint: 'question' });
+  await server(page, 0, {
+    type: 'pane_delta', pane_id: 'w1:p1', format: 'plain', base_fingerprint: 'question', content_fingerprint: 'question',
+    segments: [], attention_kind: 'question', interaction, question_layout: true,
+  });
+  await waitForReloadedDocument(page);
+  await askQuestion();
+  await expect(page.getByRole('radio', { name: 'Deployed' })).toBeVisible();
+  expect(deploy.fileRequests).toBe(2);
+});
+
 test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem('herdr_default_agent_view', 'terminal');

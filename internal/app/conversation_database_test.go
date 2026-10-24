@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -236,5 +238,152 @@ func testDatabaseRecordedConversation(t *testing.T, format string, entrypoint bo
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stale target continued polling")
+	}
+}
+
+// heldPublicationRefresh lets the feed sample its change token while a commit
+// is in the WAL but not yet published to readers, then publishes the commit
+// after the refresh that read the older snapshot.
+type heldPublicationRefresh struct {
+	databaseConversationRefresh
+	mu      sync.Mutex
+	hold    func() (func() error, error)
+	publish func() error
+	err     error
+}
+
+func (r *heldPublicationRefresh) NeedsReset() bool {
+	r.mu.Lock()
+	if r.hold != nil {
+		r.publish, r.err = r.hold()
+		r.hold = nil
+	}
+	r.mu.Unlock()
+	return r.databaseConversationRefresh.NeedsReset()
+}
+
+func (r *heldPublicationRefresh) Refresh(ctx context.Context) (conversation.BrowsePage, bool) {
+	page, reset := r.databaseConversationRefresh.Refresh(ctx)
+	r.mu.Lock()
+	if r.publish != nil && r.err == nil {
+		r.err = r.publish()
+		r.publish = nil
+	}
+	r.mu.Unlock()
+	return page, reset
+}
+
+func (r *heldPublicationRefresh) failure() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
+}
+
+// holdWALPublication runs write, then puts back SQLite's WAL-index header so
+// readers still see the previous commit, as they do while a writer is between
+// appending its WAL frames and publishing them. The returned function publishes.
+func holdWALPublication(database string, write func() error) (func() error, error) {
+	shm, err := os.OpenFile(database+"-shm", os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	var before, after [96]byte
+	if _, err := shm.ReadAt(before[:], 0); err != nil {
+		return nil, errors.Join(err, shm.Close())
+	}
+	if err := write(); err != nil {
+		return nil, errors.Join(err, shm.Close())
+	}
+	if _, err := shm.ReadAt(after[:], 0); err != nil {
+		return nil, errors.Join(err, shm.Close())
+	}
+	if before == after {
+		return nil, errors.Join(errors.New("write did not publish a WAL commit"), shm.Close())
+	}
+	if _, err := shm.WriteAt(before[:], 0); err != nil {
+		return nil, errors.Join(err, shm.Close())
+	}
+	return func() error {
+		_, err := shm.WriteAt(after[:], 0)
+		return errors.Join(err, shm.Close())
+	}, nil
+}
+
+func TestDatabaseFeedRefreshesCommitPublishedAfterItsWALWrite(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(agentroots.OpenCodeListEnv, root)
+	t.Setenv(agentroots.HermesListEnv, root)
+	t.Setenv("HERMES_HOME", "")
+	session := "ses_live123"
+	database := filepath.Join(root, "opencode.db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	for _, query := range []string{
+		"PRAGMA journal_mode=WAL",
+		`CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_updated INTEGER,agent TEXT); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,time_created INTEGER,data TEXT); CREATE INDEX session_order ON session_message(session_id,seq);`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("INSERT INTO session_v2 VALUES(?,?,'Live',1,'opencode')", session, root); err != nil {
+		t.Fatal(err)
+	}
+	appendMessage := func(index int, text string) error {
+		raw, _ := json.Marshal(map[string]any{"content": []map[string]any{{"type": "text", "text": text}}})
+		_, err := db.Exec("INSERT INTO session_message VALUES(?,?,'assistant',?,?,?)", fmt.Sprintf("m%04d", index), session, index, index, string(raw))
+		return err
+	}
+	if err := appendMessage(1, "seed"); err != nil {
+		t.Fatal(err)
+	}
+	server := testServerWithCacheDir(t.TempDir())
+	server.conversationB.Close()
+	reader := conversation.NewReader(t.TempDir())
+	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer browser.Close()
+	defer server.herdrC.Close()
+	server.conversationM, server.conversationB = reader, browser
+	server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "db-pane", TerminalID: "db-terminal", ServerSessionID: "primary", Agent: "opencode", Cwd: root, SessionID: session, AgentSessionID: session, Status: "working"}}, server.state.RevisionCounter())
+	agent, _ := server.state.Agent("db-pane")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	feed := &conversationFeed{ctx: ctx, cancel: cancel, target: protocol.TargetRef{PaneID: agent.PaneID, TerminalID: agent.TerminalID, ServerSessionID: agent.ServerSessionID, AgentSessionID: session, Generation: agent.Generation}, agent: agent, ready: make(chan struct{}), notify: make(chan struct{})}
+	watch := &heldPublicationRefresh{databaseConversationRefresh: browser.NewDatabaseWatch(conversationScope(agent))}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.runDatabaseConversationFeed(feed, watch)
+	}()
+	defer func() { cancel(); <-done }()
+	var seq uint64
+	if initial := waitRecordedDatabaseBatch(t, feed, &seq, time.After(5*time.Second)); initial.Kind != "batch" || len(initial.Entries) != 1 {
+		t.Fatalf("initial page = %+v", initial)
+	}
+	held := make(chan struct{})
+	watch.mu.Lock()
+	watch.hold = func() (func() error, error) {
+		defer close(held)
+		return holdWALPublication(database, func() error { return appendMessage(2, "appended") })
+	}
+	watch.mu.Unlock()
+	select {
+	case <-held:
+	case <-time.After(3 * time.Second):
+		t.Fatal("feed stopped polling")
+	}
+	if err := watch.failure(); err != nil {
+		t.Fatal(err)
+	}
+	batch := waitRecordedDatabaseBatch(t, feed, &seq, time.After(3*time.Second))
+	if batch.Kind != "batch" || len(batch.Entries) != 1 || batch.Entries[0].Text != "appended" {
+		t.Fatalf("published commit = %+v", batch)
 	}
 }

@@ -15,7 +15,8 @@ import { currentView, navigate } from '$lib/router';
 import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
-import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { appUpdateStatus, clearUpdateProgress, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { guardReload } from '$lib/reload-guard';
 import { defaultAgentView, paneAgentViewOverrides, readTerminalResizeSession, setTerminalResizeSession } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
@@ -665,6 +666,39 @@ describe('settings relay status', () => {
       phase: 'scheduled',
       data: { update: { state: 'scheduled', target_revision: 'f'.repeat(40) } },
     });
+  });
+
+  it('asks again before Load Update discards work that appeared after the dialog opened', async () => {
+    const user = userEvent.setup();
+    appUpdateStatus.set({
+      state: 'reload-ready',
+      currentVersion: APP_VERSION,
+      currentAssets: APP_ASSET_VERSION,
+      deployedVersion: APP_VERSION,
+      deployedAssets: APP_ASSET_VERSION + 1,
+      upstreamVersion: APP_VERSION,
+      upstreamAssets: APP_ASSET_VERSION + 1,
+      checkedAt: 123,
+      error: '',
+    });
+    const replace = vi.fn();
+    render(SettingsView);
+    await user.click(screen.getByRole('button', { name: 'Load Update' }));
+    let dialog = screen.getByRole('dialog', { name: 'Load Update' });
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+    const release = guardReload(() => 'draft');
+    vi.stubGlobal('location', { href: 'https://app.example/', origin: 'https://app.example', replace });
+    try {
+      await user.click(within(dialog).getByRole('button', { name: 'Load Update' }));
+      expect(replace).not.toHaveBeenCalled();
+      dialog = screen.getByRole('dialog', { name: 'Load Update' });
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('A draft is not saved on this phone, and loading the app update discards it.');
+      await user.click(within(dialog).getByRole('button', { name: 'Load Update Anyway' }));
+      expect(replace).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      clearUpdateProgress();
+    }
   });
 
   it('confirms a separate app deployment through its authorized relay', async () => {

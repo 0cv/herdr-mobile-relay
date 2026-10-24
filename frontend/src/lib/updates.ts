@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from './config';
+import { reloadRisk, reloadRiskMessage, type ReloadRisk } from './reload-guard';
 import type { AppDeploymentStatus, AppUpdateStatus, RelayConnectionView, RelayUpdateStatus } from './types';
 
 const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
@@ -487,7 +488,17 @@ export async function waitForDeployedApp(
   return null;
 }
 
+/** A newer build is ready, but reloading into it now would lose work that only this page holds. */
+export class AppReloadHeld extends Error {}
+
+function heldReloadMessage(risk: ReloadRisk): string {
+  return `A newer app version is ready but was not loaded automatically. ${reloadRiskMessage(risk)} Use Load Update in Settings when you are ready.`;
+}
+
 let automaticReload: Promise<boolean> | null = null;
+let heldReload = '';
+// Every caller waiting on the running reload adds its own check; the reload goes ahead if any still wants it.
+let automaticReloadWanted: Array<() => boolean> = [];
 
 function currentPhoneTarget(): PhoneAppTarget {
   return { version: APP_VERSION, assets: APP_ASSET_VERSION, build: APP_BUILD_ID };
@@ -533,7 +544,9 @@ function reloadMarkerVersion(value: string): string {
 export function reloadUpdatedSameOriginApp(
   version: string,
   target: PhoneAppTarget | null = null,
+  stillWanted: () => boolean = () => true,
 ): Promise<boolean> {
+  if (!automaticReload) heldReload = '';
   const requested = requestedPhoneTarget(version, target);
   if (!phoneTargetIsNewer(requested)) return Promise.resolve(false);
   const key = reloadTargetKey(requested);
@@ -559,6 +572,7 @@ export function reloadUpdatedSameOriginApp(
     setPhoneUpdateError(`The phone app did not acknowledge build v${requested.version} after ${MAX_AUTOMATIC_RELOAD_ATTEMPTS} automatic attempts. Use Load Update to try again.`);
     return Promise.resolve(false);
   }
+  automaticReloadWanted.push(stillWanted);
   if (automaticReload) return automaticReload;
   automaticReload = (async () => {
     const status = await waitForDeployedApp(requested.version, { target: requested });
@@ -571,13 +585,58 @@ export function reloadUpdatedSameOriginApp(
       assets: status.deployedAssets,
       build: status.deployedBuild || '',
     };
+    if (!automaticReloadWanted.some((wanted) => wanted())) return false;
+    const risk = reloadRisk();
+    if (risk) {
+      heldReload = heldReloadMessage(risk);
+      setPhoneUpdateError(heldReload);
+      return false;
+    }
     setPhoneUpdateTarget(actualTarget);
     reloadApp(status.deployedVersion, actualTarget);
     return true;
   })().finally(() => {
     automaticReload = null;
+    automaticReloadWanted = [];
   });
   return automaticReload;
+}
+
+/** Why the last automatic reload waited instead of navigating, or '' if it did not wait for that reason. */
+export function reloadHeldMessage(): string {
+  return heldReload;
+}
+
+/**
+ * A deploy removes the previous build's lazily loaded files. When one fails to
+ * load, reload into the newer deployed build if there is one and it is still wanted.
+ */
+export async function importOrReload<T>(load: () => Promise<T>, stillWanted: () => boolean): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    // Read the version quietly: offline, the load error alone is the useful message.
+    let status: AppUpdateStatus;
+    try {
+      status = appStatusFromMetadata(await versionMetadata(fetch, `/version.json?check=${Date.now()}`), Date.now());
+    } catch {
+      throw error;
+    }
+    appUpdateStatus.set(status);
+    const deployed = {
+      version: status.deployedVersion,
+      assets: status.deployedAssets,
+      build: status.deployedBuild || '',
+    };
+    if (status.state === 'reload-ready' && stillWanted()) {
+      if (await reloadUpdatedSameOriginApp(deployed.version, deployed, stillWanted)) {
+        // The page is now navigating to the deployed build, so this load never finishes.
+        return new Promise<T>(() => {});
+      }
+      if (heldReload) throw new AppReloadHeld(heldReload);
+    }
+    throw error;
+  }
 }
 
 export function reloadApp(version = '', target: PhoneAppTarget | null = null): void {

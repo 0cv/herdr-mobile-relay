@@ -38,6 +38,7 @@ type openCodeFileStamp struct {
 	databaseChange string
 	walID          string
 	walChange      string
+	walIndex       string
 }
 
 type openCodeCacheEntry struct {
@@ -150,6 +151,7 @@ func openCodeStamp(database string) (openCodeFileStamp, bool) {
 		stamp.walID = fileIdentity(info)
 		stamp.walChange = fileChangeToken(info)
 	}
+	stamp.walIndex = walIndexHeader(database)
 	return stamp, true
 }
 

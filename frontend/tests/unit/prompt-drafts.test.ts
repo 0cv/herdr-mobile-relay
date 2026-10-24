@@ -5,6 +5,7 @@ import {
   promptDraftIdentity,
   prunePromptDrafts,
   savePromptDraft,
+  unsavedPromptDraft,
 } from '$lib/prompt-drafts';
 import type { Agent } from '$lib/types';
 
@@ -62,6 +63,23 @@ describe('prompt drafts', () => {
     clearPromptDraft(current);
     expect(loadPromptDraft(current, 3_001)).toBe('');
     expect(localStorage.length).toBe(0);
+  });
+
+  it('reports drafts that only this page holds', () => {
+    const current = agent({ terminal_id: 'terminal-unsaved' });
+    expect(unsavedPromptDraft(1_000)).toBe(false);
+    expect(savePromptDraft(current, 'x'.repeat(64 * 1_024 + 1), 1_000)).toBe('too-large');
+    expect(unsavedPromptDraft(1_000)).toBe(true);
+    expect(unsavedPromptDraft(48 * 60 * 60 * 1_000 + 1_001)).toBe(false);
+    expect(savePromptDraft(current, 'saved now', 2_000)).toBe('saved');
+    expect(unsavedPromptDraft(2_000)).toBe(false);
+
+    const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    expect(savePromptDraft(current, 'storage refused', 3_000)).toBe('unavailable');
+    setItem.mockRestore();
+    expect(unsavedPromptDraft(3_000)).toBe(true);
+    clearPromptDraft(current);
+    expect(unsavedPromptDraft(3_000)).toBe(false);
   });
 
   it('keeps only the newest bounded set of drafts', () => {

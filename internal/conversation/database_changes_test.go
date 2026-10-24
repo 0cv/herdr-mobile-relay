@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,5 +123,80 @@ func TestDatabaseChangeTokenIdleAndReplacement(t *testing.T) {
 				t.Fatal("cancelled polling ignored context")
 			}
 		})
+	}
+}
+
+func TestDatabaseReadsFollowCommitPublishedAfterItsWALWrite(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(agentroots.OpenCodeListEnv, root)
+	session := "ses_live123"
+	database := filepath.Join(root, "opencode.db")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec("PRAGMA journal_mode=WAL")
+	exec(`CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_updated INTEGER,agent TEXT); CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,time_created INTEGER,data TEXT); CREATE INDEX session_order ON session_message(session_id,seq);`)
+	exec("INSERT INTO session_v2 VALUES(?,?,'Live',1,'opencode')", session, root)
+	appendMessage := func(index int, text string) {
+		t.Helper()
+		exec("INSERT INTO session_message VALUES(?,?,'assistant',?,?,?)", fmt.Sprintf("m%04d", index), session, index, index, `{"content":[{"type":"text","text":"`+text+`"}]}`)
+	}
+	appendMessage(1, "seed")
+	reader := NewReader(t.TempDir())
+	scope := BrowseScope{Provider: "opencode", SessionID: session}
+	read := func() []Entry {
+		t.Helper()
+		page, err := reader.ReadFor(scope.Provider, root, session, "", 10)
+		if err != nil || !page.Available {
+			t.Fatalf("read failed: %+v %v", page, err)
+		}
+		return page.Entries
+	}
+	if entries := read(); len(entries) != 1 {
+		t.Fatalf("seed entries = %+v", entries)
+	}
+
+	shm, err := os.OpenFile(database+"-shm", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shm.Close()
+	var published, unpublished [96]byte
+	if _, err := shm.ReadAt(unpublished[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	appendMessage(2, "appended")
+	if _, err := shm.ReadAt(published[:], 0); err != nil || published == unpublished {
+		t.Fatalf("commit did not change the WAL index: %v", err)
+	}
+	// A writer appends its WAL frames before this header publishes them to readers.
+	if _, err := shm.WriteAt(unpublished[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := reader.ChangeToken(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries := read(); len(entries) != 1 {
+		t.Fatalf("reader saw the unpublished commit: %+v", entries)
+	}
+	if _, err := shm.WriteAt(published[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	current, err := reader.ChangeToken(t.Context(), scope)
+	if err != nil || current == pending {
+		t.Fatalf("publishing the commit left the change token unchanged: %v", err)
+	}
+	if entries := read(); len(entries) != 2 || entries[1].Text != "appended" {
+		t.Fatalf("read after publication = %+v", entries)
 	}
 }

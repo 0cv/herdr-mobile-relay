@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import { agentNeedsResponse, attentionKind, approvalButtonTone, approvalOptions, questionInteraction } from '$lib/agents';
   import { relayStore } from '$lib/store';
+  import { AppReloadHeld, importOrReload } from '$lib/updates';
   import type { Agent } from '$lib/types';
 
   let { agent, readOnly = false, responding = false, blocked = false }:
@@ -9,15 +11,18 @@
   const pending = $derived(!readOnly && agentNeedsResponse(agent));
   const interaction = $derived(questionInteraction(agent));
   const options = $derived(approvalOptions(agent));
+  let destroyed = false;
+  onDestroy(() => { destroyed = true; });
+  const questionPending = () => !destroyed && pending && attentionKind(agent) === 'question';
 </script>
 
 {#if pending && attentionKind(agent) === 'question' && interaction}
-  {#await import('./QuestionForm.svelte')}
+  {#await importOrReload(() => import('./QuestionForm.svelte'), questionPending)}
     <p role="status">Loading question controls…</p>
   {:then { default: Form }}
     <Form {agent} {interaction} {responding} {blocked} />
-  {:catch}
-    <p role="alert">Question controls could not load. Open Terminal to use Type in terminal.</p>
+  {:catch error}
+    <p role="alert">{error instanceof AppReloadHeld ? error.message : 'Question controls could not load. Open Terminal to use Type in terminal.'}</p>
   {/await}
 {:else if pending && attentionKind(agent) === 'approval'}
   <div class="quick-actions" aria-label="Approval choices">

@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import { inputContextIdentity } from '$lib/input-target-state';
   import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
   import { piPromptDelivery } from '$lib/pi-prompt.svelte';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
+  import { AppReloadHeld, importOrReload } from '$lib/updates';
   import type { Agent, TerminalFrame } from '$lib/types';
   import type ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 
@@ -14,6 +15,8 @@
   const connections = relayStore.connections;
   let Panel = $state<typeof ManualTerminalInput>();
   let loading = $state(false);
+  let destroyed = false;
+  onDestroy(() => { destroyed = true; });
   const identity = $derived(inputContextIdentity(agent));
   const delivery = $derived(terminalInputDelivery(agent));
   const piDelivery = $derived(piPromptDelivery(agent));
@@ -40,10 +43,13 @@
     const started = context;
     loading = true;
     try {
-      Panel = (await import('$components/ManualTerminalInput.svelte')).default;
+      Panel = (await importOrReload(
+        () => import('$components/ManualTerminalInput.svelte'),
+        () => !destroyed && context === started,
+      )).default;
       if (context === started) manual = true;
-    } catch {
-      relayStore.showToast('Could not load controls.', true);
+    } catch (error) {
+      relayStore.showToast(error instanceof AppReloadHeld ? error.message : 'Could not load controls.', true);
     } finally {
       loading = false;
     }

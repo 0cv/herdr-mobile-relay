@@ -20,7 +20,7 @@ interface PromptDraftRecord {
  * keeps them alive across the remount a pane switch performs. Bounded like the
  * persisted set; lost on reload, which the composer warning states.
  */
-const memoryDrafts = new Map<string, { text: string; updatedAt: number }>();
+const memoryDrafts = new Map<string, { text: string; updatedAt: number; saved: boolean }>();
 
 function readMemoryDraft(identity: string, now: number): string {
   const draft = memoryDrafts.get(identity);
@@ -34,12 +34,20 @@ function readMemoryDraft(identity: string, now: number): string {
 
 function writeMemoryDraft(identity: string, text: string, updatedAt: number): void {
   memoryDrafts.delete(identity);
-  memoryDrafts.set(identity, { text, updatedAt });
+  memoryDrafts.set(identity, { text, updatedAt, saved: false });
   while (memoryDrafts.size > DRAFT_MAX_ENTRIES) {
     const oldest = memoryDrafts.keys().next();
     if (oldest.done) return;
     memoryDrafts.delete(oldest.value);
   }
+}
+
+/** True when a draft lives only in this page because storage refused it. */
+export function unsavedPromptDraft(now = Date.now()): boolean {
+  for (const draft of memoryDrafts.values()) {
+    if (!draft.saved && now - draft.updatedAt <= DRAFT_MAX_AGE_MS) return true;
+  }
+  return false;
 }
 
 export type PromptDraftSaveResult = 'saved' | 'cleared' | 'too-large' | 'unavailable';
@@ -127,6 +135,7 @@ export function savePromptDraft(agent: Agent, text: string, now = Date.now()): P
     const draft: PromptDraftRecord = { version: DRAFT_VERSION, identity, text, updatedAt: now };
     localStorage.setItem(key, JSON.stringify(draft));
     prunePromptDrafts(now);
+    memoryDrafts.get(identity)!.saved = true;
     return 'saved';
   } catch {
     return 'unavailable';
