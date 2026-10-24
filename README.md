@@ -84,11 +84,14 @@ paths.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.
 
-**New in 0.23.0:** Clean Conversation by default, explicit Full history,
-live Pi text, tool activity and extension notices, faster recorded updates for
-Codex, Claude Code, Cursor, Qoder, Oh My Pi, OpenCode, Hermes and Kimi Code,
-and a shared prompt composer. Advanced literal input and terminal keys stay
-in Terminal. Resize Session is on by default; saved off choices stay off.
+**New in 0.23.0:** Clean, recent-first Conversation by default, explicit Full
+history, sticky following while streaming, and a workspace inspector button.
+Enable **Settings → Pi Integration** for live Pi text, tool activity, notices
+and unconfirmed replies to Needs inspection panes. Other supported agents get
+recorded updates and a shared prompt composer. Advanced literal input and
+terminal keys stay in Terminal. Resize Session is on by default; saved off
+choices stay off. Kimi, Hermes and older/unindexed OpenCode histories can still
+have a [history-sized cold-open cost](docs/conversation-activity.md#native-history-opening-cost).
 
 **[Full feature tour →](docs/mobile-app.md)**
 
