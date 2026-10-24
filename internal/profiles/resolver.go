@@ -31,12 +31,15 @@ var defaultCandidates = []Profile{
 	{ID: "omp", Label: "Oh My Pi", Kind: "omp"},
 	{ID: "kimi", Label: "Kimi", Kind: "kimi"},
 	{ID: "hermes", Label: "Hermes", Kind: "hermes"},
+	{ID: "devin", Label: "Devin", Kind: "devin"},
 }
 
 var defaultAliases = map[string]string{
 	"claude-code":     "claude",
 	"claude code":     "claude",
 	"pi-coding-agent": "pi",
+	"devin-cli":       "devin",
+	"devin cli":       "devin",
 }
 
 // defaultSkillDirs and defaultCommandFormats hold no defaults: every provider
@@ -239,6 +242,7 @@ func (r *Resolver) loadINI() (
 
 var integrationLabels = map[string]string{
 	"qodercli": "Qoder",
+	"devin":    "Devin",
 }
 
 func (r *Resolver) discoverIntegrations() []Profile {

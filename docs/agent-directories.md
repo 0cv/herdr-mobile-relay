@@ -95,6 +95,7 @@ Every other case needs to be named explicitly:
 | `HERDR_KIMI_CODE_HOME_DIRS` | `~/.kimi-code` | `KIMI_CODE_HOME` |
 | `HERDR_HERMES_DATA_DIRS` | `~/.hermes` | `HERMES_HOME` |
 | `HERDR_OMO_CONFIG_DIRS` | `~/.senpi/agent` plus supported `~/.omo` layouts | `OMO_CODING_AGENT_DIR`, `SENPI_CODING_AGENT_DIR`, `PI_CODING_AGENT_DIR` |
+
 Kimi entries are home directories containing `sessions`, not the sessions
 leaf itself. The reader uses `sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl`
 and bounded session metadata/index evidence. It does not read Kimi configuration,
@@ -113,9 +114,16 @@ Three things to get right:
   relay appends the right leaf itself. Use the same value you'd put in that
   row's own "Agent's own directory variable": a full config directory for
   Claude, Qoder, and Codex, but already the *agent* directory for Pi and Oh My
-  Pi, since that is what `PI_CODING_AGENT_DIR` takes.
+  Pi, since that is what `PI_CODING_AGENT_DIR` takes. Cursor is the
+  exception: it has no such variable, and its entry is already the projects
+  directory (see below).
 - What you configure is searched before what the relay discovered, and the home
   default is searched last.
+
+Cursor's entry is the projects directory that holds its per-project
+`<slug>/agent-transcripts` trees (`~/.cursor/projects` by default), not the
+`.cursor` root above it. Naming a relocated projects directory there is the
+remedy when a Cursor Agent conversation reads as unavailable.
 
 Separate multiple entries with a colon — the platform path-list separator, as
 in `PATH` — so a directory whose name contains a literal colon can't be

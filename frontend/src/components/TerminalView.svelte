@@ -476,9 +476,6 @@
     const interfaceSizeValue = $interfaceSize;
     void interfaceSizeValue;
     if (!terminalElement || terminalLayoutSuspended) return;
-    virtualStickToBottom = terminalElement.scrollHeight
-      - terminalElement.scrollTop
-      - terminalElement.clientHeight < 48;
     pendingLayoutStick = virtualStickToBottom;
   });
 
@@ -521,10 +518,7 @@
       const widthChanged = Math.abs(nextWidth - previousWidth) >= 1;
       const heightChanged = Math.abs(nextHeight - previousHeight) >= 1;
       if (renderedRows.length && widthChanged) {
-        const stick = virtualStickToBottom
-          || element.scrollHeight - element.scrollTop - element.clientHeight < 48;
-        virtualStickToBottom = stick;
-        resetVirtualScroll(element, stick);
+        resetVirtualScroll(element, virtualStickToBottom);
       } else if (heightChanged && virtualStickToBottom) {
         jumpToBottom();
       } else {
@@ -639,8 +633,10 @@
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) return;
+    // Exactly at the bottom counts too: the scroll event that would say so may
+    // not have run yet when this frame arrives.
     const frameStick = virtualStickToBottom || Boolean(terminalElement
-      && terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48);
+      && terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight <= 1);
     const stick = resizeSessionActive && pendingResizeStick !== null
       ? pendingResizeStick
       : layoutChanged && pendingLayoutStick !== null
@@ -919,8 +915,7 @@
     if (!terminalElement || !entries.length || terminalLayoutSuspended) return;
     if (virtualScrollResetPending) return;
     const previousTop = terminalElement.scrollTop;
-    const wasAtBottom = virtualStickToBottom
-      || terminalElement.scrollHeight - previousTop - terminalElement.clientHeight < 48;
+    const wasAtBottom = virtualStickToBottom;
     const anchor = virtualIndex.indexAt(previousTop);
     let anchorDelta = 0;
     let changed = false;
@@ -1271,7 +1266,6 @@
     const scrollHeight = terminalElement.scrollHeight;
     const clientHeight = terminalElement.clientHeight;
     const bottomDistance = scrollHeight - scrollTop - clientHeight;
-    const atBottom = bottomDistance < 48;
     // Only a viewport/controls height change may re-pin: content growth also
     // changes scrollHeight, and a user scrolling up during a stream must win.
     const layoutChanged = Math.abs(clientHeight - virtualClientHeight) >= 1;
@@ -1289,11 +1283,7 @@
     rememberVirtualScrollGeometry(terminalElement);
     if (movedTowardHistory) {
       virtualStickToBottom = false;
-    } else if (atBottom) {
-      if (bottomDistance > 0.5) {
-        jumpToBottom();
-        return;
-      }
+    } else if (bottomDistance <= 1) {
       virtualStickToBottom = true;
     } else if (virtualStickToBottom) {
       jumpToBottom();

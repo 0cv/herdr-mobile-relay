@@ -674,11 +674,12 @@ func (d *Dispatcher) handleAcknowledge(requestID, paneID string) *CommandResult 
 
 func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time, requestID string, message map[string]any) *CommandResult {
 	request := StartRequest{
-		ProfileID:   stringValue(message, "profile_id"),
-		WorkspaceID: stringValue(message, "workspace_id"),
-		Name:        stringValue(message, "name"),
-		Cwd:         stringValue(message, "cwd"),
-		Prompt:      stringValue(message, "prompt"),
+		ProfileID:     stringValue(message, "profile_id"),
+		WorkspaceID:   stringValue(message, "workspace_id"),
+		Name:          stringValue(message, "name"),
+		Cwd:           stringValue(message, "cwd"),
+		Prompt:        stringValue(message, "prompt"),
+		HermesProfile: stringValue(message, "hermes_profile"),
 	}
 	if request.ProfileID == "" || request.Name == "" || request.Cwd == "" {
 		return d.fail(requestID, "agent_start", "", "Profile, name, and working directory are required")
@@ -717,10 +718,14 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		} else {
 			// Compatibility for direct unit construction. The production server
 			// always installs a profile resolver and uses the full workflow.
+			var agentArgs []string
+			agentArgs, err = hermesProfileArgs(request.HermesProfile)
 			snapshot := d.state.beginLaunch()
 			paneID := "pane-" + request.Name
 			var returned string
-			returned, err = d.herdr.StartAgent(startupCtx, request.Name, request.ProfileID, paneID, agentStartProcessTimeoutMS)
+			if err == nil {
+				returned, err = d.herdr.StartAgent(startupCtx, request.Name, request.ProfileID, paneID, agentStartProcessTimeoutMS, agentArgs...)
+			}
 			started = StartResult{PaneID: returned, Name: request.Name, Cwd: request.Cwd, Identity: d.state.finishLaunch(snapshot, returned)}
 		}
 		if err != nil {

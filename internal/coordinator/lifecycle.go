@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/hermesprofiles"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 )
 
@@ -42,6 +43,10 @@ type StartRequest struct {
 	Name        string
 	Cwd         string
 	Prompt      string
+	// HermesProfile is the Hermes Agent profile (`hermes -p <name>`) the launch
+	// should select. It is empty for every other agent kind, and for a Hermes
+	// launch that did not pick one at all; both start the default profile.
+	HermesProfile string
 }
 
 type StartResult struct {
@@ -69,6 +74,25 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 	profile, ok := l.profiles.Profile(request.ProfileID)
 	if !ok {
 		return profiles.Profile{}, request, errors.New("profile_id is not available")
+	}
+	// A Hermes profile is a property of the Hermes launcher, not of the pane:
+	// `hermes -p x` is the only thing the relay can do with it, so any other
+	// kind that carried the field would have its value silently ignored.
+	// Rejecting here keeps the phone honest instead of starting a different
+	// agent than the form showed.
+	if request.HermesProfile != "" {
+		if profile.Kind != "hermes" {
+			return profiles.Profile{}, request, errors.New("hermes_profile is only valid for Hermes agents")
+		}
+		if !hermesprofiles.Valid(request.HermesProfile) {
+			return profiles.Profile{}, request, fmt.Errorf("hermes_profile must match %s", hermesprofiles.NamePattern)
+		}
+		// Existence is checked before any pane is created: `hermes` would
+		// otherwise fail inside the new terminal, leaving the user a dead
+		// pane to clean up and no obvious cause.
+		if !hermesprofiles.Exists(l.home, request.HermesProfile) {
+			return profiles.Profile{}, request, fmt.Errorf("hermes profile %q is not installed on this computer", request.HermesProfile)
+		}
 	}
 	if !agentNamePattern.MatchString(request.Name) {
 		return profiles.Profile{}, request, errors.New("name must match [a-z][a-z0-9_-]{0,31}")
@@ -156,7 +180,7 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 	if err := l.profiles.BeginLaunchOwnership(ownership, profile.ID); err != nil {
 		return result, err
 	}
-	startErr := l.startInTarget(startupCtx, profile, request.Name, target.PaneID)
+	startErr := l.startInTarget(startupCtx, profile, request, target.PaneID)
 	if startErr != nil {
 		// The target stays open. Herdr created it, so closing it would destroy
 		// the workspace the user asked for and leave nothing to retry into. An
@@ -193,9 +217,14 @@ func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd st
 	return result, nil
 }
 
-func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile, name, paneID string) error {
+func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile, request StartRequest, paneID string) error {
+	name := request.Name
 	if profile.Kind != "" {
-		return l.startKindAgent(ctx, profile.Kind, name, paneID)
+		agentArgs, err := hermesProfileArgs(request.HermesProfile)
+		if err != nil {
+			return err
+		}
+		return l.startKindAgent(ctx, profile.Kind, name, paneID, agentArgs)
 	}
 	if len(profile.Argv) == 0 {
 		return errors.New("profile has no executable argv")
@@ -228,15 +257,36 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 // start with agent_pane_busy before its own --timeout window opens, so the
 // timeout the relay passes cannot cover it. The refusal proves nothing ran,
 // which makes the retry safe.
-func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID string) error {
+func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID string, agentArgs []string) error {
 	wait := l.waitForRetry
 	if wait == nil {
 		wait = waitForAgentRetry
 	}
 	return retryAgentStart(ctx, func() error {
-		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx))
+		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx), agentArgs...)
 		return err
 	}, wait)
+}
+
+// hermesProfileArgs is the agent-side argv that selects a Hermes profile.
+// `-p default` is passed when the phone names default explicitly: hermes
+// resolves it to the root home, and sending the choice unchanged keeps the
+// start command identical to what the user picked. An empty value means the
+// launch never chose, so no -p is sent and hermes applies its own default.
+//
+// The name is re-checked here even though ValidateStart already did: this is
+// the last frame before it becomes argv, and a name that cannot be a profile
+// must never reach the command line. A name that fails the check is an error
+// rather than a silent nil: dropping -p would start Hermes on whatever profile
+// is sticky on the host, which is a different agent than the user asked for.
+func hermesProfileArgs(name string) ([]string, error) {
+	if name == "" {
+		return nil, nil
+	}
+	if !hermesprofiles.Valid(name) {
+		return nil, fmt.Errorf("hermes_profile %q must match %s", name, hermesprofiles.NamePattern)
+	}
+	return []string{"-p", name}, nil
 }
 
 func retryAgentStart(ctx context.Context, start func() error, wait func(context.Context, time.Duration) bool) error {
