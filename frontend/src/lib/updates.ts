@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from './config';
+import { reloadRisk, reloadRiskMessage, type ReloadRisk } from './reload-guard';
 import type { AppDeploymentStatus, AppUpdateStatus, RelayConnectionView, RelayUpdateStatus } from './types';
 
 const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
@@ -487,6 +488,13 @@ export async function waitForDeployedApp(
   return null;
 }
 
+/** A newer build is ready, but reloading into it now would lose work that only this page holds. */
+export class AppReloadHeld extends Error {}
+
+function heldReloadMessage(risk: ReloadRisk): string {
+  return `A newer app version is ready but was not loaded automatically. ${reloadRiskMessage(risk)} Use Load Update in Settings when you are ready.`;
+}
+
 let automaticReload: Promise<boolean> | null = null;
 // Every caller waiting on the running reload adds its own check; the reload goes ahead if any still wants it.
 let automaticReloadWanted: Array<() => boolean> = [];
@@ -576,6 +584,11 @@ export function reloadUpdatedSameOriginApp(
       build: status.deployedBuild || '',
     };
     if (!automaticReloadWanted.some((wanted) => wanted())) return false;
+    const risk = reloadRisk();
+    if (risk) {
+      setPhoneUpdateError(heldReloadMessage(risk));
+      return false;
+    }
     setPhoneUpdateTarget(actualTarget);
     reloadApp(status.deployedVersion, actualTarget);
     return true;
@@ -594,16 +607,26 @@ export async function importOrReload<T>(load: () => Promise<T>, stillWanted: () 
   try {
     return await load();
   } catch (error) {
-    const status = await checkAppUpdate();
+    // Read the version quietly: offline, the load error alone is the useful message.
+    let status: AppUpdateStatus;
+    try {
+      status = appStatusFromMetadata(await versionMetadata(fetch, `/version.json?check=${Date.now()}`), Date.now());
+    } catch {
+      throw error;
+    }
+    appUpdateStatus.set(status);
     const deployed = {
       version: status.deployedVersion,
       assets: status.deployedAssets,
       build: status.deployedBuild || '',
     };
-    if (status.state === 'reload-ready' && stillWanted()
-      && await reloadUpdatedSameOriginApp(deployed.version, deployed, stillWanted)) {
-      // The page is now navigating to the deployed build, so this load never finishes.
-      return new Promise<T>(() => {});
+    if (status.state === 'reload-ready' && stillWanted()) {
+      if (await reloadUpdatedSameOriginApp(deployed.version, deployed, stillWanted)) {
+        // The page is now navigating to the deployed build, so this load never finishes.
+        return new Promise<T>(() => {});
+      }
+      const risk = reloadRisk();
+      if (risk) throw new AppReloadHeld(heldReloadMessage(risk));
     }
     throw error;
   }

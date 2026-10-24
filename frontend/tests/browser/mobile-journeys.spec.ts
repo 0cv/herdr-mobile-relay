@@ -3941,6 +3941,64 @@ test('opens the deployed build when a deploy removed the terminal input controls
   expect(deploy.fileRequests).toBe(2);
 });
 
+test('keeps an unsaved draft instead of reloading when a deploy removed the terminal input controls', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  const deploy = await removeLazyFile(page, 'ManualTerminalInput', { newerBuild: true });
+  await boot(page, [fedora]);
+  await connectDeployedApp(page);
+  await page.getByRole('button', { name: 'Open Deployed app on Fedora' }).click();
+  const prompt = page.getByLabel('Prompt', { exact: true });
+  await prompt.fill('draft this phone has not saved');
+  await expect(page.getByText(/^Not saved on this phone/)).toBeVisible();
+  await markCurrentDocument(page);
+  await page.getByRole('button', { name: 'Type in terminal', exact: true }).click();
+  await expect(page.getByText(/^A newer app version is ready but was not loaded automatically\. A draft is not saved on this phone/)).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(deploy.reloads).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
+  await expect(prompt).toHaveValue('draft this phone has not saved');
+});
+
+test('keeps an unconfirmed terminal send fenced instead of reloading when a deploy removed the conversation view', async ({ page }) => {
+  const button = (name: string) => page.getByRole('button', { name, exact: true });
+  await page.addInitScript(() => localStorage.setItem('herdr_default_agent_view', 'terminal'));
+  const deploy = await removeLazyFile(page, 'ConversationHistory', { newerBuild: true });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history', 'manual_terminal_input'] });
+  await server(page, 0, deployedAppAgents());
+  await button('Open Deployed app on Fedora').click();
+  await button('Type in terminal').click();
+  await expect(page.getByLabel('Terminal text', { exact: true })).toBeVisible();
+  const read = (await commands(page)).findLast(command => command.type === 'read_pane');
+  expect(read).toBeTruthy();
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', request_id: read!.request_id, target: read!.target, content: '> ', format: 'plain', no_echo: false });
+  await expect(button('Enter')).toBeEnabled();
+  await setAutoCommands(page, false);
+  await page.getByLabel('Terminal text', { exact: true }).fill('sent at most once');
+  await button('Send text').click();
+  const attempt = (await commands(page)).findLast(command => command.type === 'send_terminal_text')!;
+  await server(page, 0, { type: 'command_result', request_id: attempt.request_id, ok: true, phase: 'dispatched_unknown' });
+  await setAutoCommands(page, true);
+  await expect(page.getByText(/^Delivery is uncertain\./)).toBeVisible();
+  await markCurrentDocument(page);
+  await button('Conversation history').click();
+  const held = 'A newer app version is ready but was not loaded automatically. A send to a terminal is not confirmed yet';
+  await expect(page.getByRole('alert').filter({ hasText: held })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(deploy.reloads).toEqual([]);
+  expect(await page.evaluate(() => (window as any).__beforeReload)).toBe(true);
+
+  // Loading the update stays an explicit choice that names what it forgets.
+  await page.getByRole('button', { name: /^Settings, phone app update available/ }).click();
+  await page.getByRole('button', { name: 'Load Update', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Load Update' });
+  await expect(dialog.getByRole('alert')).toHaveText('A send to a terminal is not confirmed yet, and loading the app update forgets it. Check the terminal before sending again.');
+  await dialog.getByRole('button', { name: 'Load Update Anyway', exact: true }).click();
+  await expect.poll(() => deploy.reloads.length).toBeGreaterThan(0);
+  expect(new URL(deploy.reloads[0]).searchParams.get('herdr_reload')).toContain(APP_RELEASE);
+});
+
 test('opens the deployed build when a deploy removed the question controls', async ({ page }) => {
   const interaction = {
     id: 'deploy-question', kind: 'single_select', question: 'Which build should run?',

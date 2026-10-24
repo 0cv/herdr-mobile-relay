@@ -6,7 +6,7 @@
   import { piPromptDelivery } from '$lib/pi-prompt.svelte';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
-  import { importOrReload } from '$lib/updates';
+  import { AppReloadHeld, importOrReload } from '$lib/updates';
   import type { Agent, TerminalFrame } from '$lib/types';
   import type ManualTerminalInput from '$components/ManualTerminalInput.svelte';
 
@@ -48,8 +48,8 @@
         () => !destroyed && context === started,
       )).default;
       if (context === started) manual = true;
-    } catch {
-      relayStore.showToast('Could not load controls.', true);
+    } catch (error) {
+      relayStore.showToast(error instanceof AppReloadHeld ? error.message : 'Could not load controls.', true);
     } finally {
       loading = false;
     }

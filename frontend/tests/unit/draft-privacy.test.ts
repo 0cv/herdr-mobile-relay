@@ -4,6 +4,7 @@ import TerminalView from '$components/TerminalView.svelte';
 import ConversationHistory from '$components/ConversationHistory.svelte';
 import PromptComposer from '$components/PromptComposer.svelte';
 import { clearPromptDraft, loadPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
+import { reloadRisk } from '$lib/reload-guard';
 import { targetRefForAgent } from '$lib/resource-id';
 import { relayStore } from '$lib/store';
 import type { Agent, TerminalFrame } from '$lib/types';
@@ -31,6 +32,18 @@ beforeEach(() => {
   vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({ available: true, reason: '', entries: [], hasMore: false, total: 0 });
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); relayStore.connections.set(new Map()); });
+
+it('holds automatic app reloads for text it does not save, without saving it', async () => {
+  const view = render(TerminalView, { agent, allAgents: [agent], responding: new Set<string>() });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(reloadRisk()).toBeNull();
+  await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: secret } });
+  expect(screen.getByText(/Not saved on this phone/)).toBeVisible();
+  expect(reloadRisk()).toBe('draft');
+  expect(JSON.stringify(localStorage)).not.toContain(secret);
+  view.unmount();
+  expect(reloadRisk()).toBeNull();
+});
 
 for (const component of [TerminalView, ConversationHistory]) {
   describe(component === TerminalView ? 'Terminal draft privacy' : 'Conversation draft privacy', () => {

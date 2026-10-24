@@ -47,6 +47,12 @@ export class TerminalInputDelivery {
 
 const deliveries = new Map<string, TerminalInputDelivery>();
 
+/** True while any send to a terminal is pending or unconfirmed. */
+export function terminalInputUnsettled(): boolean {
+  for (const delivery of deliveries.values()) if (delivery.pending || delivery.uncertain) return true;
+  return false;
+}
+
 export function terminalInputDelivery(agent: Agent): TerminalInputDelivery {
   const target = targetRefForAgent(agent);
   const key = target && targetStoreKey(target);

@@ -12,6 +12,7 @@
   import { piPromptDelivery, piPromptTarget, validPiPromptText, type PiPromptCapability } from '$lib/pi-prompt.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { inputContextIdentity } from '$lib/input-target-state';
+  import { guardReload } from '$lib/reload-guard';
   import { dispatchFlag, type ComposerSubmitAdapter } from '$lib/composer';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
@@ -52,6 +53,8 @@
     return () => { state.release(); piState.release(); };
   });
   let sendingSecret = $state(false);
+  onMount(() => guardReload(() => (sending || sendingSecret ? 'delivery'
+    : secretValue || composer && noEchoDraftTainted ? 'draft' : null)));
   let noEchoDraftBaseline: string | null = null;
   let noEchoDraftTainted = $state(false);
   let draftPersistenceWarning = $state('');

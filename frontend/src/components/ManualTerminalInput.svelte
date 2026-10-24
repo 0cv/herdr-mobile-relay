@@ -6,6 +6,7 @@
   import { piPromptDelivery } from '$lib/pi-prompt.svelte';
   import { terminalTextError } from '$lib/terminal-input-policy';
   import { freshAgentStatus } from '$lib/input-target-state';
+  import { guardReload } from '$lib/reload-guard';
   import { securityState } from '$lib/security';
   import { terminalDraftState } from '$lib/terminal-draft-state.svelte';
   import { stripAnsi } from '$lib/terminal';
@@ -42,6 +43,7 @@
     void tick().then(() => { if (mounted && active) input?.focus(); });
   });
   onDestroy(() => { mounted = false; });
+  onMount(() => guardReload(() => (active && text ? 'draft' : null)));
   onMount(() => {
     const changed = () => { if (document.visibilityState === 'hidden') onexit(); };
     document.addEventListener('visibilitychange', changed);

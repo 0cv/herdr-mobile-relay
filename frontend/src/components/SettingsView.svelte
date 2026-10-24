@@ -84,6 +84,7 @@
   } from '$lib/security';
   import { wakeLockState } from '$lib/wake-lock';
   import { relayStore } from '$lib/store';
+  import { reloadRisk, reloadRiskMessage, type ReloadRisk } from '$lib/reload-guard';
   import {
     appUpdateStatus,
     CHECKOUT_UPDATE_COMMAND,
@@ -191,6 +192,7 @@
   let deviceLock = $state(deviceVerificationEnabled());
   let updateOpen = $state(false);
   let pendingUpdateAction = $state<SafeUpdateAction | null>(null);
+  let pendingReloadRisk = $state<ReloadRisk | null>(null);
   let manualRelayId = $state('');
   let manualOpen = $state(false);
   let removalRelayId = $state('');
@@ -490,6 +492,7 @@
   function requestSafeUpdate() {
     if (!safeUpdateAction) return;
     pendingUpdateAction = safeUpdateAction;
+    pendingReloadRisk = safeUpdateAction.kind === 'reload_app' ? reloadRisk() : null;
     updateOpen = true;
   }
 
@@ -1042,9 +1045,10 @@
   description={pendingUpdateAction?.description || 'No safe update path is currently available.'}
 >
   <p class="hint">Herdr selects the safe order automatically: publish the phone app first when required, then update each relay one at a time while preserving running agents.</p>
+  {#if pendingReloadRisk}<p class="warning" role="alert">{reloadRiskMessage(pendingReloadRisk)}</p>{/if}
   <div class="dialog-actions">
     <Button disabled={!pendingUpdateAction || Boolean(busyRelayId)} onclick={startSafeUpdate}>
-      {pendingUpdateAction?.kind === 'reload_app' ? 'Load Update' : 'Start Update'}
+      {pendingUpdateAction?.kind !== 'reload_app' ? 'Start Update' : pendingReloadRisk ? 'Load Update Anyway' : 'Load Update'}
     </Button>
     <Button variant="ghost" onclick={() => { updateOpen = false; pendingUpdateAction = null; }}>Cancel</Button>
   </div>

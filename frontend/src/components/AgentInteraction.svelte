@@ -3,7 +3,7 @@
   import Button from '$components/ui/Button.svelte';
   import { agentNeedsResponse, attentionKind, approvalButtonTone, approvalOptions, questionInteraction } from '$lib/agents';
   import { relayStore } from '$lib/store';
-  import { importOrReload } from '$lib/updates';
+  import { AppReloadHeld, importOrReload } from '$lib/updates';
   import type { Agent } from '$lib/types';
 
   let { agent, readOnly = false, responding = false, blocked = false }:
@@ -21,8 +21,8 @@
     <p role="status">Loading question controls…</p>
   {:then { default: Form }}
     <Form {agent} {interaction} {responding} {blocked} />
-  {:catch}
-    <p role="alert">Question controls could not load. Open Terminal to use Type in terminal.</p>
+  {:catch error}
+    <p role="alert">{error instanceof AppReloadHeld ? error.message : 'Question controls could not load. Open Terminal to use Type in terminal.'}</p>
   {/await}
 {:else if pending && attentionKind(agent) === 'approval'}
   <div class="quick-actions" aria-label="Approval choices">

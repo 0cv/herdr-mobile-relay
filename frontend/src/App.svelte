@@ -51,6 +51,7 @@
   import { initializeDeviceSecurity, securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
   import {
+    AppReloadHeld,
     appUpdateStatus,
     clearPendingRelayUpdate,
     importOrReload,
@@ -87,6 +88,7 @@
   let visibilityRevision = $state(0);
   let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
   let conversationHistoryFailedRoute = $state.raw<ViewState | null>(null);
+  let conversationHistoryFailure = $state('');
   let conversationHistoryLoading = false;
   let viewedRelayId = '';
   let viewedTargetSignature = '';
@@ -118,12 +120,13 @@
       .then(({ default: component }) => {
         conversationHistoryComponent = component;
       })
-      .catch(() => {
+      .catch((error) => {
         if (!stillOpen()) return;
         const route = get(currentView);
         if (route.view === 'history' && route.fallbackToTerminalOnInitialUnavailable) {
           replaceView({ view: 'terminal', paneId: route.paneId, target: route.target });
         } else {
+          conversationHistoryFailure = error instanceof AppReloadHeld ? error.message : '';
           conversationHistoryFailedRoute = route;
         }
       })
@@ -712,8 +715,8 @@
         cwd={$currentView.cwd}
         {readOnlyRelayIds}
       />
-    {:catch}
-      <main class="page"><p role="alert">The launch form could not be loaded. Reload the app to try again.</p></main>
+    {:catch error}
+      <main class="page"><p role="alert">{error instanceof AppReloadHeld ? error.message : 'The launch form could not be loaded. Reload the app to try again.'}</p></main>
     {/await}
   {:else if $currentView.view === 'activity'}
     <ActivityView />
@@ -735,7 +738,7 @@
         />
       {:else if conversationHistoryFailedRoute === openingRoute}
         <main class="page terminal-loading" aria-label="Conversation history failed to load">
-          <p role="alert">Conversation history could not be loaded. Reload the app to try again.</p>
+          <p role="alert">{conversationHistoryFailure || 'Conversation history could not be loaded. Reload the app to try again.'}</p>
         </main>
       {:else}
         <main class="page terminal-loading" aria-label="Opening conversation history">

@@ -9,6 +9,7 @@ import { securityState } from '$lib/security';
 import { targetRefForAgent } from '$lib/resource-id';
 import { terminalTextError } from '$lib/terminal-input-policy';
 import { clearPromptDraft, loadPromptDraft } from '$lib/prompt-drafts';
+import { reloadRisk } from '$lib/reload-guard';
 import { TerminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import { piPromptDelivery } from '$lib/pi-prompt.svelte';
 import type { Agent, CommandResult, QuestionInteraction } from '$lib/types';
@@ -56,6 +57,16 @@ it('refreshes read-only context using the normal history budget without inventor
   await vi.advanceTimersByTimeAsync(4_000);
   expect(relayStore.readPane).toHaveBeenCalledTimes(2);
   expect(relayStore.sendToAgent).not.toHaveBeenCalled();
+});
+
+it('holds automatic app reloads while terminal text is typed', async () => {
+  const rendered = render(ManualTerminalInput, { agent: { ...agent }, frame: frame(), active: true, readOnly: false, delivery: new TerminalInputDelivery(), onexit: () => {} });
+  expect(reloadRisk()).toBeNull();
+  await fireEvent.input(screen.getByLabelText('Terminal text'), { target: { value: 'typed, not sent' } });
+  expect(reloadRisk()).toBe('draft');
+  rendered.unmount();
+  expect(reloadRisk()).toBeNull();
+  expect(JSON.stringify(localStorage)).not.toContain('typed, not sent');
 });
 
 it('preserves Unicode, spaces and the exact byte ceiling', () => {
