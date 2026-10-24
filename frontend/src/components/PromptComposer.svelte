@@ -12,7 +12,7 @@
   import { piPromptDelivery, piPromptTarget, validPiPromptText, type PiPromptCapability } from '$lib/pi-prompt.svelte';
   import { promptDispatchRestriction } from '$lib/terminal-input';
   import { inputContextIdentity } from '$lib/input-target-state';
-  import { guardReload, whileSending } from '$lib/reload-guard';
+  import { guardReload, holdReloadsWhileSending } from '$lib/reload-guard';
   import { dispatchFlag, type ComposerSubmitAdapter } from '$lib/composer';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
@@ -256,12 +256,11 @@
     sending = true;
     composer = '';
     clearPromptDraft(target);
+    const sent = holdReloadsWhileSending();
     try {
-      await whileSending(async () => {
-        if (bridge) await relayStore.sendPiPrompt(target, text, piCapability!, frame!);
-        else if (adapter) await adapter.send(target, text);
-        else await relayStore.sendToAgent(target, { type: 'submit_prompt', text });
-      });
+      if (bridge) await relayStore.sendPiPrompt(target, text, piCapability!, frame!);
+      else if (adapter) await adapter.send(target, text);
+      else await relayStore.sendToAgent(target, { type: 'submit_prompt', text });
       if (!bridge) relayStore.showToast(adapter?.sentMessage || 'Prompt sent.');
       if (mounted && targetRefMatchesAgent(identity, agent)) {
         uploadStatus = '';
@@ -275,6 +274,7 @@
       const detail = error instanceof Error ? error.message : adapter?.failureMessage || 'Prompt could not be sent.';
       if (!bridge || !unknown) relayStore.showToast(unknown ? `${detail} Check the terminal before sending again.` : detail, true);
     } finally {
+      sent();
       sending = false;
       setTimeout(() => { if (mounted && targetRefMatchesAgent(identity, agent)) relayStore.readPane(target); }, 500);
     }

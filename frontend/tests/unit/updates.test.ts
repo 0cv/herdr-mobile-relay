@@ -2,7 +2,7 @@ import { get } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
 import { clearPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
-import { guardReload, whileSending } from '$lib/reload-guard';
+import { guardReload, holdReloadsWhileSending } from '$lib/reload-guard';
 import { terminalInputDelivery } from '$lib/terminal-input-delivery.svelte';
 import type { Agent } from '$lib/types';
 import {
@@ -563,11 +563,9 @@ describe('release updates', () => {
 
       it('holds the reload while a send runs, even after the view that started it is gone', async () => {
         const replace = deployNewerBuild();
-        let finish: () => void = () => {};
-        const send = whileSending(() => new Promise<void>((resolve) => { finish = resolve; }));
+        const sent = holdReloadsWhileSending();
         await expectHeld(replace, 'A send to a terminal is not confirmed yet');
-        finish();
-        await send;
+        sent();
         await expectReload(replace);
       });
 

@@ -13,14 +13,10 @@ export function guardReload(check: () => ReloadRisk | null): () => void {
   return () => { checks.delete(check); };
 }
 
-/** Holds automatic reloads until a send settles, even after the view that started it is gone. */
-export async function whileSending<T>(send: () => Promise<T>): Promise<T> {
+/** Holds automatic reloads until the returned function runs, even after the view that started the send is gone. */
+export function holdReloadsWhileSending(): () => void {
   sendsInFlight += 1;
-  try {
-    return await send();
-  } finally {
-    sendsInFlight -= 1;
-  }
+  return () => { sendsInFlight -= 1; };
 }
 
 export function reloadRisk(): ReloadRisk | null {
