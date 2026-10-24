@@ -264,7 +264,7 @@ alone. Normal Node shutdown removes both socket paths.
 - Phone history and provisional content share the existing 32 MiB content
   budget: 31 MiB history plus at most 1 MiB / 16 provisional entries. History
   retains the existing 20,000-entry ceiling. Caches remain bounded and
-  memory-only. At most 200 message articles mount at once; scrolling near the
+  memory-only. At most 24 message articles mount at once; scrolling near the
   top reveals earlier loaded windows, and reaching a window's bottom reveals
   newer loaded messages. Search covers all loaded messages. Reading an older
   window keeps its entry anchor rather than dropping content underneath an
