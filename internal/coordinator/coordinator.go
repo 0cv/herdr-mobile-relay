@@ -64,7 +64,6 @@ type scheduledOperation struct {
 	cancel     context.CancelFunc
 	dispatched bool
 	finalize   func(*CommandResult, error) *CommandResult
-	release    func()
 }
 
 type scheduleWaiter struct {
@@ -536,11 +535,7 @@ func (s *Scheduler) run() {
 				s.metrics.Completed++
 				s.metricsMu.Unlock()
 				s.setOwnerMetrics(inUse, len(slots))
-				if (op.options.Kind == CommandScroll || op.options.Kind == CommandScrollSelection) && event.result.Result != nil && event.result.Result.Phase == "not_started" {
-					s.finish(op, event.result.Result, nil, ledger)
-				} else {
-					s.replyStale(op, ledger)
-				}
+				s.replyStale(op, ledger)
 				dispatch()
 				return
 			}
@@ -756,16 +751,6 @@ func (s *Scheduler) run() {
 					existing.operation.waiters = append(existing.operation.waiters, op.waiters...)
 					continue
 				}
-			}
-			if reserve := op.options.Reserve; reserve != nil {
-				release, err := reserve()
-				if err != nil {
-					s.reply(op, nil, err)
-					continue
-				}
-				op.release = release
-			}
-			if key := op.options.LedgerKey; key != "" {
 				ledger[key] = &ledgerEntry{
 					payloadHash: op.options.PayloadHash,
 					operation:   op,
@@ -959,7 +944,7 @@ func notStartedResult(op *scheduledOperation) *CommandResult {
 }
 
 func (s *Scheduler) replyStale(op *scheduledOperation, ledger map[string]*ledgerEntry) {
-	if op.finalize == nil && op.options.LedgerKey != "" && op.options.Kind != CommandScroll && op.options.Kind != CommandScrollSelection {
+	if op.finalize == nil && op.options.LedgerKey != "" {
 		delete(ledger, op.options.LedgerKey)
 	}
 	phase := "failed"
@@ -1017,10 +1002,6 @@ func (s *Scheduler) replyReplayed(op *scheduledOperation, result *CommandResult,
 }
 
 func (s *Scheduler) replyWithReplay(op *scheduledOperation, result *CommandResult, err error, forceReplay bool) {
-	if op.release != nil {
-		op.release()
-		op.release = nil
-	}
 	for _, waiter := range op.waiters {
 		reply := result
 		if result != nil {

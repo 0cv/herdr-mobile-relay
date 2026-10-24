@@ -103,80 +103,85 @@ func mutateAction(operation string, coordinated, audited bool) ActionMetadata {
 }
 
 var actionCatalog = map[string]ActionMetadata{
-	"acknowledge_pane":         mutateAction("acknowledge_pane", true, false),
-	"agent_clear":              mutateAction("agent_clear", true, true),
-	"agent_rename":             mutateAction("agent_rename", true, true),
-	"agent_restart":            mutateAction("agent_restart", true, true),
-	"agent_start":              mutateAction("agent_start", true, true),
-	"agent_stop":               mutateAction("agent_stop", true, true),
-	"answer_question":          mutateAction("answer_question", true, true),
-	"cancel_speech":            readAction("cancel_speech"),
-	"check_update":             readAction("check_update"),
-	"clarify_question":         mutateAction("clarify_question", true, true),
-	"clear_activities":         mutateAction("clear_activities", false, false),
-	"copy_agent_response":      mutateAction("copy_agent_response", false, false),
-	"deploy_app_update":        mutateAction("deploy_app_update", false, false),
-	"create_device_invitation": mutateAction("create_device_invitation", false, true),
-	"device_list":              readAction("device_list"),
-	"get_activity":             readAction("get_activity"),
-	"get_conversation_history": readAction("get_conversation_history"),
-	"install_update":           mutateAction("install_update", false, false),
-	"lease_pane_size":          mutateAction("lease_pane_size", true, false),
-	"list_directories":         readAction("list_directories"),
-	"list_slash_commands":      readAction("list_slash_commands"),
-	"navigate_question":        mutateAction("navigate_question", true, true),
-	"pane_applied":             readAction("pane_applied"),
-	"push_open_ref":            readAction("push_open_ref"),
-	"push_policy_get":          readAction("push_policy_get"),
-	"push_policy_set":          mutateAction("push_policy_set", false, false),
-	"push_snooze":              mutateAction("push_snooze", false, false),
-	"push_subscribe":           mutateAction("push_subscribe", false, false),
-	"push_test_device":         mutateAction("push_test_device", false, true),
-	"push_unsubscribe":         mutateAction("push_unsubscribe", false, false),
-	"push_viewed_pane":         mutateAction("push_viewed_pane", false, false),
-	"qr_code":                  readAction("qr_code"),
-	"read_pane":                readAction("read_pane"),
-	"refresh_agents":           readAction("refresh_agents"),
-	"register_app_origin":      mutateAction("register_app_origin", false, false),
-	"release_pane_size":        mutateAction("release_pane_size", true, false),
-	"rename_device":            mutateAction("rename_device", false, true),
-	"respond":                  mutateAction("respond", true, true),
-	"send_keys":                mutateAction("send_keys", true, true),
-	"send_input":               mutateAction("send_input", true, true),
-	"scroll_agent":             mutateAction("scroll_agent", true, true),
-	"set_scroll_selection":     mutateAction("set_scroll_selection", false, false),
-	"send_filter_text":         mutateAction("send_filter_text", true, true),
-	"send_secret":              mutateAction("send_secret", true, true),
-	"reset_devices":            mutateAction("reset_devices", false, true),
-	"revoke_device":            mutateAction("revoke_device", false, true),
-	"send_text":                mutateAction("send_text", true, true),
-	"speak_text":               readAction("speak_text"),
-	"speech_voice_install":     mutateAction("speech_voice_install", false, true),
-	"speech_voice_remove":      mutateAction("speech_voice_remove", false, true),
-	"speech_voices_list":       readAction("speech_voices_list"),
-	"submit_prompt":            mutateAction("submit_prompt", true, true),
-	"tab_reorder":              mutateAction("tab_reorder", true, true),
-	"unwatch_pane":             readAction("unwatch_pane"),
-	"upload_begin":             mutateAction("upload_begin", false, true),
-	"upload_cancel":            mutateAction("upload_cancel", false, true),
-	"upload_chunk":             mutateAction("upload_chunk", false, true),
-	"upload_finish":            mutateAction("upload_finish", false, true),
-	"watch_pane":               readAction("watch_pane"),
-	"webrtc_close":             readAction("webrtc_close"),
-	"webrtc_ice":               readAction("webrtc_ice"),
-	"webrtc_offer":             readAction("webrtc_offer"),
-	"workspace_close":          mutateAction("workspace_close", true, true),
-	"workspace_create":         mutateAction("workspace_create", true, true),
-	"workspace_file":           readAction("workspace_file"),
-	"workspace_git_diff":       readAction("workspace_git_diff"),
-	"workspace_git_status":     readAction("workspace_git_status"),
-	"workspace_rename":         mutateAction("workspace_rename", true, true),
-	"workspace_reorder":        mutateAction("workspace_reorder", true, true),
-	"workspace_tree":           readAction("workspace_tree"),
-	"worktree_create":          mutateAction("worktree_create", true, true),
-	"worktree_list":            readAction("worktree_list"),
-	"worktree_open":            mutateAction("worktree_open", true, true),
-	"worktree_remove":          mutateAction("worktree_remove", true, true),
+	"acknowledge_pane":           mutateAction("acknowledge_pane", true, false),
+	"agent_clear":                mutateAction("agent_clear", true, true),
+	"agent_rename":               mutateAction("agent_rename", true, true),
+	"agent_restart":              mutateAction("agent_restart", true, true),
+	"agent_start":                mutateAction("agent_start", true, true),
+	"agent_stop":                 mutateAction("agent_stop", true, true),
+	"answer_question":            mutateAction("answer_question", true, true),
+	"cancel_speech":              readAction("cancel_speech"),
+	"check_update":               readAction("check_update"),
+	"clarify_question":           mutateAction("clarify_question", true, true),
+	"clear_activities":           mutateAction("clear_activities", false, false),
+	"copy_agent_response":        mutateAction("copy_agent_response", false, false),
+	"deploy_app_update":          mutateAction("deploy_app_update", false, false),
+	"create_device_invitation":   mutateAction("create_device_invitation", false, true),
+	"device_list":                readAction("device_list"),
+	"get_pi_integration":         readAction("get_pi_integration"),
+	"set_pi_integration":         mutateAction("set_pi_integration", false, true),
+	"get_activity":               readAction("get_activity"),
+	"get_conversation_history":   readAction("get_conversation_history"),
+	"get_conversation_updates":   readAction("get_conversation_updates"),
+	"unwatch_conversation":       readAction("unwatch_conversation"),
+	"install_update":             mutateAction("install_update", false, false),
+	"lease_pane_size":            mutateAction("lease_pane_size", true, false),
+	"list_directories":           readAction("list_directories"),
+	"list_slash_commands":        readAction("list_slash_commands"),
+	"navigate_question":          mutateAction("navigate_question", true, true),
+	"pane_applied":               readAction("pane_applied"),
+	"push_open_ref":              readAction("push_open_ref"),
+	"push_policy_get":            readAction("push_policy_get"),
+	"push_policy_set":            mutateAction("push_policy_set", false, false),
+	"push_snooze":                mutateAction("push_snooze", false, false),
+	"push_subscribe":             mutateAction("push_subscribe", false, false),
+	"push_test_device":           mutateAction("push_test_device", false, true),
+	"push_unsubscribe":           mutateAction("push_unsubscribe", false, false),
+	"push_viewed_pane":           mutateAction("push_viewed_pane", false, false),
+	"qr_code":                    readAction("qr_code"),
+	"read_pane":                  readAction("read_pane"),
+	"refresh_agents":             readAction("refresh_agents"),
+	"register_app_origin":        mutateAction("register_app_origin", false, false),
+	"release_pane_size":          mutateAction("release_pane_size", true, false),
+	"rename_device":              mutateAction("rename_device", false, true),
+	"respond":                    mutateAction("respond", true, true),
+	"send_keys":                  mutateAction("send_keys", true, true),
+	"send_input":                 mutateAction("send_input", true, true),
+	"send_terminal_text":         mutateAction("send_terminal_text", true, true),
+	"send_filter_text":           mutateAction("send_filter_text", true, true),
+	"send_secret":                mutateAction("send_secret", true, true),
+	"reset_devices":              mutateAction("reset_devices", false, true),
+	"revoke_device":              mutateAction("revoke_device", false, true),
+	"send_text":                  mutateAction("send_text", true, true),
+	"speak_text":                 readAction("speak_text"),
+	"speech_voice_install":       mutateAction("speech_voice_install", false, true),
+	"speech_voice_remove":        mutateAction("speech_voice_remove", false, true),
+	"speech_voices_list":         readAction("speech_voices_list"),
+	"submit_prompt":              mutateAction("submit_prompt", true, true),
+	"get_pi_prompt_capability":   readAction("get_pi_prompt_capability"),
+	"send_pi_prompt_unconfirmed": mutateAction("send_pi_prompt_unconfirmed", true, true),
+	"tab_reorder":                mutateAction("tab_reorder", true, true),
+	"unwatch_pane":               readAction("unwatch_pane"),
+	"upload_begin":               mutateAction("upload_begin", false, true),
+	"upload_cancel":              mutateAction("upload_cancel", false, true),
+	"upload_chunk":               mutateAction("upload_chunk", false, true),
+	"upload_finish":              mutateAction("upload_finish", false, true),
+	"watch_pane":                 readAction("watch_pane"),
+	"webrtc_close":               readAction("webrtc_close"),
+	"webrtc_ice":                 readAction("webrtc_ice"),
+	"webrtc_offer":               readAction("webrtc_offer"),
+	"workspace_close":            mutateAction("workspace_close", true, true),
+	"workspace_create":           mutateAction("workspace_create", true, true),
+	"workspace_file":             readAction("workspace_file"),
+	"workspace_git_diff":         readAction("workspace_git_diff"),
+	"workspace_git_status":       readAction("workspace_git_status"),
+	"workspace_rename":           mutateAction("workspace_rename", true, true),
+	"workspace_reorder":          mutateAction("workspace_reorder", true, true),
+	"workspace_tree":             readAction("workspace_tree"),
+	"worktree_create":            mutateAction("worktree_create", true, true),
+	"worktree_list":              readAction("worktree_list"),
+	"worktree_open":              mutateAction("worktree_open", true, true),
+	"worktree_remove":            mutateAction("worktree_remove", true, true),
 }
 
 type Inbound struct {
@@ -189,6 +194,7 @@ type Inbound struct {
 	SessionID            string          `json:"session_id,omitempty"`
 	PaneID               string          `json:"pane_id,omitempty"`
 	Text                 string          `json:"text,omitempty"`
+	PiPromptLease        json.RawMessage `json:"pi_prompt_lease,omitempty"`
 	Name                 string          `json:"name,omitempty"`
 	DeviceID             string          `json:"device_id,omitempty"`
 	Role                 string          `json:"role,omitempty"`
@@ -217,12 +223,13 @@ type Inbound struct {
 	OtherSelected        bool            `json:"other_selected,omitempty"`
 	OtherText            string          `json:"other_text,omitempty"`
 	Direction            string          `json:"direction,omitempty"`
-	Selection            string          `json:"selection,omitempty"`
-	StateRevision        string          `json:"state_revision,omitempty"`
-	FrameRevision        string          `json:"frame_revision,omitempty"`
 	Lines                int             `json:"lines,omitempty"`
 	Before               string          `json:"before,omitempty"`
 	Cursor               string          `json:"cursor,omitempty"`
+	SubscriptionID       string          `json:"subscription_id,omitempty"`
+	Observe              bool            `json:"observe,omitempty"`
+	After                uint64          `json:"after,omitempty"`
+	SourceRevision       string          `json:"source_revision,omitempty"`
 	Retry                bool            `json:"retry,omitempty"`
 	Limit                int             `json:"limit,omitempty"`
 	Columns              int             `json:"columns,omitempty"`
@@ -444,21 +451,6 @@ func DecodeFailureResponse(raw map[string]any) map[string]any {
 	return ErrorResponse(requestID, NewApiError(ErrorInvalidRequest, nil))
 }
 
-type ScrollState struct {
-	Selection     string `json:"selection"`
-	Renderer      string `json:"renderer"`
-	Wheel         string `json:"wheel"`
-	Source        string `json:"source"`
-	Route         string `json:"route"`
-	Presentation  string `json:"presentation"`
-	Available     bool   `json:"available"`
-	Reason        string `json:"reason"`
-	Rows          int    `json:"rows"`
-	Columns       int    `json:"columns"`
-	GeometryEpoch uint64 `json:"geometry_epoch"`
-	Revision      string `json:"revision"`
-}
-
 type HerdrFeatureStatus struct {
 	State      string `json:"state"`
 	Reason     string `json:"reason"`
@@ -516,6 +508,7 @@ const PaneSizeOptInRowsCapability = "pane_size_opt_in_rows"
 const SpeechVoiceManagementCapability = "speech_voice_management"
 
 var Capabilities = []string{
+	"pi_integration",
 	"attention_classification",
 	"clear_activities",
 	"directory_browser",
@@ -525,9 +518,10 @@ var Capabilities = []string{
 	"structured_questions",
 	"slash_commands",
 	"conversation_history",
-	"pi_scroll_buttons",
+	"conversation_activity",
 	"workspace_inspection",
 	"semantic_input",
+	"manual_terminal_input",
 	"secret_input",
 	"invitation_qr",
 }

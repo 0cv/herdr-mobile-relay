@@ -1,6 +1,7 @@
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { assertDistinctUpgrade, assertStylesheetMode, validateWebRoot, writeBundleSet, type BundleExpectation, type BundleSet, type PreparedBundle } from './support/artifacts';
 import { command } from './support/process';
 import { prepareOutput, repositoryPath, repositoryRoot } from './support/paths';
@@ -52,7 +53,7 @@ async function main(): Promise<void> {
     join(repositoryRoot, 'frontend'), join(repositoryRoot, 'herdr-plugin.toml'), join(repositoryRoot, 'contracts'),
   ]);
   await mkdir(join(output, 'bundles'), { recursive: true, mode: 0o700 });
-  const temporary = await mkdtemp(join('/tmp', 'herdr-mobile-current-'));
+  const temporary = await mkdtemp(join(tmpdir(), 'herdr-mobile-current-'));
   try {
     const baselineRoot = join(output, 'bundles', 'current-code-baseline');
     const candidateRoot = join(output, 'bundles', 'current-code-target');

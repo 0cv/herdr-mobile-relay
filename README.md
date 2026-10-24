@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.22.9`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.22.9) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.23.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.23.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -74,18 +74,21 @@ paths.
 - Send prompts, terminal keys, and slash commands, including discovered Cursor
   commands and skills; attach screenshots, photos, and documents in cancellable
   batches. Optionally discover live Pi extension commands, skills, and templates
-  after [installing the Pi integration](docs/slash-command-discovery.md#pi-runtime-commands).
-- Read and search each agent's native conversation, including Hermes, OpenCode
-  and Oh My OpenCode plans; inspect workspace files, images, and Git diffs
-  read-only.
+  by enabling **Settings → Pi Integration** for that computer, then reloading Pi
+  ([CLI alternative](docs/slash-command-discovery.md#pi-runtime-commands)).
+- Read and search native conversations for agents with a native history reader,
+  including Hermes, OpenCode, Oh My OpenCode plans and native Kimi Code journals.
+  Kimi imports and human-engine-only histories use the Terminal fallback. Inspect workspace files, images, and Git diffs read-only.
 - Manage workspaces and Git worktrees; start, rename, clear, and stop agents.
 - Have the relay read responses aloud, even with the screen off.
 - Pair every phone as its own named device — controller or read-only reader —
   each with its own notification rules, and revoke any of them.
 
-**New in 0.22.0:** Cursor slash-command and skill suggestions, optional live Pi
-command discovery, verified text entry in Cursor model pickers, and safer agent
-launches and background-service upgrades.
+**New in 0.23.0:** Clean Conversation by default, explicit Full history,
+live Pi text, tool activity and extension notices, faster recorded updates for
+Codex, Claude Code, Cursor, Qoder, Oh My Pi, OpenCode, Hermes and Kimi Code,
+and a shared prompt composer. Advanced literal input and terminal keys stay
+in Terminal. Resize Session is on by default; saved off choices stay off.
 
 **[Full feature tour →](docs/mobile-app.md)**
 

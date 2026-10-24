@@ -1323,7 +1323,7 @@ func fixtureConnectionTornDown(err error) bool {
 }
 
 func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "s")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1650,7 +1650,7 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 }
 
 func TestProductionPollInventoryRecoveryCommitsWithoutListeners(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -2017,10 +2017,10 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 		t.Fatal("resize settling state did not change the pane frame fingerprint")
 	}
 
-	if !paneWatchNeedsFrameRead("probe-1", "probe-1", acknowledged, "", false) {
+	if !paneWatchNeedsFrameRead("probe-1", "probe-1", acknowledged, "") {
 		t.Fatal("settling pane frame would not be re-read after an unchanged probe")
 	}
-	if paneWatchNeedsFrameRead("probe-1", "probe-1", current, "", false) {
+	if paneWatchNeedsFrameRead("probe-1", "probe-1", current, "") {
 		t.Fatal("settled pane frame would be re-read after an unchanged probe")
 	}
 	update := paneWatchUpdate(settledResponse, acknowledged, current)
@@ -3396,10 +3396,11 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 
 func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	response := map[string]any{
-		"type":    "pane_content",
-		"pane_id": "w1:p1",
-		"content": "unchanged output",
-		"format":  "ansi",
+		"request_id": "identified-read",
+		"type":       "pane_content",
+		"pane_id":    "w1:p1",
+		"content":    "unchanged output",
+		"format":     "ansi",
 		"target": protocol.TargetRef{
 			ServerSessionID: "primary",
 			PaneID:          "w1:p1",
@@ -3408,9 +3409,8 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 		},
 	}
 	fingerprint := paneFingerprint("unchanged output")
-	response["frame_revision"] = paneFrameFingerprint(response)
 	unchanged := unchangedPaneResponse(
-		map[string]any{"content_fingerprint": fingerprint, "frame_revision": response["frame_revision"]},
+		map[string]any{"content_fingerprint": fingerprint},
 		response,
 	)
 	if unchanged == nil {
@@ -3421,6 +3421,9 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 	if unchanged["target"] != response["target"] {
 		t.Fatalf("unchanged response lost exact target: %#v", unchanged)
+	}
+	if unchanged["request_id"] != response["request_id"] {
+		t.Fatalf("unchanged response lost read identity: %#v", unchanged)
 	}
 	if _, included := unchanged["content"]; included {
 		t.Fatalf("unchanged response included terminal content: %#v", unchanged)

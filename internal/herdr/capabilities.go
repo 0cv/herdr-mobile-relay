@@ -9,8 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/0cv/herdr-mobile-relay/internal/pibridge"
 )
 
 type FeatureState string
@@ -26,7 +24,6 @@ const (
 	FeatureWorkspaceMoveBlock = "workspace.move_block"
 	FeatureWorkspaceReordered = "workspace.reordered"
 	FeaturePaneRead           = "pane.read"
-	FeaturePiScrollSocket     = "pi_scroll_socket"
 	FeatureTabMove            = "tab.move"
 	FeatureEndpoint           = "client_shell.endpoint"
 	FeatureDirectTerminal     = "direct_terminal"
@@ -42,7 +39,6 @@ type ServerStatus struct {
 	InstalledClientVersion     string                     `json:"installed_client_version,omitempty"`
 	ServerVersion              string                     `json:"server_version,omitempty"`
 	ServerProtocol             int                        `json:"server_protocol,omitempty"`
-	SocketInstance             string                     `json:"socket_instance,omitempty"`
 	ServerProtocolKnown        bool                       `json:"server_protocol_known"`
 	EndpointProtocolGeneration *int                       `json:"endpoint_protocol_generation,omitempty"`
 	SurfaceInterest            *bool                      `json:"surface_interest,omitempty"`
@@ -58,7 +54,6 @@ func initialServerStatus() ServerStatus {
 		FeatureWorkspaceMoveBlock,
 		FeatureWorkspaceReordered,
 		FeaturePaneRead,
-		FeaturePiScrollSocket,
 		FeatureTabMove,
 		FeatureEndpoint,
 		FeatureDirectTerminal,
@@ -149,6 +144,9 @@ func (m *capabilityManager) updateFeatureAt(epoch uint64, name string, state Fea
 		m.mu.Unlock()
 		return
 	}
+	if sequence := m.refreshSeq.Load(); sequence > m.appliedSeq {
+		m.appliedSeq = sequence
+	}
 	features := cloneServerStatus(current).Features
 	features[name] = FeatureEvidence{State: state, Reason: reason, Generation: current.Generation + 1}
 	current.Features = features
@@ -235,12 +233,8 @@ func (m *capabilityManager) refresh(ctx context.Context) ServerStatus {
 	defer m.refreshMu.Unlock()
 	sequence := m.refreshSeq.Add(1)
 	epoch := m.epoch()
-	observedGeneration := m.snapshot().Generation
-	socketInstance, _ := pibridge.Instance(m.client.socketPath)
 	installed := m.client.installedClientVersion(ctx)
 	next := initialServerStatus()
-	next.Generation = observedGeneration
-	next.SocketInstance = socketInstance
 	next.InstalledClientVersion = installed
 
 	raw, wrote, err := m.client.api.requestUnary(ctx, "ping", map[string]any{})
@@ -255,7 +249,7 @@ func (m *capabilityManager) refresh(ctx context.Context) ServerStatus {
 		m.applyRefresh(sequence, epoch, "", next)
 		return m.snapshot()
 	}
-	identity := pingIdentity(ping) + "\x00" + socketInstance
+	identity := pingIdentity(ping)
 	next.ServerVersion = *ping.Version
 	next.ServerProtocol = *ping.Protocol
 	next.ServerProtocolKnown = true
@@ -282,46 +276,8 @@ func (m *capabilityManager) refresh(ctx context.Context) ServerStatus {
 		paneState, paneReason := probePaneRead(ctx, m.client.api)
 		next.Features[FeaturePaneRead] = FeatureEvidence{State: paneState, Reason: paneReason}
 	}
-	next.Features[FeaturePiScrollSocket] = m.client.piScrollSchemaEvidence(ctx, next)
-	currentInstance, instanceErr := pibridge.Instance(m.client.socketPath)
-	if socketInstance == "" || instanceErr != nil || currentInstance != socketInstance {
-		next.Features[FeaturePiScrollSocket] = FeatureEvidence{State: FeatureUnknown, Reason: "socket_instance_unavailable"}
-	}
 	m.applyRefresh(sequence, epoch, identity, next)
 	return m.snapshot()
-}
-
-func (c *Client) piScrollSchemaEvidence(ctx context.Context, status ServerStatus) (decision FeatureEvidence) {
-	var consumed []byte
-	var probeErr error
-	start := time.Now()
-	if observer := c.api.scrollObserver(); observer != nil {
-		defer func() {
-			selected := cloneServerStatus(status)
-			record := ScrollEvidenceRecord{Kind: "consumed_schema", SocketPath: c.socketPath, Started: start, Duration: time.Since(start), Response: consumed, Status: &selected, Decision: &decision}
-			if probeErr != nil {
-				record.Error = probeErr.Error()
-			}
-			observer.record(record)
-		}()
-	}
-	unknown := FeatureEvidence{State: FeatureUnknown, Reason: "schema_unavailable"}
-	if status.ServerVersion == "" || strings.TrimPrefix(status.InstalledClientVersion, "herdr ") != status.ServerVersion || !status.ServerProtocolKnown || status.ServerProtocol <= 0 {
-		return FeatureEvidence{State: FeatureUnknown, Reason: "schema_server_mismatch"}
-	}
-	out, err := c.runCommand(ctx, "api", "schema", "--json")
-	consumed, probeErr = out, err
-	if err != nil {
-		return unknown
-	}
-	schema, ok := piScrollSchemaDocument(out)
-	if !ok || schema["protocol"] != float64(status.ServerProtocol) {
-		return unknown
-	}
-	if !qualifiesPiScrollWire(schema) {
-		return FeatureEvidence{State: FeatureUnsupported, Reason: "schema_incompatible_wire"}
-	}
-	return FeatureEvidence{State: FeatureSupported, Reason: "matching_server_schema"}
 }
 
 func (m *capabilityManager) applyRefresh(sequence, epoch uint64, identity string, status ServerStatus) {
@@ -337,12 +293,8 @@ func (m *capabilityManager) applyRefresh(sequence, epoch uint64, identity string
 	if identity != "" && (identity == m.serverIdentity ||
 		m.serverIdentity == "" && m.status.ServerVersion == "") {
 		for name, feature := range m.status.Features {
-			if feature.Generation > status.Generation {
-				status.Features[name] = feature
-				continue
-			}
 			switch name {
-			case FeatureJSONAvailability, FeatureEndpoint, FeatureWorkspaceMoveBlock, FeatureTabMove, FeaturePaneRead, FeaturePiScrollSocket:
+			case FeatureJSONAvailability, FeatureEndpoint, FeatureWorkspaceMoveBlock, FeatureTabMove, FeaturePaneRead:
 				continue
 			default:
 				status.Features[name] = feature
@@ -418,7 +370,6 @@ func (c *Client) RequestCapabilityRefresh() {
 
 func (c *Client) InvalidateLiveCapabilities() {
 	c.capabilities.invalidateMany(
-		FeaturePiScrollSocket,
 		FeatureJSONAvailability,
 		FeatureWorkspaceMoveBlock,
 		FeatureWorkspaceReordered,
@@ -431,15 +382,6 @@ func (c *Client) InvalidateLiveCapabilities() {
 
 func (c *Client) SupportsWorkspaceMoveBlock() bool {
 	return c.CapabilityStatus().Supports(FeatureWorkspaceMoveBlock)
-}
-
-func (c *Client) SupportsPiScrollSocket() bool {
-	status := c.CapabilityStatus()
-	if !status.Supports(FeaturePiScrollSocket) || status.SocketInstance == "" {
-		return false
-	}
-	instance, err := pibridge.Instance(c.socketPath)
-	return err == nil && instance == status.SocketInstance
 }
 
 func (c *Client) SupportsPaneRead() bool {

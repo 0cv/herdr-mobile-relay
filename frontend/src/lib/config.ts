@@ -9,8 +9,6 @@ export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
-// Resize Session is a per-device opt-in, off by default. Whether a relay can
-// honour it is its pane_size_opt_in capability, never a build constant.
 export const TERMINAL_RESIZE_SESSION_KEY = 'herdr_terminal_resize_session';
 export const TERMINAL_HEIGHT_LEASE_KEY = 'herdr_terminal_height_lease';
 export const TERMINAL_WAKE_LOCK_KEY = 'herdr_terminal_wake_lock';

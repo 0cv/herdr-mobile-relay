@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func discoverGenericSkills(dirs []string, commandFormat string) ([]Command, bool) {
+func (reader *catalogReader) discoverGenericSkills(dirs []string, commandFormat string) ([]Command, bool) {
 	if commandFormat == "" || strings.Count(commandFormat, "{name}") != 1 {
 		return nil, false
 	}
@@ -32,7 +32,7 @@ func discoverGenericSkills(dirs []string, commandFormat string) ([]Command, bool
 			return left < right
 		})
 		for _, entry := range entries {
-			if scanned >= maxCustomFiles {
+			if scanned >= maxCustomFiles || reader.truncated {
 				truncated = true
 				break
 			}
@@ -45,7 +45,7 @@ func discoverGenericSkills(dirs []string, commandFormat string) ([]Command, bool
 				continue
 			}
 			scanned++
-			metadata, ok := readSkillMetadata(path)
+			metadata, ok := reader.readSkillMetadata(path)
 			if !ok {
 				continue
 			}
@@ -69,7 +69,7 @@ func discoverGenericSkills(dirs []string, commandFormat string) ([]Command, bool
 			break
 		}
 	}
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
 
 func userInvocable(metadata map[string]string) bool {

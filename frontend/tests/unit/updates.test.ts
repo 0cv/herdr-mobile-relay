@@ -338,6 +338,41 @@ describe('release updates', () => {
     stylesheet.remove();
   });
 
+  it.each(['delayed', 'ready', 'error', 'timed-out', 'failed', 'wrong-build', 'stopped'])('observes required CSS with a legacy bootstrap: %s', (scenario) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ version: APP_VERSION, assets: APP_ASSET_VERSION, build: APP_BUILD_ID })));
+    queueUpdateProgressForReload(APP_VERSION, [], {
+      version: APP_VERSION,
+      assets: APP_ASSET_VERSION,
+      build: scenario === 'wrong-build' ? 'different-build' : APP_BUILD_ID,
+    });
+    const stylesheet = document.createElement('link');
+    stylesheet.rel = 'stylesheet';
+    stylesheet.href = '/assets/app-test.css';
+    let sheet: CSSStyleSheet | null = scenario === 'ready' ? new CSSStyleSheet() : null;
+    Object.defineProperty(stylesheet, 'sheet', { get: () => sheet });
+    document.head.append(stylesheet);
+    const removeListener = vi.spyOn(stylesheet, 'removeEventListener');
+    const stop = initializeAppUpdates();
+    try {
+      expect(get(updateProgressPlan)).toMatchObject({ phoneAcknowledged: scenario === 'ready' });
+      if (scenario === 'stopped') stop();
+      if (scenario === 'timed-out') document.documentElement.dataset.herdrLoadTimedOut = '1';
+      if (scenario === 'failed') document.documentElement.dataset.herdrLoadFailed = '1';
+      if (scenario !== 'error') sheet = new CSSStyleSheet();
+      stylesheet.dispatchEvent(new Event(scenario === 'error' ? 'error' : 'load'));
+      const loaded = scenario === 'ready' || scenario === 'delayed';
+      expect(get(updateProgressPlan)).toMatchObject({
+        phoneState: loaded ? 'loaded' : ['error', 'timed-out', 'failed'].includes(scenario) ? 'failed' : 'loading',
+        phoneAcknowledged: loaded,
+      });
+    } finally {
+      stop();
+      stylesheet.remove();
+    }
+    expect(removeListener).toHaveBeenCalledWith('load', expect.any(Function));
+    expect(removeListener).toHaveBeenCalledWith('error', expect.any(Function));
+  });
+
   it('does not acknowledge a phone update after a required stylesheet failure', () => {
     queueUpdateProgressForReload(APP_VERSION, [], {
       version: APP_VERSION,

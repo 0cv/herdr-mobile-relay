@@ -2,12 +2,68 @@ import { createServer } from 'node:net';
 import { lstat, mkdir, readlink, chmod } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { createActivitySource, startActivityServer, listenPrivateSocket } from './activity.mjs';
 
 const maxBytes = 2 * 1024 * 1024;
 const maxEntries = 4096;
 const ownerKey = Symbol.for('herdr.mobile.commandBridge');
 const probeKey = Symbol.for('herdr.mobile.commandBridge.autocomplete');
 const text = (value, limit) => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, limit) : '';
+
+export const promptCapability = 'pi_prompt_unconfirmed';
+export const maxPromptBytes = 100_000;
+
+export function validPromptText(value) {
+  return typeof value === 'string' && value.trim().length > 0 && Buffer.byteLength(value) <= maxPromptBytes
+    && !/[\x00-\x08\x0b-\x1f\x7f]/.test(value) && Buffer.from(value).toString('utf8') === value
+    && !value.includes('[attachment:') && !value.includes('Attachment: ');
+}
+
+export function createPromptIngress({ pi, identity, sessionFile, incarnation, currentSession, now = Date.now, limit = 4096 }) {
+  const leases = new Map();
+  const requests = new Map();
+  const current = request => {
+    const session = currentSession();
+    return session?.id === identity.session && session.file === sessionFile
+      && request.instance === identity.instance && request.pane === identity.pane && request.pid === identity.pid
+      && (request.session === identity.session || (sessionFile && request.session === sessionFile));
+  };
+  return request => {
+    const base = { ...identity, session: request.session, incarnation, challenge: request.challenge };
+    const refuse = () => ({ ...base, status: 'not_started' });
+    if (!current(request) || !/^[a-f0-9]{32}$/.test(request.challenge)
+      || typeof request.connection !== 'string' || !request.connection || request.connection.length > 160
+      || typeof request.target_key !== 'string' || !request.target_key || request.target_key.length > 4096) return refuse();
+    const key = JSON.stringify([request.connection, request.target_key, request.session]);
+    if (request.operation === 'prompt_capability') {
+      let lease = leases.get(key);
+      if (!lease) {
+        if (leases.size >= limit) return refuse();
+        lease = { token: randomUUID(), expires_at: 0 };
+        leases.set(key, lease);
+      }
+      lease.expires_at = now() + 15_000;
+      return { ...base, status: 'available', capability: promptCapability, connection: request.connection,
+        target_key: request.target_key, ...lease };
+    }
+    const allowed = new Set(['instance', 'pane', 'session', 'pid', 'challenge', 'operation', 'connection', 'target_key', 'incarnation', 'token', 'request_id', 'text']);
+    if (request.operation !== 'send_prompt_unconfirmed' || Object.keys(request).some(key => !allowed.has(key))
+      || request.incarnation !== incarnation || typeof request.request_id !== 'string' || !request.request_id.startsWith(`${incarnation}_`)
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(request.request_id)
+      || !validPromptText(request.text)) return refuse();
+    const digest = createHash('sha256').update(JSON.stringify([key, request.token, request.text])).digest('hex');
+    const prior = requests.get(request.request_id);
+    if (prior) return prior.digest === digest ? { ...base, ...prior.result } : refuse();
+    const lease = leases.get(key);
+    if (!lease || request.token !== lease.token || now() >= lease.expires_at || requests.size >= limit) return refuse();
+    const result = { status: 'unconfirmed', sent_at: now() };
+    requests.set(request.request_id, { digest, result });
+    try {
+      pi.sendUserMessage(request.text, { expandPromptTemplates: true, deliverAs: 'followUp' });
+    } catch {}
+    return { ...base, ...result };
+  };
+}
 
 export function sanitizeSource(source) {
   source = source.trim();
@@ -171,32 +227,7 @@ export async function instanceIdentity(socketPath) {
   return createHash('sha256').update(`${path}\n${stat.dev}\n${stat.ino}`).digest('hex');
 }
 
-export function createScrollState() {
-  let reference;
-  return {
-    widget(tui) {
-      const component = {
-        render: () => [],
-        invalidate() {},
-        dispose() { if (reference?.component === component) reference = undefined; },
-      };
-      reference = { tui, component };
-      return component;
-    },
-    clear() { reference = undefined; },
-    query() {
-      const mode = reference?.tui.mode;
-      const renderer = mode === 'fullscreen' || mode === 'regular' ? mode : 'unknown';
-      return {
-        renderer,
-        wheel: renderer === 'fullscreen' ? 'sgr_cell' : 'unavailable',
-        reason: renderer === 'fullscreen' ? 'pi_fullscreen' : renderer === 'regular' ? 'pi_regular' : 'ui_unavailable',
-      };
-    },
-  };
-}
-
-export async function startBridge({ instance, pane, session, sessionFile, pid = process.pid, directory, catalog, scrollState = () => ({ renderer: 'unknown', wheel: 'unavailable', reason: 'ui_unavailable' }) }) {
+export async function startBridge({ instance, pane, session, sessionFile, pid = process.pid, directory, catalog, prompt }) {
   await mkdir(directory, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
   return listen();
   async function listen() {
@@ -206,6 +237,7 @@ export async function startBridge({ instance, pane, session, sessionFile, pid = 
     }
     const path = join(directory, `${pid}.sock`);
     const incarnation = randomUUID();
+    const promptIngress = prompt && createPromptIngress({ ...prompt, identity: { instance, pane, session, pid }, sessionFile, incarnation });
     const sockets = new Set();
     let closed = false;
     let busy = false;
@@ -225,9 +257,10 @@ export async function startBridge({ instance, pane, session, sessionFile, pid = 
       socket.on('error', () => {});
       socket.setTimeout(1000, () => socket.destroy());
       let input = '';
+      socket.setEncoding('utf8');
       socket.on('data', chunk => {
         input += chunk.toString('utf8');
-        if (input.length > 4096) { socket.destroy(); return; }
+        if (Buffer.byteLength(input) > 1024 * 1024) { socket.destroy(); return; }
         if (!input.includes('\n')) return;
         socket.removeAllListeners('data');
         void respond().catch(() => socket.destroy());
@@ -238,30 +271,27 @@ export async function startBridge({ instance, pane, session, sessionFile, pid = 
           || request.instance !== instance || request.pane !== pane
           || (request.session !== session && (!sessionFile || request.session !== sessionFile))
           || request.pid !== pid || !/^[a-f0-9]{32}$/.test(request.challenge)
-          || !['catalog', 'scroll_state'].includes(request.operation)
-          || (request.operation === 'catalog' && busy)) { socket.destroy(); return; }
-        const isCatalog = request.operation === 'catalog';
-        if (isCatalog) busy = true;
+          || closed) { socket.destroy(); return; }
+        if (['prompt_capability', 'send_prompt_unconfirmed'].includes(request.operation)) {
+          if (!promptIngress) { socket.destroy(); return; }
+          socket.end(`${JSON.stringify(promptIngress(request))}\n`);
+          return;
+        }
+        if (request.operation !== 'catalog' || busy) { socket.destroy(); return; }
+        busy = true;
         try {
-          const result = isCatalog
-            ? await abortable(Promise.resolve().then(() => catalog(controller.signal)), controller.signal)
-            : scrollState();
+          const result = await abortable(Promise.resolve().then(() => catalog(controller.signal)), controller.signal);
           if (closed || socket.destroyed) return;
           const response = { ...result, instance, pane, session: request.session, pid, incarnation, challenge: request.challenge };
-          response.revision = createHash('sha256').update(JSON.stringify(isCatalog
-            ? [response.status, response.truncated, response.commands]
-            : [response.renderer, response.wheel, response.reason])).digest('hex');
+          response.revision = createHash('sha256').update(JSON.stringify([response.status, response.truncated, response.commands])).digest('hex');
           const payload = JSON.stringify(response);
           if (Buffer.byteLength(payload) >= maxBytes) { socket.destroy(); return; }
           socket.end(`${payload}\n`);
         } catch { socket.destroy(); }
-        finally { if (isCatalog) busy = false; }
+        finally { busy = false; }
       }
     });
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(path, () => { server.removeListener('error', reject); resolve(); });
-    });
+    await listenPrivateSocket(server, path);
     server.on('error', () => {});
     try { await chmod(path, 0o600); }
     catch (error) { await new Promise(resolve => server.close(resolve)); throw error; }
@@ -276,14 +306,14 @@ export async function startBridge({ instance, pane, session, sessionFile, pid = 
 }
 
 export default function commandBridge(pi) {
+  let activity;
+  let closeActivity;
+  for (const type of ['message_start', 'message_update', 'tool_execution_start', 'tool_execution_update', 'tool_execution_end', 'turn_end', 'session_tree', 'session_compact', 'agent_settled']) pi.on(type, (event, ctx) => activity?.event(type, event, ctx));
   let close;
   let owner;
   let provider;
   let discovering = false;
   let ready = false;
-  let ui;
-  const scroll = createScrollState();
-  const widgetKey = 'herdr-mobile-relay:scroll-state';
   pi.on('resources_discover', () => { discovering = true; });
   pi.on('session_start', async (_event, ctx) => {
     if (ctx.mode !== 'tui' || !process.stdin.isTTY || globalThis[ownerKey]) return;
@@ -296,8 +326,6 @@ export default function commandBridge(pi) {
     globalThis[ownerKey] = owner;
     try {
       const instance = await instanceIdentity(socketPath);
-      ui = ctx.ui;
-      ui.setWidget(widgetKey, tui => scroll.widget(tui), { placement: 'belowEditor' });
       ctx.ui.addAutocompleteProvider(current => {
         provider = current;
         if (discovering) ready = true;
@@ -306,20 +334,26 @@ export default function commandBridge(pi) {
       const directory = `/tmp/herdr-pi-${process.getuid()}-${instance.slice(0, 16)}`;
       close = await startBridge({ instance, pane, session, sessionFile, directory,
         catalog: createCatalog(() => pi.getCommands(), () => ready ? provider : undefined),
-        scrollState: () => scroll.query(),
+        prompt: { pi, currentSession: () => ({ id: ctx.sessionManager.getSessionId(), file: ctx.sessionManager.getSessionFile() }) },
       });
+      activity = createActivitySource(ctx.sessionManager, { incomplete: !ctx.isIdle() });
+      closeActivity = await startActivityServer({ directory, identity: { instance, pane, session, sessionFile, pid: process.pid }, source: activity });
     } catch {
-      scroll.clear();
-      ui?.setWidget(widgetKey, undefined);
-      ui = undefined;
+      activity?.close();
+      activity = undefined;
+      await closeActivity?.();
+      closeActivity = undefined;
+      await close?.();
+      close = undefined;
       if (globalThis[ownerKey] === owner) delete globalThis[ownerKey];
     }
   });
   pi.on('session_shutdown', async () => {
+    activity?.close();
+    activity = undefined;
+    await closeActivity?.();
+    closeActivity = undefined;
     ready = false;
-    scroll.clear();
-    ui?.setWidget(widgetKey, undefined);
-    ui = undefined;
     await close?.();
     close = undefined;
     if (owner && globalThis[ownerKey] === owner) delete globalThis[ownerKey];

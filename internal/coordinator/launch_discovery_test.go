@@ -33,7 +33,9 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600); _ = d.Close(context.Background()) })
 	resultCh := make(chan *CommandResult, 1)
 	var revoked atomic.Bool
-	ctx := herdr.WithDispatchCheck(context.Background(), func() error {
+	waitCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	ctx := herdr.WithDispatchCheck(waitCtx, func() error {
 		if revoked.Load() {
 			return errors.New("revoked")
 		}
@@ -41,15 +43,15 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 	})
 	message := map[string]any{"action": "agent_start", "request_id": "normal-discovery", "profile_id": "claude", "name": "proj", "cwd": "/tmp", "prompt": "hello"}
 	go func() { resultCh <- d.Handle(ctx, message) }()
-	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if _, err := os.Stat(entered); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ctx.Done():
 			t.Fatal("start did not enter")
+		case <-time.After(time.Millisecond):
 		}
-		time.Sleep(time.Millisecond)
 	}
 	state.CommitInventory([]*AgentState{{PaneID: "pane-new", RawPaneID: "raw-new", TerminalID: "terminal-new", Agent: "claude", Status: "idle"}}, state.RevisionCounter())
 	terminal := "terminal-new"
@@ -82,7 +84,7 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 		if result.Phase != wantPhase || strings.Count(string(data), "agent prompt") != wantPrompts {
 			t.Fatalf("launch identity result=%+v generation=%d calls=%s", result, state.Generation("pane-new"), data)
 		}
-		replay := d.Handle(context.Background(), message)
+		replay := d.Handle(ctx, message)
 		if replay.Phase != result.Phase {
 			t.Fatalf("duplicate outcome differs: %+v", replay)
 		}
@@ -90,7 +92,7 @@ func runLaunchDiscovery(t *testing.T, mode string) {
 		if err != nil || string(after) != string(data) {
 			t.Fatal("duplicate launch dispatched again")
 		}
-	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("launch did not finish")
 	}
 }

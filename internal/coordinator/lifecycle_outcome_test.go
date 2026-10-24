@@ -23,7 +23,7 @@ func TestCustomAgentRenameRefusalIsPartiallyApplied(t *testing.T) {
 	client := herdr.NewClient(bin, filepath.Join(dir, "sock"))
 	t.Cleanup(func() { _ = client.Close() })
 	lifecycle := &Lifecycle{herdr: client}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	err := lifecycle.startInTarget(ctx, profiles.Profile{Argv: []string{"custom-agent"}}, "agent", "pane-1")
 	if !errors.Is(err, herdr.ErrPartiallyApplied) {

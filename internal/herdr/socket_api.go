@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 	"sync"
@@ -17,13 +16,11 @@ import (
 const socketAPIBufferBytes = 64 * 1024
 
 type socketAPIClient struct {
-	path      string
-	mu        sync.Mutex
-	conn      net.Conn
-	reader    *bufio.Reader
-	seq       atomic.Uint64
-	evidence  atomic.Pointer[scrollEvidenceInstallation]
-	unaryDial func(context.Context, string, string) (net.Conn, error)
+	path   string
+	mu     sync.Mutex
+	conn   net.Conn
+	reader *bufio.Reader
+	seq    atomic.Uint64
 }
 
 type PaneRead struct {
@@ -74,20 +71,7 @@ func (c *socketAPIClient) requestUnary(
 	ctx context.Context,
 	method string,
 	params map[string]any,
-) (result json.RawMessage, wrote bool, returnErr error) {
-	var observation *ScrollEvidenceRecord
-	observer := c.scrollObserver()
-	if observer != nil && scrollEvidenceMethod(method) {
-		observation = &ScrollEvidenceRecord{Kind: "unary", Method: method, SocketPath: c.path, Started: time.Now()}
-		defer func() {
-			observation.Duration = time.Since(observation.Started)
-			observation.Wrote = wrote
-			if returnErr != nil {
-				observation.Error = returnErr.Error()
-			}
-			observer.record(*observation)
-		}()
-	}
+) (json.RawMessage, bool, error) {
 	if c == nil || c.path == "" {
 		return nil, false, errors.New("Herdr socket path is unavailable")
 	}
@@ -98,11 +82,7 @@ func (c *socketAPIClient) requestUnary(
 	}
 	defer cancel()
 
-	dial := c.unaryDial
-	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
-	}
-	conn, err := dial(requestCtx, "unix", c.path)
+	conn, err := (&net.Dialer{}).DialContext(requestCtx, "unix", c.path)
 	if err != nil {
 		return nil, false, fmt.Errorf("connect to Herdr socket API: %w", err)
 	}
@@ -122,32 +102,14 @@ func (c *socketAPIClient) requestUnary(
 		return nil, false, fmt.Errorf("encode Herdr socket API request: %w", err)
 	}
 	payload = append(payload, '\n')
-	if observation != nil {
-		observation.RequestID = requestID
-		observation.Request = payload
-	}
-	if err := requestCtx.Err(); err != nil {
-		return nil, false, errors.Join(ErrNotStarted, err)
-	}
 	if err := CheckDispatch(requestCtx); err != nil {
 		return nil, false, errors.Join(ErrNotStarted, err)
 	}
 	written, err := conn.Write(payload)
-	if observation != nil {
-		observation.WriteCalls = 1
-		observation.Written = written
-	}
-	if err == nil && written != len(payload) {
-		err = io.ErrShortWrite
-	}
 	if err != nil {
 		return nil, written > 0, fmt.Errorf("write Herdr socket API request: %w", err)
 	}
-	var responseReader io.Reader = conn
-	if observation != nil {
-		responseReader = scrollEvidenceReader{reader: conn, record: observation}
-	}
-	line, err := readSocketAPILine(bufio.NewReaderSize(responseReader, socketAPIBufferBytes))
+	line, err := readSocketAPILine(bufio.NewReaderSize(conn, socketAPIBufferBytes))
 	if err != nil {
 		return nil, true, fmt.Errorf("read Herdr socket API response: %w", err)
 	}
@@ -269,7 +231,6 @@ func (c *socketAPIClient) readPane(
 }
 
 func (c *socketAPIClient) connect(ctx context.Context) error {
-	c.scrollObserver()
 	if c.conn != nil {
 		return nil
 	}
@@ -435,7 +396,6 @@ func readSocketAPILine(reader *bufio.Reader) ([]byte, error) {
 }
 
 func (c *socketAPIClient) close() error {
-	c.scrollObserver()
 	if c == nil {
 		return nil
 	}

@@ -5,15 +5,80 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-20
+
 ### Added
 
+- Make **Conversation / Full history** the default for agents with available
+  history. Terminal remains one tap away and is the fallback when history is
+  unavailable; saved view preferences are respected.
+- Stream Pi text and tool progress into Full history while a turn is running,
+  then reconcile them with the recorded conversation. The optional Pi
+  integration now streams partial updates without a launch flag to authorized
+  paired devices, including readers. Completion-time redactions cannot retract
+  earlier streamed content; see the [Pi privacy policy](docs/conversation-activity.md#pi-privacy-policy).
+- Deliver recorded-message updates for Codex, Claude Code, Cursor, Qoder,
+  Oh My Pi, OpenCode's supported 1.x/2.x SQLite stores (including mixed stores),
+  Hermes and Oh My OpenCode through a bounded 250 ms observation feed. Native
+  database edits and recorded tool state changes update loaded conversation
+  pages through bounded rowid/indexed queries, without counting or joining the
+  whole store per tick. Missing indexes or exceeded budgets refresh the snapshot;
+  edits outside the loaded window may wait for paging. Loose OpenCode JSON-file
+  stores remain unsupported. Validated Oh My OpenCode plan changes refresh its
+  snapshot. These are updates
+  after records reach disk, not an attachment to the running TUI.
+- Read native Kimi Code 1.5 and legacy-engine 1.4 conversation journals, including
+  validated 2.2.0 undo branches, through the recorded 250 ms feed. Conversation /
+  Full history is the default with Terminal fallback. Imports, human-engine-only
+  histories and unsupported/incomplete structures remain unavailable. Kimi
+  persists complete responses, not token streams; hidden reasoning, media,
+  injected origins and opaque metadata are excluded.
+- Share the prompt composer between Conversation and Terminal, including slash
+  commands, attachments, upload progress/cancellation and structured responses,
+  with inline terminal keys in both views. Reader controls remain disabled.
+- Discover OpenCode custom Markdown commands from supported project, user and
+  XDG command directories, including nested command names. Native skills remain
+  available through OpenCode's Terminal skill menu, not as slash commands.
 - Read OpenCode 2.x conversation history. History, completion responses and
   activity extracts now work for OpenCode 2.x, on fresh installs and on stores
   upgraded from 1.x, where each session is read from whichever format holds
   it. OpenCode 1.x stores keep working as before.
 
+### Changed
+
+- Remove **Jump to latest** from both views and **Show newer loaded messages**
+  from history. Scroll to move through loaded messages and return to following
+  the latest output, while preserving older reading positions.
+- Remove the Pi-specific terminal-scroll controls, retained terminal snapshots
+  and their bridge/Herdr integration. Read native Conversation / Full history
+  or use the ordinary Terminal view instead.
+- Bound slash-catalog file reads and metadata parsing across providers, and
+  report incomplete catalogs when the shared read budget is exhausted. Large
+  command bodies remain eligible when their metadata fits within the limits.
+
 ### Fixed
 
+- Keep older Hermes sessions incremental when more than 32,768 newer rows belong
+  to unrelated sessions, using a verified per-session rowid range when indexed.
+- Keep live conversation state tied to the exact agent target so delayed
+  history or updates cannot restore another session's provisional messages.
+- Follow new messages after paging long histories, observe Claude continuation
+  appends, refresh changed availability/warnings, and avoid repeated identical
+  resets while a recorded source is unavailable.
+- Allow an explicit history retry as soon as a failed preparation is reported,
+  after its previous worker has released resources.
+- Preserve Terminal's visible position and following state when switching to
+  and from structured questions.
+- Keep sensitive text out of saved Conversation drafts when terminal echo
+  evidence is stale, missing or belongs to another target, including after
+  clock changes; retain masked secret entry and safe attachment/send gating.
+- Reduce redundant slash-catalog refreshes and terminal snapshot traffic while
+  reading Conversation.
+- Match Pi's canonical trust-directory decisions without conflicting aliases
+  overriding them, and preserve Oh My Pi marketplace registry/install order
+  while ignoring malformed registry identifiers.
+- Complete phone updates when an older cached bootstrap loads the required
+  stylesheet after initialization, without clearing phone storage.
 - Show OpenCode conversation history, completion responses and activity
   extracts when a session is resumed from a directory other than the one it
   was created in, such as a subdirectory or another project folder. OpenCode
@@ -23,6 +88,13 @@ project follows [Semantic Versioning](https://semver.org/).
 - Mark OpenCode shell commands that exit with a non-zero code as failed in
   conversation history. OpenCode records them as completed and stores the
   exit code separately.
+
+### Upgrade
+
+Restart the relay after upgrading. Pi users of the optional integration must
+refresh it from the updated release: run
+`bash relay/pi-commands.sh install ~/.pi/agent` (or each custom absolute Pi
+agent directory), then `/reload` in each affected Pi pane (or restart Pi).
 
 ## [0.22.9] - 2026-10-13
 
@@ -1708,7 +1780,8 @@ Version 0.22.5 was withdrawn; this release skips its version and asset generatio
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.9...v0.23.0
 [0.22.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.8...v0.22.9
 [0.22.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.7...v0.22.8
 [0.22.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.22.6...v0.22.7

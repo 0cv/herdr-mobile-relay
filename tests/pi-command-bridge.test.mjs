@@ -2,11 +2,13 @@ import { test, expect } from 'bun:test';
 import { createConnection, createServer } from 'node:net';
 import { mkdtemp, mkdir, rm, chmod, lstat, symlink, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import redactionCases from '../contracts/fixtures/pi_provenance_redaction.json';
-import bridge, { createCatalog, createScrollState, normalizeCommands, startBridge, instanceIdentity } from '../relay/pi-command-bridge/bridge.mjs';
+import bridge, { createCatalog, normalizeCommands, startBridge, instanceIdentity } from '../relay/pi-command-bridge/bridge.mjs';
+import { herdrSocketFixture } from './fixtures/pi-herdr-socket.mjs';
 
 const sourceInfo = { path: '/fixture/extension.ts', source: 'npm:test', scope: 'user', origin: 'package' };
 const entry = (name, source = 'extension', info = sourceInfo) => ({ name, source, sourceInfo: info, description: `${name} description`, handler: () => { throw new Error('must not execute'); }, body: 'secret prompt body' });
@@ -22,52 +24,6 @@ function query(path, target = identity, operation = 'catalog') {
     socket.on('end', () => { try { resolve(JSON.parse(response)); } catch { reject(new Error('empty or malformed response')); } });
   });
 }
-
-test('scroll evidence follows the live TUI reference, replacement, and disposal', () => {
-  const state = createScrollState();
-  let mode = 'regular';
-  const tui = { get mode() { return mode; } };
-  const original = state.widget(tui);
-  expect(original.render(80)).toEqual([]);
-  expect(state.query()).toEqual({ renderer: 'regular', wheel: 'unavailable', reason: 'pi_regular' });
-  mode = 'fullscreen';
-  expect(state.query().wheel).toBe('sgr_cell');
-  mode = 'unsupported';
-  expect(state.query().renderer).toBe('unknown');
-  const replacement = state.widget({ mode: 'fullscreen' });
-  original.dispose();
-  expect(state.query().renderer).toBe('fullscreen');
-  replacement.invalidate();
-  replacement.dispose();
-  expect(state.query().renderer).toBe('unknown');
-  state.widget(tui);
-  state.clear();
-  expect(state.query().wheel).toBe('unavailable');
-});
-
-test('scroll query is independent of stalled command discovery and rejects unknown operations', async () => {
-  const directory = await mkdtemp('/tmp/pi-scroll-');
-  let begin;
-  const begun = new Promise(resolve => { begin = resolve; });
-  let signal;
-  const close = await startBridge({ ...identity, directory,
-    catalog: current => { signal = current; begin(); return new Promise(() => {}); },
-    scrollState: () => ({ renderer: 'fullscreen', wheel: 'sgr_cell', reason: 'pi_fullscreen' }),
-  });
-  const path = join(directory, `${process.pid}.sock`);
-  const catalog = query(path).catch(() => undefined);
-  try {
-    await begun;
-    const result = await query(path, identity, 'scroll_state');
-    expect(result.renderer).toBe('fullscreen');
-    expect(result.commands).toBeUndefined();
-    expect(result.incarnation).toHaveLength(36);
-    await expect(query(path, identity, 'unknown')).rejects.toThrow();
-    await close();
-    await catalog;
-    expect(signal.aborted).toBe(true);
-  } finally { await close(); await catalog; await rm(directory, { recursive: true, force: true }); }
-});
 
 test('normalizes active invocation names, precedence, provenance, disabled skills, and limits', () => {
   const names = ['orchestrate', 'orchestrate-plan', 'orchestrate-implement', 'orchestrate-status', 'orchestrate-answer'];
@@ -93,7 +49,7 @@ test('normalizes active invocation names, precedence, provenance, disabled skill
 });
 
 test('socket queries current metadata, rejects identity mismatch and concurrent ownership, and cleans up', async () => {
-  const directory = await mkdtemp('/tmp/pi-bridge-test-');
+  const directory = await mkdtemp(join(tmpdir(), 'pi-bridge-test-'));
   let commands = [entry('first')];
   const sessionFile = join(directory, 'session.jsonl');
   const close = await startBridge({ ...identity, sessionFile, directory, catalog: () => normalizeCommands(commands, new Set()) });
@@ -108,16 +64,22 @@ test('socket queries current metadata, rejects identity mismatch and concurrent 
     expect(second.incarnation).toBe(first.incarnation);
     await expect(query(path, { ...identity, session: 'child' })).rejects.toThrow();
     expect((await query(path, { ...identity, session: sessionFile })).session).toBe(sessionFile);
-    expect((await query(path, { ...identity, session: sessionFile }, 'scroll_state')).session).toBe(sessionFile);
     await expect(query(path, { ...identity, session: '/fixture/unrelated.jsonl' })).rejects.toThrow();
     await expect(query(path, { ...identity, pane: 'other' })).rejects.toThrow();
     await expect(startBridge({ ...identity, directory, catalog: () => ({}) })).rejects.toThrow();
     expect((await query(path)).commands[0].command).toBe('/second');
-  } finally { await close(); await close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await close(); await close();
+    await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    const again = await startBridge({ ...identity, directory, catalog: () => normalizeCommands([], new Set()) });
+    await again();
+    await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('redacts authenticated package provenance before bridge serialization', async () => {
-  const directory = await mkdtemp('/tmp/pi-redaction-');
+  const directory = await mkdtemp(join(tmpdir(), 'pi-redaction-'));
   const commands = redactionCases.map((fixture, i) => entry(`package-${i}`, 'extension', {
     ...sourceInfo, source: fixture.input, path: fixture.path || sourceInfo.path,
     ...(fixture.base_dir ? { baseDir: fixture.base_dir } : {}),
@@ -136,7 +98,7 @@ test('redacts authenticated package provenance before bridge serialization', asy
 });
 
 test('Node subprocess survives null and malformed request frames and serves a later valid request', async () => {
-  const directory = await mkdtemp('/tmp/pi-node-');
+  const directory = await mkdtemp(join(tmpdir(), 'pi-node-'));
   const child = spawn('node', ['--unhandled-rejections=strict', fileURLToPath(new URL('./fixtures/pi-bridge-server.mjs', import.meta.url)), identity.instance, identity.pane, identity.session, directory], { stdio: ['ignore', 'pipe', 'pipe'] });
   const exited = once(child, 'exit');
   let errors = '';
@@ -163,7 +125,7 @@ test('Node subprocess survives null and malformed request frames and serves a la
 });
 
 test('passes request signals and recovers metadata discovery without accumulating stalled autocomplete work', async () => {
-  const directory = await mkdtemp('/tmp/pi-cancellation-');
+  const directory = await mkdtemp(join(tmpdir(), 'pi-cancellation-'));
   let calls = 0;
   let stalledSignal;
   let settle;
@@ -211,7 +173,7 @@ test('passes request signals and recovers metadata discovery without accumulatin
 });
 
 test('aborts autocomplete when a client disconnects or the bridge shuts down', async () => {
-  const directory = await mkdtemp('/tmp/pi-abort-');
+  const directory = await mkdtemp(join(tmpdir(), 'pi-abort-'));
   let observed;
   let started;
   let begun = new Promise(resolve => { started = resolve; });
@@ -241,7 +203,7 @@ test('aborts autocomplete when a client disconnects or the bridge shuts down', a
 });
 
 test('names one instance for a socket reached through symbolic links', async () => {
-  const fixture = await mkdtemp('/tmp/pi-identity-');
+  const fixture = await mkdtemp(join(tmpdir(), 'pi-identity-'));
   const server = createServer();
   try {
     await mkdir(join(fixture, 'real', 'sub'), { recursive: true });
@@ -277,7 +239,7 @@ test('names one instance for a socket reached through symbolic links', async () 
 });
 
 test('rejects public runtime directories', async () => {
-  const directory = await mkdtemp('/tmp/pi-bridge-test-');
+  const directory = await mkdtemp(join(tmpdir(), 'pi-bridge-test-'));
   try {
     await chmod(directory, 0o755);
     await expect(startBridge({ ...identity, directory, catalog: () => ({}) })).rejects.toThrow('Unsafe');
@@ -285,12 +247,11 @@ test('rejects public runtime directories', async () => {
 });
 
 test('session lifecycle waits for post-discovery autocomplete, isolates nested runtimes, reloads, and shuts down', async () => {
-  const fixture = await mkdtemp('/tmp/pi-lifecycle-');
-  const herdrPath = join(fixture, 'herdr.sock');
-  const herdr = createServer();
-  await new Promise(resolve => herdr.listen(herdrPath, resolve));
+  const herdr = await herdrSocketFixture();
+  const herdrPath = herdr.path;
   const instance = await instanceIdentity(herdrPath);
   const directory = `/tmp/herdr-pi-${process.getuid()}-${instance.slice(0, 16)}`;
+  await mkdir(directory, { mode: 0o700 });
   const savedPane = process.env.HERDR_PANE_ID;
   const savedSocket = process.env.HERDR_SOCKET_PATH;
   const tty = process.stdin.isTTY;
@@ -300,19 +261,7 @@ test('session lifecycle waits for post-discovery autocomplete, isolates nested r
   let registered = [entry('loaded')];
   let factory;
   const provider = { getSuggestions: async () => ({ items: [{ value: '/skill:active' }] }) };
-  let widget;
-  let widgetFactory;
-  const tui = { mode: 'regular' };
-  const context = { mode: 'tui', sessionManager: { getSessionId: () => 'session', getSessionFile: () => '/fixture/session.jsonl' }, ui: {
-    addAutocompleteProvider: fn => { factory = fn; fn(provider); },
-    setWidget: (key, fn, options) => {
-      expect(key).toBe('herdr-mobile-relay:scroll-state');
-      widget?.dispose();
-      widgetFactory = fn;
-      widget = fn?.(tui, {});
-      if (fn) expect(options).toEqual({ placement: 'belowEditor' });
-    },
-  } };
+  const context = { mode: 'tui', isIdle: () => true, sessionManager: { getSessionId: () => 'session', getSessionFile: () => '/fixture/session.jsonl', getLeafId: () => null, getEntry: () => undefined }, ui: { addAutocompleteProvider: fn => { factory = fn; fn(provider); } } };
   const makeAPI = () => {
     const handlers = {};
     bridge({ on: (event, handler) => { handlers[event] = handler; }, getCommands: () => registered });
@@ -324,21 +273,6 @@ test('session lifecycle waits for post-discovery autocomplete, isolates nested r
   try {
     await handlers.session_start({}, context);
     expect((await query(path, target)).status).toBe('loading');
-    expect(widget.render(80)).toEqual([]);
-    expect(widget.handleInput).toBeUndefined();
-    const regular = await query(path, target, 'scroll_state');
-    expect(regular.renderer).toBe('regular');
-    expect(regular.wheel).toBe('unavailable');
-    tui.mode = 'fullscreen';
-    const fullscreen = await query(path, target, 'scroll_state');
-    expect(fullscreen.renderer).toBe('fullscreen');
-    expect(fullscreen.wheel).toBe('sgr_cell');
-    expect(fullscreen.revision).not.toBe(regular.revision);
-    expect((await query(path, target, 'scroll_state')).revision).toBe(fullscreen.revision);
-    widget.dispose();
-    expect((await query(path, target, 'scroll_state')).renderer).toBe('unknown');
-    widget = widgetFactory(tui, {});
-    expect((await query(path, target, 'scroll_state')).renderer).toBe('fullscreen');
     handlers.resources_discover();
     registered.push(entry('skill:active', 'skill'), entry('skill:hidden', 'skill'));
     factory(provider);
@@ -360,8 +294,7 @@ test('session lifecycle waits for post-discovery autocomplete, isolates nested r
     process.stdin.isTTY = tty;
     if (savedPane === undefined) delete process.env.HERDR_PANE_ID; else process.env.HERDR_PANE_ID = savedPane;
     if (savedSocket === undefined) delete process.env.HERDR_SOCKET_PATH; else process.env.HERDR_SOCKET_PATH = savedSocket;
-    await new Promise(resolve => herdr.close(resolve));
+    await herdr.close();
     await rm(directory, { recursive: true, force: true });
-    await rm(fixture, { recursive: true, force: true });
   }
 });

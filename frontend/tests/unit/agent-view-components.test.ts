@@ -139,6 +139,27 @@ describe('agent view controls and conversation loading hook', () => {
     expect(paneAgentViewOverrides).toBeDefined();
   });
 
+  it.each([null, 'invalid', 'activity', 'conversation'])('defaults to clean Conversation and remembers explicit mode %s', async (saved) => {
+    if (saved) localStorage.setItem('herdr-conversation-view', saved);
+    vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue(page({ entries: [
+      { id: 'tool', timestamp: '', role: 'assistant', text: '', tools: [{ id: 'call', name: 'Default tool' }] },
+    ] }));
+    const view = render(ConversationHistory, { agent: agent() });
+    const full = screen.getByRole('button', { name: 'Full history' });
+    await waitFor(() => expect(full).toHaveAttribute('aria-pressed', String(saved === 'activity')));
+    if (saved === 'activity') expect(await screen.findByText('Default tool')).toBeVisible();
+    else expect(screen.queryByText('Default tool')).not.toBeInTheDocument();
+    expect(relayStore.getConversationHistory).toHaveBeenCalledTimes(1);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Conversation' }));
+    expect(localStorage.getItem('herdr-conversation-view')).toBe('conversation');
+    view.unmount();
+    render(ConversationHistory, { agent: agent() });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true'));
+    await user.click(screen.getByRole('button', { name: 'Full history' }));
+    expect(localStorage.getItem('herdr-conversation-view')).toBe('activity');
+  });
+
   it('calls the initial-page hook once for the first settled latest load', async () => {
     const callback = vi.fn();
     vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue(page({ available: false, reason: 'No transcript' }));
@@ -148,6 +169,7 @@ describe('agent view controls and conversation loading hook', () => {
   });
 
   it('hides a leading older fragment while showing the usable latest exchange', async () => {
+    localStorage.setItem('herdr-conversation-view', 'conversation');
     const history = vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue(page({
       entries: [
         { id: 'orphan', timestamp: '2026-01-01', role: 'assistant', text: 'older fragment' },
@@ -227,7 +249,7 @@ describe('agent view controls and conversation loading hook', () => {
         expect(screen.getByText('older answer')).toBeVisible();
       });
       expect(screen.queryByRole('button', { name: 'Return to latest' })).not.toBeInTheDocument();
-      await user.type(screen.getByRole('textbox', { name: 'Prompt' }), 'send while browsing');
+      await user.type(screen.getByRole('combobox', { name: 'Prompt' }), 'send while browsing');
       await user.click(screen.getByRole('button', { name: 'Send prompt' }));
       await waitFor(() => expect(screen.getByText('new latest answer')).toBeInTheDocument());
       expect(screen.getByText('older answer')).toBeInTheDocument();

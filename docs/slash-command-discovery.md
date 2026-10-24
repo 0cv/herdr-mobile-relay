@@ -19,6 +19,16 @@ while its final catalog and wire-size limits still apply. This preserves Hermes'
 provider precedence and configured-folder behavior; it is not a promise of an
 unbounded catalog.
 
+| Provider | Catalog source |
+| --- | --- |
+| Claude Code, Qoder | Builtins plus native command and skill files |
+| Cursor Agent | Builtins plus project commands and native/configured skills |
+| Codex | Builtins plus discovered skills |
+| Pi | Builtins and filesystem fallback; optional exact-session runtime catalog |
+| Oh My Pi | Builtins plus selected profile/project resources |
+| OpenCode | 17 builtin suggestions plus bounded native Markdown commands; skills use native `@` mentions |
+| Hermes, Kimi | Builtins plus native/configured skills |
+
 ## Cursor
 
 Cursor needs its own provider rather than the generic skill path, for two
@@ -94,10 +104,51 @@ Cache identity includes the relay, server session, pane, terminal generation,
 agent session, agent name, and working directory. This is not a filesystem watch:
 reopen the palette or use its refresh button after changing command resources.
 
+## OpenCode
+
+The filesystem catalog follows the installed OpenCode **2.0.29** Markdown
+command loader: personal `${XDG_CONFIG_HOME:-~/.config}/opencode/{command,commands}`
+and project `.opencode/{command,commands}`. Project discovery walks bounded
+ancestors through the Git root (or filesystem root outside a repository), with
+nearer projects overriding personal and outer project commands. Within a scope,
+`commands` overrides `command`. Builtin suggestions retain precedence.
+Nested filenames keep their native slash separator: `commands/git/review.md`
+is `/git/review`, not `/git:review`. Command frontmatter `hidden` and
+`user-invocable` are not native OpenCode command filters.
+
+Only command names and descriptions are exported; prompt bodies, shell
+interpolation and agent/model directives are never executed. The shared
+2,000-file budget and 1 MiB file limit apply, with at most 4,096 visited
+filesystem entries and 32 directory levels per tree. Symlink entries and special
+files are skipped; a linked root itself may be selected. Budget/depth loss sets
+`truncated`; oversized files are skipped as for other providers. Names are
+restricted to the palette's 120-character safe path format.
+
+OpenCode 2.0.29 skills are **`@id` mentions**, selected by its native `/skills`
+menu, not `/id` commands. They are deliberately not invented as slash-command
+suggestions here. Use Terminal for that native menu. This bounded filesystem
+catalog does not evaluate `opencode.json`/JSONC command definitions, remote or
+system-managed configuration, runtime plugins, policies, or configured skill
+sources; it is not a complete native-runtime catalog.
+
 ## Pi runtime commands
 
-For Pi 1.2.0, install the relay-owned metadata integration into the selected
-**agent directory** (not the directory containing it):
+Filesystem discovery follows Pi’s trust-store lookup: canonicalize the working
+directory, then look up its exact path and each canonical ancestor in
+`trust.json`. Stored keys are not rewritten through symlinks. A noncanonical
+alias cannot override a canonical decision or independently grant project
+trust; null entries defer to ancestors and then `defaultProjectTrust`.
+
+For Pi, turn on **Settings → Pi Integration** for its computer. This
+controller-only setting installs the relay-owned integration into all Pi agent
+directories known to that relay and reports each profile's result. Readers see
+it read-only. It starts off and never edits Pi settings, trust decisions,
+Herdr's integration or other extensions. It supports live command discovery,
+text/tool progress, extension notices and the exact-session unconfirmed reply
+path for blocked Pi panes.
+
+The CLI remains an alternative for a selected **agent directory** (not the
+directory containing it):
 
 ```bash
 bash relay/setup.sh --pi-install "$HOME/.pi/agent"
@@ -106,12 +157,16 @@ bash relay/setup.sh --pi-install /absolute/path/to/profile/agent
 ```
 
 With no directory argument, setup uses `PI_CODING_AGENT_DIR`, then
-`~/.pi/agent`. Run `/reload` in each affected Pi pane or restart Pi. Install the
-integration into every profile whose commands you want to discover. After
-updating the relay bundle, rerun the install command to copy its matching bridge
-version into each selected profile, then reload Pi. It lives
-alongside Herdr's integration and does not edit settings, trust decisions, or
-other extension files. To remove only its owned files:
+`~/.pi/agent`. App and CLI state agree because ownership is read from disk.
+At relay startup, including verified-update activation, installed marker-owned
+copies are refreshed from the relay bundle. Unowned directories and symlinked
+extension directories/files are refused. Files are mode 0600 in a mode 0700
+integration directory.
+
+Run `/reload` in each affected Pi pane or restart Pi to activate changes. The
+relay never reloads Pi or types into a pane automatically. The setting shows a
+generic reload hint; it does not claim that a running Pi has loaded new files.
+Turning it off, or this CLI alternative, removes only marker-verified owned files:
 
 ```bash
 bash relay/setup.sh --pi-remove /absolute/path/to/profile/agent
@@ -160,54 +215,6 @@ without launching more autocomplete work. Skill discovery resumes when that
 call settles; restart Pi if it never does. Shutdown, reload, and replacement close owned sockets. A stale
 socket is rejected rather than taken over. The integration requires no Node
 packages beyond Pi's own runtime; it ships in the relay release archive.
-
-### Pi buttons only
-
-The bridge's separate, cheap `scroll_state` query reads the live TUI reference
-supplied to a zero-row `belowEditor` widget, not saved `tuiMode` or extension
-context mode. The reference follows renderer replacement; widget disposal clears
-readiness. Only the observed fullscreen renderer reports SGR cell wheel support.
-Regular or unavailable UI never does. Command discovery remains separate.
-
-A controller can choose **Automatic** or **Local view**, or use **Scroll agent
-up/down**. Readers cannot mutate these controls. Local view never sends application
-input; it preserves a genuine prior local-history snapshot separately when one
-exists. Automatic returns to the latest live screen. Fullscreen redraws are not
-appended to history. Unknown renderer evidence cannot overwrite retained history
-after a live screen has been observed. Conversation History and ordinary local
-scrolling remain independent.
-
-Every wheel intent carries an exact target, request ID and relay-issued state
-revision, never browser-supplied escape bytes or dimensions. The relay checks the
-whole foreground group before and after fresh bridge and read-only PTY geometry
-queries. Editor handoffs, ambiguity, stale revisions and unavailable evidence
-refuse input. Known lease resizes/restoration invalidate geometry. Selected-socket
-schema qualification checks referenced request parameters and success responses,
-not just method names. There is no CLI wheel writer or input fallback.
-
-Writes must start within 250 ms of receipt, with up to another 250 ms for the
-acknowledgement and 500 ms total. The browser retains one in-flight report and at
-most one pending direction; reversal replaces pending work. Selection changes,
-disconnects and stale or uncertain outcomes cancel pending work. Busy or expired
-clicks are dropped, never retried automatically.
-
-Buttons affect the **shared laptop view**. Reports target the measured terminal
-**center cell**, which can scroll a **menu instead of the transcript**. Ownership,
-mode and geometry checks are **best-effort**: a handoff, resize or capture change
-after validation can ignore input, expose literal escape text or reach a different
-input surface. Same-process transitions are not always observable. Switch to Local
-view before incompatible screens. No swipe support, Codex/Claude adapter,
-automatic mouse enabling, synthetic key fallback or application-history harvesting
-is provided.
-
-Run `tests/pi-scroll-qualification.sh` with `HERDR_P1_QUALIFICATION_OUTPUT` naming
-a private persistent evidence directory. Each invocation allocates a fresh
-`/tmp/herdr-scroll-p1-*` home/server/transcript, uses installed Pi in offline mode,
-and retains a receipt, logs, received SGR bytes and visible viewport captures.
-It refuses more than six allocations in that directory and never retries a run.
-Focused browser specs use a declared mocked relay; they are not a paired-browser
-demonstration against real Pi. Physical-phone and non-host-OS coverage are separate
-qualification obligations.
 
 ### Runtime states and troubleshooting
 

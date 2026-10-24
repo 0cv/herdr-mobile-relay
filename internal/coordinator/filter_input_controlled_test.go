@@ -29,12 +29,13 @@ type controlledFilterSocket struct {
 	reads               map[string]int
 	deferRepaint        bool
 	failReadsAfterWrite bool
+	dropInputReply      bool
 }
 
 func newControlledFilterDispatcher(t *testing.T) (*Dispatcher, *controlledFilterSocket) {
 	t.Helper()
 	fake := &controlledFilterSocket{accepted: make(map[string]string), visible: make(map[string]string), reads: make(map[string]int)}
-	path := filepath.Join(t.TempDir(), "native.sock")
+	path := filepath.Join(testSocketDir(t), "native.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +103,11 @@ func newControlledFilterDispatcher(t *testing.T) (*Dispatcher, *controlledFilter
 						delete(response, "result")
 						response["error"] = map[string]any{"code": "unknown_method", "message": "unsupported test method"}
 					}
+					drop := fake.dropInputReply && request.Method == "pane.send_input"
 					fake.mu.Unlock()
+					if drop {
+						return
+					}
 					if json.NewEncoder(conn).Encode(response) != nil {
 						return
 					}

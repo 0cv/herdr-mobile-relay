@@ -354,7 +354,7 @@ func TestOpenCodeV2FreshStoreReadsVisibleTurns(t *testing.T) {
 	sqlite := createOpenCodeFixture(t, filepath.Join(root, "opencode.db"), sql)
 	reader := openCodeFixtureReader(t, sqlite, root)
 	page, err := reader.readOpenCode("ses_fresh", "", defaultPageSize)
-	if err != nil || !page.Available || page.SourceCorrupt || page.HasMore || page.Total != 2 || len(page.Entries) != 2 {
+	if err != nil || !page.Available || page.SourceCorrupt || page.HasMore || page.Total != UnknownTotal || len(page.Entries) != 2 {
 		t.Fatalf("page = %#v, err = %v", page, err)
 	}
 	user, assistantEntry := page.Entries[0], page.Entries[1]
@@ -465,7 +465,7 @@ func TestOpenCodeV2PagingOrdersBySeqAndSkipsHiddenTurns(t *testing.T) {
 		return strings.Join(parts, ",")
 	}
 	first, err := reader.readOpenCode("ses_pages", "", 2)
-	if err != nil || !first.Available || !first.HasMore || first.Total != 5 || texts(first) != "four,five" {
+	if err != nil || !first.Available || !first.HasMore || first.Total != UnknownTotal || texts(first) != "four,five" {
 		t.Fatalf("first page = %#v, err = %v", first, err)
 	}
 	second, err := reader.readOpenCode("ses_pages", first.Entries[0].ID, 2)
@@ -516,7 +516,7 @@ INSERT INTO session_v2(id,directory,title,agent) VALUES('ses_hidden','/work','D'
 		t.Fatalf("unmigrated page = %#v, err = %v", page, err)
 	}
 	page, err = reader.readOpenCode("ses_emptyv2", "", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 0 || page.Total != 0 || page.ReasonCode != "" {
+	if err != nil || !page.Available || len(page.Entries) != 0 || page.Total != UnknownTotal || page.ReasonCode != "" {
 		t.Fatalf("empty page = %#v, err = %v", page, err)
 	}
 	page, err = reader.readOpenCode("ses_hidden", "", defaultPageSize)
@@ -564,7 +564,7 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 	// The pane cwd differs from session_v2.directory (#61).
 	scope := BrowseScope{Provider: "opencode", CWD: cwd, SessionID: "ses_browser2"}
 	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
-	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {
+	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" || latest.Total != nil {
 		t.Fatalf("latest page = %#v, err = %v", latest, err)
 	}
 	appendSQL := openCodeV2Message("m4", "ses_browser2", "assistant", 4, 4, `{"content":[{"type":"text","text":"appended"}]}`)
@@ -573,11 +573,11 @@ func TestBrowserUsesNativeOpenCodeV2CursorPaging(t *testing.T) {
 		t.Fatalf("append OpenCode database: %v: %s", err, output)
 	}
 	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
-	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" {
+	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" || older.Total != nil {
 		t.Fatalf("older page after append = %#v, err = %v", older, err)
 	}
 	page, err := reader.ReadWithProject("opencode", ProjectContext{CWD: cwd}, "ses_browser2", "", defaultPageSize)
-	if err != nil || !page.Available || len(page.Entries) != 3 || page.Entries[2].Text != "appended" {
+	if err != nil || !page.Available || len(page.Entries) != 3 || page.Entries[2].Text != "appended" || page.Total != UnknownTotal {
 		t.Fatalf("pane read = %#v, err = %v", page, err)
 	}
 }

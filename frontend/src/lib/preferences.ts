@@ -36,7 +36,8 @@ import {
 
 export function readTerminalResizeSession(storage?: Pick<Storage, 'getItem'>): boolean {
   try {
-    return (storage || localStorage).getItem(TERMINAL_RESIZE_SESSION_KEY) === 'true';
+    const value = (storage || localStorage).getItem(TERMINAL_RESIZE_SESSION_KEY);
+    return value === null || value === 'true';
   } catch {
     return false;
   }
@@ -45,9 +46,9 @@ export function readTerminalResizeSession(storage?: Pick<Storage, 'getItem'>): b
 export function readDefaultAgentView(storage?: Pick<Storage, 'getItem'>): AgentView {
   try {
     const value = (storage || localStorage).getItem(DEFAULT_AGENT_VIEW_KEY);
-    return isAgentView(value) ? value : 'terminal';
+    return isAgentView(value) ? value : 'conversation';
   } catch {
-    return 'terminal';
+    return 'conversation';
   }
 }
 
@@ -110,11 +111,6 @@ export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
 export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
 export const homeLayout = writable<HomeLayout>(savedHomeLayout());
-// Off by default: resizing the shared pane's height strands stale copies of
-// inline agents' status bars in the scrollback (the terminal reflows the
-// primary buffer before the agent can repaint), so only people who need
-// full-screen TUIs to fit the phone opt in.
-// Never migrate consent from the old height-only preference.
 export const terminalResizeSession = writable<boolean>(readTerminalResizeSession());
 export const terminalHeightLease = writable<boolean>(
   localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',

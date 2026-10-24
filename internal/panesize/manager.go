@@ -204,7 +204,6 @@ type Manager struct {
 	logger    *slog.Logger
 	panes     map[string]*paneState
 	closed    bool
-	onResize  func(string)
 }
 
 // NewManager returns the production manager: fresh Herdr lookups through
@@ -251,21 +250,6 @@ func newManager(
 		now:       now,
 		logger:    logger,
 		panes:     make(map[string]*paneState),
-	}
-}
-
-func (m *Manager) SetOnResize(callback func(string)) {
-	m.mu.Lock()
-	m.onResize = callback
-	m.mu.Unlock()
-}
-
-func (m *Manager) notifyResize(paneID string) {
-	m.mu.Lock()
-	callback := m.onResize
-	m.mu.Unlock()
-	if callback != nil {
-		callback(paneID)
 	}
 }
 
@@ -378,9 +362,6 @@ func (m *Manager) Acquire(
 		state.applied = sizeOf(current)
 	} else {
 		m.removeExpiredLocked(state, now)
-		if state.applied != sizeOf(current) {
-			defer m.notifyResize(paneID)
-		}
 		state.observeLocked(current)
 	}
 	previous, hadPrevious := state.leases[clientID]
@@ -406,7 +387,6 @@ func (m *Manager) Acquire(
 			m.mu.Unlock()
 			return 0, 0, fmt.Errorf("%w: %v", ErrResizeFailed, err)
 		}
-		m.notifyResize(paneID)
 	}
 
 	m.mu.Lock()
@@ -938,9 +918,6 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 		m.mu.Unlock()
 		return nil
 	}
-	if state.applied != sizeOf(current) {
-		defer m.notifyResize(paneID)
-	}
 	state.observeLocked(current)
 	want := state.leaseTargetLocked(current)
 	m.mu.Unlock()
@@ -948,7 +925,6 @@ func (m *Manager) reconcileActive(ctx context.Context, paneID string, state *pan
 		if err := terminal.SetSize(next); err != nil {
 			return fmt.Errorf("%w: %v", ErrResizeFailed, err)
 		}
-		m.notifyResize(paneID)
 	}
 	m.mu.Lock()
 	if m.panes[paneID] == state {
@@ -1056,7 +1032,6 @@ func (m *Manager) restoreOnce(ctx context.Context, paneID string, state *paneSta
 		if err := terminal.SetSize(next); err != nil {
 			return unverified("write terminal size", err)
 		}
-		m.notifyResize(paneID)
 	}
 	return nil
 }

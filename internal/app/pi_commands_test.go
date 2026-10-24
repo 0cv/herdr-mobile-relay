@@ -3,10 +3,8 @@ package app
 import (
 	"bufio"
 	"context"
-	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -14,9 +12,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/pibridge"
-	"github.com/0cv/herdr-mobile-relay/internal/piscroll"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
-	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -26,7 +22,7 @@ type fixtureProcesses struct {
 	replace bool
 }
 
-func (f *fixtureProcesses) PaneProcessInfo(_ context.Context, pane string) (*herdr.PaneProcessInfo, error) {
+func (f *fixtureProcesses) PaneProcessInfoFresh(_ context.Context, pane string) (*herdr.PaneProcessInfo, error) {
 	f.calls++
 	pid := f.pid
 	if f.replace && f.calls > 1 {
@@ -59,7 +55,7 @@ func TestSlashCatalogTargetRecheck(t *testing.T) {
 
 func TestReaderCanDiscoverButCannotSubmitPiCommands(t *testing.T) {
 	identity := transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}
-	for _, operation := range []string{"list_slash_commands", "submit_prompt", "send_keys", "scroll_agent", "set_scroll_selection"} {
+	for _, operation := range []string{"list_slash_commands", "submit_prompt", "send_keys"} {
 		action, exists := protocol.ClassifyAction(operation)
 		if !exists {
 			t.Fatalf("unknown operation %s", operation)
@@ -86,37 +82,20 @@ func TestForegroundRootRejectsAmbiguousAndShell(t *testing.T) {
 	}
 }
 
-func runtimePiCatalog(ctx context.Context, reader *fixtureProcesses, socket, pane, session string) (slashcmd.Catalog, error) {
-	target := piscroll.Target{Ref: protocol.TargetRef{PaneID: pane, TerminalID: "fixture-terminal", AgentSessionID: session, Generation: 1, ServerSessionID: "primary"}, Agent: "pi"}
-	resolver := &piscroll.PiResolver{Process: reader.PaneProcessInfo, Catalog: pibridge.Query, Instance: func() (string, error) { return pibridge.Instance(socket) }, Supported: func() bool { return true }, Current: func(got piscroll.Target) bool { return got == target }}
-	response, err := resolver.ResolveCatalog(ctx, target)
-	if err != nil {
-		return slashcmd.Catalog{}, err
-	}
-	return slashcmd.MergePiRuntime(response.Commands, response.Status, response.Truncated), nil
-}
-
 func TestRuntimePiCatalogAcrossBunSocket(t *testing.T) {
 	bun, err := exec.LookPath("bun")
 	if err != nil {
 		t.Skip("Bun required for cross-runtime integration")
 	}
-	dir, err := os.MkdirTemp("/tmp", "pi-app-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	socket := filepath.Join(dir, "herdr.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
+	socket := testPiHerdrSocket(t)
 	instance, err := pibridge.Instance(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	directory := pibridge.Directory(instance)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	defer os.RemoveAll(directory)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

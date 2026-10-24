@@ -160,12 +160,74 @@ func Query(ctx context.Context, identity Identity) (Response, error) {
 
 func query(ctx context.Context, directory string, identity Identity) (Response, error) {
 	var result Response
-	data, err := queryBridge(ctx, directory, identity, "catalog", MaxBytes)
+	if directory == "" || identity.PID <= 0 || identity.Pane == "" || identity.Session == "" || len(identity.Session) > 2048 {
+		return result, errors.New("missing bridge identity")
+	}
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	default:
+		return result, errors.New("bridge busy")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+	defer cancel()
+	if _, err := owned(directory, false); err != nil {
+		return result, err
+	}
+	path := filepath.Join(directory, fmt.Sprintf("%d.sock", identity.PID))
+	before, err := owned(path, true)
 	if err != nil {
+		return result, err
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return result, err
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return result, err
+	}
+	if err := checkPeer(conn.(*net.UnixConn), identity.PID); err != nil {
+		return result, err
+	}
+	challengeBytes := make([]byte, 16)
+	if _, err := rand.Read(challengeBytes); err != nil {
+		return result, err
+	}
+	challenge := hex.EncodeToString(challengeBytes)
+	request := struct {
+		Identity
+		Challenge string `json:"challenge"`
+		Operation string `json:"operation"`
+	}{identity, challenge, "catalog"}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return result, err
+	}
+	data, err := io.ReadAll(io.LimitReader(conn, MaxBytes+1))
+	if err != nil {
+		return result, err
+	}
+	if len(data) > MaxBytes {
+		return result, errors.New("bridge response too large")
+	}
+	if err := ctx.Err(); err != nil {
 		return result, err
 	}
 	if err := decodeBridge(data, &result); err != nil {
 		return result, err
+	}
+	after, err := owned(path, true)
+	if err != nil || !os.SameFile(before, after) {
+		return result, errors.New("bridge replaced")
+	}
+	if result.Identity != identity || result.Challenge != challenge || len(result.Incarnation) != 36 || len(result.Revision) != 64 {
+		return result, errors.New("bridge identity mismatch")
 	}
 	if result.Status != "available" && result.Status != "partial" && result.Status != "loading" && result.Status != "unavailable" {
 		return result, errors.New("invalid bridge status")
@@ -182,85 +244,6 @@ func query(ctx context.Context, directory string, identity Identity) (Response, 
 		result.Commands[index].Provenance.BaseDir = sanitizePath(entry.Provenance.BaseDir)
 	}
 	return result, nil
-}
-
-func queryBridge(ctx context.Context, directory string, identity Identity, operation string, limit int64) ([]byte, error) {
-	var result struct {
-		Identity
-		Challenge   string `json:"challenge"`
-		Incarnation string `json:"incarnation"`
-		Revision    string `json:"revision"`
-	}
-	if directory == "" || identity.PID <= 0 || identity.Pane == "" || identity.Session == "" || len(identity.Session) > 2048 {
-		return nil, errors.New("missing bridge identity")
-	}
-	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
-	default:
-		return nil, errors.New("bridge busy")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
-	defer cancel()
-	if _, err := owned(directory, false); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(directory, fmt.Sprintf("%d.sock", identity.PID))
-	before, err := owned(path, true)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	deadline, _ := ctx.Deadline()
-	if err := conn.SetDeadline(deadline); err != nil {
-		return nil, err
-	}
-	if err := checkPeer(conn.(*net.UnixConn), identity.PID); err != nil {
-		return nil, err
-	}
-	challengeBytes := make([]byte, 16)
-	if _, err := rand.Read(challengeBytes); err != nil {
-		return nil, err
-	}
-	challenge := hex.EncodeToString(challengeBytes)
-	request := struct {
-		Identity
-		Challenge string `json:"challenge"`
-		Operation string `json:"operation"`
-	}{identity, challenge, operation}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
-		return nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(conn, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, errors.New("bridge response too large")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
-	}
-	after, err := owned(path, true)
-	if err != nil || !os.SameFile(before, after) {
-		return nil, errors.New("bridge replaced")
-	}
-	if result.Identity != identity || result.Challenge != challenge || len(result.Incarnation) != 36 || len(result.Revision) != 64 {
-		return nil, errors.New("bridge identity mismatch")
-	}
-	return data, nil
 }
 
 func decodeBridge(data []byte, target any) error {

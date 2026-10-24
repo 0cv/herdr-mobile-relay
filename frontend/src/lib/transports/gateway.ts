@@ -5,7 +5,6 @@ import type { RelayConfig } from '../types';
 import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking';
 import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
 import {
-  DEVICE_UNAUTHORIZED_CODE,
   type FrameChannel,
   type FrameChannelHandlers,
   type RelayTransport,
@@ -184,11 +183,7 @@ export function createGatewayChannel(
           fail(error instanceof Error && error.message ? error.message : 'The gateway sent an invalid frame.');
         }
       };
-      socket.onclose = (event) => {
-        if (event.reason === DEVICE_UNAUTHORIZED_CODE) {
-          fail('This relay no longer accepts this device', true, DEVICE_UNAUTHORIZED_CODE);
-          return;
-        }
+      socket.onclose = () => {
         fail(phase === 'open' ? 'The gateway connection closed.' : 'The gateway refused the connection.');
       };
       socket.onerror = () => {

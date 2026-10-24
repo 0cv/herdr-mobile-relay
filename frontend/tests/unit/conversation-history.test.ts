@@ -71,7 +71,46 @@ describe('conversation history identity and batch analysis', () => {
 });
 
 describe('ConversationHistoryController', () => {
-  it('serializes initial context loading and requests the wire maximum', async () => {
+  it('keeps native cursor traversal working without a total and clears a stale head count', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(page({ mode: 'native', total: 4, sourceRevision: 'db', entries: [entry('u2', 'user'), entry('a2', 'assistant')], hasMore: true, nextCursor: 'older' }))
+      .mockResolvedValueOnce(page({ mode: 'native', total: null, sourceRevision: 'db', entries: [entry('u2', 'user'), entry('a2', 'assistant')], hasMore: true, nextCursor: 'older' }))
+      .mockResolvedValueOnce(page({ mode: 'native', total: null, sourceRevision: 'db', entries: [entry('u1', 'user'), entry('a1', 'assistant')] }));
+    const controller = new ConversationHistoryController(agent(), { request });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.total).toBe(4);
+    controller.refresh();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.total).toBeNull();
+    controller.demandOlder();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['u1', 'a1', 'u2', 'a2']);
+    expect(controller.state.hasMore).toBe(false);
+    expect(controller.state.total).toBeNull();
+    controller.cancel();
+  });
+
+  it.each([[1, 'live result'], [3, 'snapshot result']] as const)('orders a snapshot captured at sequence %i against a concurrent finalized delta', async (snapshotSequence, expectedOutput) => {
+    const toolEntry = (output: string) => entry('pi:answer', 'assistant', 'Tool turn', [{ id: 'tool', name: 'read', output }]);
+    const snapshot = (sequence: number, output: string) => page({ mode: 'snapshot', snapshotId: 'snapshot', sourceRevision: 'revision', sequence, entries: [entry('pi:user', 'user'), toolEntry(output)] });
+    let resolveHead: (value: ConversationPage) => void = () => {};
+    const request = vi.fn().mockResolvedValueOnce(snapshot(0, 'initial')).mockImplementationOnce(() => new Promise<ConversationPage>(resolve => { resolveHead = resolve; }));
+    const controller = new ConversationHistoryController(agent(), { request });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    controller.refresh();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(controller.applyLiveEntries('revision', [toolEntry('live result')], 2)).toBe(true);
+    resolveHead(snapshot(snapshotSequence, 'snapshot result'));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(controller.state.entries.find(entry => entry.id === 'pi:answer')?.tools?.[0].output).toBe(expectedOutput);
+    controller.cancel();
+  });
+
+  it('opens a bounded recent page and fetches missing prompt context only on demand', async () => {
     const calls: { cursor?: string; limit?: number }[] = [];
     const request = vi.fn(async (_target: Agent, input: { cursor?: string; limit?: number }) => {
       calls.push(input);
@@ -93,16 +132,21 @@ describe('ConversationHistoryController', () => {
       yieldToBrowser: async () => {},
     });
     controller.start();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(HISTORY_WIRE_PAGE_SIZE).toBe(24);
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['answer-only']);
+    controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
     expect(calls.map(({ cursor, limit }) => [cursor, limit])).toEqual([
       [undefined, HISTORY_WIRE_PAGE_SIZE],
       ['context-cursor', HISTORY_WIRE_PAGE_SIZE],
     ]);
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['question', 'answer-only']);
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toEqual(['question', 'answer-only']));
     expect(controller.state.beginningReached).toBe(true);
   });
 
-  it('starts each older demand from current semantic progress and crosses tool-only pages', async () => {
+  it('bounds each older demand to one ready page including tool-only pages', async () => {
     const requests: { cursor?: string }[] = [];
     const olderExchanges = Array.from({ length: 12 }, (_, index) => [
       entry(`older-user-${index}`, 'user', `older question ${index}`),
@@ -136,10 +180,14 @@ describe('ConversationHistoryController', () => {
     controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
     controller.demandOlder();
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(controller.state.entries.map(({ id }) => id)).toContain('tool-0');
+    controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(4));
 
     expect(requests.map(({ cursor }) => cursor)).toEqual([undefined, 'older-1', 'older-2', 'older-3']);
-    expect(controller.state.entries.map(({ id }) => id)).toContain('earlier-user');
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toContain('earlier-user'));
     expect(controller.state.requestPhase).toBe('idle');
     expect(controller.state.contextSearching).toBe(false);
   });
@@ -164,7 +212,7 @@ describe('ConversationHistoryController', () => {
     expect(controller.state.requestPhase).toBe('idle');
   });
 
-  it('keeps searching when the newest window contains only tools and assistant activity', async () => {
+  it('shows tools and assistant activity without searching for a deep prompt', async () => {
     let calls = 0;
     const request = vi.fn(async () => {
       calls++;
@@ -185,8 +233,10 @@ describe('ConversationHistoryController', () => {
     const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
     controller.start();
     await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['actual-user', 'actual-answer', 'tool-only', 'assistant-activity']);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['tool-only', 'assistant-activity']);
+    expect(controller.state.contextSearching).toBe(false);
+    expect(controller.state.hasMore).toBe(true);
   });
 
   it('promotes a warm preview when the fresh page has a leading fragment and a usable exchange', async () => {
@@ -220,7 +270,7 @@ describe('ConversationHistoryController', () => {
     expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-orphan', 'fresh-user', 'fresh-answer']);
   });
 
-  it('keeps a warm preview separate until fresh context is usable', async () => {
+  it('keeps a warm preview separate until a fresh recent fragment is accepted', async () => {
     let resolve!: (value: ConversationPage) => void;
     const request = vi.fn(() => new Promise<ConversationPage>((complete) => { resolve = complete; }));
     const cached = [entry('cached-user', 'user', 'saved question'), entry('cached-answer', 'assistant', 'saved answer')];
@@ -247,13 +297,16 @@ describe('ConversationHistoryController', () => {
       hasMore: true,
       sourceRevision: 'new-revision',
     }));
+    await vi.waitFor(() => expect(controller.state.requestPhase).toBe('idle'));
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(controller.state.preview).toBe(false);
+    expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-answer']);
+    controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
-    expect(controller.state.preview).toBe(true);
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['cached-user', 'cached-answer']);
 
     resolve(page({ entries: [entry('fresh-user', 'user', 'fresh question')], sourceRevision: 'new-revision' }));
-    await vi.waitFor(() => expect(controller.state.preview).toBe(false));
-    expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-user', 'fresh-answer']);
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toEqual(['fresh-user', 'fresh-answer']));
+    expect(controller.state.preview).toBe(false);
   });
 
   it('rejects a changed snapshot identity after preparation starts', async () => {

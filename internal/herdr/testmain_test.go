@@ -1,17 +1,17 @@
 package herdr
 
 import (
-	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
-
-	"github.com/0cv/herdr-mobile-relay/internal/p1fixture"
 )
 
 func TestMain(m *testing.M) {
-	if err := p1fixture.PrepareEnvironment(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if runtime.GOOS == "darwin" && os.Getenv("TMPDIR") == "" {
+		if tempDir, err := filepath.EvalSymlinks("/tmp"); err == nil {
+			_ = os.Setenv("TMPDIR", tempDir)
+		}
 	}
 	os.Exit(m.Run())
 }

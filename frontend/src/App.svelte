@@ -645,6 +645,18 @@
             <path d="m7 9 3 3-3 3M12 15h5"></path>
           </svg>
         </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Inspect workspace"
+          disabled={!workspaceInspectionAvailable}
+          title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
+          onclick={() => { workspaceOpen = true; }}
+        >
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3 5.5h7l2 2h9v11H3z"></path>
+          </svg>
+        </Button>
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else}
         <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => toggle('workspaces')}>
@@ -696,6 +708,8 @@
         <HistoryComponent
           agent={activeAgent}
           readOnly={activeReadOnly}
+          frame={$frames.get(activeAgent.pane_id)}
+          responding={$responding}
           onInitialPage={openingRoute.fallbackToTerminalOnInitialUnavailable
             ? makeInitialPageHandler(openingRoute)
             : undefined}

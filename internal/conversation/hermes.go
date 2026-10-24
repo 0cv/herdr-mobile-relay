@@ -26,19 +26,20 @@ type hermesReader struct {
 }
 
 type hermesRow struct {
-	SessionID   string  `json:"session_id"`
-	CWD         string  `json:"cwd"`
-	Title       string  `json:"title"`
-	MessageID   int64   `json:"message_id"`
-	Role        string  `json:"role"`
-	ContentHex  string  `json:"content_hex"`
-	ToolCallID  string  `json:"tool_call_id"`
-	ToolCalls   string  `json:"tool_calls"`
-	ToolName    string  `json:"tool_name"`
-	DisplayKind string  `json:"display_kind"`
-	Timestamp   float64 `json:"timestamp"`
-	Total       int     `json:"message_total"`
-	CursorFound int     `json:"cursor_found"`
+	SchemaVersion int     `json:"schema_version"`
+	SessionID     string  `json:"session_id"`
+	CWD           string  `json:"cwd"`
+	Title         string  `json:"title"`
+	MessageID     int64   `json:"message_id"`
+	Role          string  `json:"role"`
+	ContentHex    string  `json:"content_hex"`
+	ToolCallID    string  `json:"tool_call_id"`
+	ToolCalls     string  `json:"tool_calls"`
+	ToolName      string  `json:"tool_name"`
+	DisplayKind   string  `json:"display_kind"`
+	Timestamp     float64 `json:"timestamp"`
+	Total         int     `json:"message_total"`
+	CursorFound   int     `json:"cursor_found"`
 }
 
 type hermesToolRow struct {
@@ -203,7 +204,7 @@ func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, be
 			`FROM displayed AS d WHERE 1=1`+cursorFilter+
 			` ORDER BY logical_id DESC LIMIT %d`+
 			`) `+
-			`SELECT s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,`+
+			`SELECT (SELECT schema_version FROM pragma_schema_version) AS schema_version,s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,`+
 			`COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,`+
 			`hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,`+
 			`COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,`+
@@ -263,6 +264,10 @@ func (r *hermesReader) attachToolResultsContext(ctx context.Context, database, s
 	if code != "" {
 		return true
 	}
+	return attachHermesToolRows(entries, rows)
+}
+
+func attachHermesToolRows(entries []Entry, rows []hermesToolRow) bool {
 	corrupt := false
 	for _, row := range rows {
 		row.ToolCallID = strings.TrimSpace(row.ToolCallID)
@@ -272,15 +277,13 @@ func (r *hermesReader) attachToolResultsContext(ctx context.Context, database, s
 			continue
 		}
 		output, truncated := clampText(sanitizeText(outputText), maxEntryBytes)
-		if output == "" {
-			continue
-		}
 		for entryIndex := range entries {
 			for toolIndex := range entries[entryIndex].Tools {
 				tool := &entries[entryIndex].Tools[toolIndex]
 				if toolAssociationID(*tool) != row.ToolCallID {
 					continue
 				}
+				tool.State = "completed"
 				if tool.Output != "" && tool.Output != output {
 					tool.Output += "\n" + output
 					tool.Output, tool.Truncated = clampText(tool.Output, maxEntryBytes)
@@ -398,7 +401,9 @@ func parseHermesToolCalls(raw string) ([]ToolActivity, bool) {
 				input = firstValue(function, "arguments", "input")
 			}
 		}
-		activities = append(activities, newToolActivity(id, name, input))
+		activity := newToolActivity(id, name, input)
+		activity.State = "running"
+		activities = append(activities, activity)
 	}
 	return activities, corrupt
 }
