@@ -57,7 +57,7 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 	}
 	port := freePort(t)
 	pluginPort := freePort(t)
-	socketPath := filepath.Join(tmpDir, "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	socketListener := startInventorySocket(t, socketPath, scenario)
 
 	// Write scenario file

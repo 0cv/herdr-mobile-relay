@@ -292,14 +292,20 @@ function requiredAssetPending(): boolean {
 }
 
 export function initializeAppUpdates(): () => void {
-  const requiredAssetChange = () => {
+  const requiredAssetChange = (event?: Event) => {
     const dataset = document.documentElement.dataset;
-    if (dataset.herdrLoadFailed || dataset.herdrLoadTimedOut) setPhoneUpdateError('The required app asset did not load. Use Load Update to try again.');
-    else acknowledgePhoneUpdate();
+    if (event?.type === 'error' || dataset.herdrLoadFailed || dataset.herdrLoadTimedOut) {
+      setPhoneUpdateError('The required app asset did not load. Use Load Update to try again.');
+      return false;
+    }
+    return acknowledgePhoneUpdate();
   };
+  const stylesheet = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="/assets/app-"]');
+  stylesheet?.addEventListener('load', requiredAssetChange);
+  stylesheet?.addEventListener('error', requiredAssetChange);
   window.addEventListener('herdr-required-assets', requiredAssetChange);
   restoreUpdateProgress();
-  const acknowledged = acknowledgePhoneUpdate();
+  const acknowledged = requiredAssetChange();
   try {
     const attempted = sessionStorage.getItem(APP_RELOAD_TARGET_KEY) || '';
     const attemptedVersion = reloadMarkerVersion(attempted);
@@ -330,6 +336,8 @@ export function initializeAppUpdates(): () => void {
     document.removeEventListener('visibilitychange', recheckWhenVisible);
     window.removeEventListener('pageshow', recheckWhenVisible);
     window.removeEventListener('herdr-required-assets', requiredAssetChange);
+    stylesheet?.removeEventListener('load', requiredAssetChange);
+    stylesheet?.removeEventListener('error', requiredAssetChange);
   };
 }
 

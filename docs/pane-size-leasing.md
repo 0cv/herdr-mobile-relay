@@ -1,8 +1,9 @@
-# Pane-size leasing: opt-in Resize Session
+# Pane-size leasing: Resize Session
 
 Resize Session lets a controller phone resize the shared pane to fit itself
-while it has the pane open. It is a per-device opt-in, off by default, and it
-is honest about its cost: **while a phone holds a lease, the desktop and SSH
+while it has the pane open. It is on by default per device; a saved off choice
+stays off. Lease Terminal Height stays off by default and requires Resize Session.
+The cost remains: **while a phone holds a lease, the desktop and SSH
 views of that pane look garbled.** This page records the design, the safety
 boundary every write passes through, the cleanup budget, and the risks that
 remain. User-facing behavior is in
@@ -37,7 +38,7 @@ Compatibility matrix:
 | --- | --- | --- |
 | ≤ 0.22.7 | this release | Sees no `pane_size_lease`, so never leases; a stale lease without `opt_in` is refused before any access. |
 | this release | ≤ 0.22.7 or Stage A/removal builds | The relay lacks `pane_size_opt_in`, so the app never sends a lease. |
-| this release | this release, darwin/linux | Leases only when the device opted in. |
+| this release | this release, darwin/linux | Controller leases when Resize Session is on (the device default). |
 | this release | this release, other OS | Capability absent; default layout, no error. |
 
 The app gates leasing on all of: controller role, the relay's
@@ -182,7 +183,7 @@ compare-and-set for the window size.
 rows/columns operation owned by Herdr that updates grid and PTY together, is
 scoped to a terminal identity (`PaneInfo.terminal_id`), defines multi-client
 constraints, release/expiry/restart semantics, and a resize revision for
-conditional restore. Until it exists, the opt-in direct-PTY path described here
+conditional restore. Until it exists, the capability-gated direct-PTY path described here
 is the only resizing on offer. Verify the running server's protocol before
 building on such an API; the installed CLI version is not capability evidence.
 

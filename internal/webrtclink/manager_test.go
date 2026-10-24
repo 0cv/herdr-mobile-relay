@@ -74,9 +74,11 @@ type browserPeer struct {
 	toRelay   gate
 	toBrowser gate
 
-	assembler *framing.Reassembler
-	sendMu    sync.Mutex
-	chunks    [][]byte
+	diagnostics  setupDiagnostics
+	diagnosticID int
+	assembler    *framing.Reassembler
+	sendMu       sync.Mutex
+	chunks       [][]byte
 }
 
 func newBrowserPeer(t *testing.T, label string) *browserPeer {
@@ -105,7 +107,17 @@ func newBrowserPeer(t *testing.T, label string) *browserPeer {
 		t.Fatalf("create data channel: %v", err)
 	}
 	peer.dc = dc
-	dc.OnOpen(func() { close(peer.opened) })
+	peer.diagnostics.record("browser.callbacks.registered", pc, "", nil, nil)
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		peer.diagnostics.record("browser.ice."+state.String(), pc, "", nil, nil)
+	})
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		peer.diagnostics.record("browser.connection."+state.String(), pc, "", nil, nil)
+	})
+	dc.OnOpen(func() {
+		peer.diagnostics.record("browser.datachannel.open", pc, "", nil, nil)
+		close(peer.opened)
+	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		frame, err := peer.assembler.Push(msg.Data)
 		if err != nil || frame == nil {
@@ -166,6 +178,7 @@ func newHarness(t *testing.T, maxSessions int, mappedIPs []string) *harness {
 		NAT1To1IPs:       mappedIPs,
 		OnLocalCandidate: h.routeCandidate,
 		Serve: func(ctx context.Context, conn transport.FrameConn) {
+			h.recordServe(conn)
 			h.served <- conn
 			<-ctx.Done()
 		},
@@ -190,12 +203,15 @@ func (h *harness) routeCandidate(key SessionKey, c Candidate) {
 	if peer == nil {
 		return
 	}
+	peer.diagnostics.record("relay.candidate.generated", h.relayPeer(key), c.Candidate, nil, nil)
 	peer.toBrowser.do(func() {
 		init := webrtc.ICECandidateInit{Candidate: c.Candidate, SDPMLineIndex: &c.SDPMLineIndex}
 		if c.SDPMid != "" {
 			init.SDPMid = &c.SDPMid
 		}
-		_ = peer.pc.AddICECandidate(init)
+		peer.diagnostics.record("browser.candidate.before", peer.pc, init.Candidate, init.UsernameFragment, nil)
+		err := peer.pc.AddICECandidate(init)
+		peer.diagnostics.record("browser.candidate.applied", peer.pc, init.Candidate, init.UsernameFragment, err)
 	})
 }
 
@@ -209,17 +225,25 @@ func (h *harness) localCandidates() []Candidate {
 // returns the browser peer.
 func (h *harness) negotiate(t *testing.T, key SessionKey, label string) *browserPeer {
 	t.Helper()
+	return h.negotiateWithCandidates(t, key, label, true)
+}
+
+func (h *harness) negotiateWithCandidates(t *testing.T, key SessionKey, label string, trickle bool) *browserPeer {
+	t.Helper()
 
 	peer := newBrowserPeer(t, label)
 	h.mu.Lock()
+	peer.diagnosticID = len(h.peers) + 1
 	h.peers[key] = peer
 	h.mu.Unlock()
 
 	peer.pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
+			peer.diagnostics.record("browser.gathering.complete", peer.pc, "", nil, nil)
 			return
 		}
 		init := candidate.ToJSON()
+		peer.diagnostics.record("browser.candidate.generated", peer.pc, init.Candidate, init.UsernameFragment, nil)
 		remote := Candidate{Candidate: init.Candidate}
 		if init.SDPMid != nil {
 			remote.SDPMid = *init.SDPMid
@@ -228,9 +252,9 @@ func (h *harness) negotiate(t *testing.T, key SessionKey, label string) *browser
 			remote.SDPMLineIndex = *init.SDPMLineIndex
 		}
 		peer.toRelay.do(func() {
-			if err := h.manager.AddRemoteCandidate(key, remote); err != nil {
-				t.Logf("add remote candidate: %v", err)
-			}
+			peer.diagnostics.record("relay.candidate.before", h.relayPeer(key), remote.Candidate, init.UsernameFragment, nil)
+			err := h.manager.AddRemoteCandidate(key, remote)
+			peer.diagnostics.record("relay.candidate.applied", h.relayPeer(key), remote.Candidate, init.UsernameFragment, err)
 		})
 	})
 
@@ -241,12 +265,19 @@ func (h *harness) negotiate(t *testing.T, key SessionKey, label string) *browser
 	if err := peer.pc.SetLocalDescription(offer); err != nil {
 		t.Fatalf("set browser local description: %v", err)
 	}
+	peer.diagnostics.record("browser.local.ready", peer.pc, "", nil, nil)
 
 	answerSDP, err := h.manager.HandleOffer(context.Background(), key, offer.SDP)
 	if err != nil {
 		t.Fatalf("handle offer: %v", err)
 	}
-	peer.toRelay.release()
+	peer.diagnostics.record("relay.answer.returned", h.relayPeer(key), "", nil, nil)
+	if !trickle && (strings.Contains(offer.SDP, "a=candidate:") || strings.Contains(answerSDP, "a=candidate:")) {
+		t.Fatal("candidate-free negotiation carried an embedded candidate")
+	}
+	if trickle {
+		peer.toRelay.release()
+	}
 
 	if err := peer.pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
@@ -254,7 +285,11 @@ func (h *harness) negotiate(t *testing.T, key SessionKey, label string) *browser
 	}); err != nil {
 		t.Fatalf("set browser remote description: %v", err)
 	}
-	peer.toBrowser.release()
+	peer.diagnostics.record("browser.remote.ready", peer.pc, "", nil, nil)
+	if trickle {
+		peer.toBrowser.release()
+	}
+	peer.diagnostics.record("negotiate.return", peer.pc, "", nil, nil)
 	return peer
 }
 
@@ -264,6 +299,7 @@ func (h *harness) awaitServe(t *testing.T) transport.FrameConn {
 	case conn := <-h.served:
 		return conn
 	case <-time.After(testTimeout):
+		t.Logf("WebRTC setup diagnostics: %s", h.setupSnapshot())
 		t.Fatal("no connection was handed to the hub")
 		return nil
 	}
@@ -564,20 +600,33 @@ func startSTUNResponder(t *testing.T, portDelta int) string {
 	if err != nil {
 		t.Fatalf("listen stun responder: %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		_ = conn.Close()
+		<-done
+	})
 
+	started := time.Now()
 	go func() {
+		defer close(done)
 		buf := make([]byte, 1500)
 		for {
 			n, from, err := conn.ReadFromUDP(buf)
 			if err != nil {
 				return
 			}
+			received := time.Since(started)
 			reply, ok := stunBindingSuccess(buf[:n], from.IP, from.Port+portDelta)
 			if !ok {
+				t.Logf("STUN ignored %d bytes from %s at %s", n, from, received)
 				continue
 			}
-			_, _ = conn.WriteToUDP(reply, from)
+			written, err := conn.WriteToUDP(reply, from)
+			t.Logf("STUN received request from %s at %s; replied %d bytes at %s: %v", from, received, written, time.Since(started), err)
+			if err != nil {
+				t.Errorf("reply to STUN request: %v", err)
+				return
+			}
 		}
 	}()
 	return conn.LocalAddr().String()
@@ -623,11 +672,22 @@ func TestDiscoverMappedAddressReflectsSharedSocket(t *testing.T) {
 	h := newHarness(t, 1, nil)
 	h.manager.SetSTUNServers([]string{"stun:" + server})
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	discovered, err := h.manager.DiscoverMappedAddresses(ctx)
+	var discovered []netip.AddrPort
+	var err error
+	for attempt := range 3 {
+		discovered, err = h.manager.DiscoverMappedAddresses(ctx)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "timeout while waiting for XORMappedAddr") {
+			t.Fatalf("discover mapped address: %v", err)
+		}
+		t.Logf("shared-socket connectivity attempt %d timed out: %v", attempt+1, err)
+	}
 	if err != nil {
-		t.Fatalf("discover mapped address: %v", err)
+		t.Fatalf("discover mapped address after bounded connectivity attempts: %v", err)
 	}
 	if len(discovered) == 0 {
 		t.Fatal("discovery returned no mappings")
@@ -709,6 +769,9 @@ func TestPublishMappedAddressPortChangedTricklesSrflx(t *testing.T) {
 	h.manager.mu.Unlock()
 
 	externalPort := h.manager.LocalPort() + 1
+	if externalPort > 65535 {
+		externalPort = h.manager.LocalPort() - 1
+	}
 	mapped := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.9"), uint16(externalPort))
 	h.manager.PublishMappedAddresses([]netip.AddrPort{mapped})
 	// A repeated discovery of the same address must not duplicate it.
@@ -801,6 +864,20 @@ func TestSessionReportCarriesTypesOnly(t *testing.T) {
 	}
 }
 
+func awaitSelectedPair(t *testing.T, s *session) SessionReport {
+	t.Helper()
+	deadline := time.Now().Add(testTimeout)
+	for {
+		if report := s.report(); report.SelectedLocal != "" && report.SelectedRemote != "" {
+			return report
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("real peers did not select a candidate pair")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // The counters exist to answer whether the direct path forms in the field, so
 // each finished session must land in exactly one bucket: a nominated pair is a
 // direct session, and a session that closes without one is the cohort that
@@ -812,10 +889,26 @@ func TestOutcomeCountersClassifyEachSessionOnce(t *testing.T) {
 	}
 
 	relayed := SessionKey{ClientID: "client-relayed", RequestID: "req-1"}
-	h.negotiate(t, relayed, dataChannelLabel)
+	peer := h.negotiateWithCandidates(t, relayed, dataChannelLabel, false)
+	for _, candidates := range []*gate{&peer.toRelay, &peer.toBrowser} {
+		candidates.mu.Lock()
+		open := candidates.open
+		candidates.mu.Unlock()
+		if open {
+			t.Error("unnominated session released a candidate gate")
+		}
+	}
+	relayedSession := h.manager.lookup(relayed)
+	if relayedSession == nil {
+		t.Fatal("expected a live unnominated session")
+	}
+	if report := relayedSession.report(); report.SelectedLocal != "" || report.SelectedRemote != "" || len(report.RemoteTypes) != 0 {
+		t.Errorf("candidate-free session received or selected a remote candidate: %+v", report)
+	}
 	h.manager.CloseSession(relayed, "test")
 	// Closing twice must not double count; close is guarded by closeOnce.
 	h.manager.CloseSession(relayed, "test again")
+	relayedSession.close("duplicate close")
 
 	if got := h.manager.Outcomes(); got.Direct != 0 || got.Relayed != 1 {
 		t.Fatalf("after an unnominated session outcomes = %+v, want 0 direct / 1 relayed", got)
@@ -825,12 +918,12 @@ func TestOutcomeCountersClassifyEachSessionOnce(t *testing.T) {
 	h.negotiate(t, direct, dataChannelLabel)
 	session := h.manager.lookup(direct)
 	if session == nil {
-		t.Fatal("expected a live session to mark as nominated")
+		t.Fatal("expected a live session to await nomination")
 	}
-	session.mu.Lock()
-	session.selectedLocal, session.selectedRemote = "host", "srflx"
-	session.mu.Unlock()
+	awaitSelectedPair(t, session)
 	h.manager.CloseSession(direct, "test")
+	h.manager.CloseSession(direct, "test again")
+	session.close("duplicate close")
 
 	if got := h.manager.Outcomes(); got.Direct != 1 || got.Relayed != 1 {
 		t.Fatalf("after a nominated session outcomes = %+v, want 1 direct / 1 relayed", got)

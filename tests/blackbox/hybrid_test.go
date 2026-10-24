@@ -99,7 +99,7 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 
 	relayPort := freePort(t)
 	env.relayHTTP = fmt.Sprintf("http://127.0.0.1:%d", relayPort)
-	socketPath := filepath.Join(tmpDir, "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	socketListener := startInventorySocket(t, socketPath, scenario)
 	relay := exec.Command(paths["herdr-mobile-relay"])
 	relay.Env = append(os.Environ(),

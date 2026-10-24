@@ -1,5 +1,23 @@
 import { expect, test } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+
+test.beforeEach(async ({ page }) => {
+  const path = process.env.HERDR_ATTENTION_CREDENTIALS;
+  if (!path) return;
+  try {
+    const credential = await readFile(path, 'utf8');
+    await page.addInitScript(value => localStorage.setItem('herdr_device_auth_v1', value), credential);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+});
+
+test.afterEach(async ({ page }) => {
+  const path = process.env.HERDR_ATTENTION_CREDENTIALS;
+  if (!path || page.isClosed()) return;
+  const credential = await page.evaluate(() => localStorage.getItem('herdr_device_auth_v1'));
+  if (credential) await writeFile(path, credential, { mode: 0o600 });
+});
 
 interface FakeOperation {
   argv?: string[];
@@ -224,11 +242,9 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await settingsCard.getByRole('button', {
     name: /Open qoder-settings on Captured relay/,
   }).click();
-  await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveAttribute(
-    'placeholder',
-    'Needs inspection — use terminal controls',
-  );
-  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Send prompt', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Type in terminal', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
 });
@@ -247,7 +263,7 @@ test('browses a full conversation through the real relay', async ({ page }) => {
   }, { relayURL: wsURL });
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Open conversation on Captured relay' }).click();
+  await page.getByRole('region', { name: 'conversation-history tab', exact: true }).getByRole('button', { name: 'Open conversation on Captured relay' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('history question')).toBeVisible();
   await expect(page.getByText('history answer')).toBeVisible();

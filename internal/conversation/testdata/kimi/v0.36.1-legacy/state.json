@@ -1,0 +1,10 @@
+{
+  "createdAt": "2026-08-14T00:00:00.000Z",
+  "updatedAt": "2026-08-14T00:00:03.000Z",
+  "title": "Synthetic legacy engine",
+  "isCustomTitle": true,
+  "lastPrompt": "Legacy engine prompt.",
+  "workDir": "/fixture/kimi-project",
+  "agents": {"main": {"type": "main", "parentAgentId": null}},
+  "custom": {}
+}

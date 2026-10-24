@@ -34,7 +34,7 @@ func TestLifecycleStartsAgentInNestedWorkspaceCreateRootPane(t *testing.T) {
 		"esac\n")
 
 	resolver := profiles.NewResolver(filepath.Join(dir, "config"), nil)
-	socketPath := filepath.Join(dir, "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	startInventorySocket(t, socketPath, nil, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-new"})
 	lifecycle := &Lifecycle{
 		herdr:    herdr.NewClient(bin, socketPath),
@@ -84,7 +84,7 @@ func TestLifecycleStartsAgentInExplicitWorkspace(t *testing.T) {
 		"  'agent start') printf '%s\\n' '{\"result\":{\"type\":\"agent_started\",\"agent\":{\"pane_id\":\"pane-new\",\"agent\":\"codex\",\"name\":\"project-codex\"}}}' ;;\n"+
 		"  *) exit 2 ;;\n"+
 		"esac\n")
-	socketPath := filepath.Join(dir, "herdr.sock")
+	socketPath := filepath.Join(testSocketDir(t), "herdr.sock")
 	startInventorySocket(t, socketPath, []any{
 		map[string]any{"workspace_id": "workspace-existing", "label": "Project"},
 	}, herdr.Pane{ID: "pane-new", TerminalID: "terminal-new", TabID: "tab-new", WorkspaceID: "workspace-existing"})

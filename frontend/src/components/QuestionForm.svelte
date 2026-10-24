@@ -22,10 +22,12 @@
     agent,
     interaction,
     responding,
+    blocked = false,
   }: {
     agent: Agent;
     interaction: QuestionInteraction;
     responding: boolean;
+    blocked?: boolean;
   } = $props();
 
   let draft = $state<QuestionDraft>({ selected: new Set(), otherSelected: false, otherText: '' });
@@ -108,6 +110,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
+    if (responding || blocked) return;
     if (!questionSubmitAllowed(interaction, draft)) {
       relayStore.showToast('Complete the question first.', true);
       return;
@@ -138,6 +141,7 @@
   }
 
   async function previous() {
+    if (responding || blocked) return;
     try {
       const result = await relayStore.navigateQuestionPrevious(agent, interaction);
       relayStore.clearResponding(agent.pane_id);
@@ -158,6 +162,7 @@
   }
 
   async function chat() {
+    if (responding || blocked) return;
     try {
       await relayStore.clarifyQuestion(agent, interaction);
       relayStore.clearResponding(agent.pane_id);
@@ -233,11 +238,11 @@
     </div>{/if}
   </fieldset>
   <div class="question-actions">
-    {#if interaction.can_go_back}<Button type="button" variant="secondary" disabled={responding} onclick={previous}>← Previous</Button>{/if}
-    <Button type="submit" disabled={responding || !questionSubmitAllowed(interaction, draft)}>{interaction.submit_label || 'Submit'}</Button>
-    {#if interaction.can_chat && !interaction.other}<Button type="button" variant="trust" disabled={responding} onclick={chat}>Chat about this</Button>{/if}
+    {#if interaction.can_go_back}<Button type="button" variant="secondary" disabled={responding || blocked} onclick={previous}>← Previous</Button>{/if}
+    <Button type="submit" disabled={responding || blocked || !questionSubmitAllowed(interaction, draft)}>{interaction.submit_label || 'Submit'}</Button>
+    {#if interaction.can_chat && !interaction.other}<Button type="button" variant="trust" disabled={responding || blocked} onclick={chat}>Chat about this</Button>{/if}
   </div>
   <p class="question-status" aria-live="polite">
-    {responding ? 'Waiting for agent…' : interaction.kind === 'multi_select' ? 'Selections are sent when you submit.' : 'Choose one answer.'}
+    {blocked ? 'Inspect terminal delivery before sending.' : responding ? 'Waiting for agent…' : interaction.kind === 'multi_select' ? 'Selections are sent when you submit.' : 'Choose one answer.'}
   </p>
 </form>

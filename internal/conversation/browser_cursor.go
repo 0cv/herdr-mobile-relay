@@ -54,6 +54,10 @@ func browseScopeID(scope BrowseScope) string {
 		ServerSessionID: strings.TrimSpace(scope.ServerSessionID),
 		TerminalID:      strings.TrimSpace(scope.TerminalID),
 		Generation:      scope.Generation,
+		ProcessIdentity: scope.ProcessIdentity,
+		SelectionReason: scope.SelectionReason,
+		InferredSession: scope.InferredSession,
+		SelectionSource: scope.SelectionSource,
 	}
 	data, _ := json.Marshal(normalized)
 	digest := sha256.Sum256(data)

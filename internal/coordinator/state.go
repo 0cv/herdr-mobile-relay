@@ -50,6 +50,12 @@ type AgentState struct {
 	QuestionLayout               bool                   `json:"question_layout,omitempty"`
 	InteractionID                string                 `json:"-"`
 	SessionID                    string                 `json:"-"`
+	SessionKind                  string                 `json:"-"`
+	ConversationProcess          string                 `json:"-"`
+	ConversationSource           string                 `json:"-"`
+	ConversationInferred         bool                   `json:"-"`
+	ConversationInferredOwner    string                 `json:"conversation_inferred_owner,omitempty"`
+	ConversationReason           string                 `json:"-"`
 	ConversationHistoryAvailable bool                   `json:"conversation_history_available,omitempty"`
 	PaneRevision                 int                    `json:"-"`
 	StateRevision                int64                  `json:"pane_revision,omitempty"`
@@ -645,6 +651,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 func paneSessionReplaced(existing, incoming *AgentState) bool {
 	if existing == nil || incoming == nil {
 		return false
+	}
+	if existing.ConversationProcess != incoming.ConversationProcess || existing.ConversationSource != incoming.ConversationSource {
+		return true
 	}
 	for _, identity := range [][2]string{
 		{existing.RawPaneID, incoming.RawPaneID},

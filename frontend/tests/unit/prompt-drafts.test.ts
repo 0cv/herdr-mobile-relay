@@ -15,6 +15,9 @@ function agent(overrides: Partial<Agent> = {}): Agent {
     raw_pane_id: 'pane-1',
     pane_id: 'relay-1::pane-1',
     terminal_id: 'terminal-1',
+    server_session_id: 'server-1',
+    generation: 1,
+    agent_session_id: 'session-1',
     agent: 'codex',
     cwd: '/work/project',
     ...overrides,
@@ -30,6 +33,10 @@ describe('prompt drafts', () => {
     expect(loadPromptDraft(current, 2_000)).toBe('unfinished reply');
     expect(loadPromptDraft(agent({ terminal_id: 'terminal-2' }), 2_000)).toBe('');
     expect(loadPromptDraft(agent({ relay_id: 'relay-2' }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ raw_pane_id: 'pane-2' }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ server_session_id: 'server-2' }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ generation: 2 }), 2_000)).toBe('');
+    expect(loadPromptDraft(agent({ agent_session_id: 'session-2' }), 2_000)).toBe('');
   });
 
   it('expires old drafts and clears successful sends', () => {

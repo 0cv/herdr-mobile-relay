@@ -476,10 +476,15 @@ func TestEncryptedHubRejectsHTTPCredentials(t *testing.T) {
 	}
 }
 
-func testClientE2EEHandshake(
+func testClientE2EEHandshake(t *testing.T, ctx context.Context, conn *websocket.Conn, token string, beforeFinish func()) (*e2eeSession, []byte, []byte) {
+	t.Helper()
+	return testClientFrameE2EEHandshake(t, ctx, newWebSocketConn(conn, true), token, beforeFinish)
+}
+
+func testClientFrameE2EEHandshake(
 	t *testing.T,
 	ctx context.Context,
-	conn *websocket.Conn,
+	conn FrameConn,
 	token string,
 	beforeFinish func(),
 ) (*e2eeSession, []byte, []byte) {
@@ -510,15 +515,12 @@ func testClientE2EEHandshake(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
+	if err := conn.WriteFrame(ctx, hello); err != nil {
 		t.Fatal(err)
 	}
-	messageType, rawServerHello, err := conn.Read(ctx)
+	rawServerHello, err := conn.ReadFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if messageType != websocket.MessageText {
-		t.Fatalf("server hello message type = %v", messageType)
 	}
 	var serverHello e2eeServerHello
 	if err := json.Unmarshal(rawServerHello, &serverHello); err != nil {
@@ -562,6 +564,7 @@ func testClientE2EEHandshake(
 	if err != nil {
 		t.Fatal(err)
 	}
+	session.codec = conn.Codec()
 	beforeFinish()
 	finish, err := json.Marshal(e2eeClientFinish{
 		Type:    "e2ee_client_finish",
@@ -574,15 +577,12 @@ func testClientE2EEHandshake(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Write(ctx, websocket.MessageText, encryptedFinish); err != nil {
+	if err := conn.WriteFrame(ctx, encryptedFinish); err != nil {
 		t.Fatal(err)
 	}
-	messageType, encryptedServerFinish, err := conn.Read(ctx)
+	encryptedServerFinish, err := conn.ReadFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if messageType != websocket.MessageText {
-		t.Fatalf("server finish message type = %v, want text", messageType)
 	}
 	plaintextServerFinish, err := session.open(encryptedServerFinish)
 	if err != nil {

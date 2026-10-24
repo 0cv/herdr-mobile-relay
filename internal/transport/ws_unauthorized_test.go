@@ -42,6 +42,15 @@ func (transientResolver) IsE2EEAuthRejected(error) bool { return false }
 // A phone whose pairing is gone would otherwise reconnect with the same dead
 // credential forever, so the relay has to say the refusal is permanent.
 func TestRejectedHandshakeClosesWithUnauthorizedCode(t *testing.T) {
+	for _, scheme := range []string{"ws", "wss"} {
+		t.Run(scheme, func(t *testing.T) {
+			testRejectedHandshake(t, scheme == "wss")
+		})
+	}
+}
+
+func testRejectedHandshake(t *testing.T, secure bool) {
+	t.Helper()
 	hub := NewHub(&config.Config{Token: "relay-token"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hub.SetE2EEAuthResolver(rejectingResolver{})
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -50,7 +59,11 @@ func TestRejectedHandshakeClosesWithUnauthorizedCode(t *testing.T) {
 	}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(hub.HandleWebSocket))
 	server.Listener = listener
-	server.Start()
+	if secure {
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
 	defer server.Close()
 	t.Cleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -62,6 +75,7 @@ func TestRejectedHandshakeClosesWithUnauthorizedCode(t *testing.T) {
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), &websocket.DialOptions{
 		Subprotocols: []string{e2eeSubprotocol},
+		HTTPClient:   server.Client(),
 	})
 	if err != nil {
 		t.Fatalf("dial: %v", err)

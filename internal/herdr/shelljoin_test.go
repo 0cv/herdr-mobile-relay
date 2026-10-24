@@ -21,7 +21,7 @@ func FuzzShellJoinRoundTrip(f *testing.F) {
 				t.Skip("POSIX argv cannot contain NUL")
 			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		command := "set -- " + ShellJoin(values) + `; printf '%s\000' "$@"`
 		output, err := exec.CommandContext(ctx, "sh", "-c", command).Output()

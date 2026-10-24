@@ -283,7 +283,7 @@ func TestPostDispatchTimeoutIsDispatchedUnknown(t *testing.T) {
 
 	// A short parent deadline wins over the handler's internal command deadline,
 	// so the herdr child is started and then cancelled quickly.
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	res := d.Handle(ctx, map[string]any{

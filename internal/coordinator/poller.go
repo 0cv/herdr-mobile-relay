@@ -199,7 +199,7 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 
 	agents := make([]*AgentState, 0, len(panes))
 	for _, pane := range panes {
-		if pane.Agent == "" {
+		if pane.ID == "" {
 			continue
 		}
 		if tab, ok := tabByID[pane.TabID]; ok {
@@ -227,6 +227,7 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 			Project:         project,
 			Host:            p.hostname,
 			Session:         pane.Session,
+			SessionKind:     pane.SessionRaw.Kind,
 			ActivitySeq:     pane.StateChangeSeq,
 			PaneRevision:    pane.Revision,
 			ScrollMaxOffset: pane.Scroll.MaxOffsetFromBottom,

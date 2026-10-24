@@ -103,23 +103,24 @@ var ompBuiltins = []Command{
 // also spends the shared file budget on them, so exhaustion truncates the least
 // important skills, never the highest-priority ones.
 func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	reader := newCatalogReader()
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(ompBuiltins))
 		copy(builtins, ompBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.
-		custom, truncated := discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
-		return builtinsWithCustom(ompBuiltins, custom), truncated
+		custom, truncated := reader.discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+		return builtinsWithCustom(ompBuiltins, custom), truncated || reader.truncated
 	}
 
-	settings := loadOMPSkillSettings(ctx)
+	settings := reader.loadOMPSkillSettings(ctx)
 	if !settings.enabled || !settings.enableSkillCommands {
 		builtins := make([]Command, len(ompBuiltins))
 		copy(builtins, ompBuiltins)
-		return builtins, false
+		return builtins, reader.truncated
 	}
 
 	truncated := false
@@ -158,7 +159,7 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				requireDescription: true,
 				respectEnabled:     true,
 			}
-			cmds, trunc := scanSkillDirFormatOptions(dir, scope, ompCommandFormat, &budget, options)
+			cmds, trunc := reader.scanSkillDirFormatOptions(dir, scope, ompCommandFormat, &budget, options)
 			allowed := cmds[:0]
 			for _, command := range cmds {
 				if settings.allows(ompSkillName(command.Command)) {
@@ -203,9 +204,9 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	// Extension packages register below native skills and above compatibility
-	for _, extension := range ompExtensionSkillDirs(ctx, settings) {
+	for _, extension := range reader.ompExtensionSkillDirs(ctx, settings) {
 		if extension.directSkillDir {
-			scanExtensionSkillPath(extension, &budget, apply, &truncated, settings)
+			reader.scanExtensionSkillPath(extension, &budget, apply, &truncated, settings)
 			continue
 		}
 		scan(extension.source, filepath.Join(extension.path, "skills"))
@@ -286,11 +287,11 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if budget <= 0 {
 		truncated = true
 	}
-	return commands, truncated
+	return commands, truncated || reader.truncated
 }
-func scanExtensionSkillPath(extension ompExtensionDir, budget *int, apply func([]Command), truncated *bool, settings ompSkillSettings) {
+func (reader *catalogReader) scanExtensionSkillPath(extension ompExtensionDir, budget *int, apply func([]Command), truncated *bool, settings ompSkillSettings) {
 	options := skillScanOptions{requireDescription: true, respectEnabled: true}
-	commands, trunc := scanSkillPathFormatOptions(extension.path, extension.source, ompCommandFormat, budget, options)
+	commands, trunc := reader.scanSkillPathFormatOptions(extension.path, extension.source, ompCommandFormat, budget, options)
 	allowed := commands[:0]
 	for _, command := range commands {
 		if settings.allows(ompSkillName(command.Command)) {
@@ -310,18 +311,18 @@ func ompSkillName(command string) string {
 
 // loadOMPSkillSettings reads the pane's active agent config, then overlays only
 // <cwd>/.omp/config.yml. OMP does not inherit native config from ancestors.
-func loadOMPSkillSettings(ctx DiscoverContext) ompSkillSettings {
+func (reader *catalogReader) loadOMPSkillSettings(ctx DiscoverContext) ompSkillSettings {
 	settings := defaultOMPSkillSettings()
 	dir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
 	if dir != "" {
-		data, found, ok := settingsFileIn(dir, "config.yml", "config.yaml")
+		data, found, ok := reader.settingsFileIn(dir, "config.yml", "config.yaml")
 		settings.customDirectoriesSet = false
 		settings.extensionDirectoriesSet = false
 		if found {
 			if ok {
 				parseOMPSkillSettings(data, &settings)
 			}
-		} else if legacy, legacyFound, legacyOK := settingsFileIn(dir, "settings.json"); legacyFound && legacyOK {
+		} else if legacy, legacyFound, legacyOK := reader.settingsFileIn(dir, "settings.json"); legacyFound && legacyOK {
 			parseOMPLegacyExtensions(legacy, &settings)
 		}
 		if settings.customDirectoriesSet {
@@ -334,14 +335,14 @@ func loadOMPSkillSettings(ctx DiscoverContext) ompSkillSettings {
 	}
 	if filepath.IsAbs(ctx.Cwd) {
 		projectDir := filepath.Join(ctx.Cwd, ".omp")
-		data, found, ok := settingsFileIn(projectDir, "config.yml", "config.yaml")
+		data, found, ok := reader.settingsFileIn(projectDir, "config.yml", "config.yaml")
 		settings.customDirectoriesSet = false
 		settings.extensionDirectoriesSet = false
 		if found {
 			if ok {
 				parseOMPSkillSettings(data, &settings)
 			}
-		} else if legacy, legacyFound, legacyOK := settingsFileIn(projectDir, "settings.json"); legacyFound && legacyOK {
+		} else if legacy, legacyFound, legacyOK := reader.settingsFileIn(projectDir, "settings.json"); legacyFound && legacyOK {
 			parseOMPLegacyExtensions(legacy, &settings)
 		}
 		if settings.customDirectoriesSet {
@@ -367,8 +368,8 @@ func parseOMPLegacyExtensions(data []byte, settings *ompSkillSettings) {
 }
 
 // readSettingsFile returns the contents of the first readable name in dir.
-func readSettingsFile(dir string, names ...string) ([]byte, bool) {
-	data, _, ok := settingsFileIn(dir, names...)
+func (reader *catalogReader) readSettingsFile(dir string, names ...string) ([]byte, bool) {
+	data, _, ok := reader.settingsFileIn(dir, names...)
 	return data, ok
 }
 
@@ -377,7 +378,7 @@ func readSettingsFile(dir string, names ...string) ([]byte, bool) {
 // first-found-wins search over agent directories must stop on; ok reports that
 // data was actually read. A candidate is unusable when it is not a regular
 // file, exceeds maxSettingsSize, or cannot be read.
-func settingsFileIn(dir string, names ...string) ([]byte, bool, bool) {
+func (reader *catalogReader) settingsFileIn(dir string, names ...string) ([]byte, bool, bool) {
 	found := false
 	for _, name := range names {
 		path := filepath.Join(dir, name)
@@ -389,8 +390,8 @@ func settingsFileIn(dir string, names ...string) ([]byte, bool, bool) {
 		if !info.Mode().IsRegular() || info.Size() > maxSettingsSize {
 			continue
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
+		data, ok := reader.readPath(path, maxSettingsSize, maxSettingsSize+1)
+		if !ok {
 			continue
 		}
 		return data, true, true

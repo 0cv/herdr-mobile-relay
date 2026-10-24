@@ -1,4 +1,5 @@
-import type { Agent } from './types';
+import type { Agent, FrontendTargetRef } from './types';
+import { normalizeFrontendTargetRef, targetRefForAgent } from './resource-id';
 
 const DRAFT_PREFIX = 'herdr_prompt_draft_v1:';
 const DRAFT_VERSION = 1;
@@ -43,11 +44,26 @@ function writeMemoryDraft(identity: string, text: string, updatedAt: number): vo
 
 export type PromptDraftSaveResult = 'saved' | 'cleared' | 'too-large' | 'unavailable';
 
-export function promptDraftIdentity(agent: Agent): string {
-  const paneIdentity = String(agent.terminal_id || [agent.workspace_id, agent.tab_id, agent.raw_pane_id].filter(Boolean).join(':'));
+export function promptDraftTarget(value: unknown): FrontendTargetRef | null {
+  const target = normalizeFrontendTargetRef(value);
+  const session = target?.agent_session_id;
+  if (typeof session !== 'string' || !session.trim()
+    || /[\uD800-\uDFFF]/u.test(session)) return null;
+  return target;
+}
+
+export function promptComposerScope(agent: Agent): string {
   return JSON.stringify([
-    agent.relay_id,
-    paneIdentity,
+    agent.relay_id, agent.server_session_id, agent.raw_pane_id, agent.pane_id,
+    agent.terminal_id, agent.generation, agent.agent_session_id, agent.agent, agent.cwd,
+  ]);
+}
+
+export function promptDraftIdentity(agent: Agent): string | null {
+  const target = promptDraftTarget(targetRefForAgent(agent));
+  if (!target) return null;
+  return JSON.stringify([
+    target,
     String(agent.agent || ''),
     String(agent.cwd || ''),
   ]);
@@ -75,6 +91,7 @@ function parseDraft(raw: string | null): PromptDraftRecord | null {
 
 export function loadPromptDraft(agent: Agent, now = Date.now()): string {
   const identity = promptDraftIdentity(agent);
+  if (!identity) return '';
   const key = promptDraftKey(identity);
   const live = readMemoryDraft(identity, now);
   if (live) return live;
@@ -92,6 +109,7 @@ export function loadPromptDraft(agent: Agent, now = Date.now()): string {
 
 export function savePromptDraft(agent: Agent, text: string, now = Date.now()): PromptDraftSaveResult {
   const identity = promptDraftIdentity(agent);
+  if (!identity) return 'unavailable';
   const key = promptDraftKey(identity);
   if (text) writeMemoryDraft(identity, text, now);
   else memoryDrafts.delete(identity);
@@ -117,6 +135,7 @@ export function savePromptDraft(agent: Agent, text: string, now = Date.now()): P
 
 export function clearPromptDraft(agent: Agent): void {
   const identity = promptDraftIdentity(agent);
+  if (!identity) return;
   memoryDrafts.delete(identity);
   try {
     localStorage.removeItem(promptDraftKey(identity));

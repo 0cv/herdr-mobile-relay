@@ -1,0 +1,14 @@
+{
+  "id": "session_00000000-0000-4000-8000-000000000001",
+  "version": 2,
+  "cwd": "/fixture/kimi-project",
+  "createdAt": 1786680000000,
+  "updatedAt": 1786680002700,
+  "archived": false,
+  "title": "Synthetic v2 conversation",
+  "titleKind": "custom",
+  "isCustomTitle": true,
+  "lastPrompt": "Check the fixture.",
+  "agents": {"main": {"type": "main", "parentAgentId": null}},
+  "custom": {}
+}
