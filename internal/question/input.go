@@ -333,6 +333,8 @@ func planClaudeInput(interaction *Interaction, intent InputIntent) []InputStep {
 		if intent.OtherText != "" {
 			steps = append(steps, InputStep{Text: intent.OtherText})
 		}
+		// Claude ticks the row while it holds text and unticks it when cleared.
+		current.Other.Selected = intent.OtherText != ""
 	}
 	if current.Other.Selected != intent.OtherSelected {
 		steps = append(steps, InputStep{Keys: append(navigationKeys(&current, otherTarget), "Enter")})
