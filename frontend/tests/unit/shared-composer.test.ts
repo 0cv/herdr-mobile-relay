@@ -81,6 +81,28 @@ describe('shared composer safety', () => {
     expect(JSON.stringify(localStorage)).not.toContain('expired-echo-secret');
   });
 
+  it.each([1, 2, 3, 4, 5, 6, 7, 8])('expires echo state when the deadline passes after clock read %i of the expiry update', async (crossing) => {
+    vi.useFakeTimers();
+    let monotonicNow = 100_000;
+    let step = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => (monotonicNow += step));
+    const view = render(ConversationHistory, { agent });
+    await vi.advanceTimersByTimeAsync(0);
+    await view.rerender({ frame: { ...frame, target: targetRefForAgent(agent), noEcho: false, receivedAt: monotonicNow } });
+    await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'safe draft' } });
+    expect(loadPromptDraft(agent)).toBe('safe draft');
+    monotonicNow = 103_000 - crossing * 0.01 - 0.005;
+    step = 0.01;
+    await vi.advanceTimersByTimeAsync(3_000);
+    step = 0;
+    monotonicNow = 104_000;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(screen.getByText('Not saved on this phone: waiting for fresh terminal input state.')).toBeInTheDocument();
+    await fireEvent.input(screen.getByLabelText('Prompt'), { target: { value: 'stale-echo-secret' } });
+    expect(loadPromptDraft(agent)).toBe('safe draft');
+    expect(JSON.stringify(localStorage)).not.toContain('stale-echo-secret');
+  });
+
   it.each(['untagged', 'generation', 'terminal', 'session', 'server'] as const)('rejects late %s echo-on frames after a target switch', async (kind) => {
     vi.useFakeTimers();
     vi.setSystemTime(100_000);

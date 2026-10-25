@@ -75,6 +75,26 @@ describe('settings relay status', () => {
     } finally { credential.mockRestore(); send.mockRestore(); }
   });
 
+  it('keeps Pi Integration loaded while unrelated relay updates arrive', async () => {
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValueOnce({ type: 'command_result', request_id: 'pi-setting', ok: true,
+      data: { instance: 'synthetic', enabled: true, profiles: [{ path: '/synthetic/agent', status: 'up to date' }] } })
+      .mockReturnValue(new Promise(() => {}));
+    try {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({ type: 'push_config', protocol: 3, capabilities: ['pi_integration'], inventory: { state: 'ready' } });
+      const toggle = await screen.findByRole('switch', { name: 'Pi Integration' });
+      await waitFor(() => expect(toggle).toBeChecked());
+      socket.server({ type: 'agents', agents: [] });
+      socket.server({ type: 'inventory_status', state: 'ready' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(toggle).toBeChecked();
+      expect(screen.getByText('/synthetic/agent: up to date')).toBeInTheDocument();
+      expect(send.mock.calls.filter(([, command]) => command.type === 'get_pi_integration')).toHaveLength(1);
+    } finally { send.mockRestore(); }
+  });
+
   const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
 
   beforeEach(() => {
