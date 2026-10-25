@@ -1,5 +1,5 @@
 import { redactText } from './diagnostics';
-import { PhaseBudget, PhaseBudgetError } from './budget';
+import { PhaseBudget, PhaseBudgetError, timingScale } from './budget';
 
 export interface WebDriverElement {
   [key: string]: string;
@@ -706,7 +706,7 @@ export class AppiumClient {
       if (checkSession) this.assertUsable(path);
       const operation = `${method} ${path}`;
       if (enforceBudget) this.budget?.assertAvailable(operation);
-      const operationTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
+      const operationTimeoutMs = (timeoutMs ?? this.requestTimeoutMs) * timingScale;
       const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
       const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
       const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');

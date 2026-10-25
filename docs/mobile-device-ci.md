@@ -357,6 +357,10 @@ bootstrap and project paths, runtime and fresh state directory before running
 `bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
 command and shutdown of only the marked simulator.
 
+Hosted iOS jobs set `MOBILE_TIMING_SCALE=2`, which doubles every phase and
+WebDriver request allowance below the unchanged scenario deadline; the values
+below are the unscaled ones used locally and by unit tests.
+
 Initial Safari navigation issues one `simctl openurl` with a 90-second cap.
 The following 110-second readiness phase allows two complete 45-second WebKit
 discovery calls, a 15-second attachment, URL verification and return to native

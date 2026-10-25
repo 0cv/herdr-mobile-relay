@@ -15,7 +15,7 @@ import {
   type BundleExpectation,
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
-import { PhaseBudget } from '../support/budget';
+import { parseTimingScale, PhaseBudget, timingScale } from '../support/budget';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
@@ -2260,6 +2260,35 @@ test('iOS openurl failures distinguish transient, terminal, and timeout outcomes
   assert.equal(iosOpenURLFailureKind(new Error('LaunchServices temporarily unavailable')), 'transient');
   assert.equal(iosOpenURLFailureKind(new Error('invalid simulator device')), 'terminal');
   assert.equal(iosOpenURLFailureKind(new Error('ETIMEDOUT')), 'timeout');
+});
+
+test('mobile timing scale stretches phase views and request caps only when configured', async () => {
+  assert.equal(parseTimingScale(undefined), 1);
+  assert.equal(parseTimingScale(''), 1);
+  assert.equal(parseTimingScale('2'), 2);
+  for (const invalid of ['0.5', '5', 'fast', 'Infinity']) assert.throws(() => parseTimingScale(invalid), /MOBILE_TIMING_SCALE/u);
+  assert.equal(timingScale, 1);
+  const budgetModule = new URL('../support/budget.ts', import.meta.url).pathname;
+  const webdriverModule = new URL('../support/webdriver.ts', import.meta.url).pathname;
+  const script = `
+    const { PhaseBudget } = await import(${JSON.stringify(budgetModule)});
+    const { AppiumClient } = await import(${JSON.stringify(webdriverModule)});
+    let now = 0;
+    const root = new PhaseBudget('root', { timeoutMs: 100_000, now: () => now });
+    const child = root.phaseView('child', 10_000);
+    const reserved = root.phaseView('reserved', 200_000, 1_000);
+    const client = new AppiumClient('http://fake.test', 30_000, async (input) => new URL(String(input)).pathname === '/session'
+      ? new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 })
+      : new Response(JSON.stringify({ value: '<AppiumAUT></AppiumAUT>' }), { status: 200 }));
+    await client.create({ capabilities: {} });
+    await client.pageSource(1_000);
+    const source = client.snapshot().commands.find((command) => command.path.endsWith('/source'));
+    console.log(JSON.stringify({ root: root.remainingMs, child: child.remainingMs, reserved: reserved.remainingMs, source: source.timeoutMs }));
+  `;
+  const output = execFileSync(process.execPath, ['--no-env-file', '-e', script], {
+    env: { ...process.env, MOBILE_TIMING_SCALE: '2' }, encoding: 'utf8', timeout: 30_000,
+  });
+  assert.deepEqual(JSON.parse(output.trim().split('\n').at(-1)!), { root: 100_000, child: 20_000, reserved: 98_000, source: 2_000 });
 });
 
 test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {

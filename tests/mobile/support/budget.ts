@@ -40,6 +40,16 @@ export interface PhaseBudgetOptions {
   now?: () => number;
 }
 
+export function parseTimingScale(value: string | undefined): number {
+  if (value === undefined || value === '') return 1;
+  const scale = Number(value);
+  if (!Number.isFinite(scale) || scale < 1 || scale > 4) throw new Error('PHASE_BUDGET: MOBILE_TIMING_SCALE must be a number from 1 to 4');
+  return scale;
+}
+
+// Hosted simulators run every native step slower, so CI can stretch phase and request allowances without changing their order or checks.
+export const timingScale = parseTimingScale(process.env.MOBILE_TIMING_SCALE);
+
 export class PhaseBudget {
   private readonly root: PhaseBudget;
   private readonly clock: () => number;
@@ -86,7 +96,7 @@ export class PhaseBudget {
   }
 
   phaseView(name: string, timeoutMs: number, reserveParentMs = 0): PhaseBudget {
-    return new PhaseBudget(name, { timeoutMs, parent: this, reserveParentMs });
+    return new PhaseBudget(name, { timeoutMs: timeoutMs * timingScale, parent: this, reserveParentMs: reserveParentMs * timingScale });
   }
 
   assertAvailable(operation: string): void {
