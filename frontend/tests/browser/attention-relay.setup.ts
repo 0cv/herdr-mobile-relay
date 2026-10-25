@@ -300,6 +300,8 @@ export default async function setup() {
   };
   const socketServer = createServer((connection) => {
     connection.setEncoding('utf8');
+    // The relay may close a request early; without a listener the reply's EPIPE would crash the whole test run.
+    connection.on('error', () => connection.destroy());
     let pending = '';
     const handle = async (line: string) => {
       let request: { id?: string; method?: string; params?: Record<string, unknown> };
