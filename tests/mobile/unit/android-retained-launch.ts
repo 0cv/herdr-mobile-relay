@@ -342,7 +342,7 @@ const save = () => writeFileSync(file, JSON.stringify(s));
 const output = value => process.stdout.write(value);
 const expire = () => { s.timeOffset += 31000; save(); };
 if (args.join(' ') === 'devices') output('List of devices attached\\nemulator-5554\\tdevice\\n');
-else if (request === 'wait-for-device' || request === 'shell pm clear com.android.chrome') output('');
+else if (request === 'wait-for-device' || request === 'shell pm clear com.android.chrome' || request === 'reverse --list') output('');
 else if (request === 'shell pm list packages') {
   appendFileSync(log, request + '\\n');
   if (s.fault === 'setup-before-settings') {

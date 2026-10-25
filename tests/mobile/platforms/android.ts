@@ -36,12 +36,23 @@ import {
   minimumDriverRequestMs,
   textLocator,
   type Locator,
+  type SessionOptions,
   WebDriverError,
 } from '../support/webdriver';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
 
 function isFatalDriverError(error: unknown): boolean {
   return isFatalAppiumError(error) || isQualificationFatal(error);
+}
+
+function isAdbTransportLoss(error: unknown): boolean {
+  return error instanceof WebDriverError && error.code === 'APPIUM_COMMAND' && error.status === 500
+    && /\badb: device offline\b/u.test(error.message);
+}
+
+function adbReverseMappings(listing: string): Array<[string, string]> {
+  return listing.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((fields) => fields.length === 3 && fields.slice(1).every((field) => /^tcp:\d+$/u.test(field)))
+    .map((fields) => [fields[1], fields[2]]);
 }
 
 function androidShellQuote(value: string): string {
@@ -302,7 +313,7 @@ export class AndroidPlatform implements MobilePlatform {
     // trust configuration during process startup, so installing it after a
     // browser session has already launched can leave the current target unable
     // to use the newly trusted certificate.
-    await this.driver.create({
+    await this.createFirstSession({
       capabilities: {
         platformName: 'Android',
         'appium:automationName': 'UiAutomator2',
@@ -324,6 +335,28 @@ export class AndroidPlatform implements MobilePlatform {
     await this.closeOwnedSession();
     await this.createChromeSession(false);
     await this.verifyFixtureEndpoint();
+  }
+
+  // Hosted emulators have dropped their adb connection for under a second while UiAutomator2 first started, which also clears adb reverse mappings.
+  private async createFirstSession(options: SessionOptions): Promise<void> {
+    const adb = process.env.ADB || 'adb';
+    const reverses = adbReverseMappings(await commandOutput(adb, ['-s', this.serial, 'reverse', '--list']));
+    this.assertDriverClear();
+    try {
+      await this.driver.create(options);
+      return;
+    } catch (error) {
+      const driver = this.driver.snapshot();
+      if (!isAdbTransportLoss(error) || driver.sessionId || driver.unusable || driver.firstFatal) throw error;
+      this.diagnostics.record({ phase: 'android-setup', operation: 'adb-transport-reconnect', detail: { error: String(error), reverses } });
+    }
+    await command(adb, ['-s', this.serial, 'wait-for-device'], 60_000);
+    this.assertDriverClear();
+    for (const [remote, local] of reverses) {
+      await command(adb, ['-s', this.serial, 'reverse', remote, local]);
+      this.assertDriverClear();
+    }
+    await this.driver.create(options);
   }
 
   async observeGmsStage(stage: AndroidGmsObservationStage): Promise<void> {

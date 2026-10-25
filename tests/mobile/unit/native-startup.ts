@@ -8,6 +8,7 @@ import type { createConnection } from 'node:net';
 import { AndroidStartupLog } from '../support/android-startup-log';
 import { managedWdaCapabilities, validWdaStatus } from '../support/ios-xctest';
 import { AndroidPlatform } from '../platforms/android';
+import { WebDriverError } from '../support/webdriver';
 
 class Socket extends EventEmitter {
   writes: string[] = [];
@@ -414,6 +415,64 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       if (savedAdb === undefined) delete process.env.ADB; else process.env.ADB = savedAdb;
       if (savedOwnership === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE; else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = savedOwnership;
       await rm(root, { recursive: true, force: true });
+    }
+  }],
+  ['Native startup Android first session retries once across an adb reconnect and restores reverse mappings', async () => {
+    const offline = () => new WebDriverError({
+      code: 'APPIUM_COMMAND', status: 500, path: '/session', method: 'POST', durationMs: 10_679, selectedContext: '', selectedWindow: '',
+      message: 'HTTP 500: {"error":"unknown error","message":"Error executing adbExec. Command output: adb: device offline\\n"}',
+    });
+    const other = () => new WebDriverError({
+      code: 'APPIUM_COMMAND', status: 500, path: '/session', method: 'POST', durationMs: 1_000, selectedContext: '', selectedWindow: '',
+      message: 'HTTP 500: {"error":"session not created","message":"instrumentation crashed"}',
+    });
+    const cases: Array<[string, Array<() => Error>, RegExp, number]> = [
+      ['reconnect', [offline, () => new Error('stop after retry')], /stop after retry/u, 2],
+      ['repeated', [offline, offline], /adb: device offline/u, 2],
+      ['other', [other], /instrumentation crashed/u, 1],
+    ];
+    for (const [name, failures, expected, sessions] of cases) {
+      const root = await mkdtemp(join(tmpdir(), 'herdr-startup-'));
+      const savedAdb = process.env.ADB;
+      const savedOwnership = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+      const start = AndroidStartupLog.prototype.start;
+      AndroidStartupLog.prototype.start = function () {};
+      try {
+        const log = join(root, 'adb.log');
+        await writeFile(join(root, 'owned'), 'android:emulator-5554');
+        await writeFile(join(root, 'adb'), [
+          '#!/bin/sh',
+          `printf '%s\\n' "$*" >> '${log}'`,
+          'if [ "$1" = devices ]; then printf "emulator-5554\\tdevice\\n"; fi',
+          'if [ "$3" = reverse ] && [ "$4" = --list ]; then printf "host-17 tcp:44323 tcp:44323\\nhost-17 tcp:33251 tcp:33251\\n"; fi',
+          '',
+        ].join('\n'), { mode: 0o700 });
+        process.env.ADB = join(root, 'adb');
+        process.env.MOBILE_DEVICE_OWNERSHIP_FILE = join(root, 'owned');
+        const platform = new AndroidPlatform({ deviceId: 'emulator-5554', origin: 'https://example.test', setupUrl: 'https://example.test/setup', outputDir: root, appiumUrl: 'http://127.0.0.1:1', certificate: '/unused' });
+        const adbCalls = async () => (await readFile(log, 'utf8')).trim().split('\n');
+        const marks: number[] = [];
+        platform.driver.create = async () => {
+          marks.push((await adbCalls()).length);
+          throw failures[marks.length - 1]();
+        };
+        platform.driver.close = async () => {};
+        await assert.rejects(platform.startFreshDevice(), expected, name);
+        await platform.stopOwnedResources();
+        assert.equal(marks.length, sessions, name);
+        if (sessions === 2) {
+          assert.deepEqual((await adbCalls()).slice(marks[0], marks[1]), [
+            '-s emulator-5554 wait-for-device',
+            '-s emulator-5554 reverse tcp:44323 tcp:44323',
+            '-s emulator-5554 reverse tcp:33251 tcp:33251',
+          ], name);
+        }
+      } finally {
+        AndroidStartupLog.prototype.start = start;
+        if (savedAdb === undefined) delete process.env.ADB; else process.env.ADB = savedAdb;
+        if (savedOwnership === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE; else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = savedOwnership;
+        await rm(root, { recursive: true, force: true });
+      }
     }
   }],
   ['Native startup finalizes Android diagnostics when session teardown fails', async () => {
