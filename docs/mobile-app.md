@@ -333,8 +333,10 @@ actual bottom. Scrolling to the bottom of an older loaded window reveals the
 next newer window without losing the visible message anchor; repeat until the
 newest messages, then following resumes. No jump button is needed.
 **Conversation** keeps each user prompt and the latest agent answer from
-that exchange. **Conversation** is the initial mode. **Full history** is an explicit
-preference that shows every recorded message with collapsible tool activity;
+that exchange. Questions the agent asked (Claude Code AskUserQuestion) stay
+visible with the chosen answer. **Conversation** is the initial mode. **Full history** is an explicit
+preference that shows every recorded message with collapsible tool activity
+(agent questions stay expanded);
 the app remembers either mode on this device. Both use an escaped Markdown subset, search filters the
 currently displayed view, each fenced code block has its own copy control, and
 each message can copy its original Markdown.

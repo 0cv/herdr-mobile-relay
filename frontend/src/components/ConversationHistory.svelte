@@ -9,8 +9,8 @@
   import ConversationMessage from '$components/ConversationMessage.svelte';
   import OmoPlan from '$components/OmoPlan.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { displayName } from '$lib/agents';
-  import { conversationEntries } from '$lib/conversation';
+  import { agentNeedsResponse, attentionKind, displayName, questionInteraction } from '$lib/agents';
+  import { conversationEntries, pendingQuestionEntryId } from '$lib/conversation';
   import {
     ConversationHistoryController,
     type ConversationHistoryControllerState,
@@ -136,6 +136,8 @@
     const pendingIds = new Set(pendingPrefix.map((entry) => entry.id));
     return compact.filter((entry) => entry.kind === 'notice' || !pendingIds.has(entry.id));
   });
+  const waitingQuestionEntryId = $derived(agentNeedsResponse(agent) && attentionKind(agent) === 'question' ? pendingQuestionEntryId(mode === 'activity' ? [...modeEntries, ...liveEntries] : modeEntries) : null);
+  const questionFormShown = $derived(!readOnly && Boolean(questionInteraction(agent)));
   const draftPersistenceAllowed = $derived(draftState.allowed);
   const screenPickerActive = $derived(frame?.paneId === agent.pane_id && terminalTextInputMode(stripAnsi(frame.content)) === 'filter');
   const delivery = $derived(terminalInputDelivery(agent));
@@ -705,7 +707,7 @@
     </div>
     <div class="conversation-toolbar-actions">
       <div class="conversation-mode" role="group" aria-label="Conversation display">
-        <button class:active={mode === 'conversation'} type="button" aria-pressed={mode === 'conversation'} title="Show user prompts and the latest agent answer from each exchange" onclick={() => setMode('conversation')}>Conversation</button>
+        <button class:active={mode === 'conversation'} type="button" aria-pressed={mode === 'conversation'} title="Show user prompts, agent questions and the latest agent answer from each exchange" onclick={() => setMode('conversation')}>Conversation</button>
         <button class:active={mode === 'activity'} type="button" aria-pressed={mode === 'activity'} title="Show every recorded agent message and tool call" onclick={() => setMode('activity')}>Full history</button>
       </div>
       {#if entries.length}
@@ -850,7 +852,7 @@
                 {/if}
               </span>
             </header>
-            <ConversationMessage viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} />
+            <ConversationMessage viewState={messageStates.get(entry.id)} text={entry.text} tools={entry.tools} highlight={query.trim()} awaiting={entry.id === waitingQuestionEntryId ? (questionFormShown ? 'below' : 'elsewhere') : null} />
             {#if entry.id.startsWith('live:')}<small>Live · not saved yet</small>{/if}
             {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
           </article>
