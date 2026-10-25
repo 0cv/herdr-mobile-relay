@@ -221,9 +221,19 @@ export interface AndroidNormalRetirement {
   events: string[];
 }
 
-function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, bounded: (record: LogRecord) => boolean, afterEnd: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
+function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, startMarker: LogRecord, bounded: (record: LogRecord) => boolean, afterEnd: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
   const result: AndroidNormalRetirement[] = [];
   const proof = (record: LogRecord) => ({ lineNumber: record.lineNumber, line: record.line });
+  const processStarts: { record: LogRecord; pid: string; name: string }[] = records.flatMap((record) => {
+    if (record.tag !== 'ActivityManager') return [];
+    const start = record.message.match(/^Start proc (\d+):([^/\s]+)\/\S+ for /u);
+    return start ? [{ record, pid: start[1], name: start[2] }] : [];
+  });
+  // Log buffers can deliver records out of timestamp order, so any restart of the PID that may precede the record by either ordering disqualifies it.
+  const isChromeBrowserAt = (record: LogRecord) => processes[record.pid] === 'com.android.chrome'
+    && !processStarts.some((start) => start.pid === record.pid
+      && (start.record.lineNumber > startMarker.lineNumber || start.record.time > startMarker.time)
+      && (start.record.lineNumber < record.lineNumber || start.record.time <= record.time));
   for (const birth of records) {
     if (birth.tag !== 'ActivityManager') continue;
     const start = birth.message.match(/^Start proc ([1-9]\d*):(com\.android\.chrome:sandboxed_process0:org\.chromium\.content\.app\.SandboxedProcessService0:(\d+))\/u0ai(0|[1-9]\d{0,3}) for {2}\{com\.android\.chrome\/org\.chromium\.content\.app\.SandboxedProcessService0:(\d+)\}$/u);
@@ -236,7 +246,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const exits = records.filter((record) => record.tag === 'Zygote' && record.message.startsWith(`Process ${pid} exited`));
     const children = records.filter((record) => record.pid === pid && record.tag === 'chromium'
       && /^\[INFO:child_process_service\.cc\(\d+\)\] ChildProcessService: Exiting child process\.$/u.test(record.message));
-    if (births.length !== 1 || forks.length !== 1 || exits.length !== 1 || children.length > 1) continue;
+    if (births.length !== 1 || forks.length !== 1 || exits.length > 1 || children.length > 1) continue;
     const fork = forks[0];
     const exit = exits[0];
     const child: LogRecord | undefined = children[0];
@@ -244,9 +254,15 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       && record.message.startsWith(`Killing ${pid}:`));
     // The system reaps an isolated helper once Chrome stops binding it; the zygote then reports either the helper's own exit or the kill.
     const reaper = reapers.length === 1 && androidEventDetails(reapers[0].line).reason === 'isolated not needed' ? reapers[0] : undefined;
-    const cleanExit = exit.message === `Process ${pid} exited cleanly (0)`;
-    const killedByReaper = Boolean(reaper) && exit.message === `Process ${pid} exited due to signal 9 (Killed)`
-      && (reaper!.time <= exit.time || reaper!.lineNumber < exit.lineNumber);
+    const cleanExit = exit?.message === `Process ${pid} exited cleanly (0)`;
+    const killedByReaper = Boolean(reaper && exit?.message === `Process ${pid} exited due to signal 9 (Killed)`
+      && (reaper.time <= exit.time || reaper.lineNumber < exit.lineNumber));
+    const after = (record: LogRecord, previous: LogRecord) => record.time > previous.time
+      || (record.time === previous.time && record.lineNumber > previous.lineNumber);
+    const browserDeaths = !exit && reaper ? records.filter((record) => record.tag === 'chromium'
+      && isChromeBrowserAt(record)
+      && new RegExp(`^\\[WARNING:compositor_view\\.cc\\(\\d+\\)\\] Child process died \\(type=\\d+\\) pid=${pid}\\)$`, 'u').test(record.message)
+      && after(record, reaper)) : [];
     // The helper and the zygote stamp their records independently, so the helper's first lines may carry a slightly earlier time than the fork.
     const earliestHelperTime = fork.time - 20;
     const startup = records.filter((record) => record.pid === pid && record.lineNumber < fork.lineNumber);
@@ -265,7 +281,8 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
         && processes[zygoteBirths[0].pid] === 'zygote64' && bounded(zygoteBirths[0])
         && zygoteBirths[0].time <= fork.time && zygoteBirths[0].lineNumber < fork.lineNumber
         && !records.some((record) => record.tag === 'Zygote' && record.message.startsWith(`Process ${fork.pid} exited`)));
-    if (fork.pid !== exit.pid || !chromeZygote || !(cleanExit || killedByReaper)) continue;
+    if (!chromeZygote || (exit && (fork.pid !== exit.pid || !(cleanExit || killedByReaper)))
+      || (!exit && (!child || !reaper || reapers.length !== 1 || !after(reaper, child) || !browserDeaths.length))) continue;
     const conflictingAuditSubject = records.some((record) => record.pid === pid
       && /^type=1400\s+audit\(/u.test(record.message)
       && [...record.message.matchAll(/\sscontext=(\S*)/gu)].some((context) => context[1] !== 'u:r:isolated_app:s0:c512,c768'));
@@ -285,12 +302,16 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     if (records.some((record) => record.pid === pid && record.tag === 'cr_SplitCompatApp'
       && !record.message.endsWith(` processName=${processName} isIsolatedProcess=true`))) continue;
     if (!bounded(fork) || !bounded(birth)
-      || [...(child ? [child] : []), ...(reaper ? [reaper] : []), exit, ...records.filter((record) => record.pid === pid)].some((record) => !observed(record))) continue;
-    if (records.some((record) => (record.tag === 'ActivityManager'
+      || [...(child ? [child] : []), ...(reaper ? [reaper] : []), ...(exit ? [exit] : []), ...browserDeaths,
+        ...records.filter((record) => record.pid === pid)].some((record) => !observed(record))) continue;
+    const helperEnd = exit || reaper;
+    if (!helperEnd || records.some((record) => (record.tag === 'ActivityManager'
       && [fork.pid, birth.pid].some((producerPid) => record.message.startsWith(`Start proc ${producerPid}:`)))
-      || (record.pid === pid && (record.time < earliestHelperTime || record.time > exit.time)))) continue;
-    if (deaths.length !== (killedByReaper ? 2 : 1) || (killedByReaper && !deaths.includes(exit.line))) continue;
-    const deathRecords = deaths.filter((line) => line !== exit.line)
+      || (record.pid === pid && (record.time < earliestHelperTime || record.time > helperEnd.time
+        || (!exit && record.time === helperEnd.time && record.lineNumber > helperEnd.lineNumber))))) continue;
+    if (deaths.length !== (killedByReaper ? 2 : 1) || (killedByReaper && !deaths.includes(exit!.line))
+      || (!exit && (!reaper || deaths[0] !== reaper.line))) continue;
+    const deathRecords = deaths.filter((line) => line !== exit?.line)
       .map((line) => records.find((record) => record.line === line));
     if (reaper && !deathRecords.includes(reaper)) continue;
     if (deathRecords.some((record) => !record || !observed(record) || record.time < earliestHelperTime
@@ -303,7 +324,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
         const uid = detail.uid?.match(/^u0a\d+i(-?\d+)$/u);
         return detail.reason !== 'isolated not needed' || !uid || Number(uid[1]) + 99000 !== Number(isolated) + 90000;
       })())) continue;
-    const producerProofs = [exit, ...deathRecords as LogRecord[]];
+    const producerProofs = [...(exit ? [exit] : []), ...deathRecords as LogRecord[]];
     if (producerProofs.some((lastProof) => records.some((record) => {
       if (record.time > lastProof.time && record.lineNumber > lastProof.lineNumber) return false;
       const producerPid = lastProof.pid;
@@ -313,8 +334,8 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
         || new RegExp(`^Process \\S+ \\(pid ${producerPid}\\) has died:`, 'u').test(record.message))) return true;
       return record.pid === producerPid && record.tag === 'AndroidRuntime' && /crash|fatal/iu.test(record.message);
     }))) continue;
-    const ended = Math.max(exit.time, ...deathRecords.map((record) => record!.time));
-    const endedLine = Math.max(exit.lineNumber, ...deathRecords.map((record) => record!.lineNumber));
+    const ended = Math.max(helperEnd.time, ...browserDeaths.map((record) => record.time), ...deathRecords.map((record) => record!.time));
+    const endedLine = Math.max(helperEnd.lineNumber, ...browserDeaths.map((record) => record.lineNumber), ...deathRecords.map((record) => record!.lineNumber));
     const adverse = records.some((record) => {
       if (killedByReaper && record === exit) return false;
       const possiblyDuringLifetime = (record.time >= lifetimeStartTime || record.lineNumber >= lifetimeStartLine)
@@ -336,7 +357,8 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     });
     if (adverse) continue;
     result.push({ pid, processName, packageName: 'com.android.chrome', uid: Number(isolated) + 90000, auditSubjects,
-      proof: [...startup, fork, birth, ...(child ? [child] : []), exit, ...deathRecords as LogRecord[]].sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
+      proof: [...startup, fork, birth, ...(child ? [child] : []), ...(exit ? [exit] : []), ...deathRecords as LogRecord[], ...browserDeaths]
+        .sort((a, b) => a.lineNumber - b.lineNumber).map(proof), events: deaths });
   }
   return result;
 }
@@ -403,7 +425,7 @@ export function measuredAndroidEvents(
   if (operationMarkers.length !== operations.length * 2) issues.push('unrecorded or incomplete planned termination markers');
   const events = androidLogEvents(log, first.processes, planned, starts[0]);
   const afterEnd = (record: LogRecord) => record.time >= ends[0].time && record.lineNumber > ends[0].lineNumber;
-  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, bounded, afterEnd);
+  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, starts[0], bounded, afterEnd);
   const normalEvents = new Set(retirements.flatMap((retirement) => retirement.events));
   return { events, fatalEvents: events.filter((event) => !normalEvents.has(event)), normalRetirements: retirements, issues, boundaryDiscordances };
 }

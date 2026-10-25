@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { measuredAndroidEvents, parseAndroidAuditSubject } from '../android-events';
 import type { AndroidEnvironmentSnapshot, AndroidPlannedTermination } from '../android-environment';
@@ -497,6 +498,85 @@ androidEventTests.push(['synthetic system-reaped helper admits a missing child e
     for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line, name);
     assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === events[0].trimEnd()), name);
     assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === ending.trimEnd()), name);
+  }
+}]);
+
+const hostedMissingExitProcesses = {
+  '564': 'system_server', '5609': 'com.android.chrome', '5649': 'com.android.chrome_zygote',
+};
+const hostedMissingExitSnapshot = (boundary: 'start' | 'end', processes: Record<string, string> = hostedMissingExitProcesses) => ({
+  measurement: { id: '40095544451', boundary, processes },
+}) as AndroidEnvironmentSnapshot;
+const hostedMissingExitFixturePath = 'tests/mobile/unit/fixtures/android-hosted-40095544451-helper-missing-zygote-exit.log';
+const hostedMissingExitFixtureSha256 = 'b1d60de5b658061e84ddf9757714f92658d09da901ef113b6bfda6b185e985f8';
+const hostedMissingExitProjection = [
+  '         1792874856.500   564   564 I HerdrMeasure: 40095544451 START',
+  '         1792874856.540  5649  5649 D Zygote  : Forked child process 10658',
+  '         1792874856.550   564   975 I ActivityManager: Start proc 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0ai12 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:12}',
+  '         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.',
+  '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed',
+  '         1792874856.626  5609  5609 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10658)',
+  '         1792874856.700 10755 10755 I HerdrMeasure: 40095544451 END',
+].join('\n') + '\n';
+const hostedMissingExitLog = () => readFile(new URL(`./${hostedMissingExitFixturePath.slice('tests/mobile/unit/'.length)}`, import.meta.url), 'utf8');
+const measureHostedMissingExit = (log: string) => measuredAndroidEvents(log,
+  hostedMissingExitSnapshot('start'), hostedMissingExitSnapshot('end'), []);
+
+androidEventTests.push(['hosted 40095544451 Chrome helper without a Zygote exit is retired only with browser observation', async () => {
+  const log = await hostedMissingExitLog();
+  assert.equal(log, hostedMissingExitProjection);
+  assert.equal(createHash('sha256').update(log).digest('hex'), hostedMissingExitFixtureSha256);
+  const result = measureHostedMissingExit(log);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.fatalEvents, []);
+  assert.deepEqual(result.normalRetirements.map((retirement) => retirement.pid), ['10658']);
+  assert.deepEqual(result.normalRetirements[0].events, [
+    '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed',
+  ]);
+  for (const expected of [
+    '         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.',
+    '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed',
+    '         1792874856.626  5609  5609 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10658)',
+  ]) assert.ok(result.normalRetirements[0].proof.some((proof) => proof.line === expected), expected);
+}]);
+
+androidEventTests.push(['synthetic missing-Zygote-exit retirement rejects incomplete or adverse helper observations', async () => {
+  const log = await hostedMissingExitLog();
+  const selfExit = '         1792874856.614 10658 10668 I chromium: [INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.\n';
+  const kill = '         1792874856.615   564   975 I ActivityManager: Killing 10658:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:12/u0a145i-8988 (adj 0): isolated not needed\n';
+  const browserDeath = '         1792874856.626  5609  5609 W chromium: [WARNING:compositor_view.cc(344)] Child process died (type=6) pid=10658)\n';
+  const end = '         1792874856.700 10755 10755 I HerdrMeasure: 40095544451 END\n';
+  const fatal = '         1792874856.614 10658 10658 E AndroidRuntime: FATAL EXCEPTION: main\n';
+  const forceStop = '         1792874856.616   564   975 I ActivityManager: Force stopping com.android.chrome appid=10145 user=0: from pid 50\n';
+  const helperAfterKill = '         1792874856.616 10658 10668 I Other: later helper record\n';
+  const packageChange = '         1792874856.616   564   975 I PackageManager: Replacing package com.android.chrome\n';
+  const browserPidReuse = '         1792874856.622   564   975 I ActivityManager: Start proc 5609:com.example.app/u0a123 for service\n';
+  const rejected: [string, string][] = [
+    ['self-exit missing', log.replace(selfExit, '')],
+    ['browser-observed death missing', log.replace(browserDeath, '')],
+    ['browser-observed death before the kill', log.replace(kill + browserDeath, browserDeath.replace('1792874856.626', '1792874856.613') + kill)],
+    ['browser-observed death stamped before the kill but received after it', log.replace(browserDeath, browserDeath.replace('1792874856.626', '1792874856.610'))],
+    ['browser-observed death stamped before the self-exit but received after the kill', log.replace(browserDeath, browserDeath.replace('1792874856.626', '1792874856.605'))],
+    ['browser PID reused by another Android user before the observation', log.replace(browserDeath, browserPidReuse.replace('/u0a123', '/u10a123') + browserDeath)],
+    ['browser-observed death from a non-Chrome pid', log.replace('1792874856.626  5609  5609', '1792874856.626  5649  5649')],
+    ['browser PID reused by a non-Chrome process before the observation', log.replace(browserDeath, browserPidReuse + browserDeath)],
+    ['browser PID reuse stamped before the observation but received after it', log.replace(browserDeath, browserDeath + browserPidReuse)],
+    ['browser-observed death after END without another retirement event', log.replace(browserDeath + end,
+      '         1792874856.620 10755 10755 I HerdrMeasure: 40095544451 END\n' + browserDeath)],
+    ['reason other than isolated not needed', log.replace('isolated not needed', 'remove task')],
+    ['mismatched isolated UID', log.replace('i-8988', 'i-8987')],
+    ['two kills', log.replace(kill, kill + kill.replace('1792874856.615', '1792874856.616'))],
+    ['helper record after the kill', log.replace(kill, kill + helperAfterKill)],
+    ['package change during the helper lifetime', log.replace(kill, kill + packageChange)],
+    ['crash or fatal record', log.replace(kill, fatal + kill)],
+    ['Zygote exit with a non-reaper signal', log.replace(end, '         1792874856.640  5649  5649 I Zygote  : Process 10658 exited due to signal 11 (Segmentation fault)\n' + end)],
+    ['force stop during the helper lifetime', log.replace(kill, forceStop + kill)],
+  ];
+  for (const [name, candidate] of rejected) {
+    const result = measureHostedMissingExit(candidate);
+    assert.deepEqual(result.issues, [], name);
+    assert.equal(result.normalRetirements.length, 0, name);
+    assert.ok(result.fatalEvents.length > 0, name);
   }
 }]);
 

@@ -174,10 +174,19 @@ only the process's importance at death (such as `vis BTOP`, `fg  SVC` or
 `cch+75 CEM`) or one `isolated not needed` kill with the matching isolated UID;
 or with one such `isolated not needed` kill logged before that Zygote's SIGKILL
 report by timestamp or capture order. A kill logged after a clean exit is
-accepted because the helper can exit on its own while the system reaps it.
-The Chromium child exit message, the helper's lifetime and the order in which
-the fork, start, kill and exit records arrive are not required, because
-independent producers stamp and submit them. For force-stop and package checks
+accepted because the helper can exit on its own while the system reaps it. If
+there is no Zygote exit record, retirement instead requires exactly one helper
+`ChildProcessService: Exiting child process.` record, followed by exactly one
+system_server `isolated not needed` kill with the matching isolated UID and at
+least one later `Child process died (type=N) pid=...` record from the Chrome
+browser PID in the START process inventory. The helper's records must end by
+the kill, its death event set must be exactly that kill, and the numbered
+proof retains the helper self-exit, kill, and browser observation. Any Zygote
+exit, including a crash signal, continues to use only the existing exit rules.
+Except for this no-exit case, the Chromium child exit message, the helper's
+lifetime and the order in which the fork, start, kill and exit records arrive
+are not required, because independent producers stamp and submit them. For
+force-stop and package checks
 the lifetime starts at the earliest fork, start or helper record by timestamp
 or by capture order. A planned Chrome force-stop
 also covers helpers from its observed process set that the system kills as
@@ -188,12 +197,15 @@ SIGKILL, so any other signal, crash or second exit stays fatal. The schema-3
 check retains raw observations and numbered proof lines, reporting normal helper
 lifetimes separately from fatal events and distinguishing event counts from PID
 counts. The helper's own records may be stamped up to 20 ms before the Zygote
-fork and no later than its exit, in any capture order, and must fit both
-START/END marker bounds, including audit subject timestamps. The fork and start record must always be inside both bounds; only when
-the helper's own child exit, Zygote exit, kill or death record is at or after
-END's timestamp and after END in capture order may its remaining records, and records that
-mention it, also come from the capture after END, still under every other check
-above. Capture is monitored, receive-bounded `main`/`system` logcat, not an
+fork and no later than its exit, or no later than the matching kill when there
+is no Zygote exit, in any capture order, and must fit both START/END marker
+bounds, including audit subject timestamps. The fork and start record must always be inside both bounds; only when
+the helper's own child exit, Zygote exit, matching ActivityManager kill or
+helper-attributed Android death record is at or after END's timestamp and after
+END in capture order may its remaining records, and records that mention it,
+also come from the capture after END, still under every other check above. The
+required Chrome browser observation does not by itself extend this post-END
+allowance. Capture is monitored, receive-bounded `main`/`system` logcat, not an
 exhaustive or lossless all-producer generation-time trace. Producers sample time
 before submission; another producer's earlier/later timestamp is diagnostic
 `boundaryDiscordances`, not proof of capture loss. Original bytes and line numbers
